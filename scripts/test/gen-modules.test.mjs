@@ -539,10 +539,10 @@ describe('gen-modules: registry modules (@haive-module/<id>)', () => {
 describe('gen-modules: the list of web modules compiled in', () => {
   const ALL = {
     modules: {
-      abc: { exports: WEB },
-      bar: { exports: ['./manifest', './routes'] },
-      baz: { exports: WEB },
-      mid: { exports: ['./manifest', './dashboard'] },
+      abc: { exports: WEB, version: '0.4.2' },
+      bar: { exports: ['./manifest', './routes'], version: '0.5.0' },
+      baz: { exports: WEB, version: '0.6.0' },
+      mid: { exports: ['./manifest', './dashboard'], version: '2.0.0-rc.1' },
     },
     installed: { foo: { exports: ['./manifest', './web'] } },
     api: [...names('abc', 'bar', 'mid'), ...registry('foo')],
@@ -600,18 +600,54 @@ export const moduleDashboardWidgets = [
 `,
   ];
 
-  it('lists each module with a web part by id, with its source and parts, and none that is api-only or not installed', (t) => {
+  it('lists each module with a web part by id, with its source, version and parts, and none that is api-only or not installed', (t) => {
     const tree = makeTree(t, ALL);
     const out = tree.run('gen-modules.mjs');
     assert.equal(out.status, 0, out.stderr);
     assert.match(out.stdout, /present, not installed: pnpm module add baz/);
     REGISTRIES.forEach((rel, i) => assert.equal(tree.read(rel), FOUR[i], rel));
     const list = [
-      { id: 'abc', packageName: '@haive/module-abc', source: 'local', parts: ['dashboard', 'web'] },
-      { id: 'foo', packageName: '@haive-module/foo', source: 'registry', parts: ['web'] },
-      { id: 'mid', packageName: '@haive/module-mid', source: 'local', parts: ['dashboard'] },
+      {
+        id: 'abc',
+        packageName: '@haive/module-abc',
+        source: 'local',
+        version: '0.4.2',
+        parts: ['dashboard', 'web'],
+      },
+      {
+        id: 'foo',
+        packageName: '@haive-module/foo',
+        source: 'registry',
+        version: '1.0.0',
+        parts: ['web'],
+      },
+      {
+        id: 'mid',
+        packageName: '@haive/module-mid',
+        source: 'local',
+        version: '2.0.0-rc.1',
+        parts: ['dashboard'],
+      },
     ];
     assert.equal(tree.read(LIST), `${JSON.stringify(list, null, 2)}\n`);
+    for (const entry of JSON.parse(tree.read(LIST))) {
+      assert.deepEqual(Object.keys(entry), ['id', 'packageName', 'source', 'version', 'parts']);
+    }
+  });
+
+  it('takes the version of a registry module from the installed copy, not the declared one', (t) => {
+    const tree = lagging(specTree(t, { api: '1.1.0', worker: '1.1.0', web: '1.1.0' }));
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(JSON.parse(tree.read(LIST)), [
+      {
+        id: 'foo',
+        packageName: '@haive-module/foo',
+        source: 'registry',
+        version: '1.0.0',
+        parts: ['dashboard', 'web'],
+      },
+    ]);
   });
 
   it('rewrites none of the five outputs when nothing changed', (t) => {

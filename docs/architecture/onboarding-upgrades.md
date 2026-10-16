@@ -338,8 +338,11 @@ when `rtkLeftoversToRemove` holds, a recorded choice and the switch off; the ban
 strip all ask it, so the banner offers exactly what the upgrade will do.
 
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
-`rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
-off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
+`rtk_enabled` wherever the choice is recorded (`isRtkChoiceRecorded`): the context recorded one, or a
+person switched RTK on this install (`repositories.rtk_choice_made_at`, stamped by the Tooling page's
+PATCH when the value changes and by taking the team's value in the RTK question). A context from
+before RTK recorded none and, unless a person switched RTK since, stays off, since the column
+defaults on. The RTK settings files (kind `rtk-config`) then read as
 `obsolete` and go only under the rule above, and 03 records each removal (`deletedPaths`, `git rm
 --cached` while the path is still absent), or HEAD would keep the hook and every worktree checked
 out from it would restore it. Nothing records the ones a blank scaffold seeds (a row needs a task,
@@ -392,7 +395,8 @@ nothing. A repository never onboarded gets neither, since POST /tasks refuses it
 Switching RTK back on offers the settings files again, and the banner says so: an
 upgrade or a sync computed while it was off left their ids out of `applicable_template_ids`, so upgrade-status
 counts an RTK template as applicable again while RTK is on and the providers of the context 01
-renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders from too).
+renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders from too):
+for a context recovered from the last onboarding, the providers its step 07 recorded.
 Both resolve that context in one order (`renderContextOrigin`, `@haive/shared/project-state`).
 A writer (12, 02, 04) whose record write fails clears the column, so that order falls back to the
 snapshot its own rows carry rather than to a column it could not move (`writeProjectStateRecord`).
@@ -401,12 +405,16 @@ The step does not fail: it keeps a warning and reports `recordWrite: 'failed'` i
 A fenced write (02's) clears it only while it still holds a context 02 planned against: a sync
 that took the lock after the failed write and before the clear is newer than both, and stays.
 First comes the repository's render context column, whose RTK choice is its stored
-`rtkChoiceRecorded` and whose providers are its own or, for a column the project-state sync filled
+`rtkChoiceRecorded` or a person's switch (`rtk_choice_made_at`), as everywhere the choice is read,
+and whose providers are its own or, for a column the project-state sync filled
 with the portable fields alone, the owner's enabled ones. Then comes the newest snapshot that
 recorded the choice, ahead of one from before RTK (`pickSnapshotRow`, by `newestArtifactsFirst`),
 since an upgrade replaces only the paths it writes and rows from several runs stay live side by
-side. So the banner and the plan read the same context, and a repository whose snapshots all
-predate RTK stays quiet.
+side. Once a person has switched RTK, the switch is the choice, so the newest snapshot is read
+whatever it holds and an older row that recorded RTK no longer hands the plan an older framework
+or older targets. A rollback that takes the live rows' context picks the same way, and expands its
+applicable set with the switch, as every reader renders it. So the banner and the plan read the
+same context, and a repository whose snapshots all predate RTK stays quiet.
 
 **A key both installs changed is held for an answer, never settled for the column's side.** The
 project-state sync merges the checkout's record against the base it last synced from. A render key
@@ -459,9 +467,9 @@ the checkout deleted never makes a conflict: the sync returns `absent` before it
 
 **One question is not a render key: an imported RTK-off this install never applied.** A repository
 imported before the mirror import set `rtk_enabled` from the tooling it read holds the column's
-default `true` beside imported tooling that says `rtkEnabled: false`. The tooling page writes the
-column alone, so nothing says whether a person switched RTK back on since, and a migration would
-have to choose. `needsRtkQuestion` (`project-state/rtk-conflict.ts`, pure) asks exactly when the
+default `true` beside imported tooling that says `rtkEnabled: false`. Before `rtk_choice_made_at`
+(0208) the tooling page wrote the column alone, so nothing says whether a person switched RTK back on
+before then, and a migration would have to choose; the rule below does not read that stamp. `needsRtkQuestion` (`project-state/rtk-conflict.ts`, pure) asks exactly when the
 stored tooling says off, the column says on, no local `04-tooling-infrastructure` output equals that
 tooling (the test `holdImportedMcpServerLists` uses) and no row of the unit exists in any state, so
 an answered question is never asked again. `persistDetection` calls it after the mirror import and
@@ -474,7 +482,8 @@ job and `upgradeAdmission` take it (`isConflictUnit`, `blocksUpgrade`). The work
 under the same locks and the same busy, closed-row and different-answer rules, and writes no file:
 keep mine stamps the row and leaves the column; take theirs sets `rtk_enabled = false` through
 `rtkEnabledUpdate` (the columns the tooling page's PATCH writes, `rtk_enabled` and `updated_at`,
-which that route uses too) and stamps the row. Neither recomputes the applicable ids nor touches the
+which that route uses too), stamps `rtk_choice_made_at`, since taking the team's value is a choice,
+and stamps the row. Neither recomputes the applicable ids nor touches the
 rules files, since the PATCH does not: the next upgrade, which the answer releases, removes the RTK
 settings files and block as it does after any switch off. A pending row stops asking once RTK is off
 here by any route: every writer of `rtk_enabled = false` (the tooling page's PATCH, 04's save, the
@@ -486,7 +495,14 @@ key is null like the whole render file's (`isRtkConflict`).
 **The ledger follows the record: another install's claims are imported as markers.** The record
 carries one claim file per live row (`artifacts/<claimFileName(path)>`: path, portable template id,
 kind, schema version, template and written hashes, Haive version), written by 12, 02 and 04 through
-`writeProjectStateRecord`. The writer removes only a claim file the previous `base_snapshot` named
+`writeProjectStateRecord`. A claim names a relative, canonical path with no `.git` segment in any
+letter case (`isClaimablePath`): a record never imports a claim to git data, 02's `safeDiskRel`
+refuses such a path as a backstop, and 01 neither lists nor reads a ledger row imported before the
+rule. A claim file at such a path that an earlier release wrote, under its own file name, does not
+refuse the record: the codec reads it apart (`gitDataClaims`), the sync keeps it in the base for the
+writer to remove at the next write (and marks the record due), and no merge, import or set-aside
+check reads it as a claim. Any other claim at a path no claim may name still refuses the whole
+record. The writer removes only a claim file the previous `base_snapshot` named
 and the new render no longer produces, so a teammate's unsynced file is never touched, and it
 returns `{written, removed}` for 12 and 03 to stage. The sync reads those files back: it loads the
 live rows as claims (`loadRecordClaims`), merges the whole record (render and claims) three ways
@@ -523,7 +539,9 @@ source (`custom_bundles` has no unique index on it) collapse to the smallest nam
 since the codec refuses a source listed twice and would fail the whole write. A descriptor in the
 previous `base_snapshot` that no local bundle holds is kept while a claim's template id starts
 `custom:<encodeURIComponent(source)>:`, and removed (reported in `removed`) once none does; a
-descriptor file the base never named is not touched, like a claim file. The sync reads the descriptors
+descriptor file the base never named is not touched, like a claim file. A descriptor for a bundle
+that has no installed item can flap across pushes between two installs that disagree on holding the
+bundle: each write adds or removes it. The ledger is unaffected. The sync reads the descriptors
 into the base as the checkout holds them and leaves them out of the merge: a conflict row on one could
 not be answered by anybody, and `upgradeAdmission` would hold every upgrade for it.
 
@@ -539,8 +557,13 @@ signal. The writer reads the row's `revision` under `lockProjectState`, before i
 database, and stamps `written_revision` to what it read when it finishes, so 12, 02 and 04 leave the
 row clean and a mutation that lands during a write stays dirty. The 10 s plan-mirror sweep calls
 `sweepDirtyProjectStates` (`project-state/refresh.ts`, at most 25 rows with a render context, each
-sweep in its own try): it skips a checkout with `MERGE_HEAD` or `REBASE_HEAD`, runs the sync first,
-writes nothing and keeps the row dirty with `last_error` when the sync was refused (a record in a
+sweep in its own try): it skips a checkout with `MERGE_HEAD` or `REBASE_HEAD`, and looks again once it
+holds the project-state lock, for the sync and for the write (`refuseDuringGitOperation`), since a
+merge can open while it waits there: the sync then answers `held`, imports nothing it read and leaves
+`last_error` alone, as the first check does, and the write refuses. The sync also reads the checkout
+again under the lock and answers `superseded` when the two reads differ, so a merge that opened and
+was given up while it waited cannot pass its intermediate record in. It runs the sync first, writes
+nothing and keeps the row dirty with `last_error` when the sync was refused (a record in a
 newer format included), deferred (a live onboarding task) or superseded, and otherwise writes with
 `expectedColumns` set to the column it read, a column that moved waiting for the next tick. It
 writes and never commits; 12, 03 or the person carries the files. `writeProjectStateRecord` keeps
@@ -588,7 +611,8 @@ a sync against it would read the incoming head as the other side's revert. The p
 step: its base (`synced_snapshot`) is only ever the plan.json last read in. A valid hand edit is
 not refused: the sync that runs first imports it, so the database holds it and the set-aside loses
 nothing. After the move, `resyncHaiveProjections` runs the sync, writes the record if the outbox is
-dirty, reconciles the plan and flushes it, each in its own try. The revision is bumped again after
+dirty, reconciles the plan and flushes it, each in its own try; it reads nothing in while a merge or
+rebase is open, and looks again under the lock as the sweep does. The revision is bumped again after
 the restore, since a sweep that ran between the two would have stamped it written. 00a calls it
 only when the base is the checked-out branch (a ref-only update moves no file), and again after a
 merge it drove; `persistDetection` keeps its two importers, because the legacy mirror files
@@ -598,8 +622,24 @@ Save & push and the `01-plan-merge` confirm set aside the same way around their 
 (`integrateOrigin`): their fence is the checkout-holding task count (the confirm leaves out its own task
 and counts only tasks working in the checkout itself), a Save sets aside only once the remote is ahead,
 so a Save with nothing to land is never stopped by a waiting task, and a Pull refuses, by name, an
-untracked file under `.haive-data/state/` that Haive did not write. The merge resolver on the checkout
-and step 13 do not call it yet. An onboarding or upgrade that ends re-syncs at once
+untracked file under `.haive-data/state/` that Haive did not write. A merge the resolver drives on the
+checkout itself (00a's merge, 12 when the parent checkout is on the base branch, 13) sets aside after
+it seeds the plan base and checks again under the projection locks right before `openMerge`, where a
+file Haive rewrote since the set-aside sends it round again, up to `MOVE_ATTEMPTS`. Every outcome that
+did not merge puts the files back and, once no merge or rebase is open, re-syncs them, a throw from
+the merge section recovers them before it reaches the caller, and reaching done re-syncs. The owner
+and mode a set-aside captured ride in the merge state (`keptMetadata`, never the bytes), so the
+call that ends a merge restores them even when an earlier call set the files aside; a merge left
+open keeps them for its end. They are restored, and cleared, only after a re-sync that completed:
+`resyncHaiveProjections` answers whether both halves re-synced, and one that returned early (a merge
+or rebase open) or failed leaves `keptMetadata` in the state. Only a later call that ends the same
+merge settles it. A merge that reached done, or a cancel that found the merge gone, settles nothing
+again, so the projection sweep recreates those files with its own owner and mode. Every other
+set-aside caller whose re-sync fails loses them the same way. A cancelled task's merge ends elsewhere, and each ending restores them
+too: the abort job, a cancel that finds the merge already gone, or the next task's merge that
+clears it, which takes them into its own state first. That clearing reads the checkout-holding count first, as a merge it opens does, and a state file edited by
+hand halts it by name even when the incoming commit leaves that file alone, as it halts a refresh or
+a Pull. An onboarding or upgrade that ends re-syncs at once
 (`resyncAfterTaskEnd`): the sync defers while such a task holds the checkout, so a change pending in
 the database, or an incoming record a move landed meanwhile, waited for the sweep. It runs once the
 ending has committed: on completion after the bookkeeping, on failure after the containers are
@@ -613,12 +653,15 @@ checkout-holder check requires `dead_at IS NULL`, and its writer is refused as r
 `chrome-devtools-mcp-version` and `review-dimensions`, and nothing else. `app_auth` and
 `verify_commands` stay on the machine, since a committed login URL or command would be typed or run
 on a teammate's. `settings/rtk-enabled.json` is written, named in the base and counted as this install's value only
-while the render column's `rtkChoiceRecorded` is true (`withoutUnchosenRtk`): `rtk_enabled` is NOT
-NULL default true, so a default nobody chose must not travel or outvote a teammate's choice. Until
-then the sync takes the checkout's value with no conflict and keeps it out of the base, and the writer
-neither writes the file nor removes one the base names. Importing a record into a NULL column records
-the choice, as before. A tooling-page switch on a repository whose choice was never recorded
-therefore does not travel until step 12 or 02 records it. A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
+while the choice is recorded (`withoutUnchosenRtk`, `isRtkChoiceRecorded`): the render column's
+`rtkChoiceRecorded`, or `rtk_choice_made_at`, which a person's switch on the Tooling page stamps.
+`rtk_enabled` is NOT NULL default true, so a default nobody chose must not travel or outvote a
+teammate's choice. Until then the sync takes the checkout's value with no conflict and keeps it out
+of the base, and the writer neither writes the file nor removes one the base names. Importing a record
+into a NULL column records the choice, as before. A tooling-page switch therefore travels at the next
+record write. The first sync after it, on a sync row whose base never held the setting, keeps this
+install's value with no question and records the checkout's in the base, so later changes merge
+three-way as any setting does; with no sync row at all, the checkout's value still wins. A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
 not an empty list), and `environmentUnitOf` gives `project/environment.json` from
 `onboarding_environment` without its schema version. The writer plans them into the record and the
 base, and removes a file the base named that the record no longer holds. `settings/rtk-enabled.json`
@@ -645,7 +688,8 @@ the record dirty for the writer; any other missing file unsets its column where 
 here. **A base that holds no setting and no environment (no sync row, or one written before the record
 carried them) merges them as no base at all**: the checkout's value wins over a column nobody chose
 (`rtk_enabled` is NOT NULL default true, and would otherwise push B's default back over A's choice on
-B's first sync), and a set joins both lists. An RTK-off import closes the RTK question as converged
+B's first sync), except a switched `rtk-enabled` on an existing sync row, as above, and a set joins
+both lists. An RTK-off import closes the RTK question as converged
 (`convergeRtkQuestion`); the sync's own converge pass skips that question, whose base equals its local
 side (`isRtkQuestion`), since no merge contests that unit (a boolean cannot differ from base and both
 sides). When the merge leaves a value the checkout's file does not hold, the repository is marked dirty

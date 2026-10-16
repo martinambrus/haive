@@ -8,8 +8,14 @@ export const CORE_STEP_ID_PATTERN = /^[0-9a-z_-]+$/;
 const MODULE_STEP_ID_PATTERN = /^module\.([a-z0-9][a-z0-9-]*)\.([a-z0-9][a-z0-9_-]*)$/;
 const CUSTOM_STEP_ID_PATTERN = /^custom\.([a-z0-9][a-z0-9-]*)\.([a-z0-9][a-z0-9-]*)$/;
 export const CORE_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+export const TOOL_NAME_MAX_LENGTH = 40;
 /** An MCP tool name Haive lists: integration operations and custom tools alike. */
-export const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,39}$/;
+export const TOOL_NAME_PATTERN = new RegExp(`^[a-z][a-z0-9_]{0,${TOOL_NAME_MAX_LENGTH - 1}}$`);
+export const INTEGRATION_ID_MAX_LENGTH = 16;
+/** A module or prompt step's requirement id prefixes a shared tool name (`<id>_<opId>`), cut to the cap with a digest past it. */
+export const INTEGRATION_ID_PATTERN = new RegExp(
+  `^[a-z][a-z0-9-]{0,${INTEGRATION_ID_MAX_LENGTH - 1}}$`,
+);
 export const PERSONA_ID_PATTERN_SOURCE = '[a-z0-9-]+';
 const PERSONA_ID_PATTERN = new RegExp(`^${PERSONA_ID_PATTERN_SOURCE}$`);
 const TASK_TYPE_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
@@ -64,6 +70,8 @@ export const CORE_INTEGRATION_CATEGORY_SPECS: readonly {
 }));
 
 const CORE_INTEGRATION_CATEGORY_IDS: ReadonlySet<string> = new Set(CORE_INTEGRATION_CATEGORIES);
+
+export const REPOSITORY_BOUND_CATEGORIES: ReadonlySet<string> = new Set(['forge']);
 
 export type ParsedStepId =
   | { kind: 'core' }

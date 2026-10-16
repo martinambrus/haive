@@ -71,4 +71,18 @@ describe('the global KB entries list', () => {
       'hand-written': null,
     });
   });
+
+  it('answers a sourceTaskId that is not a uuid with 400', async () => {
+    const res = await app.request('/entries?sourceTaskId=abc');
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'sourceTaskId must be a UUID', code: null });
+  });
+
+  it.each(['', FAILED_TASK])(
+    'keeps answering GET /entries?sourceTaskId=%s with 200 (passes before and after)',
+    async (value) => {
+      expect((await app.request(`/entries?sourceTaskId=${value}`)).status).toBe(200);
+    },
+  );
 });

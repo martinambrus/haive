@@ -55,7 +55,11 @@ import {
 } from '@haive/shared/modularity';
 import { moduleDeactivationMessage } from '../modules/activation.js';
 import { invalidToolsFailure, pinnedToolsFailure } from './steps/custom/pinned-tools.js';
-import { promptStepNamedText, promptStepTools } from './steps/custom/prompt-step.js';
+import {
+  promptStepAccountIds,
+  promptStepNamedText,
+  promptStepTools,
+} from './steps/custom/prompt-step.js';
 import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import { closeRunnerExtraTabs, restoreRunnerBrowserWindow } from '../sandbox/ddev-runner.js';
 import { closeAppRunnerExtraTabs, restoreAppRunnerBrowserWindow } from '../sandbox/app-runner.js';
@@ -90,7 +94,9 @@ import { resolveDagPhase } from './dag-executor.js';
 import { learnedLadderBaseMs } from './dispatch-timeout.js';
 import { resolveMergePhase } from './merge-resolver.js';
 import {
+  dispatchIntegrationAccounts,
   insertStampedRun,
+  invalidRequirementsFailure,
   resolveDispatchIntegrations,
   stepIntegrationRequirements,
 } from './step-integrations.js';
@@ -602,6 +608,8 @@ type DispatchStamp = {
   requirements: readonly IntegrationRequirement[];
   bindings: IntegrationBinding[];
   failure: string | null;
+  /** Each requirement whose account the prompt names, with the connection it had in the first resolution (null: none). */
+  named?: ReadonlyMap<string, string | null>;
   fixed?: { integrations: IntegrationBinding[] | null };
 };
 
@@ -612,11 +620,23 @@ async function resolveDispatchStamp(
   stepDef: StepDefinition,
   toolProfile: 'rag_only' | 'none' | undefined,
 ): Promise<DispatchStamp> {
+  const invalid = toolProfile === undefined ? invalidRequirementsFailure(stepDef) : null;
+  if (invalid !== null) return { requirements: [], bindings: [], failure: invalid };
   const requirements = toolProfile === undefined ? stepIntegrationRequirements(stepDef) : [];
   if (requirements.length === 0) return { requirements, bindings: [], failure: null };
   const resolved = await resolveDispatchIntegrations(db, taskId, requirements);
   return resolved.ok
-    ? { requirements, bindings: resolved.bindings, failure: null }
+    ? {
+        requirements,
+        bindings: resolved.bindings,
+        failure: null,
+        named: new Map<string, string | null>(
+          promptStepAccountIds(stepDef).map((id) => [
+            id,
+            resolved.bindings.find((binding) => binding.requirementId === id)?.connectionId ?? null,
+          ]),
+        ),
+      }
     : { requirements, bindings: [], failure: resolved.failure };
 }
 
@@ -632,7 +652,14 @@ async function insertDispatchRun(
   if (stamp.fixed) {
     return insertOwnedRun(db, stepRowId, { ...values, integrations: stamp.fixed.integrations });
   }
-  const run = await insertStampedRun(db, taskId, stepRowId, values, stamp.requirements);
+  const run = await insertStampedRun(
+    db,
+    taskId,
+    stepRowId,
+    values,
+    stamp.requirements,
+    stamp.named,
+  );
   if (!('failure' in run)) stamp.fixed = { integrations: run.integrations };
   return run;
 }
@@ -924,6 +951,11 @@ async function resolveLlmPhase(
   // (truncationRetries) reaches the first pass too.
   const trailingTruncations = await countTrailingTruncations(db, current.id);
   const truncationRetries = stepDef.loop ? trailingTruncations : 0;
+  const integrationAccounts = await dispatchIntegrationAccounts(
+    db,
+    stamp.requirements,
+    stamp.bindings,
+  );
   let prompt =
     (upcomingIteration > 0 ||
       (truncationRetries > 0 && stepDef.loop?.iterationPromptCoversFirstPass)) &&
@@ -935,7 +967,7 @@ async function resolveLlmPhase(
           previousIterations,
           truncationRetries,
         })
-      : llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
+      : llmSpec.buildPrompt({ detected, formValues: formValues ?? {}, integrationAccounts });
   // Read before anything is appended: a marker in an attachment name, a ledger entry or learned
   // guidance is quoted text, not a persona the prompt step's author chose.
   const promptStepPersonaIds = isPromptStep(stepDef) ? templatePersonaIds(prompt) : undefined;

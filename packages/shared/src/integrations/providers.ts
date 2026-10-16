@@ -1,11 +1,14 @@
 import { eq } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
-import { CORE_FORGE_PROVIDER_SPECS } from '../forge/provider-specs.js';
 import { parseProviderId } from '../modularity/contracts.js';
 import type { IntegrationProviderSpec } from '../modularity/integrations.js';
+import { loadDeactivatedModuleIds, registeredProviders } from './module-registry.js';
+
+export type ProviderState =
+  'enabled' | 'disabled' | 'module-deactivated' | 'module-missing' | 'unknown';
 
 export function listIntegrationProviders(): readonly IntegrationProviderSpec[] {
-  return CORE_FORGE_PROVIDER_SPECS;
+  return registeredProviders();
 }
 
 export function getIntegrationProvider(providerId: string): IntegrationProviderSpec | undefined {
@@ -20,7 +23,7 @@ export function defaultProviderEnabled(providerId: string): boolean {
 }
 
 /** The admin's switch when there is a row for the provider, else its default. */
-export async function isProviderEnabled(db: Database | DbTx, providerId: string): Promise<boolean> {
+async function switchedOn(db: Database | DbTx, providerId: string): Promise<boolean> {
   const [row] = await db
     .select({ enabled: schema.integrationProviderConfigs.enabled })
     .from(schema.integrationProviderConfigs)
@@ -28,7 +31,33 @@ export async function isProviderEnabled(db: Database | DbTx, providerId: string)
   return row ? row.enabled : defaultProviderEnabled(providerId);
 }
 
-/** The switch of every registered provider, as isProviderEnabled reads it, from one query. */
+async function moduleDeactivated(db: Database | DbTx, providerId: string): Promise<boolean> {
+  const parsed = parseProviderId(providerId);
+  if (parsed?.kind !== 'module' || getIntegrationProvider(providerId) === undefined) return false;
+  const [row] = await db
+    .select({ deactivatedAt: schema.modules.deactivatedAt })
+    .from(schema.modules)
+    .where(eq(schema.modules.moduleId, parsed.moduleId));
+  return row?.deactivatedAt != null;
+}
+
+export async function isProviderEnabled(db: Database | DbTx, providerId: string): Promise<boolean> {
+  return (await switchedOn(db, providerId)) && !(await moduleDeactivated(db, providerId));
+}
+
+/** Why a provider is or is not usable now; the module's deactivation comes before the admin's switch. */
+export async function providerState(
+  db: Database | DbTx,
+  providerId: string,
+): Promise<ProviderState> {
+  if (getIntegrationProvider(providerId) === undefined) {
+    return parseProviderId(providerId)?.kind === 'module' ? 'module-missing' : 'unknown';
+  }
+  if (await moduleDeactivated(db, providerId)) return 'module-deactivated';
+  return (await switchedOn(db, providerId)) ? 'enabled' : 'disabled';
+}
+
+/** The switch of every registered provider, as isProviderEnabled reads it, from two queries at most. */
 export async function loadProviderEnablement(
   db: Database | DbTx,
 ): Promise<ReadonlyMap<string, boolean>> {
@@ -39,10 +68,15 @@ export async function loadProviderEnablement(
     })
     .from(schema.integrationProviderConfigs);
   const configured = new Map(rows.map((row) => [row.providerId, row.enabled]));
+  const deactivated = await loadDeactivatedModuleIds(db);
   return new Map(
-    listIntegrationProviders().map((provider) => [
-      provider.id,
-      configured.get(provider.id) ?? defaultProviderEnabled(provider.id),
-    ]),
+    listIntegrationProviders().map((provider) => {
+      const parsed = parseProviderId(provider.id);
+      const off = parsed?.kind === 'module' && deactivated.has(parsed.moduleId);
+      return [
+        provider.id,
+        !off && (configured.get(provider.id) ?? defaultProviderEnabled(provider.id)),
+      ];
+    }),
   );
 }

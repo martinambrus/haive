@@ -1,6 +1,9 @@
 import type { schema } from '@haive/database';
 import { credentialUsableForPr } from '../forge/known-hosts.js';
-import type { IntegrationRequirement } from '../modularity/contracts.js';
+import {
+  REPOSITORY_BOUND_CATEGORIES,
+  type IntegrationRequirement,
+} from '../modularity/contracts.js';
 
 type ConnectionRow = typeof schema.integrationConnections.$inferSelect;
 
@@ -106,8 +109,6 @@ export type IntegrationResolution =
       connectionId: string | null;
       candidates: readonly string[];
     };
-
-const REPOSITORY_BOUND_CATEGORIES: ReadonlySet<string> = new Set(['forge']);
 
 type Account =
   | { kind: 'absent' }

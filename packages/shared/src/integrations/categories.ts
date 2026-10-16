@@ -1,6 +1,6 @@
-import { CORE_INTEGRATION_CATEGORY_SPECS } from '../modularity/contracts.js';
 import type { IntegrationCategorySpec } from '../modularity/integrations.js';
+import { registeredCategories } from './module-registry.js';
 
 export function listIntegrationCategories(): readonly IntegrationCategorySpec[] {
-  return CORE_INTEGRATION_CATEGORY_SPECS;
+  return registeredCategories();
 }

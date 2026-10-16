@@ -1,7 +1,13 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Hono, type Context } from 'hono';
 import { and, desc, eq, inArray, isNotNull, ne, sql, type SQL } from 'drizzle-orm';
-import { isLockNotAvailable, isRefusedStatement, schema } from '@haive/database';
+import {
+  isLockNotAvailable,
+  isRefusedStatement,
+  lockRepositoryTasksKey,
+  schema,
+} from '@haive/database';
 import {
   CONFIG_KEYS,
   GLOBAL_KB_JOB_NAMES,
@@ -53,7 +59,9 @@ import { recordAuditEvent } from '../lib/audit.js';
 import { getGlobalKbSyncQueue } from '../queues.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
+import { isUuid } from '../lib/uuid.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
+import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 
 // Global KB is instance/namespace-scoped (not per-user). haive is self-hosted
@@ -157,11 +165,9 @@ function lockBusyError(err: unknown): never {
   throw err;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 // Postgres refuses a non-uuid in a uuid comparison, and that error would answer 500.
 function entryIdParam(raw: string): string {
-  if (!UUID_RE.test(raw)) throw new HttpError(404, 'global KB entry not found');
+  if (!isUuid(raw)) throw new HttpError(404, 'global KB entry not found');
   return raw;
 }
 
@@ -577,7 +583,7 @@ globalKbRoutes.post('/release-embed-model', async (c) => {
 // Repo-anchored AI enrichment (plan §5.1/§5.3): create a `skeleton` entry, then a
 // kb_author task that reads the chosen repo with the chosen CLI to expand the
 // skeleton into a version-scoped `draft`. The user reviews + activates the draft.
-globalKbRoutes.post('/enrich', async (c) => {
+globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
   const parsed = enrichSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid enrich request', 'invalid_body');
   const data = parsed.data;
@@ -610,6 +616,7 @@ globalKbRoutes.post('/enrich', async (c) => {
     generic: false,
   });
 
+  const taskId = randomUUID();
   const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {
     const [row] = await gdb
       .insert(globalKbEntries)
@@ -629,16 +636,22 @@ globalKbRoutes.post('/enrich', async (c) => {
         status: 'skeleton',
         source: 'user',
         embedStatus: 'pending',
+        // So the UI can offer a "watch task" link. The task is inserted below under this id.
+        sourceTaskId: taskId,
       })
       .returning();
     return presentEntry(row!, await houseRuleContext(settings.namespace));
   });
 
-  let task: typeof schema.tasks.$inferSelect | undefined;
+  let queued: Awaited<ReturnType<typeof markQueuedForStart>>;
+  let reachedCommit = false;
   try {
-    [task] = await db
-      .insert(schema.tasks)
-      .values({
+    queued = await db.transaction(async (tx) => {
+      await admitNewWork(tx);
+      // Queuing takes this lock; taken before the insert, it inverts no lock the row's insert holds.
+      if (data.repositoryId) await lockRepositoryTasksKey(tx, data.repositoryId);
+      await tx.insert(schema.tasks).values({
+        id: taskId,
         userId,
         type: 'kb_author',
         title: `Enrich: ${data.title}`.slice(0, 512),
@@ -667,13 +680,15 @@ globalKbRoutes.post('/enrich', async (c) => {
         runListSnapshot,
         customSteps,
         status: 'created',
-      })
-      .returning();
-    if (!task) throw new HttpError(500, 'failed to create enrichment task');
+      });
+      const claimed = await markQueuedForStart(tx, taskId);
+      reachedCommit = true;
+      return claimed;
+    });
   } catch (err) {
-    // The entry lives in the global KB database, so no transaction spans both writes. Only an insert
-    // Postgres refused is known to have written nothing; any other failure may still commit.
-    if (isRefusedStatement(err)) {
+    // The entry lives in the global KB database, so no transaction spans both writes. An error
+    // inside the transaction rolled the task back; a failed commit wrote nothing only if refused.
+    if (!reachedCommit || isRefusedStatement(err)) {
       await withGlobalKb(db, ({ db: gdb }) =>
         gdb.transaction(async (tx) => {
           if ((await lockEntry(tx, entry.id))?.status !== 'skeleton') return;
@@ -689,17 +704,9 @@ globalKbRoutes.post('/enrich', async (c) => {
     throw err;
   }
 
-  // Link the entry back to its task so the UI can offer a "watch task" link.
-  await withGlobalKb(db, async ({ db: gdb }) => {
-    await gdb
-      .update(globalKbEntries)
-      .set({ sourceTaskId: task.id })
-      .where(eq(globalKbEntries.id, entry.id));
-  });
+  if (queued) await enqueueStart(taskId, userId);
 
-  if (await markQueuedForStart(db, task.id)) await enqueueStart(task.id, userId);
-
-  return c.json({ entry, taskId: task.id }, 201);
+  return c.json({ entry, taskId }, 201);
 });
 
 /** Each entry's source task status, read from the main database since the global KB is a separate
@@ -733,6 +740,9 @@ globalKbRoutes.get('/entries', async (c) => {
   const category = c.req.query('category');
   const framework = c.req.query('framework');
   const sourceTaskId = c.req.query('sourceTaskId');
+  if (sourceTaskId && !isUuid(sourceTaskId)) {
+    throw new HttpError(400, 'sourceTaskId must be a UUID');
+  }
   const q = c.req.query('q')?.trim();
   const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1')) || 1);
   const pageSize = Math.min(

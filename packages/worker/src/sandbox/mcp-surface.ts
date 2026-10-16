@@ -386,7 +386,7 @@ const BROWSER_TAB_DISCIPLINE = [
 ] as const;
 
 /** A provider's display name is module text: one that is not a single safe line, or that names an agent path, gives way to its id. */
-function providerLabel(providerId: string): string {
+export function providerLabel(providerId: string): string {
   const name = getIntegrationProvider(providerId)?.displayName;
   return name !== undefined &&
     isSingleLine(name) &&

@@ -37,7 +37,7 @@ import { Hono } from 'hono';
 import { and, eq, inArray, lt } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb, type FakeDbHandle, type FakeRow } from '@haive/database/testing';
-import { logger } from '@haive/shared';
+import { configService, logger } from '@haive/shared';
 import { repoRoutes } from '../src/routes/repos.js';
 import { dbDumpRoutes } from '../src/routes/db-dumps.js';
 import { bundleRoutes } from '../src/routes/bundles.js';
@@ -179,6 +179,7 @@ const saved: Record<string, string | undefined> = {};
 
 beforeEach(async () => {
   vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
   storage = await mkdtemp(path.join(tmpdir(), 'upload-guards-'));
   volumes = { repos: path.join(storage, 'repos'), bundles: path.join(storage, 'bundles') };
   for (const [env, root] of [

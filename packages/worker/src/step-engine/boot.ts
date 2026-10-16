@@ -1,4 +1,5 @@
 import type { Database } from '@haive/database';
+import { registerModuleIntegrations } from '@haive/shared/integrations';
 import {
   ensureModuleSchemas,
   publishWorkerBootReport,
@@ -12,7 +13,11 @@ import { getRedis } from '../redis.js';
 import { CORE_COMPOSABLE_STEPS, assertCoreComposableCatalog } from './composable-core.js';
 import { stepRegistry } from './registry.js';
 import { syncStepCatalog } from './step-catalog.js';
-import { assertIntegrationsDeliverable, setComposableCatalog } from './step-integrations.js';
+import {
+  assertIntegrationsDeliverable,
+  assertModuleIntegrationsDeclared,
+  setComposableCatalog,
+} from './step-integrations.js';
 import { syncTaskTypeDefinitions } from './task-type-seed.js';
 import { registerAllSteps } from './steps/index.js';
 
@@ -43,6 +48,7 @@ export async function bootStepEngine(db: Database): Promise<{
   registerStepsOnce();
   assertCoreComposableCatalog(stepRegistry);
   const { loaded, entries } = await registerModulesOnce();
+  registerModuleIntegrations(loaded);
   const composables = new Map(
     loaded.flatMap((m) => m.composable.map((c) => [c.stepId, c] as const)),
   );
@@ -50,6 +56,7 @@ export async function bootStepEngine(db: Database): Promise<{
     ...CORE_COMPOSABLE_STEPS.map((c) => [c.stepId, c] as const),
     ...composables,
   ]);
+  assertModuleIntegrationsDeclared(catalog);
   assertIntegrationsDeliverable(stepRegistry, catalog);
   setComposableCatalog(catalog);
   await syncStepCatalog(db, stepRegistry, composables);

@@ -19,6 +19,19 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
 - **A person's own checkout is never written to.** The worker's `/host-fs` mount is read-write, so under
   `HOST_REPO_ROOT` nothing is put back from the index and a merge open for another ref is left alone:
   both halt and name what blocks them.
+- **A same-branch merge halts while another task works in the checkout.** A same-branch merge
+  (00a's divergence merge, 12's `merge_remove` on the base, `13-onboarding-push`) opens in the
+  repository's checkout itself, so a task working there without a worktree of its own would have its
+  tree changed under it. As 00a's fast-forward does, the set-aside counts such tasks
+  (`checkoutHoldingTasks` with `rootOnly`, this task left out), and each section that opens a merge
+  there, or clears an earlier attempt's merge first, takes the repository's task-creation lock
+  (`lockRepositoryTasksKey`) and counts them again before it moves anything. Every task's start takes
+  the same lock to move it from `created` to `queued` (`markQueuedForStart`), so none becomes a holder
+  between that count and the move; a create with a repository takes it before its insert, as every
+  other holder does, so no create inverts it with the repository row or the database-snapshot lock.
+  A count above zero halts the step with "N other task(s) working in this checkout; nothing was
+  merged. Retry this step once it/they finish(es)." and nothing is merged or aborted. A cross-branch
+  merge runs in the shared `<base>--base` worktree and is not fenced.
 - **A merge dir holds one task's merge at a time, by a claim and fenced sections.** A cross-branch
   merge runs in a worktree named from the base branch alone (`main--base`), shared by every task
   merging into that base, since git allows the branch in one worktree. A step takes the dir in
@@ -41,7 +54,7 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   skipped step, or a cancelled task whose `task.cancel_finished` event exists is stale: the next
   claim takes the row over and its abort cleans the leftover. The event is written after the
   release, so it also covers a claim that committed after the release read the task's claims; a
-  cancelled task without it still holds, since its fixer may still be running. A
+  cancelled task without it still holds, since its fixer may still be running, until the stalled sweep gives its teardown up and writes the event with `abandoned: true` ([worker restarts](worker-restarts.md)). A
   failed task keeps the claim, since its Retry resumes the merge it left open, and so does a crashed
   worker's, which boot re-drives. Every host-side write to the dir in `merge-resolver.ts` runs in
   `withMergeDirSection`: one transaction that holds the lock, reads the claim FOR UPDATE and requires
@@ -131,7 +144,13 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   identity (whoever owns the tree, since a tree the sandbox reaches through its mode bits is accepted
   as it stands), one `diff --name-only -z` per call, and the index is refreshed since a chown moves ctime and
   `merge --abort` refuses stat data that moved; a name that is not UTF-8 stays the worker's and is
-  logged. `.haive/`,
+  logged. A fast-forward of the checkout is handed back the same way from the commit before it
+  (`handBackAfterMove`): 00a's on the checked-out branch, a repository refresh's, and `landPlanMerge`'s
+  for a plan Pull, Save or confirm. In the checkout, Haive's projection files and their directories
+  (`.haive-data/state/**`, `plan.json`, `plan.md`) are left out of all three hand-backs: the worker
+  writes them, and `restoreKeptMetadata` restores the owner and mode a set-aside captured only on a
+  file the worker still owns. A worktree is never set aside, so there they are handed back like any
+  other path; `knowledge_base/` and `learnings/` are handed back everywhere. `.haive/`,
   `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name that is
   not UTF-8 stays and is reported, a link with its target in the manifest, since a scratch worktree
   removed later takes the link with it. A name is judged by its bytes (the plan merge's
@@ -173,17 +192,26 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   (`abortLeftMerge`) runs under the directory's lock and records `merge.left_open_settled`
   `{dir, mergeHead, outcome, reason}`: `refused` while a live task's `merge_dir_claims` row holds the
   directory (`liveClaimHolder`, the staleness rules `claimMergeDir` uses), `moved` with nothing
-  done when HEAD or MERGE_HEAD are no longer the reported ones, otherwise the fixer's changes outside
+  aborted when HEAD or MERGE_HEAD are no longer the reported ones, otherwise the fixer's changes outside
   the conflict are moved aside if a `fixBaseline` for that head and merge head is still recorded
   (reported unchecked when not) and `abortMerge` ends the merge. A `refused` outcome (a live holder,
   an abort git refused, a job that threw) leaves the report open with the reason shown and the button
-  offered again; `moved`, `aborted` and `aborted-by-next` close it. A failure while recording a
+  offered again; `moved`, `aborted` and `aborted-by-next` close it. For a same-branch merge both
+  `moved` and `aborted` also put back the projections its set-aside moved away, with the owner and
+  mode it kept (`settleProjections`), and a `moved` reason then says so; a put-back that throws, or
+  whose re-sync did not finish, fails the job, which is retried rather than settled, so the report
+  stays open until the owner and mode go back. A cancel that finds such a merge already
+  gone reports nothing but puts the files back the same way at once. A failure while recording a
   report throws, so the cancel is re-driven before `task.cancel_finished`; the page polls until that
   event is in and no abort it sent is still waiting. A resolver that clears a stale
   merge before opening its own first moves that task's fixer changes aside under its report
   (`relocateLeftOpenFixers`, halting instead while the index still holds what the fixer staged),
   then (`peekOpenMerge` before the abort, `noteAbortedByNext` after) settles
-  the report of the same directory, head and merge head with `aborted-by-next` and warns on its step.
+  the report of the same directory, head and merge head with `aborted-by-next` and warns on its step;
+  for a same-branch merge it first takes what that task's set-aside kept into its own state
+  (`takeLeftOpenKept`), so its own end restores those files' owner and mode. That write commits on
+  its own before the abort, not with the section: once the merge is gone, nothing finds that task
+  again.
   A cancelled plan merge is the exception (`discardPlanMerge`, from `handleCancelTask`): the worker
   moves aside what the recorded fixers left, aborts the merge and removes the scratch worktree,
   unless another `plan_merge` task of the repository holds it, a live one or a failed one opened after it
@@ -199,6 +227,23 @@ paths already resolved. A side it fell back on is logged and added to the step's
 prompts (the three merge steps' and `01-plan-merge`'s) say to leave exactly the files the resolver
 merges alone — `.haive-data/plan.json`, `plan.md` and `.haive-data/state/` (`HAIVE_OWN_FILES_LINE`);
 any other Haive path that conflicts stays the fixer's to resolve, or the merge could never close. The DAG level merge does not do this yet, so its prompt omits the line.
+
+A DAG level merge records which files conflicted. The merge pass reads `unmergedPaths` while the
+merge it opened is still open, since the abort that follows clears them and nothing else keeps the
+list, and after the abort writes one `dag_issue.merge_conflict` task event in the transaction that
+sets `merge_status = 'conflict'`: `{issueKey, level, paths, pathCount}`, `paths` capped at 20, both
+`null` when git could not list them. A pass that halts on a refused abort, or dies before that
+write, records neither, so the retry that re-enters the issue records the conflict once. Nothing
+reads it. It is what a change to how the sprint planner orders issues has to be
+measured against. MEASURED on the dev install (13 DAG plans, Jul-Aug 2026): 30 of 63 merged issues
+needed a merge-fix and all 30 were resolved, at 3.7 min each, while a DAG issue's median wall time
+is 32.3 min. So a same-level conflict is left to the merge-fix rather than prevented by ordering:
+moving an issue a level, or adding a contract-first level, costs several times the conflict it
+avoids. A warning on the DAG gate would inform nothing, since auto-continue submits that gate with
+its defaults (all 13 plans), and listing shared lists such as `.gitignore` in `estimated_files`
+would let `overlapRefinedEstimate` anchor the effort estimate on unrelated tasks. The visible
+colliders were list files (`.gitignore` in 5 plans, docs, `.ddev` ini files) and one shared PHP
+file; `docs/plans/blastloop-lessons.md` says what the event's data would reopen.
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.

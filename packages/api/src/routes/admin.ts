@@ -40,6 +40,7 @@ import { hashPassword } from '../auth/password.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { recordAuditEvent } from '../lib/audit.js';
+import { isUuid } from '../lib/uuid.js';
 import { generateInviteToken, hashInviteToken } from '../lib/invites.js';
 
 const log = logger.child({ module: 'admin' });
@@ -188,6 +189,7 @@ adminRoutes.get('/audit', async (c) => {
   const action = q.action || undefined;
   const targetType = q.targetType || undefined;
   const actorUserId = q.actorUserId || undefined;
+  if (actorUserId && !isUuid(actorUserId)) throw new HttpError(400, 'actorUserId must be a UUID');
   const fromDate = q.from ? new Date(q.from) : undefined;
   const toDate = q.to ? new Date(q.to) : undefined;
   const limit = Math.min(200, Math.max(1, Number.parseInt(q.limit ?? '50', 10) || 50));
@@ -784,6 +786,7 @@ const CODEX_APP_SERVER_FAILURE_LIMIT = 20;
 type CodexAppServerFailureRow = {
   taskId: string;
   taskTitle: string;
+  ownerId: string;
   providerId: string;
   providerLabel: string | null;
   stage: string | null;
@@ -805,6 +808,7 @@ adminRoutes.get('/config/codex-app-server', async (c) => {
   const rows = await getDb().execute<CodexAppServerFailureRow>(sql`
     SELECT t.id AS "taskId",
            t.title AS "taskTitle",
+           t.user_id AS "ownerId",
            v.key AS "providerId",
            p.label AS "providerLabel",
            v.value->>'stage' AS "stage",
@@ -821,7 +825,12 @@ adminRoutes.get('/config/codex-app-server', async (c) => {
        AND v.value->>'at' >= ${since}
      ORDER BY v.value->>'at' DESC
      LIMIT ${CODEX_APP_SERVER_FAILURE_LIMIT}`);
-  return c.json({ enabled, recentFailures: rows as unknown as CodexAppServerFailureRow[] });
+  return c.json({
+    enabled,
+    // GET /tasks/:id answers only a task's owner, so the page links just the viewer's own tasks.
+    viewerId: c.get('userId'),
+    recentFailures: rows as unknown as CodexAppServerFailureRow[],
+  });
 });
 
 adminRoutes.put('/config/codex-app-server', async (c) => {

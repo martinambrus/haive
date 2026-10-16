@@ -7,6 +7,7 @@ const loadConfiguredLspLanguages = vi.fn();
 const runInSandbox = vi.fn();
 const resolveInvocationRepoMount = vi.fn();
 const haiveDataBoundary = vi.fn();
+const worktreesBoundary = vi.fn();
 
 vi.mock('../../../sandbox/sandbox-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../sandbox/sandbox-runner.js')>()),
@@ -32,6 +33,9 @@ vi.mock('../../../queues/cli-exec/gitfile-mask.js', async (importOriginal) => ({
 }));
 vi.mock('../../../queues/cli-exec/haive-data-boundary.js', () => ({
   haiveDataBoundary: (...args: unknown[]) => haiveDataBoundary(...args),
+}));
+vi.mock('../../../queues/cli-exec/worktrees-boundary.js', () => ({
+  worktreesBoundary: (...args: unknown[]) => worktreesBoundary(...args),
 }));
 
 vi.mock('../../workspace-probe.js', () => ({
@@ -81,6 +85,8 @@ beforeEach(() => {
   });
   haiveDataBoundary.mockReset();
   haiveDataBoundary.mockResolvedValue([]);
+  worktreesBoundary.mockReset();
+  worktreesBoundary.mockResolvedValue([]);
   hasWorkspaceEntry.mockReset();
   resolveDdevWorkspace.mockReset();
   loadConfiguredLspLanguages.mockReset();
@@ -244,6 +250,41 @@ describe('01b-install-plugins apply: what the step records', () => {
     expect(runInSandbox).toHaveBeenCalled();
     for (const call of runInSandbox.mock.calls) {
       expect(call[1].extraMounts).toEqual([...boundary, repoMount]);
+    }
+  });
+
+  it('keeps .haive/worktrees read-only for a repository root mount, ahead of the repository mount', async () => {
+    runInSandbox.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
+    const repoMount = { source: 'haive_repos', target: '/haive/workdir', subpath: 'u/r' };
+    const boundary = [
+      {
+        source: 'haive_repos',
+        target: '/haive/workdir/.haive-data',
+        subpath: 'u/r/.haive-data',
+        readOnly: true,
+      },
+    ];
+    const worktrees = [
+      {
+        source: 'haive_repos',
+        target: '/haive/workdir/.haive/worktrees',
+        subpath: 'u/r/.haive/worktrees',
+        readOnly: true,
+      },
+    ];
+    resolveInvocationRepoMount.mockResolvedValue({ repoMount, hasWorktree: false, hasRepo: true });
+    haiveDataBoundary.mockResolvedValue(boundary);
+    worktreesBoundary.mockResolvedValue(worktrees);
+
+    await installPluginsStep.apply(ctx(), detectedWith(null));
+
+    expect(worktreesBoundary).toHaveBeenCalledWith(repoMount, {
+      hasWorktree: false,
+      hasRepo: true,
+    });
+    expect(runInSandbox).toHaveBeenCalled();
+    for (const call of runInSandbox.mock.calls) {
+      expect(call[1].extraMounts).toEqual([...boundary, ...worktrees, repoMount]);
     }
   });
 

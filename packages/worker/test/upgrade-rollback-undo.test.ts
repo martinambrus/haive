@@ -71,6 +71,7 @@ async function setup() {
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
+    repositories: schema.repositories,
   });
   const row = fake.insert(schema.onboardingArtifacts, {
     userId: USER,

@@ -9,7 +9,7 @@ import {
   gitRun,
   scrubSecret,
 } from '../../../repo/git-push.js';
-import { buildMergeFixPrompt } from '../../git-merge.js';
+import { buildMergeFixPrompt, handBackAfterMove } from '../../git-merge.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { seedPlanBaseFromCheckout } from '../../../plan/mirror.js';
 import { checkoutHoldingTasks } from '../../../repo/refresh.js';
@@ -486,7 +486,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         for (let attempt = 1; ; attempt++) {
           // A claimed section: no merge in this checkout interleaves, and a cancelled pass is refused.
           const moved = await withMergeDirSection(ctx.db, owner, async (tx) => {
-            // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the move.
+            // Every task's start and every revival take this lock, so none lands between the fence and the move.
             await lockRepositoryTasksKey(tx, repositoryId);
             const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
             if (again.outcome !== 'clean') return { again, res: null, holding: 0 };
@@ -564,6 +564,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         }
         throw err;
       }
+      if (onCurrent && res.code === 0) await handBackAfterMove(ctx.repoPath, before);
       if (repositoryId && res.code === 0) {
         await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
         await restoreKeptMetadata(ctx.repoPath, kept);

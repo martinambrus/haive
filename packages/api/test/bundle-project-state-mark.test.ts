@@ -18,7 +18,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
-import { logger } from '@haive/shared';
+import { configService, logger } from '@haive/shared';
 import { bundleRoutes } from '../src/routes/bundles.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -68,6 +68,7 @@ const outbox = (id: string) =>
 
 beforeEach(async () => {
   vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
   storage = await mkdtemp(path.join(tmpdir(), 'bundle-mark-'));
   saved = process.env.BUNDLE_STORAGE_ROOT;
   process.env.BUNDLE_STORAGE_ROOT = storage;

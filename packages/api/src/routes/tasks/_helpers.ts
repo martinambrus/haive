@@ -1,6 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
   decideTaskWorktree,
@@ -419,6 +419,32 @@ export async function findActiveCliInvocation(
     .orderBy(desc(schema.cliInvocations.createdAt))
     .limit(1);
   return rows[0] ?? null;
+}
+
+/** The runs of a task that GET /tasks/:id/tool-usage rolls up: not replaced, attributed to a step
+ *  or to a step's recap. */
+export function rolledUpRunsOf(taskId: string): SQL {
+  const inv = schema.cliInvocations;
+  return and(
+    eq(inv.taskId, taskId),
+    isNull(inv.supersededAt),
+    or(isNotNull(inv.taskStepId), isNotNull(inv.summaryForStepId)),
+  )!;
+}
+
+/** Digest of the rolled-up runs that have ended: which, when, and whether `tool_usage` is written.
+ *  Not their number, which stays put when a run is replaced and its replacement finishes. */
+export async function loadFinishedRunsRevision(
+  db: ReturnType<typeof getDb>,
+  taskId: string,
+): Promise<string> {
+  const inv = schema.cliInvocations;
+  const runState = sql`concat_ws(' ', ${inv.id}, ${inv.endedAt}, ${inv.toolUsage} is not null)`;
+  const [row] = await db
+    .select({ revision: sql<string | null>`md5(string_agg(${runState}, ',' order by ${inv.id}))` })
+    .from(inv)
+    .where(and(rolledUpRunsOf(taskId), isNotNull(inv.endedAt)));
+  return row?.revision ?? '';
 }
 
 /** `task_steps.id` of every step in `taskIds` that is WHOLLY parked on the agent gate: it holds
@@ -1087,6 +1113,29 @@ export async function appendTaskEvent(
   });
 }
 
+/** Ids among `taskIds` whose newest `task.paused` event is an administrator's (`byAdmin`). */
+export async function findAdminPausedTaskIds(
+  db: Pick<ReturnType<typeof getDb>, 'select'>,
+  taskIds: string[],
+): Promise<Set<string>> {
+  if (taskIds.length === 0) return new Set();
+  const events = await db
+    .select({ taskId: schema.taskEvents.taskId, payload: schema.taskEvents.payload })
+    .from(schema.taskEvents)
+    .where(
+      and(
+        inArray(schema.taskEvents.taskId, taskIds),
+        eq(schema.taskEvents.eventType, 'task.paused'),
+      ),
+    )
+    .orderBy(desc(schema.taskEvents.createdAt));
+  const newest = new Map<string, boolean>();
+  for (const { taskId, payload } of events) {
+    if (!newest.has(taskId)) newest.set(taskId, payload?.byAdmin === true);
+  }
+  return new Set([...newest].filter(([, byAdmin]) => byAdmin).map(([taskId]) => taskId));
+}
+
 /** The model-health canary validates THE task's model, so swapping the CLI on a
  *  canary step (typically because the canary rejected the original model) is a
  *  task-level decision, not a per-step one: rewrite tasks.cli_provider_id so every
@@ -1099,7 +1148,7 @@ export async function appendTaskEvent(
  *  picked: clearing the per-step pref back to the task default carries no new
  *  provider to propagate. Returns true when it rewrote the default. */
 export async function propagateModelHealthCliToTaskDefault(
-  db: ReturnType<typeof getDb>,
+  db: ReturnType<typeof getDb> | DbTx,
   params: {
     taskId: string;
     taskStepId: string;

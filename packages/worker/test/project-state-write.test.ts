@@ -1001,6 +1001,20 @@ describe('writeProjectStateRecord: one claim per live ledger row', () => {
     expect(written).not.toContain(claimPath('.claude/agents/old.md'));
   });
 
+  it('removes the claim file of a git-data path an earlier release wrote, though no claim may name it now', async () => {
+    const s = await setup();
+    s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/code-reviewer.md'));
+    s.syncSeed({ [s.col.baseSnapshot]: { claims: [{ path: '.git/config' }] } });
+    const legacy = claimPath('.git/config');
+    await mkdir(join(s.root, STATE_DIR, 'artifacts'), { recursive: true });
+    await writeFile(join(s.root, legacy), '{"path":".git/config"}\n');
+
+    const { removed } = await s.writeFull(context(), true);
+
+    expect(removed).toEqual([legacy]);
+    expect(await claimFiles(s.root)).toEqual([claimPath('.claude/agents/code-reviewer.md')]);
+  });
+
   it('leaves a claim file the previous base never named, though no row produces it', async () => {
     const s = await setup();
     s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/code-reviewer.md'));
@@ -1634,6 +1648,44 @@ describe('writeProjectStateRecord: the portable settings and the environment', (
 
       expect(read(s.root, RTK)).toBe(true);
       expect(baseOf(s).settings['rtk-enabled']).toBe(true);
+    });
+
+    describe('that a person has since switched on this install', () => {
+      const SWITCHED = new Date(1000);
+
+      it('writes the file and names it in the base, though the column recorded no choice', async () => {
+        const s = await setup();
+        await setColumns(s, { rtkEnabled: false, rtkChoiceMadeAt: SWITCHED });
+
+        await s.writeFull(context(), false);
+
+        expect(read(s.root, RTK)).toBe(false);
+        expect(baseOf(s).settings['rtk-enabled']).toBe(false);
+      });
+
+      it('rewrites it when the person switches again', async () => {
+        const s = await setup();
+        await setColumns(s, { rtkEnabled: false, rtkChoiceMadeAt: SWITCHED });
+        await s.writeFull(context(), false);
+
+        await setColumns(s, { rtkEnabled: true });
+        await s.writeFull(context(), false);
+
+        expect(read(s.root, RTK)).toBe(true);
+        expect(baseOf(s).settings['rtk-enabled']).toBe(true);
+      });
+
+      it('owns a file the previous base names, as it does once the choice is recorded', async () => {
+        const s = await setup();
+        await setColumns(s, { rtkChoiceMadeAt: SWITCHED });
+        await mkdir(join(s.root, SETTINGS), { recursive: true });
+        await writeFile(join(s.root, RTK), 'false\n');
+        s.syncSeed({ [s.col.baseSnapshot]: { settings: { 'rtk-enabled': false } } });
+
+        const { removed } = await s.writeFull(context(), false);
+
+        expect(removed).toEqual([RTK]);
+      });
     });
   });
 

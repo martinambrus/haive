@@ -6,7 +6,11 @@ builder's first step reads the uploads dir and the worker picks a job up immedia
 files through the ordinary attachment route and finalizes with the `start` task action, which
 claims `status = 'created'` in one atomic UPDATE (a second click matches no row and enqueues
 nothing). An upload that fails therefore cannot start anything — the draft is the repair
-surface, reachable from its Attachments tab. This replaced the inline-document seed hook,
+surface, reachable from its Attachments tab. `POST /tasks` takes the same `deferStart`, and the
+New Task page sends it only when files are picked; there the rule differs: the page uploads the
+files, then sends `start` whatever the uploads did (the task page's Attachments panel is the retry
+surface), and a `start` that never arrives (the tab closed mid-upload, a drain refusing it) leaves
+the task `created` with the task page's Start as the way on. This replaced the inline-document seed hook,
 which could carry exactly one file. `_ATTACHMENTS.md` is regenerated after every write: the
 prompt notice names that file unconditionally, so a path that skipped it handed the agent a
 pointer to nothing. Every writer — upload, delete and archive expansion — goes through ONE

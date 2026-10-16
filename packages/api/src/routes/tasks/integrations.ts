@@ -4,9 +4,11 @@ import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   listIntegrationProviders,
+  loadDeactivatedModuleIds,
   lockTaskIntegrations,
   resolveTaskCategories,
 } from '@haive/shared/integrations';
+import { parseProviderId } from '@haive/shared/modularity';
 import { getDb, type Database } from '../../db.js';
 import {
   removePreference,
@@ -54,8 +56,13 @@ taskIntegrationRoutes.get('/:id/integrations', async (c) => {
     .select({ categoryId: schema.taskIntegrationChoices.categoryId })
     .from(schema.taskIntegrationChoices)
     .where(eq(schema.taskIntegrationChoices.taskId, task.id));
+  const deactivated = await loadDeactivatedModuleIds(db);
+  const served = listIntegrationProviders().filter((provider) => {
+    const parsed = parseProviderId(provider.id);
+    return parsed?.kind !== 'module' || !deactivated.has(parsed.moduleId);
+  });
   const categories = new Set([
-    ...listIntegrationProviders().flatMap((provider) => provider.categories),
+    ...served.flatMap((provider) => provider.categories),
     ...chosen.map((choice) => choice.categoryId),
   ]);
   return c.json({

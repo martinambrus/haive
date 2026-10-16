@@ -16,9 +16,9 @@ resolution, the choice routes, the broker (`/integration-mcp`, see The broker) a
 worker are merged: a run whose invocation row carries a stamp gets the `haive-integrations` MCP server
 and its own `integrations` token (see The call log, the stamp and the token), and the dispatch side is
 merged: a step whose catalog entry declares requirements is resolved, granted and stamped at dispatch
-(see Dispatch). No shipped step declares one yet (a module step can; prompt templates will with J6), so
-in production no agent reaches the broker and the resolver's grant tier stays empty. The task page has
-no Integrations section yet.
+(see Dispatch). No shipped core step declares one; a module step can, and an admin's prompt step can
+declare `integrations` (see [Task types](task-types.md)), so only those reach the broker. The task page
+has no Integrations section yet.
 
 ## Providers and categories
 
@@ -40,11 +40,29 @@ sign anyone in), `token` (a form and help text).
 
 Ids: a core provider or category is `^[a-z0-9][a-z0-9_-]*$`, a module's is `module.<moduleId>.<id>`.
 `isCategoryId` accepts a module-grammar id or a registered core id only; the choice routes are
-stricter and accept only the core list (`listIntegrationCategories`). Core categories and their labels:
+stricter and accept only a registered category (`listIntegrationCategories`: the core list, then the
+categories loaded modules declare). Core categories and their labels:
 `rich-documents` Documents, `spreadsheets`, `file-storage` File storage, `mail` Email, `chat`,
-`issues` Issue tracking, `wiki`, `forge` Git forge. Only `forge` has providers today.
+`issues` Issue tracking, `wiki`, `forge` Git forge. Only `forge` has core providers.
 
-The registered providers are the five forges, in this order: `github`, `gitea`, `gitlab`,
+**Module providers and categories.** A module's manifest may declare `integrations` (provider specs)
+and `categories` (`{id, label, description?}`), full `module.<moduleId>.<local>` ids (local part at most 64
+characters); the manifest rules refuse another module's prefix, a provider category outside core plus the
+module's own, `forge`, an `mcp` surface, `selfHosted`, a provider with no usable sign-in (oauth2 with
+`userInfo` and `preregistered`, or device with `userInfo`), duplicate ids, a module provider without
+`apiHosts` (bare https hostnames), and a composable step requirement naming a `module.*` id the manifest does not
+declare or whose id is not `^[a-z][a-z0-9-]{0,15}$`. Provider specs parse strictly: an unknown or misplaced key
+is refused by name. The api's `mountModules` and the worker's `bootStepEngine` call
+`registerModuleIntegrations` (an idempotent replace behind the unchanged `listIntegrationProviders`,
+`getIntegrationProvider` and `listIntegrationCategories`, core first); the worker refuses at boot, naming the step,
+a requirement naming a module category or provider no loaded module declares. A module provider with no
+provider-config row is off, and enablement folds `modules.deactivated_at` in live, never cached:
+`providerState(db, id)` answers `enabled`, `disabled`, `module-deactivated`, `module-missing` (a module-grammar id
+nothing registers) or `unknown`. `GET /integrations/categories` lists the core categories, then those of active
+modules (`{id, label, description?, moduleId, moduleName}`); `GET /tasks/:id/integrations` lists the categories of
+core and active-module providers plus any category a choice row of the task already names.
+
+The core providers are the five forges, in this order: `github`, `gitea`, `gitlab`,
 `bitbucket_cloud`, `bitbucket_server` (`CORE_FORGE_PROVIDER_SPECS`, `@haive/shared/forge`). Each
 declares `forge`, a token method first, and two operations: `open_pull_request` (write) and
 `get_pull_request_state` (read). GitHub alone adds `device` and `oauth2`; its read and write scopes are
@@ -253,25 +271,34 @@ the grant is written FIRST and the stamped invocation inserted after it, in one 
 holds a connection without a grant.
 
 **Dispatch** (`worker/src/step-engine/step-integrations.ts`, the llm and fan-out sites of
-`step-runner.ts`). A step's requirements are its composable catalog entry's `integrations` (a
-`custom.*` step has none yet); boot refuses, naming the step, a declaration none of the step's
-dispatches can carry (no `llm` or `agentMining` phase without a `toolProfile`). Only a dispatch whose
-spec leaves `toolProfile` unset resolves; recaps, the AI-fix agent, merges and the DAG never do. One
-resolution per dispatch, shared by every agent of a fan-out: a required requirement that does not
-resolve fails the step `integration-unresolved` naming it, its category and the reason (an optional one
-is dropped), a requirement that pins a provider is refused `integration-provider-pinned` until J6, and
-a missing signing key or tool names the broker could not list fail `integrations-no-signing-key` and
-`integration-tools-unlistable`. The run is written by `insertStampedRun`: one transaction that takes
-`lockTaskIntegrations` (the lock the choice PUT and DELETE take first), resolves again, records the
-grants from that resolution and inserts the run stamped with its bindings; a required binding lost
-since the first resolution writes nothing and fails the step. In a fan-out only the first run goes
+`step-runner.ts`). A step's requirements are its composable catalog entry's `integrations` (a prompt
+step's are its pinned entry's, and one that no longer parses fails the step
+`integration-requirement-invalid` before anything resolves); boot refuses, naming the step, a
+declaration none of the step's dispatches can carry (no `llm` or `agentMining` phase without a
+`toolProfile`). Only a dispatch whose spec leaves `toolProfile` unset resolves; recaps, the AI-fix
+agent, merges and the DAG never do. One resolution per dispatch, shared by every agent of a fan-out:
+a required requirement that does not resolve fails the step `integration-unresolved` naming it, its
+category and the reason (an optional one is dropped), a requirement that pins a provider is refused
+`integration-provider-pinned` until pins land (J6e), and a missing signing key or tool names the
+broker could not list fail
+`integrations-no-signing-key` and `integration-tools-unlistable`. The run is written by
+`insertStampedRun`: one transaction that takes `lockTaskIntegrations` (the lock the choice PUT and
+DELETE take first), resolves again, records the grants from that resolution and inserts the run
+stamped with its bindings; a required binding lost since the first resolution writes nothing and
+fails the step, and so does an account a prompt step's template names (`{{integration:<id>.account}}`)
+that now resolves to another connection than the prompt was built on, or appeared or went away
+(`integration-account-changed`). A dispatch whose first resolution bound nothing (every requirement
+optional and unresolved) inserts its run unstamped with no second resolution, so the prompt's
+`(no account connected)` holds for that run and an account connected meanwhile applies from the next
+dispatch. In a fan-out only the first run goes
 through it: that run's stamp is the fan-out's, and every later agent is inserted with the same
 bindings, with no second resolution and no grant write, so a choice changed meanwhile applies from the
 next dispatch (an agent can then carry an account removed after the first insert, and the broker
 refuses its calls `connection-unavailable`). Bindings make the dispatch need an
 MCP-capable CLI, and the prompt names each provider (its id when the display name is not one safe line
 or names an agent path) with the tools the agent will see, write tools only while the owner's switch
-is on, never the account. The prompt and the CLI choice come from the first resolution and the stamp
+is on, never the account; a prompt step's template names it only through
+`{{integration:<id>.account}}` (see [Task types](task-types.md)). The prompt and the CLI choice come from the first resolution and the stamp
 from the second; tools/list follows the stamp, so a choice change landing between the two can only
 leave the prompt naming tools the agent is not offered.
 
@@ -392,9 +419,12 @@ follows an http(s) remote's host.
   before its CLI starts, rather than running
   without the tools its prompt names.
 - **Tool names** (`integrationTools`): a tool is named by its operation id; when two declared tools
-  share one, every holder becomes `<requirementId>_<opId>` (other characters replaced by `_`). Every
+  share one, every holder becomes `<requirementId>_<opId>` (other characters replaced by `_`), and such
+  a name longer than 40 characters keeps its first 31, then `_` and the first 8 hex characters of the
+  sha256 of `<requirementId>\n<opId>`, so a long operation id never leaves a step unlistable. Every
   declared name is checked against `TOOL_NAME_PATTERN` and for uniqueness even while the write switch
-  is off, and a bad name throws, naming the requirement and the operation, instead of being skipped.
+  is off, and a bad name (a leading digit, a collision) throws, naming the requirement and the
+  operation, instead of being skipped.
 
 ## The broker
 
@@ -413,8 +443,12 @@ title's `minLength: 1` is published too.
 - **call** matches the tool name against the stamp with every write tool included, so a write the
   switch has turned off is refused as `write-switched-off` with a row rather than as unknown; a name
   the stamp never declared answers 403 `undeclared-tool` and writes nothing. Each later refusal is a
-  row with its reason: `provider-unavailable` (no spec or disabled), `connection-unavailable` (gone,
-  not `connected`, another provider, shared, another user's, or its credential cannot be read),
+  row with its reason: `provider-unavailable` (no spec, disabled, or a module provider with no executor
+  for the operation), `provider-deactivated` (its module is deactivated), `provider-missing` (the stamp
+  binds a module provider no loaded module declares; any tool name the stamp no longer lists is then
+  refused this way, with the agent's name not stored), `connection-unavailable` (gone, not
+  `connected`, another provider, shared, another user's, its credential cannot be read, or its token
+  could not be renewed),
   `write-switched-off`, `invalid-arguments` (400), `no-remote` (409), `connection-not-for-repository`
   (the credential's host is not the task's remote, or it has none), `unsafe-api-base` (`apiBaseFits`,
   so older credentials saved before the rule are refused here rather than sent as is).
@@ -438,6 +472,36 @@ title's `minLength: 1` is published too.
   open-PR lookup on Gitea or Bitbucket Server lists a whole page of pull requests with their bodies),
   an error body up to 4 KiB, and the stream is cancelled past either. This is in the shared
   `BaseForgeProvider`, so the worker's forge calls are bounded too.
+- **One scrub** (`redactSecrets`, `api/src/lib/module-vendor-client.ts`) removes the secrets from every
+  vendor answer before a module executor sees it, and from every error text, every module result and
+  every forge success text the broker answers, in every spelling a vendor's encoder may echo: each
+  character, a letter or digit too, as is, `%xx` or `\uXXXX` in either case, a slash as `\/`, each
+  also inside a JSON string; with a cut read, also a start of one, or of one of its escapes, left at
+  the end. Forge success text is scrubbed and never cut.
+
+### Module provider calls
+
+A module that declares providers exports `./integrations`: executors by provider id, then operation
+id, each a zod `args` schema and a `run` (`IntegrationExecutor`, `@haive/shared/module-host`). The api
+loader refuses to boot a module whose executors name a provider or operation its manifest does not
+declare, or whose manifest declares an operation with no executor, naming the module and the
+operation. The broker answers a module provider's tool as it does a forge's (state, connection, write
+switch, budget row, deadline) and then:
+
+- parses the arguments with the executor's schema (400 `invalid-arguments` naming the first issue);
+- hands `run` the parsed arguments, the call's abort signal, the connection's account label and a
+  vendor client, never the token. The client adds `Authorization: Bearer <token>` itself and sends
+  only to `https` URLs on the default port of a host the provider declares in `apiHosts`
+  (`vendor-host-refused`); it drops a module's own `Authorization` and `Host` headers, refuses
+  redirects (`vendor-redirect-refused`), lets a read operation send only GET or HEAD
+  (`vendor-method-refused`), reads at most 8 MiB of an answer and 4 KiB of an error body, maps a
+  non-2xx status to `vendor-auth`, `vendor-not-found`, `vendor-conflict`, `vendor-rate-limited` or
+  `vendor-error`, and scrubs the token out of an answer before it parses one, so even an echo of it
+  never reaches the executor;
+- races the run against the 30 s deadline, so a run that ignores its signal still answers 504
+  `timeout`, and aborts what it started once the call is recorded;
+- answers the result as JSON text, scrubbed of the token and cut to 64 KiB (`[truncated]` marks a
+  cut).
 
 ## Migrations
 
@@ -484,4 +548,4 @@ uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
     on every call; it never reads grants, and no token or its Basic form reaches a response, row or log.
 17. Only a dispatch stamps, under the task's integrations lock, with its grants in the same
     transaction; the choice routes take that lock first; a provider-pinned requirement is refused at
-    dispatch until J6.
+    dispatch until pins land (J6e).

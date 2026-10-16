@@ -2,12 +2,17 @@ import { z } from 'zod';
 import { formSchemaSchema } from '../schemas/form.js';
 import { collapseToLine } from '../utils/collapse-line.js';
 import {
+  INTEGRATION_ID_MAX_LENGTH,
+  INTEGRATION_ID_PATTERN,
+  integrationRequirementSchema,
   isCustomStepId,
   isPersonaId,
   parseStepId,
   PERSONA_ID_PATTERN_SOURCE,
+  REPOSITORY_BOUND_CATEGORIES,
   REPOSITORY_TOKEN,
   type ComposableStepEntry,
+  type IntegrationRequirement,
 } from './contracts.js';
 import {
   CUSTOM_TOOL_PROBLEM_KINDS,
@@ -26,6 +31,7 @@ export const PROMPT_STEP_TIMEOUT_MIN_MS = 60_000;
 export const PROMPT_STEP_TIMEOUT_MAX_MS = 30 * 60_000;
 export const PROMPT_STEP_CAPABILITIES = ['tool_use', 'file_write', 'vision'] as const;
 export type PromptStepCapability = (typeof PROMPT_STEP_CAPABILITIES)[number];
+export const INTEGRATIONS_MAX_PER_STEP = 8;
 
 const RESERVED_MARKER_OPEN = '[[HAIVE_';
 const PREAMBLE_OPEN = '<haive_';
@@ -48,25 +54,49 @@ export const promptStepEntrySchema = z.object({
   paramFormSchema: formSchemaSchema.optional(),
   capabilities: z.array(z.enum(PROMPT_STEP_CAPABILITIES)).default([]),
   tools: z.array(customToolSchema).max(CUSTOM_TOOLS_MAX_PER_STEP).default([]),
+  integrations: z.array(integrationRequirementSchema).optional(),
   timeoutMs: z.number().int().min(PROMPT_STEP_TIMEOUT_MIN_MS).max(PROMPT_STEP_TIMEOUT_MAX_MS),
   agentPool: z.literal('*').optional(),
 });
 export type PromptStepEntry = z.infer<typeof promptStepEntrySchema>;
 
-/** What a read of a stored entry returns; `invalidTools` is derived on every read and never stored. */
-export type ParsedPromptStepEntry = PromptStepEntry & { invalidTools?: string[] };
+/** What a read of a stored entry returns; `invalidTools` and `invalidIntegrations` are derived on every read and never stored. */
+export type ParsedPromptStepEntry = PromptStepEntry & {
+  invalidTools?: string[];
+  invalidIntegrations?: string[];
+};
 
 const toolLabel = (tool: unknown, index: number): string => {
   const name = typeof tool === 'object' && tool !== null ? (tool as { name?: unknown }).name : null;
   return typeof name === 'string' ? name : `#${index}`;
 };
 
-/** Reads the entry with its tools set aside: a tool that fails (or sits past the eighth) is named in `invalidTools`; any other failure is null. */
+const integrationLabel = (requirement: unknown, index: number): string => {
+  const id =
+    typeof requirement === 'object' && requirement !== null
+      ? (requirement as { id?: unknown }).id
+      : null;
+  return typeof id === 'string' ? id : `#${index}`;
+};
+
+// A named tool keeps the detailed checks the tool editor shows, whatever else it breaks; anything else cannot be judged.
+const hasToolName = (tool: unknown): tool is CustomTool =>
+  typeof tool === 'object' &&
+  tool !== null &&
+  typeof (tool as { name?: unknown }).name === 'string';
+
+/** Reads the entry with its tools and integrations set aside: a tool that fails (or sits past the eighth) is named in `invalidTools`, a requirement that fails in `invalidIntegrations`; any other failure is null. */
 export function parsePromptStepEntry(value: unknown): ParsedPromptStepEntry | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  const { tools = [] } = value as { tools?: unknown };
-  if (!Array.isArray(tools)) return null;
-  const head = promptStepEntrySchema.safeParse({ ...value, tools: [] });
+  const {
+    tools = [],
+    integrations,
+    ...rest
+  } = value as { tools?: unknown; integrations?: unknown };
+  if (!Array.isArray(tools) || (integrations !== undefined && !Array.isArray(integrations))) {
+    return null;
+  }
+  const head = promptStepEntrySchema.safeParse({ ...rest, tools: [] });
   if (!head.success) return null;
   const kept: CustomTool[] = [];
   const invalid: string[] = [];
@@ -75,7 +105,20 @@ export function parsePromptStepEntry(value: unknown): ParsedPromptStepEntry | nu
     if (parsed?.success) kept.push(parsed.data);
     else invalid.push(toolLabel(tool, index));
   });
-  return { ...head.data, tools: kept, ...(invalid.length > 0 ? { invalidTools: invalid } : {}) };
+  const declared: IntegrationRequirement[] = [];
+  const invalidIntegrations: string[] = [];
+  integrations?.forEach((requirement: unknown, index) => {
+    const parsed = integrationRequirementSchema.safeParse(requirement);
+    if (parsed.success) declared.push(parsed.data);
+    else invalidIntegrations.push(integrationLabel(requirement, index));
+  });
+  return {
+    ...head.data,
+    tools: kept,
+    ...(integrations === undefined ? {} : { integrations: declared }),
+    ...(invalid.length > 0 ? { invalidTools: invalid } : {}),
+    ...(invalidIntegrations.length > 0 ? { invalidIntegrations } : {}),
+  };
 }
 
 /** A task's pinned prompt steps by id; an entry that does not fit its key, or whose fields other than its tools do not parse, is dropped. */
@@ -189,6 +232,8 @@ export interface PromptTemplateValues {
   taskDescription: string;
   /** Each value arrives already fenced; it is inserted as it is. */
   steps: Readonly<Record<string, string>>;
+  /** The account each requirement id stands for, as text; the renderer keeps it to one line. */
+  integrations: Readonly<Record<string, string>>;
 }
 
 export class PromptTemplateRenderError extends Error {
@@ -204,6 +249,15 @@ export class PromptTemplateRenderError extends Error {
 const own = (record: Readonly<Record<string, string>>, key: string): string =>
   Object.hasOwn(record, key) ? record[key]! : '';
 
+const ACCOUNT_SUFFIX = '.account';
+
+/** The requirement id of an `{{integration:<id>.account}}` token, from what follows `integration:`; null for any other shape. */
+function accountRequirementId(body: string): string | null {
+  if (!body.endsWith(ACCOUNT_SUFFIX)) return null;
+  const id = body.slice(0, -ACCOUNT_SUFFIX.length);
+  return id !== '' && !id.includes('.') ? id : null;
+}
+
 function tokenValue(token: PromptTemplateToken, values: PromptTemplateValues): string | null {
   switch (token.kind) {
     case 'field':
@@ -214,6 +268,10 @@ function tokenValue(token: PromptTemplateToken, values: PromptTemplateValues): s
       return values.taskDescription;
     case 'step':
       return own(values.steps, token.id);
+    case 'integration': {
+      const requirementId = accountRequirementId(token.id);
+      return requirementId === null ? null : own(values.integrations, requirementId);
+    }
     default:
       return null;
   }
@@ -257,7 +315,8 @@ export function renderPromptTemplate(template: string, values: PromptTemplateVal
     if (token.kind === 'step' && !token.ownLine) {
       throw new PromptTemplateRenderError('step-token-not-own-line', token.raw);
     }
-    const text = token.kind === 'step' || token.ownLine ? value : collapseToLine(value);
+    const keepsLines = token.kind === 'step' || (token.ownLine && token.kind !== 'integration');
+    const text = keepsLines ? value : collapseToLine(value);
     dynamic.push([out.length, out.length + text.length]);
     out += text;
   }
@@ -270,7 +329,6 @@ export const PROMPT_STEP_PROBLEM_KINDS = [
   'field-not-declared',
   'persona-id-invalid',
   'reserved-marker-in-template',
-  'integration-token',
   'template-too-large',
   'timeout-out-of-range',
   'capability-not-allowed',
@@ -282,6 +340,16 @@ export const PROMPT_STEP_PROBLEM_KINDS = [
   'step-token-not-own-line',
   ...CUSTOM_TOOL_PROBLEM_KINDS,
   'tool-no-longer-valid',
+  'too-many-integrations',
+  'integration-provider-pinned',
+  'integration-category-duplicate',
+  'integration-id-duplicate',
+  'integration-id-invalid',
+  'integration-category-unknown',
+  'integration-without-repository',
+  'integration-no-longer-valid',
+  'integration-not-declared',
+  'integration-property-unknown',
 ] as const;
 export type PromptStepProblemKind = (typeof PROMPT_STEP_PROBLEM_KINDS)[number];
 
@@ -298,6 +366,8 @@ export type PromptStepValidationInput = Pick<
   slug?: string;
   tools?: readonly CustomTool[];
   invalidTools?: readonly string[];
+  integrations?: readonly IntegrationRequirement[];
+  invalidIntegrations?: readonly string[];
 };
 
 /** The width of every step_id column a custom step id is stored in (task_steps, task_step_cli_choices). */
@@ -309,9 +379,102 @@ export interface PromptStepValidationContext {
   stepIdsBefore: readonly string[];
   /** When given, a quoted step must be in it: the steps whose stored output is purely agent-authored. */
   quotableStepIds?: ReadonlySet<string>;
+  /** When given, a requirement's category must be in it: the categories this install registers. */
+  integrationCategoryIds?: ReadonlySet<string>;
 }
 
 const NO_TOKEN = { raw: '', start: 0 } as const;
+
+function integrationProblems(
+  entry: PromptStepValidationInput,
+  ctx: PromptStepValidationContext,
+): PromptStepProblem[] {
+  const problems: PromptStepProblem[] = [];
+  const add = (kind: PromptStepProblemKind, message: string, raw = '') =>
+    problems.push({ kind, message, raw, start: 0 });
+  // The web editor checks the stored entry as it was read, so an item can be anything; one the schema cannot read is named, not judged.
+  const requirements: IntegrationRequirement[] = [];
+  const unreadable: string[] = [];
+  (entry.integrations ?? []).forEach((item: unknown, index) => {
+    const parsed = integrationRequirementSchema.safeParse(item);
+    if (parsed.success) requirements.push(parsed.data);
+    else unreadable.push(integrationLabel(item, index));
+  });
+  if (requirements.length > INTEGRATIONS_MAX_PER_STEP) {
+    add(
+      'too-many-integrations',
+      `A step can declare at most ${INTEGRATIONS_MAX_PER_STEP} integrations.`,
+    );
+  }
+  const ids = new Set<string>();
+  const repeatedIds = new Set<string>();
+  const categories = new Set<string>();
+  for (const { id, category, provider } of requirements) {
+    const name = shownToolName(id);
+    if (provider !== undefined) {
+      add(
+        'integration-provider-pinned',
+        `The integration ${name} pins the provider ${shownToolName(provider)}; a prompt step names a category and Haive resolves the account.`,
+        name,
+      );
+    }
+    if (!INTEGRATION_ID_PATTERN.test(id)) {
+      add(
+        'integration-id-invalid',
+        `The integration id ${name} must start with a lowercase letter and use only lowercase letters, digits and hyphens, up to ${INTEGRATION_ID_MAX_LENGTH} characters.`,
+        name,
+      );
+    }
+    if (ids.has(id) && !repeatedIds.has(id)) {
+      repeatedIds.add(id);
+      add(
+        'integration-id-duplicate',
+        `Two integrations of this step have the id ${name}; give each its own id.`,
+        name,
+      );
+    }
+    ids.add(id);
+    if (category === undefined) continue;
+    const shown = shownToolName(category);
+    if (categories.has(category)) {
+      add(
+        'integration-category-duplicate',
+        `The integration ${name} asks for the category ${shown}, which another integration of this step already asks for; a step gets one account per category.`,
+        name,
+      );
+    }
+    categories.add(category);
+    if (ctx.integrationCategoryIds && !ctx.integrationCategoryIds.has(category)) {
+      add(
+        'integration-category-unknown',
+        `The integration ${name} asks for the category ${shown}, which this install does not have.`,
+        name,
+      );
+    }
+    if (!ctx.requiresRepository && REPOSITORY_BOUND_CATEGORIES.has(category)) {
+      add(
+        'integration-without-repository',
+        `The integration ${name} asks for the category ${shown}, which works on a repository, and this task type has none.`,
+        name,
+      );
+    }
+  }
+  const invalid = [...unreadable, ...(entry.invalidIntegrations ?? [])];
+  for (const name of invalid.slice(0, INVALID_TOOLS_SHOWN)) {
+    add(
+      'integration-no-longer-valid',
+      `The integration ${describeInvalidTools([name])} no longer passes its checks; fix it or remove it.`,
+      shownToolName(name),
+    );
+  }
+  if (invalid.length > INVALID_TOOLS_SHOWN) {
+    add(
+      'integration-no-longer-valid',
+      `${invalid.length - INVALID_TOOLS_SHOWN} more integrations no longer pass their checks.`,
+    );
+  }
+  return problems;
+}
 
 export function validatePromptStep(
   entry: PromptStepValidationInput,
@@ -341,6 +504,12 @@ export function validatePromptStep(
       .map((f) => f.id),
   );
   const earlier = new Set(ctx.stepIdsBefore);
+  const requirementIds = new Set(
+    (entry.integrations ?? []).flatMap((item: unknown) => {
+      const parsed = integrationRequirementSchema.safeParse(item);
+      return parsed.success ? [parsed.data.id] : [];
+    }),
+  );
   for (const token of tokens) {
     switch (token.kind) {
       case 'field':
@@ -364,9 +533,23 @@ export function validatePromptStep(
           );
         }
         break;
-      case 'integration':
-        add('integration-token', `${token.raw} is not supported yet.`, token);
+      case 'integration': {
+        const requirementId = accountRequirementId(token.id);
+        if (requirementId === null) {
+          add(
+            'integration-property-unknown',
+            `${token.raw} must be written {{integration:<id>.account}}; account is the only property an integration has.`,
+            token,
+          );
+        } else if (!requirementIds.has(requirementId)) {
+          add(
+            'integration-not-declared',
+            `${token.raw} names an integration the step does not declare.`,
+            token,
+          );
+        }
         break;
+      }
       case 'step':
         if (!earlier.has(token.id)) {
           add(
@@ -436,10 +619,16 @@ export function validatePromptStep(
       'A prompt step can write files only in a task type that requires a repository.',
     );
   }
-  for (const problem of validateCustomTools(entry.tools ?? [], ctx)) {
+  const tools: CustomTool[] = [];
+  const untyped: string[] = [];
+  (entry.tools ?? []).forEach((tool: unknown, index) => {
+    if (hasToolName(tool)) tools.push(tool);
+    else untyped.push(toolLabel(tool, index));
+  });
+  for (const problem of validateCustomTools(tools, ctx)) {
     add(problem.kind, problem.message, { raw: problem.tool, start: 0, param: problem.param });
   }
-  const invalid = entry.invalidTools ?? [];
+  const invalid = [...untyped, ...(entry.invalidTools ?? [])];
   for (const name of invalid.slice(0, INVALID_TOOLS_SHOWN)) {
     add(
       'tool-no-longer-valid',
@@ -453,11 +642,15 @@ export function validatePromptStep(
       `${invalid.length - INVALID_TOOLS_SHOWN} more tools no longer pass their checks.`,
     );
   }
+  problems.push(...integrationProblems(entry, ctx));
   return problems;
 }
 
 export function derivePromptStepComposable(
-  entry: Pick<PromptStepEntry, 'slug' | 'title' | 'capabilities' | 'paramFormSchema'>,
+  entry: Pick<
+    PromptStepEntry,
+    'slug' | 'title' | 'capabilities' | 'paramFormSchema' | 'integrations'
+  >,
   typeSlug: string,
   requiresRepository: boolean,
 ): ComposableStepEntry {
@@ -477,5 +670,8 @@ export function derivePromptStepComposable(
     provides: [],
     ...(writesFiles ? { removes: ['clean-tree'] } : {}),
     ...(entry.paramFormSchema ? { paramFormSchema: entry.paramFormSchema } : {}),
+    ...(entry.integrations && entry.integrations.length > 0
+      ? { integrations: entry.integrations }
+      : {}),
   };
 }

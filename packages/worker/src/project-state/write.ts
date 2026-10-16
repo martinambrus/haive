@@ -12,10 +12,12 @@ import {
   conflictSideValue,
   emptyProjectState,
   environmentUnitOf,
+  isCanonicalRepoPath,
   isClaimablePath,
   isClaimUnit,
   isEnvironmentUnit,
   isRenderUnit,
+  isRtkChoiceRecorded,
   isRtkQuestion,
   isSettingUnit,
   sameValue,
@@ -39,6 +41,7 @@ import {
   type ProjectStateClaim,
 } from '@haive/shared/project-state';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
+import { gitOperationInProgress } from '../repo/git-operation.js';
 import type { TemplateRenderContext } from '../step-engine/template-manifest.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -394,7 +397,8 @@ async function loadBase(
   if (Array.isArray(snapshot?.claims)) {
     for (const claim of snapshot.claims) {
       const path = (claim as { path?: unknown } | null)?.path;
-      if (typeof path === 'string' && isClaimablePath(path)) {
+      // Canonical, not claimable: a git-data claim an earlier release wrote is still removed.
+      if (typeof path === 'string' && isCanonicalRepoPath(path)) {
         files.push(`${PROJECT_STATE_DIR}/${claimFileName(path)}`);
       }
     }
@@ -444,10 +448,13 @@ export async function writeProjectStateColumn(
     expectedColumns,
     holdingTaskId,
     keepColumnOnFailure,
+    refuseDuringGitOperation,
   }: ProjectStateColumnInput & {
     column: RenderContextColumn;
     /** The column is what it was before the write, so a failure leaves it rather than clearing it. */
     keepColumnOnFailure?: boolean;
+    /** A merge or rebase open in the checkout refuses the write, as the sweep refuses to start one. */
+    refuseDuringGitOperation?: boolean;
   },
 ): Promise<ProjectStateWriteResult> {
   const written: string[] = [];
@@ -489,12 +496,14 @@ export async function writeProjectStateColumn(
           reviewDimensions: schema.repositories.reviewDimensions,
           onboardingEnvironment: schema.repositories.onboardingEnvironment,
           onboardingTooling: schema.repositories.onboardingTooling,
+          rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
         })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
         .limit(1);
+      const rtkChosen = isRtkChoiceRecorded(column.rtkChoiceRecorded, repo?.rtkChoiceMadeAt);
       const settings = repo
-        ? withoutUnchosenRtk(portableSettingsOf(repo), column.rtkChoiceRecorded)
+        ? withoutUnchosenRtk(portableSettingsOf(repo), rtkChosen)
         : emptyProjectState().settings;
       const tooling = repo ? toolingUnitOf(repo.onboardingTooling) : null;
       if (tooling !== null) settings[TOOLING_UNIT_NAME] = tooling;
@@ -510,9 +519,7 @@ export async function writeProjectStateColumn(
           base.bundles,
           overlayClaims(claims, pendingClaims, 'incoming'),
         ),
-        baseFiles: column.rtkChoiceRecorded
-          ? base.files
-          : base.files.filter((f) => f !== RTK_SETTING_FILE),
+        baseFiles: rtkChosen ? base.files : base.files.filter((f) => f !== RTK_SETTING_FILE),
       };
     };
     // A first look only, so its failure must not clear the column: the files then wait for the locked read.
@@ -558,6 +565,9 @@ export async function writeProjectStateColumn(
     if (!expectedColumns && seen !== null) await writeFiles(seen.baseFiles);
     await db.transaction(async (tx) => {
       await lockProjectState(tx, repositoryId);
+      if (refuseDuringGitOperation && (await gitOperationInProgress(repoPath))) {
+        throw new ProjectStateMovedError();
+      }
       if (expectedColumns) {
         await refuseMovedColumn(tx, repositoryId, expectedColumns);
         if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId);

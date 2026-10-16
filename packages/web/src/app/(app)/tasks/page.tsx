@@ -7,7 +7,8 @@ import { api, type Task, type TaskListResponse, type TaskStatus } from '@/lib/ap
 import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/components/ui';
 import { CircleDot, FolderGit2 } from 'lucide-react';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
-import { isTaskDead } from '@/lib/step-banners';
+import { isTaskDead, moduleStopBanner } from '@/lib/step-banners';
+import { pausedByLabel } from '@/lib/task-state';
 import { TaskVote } from '@/components/task-vote';
 import { UsageStrip } from '@/components/usage-strip';
 import { formatDuration } from '@/lib/format-duration';
@@ -40,6 +41,7 @@ function statusVariant(status: TaskStatus): BadgeVariant {
 // reconciles all loaded rows. Props are just `task`; everything else it uses is a
 // module-level helper.
 const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
+  const stopNote = moduleStopBanner(task, task.stop);
   return (
     <Link
       href={`/tasks/${task.id}`}
@@ -102,7 +104,7 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
               ) : task.pausedAt ? (
                 <Badge
                   variant="warning"
-                  title={`Paused by you at ${new Date(task.pausedAt).toLocaleString()} — the orchestrator is not handing this task any work.`}
+                  title={`${pausedByLabel(task)} at ${new Date(task.pausedAt).toLocaleString()} — the orchestrator is not handing this task any work.`}
                 >
                   paused
                 </Badge>
@@ -156,6 +158,7 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
           </p>
         )}
         {task.errorMessage && <p className="text-xs text-red-400">{task.errorMessage}</p>}
+        {stopNote && <p className="text-xs text-red-400">{stopNote.text}</p>}
         {task.timing && task.startedAt && (
           <div className="flex flex-wrap items-center gap-3 font-mono text-xs">
             <span className="text-neutral-300" title="Wall clock since the task started">

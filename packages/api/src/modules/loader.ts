@@ -9,6 +9,7 @@ import {
   type ModuleTeardownPayload,
   type ModuleTeardownResult,
 } from '@haive/shared';
+import { registerModuleIntegrations } from '@haive/shared/integrations';
 import {
   collectFieldIds,
   diffModuleIntent,
@@ -20,6 +21,7 @@ import {
 } from '@haive/shared/modularity';
 import {
   moduleSettingKey,
+  type ModuleIntegrationExecutors,
   type ModuleRouteContext,
   type ModuleSettingsKind,
 } from '@haive/shared/module-host';
@@ -36,6 +38,7 @@ import {
   liveDependents,
   setModuleActive,
 } from './activation.js';
+import { setModuleExecutors } from './integration-executors.js';
 import { PurgeIncompleteError, purgeModule } from './purge.js';
 
 export type ApiModuleEntry = {
@@ -43,6 +46,7 @@ export type ApiModuleEntry = {
   source?: ModuleSource;
   manifest: unknown;
   routes?: (ctx: ModuleRouteContext) => Hono<AppEnv>;
+  integrations?: ModuleIntegrationExecutors;
 };
 
 export type LoadedApiModule = {
@@ -66,6 +70,40 @@ function lockBusyError(err: unknown): never {
     throw new HttpError(503, 'Another save of this setting is in progress; try again');
   }
   throw err;
+}
+
+function assertExecutors(entry: ApiModuleEntry, manifest: ModuleManifest): void {
+  const where = `Module ${manifest.id} (${entry.packageName})`;
+  const executors = entry.integrations ?? {};
+  const providers = new Map(
+    (manifest.integrations ?? []).map((provider) => [provider.id, provider]),
+  );
+  for (const providerId of Object.keys(executors)) {
+    if (!providers.has(providerId)) {
+      throw new Error(
+        `${where} exports executors for the provider ${providerId}, which its manifest does not declare`,
+      );
+    }
+  }
+  for (const [providerId, provider] of providers) {
+    const byOperation = executors[providerId] ?? {};
+    const declared = new Set((provider.operations ?? []).map((op) => op.opId));
+    for (const opId of Object.keys(byOperation)) {
+      if (!declared.has(opId)) {
+        throw new Error(
+          `${where} exports an executor for the operation ${opId} of ${providerId}, which its manifest does not declare`,
+        );
+      }
+    }
+    for (const opId of declared) {
+      const executor = byOperation[opId];
+      if (typeof executor?.run !== 'function' || typeof executor.args?.safeParse !== 'function') {
+        throw new Error(
+          `${where} declares the operation ${opId} of ${providerId} but exports no executor for it`,
+        );
+      }
+    }
+  }
 }
 
 function settingsOf(manifest: ModuleManifest, kind: ModuleSettingsKind) {
@@ -103,12 +141,15 @@ export async function mountModules(
       throw new Error(`Duplicate module id "${manifest.id}" (${entry.packageName})`);
     }
     seen.add(manifest.id);
+    assertExecutors(entry, manifest);
     loaded.push({
       packageName: entry.packageName,
       manifest,
       hasRoutes: entry.routes !== undefined,
     });
   }
+  registerModuleIntegrations(loaded);
+  setModuleExecutors(entries.map((entry) => entry.integrations));
 
   for (const [index, entry] of entries.entries()) {
     const { manifest } = loaded[index]!;

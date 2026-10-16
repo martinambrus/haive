@@ -55,7 +55,8 @@ export function MaintenanceNotice({
               : 'Haive is in maintenance.'}
           </span>
           <span className="text-amber-200/80">
-            New tasks cannot be started. Work already running will finish normally.
+            New work cannot be started: no new tasks, retries or resumes. Work already running will
+            finish normally.
           </span>
           {role === 'admin' && (
             <Link href="/admin/maintenance" className="font-semibold text-amber-100 underline">

@@ -21,7 +21,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { TASK_JOB_NAMES } from '@haive/shared';
+import { TASK_JOB_NAMES, configService } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { markQueuedForStart } from '../src/lib/task-start.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -37,6 +37,7 @@ const UPCOMING_STEP = '08c-code-review';
 const app = new Hono<AppEnv>();
 app.route('/', taskRoutes);
 app.onError(errorHandler);
+vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 type Rows = Record<string, unknown>;
 /** The task row, optionally one step row on `STEP` and a failed fan-out agent on it. */

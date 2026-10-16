@@ -62,7 +62,13 @@ import {
   type DeadStepRow,
   type TaskStopRow,
 } from '@/lib/step-banners';
-import { taskBadgeKind, taskClockEndMs, taskMenuKeys, taskStoppedAt } from '@/lib/task-state';
+import {
+  pausedByLabel,
+  taskBadgeKind,
+  taskClockEndMs,
+  taskMenuKeys,
+  taskStoppedAt,
+} from '@/lib/task-state';
 import { useGlobalPause } from '@/lib/use-global-pause';
 import {
   defaultRetryTimeoutMinutes,
@@ -576,6 +582,8 @@ interface TaskDetailResponse {
   loggedCallCount?: number;
   /** Those of them still running. Absent on an older server. */
   runningCallCount?: number;
+  /** Digest of the CLI runs of the task whose result has landed. Absent on an older server. */
+  finishedRunsRevision?: string;
   /** Currency + dated FX rate the server resolved for THIS task, so costs render the
    *  same on every later view. Absent on an older server: fall back to USD. */
   costDisplay?: CostDisplay | null;
@@ -691,6 +699,7 @@ export default function TaskDetailPage() {
   const [providerBreakdown, setProviderBreakdown] = useState<TaskProviderUsage[]>([]);
   const [loggedCallCount, setLoggedCallCount] = useState(0);
   const [runningCallCount, setRunningCallCount] = useState(0);
+  const [finishedRunsRevision, setFinishedRunsRevision] = useState('');
   const [parentTask, setParentTask] = useState<LinkedTask | null>(null);
   const [childTasks, setChildTasks] = useState<LinkedTask[]>([]);
   const [promotedDraftCount, setPromotedDraftCount] = useState(0);
@@ -806,6 +815,7 @@ export default function TaskDetailPage() {
       setProviderBreakdown(data.providerBreakdown ?? []);
       setLoggedCallCount(data.loggedCallCount ?? 0);
       setRunningCallCount(data.runningCallCount ?? 0);
+      setFinishedRunsRevision(data.finishedRunsRevision ?? '');
       setCostDisplay(data.costDisplay ?? USD_DISPLAY);
       setParentTask(data.parentTask ?? null);
       setChildTasks(data.childTasks ?? []);
@@ -2025,10 +2035,10 @@ export default function TaskDetailPage() {
       {deadNote && <DeadTaskBanner text={deadNote.text} />}
 
       {/* Task-scoped hold. The GLOBAL pause has its own app-wide banner, so it is not
-          repeated here — this one only ever means "you paused this task". */}
+          repeated here — this one means this task was paused, by you or by an administrator. */}
       {badgeKind === 'paused' && task.pausedAt && (
         <div className="rounded-md border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-          <span className="font-semibold">Paused</span> since{' '}
+          <span className="font-semibold">{pausedByLabel(task)}</span> since{' '}
           {new Date(task.pausedAt).toLocaleString()}. Any CLI run that was already in flight
           finishes, and nothing new starts — the concurrency goes to your other tasks. The
           environment stays up, though another task may reclaim its runtime slot while this one is
@@ -2185,6 +2195,7 @@ export default function TaskDetailPage() {
                   taskCompletedAt={task.completedAt ?? null}
                   loggedCallCount={loggedCallCount}
                   runningCallCount={runningCallCount}
+                  finishedRunsRevision={finishedRunsRevision}
                 />
               </div>
             </PersistedDetails>

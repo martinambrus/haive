@@ -23,16 +23,19 @@ import {
   CredentialProviderMismatchError,
   IntegrationToolNameError,
   NeedsReauthError,
+  OauthUnavailableError,
+  OauthVendorError,
   getConnectionCredential,
   getIntegrationProvider,
   integrationTools,
-  isProviderEnabled,
   parseIntegrationBindings,
+  providerState,
   writeAllowedBy,
   type ConnectionCredential,
   type IntegrationBinding,
   type IntegrationTool,
 } from '@haive/shared/integrations';
+import { parseProviderId } from '@haive/shared/modularity';
 import { getDb, type Database } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
@@ -41,19 +44,29 @@ import {
   INTEGRATION_CALL_DEADLINE_MS,
 } from '../lib/integration-call-limits.js';
 import {
+  VendorError,
+  createVendorClient,
+  redactSecrets,
+  type VendorReason,
+} from '../lib/module-vendor-client.js';
+import {
   assertInvocationLive,
   claimsFromBearer,
   type TaskCallClaims,
 } from '../lib/task-call-auth.js';
+import { cutToBytes, describeIssue } from '../lib/tool-call-text.js';
 import { jsonBodyLimit } from '../middleware/sandbox-body-limit.js';
+import { moduleExecutorOf } from '../modules/integration-executors.js';
 
 const log = logger.child({ module: 'integration-mcp-routes' });
 
 const ERROR_TEXT_MAX_LENGTH = 400;
-const REDACTED = '[redacted]';
+const RESULT_TEXT_MAX_BYTES = 65_536;
 
 type Reason =
   | 'provider-unavailable'
+  | 'provider-deactivated'
+  | 'provider-missing'
   | 'connection-unavailable'
   | 'write-switched-off'
   | 'invalid-arguments'
@@ -61,11 +74,7 @@ type Reason =
   | 'connection-not-for-repository'
   | 'unsafe-api-base'
   | 'timeout'
-  | 'vendor-auth'
-  | 'vendor-not-found'
-  | 'vendor-conflict'
-  | 'vendor-rate-limited'
-  | 'vendor-error'
+  | VendorReason
   | 'internal-error';
 
 type Connection = {
@@ -74,6 +83,8 @@ type Connection = {
   scope: 'user' | 'shared';
   ownerUserId: string;
   status: string;
+  accountLabel: string;
+  externalAccountId: string | null;
 };
 
 type BoundOperation =
@@ -111,6 +122,8 @@ async function loadConnections(
       scope: schema.integrationConnections.scope,
       ownerUserId: schema.integrationConnections.ownerUserId,
       status: schema.integrationConnections.status,
+      accountLabel: schema.integrationConnections.accountLabel,
+      externalAccountId: schema.integrationConnections.externalAccountId,
     })
     .from(schema.integrationConnections)
     .where(
@@ -166,7 +179,12 @@ function bindOperation(opId: string, args: unknown): BoundOperation {
   return { ok: false, error: 'unknown operation' };
 }
 
-function vendorReason(err: ForgeError): Reason {
+const isUnloadedModuleProvider = (binding: IntegrationBinding): boolean =>
+  parseProviderId(binding.providerId)?.kind === 'module' &&
+  getIntegrationProvider(binding.providerId) === undefined;
+
+function vendorReason(err: ForgeError | VendorError): Reason {
+  if (err instanceof VendorError) return err.reason;
   if (err instanceof ForgeAuthError) return 'vendor-auth';
   if (err instanceof ForgeNotFoundError) return 'vendor-not-found';
   if (err instanceof ForgeConflictError) return 'vendor-conflict';
@@ -180,8 +198,8 @@ const secretsOf = ({ accessToken, username }: ConnectionCredential): string[] =>
     .filter((secret) => secret.length > 0)
     .sort((a, b) => b.length - a.length);
 
-const redact = (text: string, secrets: readonly string[]): string =>
-  secrets.reduce((out, secret) => out.split(secret).join(REDACTED), text);
+const textOf = (result: unknown, secrets: readonly string[]): string =>
+  redactSecrets(JSON.stringify(result) ?? 'null', secrets);
 
 function failureOf(
   err: unknown,
@@ -195,11 +213,11 @@ function failureOf(
       message: 'the vendor did not answer within the deadline',
     };
   }
-  if (err instanceof ForgeError) {
+  if (err instanceof ForgeError || err instanceof VendorError) {
     return {
       status: 502,
       reason: vendorReason(err),
-      message: redact(err.message, secrets).slice(0, ERROR_TEXT_MAX_LENGTH),
+      message: redactSecrets(err.message, secrets).slice(0, ERROR_TEXT_MAX_LENGTH),
     };
   }
   return { status: 500, reason: 'internal-error', message: 'the integration call failed' };
@@ -253,12 +271,12 @@ integrationMcpRoutes.post('/call', async (c) => {
 
   // A write tool the switch has turned off is still matched here, so it is refused with a row, not as unknown.
   const name = typeof body?.tool === 'string' ? body.tool : '';
-  const tool = declaredTools(parseIntegrationBindings(invocation.stamp), claims, () => true).get(
-    name,
-  );
-  if (!tool)
+  const bindings = parseIntegrationBindings(invocation.stamp);
+  const tool = declaredTools(bindings, claims, () => true).get(name);
+  // A tool nothing lists, while the stamp binds a module provider no loaded module declares, was that provider's.
+  const binding = tool?.binding ?? bindings.find(isUnloadedModuleProvider);
+  if (!binding)
     throw new HttpError(403, 'this invocation does not declare that tool', 'undeclared-tool');
-  const { binding, op } = tool;
 
   // A row is a claim: written under the invocation's lock, and only below the budget.
   const claim = async (outcome: 'running' | 'refused', reason: Reason | null): Promise<string> => {
@@ -276,8 +294,9 @@ integrationMcpRoutes.post('/call', async (c) => {
           taskId: claims.taskId,
           taskStepId: claims.taskStepId,
           cliInvocationId: claims.cliInvocationId,
-          tool: name,
-          access: op.access,
+          // A name no provider declares is the agent's own, so it is not stored.
+          tool: tool ? name : '',
+          access: tool?.op.access ?? binding.access,
           surface: 'rest',
           outcome,
           reason,
@@ -302,14 +321,63 @@ integrationMcpRoutes.post('/call', async (c) => {
       .set({ outcome, reason, durationMs: Date.now() - startedAt })
       .where(eq(schema.integrationCalls.id, id));
 
-  const forge = isForgeProviderName(binding.providerId) ? binding.providerId : null;
-  if (
-    !forge ||
-    !getIntegrationProvider(binding.providerId) ||
-    !(await isProviderEnabled(db, binding.providerId))
-  ) {
+  const fail = async (
+    err: unknown,
+    callId: string,
+    deadline: AbortSignal,
+    secrets: readonly string[],
+  ): Promise<never> => {
+    const failure = failureOf(err, deadline, secrets);
+    const logged = {
+      taskId: claims.taskId,
+      cliInvocationId: claims.cliInvocationId,
+      tool: name,
+      reason: failure.reason,
+    };
+    if (failure.reason === 'internal-error') {
+      const detail = redactSecrets(
+        err instanceof Error ? (err.stack ?? err.message) : String(err),
+        secrets,
+      );
+      log.error({ ...logged, detail }, 'an integration call failed unexpectedly');
+    } else {
+      log.warn(logged, 'an integration call did not succeed');
+    }
+    await finish(callId, 'error', failure.reason);
+    throw new HttpError(failure.status, failure.message, failure.reason);
+  };
+  const credentialOf = async (connectionId: string): Promise<ConnectionCredential> => {
+    try {
+      return await getConnectionCredential(db, connectionId, { fetchFn: fetch });
+    } catch (err) {
+      if (
+        err instanceof NeedsReauthError ||
+        err instanceof ConnectionNotFoundError ||
+        err instanceof CredentialProviderMismatchError
+      ) {
+        return refuse(403, 'connection-unavailable', err.message);
+      }
+      if (err instanceof OauthVendorError || err instanceof OauthUnavailableError) {
+        return refuse(403, 'connection-unavailable', 'the access token could not be renewed');
+      }
+      throw err;
+    }
+  };
+
+  if (!tool) {
+    const message = `the provider ${binding.providerId} is not loaded on this install`;
+    return refuse(403, 'provider-missing', message);
+  }
+  const { op } = tool;
+
+  const state = await providerState(db, binding.providerId);
+  if (state === 'module-deactivated') {
+    return refuse(403, 'provider-deactivated', 'the module of this provider is deactivated');
+  }
+  if (state !== 'enabled') {
     return refuse(403, 'provider-unavailable', 'this provider is not available on this install');
   }
+  const forge = isForgeProviderName(binding.providerId) ? binding.providerId : null;
 
   const connections = await loadConnections(db, [binding]);
   const connection = connections.get(binding.connectionId);
@@ -334,6 +402,57 @@ integrationMcpRoutes.post('/call', async (c) => {
     }
   }
 
+  if (forge === null) {
+    const executor = moduleExecutorOf(binding.providerId, op.opId);
+    if (!executor) {
+      return refuse(403, 'provider-unavailable', 'this provider is not available on this install');
+    }
+    const args = executor.args.safeParse(body?.arguments);
+    if (!args.success) {
+      return refuse(400, 'invalid-arguments', describeIssue(args.error, ERROR_TEXT_MAX_LENGTH));
+    }
+
+    const { accessToken } = await credentialOf(connection.id);
+    const callId = await claim('running', null);
+    const deadline = AbortSignal.timeout(INTEGRATION_CALL_DEADLINE_MS);
+    // A run that ignores its signal is raced against the deadline; `done` stops what it started once the call is recorded.
+    const done = new AbortController();
+    const signal = AbortSignal.any([deadline, done.signal]);
+    const expired = new Promise<never>((_resolve, reject) => {
+      deadline.addEventListener('abort', () => reject(deadline.reason), {
+        once: true,
+        signal: done.signal,
+      });
+    });
+    let text: string;
+    try {
+      const result = await Promise.race([
+        executor.run({
+          args: args.data,
+          vendor: createVendorClient({
+            token: accessToken,
+            apiHosts: getIntegrationProvider(binding.providerId)?.apiHosts ?? [],
+            access: op.access,
+            signal,
+          }),
+          signal,
+          account: {
+            label: connection.accountLabel,
+            externalAccountId: connection.externalAccountId,
+          },
+        }),
+        expired,
+      ]);
+      text = cutToBytes(textOf(result, [accessToken]), RESULT_TEXT_MAX_BYTES);
+    } catch (err) {
+      return fail(err, callId, deadline, [accessToken]);
+    } finally {
+      done.abort();
+    }
+    await finish(callId, 'ok', null);
+    return c.json({ ok: true, text });
+  }
+
   const operation = bindOperation(op.opId, body?.arguments);
   if (!operation.ok) return refuse(400, 'invalid-arguments', operation.error);
 
@@ -347,19 +466,7 @@ integrationMcpRoutes.post('/call', async (c) => {
     return refuse(409, 'no-remote', 'the remote of this repository cannot be read');
   }
 
-  let credential: ConnectionCredential;
-  try {
-    credential = await getConnectionCredential(db, connection.id, { fetchFn: fetch });
-  } catch (err) {
-    if (
-      err instanceof NeedsReauthError ||
-      err instanceof ConnectionNotFoundError ||
-      err instanceof CredentialProviderMismatchError
-    ) {
-      return refuse(403, 'connection-unavailable', err.message);
-    }
-    throw err;
-  }
+  const credential = await credentialOf(connection.id);
   if (
     credential.host === null ||
     !credentialUsableForPr({ provider: credential.provider, host: credential.host }, remoteUrl)
@@ -400,25 +507,8 @@ integrationMcpRoutes.post('/call', async (c) => {
   try {
     result = await operation.run(provider, ctx);
   } catch (err) {
-    const failure = failureOf(err, deadline, secretsOf(credential));
-    const logged = {
-      taskId: claims.taskId,
-      cliInvocationId: claims.cliInvocationId,
-      tool: name,
-      reason: failure.reason,
-    };
-    if (failure.reason === 'internal-error') {
-      const detail = redact(
-        err instanceof Error ? (err.stack ?? err.message) : String(err),
-        secretsOf(credential),
-      );
-      log.error({ ...logged, detail }, 'an integration call failed unexpectedly');
-    } else {
-      log.warn(logged, 'an integration call did not succeed');
-    }
-    await finish(callId, 'error', failure.reason);
-    throw new HttpError(failure.status, failure.message, failure.reason);
+    return fail(err, callId, deadline, secretsOf(credential));
   }
   await finish(callId, 'ok', null);
-  return c.json({ ok: true, text: JSON.stringify(result) });
+  return c.json({ ok: true, text: textOf(result, secretsOf(credential)) });
 });

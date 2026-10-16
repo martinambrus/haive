@@ -27,6 +27,7 @@ vi.mock('../src/lib/task-type-definition.js', async (importOriginal) => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { conflictUnitLabel } from '@haive/shared/project-state-conflicts';
 import * as onboardingState from '../src/lib/onboarding-state.js';
@@ -46,12 +47,9 @@ const REPO = '00000000-0000-4000-8000-0000000000c1';
 const NO_ONBOARDING = 'No completed onboarding found for this repository, so it cannot be upgraded';
 
 const app = new Hono<AppEnv>();
-app.use(async (c, next) => {
-  c.set('maintenanceState', 'normal');
-  await next();
-});
 app.route('/tasks', taskRoutes);
 app.onError(errorHandler);
+vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 beforeEach(() => {
   h.add.mockReset();

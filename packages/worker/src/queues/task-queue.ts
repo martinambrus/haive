@@ -32,6 +32,7 @@ import {
   repoIdeSessionId,
   logger,
   parseAllowanceWatchMode,
+  refusesNewWork,
   type CliExecJobPayload,
   type AbortLeftMergePayload,
   type RepoRagCleanupPayload,
@@ -161,7 +162,7 @@ import {
   updateOwnedStep,
   type TaskFence,
 } from '../step-engine/step-ownership.js';
-import { refuseRevive } from './_revive-check.js';
+import { admitReopen, NewWorkHeld, readMaintenanceState, refuseRevive } from './_revive-check.js';
 import { resetStepAndDownstream } from './_step-reset.js';
 import {
   foldAbandonedPark,
@@ -392,15 +393,18 @@ async function resolveCurrentStepIndex(
 }
 
 /** Run a task write that can lift a failed task (no fence, or one that may revive) after the
- *  creation's checks, in one transaction; false when one refused, recorded, or nothing landed. */
+ *  creation's checks, in one transaction; false when one refused, recorded, or nothing landed.
+ *  While the system drains or is in maintenance it throws NewWorkHeld, with nothing written, for a
+ *  failed task, and the write of any other never matches one that failed since; it throws
+ *  MaintenanceStateUnreadable, with nothing written, when that state cannot be read. */
 async function writeReviving(
   db: Database | DbHandle,
   taskId: string,
   stepId: string,
   fence: TaskFence | undefined,
-  write: (handle: Database | DbHandle) => Promise<boolean>,
+  write: (handle: Database | DbHandle, held: boolean) => Promise<boolean>,
 ): Promise<boolean> {
-  if (fence && !fence.reviveFailed) return write(db);
+  if (fence && !fence.reviveFailed) return write(db, false);
   const refuse = async (reason: string, extra: Record<string, unknown> = {}) => {
     logger.info(
       { taskId, stepId, reason },
@@ -415,9 +419,10 @@ async function writeReviving(
   };
   try {
     const refused = await db.transaction(async (tx) => {
+      const { held } = await admitReopen(tx, taskId);
       const refusal = await refuseRevive(tx, taskId);
       if (refusal) return refusal;
-      return (await write(tx)) ? null : 'overtaken';
+      return (await write(tx, held)) ? null : 'overtaken';
     });
     if (refused === null) return true;
     if (refused === 'overtaken') return false;
@@ -442,7 +447,7 @@ export async function markTaskWaiting(
   fence?: TaskFence,
 ): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  return writeReviving(db, taskId, stepId, fence, async (handle) => {
+  return writeReviving(db, taskId, stepId, fence, async (handle, held) => {
     const [parked] = await handle
       .update(schema.tasks)
       .set({
@@ -452,7 +457,7 @@ export async function markTaskWaiting(
         currentRound: round,
         updatedAt: new Date(),
       })
-      .where(taskWriteTarget(taskId, fence))
+      .where(taskWriteTarget(taskId, fence, held))
       .returning({ id: schema.tasks.id });
     return parked !== undefined;
   });
@@ -471,7 +476,7 @@ export async function markTaskRunningWithStep(
   fence?: TaskFence,
 ): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  return writeReviving(db, taskId, stepId, fence, async (handle) => {
+  return writeReviving(db, taskId, stepId, fence, async (handle, held) => {
     const [pointed] = await handle
       .update(schema.tasks)
       .set({
@@ -491,9 +496,9 @@ export async function markTaskRunningWithStep(
       })
       // …but never on a CANCELLED or COMPLETED task. Clearing completedAt is what makes this write
       // able to resurrect the dead: a park tick on a cancelled task called this and flipped it back
-      // to `running` one poll after the user cancelled, over and over. `failed` stays writable —
-      // the allowance auto-resume legitimately revives a failed task through here.
-      .where(taskWriteTarget(taskId, fence))
+      // to `running` one poll after the user cancelled, over and over. `failed` stays writable,
+      // outside a hold — an answer to a failed task's form legitimately reopens it through here.
+      .where(taskWriteTarget(taskId, fence, held))
       .returning({ id: schema.tasks.id });
     return pointed !== undefined;
   });
@@ -2413,6 +2418,8 @@ export function advanceChainHasMoved(
   return task.currentStepId !== stepId || task.currentRound !== round;
 }
 
+const FAILED_ADVANCE_SKIPPED = 'advance-step skipped: the task failed and nothing has reopened it';
+
 async function handleAdvanceStep(
   db: Database,
   payload: TaskJobPayload,
@@ -2581,17 +2588,26 @@ async function handleAdvanceStep(
     ctx.completedAt,
     jobTimestamp,
   );
+  const newWorkHeld =
+    ctx.status === 'failed' && refusesNewWork(await readMaintenanceState(ctx.taskId));
   if (
     failedTaskRefusesAdvance(
       ctx.status,
       existing?.status,
       payload.formValues != null,
       gateAnswerAfterFailure,
+      newWorkHeld,
     )
   ) {
     logger.info(
-      { taskId: ctx.taskId, stepId: payload.stepId, round, rowStatus: existing?.status ?? null },
-      'advance-step skipped: the task failed and nothing has reopened it',
+      {
+        taskId: ctx.taskId,
+        stepId: payload.stepId,
+        round,
+        rowStatus: existing?.status ?? null,
+        newWorkHeld,
+      },
+      FAILED_ADVANCE_SKIPPED,
     );
     return;
   }
@@ -3927,7 +3943,19 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
     if (job.name === TASK_JOB_NAMES.START) {
       await handleStartTask(db, payload, held);
     } else if (job.name === TASK_JOB_NAMES.ADVANCE_STEP) {
-      await handleAdvanceStep(db, payload, job.id, job.timestamp, held);
+      await handleAdvanceStep(db, payload, job.id, job.timestamp, held).catch((err: unknown) => {
+        if (!(err instanceof NewWorkHeld)) throw err;
+        logger.info(
+          {
+            taskId: payload.taskId,
+            stepId: payload.stepId,
+            round: payload.round ?? 0,
+            newWorkHeld: true,
+            state: err.state,
+          },
+          FAILED_ADVANCE_SKIPPED,
+        );
+      });
     } else if (job.name === TASK_JOB_NAMES.CANCEL) {
       await handleCancelTask(db, payload);
     } else {

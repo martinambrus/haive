@@ -3,7 +3,12 @@ import { buildCredentialHelper, gitRun, scrubSecret } from '../repo/git-push.js'
 import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
-import { abortMerge as abortGitMerge, openMerge, utf8Name } from '../step-engine/git-merge.js';
+import {
+  abortMerge as abortGitMerge,
+  handBackAfterMove,
+  openMerge,
+  utf8Name,
+} from '../step-engine/git-merge.js';
 import { resolveHaiveProjectionConflicts } from './projection-merge.js';
 import type { Database } from '@haive/database';
 
@@ -318,6 +323,7 @@ export async function commitMerge(
  * quietly resetting over their work.
  */
 export async function landPlanMerge(repoPath: string, sha: string): Promise<void> {
+  const before = (await gitRun(repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
   const res = await gitRun(repoPath, ['merge', '--ff-only', sha]);
   if (res.code !== 0) {
     const changed = await gitRun(repoPath, [
@@ -333,6 +339,7 @@ export async function landPlanMerge(repoPath: string, sha: string): Promise<void
         `so the result could not be fast-forwarded in: ${res.stderr || res.stdout}`,
     );
   }
+  await handBackAfterMove(repoPath, before);
 }
 
 /** Both mirror files, for a caller that wants to name them. */

@@ -227,13 +227,14 @@ field list, `delete`).
 
 An admin type may carry prompt steps (`prompt_steps`, keyed by the step slug; never on built-in or
 module rows). Each is `{slug, title (≤512), description?, template (≤16 KiB), paramFormSchema?,
-capabilities (tool_use, file_write, vision), tools (≤8), timeoutMs (60 s–30 min), agentPool '*'}`. No
-field can turn agent rules, the MCP surface or tools off: a prompt step gets agent rules whenever the
-install's agent-rules switch is on, and always gets the containment lines.
+capabilities (tool_use, file_write, vision), tools (≤8), integrations? (≤8), timeoutMs (60 s–30 min),
+agentPool '*'}`. No field can turn agent rules, the MCP surface or tools off: a prompt step gets agent
+rules whenever the install's agent-rules switch is on, and always gets the containment lines.
 
-**Pinned raw, parsed per tool.** `custom_steps` holds the entries as stored; readers parse tools one by
-one and name a bad tool in `invalidTools` while the step survives. A whole-entry parse would drop the
-step when a release tightens one tool bound — and a task whose current step is missing goes dead.
+**Pinned raw, parsed per tool and per requirement.** `custom_steps` holds the entries as stored; readers
+parse tools and `integrations` one by one and name a bad one in `invalidTools` / `invalidIntegrations`
+while the step survives. A whole-entry parse would drop the step when a release tightens one tool bound
+— and a task whose current step is missing goes dead.
 
 **The worker synthesises each prompt step per task** from the pinned copy (memoised per task and id, at
 most 256), never from a registry: a registry keyed by id cannot hold two versions of one id for two
@@ -243,11 +244,12 @@ retried older round could otherwise quote its future). Apply stores the reply re
 `cli_invocations` by invocation id, so a later quote sees the exact reply.
 
 **Tokens:** `{{task.title}}`, `{{task.description}}`, `{{field:<id>}}`, `{{agent:<id>}}`,
-`{{step:<stepId>}}`; `{{integration:…}}` is refused ("not supported yet"). The renderer makes one pass
-and never rescans a value; a value mid-line is collapsed to one line, and a `{{step:}}` quote must sit
-on its own line. Quoted step output is fenced; field values, the title and the description are not.
+`{{step:<stepId>}}`, `{{integration:<id>.account}}`. The renderer makes one pass and never rescans a
+value; a value mid-line is collapsed to one line, and a `{{step:}}` quote must sit on its own line.
+Quoted step output is fenced; field values, the title, the description and account texts are not.
 Every value is capped: each quote or other value at most 16 KiB, all quotes 64 KiB, all other values
-64 KiB. Any `[[HAIVE_` overlapping a value and any leading `<haive_` opener is broken, so a value cannot
+(account texts included, each occurrence counted) 64 KiB, and a cut value's `[truncated: …]` notice
+counts inside its share. Any `[[HAIVE_` overlapping a value and any leading `<haive_` opener is broken, so a value cannot
 forge a marker or a preamble block. The save check (`validatePromptStep`, `checkPromptSteps`) refuses
 unknown tokens, undeclared fields, a persona or a file-writing step on a repo-less type, a step quote
 that is not earlier, not on its own line or not quotable, reserved markers, a missing or orphan entry,
@@ -263,6 +265,27 @@ has no findings channel. Personas, house rules for prompt steps and the start-ti
 [Prompt containment](prompt-containment.md) and [Global knowledge base](global-kb.md): only the
 step's own template ids resolve, dispatch fails closed on a missing persona, and the start check only
 records `agent_persona.unresolved` (a persona may exist only on the base branch).
+
+**Integrations.** A prompt step may declare up to 8 integration requirements `{id, category, access,
+optional?}`, pinned with the step and read per requirement like its tools. The save check refuses an id
+outside `^[a-z][a-z0-9-]{0,15}$` or repeated within the step, two requirements of one category (a step
+gets one account per category), a category the install does not register (the api passes
+`listIntegrationCategories()`; the web composer checks core categories only), a pinned `provider` (a
+prompt step names a category and Haive resolves the account) and a repository-bound category (`forge`)
+on a repo-less type. Dispatch hands the pinned requirements to the broker exactly as a catalog entry's
+(see [Integrations](integrations.md)); one that no longer parses fails the step
+`integration-requirement-invalid` before anything resolves. Drafts carry none, so a draft's
+`{{integration:…}}` is refused as undeclared.
+
+`{{integration:<id>.account}}` names the account the declared requirement `<id>` resolved to at this
+dispatch: the connection's account label when, cut to 200 characters, it is one line, survives the
+fence, opens no code fence and names no agent path; otherwise the provider's name; and
+`(no account connected)` for an optional requirement that resolved to nothing. It is always collapsed
+to one line and treated as a dynamic value, so `[[HAIVE_` and a leading `<haive_` in a label are
+broken. House-rules text gets no account. The stamped run must carry the connection each named
+account was rendered from; if the task's choice moved in between, the dispatch writes nothing and
+fails `integration-account-changed`, and a retry renders the new account. The save check refuses an undeclared id
+(`integration-not-declared`) and any other property (`integration-property-unknown`).
 
 ## Custom tools
 
@@ -373,7 +396,7 @@ tasks are listed in the task list like any other task (a product decision).
 1. A missing step marks the task dead; never filter it out of a run list.
 2. A static type's run list and the prompt steps it uses are pinned at create, and only INSERTs write
    them; `workflow` and `run_app` keep a null snapshot and assemble their list per path and mode.
-3. `custom_steps` is pinned raw and parsed per tool.
+3. `custom_steps` is pinned raw and parsed per tool and per integration requirement.
 4. Prompt steps are never registered; the worker synthesises them per task.
 5. The seeder writes only its own columns and rows, skips unchanged rows and never deletes.
 6. Every built-in slug is held by a `builtin` row with the registry's list, or the worker does not boot.

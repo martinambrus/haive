@@ -2,6 +2,12 @@ export * from './access-token.js';
 export * from './categories.js';
 export * from './connection-tokens.js';
 export * from './errors.js';
+export {
+  listIntegrationModules,
+  loadDeactivatedModuleIds,
+  registerModuleIntegrations,
+  type IntegrationModule,
+} from './module-registry.js';
 export * from './oauth-client.js';
 export * from './oauth.js';
 export * from './providers.js';

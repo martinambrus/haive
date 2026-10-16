@@ -25,6 +25,11 @@ import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { getDb } from '../db.js';
 import { getBundleQueue } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
+import {
+  admitNewWork,
+  assertNewWorkAllowed,
+  requireNewWorkAllowed,
+} from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
@@ -40,6 +45,7 @@ import {
   uploadFileRelOrThrow,
   uploadsRel,
 } from '../lib/uploads.js';
+import { isUuid } from '../lib/uuid.js';
 
 const ARCHIVE_FORMATS = new Set<ArchiveFormat>(['zip', 'tar', 'tar.gz']);
 
@@ -227,6 +233,9 @@ bundleRoutes.use('*', requireAuth);
 bundleRoutes.get('/', async (c) => {
   const userId = c.get('userId');
   const repositoryId = c.req.query('repositoryId');
+  if (repositoryId && !isUuid(repositoryId)) {
+    throw new HttpError(400, 'repositoryId must be a UUID');
+  }
   const db = getDb();
 
   const where = repositoryId
@@ -308,7 +317,7 @@ async function completedUploadBody(userId: string, sessionId: string) {
   };
 }
 
-bundleRoutes.post('/', async (c) => {
+bundleRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const body = createGitBundleRequestSchema.parse(await c.req.json());
   const db = getDb();
@@ -320,6 +329,7 @@ bundleRoutes.post('/', async (c) => {
   const bundleId = randomUUID();
   const storageRoot = path.join(bundleDirFor(userId, bundleId), 'extracted');
   const bundle = await db.transaction(async (tx) => {
+    await admitNewWork(tx);
     const [row] = await tx
       .insert(schema.customBundles)
       .values({
@@ -498,7 +508,7 @@ bundleRoutes.put('/uploads/:id/chunk', async (c) => {
   return c.json({ session: uploadSessionFromRow(updated[0]!) });
 });
 
-bundleRoutes.post('/uploads/:id/complete', async (c) => {
+bundleRoutes.post('/uploads/:id/complete', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const uploadId = c.req.param('id');
   const db = getDb();
@@ -527,6 +537,8 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
   const finalArchive = path.join(anchor, finalRel);
   const wholeFileAt = (rel: string) => isWholeFile(anchor, rel, Number(row.totalSize));
 
+  // The claim is a write, so a drain that began after the early check refuses before it.
+  await assertNewWorkAllowed();
   await withCompleteClaim(db, schema.customBundleUploads, row.id, async (claim) => {
     const staged = await wholeFileAt(archiveRel);
     if (!staged && !(await wholeFileAt(finalRel))) {
@@ -536,6 +548,7 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
     // Create the bundle row first, under the upload's id so a repeated complete finds it, with its
     // storage_root and archive_path; then move the staged archive into the bundle's directory.
     const inserted = await db.transaction(async (tx) => {
+      await admitNewWork(tx);
       const [created] = await tx
         .insert(schema.customBundles)
         .values({
@@ -574,15 +587,18 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
     const jobId = `ingest-zip-${row.id}`;
     if (inserted || !(await queue.getJob(jobId))) {
       if (!inserted) {
-        await db
-          .update(schema.customBundles)
-          .set({ status: 'syncing', lastSyncError: null, updatedAt: new Date() })
-          .where(
-            and(
-              eq(schema.customBundles.id, row.id),
-              inArray(schema.customBundles.status, ['syncing', 'failed']),
-            ),
-          );
+        await db.transaction(async (tx) => {
+          await admitNewWork(tx);
+          await tx
+            .update(schema.customBundles)
+            .set({ status: 'syncing', lastSyncError: null, updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.customBundles.id, row.id),
+                inArray(schema.customBundles.status, ['syncing', 'failed']),
+              ),
+            );
+        });
       }
       const payload: BundleJobPayload = {
         bundleId: row.id,
@@ -691,7 +707,7 @@ bundleRoutes.post('/:id/replace/init', async (c) => {
   return c.json({ session: uploadSessionFromRow(inserted[0]!) }, 201);
 });
 
-bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
+bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const bundleId = c.req.param('id');
   const uploadId = c.req.param('uploadId');
@@ -729,17 +745,19 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
   // Overwrite source.<ext> before wiping the prior extracted/ tree, so a death between the two
   // leaves a complete archive. Keeping the bundle row + items table intact during the swap means
   // the UI can keep displaying the previous state until the worker re-parses.
+  // The claim is a write, so a drain that began after the early check refuses before it.
+  await assertNewWorkAllowed();
   await withCompleteClaim(db, schema.customBundleUploads, row.id, async (claim) => {
     const onDisk = await lstatNoFollow(anchor, archiveRel);
     if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
       throw new HttpError(409, 'archive size mismatch on disk');
     }
-    await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
-    // A replace cannot resume past its rename, so a failure from here on gives the session back.
-    await removeNoFollow(anchor, extractedRel, { recursive: true });
-
     // The bundle row moves only with the claim, so a complete that lost it leaves the row alone.
     await db.transaction(async (tx) => {
+      await admitNewWork(tx);
+      await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
+      // A replace cannot resume past its rename, so a failure from here on gives the session back.
+      await removeNoFollow(anchor, extractedRel, { recursive: true });
       await claim.write(tx, {
         status: 'complete',
         archivePath: finalArchive,
@@ -785,7 +803,7 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
   });
 });
 
-bundleRoutes.post('/:id/sync', async (c) => {
+bundleRoutes.post('/:id/sync', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const bundleId = c.req.param('id');
   const row = await loadBundle(userId, bundleId);
@@ -794,10 +812,13 @@ bundleRoutes.post('/:id/sync', async (c) => {
   }
 
   const db = getDb();
-  await db
-    .update(schema.customBundles)
-    .set({ status: 'syncing', lastSyncError: null, updatedAt: new Date() })
-    .where(eq(schema.customBundles.id, bundleId));
+  await db.transaction(async (tx) => {
+    await admitNewWork(tx);
+    await tx
+      .update(schema.customBundles)
+      .set({ status: 'syncing', lastSyncError: null, updatedAt: new Date() })
+      .where(eq(schema.customBundles.id, bundleId));
+  });
 
   const queue = getBundleQueue();
   const payload: BundleJobPayload = { bundleId, userId };

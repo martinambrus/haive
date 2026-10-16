@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -12,6 +12,7 @@ import {
   getHaiveVersion,
   installId,
   isDevVersion,
+  lockNewWorkFenceExclusive,
   logger,
   maintenanceStateSchema,
   networkName,
@@ -39,14 +40,13 @@ maintenanceRoutes.use('*', requireAdmin);
 
 /** Task states that still hold a maintenance window open. `waiting_user` counts: a task parked on
  *  a form is live work whose owner will come back to it, and stopping it loses their place. */
-export const LIVE_TASK_STATES = [
-  'created',
-  'queued',
-  'running',
-  'paused',
-  'waiting_user',
-  'waiting_pr',
-] as const;
+const BLOCKING_TASK_STATES = ['queued', 'running', 'paused', 'waiting_user', 'waiting_pr'] as const;
+
+/** Also `created`: a draft runs nothing but would find its module deactivated once started. */
+export const LIVE_TASK_STATES = ['created', ...BLOCKING_TASK_STATES] as const;
+
+/** The most rows either list of GET /blocking answers. */
+export const BLOCKING_LIST_CAP = 200;
 
 const setStateSchema = z.object({ state: maintenanceStateSchema });
 
@@ -57,8 +57,14 @@ maintenanceRoutes.get('/', async (c) => {
 
 maintenanceRoutes.put('/', async (c) => {
   const { state } = setStateSchema.parse(await c.req.json());
-  const previous = parseMaintenanceState(await configService.get(CONFIG_KEYS.MAINTENANCE_STATE));
-  await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state);
+  const previous = await getDb().transaction(async (tx) => {
+    await lockNewWorkFenceExclusive(tx);
+    const replaced = parseMaintenanceState(
+      await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
+    );
+    await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state);
+    return replaced;
+  });
   await recordAuditEvent(getDb(), {
     actorUserId: c.get('userId'),
     action: 'maintenance.set_state',
@@ -69,6 +75,81 @@ maintenanceRoutes.put('/', async (c) => {
   return c.json({ state, previous });
 });
 
+const jobOwner = {
+  ownerId: schema.users.id,
+  ownerName: schema.users.name,
+  ownerEmailEncrypted: schema.users.emailEncrypted,
+};
+
+/** The background jobs the updater counts beside the tasks; a provider with two in progress is one row. */
+async function listBlockingJobs(db: ReturnType<typeof getDb>) {
+  const [repositories, bundles, providers] = await Promise.all([
+    db
+      .select({
+        id: schema.repositories.id,
+        name: schema.repositories.name,
+        status: schema.repositories.status,
+        updatedAt: schema.repositories.updatedAt,
+        ...jobOwner,
+      })
+      .from(schema.repositories)
+      .leftJoin(schema.users, eq(schema.users.id, schema.repositories.userId))
+      .where(eq(schema.repositories.status, 'cloning'))
+      .orderBy(desc(schema.repositories.updatedAt))
+      .limit(BLOCKING_LIST_CAP + 1),
+    db
+      .select({
+        id: schema.customBundles.id,
+        name: schema.customBundles.name,
+        status: schema.customBundles.status,
+        updatedAt: schema.customBundles.updatedAt,
+        ...jobOwner,
+      })
+      .from(schema.customBundles)
+      .leftJoin(schema.users, eq(schema.users.id, schema.customBundles.userId))
+      .where(eq(schema.customBundles.status, 'syncing'))
+      .orderBy(desc(schema.customBundles.updatedAt))
+      .limit(BLOCKING_LIST_CAP + 1),
+    db
+      .select({
+        id: schema.cliProviders.id,
+        name: schema.cliProviders.label,
+        building: schema.cliProviders.sandboxImageBuildStatus,
+        provisioning: schema.cliProviders.modelProvisionStatus,
+        updatedAt: schema.cliProviders.updatedAt,
+        ...jobOwner,
+      })
+      .from(schema.cliProviders)
+      .leftJoin(schema.users, eq(schema.users.id, schema.cliProviders.userId))
+      .where(
+        or(
+          eq(schema.cliProviders.sandboxImageBuildStatus, 'building'),
+          eq(schema.cliProviders.modelProvisionStatus, 'provisioning'),
+        ),
+      )
+      .orderBy(desc(schema.cliProviders.updatedAt))
+      .limit(BLOCKING_LIST_CAP + 1),
+  ]);
+  const listed = [
+    ...repositories.map((r) => ({ kind: 'repository' as const, ...r })),
+    ...bundles.map((r) => ({ kind: 'bundle' as const, ...r })),
+    ...providers.map(({ building, provisioning, ...r }) => ({
+      kind: 'cli_provider' as const,
+      ...r,
+      status: [
+        building === 'building' ? 'building' : null,
+        provisioning === 'provisioning' ? 'provisioning' : null,
+      ]
+        .filter(Boolean)
+        .join(' + '),
+    })),
+  ].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  return {
+    jobs: listed.slice(0, BLOCKING_LIST_CAP),
+    capped: listed.length > BLOCKING_LIST_CAP,
+  };
+}
+
 /**
  * What is still holding the window open.
  *
@@ -78,7 +159,7 @@ maintenanceRoutes.put('/', async (c) => {
  */
 maintenanceRoutes.get('/blocking', async (c) => {
   const db = getDb();
-  const rows = await db
+  const fetched = await db
     .select({
       id: schema.tasks.id,
       title: schema.tasks.title,
@@ -96,9 +177,14 @@ maintenanceRoutes.get('/blocking', async (c) => {
     })
     .from(schema.tasks)
     .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
-    .where(inArray(schema.tasks.status, [...LIVE_TASK_STATES]))
+    // A dead task runs nothing, and none of this page's actions reach it; its owner cancels it.
+    .where(
+      and(inArray(schema.tasks.status, [...BLOCKING_TASK_STATES]), isNull(schema.tasks.deadAt)),
+    )
     .orderBy(desc(schema.tasks.updatedAt))
-    .limit(200);
+    .limit(BLOCKING_LIST_CAP + 1);
+  const rows = fetched.slice(0, BLOCKING_LIST_CAP);
+  const { jobs, capped: jobsCapped } = await listBlockingJobs(db);
   const fieldKey = await configService.getEncryptionKey();
 
   // A task with a live CLI is the one a drain actually has to wait for; a parked one is only
@@ -106,7 +192,14 @@ maintenanceRoutes.get('/blocking', async (c) => {
   const live = await db
     .select({ taskId: schema.cliInvocations.taskId })
     .from(schema.cliInvocations)
-    .where(and(isNull(schema.cliInvocations.endedAt), isNull(schema.cliInvocations.supersededAt)));
+    // A run the pause held back has no started_at: it is queued, not running.
+    .where(
+      and(
+        isNotNull(schema.cliInvocations.startedAt),
+        isNull(schema.cliInvocations.endedAt),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
   const withLiveCli = new Set(live.map((r) => r.taskId));
 
   return c.json({
@@ -115,10 +208,16 @@ maintenanceRoutes.get('/blocking', async (c) => {
       ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
       hasLiveCli: withLiveCli.has(r.id),
     })),
-    total: rows.length,
+    jobs: jobs.map(({ ownerEmailEncrypted, ...r }) => ({
+      ...r,
+      ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
+    })),
+    total: rows.length + jobs.length,
     // The listing is capped; say so rather than letting an operator read a truncated list as the
     // whole picture and force a drain that still had work behind it.
-    capped: rows.length === 200,
+    capped: fetched.length > BLOCKING_LIST_CAP || jobsCapped,
+    // GET /tasks/:id answers only a task's owner, so the page links just the viewer's own tasks.
+    viewerId: c.get('userId'),
   });
 });
 
@@ -171,23 +270,40 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
       // that stamp anchors the runtime reaper's paused-grace.
       if (task.pausedAt) return c.json({ ok: true, pausedAt: task.pausedAt.toISOString() });
       const pausedAt = new Date();
-      await db
-        .update(schema.tasks)
-        .set({ pausedAt, updatedAt: pausedAt })
-        .where(eq(schema.tasks.id, taskId));
-      await appendTaskEvent(db, taskId, null, 'task.paused', {
-        by: actorUserId,
-        byAdmin: true,
-        reason: 'maintenance',
+      const paused = await db.transaction(async (tx) => {
+        // Only the pause that changes the row is recorded.
+        const rows = await tx
+          .update(schema.tasks)
+          .set({ pausedAt, updatedAt: pausedAt })
+          .where(and(eq(schema.tasks.id, taskId), isNull(schema.tasks.pausedAt)))
+          .returning({ id: schema.tasks.id });
+        if (rows.length === 0) return false;
+        await appendTaskEvent(tx, taskId, null, 'task.paused', {
+          by: actorUserId,
+          byAdmin: true,
+          reason: 'maintenance',
+        });
+        return true;
       });
+      if (!paused) {
+        const standing = await db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, taskId),
+          columns: { pausedAt: true },
+        });
+        return c.json({ ok: true, pausedAt: standing?.pausedAt?.toISOString() ?? null });
+      }
       await audit({ pausedAt: pausedAt.toISOString() });
       return c.json({ ok: true, pausedAt: pausedAt.toISOString() });
     }
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
-      await clearTaskPause(db, taskId);
-      await appendTaskEvent(db, taskId, null, 'task.resumed', { by: actorUserId, byAdmin: true });
-      await audit({});
+      const resumed = await db.transaction(async (tx) => {
+        // Only the resume that changes the row is recorded.
+        if (!(await clearTaskPause(tx, taskId))) return false;
+        await appendTaskEvent(tx, taskId, null, 'task.resumed', { by: actorUserId, byAdmin: true });
+        return true;
+      });
+      if (resumed) await audit({});
       return c.json({ ok: true, pausedAt: null });
     }
     case 'stop': {
@@ -195,14 +311,17 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
         failTask: true,
         actor: 'admin',
       });
-      await appendTaskEvent(db, taskId, null, 'task.stopped', {
-        by: actorUserId,
-        byAdmin: true,
-        reason: 'maintenance',
-        ...result,
-      });
-      await audit(result);
-      log.info({ taskId, ...result }, 'admin stopped a task for maintenance');
+      // The owner and the audit trail hear of a stop only when a run ended or a step failed.
+      if (result.cancelled > 0 || result.stopped > 0) {
+        await appendTaskEvent(db, taskId, null, 'task.stopped', {
+          by: actorUserId,
+          byAdmin: true,
+          reason: 'maintenance',
+          ...result,
+        });
+        await audit(result);
+        log.info({ taskId, ...result }, 'admin stopped a task for maintenance');
+      }
       return c.json({ ok: true, ...result });
     }
   }

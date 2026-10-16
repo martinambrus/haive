@@ -37,7 +37,7 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb, type FakeDbHandle, type FakeRow } from '@haive/database/testing';
-import { BUNDLE_JOB_NAMES, logger } from '@haive/shared';
+import { BUNDLE_JOB_NAMES, configService, logger } from '@haive/shared';
 import { bundleRoutes } from '../src/routes/bundles.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -127,6 +127,7 @@ function setup() {
 
 beforeEach(async () => {
   vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
   storage = await mkdtemp(path.join(tmpdir(), 'bundle-crash-'));
   saved = process.env.BUNDLE_STORAGE_ROOT;
   process.env.BUNDLE_STORAGE_ROOT = storage;

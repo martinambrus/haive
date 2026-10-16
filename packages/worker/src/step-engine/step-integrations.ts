@@ -1,8 +1,11 @@
-import type { Database, schema } from '@haive/database';
+import { inArray } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
+import { promptNamesAgentPath } from '@haive/shared';
 import {
   IntegrationToolNameError,
   getIntegrationProvider,
   integrationTools,
+  listIntegrationCategories,
   lockTaskIntegrations,
   recordTaskGrants,
   resolveStepIntegrations,
@@ -10,18 +13,28 @@ import {
   type IntegrationResolution,
 } from '@haive/shared/integrations';
 import {
+  describeInvalidTools,
+  parseCategoryId,
+  parseProviderId,
   parseStepId,
   type ComposableStepEntry,
   type IntegrationRequirement,
 } from '@haive/shared/modularity';
+import { fenceOpener } from '@haive/shared/markdown-fences';
+import { providerLabel } from '../sandbox/mcp-surface.js';
+import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type { StepRegistry } from './registry.js';
 import type { StepDefinition } from './step-definition.js';
 import { insertOwnedRun } from './step-ownership.js';
+import { SAFE_TITLE_CHARS, isSingleLine, survivesFence } from './steps/_untrusted-repo.js';
+import { promptStepIntegrations } from './steps/custom/prompt-step.js';
 
 export const INTEGRATION_UNRESOLVED_REASON = 'integration-unresolved';
 export const INTEGRATION_PROVIDER_PINNED_REASON = 'integration-provider-pinned';
+export const INTEGRATION_REQUIREMENT_INVALID_REASON = 'integration-requirement-invalid';
 export const INTEGRATION_TOOLS_UNLISTABLE_REASON = 'integration-tools-unlistable';
 export const INTEGRATIONS_NO_SIGNING_KEY_REASON = 'integrations-no-signing-key';
+export const INTEGRATION_ACCOUNT_CHANGED_REASON = 'integration-account-changed';
 
 export type DispatchIntegrations =
   | { ok: true; bindings: IntegrationBinding[]; resolutions: IntegrationResolution[] }
@@ -33,12 +46,56 @@ export function setComposableCatalog(entries: ReadonlyMap<string, ComposableStep
   catalog = entries;
 }
 
-/** What the catalog entry of a step declares; a prompt step declares none yet. */
+/** What the catalog entry of a step declares; a prompt step declares what its task pinned. */
 export function stepIntegrationRequirements(
   stepDef: StepDefinition,
 ): readonly IntegrationRequirement[] {
   const id = stepDef.metadata.id;
-  return parseStepId(id)?.kind === 'custom' ? [] : (catalog.get(id)?.integrations ?? []);
+  return parseStepId(id)?.kind === 'custom'
+    ? (promptStepIntegrations(stepDef)?.requirements ?? [])
+    : (catalog.get(id)?.integrations ?? []);
+}
+
+/** Why a pinned prompt step cannot dispatch: a requirement it stored no longer parses. Null when none fails. */
+export function invalidRequirementsFailure(stepDef: StepDefinition): string | null {
+  const invalid = promptStepIntegrations(stepDef)?.invalid ?? [];
+  return invalid.length > 0
+    ? `${INTEGRATION_REQUIREMENT_INVALID_REASON}: this step's integrations no longer pass their checks: ${describeInvalidTools(invalid)}. The task pinned them when it was created; fix them in the task type and start a new task.`
+    : null;
+}
+
+function undeclaredModuleTarget(requirement: IntegrationRequirement): string | null {
+  const { category, provider } = requirement;
+  if (
+    category !== undefined &&
+    parseCategoryId(category)?.kind === 'module' &&
+    !listIntegrationCategories().some((declared) => declared.id === category)
+  ) {
+    return `the category ${category}`;
+  }
+  if (
+    provider !== undefined &&
+    parseProviderId(provider)?.kind === 'module' &&
+    getIntegrationProvider(provider) === undefined
+  ) {
+    return `the provider ${provider}`;
+  }
+  return null;
+}
+
+export function assertModuleIntegrationsDeclared(
+  entries: ReadonlyMap<string, ComposableStepEntry>,
+): void {
+  for (const entry of entries.values()) {
+    for (const requirement of entry.integrations ?? []) {
+      const target = undeclaredModuleTarget(requirement);
+      if (target !== null) {
+        throw new Error(
+          `Composable entry ${entry.stepId} requires ${target}, which no loaded module declares`,
+        );
+      }
+    }
+  }
 }
 
 export function assertIntegrationsDeliverable(
@@ -118,24 +175,99 @@ export async function resolveDispatchIntegrations(
   return { ok: true, bindings, resolutions };
 }
 
-/** Resolves again under the task lock, so the grant and the stamp follow the choice as it stands now; a required requirement lost since then writes nothing. */
+/** Resolves again under the task lock, so the grant and the stamp follow the choice as it stands now; a required requirement lost since then writes nothing, nor does a `named` account (requirement id to the connection its prompt was built on, null for none) that is another now. */
 export async function insertStampedRun(
   db: Database,
   taskId: string,
   stepRowId: string,
   values: typeof schema.cliInvocations.$inferInsert,
   requirements: readonly IntegrationRequirement[],
+  named: ReadonlyMap<string, string | null> = new Map(),
 ): Promise<typeof schema.cliInvocations.$inferSelect | { failure: string }> {
   return db.transaction(async (tx) => {
     await lockTaskIntegrations(tx, taskId);
     const resolutions = await resolveStepIntegrations(tx, { taskId }, requirements);
-    const failure = unresolvedFailure(resolutions);
-    if (failure !== null) return { failure };
-    await recordTaskGrants(tx, taskId, resolutions);
+    const unresolved = unresolvedFailure(resolutions);
+    if (unresolved !== null) return { failure: unresolved };
     const bindings = bindingsOf(resolutions);
+    const changed = [...named]
+      .filter(
+        ([id, connectionId]) =>
+          (bindings.find((binding) => binding.requirementId === id)?.connectionId ?? null) !==
+          connectionId,
+      )
+      .map(([id]) => id);
+    if (changed.length > 0) {
+      return {
+        failure: `${INTEGRATION_ACCOUNT_CHANGED_REASON}: the account of ${changed.join(', ')} changed while this step was starting, so the prompt names another account; retry the step.`,
+      };
+    }
+    await recordTaskGrants(tx, taskId, resolutions);
     return insertOwnedRun(tx, stepRowId, {
       ...values,
       integrations: bindings.length > 0 ? bindings : null,
     });
   });
+}
+
+export const NO_ACCOUNT_TEXT = '(no account connected)';
+
+/** The label as the prompt will hold it (cut first, so what is judged is what is sent), or the provider's name when that is not one safe line. */
+function accountText(binding: IntegrationBinding, label: string | undefined): string {
+  const cut = label?.slice(0, SAFE_TITLE_CHARS);
+  return cut !== undefined &&
+    isSingleLine(cut) &&
+    survivesFence(cut) &&
+    fenceOpener(cut) === null &&
+    !promptNamesAgentPath(cut, SANDBOX_WORKDIR)
+    ? cut
+    : providerLabel(binding.providerId);
+}
+
+/** What `{{integration:<id>.account}}` renders for each requirement: the label of its account, or `NO_ACCOUNT_TEXT` when it resolved to none. */
+export function integrationAccountTexts(
+  requirements: readonly IntegrationRequirement[],
+  bindings: readonly IntegrationBinding[],
+  labels: ReadonlyMap<string, string>,
+): Record<string, string> {
+  return Object.fromEntries(
+    requirements.map(({ id }) => {
+      const binding = bindings.find((candidate) => candidate.requirementId === id);
+      return [
+        id,
+        binding === undefined
+          ? NO_ACCOUNT_TEXT
+          : accountText(binding, labels.get(binding.connectionId)),
+      ];
+    }),
+  );
+}
+
+/** The account texts of a dispatch, with every label read in one query; undefined when the step declares no integration. */
+export async function dispatchIntegrationAccounts(
+  db: Database,
+  requirements: readonly IntegrationRequirement[],
+  bindings: readonly IntegrationBinding[],
+): Promise<Record<string, string> | undefined> {
+  if (requirements.length === 0) return undefined;
+  const rows =
+    bindings.length === 0
+      ? []
+      : await db
+          .select({
+            id: schema.integrationConnections.id,
+            label: schema.integrationConnections.accountLabel,
+          })
+          .from(schema.integrationConnections)
+          .where(
+            inArray(
+              schema.integrationConnections.id,
+              bindings.map((binding) => binding.connectionId),
+            ),
+          );
+  return integrationAccountTexts(
+    requirements,
+    bindings,
+    new Map(rows.map((row) => [row.id, row.label])),
+  );
 }
