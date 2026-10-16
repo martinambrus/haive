@@ -417,6 +417,25 @@ the P0 eval before and after on the same queries, and the store's size before an
 replaced vectors keep their index space (F15). Rollback: revert the commit; the next `02` or `11c`
 sync re-embeds the changed chunks back (one reindex, F11). No schema change.
 
+MEASURED (2026-10-16, the P0 eval set on the eval repository, before = main 9c0c8ee77, after = this
+change; each store built from scratch with the same embedder, own paths and exclusions):
+
+| Eval set (n) | recall@5 | MRR@5 | recall@12 | recall@20 | MRR@20 |
+|---|---|---|---|---|---|
+| real (71) | 0.484 → 0.498 | 0.452 → 0.429 | 0.582 → 0.603 | 0.610 → 0.638 | 0.449 → 0.466 |
+| synthetic-lex (100) | 0.940 → 0.950 | 0.796 → 0.813 | 0.980 → 1.000 | 0.990 → 1.000 | 0.813 → 0.823 |
+| synthetic-para (100 → 98) | 0.630 → 0.622 | 0.481 → 0.466 | 0.730 → 0.714 | 0.775 → 0.750 | 0.498 → 0.480 |
+| overview (25) | 0.248 → 0.258 | 0.458 → 0.401 | 0.405 → 0.397 | 0.517 → 0.527 | 0.469 → 0.423 |
+| OVERALL hybrid (296 → 294) | 0.667 → 0.673 | 0.578 → 0.569 | 0.752 → 0.758 | 0.786 → 0.789 | 0.590 → 0.589 |
+| OVERALL lexical only | 0.365 → 0.367 | 0.342 → 0.355 | | 0.365 → 0.367 | 0.343 → 0.357 |
+
+Real queries gain 3 hits at k=20 (52 → 55 of 71); the overview set loses MRR (its 25 queries find
+their files at lower ranks). Two paraphrase queries leave the after set because their gold chunk is
+no longer in the store: finer sections fill the 80-chunk cap of a large file sooner, so a vendored or
+bundled file keeps less of itself. Counted as misses, paraphrase hits@20 go 78 → 74 of 100 and the
+overall hits@20 stay 253 of 296. The store grows 20,921 → 23,105 rows (+10.4%), HNSW 163.4 → 180.5
+MiB, database 470.8 → 516.7 MiB; neither store holds a null or hash-fallback vector.
+
 ### P2. Query-side experiments (no reindex)
 
 Each sits behind a config key, off until P0 says on, so the rollback is the key.
