@@ -1122,7 +1122,7 @@ export async function findAdminPausedTaskIds(
  *  picked: clearing the per-step pref back to the task default carries no new
  *  provider to propagate. Returns true when it rewrote the default. */
 export async function propagateModelHealthCliToTaskDefault(
-  db: ReturnType<typeof getDb>,
+  db: ReturnType<typeof getDb> | DbTx,
   params: {
     taskId: string;
     taskStepId: string;

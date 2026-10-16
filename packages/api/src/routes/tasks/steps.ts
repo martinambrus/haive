@@ -1777,18 +1777,21 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     step.iterationCount === 0 && (step.status === 'waiting_form' || step.status === 'failed');
   if (movesTask) await assertNewWorkAllowed();
 
-  await writeStepCliChoice(db, choice);
-
-  // A CLI swap on the model-health canary rewrites the task default so every later
-  // step inherits the new model (see propagateModelHealthCliToTaskDefault). No-op
-  // for any other step or when the pref was cleared rather than set.
-  await propagateModelHealthCliToTaskDefault(db, {
-    taskId: id,
-    taskStepId: step.id,
-    stepId,
-    cliProviderId: body.cliProviderId ?? null,
-    by: userId,
-  });
+  const saveChoice = async (handle: Database | DbHandle) => {
+    await writeStepCliChoice(handle, choice);
+    // A CLI swap on the model-health canary rewrites the task default so every later
+    // step inherits the new model (see propagateModelHealthCliToTaskDefault). No-op
+    // for any other step or when the pref was cleared rather than set.
+    await propagateModelHealthCliToTaskDefault(handle, {
+      taskId: id,
+      taskStepId: step.id,
+      stepId,
+      cliProviderId: body.cliProviderId ?? null,
+      by: userId,
+    });
+  };
+  // A re-run saves the choice inside its fenced admission, so a refused one changes nothing.
+  if (!movesTask) await saveChoice(db);
 
   // Invalidate the step's cached detect/form so the next advance re-detects
   // against the newly-preferred CLI's metadata. Skipped if step is terminal, and
@@ -1859,8 +1862,10 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
-      if (movesTask) return moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now);
-      return null;
+      if (!movesTask) return null;
+      const moved = await moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now);
+      await saveChoice(tx);
+      return moved;
     });
     if (redrive?.leftActive.some(isLive)) {
       const killed = await killTaskSandboxes(id);

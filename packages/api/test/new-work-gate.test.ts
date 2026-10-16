@@ -622,8 +622,16 @@ describe('PATCH /tasks/:id/steps/:stepId/cli-provider', () => {
       taskStepAgentMinings: schema.taskStepAgentMinings,
       taskStepCliChoices: schema.taskStepCliChoices,
       stepCatalog: schema.stepCatalog,
+      cliProviders: schema.cliProviders,
     });
     seedStepCatalog(fake);
+    fake.insert(schema.cliProviders, {
+      id: PROVIDER,
+      userId: USER,
+      name: 'claude-code',
+      label: 'claude-code',
+      enabled: true,
+    });
     fake.insert(schema.tasks, {
       id: TASK,
       userId: USER,
@@ -709,6 +717,47 @@ describe('PATCH /tasks/:id/steps/:stepId/cli-provider', () => {
       expect(h.queued).toEqual([]);
       expect(rerun()).toEqual(before);
       expect(stored).toHaveBeenCalledTimes(2);
+    });
+
+    it('answers 503 and saves no CLI choice when the state turns draining after the early check', async () => {
+      const fake = withStep({ status }, task);
+      const before = written(fake);
+      turnsDrainingAfterTheEarlyCheck();
+
+      const res = await pick({ cliProviderId: PROVIDER });
+
+      expect(res.status).toBe(503);
+      expect(written(fake)).toEqual(before);
+    });
+  });
+
+  describe('on the model-health canary, whose pick rewrites the task default', () => {
+    const CANARY = '00-model-health-workflow';
+    const onCanary = () =>
+      withStep({ status: 'failed', stepId: CANARY }, { currentStepId: CANARY });
+
+    it('re-runs the canary and rewrites the task default while the system is normal', async () => {
+      const fake = onCanary();
+
+      expect((await pick({ cliProviderId: PROVIDER }, CANARY)).status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({
+        status: 'running',
+        cliProviderId: PROVIDER,
+      });
+      expect(fake.rows(schema.taskStepCliChoices)).toMatchObject([
+        { stepId: CANARY, cliProviderId: PROVIDER },
+      ]);
+    });
+
+    it('answers 503 and leaves the task default when the state turns draining after the early check', async () => {
+      const fake = onCanary();
+      const before = written(fake);
+      turnsDrainingAfterTheEarlyCheck();
+
+      const res = await pick({ cliProviderId: PROVIDER }, CANARY);
+
+      expect(res.status).toBe(503);
+      expect(written(fake)).toEqual(before);
     });
   });
 
