@@ -1,10 +1,14 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
 import type { ComposableStepEntry, IntegrationRequirement } from '@haive/shared/modularity';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
-import type { IntegrationBinding } from '@haive/shared/integrations';
+import {
+  lockTaskIntegrations,
+  resolveStepIntegrations,
+  type IntegrationBinding,
+} from '@haive/shared/integrations';
 import type { DispatchRequest } from '../src/orchestrator/dispatcher.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import { realStepIntegrations } from './support/step-integrations-contract.js';
@@ -18,6 +22,7 @@ import {
   grantsOf,
   runsOf,
   seedBareWorld,
+  seedConnection,
   seedProvider,
   seedStepRow,
   seedTask,
@@ -38,6 +43,7 @@ const h = vi.hoisted(() => {
     resolveCalls: [] as unknown[][],
     stampCalls: [] as unknown[][],
     requests: [] as unknown[],
+    beforeRequest: null as ((nth: number) => Promise<void>) | null,
   };
 });
 
@@ -63,8 +69,9 @@ vi.mock('../src/orchestrator/dispatcher.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/orchestrator/dispatcher.js')>();
   return {
     ...actual,
-    resolveTaskDispatch: (...args: Parameters<typeof actual.resolveTaskDispatch>) => {
+    resolveTaskDispatch: async (...args: Parameters<typeof actual.resolveTaskDispatch>) => {
       h.requests.push(args[2]);
+      await h.beforeRequest?.(h.requests.length);
       return actual.resolveTaskDispatch(...args);
     },
   };
@@ -122,6 +129,7 @@ describe.skipIf(!url)(
       h.resolveCalls.length = 0;
       h.stampCalls.length = 0;
       h.requests.length = 0;
+      h.beforeRequest = null;
     });
 
     afterEach(() => {
@@ -617,6 +625,133 @@ describe.skipIf(!url)(
         expect(enqueued).toHaveLength(AGENTS.length);
         expect(await grantsOf(db, w.taskId)).toEqual([]);
         await expectRequiredStillFails(w, stepId);
+      }, 60_000);
+    });
+
+    describe('[D6+] a choice that changes while a fan-out is being sent', () => {
+      async function choiceWorld() {
+        const w = await world();
+        const second = await seedConnection(db, w.userId, { label: 'second-account' });
+        await db.insert(schema.taskIntegrationChoices).values({
+          taskId: w.taskId,
+          categoryId: 'forge',
+          providerId: 'github',
+          connectionId: w.connectionId,
+        });
+        return { ...w, first: w.connectionId, second };
+      }
+
+      const stampOf = (connectionId: string | null) => [
+        {
+          requirementId: FORGE_READ.id,
+          categoryId: 'forge',
+          providerId: 'github',
+          connectionId,
+          access: 'read',
+        },
+      ];
+
+      const putChoice = (taskId: string, connectionId: string) =>
+        db.transaction(async (tx) => {
+          await lockTaskIntegrations(tx, taskId);
+          await tx
+            .update(schema.taskIntegrationChoices)
+            .set({ connectionId })
+            .where(eq(schema.taskIntegrationChoices.taskId, taskId));
+        });
+
+      const deleteChoice = (taskId: string) =>
+        db.transaction(async (tx) => {
+          await lockTaskIntegrations(tx, taskId);
+          await tx
+            .delete(schema.taskIntegrationChoices)
+            .where(eq(schema.taskIntegrationChoices.taskId, taskId));
+          await tx
+            .delete(schema.integrationGrants)
+            .where(
+              and(
+                eq(schema.integrationGrants.targetKind, 'task'),
+                eq(schema.integrationGrants.taskId, taskId),
+              ),
+            );
+        });
+
+      /** Runs `change` when the second agent is about to be built; the list holds how many runs existed then. */
+      function changeBeforeSecondAgent(taskId: string, change: () => Promise<void>) {
+        const sentWhenChanged: number[] = [];
+        h.beforeRequest = async (nth) => {
+          if (nth !== 2) return;
+          sentWhenChanged.push((await runsOf(db, taskId)).length);
+          await change();
+        };
+        return sentWhenChanged;
+      }
+
+      it('[D6+] stamps every agent alike with one grant when nothing changes (passes before and after)', async () => {
+        const w = await choiceWorld();
+        const stepId = nextStepId();
+        await declare(stepId, [FORGE_READ]);
+
+        const result = await advance(w, miningStep(stepId), [w.claude]);
+
+        expect(result.status).toBe('waiting_cli');
+        const runs = await runsOf(db, w.taskId);
+        expect(runs).toHaveLength(AGENTS.length);
+        for (const run of runs) expect(run.integrations).toEqual(stampOf(w.first));
+        expect(await grantsOf(db, w.taskId)).toEqual([
+          { categoryId: 'forge', connectionId: w.first },
+        ]);
+        expect(enqueued).toHaveLength(AGENTS.length);
+      }, 60_000);
+
+      it('[D6+] stamps every agent with the account the first was stamped with when the choice names another between two inserts', async () => {
+        const w = await choiceWorld();
+        const stepId = nextStepId();
+        await declare(stepId, [FORGE_READ]);
+        const sentWhenChanged = changeBeforeSecondAgent(w.taskId, () =>
+          putChoice(w.taskId, w.second),
+        );
+
+        const result = await advance(w, miningStep(stepId), [w.claude]);
+
+        expect(sentWhenChanged, 'the change landed after the first agent was sent').toEqual([1]);
+        expect(
+          await resolveStepIntegrations(db, { taskId: w.taskId }, [FORGE_READ]),
+          'a fresh resolution now names the second account',
+        ).toMatchObject([{ status: 'resolved', connectionId: w.second }]);
+        expect(result.status).toBe('waiting_cli');
+        const runs = await runsOf(db, w.taskId);
+        expect(runs).toHaveLength(AGENTS.length);
+        for (const run of runs) expect(run.integrations).toEqual(stampOf(w.first));
+        expect(await grantsOf(db, w.taskId)).toEqual([
+          { categoryId: 'forge', connectionId: w.first },
+        ]);
+        expect(enqueued).toHaveLength(AGENTS.length);
+        expect(h.stampCalls, 'stamped inserts for 3 agents').toHaveLength(1);
+      }, 60_000);
+
+      it('[D6+] sends every agent with the account the first was stamped with when the choice is deleted between two inserts', async () => {
+        const w = await choiceWorld();
+        const stepId = nextStepId();
+        await declare(stepId, [FORGE_READ]);
+        const sentWhenChanged = changeBeforeSecondAgent(w.taskId, () => deleteChoice(w.taskId));
+
+        const result = await advance(w, miningStep(stepId), [w.claude]);
+
+        expect(sentWhenChanged, 'the change landed after the first agent was sent').toEqual([1]);
+        expect(
+          await resolveStepIntegrations(db, { taskId: w.taskId }, [FORGE_READ]),
+          'a fresh resolution now asks for a choice',
+        ).toMatchObject([{ status: 'unresolved', reason: 'needs-choice' }]);
+        expect(result.status).toBe('waiting_cli');
+        const runs = await runsOf(db, w.taskId);
+        expect(runs, 'agents were refused after the choice went').toHaveLength(AGENTS.length);
+        for (const run of runs) expect(run.integrations).toEqual(stampOf(w.first));
+        const mining = await miningRows((await stepRow(w.taskId)).id);
+        expect(mining.map((row) => row.status)).toEqual(AGENTS.map(() => 'pending'));
+        expect(await grantsOf(db, w.taskId), 'no agent wrote the grant back').toEqual([]);
+        expect(enqueued).toHaveLength(AGENTS.length);
+        expect(h.stampCalls, 'stamped inserts for 3 agents').toHaveLength(1);
       }, 60_000);
     });
 

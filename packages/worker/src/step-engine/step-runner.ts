@@ -602,6 +602,7 @@ type DispatchStamp = {
   requirements: readonly IntegrationRequirement[];
   bindings: IntegrationBinding[];
   failure: string | null;
+  fixed?: { integrations: IntegrationBinding[] | null };
 };
 
 /** What a dispatch of this step carries from its declared integrations, or why it cannot; a dispatch with a toolProfile carries none. */
@@ -619,16 +620,21 @@ async function resolveDispatchStamp(
     : { requirements, bindings: [], failure: resolved.failure };
 }
 
-function insertDispatchRun(
+/** The first stamped run of a dispatch fixes its stamp; its later runs repeat it, with no second resolution and no grant write. */
+async function insertDispatchRun(
   db: Database,
   taskId: string,
   stepRowId: string,
   stamp: DispatchStamp,
   values: typeof schema.cliInvocations.$inferInsert,
 ): Promise<typeof schema.cliInvocations.$inferSelect | { failure: string }> {
-  return stamp.bindings.length > 0
-    ? insertStampedRun(db, taskId, stepRowId, values, stamp.requirements)
-    : insertOwnedRun(db, stepRowId, values);
+  if (stamp.bindings.length === 0) return insertOwnedRun(db, stepRowId, values);
+  if (stamp.fixed) {
+    return insertOwnedRun(db, stepRowId, { ...values, integrations: stamp.fixed.integrations });
+  }
+  const run = await insertStampedRun(db, taskId, stepRowId, values, stamp.requirements);
+  if (!('failure' in run)) stamp.fixed = { integrations: run.integrations };
+  return run;
 }
 
 async function failDispatch(
