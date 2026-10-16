@@ -1,7 +1,13 @@
 import path from 'node:path';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
-import { schema, isUniqueViolation, type Database, type MergeResolveState } from '@haive/database';
+import {
+  lockRepositoryTasksKey,
+  schema,
+  isUniqueViolation,
+  type Database,
+  type MergeResolveState,
+} from '@haive/database';
 import {
   MERGE_CLARIFICATION_ANSWERED_EVENT,
   MERGE_CLARIFICATION_ASKED_EVENT,
@@ -11,6 +17,7 @@ import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
+import { checkoutHoldingTasks } from '../repo/refresh.js';
 import {
   abortFailureNote,
   abortMerge,
@@ -330,7 +337,16 @@ async function taskRepositoryId(db: Database, taskId: string): Promise<string | 
   return task?.repositoryId ?? null;
 }
 
-function asideHalt(why: { outcome: 'refused'; reason: string } | { outcome: 'retry' }): string {
+function asideHalt(
+  why:
+    | { outcome: 'refused'; reason: string }
+    | { outcome: 'held'; holding: number }
+    | { outcome: 'retry' },
+): string {
+  if (why.outcome === 'held') {
+    const n = why.holding;
+    return `${n} other task${n === 1 ? ' is' : 's are'} working in this checkout; nothing was merged. Retry this step once ${n === 1 ? 'it finishes' : 'they finish'}.`;
+  }
   return why.outcome === 'refused'
     ? `${why.reason}. Nothing was merged; commit or discard that change, then retry.`
     : "Haive's project files kept changing under the merge; nothing was merged. Retry this step.";
@@ -873,14 +889,23 @@ export async function resolveMergePhase(
     (mergeDir: string): RestoreSection =>
     (fn) =>
       inMergeDirUnlessClaimed(db, mergeDirOwner(mergeDir), fn);
+  /** Tasks working in the checkout itself (no worktree of their own) have their tree changed by a merge opened there. */
+  const othersIn = (conn: Parameters<typeof checkoutHoldingTasks>[0], repositoryId: string) =>
+    checkoutHoldingTasks(conn, repositoryId, { excludeTaskId: params.taskId, rootOnly: true });
   /** Why the files cannot be set aside, or null once they are. */
-  const setAside = async (repositoryId: string, dir: string): Promise<string | null> => {
+  const setAside = async (repositoryId: string, dir: string) => {
     let aside;
     try {
-      aside = await setAsideHaiveProjections(db, repositoryId, dir, undefined, {
-        restore: (fn) => withMergeDirSection(db, mergeDirOwner(dir), fn),
-        putBack: putBackSection(dir),
-      });
+      aside = await setAsideHaiveProjections(
+        db,
+        repositoryId,
+        dir,
+        (conn) => othersIn(conn, repositoryId),
+        {
+          restore: (fn) => withMergeDirSection(db, mergeDirOwner(dir), fn),
+          putBack: putBackSection(dir),
+        },
+      );
     } catch (err) {
       if (kept.size > 0) {
         await putBackAfterFailure(db, repositoryId, dir, kept, err, putBackSection(dir));
@@ -890,7 +915,15 @@ export async function resolveMergePhase(
     if (aside.outcome === 'set-aside') {
       for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
     }
-    return aside.outcome === 'refused' ? aside.reason : null;
+    return aside.outcome === 'refused' || aside.outcome === 'held' ? aside : null;
+  };
+  /** Under the projection locks, before a section opens a merge: the files still clean, then no one working in the checkout. */
+  const beforeOpen = async (tx: Tx, repositoryId: string | null, dir: string) => {
+    if (!repositoryId) return null;
+    const again = await restoreProjectionsInTx(tx, repositoryId, dir);
+    if (again.outcome !== 'clean') return again;
+    const holding = await othersIn(tx, repositoryId);
+    return holding > 0 ? { outcome: 'held' as const, holding } : null;
   };
   const putBack = async (repositoryId: string | null, dir: string): Promise<void> => {
     if (repositoryId) await putBackProjections(db, repositoryId, dir, kept, putBackSection(dir));
@@ -1033,11 +1066,10 @@ export async function resolveMergePhase(
           'plan base unread',
         );
       }
-      const refused = await setAside(repositoryId, pending.mergeDir);
-      if (refused !== null) {
+      const stopped = await setAside(repositoryId, pending.mergeDir);
+      if (stopped !== null) {
         await settleGivenUp(db, current, params, pending);
-        const why = asideHalt({ outcome: 'refused', reason: refused });
-        return haltFailed(db, current, why, 'haive files changed');
+        return haltFailed(db, current, asideHalt(stopped), 'haive files changed');
       }
     }
     const openPending = async (tx: Tx) => {
@@ -1045,6 +1077,8 @@ export async function resolveMergePhase(
       if (pending.mode === 'cross-branch') {
         await ensureBaseWorktree(ctx, pending.mergeDir, pending.baseBranch);
       }
+      // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the open.
+      if (repositoryId) await lockRepositoryTasksKey(tx, repositoryId);
       // The base tip before ANY merge round: the squash resets back to it, and it is the
       // documented undo point, measured in the dir the merge runs in.
       let armed = withKept(pending);
@@ -1054,6 +1088,17 @@ export async function resolveMergePhase(
       }
       // This pass has opened no merge yet, so a merge open here is an earlier attempt's.
       const staleOpen = await peekOpenMerge(armed.mergeDir);
+      // Clearing that merge moves the tree as opening one does.
+      const crowded = staleOpen && repositoryId ? await othersIn(tx, repositoryId) : 0;
+      if (crowded > 0) {
+        return {
+          kind: 'aside' as const,
+          again: { outcome: 'held' as const, holding: crowded },
+          armed,
+          staleOpen: null,
+          adopted: {},
+        };
+      }
       const held = staleOpen
         ? await relocateLeftOpenFixers(db, params.taskId, armed.mergeDir, staleOpen)
         : null;
@@ -1064,12 +1109,8 @@ export async function resolveMergePhase(
       const stale = cleared.ok ? await abortMerge(armed.mergeDir) : cleared;
       if (!stale.ok) return { kind: 'unaborted' as const, stale, armed, adopted };
       // Under the projection locks, so no sweep rewrites a file between this check and the merge.
-      const again = repositoryId
-        ? await restoreProjectionsInTx(tx, repositoryId, armed.mergeDir)
-        : null;
-      if (again && again.outcome !== 'clean') {
-        return { kind: 'aside' as const, again, armed, staleOpen, adopted };
-      }
+      const again = await beforeOpen(tx, repositoryId, armed.mergeDir);
+      if (again) return { kind: 'aside' as const, again, armed, staleOpen, adopted };
       const opened = await openMerge(
         armed.mergeDir,
         armed.featureBranch,
@@ -1114,12 +1155,11 @@ export async function resolveMergePhase(
           attempt.staleOpen,
         );
       }
-      const refused = await setAside(repositoryId, pending.mergeDir);
-      if (refused !== null) {
+      const stopped = await setAside(repositoryId, pending.mergeDir);
+      if (stopped !== null) {
         await putBack(repositoryId, pending.mergeDir);
         await settleGivenUp(db, current, params, pending);
-        const why = asideHalt({ outcome: 'refused', reason: refused });
-        return haltFailed(db, current, why, 'haive files changed');
+        return haltFailed(db, current, asideHalt(stopped), 'haive files changed');
       }
       attempt = await mergeSection(repositoryId, pending.mergeDir, openPending);
       pending = adoptKept(pending, attempt.adopted);
@@ -1333,16 +1373,26 @@ export async function resolveMergePhase(
     const repositoryId =
       state.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
     if (repositoryId && !(await peekOpenMerge(dir))) {
-      const refused = await setAside(repositoryId, dir);
-      if (refused !== null) {
+      const stopped = await setAside(repositoryId, dir);
+      if (stopped !== null) {
         await settleGivenUp(db, current, params, state);
-        const why = asideHalt({ outcome: 'refused', reason: refused });
-        return haltFailed(db, current, why, 'haive files changed');
+        return haltFailed(db, current, asideHalt(stopped), 'haive files changed');
       }
     }
     const reopen = async (tx: Tx) => {
+      if (repositoryId) await lockRepositoryTasksKey(tx, repositoryId);
       const wasOpen = await peekOpenMerge(dir);
       const ours = wasOpen !== null && (await mergeOpenFor(dir, feature));
+      // Clearing a merge for another ref moves the tree as opening one does.
+      const crowded = wasOpen && !ours && repositoryId ? await othersIn(tx, repositoryId) : 0;
+      if (crowded > 0) {
+        return {
+          kind: 'aside' as const,
+          again: { outcome: 'held' as const, holding: crowded },
+          staleOpen: null,
+          adopted: {},
+        };
+      }
       const held = wasOpen ? await relocateLeftOpenFixers(db, params.taskId, dir, wasOpen) : null;
       if (held) return { kind: 'held' as const, held, adopted: {} };
       const staleOpen = ours ? null : wasOpen;
@@ -1350,10 +1400,8 @@ export async function resolveMergePhase(
       const cleared = await abortOtherMerge(dir, feature);
       if (!cleared.ok) return { kind: 'unaborted' as const, cleared, adopted };
       if (!(await mergeOpenFor(dir, feature))) {
-        const again = repositoryId ? await restoreProjectionsInTx(tx, repositoryId, dir) : null;
-        if (again && again.outcome !== 'clean') {
-          return { kind: 'aside' as const, again, staleOpen, adopted };
-        }
+        const again = await beforeOpen(tx, repositoryId, dir);
+        if (again) return { kind: 'aside' as const, again, staleOpen, adopted };
         const opened = await openMerge(dir, feature, ['-m', `Merge ${feature}`], commitEnv);
         if (opened.kind === 'merged') {
           return { kind: 'merged' as const, staleOpen, warnings: [], adopted };
@@ -1387,12 +1435,11 @@ export async function resolveMergePhase(
       if (reopened.staleOpen) {
         current = await noteAbortedByNext(db, current, params.taskId, dir, reopened.staleOpen);
       }
-      const refused = await setAside(repositoryId, dir);
-      if (refused !== null) {
+      const stopped = await setAside(repositoryId, dir);
+      if (stopped !== null) {
         await putBack(repositoryId, dir);
         await settleGivenUp(db, current, params, state);
-        const why = asideHalt({ outcome: 'refused', reason: refused });
-        return haltFailed(db, current, why, 'haive files changed');
+        return haltFailed(db, current, asideHalt(stopped), 'haive files changed');
       }
       reopened = await mergeSection(repositoryId, dir, reopen);
       state = adoptKept(state, reopened.adopted);
