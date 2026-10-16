@@ -215,6 +215,21 @@ prompts (the three merge steps' and `01-plan-merge`'s) say to leave exactly the 
 merges alone — `.haive-data/plan.json`, `plan.md` and `.haive-data/state/` (`HAIVE_OWN_FILES_LINE`);
 any other Haive path that conflicts stays the fixer's to resolve, or the merge could never close. The DAG level merge does not do this yet, so its prompt omits the line.
 
+A DAG level merge records which files conflicted. The merge pass reads `unmergedPaths` while the
+merge it opened is still open, since the abort that follows clears them and nothing else keeps the
+list, and writes one `dag_issue.merge_conflict` task event per conflicting issue:
+`{issueKey, level, paths, pathCount}`, `paths` capped at 20, both `null` when git could not list
+them. Nothing reads it. It is what a change to how the sprint planner orders issues has to be
+measured against. MEASURED on the dev install (13 DAG plans, Jul-Aug 2026): 30 of 63 merged issues
+needed a merge-fix and all 30 were resolved, at 3.7 min each, while a DAG issue's median wall time
+is 32.3 min. So a same-level conflict is left to the merge-fix rather than prevented by ordering:
+moving an issue a level, or adding a contract-first level, costs several times the conflict it
+avoids. A warning on the DAG gate would inform nothing, since auto-continue submits that gate with
+its defaults (all 13 plans), and listing shared lists such as `.gitignore` in `estimated_files`
+would let `overlapRefinedEstimate` anchor the effort estimate on unrelated tasks. The visible
+colliders were list files (`.gitignore` in 5 plans, docs, `.ddev` ini files) and one shared PHP
+file; `docs/plans/blastloop-lessons.md` says what the event's data would reopen.
+
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.
 

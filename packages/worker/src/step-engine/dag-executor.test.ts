@@ -1801,6 +1801,49 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
     }
   });
 
+  it('a conflict in the merge pass records which files conflicted before the abort clears them', async () => {
+    const integrationDir = await setupConflictedIntegration(true);
+    const issueDir = await mkdtemp(path.join(tmpdir(), 'dag-issue-commit-'));
+    try {
+      await gitCode(integrationDir, ['merge', '--abort']);
+      await git(integrationDir, ['worktree', 'add', issueDir, 'main--ISSUE-1']);
+      const h = makeDagMergeWaitDb({
+        invocation: undefined,
+        integrationDir,
+        autoResolveConflicts: false,
+        issue: { mergeStatus: null, worktreePath: issueDir },
+      });
+      const result = await resolveDagPhase(
+        h.db as never,
+        dagExecuteStep as never,
+        { id: 'step1', status: 'running', round: 0 } as never,
+        mergeCtx(integrationDir),
+        dispatchingParams as never,
+      );
+      expect(result.resolved).toBe(false);
+      if (!result.resolved) {
+        expect(result.result.status).toBe('failed');
+        expect((result.result as { error?: string }).error).toContain('Merge halted');
+      }
+      const recorded = h.events.filter((e) => e.eventType === 'dag_issue.merge_conflict');
+      expect(recorded).toHaveLength(1);
+      // issue.txt, which only the issue adds, merged cleanly and is not a conflicted file.
+      expect((recorded[0] as { payload?: unknown }).payload).toEqual({
+        issueKey: 'ISSUE-1',
+        level: 0,
+        paths: ['base.txt'],
+        pathCount: 1,
+      });
+      expect(h.issueUpdates.some((u) => u.mergeStatus === 'conflict')).toBe(true);
+      expect(await gitCode(integrationDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(
+        0,
+      );
+    } finally {
+      await rm(issueDir, { recursive: true, force: true });
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
   it("a fixer's changes outside the conflict are moved aside, and the level merge commits only the merge", async () => {
     const integrationDir = await setupConflictedIntegration(true);
     try {
