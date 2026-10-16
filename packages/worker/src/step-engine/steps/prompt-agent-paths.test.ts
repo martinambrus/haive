@@ -167,6 +167,37 @@ function permissive(overrides: Record<string, unknown> = {}): never {
   }) as never;
 }
 
+const CUSTOM_ARM = {
+  custom: { enabled: true, apiUrl: 'http://api:3001', tools: ['repo_status', 'list_todos'] },
+};
+
+function integrationsArm(access: 'read' | 'write') {
+  const binding = {
+    requirementId: 'pull-requests',
+    categoryId: 'forge',
+    providerId: 'github',
+    connectionId: '5b0f9c1e-1111-4111-8111-111111111111',
+    access,
+  };
+  const tool = (name: string, toolAccess: 'read' | 'write') => ({
+    name,
+    providerId: 'github',
+    categoryId: 'forge',
+    access: toolAccess,
+  });
+  return {
+    integrations: {
+      enabled: true,
+      apiUrl: 'http://api:3001',
+      bindings: [binding],
+      tools: [
+        tool('get_pull_request_state', 'read'),
+        ...(access === 'write' ? [tool('open_pull_request', 'write')] : []),
+      ],
+    },
+  };
+}
+
 /** A concrete McpSurface, so each branch of `mcpSurfacePrompt` is a separate scanned source. */
 function mcpFixture(
   rag: boolean,
@@ -177,6 +208,8 @@ function mcpFixture(
    *  project-configured server back to the model, and the dispatcher appends this block AFTER the
    *  isolation decision. */
   userServers: Record<string, unknown> = {},
+  /** Surface arms beyond the four above: the custom tools line and the integrations line. */
+  extra: Record<string, unknown> = {},
 ): Parameters<typeof mcpSurfacePrompt>[0] {
   return {
     ragOnly: false,
@@ -184,6 +217,7 @@ function mcpFixture(
     chromeDevtools: { enabled: chrome, version: '1.7.0' },
     ddevControl: { enabled: ddev, apiUrl: 'http://api:3001', token: 't' },
     userServers,
+    ...extra,
   };
 }
 
@@ -648,6 +682,17 @@ const NAMED_PROMPT_BUILDERS: PromptSource[] = [
         surface: mcpFixture(true, true, true, {
           '.claude/agents/foo': { command: 'npx', args: ['-y', 'foo-mcp'] },
         }),
+        opts: {},
+      },
+      { label: 'custom tools', surface: mcpFixture(true, true, true, {}, CUSTOM_ARM), opts: {} },
+      {
+        label: 'integrations (read tools)',
+        surface: mcpFixture(true, true, true, {}, integrationsArm('read')),
+        opts: {},
+      },
+      {
+        label: 'integrations (read and write tools)',
+        surface: mcpFixture(true, true, true, {}, integrationsArm('write')),
         opts: {},
       },
     ] as const
@@ -1731,7 +1776,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(
       clean.length + named.length,
       'built prompt count changed: update the expected count when sources are added or removed',
-    ).toBe(198);
+    ).toBe(201);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 
@@ -2101,6 +2146,34 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // Both names and the separator: this arm exists to tell the model what a REPOSITORY wired up, so
     // the server names are the part that varies and the part a path could hide in.
     expect(text).toContain('Project-configured servers: `company-docs`, `jira`.');
+  });
+
+  const renderedCell = async (label: string) => {
+    const source = promptSources().find((candidate) => candidate.label === label);
+    expect(source, `the ${label} fixture is missing`).toBeDefined();
+    return builtEntries(source!, await source!.build())
+      .map((entry) => entry.prompt)
+      .join('\n');
+  };
+
+  it('[D11] RENDERS the haive-custom arm with the tool names', async () => {
+    const text = await renderedCell('mcpSurfacePrompt (custom tools)');
+
+    expect(text).toContain('`haive-custom`');
+    expect(text).toContain('`repo_status`, `list_todos`');
+  });
+
+  it('[D11] RENDERS the haive-integrations arm: the provider and the tools its surface lists', async () => {
+    const read = await renderedCell('mcpSurfacePrompt (integrations (read tools))');
+    const write = await renderedCell('mcpSurfacePrompt (integrations (read and write tools))');
+
+    for (const text of [read, write]) {
+      expect(text).toContain('haive-integrations');
+      expect(text).toContain('GitHub');
+      expect(text).toContain('get_pull_request_state');
+    }
+    expect(read).not.toContain('open_pull_request');
+    expect(write).toContain('open_pull_request');
   });
 
   it('the appended external text is scanned by the RULE, not only rendered here', () => {

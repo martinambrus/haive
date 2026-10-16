@@ -44,6 +44,7 @@ import {
 import { getDb } from '../../db.js';
 import { rollupToolUsage } from '@haive/shared/stats-server';
 import { parseInvocationHistoryQuery } from './_invocation-history.js';
+import { loadCustomToolCalls, loadIntegrationCalls } from './_call-log.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
@@ -521,6 +522,7 @@ stepRoutes.get('/:id/steps/:stepId/rag-queries', async (c) => {
 // step badges (enrichStepsWithCliStats), so the panel reconciles with them; a step with no
 // attributed invocation carries `usage: null`, which the client renders as a dash and never as
 // zeros. Totals are summed here with the shared pure merge so the browser does no arithmetic.
+// The call groups come from the brokers' own logs, not from the rollup, so replaced runs count.
 stepRoutes.get('/:id/tool-usage', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -533,7 +535,7 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
   if (!task) throw new HttpError(404, 'Task not found');
 
   const inv = schema.cliInvocations;
-  const [rollup, stepRows] = await Promise.all([
+  const [rollup, stepRows, customCalls, integrationCalls] = await Promise.all([
     rollupToolUsage(db, {
       where: and(
         eq(inv.taskId, id),
@@ -558,6 +560,8 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
         asc(schema.taskSteps.createdAt),
         asc(schema.taskSteps.stepIndex),
       ),
+    loadCustomToolCalls(db, id),
+    loadIntegrationCalls(db, id),
   ]);
 
   const byStep = new Map<string, ToolUsageStepRow>();
@@ -612,6 +616,8 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
       round: s.round,
       title: s.title,
       usage: byStep.get(s.id) ?? null,
+      customTools: customCalls.byStep.get(s.id) ?? [],
+      integrations: integrationCalls.byStep.get(s.id) ?? [],
     })),
     totals,
     coverage: {
@@ -621,6 +627,7 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
       unobservable: totals.unobservable,
       unrecorded: totals.unrecorded,
     },
+    callTotals: { customTools: customCalls.all, integrations: integrationCalls.all },
   });
 });
 

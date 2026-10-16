@@ -8,4 +8,6 @@ export * from './providers.js';
 export * from './redirect-uri.js';
 export * from './resolution.js';
 export * from './resolver.js';
+export * from './task-lock.js';
 export * from './tools.js';
+export * from './write-switch.js';
