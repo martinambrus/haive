@@ -13,6 +13,7 @@ import { GithubForgeProvider } from '../src/forge/github.js';
 import { GitlabForgeProvider } from '../src/forge/gitlab.js';
 import {
   ForgeAuthError,
+  ForgeConflictError,
   type ForgeContext,
   type ForgeProvider,
   type ForgeProviderName,
@@ -55,6 +56,12 @@ function lastCall(): {
   const call = fetchMock.mock.calls.at(-1);
   if (!call) throw new Error('fetch was not called');
   return { url: call[0] as string, init: call[1] as never };
+}
+
+function lookups(): string[] {
+  return fetchMock.mock.calls
+    .filter(([, init]) => init?.method === 'GET')
+    .map(([url]) => String(url));
 }
 
 const OPEN_INPUT = { head: 'feat', base: 'main', title: 'T', body: 'B' };
@@ -132,6 +139,67 @@ describe('gitea adapter', () => {
     const { url, init } = lastCall();
     expect(url).toBe('https://gitea.acme.io/api/v1/repos/acme/app/pulls');
     expect(init.headers.Authorization).toBe('token tok');
+  });
+
+  describe('looking for the open PR after a create conflict', () => {
+    const giteaCtx = ctx({
+      provider: 'gitea',
+      apiBase: 'https://gitea.acme.io/api/v1',
+      host: 'gitea.acme.io',
+    });
+    const pulls = 'https://gitea.acme.io/api/v1/repos/acme/app/pulls';
+    const pr = (number: number, head: string, base = 'main') => ({
+      number,
+      html_url: `https://gitea.acme.io/acme/app/pulls/${number}`,
+      head: { ref: head },
+      base: { ref: base },
+    });
+    const others = (count: number, from = 1) =>
+      Array.from({ length: count }, (_, i) => pr(from + i, `other-${from + i}`));
+    const conflict = () => jsonResponse({ message: 'pull request already exists' }, 409);
+    const open = () => new GiteaForgeProvider().openPullRequest(giteaCtx, OPEN_INPUT);
+
+    it('finds the existing PR past the first page, following page and limit', async () => {
+      fetchMock
+        .mockResolvedValueOnce(conflict())
+        .mockResolvedValueOnce(jsonResponse([...others(49), pr(900, 'feat', 'release')]))
+        .mockResolvedValueOnce(jsonResponse([pr(51, 'other-51'), pr(52, 'feat')]));
+      expect(await open()).toEqual({
+        url: 'https://gitea.acme.io/acme/app/pulls/52',
+        number: '52',
+      });
+      expect(lookups()).toEqual([
+        `${pulls}?state=open&page=1&limit=50`,
+        `${pulls}?state=open&page=2&limit=50`,
+      ]);
+    });
+
+    it('asks for no second page when the first one holds the PR', async () => {
+      fetchMock
+        .mockResolvedValueOnce(conflict())
+        .mockResolvedValueOnce(jsonResponse([...others(3), pr(7, 'feat')]));
+      expect((await open()).number).toBe('7');
+      expect(lookups()).toHaveLength(1);
+      expect(new URL(lookups()[0]!).searchParams.get('state')).toBe('open');
+    });
+
+    it('reads to the first empty page and gives the conflict back when nothing matches', async () => {
+      fetchMock
+        .mockResolvedValueOnce(conflict())
+        .mockResolvedValueOnce(jsonResponse(others(50)))
+        .mockResolvedValueOnce(jsonResponse(others(2, 51)))
+        .mockResolvedValueOnce(jsonResponse([]));
+      await expect(open()).rejects.toBeInstanceOf(ForgeConflictError);
+      expect(lookups()).toHaveLength(3);
+    });
+
+    it('gives up after 20 pages', async () => {
+      fetchMock.mockImplementation(async (_url, init) =>
+        init?.method === 'POST' ? conflict() : jsonResponse(others(50)),
+      );
+      await expect(open()).rejects.toBeInstanceOf(ForgeConflictError);
+      expect(lookups()).toHaveLength(20);
+    });
   });
 });
 
@@ -251,6 +319,92 @@ describe('bitbucket server adapter', () => {
       description: 'B',
       fromRef: { id: 'refs/heads/feat' },
       toRef: { id: 'refs/heads/main' },
+    });
+  });
+
+  describe('looking for the open PR after a create conflict', () => {
+    const bbCtx = ctx({
+      provider: 'bitbucket_server',
+      apiBase: 'https://bb.acme.io/rest/api/1.0',
+      host: 'bb.acme.io',
+      owner: 'PROJ',
+    });
+    const pulls = 'https://bb.acme.io/rest/api/1.0/projects/PROJ/repos/app/pull-requests';
+    const pr = (id: number, head: string, base = 'main') => ({
+      id,
+      state: 'OPEN',
+      links: { self: [{ href: `https://bb.acme.io/projects/PROJ/repos/app/pull-requests/${id}` }] },
+      fromRef: { displayId: head },
+      toRef: { displayId: base },
+    });
+    const others = (count: number, from = 1) =>
+      Array.from({ length: count }, (_, i) => pr(from + i, `other-${from + i}`));
+    const page = (values: unknown[], nextPageStart?: number) =>
+      jsonResponse(
+        nextPageStart === undefined
+          ? { values, isLastPage: true }
+          : { values, isLastPage: false, nextPageStart },
+      );
+    const conflict = () => jsonResponse({ errors: [{ message: 'already exists' }] }, 409);
+    const open = () => new BitbucketServerForgeProvider().openPullRequest(bbCtx, OPEN_INPUT);
+
+    it('finds the existing PR past the first page, following nextPageStart', async () => {
+      fetchMock
+        .mockResolvedValueOnce(conflict())
+        .mockResolvedValueOnce(page([...others(49), pr(900, 'feat', 'release')], 50))
+        .mockResolvedValueOnce(page([pr(51, 'other-51'), pr(52, 'feat')]));
+      expect(await open()).toEqual({
+        url: 'https://bb.acme.io/projects/PROJ/repos/app/pull-requests/52',
+        number: '52',
+      });
+      expect(lookups()).toEqual([
+        `${pulls}?state=OPEN&direction=OUTGOING&start=0&limit=50`,
+        `${pulls}?state=OPEN&direction=OUTGOING&start=50&limit=50`,
+      ]);
+    });
+
+    it('asks for no second page when the first one holds the PR', async () => {
+      fetchMock
+        .mockResolvedValueOnce(conflict())
+        .mockResolvedValueOnce(page([...others(3), pr(7, 'feat')], 25));
+      expect((await open()).number).toBe('7');
+      expect(lookups()).toHaveLength(1);
+      expect(new URL(lookups()[0]!).searchParams.get('direction')).toBe('OUTGOING');
+    });
+
+    it('takes the next start from the server, which may cap the limit it was given', async () => {
+      fetchMock
+        .mockResolvedValueOnce(conflict())
+        .mockResolvedValueOnce(page(others(25), 25))
+        .mockResolvedValueOnce(page([pr(26, 'feat')]));
+      expect((await open()).number).toBe('26');
+      expect(new URL(lookups()[1]!).searchParams.get('start')).toBe('25');
+    });
+
+    it('stops at the last page and gives the conflict back when nothing matches', async () => {
+      fetchMock
+        .mockResolvedValueOnce(conflict())
+        .mockResolvedValueOnce(page(others(50), 50))
+        .mockResolvedValueOnce(page(others(2, 51)));
+      await expect(open()).rejects.toBeInstanceOf(ForgeConflictError);
+      expect(lookups()).toHaveLength(2);
+    });
+
+    it('asks for no second page when the first one is the last', async () => {
+      fetchMock.mockResolvedValueOnce(conflict()).mockResolvedValueOnce(page(others(3)));
+      await expect(open()).rejects.toBeInstanceOf(ForgeConflictError);
+      expect(lookups()).toHaveLength(1);
+    });
+
+    it('gives up after 20 pages', async () => {
+      let start = 0;
+      fetchMock.mockImplementation(async (_url, init) => {
+        if (init?.method === 'POST') return conflict();
+        start += 50;
+        return page(others(50), start);
+      });
+      await expect(open()).rejects.toBeInstanceOf(ForgeConflictError);
+      expect(lookups()).toHaveLength(20);
     });
   });
 });

@@ -120,7 +120,12 @@ const KINDS: Record<KindOf, Reach> = {
   'field-not-declared': { reaches: () => withStep({ template: 'Say {{field:topic}}' }) },
   'persona-id-invalid': { reaches: () => withStep({ template: 'Be {{agent:Bad_Id}}' }) },
   'reserved-marker-in-template': { reaches: () => withStep({ template: 'Say [[HAIVE_X]]' }) },
-  'integration-token': { reaches: () => withStep({ template: 'Say {{integration:x}}' }) },
+  'integration-not-declared': {
+    reaches: () => withStep({ template: 'Say {{integration:x.account}}' }),
+  },
+  'integration-property-unknown': {
+    reaches: () => withStep({ template: 'Say {{integration:x}}' }),
+  },
   'persona-without-repository': {
     reaches: () => withStep({ template: 'Be {{agent:reviewer}}' }, noRepo),
   },

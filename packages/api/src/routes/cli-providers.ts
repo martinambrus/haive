@@ -43,6 +43,11 @@ import {
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
+import {
+  admitNewWork,
+  assertNewWorkAllowed,
+  requireNewWorkAllowed,
+} from '../middleware/maintenance.js';
 import { getCliExecQueue, getUsagePollQueue } from '../queues.js';
 
 async function loadOwnedProvider(db: Database, userId: string, providerId: string) {
@@ -200,16 +205,8 @@ export function assertAuthModeSupported(
   }
 }
 
+/** The caller has already written `building`, in the transaction that admitted the build. */
 async function enqueueBuildForProvider(providerId: string, userId: string): Promise<void> {
-  const db = getDb();
-  await db
-    .update(schema.cliProviders)
-    .set({
-      sandboxImageBuildStatus: 'building',
-      sandboxImageBuildError: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.cliProviders.id, providerId));
   const payload: SandboxImageBuildJobPayload = { providerId, userId };
   const queue = getCliExecQueue();
   await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
@@ -226,18 +223,13 @@ function shouldProvisionOllamaModel(p: { name: string; model: string | null }): 
   return p.name === 'ollama' && !!p.model && !isOllamaCloudModel(p.model);
 }
 
-/** Mark a provider's model as provisioning and enqueue the worker job that pulls
- *  (or builds, when a Modelfile is set) it, so a new/edited Ollama model is ready
- *  without a worker restart. Mirrors enqueueBuildForProvider (sandbox image). */
+/** Enqueue the worker job that pulls (or builds, when a Modelfile is set) a provider's
+ *  model, so a new/edited Ollama model is ready without a worker restart. Mirrors
+ *  enqueueBuildForProvider (sandbox image). */
 async function enqueueOllamaProvisionForProvider(
   providerId: string,
   userId: string,
 ): Promise<void> {
-  const db = getDb();
-  await db
-    .update(schema.cliProviders)
-    .set({ modelProvisionStatus: 'provisioning', modelProvisionError: null, updatedAt: new Date() })
-    .where(eq(schema.cliProviders.id, providerId));
   const payload: OllamaProvisionJobPayload = { providerId, userId };
   const queue = getCliExecQueue();
   await queue.add(CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL, payload, {
@@ -382,7 +374,7 @@ cliProviderRoutes.get('/:id', async (c) => {
   return c.json({ provider: withRulesState(row) });
 });
 
-cliProviderRoutes.post('/', async (c) => {
+cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const body = createCliProviderRequestSchema.parse(await c.req.json());
   const meta = CLI_PROVIDER_CATALOG[body.name];
@@ -396,7 +388,10 @@ cliProviderRoutes.post('/', async (c) => {
     body.cliVersion?.trim() || null,
   );
   const split = body.envVars ? splitSecretLikeEnv(body.envVars) : null;
+  const model = body.model?.trim() || null;
+  const provisioningModel = shouldProvisionOllamaModel({ name: body.name, model });
   const inserted = await db.transaction(async (tx) => {
+    await admitNewWork(tx);
     const rows = await tx
       .insert(schema.cliProviders)
       .values({
@@ -414,7 +409,7 @@ cliProviderRoutes.post('/', async (c) => {
         authMode: body.authMode,
         cliVersion: resolvedVersion,
         effortLevel: resolveEffortLevelForSave(body.name, body.effortLevel ?? null),
-        model: body.model?.trim() || null,
+        model,
         modelfile: body.modelfile?.trim() || null,
         sandboxDockerfileExtra: body.sandboxDockerfileExtra?.length
           ? body.sandboxDockerfileExtra
@@ -423,6 +418,8 @@ cliProviderRoutes.post('/', async (c) => {
         isolateAuth: body.isolateAuth ?? false,
         disableThinking: body.disableThinking ?? false,
         rulesContent: body.rulesContent ?? DEFAULT_AGENT_RULES,
+        sandboxImageBuildStatus: 'building',
+        ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
       })
       .returning();
     for (const [name, value] of Object.entries(split?.secrets ?? {})) {
@@ -439,7 +436,6 @@ cliProviderRoutes.post('/', async (c) => {
 
   const created = inserted[0]!;
   await enqueueBuildForProvider(created.id, userId);
-  const provisioningModel = shouldProvisionOllamaModel(created);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(
     {
@@ -534,7 +530,24 @@ cliProviderRoutes.patch('/:id', async (c) => {
   // themselves are written by the worker from observed failures, never by the client.
   if (body.clearModelLimits) updates.modelLimits = null;
 
+  const model = updates.model === undefined ? existing.model : updates.model;
+  const provisioningModel =
+    modelInputsChanged && shouldProvisionOllamaModel({ name: existing.name, model });
+  const startsJob = imageInputsChanged || provisioningModel;
+  if (startsJob) {
+    await assertNewWorkAllowed();
+    if (imageInputsChanged) {
+      updates.sandboxImageBuildStatus = 'building';
+      updates.sandboxImageBuildError = null;
+    }
+    if (provisioningModel) {
+      updates.modelProvisionStatus = 'provisioning';
+      updates.modelProvisionError = null;
+    }
+  }
+
   const updated = await db.transaction(async (tx) => {
+    if (startsJob) await admitNewWork(tx);
     const rows = await tx
       .update(schema.cliProviders)
       .set(updates)
@@ -553,9 +566,6 @@ cliProviderRoutes.patch('/:id', async (c) => {
   });
   const updatedRow = updated[0]!;
 
-  const provisioningModel =
-    modelInputsChanged &&
-    shouldProvisionOllamaModel({ name: existing.name, model: updatedRow.model });
   if (provisioningModel) await enqueueOllamaProvisionForProvider(id, userId);
   const modelStatusOverride = provisioningModel
     ? { modelProvisionStatus: 'provisioning' as const, modelProvisionError: null }
@@ -602,7 +612,7 @@ cliProviderRoutes.delete('/:id', async (c) => {
   return c.json({ ok: true });
 });
 
-cliProviderRoutes.post('/:id/sandbox-image/build', async (c) => {
+cliProviderRoutes.post('/:id/sandbox-image/build', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
@@ -612,14 +622,17 @@ cliProviderRoutes.post('/:id/sandbox-image/build', async (c) => {
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
-  await db
-    .update(schema.cliProviders)
-    .set({
-      sandboxImageBuildStatus: 'building',
-      sandboxImageBuildError: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.cliProviders.id, provider.id));
+  await db.transaction(async (tx) => {
+    await admitNewWork(tx);
+    await tx
+      .update(schema.cliProviders)
+      .set({
+        sandboxImageBuildStatus: 'building',
+        sandboxImageBuildError: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.cliProviders.id, provider.id));
+  });
 
   const payload: SandboxImageBuildJobPayload = {
     providerId: provider.id,
@@ -728,7 +741,7 @@ cliProviderRoutes.get('/:id/sign-out/:jobId', async (c) => {
   return c.json({ status: 'pending', state });
 });
 
-cliProviderRoutes.post('/:id/clone', async (c) => {
+cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
@@ -742,7 +755,9 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
 
   // A source saved before the split still holds secret-looking keys in envVars; the clone does not.
   const split = splitSecretLikeEnv(source.envVars ?? {});
+  const provisioningModel = shouldProvisionOllamaModel(source);
   const created = await db.transaction(async (tx) => {
+    await admitNewWork(tx);
     const inserted = await tx
       .insert(schema.cliProviders)
       .values({
@@ -767,6 +782,8 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
         isolateAuth: source.isolateAuth,
         disableThinking: source.disableThinking,
         rulesContent: source.rulesContent,
+        sandboxImageBuildStatus: 'building',
+        ...(provisioningModel ? { modelProvisionStatus: 'provisioning' } : {}),
       })
       .returning();
     const row = inserted[0]!;
@@ -801,7 +818,6 @@ cliProviderRoutes.post('/:id/clone', async (c) => {
   });
 
   await enqueueBuildForProvider(created.id, userId);
-  const provisioningModel = shouldProvisionOllamaModel(created);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(
     {

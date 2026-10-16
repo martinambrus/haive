@@ -12,7 +12,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { logger } from '@haive/shared';
+import { configService, logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { autoResumeFailedStep } from '../src/queues/_step-reset.js';
 import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
@@ -98,6 +98,8 @@ async function seedTask(
 }
 
 async function main(): Promise<void> {
+  // The reopen check reads the stored maintenance state from Redis, which this smoke does not start.
+  configService.getFresh = async () => null;
   initDatabase(process.env.DATABASE_URL!);
   const db = getDb();
 

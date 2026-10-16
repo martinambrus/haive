@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ONE_LIVE_UPGRADE_INDEX, schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
 import { markTaskRunningWithStep } from '../src/queues/task-queue.js';
 import { autoResumeFailedStep } from '../src/queues/_step-reset.js';
 
@@ -123,7 +124,10 @@ function setup(w: World = {}) {
 
 const admitted = (): World => ({ completedOnboardingAt: new Date(Date.now() - DAY) });
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
+});
 
 describe('the worker reviving a failed upgrade runs the reset admission', () => {
   it('refuses an upgrade a reset cut off between the answer and the pickup', async () => {

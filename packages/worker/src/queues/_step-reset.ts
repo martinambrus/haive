@@ -10,7 +10,7 @@ import {
 } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
 import { isProviderOutage } from './cli-exec/failure-class.js';
-import { refuseRevive, type ReviveRefused } from './_revive-check.js';
+import { admitReopen, NewWorkHeld, refuseRevive, type ReviveRefused } from './_revive-check.js';
 
 // Reset a step + its downstream back to `pending` so the worker re-runs the step from
 // detect. Used by the `revise` route (handleResult): a review step asks to re-run an
@@ -207,7 +207,8 @@ export async function resetStepAndDownstream(
  *  its span and would bill as WORK — CLOSED_GAP_INTO_IDLE_MS credits it to idle in the same
  *  update, exactly as the api re-open sites do. Does NOT enqueue the advance itself (that
  *  would import the task queue and form a cycle) — the caller enqueues ADVANCE_STEP when this
- *  returns true. */
+ *  returns true. Throws NewWorkHeld, writing nothing, while the system is held, and
+ *  MaintenanceStateUnreadable, writing nothing, when the held state cannot be read. */
 export async function autoResumeFailedStep(
   db: Database,
   args: {
@@ -237,6 +238,8 @@ export async function autoResumeFailedStep(
   let flipped = false;
   try {
     await db.transaction(async (tx) => {
+      const { held, state } = await admitReopen(tx, taskId);
+      if (held) throw new NewWorkHeld(state);
       const refusal = await refuseRevive(tx, taskId);
       if (refusal) throw new ReviveBlocked(refusal);
       const now = new Date();

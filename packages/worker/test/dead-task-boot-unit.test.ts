@@ -184,4 +184,12 @@ describe('worker boot order', () => {
     expect(at('requeueOrphanedActiveJobs(getCliExecQueue()')).toBeLessThan(judged);
     expect(judged).toBeLessThan(at('reconcileOrphanedSteps('));
   });
+
+  it('starts the retry of revivals when the boot pass held one back, failed one or could not run, and stops it when the worker shuts down', () => {
+    expect(at('retryHeldRevivals(')).toBeGreaterThan(at('reconcileDeadTasks('));
+    expect(boot).toMatch(
+      /!deadTasks \|\| deadTasks\.held > 0 \|\| deadTasks\.failed > 0\s*\?\s*retryHeldRevivals\(/,
+    );
+    expect(boot.slice(at('const shutdown = async'))).toContain('stopDeadTaskRevival()');
+  });
 });

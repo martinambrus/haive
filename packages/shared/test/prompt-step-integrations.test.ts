@@ -456,14 +456,6 @@ describe('[C1] what the save validator refuses', () => {
       }
     }
   });
-
-  it('[C0] still refuses an {{integration:…}} token, though the step declares the requirement it names', () => {
-    const found = kindsOf(
-      entry([FORGE], { template: 'The account is {{integration:forge.account}}.' }),
-    );
-
-    expect(found).toContain('integration-token');
-  });
 });
 
 describe('[C1] a draft', () => {

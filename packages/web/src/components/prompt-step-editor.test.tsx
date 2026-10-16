@@ -39,6 +39,7 @@ describe('PromptStepEditor', () => {
       '{{task.description}}',
       '{{step:&lt;id&gt;}}',
       '{{agent:&lt;id&gt;}}',
+      '{{integration:&lt;id&gt;.account}}',
     ]) {
       expect(html).toContain(`<code>${token}</code>`);
     }

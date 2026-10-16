@@ -35,7 +35,7 @@ import {
   reconcileOrphanedSteps,
   startTaskWorker,
 } from './queues/task-queue.js';
-import { reconcileDeadTasks } from './queues/dead-task-boot.js';
+import { reconcileDeadTasks, retryHeldRevivals } from './queues/dead-task-boot.js';
 import { defaultDeps, redriveStalledTasks, StalledTaskSweeper } from './queues/stalled-redrive.js';
 import { closeRedis } from './redis.js';
 import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
@@ -117,8 +117,9 @@ async function main(): Promise<void> {
   await requeueOrphanedActiveJobs(getTaskQueue(), () => true);
   await requeueOrphanedActiveJobs(getCliExecQueue(), cliExecJobRequeuedAtBoot);
   // Before the reconcile, which skips a dead task: a revived task's orphaned run is ended there and nowhere else.
-  await reconcileDeadTasks(getDb()).catch((err) => {
+  const deadTasks = await reconcileDeadTasks(getDb()).catch((err) => {
     logger.warn({ err }, 'dead-task reconciliation on boot failed');
+    return null;
   });
   // Recover steps a prior worker orphaned mid-step (their sandboxes were reaped
   // above): resume waiting_cli steps and re-drive running steps whose advance-step
@@ -259,6 +260,11 @@ async function main(): Promise<void> {
   // Periodic sibling of the boot-time redrive above.
   const stalledTaskSweeper = new StalledTaskSweeper({ db: getDb() });
   stalledTaskSweeper.start();
+  // A revival the boot pass held back, failed or never reached goes on being tried until a pass holds none back and fails none.
+  const stopDeadTaskRevival =
+    !deadTasks || deadTasks.held > 0 || deadTasks.failed > 0
+      ? retryHeldRevivals(getDb())
+      : () => undefined;
   // Live-retune the runtime admission gate when the resource-limit config changes.
   const stopRuntimeLimitsWatch = startRuntimeLimitsWatch();
   // Age out persisted CLI transcripts. Nothing else deletes cli_invocations.stream_log,
@@ -309,6 +315,7 @@ async function main(): Promise<void> {
     agentPreemptionSweeper.stop();
     cliPriorityDecaySweeper.stop();
     stalledTaskSweeper.stop();
+    stopDeadTaskRevival();
     cliStreamLogReaper.stop();
     stopRuntimeLimitsWatch();
     clearInterval(moduleJobsTimer);

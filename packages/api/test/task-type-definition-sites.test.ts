@@ -30,6 +30,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { taskTypeDraftRoutes } from '../src/routes/task-type-drafts.js';
 import { upgradeRoutes } from '../src/routes/upgrades.js';
@@ -43,14 +44,11 @@ const SNAPSHOT = ['00-x', '01-y'];
 const PINNED = { 'custom.t.s': { slug: 's', title: 'S' } };
 
 const app = new Hono<AppEnv>();
-app.use(async (c, next) => {
-  c.set('maintenanceState', 'normal');
-  await next();
-});
 app.route('/tasks', taskRoutes);
 app.route('/repositories', upgradeRoutes);
 app.route('/admin/task-type-drafts', taskTypeDraftRoutes);
 app.onError(errorHandler);
+vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 function world() {
   const fake = createFakeDb({
@@ -177,17 +175,19 @@ describe('spawnPlanTask pins the run list', () => {
     'writes the helper snapshot into a %s row',
     async (type) => {
       const fake = createFakeDb({ tasks: schema.tasks });
-      await spawnPlanTask({
-        db: fake.db as never,
-        userId: USER,
-        repositoryId: REPO,
-        type,
-        title: 'x',
-        metadata: {},
-        cliProviderId: null,
-        enqueue: false,
-      });
-      expect(h.definition).toHaveBeenCalledWith(fake.db, type, { generic: false });
+      await fake.db.transaction((tx) =>
+        spawnPlanTask({
+          db: tx as never,
+          userId: USER,
+          repositoryId: REPO,
+          type,
+          title: 'x',
+          metadata: {},
+          cliProviderId: null,
+          enqueue: false,
+        }),
+      );
+      expect(h.definition).toHaveBeenCalledWith(expect.anything(), type, { generic: false });
       expect(fake.rows(schema.tasks)[0]).toMatchObject({
         type,
         runListSnapshot: SNAPSHOT,
@@ -200,16 +200,18 @@ describe('spawnPlanTask pins the run list', () => {
     const fake = createFakeDb({ tasks: schema.tasks });
     h.definition.mockRejectedValueOnce(new HttpError(403, 'Task type plan_chat is disabled'));
     await expect(
-      spawnPlanTask({
-        db: fake.db as never,
-        userId: USER,
-        repositoryId: REPO,
-        type: 'plan_chat',
-        title: 'x',
-        metadata: {},
-        cliProviderId: null,
-        enqueue: false,
-      }),
+      fake.db.transaction((tx) =>
+        spawnPlanTask({
+          db: tx as never,
+          userId: USER,
+          repositoryId: REPO,
+          type: 'plan_chat',
+          title: 'x',
+          metadata: {},
+          cliProviderId: null,
+          enqueue: false,
+        }),
+      ),
     ).rejects.toMatchObject({ status: 403 });
     expect(fake.rows(schema.tasks)).toHaveLength(0);
   });

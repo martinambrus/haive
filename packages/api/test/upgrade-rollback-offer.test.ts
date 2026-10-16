@@ -25,6 +25,7 @@ import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { PROJECT_STATE_IMPORT_STEP_ID } from '@haive/shared/project-state';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
 import { lastUpgradeRemovedContent, upgradeRoutes } from '../src/routes/upgrades.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -123,13 +124,10 @@ describe('offering the rollback of an upgrade that only removed things', () => {
 });
 
 const app = new Hono<AppEnv>();
-app.use(async (c, next) => {
-  c.set('maintenanceState', 'normal');
-  await next();
-});
 app.route('/tasks', taskRoutes);
 app.route('/repositories', upgradeRoutes);
 app.onError(errorHandler);
+vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 beforeEach(() => {
   h.add.mockReset();
