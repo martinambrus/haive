@@ -7,6 +7,10 @@ import {
   CUSTOM_TOOL_NAME_MAX_LENGTH,
   CUSTOM_TOOL_PARAMS_MAX,
   CUSTOM_TOOL_PARAM_DESCRIPTION_MAX_LENGTH,
+  CUSTOM_TOOL_RESPONSE_MAX_BYTES,
+  CUSTOM_TOOL_RESPONSE_MIN_BYTES,
+  CUSTOM_TOOL_TIMEOUT_MAX_MS,
+  CUSTOM_TOOL_TIMEOUT_MIN_MS,
   CUSTOM_TOOL_URL_MAX_LENGTH,
   RAG_QUERY_TOP_K_MAX,
   RAG_QUERY_TOP_K_MIN,
@@ -96,6 +100,15 @@ const numberOf = (text: string): number | undefined => {
   return text.trim() !== '' && Number.isFinite(value) ? value : undefined;
 };
 const WHOLE: Codec<number> = { show: String, read: (text) => numberOf(text) ?? 0 };
+// Shown in seconds and KiB, stored as the milliseconds and bytes the api checks.
+const SECONDS: Codec<number> = {
+  show: (ms) => String(ms / 1000),
+  read: (text) => Math.round((numberOf(text) ?? 0) * 1000),
+};
+const KIB: Codec<number> = {
+  show: (bytes) => String(bytes / 1024),
+  read: (text) => Math.round((numberOf(text) ?? 0) * 1024),
+};
 const OPTIONAL_WHOLE: Codec<number | undefined> = {
   show: (value) => (value === undefined ? '' : String(value)),
   read: numberOf,
@@ -390,6 +403,34 @@ function ToolRow({ tool, issues, disabled, onChange, onRemove }: ToolRowProps) {
           />
         </div>
       )}
+      <div className="grid gap-3 sm:grid-cols-2">
+        {tool.action === 'http-get' && (
+          <ParsedField
+            label="Timeout (seconds)"
+            type="number"
+            inputMode="decimal"
+            step="any"
+            min={CUSTOM_TOOL_TIMEOUT_MIN_MS / 1000}
+            max={CUSTOM_TOOL_TIMEOUT_MAX_MS / 1000}
+            value={tool.timeoutMs}
+            codec={SECONDS}
+            disabled={disabled}
+            onValue={(timeoutMs) => onChange({ ...tool, timeoutMs })}
+          />
+        )}
+        <ParsedField
+          label="Response cap (KiB)"
+          type="number"
+          inputMode="decimal"
+          step="any"
+          min={CUSTOM_TOOL_RESPONSE_MIN_BYTES / 1024}
+          max={CUSTOM_TOOL_RESPONSE_MAX_BYTES / 1024}
+          value={tool.maxResponseBytes}
+          codec={KIB}
+          disabled={disabled}
+          onValue={(maxResponseBytes) => onChange({ ...tool, maxResponseBytes })}
+        />
+      </div>
       {issues.map((issue) => (
         <InlineMarkdown
           key={`${issue.kind}:${issue.param ?? ''}`}
