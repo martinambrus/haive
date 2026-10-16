@@ -91,6 +91,9 @@ export function parseExpect(text) {
     ) {
       bad(`${at}.version is for a registry module and must be a non-empty string`);
     }
+    if (entry.source === 'registry' && entry.version === undefined) {
+      bad(`${at} is the registry module ${entry.packageName}, which has no version`);
+    }
     const parts = entry.webParts ?? [];
     if (
       !Array.isArray(parts) ||
@@ -323,6 +326,8 @@ const webEntry = (e) =>
 const listKey = (packageName, source) => `${packageName} (${source})`;
 const webKey = (packageName, source, parts) =>
   `${listKey(packageName, source)} ${[...parts].sort().join('+')}`;
+const listedVersion = (version) =>
+  version === undefined ? 'no version' : `version ${JSON.stringify(version)}`;
 
 export function compareLists(key, reading, expect) {
   const out = [];
@@ -344,7 +349,17 @@ export function compareLists(key, reading, expect) {
       else offend(`${WEB_LIST} holds an entry that is not {packageName, source, parts}`);
     }
     for (const m of expect.modules.filter((m) => m.webParts.length > 0)) {
-      want.add(webKey(m.packageName, m.source, m.webParts));
+      const key = webKey(m.packageName, m.source, m.webParts);
+      want.add(key);
+      if (m.source !== 'registry') continue;
+      const listed = reading.list.filter(
+        (e) => webEntry(e) && webKey(e.packageName, e.source, e.parts) === key,
+      );
+      for (const { version } of listed) {
+        if (version !== m.version) {
+          offend(`${key} is listed with ${listedVersion(version)}, expected ${m.version}`);
+        }
+      }
     }
   } else {
     for (const e of reading.entries) {

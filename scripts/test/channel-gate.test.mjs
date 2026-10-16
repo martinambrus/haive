@@ -118,7 +118,7 @@ describe('parseExpect', () => {
   it('reads a missing images.web as no web image, and a module with no webParts as having none', () => {
     const parsed = expectA({
       images: { api: 'b-api:1', worker: 'b-worker:1' },
-      modules: [{ packageName: '@haive-module/beta', source: 'registry' }],
+      modules: [{ packageName: '@haive-module/beta', source: 'registry', version: '0.1.0' }],
     });
     assert.equal(parsed.images.web, undefined);
     assert.deepEqual(parsed.modules[0].webParts, []);
@@ -149,6 +149,7 @@ describe('parseExpect', () => {
       { modules: [{ ...ALPHA, packageName: '@haive/module-alpha' }] },
     ],
     ['a version on a local module', { modules: [{ ...STATISTICS, version: '1.0.0' }] }],
+    ['a registry module with no version', { modules: [{ ...ALPHA, version: undefined }] }],
     ['an empty version on a registry module', { modules: [{ ...ALPHA, version: '' }] }],
     ['webParts that is not a list', { modules: [{ ...ALPHA, webParts: 'web' }] }],
     ['an unknown web part', { modules: [{ ...ALPHA, webParts: ['page'] }] }],
@@ -173,6 +174,14 @@ describe('parseExpect', () => {
   for (const [name, over] of MALFORMED) {
     it(`refuses ${name}`, () => refuses(JSON.stringify(expectation(over))));
   }
+
+  it('names the registry module that has no version', () => {
+    const modules = [STATISTICS, { ...ALPHA, version: undefined }];
+    assert.throws(
+      () => parseExpect(JSON.stringify(expectation({ modules }))),
+      /malformed expectation: .*@haive-module\/alpha/,
+    );
+  });
 });
 
 describe('parseToken', () => {
@@ -478,10 +487,9 @@ describe('comparePresence', () => {
     assert.deepEqual(check(names), ['alpha@0.3.0 is in the image, expected alpha@0.1.0']);
   });
 
-  it('compares no version where the expectation gives none', () => {
-    const names = A_API_NAMES.map((n) => n.replace('alpha@0.1.0', 'alpha@9.9.9'));
-    const noVersion = expectation({ modules: [STATISTICS, { ...ALPHA, version: undefined }] });
-    assert.deepEqual(check(names, noVersion), []);
+  it('compares no version for a local module, which the expectation gives none', () => {
+    const names = [...A_API_NAMES, `${PNPM}/@haive-module+statistics@9.9.9/`];
+    assert.deepEqual(check(names), ['registry module statistics is in the image but not expected']);
   });
 
   it('fails an @haive-module+ name that does not parse, naming it', () => {
@@ -645,6 +653,58 @@ describe('compareLists', () => {
       whats(compareLists('web', web(ENTRY_ALPHA, 7, ENTRY_STATISTICS), expectA()))[0],
       /holds an entry that is not/,
     );
+  });
+
+  describe('the version of a registry module in the web list', () => {
+    const at = (version) => ({ ...ENTRY_ALPHA, version });
+    const UNVERSIONED = { ...ENTRY_ALPHA };
+    delete UNVERSIONED.version;
+    const check = (...entries) => whats(compareLists('web', web(...entries), expectA()));
+    const listedWith = (found) =>
+      `@haive-module/alpha (registry) web is listed with ${found}, expected 0.1.0`;
+    const NONE = listedWith('no version');
+
+    it('fails another version, naming the package and both versions, on one line', () => {
+      assert.deepEqual(check(at('0.2.0'), ENTRY_STATISTICS), [listedWith('version "0.2.0"')]);
+    });
+
+    it('fails an entry with no version', () => {
+      assert.deepEqual(check(UNVERSIONED, ENTRY_STATISTICS), [NONE]);
+    });
+
+    it('fails a version that is not a string', () => {
+      assert.deepEqual(check(at(1), ENTRY_STATISTICS), [listedWith('version 1')]);
+      assert.deepEqual(check(at(null), ENTRY_STATISTICS), [listedWith('version null')]);
+    });
+
+    it('ignores the listed version of a local module, whatever it is', () => {
+      assert.deepEqual(check(ENTRY_ALPHA, ENTRY_STATISTICS), []);
+      for (const version of ['9.9.9', '', null, 7]) {
+        assert.deepEqual(check(ENTRY_ALPHA, { ...ENTRY_STATISTICS, version }), [], `${version}`);
+      }
+    });
+
+    it('counts an entry listed twice once when both give the expected version', () => {
+      assert.deepEqual(check(ENTRY_ALPHA, ENTRY_ALPHA, ENTRY_STATISTICS), []);
+    });
+
+    it('checks every entry of a module listed twice, in either order', () => {
+      const wrong = [listedWith('version "0.2.0"')];
+      assert.deepEqual(check(ENTRY_ALPHA, at('0.2.0'), ENTRY_STATISTICS), wrong);
+      assert.deepEqual(check(at('0.2.0'), ENTRY_ALPHA, ENTRY_STATISTICS), wrong);
+      assert.deepEqual(check(ENTRY_ALPHA, UNVERSIONED, ENTRY_STATISTICS), [NONE]);
+      assert.deepEqual(check(UNVERSIONED, ENTRY_ALPHA, ENTRY_STATISTICS), [NONE]);
+    });
+
+    it('prints one line for each version found, and one for a version listed twice', () => {
+      assert.deepEqual(check(at('0.2.0'), at('0.2.0'), ENTRY_STATISTICS), [
+        listedWith('version "0.2.0"'),
+      ]);
+      assert.deepEqual(check(at('0.3.0'), at('0.2.0'), ENTRY_STATISTICS), [
+        listedWith('version "0.2.0"'),
+        listedWith('version "0.3.0"'),
+      ]);
+    });
   });
 });
 
@@ -993,6 +1053,17 @@ describe('the command line: a run that cannot look exits 2', () => {
     assert.match(result.stderr, /malformed expectation: images is not an object/);
   });
 
+  it('on a registry module with no version, naming the package, before docker is asked anything', (t) => {
+    const modules = [STATISTICS, { ...ALPHA, version: undefined }];
+    const files = { 'expect.json': JSON.stringify(expectation({ modules })), token: TOKEN };
+    const stub = '#!/bin/sh\necho "docker was asked: $*" >&2\nexit 1\n';
+    const result = runGate(t, { files, stub });
+    assert.equal(result.status, 2);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /malformed expectation: .*@haive-module\/alpha/);
+    assert.doesNotMatch(result.stderr, /docker was asked/);
+  });
+
   for (const [name, text] of [
     ['empty', ''],
     ['two lines', 'abc\ndef\n'],
@@ -1167,6 +1238,29 @@ describe('the command line against a docker that answers', () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stderr, /web a-web:1: 0 offender\(s\), 0 check\(s\) not looked at/);
   });
+
+  for (const [name, listed, line] of [
+    ['another version', { version: '0.2.0' }, 'is listed with version "0.2.0", expected 0.1.0'],
+    ['no version', {}, 'is listed with no version, expected 0.1.0'],
+  ]) {
+    it(`exits 1 with one web lists line when the web list gives a registry module ${name}`, (t) => {
+      const image = fakeImage(t);
+      const { packageName, source } = ALPHA;
+      image.env.STUB_READING_WEB = JSON.stringify({
+        list: [
+          { id: 'alpha', packageName, source, ...listed, parts: ['web'] },
+          { id: 'statistics', ...STATISTICS, parts: ['dashboard', 'web'] },
+        ],
+      });
+      const files = { ...GOOD_FILES, 'expect.json': JSON.stringify(expectation()) };
+      const result = runGate(t, { files, ...image });
+      assert.equal(result.status, 1, result.stderr);
+      assert.deepEqual(result.stdout.trim().split('\n'), [
+        `OFFENDER web lists @haive-module/alpha (registry) web ${line}`,
+      ]);
+      assert.deepEqual(result.leftovers, []);
+    });
+  }
 
   it('exits 1 and prints one line per offender, from every check that found one', (t) => {
     const flawed = [
