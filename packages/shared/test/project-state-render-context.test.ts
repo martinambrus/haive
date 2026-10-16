@@ -232,15 +232,19 @@ type History = { kind: 'onboarding'; rtkRecorded: boolean } | { kind: 'blank' } 
 
 const readColumn = () => added<(value: unknown) => ColumnRead>('readRenderContextColumn');
 const originOf = () =>
-  added<(input: { column: ColumnRead; rows: Row[] }) => Origin>('renderContextOrigin');
+  added<(input: { column: ColumnRead; rows: Row[]; rtkChoiceMadeAt?: Date | null }) => Origin>(
+    'renderContextOrigin',
+  );
 const historyOf = () =>
   added<
     (input: {
       onboarding: { detected: boolean; rtkRecorded: boolean } | null;
       source: string;
+      rtkChoiceMadeAt?: Date | null;
     }) => History
   >('historyOrigin');
-const pickRow = () => added<(rows: Row[]) => Row | null>('pickSnapshotRow');
+const pickRow = () =>
+  added<(rows: Row[], rtkChoiceMadeAt?: Date | null) => Row | null>('pickSnapshotRow');
 const namesOf = () =>
   added<(column: Record<string, unknown>, enabledNames: string[]) => string[]>(
     'renderContextProviderNames',
@@ -420,6 +424,75 @@ describe('S1: renderContextOrigin', () => {
   });
 });
 
+describe('S1: renderContextOrigin: a person switched RTK on this install', () => {
+  const SWITCHED = new Date(1000);
+  const UNRECORDED_ROW = row('a', 1, true, null);
+  const unrecordedColumn = { ...full(), rtkChoiceRecorded: false };
+
+  it('counts the choice as recorded for a column that recorded none', () => {
+    const column: ColumnRead = { kind: 'column', column: unrecordedColumn };
+
+    expect(originOf()({ column, rows: [], rtkChoiceMadeAt: SWITCHED })).toEqual({
+      from: 'column',
+      column: unrecordedColumn,
+      rtkRecorded: true,
+    });
+  });
+
+  it('counts it for a snapshot from before RTK', () => {
+    expect(
+      originOf()({ column: { kind: 'absent' }, rows: [UNRECORDED_ROW], rtkChoiceMadeAt: SWITCHED }),
+    ).toEqual({ from: 'snapshot', row: UNRECORDED_ROW, rtkRecorded: true });
+  });
+
+  it.each([
+    ['null', null],
+    ['absent', undefined],
+  ])('changes nothing while the switch was never made (%s)', (_name, rtkChoiceMadeAt) => {
+    const column: ColumnRead = { kind: 'column', column: unrecordedColumn };
+
+    expect(originOf()({ column, rows: [], rtkChoiceMadeAt })).toMatchObject({
+      rtkRecorded: false,
+    });
+    expect(
+      originOf()({ column: { kind: 'absent' }, rows: [UNRECORDED_ROW], rtkChoiceMadeAt }),
+    ).toMatchObject({ rtkRecorded: false });
+  });
+
+  it.each([
+    ['absent', { kind: 'absent' }],
+    ['refused', { kind: 'refused', problems: ['the column is wrong'] }],
+  ] as [string, ColumnRead][])(
+    'renders from the newest snapshot, ahead of an older one that recorded RTK (column %s)',
+    (_name, column) => {
+      const recorded = row('a', 1, true, true);
+      const newer = row('b', 2, true, null);
+
+      expect(originOf()({ column, rows: [recorded, newer], rtkChoiceMadeAt: SWITCHED })).toEqual({
+        from: 'snapshot',
+        row: newer,
+        rtkRecorded: true,
+      });
+      expect(originOf()({ column, rows: [recorded, newer], rtkChoiceMadeAt: null })).toEqual({
+        from: 'snapshot',
+        row: recorded,
+        rtkRecorded: true,
+      });
+    },
+  );
+
+  it('leaves a recorded choice recorded, and the history to a repository with nothing else', () => {
+    const column: ColumnRead = { kind: 'column', column: full() };
+
+    expect(originOf()({ column, rows: [], rtkChoiceMadeAt: SWITCHED })).toMatchObject({
+      rtkRecorded: true,
+    });
+    expect(originOf()({ column: { kind: 'absent' }, rows: [], rtkChoiceMadeAt: SWITCHED })).toEqual(
+      { from: 'history', refused: null },
+    );
+  });
+});
+
 describe('S2: historyOrigin', () => {
   it('reads a repository with no completed onboarding as blank when it is, and as nothing otherwise', () => {
     expect(historyOf()({ onboarding: null, source: 'blank' })).toEqual({ kind: 'blank' });
@@ -448,6 +521,42 @@ describe('S2: historyOrigin', () => {
         rtkRecorded: false,
       });
     }
+  });
+});
+
+describe('S2: historyOrigin: a person switched RTK on this install', () => {
+  const SWITCHED = new Date(1000);
+
+  it('counts the choice as recorded for a step 07 output from before RTK', () => {
+    for (const source of ['blank', 'git_https']) {
+      expect(
+        historyOf()({
+          onboarding: { detected: true, rtkRecorded: false },
+          source,
+          rtkChoiceMadeAt: SWITCHED,
+        }),
+      ).toEqual({ kind: 'onboarding', rtkRecorded: true });
+    }
+  });
+
+  it('changes nothing while the switch was never made, and nothing where no output exists', () => {
+    expect(
+      historyOf()({
+        onboarding: { detected: true, rtkRecorded: false },
+        source: 'git_https',
+        rtkChoiceMadeAt: null,
+      }),
+    ).toEqual({ kind: 'onboarding', rtkRecorded: false });
+    expect(
+      historyOf()({
+        onboarding: { detected: false, rtkRecorded: false },
+        source: 'git_https',
+        rtkChoiceMadeAt: SWITCHED,
+      }),
+    ).toEqual({ kind: 'none' });
+    expect(historyOf()({ onboarding: null, source: 'blank', rtkChoiceMadeAt: SWITCHED })).toEqual({
+      kind: 'blank',
+    });
   });
 });
 
@@ -480,6 +589,15 @@ describe('S3: pickSnapshotRow', () => {
     expect(pickRow()([row('a', null, true, null), row('b', 1, true, null)])).toEqual(
       row('b', 1, true, null),
     );
+  });
+
+  it('takes the newest row with a snapshot once a person switched RTK, whatever an older one recorded', () => {
+    const older = row('a', 1, true, true);
+    const newer = row('b', 2, true, null);
+
+    expect(pickRow()([older, newer], new Date(1000))).toEqual(newer);
+    expect(pickRow()([older, row('b', 2, false, false)], new Date(1000))).toEqual(older);
+    expect(pickRow()([older, newer], null)).toEqual(older);
   });
 
   it('does not change the rows it is given', () => {
@@ -536,5 +654,21 @@ describe('S6: rtkLeftoversToRemove', () => {
     expect(remove()(true, true)).toBe(false);
     expect(remove()(false, false)).toBe(false);
     expect(remove()(false, true)).toBe(false);
+  });
+});
+
+describe('S7: isRtkChoiceRecorded', () => {
+  const recorded = () =>
+    added<(contextRecorded: boolean, choiceMadeAt: Date | null | undefined) => boolean>(
+      'isRtkChoiceRecorded',
+    );
+
+  it('is the column flag, or a switch a person made on this install', () => {
+    expect(recorded()(true, null)).toBe(true);
+    expect(recorded()(true, new Date(1000))).toBe(true);
+    expect(recorded()(false, new Date(1000))).toBe(true);
+    expect(recorded()(false, new Date(0))).toBe(true);
+    expect(recorded()(false, null)).toBe(false);
+    expect(recorded()(false, undefined)).toBe(false);
   });
 });

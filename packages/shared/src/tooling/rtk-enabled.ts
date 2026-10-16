@@ -2,8 +2,8 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import { RTK_ENABLED_UNIT } from '../project-state/conflicts.js';
 
-/** The columns that switch a repository's RTK on or off: the tooling page's PATCH and the answer to
- *  an imported RTK-off question both write exactly these. */
+/** The columns that switch a repository's RTK on or off, which the tooling page's PATCH and the answer
+ *  to an imported RTK-off question both write; each also stamps `rtkChoiceMadeAt` on a change. */
 export const rtkEnabledUpdate = (enabled: boolean): { rtkEnabled: boolean; updatedAt: Date } => ({
   rtkEnabled: enabled,
   updatedAt: new Date(),
