@@ -55,7 +55,7 @@ import { getGlobalKbSyncQueue } from '../queues.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
-import { admitNewWork, NewWorkRefused, requireNewWorkAllowed } from '../middleware/maintenance.js';
+import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 
 // Global KB is instance/namespace-scoped (not per-user). haive is self-hosted
@@ -640,6 +640,7 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
   });
 
   let queued: Awaited<ReturnType<typeof markQueuedForStart>>;
+  let reachedCommit = false;
   try {
     queued = await db.transaction(async (tx) => {
       await admitNewWork(tx);
@@ -674,12 +675,14 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
         customSteps,
         status: 'created',
       });
-      return markQueuedForStart(tx, taskId);
+      const claimed = await markQueuedForStart(tx, taskId);
+      reachedCommit = true;
+      return claimed;
     });
   } catch (err) {
-    // The entry lives in the global KB database, so no transaction spans both writes. Only an insert
-    // Postgres refused, or the fence did, is known to have written nothing; any other may commit.
-    if (isRefusedStatement(err) || err instanceof NewWorkRefused) {
+    // The entry lives in the global KB database, so no transaction spans both writes. An error
+    // inside the transaction rolled the task back; a failed commit wrote nothing only if refused.
+    if (!reachedCommit || isRefusedStatement(err)) {
       await withGlobalKb(db, ({ db: gdb }) =>
         gdb.transaction(async (tx) => {
           if ((await lockEntry(tx, entry.id))?.status !== 'skeleton') return;

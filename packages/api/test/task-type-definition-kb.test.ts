@@ -4,6 +4,7 @@ const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   gdb: undefined as unknown,
+  beforeAdmit: undefined as (() => Promise<void>) | undefined,
   definition: vi.fn(
     async (..._args: unknown[]) =>
       ({
@@ -24,8 +25,18 @@ vi.mock('../src/queues.js', () => ({
 }));
 vi.mock('../src/lib/task-start.js', () => ({
   enqueueStart: vi.fn(async () => {}),
-  markQueuedForStart: async () => true,
+  markQueuedForStart: vi.fn(async () => true),
 }));
+vi.mock('../src/middleware/maintenance.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/middleware/maintenance.js')>();
+  return {
+    ...actual,
+    admitNewWork: async (...args: Parameters<typeof actual.admitNewWork>) => {
+      await h.beforeAdmit?.();
+      return actual.admitNewWork(...args);
+    },
+  };
+});
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
@@ -48,6 +59,8 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { globalKbEntries } from '@haive/shared/global-kb';
 import { globalKbRoutes } from '../src/routes/global-kb.js';
+import { enqueueStart, markQueuedForStart } from '../src/lib/task-start.js';
+import { NewWorkRefused } from '../src/middleware/maintenance.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { HttpError } from '../src/context.js';
 import type { AppEnv } from '../src/context.js';
@@ -68,6 +81,7 @@ beforeEach(() => {
   h.db = fake.db;
   h.gdb = fake.db;
   h.definition.mockClear();
+  h.beforeAdmit = undefined;
 });
 
 const enrich = () =>
@@ -119,7 +133,7 @@ describe('POST /enrich pins the kb_author step list', () => {
     expect(entry?.id).toBe((task!.metadata as { globalKbEntryId: string }).globalKbEntryId);
   });
 
-  it('keeps the skeleton entry when the outcome of the insert is unknown', async () => {
+  it('removes the skeleton entry however the insert fails, since the error rolls the task back', async () => {
     for (const error of [
       Object.assign(new Error('connection failure'), { code: '08006' }),
       Object.assign(new Error('statement completion unknown'), { code: '40003' }),
@@ -133,8 +147,60 @@ describe('POST /enrich pins the kb_author step list', () => {
         if (table === schema.tasks) throw error;
       };
       expect((await enrich()).status).toBe(500);
-      expect(fake.rows(globalKbEntries)).toHaveLength(1);
+      expect(fake.rows(schema.tasks)).toHaveLength(0);
+      expect(fake.rows(globalKbEntries)).toHaveLength(0);
     }
+  });
+
+  it('removes the skeleton entry when the statement after the task insert fails', async () => {
+    vi.mocked(markQueuedForStart).mockRejectedValueOnce(new Error('connection refused'));
+    expect((await enrich()).status).toBe(500);
+    expect(fake.rows(schema.tasks)).toHaveLength(0);
+    expect(fake.rows(globalKbEntries)).toHaveLength(0);
+  });
+
+  it('removes the skeleton entry when the new-work fence cannot be taken, before the task insert', async () => {
+    h.beforeAdmit = async () => {
+      throw new Error('connection refused');
+    };
+    expect((await enrich()).status).toBe(500);
+    expect(fake.rows(schema.tasks)).toHaveLength(0);
+    expect(fake.rows(globalKbEntries)).toHaveLength(0);
+  });
+
+  it('removes the skeleton entry when new work is refused after the check at the door', async () => {
+    h.beforeAdmit = async () => {
+      throw new NewWorkRefused();
+    };
+    expect((await enrich()).status).toBe(503);
+    expect(fake.rows(schema.tasks)).toHaveLength(0);
+    expect(fake.rows(globalKbEntries)).toHaveLength(0);
+  });
+
+  it('keeps the skeleton entry when the commit of the task fails, after the insert', async () => {
+    fake.hooks.beforeCommit = () => {
+      fake.hooks.beforeCommit = null;
+      throw new Error('connection dropped');
+    };
+    expect((await enrich()).status).toBe(500);
+    expect(fake.rows(globalKbEntries)).toHaveLength(1);
+  });
+
+  it('removes the skeleton entry when Postgres refuses the commit of the task', async () => {
+    fake.hooks.beforeCommit = () => {
+      fake.hooks.beforeCommit = null;
+      throw refused();
+    };
+    expect((await enrich()).status).toBe(500);
+    expect(fake.rows(schema.tasks)).toHaveLength(0);
+    expect(fake.rows(globalKbEntries)).toHaveLength(0);
+  });
+
+  it('keeps the skeleton entry when the START cannot be queued after the commit', async () => {
+    vi.mocked(enqueueStart).mockRejectedValueOnce(new Error('connection refused'));
+    expect((await enrich()).status).toBe(500);
+    expect(fake.rows(schema.tasks)).toHaveLength(1);
+    expect(fake.rows(globalKbEntries)).toHaveLength(1);
   });
 
   it('keeps an entry that stopped being a skeleton before the cleanup', async () => {
