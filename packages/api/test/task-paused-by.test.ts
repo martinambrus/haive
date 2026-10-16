@@ -66,6 +66,10 @@ vi.mock('@haive/shared/stats-server', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/stats-server')>()),
   resolveCostDisplay: async () => ({ currency: 'USD', rate: 1 }),
 }));
+vi.mock('../src/routes/tasks/_call-log.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/routes/tasks/_call-log.js')>()),
+  loadLoggedCallCount: async () => ({ logged: 0, running: 0 }),
+}));
 vi.mock('../src/routes/tasks/_helpers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/routes/tasks/_helpers.js')>()),
   findQueuedInvocationStepIds: async () => new Set<string>(),
