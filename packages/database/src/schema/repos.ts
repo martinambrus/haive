@@ -276,6 +276,9 @@ export const repositories = pgTable(
     verifyCommands: jsonb('verify_commands'),
     /** The switch restricts, not the grant list: with it on, deleting the last listed account leaves none allowed. */
     integrationsRestricted: boolean('integrations_restricted').notNull().default(false),
+    /** When a person last switched RTK here, on the Tooling page or in the RTK question. NULL: never.
+     *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
+    rtkChoiceMadeAt: timestamp('rtk_choice_made_at'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

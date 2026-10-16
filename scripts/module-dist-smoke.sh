@@ -410,7 +410,7 @@ step3() {
 npmrc_credentials() {
   find "$1" -name .npmrc -exec awk '
     /^[ \t]*[#;]/ { next }
-    /(^|:)_(auth|authToken|password)[ \t]*=/ || /:\/\/[^\/@ \t]*:[^\/@ \t]*@/ { print FILENAME ":" FNR }
+    /^[ \t]*([^ \t=#;]*:)?_(auth|authToken|password)[ \t]*=/ || /:\/\/[^\/@ \t]*:[^\/@ \t]*@/ { print FILENAME ":" FNR }
   ' {} + | sed "s|^$1/||"
 }
 

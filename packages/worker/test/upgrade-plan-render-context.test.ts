@@ -565,3 +565,111 @@ describe('the installed-set hash covers the rows this install manages', () => {
     expect(detected.installedTemplateSetHash).toBeNull();
   });
 });
+
+describe('01 renders by the live RTK switch once a person has switched it on this install', () => {
+  const SWITCHED = new Date(1000);
+  const unrecordedRow = (fake: Fake) =>
+    seedLiveRow(fake, {
+      path: '.claude/agents/row-0.md',
+      snapshot: rowSnapshot('rows-unrecorded'),
+      at: 1000,
+    });
+  const unrecordedHistory = (fake: Fake) =>
+    seedOnboarding(fake, detect07('history-unrecorded', false));
+
+  const ORIGINS: [string, unknown, ((fake: Fake) => void) | undefined][] = [
+    ['a column that recorded no choice', portableOnly({ rtkChoiceRecorded: false }), undefined],
+    ['a snapshot from before RTK', null, unrecordedRow],
+    ['a step 07 output from before RTK', null, unrecordedHistory],
+  ];
+
+  const planFor = (column: unknown, seed: ((fake: Fake) => void) | undefined, live: boolean) =>
+    planOf({
+      column,
+      live,
+      seed: (fake) => {
+        seed?.(fake);
+        fake.patch(schema.repositories, REPO, { rtkChoiceMadeAt: SWITCHED });
+      },
+    });
+
+  it.each(ORIGINS)('follows the switch when it is on, from %s', async (_name, column, seed) => {
+    const detected = await planFor(column, seed, true).detect();
+
+    expect(detected.rtkFollowsLive).toBe(true);
+    expect(detected.renderCtxSnapshot.rtkEnabled).toBe(true);
+  });
+
+  it.each(ORIGINS)(
+    'follows it when it is off, and offers the block left in AGENTS.md, from %s',
+    async (_name, column, seed) => {
+      await mkdir(join(repo, '.claude'));
+      await writeFile(join(repo, '.claude/settings.json'), buildClaudeSettingsJson(), 'utf8');
+      await writeFile(join(repo, 'AGENTS.md'), `# rules\n${RTK_BLOCK}`, 'utf8');
+      await writeFile(join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+
+      const detected = await planFor(column, seed, false).detect();
+
+      expect(detected.rtkFollowsLive).toBe(true);
+      expect(detected.renderCtxSnapshot.rtkEnabled).toBe(false);
+      expect(detected.rtkBlockLeftovers).toEqual(['AGENTS.md']);
+    },
+  );
+
+  it('renders from the newest snapshot, though an older one recorded RTK', async () => {
+    const seed = (fake: Fake) => {
+      seedLiveRow(fake, {
+        path: '.claude/agents/row-0.md',
+        snapshot: rowSnapshot('older-recorded', false),
+        at: 1000,
+      });
+      seedLiveRow(fake, {
+        path: '.claude/agents/row-1.md',
+        snapshot: rowSnapshot('newer-unrecorded'),
+        at: 2000,
+      });
+    };
+
+    expect((await planFor(null, seed, true).detect()).renderCtxSnapshot.framework).toBe(
+      'newer-unrecorded',
+    );
+    expect(
+      (await planOf({ column: null, live: true, seed }).detect()).renderCtxSnapshot.framework,
+    ).toBe('older-recorded');
+  });
+
+  it('offers the RTK settings files of a column that recorded no choice, switch on', async () => {
+    const detected = await planFor(
+      portableOnly({ rtkChoiceRecorded: false }),
+      undefined,
+      true,
+    ).detect();
+
+    expect(rtkEntries(detected).map((e) => e.diskPath)).toContain('.claude/settings.json');
+  });
+
+  it('offers the RTK settings file it finds for removal, switch off', async () => {
+    await mkdir(join(repo, '.claude'));
+    await writeFile(join(repo, '.claude/settings.json'), buildClaudeSettingsJson(), 'utf8');
+
+    const detected = await planFor(
+      portableOnly({ rtkChoiceRecorded: false }),
+      undefined,
+      false,
+    ).detect();
+
+    expect(rtkEntries(detected)).toEqual([
+      { diskPath: '.claude/settings.json', bucket: 'obsolete' },
+    ]);
+  });
+
+  it.each(ORIGINS)(
+    'keeps the context as recorded while the switch was never made, from %s',
+    async (_name, column, seed) => {
+      const detected = await planOf({ column, live: true, seed }).detect();
+
+      expect(detected.rtkFollowsLive).toBe(false);
+      expect(detected.renderCtxSnapshot.rtkEnabled).not.toBe(true);
+    },
+  );
+});

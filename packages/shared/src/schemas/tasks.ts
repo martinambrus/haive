@@ -163,6 +163,8 @@ export const createTaskRequestSchema = z
     overrideBlocked: z.boolean().optional(),
     resourceLimits: resourceLimitsSchema,
     stepLoopLimits: stepLoopLimitsSchema,
+    /** Created unstarted: the caller uploads its attachments, then sends the `start` action. */
+    deferStart: z.boolean().optional(),
   })
   .refine(
     (d) =>

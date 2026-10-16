@@ -22,6 +22,7 @@ import { ledgerImportedSince } from '@haive/shared/onboarding-admission';
 import {
   isImportMarker,
   isRenderContextSnapshot,
+  isRtkChoiceRecorded,
   PROJECT_STATE_IMPORT_STEP_ID,
 } from '@haive/shared/project-state';
 import { readUpgradeFile, RTK_BLOCK_FILES, RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
@@ -926,18 +927,35 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
 
     // A rollback that restored no snapshot (the upgrade only created files or untracked rows) takes
     // the context the rows live now carry, which is the one the repository had before the upgrade.
+    const [repo] = await ctx.db
+      .select({
+        rtkEnabled: schema.repositories.rtkEnabled,
+        rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
+      })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, detected.repositoryId))
+      .limit(1);
     const recorded =
-      snapshot ?? pickRenderSnapshot(await loadLiveArtifacts(ctx.db, detected.repositoryId));
+      snapshot ??
+      pickRenderSnapshot(
+        await loadLiveArtifacts(ctx.db, detected.repositoryId),
+        repo?.rtkChoiceMadeAt,
+      );
 
     // Refresh applicable_template_ids from a fresh expansion against the
     // restored render context. After a rollback the repo's gating may differ
     // (e.g. prior baseline didn't include LSP plugins) — recompute from
     // ground truth.
     if (recorded) {
+      const restored = recorded as unknown as TemplateRenderContext;
       const applicableExpanded = await unionExpandedFor(ctx.db, {
         repositoryId: detected.repositoryId,
         userId: ctx.userId,
-        renderCtx: recorded as unknown as TemplateRenderContext,
+        // Every reader renders a person's RTK switch over the context's own value.
+        renderCtx:
+          repo && isRtkChoiceRecorded(false, repo.rtkChoiceMadeAt)
+            ? { ...restored, rtkEnabled: repo.rtkEnabled }
+            : restored,
         logger: ctx.logger,
       });
       await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);

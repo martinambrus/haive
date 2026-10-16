@@ -53,9 +53,17 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
     fn({ db: h.gdb, settings: { namespace: 'default' } }),
 }));
 
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { createDatabase, schema, type Database } from '@haive/database';
+import {
+  createDatabase,
+  isLockNotAvailable,
+  lockRepositoryRow,
+  lockRepositoryTasksKey,
+  schema,
+  type Database,
+  type DbTx,
+} from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { TASK_JOB_NAMES } from '@haive/shared';
 import { globalKbEntries } from '@haive/shared/global-kb';
@@ -66,6 +74,7 @@ import { planRoutes } from '../src/routes/plan.js';
 import { spawnPlanTask } from '../src/lib/spawn-plan-task.js';
 import { loadLiveRootWriters } from '../src/routes/repos.js';
 import { definitionForCreate } from '../src/lib/task-type-definition.js';
+import { markQueuedForStart } from '../src/lib/task-start.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -470,6 +479,224 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
         locked: false,
       },
       'run_app/true': { ...none, snapshot: null, simplifyCode: true, pinned: true, locked: false },
+    });
+  });
+
+  describe('a task starting beside a checkout move', () => {
+    const newTask = async () => {
+      const [row] = await db
+        .insert(schema.tasks)
+        .values({ userId: USER, repositoryId: REPO, type: 'plan_build', title: 't' })
+        .returning();
+      return row!;
+    };
+    const statusOf = async (id: string) =>
+      (await db.select().from(schema.tasks).where(eq(schema.tasks.id, id)))[0]?.status;
+
+    /** A checkout move: a transaction holding REPO's task-creation lock until it is released. */
+    const move = async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let taken!: () => void;
+      const locked = new Promise<void>((resolve) => (taken = resolve));
+      const done = db.transaction(async (tx) => {
+        await lockRepositoryTasksKey(tx, REPO);
+        taken();
+        await gate;
+      });
+      await Promise.race([locked, done]);
+      return { release, done };
+    };
+
+    const requestWaiting = async () => {
+      for (let i = 0; i < 100; i++) {
+        const [row] = await db.execute<{ n: number }>(
+          sql`select count(*)::int as n from pg_locks where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`,
+        );
+        if (row!.n > 0) return true;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return false;
+    };
+
+    it('queues a created task only once the move holding the repository lock ends', async () => {
+      const task = await newTask();
+      const moving = await move();
+      const start = markQueuedForStart(db, task.id);
+      try {
+        expect(await requestWaiting()).toBe(true);
+        expect(await statusOf(task.id)).toBe('created');
+      } finally {
+        moving.release();
+        await moving.done;
+      }
+      expect(await start).toMatchObject({ status: 'queued' });
+      expect(await statusOf(task.id)).toBe('queued');
+    });
+
+    it('keeps the lock until the transaction it runs in commits', async () => {
+      const task = await newTask();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let queued!: () => void;
+      const reached = new Promise<void>((resolve) => (queued = resolve));
+      const creating = db.transaction(async (tx) => {
+        await markQueuedForStart(tx, task.id);
+        queued();
+        await gate;
+      });
+      try {
+        await Promise.race([reached, creating]);
+        const free = await db
+          .transaction(async (tx) => {
+            await tx.execute(sql`SET LOCAL lock_timeout = '200ms'`);
+            await lockRepositoryTasksKey(tx, REPO);
+          })
+          .then(
+            () => true,
+            (err: unknown) => {
+              if (isLockNotAvailable(err)) return false;
+              throw err;
+            },
+          );
+        expect(free).toBe(false);
+        expect(await statusOf(task.id)).toBe('created');
+      } finally {
+        release();
+        await creating;
+      }
+      expect(await statusOf(task.id)).toBe('queued');
+    });
+
+    it('holds a task created through POST /tasks until the move ends, then queues it', async () => {
+      const moving = await move();
+      const request = post({ type: 'cp-plain', repositoryId: REPO });
+      try {
+        expect(await requestWaiting()).toBe(true);
+        expect(await db.select().from(schema.tasks).where(eq(schema.tasks.userId, USER))).toEqual(
+          [],
+        );
+      } finally {
+        moving.release();
+        await moving.done;
+        await request;
+      }
+      const { row } = await created(await request);
+      expect(row.status).toBe('queued');
+    });
+  });
+
+  describe('a create beside another holder of the repository lock', () => {
+    const locksOn = async (locktype: string, granted: boolean) => {
+      const [row] = await db.execute<{ n: number }>(
+        sql`select count(*)::int as n from pg_locks where locktype = ${locktype} and granted = ${granted} and database = (select oid from pg_database where datname = current_database())`,
+      );
+      return row!.n;
+    };
+    const until = async (cond: () => Promise<boolean>) => {
+      for (let i = 0; i < 200; i++) {
+        if (await cond()) return true;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return false;
+    };
+    /** A transaction that takes what `hold` takes and keeps it until released. */
+    const holding = async (hold: (tx: DbTx) => Promise<unknown>) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let taken!: () => void;
+      const held = new Promise<void>((resolve) => (taken = resolve));
+      const done = db.transaction(async (tx) => {
+        await hold(tx);
+        taken();
+        await gate;
+      });
+      await Promise.race([held, done]);
+      return { release, done };
+    };
+
+    it('never deadlocks a creation that takes the lock and then the repository row', async () => {
+      const paused = await holding((tx) => tx.execute(sql`lock table task_events in share mode`));
+      const pending: Promise<unknown>[] = [];
+      try {
+        pending.push(Promise.resolve(post({ type: 'cp-plain', repositoryId: REPO })));
+        expect(await until(async () => (await locksOn('relation', false)) > 0)).toBe(true);
+        pending.push(db.transaction(async (tx) => void (await lockRepositoryRow(tx, REPO))));
+        expect(await until(async () => (await locksOn('advisory', false)) > 0)).toBe(true);
+      } finally {
+        paused.release();
+        await paused.done;
+        await Promise.allSettled(pending);
+      }
+      const [create, revival] = await Promise.allSettled(pending);
+      expect(revival!.status).toBe('fulfilled');
+      expect(create!.status === 'fulfilled' && (create!.value as Response).status).toBe(201);
+    });
+
+    it('never deadlocks a plan task spawned beside a creation that takes the lock and then the repository row', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let seeded!: () => void;
+      const inserted = new Promise<void>((resolve) => (seeded = resolve));
+      const pending: Promise<unknown>[] = [];
+      try {
+        pending.push(
+          spawnPlanTask({
+            userId: USER,
+            repositoryId: REPO,
+            type: 'plan_chat',
+            title: 'spawned beside a creation',
+            metadata: {},
+            cliProviderId: null,
+            seed: async () => {
+              seeded();
+              await gate;
+            },
+          }),
+        );
+        await Promise.race([inserted, ...pending]);
+        pending.push(db.transaction(async (tx) => void (await lockRepositoryRow(tx, REPO))));
+        await until(async () => (await locksOn('advisory', false)) > 0);
+      } finally {
+        release();
+        await Promise.allSettled(pending);
+      }
+      const [spawned, revival] = await Promise.allSettled(pending);
+      expect(revival!.status).toBe('fulfilled');
+      expect(spawned!.status).toBe('fulfilled');
+    });
+
+    it('never deadlocks a create that pins a database against one that holds the lock first', async () => {
+      await db.insert(schema.taskTypeDefinitions).values([
+        typeRow('workflow', [], {
+          source: 'builtin',
+          runListStrategy: 'workflow_paths',
+          stepIds: null,
+          requiresRepository: true,
+        }),
+        typeRow('run_app', [], {
+          source: 'builtin',
+          runListStrategy: 'run_app_modes',
+          stepIds: null,
+          requiresRepository: true,
+        }),
+      ]);
+      const paused = await holding((tx) =>
+        tx.execute(sql`select 1 from repositories where id = ${REPO} for no key update`),
+      );
+      const pending: Promise<Response>[] = [];
+      try {
+        pending.push(Promise.resolve(post({ type: 'workflow', repositoryId: REPO })));
+        expect(await until(async () => (await locksOn('advisory', true)) > 0)).toBe(true);
+        pending.push(Promise.resolve(post({ type: 'run_app', repositoryId: REPO })));
+        expect(await until(async () => (await locksOn('advisory', false)) > 0)).toBe(true);
+      } finally {
+        paused.release();
+        await paused.done;
+        await Promise.allSettled(pending);
+      }
+      const statuses = await Promise.all(pending.map(async (p) => (await p).status));
+      expect(statuses).toEqual([201, 201]);
     });
   });
 
