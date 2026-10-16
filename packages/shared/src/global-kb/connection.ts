@@ -102,7 +102,7 @@ export async function resolveGlobalKbSettings(): Promise<GlobalKbSettings> {
     ),
   ]);
   const connectionString = await secretsService.getFresh(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
-  // Leaving external writes the mode before it removes or replaces the string, so external is read again.
+  // Leaving external writes the mode before it removes the string, so external is read again.
   const settledMode =
     mode === 'external' ? await configService.getFresh(CONFIG_KEYS.GLOBAL_KB_MODE) : mode;
   return {
