@@ -42,4 +42,11 @@ appears inside the read-only mount. A `.haive` or `.haive/worktrees` that is a f
 refuses the run. The check and the mount are separate steps, the same window the `.haive-data`
 boundary has.
 
+The boundary does not look for hard links, unlike the `.haive-data` one. A worktree is a full
+checkout, often with `node_modules`, so an inode count over every worktree would walk tens of
+thousands of files on every root-mounted invocation. No new link can be made across the mounts
+(`Cross-device link`, the same mount shape `.haive-data` measured). A link a root-mounted agent
+planted before the boundary existed survives, though: an alias of a worktree file in the writable
+checkout stays writable.
+
 Step 11 asks its agent to edit the knowledge base on every task, and a blank repository has no `knowledge_base/` by design. So in a task worktree its `prepare` creates the directory, owned like the worktree root, before the agent runs; an empty directory is never committed, so it cannot fake the marker. At the repository root (01 skipped) it creates nothing: it skips the KB-sync half and offers no local investigation (a global promotion still works), and records why in `kbSyncSkipped`.
