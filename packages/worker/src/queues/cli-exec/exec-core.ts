@@ -87,6 +87,7 @@ import { assertPastedPersonasStillAllowed, resolveSecretMasks } from './secret-m
 import { resolveRipgrepConfigEnv } from './ripgrep-config.js';
 import { repoGitDataBoundary } from './gitfile-mask.js';
 import { haiveDataBoundary } from './haive-data-boundary.js';
+import { worktreesBoundary } from './worktrees-boundary.js';
 import { consumePreemptionMark } from './preempt-mark.js';
 import { SUPERSEDED_RUN_ERROR, watchSupersededRun } from './run-superseded.js';
 import { resolveDdevGeneratedMasks } from './ddev-generated-mask.js';
@@ -420,7 +421,11 @@ export async function executeByKind(
   // repository ROOT gets its real `.git` directory mounted back read-only. Same boundary, and the
   // two shapes are mutually exclusive by construction — see repoGitDataBoundary.
   const gitData = await repoGitDataBoundary(repoMount, { hasWorktree, hasRepo });
-  const boundaryMounts = [...gitData.mounts, ...(await haiveDataBoundary(repoMount, { hasRepo }))];
+  const boundaryMounts = [
+    ...gitData.mounts,
+    ...(await haiveDataBoundary(repoMount, { hasRepo })),
+    ...(await worktreesBoundary(repoMount, { hasWorktree, hasRepo })),
+  ];
   const maskFiles = [
     ...(await resolveSecretMasks(db, payload.taskId, repoMount)),
     ...gitData.masks,
