@@ -28,6 +28,7 @@ const {
   MODULE_JOB_START_WAIT_MS,
   MODULE_JOB_STOP_WAIT_MS,
   beginModuleTeardown,
+  ensureModuleSchemas,
   moduleJobsStarted,
   moduleTeardownRunning,
   startModuleJobs,
@@ -1466,4 +1467,48 @@ describe('the jobs reconcile with a start that does not end', () => {
     await reconcile(new Set());
     expect(m.ensure).toHaveBeenCalledOnce();
   });
+});
+
+describe('a teardown beside a boot schema ensure that outlived its wait', () => {
+  beforeEach(() => {
+    moduleDb.gate = undefined;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it.each(['resolve', 'reject'] as const)(
+    'is refused while that ensure runs, even after a pass saw the module deactivated, and goes ahead once it settles (%s)',
+    async (outcome) => {
+      const id = `boot-late-${outcome}`;
+      const m = moduleWithHungStart(id, 'ensureSchema');
+      const hook = vi.fn<Hook>(async () => {});
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const ensuring = ensureModuleSchemas({} as Database, [m.loaded], [m.entry], new Set());
+      await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+      expect(await ensuring).toEqual({ [id]: 'pending' });
+      const { reconcile } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+      await reconcile(new Set([id]));
+
+      const refusal = (await runModuleTeardown(teardownDeps(m, hook), id).catch(
+        (err: unknown) => err,
+      )) as Error;
+      expect(hook).not.toHaveBeenCalled();
+      expect(refusal).toBeInstanceOf(ModuleTeardownRefusedError);
+      expect(refusal.message).toMatch(new RegExp(`${id}.*schema setup.*still running`));
+      expect(moduleJobsStarted(id)).toBe(true);
+
+      if (outcome === 'resolve') m.end().resolve();
+      else m.end().reject(new Error('ddl refused'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(moduleJobsStarted(id)).toBe(false);
+      await runModuleTeardown(teardownDeps(m, hook), id);
+      expect(hook).toHaveBeenCalledOnce();
+      expect(m.ensure).toHaveBeenCalledOnce();
+    },
+  );
 });

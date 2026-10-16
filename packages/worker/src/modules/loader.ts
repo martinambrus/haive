@@ -202,12 +202,15 @@ export async function ensureModuleSchemas(
       result[moduleId] = 'ok';
     } else {
       result[moduleId] = 'pending';
-      void ensuring.catch((err: unknown) => {
-        logger.warn(
-          { err, module: moduleId },
-          'module schema bootstrap failed after boot went on without it',
-        );
-      });
+      bootEnsuresRunning.add(moduleId);
+      void ensuring
+        .catch((err: unknown) => {
+          logger.warn(
+            { err, module: moduleId },
+            'module schema bootstrap failed after boot went on without it',
+          );
+        })
+        .finally(() => bootEnsuresRunning.delete(moduleId));
     }
   }
   return result;
@@ -250,8 +253,11 @@ const jobsStarted = new Set<string>();
 const teardownsRunning = new Set<string>();
 // A teardown can begin and end between two passes, so no pass need have seen the deactivation.
 const tornDown = new Set<string>();
+// Boot went on without these schema ensures; until each settles, no teardown may drop the schema under it.
+const bootEnsuresRunning = new Set<string>();
 
-export const moduleJobsStarted = (moduleId: string): boolean => jobsStarted.has(moduleId);
+export const moduleJobsStarted = (moduleId: string): boolean =>
+  jobsStarted.has(moduleId) || bootEnsuresRunning.has(moduleId);
 
 export const moduleTeardownRunning = (moduleId: string): boolean => teardownsRunning.has(moduleId);
 
