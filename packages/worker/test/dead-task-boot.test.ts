@@ -6,7 +6,12 @@ import path from 'node:path';
 import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database, type MergeResolveState } from '@haive/database';
-import { MERGE_LEFT_OPEN_EVENT, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
+import {
+  configService,
+  MERGE_LEFT_OPEN_EVENT,
+  TASK_JOB_NAMES,
+  type WorkflowType,
+} from '@haive/shared';
 import {
   handleResult,
   markTaskDead,
@@ -16,8 +21,11 @@ import {
   resolveFixLoopGate,
 } from '../src/queues/task-queue.js';
 import {
+  DEAD_TASK_REVIVE_RETRY_MS,
   reconcileDeadTasks,
+  retryHeldRevivals,
   reviveDeadTask,
+  reviveDeadTasks,
   type DeadTaskBootDeps,
   type DeadTaskView,
 } from '../src/queues/dead-task-boot.js';
@@ -378,6 +386,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
   beforeEach(async () => {
     h.adds.length = 0;
     h.kills.length = 0;
+    vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
   });
 
@@ -654,6 +663,130 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
 
       expect(await task(id)).toMatchObject({ deadAt: null, orchestrationEpoch: 3 });
       expect(sent).toEqual([]);
+    });
+  });
+
+  describe('while new work is held', () => {
+    const stored = (value: string | Error) =>
+      vi
+        .spyOn(configService, 'getFresh')
+        .mockClear()
+        .mockImplementation(async () => {
+          if (value instanceof Error) throw value;
+          return value;
+        });
+
+    it('revives at boot, as before, while the state is normal', async () => {
+      const id = await makeDead({ status: 'queued', currentStepId: null });
+      stored('normal');
+      const { sent, deps } = recorder();
+
+      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ revived: 1 });
+
+      expect(await task(id)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
+      expect(sent).toEqual([{ kind: 'start', taskId: id }]);
+      expect(await events(id, 'task.revived')).toHaveLength(1);
+    });
+
+    it.each(['draining', 'maintenance'])(
+      'leaves a dead task dead at boot, queues nothing and writes no event, while the system is %s',
+      async (state) => {
+        const id = await makeDead({ status: 'queued', currentStepId: null });
+        stored(state);
+        const before = await task(id);
+        const { sent, deps } = recorder();
+
+        await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({
+          marked: 0,
+          revived: 0,
+          held: 1,
+        });
+
+        expect(await task(id)).toEqual(before);
+        expect(await events(id)).toEqual([]);
+        expect(sent).toEqual([]);
+      },
+    );
+
+    it('leaves a dead task dead, and writes nothing, when the stored state cannot be read', async () => {
+      const id = await makeDead({ status: 'queued', currentStepId: null });
+      stored(new Error('redis went away'));
+      const before = await task(id);
+      const { sent, deps } = recorder();
+
+      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ revived: 0, held: 1 });
+
+      expect(await task(id)).toEqual(before);
+      expect(await events(id)).toEqual([]);
+      expect(sent).toEqual([]);
+    });
+
+    it('still ends the open runs of a task it holds back, as boot does for any task that stays dead', async () => {
+      const id = await makeDead();
+      const step = await row(id, A, 'waiting_cli');
+      const orphan = await run(id, step.id, { startedAt: DEAD_AT });
+      stored('maintenance');
+      const { deps } = recorder();
+
+      await reconcileDeadTasks(db, deps);
+
+      expect(await task(id)).toMatchObject({ deadAt: DEAD_AT, orchestrationEpoch: 3 });
+      await expectEndedAsDead(orphan.id);
+    });
+
+    it('revives only, in a pass of its own: the runs of a task that stays dead are not ended', async () => {
+      const held = await makeDead({ status: 'queued', currentStepId: null });
+      const stays = await makeDead({ runListSnapshot: [A, GONE] });
+      const step = await row(stays, A, 'waiting_cli');
+      const open = await run(stays, step.id, { startedAt: DEAD_AT });
+      const { sent, deps } = recorder();
+
+      stored('maintenance');
+      await expect(reviveDeadTasks(db, deps)).resolves.toEqual({ revived: 0, held: 1 });
+      expect(await task(held)).toMatchObject({ deadAt: DEAD_AT, orchestrationEpoch: 3 });
+      expect(sent).toEqual([]);
+
+      stored('normal');
+      await expect(reviveDeadTasks(db, deps)).resolves.toEqual({ revived: 1, held: 0 });
+
+      expect(await task(held)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
+      expect(sent).toEqual([{ kind: 'start', taskId: held }]);
+      expect(await task(stays)).toMatchObject({ deadAt: DEAD_AT, orchestrationEpoch: 3 });
+      expect(await runOf(open.id)).toMatchObject({ endedAt: null, supersededAt: null });
+    });
+
+    it('keeps trying after boot, revives the task once the state is normal, and stops', async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      try {
+        const id = await makeDead({ status: 'queued', currentStepId: null });
+        const stays = await makeDead({ runListSnapshot: [A, GONE] });
+        const reads = stored('maintenance');
+        const { sent, deps } = recorder();
+        await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ held: 1 });
+        const step = await row(stays, A, 'waiting_cli');
+        const open = await run(stays, step.id, { startedAt: DEAD_AT });
+        const stopRetry = retryHeldRevivals(db, deps);
+
+        await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+        await vi.waitFor(() => expect(reads).toHaveBeenCalledTimes(2));
+        expect(await task(id)).toMatchObject({ deadAt: DEAD_AT, orchestrationEpoch: 3 });
+        expect(sent).toEqual([]);
+        expect(vi.getTimerCount()).toBe(1);
+
+        stored('normal');
+        await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+        await vi.waitFor(async () => expect((await task(id)).deadAt).toBeNull());
+        await vi.waitFor(() => expect(vi.getTimerCount()).toBe(0));
+        expect(sent).toEqual([{ kind: 'start', taskId: id }]);
+        expect(await events(id, 'task.revived')).toHaveLength(1);
+        expect(await runOf(open.id)).toMatchObject({ endedAt: null, supersededAt: null });
+
+        await vi.advanceTimersByTimeAsync(5 * DEAD_TASK_REVIVE_RETRY_MS);
+        expect(sent).toHaveLength(1);
+        stopRetry();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

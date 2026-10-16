@@ -42,17 +42,22 @@ export async function readMaintenanceState(taskId: string): Promise<MaintenanceS
   );
 }
 
+/** The shared fence, then the stored state past the cache; throws MaintenanceStateUnreadable when it cannot be read. */
+async function readStateUnderFence(tx: DbTx): Promise<MaintenanceState> {
+  await lockNewWorkFenceShared(tx);
+  return parseMaintenanceState(
+    await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE).catch((err: unknown) => {
+      throw new MaintenanceStateUnreadable(err);
+    }),
+  );
+}
+
 /** Call first in the transaction that reopens a failed task; a state write waits for its commit. */
 export async function admitReopen(
   tx: DbTx,
   taskId: string,
 ): Promise<{ held: boolean; state: MaintenanceState }> {
-  await lockNewWorkFenceShared(tx);
-  const state = parseMaintenanceState(
-    await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE).catch((err: unknown) => {
-      throw new MaintenanceStateUnreadable(err);
-    }),
-  );
+  const state = await readStateUnderFence(tx);
   const held = refusesNewWork(state);
   if (held) {
     const [task] = await tx
@@ -63,6 +68,16 @@ export async function admitReopen(
     if (task?.status === 'failed') throw new NewWorkHeld(state);
   }
   return { held, state };
+}
+
+/** Call first in the transaction that revives a dead task: true, with nothing written yet, while new work is held or the state cannot be read. */
+export async function newWorkHeldUnderFence(tx: DbTx): Promise<boolean> {
+  try {
+    return refusesNewWork(await readStateUnderFence(tx));
+  } catch (err) {
+    if (err instanceof MaintenanceStateUnreadable) return true;
+    throw err;
+  }
 }
 
 /** The api's `refuseReviveBesideLive` for the worker: the creation's checks under the repository

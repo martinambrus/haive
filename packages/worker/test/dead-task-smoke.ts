@@ -39,7 +39,7 @@ import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { checkProviderRecovery } from '../src/queues/usage-poll-queue.js';
 import { closePrPollQueue, runPrPollTick } from '../src/queues/pr-poll-queue.js';
 import { defaultDeps, redriveStalledTasks } from '../src/queues/stalled-redrive.js';
-import { reconcileDeadTasks } from '../src/queues/dead-task-boot.js';
+import { reconcileDeadTasks, retryHeldRevivals } from '../src/queues/dead-task-boot.js';
 import { buildRunList, resolveRunList, type ResolvedTaskContext } from '../src/queues/run-list.js';
 import { stepRegistry, UnresolvedStepError } from '../src/step-engine/registry.js';
 
@@ -1029,6 +1029,53 @@ async function main(): Promise<void> {
           (await eventTypes(id)).includes('task.dead'),
         { v, after },
       );
+    }
+
+    // --- a hold at boot -----------------------------------------------------------------
+    {
+      const id = await makeTask('boot-held', { status: 'queued', currentStepId: null });
+      await markDeadRaw(id);
+      const before = await view(id);
+      const hold = (state: string) => configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state);
+      const stay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const untouched = async () =>
+        JSON.stringify(await view(id)) === JSON.stringify(before) &&
+        (await jobsOf(id)).length === 0 &&
+        (await eventTypes(id)).length === 0;
+      let stop = () => {};
+      await hold('maintenance');
+      try {
+        const boot = await reconcileDeadTasks(db);
+        check(
+          'boot leaves a dead task dead, queues nothing and writes no event while the stored state is maintenance',
+          boot.held === 1 && (await untouched()),
+          { boot, now: await view(id), jobs: await jobsOf(id) },
+        );
+        stop = retryHeldRevivals(db, undefined, 100);
+        await stay(450);
+        check(
+          'the retry after boot holds it back as well while the stored state stays maintenance',
+          await untouched(),
+          { now: await view(id), jobs: await jobsOf(id) },
+        );
+        await hold('normal');
+        for (let waited = 0; waited < 5000; waited += 50) {
+          if ((await view(id)).deadAt === null) break;
+          await stay(50);
+        }
+        await stay(450);
+        check(
+          'the retry revives it once the stored state is normal, queues its job once, and writes one task.revived',
+          (await view(id)).deadAt === null &&
+            (await view(id)).epoch === 4 &&
+            JSON.stringify(await names(id)) === JSON.stringify([START]) &&
+            (await eventTypes(id)).filter((t) => t === 'task.revived').length === 1,
+          { now: await view(id), jobs: await jobsOf(id) },
+        );
+      } finally {
+        stop();
+        await hold('normal');
+      }
     }
 
     // --- a revived task is driven by the real handlers ----------------------------------
