@@ -65,6 +65,8 @@ export const CORE_INTEGRATION_CATEGORY_SPECS: readonly {
 
 const CORE_INTEGRATION_CATEGORY_IDS: ReadonlySet<string> = new Set(CORE_INTEGRATION_CATEGORIES);
 
+export const REPOSITORY_BOUND_CATEGORIES: ReadonlySet<string> = new Set(['forge']);
+
 export type ParsedStepId =
   | { kind: 'core' }
   | { kind: 'module'; moduleId: string; localId: string }

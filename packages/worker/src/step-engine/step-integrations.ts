@@ -10,6 +10,7 @@ import {
   type IntegrationResolution,
 } from '@haive/shared/integrations';
 import {
+  describeInvalidTools,
   parseStepId,
   type ComposableStepEntry,
   type IntegrationRequirement,
@@ -17,9 +18,11 @@ import {
 import type { StepRegistry } from './registry.js';
 import type { StepDefinition } from './step-definition.js';
 import { insertOwnedRun } from './step-ownership.js';
+import { promptStepIntegrations } from './steps/custom/prompt-step.js';
 
 export const INTEGRATION_UNRESOLVED_REASON = 'integration-unresolved';
 export const INTEGRATION_PROVIDER_PINNED_REASON = 'integration-provider-pinned';
+export const INTEGRATION_REQUIREMENT_INVALID_REASON = 'integration-requirement-invalid';
 export const INTEGRATION_TOOLS_UNLISTABLE_REASON = 'integration-tools-unlistable';
 export const INTEGRATIONS_NO_SIGNING_KEY_REASON = 'integrations-no-signing-key';
 
@@ -33,12 +36,22 @@ export function setComposableCatalog(entries: ReadonlyMap<string, ComposableStep
   catalog = entries;
 }
 
-/** What the catalog entry of a step declares; a prompt step declares none yet. */
+/** What the catalog entry of a step declares; a prompt step declares what its task pinned. */
 export function stepIntegrationRequirements(
   stepDef: StepDefinition,
 ): readonly IntegrationRequirement[] {
   const id = stepDef.metadata.id;
-  return parseStepId(id)?.kind === 'custom' ? [] : (catalog.get(id)?.integrations ?? []);
+  return parseStepId(id)?.kind === 'custom'
+    ? (promptStepIntegrations(stepDef)?.requirements ?? [])
+    : (catalog.get(id)?.integrations ?? []);
+}
+
+/** Why a pinned prompt step cannot dispatch: a requirement it stored no longer parses. Null when none fails. */
+export function invalidRequirementsFailure(stepDef: StepDefinition): string | null {
+  const invalid = promptStepIntegrations(stepDef)?.invalid ?? [];
+  return invalid.length > 0
+    ? `${INTEGRATION_REQUIREMENT_INVALID_REASON}: this step's integrations no longer pass their checks: ${describeInvalidTools(invalid)}. The task pinned them when it was created; fix them in the task type and start a new task.`
+    : null;
 }
 
 export function assertIntegrationsDeliverable(
