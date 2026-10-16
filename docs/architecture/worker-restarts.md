@@ -144,7 +144,9 @@ fence a drain's write waits for) that exception closes, as does the fix-loop gat
 stays stored on its row and the advance is dropped, so an answer accepted while the task was live
 cannot reopen it during a drain. The early read fails open, since it only decides whether to try; the
 read under the fence fails closed: a state it cannot read writes nothing and throws
-`MaintenanceStateUnreadable`, so the job fails and is retried with the answer still on its row. Both
+`MaintenanceStateUnreadable`, so the job fails and is retried with the answer still on its row. A
+hold it sees also travels into the write that follows (`taskWriteTarget`, `held`): the task row is
+written only while it is not `failed`, so a task that failed after that read is not reopened either. Both
 answer routes read the task's status inside their own
 transaction, with no row lock (one taken before the step write would cross a Retry's order: step rows
 first, the task row last), and admit a failed task through the same fence, 503 while new work is
@@ -184,7 +186,7 @@ administrator's Stop writes carries it: the task page names a stop as the cause 
 when that stamp equals the task's `completedAt` (`loadTaskStop`), since the event is written after
 the kill and a Retry that failed in between would otherwise read as the stop's. The allowance auto-resume
 (`autoResumeFailedStep`) writes in the same order, its claim on the failed task last, and a claim it
-loses takes back every write before it. While new work is refused it does nothing at all — no write,
+loses takes back every write before it. While new work is refused it does nothing at all, whatever status it read — no write,
 no job, no attempt spent — and the next poll resumes the task once the state is normal again. When the state cannot be read
 under the fence, or the resume throws anything else, that task stays failed with its watch armed and
 the poll goes on to the next armed task (`checkProviderRecovery`). A repository delete cancels its open tasks the same way:
