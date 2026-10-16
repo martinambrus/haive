@@ -122,4 +122,19 @@ describe('shouldRun for a task that carries an uploaded dump', () => {
 
     expect(await restoreDatabaseStep.shouldRun!(ctx)).toBe(false);
   });
+
+  it('fails a Retry whose dump the reaper has claimed and not yet removed, the same way', async () => {
+    const ctx = failedTask({ status: 'reaping' });
+
+    const run = restoreDatabaseStep.shouldRun!(ctx);
+
+    await expect(run).rejects.toThrow('removed after the task ended');
+    await expect(run).rejects.toThrow('Upload it again');
+  });
+
+  it('skips a reaping dump the task has already imported', async () => {
+    const ctx = failedTask({ status: 'reaping' }, true);
+
+    expect(await restoreDatabaseStep.shouldRun!(ctx)).toBe(false);
+  });
 });

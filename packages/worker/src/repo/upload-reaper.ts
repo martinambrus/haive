@@ -106,15 +106,22 @@ async function reapIdleSessions(db: Database, kind: UploadKind, cutoff: Date): P
 
 // A failed or cancelled task can be retried, so a dump stays a day after its last task changed;
 // one no task names stays a day after the upload, since task creation follows it.
+// A claim parks the dump in 'reaping' until its file is gone, and every pass finishes those rows.
 async function reapEndedDumps(db: Database, cutoff: Date): Promise<number> {
   const dumps = await db
     .select({
       id: schema.dbUploads.id,
       userId: schema.dbUploads.userId,
       stored: schema.dbUploads.dumpPath,
+      status: schema.dbUploads.status,
     })
     .from(schema.dbUploads)
-    .where(and(eq(schema.dbUploads.status, 'complete'), lt(schema.dbUploads.updatedAt, cutoff)));
+    .where(
+      or(
+        and(eq(schema.dbUploads.status, 'complete'), lt(schema.dbUploads.updatedAt, cutoff)),
+        eq(schema.dbUploads.status, 'reaping'),
+      ),
+    );
   if (dumps.length === 0) return 0;
 
   const tasks = await db
@@ -138,55 +145,63 @@ async function reapEndedDumps(db: Database, cutoff: Date): Promise<number> {
 
   let reaped = 0;
   for (const dump of dumps) {
-    if (pinned.has(dump.id)) continue;
+    if (dump.status === 'complete' && pinned.has(dump.id)) continue;
     try {
       const rel = ownedRel(repoRoot(), dump.userId, dump.stored, DUMP_FILE);
       if (rel === null) {
         log.warn({ stored: dump.stored }, 'completed dump names a path that is not its own file');
         continue;
       }
-      const keptByTask = db
-        .select({ id: schema.tasks.id })
-        .from(schema.tasks)
-        .where(
-          and(
-            eq(schema.tasks.dbUploadId, dump.id),
-            or(
-              notInArray(schema.tasks.status, [...ENDED_TASK_STATUSES]),
-              gte(schema.tasks.updatedAt, cutoff),
-            ),
-          ),
-        );
-      // Lock the row first: an uncommitted task insert holds KEY SHARE on it, which the UPDATE does
-      // not wait for, and the statement after the lock sees that task once it commits.
-      const claimed = await db.transaction(async (tx) => {
-        const [locked] = await tx
-          .select({ id: schema.dbUploads.id })
-          .from(schema.dbUploads)
-          .where(and(eq(schema.dbUploads.id, dump.id), eq(schema.dbUploads.status, 'complete')))
-          .for('update');
-        if (!locked) return false;
-        const [taken] = await tx
-          .update(schema.dbUploads)
-          .set({ status: 'cancelled', updatedAt: new Date() })
-          .where(
-            and(
-              eq(schema.dbUploads.id, dump.id),
-              eq(schema.dbUploads.status, 'complete'),
-              notExists(keptByTask),
-            ),
-          )
-          .returning({ id: schema.dbUploads.id });
-        return taken !== undefined;
-      });
-      if (!claimed) continue;
-      reaped += 1;
+      if (dump.status === 'complete' && !(await claimDump(db, dump.id, cutoff))) continue;
       await removeFile(repoRoot(), rel);
+      const [done] = await db
+        .update(schema.dbUploads)
+        .set({ status: 'cancelled', updatedAt: new Date() })
+        .where(and(eq(schema.dbUploads.id, dump.id), eq(schema.dbUploads.status, 'reaping')))
+        .returning({ id: schema.dbUploads.id });
+      if (done !== undefined) reaped += 1;
     } catch (err) {
       log.warn({ err, dumpId: dump.id }, 'ended dump was not fully reaped');
     }
   }
   return reaped;
+}
+
+async function claimDump(db: Database, dumpId: string, cutoff: Date): Promise<boolean> {
+  const keptByTask = db
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.dbUploadId, dumpId),
+        or(
+          notInArray(schema.tasks.status, [...ENDED_TASK_STATUSES]),
+          gte(schema.tasks.updatedAt, cutoff),
+        ),
+      ),
+    );
+  // Lock the row first: an uncommitted task insert holds KEY SHARE on it, which the UPDATE does
+  // not wait for, and the statement after the lock sees that task once it commits.
+  return db.transaction(async (tx) => {
+    const [locked] = await tx
+      .select({ id: schema.dbUploads.id })
+      .from(schema.dbUploads)
+      .where(and(eq(schema.dbUploads.id, dumpId), eq(schema.dbUploads.status, 'complete')))
+      .for('update');
+    if (!locked) return false;
+    const [taken] = await tx
+      .update(schema.dbUploads)
+      .set({ status: 'reaping', updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.dbUploads.id, dumpId),
+          eq(schema.dbUploads.status, 'complete'),
+          notExists(keptByTask),
+        ),
+      )
+      .returning({ id: schema.dbUploads.id });
+    return taken !== undefined;
+  });
 }
 
 // A complete flips its row to the final path before it moves the partial, so a row touched inside

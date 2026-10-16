@@ -6,8 +6,15 @@ export const dbDumpFormatSchema = z.enum(['sql', 'sql.gz', 'dump']);
 export type DbDumpFormat = z.infer<typeof dbDumpFormatSchema>;
 
 /** Chunked-upload session lifecycle for a DB dump. Mirrors the repo upload
- *  session; `consumed` is set once the import step has loaded + deleted it. */
-export const dbUploadStatusSchema = z.enum(['uploading', 'complete', 'cancelled', 'consumed']);
+ *  session; `consumed` is set once the import step has loaded + deleted it, and `reaping` marks a
+ *  completed dump the upload reaper has claimed and is still removing. */
+export const dbUploadStatusSchema = z.enum([
+  'uploading',
+  'complete',
+  'cancelled',
+  'consumed',
+  'reaping',
+]);
 
 export const initDbUploadRequestSchema = z.object({
   filename: z.string().min(1).max(512),

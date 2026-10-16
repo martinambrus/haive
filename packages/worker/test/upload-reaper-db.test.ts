@@ -3,8 +3,23 @@ import { lstat, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq, sql } from 'drizzle-orm';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
+
+const faults = vi.hoisted(() => ({
+  removal: null as null | ((rel: string) => boolean | Promise<boolean>),
+}));
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...real,
+    removeNoFollow: async (...args: Parameters<typeof real.removeNoFollow>) => {
+      if (await faults.removal?.(args[1])) throw new Error('EACCES: the removal failed');
+      return real.removeNoFollow(...args);
+    },
+  };
+});
+
 import { reapAbandonedUploads } from '../src/repo/upload-reaper.js';
 
 const url = process.env.UPLOAD_REAPER_TEST_URL;
@@ -57,6 +72,7 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
     }
   });
   afterEach(async () => {
+    faults.removal = null;
     await db.delete(schema.users).where(eq(schema.users.id, userId));
   });
   afterAll(async () => {
@@ -71,7 +87,7 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
 
   const exists = async (file: string) => (await lstat(file).catch(() => null)) !== null;
 
-  async function dump(idleMs: number) {
+  async function dump(idleMs: number, status: 'complete' | 'reaping' = 'complete') {
     const id = randomUUID();
     const file = path.join(root, 'repos', '_uploads', userId, `db-${id}.sql`);
     await writeFile(file, 'dump bytes');
@@ -84,7 +100,7 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
       bytesReceived: 10,
       chunkSize: 10,
       dumpPath: file,
-      status: 'complete',
+      status,
       updatedAt: new Date(Date.now() - idleMs),
     });
     return { id, file };
@@ -234,6 +250,105 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
     });
   });
 
+  describe('a claimed dump stays reaping until its file is gone', () => {
+    async function endedLongAgo() {
+      const upload = await dump(5 * 24 * HOUR);
+      await link(upload.id, 'cancelled', 5 * 24 * HOUR);
+      return upload;
+    }
+    const dumpFilesFail = () => {
+      faults.removal = (rel) => rel.endsWith('.sql');
+    };
+
+    it('leaves the row reaping with its file when the removal fails, and the next pass finishes it', async () => {
+      const upload = await endedLongAgo();
+      dumpFilesFail();
+
+      const failed = await reapAbandonedUploads(db);
+
+      expect(await statusOf(upload.id)).toBe('reaping');
+      expect(await exists(upload.file)).toBe(true);
+      expect(failed.dumps).toBe(0);
+
+      faults.removal = null;
+      const finished = await reapAbandonedUploads(db);
+
+      expect(await statusOf(upload.id)).toBe('cancelled');
+      expect(await exists(upload.file)).toBe(false);
+      expect(finished.dumps).toBe(1);
+    });
+
+    it.each([
+      ['just now, beside an ended task', 0, 'cancelled'],
+      ['5 days ago, beside a live task', 5 * 24 * HOUR, 'running'],
+      ['5 days ago, beside no task', 5 * 24 * HOUR, null],
+    ] as const)(
+      'finishes a row a dead worker left reaping, updated %s',
+      async (_name, idleMs, taskStatus) => {
+        const upload = await dump(idleMs, 'reaping');
+        if (taskStatus !== null) await link(upload.id, taskStatus, 5 * 24 * HOUR);
+
+        const result = await reapAbandonedUploads(db);
+
+        expect(await statusOf(upload.id)).toBe('cancelled');
+        expect(await exists(upload.file)).toBe(false);
+        expect(result.dumps).toBe(1);
+      },
+    );
+
+    it('finishes a reaping row whose file is already gone', async () => {
+      const upload = await dump(0, 'reaping');
+      await rm(upload.file);
+
+      const result = await reapAbandonedUploads(db);
+
+      expect(await statusOf(upload.id)).toBe('cancelled');
+      expect(result.dumps).toBe(1);
+    });
+
+    it('counts a file that is already gone when it claims a dump as removed', async () => {
+      const upload = await endedLongAgo();
+      await rm(upload.file);
+
+      const result = await reapAbandonedUploads(db);
+
+      expect(await statusOf(upload.id)).toBe('cancelled');
+      expect(result.dumps).toBe(1);
+    });
+
+    it('is left alone by the session and file passes, which still take what is theirs', async () => {
+      const upload = await dump(5 * 24 * HOUR, 'reaping');
+      dumpFilesFail();
+      const idleId = randomUUID();
+      const idle = path.join(root, 'repos', '_uploads', userId, `db-${idleId}.sql.partial`);
+      await writeFile(idle, 'partial bytes');
+      await db.insert(schema.dbUploads).values({
+        id: idleId,
+        userId,
+        filename: 'a.sql',
+        dumpFormat: 'sql',
+        totalSize: 10,
+        bytesReceived: 3,
+        chunkSize: 10,
+        dumpPath: idle,
+        status: 'uploading',
+        updatedAt: new Date(Date.now() - 25 * HOUR),
+      });
+      const orphan = path.join(root, 'repos', '_uploads', userId, `${randomUUID()}.zip.partial`);
+      await writeFile(orphan, 'orphan bytes');
+      await utimes(orphan, new Date(Date.now() - 25 * HOUR), new Date(Date.now() - 25 * HOUR));
+
+      const result = await reapAbandonedUploads(db);
+
+      expect(result.dumps).toBe(0);
+      expect(await statusOf(idleId)).toBe('cancelled');
+      expect(await exists(idle)).toBe(false);
+      expect(await exists(orphan)).toBe(false);
+      expect(await statusOf(upload.id)).toBe('reaping');
+      expect(await exists(upload.file)).toBe(true);
+    });
+  });
+
   describe('the claim of a completed dump beside a transaction that has not committed', () => {
     async function endedLongAgo() {
       const upload = await dump(5 * 24 * HOUR);
@@ -352,6 +467,11 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
       const holding = holdingTheClaim(db);
       const pass = runPass(holding.db);
       let reader: Promise<unknown> = Promise.resolve();
+      // Holds the removal, and so the finishing update after it, until the reader has its answer.
+      faults.removal = async () => {
+        await reader;
+        return false;
+      };
       try {
         const reaperPid = await Promise.race([
           holding.claimedPid,
@@ -380,7 +500,7 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
         await reader;
       }
 
-      expect(await reader).toEqual({ ok: true, value: [{ status: 'cancelled' }] });
+      expect(await reader).toEqual({ ok: true, value: [{ status: 'reaping' }] });
       expect(await statusOf(upload.id)).toBe('cancelled');
       expect(await exists(upload.file)).toBe(false);
     }, 30_000);

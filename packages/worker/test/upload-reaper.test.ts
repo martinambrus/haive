@@ -18,7 +18,20 @@ import { schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeRow } from '@haive/database/testing';
 import { reapAbandonedUploads, startUploadReaper } from '../src/repo/upload-reaper.js';
 
-const guard = vi.hoisted(() => ({ claims: 0 }));
+const guard = vi.hoisted(() => ({
+  claims: 0,
+  removal: null as null | ((rel: string) => boolean),
+}));
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...real,
+    removeNoFollow: async (...args: Parameters<typeof real.removeNoFollow>) => {
+      if (guard.removal?.(args[1])) throw new Error('EACCES: the removal failed');
+      return real.removeNoFollow(...args);
+    },
+  };
+});
 // The fake db evaluates no subquery, so the live-task check of the ended-dump claim is dropped here
 // and the pass's own read decides; upload-reaper-db.test.ts runs the statement as written on Postgres.
 vi.mock('drizzle-orm', async (original) => ({
@@ -117,6 +130,7 @@ beforeEach(async () => {
   await mkdir(uploadsDir('bundles'), { recursive: true });
   fake = makeFake();
   guard.claims = 0;
+  guard.removal = null;
 });
 
 afterEach(async () => {
@@ -722,6 +736,77 @@ describe('U5: a completed dump whose task ended without importing it', () => {
 
     expect(rowOf(dumps, id).status).toBe('complete');
     expect(await readFile(outside, 'utf8')).toBe('keep me');
+  });
+
+  describe('a claimed dump stays reaping until its file is gone', () => {
+    const dumpFilesFail = () => {
+      guard.removal = (rel) => rel.endsWith('.sql.gz');
+    };
+
+    it('leaves the row reaping with its file when the removal fails, and the next pass finishes it', async () => {
+      const upload = await dump();
+      task(upload.id, 'cancelled', 5 * TTL);
+      dumpFilesFail();
+
+      const failed = await reapAbandonedUploads(db());
+
+      expect(rowOf(dumps, upload.id).status).toBe('reaping');
+      expect(await exists(upload.file)).toBe(true);
+      expect(failed.dumps).toBe(0);
+
+      guard.removal = null;
+      const finished = await reapAbandonedUploads(db());
+
+      expect(rowOf(dumps, upload.id).status).toBe('cancelled');
+      expect(await exists(upload.file)).toBe(false);
+      expect(finished.dumps).toBe(1);
+    });
+
+    it.each([
+      ['just now, beside an ended task', 0, 'cancelled'],
+      ['5 days ago, beside a live task', 5 * TTL, 'running'],
+      ['5 days ago, beside no task', 5 * TTL, null],
+    ] as const)(
+      'finishes a row a dead worker left reaping, updated %s',
+      async (_name, idleMs, taskStatus) => {
+        const upload = await dump({ status: 'reaping', idleMs });
+        if (taskStatus !== null) task(upload.id, taskStatus, 5 * TTL);
+
+        const result = await reapAbandonedUploads(db());
+
+        expect(rowOf(dumps, upload.id).status).toBe('cancelled');
+        expect(await exists(upload.file)).toBe(false);
+        expect(result.dumps).toBe(1);
+      },
+    );
+
+    it('finishes a reaping row whose file is already gone', async () => {
+      const upload = await dump({ status: 'reaping', idleMs: 0 });
+      await rm(upload.file);
+
+      const result = await reapAbandonedUploads(db());
+
+      expect(rowOf(dumps, upload.id).status).toBe('cancelled');
+      expect(result.dumps).toBe(1);
+    });
+
+    it('is left alone by the session and file passes, which still take what is theirs', async () => {
+      const upload = await dump({ status: 'reaping' });
+      dumpFilesFail();
+      const idle = await session(dumps, { idleMs: TTL + MIN });
+      const orphan = path.join(uploadsDir('repos'), `${randomUUID()}.zip.partial`);
+      await writeFile(orphan, 'orphan bytes');
+      await age(orphan, TTL + MIN);
+
+      const result = await reapAbandonedUploads(db());
+
+      expect(result).toMatchObject({ sessions: 1, dumps: 0, orphans: 1 });
+      expect(rowOf(dumps, idle.id).status).toBe('cancelled');
+      expect(await exists(idle.file)).toBe(false);
+      expect(await exists(orphan)).toBe(false);
+      expect(rowOf(dumps, upload.id).status).toBe('reaping');
+      expect(await exists(upload.file)).toBe(true);
+    });
   });
 
   it('does not remove the finished archive of a repository upload', async () => {

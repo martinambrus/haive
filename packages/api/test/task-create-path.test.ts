@@ -516,7 +516,7 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
           if (!locked) return 0;
           const taken = await tx
             .update(schema.dbUploads)
-            .set({ status: 'cancelled', updatedAt: new Date() })
+            .set({ status: 'reaping', updatedAt: new Date() })
             .where(
               and(
                 eq(schema.dbUploads.id, DUMP),
@@ -606,12 +606,27 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
       const outcome = await request;
       expect(outcome.ok && outcome.value.status).toBe(409);
       expect(outcome.ok && ((await outcome.value.json()) as { error: string }).error).toBe(
-        'DB dump upload is cancelled, not complete',
+        'DB dump upload is reaping, not complete',
       );
       expect(await reaper.done).toEqual({ ok: true, value: 1 });
-      expect(await dumpStatus()).toBe('cancelled');
+      expect(await dumpStatus()).toBe('reaping');
       expect(await taskCount()).toBe(0);
     }, 30_000);
+
+    it('answers 409 for a dump a dead worker left reaping, and creates no task', async () => {
+      await db
+        .update(schema.dbUploads)
+        .set({ status: 'reaping' })
+        .where(eq(schema.dbUploads.id, DUMP));
+
+      const res = await withDump();
+
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe(
+        'DB dump upload is reaping, not complete',
+      );
+      expect(await taskCount()).toBe(0);
+    });
 
     it.each(['before', 'after'] as const)(
       'makes the reaper wait for a task transaction stopped %s its task insert, and keeps the dump',
