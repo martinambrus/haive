@@ -169,11 +169,11 @@ export class TerminalSessionManager {
       if (!req) return;
       if (req.op === 'open') {
         const replyChannel = `${TERMINAL_REPLY_CHANNEL_PREFIX}${req.correlationId}`;
+        const refused: TerminalOpenResult = {
+          ok: false,
+          error: 'the worker is shutting down; open the terminal again once it is back',
+        };
         if (!this.started) {
-          const refused: TerminalOpenResult = {
-            ok: false,
-            error: 'the worker is shutting down; open the terminal again once it is back',
-          };
           await this.redis.publish(replyChannel, JSON.stringify(refused));
           return;
         }
@@ -181,7 +181,15 @@ export class TerminalSessionManager {
           ok: false,
           error: err instanceof Error ? err.message : String(err),
         }));
-        await this.redis.publish(replyChannel, JSON.stringify(reply));
+        if (this.started) {
+          await this.redis.publish(replyChannel, JSON.stringify(reply));
+          return;
+        }
+        // stop() began while this open ran, and its own pass may have ended before this session was added.
+        for (const session of this.sessions.values()) {
+          await this.teardownSession(session, 'manager-stop').catch(() => undefined);
+        }
+        await this.redis.publish(replyChannel, JSON.stringify(refused));
         return;
       }
       if (req.op === 'close') {

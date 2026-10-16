@@ -156,4 +156,91 @@ describe('terminal manager stop', () => {
     expect(channel).toBe(`${TERMINAL_REPLY_CHANNEL_PREFIX}c1`);
     expect(JSON.parse(message)).toEqual({ ok: false, error: expect.any(String) });
   });
+
+  it.each(['ok', 'error'] as const)(
+    'tears down the session an open in flight added after stop had passed, and answers that open refused (%s)',
+    async (outcome) => {
+      const { mgr, subscriber, publish, addSession } = await startedManager(async () => 1);
+      let finishOpen!: () => void;
+      let late!: PassThrough;
+      vi.spyOn(
+        mgr as unknown as { openSession: () => Promise<unknown> },
+        'openSession',
+      ).mockImplementation(
+        () =>
+          new Promise((resolve, reject) => {
+            finishOpen = () => {
+              late = addSession('late');
+              if (outcome === 'ok') {
+                resolve({
+                  ok: true,
+                  sessionId: 'late',
+                  containerName: 'haive-shell-late',
+                  shell: 'bash',
+                });
+              } else {
+                reject(new Error('Connection is closed.'));
+              }
+            };
+          }),
+      );
+      const onMessage = subscriber.on.mock.calls[0]![1] as (channel: string, raw: string) => void;
+
+      onMessage(
+        TERMINAL_REQUEST_CHANNEL,
+        JSON.stringify({
+          op: 'open',
+          correlationId: 'c2',
+          userId: 'u1',
+          cliProviderId: 'p1',
+          taskId: 't1',
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await mgr.stop();
+      finishOpen();
+      await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(1));
+
+      expect(late.destroyed).toBe(true);
+      expect((mgr as unknown as { sessions: Map<string, unknown> }).sessions.size).toBe(0);
+      const [channel, message] = publish.mock.calls[0]!;
+      expect(channel).toBe(`${TERMINAL_REPLY_CHANNEL_PREFIX}c2`);
+      expect(JSON.parse(message)).toEqual({
+        ok: false,
+        error: expect.stringMatching(/shutting down/),
+      });
+    },
+  );
+
+  it('answers an open with what openSession returned, and keeps its session, while no stop has begun', async () => {
+    const { mgr, subscriber, publish, addSession } = await startedManager(async () => 1);
+    const opened = { ok: true, sessionId: 's7', containerName: 'haive-shell-s7', shell: 'bash' };
+    let stream!: PassThrough;
+    vi.spyOn(
+      mgr as unknown as { openSession: () => Promise<unknown> },
+      'openSession',
+    ).mockImplementation(async () => {
+      stream = addSession('s7');
+      return opened;
+    });
+    const onMessage = subscriber.on.mock.calls[0]![1] as (channel: string, raw: string) => void;
+
+    onMessage(
+      TERMINAL_REQUEST_CHANNEL,
+      JSON.stringify({
+        op: 'open',
+        correlationId: 'c3',
+        userId: 'u1',
+        cliProviderId: 'p1',
+        taskId: 't1',
+      }),
+    );
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(1));
+
+    expect(stream.destroyed).toBe(false);
+    expect((mgr as unknown as { sessions: Map<string, unknown> }).sessions.has('s7')).toBe(true);
+    const [channel, message] = publish.mock.calls[0]!;
+    expect(channel).toBe(`${TERMINAL_REPLY_CHANNEL_PREFIX}c3`);
+    expect(JSON.parse(message)).toEqual(opened);
+  });
 });
