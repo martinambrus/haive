@@ -190,6 +190,6 @@ describe('worker boot order', () => {
     expect(boot).toMatch(
       /!deadTasks \|\| deadTasks\.held > 0 \|\| deadTasks\.failed > 0\s*\?\s*retryHeldRevivals\(/,
     );
-    expect(boot.slice(at('const shutdown = async'))).toContain('stopDeadTaskRevival()');
+    expect(boot.slice(at('const runShutdown = async'))).toContain('stopDeadTaskRevival()');
   });
 });

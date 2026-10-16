@@ -241,6 +241,7 @@ describe('C1: a fault right after the zip bundle insert commits', () => {
     };
 
     expect((await complete(SESSION)).status).toBe(500);
+    expect(fake.rows(schema.customBundleUploads)[0]).toMatchObject({ status: 'uploading' });
     expect2xx(await complete(SESSION));
 
     expect(fake.rows(schema.customBundles).map((r) => r.id)).toEqual([SESSION]);
@@ -281,14 +282,19 @@ describe('C1: a fault right after the zip bundle insert commits', () => {
 
   it('commits the bundle row and the upload link together, or neither', async () => {
     await stage(SESSION, 'zip bytes');
+    let uploadWrites = 0;
     fake.hooks.beforeUpdate = (table) => {
-      if (table === schema.customBundleUploads) throw new Error('the link write failed');
+      // The first write to the upload row is the claim; the one that fails is the link.
+      if (table === schema.customBundleUploads && (uploadWrites += 1) === 2) {
+        throw new Error('the link write failed');
+      }
     };
 
     expect((await complete(SESSION)).status).toBe(500);
 
     expect(fake.rows(schema.customBundles)).toEqual([]);
     expect(queue.jobs).toHaveLength(0);
+    expect(fake.rows(schema.customBundleUploads)[0]).toMatchObject({ status: 'uploading' });
 
     fake.hooks.beforeUpdate = null;
     expect2xx(await complete(SESSION));
@@ -448,6 +454,64 @@ describe('C6: a fault between the replace move and its deletes', () => {
   });
 });
 
+describe('I1: a replace complete that fails after the move gives its session back', () => {
+  const replaceUrl = `/${BUNDLE}/replace/${REPLACE}/complete`;
+  const cancel = () => app.request(`/uploads/${REPLACE}`, { method: 'DELETE' });
+  const sessionStatus = () =>
+    fake.rows(schema.customBundleUploads).find((r) => r.id === REPLACE)?.status;
+
+  async function stageReplace() {
+    const dir = await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    return dir;
+  }
+
+  it('a failed removal of the old tree: the session is uploading again and a cancel answers 200', async () => {
+    const dir = await stageReplace();
+    h.beforeRemove = (rel) => {
+      if (rel.endsWith('/extracted')) throw new Error('the removal failed');
+    };
+
+    const res = await post(replaceUrl);
+    h.beforeRemove = null;
+
+    expect(res.status).toBe(500);
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('NEW-ARCHIVE');
+    expect(sessionStatus()).toBe('uploading');
+    expect((await cancel()).status).toBe(200);
+    expect(sessionStatus()).toBe('cancelled');
+  });
+
+  it('a failed bundle update: the session is uploading again and a cancel answers 200', async () => {
+    const dir = await stageReplace();
+    fake.hooks.beforeUpdate = (table) => {
+      if (table !== schema.customBundles) return;
+      fake.hooks.beforeUpdate = null;
+      throw new Error('the update failed');
+    };
+
+    const res = await post(replaceUrl);
+
+    expect(res.status).toBe(500);
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('NEW-ARCHIVE');
+    expect(sessionStatus()).toBe('uploading');
+    expect(ingestJobs()).toHaveLength(0);
+    expect((await cancel()).status).toBe(200);
+    expect(sessionStatus()).toBe('cancelled');
+  });
+
+  it('a failed enqueue comes after the final write, so the session stays complete and a cancel answers 409', async () => {
+    await stageReplace();
+    queue.state.refuse = new Error('redis is down');
+
+    const res = await post(replaceUrl);
+
+    expect(res.status).toBe(500);
+    expect(sessionStatus()).toBe('complete');
+    expect((await cancel()).status).toBe(409);
+  });
+});
+
 describe('zip complete, the normal path', () => {
   it('creates the bundle under the upload id, moves the archive in and queues one job', async () => {
     await stage(SESSION, 'zip bytes');
@@ -480,7 +544,7 @@ describe('zip complete, the normal path', () => {
     });
   });
 
-  it('queues the job while the upload still reads uploading', async () => {
+  it('queues the job while the upload still reads completing', async () => {
     await stage(SESSION, 'zip bytes');
     let statusAtAdd: unknown;
     queue.state.onAdd = () => {
@@ -489,6 +553,6 @@ describe('zip complete, the normal path', () => {
 
     expect2xx(await complete(SESSION));
 
-    expect(statusAtAdd).toBe('uploading');
+    expect(statusAtAdd).toBe('completing');
   });
 });

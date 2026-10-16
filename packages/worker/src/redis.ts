@@ -1,6 +1,8 @@
 import type { Redis } from 'ioredis';
 import { createRedisConnection, createBullRedisConnection } from '@haive/shared';
 
+const QUIT_WAIT_MS = 1_000;
+
 let redisInstance: Redis | null = null;
 let bullRedisInstance: Redis | null = null;
 
@@ -25,7 +27,23 @@ export function getBullRedis(): Redis {
 }
 
 export async function closeRedis(): Promise<void> {
-  await Promise.allSettled([redisInstance?.quit(), bullRedisInstance?.quit()]);
+  await Promise.all(
+    [redisInstance, bullRedisInstance].map((conn) => conn && quitOrDisconnect(conn)),
+  );
   redisInstance = null;
   bullRedisInstance = null;
+}
+
+function quitOrDisconnect(conn: Redis): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      conn.disconnect();
+      resolve();
+    }, QUIT_WAIT_MS);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    void conn.quit().then(done, done);
+  });
 }

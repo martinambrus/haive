@@ -826,6 +826,34 @@ function haltRefused(
   );
 }
 
+/** 12 only; skipped in a base-sync round and with the feature's merge open, whose tip must not move. */
+async function putBackBeforeFeatureMerge(
+  db: Database,
+  spec: MergeResolveSpec,
+  current: TaskStepRow,
+  ctx: StepContext,
+  state: MergeResolveState,
+  worktreePath: string | null,
+): Promise<{ current: TaskStepRow } | { halted: MergeResolved }> {
+  if (!spec.putBackBeforeMerge || (state.mergeStage ?? 'feature') !== 'feature') return { current };
+  if (await mergeOpenFor(state.mergeDir, state.featureBranch)) return { current };
+  let notes: string[];
+  try {
+    notes = await spec.putBackBeforeMerge({
+      ctx,
+      worktreePath,
+      featureBranch: state.featureBranch,
+      baseBranch: state.baseBranch,
+    });
+  } catch (err) {
+    const message = `Nothing was merged: ${err instanceof Error ? err.message : String(err)}`;
+    return { halted: await haltFailed(db, current, message, 'haive files not put back') };
+  }
+  let updated = current;
+  for (const note of notes) updated = await addStepWarning(db, updated, note);
+  return { current: updated };
+}
+
 /** Halt on a merge that could not be aborted, since a fixer dispatched into it would start from
  *  whatever the last one left. `why` is the halt the abort was part of, when there was one. */
 async function haltUnaborted(
@@ -864,6 +892,8 @@ export async function resolveMergePhase(
 ): Promise<MergeResolved> {
   const spec = stepDef.mergeResolve!;
   const formValues = (current.formValues ?? {}) as Record<string, unknown>;
+  const worktreePath =
+    ((current.detectOutput ?? {}) as { worktreePath?: string | null }).worktreePath ?? null;
   if (!spec.selectedMerge(formValues)) {
     // keep / remove_only — no merge; apply handles the worktree.
     return { resolved: true, current };
@@ -1051,6 +1081,16 @@ export async function resolveMergePhase(
         'merge dir in use',
       );
     }
+    const putBackFirst = await putBackBeforeFeatureMerge(
+      db,
+      spec,
+      current,
+      ctx,
+      pending,
+      worktreePath,
+    );
+    if ('halted' in putBackFirst) return putBackFirst.halted;
+    current = putBackFirst.current;
     const repositoryId =
       pending.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
     // A plan row stamped before 0196 takes its base from the checkout before the merge moves it.
@@ -1372,6 +1412,16 @@ export async function resolveMergePhase(
     const baselineSource = await maskSourceOnce(db, params.taskId);
     const repositoryId =
       state.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
+    const putBackFirst = await putBackBeforeFeatureMerge(
+      db,
+      spec,
+      current,
+      ctx,
+      state,
+      worktreePath,
+    );
+    if ('halted' in putBackFirst) return putBackFirst.halted;
+    current = putBackFirst.current;
     if (repositoryId && !(await peekOpenMerge(dir))) {
       const stopped = await setAside(repositoryId, dir);
       if (stopped !== null) {

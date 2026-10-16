@@ -17,9 +17,13 @@ vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
   ...(await import('../../../../../test/render-tree')).reactHooks,
 }));
-const nav = vi.hoisted(() => ({ search: new URLSearchParams() }));
+const nav = vi.hoisted(() => ({ search: new URLSearchParams(), pushed: [] as string[] }));
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: () => {} }),
+  useRouter: () => ({
+    push: (href: string) => {
+      nav.pushed.push(href);
+    },
+  }),
   useSearchParams: () => nav.search,
 }));
 vi.mock('next/link', async () => {
@@ -89,7 +93,9 @@ const posted: Record<string, unknown>[] = [];
 let holdLastCli = false;
 let holdParents = false;
 let holdUploads = false;
-let failUploads = false;
+let failUploads: Record<string, string> = {};
+let failStart = false;
+let startAnswer: { started: boolean; status: string } | null = null;
 const actions: Record<string, unknown>[] = [];
 
 const reply = (code: number, body: unknown) => ({
@@ -122,11 +128,14 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
     return reply(200, { tasks: PARENTS[url.searchParams.get('repositoryId') ?? ''] ?? [] });
   }
   if (call === 'POST /tasks/task-new/attachments') {
-    return failUploads
-      ? reply(500, { error: 'upload failed' })
-      : reply(201, { attachment: { id: url.searchParams.get('filename') } });
+    const name = url.searchParams.get('filename') ?? '';
+    return Object.hasOwn(failUploads, name)
+      ? reply(500, { error: failUploads[name] })
+      : reply(201, { attachment: { id: name } });
   }
   if (call === 'POST /tasks/task-new/action') {
+    if (failStart) return reply(409, { error: 'the queue is draining' });
+    if (startAnswer) return reply(200, { ok: true, ...startAnswer });
     actions.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>);
     return reply(200, { ok: true, started: true, status: 'queued' });
   }
@@ -147,7 +156,10 @@ beforeEach(() => {
   holdLastCli = false;
   holdParents = false;
   holdUploads = false;
-  failUploads = false;
+  failUploads = {};
+  failStart = false;
+  startAnswer = null;
+  nav.pushed.length = 0;
   actions.length = 0;
 });
 
@@ -652,6 +664,16 @@ describe('a new task with attachments', () => {
     return view;
   }
   const two = () => [new File(['a'], 'a.md'), new File(['b'], 'b.md')];
+  const three = () => [new File(['a'], 'a.md'), new File(['b'], 'b.md'), new File(['c'], 'c.md')];
+  const failedList = (view: Renderer) =>
+    findAll(
+      view.tree(),
+      (h) => h.tag === 'ul' && h.props['aria-label'] === 'Attachments that failed to upload',
+    )[0];
+  const failedFiles = (view: Renderer) =>
+    findAll(failedList(view)!, (h) => h.tag === 'li').map((li) => textOf(li));
+  const submitButton = (view: Renderer) =>
+    findAll(view.tree(), (h) => h.tag === 'button' && h.props.type === 'submit')[0]!;
 
   it('creates the task unstarted, uploads every file, then starts it', async () => {
     const view = await readyOnA(two());
@@ -672,11 +694,71 @@ describe('a new task with attachments', () => {
     expect(writes()).toEqual(['POST /tasks', UPLOAD('a.md'), START]);
   });
 
-  it('still starts the task when an upload fails', async () => {
-    failUploads = true;
-    const view = await readyOnA(two());
+  it('tries every file when one fails, starts the task once, and stays to name the file', async () => {
+    failUploads = { 'b.md': 'too large' };
+    const view = await readyOnA(three());
     await submitForm(view);
-    expect(writes()).toEqual(['POST /tasks', UPLOAD('a.md'), START]);
+    expect(writes()).toEqual([
+      'POST /tasks',
+      UPLOAD('a.md'),
+      UPLOAD('b.md'),
+      UPLOAD('c.md'),
+      START,
+    ]);
+    expect(actions).toEqual([{ action: 'start' }]);
+    expect(failedFiles(view)).toEqual(['b.md: too large']);
+    expect(page(view)).toContain('The task was created and started.');
+    expect(page(view)).toContain('1 of 3 attachment(s) could not be uploaded:');
+    expect(
+      findAll(view.tree(), (h) => h.tag === 'a' && h.props.href === '/tasks/task-new'),
+    ).toHaveLength(1);
+    expect(nav.pushed).toEqual([]);
+    expect(isDisabled(submitButton(view))).toBe(true);
+    expect(textOf(submitButton(view))).toBe('Created');
+  });
+
+  it('names every file that failed with its own message', async () => {
+    failUploads = { 'a.md': 'too large', 'c.md': 'type not allowed' };
+    const view = await readyOnA(three());
+    await submitForm(view);
+    expect(failedFiles(view)).toEqual(['a.md: too large', 'c.md: type not allowed']);
+    expect(page(view)).toContain('2 of 3 attachment(s) could not be uploaded:');
+  });
+
+  it('names a file from a picked folder by its path inside the folder', async () => {
+    const inFolder = new File(['x'], 'spec.md');
+    Object.defineProperty(inFolder, 'webkitRelativePath', { value: 'docs/spec.md' });
+    failUploads = { 'docs/spec.md': 'too large' };
+    const view = await readyOnA([inFolder]);
+    await submitForm(view);
+    expect(failedFiles(view)).toEqual(['docs/spec.md: too large']);
+  });
+
+  it('navigates to the task, with no failure list, when every upload lands', async () => {
+    const view = await readyOnA(three());
+    await submitForm(view);
+    expect(nav.pushed).toEqual(['/tasks/task-new']);
+    expect(failedList(view)).toBeUndefined();
+  });
+
+  it('does not say the task started when its start is refused', async () => {
+    failUploads = { 'b.md': 'too large' };
+    failStart = true;
+    const view = await readyOnA(three());
+    await submitForm(view);
+    expect(page(view)).toContain('The task was created but could not be started.');
+    expect(page(view)).not.toContain('created and started');
+    expect(nav.pushed).toEqual([]);
+  });
+
+  it('says the task did not start when its start answers that it is no longer created', async () => {
+    failUploads = { 'b.md': 'too large' };
+    startAnswer = { started: false, status: 'cancelled' };
+    const view = await readyOnA(three());
+    await submitForm(view);
+    expect(page(view)).toContain('The task was created but not started: it is cancelled now.');
+    expect(page(view)).not.toContain('created and started');
+    expect(nav.pushed).toEqual([]);
   });
 
   it('creates and starts a task with no attachments in one call', async () => {

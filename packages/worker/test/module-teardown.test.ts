@@ -272,7 +272,7 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
       ['alpha'],
       ['alpha'],
       new RegExp(
-        `alpha.*jobs or schema setup.*still running on this worker.*try again once they have stopped.*about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds`,
+        `alpha.*jobs or schema setup.*still running on this worker.*try again once they have ended.*jobs normally stop within about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds of the deactivation.*schema setup has no time limit`,
       ),
     ],
   ])(

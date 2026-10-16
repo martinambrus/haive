@@ -224,7 +224,8 @@ Commands:
                      node_modules volumes. No args = full rebuild; a root/shared/database
                      dependency needs the full rebuild (those node_modules are shared).
   reset              Full rebuild + wipe compiled dist (recover a stale/corrupt build).
-  sandbox-build      Build the cli-sandbox image (the worker also builds it when missing).
+  sandbox-build      Build the cli-sandbox image by hand. The worker builds it itself when it
+                     is missing or out of date, and rebuilds a hand-built one once to label it.
   migrate            Apply pending SQL migrations (packages/database/migrations).
   help               This text.
 

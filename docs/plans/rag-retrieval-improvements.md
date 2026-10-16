@@ -18,7 +18,8 @@ How retrieval works today (resolve by symbol; line numbers drift):
 - **Writers.** `10-rag-populate` (onboarding), `runRagIndexSync` in `_rag-index.ts` (workflow
   `02-pre-rag-sync` and `11c-rag-reindex`) and `global-kb-sync-queue.ts` all chunk through
   `_rag-chunkers.ts`: construct regexes per language (`phpRanges`, `jsRanges`, …), then
-  `assembleSections` (the spans between constructs become `chunk-<n>` gap sections), then
+  `assembleSections` (a span between constructs of 120 trimmed characters or more becomes a
+  `chunk-<n>` gap section, and a shorter one that is not blank joins a neighbouring section), then
   `chunkSection` (2,000 chars, 200 overlap; split at a paragraph break, else at `'. '`, else a hard
   cut), then `capChunks` (`MAX_CHUNKS_PER_FILE`, 80). Every chunk carries a
   `[path > class > function]` header inside `content`, so the header is embedded and indexed, and
@@ -416,6 +417,32 @@ together and the reindex happens once. Verification: chunker unit controls that 
 the P0 eval before and after on the same queries, and the store's size before and after, since
 replaced vectors keep their index space (F15). Rollback: revert the commit; the next `02` or `11c`
 sync re-embeds the changed chunks back (one reindex, F11). No schema change.
+
+MEASURED (2026-10-16, the P0 eval set on the eval repository, before = main 9c0c8ee77, after = this
+change; each store built from scratch with the same embedder, own paths and exclusions):
+
+| Eval set (n) | recall@5 | MRR@5 | recall@12 | recall@20 | MRR@20 |
+|---|---|---|---|---|---|
+| real (71) | 0.484 → 0.498 | 0.452 → 0.429 | 0.582 → 0.603 | 0.610 → 0.638 | 0.449 → 0.466 |
+| synthetic-lex (100) | 0.940 → 0.950 | 0.796 → 0.813 | 0.980 → 1.000 | 0.990 → 1.000 | 0.813 → 0.823 |
+| synthetic-para (100 → 98) | 0.630 → 0.622 | 0.481 → 0.466 | 0.730 → 0.714 | 0.775 → 0.750 | 0.498 → 0.480 |
+| overview (25) | 0.248 → 0.258 | 0.458 → 0.401 | 0.405 → 0.397 | 0.517 → 0.527 | 0.469 → 0.423 |
+| OVERALL hybrid (296 → 294) | 0.667 → 0.673 | 0.578 → 0.569 | 0.752 → 0.758 | 0.786 → 0.789 | 0.590 → 0.589 |
+| OVERALL lexical only | 0.365 → 0.367 | 0.342 → 0.355 | | 0.365 → 0.367 | 0.343 → 0.357 |
+
+Real queries gain 3 hits at k=20 (52 → 55 of 71); the overview set loses MRR (its 25 queries find
+their files at lower ranks). Two paraphrase queries leave the after set because their gold chunk is
+no longer in the store: finer sections fill the 80-chunk cap of a large file sooner, so a vendored or
+bundled file keeps less of itself. Counted as misses, paraphrase hits@20 go 78 → 74 of 100 and the
+overall hits@20 stay 253 of 296. The store grows 20,921 → 23,105 rows (+10.4%), HNSW 163.4 → 180.5
+MiB, database 470.8 → 516.7 MiB; neither store holds a null or hash-fallback vector.
+
+The after store predates the review fix that stopped dropping a span shorter than 120 characters
+between sections (a class's fields, a decorator, the rest of a method a `}` in a string cut short):
+such a span now joins the section it continues, or the one it leads into. That fix takes the text
+outside every section from 0.35% to 0.0035% of the non-blank characters (main: 0.16%; what remains is
+13 small files with no construct at all), keeps M1, M2 and M4 and finds one more JS construct (M3
+176 → 175), and changes 3,838 of the 22,035 code chunk hashes. The eval set was not re-run on it.
 
 ### P2. Query-side experiments (no reindex)
 

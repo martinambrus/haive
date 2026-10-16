@@ -1,11 +1,23 @@
 import { execFile } from 'node:child_process';
-import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { schema, type MergeResolveState } from '@haive/database';
 import {
+  KB_DIR,
+  LEARNINGS_DIR,
   MERGE_CLARIFICATION_ANSWERED_EVENT,
   MERGE_CLARIFICATION_ASKED_EVENT,
   configService,
@@ -17,6 +29,7 @@ import { renderPlanMarkdownFromMirror, serializePlanMirror } from '@haive/shared
 import {
   PROJECT_STATE_DIR,
   emptyProjectState,
+  normalizeProjectState,
   renderProjectState,
   type ProjectRender,
 } from '@haive/shared/project-state';
@@ -29,6 +42,22 @@ import { OUTPUT_TRUNCATION_HEADLINE } from '../../../queues/cli-exec/failure-cla
 import { TRUNCATION_RETRY_NOTICE } from '../../step-runner.js';
 import type { StepContext, StepApplyArgs, StepDefinition } from '../../step-definition.js';
 import { claimFake } from '../../../../test/merge-dir-claim-fake.js';
+import { syncBaseStep } from './00a-sync-base.js';
+import { onboardingPushStep } from '../onboarding/13-onboarding-push.js';
+import { syncProjectStateFromCheckout } from '../../../project-state/sync.js';
+import { createFakeDb } from '@haive/database/testing';
+
+// create_pr pushes with a stored credential and opens the PR on the forge; neither is the subject here.
+vi.mock('../../../repo/credentials.js', () => ({
+  getDecryptedCredentials: vi.fn(async () => ({ username: 'u', secret: 's', host: 'github.com' })),
+}));
+vi.mock('../../../forge/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../forge/index.js')>()),
+  resolveForgeContext: vi.fn(async () => ({ provider: 'github' })),
+  resolveForgeProvider: vi.fn(() => ({
+    openPullRequest: async () => ({ url: 'https://forge.test/pr/1', number: 1 }),
+  })),
+}));
 
 vi.mock('../../merge-dir-claim.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../merge-dir-claim.js')>()),
@@ -81,6 +110,7 @@ vi.mock('../../../orchestrator/dispatcher.js', () => ({
   ),
 }));
 
+const PUT_BACK_EVENT = 'branch.projections_put_back';
 const exec = promisify(execFile);
 const GIT_ENV = {
   ...process.env,
@@ -247,7 +277,9 @@ function makeDb(
     query: {
       users: { findFirst: async () => undefined },
       tasks: { findFirst: async () => opts.worktreeSharer ?? undefined },
-      taskSteps: { findFirst: async () => ({ id: 'step1', mergeResolveState: mergeState }) },
+      taskSteps: {
+        findFirst: async () => ({ id: 'step1', mergeResolveState: mergeState, warningMessage }),
+      },
       cliInvocations: { findFirst: async () => opts.invocation ?? undefined },
       userStepCliRolePreferences: { findFirst: async () => undefined },
       userStepCliPreferences: { findFirst: async () => undefined },
@@ -319,6 +351,17 @@ function makeDb(
         ) {
           return { where: () => ({ orderBy: async () => opts.leftOpen?.events ?? [] }) };
         }
+        // What the pass recorded of the branch's Haive files it put back, as the warning is re-derived.
+        if (table === schema.taskEvents && cols && typeof cols === 'object' && 'payload' in cols) {
+          return {
+            where: () => ({
+              orderBy: async () =>
+                events
+                  .filter((e) => e.eventType === PUT_BACK_EVENT)
+                  .map((e) => ({ payload: e.payload })),
+            }),
+          };
+        }
         return {
           where: () => ({
             orderBy: () => ({
@@ -335,6 +378,10 @@ function makeDb(
     getState: () => mergeState,
     getStatus: () => status,
     getWarning: () => warningMessage,
+    /** A Retry clears the step's warning. */
+    clearWarning: () => {
+      warningMessage = null;
+    },
     events,
     invocationInserts,
   };
@@ -1663,7 +1710,10 @@ function planFiles(childTitle: string): Record<string, string> {
   };
 }
 
-function stateFiles(render: Partial<ProjectRender>): Record<string, string> {
+function stateFiles(
+  render: Partial<ProjectRender>,
+  settings: Record<string, unknown> = {},
+): Record<string, string> {
   const record = {
     ...emptyProjectState(),
     render: {
@@ -1674,6 +1724,7 @@ function stateFiles(render: Partial<ProjectRender>): Record<string, string> {
       lspLanguages: [],
       ...render,
     },
+    settings,
   };
   return Object.fromEntries(
     [...renderProjectState(record)].map(([rel, text]) => [`${PROJECT_STATE_DIR}/${rel}`, text]),
@@ -1686,20 +1737,111 @@ async function commitIn(dir: string, files: Record<string, string>, message: str
   await git(dir, ['commit', '-m', message]);
 }
 
-describe("12 merge phase: Haive's own files merge before any agent", () => {
+const SYNC_USER = '00000000-0000-4000-8000-0000000000a1';
+const SYNC_REPO = '00000000-0000-4000-8000-0000000000b1';
+const BASE_RENDER: ProjectRender = {
+  projectInfo: { name: 'acme', framework: 'drupal', docroot: 'web' },
+  framework: 'drupal',
+  acceptedAgentIds: ['code-reviewer'],
+  customAgentSpecs: [],
+  lspLanguages: ['css'],
+};
+const TEAM_RENDER: ProjectRender = {
+  ...BASE_RENDER,
+  framework: 'drupal11',
+  acceptedAgentIds: ['code-reviewer', 'qa-lead'],
+};
+const PER_INSTALL = {
+  agentTargets: [{ dir: '.claude/agents', format: 'markdown', supportsLsp: true }],
+  enabledCliProviders: [{ name: 'claude-code', rulesFile: 'CLAUDE.md', rulesFileMode: 'import' }],
+  rtkEnabled: false,
+};
+
+/** A jsonb value as Postgres hands it back: object keys by length, then bytes, so a row seeded with
+ *  one reads the way a stored one does. */
+function jsonb(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(jsonb);
+  if (value === null || typeof value !== 'object') return value;
+  const byKey = ([a]: [string, unknown], [b]: [string, unknown]) =>
+    a.length - b.length || (a < b ? -1 : a > b ? 1 : 0);
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(byKey)
+      .map(([key, member]) => [key, jsonb(member)]),
+  );
+}
+
+/** A repository this install last synced at `record`, in a database holding only what the sync reads. */
+function syncFixture(record: { render: ProjectRender; settings: Record<string, unknown> }) {
+  const t = schema;
+  const fake = createFakeDb({
+    repositories: t.repositories,
+    projectStateSync: t.projectStateSync,
+    projectStateOutbox: t.projectStateOutbox,
+    projectStateConflicts: t.projectStateConflicts,
+    tasks: t.tasks,
+    taskSteps: t.taskSteps,
+    onboardingArtifacts: t.onboardingArtifacts,
+    cliProviders: t.cliProviders,
+    customBundles: t.customBundles,
+    customBundleItems: t.customBundleItems,
+  });
+  const synced = {
+    ...emptyProjectState(),
+    render: record.render,
+    settings: Object.assign(Object.create(null) as Record<string, unknown>, record.settings),
+  };
+  fake.insert(t.repositories, {
+    id: SYNC_REPO,
+    userId: SYNC_USER,
+    name: 'acme',
+    source: 'blank',
+    status: 'ready',
+    updatedAt: new Date(1000),
+    rtkEnabled: null,
+    renderContext: jsonb({ ...record.render, ...PER_INSTALL, rtkChoiceRecorded: true }),
+    scopeExcludeGlobs: record.settings['scope-exclude-globs'],
+  });
+  fake.insert(t.projectStateSync, {
+    repositoryId: SYNC_REPO,
+    baseSnapshot: jsonb(JSON.parse(JSON.stringify(normalizeProjectState(synced)))),
+    lastError: null,
+    updatedAt: new Date(0),
+  });
+  return { fake };
+}
+
+/** `origin/main` as a ref one commit past the fork that holds `files`: what a fetch brings, with no remote. */
+async function originAhead(parent: string, files: Record<string, string>, message: string) {
+  await git(parent, ['checkout', '-q', '-b', 'origin-side']);
+  await commitIn(parent, files, message);
+  await git(parent, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+  await git(parent, ['checkout', '-q', 'main']);
+  await git(parent, ['branch', '-q', '-D', 'origin-side']);
+}
+
+// A task branch no longer brings its own edits to Haive's files into the merge (12 puts them back
+// first), so the plan and state rules that settle a clash are driven where they still decide: the
+// merge of origin/main into main that 00a and the pre-push base sync run.
+describe("merge of origin/main: Haive's own files merge before any agent", () => {
   const dispatching = {
     providers: [{ id: 'p1', enabled: true }],
     deps: { enqueueCliInvocation: async () => {} },
   };
   const dispatches = () => vi.mocked(resolveTaskDispatch).mock.calls.length;
+  const sync = syncBaseStep as unknown as StepDefinition;
 
-  async function merge(parent: string, wt: string, over: Partial<StepDefinition> = {}) {
+  async function mergeOrigin(
+    parent: string,
+    over: Partial<StepDefinition> = {},
+    state: MergeResolveState | null = null,
+  ) {
     const h = makeDb();
     const before = dispatches();
     const out = await resolveMergePhase(
       h.db as never,
-      { ...step, ...over } as StepDefinition,
-      mkCurrent(det(wt), { action: 'merge_remove' }),
+      { ...sync, ...over } as StepDefinition,
+      mkCurrent(det('/unused', { branchName: 'origin/main' }), { syncAction: 'merge' }, state),
       mkCtx(parent, h.db),
       mkParams(h.db, dispatching),
     );
@@ -1707,33 +1849,32 @@ describe("12 merge phase: Haive's own files merge before any agent", () => {
   }
 
   it('a merge whose only conflict is plan.json commits with no fixer', async () => {
-    const { parent, wt } = await setupWorktree(planFiles('Base'));
+    const { parent } = await setupWorktree(planFiles('Base'));
     try {
-      await commitIn(wt, planFiles('Theirs'), 'plan on feature');
+      await originAhead(parent, planFiles('Theirs'), 'plan on origin');
       await commitIn(parent, planFiles('Ours'), 'plan on main');
-      const { out, h, dispatched } = await merge(parent, wt);
+      const { out, h, dispatched } = await mergeOrigin(parent);
       expect(out.resolved).toBe(true);
       expect(dispatched).toBe(0);
       expect(h.invocationInserts).toEqual([]);
       expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
       expect(await git(parent, ['ls-files', '-u'])).toBe('');
       expect(await git(parent, ['show', `HEAD:${PLAN_JSON}`])).toContain('Theirs');
-      expect(await git(parent, ['show', 'HEAD:feature.txt'])).toBe('feature\n');
     } finally {
       await rm(parent, { recursive: true, force: true });
     }
   });
 
   it('a merge whose only conflict is under .haive-data/state/ commits with no fixer', async () => {
-    const { parent, wt } = await setupWorktree(stateFiles({}));
+    const { parent } = await setupWorktree(stateFiles({}));
     try {
-      await commitIn(
-        wt,
+      await originAhead(
+        parent,
         stateFiles({ customAgentSpecs: [{ id: 'agent-a', description: 'A' }] }),
         's',
       );
       await commitIn(parent, stateFiles({ framework: 'drupal' }), 'state on main');
-      const { out, dispatched } = await merge(parent, wt);
+      const { out, dispatched } = await mergeOrigin(parent);
       expect(out.resolved).toBe(true);
       expect(dispatched).toBe(0);
       expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
@@ -1750,16 +1891,15 @@ describe("12 merge phase: Haive's own files merge before any agent", () => {
   });
 
   it('a retry that reopens the merge settles plan.json the same way', async () => {
-    const { parent, wt } = await setupWorktree(planFiles('Base'));
+    const { parent } = await setupWorktree(planFiles('Base'));
     try {
-      await commitIn(wt, planFiles('Theirs'), 'plan on feature');
+      await originAhead(parent, planFiles('Theirs'), 'plan on origin');
       await commitIn(parent, planFiles('Ours'), 'plan on main');
-      const h = makeDb();
       const state: MergeResolveState = {
         mode: 'same-branch',
         phase: 'resolving',
         baseBranch: 'main',
-        featureBranch: 'feature/x',
+        featureBranch: 'origin/main',
         mergeDir: parent,
         sandboxMergeDir: parent,
         fixInvocationId: null,
@@ -1770,16 +1910,9 @@ describe("12 merge phase: Haive's own files merge before any agent", () => {
         skipReason: null,
         pushed: false,
       };
-      const before = dispatches();
-      const out = await resolveMergePhase(
-        h.db as never,
-        step,
-        mkCurrent(det(wt), { action: 'merge_remove' }, state),
-        mkCtx(parent, h.db),
-        mkParams(h.db, dispatching),
-      );
+      const { out, dispatched } = await mergeOrigin(parent, {}, state);
       expect(out.resolved).toBe(true);
-      expect(dispatches() - before).toBe(0);
+      expect(dispatched).toBe(0);
       expect(await git(parent, ['show', `HEAD:${PLAN_JSON}`])).toContain('Theirs');
     } finally {
       await rm(parent, { recursive: true, force: true });
@@ -1787,13 +1920,13 @@ describe("12 merge phase: Haive's own files merge before any agent", () => {
   });
 
   it('a mixed conflict sends the fixer only the other file, with the leave-alone line', async () => {
-    const { parent, wt } = await setupWorktree(planFiles('Base'));
+    const { parent } = await setupWorktree(planFiles('Base'));
     try {
-      await commitIn(wt, { ...planFiles('Theirs'), 'base.txt': 'feature-edit\n' }, 'feature');
+      await originAhead(parent, { ...planFiles('Theirs'), 'base.txt': 'feature-edit\n' }, 'origin');
       await commitIn(parent, { ...planFiles('Ours'), 'base.txt': 'main-edit\n' }, 'main');
-      const buildFixPrompt = vi.fn(step.mergeResolve!.buildFixPrompt);
-      const { out, dispatched } = await merge(parent, wt, {
-        mergeResolve: { ...step.mergeResolve!, buildFixPrompt },
+      const buildFixPrompt = vi.fn(sync.mergeResolve!.buildFixPrompt);
+      const { out, dispatched } = await mergeOrigin(parent, {
+        mergeResolve: { ...sync.mergeResolve!, buildFixPrompt },
       });
       expect(out.resolved).toBe(false);
       expect(dispatched).toBe(1);
@@ -1807,6 +1940,545 @@ describe("12 merge phase: Haive's own files merge before any agent", () => {
     } finally {
       await rm(parent, { recursive: true, force: true });
     }
+  });
+});
+
+const GLOBS = `${PROJECT_STATE_DIR}/settings/scope-exclude-globs.json`;
+const RTK_VERSION = `${PROJECT_STATE_DIR}/settings/rtk-version.json`;
+const REVIEW_DIMS = `${PROJECT_STATE_DIR}/settings/review-dimensions.json`;
+const AT_FORK = { 'scope-exclude-globs': ['vendor/**'] };
+const BY_AGENT = { 'scope-exclude-globs': ['vendor/**', 'dist/**'] };
+
+/** What `rev` holds at `file`, or null when it holds nothing there. */
+async function at(dir: string, rev: string, file: string): Promise<string | null> {
+  try {
+    return await git(dir, ['show', `${rev}:${file}`]);
+  } catch {
+    return null;
+  }
+}
+const revOf = async (dir: string, rev = 'HEAD') => (await git(dir, ['rev-parse', rev])).trim();
+const putBackEvents = (h: ReturnType<typeof makeDb>) =>
+  h.events.filter((e) => e.eventType === PUT_BACK_EVENT);
+
+describe('12 puts back the Haive files a task branch changed, before it lands or is left', () => {
+  const dispatching = {
+    providers: [{ id: 'p1', enabled: true }],
+    deps: { enqueueCliInvocation: async () => {} },
+  };
+
+  async function mergePass(
+    parent: string,
+    wt: string,
+    h = makeDb(),
+    formValues: Record<string, unknown> = { action: 'merge_remove' },
+  ) {
+    const out = await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(det(wt), formValues),
+      mkCtx(parent, h.db),
+      mkParams(h.db, dispatching),
+    );
+    return { out, h };
+  }
+  const keepPass = (parent: string, wt: string, h = makeDb(), action = 'keep') =>
+    worktreeCleanupStep.apply(mkCtx(parent, h.db), applyArgs(det(wt), { action }));
+
+  it('C1 same-branch merge_remove: base holds the fork point, the branch carries the revert, the step warns', async () => {
+    const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
+    try {
+      const forked = await revOf(parent);
+      await commitIn(wt, stateFiles({}, BY_AGENT), 'agent edits a setting');
+      const preRevert = await revOf(wt);
+      const { out, h } = await mergePass(parent, wt);
+      expect(out.resolved).toBe(true);
+      expect(await at(parent, 'main', GLOBS)).toBe(await at(parent, forked, GLOBS));
+      expect(await at(parent, 'main', 'feature.txt')).toBe('feature\n');
+      expect(await git(parent, ['log', '-1', '--format=%s', 'feature/x'])).toContain('Put back');
+      expect(await at(parent, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
+      expect(h.getWarning()).toContain(GLOBS);
+      const [event] = putBackEvents(h);
+      expect(event?.payload).toMatchObject({
+        paths: [GLOBS],
+        preRevertSha: preRevert,
+        mergeBase: forked,
+        commit: await revOf(wt),
+      });
+      expect(await git(wt, ['status', '--porcelain'])).toBe('');
+      expect(await readFile(path.join(wt, GLOBS), 'utf8')).toBe(await at(parent, forked, GLOBS));
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('C1 cross-branch merge_remove puts them back as well', async () => {
+    const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
+    try {
+      const forked = await revOf(parent);
+      await commitIn(wt, stateFiles({}, BY_AGENT), 'agent edits a setting');
+      await git(parent, ['checkout', '-q', '-b', 'elsewhere']);
+      const h = makeDb();
+      const out = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt, { parentBranch: 'elsewhere' }), { action: 'merge_remove' }),
+        mkCtx(parent, h.db),
+        mkParams(h.db, dispatching),
+      );
+      expect(out.resolved).toBe(true);
+      expect(await at(parent, 'main', GLOBS)).toBe(await at(parent, forked, GLOBS));
+      expect(h.getWarning()).toContain(GLOBS);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('C2 base changed another unit of the same file after the fork: the merged file holds base only', async () => {
+    const { parent, wt } = await setupWorktree(stateFiles({}));
+    try {
+      await commitIn(
+        wt,
+        stateFiles({ customAgentSpecs: [{ id: 'agent-a', description: 'A' }] }),
+        'agent edits a unit',
+      );
+      await commitIn(parent, stateFiles({ framework: 'drupal' }), 'state on main');
+      const { out } = await mergePass(parent, wt);
+      expect(out.resolved).toBe(true);
+      expect(await git(parent, ['ls-files', '-u'])).toBe('');
+      const render = JSON.parse((await at(parent, 'main', STATE_RENDER))!) as {
+        framework: string;
+        customAgentSpecs: unknown[];
+      };
+      expect(render.framework).toBe('drupal');
+      expect(render.customAgentSpecs).toEqual([]);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('C3 create_pr: the branch is pushed with the files put back', async () => {
+    const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
+    const bare = await pushParentMainToOrigin(parent);
+    try {
+      const forked = await revOf(parent);
+      await commitIn(wt, stateFiles({}, BY_AGENT), 'agent edits a setting');
+      const h = makeDb();
+      const detected = det(wt, {
+        hasOrigin: true,
+        originUrl: `file://${bare}`,
+        prWorkflowAvailable: true,
+      });
+      const out = await worktreeCleanupStep.apply(
+        mkCtx(parent, h.db),
+        applyArgs(detected, {
+          action: 'create_pr',
+          prCredentialId: 'cred-1',
+          prBaseBranch: 'main',
+          prTitle: 'Task',
+        }),
+      );
+      expect(out.prUrl).toBe('https://forge.test/pr/1');
+      expect(await at(bare, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
+      expect(await revOf(bare, 'feature/x')).toBe(await revOf(parent, 'feature/x'));
+      expect(h.getWarning()).toContain(GLOBS);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('C3 create_pr leaves alone a record that local base holds ahead of origin', async () => {
+    const { parent, wt } = await setupWorktree();
+    const bare = await pushParentMainToOrigin(parent);
+    try {
+      await commitIn(parent, stateFiles({}, AT_FORK), 'the record, not yet pushed');
+      await git(wt, ['merge', '-q', '--no-edit', 'main']);
+      await commitIn(wt, stateFiles({}, BY_AGENT), 'agent edits a setting');
+      const h = makeDb();
+      const detected = det(wt, {
+        hasOrigin: true,
+        originUrl: `file://${bare}`,
+        prWorkflowAvailable: true,
+      });
+      await worktreeCleanupStep.apply(
+        mkCtx(parent, h.db),
+        applyArgs(detected, {
+          action: 'create_pr',
+          prCredentialId: 'cred-1',
+          prBaseBranch: 'main',
+          prTitle: 'Task',
+        }),
+      );
+      expect(await at(bare, 'feature/x', GLOBS)).toBe(await at(parent, 'main', GLOBS));
+      expect(await revOf(bare, 'feature/x:.haive-data/state')).toBe(
+        await revOf(parent, 'main:.haive-data/state'),
+      );
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('a .haive-data link halts the merge before anything merges, naming it', async () => {
+    const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
+    try {
+      await commitIn(wt, stateFiles({}, BY_AGENT), 'agent edits a setting');
+      await rm(path.join(wt, '.haive-data'), { recursive: true });
+      await symlink(parent, path.join(wt, '.haive-data'));
+      const { out, h } = await mergePass(parent, wt);
+      expect(out.resolved).toBe(false);
+      if (!out.resolved) {
+        expect(out.result.status).toBe('failed');
+        if (out.result.status === 'failed') {
+          expect(out.result.error).toContain('.haive-data is a link in the worktree');
+        }
+      }
+      expect(h.getStatus()).toBe('failed');
+      expect(await at(parent, 'main', 'feature.txt')).toBeNull();
+      expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('C4 base has no state directory: a record the branch adds does not land, and the sync finds none', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      await commitIn(wt, stateFiles({ framework: 'drupal' }, BY_AGENT), 'agent adds a record');
+      const { out } = await mergePass(parent, wt);
+      expect(out.resolved).toBe(true);
+      expect(await git(parent, ['ls-tree', '-r', '--name-only', 'main'])).not.toContain(
+        PROJECT_STATE_DIR,
+      );
+      const { fake } = syncFixture({ render: BASE_RENDER, settings: AT_FORK });
+      const result = await syncProjectStateFromCheckout(fake.db as never, {
+        repositoryId: SYNC_REPO,
+        repoPath: parent,
+      });
+      expect(result.outcome).toBe('absent');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('C5 a second pass makes no commit, and the pass after a Retry shows the warning again', async () => {
+    const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
+    try {
+      await commitIn(wt, stateFiles({}, BY_AGENT), 'agent edits a setting');
+      const h = makeDb();
+      await keepPass(parent, wt, h);
+      const tip = await revOf(parent, 'feature/x');
+      expect(h.getWarning()).toContain(GLOBS);
+      h.clearWarning();
+      await keepPass(parent, wt, h);
+      expect(await revOf(parent, 'feature/x')).toBe(tip);
+      expect(putBackEvents(h)).toHaveLength(1);
+      expect(h.getWarning()).toContain(GLOBS);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('C5 merge_remove: the pass after a Retry, with the merge landed, shows the warning again', async () => {
+    const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
+    try {
+      await commitIn(wt, stateFiles({}, BY_AGENT), 'agent edits a setting');
+      const h = makeDb();
+      const ctx = mkCtx(parent, h.db);
+      const values = { action: 'merge_remove', deleteBranch: false };
+      const merged = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), values),
+        ctx,
+        mkParams(h.db, dispatching),
+      );
+      expect(merged.resolved).toBe(true);
+      expect(h.getWarning()).toContain(GLOBS);
+      h.clearWarning();
+      // A Retry keeps the merge state, so the next pass goes straight to apply.
+      const again = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), values, h.getState()),
+        ctx,
+        mkParams(h.db, dispatching),
+      );
+      expect(again.resolved).toBe(true);
+      await worktreeCleanupStep.apply(ctx, applyArgs(det(wt), values));
+      expect(h.getWarning()).toContain(GLOBS);
+      expect(putBackEvents(h)).toHaveLength(1);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('C6 files deleted, made executable and moved out: the state tree at the tip is the fork point', async () => {
+    const seed = stateFiles(
+      {},
+      { ...AT_FORK, 'rtk-version': '1.2.3', 'review-dimensions': ['security'] },
+    );
+    const { parent, wt } = await setupWorktree(seed);
+    try {
+      const forked = await revOf(parent);
+      await rm(path.join(wt, GLOBS));
+      await chmod(path.join(wt, RTK_VERSION), 0o755);
+      await mkdir(path.join(wt, 'moved'), { recursive: true });
+      await rename(path.join(wt, REVIEW_DIMS), path.join(wt, 'moved', 'review-dimensions.json'));
+      await git(wt, ['add', '-A']);
+      await git(wt, ['commit', '-m', 'agent edits three files']);
+      expect(await revOf(wt, 'HEAD:.haive-data/state')).not.toBe(
+        await revOf(parent, `${forked}:.haive-data/state`),
+      );
+      await keepPass(parent, wt);
+      expect(await revOf(parent, 'feature/x:.haive-data/state')).toBe(
+        await revOf(parent, `${forked}:.haive-data/state`),
+      );
+      expect(await at(parent, 'feature/x', 'moved/review-dimensions.json')).not.toBeNull();
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('C7 knowledge base, learnings and dependency ownership stay as the branch made them', async () => {
+    const owned = {
+      [`${KB_DIR}/overview.md`]: 'kb v1\n',
+      [`${LEARNINGS_DIR}/l1.md`]: 'learning v1\n',
+      '.haive-data/dependency-ownership.json': '{"ownedPaths":[]}\n',
+      '.haive-data/environment.json': '{}\n',
+    };
+    const { parent, wt } = await setupWorktree({ ...stateFiles({}, AT_FORK), ...owned });
+    try {
+      const edited = Object.fromEntries(Object.keys(owned).map((f) => [f, `${f} edited\n`]));
+      await commitIn(wt, { ...stateFiles({}, BY_AGENT), ...edited }, 'agent edits');
+      await keepPass(parent, wt);
+      expect(await at(parent, 'feature/x', GLOBS)).toBe(await at(parent, 'main', GLOBS));
+      for (const [file, body] of Object.entries(edited)) {
+        expect(await at(parent, 'feature/x', file), file).toBe(body);
+      }
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('C8 a plan.json edit on the branch is put back, so the merge has no plan conflict', async () => {
+    const { parent, wt } = await setupWorktree(planFiles('Base'));
+    try {
+      await commitIn(wt, planFiles('Theirs'), 'plan on feature');
+      await commitIn(parent, planFiles('Ours'), 'plan on main');
+      const { out, h } = await mergePass(parent, wt);
+      expect(out.resolved).toBe(true);
+      expect(h.invocationInserts).toEqual([]);
+      expect(await git(parent, ['ls-files', '-u'])).toBe('');
+      expect(await at(parent, 'main', PLAN_JSON)).toContain('Ours');
+      expect(await at(parent, 'main', PLAN_JSON)).not.toContain('Theirs');
+      expect(await at(parent, 'main', 'feature.txt')).toBe('feature\n');
+      expect(h.getWarning()).toContain(PLAN_JSON);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('C8 a mixed conflict sends the fixer only the other file, and plan.json is already base’s', async () => {
+    const { parent, wt } = await setupWorktree(planFiles('Base'));
+    try {
+      await commitIn(wt, { ...planFiles('Theirs'), 'base.txt': 'feature-edit\n' }, 'feature');
+      await commitIn(parent, { ...planFiles('Ours'), 'base.txt': 'main-edit\n' }, 'main');
+      const buildFixPrompt = vi.fn(step.mergeResolve!.buildFixPrompt);
+      const h = makeDb();
+      const out = await resolveMergePhase(
+        h.db as never,
+        { ...step, mergeResolve: { ...step.mergeResolve!, buildFixPrompt } } as StepDefinition,
+        mkCurrent(det(wt), { action: 'merge_remove' }),
+        mkCtx(parent, h.db),
+        mkParams(h.db, dispatching),
+      );
+      expect(out.resolved).toBe(false);
+      expect(buildFixPrompt.mock.calls[0]![0].conflictFiles).toEqual(['base.txt']);
+      expect(await git(parent, ['show', ':3:base.txt'])).toBe('feature-edit\n');
+      expect(await git(parent, ['show', `:${PLAN_JSON}`])).toContain('Ours');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  describe('C9 with the project state sync that follows a same-branch merge', () => {
+    it('leaves repositories.render_context and scope_exclude_globs as they were', async () => {
+      const { parent, wt } = await setupWorktree(stateFiles(BASE_RENDER, AT_FORK));
+      try {
+        const { fake } = syncFixture({ render: BASE_RENDER, settings: AT_FORK });
+        const repoArgs = { repositoryId: SYNC_REPO, repoPath: parent };
+        // The fixture is coherent: the fork point's files are what the sync last saw.
+        expect((await syncProjectStateFromCheckout(fake.db as never, repoArgs)).outcome).toBe(
+          'unchanged',
+        );
+        const columns = () => {
+          const row = fake.rows(schema.repositories).find((r) => r.id === SYNC_REPO)!;
+          return JSON.stringify([row.renderContext, row.scopeExcludeGlobs]);
+        };
+        const before = columns();
+        await commitIn(wt, stateFiles(TEAM_RENDER, BY_AGENT), 'agent edits the record');
+        const { out } = await mergePass(parent, wt);
+        expect(out.resolved).toBe(true);
+        const synced = await syncProjectStateFromCheckout(fake.db as never, repoArgs);
+        expect(columns()).toBe(before);
+        expect(synced.outcome).toBe('unchanged');
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it.each(['keep', 'remove_only'])(
+    'C11 %s leaves the branch with the files put back',
+    async (action) => {
+      const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
+      try {
+        const forked = await revOf(parent);
+        await commitIn(wt, stateFiles({}, BY_AGENT), 'agent edits a setting');
+        const h = makeDb();
+        const out = await keepPass(parent, wt, h, action);
+        expect(await at(parent, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
+        expect(h.getWarning()).toContain(GLOBS);
+        // The worktree matched the new tip, so removing it deleted nothing: remove_only took it away.
+        expect(out.removed).toBe(action === 'remove_only');
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('C12 an uncommitted edit to a Haive file survives, and so does one to any other file', async () => {
+    const seed = stateFiles({}, { ...AT_FORK, 'rtk-version': '1.2.3' });
+    const { parent, wt } = await setupWorktree(seed);
+    try {
+      const forked = await revOf(parent);
+      await commitIn(
+        wt,
+        stateFiles({}, { 'scope-exclude-globs': ['vendor/**', 'dist/**'], 'rtk-version': '2.0.0' }),
+        'agent edits two settings',
+      );
+      await writeIn(wt, { [RTK_VERSION]: '"3.0.0"\n', 'feature.txt': 'feature, edited\n' });
+      await keepPass(parent, wt);
+      expect(await at(parent, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
+      expect(await at(parent, 'feature/x', RTK_VERSION)).toBe(
+        await at(parent, forked, RTK_VERSION),
+      );
+      expect(await readFile(path.join(wt, GLOBS), 'utf8')).toBe(await at(parent, forked, GLOBS));
+      expect(await readFile(path.join(wt, RTK_VERSION), 'utf8')).toBe('"3.0.0"\n');
+      expect(await readFile(path.join(wt, 'feature.txt'), 'utf8')).toBe('feature, edited\n');
+      expect((await git(wt, ['status', '--porcelain'])).split('\n').filter(Boolean).sort()).toEqual(
+        [` M ${RTK_VERSION}`, ' M feature.txt'].sort(),
+      );
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  describe('C13 which passes run it', () => {
+    const hook = vi.fn(async () => [] as string[]);
+    const spied = {
+      ...step,
+      mergeResolve: { ...step.mergeResolve!, putBackBeforeMerge: hook },
+    } as StepDefinition;
+    beforeEach(() => hook.mockClear());
+    const baseSyncState = (parent: string): MergeResolveState => ({
+      mode: 'same-branch',
+      phase: 'pending',
+      baseBranch: 'main',
+      featureBranch: 'origin/main',
+      mergeDir: parent,
+      sandboxMergeDir: parent,
+      fixInvocationId: null,
+      conflictRetries: 0,
+      pendingQuestion: null,
+      pushAfterMerge: false,
+      merged: false,
+      skipReason: null,
+      pushed: false,
+      mergeStage: 'base-sync',
+      baseSyncRounds: 1,
+    });
+
+    it('only 12 sets it, not 00a-sync-base and not 13-onboarding-push', () => {
+      expect(step.mergeResolve?.putBackBeforeMerge).toBeTypeOf('function');
+      expect(syncBaseStep.mergeResolve?.putBackBeforeMerge).toBeUndefined();
+      expect(onboardingPushStep.mergeResolve?.putBackBeforeMerge).toBeUndefined();
+    });
+
+    it('the feature merge calls it once, with the branch, its base and its worktree', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const h = makeDb();
+        await resolveMergePhase(
+          h.db as never,
+          spied,
+          mkCurrent(det(wt), { action: 'merge_remove' }),
+          mkCtx(parent, h.db),
+          mkParams(h.db, dispatching),
+        );
+        expect(hook).toHaveBeenCalledTimes(1);
+        expect(hook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            baseBranch: 'main',
+            featureBranch: 'feature/x',
+            worktreePath: wt,
+          }),
+        );
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('the base-sync round of 12 does not call it', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await originAhead(parent, { 'origin.txt': 'origin\n' }, 'origin moved');
+        const h = makeDb();
+        const out = await resolveMergePhase(
+          h.db as never,
+          spied,
+          mkCurrent(det(wt), { action: 'merge_remove' }, baseSyncState(parent)),
+          mkCtx(parent, h.db),
+          mkParams(h.db, dispatching),
+        );
+        expect(out.resolved).toBe(true);
+        expect(await at(parent, 'main', 'origin.txt')).toBe('origin\n');
+        expect(hook).not.toHaveBeenCalled();
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
+
+    it('a pass that finds the feature merge open does not call it, and leaves the tip alone', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await divergeBase(parent, wt);
+        await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+        expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+        const tip = await revOf(parent, 'feature/x');
+        const h = makeDb();
+        const state: MergeResolveState = {
+          ...baseSyncState(parent),
+          featureBranch: 'feature/x',
+          phase: 'resolving',
+          mergeStage: 'feature',
+          baseSyncRounds: 0,
+        };
+        await resolveMergePhase(
+          h.db as never,
+          spied,
+          mkCurrent(det(wt), { action: 'merge_remove' }, state),
+          mkCtx(parent, h.db),
+          mkParams(h.db, dispatching),
+        );
+        expect(hook).not.toHaveBeenCalled();
+        expect(await revOf(parent, 'feature/x')).toBe(tip);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
   });
 });
 
@@ -1950,6 +2622,8 @@ describe('12 worktree cleanup apply (non-merge actions)', () => {
           // findWorktreePathClaimant: no sharer unless the test supplies one.
           tasks: { findFirst: async () => sharer },
         },
+        // The warning re-derived from what the pass recorded of the Haive files it put back: nothing.
+        select: () => ({ from: () => ({ where: () => ({ orderBy: async () => [] }) }) }),
       },
       logger,
     }) as unknown as StepContext;
@@ -2171,6 +2845,36 @@ describe('12 worktree cleanup with uncommitted changes (real git)', () => {
     try {
       const detected = await worktreeCleanupStep.detect!(detectCtx(parent, wt));
       expect(detected.uncommitted).toEqual({ count: 0, paths: [] });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('detect lists the Haive files the branch changed, and the form says so before the action', async () => {
+    const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
+    try {
+      await commitIn(wt, stateFiles({}, BY_AGENT), 'agent edits a setting');
+      const detected = await worktreeCleanupStep.detect!(detectCtx(parent, wt));
+      expect(detected.projectionEdits).toEqual([GLOBS]);
+      expect(await revOf(parent, 'feature/x')).toBe(await revOf(wt));
+      const fields = formOf(detectCtx(parent, wt), detected).fields;
+      const note = fields.find((f) => f.id === 'projectionEditsNote');
+      expect(note).toMatchObject({ type: 'note', variant: 'warning' });
+      expect((note as { body: string }).body).toContain(`\`${GLOBS}\``);
+      const ids = fields.map((f) => f.id);
+      expect(ids.indexOf('projectionEditsNote')).toBeLessThan(ids.indexOf('action'));
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('detect lists none for a branch that changed none, and the form has no note', async () => {
+    const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
+    try {
+      const detected = await worktreeCleanupStep.detect!(detectCtx(parent, wt));
+      expect(detected.projectionEdits).toEqual([]);
+      const ids = formOf(detectCtx(parent, wt), detected).fields.map((f) => f.id);
+      expect(ids).not.toContain('projectionEditsNote');
     } finally {
       await rm(parent, { recursive: true, force: true });
     }

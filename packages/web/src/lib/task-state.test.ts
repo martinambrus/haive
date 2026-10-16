@@ -5,6 +5,7 @@ import {
   taskBadgeKind,
   taskClockEndMs,
   taskMenuKeys,
+  taskNotStarted,
   taskStatusWord,
   taskStoppedAt,
 } from './task-state';
@@ -112,6 +113,46 @@ describe('taskMenuKeys', () => {
     for (const status of ['cancelled', 'completed']) {
       expect(taskMenuKeys({ status }, idle)).toEqual([]);
       expect(taskMenuKeys({ status, deadAt: DEAD_AT }, idle)).toEqual([]);
+    }
+  });
+});
+
+describe('taskNotStarted', () => {
+  it('is true for a created task', () => {
+    expect(taskNotStarted({ status: 'created' })).toBe(true);
+  });
+
+  it('is false for every other status', () => {
+    for (const status of [
+      'queued',
+      'running',
+      'waiting_user',
+      'waiting_pr',
+      'failed',
+      'completed',
+      'cancelled',
+    ]) {
+      expect(taskNotStarted({ status })).toBe(false);
+    }
+  });
+
+  it('is false for a dead task, which can only be cancelled', () => {
+    expect(taskNotStarted({ status: 'created', deadAt: DEAD_AT })).toBe(false);
+  });
+
+  it('keys on dead_at and never on a dead_reason that outlived it', () => {
+    // NEGATIVE CONTROL: a version keyed on dead_reason hides the banner from a live task.
+    expect(taskNotStarted({ ...COPY_ONLY, status: 'created' })).toBe(true);
+  });
+
+  it('is true exactly when the Actions menu offers Start', () => {
+    for (const status of [...LIVE_STATUSES, 'completed', 'cancelled']) {
+      for (const deadAt of [null, DEAD_AT]) {
+        const task = { status, deadAt };
+        expect(taskNotStarted(task)).toBe(
+          taskMenuKeys(task, { stepRunning: false }).includes('start'),
+        );
+      }
     }
   });
 });

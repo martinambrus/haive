@@ -233,6 +233,7 @@ jobs:
           worker test/cancel-sandbox-fence.test.ts CANCEL_FENCE_TEST_URL cancel_fence_test pg
           worker test/pending-fail-path.test.ts PENDING_FAIL_PATH_TEST_URL pending_fail_path_test pg
           worker test/dead-task-boot.test.ts DEAD_TASK_BOOT_TEST_URL dead_task_boot_test pg
+          worker test/upload-reaper-db.test.ts UPLOAD_REAPER_TEST_URL upload_reaper_test pg
           api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test pg
           api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test pg
           api test/task-type-drafts-db.test.ts TASK_TYPE_DRAFTS_TEST_URL task_type_drafts_test pg

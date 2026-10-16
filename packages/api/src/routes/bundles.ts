@@ -25,11 +25,20 @@ import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { getDb } from '../db.js';
 import { getBundleQueue } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
-import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
+import {
+  admitNewWork,
+  assertNewWorkAllowed,
+  requireNewWorkAllowed,
+} from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
+import {
+  cancelUploadSession,
+  isWholeFile,
+  withCompleteClaim,
+} from '../lib/upload-complete-claim.js';
 import {
   ensureUploadsDir,
   uploadFileRel,
@@ -139,7 +148,7 @@ function uploadSessionFromRow(
     totalSize: Number(row.totalSize),
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
-    status: row.status as 'uploading' | 'complete' | 'cancelled',
+    status: row.status as 'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping',
   };
 }
 
@@ -526,94 +535,89 @@ bundleRoutes.post('/uploads/:id/complete', requireNewWorkAllowed, async (c) => {
     `source.${archiveExt(row.archiveFormat as ArchiveFormat)}`,
   );
   const finalArchive = path.join(anchor, finalRel);
-  // A link at either name now fails these checks rather than reporting its target's size.
-  const wholeFileAt = async (rel: string) => {
-    const info = await lstatNoFollow(anchor, rel);
-    return info?.kind === 'file' && info.stats.size === Number(row.totalSize);
-  };
-  const staged = await wholeFileAt(archiveRel);
-  if (!staged && !(await wholeFileAt(finalRel))) {
-    throw new HttpError(409, 'archive size mismatch on disk');
-  }
+  const wholeFileAt = (rel: string) => isWholeFile(anchor, rel, Number(row.totalSize));
 
-  // Create the bundle row first, under the upload's id so a repeated complete finds it, with its
-  // storage_root and archive_path; then move the staged archive into the bundle's directory.
-  const inserted = await db.transaction(async (tx) => {
-    await admitNewWork(tx);
-    const [created] = await tx
-      .insert(schema.customBundles)
-      .values({
-        id: row.id,
-        userId,
-        repositoryId: row.repositoryId,
-        name: row.name,
-        sourceType: 'zip',
-        archiveFilename: row.filename,
-        archiveFormat: row.archiveFormat,
-        archivePath: finalArchive,
-        storageRoot: path.join(bundleDirFor(userId, row.id), 'extracted'),
-        enabledKinds: row.enabledKinds,
-        status: 'syncing',
-      })
-      .onConflictDoNothing({ target: schema.customBundles.id })
-      .returning();
-    await tx
-      .update(schema.customBundleUploads)
-      .set({ bundleId: row.id, updatedAt: new Date() })
-      .where(eq(schema.customBundleUploads.id, row.id));
-    if (created) await markProjectStateDirty(tx, row.repositoryId);
-    return created;
-  });
+  // The claim is a write, so a drain that began after the early check refuses before it.
+  await assertNewWorkAllowed();
+  await withCompleteClaim(db, schema.customBundleUploads, row.id, async (claim) => {
+    const staged = await wholeFileAt(archiveRel);
+    if (!staged && !(await wholeFileAt(finalRel))) {
+      throw new HttpError(409, 'archive size mismatch on disk');
+    }
 
-  if (staged) {
-    try {
-      // `createParents` walks the bundle directory into place, which is what the separate `mkdir`
-      // did — and both rels sit under the same anchor, so this move cannot cross a filesystem.
-      await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
-    } catch (err) {
-      if (!(await wholeFileAt(finalRel))) {
-        throw new HttpError(500, `failed to move archive: ${(err as Error).message}`);
+    // Create the bundle row first, under the upload's id so a repeated complete finds it, with its
+    // storage_root and archive_path; then move the staged archive into the bundle's directory.
+    const inserted = await db.transaction(async (tx) => {
+      await admitNewWork(tx);
+      const [created] = await tx
+        .insert(schema.customBundles)
+        .values({
+          id: row.id,
+          userId,
+          repositoryId: row.repositoryId,
+          name: row.name,
+          sourceType: 'zip',
+          archiveFilename: row.filename,
+          archiveFormat: row.archiveFormat,
+          archivePath: finalArchive,
+          storageRoot: path.join(bundleDirFor(userId, row.id), 'extracted'),
+          enabledKinds: row.enabledKinds,
+          status: 'syncing',
+        })
+        .onConflictDoNothing({ target: schema.customBundles.id })
+        .returning();
+      await claim.write(tx, { bundleId: row.id });
+      if (created) await markProjectStateDirty(tx, row.repositoryId);
+      return created;
+    });
+
+    if (staged) {
+      try {
+        // `createParents` walks the bundle directory into place, which is what the separate `mkdir`
+        // did — and both rels sit under the same anchor, so this move cannot cross a filesystem.
+        await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
+      } catch (err) {
+        if (!(await wholeFileAt(finalRel))) {
+          throw new HttpError(500, `failed to move archive: ${(err as Error).message}`);
+        }
       }
     }
-  }
 
-  const queue = getBundleQueue();
-  const jobId = `ingest-zip-${row.id}`;
-  if (inserted || !(await queue.getJob(jobId))) {
-    if (!inserted) {
-      await db.transaction(async (tx) => {
-        await admitNewWork(tx);
-        await tx
-          .update(schema.customBundles)
-          .set({ status: 'syncing', lastSyncError: null, updatedAt: new Date() })
-          .where(
-            and(
-              eq(schema.customBundles.id, row.id),
-              inArray(schema.customBundles.status, ['syncing', 'failed']),
-            ),
-          );
-      });
+    const queue = getBundleQueue();
+    const jobId = `ingest-zip-${row.id}`;
+    if (inserted || !(await queue.getJob(jobId))) {
+      if (!inserted) {
+        await db.transaction(async (tx) => {
+          await admitNewWork(tx);
+          await tx
+            .update(schema.customBundles)
+            .set({ status: 'syncing', lastSyncError: null, updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.customBundles.id, row.id),
+                inArray(schema.customBundles.status, ['syncing', 'failed']),
+              ),
+            );
+        });
+      }
+      const payload: BundleJobPayload = {
+        bundleId: row.id,
+        userId,
+        archivePath: finalArchive,
+        archiveFormat: row.archiveFormat as ArchiveFormat,
+      };
+      await addBundleJobOrMarkFailed(db, row.id, () =>
+        queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
+          jobId,
+          attempts: 1,
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        }),
+      );
     }
-    const payload: BundleJobPayload = {
-      bundleId: row.id,
-      userId,
-      archivePath: finalArchive,
-      archiveFormat: row.archiveFormat as ArchiveFormat,
-    };
-    await addBundleJobOrMarkFailed(db, row.id, () =>
-      queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
-        jobId,
-        attempts: 1,
-        removeOnComplete: 100,
-        removeOnFail: 100,
-      }),
-    );
-  }
 
-  await db
-    .update(schema.customBundleUploads)
-    .set({ status: 'complete', archivePath: finalArchive, updatedAt: new Date() })
-    .where(eq(schema.customBundleUploads.id, row.id));
+    await claim.write(db, { status: 'complete', archivePath: finalArchive, updatedAt: new Date() });
+  });
 
   return c.json(await completedUploadBody(userId, row.id), 201);
 });
@@ -624,17 +628,14 @@ bundleRoutes.delete('/uploads/:id', async (c) => {
   const db = getDb();
 
   const row = await loadUploadSession(userId, uploadId);
-  if (row.archivePath) {
-    // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
-    // unlink: the session is still cancelled, and a leftover partial is the sweeper's problem.
-    const anchor = bundleStorageRoot();
-    const archiveRel = uploadFileRel(userId, row.archivePath, anchor);
-    if (archiveRel) await removeNoFollow(anchor, archiveRel).catch(() => {});
+  if (row.status !== 'uploading') {
+    throw new HttpError(409, `session is ${row.status}`);
   }
-  await db
-    .update(schema.customBundleUploads)
-    .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(eq(schema.customBundleUploads.id, row.id));
+  // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
+  // unlink: the session is still cancelled, and the upload reaper removes a leftover partial.
+  const anchor = bundleStorageRoot();
+  const archiveRel = uploadFileRel(userId, row.archivePath, anchor);
+  await cancelUploadSession(db, schema.customBundleUploads, row.id, anchor, [archiveRel]);
 
   return c.json({ ok: true });
 });
@@ -731,11 +732,6 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
   }
   const anchor = bundleStorageRoot();
   const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Bundle archive', anchor);
-  const onDisk = await lstatNoFollow(anchor, archiveRel);
-  if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
-    throw new HttpError(409, 'archive size mismatch on disk');
-  }
-
   const dir = bundleDirFor(userId, bundleId);
   const finalRel = bundleRel(
     userId,
@@ -749,47 +745,53 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
   // Overwrite source.<ext> before wiping the prior extracted/ tree, so a death between the two
   // leaves a complete archive. Keeping the bundle row + items table intact during the swap means
   // the UI can keep displaying the previous state until the worker re-parses.
-  await db.transaction(async (tx) => {
-    await admitNewWork(tx);
-    await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
-    await removeNoFollow(anchor, extractedRel, { recursive: true });
-    await tx
-      .update(schema.customBundles)
-      .set({
-        archiveFilename: row.filename,
-        archiveFormat: row.archiveFormat,
+  // The claim is a write, so a drain that began after the early check refuses before it.
+  await assertNewWorkAllowed();
+  await withCompleteClaim(db, schema.customBundleUploads, row.id, async (claim) => {
+    const onDisk = await lstatNoFollow(anchor, archiveRel);
+    if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
+      throw new HttpError(409, 'archive size mismatch on disk');
+    }
+    // The bundle row moves only with the claim, so a complete that lost it leaves the row alone.
+    await db.transaction(async (tx) => {
+      await admitNewWork(tx);
+      await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
+      // A replace cannot resume past its rename, so a failure from here on gives the session back.
+      await removeNoFollow(anchor, extractedRel, { recursive: true });
+      await claim.write(tx, {
+        status: 'complete',
         archivePath: finalArchive,
-        storageRoot: newExtracted,
-        status: 'syncing',
-        lastSyncError: null,
         updatedAt: new Date(),
-      })
-      .where(eq(schema.customBundles.id, bundleId));
-  });
+      });
+      await tx
+        .update(schema.customBundles)
+        .set({
+          archiveFilename: row.filename,
+          archiveFormat: row.archiveFormat,
+          archivePath: finalArchive,
+          storageRoot: newExtracted,
+          status: 'syncing',
+          lastSyncError: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.customBundles.id, bundleId));
+    });
 
-  await db
-    .update(schema.customBundleUploads)
-    .set({
-      status: 'complete',
+    const queue = getBundleQueue();
+    const payload: BundleJobPayload = {
+      bundleId,
+      userId,
       archivePath: finalArchive,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.customBundleUploads.id, row.id));
-
-  const queue = getBundleQueue();
-  const payload: BundleJobPayload = {
-    bundleId,
-    userId,
-    archivePath: finalArchive,
-    archiveFormat: row.archiveFormat as ArchiveFormat,
-  };
-  await addBundleJobOrMarkFailed(db, bundleId, () =>
-    queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
-      attempts: 1,
-      removeOnComplete: 100,
-      removeOnFail: 100,
-    }),
-  );
+      archiveFormat: row.archiveFormat as ArchiveFormat,
+    };
+    await addBundleJobOrMarkFailed(db, bundleId, () =>
+      queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
+        attempts: 1,
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      }),
+    );
+  });
 
   const counts = await loadItemCounts([bundleId]);
   return c.json({
@@ -831,9 +833,9 @@ bundleRoutes.post('/:id/sync', requireNewWorkAllowed, async (c) => {
 });
 
 /** Lazy file browser for a bundle's extracted/ tree. Returns flat
- *  `[{path,size}]` pairs (UI groups by `/`). Skips `.git/` to keep git-sourced
- *  bundles small and avoid leaking pack contents. Caps at 5000 entries to
- *  keep the response bounded; truncated flag tells the UI to warn the user. */
+ *  `[{path,size}]` pairs (UI groups by `/`). Lists regular files only and skips `.git/`
+ *  and `.DS_Store`, to keep git-sourced bundles small and avoid leaking pack contents.
+ *  Lists at most 5000 files; `truncated` says a file was left out, so the UI warns. */
 const FILES_LIST_CAP = 5000;
 
 async function listExtractedFiles(
@@ -846,20 +848,13 @@ async function listExtractedFiles(
   const out: Array<{ path: string; size: number }> = [];
   let truncated = false;
   const walk = async (relDir: string, rel: string): Promise<void> => {
-    if (out.length >= FILES_LIST_CAP) {
-      truncated = true;
-      return;
-    }
     // Lenient: a directory that cannot be listed — absent, unreadable, or a link standing where a
     // directory should be — contributes nothing, which is exactly what the `catch` here did.
     const entries = await readdirNoFollow(anchor, relDir);
     if (entries === null) return;
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
-      if (out.length >= FILES_LIST_CAP) {
-        truncated = true;
-        return;
-      }
+      if (truncated) return;
       if (entry.name === '.git') continue;
       if (entry.name === '.DS_Store') continue;
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
@@ -873,6 +868,10 @@ async function listExtractedFiles(
       if (!entry.isFile()) continue;
       const info = await lstatNoFollow(anchor, `${relDir}/${entry.name}`);
       if (info?.kind !== 'file') continue;
+      if (out.length >= FILES_LIST_CAP) {
+        truncated = true;
+        return;
+      }
       out.push({ path: childRel, size: Number(info.stats.size) });
     }
   };

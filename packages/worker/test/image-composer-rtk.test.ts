@@ -10,7 +10,7 @@ const baseInput = {
 describe('composeSandboxImage RTK version pin', () => {
   it('bakes the default rtk version with checksums.txt verification when unpinned', () => {
     const c = composeSandboxImage({ ...baseInput });
-    expect(c.dockerfileBody).toContain('releases/download/v0.37.2/');
+    expect(c.dockerfileBody).toContain('releases/download/v1.0.1/');
     expect(c.dockerfileBody).toContain('checksums.txt');
     expect(c.dockerfileBody).toContain('sha256sum -c -');
   });
@@ -19,7 +19,7 @@ describe('composeSandboxImage RTK version pin', () => {
     const def = composeSandboxImage({ ...baseInput });
     const pinned = composeSandboxImage({ ...baseInput, rtkVersion: '0.42.4' });
     expect(pinned.dockerfileBody).toContain('releases/download/v0.42.4/');
-    expect(pinned.dockerfileBody).not.toContain('releases/download/v0.37.2/');
+    expect(pinned.dockerfileBody).not.toContain('releases/download/v1.0.1/');
     expect(pinned.hash).not.toBe(def.hash);
   });
 

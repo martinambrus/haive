@@ -172,7 +172,7 @@ export function buildOscillationEscalationSchema(
 /** Record that the user accepted the remaining issues — every later fix-loop check is
  *  suppressed for this task so the run proceeds to gate 2 instead of looping again. */
 export async function recordFixLoopAccepted(
-  db: Database,
+  db: Pick<Database, 'insert'>,
   taskId: string,
   sourceTaskStepId: string,
 ): Promise<void> {

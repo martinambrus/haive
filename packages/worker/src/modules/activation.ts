@@ -1,6 +1,7 @@
 import { eq, isNotNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { parseStepId } from '@haive/shared/modularity';
+import { moduleSchemaUnready } from './schema-ready.js';
 
 /** `lock` reads under KEY SHARE, which waits out a deactivation holding the row FOR UPDATE. */
 export async function moduleDeactivationMessage(
@@ -15,7 +16,14 @@ export async function moduleDeactivationMessage(
     .from(schema.modules)
     .where(eq(schema.modules.moduleId, parsed.moduleId));
   const [row] = opts.lock ? await read.for('key share') : await read.limit(1);
-  if (!row?.deactivatedAt) return null;
+  if (!row?.deactivatedAt) {
+    if (!moduleSchemaUnready(parsed.moduleId)) return null;
+    return (
+      `Module ${parsed.moduleId}'s schema setup has not finished on this worker, so step ${stepId} cannot run yet. ` +
+      `Retry the step shortly; if this repeats, the worker log has the setup error, and deactivating and ` +
+      `reactivating the module (Admin > Modules) runs the setup again.`
+    );
+  }
   return (
     `Module ${parsed.moduleId} is deactivated, so step ${stepId} cannot run. ` +
     `Reactivate the module (Admin > Modules), then Retry the step.`

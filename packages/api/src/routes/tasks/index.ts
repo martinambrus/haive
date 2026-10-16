@@ -537,16 +537,6 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
   if (body.databaseSnapshotId && body.dbUploadId) {
     throw new HttpError(400, 'Select either a saved database or an uploaded dump');
   }
-  if (body.dbUploadId) {
-    const dump = await db.query.dbUploads.findFirst({
-      where: and(eq(schema.dbUploads.id, body.dbUploadId), eq(schema.dbUploads.userId, userId)),
-      columns: { id: true, status: true },
-    });
-    if (!dump) throw new HttpError(404, 'DB dump upload not found');
-    if (dump.status !== 'complete') {
-      throw new HttpError(409, `DB dump upload is ${dump.status}, not complete`);
-    }
-  }
 
   if (
     body.databaseSnapshotId &&
@@ -671,6 +661,19 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
   if (definition.repoOptional) metadata.anchorRepositoryId = body.repositoryId ?? null;
 
   const insertTask = async (handle: typeof db | DbTx) => {
+    if (body.dbUploadId) {
+      // FOR SHARE: the upload reaper's claim of this dump waits for this transaction, or has already
+      // committed and is what this read returns.
+      const [dump] = await handle
+        .select({ status: schema.dbUploads.status })
+        .from(schema.dbUploads)
+        .where(and(eq(schema.dbUploads.id, body.dbUploadId), eq(schema.dbUploads.userId, userId)))
+        .for('share');
+      if (!dump) throw new HttpError(404, 'DB dump upload not found');
+      if (dump.status !== 'complete') {
+        throw new HttpError(409, `DB dump upload is ${dump.status}, not complete`);
+      }
+    }
     const locked = await definitionForCreate(handle, body.type, { generic: true });
     // The lock and database decisions above came from the preflight read; refuse if an edit changed them since.
     if (

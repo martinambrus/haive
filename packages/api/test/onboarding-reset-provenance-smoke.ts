@@ -24,7 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { LEGACY_RTK_MD_PATHS, RTK_SLIM, logger } from '@haive/shared';
+import { LEGACY_RTK_MD_BODY, LEGACY_RTK_MD_PATHS, logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import { loadOnboardingTaskFacts, resolveOnboardingVerdict } from '../src/lib/onboarding-state.js';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
@@ -598,9 +598,9 @@ async function main(): Promise<void> {
     });
     await mkdir(join(rtkRoot, '.gemini'), { recursive: true });
     await mkdir(join(rtkRoot, '.claude'), { recursive: true });
-    await writeFile(join(rtkRoot, 'RTK.md'), RTK_SLIM, 'utf8');
-    await writeFile(join(rtkRoot, '.gemini/RTK.md'), RTK_SLIM, 'utf8');
-    const editedRtk = `${RTK_SLIM}\nOur own note.\n`;
+    await writeFile(join(rtkRoot, 'RTK.md'), LEGACY_RTK_MD_BODY, 'utf8');
+    await writeFile(join(rtkRoot, '.gemini/RTK.md'), LEGACY_RTK_MD_BODY, 'utf8');
+    const editedRtk = `${LEGACY_RTK_MD_BODY}\nOur own note.\n`;
     await writeFile(join(rtkRoot, '.claude/RTK.md'), editedRtk, 'utf8');
 
     const rtkSteps = await loadProvenanceSteps(db, rtkRepoId, null);

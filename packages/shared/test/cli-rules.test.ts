@@ -9,8 +9,8 @@ import {
   inheritsDefaultRules,
   extractRegion,
   upsertRegion,
+  LEGACY_RTK_MD_BODY,
   LEGACY_RTK_MD_SHA256,
-  RTK_SLIM,
 } from '../src/templates/cli-rules.js';
 import { promptNamesAgentPath } from '../src/cli-providers/catalog.js';
 import { normalizeContent, sha256Hex } from '../src/templates/manifest.js';
@@ -224,7 +224,7 @@ describe('upsertRegion + round-trip hash invariant', () => {
 
 describe('LEGACY_RTK_MD_SHA256', () => {
   it('names the RTK body the legacy RTK.md files were written with', () => {
-    // If a re-vendor of RTK_SLIM breaks this, keep the literal: it names bytes already on disk.
-    expect(sha256Hex(normalizeContent(RTK_SLIM))).toBe(LEGACY_RTK_MD_SHA256);
+    // Both are frozen: they name bytes already on disk, whatever RTK_SLIM says now.
+    expect(sha256Hex(normalizeContent(LEGACY_RTK_MD_BODY))).toBe(LEGACY_RTK_MD_SHA256);
   });
 });

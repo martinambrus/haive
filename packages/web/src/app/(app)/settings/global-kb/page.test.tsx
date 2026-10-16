@@ -370,4 +370,28 @@ describe('Save connection', () => {
 
     expect(configPuts()).toEqual([[CONFIG_PATH, { namespace: 'elsewhere' }]]);
   });
+
+  it('does not send a string typed for the external store once the built-in one is selected again', async () => {
+    const view = await mount();
+    view.choose('cfg-mode', 'external');
+    view.choose('cfg-conn', 'postgres://typed:secret@elsewhere/kb');
+    view.choose('cfg-mode', 'internal');
+    view.choose('cfg-namespace', 'elsewhere');
+
+    await view.press('Save connection');
+
+    expect(configPuts()).toEqual([[CONFIG_PATH, { namespace: 'elsewhere' }]]);
+  });
+
+  it('sends a string typed while the external store is selected', async () => {
+    const view = await mount();
+    view.choose('cfg-mode', 'external');
+    view.choose('cfg-conn', 'postgres://typed:secret@elsewhere/kb');
+
+    await view.press('Save connection');
+
+    expect(configPuts()).toEqual([
+      [CONFIG_PATH, { mode: 'external', connectionString: 'postgres://typed:secret@elsewhere/kb' }],
+    ]);
+  });
 });

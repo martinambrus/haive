@@ -3,6 +3,7 @@ import type { Database } from '@haive/database';
 import { imageRepo, logger } from '@haive/shared';
 import { removeOrphanedPreviousImage } from '../queues/cli-exec/images.js';
 import { defaultDockerRunner, type DockerRunner } from './docker-runner.js';
+import { CORE_IDENTITY_LABEL } from './sandbox-core-image.js';
 
 const log = logger.child({ module: 'sandbox-image-reaper' });
 
@@ -90,6 +91,59 @@ export async function reapOrphanedSandboxImages(
     if (removed > 0) log.info({ removed }, 'orphaned sandbox images removed');
   } catch (err) {
     log.warn({ err }, 'orphaned sandbox image sweep failed');
+  }
+  return removed;
+}
+
+export interface SupersededCoreReaperDeps {
+  listSupersededCoreIds: () => Promise<string[]>;
+  remove: (id: string) => Promise<{ ok: boolean; stderr: string }>;
+}
+
+const defaultCoreDeps: SupersededCoreReaperDeps = {
+  async listSupersededCoreIds() {
+    const listed = await docker(
+      [
+        'images',
+        '--filter',
+        'dangling=true',
+        '--filter',
+        `label=${CORE_IDENTITY_LABEL}`,
+        '--format',
+        '{{.ID}}',
+      ],
+      15_000,
+    );
+    if (!listed.ok) throw new Error(listed.stderr || 'docker images failed');
+    return listed.stdout
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+  },
+  async remove(id) {
+    const result = await docker(['image', 'rm', id], 30_000);
+    return { ok: result.ok, stderr: result.stderr };
+  },
+};
+
+/** Remove the base images a rebuild superseded, on worker boot: untagged, and stamped by a build of
+ *  the base (a per-CLI image built on one inherits the stamp). Without --force, so docker refuses
+ *  one that a container or an image built on it still uses, and a later boot takes it once neither
+ *  does. The current base is tagged `:latest`, never dangling. Best-effort: never throws, returns
+ *  the count removed. */
+export async function reapSupersededSandboxCores(
+  deps: SupersededCoreReaperDeps = defaultCoreDeps,
+): Promise<number> {
+  let removed = 0;
+  try {
+    for (const id of await deps.listSupersededCoreIds()) {
+      const result = await deps.remove(id);
+      if (result.ok) removed += 1;
+      else log.debug({ id, stderr: result.stderr.trim() }, 'superseded sandbox base image kept');
+    }
+    if (removed > 0) log.info({ removed }, 'superseded sandbox base images removed');
+  } catch (err) {
+    log.warn({ err }, 'superseded sandbox base image sweep failed');
   }
   return removed;
 }

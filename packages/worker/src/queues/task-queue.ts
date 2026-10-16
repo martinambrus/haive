@@ -2133,6 +2133,8 @@ export async function handleResult(
   }
 }
 
+class GateAnswerOvertaken extends Error {}
+
 /** Resolve a fix-loop escalation gate decision parked on the source step (the step that
  *  found the defect at the round cap): continue (one more round), accept (stand down the
  *  loop + advance), or abort (fail). Mirrors the revise route's submit-driven routing. */
@@ -2147,9 +2149,10 @@ export async function resolveFixLoopGate(
   instruction: string,
 ): Promise<void> {
   // A Retry that reset the gate took it over, and its own pass decides what runs next.
-  if (!(await writeOwnedRow(db, gateRow.id, { status: 'done', endedAt: new Date() }))) return;
+  const closeGate = () => writeOwnedRow(db, gateRow.id, { status: 'done', endedAt: new Date() });
 
   if (action === 'abort') {
+    if (!(await closeGate())) return;
     await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.aborted', { round });
     await markTaskFailed(
       db,
@@ -2163,42 +2166,75 @@ export async function resolveFixLoopGate(
   // The answer reopens a task that failed while its gate waited (failedTaskRefusesAdvance).
   const fence = { epoch: ctx.orchestrationEpoch, reviveFailed: ctx.status === 'failed' };
 
+  // The close, the record and the reopen share one transaction, under the fence and the repository
+  // lock first when the task failed, so a refused reopen leaves the gate parked, nothing recorded.
+  const reopen = async (
+    target: StepDefinition,
+    targetRound: number,
+    record: (tx: DbHandle) => Promise<void>,
+  ): Promise<boolean> => {
+    try {
+      await db.transaction(async (tx) => {
+        if (fence.reviveFailed) {
+          await admitReopen(tx, ctx.taskId);
+          if (await refuseRevive(tx, ctx.taskId)) throw new GateAnswerOvertaken();
+        }
+        await updateOwnedStep(tx, gateRow.id, { status: 'done', endedAt: new Date() });
+        await record(tx);
+        const pointed = await markTaskRunningWithStep(
+          tx,
+          ctx.taskId,
+          target.metadata.id,
+          computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
+          targetRound,
+          fence,
+        );
+        if (!pointed) throw new GateAnswerOvertaken();
+      });
+      return true;
+    } catch (err) {
+      if (err instanceof GateAnswerOvertaken || err instanceof StepSupersededError) return false;
+      throw err;
+    }
+  };
+
   if (action === 'accept') {
     // Stand down every later fix-loop check + advance forward from the source step so the
     // remaining chain runs to gate 2 with the issues recorded but unresolved.
-    await recordFixLoopAccepted(db, ctx.taskId, gateRow.id);
-    // "Unresolved" is now a decision, not a pending state: this round's findings ship as they
-    // are. Recorded on the rows so a later read cannot mistake them for work still in flight.
-    await acceptRemainingReviewFindings(db, ctx.taskId, round, 'fix-loop-gate');
-    await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.accepted', { round });
     const steps = await buildRunList(ctx, db);
     const idx = steps.findIndex((s) => s.metadata.id === gateRow.stepId);
+    const next = idx < 0 ? undefined : steps[idx + 1];
+    if (next) {
+      const landed = await reopen(next, round, async (tx) => {
+        await recordFixLoopAccepted(tx, ctx.taskId, gateRow.id);
+        await appendEvent(tx, ctx.taskId, gateRow.id, 'fix_loop.accepted', { round });
+      });
+      if (!landed) return;
+      // "Unresolved" is now a decision, not a pending state: this round's findings ship as they
+      // are. Recorded on the rows so a later read cannot mistake them for work still in flight.
+      await acceptRemainingReviewFindings(db, ctx.taskId, round, 'fix-loop-gate');
+      await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
+      return;
+    }
+    if (!(await closeGate())) return;
+    await recordFixLoopAccepted(db, ctx.taskId, gateRow.id);
+    await acceptRemainingReviewFindings(db, ctx.taskId, round, 'fix-loop-gate');
+    await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.accepted', { round });
     if (idx < 0) {
       await markTaskDeadOnStep(db, ctx, gateRow.id, round, gateRow.stepId, [gateRow.stepId]);
       return;
     }
-    const next = steps[idx + 1];
-    if (next) {
-      const pointed = await markTaskRunningWithStep(
-        db,
-        ctx.taskId,
-        next.metadata.id,
-        computeGlobalStepIndex(next.metadata.workflowType, next.metadata.index),
-        round,
-        fence,
-      );
-      if (!pointed) return;
-      await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
-    } else {
-      await markTaskCompleted(db, ctx.taskId, fence);
-    }
+    await markTaskCompleted(db, ctx.taskId, fence);
     return;
   }
 
   // 'continue' (default): grant one more round — re-enter implementation at round + 1.
   // The fix request for that round was recorded when the gate was raised.
   const target = await routableFixLoopTarget(db, ctx, gateRow.id);
-  if (!target) return;
+  if (!target) {
+    await closeGate();
+    return;
+  }
   const nextRound = round + 1;
   // A directive typed at the gate supersedes that recorded request. Written as a NEW event for
   // the same round rather than mutating the old one: task_events is append-only, and
@@ -2206,28 +2242,23 @@ export async function resolveFixLoopGate(
   // one wins with no schema change. Re-fingerprinting the round also stops the oscillation guard
   // from re-tripping on text the user has now arbitrated.
   const directive = instruction.trim();
-  if (directive.length > 0) {
-    const prior = await loadRecordedDiagnosisForRound(db, ctx.taskId, nextRound);
-    await recordFixLoopRequest(db, ctx.taskId, gateRow.id, {
-      diagnosis: buildGateDirectiveDiagnosis(directive, prior.diagnosis),
-      sourceStepId: FIX_LOOP_GATE_SOURCE,
+  const prior =
+    directive.length > 0 ? await loadRecordedDiagnosisForRound(db, ctx.taskId, nextRound) : null;
+  const landed = await reopen(target, nextRound, async (tx) => {
+    if (prior) {
+      await recordFixLoopRequest(tx, ctx.taskId, gateRow.id, {
+        diagnosis: buildGateDirectiveDiagnosis(directive, prior.diagnosis),
+        sourceStepId: FIX_LOOP_GATE_SOURCE,
+        round: nextRound,
+        guidance: prior.guidance,
+      });
+    }
+    await appendEvent(tx, ctx.taskId, gateRow.id, 'fix_loop.continued', {
       round: nextRound,
-      guidance: prior.guidance,
+      directed: directive.length > 0,
     });
-  }
-  await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.continued', {
-    round: nextRound,
-    directed: directive.length > 0,
   });
-  const pointed = await markTaskRunningWithStep(
-    db,
-    ctx.taskId,
-    target.metadata.id,
-    computeGlobalStepIndex(target.metadata.workflowType, target.metadata.index),
-    nextRound,
-    fence,
-  );
-  if (!pointed) return;
+  if (!landed) return;
   await enqueueAdvance(
     ctx.taskId,
     ctx.userId,
