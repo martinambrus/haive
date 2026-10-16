@@ -430,7 +430,10 @@ describe.skipIf(!url)(
         expectOk(reply);
         if (process.env.PROVIDERS_BASELINE_CAPTURE === '1')
           writeFileSync(PROVIDERS_BASELINE, reply.text);
-        expect(reply.text).toBe(readFileSync(PROVIDERS_BASELINE, 'utf8'));
+        // The fixture is formatted by prettier; its canonical compact form keeps the byte-for-byte pin.
+        expect(reply.text).toBe(
+          JSON.stringify(JSON.parse(readFileSync(PROVIDERS_BASELINE, 'utf8'))),
+        );
         expect(entriesOf(reply).map((provider) => provider.id)).toEqual(CORE_PROVIDER_IDS);
       });
     });
