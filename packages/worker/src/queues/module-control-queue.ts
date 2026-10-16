@@ -19,6 +19,7 @@ import {
   type LoadedWorkerModule,
   type WorkerModuleEntry,
 } from '../modules/loader.js';
+import { markModuleSchemaUnready } from '../modules/schema-ready.js';
 
 const log = logger.child({ module: 'module-control' });
 
@@ -131,7 +132,7 @@ export async function runModuleTeardown(
   }
   if (deps.jobsStarted(moduleId)) {
     throw new ModuleTeardownRefusedError(
-      `Module ${moduleId}'s jobs or schema setup are still running on this worker; try again once they have stopped, normally within about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds of the deactivation`,
+      `Module ${moduleId}'s jobs or schema setup are still running on this worker; try again once they have ended. Its jobs normally stop within about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds of the deactivation; a schema setup has no time limit`,
     );
   }
   if (deps.teardownRunning(moduleId)) {
@@ -144,6 +145,7 @@ export async function runModuleTeardown(
   if (teardown) {
     // The jobs reconcile starts nothing of this module while its hook drops data.
     const endTeardown = beginModuleTeardown(moduleId);
+    if (deps.entries[index]?.ensureSchema) markModuleSchemaUnready(moduleId);
     await runHook(
       db,
       moduleId,
