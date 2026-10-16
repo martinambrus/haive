@@ -78,7 +78,10 @@ the module loads again.
   `haive-worker ready` without it (a failure within the wait still stops boot); a late ensure is held
   back like a deactivated module, so the first pass ensures it again and then starts its jobs. At
   shutdown one deadline, `MODULE_SHUTDOWN_WAIT_MS` (5 s), covers the reconcile pass in flight and every
-  module stop together, so the queue closes and the sandbox reap still run inside Docker's ~10 s grace;
+  module stop together, and the terminal manager's stop runs beside it under its own 5 s bound (it
+  refuses a terminal open from the moment it begins), so the queue closes and the sandbox reap still
+  run inside Docker's ~10 s grace, and the shared Redis connections get 1 s to quit before they are
+  dropped;
   a start that succeeds after the stops began stops itself, and a second signal waits on the shutdown
   already running (a third exits at once). A task type that uses the module, as its source or
   through any step, is
