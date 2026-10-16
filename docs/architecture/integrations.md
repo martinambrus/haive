@@ -257,7 +257,11 @@ a missing signing key or tool names the broker could not list fail `integrations
 `integration-tools-unlistable`. The run is written by `insertStampedRun`: one transaction that takes
 `lockTaskIntegrations` (the lock the choice PUT and DELETE take first), resolves again, records the
 grants from that resolution and inserts the run stamped with its bindings; a required binding lost
-since the first resolution writes nothing and fails the step. Bindings make the dispatch need an
+since the first resolution writes nothing and fails the step. In a fan-out only the first run goes
+through it: that run's stamp is the fan-out's, and every later agent is inserted with the same
+bindings, with no second resolution and no grant write, so a choice changed meanwhile applies from the
+next dispatch (an agent can then carry an account removed after the first insert, and the broker
+refuses its calls `connection-unavailable`). Bindings make the dispatch need an
 MCP-capable CLI, and the prompt names each provider (its id when the display name is not one safe line
 or names an agent path) with the tools the agent will see, write tools only while the owner's switch
 is on, never the account. The prompt and the CLI choice come from the first resolution and the stamp
