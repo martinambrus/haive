@@ -973,6 +973,7 @@ export async function resolveAuthMounts(
   db: Database,
   provider: CliProviderRecord,
   taskId: string,
+  sandboxImage: string | null,
 ): Promise<DockerVolumeMount[]> {
   const providerName = provider.name as CliProviderName;
   await assertUserAuthReady(db, provider);
@@ -993,6 +994,8 @@ export async function resolveAuthMounts(
   // RTK.md / @-ref artifacts). Best-effort — failures are logged inside
   // the seeder and don't block CLI execution. Project-level files written
   // by step 07 cover the case where the user's CLI ignores home settings.
+  // `sandboxImage` is the image the CLI runs in: the seed writes only hooks
+  // that image's rtk runs.
   const taskRow = await db
     .select({ repositoryId: schema.tasks.repositoryId })
     .from(schema.tasks)
@@ -1006,7 +1009,7 @@ export async function resolveAuthMounts(
       .where(eq(schema.repositories.id, repoId))
       .limit(1);
     if (repoRow[0]?.rtkEnabled) {
-      await seedRtkInTaskVolume(taskId, providerName);
+      await seedRtkInTaskVolume(taskId, providerName, sandboxImage);
     }
   }
 

@@ -38,7 +38,13 @@ export const initBundleUploadRequestSchema = z.object({
 
 export type InitBundleUploadRequest = z.infer<typeof initBundleUploadRequestSchema>;
 
-export const bundleUploadStatusSchema = z.enum(['uploading', 'complete', 'cancelled']);
+export const bundleUploadStatusSchema = z.enum([
+  'uploading',
+  'completing',
+  'complete',
+  'cancelled',
+  'reaping',
+]);
 
 export const bundleUploadSessionSchema = z.object({
   id: z.string().uuid(),

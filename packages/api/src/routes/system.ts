@@ -29,7 +29,7 @@ systemRoutes.get('/pause', async (c) => {
 systemRoutes.get('/state', async (c) => {
   const [globalPause, rawMaintenance] = await Promise.all([
     configService.getBoolean(CONFIG_KEYS.GLOBAL_PAUSE, false),
-    configService.get(CONFIG_KEYS.MAINTENANCE_STATE),
+    configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
   ]);
   return c.json({ globalPause, maintenance: parseMaintenanceState(rawMaintenance) });
 });

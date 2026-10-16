@@ -7,10 +7,16 @@ files through the ordinary attachment route and finalizes with the `start` task 
 claims `status = 'created'` in one atomic UPDATE (a second click matches no row and enqueues
 nothing). An upload that fails therefore cannot start anything — the draft is the repair
 surface, reachable from its Attachments tab. `POST /tasks` takes the same `deferStart`, and the
-New Task page sends it only when files are picked; there the rule differs: the page uploads the
-files, then sends `start` whatever the uploads did (the task page's Attachments panel is the retry
-surface), and a `start` that never arrives (the tab closed mid-upload, a drain refusing it) leaves
-the task `created` with the task page's Start as the way on. This replaced the inline-document seed hook,
+New Task page sends it only when files are picked; there the rule differs: the page tries every
+file, then sends `start` whatever the uploads did (the task page's Attachments panel is the retry
+surface). When any upload failed it stays put and names each failed file with its error, says
+whether the task started, and links the task; the form stays locked, so the submit cannot create a
+second task. The task page's Attachments tab does the same with a pick: it tries every file, reloads
+once, and lists each failure by its path inside a picked folder until the next pick (a reload does not
+clear it). A `start` that never arrives (the tab closed mid-upload, a drain refusing it) leaves
+the task `created`, and the task page says so in a banner with Start (`taskNotStarted`,
+`web/src/lib/task-state.ts`, keyed on the status and the dead stamp). A normal create never shows it:
+`markQueuedForStart` moves the row to `queued` in the create transaction. This replaced the inline-document seed hook,
 which could carry exactly one file. `_ATTACHMENTS.md` is regenerated after every write: the
 prompt notice names that file unconditionally, so a path that skipped it handed the agent a
 pointer to nothing. Every writer — upload, delete and archive expansion — goes through ONE

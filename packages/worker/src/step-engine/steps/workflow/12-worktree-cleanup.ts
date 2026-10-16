@@ -14,6 +14,12 @@ import { gitRun } from '../../../repo/git-exec.js';
 import { detectOrigin, getOriginUrl, pushBranch } from '../../../repo/git-push.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import {
+  listBranchProjectionEdits,
+  projectionRevertNotes,
+  putBackProjections,
+  warnStep,
+} from '../../../project-state/branch-revert.js';
+import {
   describeChanges,
   readUncommittedChanges,
   type UncommittedChanges,
@@ -43,6 +49,8 @@ interface WorktreeCleanupDetect {
   /** What the worktree holds that no commit does, which the merge cannot carry. Null when git
    *  could not say, or the output predates the field: never a clean tree. */
   uncommitted: UncommittedChanges | null;
+  /** Haive's own files the branch changed since it forked; absent on an output that predates it. */
+  projectionEdits?: string[];
   /** For the manual-delete terminal deep-link on the remove-only path. */
   repositoryId: string | null;
   /** Whether the repo has a pushable `origin` remote (gates the base-push fields). */
@@ -103,6 +111,37 @@ function uncommittedNoteBody(uncommitted: UncommittedChanges | null): string {
   ].join('\n');
 }
 
+function projectionEditsNoteBody(paths: readonly string[]): string {
+  const listed = paths.slice(0, MAX_LISTED_UNCOMMITTED).map((p) => `- ${codeSpan(p)}`);
+  const more = paths.length - listed.length;
+  if (more > 0) listed.push(`- and ${more} more`);
+  return [
+    `This branch changed **${paths.length}** of Haive's own project files (the project record and the plan). Haive puts them back to where the branch forked, in one commit, before it merges, pushes or leaves the branch, and says so on this step:`,
+    '',
+    ...listed,
+    '',
+    "To change one, use the repository's settings.",
+  ].join('\n');
+}
+
+/** Puts the branch's Haive files back where 12 leaves it as it is, and warns for every action. */
+async function noteHaiveFiles(
+  ctx: StepContext,
+  d: WorktreeCleanupDetect,
+  action: CleanupAction,
+): Promise<void> {
+  if ((action === 'keep' || action === 'remove_only') && d.branchName) {
+    const target = [d.baseBranch, d.parentBranch].filter((b): b is string => !!b);
+    const branch = d.branchName;
+    await warnStep(
+      ctx,
+      await putBackProjections({ ctx, worktree: d.worktreePath, branch, target }),
+    );
+    return;
+  }
+  await warnStep(ctx, await projectionRevertNotes(ctx.db, ctx.taskId));
+}
+
 export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, WorktreeCleanupApply> = {
   metadata: {
     id: '12-worktree-cleanup',
@@ -122,6 +161,13 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     // the only one whose history may be collapsed. The form's squashMerge checkbox is the
     // per-task opt-out on top of this.
     squashable: true,
+    putBackBeforeMerge: ({ ctx, worktreePath, featureBranch, baseBranch }) =>
+      putBackProjections({
+        ctx,
+        worktree: worktreePath,
+        branch: featureBranch,
+        target: baseBranch,
+      }),
     buildFixPrompt: ({ featureBranch, guidance }) =>
       buildMergeFixPrompt(featureBranch, undefined, guidance, true),
     buildClarificationForm: ({ baseBranch, featureBranch, uncertainty }) => ({
@@ -192,6 +238,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     // affordances (origin presence + the user's credentials).
     let parentBranch: string | null = null;
     let uncommitted: UncommittedChanges | null = null;
+    let projectionEdits: string[] = [];
     let hasOrigin = false;
     let originUrl: string | null = null;
     let boundCredentialId: string | null = null;
@@ -202,6 +249,16 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       parentBranch = res.code === 0 ? res.stdout.trim() : null;
       if (output.worktreePath)
         uncommitted = await readUncommittedChanges(output.worktreePath, MAX_LISTED_UNCOMMITTED);
+      if (output.branchName) {
+        projectionEdits = await listBranchProjectionEdits({
+          repoPath: ctx.repoPath,
+          branch: output.branchName,
+          target: [output.baseBranch, parentBranch].filter((b): b is string => !!b),
+        }).catch((err: unknown) => {
+          ctx.logger.warn({ err }, "the branch's Haive project file edits could not be listed");
+          return [];
+        });
+      }
       hasOrigin = await detectOrigin(ctx.repoPath);
       originUrl = hasOrigin ? await getOriginUrl(ctx.repoPath) : null;
       const repo = repositoryId
@@ -243,6 +300,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       baseBranch: output.baseBranch ?? null,
       parentBranch,
       uncommitted,
+      projectionEdits,
       repositoryId,
       hasOrigin,
       originUrl,
@@ -315,6 +373,17 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         id: 'uncommittedNote',
         label: 'Uncommitted changes',
         body: uncommittedNoteBody(uncommitted),
+        variant: 'warning',
+      });
+    }
+
+    const edited = detected.projectionEdits ?? [];
+    if (edited.length > 0) {
+      fields.push({
+        type: 'note',
+        id: 'projectionEditsNote',
+        label: "Haive's own files changed on this branch",
+        body: projectionEditsNoteBody(edited),
         variant: 'warning',
       });
     }
@@ -524,6 +593,8 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       values.action === 'create_pr'
         ? values.action
         : 'keep';
+
+    await noteHaiveFiles(ctx, d, action);
 
     if (action === 'keep') {
       const held = d.uncommitted?.count ?? 0;
@@ -769,6 +840,13 @@ async function openPullRequestForCleanup(
   const title = values.prTitle?.trim() || d.taskTitle || d.branchName;
   const body = values.prBody ?? d.taskDescription ?? '';
   const finalizeMode = prFinalizeModeSchema.catch('auto').parse(values.finalizeMode);
+
+  // Local base leads: a record it holds ahead of origin is in the branch's history, and origin's would undo it.
+  const target = [baseBranch, `origin/${baseBranch}`, ...(d.baseBranch ? [d.baseBranch] : [])];
+  await warnStep(
+    ctx,
+    await putBackProjections({ ctx, worktree: d.worktreePath, branch: d.branchName, target }),
+  );
 
   // Make sure the feature branch is on origin. It was pushed at 11a-gate-4-push, but
   // fix loops after that push can add commits. Host-side; git works here (the sandbox

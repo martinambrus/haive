@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { CLI_INSTALL_METADATA, imageRepo, type CliProviderName } from '@haive/shared';
 import { SANDBOX_CORE_IMAGE } from './image-composer.js';
+import { sandboxCoreIdentity } from './sandbox-core-image.js';
 import { buildProviderInstallLines } from '../cli-versions/codegen.js';
 
 export interface ImageTagResolution {
@@ -10,6 +11,10 @@ export interface ImageTagResolution {
 }
 
 const BASE_IMAGE = SANDBOX_CORE_IMAGE;
+/** Names the base definition an image is built on. The tag is a hash of the image's own
+ *  Dockerfile, which names the base as `:latest`, so without this line a rebuilt base left every
+ *  tag where it was and the images built on the old base went on being served. */
+const BASE_IDENTITY_LABEL = 'haive.base-identity';
 
 export function resolveImageTag(params: {
   name: CliProviderName;
@@ -26,7 +31,7 @@ export function resolveImageTag(params: {
 
   if (!hasInstall && !hasExtras) return null;
 
-  const blocks = [`FROM ${BASE_IMAGE}`];
+  const blocks = [`FROM ${BASE_IMAGE}\nLABEL ${BASE_IDENTITY_LABEL}="${sandboxCoreIdentity()}"`];
   if (hasInstall) blocks.push(codegen.lines.join('\n'));
   if (hasExtras) blocks.push(extra);
   const dockerfileLines = [blocks.join('\n\n')];
@@ -53,7 +58,8 @@ export function resolveImageTag(params: {
     // Dockerfile is byte-identical hash identically, so claude-code and its piggybacks
     // (zai / ollama / muse / openrouter) still collapse onto ONE tag and one build. Only a real
     // change to the rendered content moves the tag — including changes name+version cannot
-    // see, such as a new BASE_IMAGE or a different autoUpdateDisable knob.
+    // see, such as a new BASE_IMAGE, a rebuilt base definition (BASE_IDENTITY_LABEL) or a
+    // different autoUpdateDisable knob.
     //
     // The version segment stays for legibility (the tag says which CLI build it is); the hash
     // is what correctness rests on. Nothing parses this string — every consumer stores it,

@@ -647,6 +647,29 @@ cleaned, on a cancel once no sandbox is left, and on every path that marks the t
 Stop has no worker hook; the sweep covers it. A task marked dead holds no checkout: every
 checkout-holder check requires `dead_at IS NULL`, and its writer is refused as released.
 
+A task branch carries Haive's projection files only as its base had them. Before 12 merges a task
+branch (`merge_remove` or `create_pr`, same-branch or cross-branch), before 11a or 99 push it, and when
+12 keeps or removes it, Haive puts back every `.haive-data/state/` and plan projection the branch
+changed since it forked (`project-state/branch-revert.ts`); the knowledge base, the learnings and the
+dependency-ownership files stay as the branch has them. One commit built from a scratch index moves
+the branch ref, and only while its tip is still the one judged; worktree files that still equal the
+old tip are restored and handed back to the sandbox user, and a file a person edited keeps its bytes
+with only its index entry moved. Each put-back is a `branch.projections_put_back` task event (its
+paths, commit, the tip before and the fork point), written before the ref moves and taken back only
+when the move is refused, and the step's warning is rebuilt from those events on every pass, so a
+Retry shows it again; 12's form lists the paths before the choice. A pass first finishes the last
+put-back this task recorded for the branch: a ref still at the old tip moves to the recorded commit,
+and a moved ref gets the worktree sync it never had, for the paths whose index entry still holds the
+old tip, and the hand-back again for the paths an earlier pass restored. The record notes when the
+worktree is done, so a later pass touches nothing. A record whose commit the branch no longer contains is dropped, and a git failure in any of
+this, a worktree status or HEAD read included, and a restored file the pass cannot hand back, fail
+the step rather than leave the worktree unsynced. 99's
+push stays best effort but its put-back does not: a put-back that fails fails 99, and with a push
+asked for, the Retry that then finds nothing left to commit still puts back and pushes. The
+fork point is taken from the local base first: a record the local base holds ahead of origin is in
+the branch's history, and origin's copy would undo it. A pass that finds the feature's merge already
+open puts nothing back, since that merge's tip must not move.
+
 **The record carries the portable settings and the environment.** `portableSettingsOf`
 (`@haive/shared/project-state`, `settings.ts`) maps the repository row to `settings/<name>.json`:
 `scope-exclude-globs`, `rtk-enabled`, `rtk-version`, `lsp-servers`, `lsp-server-versions`,

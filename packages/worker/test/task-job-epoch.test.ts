@@ -1308,6 +1308,35 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
       },
     );
 
+    it.each(['draining', 'maintenance'])(
+      'closes no gate and records no answer for a task that failed while its gate waited when the system is %s under the transaction',
+      async (state) => {
+        h.state.readsAnswer = true;
+        h.state.taskStatus = 'failed';
+        vi.spyOn(configService, 'getFresh').mockResolvedValue(state);
+        const failedCtx = { ...ctx(), status: 'failed' };
+
+        for (const [action, target] of [
+          ['accept', failedCtx],
+          ['continue', withFixTarget(failedCtx)],
+        ] as const) {
+          await expect(
+            resolveFixLoopGate(
+              db as never,
+              target as never,
+              gate as never,
+              action,
+              1,
+              'use the other flag',
+            ),
+          ).rejects.toMatchObject({ name: 'NewWorkHeld' });
+        }
+
+        expect(h.state.stepPatches).toEqual([]);
+        expect(h.state.inserted).toEqual([]);
+      },
+    );
+
     it('completes a task that failed while its last gate waited, answering accept', async () => {
       h.state.readsAnswer = true;
       h.state.taskStatus = 'failed';

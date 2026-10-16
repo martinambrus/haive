@@ -1746,10 +1746,10 @@ describe('hash vectors written while an embedding endpoint is configured', () =>
           "app.ts",
           "function-greeting",
           0,
-          "c2cb0fd3dd89b0e03d7c2ea26a1e60baf779b69372feaa4e4b2dccaf06cd0ebe",
+          "5491d9bce9084323b514db07b16f08617014d6e112abdf32be902b1bc4cdd4fc",
           "[app.ts > function greeting]
 
-      function greeting() { return "hello"; }",
+      export function greeting() { return "hello"; }",
           "[0.1,0.2]",
         ],
       ]
