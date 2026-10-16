@@ -3,6 +3,7 @@ import {
   IntegrationToolNameError,
   getIntegrationProvider,
   integrationTools,
+  listIntegrationCategories,
   lockTaskIntegrations,
   recordTaskGrants,
   resolveStepIntegrations,
@@ -10,6 +11,8 @@ import {
   type IntegrationResolution,
 } from '@haive/shared/integrations';
 import {
+  parseCategoryId,
+  parseProviderId,
   parseStepId,
   type ComposableStepEntry,
   type IntegrationRequirement,
@@ -39,6 +42,40 @@ export function stepIntegrationRequirements(
 ): readonly IntegrationRequirement[] {
   const id = stepDef.metadata.id;
   return parseStepId(id)?.kind === 'custom' ? [] : (catalog.get(id)?.integrations ?? []);
+}
+
+function undeclaredModuleTarget(requirement: IntegrationRequirement): string | null {
+  const { category, provider } = requirement;
+  if (
+    category !== undefined &&
+    parseCategoryId(category)?.kind === 'module' &&
+    !listIntegrationCategories().some((declared) => declared.id === category)
+  ) {
+    return `the category ${category}`;
+  }
+  if (
+    provider !== undefined &&
+    parseProviderId(provider)?.kind === 'module' &&
+    getIntegrationProvider(provider) === undefined
+  ) {
+    return `the provider ${provider}`;
+  }
+  return null;
+}
+
+export function assertModuleIntegrationsDeclared(
+  entries: ReadonlyMap<string, ComposableStepEntry>,
+): void {
+  for (const entry of entries.values()) {
+    for (const requirement of entry.integrations ?? []) {
+      const target = undeclaredModuleTarget(requirement);
+      if (target !== null) {
+        throw new Error(
+          `Composable entry ${entry.stepId} requires ${target}, which no loaded module declares`,
+        );
+      }
+    }
+  }
 }
 
 export function assertIntegrationsDeliverable(

@@ -1,0 +1,59 @@
+{
+  "providers": [
+    {
+      "id": "github",
+      "displayName": "GitHub",
+      "categories": ["forge"],
+      "selfHosted": false,
+      "enabled": true,
+      "writeEnabled": false,
+      "canWrite": true,
+      "writeScopes": { "device": ["repo"], "oauth2": ["repo"] },
+      "connect": []
+    },
+    {
+      "id": "gitea",
+      "displayName": "Gitea",
+      "categories": ["forge"],
+      "selfHosted": true,
+      "enabled": true,
+      "writeEnabled": false,
+      "canWrite": true,
+      "writeScopes": {},
+      "connect": []
+    },
+    {
+      "id": "gitlab",
+      "displayName": "GitLab",
+      "categories": ["forge"],
+      "selfHosted": true,
+      "enabled": true,
+      "writeEnabled": false,
+      "canWrite": true,
+      "writeScopes": {},
+      "connect": []
+    },
+    {
+      "id": "bitbucket_cloud",
+      "displayName": "Bitbucket Cloud",
+      "categories": ["forge"],
+      "selfHosted": false,
+      "enabled": true,
+      "writeEnabled": false,
+      "canWrite": true,
+      "writeScopes": {},
+      "connect": []
+    },
+    {
+      "id": "bitbucket_server",
+      "displayName": "Bitbucket Server",
+      "categories": ["forge"],
+      "selfHosted": true,
+      "enabled": true,
+      "writeEnabled": false,
+      "canWrite": true,
+      "writeScopes": {},
+      "connect": []
+    }
+  ]
+}
