@@ -103,8 +103,15 @@ describe('the worker entry point', () => {
   });
 
   it('bounds the in-flight reconcile pass and the module stops with one call', () => {
-    expect(boot).toMatch(/await moduleJobs\.shutdown\(moduleJobsPass\);/);
+    expect(boot).toMatch(/moduleJobs\.shutdown\(moduleJobsPass\)/);
     expect(boot).not.toMatch(/await moduleJobsPass;/);
     expect(boot).not.toMatch(/moduleJobs\.stopAll\(/);
+  });
+
+  it('stops the terminal manager beside the module shutdown, not after it', () => {
+    expect(boot).toMatch(
+      /await Promise\.all\(\[\s*moduleJobs\.shutdown\(moduleJobsPass\),\s*terminalManager\.stop\(\)/,
+    );
+    expect(boot).not.toMatch(/await terminalManager\.stop\(\)/);
   });
 });

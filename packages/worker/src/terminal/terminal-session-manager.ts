@@ -40,6 +40,7 @@ import { resolveGitEnv, type GitEnvScope } from '../secrets/user-git-identity.js
 const log = logger.child({ module: 'terminal-session-manager' });
 
 const TMUX_SESSION = 'haive-task';
+const STOP_WAIT_MS = 5_000;
 
 interface SessionState {
   sessionId: string;
@@ -137,14 +138,29 @@ export class TerminalSessionManager {
   async stop(): Promise<void> {
     if (!this.started) return;
     this.started = false;
-    for (const session of this.sessions.values()) {
-      await this.teardownSession(session, 'manager-stop').catch(() => undefined);
-    }
-    this.sessions.clear();
-    await this.subscriber.unsubscribe(TERMINAL_REQUEST_CHANNEL).catch(() => undefined);
-    if (this.ownsSubscriber) {
-      await this.subscriber.quit().catch(() => undefined);
-    }
+    const stopping = (async () => {
+      for (const session of this.sessions.values()) {
+        await this.teardownSession(session, 'manager-stop').catch(() => undefined);
+      }
+      this.sessions.clear();
+      await this.subscriber.unsubscribe(TERMINAL_REQUEST_CHANNEL).catch(() => undefined);
+      if (this.ownsSubscriber) {
+        await this.subscriber.quit().catch(() => undefined);
+      }
+    })();
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        log.warn(
+          { sessions: [...this.sessions.keys()], waitMs: STOP_WAIT_MS },
+          `terminal manager still stopping after ${STOP_WAIT_MS / 1000} s; going on without it`,
+        );
+        resolve();
+      }, STOP_WAIT_MS);
+      void stopping.then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   private async handleSubscriberMessage(channel: string, raw: string): Promise<void> {

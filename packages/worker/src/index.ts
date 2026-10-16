@@ -312,10 +312,12 @@ async function main(): Promise<void> {
     cliStreamLogReaper.stop();
     stopRuntimeLimitsWatch();
     clearInterval(moduleJobsTimer);
-    await moduleJobs.shutdown(moduleJobsPass);
-    await terminalManager.stop().catch((err) => {
-      logger.warn({ err }, 'terminal manager stop failed');
-    });
+    await Promise.all([
+      moduleJobs.shutdown(moduleJobsPass),
+      terminalManager.stop().catch((err) => {
+        logger.warn({ err }, 'terminal manager stop failed');
+      }),
+    ]);
     await Promise.allSettled([
       repoWorker.close(true),
       bundleWorker.close(true),
