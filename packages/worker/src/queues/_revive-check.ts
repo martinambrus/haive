@@ -43,20 +43,26 @@ export async function readMaintenanceState(taskId: string): Promise<MaintenanceS
 }
 
 /** Call first in the transaction that reopens a failed task; a state write waits for its commit. */
-export async function admitReopen(tx: DbTx, taskId: string): Promise<void> {
+export async function admitReopen(
+  tx: DbTx,
+  taskId: string,
+): Promise<{ held: boolean; state: MaintenanceState }> {
   await lockNewWorkFenceShared(tx);
   const state = parseMaintenanceState(
     await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE).catch((err: unknown) => {
       throw new MaintenanceStateUnreadable(err);
     }),
   );
-  if (!refusesNewWork(state)) return;
-  const [task] = await tx
-    .select({ status: schema.tasks.status })
-    .from(schema.tasks)
-    .where(eq(schema.tasks.id, taskId))
-    .limit(1);
-  if (task?.status === 'failed') throw new NewWorkHeld(state);
+  const held = refusesNewWork(state);
+  if (held) {
+    const [task] = await tx
+      .select({ status: schema.tasks.status })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId))
+      .limit(1);
+    if (task?.status === 'failed') throw new NewWorkHeld(state);
+  }
+  return { held, state };
 }
 
 /** The api's `refuseReviveBesideLive` for the worker: the creation's checks under the repository

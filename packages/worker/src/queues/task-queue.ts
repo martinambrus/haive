@@ -394,16 +394,17 @@ async function resolveCurrentStepIndex(
 
 /** Run a task write that can lift a failed task (no fence, or one that may revive) after the
  *  creation's checks, in one transaction; false when one refused, recorded, or nothing landed.
- *  Throws NewWorkHeld, with nothing written, while the system drains or is in maintenance, and
+ *  While the system drains or is in maintenance it throws NewWorkHeld, with nothing written, for a
+ *  failed task, and the write of any other never matches one that failed since; it throws
  *  MaintenanceStateUnreadable, with nothing written, when that state cannot be read. */
 async function writeReviving(
   db: Database | DbHandle,
   taskId: string,
   stepId: string,
   fence: TaskFence | undefined,
-  write: (handle: Database | DbHandle) => Promise<boolean>,
+  write: (handle: Database | DbHandle, held: boolean) => Promise<boolean>,
 ): Promise<boolean> {
-  if (fence && !fence.reviveFailed) return write(db);
+  if (fence && !fence.reviveFailed) return write(db, false);
   const refuse = async (reason: string, extra: Record<string, unknown> = {}) => {
     logger.info(
       { taskId, stepId, reason },
@@ -418,10 +419,10 @@ async function writeReviving(
   };
   try {
     const refused = await db.transaction(async (tx) => {
-      await admitReopen(tx, taskId);
+      const { held } = await admitReopen(tx, taskId);
       const refusal = await refuseRevive(tx, taskId);
       if (refusal) return refusal;
-      return (await write(tx)) ? null : 'overtaken';
+      return (await write(tx, held)) ? null : 'overtaken';
     });
     if (refused === null) return true;
     if (refused === 'overtaken') return false;
@@ -446,7 +447,7 @@ export async function markTaskWaiting(
   fence?: TaskFence,
 ): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  return writeReviving(db, taskId, stepId, fence, async (handle) => {
+  return writeReviving(db, taskId, stepId, fence, async (handle, held) => {
     const [parked] = await handle
       .update(schema.tasks)
       .set({
@@ -456,7 +457,7 @@ export async function markTaskWaiting(
         currentRound: round,
         updatedAt: new Date(),
       })
-      .where(taskWriteTarget(taskId, fence))
+      .where(taskWriteTarget(taskId, fence, held))
       .returning({ id: schema.tasks.id });
     return parked !== undefined;
   });
@@ -475,7 +476,7 @@ export async function markTaskRunningWithStep(
   fence?: TaskFence,
 ): Promise<boolean> {
   const currentStepIndex = await resolveCurrentStepIndex(db, taskId, stepId, round, stepIndex);
-  return writeReviving(db, taskId, stepId, fence, async (handle) => {
+  return writeReviving(db, taskId, stepId, fence, async (handle, held) => {
     const [pointed] = await handle
       .update(schema.tasks)
       .set({
@@ -495,9 +496,9 @@ export async function markTaskRunningWithStep(
       })
       // …but never on a CANCELLED or COMPLETED task. Clearing completedAt is what makes this write
       // able to resurrect the dead: a park tick on a cancelled task called this and flipped it back
-      // to `running` one poll after the user cancelled, over and over. `failed` stays writable —
-      // the allowance auto-resume legitimately revives a failed task through here.
-      .where(taskWriteTarget(taskId, fence))
+      // to `running` one poll after the user cancelled, over and over. `failed` stays writable,
+      // outside a hold — an answer to a failed task's form legitimately reopens it through here.
+      .where(taskWriteTarget(taskId, fence, held))
       .returning({ id: schema.tasks.id });
     return pointed !== undefined;
   });

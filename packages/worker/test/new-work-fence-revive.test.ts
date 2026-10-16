@@ -87,8 +87,17 @@ function setup(status: 'failed' | 'running' = 'failed') {
   const events = () => fake.rows(schema.taskEvents).map((r) => r.eventType);
   const revive = () =>
     markTaskRunningWithStep(db, TASK, STEP, 1, 0, { epoch: 3, reviveFailed: true });
+  const reviveUnfenced = () => markTaskRunningWithStep(db, TASK, STEP, 1, 0);
   const park = () =>
     markTaskWaiting(db, TASK, STEP, 1, 0, 'waiting_user', { epoch: 3, reviveFailed: true });
+  /** A Stop fails the task after the read that admitted it: the first update finds it failed. */
+  const stoppedBeforeTheWrite = () => {
+    const logged = fake.hooks.beforeUpdate;
+    fake.hooks.beforeUpdate = async (table) => {
+      await logged?.(table);
+      fake.patch(schema.tasks, TASK, { status: 'failed', errorMessage: 'stopped' });
+    };
+  };
   const resume = () =>
     autoResumeFailedStep(db, {
       taskId: TASK,
@@ -98,7 +107,19 @@ function setup(status: 'failed' | 'running' = 'failed') {
       via: 'test',
       watchSince: null,
     });
-  return { fake, log, stored, unreadable, task, events, revive, park, resume };
+  return {
+    fake,
+    log,
+    stored,
+    unreadable,
+    task,
+    events,
+    revive,
+    reviveUnfenced,
+    park,
+    stoppedBeforeTheWrite,
+    resume,
+  };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -107,6 +128,11 @@ describe.each([
   {
     write: 'a pointer write',
     reopen: (t: ReturnType<typeof setup>) => t.revive(),
+    lands: 'running',
+  },
+  {
+    write: 'a pointer write with no fence',
+    reopen: (t: ReturnType<typeof setup>) => t.reviveUnfenced(),
     lands: 'running',
   },
   { write: 'a park', reopen: (t: ReturnType<typeof setup>) => t.park(), lands: 'waiting_user' },
@@ -136,13 +162,32 @@ describe.each([
     },
   );
 
-  it('writes when the task is no longer failed, whatever the system holds', async () => {
-    const t = setup('running');
-    t.stored('draining');
+  it.each(['draining', 'maintenance'])(
+    'writes when the task is no longer failed and stays so, while the system is %s',
+    async (state) => {
+      const t = setup('running');
+      t.stored(state);
 
-    expect(await reopen(t)).toBe(true);
-    expect(t.task()).toMatchObject({ status: lands });
-  });
+      expect(await reopen(t)).toBe(true);
+      expect(t.task()).toMatchObject({ status: lands });
+    },
+  );
+
+  it.each(['draining', 'maintenance'])(
+    'reopens nothing and writes nothing when the task fails between the read that admitted it and the write, while the system is %s',
+    async (state) => {
+      const t = setup('running');
+      t.stored(state);
+      t.stoppedBeforeTheWrite();
+
+      expect(await reopen(t)).toBe(false);
+
+      expect(t.task()).toMatchObject({ status: 'failed', errorMessage: 'stopped' });
+      expect(t.events()).toEqual([]);
+      expect(t.log.slice(0, 2)).toEqual([FENCE, READS_STATE]);
+      expect(t.log).toContain('updates tasks');
+    },
+  );
 
   it('reopens nothing and writes nothing when the stored state cannot be read under the fence', async () => {
     const t = setup();
@@ -195,10 +240,41 @@ describe('the allowance auto-resume of a failed task', () => {
     expect(t.log).toEqual([FENCE, READS_STATE]);
   });
 
-  it('answers false for a task that is no longer failed, whatever the system holds', async () => {
+  it('answers false for a task that is no longer failed', async () => {
     const t = setup('running');
-    t.stored('draining');
+    t.stored('normal');
 
     expect(await t.resume()).toBe(false);
   });
+
+  it.each(['draining', 'maintenance'])(
+    'resumes nothing and writes nothing for a task that is no longer failed, while the system is %s under the fence',
+    async (state) => {
+      const t = setup('running');
+      t.stored(state);
+
+      await expect(t.resume()).rejects.toMatchObject({ name: 'NewWorkHeld', state });
+
+      expect(t.task()).toMatchObject({ status: 'running', allowanceAutoResumeCount: 0 });
+      expect(t.fake.rows(schema.taskSteps)[0]).toMatchObject({ status: 'failed' });
+      expect(t.events()).toEqual([]);
+      expect(t.log).toEqual([FENCE, READS_STATE]);
+    },
+  );
+
+  it.each(['draining', 'maintenance'])(
+    'resumes nothing and writes nothing when the task fails between the read that admitted it and the write, while the system is %s',
+    async (state) => {
+      const t = setup('running');
+      t.stored(state);
+      t.stoppedBeforeTheWrite();
+
+      await expect(t.resume()).rejects.toMatchObject({ name: 'NewWorkHeld', state });
+
+      expect(t.task()).toMatchObject({ allowanceAutoResumeCount: 0 });
+      expect(t.fake.rows(schema.taskSteps)[0]).toMatchObject({ status: 'failed' });
+      expect(t.events()).toEqual([]);
+      expect(t.log).toEqual([FENCE, READS_STATE]);
+    },
+  );
 });

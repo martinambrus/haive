@@ -10,7 +10,7 @@ import {
 } from '@haive/database';
 import { computeFoldContribution } from '@haive/shared/timing';
 import { isProviderOutage } from './cli-exec/failure-class.js';
-import { admitReopen, refuseRevive, type ReviveRefused } from './_revive-check.js';
+import { admitReopen, NewWorkHeld, refuseRevive, type ReviveRefused } from './_revive-check.js';
 
 // Reset a step + its downstream back to `pending` so the worker re-runs the step from
 // detect. Used by the `revise` route (handleResult): a review step asks to re-run an
@@ -238,7 +238,8 @@ export async function autoResumeFailedStep(
   let flipped = false;
   try {
     await db.transaction(async (tx) => {
-      await admitReopen(tx, taskId);
+      const { held, state } = await admitReopen(tx, taskId);
+      if (held) throw new NewWorkHeld(state);
       const refusal = await refuseRevive(tx, taskId);
       if (refusal) throw new ReviveBlocked(refusal);
       const now = new Date();

@@ -47,16 +47,16 @@ describe('admitReopen, the read under the fence', () => {
     const t = setup();
     t.stored('normal');
 
-    await expect(admitReopen(t.tx, TASK)).resolves.toBeUndefined();
+    await expect(admitReopen(t.tx, TASK)).resolves.toEqual({ held: false, state: 'normal' });
 
     expect(t.log).toEqual(['takes the fence', 'reads the state']);
   });
 
-  it('admits when no state is stored', async () => {
+  it('admits when no state is stored, and reports no hold', async () => {
     const t = setup();
     t.stored(null);
 
-    await expect(admitReopen(t.tx, TASK)).resolves.toBeUndefined();
+    await expect(admitReopen(t.tx, TASK)).resolves.toEqual({ held: false, state: 'normal' });
   });
 
   it.each(['draining', 'maintenance'])(
@@ -71,11 +71,23 @@ describe('admitReopen, the read under the fence', () => {
     },
   );
 
-  it('admits a task that is not failed, whatever the system holds', async () => {
-    const t = setup('running');
-    t.stored('draining');
+  it.each(['draining', 'maintenance'])(
+    'admits a task that is not failed while the system is %s, and reports the hold',
+    async (state) => {
+      const t = setup('running');
+      t.stored(state);
 
-    await expect(admitReopen(t.tx, TASK)).resolves.toBeUndefined();
+      await expect(admitReopen(t.tx, TASK)).resolves.toEqual({ held: true, state });
+
+      expect(t.log).toEqual(['takes the fence', 'reads the state', 'reads the task']);
+    },
+  );
+
+  it('reports no hold for a task that is not failed while the system is normal', async () => {
+    const t = setup('running');
+    t.stored('normal');
+
+    await expect(admitReopen(t.tx, TASK)).resolves.toEqual({ held: false, state: 'normal' });
   });
 
   it.each(['failed', 'running'])(
