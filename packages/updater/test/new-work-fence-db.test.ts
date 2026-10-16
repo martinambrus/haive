@@ -1,8 +1,17 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import postgres, { type Sql } from 'postgres';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configService } from '@haive/shared';
 import { ensureJournal, finishRun, startRun } from '../src/journal.js';
-import { phaseDraining, type UpgradeContext } from '../src/run.js';
+import { phaseCommit, phaseDraining, rollback, type UpgradeContext } from '../src/run.js';
+
+vi.mock('../src/docker.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/docker.js')>()),
+  composeUp: async () => undefined,
+  runOneShot: async () => 'migrated',
+}));
 
 const url = process.env.UPDATER_FENCE_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/updater_fence_test'))
@@ -13,15 +22,18 @@ const BLIND_INDEX = 'updater-fence-test-owner';
 const TYPE = 'updater-fence-test';
 const FENCE = 'haive-new-work-fence';
 
-describe.skipIf(!url)('the new-work fence, taken by the drain, on Postgres', () => {
+describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', () => {
   let updater: Sql;
   let admission: Sql;
+  let admin: Sql;
   let probe: Sql;
+  let holder: Awaited<ReturnType<Sql['reserve']>> | undefined;
   let runId: string;
   let written: string[];
   let logged: { event: string; fields?: Record<string, unknown> }[];
   let proceed: () => void;
   let inFlight: Promise<unknown> | undefined;
+  let updating: Promise<unknown> | undefined;
 
   const context = () =>
     ({
@@ -47,14 +59,28 @@ describe.skipIf(!url)('the new-work fence, taken by the drain, on Postgres', () 
     await holding;
   };
 
+  /** An administrator's PUT /admin/maintenance: its transaction holds the fence exclusively. */
+  const holdFence = async () => {
+    holder = await admin.reserve();
+    await holder`SELECT pg_advisory_lock(hashtextextended(${FENCE}, 0))`;
+  };
+
+  const releaseFence = async () => {
+    if (!holder) return;
+    await holder`SELECT pg_advisory_unlock(hashtextextended(${FENCE}, 0))`;
+    holder.release();
+    holder = undefined;
+  };
+
   const untilWaiting = async () => {
     const deadline = Date.now() + 3_000;
     for (;;) {
       const [row] = await probe<{ n: number }[]>`
         SELECT count(*)::int AS n FROM pg_locks
-         WHERE locktype = 'advisory' AND NOT granted AND mode = 'ExclusiveLock'`;
+         WHERE locktype = 'advisory' AND NOT granted AND mode = 'ExclusiveLock'
+           AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
       if (row && row.n > 0) return;
-      if (Date.now() > deadline) throw new Error('the drain never waited for the new-work fence');
+      if (Date.now() > deadline) throw new Error('the updater never waited for the new-work fence');
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   };
@@ -69,6 +95,7 @@ describe.skipIf(!url)('the new-work fence, taken by the drain, on Postgres', () 
   beforeAll(async () => {
     updater = postgres(url as string, { max: 1, max_lifetime: 0 });
     admission = postgres(url as string, { max: 1 });
+    admin = postgres(url as string, { max: 1, max_lifetime: 0 });
     probe = postgres(url as string, { max: 1 });
     await ensureJournal(updater);
     await updater`DELETE FROM users WHERE email_blind_index = ${BLIND_INDEX}`;
@@ -80,6 +107,7 @@ describe.skipIf(!url)('the new-work fence, taken by the drain, on Postgres', () 
     written = [];
     logged = [];
     inFlight = undefined;
+    updating = undefined;
     await updater`DELETE FROM tasks WHERE type = ${TYPE}`;
     runId = await startRun(updater, {
       fromVersion: '1.0.0',
@@ -93,7 +121,9 @@ describe.skipIf(!url)('the new-work fence, taken by the drain, on Postgres', () 
 
   afterEach(async () => {
     proceed?.();
+    await releaseFence();
     await inFlight?.catch(() => undefined);
+    await updating?.catch(() => undefined);
     await finishRun(updater, runId, 'rolled_back');
   });
 
@@ -101,6 +131,7 @@ describe.skipIf(!url)('the new-work fence, taken by the drain, on Postgres', () 
     await updater`DELETE FROM users WHERE email_blind_index = ${BLIND_INDEX}`;
     await updater.end({ timeout: 5 });
     await admission.end({ timeout: 5 });
+    await admin.end({ timeout: 5 });
     await probe.end({ timeout: 5 });
   });
 
@@ -126,5 +157,59 @@ describe.skipIf(!url)('the new-work fence, taken by the drain, on Postgres', () 
     expect(written).toEqual(['draining']);
     expect(logged).toContainEqual({ event: 'drain-forced', fields: { live: 1 } });
     expect(await fenceIsFree()).toBe(true);
+  });
+
+  describe.each([
+    {
+      name: 'the rollback',
+      run: (ctx: UpgradeContext) => rollback(ctx, 'the new containers never reported the version'),
+      finished: 'rolled-back',
+    },
+    { name: 'the commit', run: phaseCommit, finished: 'done' },
+  ])('$name', ({ run, finished }) => {
+    let envDir: string;
+
+    // A spy cannot reach setEnvVar, a local binding of run.ts, so it writes a file of its own.
+    const upgrade = () =>
+      ({
+        ...context(),
+        envFile: join(envDir, '.env'),
+        fromVersion: '1.0.0',
+        target: { version: '1.1.0' },
+        registry: 'registry.test',
+        network: 'network.test',
+      }) as unknown as UpgradeContext;
+
+    beforeEach(async () => {
+      envDir = await mkdtemp(join(tmpdir(), 'updater-fence-'));
+      await writeFile(join(envDir, '.env'), 'HAIVE_VERSION=1.1.0\n');
+    });
+
+    afterEach(async () => {
+      await rm(envDir, { recursive: true, force: true });
+    });
+
+    it('writes normal at once when no administrator holds the fence, and lets the fence go', async () => {
+      await run(upgrade());
+
+      expect(written).toEqual(['normal']);
+      expect(logged.at(-1)?.event).toBe(finished);
+      expect(await fenceIsFree()).toBe(true);
+    });
+
+    it('waits for an administrator holding the fence, and then writes normal once', async () => {
+      await holdFence();
+
+      updating = run(upgrade());
+      await untilWaiting();
+      expect(written).toEqual([]);
+
+      await releaseFence();
+      await updating;
+
+      expect(written).toEqual(['normal']);
+      expect(logged.at(-1)?.event).toBe(finished);
+      expect(await fenceIsFree()).toBe(true);
+    });
   });
 });

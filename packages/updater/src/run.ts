@@ -239,7 +239,7 @@ export async function rollback(ctx: UpgradeContext, reason: string): Promise<voi
   ctx.log('rollback', { to: ctx.fromVersion, reason });
   await setEnvVar(ctx.envFile, 'HAIVE_VERSION', ctx.fromVersion);
   await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion));
-  await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'normal');
+  await setMaintenanceState(ctx.sql, 'normal');
   await finishRun(ctx.sql, ctx.runId, 'rolled_back', reason);
   ctx.log('rolled-back', { version: ctx.fromVersion });
 }
@@ -262,7 +262,7 @@ export async function phaseCommit(ctx: UpgradeContext): Promise<void> {
   );
   ctx.log('destructive-data-migrations', { tail: out.split('\n').slice(-1)[0] ?? '' });
 
-  await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'normal');
+  await setMaintenanceState(ctx.sql, 'normal');
   await finishRun(ctx.sql, ctx.runId, 'done');
   ctx.log('done', { version: ctx.target.version });
 }
