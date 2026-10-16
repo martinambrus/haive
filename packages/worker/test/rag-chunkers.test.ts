@@ -192,6 +192,824 @@ describe('extractCodeSections — full coverage', () => {
   });
 });
 
+describe('extractCodeSections — PHP docblock attachment', () => {
+  it('gives each function behind an @file docblock its own section, docblock included', () => {
+    const documented = (name: string, doc: string) =>
+      `/**\n * ${doc}\n */\nfunction ${name}() {\n  return 1;\n}\n`;
+    const bare = '<?php\n\nfunction a() {\n  return 1;\n}\n\nfunction b() {\n  return 2;\n}\n';
+    expect(extractCodeSections(bare, 'm.module').map((s) => s.sectionId)).toEqual([
+      'function-a',
+      'function-b',
+    ]);
+
+    const php = `<?php\n/**\n * @file\n * Module summary.\n */\n\n${documented('a', 'Doc A.')}\n${documented('b', 'Doc B.')}`;
+    const byId = new Map(extractCodeSections(php, 'm.module').map((s) => [s.sectionId, s.content]));
+
+    expect([...byId.keys()]).toEqual(['file-docblock', 'function-a', 'function-b']);
+    expect(byId.get('function-a')).toContain('Doc A.');
+    expect(byId.get('function-b')).toContain('Doc B.');
+    expect(byId.get('function-a')).not.toContain('@file');
+    expect(byId.get('function-b')).not.toContain('@file');
+  });
+
+  it('keeps a lone docblock before the first function as the file docblock', () => {
+    const php = '<?php\n/**\n * @file\n * Only docblock.\n */\nfunction a() {\n  return 1;\n}\n';
+    const sections = extractCodeSections(php, 'm.module');
+
+    expect(sections.map((s) => s.sectionId)).toEqual(['file-docblock', 'function-a']);
+    expect(sections[1]!.content.startsWith('function a()')).toBe(true);
+  });
+
+  it('does not let an empty comment open a docblock', () => {
+    const php =
+      '<?php\nfunction a() {\n  /**/\n  return 1;\n}\n\n/**\n * Doc B.\n */\nfunction b() {\n  return 2;\n}\n';
+    const sections = extractCodeSections(php, 'm.module');
+
+    expect(sections.map((s) => s.sectionId)).toEqual(['function-a', 'function-b']);
+    expect(sections[1]!.content).toContain('Doc B.');
+  });
+
+  it('attaches a docblock only to the construct that follows it', () => {
+    const php = [
+      '<?php',
+      '',
+      "define('A', 0);",
+      '',
+      '/**',
+      ' * Documents a statement.',
+      ' */',
+      "define('X', 1);",
+      '',
+      'function middle() {',
+      '  return X;',
+      '}',
+      '',
+      '/**',
+      ' * Doc last.',
+      ' */',
+      'function last() {',
+      '  return 2;',
+      '}',
+      '',
+    ].join('\n');
+    const byId = new Map(extractCodeSections(php, 'm.module').map((s) => [s.sectionId, s.content]));
+
+    expect(byId.has('function-middle')).toBe(true);
+    expect(byId.get('function-last')).toContain('Doc last.');
+    expect(byId.get('function-last')).not.toContain('Documents a statement.');
+  });
+});
+
+describe('extractCodeSections — PHP signatures', () => {
+  it.each([
+    [
+      'a parenthesized default',
+      'function with_default($items = array(), $n = max(1, count(array(2)))) {',
+      'with_default',
+    ],
+    ['a return type', 'function with_type($value): ?string {', 'with_type'],
+    ['a union return type after a space', 'function with_union($v) : int|string {', 'with_union'],
+    ['a by-ref name', 'function &by_ref() {', 'by_ref'],
+    ['upper-case keywords', 'FUNCTION Shouty() {', 'Shouty'],
+    [
+      'a parenthesis in a string default',
+      "function with_glue($glue = ')', $open = '(') {",
+      'with_glue',
+    ],
+  ])('finds a function with %s', (_what, head, name) => {
+    const [section] = extractCodeSections(`<?php\n\n${head}\n  return 1;\n}\n`, 'm.module');
+
+    expect(section?.sectionId).toBe(`function-${name}`);
+    expect(section?.content.startsWith(`<?php\n\n${head}`)).toBe(true);
+  });
+
+  it('reads abstract and final modifiers in any order and skips a method with no body', () => {
+    const php = [
+      '<?php',
+      '',
+      'abstract class Base {',
+      '  abstract public function no_body($x);',
+      '  final public function sealed($x): static {',
+      '    return $this;',
+      '  }',
+      '  static protected final function stamp() {',
+      '    return 1;',
+      '  }',
+      '  Public Static Function Shouty() {',
+      '    return 2;',
+      '  }',
+      '}',
+      '',
+    ].join('\n');
+    const byId = new Map(extractCodeSections(php, 'Base.php').map((s) => [s.sectionId, s.content]));
+
+    expect([...byId.keys()].filter((id) => !id.startsWith('chunk-'))).toEqual([
+      'method-Base-sealed',
+      'method-Base-stamp',
+      'method-Base-Shouty',
+    ]);
+    expect(
+      byId
+        .get('method-Base-sealed')!
+        .startsWith(
+          '<?php\n\nabstract class Base {\n  abstract public function no_body($x);\n  final public function sealed',
+        ),
+    ).toBe(true);
+    expect(byId.get('method-Base-stamp')!.startsWith('static protected final function')).toBe(true);
+    expect(byId.get('method-Base-Shouty')!.startsWith('Public Static Function Shouty')).toBe(true);
+  });
+});
+
+describe('extractCodeSections — JS and TS named constructs', () => {
+  // A short span before the keyword, such as an export, joins the section that follows it.
+  it.each([
+    [
+      'a typed function with nested parentheses',
+      'export function load(cb: (err: Error | null, rows: Row[]) => void, n = Math.max(1, 2)): Promise<void> {\n  return run(cb, n);\n}\n',
+      'load',
+      'export function load(cb:',
+    ],
+    [
+      'generics and an indexed return type',
+      'function pick<T extends Record<string, unknown>>(a: T, key: keyof T): T[keyof T] {\n  return a[key];\n}\n',
+      'pick',
+      'function pick<T',
+    ],
+    [
+      'an export default function',
+      'export default function main(a: number): string {\n  return String(a);\n}\n',
+      'main',
+      'export default function main(',
+    ],
+    [
+      'a typed async arrow',
+      'export const parse = async (raw: string): Promise<Item[]> => {\n  return read(raw);\n};\n',
+      'parse',
+      'export const parse = async (raw',
+    ],
+    [
+      'a typed variable holding an arrow',
+      'const handler: Handler = (req) => {\n  return respond(req);\n};\n',
+      'handler',
+      'const handler: Handler',
+    ],
+  ])('names %s', (_what, src, name, startsWith) => {
+    const [section] = extractCodeSections(src, 'mod.ts');
+
+    expect(section?.sectionId).toBe(`function-${name}`);
+    expect(section?.content.startsWith(startsWith)).toBe(true);
+    expect(section?.content).toMatch(/\}[;\s]*$/);
+  });
+
+  it('reads typed and untyped declarations side by side', () => {
+    const ts = [
+      'function plain(a, b) {',
+      '  return a + b;',
+      '}',
+      '',
+      'const arrow = (a) => {',
+      '  return a;',
+      '};',
+      '',
+      'const single = a => {',
+      '  return a;',
+      '};',
+      '',
+      'function typed(a: number): string {',
+      '  return String(a);',
+      '}',
+      '',
+      'class Box {',
+      '  size = 1;',
+      '}',
+      '',
+    ].join('\n');
+
+    expect(extractCodeSections(ts, 'mod.ts').map((s) => s.sectionId)).toEqual([
+      'function-plain',
+      'function-arrow',
+      'function-single',
+      'function-typed',
+      'class-Box',
+    ]);
+  });
+
+  it('names object-literal members and leaves callbacks and control statements alone', () => {
+    const js = [
+      'jQuery(document).ready(function ($) {',
+      "  $('.item').each(function (i, el) {",
+      "    el.className = 'item-' + i;",
+      '  });',
+      '  if (window.ready) {',
+      '    for (var i = 0; i < 3; i++) {',
+      '      while (i < 0) {',
+      '        break;',
+      '      }',
+      '    }',
+      '    switch (window.mode) {',
+      '      case 0:',
+      '        break;',
+      '    }',
+      '    try {',
+      '      run();',
+      '    } catch (e) {',
+      '      fail(e);',
+      '    }',
+      '  }',
+      '});',
+      '',
+      'var api = {',
+      '  fetch(url, opts) {',
+      '    return run(url, opts);',
+      '  },',
+      '  async save(item) {',
+      '    return store(item);',
+      '  },',
+      '  load: function (id) {',
+      '    return find(id);',
+      '  },',
+      '  build: (spec) => {',
+      '    return make(spec);',
+      '  },',
+      '  quick: z => {',
+      '    return z;',
+      '  },',
+      '};',
+      '',
+    ].join('\n');
+    const sections = extractCodeSections(js, 'api.js');
+
+    expect(sections.map((s) => s.sectionId)).toEqual([
+      'chunk-0',
+      'function-fetch',
+      'function-save',
+      'function-load',
+      'function-build',
+      'function-quick',
+    ]);
+    expect(sections[0]!.content).toContain("$('.item').each(function (i, el) {");
+    expect(sections[0]!.content).toContain('while (i < 0) {');
+    expect(sections[0]!.content).toContain('switch (window.mode) {');
+    expect(sections[0]!.content).toContain('} catch (e) {');
+    expect(sections[2]!.content.startsWith('async save(item) {')).toBe(true);
+
+    // Members are a JS/TS reading: Java shares jsRanges and keeps its class section.
+    const java = 'public class Box {\n  public Box(int size) {\n    this.size = size;\n  }\n}\n';
+    expect(extractCodeSections(java, 'Box.java').map((s) => s.sectionId)).toEqual(['class-Box']);
+  });
+
+  it('keeps a type declaration whole and names a class member under its class', () => {
+    const ts = [
+      'export interface Handler {',
+      '  onEvent: (a: number) => { ok: boolean };',
+      '  run(a: number): void;',
+      '  build(a: number): { ok: boolean };',
+      '  make(a: number): Promise<{ ok: boolean }>;',
+      '  // padding, so that the declaration is long enough to be indexed on its own',
+      '}',
+      '',
+      'export class Store {',
+      '  constructor(private db: Db) {}',
+      '  async get(id: string): Promise<Item | null> {',
+      '    return this.db.find(id);',
+      '  }',
+      '}',
+      '',
+    ].join('\n');
+    const sections = extractCodeSections(ts, 'store.ts');
+
+    expect(sections.map((s) => s.sectionId)).toEqual([
+      'chunk-0',
+      'function-constructor',
+      'function-get',
+    ]);
+    expect(sections[0]!.content).toContain('onEvent: (a: number) => { ok: boolean };');
+    expect(sections[0]!.content).toContain('make(a: number): Promise<{ ok: boolean }>;');
+    expect(sections[2]!.breadcrumb).toEqual(['class Store', 'function get']);
+  });
+
+  it('never takes a control keyword for a name', () => {
+    const js = [
+      '// pass the validator function',
+      'for (var i = 0; i < n; i++) {',
+      '  total += i;',
+      '}',
+      '',
+      '// or a function',
+      'if (total) {',
+      '  report(total);',
+      '}',
+      '',
+    ].join('\n');
+
+    const ids = extractCodeSections(js, 'loop.js').map((s) => s.sectionId);
+
+    expect(ids.filter((id) => !id.startsWith('chunk-'))).toEqual([]);
+  });
+
+  it('does not read the else branch of a ternary as a return type', () => {
+    const js = [
+      'function pick(fn) {',
+      '  return fn ?',
+      '    wrap(function (a) {',
+      '      return a;',
+      '    }) :',
+      '    function (b) {',
+      '      return b;',
+      '    };',
+      '}',
+      '',
+      'var api = {',
+      '  go() {',
+      '    return 1;',
+      '  },',
+      '};',
+      '',
+    ].join('\n');
+
+    expect(extractCodeSections(js, 'pick.js').map((s) => s.sectionId)).toEqual([
+      'function-pick',
+      'function-go',
+    ]);
+  });
+
+  it('reads a signature and a call past a parenthesis inside a string', () => {
+    const js = [
+      'function parse() {',
+      '  advance("(");',
+      '  while (more()) {',
+      '    step();',
+      '  }',
+      '}',
+      '',
+      'var api = {',
+      "  go(sep = ')') {",
+      '    return sep;',
+      '  },',
+      '};',
+      '',
+    ].join('\n');
+
+    expect(extractCodeSections(js, 'parse.js').map((s) => s.sectionId)).toEqual([
+      'function-parse',
+      'function-go',
+    ]);
+  });
+
+  it.each([
+    [
+      'a double-quoted function',
+      'var t = {\n  "parent": function (a, b) {\n    return a + b;\n  },\n};\n',
+      'parent',
+      '"parent": function (a, b) {',
+    ],
+    [
+      'a single-quoted function',
+      "var t = {\n  'child' : function () {\n    return 1;\n  },\n};\n",
+      'child',
+      "'child' : function () {",
+    ],
+    [
+      'a single-quoted arrow',
+      "var t = {\n  'x': (a) => {\n    return a;\n  },\n};\n",
+      'x',
+      "'x': (a) => {",
+    ],
+    [
+      'a typed quoted arrow',
+      'var t = {\n  "typed": async (a: number): Promise<number> => {\n    return a;\n  },\n};\n',
+      'typed',
+      '"typed": async (a: number): Promise<number> => {',
+    ],
+  ])('names a member keyed by %s', (_what, src, name, startsWith) => {
+    const [section] = extractCodeSections(src, 'table.ts');
+
+    expect(section?.sectionId).toBe(`function-${name}`);
+    expect(section?.content.startsWith(`var t = {\n  ${startsWith}`)).toBe(true);
+    expect(section?.content).toMatch(/\}[;\s]*$/);
+  });
+
+  it('leaves a quoted key that is no identifier in the gap', () => {
+    const js = [
+      'var t = {',
+      '  "my-key": function (a) {',
+      `    return ${'a + '.repeat(40)}a;`,
+      '  },',
+      '  "ok": function (b) {',
+      '    return b;',
+      '  },',
+      '};',
+      '',
+    ].join('\n');
+    const sections = extractCodeSections(js, 'table.js');
+
+    expect(sections.map((s) => s.sectionId)).toEqual(['chunk-0', 'function-ok']);
+    expect(sections[0]!.content).toContain('"my-key": function (a) {');
+  });
+});
+
+describe('extractCodeSections — JS and TS leading comments', () => {
+  const byId = (src: string, file: string) =>
+    new Map(extractCodeSections(src, file).map((s) => [s.sectionId, s.content]));
+  // Long enough to stay a section of its own, so only the comment join decides what a construct takes.
+  const HEAD = `'use strict';\nvar banner = '${'x'.repeat(120)}';\n`;
+
+  it.each([
+    ['a // run', '// Adds two numbers.\n// Returns the sum.\n'],
+    ['a block', '/* Adds two numbers. */\n'],
+    ['a JSDoc block', '/**\n * Adds two numbers.\n * @returns {number}\n */\n'],
+  ])('joins %s to the function it precedes', (_what, comment) => {
+    const js = `${HEAD}\n${comment}function add(a, b) {\n  return a + b;\n}\n`;
+
+    expect(byId(js, 'math.js').get('function-add')).toBe(
+      `${comment}function add(a, b) {\n  return a + b;\n}`,
+    );
+  });
+
+  it('joins a comment to the member, the arrow and the class it precedes', () => {
+    const js = [
+      'var api = {',
+      `  banner: '${'x'.repeat(120)}',`,
+      '  // Fetches one item.',
+      '  fetch(url) {',
+      '    return get(url);',
+      '  },',
+      '  /** Saves one item. */',
+      '  save: function (item) {',
+      '    return put(item);',
+      '  },',
+      '  // Builds a spec.',
+      '  build: (spec) => {',
+      '    return make(spec);',
+      '  },',
+      '};',
+      '',
+      '/** Wraps a box. */',
+      'class Box {',
+      '  size = 1;',
+      '}',
+      '',
+    ].join('\n');
+    const sections = byId(js, 'api.js');
+
+    expect(sections.get('function-fetch')!.startsWith('// Fetches one item.\n  fetch(url) {')).toBe(
+      true,
+    );
+    expect(
+      sections
+        .get('function-save')!
+        .startsWith('/** Saves one item. */\n  save: function (item) {'),
+    ).toBe(true);
+    expect(
+      sections.get('function-build')!.startsWith('// Builds a spec.\n  build: (spec) => {'),
+    ).toBe(true);
+    expect(sections.get('class-Box')!.startsWith('/** Wraps a box. */\nclass Box {')).toBe(true);
+  });
+
+  it('steps over export, default and async to reach the comment above them', () => {
+    const ts = [
+      HEAD,
+      '/** Loads rows. */',
+      'export async function load(n: number): Promise<Row[]> {',
+      '  return fetchRows(n);',
+      '}',
+      '',
+      '// The default handler.',
+      'export default class Handler {',
+      '  size = 1;',
+      '}',
+      '',
+      '/** Parses one row. */',
+      'export const parse = (raw: string): Row => {',
+      '  return read(raw);',
+      '};',
+      '',
+    ].join('\n');
+    const sections = byId(ts, 'rows.ts');
+
+    expect(
+      sections.get('function-load')!.startsWith('/** Loads rows. */\nexport async function load('),
+    ).toBe(true);
+    expect(
+      sections
+        .get('class-Handler')!
+        .startsWith('// The default handler.\nexport default class Handler {'),
+    ).toBe(true);
+    expect(
+      sections
+        .get('function-parse')!
+        .startsWith('/** Parses one row. */\nexport const parse = (raw: string)'),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['a block', `/**\n * @file Math helpers.\n * ${'x'.repeat(120)}\n */\n`],
+    ['a // run', `// Math helpers.\n// ${'x'.repeat(120)}\n`],
+  ])('keeps %s that opens the file out of the first function', (_what, header) => {
+    const js = `${header}function first() {\n  return 1;\n}\n\n// Adds two numbers.\nfunction second() {\n  return 2;\n}\n`;
+    const sections = byId(js, 'math.js');
+
+    expect(sections.get('function-first')).toBe('function first() {\n  return 1;\n}');
+    expect(sections.get('function-second')).toBe(
+      '// Adds two numbers.\nfunction second() {\n  return 2;\n}',
+    );
+  });
+
+  it('joins the comment of the first function when a header comment stands before it', () => {
+    const js = `/* Licensed under MIT. ${'x'.repeat(120)} */\n\n/** Adds two numbers. */\nfunction add(a, b) {\n  return a + b;\n}\n`;
+
+    expect(byId(js, 'math.js').get('function-add')).toBe(
+      '/** Adds two numbers. */\nfunction add(a, b) {\n  return a + b;\n}',
+    );
+  });
+
+  it('leaves a comment out when a line of code stands between it and the construct', () => {
+    const js = [
+      HEAD,
+      '// Describes the offset.',
+      'var offset = 1;',
+      '// Adds two numbers.',
+      'function add(a, b) {',
+      '  return a + b + offset;',
+      '}',
+      '',
+    ].join('\n');
+
+    expect(byId(js, 'math.js').get('function-add')).toBe(
+      '// Adds two numbers.\nfunction add(a, b) {\n  return a + b + offset;\n}',
+    );
+  });
+
+  it('reads the comment lines directly above, across blank lines before the construct only', () => {
+    const js = [
+      HEAD,
+      'var offset = 1; // the offset',
+      '// Split from the run below by a blank line.',
+      '',
+      '// Adds two numbers.',
+      '',
+      'function add(a, b) {',
+      '  return a + b + offset;',
+      '}',
+      'function sub(a, b) {',
+      '  return a - b - offset;',
+      '}',
+      '',
+    ].join('\n');
+    const sections = byId(js, 'math.js');
+
+    expect(sections.get('function-add')).toBe(
+      '// Adds two numbers.\n\nfunction add(a, b) {\n  return a + b + offset;\n}',
+    );
+    expect(sections.get('function-sub')).toBe('function sub(a, b) {\n  return a - b - offset;\n}');
+  });
+
+  it('reads a // run across CRLF line ends', () => {
+    const js = `${HEAD.replaceAll('\n', '\r\n')}\r\n// Adds.\r\n// Sums.\r\nfunction add(a, b) {\r\n  return a + b;\r\n}\r\n`;
+
+    expect(byId(js, 'math.js').get('function-add')).toBe(
+      '// Adds.\r\n// Sums.\r\nfunction add(a, b) {\r\n  return a + b;\r\n}',
+    );
+  });
+
+  it('leaves a comment out when another section reaches into it', () => {
+    // A brace inside a string unbalances `tail`, so its range ends at the `}` in the comment below it.
+    const reaching = [
+      'function tail(text) {',
+      "  if (text[0] === '{') return text;",
+      '  return null;',
+      '}',
+      '/**',
+      ' * Closes with a `}` in prose.',
+      ' */',
+      'function escape(s) {',
+      '  return s;',
+      '}',
+      '',
+    ].join('\n');
+    // A function in the comment is a section of its own, and the commented function must not contain it.
+    const example = [
+      "'use strict';",
+      '',
+      '/**',
+      ' * @example',
+      ' *   function sample() { return 1; }',
+      ' */',
+      'function real() {',
+      '  return 2;',
+      '}',
+      '',
+    ].join('\n');
+
+    expect(byId(reaching, 'tail.js').get('function-escape')).toBe(
+      'function escape(s) {\n  return s;\n}',
+    );
+    expect(byId(example, 'real.js').get('function-real')).toBe('function real() {\n  return 2;\n}');
+  });
+
+  it('lets a JS class take the comment above it and a Java class not', () => {
+    const box = 'class Box {\n  size = 1;\n}\n';
+
+    expect(byId(`${HEAD}\n// A box.\n${box}`, 'Box.js').get('class-Box')).toBe(
+      `// A box.\n${box.trim()}`,
+    );
+    const javaHead = `package x;\nimport ${'x'.repeat(120)};\n`;
+    expect(byId(`${javaHead}\n// A box.\n${box}`, 'Box.java').get('class-Box')).toBe(box.trim());
+  });
+});
+
+describe('extractCodeSections — short spans between sections', () => {
+  const byId = (src: string, file: string) =>
+    new Map(extractCodeSections(src, file).map((s) => [s.sectionId, s.content]));
+  const withoutSpace = (text: string) => text.replace(/\s+/g, '');
+
+  const store = [
+    'export class Store {',
+    '  private cache = new Map<string, number>();',
+    '  readonly limit = 10;',
+    '',
+    '  get(key: string) {',
+    '    return this.cache.get(key);',
+    '  }',
+    '',
+    '  clear() {',
+    '    this.cache.clear();',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+  const handlers = [
+    'const handlers = {',
+    '  foo() { const marker = "}"; callCriticalThing(marker); },',
+    '  bar() {',
+    '    return 1;',
+    '  },',
+    '};',
+    '',
+  ].join('\n');
+  const decorated = [
+    'class Panel {',
+    '  open() {',
+    '    return 1;',
+    '  }',
+    '',
+    '  @Input()',
+    '  readonly size = 2;',
+    '',
+    '  close() {',
+    '    return 2;',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+  const property = [
+    '<?php',
+    'class Panel {',
+    '  public function open() {',
+    '    return 1;',
+    '  }',
+    '',
+    '  private $a = 1;',
+    '',
+    '  public function close() {',
+    '    return 2;',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+  const head =
+    '<?php\n\nnamespace App\\Lib;\n\nuse Foo\\Bar;\n\nfunction first() {\n  return 1;\n}\n\nfunction second() {\n  return 2;\n}\n';
+  const tail = 'function last() {\n  return 1;\n}\n\n// Keep this note with the function above.\n';
+  const python = 'def a():\n    return 1\n\n@cache\ndef b():\n    return 2\n';
+  const callback = [
+    'jQuery(function () {',
+    '  function open() {',
+    '    return 1;',
+    '  }',
+    '});',
+    '',
+    'function close() {',
+    '  return 2;',
+    '}',
+    '',
+  ].join('\n');
+
+  it('keeps the fields before the first method and the closing brace of a class', () => {
+    const sections = byId(store, 'store.ts');
+
+    expect(sections.get('function-get')).toContain('private cache = new Map<string, number>();');
+    expect(sections.get('function-get')).toContain('readonly limit = 10;');
+    expect(sections.get('function-clear')).toBe('clear() {\n    this.cache.clear();\n  }\n}');
+  });
+
+  it('keeps what follows a brace inside a string with the member that holds it', () => {
+    expect(byId(handlers, 'handlers.js').get('function-foo')).toContain(
+      'callCriticalThing(marker)',
+    );
+  });
+
+  it('puts a decorator and a field between two methods into the later method', () => {
+    const sections = byId(decorated, 'panel.ts');
+
+    expect(sections.get('function-close')!.startsWith('@Input()\n  readonly size = 2;')).toBe(true);
+    expect(sections.get('function-open')).not.toContain('@Input()');
+  });
+
+  it('puts a PHP property between two methods into the later method', () => {
+    const sections = byId(property, 'Panel.php');
+
+    expect(sections.get('method-Panel-close')).toContain('private $a = 1;');
+    expect(sections.get('method-Panel-open')).not.toContain('private $a = 1;');
+  });
+
+  it('puts a decorator between two Python functions into the later one', () => {
+    const sections = byId(python, 'jobs.py');
+
+    expect(sections.get('function-b')).toContain('@cache\ndef b():');
+    expect(sections.get('function-a')).not.toContain('@cache');
+  });
+
+  it('puts a short PHP head into the first section', () => {
+    expect(byId(head, 'm.module').get('function-first')).toBe(
+      '<?php\n\nnamespace App\\Lib;\n\nuse Foo\\Bar;\n\nfunction first() {\n  return 1;\n}',
+    );
+  });
+
+  it('puts a short note after the last section into that section', () => {
+    expect(byId(tail, 'last.js').get('function-last')).toContain(
+      '// Keep this note with the function above.',
+    );
+  });
+
+  it('keeps a closing line without a word with the section it closes', () => {
+    const sections = byId(callback, 'ready.js');
+
+    expect(sections.get('function-open')).toContain('\n});');
+    expect(sections.get('function-close')).toBe('function close() {\n  return 2;\n}');
+  });
+
+  it('reads letters outside ASCII as words, so a span of them leads the section after it', () => {
+    const js = 'function a() {\n  return 1;\n}\n名前;\nfunction b() {\n  return 2;\n}\n';
+    const sections = byId(js, 'names.js');
+
+    expect(sections.get('function-a')).toBe('function a() {\n  return 1;\n}');
+    expect(sections.get('function-b')!.startsWith('名前;\nfunction b() {')).toBe(true);
+  });
+
+  it.each([
+    ['a class with fields', store, 'store.ts'],
+    ['a brace inside a string', handlers, 'handlers.js'],
+    ['a decorator between methods', decorated, 'panel.ts'],
+    ['a PHP property between methods', property, 'Panel.php'],
+    ['a PHP head', head, 'm.module'],
+    ['a note after the last function', tail, 'last.js'],
+    ['a Python decorator', python, 'jobs.py'],
+    ['a closing line between functions', callback, 'ready.js'],
+    [
+      'a PHP class',
+      '<?php\nclass Foo {\n  public function bar() {\n    return 1;\n  }\n}\n',
+      'Foo.php',
+    ],
+    [
+      'a typed async arrow',
+      'export const parse = async (raw: string): Promise<Item[]> => {\n  return read(raw);\n};\n',
+      'mod.ts',
+    ],
+    [
+      'a double-quoted function',
+      'var t = {\n  "parent": function (a, b) {\n    return a + b;\n  },\n};\n',
+      'table.ts',
+    ],
+  ])('loses no text of %s', (_what, src, file) => {
+    const sections = extractCodeSections(src, file);
+
+    expect(sections.length).toBeGreaterThan(0);
+    expect(withoutSpace(sections.map((s) => s.content).join(''))).toBe(withoutSpace(src));
+  });
+
+  it('gives a file with no construct and fewer than 120 characters no section', () => {
+    const comment = (length: number) => `// ${'x'.repeat(length - 3)}\n`;
+
+    expect(extractCodeSections(comment(119), 'note.js')).toEqual([]);
+    expect(extractCodeSections(comment(120), 'note.js').map((s) => s.sectionId)).toEqual([
+      'chunk-0',
+    ]);
+  });
+
+  it('still numbers the spans of 120 characters or more as their own sections', () => {
+    const note = `// ${'x'.repeat(117)}\n`;
+    const js = `'use strict';\nfunction f() {\n  return 1;\n} // one\nfunction g() {\n  return 2;\n}\n${note}var x = 1;\nfunction h() {\n  return 3;\n}\n${note}`;
+
+    expect(extractCodeSections(js, 'f.js').map((s) => s.sectionId)).toEqual([
+      'function-f',
+      'function-g',
+      'chunk-0',
+      'function-h',
+      'chunk-1',
+    ]);
+  });
+});
+
 describe('chunkSection', () => {
   it('splits a long section without losing any region', () => {
     const content = markedBody(10_000);
@@ -222,6 +1040,35 @@ describe('chunkSection', () => {
   it('is byte-identical to the header-less form when no header is given', () => {
     const section = { sectionId: 's', content: markedBody(6000), breadcrumb: [] };
     expect(chunkSection(section, {})).toEqual(chunkSection(section));
+  });
+
+  it('splits a long section of single-newline lines at a line end', () => {
+    const rows = Array.from(
+      { length: 120 },
+      (_, i) => `row ${String(i).padStart(3, '0')} ${'x'.repeat(40)}`,
+    );
+    const chunks = chunkSection({ sectionId: 's', content: rows.join('\n'), breadcrumb: [] });
+
+    expect(chunks.length).toBeGreaterThan(2);
+    for (const chunk of chunks.slice(0, -1)) expect(chunk.content.endsWith('\n')).toBe(true);
+  });
+
+  it('orders its split points: paragraph, then line, then sentence', () => {
+    const rows = (from: number, to: number) =>
+      Array.from(
+        { length: to - from },
+        (_, i) => `row ${String(from + i).padStart(3, '0')} ${'x'.repeat(40)}`,
+      ).join('\n');
+    const split = (content: string) =>
+      chunkSection({ sectionId: 's', content, breadcrumb: [] })[0]!.content;
+
+    // A blank line past half the size beats the later line end.
+    expect(split(`${rows(0, 25)}\n\n${rows(25, 41)}`).endsWith('\n\n')).toBe(true);
+    // A line end past half the size beats a sentence end inside the long line after it.
+    const prose = 'First sentence. '.repeat(60);
+    const first = split(`${rows(0, 30)}\n${prose}`);
+    expect(first.endsWith('\n')).toBe(true);
+    expect(first.endsWith('\n\n')).toBe(false);
   });
 });
 
