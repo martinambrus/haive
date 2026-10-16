@@ -10,6 +10,7 @@ const git = vi.hoisted(() => ({
   relocateFixerChanges: vi.fn(),
   revParse: vi.fn(),
 }));
+const projections = vi.hoisted(() => ({ settleProjections: vi.fn() }));
 
 vi.mock('./git-merge.js', () => ({
   abortFailureNote: () => 'abort failed',
@@ -19,6 +20,9 @@ vi.mock('./git-merge.js', () => ({
   recordFixerLeftovers: git.recordFixerLeftovers,
   relocateFixerChanges: git.relocateFixerChanges,
   revParse: git.revParse,
+}));
+vi.mock('./merge-projections.js', () => ({
+  settleProjections: (...args: unknown[]) => projections.settleProjections(...args),
 }));
 vi.mock('./merge-dir-claim.js', () => ({
   inMergeDirLock: async (_db: unknown, _dir: string, fn: (tx: unknown) => unknown) => {
@@ -40,12 +44,14 @@ import {
   noteAbortedByNext,
   recordLeftOpenMerges,
   relocateLeftOpenFixers,
+  takeLeftOpenKept,
 } from './left-open-merge.js';
 import type { TaskStepRow } from './step-runner.js';
 
 /** A query builder whose every chained call resolves to the next queued result, in call order. */
 function chainDb(results: unknown[][], findFirst: unknown = null) {
   const inserted: unknown[] = [];
+  const updates: unknown[] = [];
   const queue = [...results];
   const chain = (): unknown =>
     new Proxy(() => undefined, {
@@ -66,8 +72,15 @@ function chainDb(results: unknown[][], findFirst: unknown = null) {
         inserted.push(v);
       },
     }),
+    update: () => ({
+      set: (v: unknown) => ({
+        where: async () => {
+          updates.push(v);
+        },
+      }),
+    }),
   };
-  return { db: db as unknown as Database, inserted };
+  return { db: db as unknown as Database, inserted, updates };
 }
 
 describe('recordLeftOpenMerges', () => {
@@ -145,6 +158,82 @@ describe('recordLeftOpenMerges on a re-driven cancel', () => {
     expect(lock.inserted).toEqual([
       expect.objectContaining({ eventType: 'merge.left_open', taskStepId: 'step-1' }),
     ]);
+  });
+});
+
+describe('recordLeftOpenMerges for a merge that is already gone', () => {
+  const kept = { '.haive-data/state/a.json': { owner: { uid: 1, gid: 1 }, mode: 0o600 } };
+  const step = (over: Record<string, unknown> = {}) => [
+    {
+      id: 'step-1',
+      state: {
+        phase: 'resolving',
+        mode: 'same-branch',
+        mergeDir: '/repo',
+        featureBranch: 'origin/main',
+        fixInvocationId: null,
+        keptMetadata: kept,
+        ...over,
+      },
+    },
+  ];
+  const run = async (steps: unknown[], claim: unknown[] = [{ taskId: 'task-1' }]) => {
+    lock.txResults = [claim];
+    const made = chainDb([[], steps, [{ worktreePath: null }]], { repositoryId: 'repo-1' });
+    await recordLeftOpenMerges(made.db, 'task-1');
+    return made;
+  };
+
+  beforeEach(() => {
+    lock.inserted = [];
+    git.revParse.mockReset().mockResolvedValue(null);
+    projections.settleProjections.mockReset().mockResolvedValue(true);
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  });
+
+  it('puts the files a same-branch merge set aside back, and writes the cleared state by id', async () => {
+    const { db, updates } = await run(step());
+    expect(lock.inserted).toEqual([]);
+    expect(projections.settleProjections).toHaveBeenCalledTimes(1);
+    const [calledDb, repositoryId, state, save] = projections.settleProjections.mock.calls[0]!;
+    expect(calledDb).toBe(db);
+    expect(repositoryId).toBe('repo-1');
+    expect(state).toEqual(expect.objectContaining({ mode: 'same-branch', keptMetadata: kept }));
+    await save({ ...state, keptMetadata: undefined });
+    expect(updates).toEqual([
+      expect.objectContaining({
+        mergeResolveState: expect.objectContaining({ phase: 'resolving' }),
+      }),
+    ]);
+  });
+
+  it('leaves a directory another task now holds the claim on to that task', async () => {
+    await run(step(), [{ taskId: 'other-task' }]);
+    expect(projections.settleProjections).not.toHaveBeenCalled();
+  });
+
+  it('still re-syncs a same-branch state that kept no metadata, since the checkout moved all the same', async () => {
+    await run(step({ keptMetadata: undefined }));
+    expect(projections.settleProjections).toHaveBeenCalledTimes(1);
+    const [, repositoryId, state] = projections.settleProjections.mock.calls[0]!;
+    expect(repositoryId).toBe('repo-1');
+    expect(state).toEqual(
+      expect.objectContaining({ mode: 'same-branch', keptMetadata: undefined }),
+    );
+  });
+
+  it('puts nothing back for a merge in a worktree of its own', async () => {
+    await run(step({ mode: 'cross-branch' }));
+    expect(projections.settleProjections).not.toHaveBeenCalled();
+  });
+
+  it('does not fail the cancel when the put-back fails', async () => {
+    projections.settleProjections.mockRejectedValue(new Error('disk full'));
+    await expect(run(step())).resolves.toBeDefined();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'task-1', dir: '/repo' }),
+      expect.any(String),
+    );
   });
 });
 
@@ -269,6 +358,74 @@ describe('abortLeftMerge', () => {
       expect.objectContaining({ payload: expect.objectContaining({ outcome: 'moved' }) }),
     ]);
   });
+
+  describe('for a same-branch merge', () => {
+    const sameBranch = () => [
+      {
+        id: 'step-1',
+        state: {
+          ...fixerStep()[0]!.state,
+          mode: 'same-branch',
+          keptMetadata: { 'a.json': { mode: 0o600 } },
+        },
+      },
+    ];
+    const settleFixture = () =>
+      chainDb([reportedOpen(), sameBranch(), [{ worktreePath: null }]], {
+        status: 'cancelled',
+        repositoryId: 'repo-1',
+      });
+    const job = { taskId: 'task-1', userId: 'u', dir: '/repo', mergeHead: 'm1' };
+
+    beforeEach(() => {
+      projections.settleProjections.mockReset().mockResolvedValue(true);
+      git.relocateFixerChanges.mockResolvedValue(null);
+    });
+
+    it('is retried, not settled as refused, when putting Haive’s files back fails', async () => {
+      git.revParse.mockResolvedValue(null);
+      projections.settleProjections.mockRejectedValue(new Error('disk full'));
+      const { db, inserted } = settleFixture();
+      await expect(abortLeftMerge(db, job)).rejects.toThrow('disk full');
+      expect(inserted).toEqual([]);
+    });
+
+    it('says Haive put its own project files back when it did, for a merge already gone', async () => {
+      git.revParse.mockResolvedValue(null);
+      const { db, inserted } = settleFixture();
+      await abortLeftMerge(db, job);
+      expect(inserted).toEqual([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            outcome: 'moved',
+            reason: expect.stringContaining('Haive put its own project files back'),
+          }),
+        }),
+      ]);
+    });
+
+    it('stays open, and is retried, while Haive’s files could not be re-synced', async () => {
+      git.revParse.mockResolvedValue(null);
+      projections.settleProjections.mockResolvedValue(false);
+      const { db, inserted } = settleFixture();
+      await expect(abortLeftMerge(db, job)).rejects.toThrow('not re-synced yet');
+      expect(inserted).toEqual([]);
+    });
+
+    it('settles an abort with its own reason', async () => {
+      git.relocateFixerChanges.mockResolvedValue({ moved: [], interrupted: [] });
+      const { db, inserted } = settleFixture();
+      await abortLeftMerge(db, job);
+      expect(inserted).toEqual([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            outcome: 'aborted',
+            reason: expect.stringContaining('The checkout is back to how it was'),
+          }),
+        }),
+      ]);
+    });
+  });
 });
 
 describe('noteAbortedByNext', () => {
@@ -291,6 +448,58 @@ describe('noteAbortedByNext', () => {
     await expect(
       noteAbortedByNext(db, row, 'task-2', '/repo', { head: 'h1', mergeHead: 'm1' }),
     ).resolves.toBe(row);
+  });
+});
+
+describe('takeLeftOpenKept', () => {
+  const owners = [{ taskId: 'cancelled-1', title: 'old' }];
+  const ownerStep = (over: Record<string, unknown> = {}) => [
+    {
+      id: 'owner-step',
+      state: {
+        phase: 'resolving',
+        mode: 'same-branch',
+        mergeDir: '/repo',
+        featureBranch: 'origin/main',
+        fixInvocationId: null,
+        keptMetadata: { 'a.json': { mode: 0o600 } },
+        ...over,
+      },
+    },
+  ];
+  const open = { head: 'h1', mergeHead: 'm1' };
+
+  it('gives save what the owners’ same-branch steps kept for the directory, and frees them after', async () => {
+    const { db, updates } = chainDb([owners, ownerStep(), [{ worktreePath: null }]]);
+    const save = vi.fn(async () => {
+      expect(updates).toEqual([]);
+    });
+    const kept = await takeLeftOpenKept(db, 'next-task', '/repo', open, save);
+    expect(save).toHaveBeenCalledWith({ 'a.json': { mode: 0o600 } });
+    expect(kept).toEqual({ 'a.json': { mode: 0o600 } });
+    expect(updates).toEqual([expect.objectContaining({ updatedAt: expect.any(Date) })]);
+  });
+
+  it('takes nothing off the owners when saving fails', async () => {
+    const { db, updates } = chainDb([owners, ownerStep(), [{ worktreePath: null }]]);
+    const save = vi.fn().mockRejectedValue(new Error('step was reset'));
+    await expect(takeLeftOpenKept(db, 'next-task', '/repo', open, save)).rejects.toThrow(
+      'step was reset',
+    );
+    expect(updates).toEqual([]);
+  });
+
+  it.each([
+    ['kept nothing', { keptMetadata: undefined }],
+    ['merged in another directory', { mergeDir: '/other' }],
+    ['merged in a worktree of its own', { mode: 'cross-branch' }],
+  ])('takes nothing from a step that %s', async (_name, over) => {
+    const { db, updates } = chainDb([owners, ownerStep(over), [{ worktreePath: null }]]);
+    const save = vi.fn();
+    const kept = await takeLeftOpenKept(db, 'next-task', '/repo', open, save);
+    expect(kept).toEqual({});
+    expect(save).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
   });
 });
 

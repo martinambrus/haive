@@ -6,6 +6,7 @@ const release = vi.fn(async () => undefined);
 const acquireAgentLease = vi.fn();
 const resolveAppReach = vi.fn();
 const haiveDataBoundary = vi.fn();
+const worktreesBoundary = vi.fn();
 
 vi.mock('./npm-cache.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./npm-cache.js')>()),
@@ -54,6 +55,9 @@ vi.mock('../queues/cli-exec/gitfile-mask.js', async (importOriginal) => ({
 vi.mock('../queues/cli-exec/haive-data-boundary.js', () => ({
   haiveDataBoundary: (...args: unknown[]) => haiveDataBoundary(...args),
 }));
+vi.mock('../queues/cli-exec/worktrees-boundary.js', () => ({
+  worktreesBoundary: (...args: unknown[]) => worktreesBoundary(...args),
+}));
 
 const { runStepCommandInSandbox, BINARY_MISSING_EXIT } = await import('./step-command.js');
 const { AgentLeaseAbortedError, AgentLeaseTimeoutError } =
@@ -98,6 +102,15 @@ beforeEach(() => {
       source: 'haive_repos',
       target: '/haive/workdir/.haive-data/knowledge_base',
       subpath: 'u/r/wt/.haive-data/knowledge_base',
+    },
+  ]);
+  worktreesBoundary.mockReset();
+  worktreesBoundary.mockResolvedValue([
+    {
+      source: 'haive_repos',
+      target: '/haive/workdir/.haive/worktrees',
+      subpath: 'u/r/.haive/worktrees',
+      readOnly: true,
     },
   ]);
   runInSandbox.mockReset();
@@ -263,12 +276,17 @@ describe('runStepCommandInSandbox', () => {
       '/haive/workdir/.git',
       '/haive/workdir/.haive-data',
       '/haive/workdir/.haive-data/knowledge_base',
+      '/haive/workdir/.haive/worktrees',
       '/haive/workdir',
       '/haive-npm-cache',
     ]);
     expect(haiveDataBoundary).toHaveBeenCalledWith(
       { source: 'haive_repos', target: '/haive/workdir', subpath: 'u/r/wt' },
       { hasRepo: true },
+    );
+    expect(worktreesBoundary).toHaveBeenCalledWith(
+      { source: 'haive_repos', target: '/haive/workdir', subpath: 'u/r/wt' },
+      { hasWorktree: true, hasRepo: true },
     );
     expect(options.addHosts).toBeUndefined();
     expect(options.noProxyHosts).toBeUndefined();
@@ -336,6 +354,7 @@ describe('runStepCommandInSandbox', () => {
       '/haive/workdir/.git',
       '/haive/workdir/.haive-data',
       '/haive/workdir/.haive-data/knowledge_base',
+      '/haive/workdir/.haive/worktrees',
       '/haive/workdir',
       '/etc/ssl/certs/ca.pem',
       '/haive-npm-cache',

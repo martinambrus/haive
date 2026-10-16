@@ -91,6 +91,7 @@ import { learnedLadderBaseMs } from './dispatch-timeout.js';
 import { resolveMergePhase } from './merge-resolver.js';
 import {
   insertStampedRun,
+  invalidRequirementsFailure,
   resolveDispatchIntegrations,
   stepIntegrationRequirements,
 } from './step-integrations.js';
@@ -612,6 +613,8 @@ async function resolveDispatchStamp(
   stepDef: StepDefinition,
   toolProfile: 'rag_only' | 'none' | undefined,
 ): Promise<DispatchStamp> {
+  const invalid = toolProfile === undefined ? invalidRequirementsFailure(stepDef) : null;
+  if (invalid !== null) return { requirements: [], bindings: [], failure: invalid };
   const requirements = toolProfile === undefined ? stepIntegrationRequirements(stepDef) : [];
   if (requirements.length === 0) return { requirements, bindings: [], failure: null };
   const resolved = await resolveDispatchIntegrations(db, taskId, requirements);

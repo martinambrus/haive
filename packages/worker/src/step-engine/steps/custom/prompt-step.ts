@@ -5,6 +5,7 @@ import {
   isCustomStepId,
   parsePromptTemplate,
   renderPromptTemplate,
+  type IntegrationRequirement,
   type ParsedPromptStepEntry,
   type PromptStepEntry,
 } from '@haive/shared/modularity';
@@ -132,6 +133,15 @@ export function promptStepTools(
   const entry = entries.get(stepDef);
   if (!entry) return undefined;
   return { names: entry.tools.map((tool) => tool.name), invalid: entry.invalidTools ?? [] };
+}
+
+/** A prompt step's declared integrations, and those stored requirements that no longer parse; undefined for another step. */
+export function promptStepIntegrations(
+  stepDef: object,
+): { requirements: IntegrationRequirement[]; invalid: string[] } | undefined {
+  const entry = entries.get(stepDef);
+  if (!entry) return undefined;
+  return { requirements: entry.integrations ?? [], invalid: entry.invalidIntegrations ?? [] };
 }
 
 /** The text a file-writing prompt step's house rules read paths from: its template with the task's

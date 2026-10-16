@@ -131,7 +131,13 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   identity (whoever owns the tree, since a tree the sandbox reaches through its mode bits is accepted
   as it stands), one `diff --name-only -z` per call, and the index is refreshed since a chown moves ctime and
   `merge --abort` refuses stat data that moved; a name that is not UTF-8 stays the worker's and is
-  logged. `.haive/`,
+  logged. A fast-forward of the checkout is handed back the same way from the commit before it
+  (`handBackAfterMove`): 00a's on the checked-out branch, a repository refresh's, and `landPlanMerge`'s
+  for a plan Pull, Save or confirm. In the checkout, Haive's projection files and their directories
+  (`.haive-data/state/**`, `plan.json`, `plan.md`) are left out of all three hand-backs: the worker
+  writes them, and `restoreKeptMetadata` restores the owner and mode a set-aside captured only on a
+  file the worker still owns. A worktree is never set aside, so there they are handed back like any
+  other path; `knowledge_base/` and `learnings/` are handed back everywhere. `.haive/`,
   `.haive-data/` (other writers keep them) and gitlinks are never moved; a link or a name that is
   not UTF-8 stays and is reported, a link with its target in the manifest, since a scratch worktree
   removed later takes the link with it. A name is judged by its bytes (the plan merge's
@@ -173,17 +179,26 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   (`abortLeftMerge`) runs under the directory's lock and records `merge.left_open_settled`
   `{dir, mergeHead, outcome, reason}`: `refused` while a live task's `merge_dir_claims` row holds the
   directory (`liveClaimHolder`, the staleness rules `claimMergeDir` uses), `moved` with nothing
-  done when HEAD or MERGE_HEAD are no longer the reported ones, otherwise the fixer's changes outside
+  aborted when HEAD or MERGE_HEAD are no longer the reported ones, otherwise the fixer's changes outside
   the conflict are moved aside if a `fixBaseline` for that head and merge head is still recorded
   (reported unchecked when not) and `abortMerge` ends the merge. A `refused` outcome (a live holder,
   an abort git refused, a job that threw) leaves the report open with the reason shown and the button
-  offered again; `moved`, `aborted` and `aborted-by-next` close it. A failure while recording a
+  offered again; `moved`, `aborted` and `aborted-by-next` close it. For a same-branch merge both
+  `moved` and `aborted` also put back the projections its set-aside moved away, with the owner and
+  mode it kept (`settleProjections`), and a `moved` reason then says so; a put-back that throws, or
+  whose re-sync did not finish, fails the job, which is retried rather than settled, so the report
+  stays open until the owner and mode go back. A cancel that finds such a merge already
+  gone reports nothing but puts the files back the same way at once. A failure while recording a
   report throws, so the cancel is re-driven before `task.cancel_finished`; the page polls until that
   event is in and no abort it sent is still waiting. A resolver that clears a stale
   merge before opening its own first moves that task's fixer changes aside under its report
   (`relocateLeftOpenFixers`, halting instead while the index still holds what the fixer staged),
   then (`peekOpenMerge` before the abort, `noteAbortedByNext` after) settles
-  the report of the same directory, head and merge head with `aborted-by-next` and warns on its step.
+  the report of the same directory, head and merge head with `aborted-by-next` and warns on its step;
+  for a same-branch merge it first takes what that task's set-aside kept into its own state
+  (`takeLeftOpenKept`), so its own end restores those files' owner and mode. That write commits on
+  its own before the abort, not with the section: once the merge is gone, nothing finds that task
+  again.
   A cancelled plan merge is the exception (`discardPlanMerge`, from `handleCancelTask`): the worker
   moves aside what the recorded fixers left, aborts the merge and removes the scratch worktree,
   unless another `plan_merge` task of the repository holds it, a live one or a failed one opened after it
