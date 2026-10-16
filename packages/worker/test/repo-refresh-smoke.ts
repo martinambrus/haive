@@ -26,7 +26,12 @@ import postgres from 'postgres';
 import { schema } from '@haive/database';
 import { HAIVE_DATA_FILES, logger, type RepoJobPayload } from '@haive/shared';
 import { applyPlanPatch } from '@haive/shared/plan';
-import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
+import {
+  canonicalJson,
+  claimFileName,
+  emptyProjectState,
+  renderProjectState,
+} from '@haive/shared/project-state';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { initDatabase, getDb } from '../src/db.js';
 import { StepSupersededError } from '../src/step-engine/step-ownership.js';
@@ -1749,6 +1754,45 @@ async function main(): Promise<void> {
         'a sweep started while the check is open waits for it, then writes',
         during.trim() === headRender.trim() && after.includes('ruby'),
         { during, after },
+      );
+    }
+
+    // 11h-2. A committed claim file at a git-data path, which an earlier release wrote, does not make the
+    // set-aside take the files Haive wrote for someone else's: the sync before it keeps the claim in the
+    // base only for the writer to remove its file.
+    {
+      const c = await committedRecord();
+      const id = c.payload.repositoryId;
+      const legacyRel = `.haive-data/state/${claimFileName('.git/config')}`;
+      await mkdir(path.dirname(path.join(c.dest, legacyRel)), { recursive: true });
+      await writeFile(
+        path.join(c.dest, legacyRel),
+        canonicalJson({
+          path: '.git/config',
+          templateId: 'workflow-config',
+          kind: 'workflow-config',
+          schemaVersion: 1,
+          templateHash: 'c'.repeat(64),
+          writtenHash: '9'.repeat(64),
+          haiveVersion: '1.2.3',
+        }),
+      );
+      git(c.dest, 'add', legacyRel);
+      git(c.dest, 'commit', '-q', '-m', 'an earlier release claimed .git/config');
+      await db
+        .update(schema.repositories)
+        .set({ renderContext: column({ lspLanguages: ['php'] }) })
+        .where(eq(schema.repositories.id, id));
+      await writeProjectStateColumn(db, {
+        repositoryId: id,
+        repoPath: c.dest,
+        column: column({ lspLanguages: ['php'] }),
+      });
+      const aside = await setAsideHaiveProjections(db, id, c.dest);
+      check(
+        'a committed claim file at a git-data path still lets the set-aside take the files Haive wrote',
+        aside.outcome === 'set-aside',
+        { aside },
       );
     }
 

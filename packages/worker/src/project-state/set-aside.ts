@@ -20,6 +20,7 @@ import {
   PROJECT_STATE_LIMITS,
   ProjectStateError,
   emptyProjectState,
+  isClaimablePath,
   renderProjectState,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
@@ -298,7 +299,12 @@ async function stateOffender(
     expected = renderProjectState({
       ...base,
       render: overlayRender(base.render, render, 'incoming'),
-      claims: overlayClaims(base.claims, claims, 'incoming'),
+      // A git-data claim the base lists is only there for the writer to remove its file.
+      claims: overlayClaims(
+        base.claims.filter((c) => isClaimablePath(c.path)),
+        claims,
+        'incoming',
+      ),
       settings: overlaySettings(base.settings, settings, 'incoming'),
       environment: overlayEnvironment(base.environment, settings, 'incoming'),
     });
