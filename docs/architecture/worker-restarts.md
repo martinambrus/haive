@@ -68,10 +68,12 @@ older than the cutoff and the task queue holds no job for it, under the same fen
 pass read, the epoch, the step and round, and the row still an answered form. A parked form, an
 answer whose job is queued and an answer newer than the cutoff are left alone. For `waiting_pr` the
 task-level cutoff gives way to the row's, since the pull-request poller rewrites `tasks.updated_at`
-every few minutes. The fence stamps the row's `updated_at`, so an advance dropped before pickup is
-re-driven once per cutoff rather than on every pass, and it locks that row before the task row, the
-order a Retry takes (the other order deadlocked); a Retry, Resume or CLI switch whose NOWAIT re-check
-meets that lock answers 503 and can be sent again. A dead `waiting_user` or `waiting_pr` task revived
+every few minutes. For a `waiting_user` or `waiting_pr` task the fence stamps the row's `updated_at`,
+so an advance dropped before pickup is re-driven once per cutoff rather than on every pass, and it
+locks that row before the task row, the order a Retry takes (the other order deadlocked); a Retry,
+Resume or CLI switch whose NOWAIT re-check meets that lock answers 503 and can be sent again. A
+`running` task's fence locks only the task row: it reads the row inside the update its epoch guards,
+and that update's stamp on the task throttles the next pass. A dead `waiting_user` or `waiting_pr` task revived
 with an answered form gets that advance at revival (`jobAfterRevive`).
 
 The same sweep covers the two other jobs that can be lost with nothing to notice. A task left
