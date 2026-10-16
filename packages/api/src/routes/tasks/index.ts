@@ -19,6 +19,7 @@ import {
   type DbTx,
   initializeTaskDatabaseState,
   DatabaseSnapshotUnavailableError,
+  lockRepositoryTasksKey,
 } from '@haive/database';
 import { isTaskClass, knownTaskTypes, typesForClass } from '@haive/shared/stats';
 import {
@@ -797,7 +798,11 @@ taskRoutes.post('/', async (c) => {
     ({ task, queued } =
       definition.takesRootLock && body.repositoryId
         ? await withRepositoryTaskLock(db, body.repositoryId, create)
-        : await db.transaction(create));
+        : await db.transaction(async (tx) => {
+            // Queuing takes this lock, and taken first, as every holder does, it inverts no other lock.
+            if (body.repositoryId) await lockRepositoryTasksKey(tx, body.repositoryId);
+            return create(tx);
+          }));
   }
 
   // `implements` ONLY. Taskable means "one task could implement this", which is

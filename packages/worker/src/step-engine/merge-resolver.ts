@@ -1077,7 +1077,7 @@ export async function resolveMergePhase(
       if (pending.mode === 'cross-branch') {
         await ensureBaseWorktree(ctx, pending.mergeDir, pending.baseBranch);
       }
-      // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the open.
+      // Every task's start and every revival take this lock, so none lands between the fence and the open.
       if (repositoryId) await lockRepositoryTasksKey(tx, repositoryId);
       // The base tip before ANY merge round: the squash resets back to it, and it is the
       // documented undo point, measured in the dir the merge runs in.

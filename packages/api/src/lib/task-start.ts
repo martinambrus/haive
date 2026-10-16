@@ -1,5 +1,5 @@
 import { and, eq, isNull } from 'drizzle-orm';
-import { schema, type DbTx } from '@haive/database';
+import { lockRepositoryTasksKey, schema, type DbTx } from '@haive/database';
 import { TASK_JOB_NAMES, logger, type TaskJobPayload } from '@haive/shared';
 import type { getDb } from '../db.js';
 import { getTaskQueue } from '../queues.js';
@@ -8,18 +8,26 @@ import { getTaskQueue } from '../queues.js';
  *  Called after every write that can fail, since a task left `created` is one nothing starts.
  *  Returns the row, or undefined when the task was no longer `created` or is dead. */
 export async function markQueuedForStart(db: ReturnType<typeof getDb> | DbTx, taskId: string) {
-  const [queued] = await db
-    .update(schema.tasks)
-    .set({ status: 'queued', updatedAt: new Date() })
-    .where(
-      and(
-        eq(schema.tasks.id, taskId),
-        eq(schema.tasks.status, 'created'),
-        isNull(schema.tasks.deadAt),
-      ),
-    )
-    .returning();
-  return queued;
+  return db.transaction(async (tx) => {
+    const [task] = await tx
+      .select({ repositoryId: schema.tasks.repositoryId })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId));
+    // A queued task holds the checkout, so its start waits out a move that holds this lock.
+    if (task?.repositoryId) await lockRepositoryTasksKey(tx, task.repositoryId);
+    const [queued] = await tx
+      .update(schema.tasks)
+      .set({ status: 'queued', updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.tasks.id, taskId),
+          eq(schema.tasks.status, 'created'),
+          isNull(schema.tasks.deadAt),
+        ),
+      )
+      .returning();
+    return queued;
+  });
 }
 
 /** Never throws: the task is `queued` already, so a START that could not be queued is the

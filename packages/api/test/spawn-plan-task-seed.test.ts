@@ -23,6 +23,9 @@ const { db, taskQueue, order, inserted } = vi.hoisted(() => {
         }),
       }),
     }),
+    select: () => ({ from: () => ({ where: async () => [{ repositoryId: 'r1' }] }) }),
+    execute: async () => undefined,
+    transaction: async (fn: (tx: unknown) => Promise<unknown>): Promise<unknown> => fn(db),
   };
   const taskQueue = {
     add: vi.fn(async () => {
