@@ -24,7 +24,7 @@ const CAPABILITY_LABELS: Record<PromptStepCapability, string> = {
 };
 
 const tokenHelp = (withFields: boolean) =>
-  `Tokens: \`{{task.title}}\` \`{{task.description}}\`${withFields ? ' `{{field:<id>}}`' : ''} \`{{step:<id>}}\` \`{{agent:<id>}}\`. A \`{{step:<id>}}\` token must be alone on its line.`;
+  `Tokens: \`{{task.title}}\` \`{{task.description}}\`${withFields ? ' `{{field:<id>}}`' : ''} \`{{step:<id>}}\` \`{{agent:<id>}}\` \`{{integration:<id>.account}}\`. A \`{{step:<id>}}\` token must be alone on its line.`;
 
 const NO_ISSUES: readonly PromptStepIssue[] = [];
 

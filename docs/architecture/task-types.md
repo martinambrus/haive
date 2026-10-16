@@ -244,11 +244,12 @@ retried older round could otherwise quote its future). Apply stores the reply re
 `cli_invocations` by invocation id, so a later quote sees the exact reply.
 
 **Tokens:** `{{task.title}}`, `{{task.description}}`, `{{field:<id>}}`, `{{agent:<id>}}`,
-`{{step:<stepId>}}`; `{{integration:…}}` is refused ("not supported yet"). The renderer makes one pass
-and never rescans a value; a value mid-line is collapsed to one line, and a `{{step:}}` quote must sit
-on its own line. Quoted step output is fenced; field values, the title and the description are not.
+`{{step:<stepId>}}`, `{{integration:<id>.account}}`. The renderer makes one pass and never rescans a
+value; a value mid-line is collapsed to one line, and a `{{step:}}` quote must sit on its own line.
+Quoted step output is fenced; field values, the title, the description and account texts are not.
 Every value is capped: each quote or other value at most 16 KiB, all quotes 64 KiB, all other values
-64 KiB. Any `[[HAIVE_` overlapping a value and any leading `<haive_` opener is broken, so a value cannot
+(account texts included, each occurrence counted) 64 KiB, and a cut value's `[truncated: …]` notice
+counts inside its share. Any `[[HAIVE_` overlapping a value and any leading `<haive_` opener is broken, so a value cannot
 forge a marker or a preamble block. The save check (`validatePromptStep`, `checkPromptSteps`) refuses
 unknown tokens, undeclared fields, a persona or a file-writing step on a repo-less type, a step quote
 that is not earlier, not on its own line or not quotable, reserved markers, a missing or orphan entry,
@@ -273,8 +274,18 @@ gets one account per category), a category the install does not register (the ap
 prompt step names a category and Haive resolves the account) and a repository-bound category (`forge`)
 on a repo-less type. Dispatch hands the pinned requirements to the broker exactly as a catalog entry's
 (see [Integrations](integrations.md)); one that no longer parses fails the step
-`integration-requirement-invalid` before anything resolves. Drafts carry none, and
-`{{integration:…}}` stays refused.
+`integration-requirement-invalid` before anything resolves. Drafts carry none, so a draft's
+`{{integration:…}}` is refused as undeclared.
+
+`{{integration:<id>.account}}` names the account the declared requirement `<id>` resolved to at this
+dispatch: the connection's account label when, cut to 200 characters, it is one line, survives the
+fence, opens no code fence and names no agent path; otherwise the provider's name; and
+`(no account connected)` for an optional requirement that resolved to nothing. It is always collapsed
+to one line and treated as a dynamic value, so `[[HAIVE_` and a leading `<haive_` in a label are
+broken. House-rules text gets no account. The stamped run must carry the connection each named
+account was rendered from; if the task's choice moved in between, the dispatch writes nothing and
+fails `integration-account-changed`, and a retry renders the new account. The save check refuses an undeclared id
+(`integration-not-declared`) and any other property (`integration-property-unknown`).
 
 ## Custom tools
 

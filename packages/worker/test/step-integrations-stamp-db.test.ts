@@ -473,4 +473,150 @@ describe.skipIf(!url)('the dispatch-time integrations of a step, on Postgres', (
       }
     });
   });
+
+  describe('[A] the account a prompt names is the account the run is stamped with', () => {
+    const named = (id: string, connectionId: string | null) => new Map([[id, connectionId]]);
+
+    const loseAccount = (connectionId: string) =>
+      db
+        .delete(schema.integrationConnections)
+        .where(eq(schema.integrationConnections.id, connectionId));
+
+    /** The failure text, after checking that the dispatch was refused and wrote nothing. */
+    async function refusedText(result: unknown, reason: string, taskId: string): Promise<string> {
+      expect(result, 'the run was stamped with an account the prompt does not name').toHaveProperty(
+        'failure',
+      );
+      const { failure } = result as { failure: string };
+      expect(reason).toBe('integration-account-changed');
+      expect(failure.startsWith(`${reason}: `)).toBe(true);
+      expect(await runsOf(db, taskId), 'cli_invocations rows').toEqual([]);
+      expect(await grantsOf(db, taskId), 'task grants').toEqual([]);
+      return failure;
+    }
+
+    it('[A1] refuses to stamp, naming the requirement, when the choice moved to another account since the first resolution', async () => {
+      const w = await twoAccountWorld();
+      const step = await seedStepRow(db, w.taskId);
+      const mod = await stepIntegrationsUnderTest();
+      expect(await mod.resolveDispatchIntegrations(db, w.taskId, [FORGE_READ])).toMatchObject({
+        ok: true,
+        bindings: [{ connectionId: w.first }],
+      });
+      await dropChoice(w.taskId);
+
+      const result = await mod.insertStampedRun(
+        db,
+        w.taskId,
+        step.id,
+        runValues(w.taskId, step.id),
+        [FORGE_READ],
+        named(FORGE_READ.id, w.first),
+      );
+
+      const failure = await refusedText(result, mod.INTEGRATION_ACCOUNT_CHANGED_REASON, w.taskId);
+      expect(failure).toContain(FORGE_READ.id);
+    });
+
+    it('[A1] refuses to stamp when an account was connected after the prompt was told there was none', async () => {
+      const w = await bareWorld();
+      const step = await seedStepRow(db, w.taskId);
+      const mod = await stepIntegrationsUnderTest();
+      expect(await mod.resolveDispatchIntegrations(db, w.taskId, [FORGE_OPTIONAL])).toMatchObject({
+        ok: true,
+        bindings: [],
+      });
+      await seedConnection(db, w.userId);
+      expect(
+        await resolveStepIntegrations(db, { taskId: w.taskId }, [FORGE_OPTIONAL]),
+        'the fixture: an account resolves now',
+      ).toMatchObject([{ status: 'resolved' }]);
+
+      const result = await mod.insertStampedRun(
+        db,
+        w.taskId,
+        step.id,
+        runValues(w.taskId, step.id),
+        [FORGE_OPTIONAL],
+        named(FORGE_OPTIONAL.id, null),
+      );
+
+      const failure = await refusedText(result, mod.INTEGRATION_ACCOUNT_CHANGED_REASON, w.taskId);
+      expect(failure).toContain(FORGE_OPTIONAL.id);
+    });
+
+    it('[A1] refuses to stamp when the account the prompt named is gone and the requirement is optional', async () => {
+      const w = await world();
+      const step = await seedStepRow(db, w.taskId);
+      const mod = await stepIntegrationsUnderTest();
+      expect(await mod.resolveDispatchIntegrations(db, w.taskId, [FORGE_OPTIONAL])).toMatchObject({
+        ok: true,
+        bindings: [{ connectionId: w.connectionId }],
+      });
+      await loseAccount(w.connectionId);
+      expect(
+        await resolveStepIntegrations(db, { taskId: w.taskId }, [FORGE_OPTIONAL]),
+        'the fixture: no account resolves now',
+      ).toMatchObject([{ status: 'unresolved' }]);
+
+      const result = await mod.insertStampedRun(
+        db,
+        w.taskId,
+        step.id,
+        runValues(w.taskId, step.id),
+        [FORGE_OPTIONAL],
+        named(FORGE_OPTIONAL.id, w.connectionId),
+      );
+
+      const failure = await refusedText(result, mod.INTEGRATION_ACCOUNT_CHANGED_REASON, w.taskId);
+      expect(failure).toContain(FORGE_OPTIONAL.id);
+    });
+
+    it('[A0] stamps the account the prompt named while the choice is still the one it named', async () => {
+      const w = await twoAccountWorld();
+      const step = await seedStepRow(db, w.taskId);
+      const mod = await stepIntegrationsUnderTest();
+
+      await mod.insertStampedRun(
+        db,
+        w.taskId,
+        step.id,
+        runValues(w.taskId, step.id),
+        [FORGE_READ],
+        named(FORGE_READ.id, w.first),
+      );
+
+      const [run] = await runsOf(db, w.taskId);
+      expect(run!.integrations).toMatchObject([
+        { requirementId: FORGE_READ.id, connectionId: w.first },
+      ]);
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: 'forge', connectionId: w.first },
+      ]);
+    });
+
+    it('[A0] stamps the new account of a requirement the prompt does not name', async () => {
+      const w = await twoAccountWorld();
+      const step = await seedStepRow(db, w.taskId);
+      const mod = await stepIntegrationsUnderTest();
+      await dropChoice(w.taskId);
+
+      await mod.insertStampedRun(
+        db,
+        w.taskId,
+        step.id,
+        runValues(w.taskId, step.id),
+        [FORGE_READ, ISSUES_OPTIONAL],
+        named(ISSUES_OPTIONAL.id, null),
+      );
+
+      const [run] = await runsOf(db, w.taskId);
+      expect(run!.integrations).toMatchObject([
+        { requirementId: FORGE_READ.id, connectionId: w.second },
+      ]);
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: 'forge', connectionId: w.second },
+      ]);
+    });
+  });
 });

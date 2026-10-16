@@ -336,15 +336,13 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
     case 'template-empty':
       return 'Write the prompt: the template is empty.';
     case 'unknown-token':
-      return `${token} is not a template token. The tokens are \`task.title\`, \`task.description\`, \`field:<id>\`, \`step:<id>\` and \`agent:<id>\`.`;
+      return `${token} is not a template token. The tokens are \`task.title\`, \`task.description\`, \`field:<id>\`, \`step:<id>\`, \`agent:<id>\` and \`integration:<id>.account\`.`;
     case 'field-not-declared':
       return `${token} names a field this step's form does not declare.`;
     case 'persona-id-invalid':
       return `${token} is not an agent id: use lowercase letters, digits and hyphens.`;
     case 'reserved-marker-in-template':
       return `The template may not contain ${inlineCode('[[HAIVE_')} or start with ${inlineCode('<haive_')}; both are reserved.`;
-    case 'integration-token':
-      return `${token} is not supported yet.`;
     case 'template-too-large':
       return `The template is over ${PROMPT_STEP_TEMPLATE_MAX_BYTES / 1024} KiB; shorten it.`;
     case 'timeout-out-of-range':
@@ -433,6 +431,10 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
       return issue.raw
         ? `${integration} no longer passes its checks; fix it or remove it.`
         : 'More integrations on this step no longer pass their checks; fix or remove them.';
+    case 'integration-not-declared':
+      return `${token} names an integration this step does not declare.`;
+    case 'integration-property-unknown':
+      return `${token} must be written \`{{integration:<id>.account}}\`; account is the only property an integration has.`;
     case 'prompt-step-orphan':
       return `${issue.stepId} is defined but is not in the step list.`;
     case 'prompt-step-missing':
