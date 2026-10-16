@@ -485,9 +485,13 @@ key is null like the whole render file's (`isRtkConflict`).
 carries one claim file per live row (`artifacts/<claimFileName(path)>`: path, portable template id,
 kind, schema version, template and written hashes, Haive version), written by 12, 02 and 04 through
 `writeProjectStateRecord`. A claim names a relative, canonical path with no `.git` segment in any
-letter case (`isClaimablePath`): the codec refuses a record that claims git data, 02's
-`safeDiskRel` refuses such a path as a backstop, and 01 neither lists nor reads a ledger row
-imported before the rule. The writer removes only a claim file the previous `base_snapshot` named
+letter case (`isClaimablePath`): a record never imports a claim to git data, 02's `safeDiskRel`
+refuses such a path as a backstop, and 01 neither lists nor reads a ledger row imported before the
+rule. A claim file at such a path that an earlier release wrote, under its own file name, does not
+refuse the record: the codec reads it apart (`gitDataClaims`), the sync keeps it in the base for the
+writer to remove at the next write (and marks the record due), and no merge, import or set-aside
+check reads it as a claim. Any other claim at a path no claim may name still refuses the whole
+record. The writer removes only a claim file the previous `base_snapshot` named
 and the new render no longer produces, so a teammate's unsynced file is never touched, and it
 returns `{written, removed}` for 12 and 03 to stage. The sync reads those files back: it loads the
 live rows as claims (`loadRecordClaims`), merges the whole record (render and claims) three ways
