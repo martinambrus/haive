@@ -833,9 +833,9 @@ bundleRoutes.post('/:id/sync', requireNewWorkAllowed, async (c) => {
 });
 
 /** Lazy file browser for a bundle's extracted/ tree. Returns flat
- *  `[{path,size}]` pairs (UI groups by `/`). Skips `.git/` to keep git-sourced
- *  bundles small and avoid leaking pack contents. Caps at 5000 entries to
- *  keep the response bounded; truncated flag tells the UI to warn the user. */
+ *  `[{path,size}]` pairs (UI groups by `/`). Lists regular files only and skips `.git/`
+ *  and `.DS_Store`, to keep git-sourced bundles small and avoid leaking pack contents.
+ *  Lists at most 5000 files; `truncated` says a file was left out, so the UI warns. */
 const FILES_LIST_CAP = 5000;
 
 async function listExtractedFiles(
@@ -848,20 +848,13 @@ async function listExtractedFiles(
   const out: Array<{ path: string; size: number }> = [];
   let truncated = false;
   const walk = async (relDir: string, rel: string): Promise<void> => {
-    if (out.length >= FILES_LIST_CAP) {
-      truncated = true;
-      return;
-    }
     // Lenient: a directory that cannot be listed — absent, unreadable, or a link standing where a
     // directory should be — contributes nothing, which is exactly what the `catch` here did.
     const entries = await readdirNoFollow(anchor, relDir);
     if (entries === null) return;
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
-      if (out.length >= FILES_LIST_CAP) {
-        truncated = true;
-        return;
-      }
+      if (truncated) return;
       if (entry.name === '.git') continue;
       if (entry.name === '.DS_Store') continue;
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
@@ -875,6 +868,10 @@ async function listExtractedFiles(
       if (!entry.isFile()) continue;
       const info = await lstatNoFollow(anchor, `${relDir}/${entry.name}`);
       if (info?.kind !== 'file') continue;
+      if (out.length >= FILES_LIST_CAP) {
+        truncated = true;
+        return;
+      }
       out.push({ path: childRel, size: Number(info.stats.size) });
     }
   };
