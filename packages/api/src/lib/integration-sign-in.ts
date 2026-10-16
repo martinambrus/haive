@@ -9,6 +9,7 @@ import {
   secretsService,
 } from '@haive/shared';
 import {
+  decryptConnectionTokens,
   encryptConnectionTokens,
   fetchUserInfo,
   type ResolvedOauthClient,
@@ -112,6 +113,23 @@ async function writeCredential(
   return created!;
 }
 
+/** Unreadable tokens (a replaced key) count as none, so a reconnect can still heal the row. */
+function storedRefreshToken(
+  row: ConnectionRow | undefined,
+  method: Oauth2Method | DeviceMethod,
+  client: ResolvedOauthClient,
+  kek: string,
+): string | null {
+  if (!row?.refreshTokenEncrypted) return null;
+  // A refresh uses the row's method and client, so a grant from another issuer would fail there.
+  if (row.authMethod !== method.kind || row.oauthClientId !== client.clientId) return null;
+  try {
+    return decryptConnectionTokens(row, kek).refreshToken;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Turns tokens a provider just issued into a connection: the account is looked up, then ONE
  * transaction writes the Git credential (a forge) and the connection, or updates both in place
@@ -183,7 +201,11 @@ export async function finishSignIn(input: {
             repoCredentialId: null,
             expiresAt: tokens.expiresAt,
             ...encryptConnectionTokens(
-              { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken },
+              {
+                accessToken: tokens.accessToken,
+                refreshToken:
+                  tokens.refreshToken ?? storedRefreshToken(existing, method, client, kek),
+              },
               kek,
             ),
           }),
