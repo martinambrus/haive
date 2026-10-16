@@ -36,6 +36,7 @@ import {
   uploadFileRelOrThrow,
   uploadsRel,
 } from '../lib/uploads.js';
+import { isUuid } from '../lib/uuid.js';
 
 const ARCHIVE_FORMATS = new Set<ArchiveFormat>(['zip', 'tar', 'tar.gz']);
 
@@ -223,6 +224,9 @@ bundleRoutes.use('*', requireAuth);
 bundleRoutes.get('/', async (c) => {
   const userId = c.get('userId');
   const repositoryId = c.req.query('repositoryId');
+  if (repositoryId && !isUuid(repositoryId)) {
+    throw new HttpError(400, 'repositoryId must be a UUID');
+  }
   const db = getDb();
 
   const where = repositoryId

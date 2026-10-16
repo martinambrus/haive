@@ -13,7 +13,7 @@ import { installIdeWebSocket } from '../src/routes/ide.js';
 const ID = '11111111-2222-3333-4444-555555555555';
 
 const HANDLERS: Array<{ file: string; install: (s: Server) => void; path: string }> = [
-  { file: 'routes/terminal.ts', install: installTerminalWebSocket, path: '/terminal/abc123' },
+  { file: 'routes/terminal.ts', install: installTerminalWebSocket, path: `/terminal/${ID}` },
   {
     file: 'routes/terminal-shell.ts',
     install: installTerminalShellWebSocket,

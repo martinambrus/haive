@@ -287,14 +287,20 @@ module providers can run calls (I6b), since the broker answers every call to one
 `insertStampedRun`: one transaction that takes `lockTaskIntegrations` (the lock the choice PUT and
 DELETE take first), resolves again, records the grants from that resolution and inserts the run
 stamped with its bindings; a required binding lost since the first resolution writes nothing and
-fails the step. In a fan-out only the first run goes
+fails the step, and so does an account a prompt step's template names (`{{integration:<id>.account}}`)
+that now resolves to another connection than the prompt was built on, or appeared or went away
+(`integration-account-changed`). A dispatch whose first resolution bound nothing (every requirement
+optional and unresolved) inserts its run unstamped with no second resolution, so the prompt's
+`(no account connected)` holds for that run and an account connected meanwhile applies from the next
+dispatch. In a fan-out only the first run goes
 through it: that run's stamp is the fan-out's, and every later agent is inserted with the same
 bindings, with no second resolution and no grant write, so a choice changed meanwhile applies from the
 next dispatch (an agent can then carry an account removed after the first insert, and the broker
 refuses its calls `connection-unavailable`). Bindings make the dispatch need an
 MCP-capable CLI, and the prompt names each provider (its id when the display name is not one safe line
 or names an agent path) with the tools the agent will see, write tools only while the owner's switch
-is on, never the account. The prompt and the CLI choice come from the first resolution and the stamp
+is on, never the account; a prompt step's template names it only through
+`{{integration:<id>.account}}` (see [Task types](task-types.md)). The prompt and the CLI choice come from the first resolution and the stamp
 from the second; tools/list follows the stamp, so a choice change landing between the two can only
 leave the prompt naming tools the agent is not offered.
 
