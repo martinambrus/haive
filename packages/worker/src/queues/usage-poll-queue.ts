@@ -505,160 +505,167 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
 
   const now = Date.now();
   for (const task of armed) {
-    if (!task.providerId) continue;
-    const snap = snapById.get(task.providerId);
-    let via: string;
+    try {
+      if (!task.providerId) continue;
+      const snap = snapById.get(task.providerId);
+      let via: string;
 
-    if (task.reason === 'server_error') {
-      const verdict = serverErrorVerdict({
-        since: task.since,
-        now,
-        snapshot: snap ? { status: snap.status, fetchedAt: snap.fetchedAt } : null,
-        hasUsageWindow: !!task.providerName && task.providerName in USAGE_PROVIDERS,
-      });
-      if (!verdict.back) {
-        if (verdict.giveUp) {
-          // The provider never came back within the watch window. Drop the watch instead of
-          // notifying arbitrarily late; the task keeps its failed state and outage errorHint.
-          await db
-            .update(schema.tasks)
-            .set({
-              awaitingAllowanceProviderId: null,
-              awaitingProviderReason: null,
-              awaitingProviderSince: null,
-              allowanceResetAt: null,
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.tasks.id, task.id));
-          log.info(
-            { taskId: task.id, providerId: task.providerId },
-            'provider server error never cleared; abandoning watch',
-          );
-        }
-        continue;
-      }
-      via = verdict.via;
-    } else {
-      // Backfill the reset if the arm path couldn't capture it (no snapshot yet) but the
-      // window is now visible — so a later tick can fire on the authoritative reset.
-      let resetAt = task.resetAt;
-      if (!resetAt && snap) resetAt = constrainingResetAt(snap) ?? null;
-
-      const verdict = allowanceVerdict({
-        resetAt,
-        windows: snap ?? null,
-        snapshotOk: snap?.status === 'ok',
-        now,
-      });
-
-      if (!verdict.back) {
-        // Not back yet. Persist a freshly-backfilled reset so the next tick can fire on it.
-        if (resetAt && resetAt !== task.resetAt) {
-          await db
-            .update(schema.tasks)
-            .set({ allowanceResetAt: resetAt, updatedAt: new Date() })
-            .where(eq(schema.tasks.id, task.id));
-        }
-        continue;
-      }
-      via = verdict.via;
-    }
-
-    // Provider is back. In 'auto' mode, under the anti-thrash cap, and with a step still to
-    // resume, re-run it (resume semantics — completed loop passes preserved) instead of only
-    // notifying. A concurrent manual resume makes autoResumeFailedStep a no-op.
-    if (
-      watchMode === 'auto' &&
-      task.currentStepId &&
-      task.autoResumeCount < ALLOWANCE_AUTO_RESUME_CAP
-    ) {
-      // Past the config cache: the api that sets the state is another process.
-      const state = await readMaintenanceState(task.id);
-      if (refusesNewWork(state)) {
-        log.info({ taskId: task.id, providerId: task.providerId, state }, AUTO_RESUME_HELD);
-        continue;
-      }
-      let resumed: boolean;
-      try {
-        resumed = await autoResumeFailedStep(db, {
-          taskId: task.id,
-          stepId: task.currentStepId,
-          round: task.currentRound ?? 0,
-          providerId: task.providerId,
-          via,
-          watchSince: task.since ?? null,
+      if (task.reason === 'server_error') {
+        const verdict = serverErrorVerdict({
+          since: task.since,
+          now,
+          snapshot: snap ? { status: snap.status, fetchedAt: snap.fetchedAt } : null,
+          hasUsageWindow: !!task.providerName && task.providerName in USAGE_PROVIDERS,
         });
-      } catch (err) {
-        // One task's failed resume must not hold the armed tasks after it back until the next tick.
-        if (err instanceof NewWorkHeld) {
-          log.info(
-            { taskId: task.id, providerId: task.providerId, state: err.state },
-            AUTO_RESUME_HELD,
-          );
-        } else if (err instanceof MaintenanceStateUnreadable) {
-          log.warn(
-            { taskId: task.id, providerId: task.providerId, err },
-            'provider recovered; auto-resume skipped, the maintenance state could not be read',
-          );
-        } else {
-          log.error(
-            { taskId: task.id, providerId: task.providerId, err },
-            'provider recovered; auto-resume failed',
-          );
+        if (!verdict.back) {
+          if (verdict.giveUp) {
+            // The provider never came back within the watch window. Drop the watch instead of
+            // notifying arbitrarily late; the task keeps its failed state and outage errorHint.
+            await db
+              .update(schema.tasks)
+              .set({
+                awaitingAllowanceProviderId: null,
+                awaitingProviderReason: null,
+                awaitingProviderSince: null,
+                allowanceResetAt: null,
+                updatedAt: new Date(),
+              })
+              .where(eq(schema.tasks.id, task.id));
+            log.info(
+              { taskId: task.id, providerId: task.providerId },
+              'provider server error never cleared; abandoning watch',
+            );
+          }
+          continue;
         }
-        continue;
+        via = verdict.via;
+      } else {
+        // Backfill the reset if the arm path couldn't capture it (no snapshot yet) but the
+        // window is now visible — so a later tick can fire on the authoritative reset.
+        let resetAt = task.resetAt;
+        if (!resetAt && snap) resetAt = constrainingResetAt(snap) ?? null;
+
+        const verdict = allowanceVerdict({
+          resetAt,
+          windows: snap ?? null,
+          snapshotOk: snap?.status === 'ok',
+          now,
+        });
+
+        if (!verdict.back) {
+          // Not back yet. Persist a freshly-backfilled reset so the next tick can fire on it.
+          if (resetAt && resetAt !== task.resetAt) {
+            await db
+              .update(schema.tasks)
+              .set({ allowanceResetAt: resetAt, updatedAt: new Date() })
+              .where(eq(schema.tasks.id, task.id));
+          }
+          continue;
+        }
+        via = verdict.via;
       }
-      if (resumed) {
-        await getTaskQueue().add(
-          TASK_JOB_NAMES.ADVANCE_STEP,
-          {
+
+      // Provider is back. In 'auto' mode, under the anti-thrash cap, and with a step still to
+      // resume, re-run it (resume semantics — completed loop passes preserved) instead of only
+      // notifying. A concurrent manual resume makes autoResumeFailedStep a no-op.
+      if (
+        watchMode === 'auto' &&
+        task.currentStepId &&
+        task.autoResumeCount < ALLOWANCE_AUTO_RESUME_CAP
+      ) {
+        // Past the config cache: the api that sets the state is another process.
+        const state = await readMaintenanceState(task.id);
+        if (refusesNewWork(state)) {
+          log.info({ taskId: task.id, providerId: task.providerId, state }, AUTO_RESUME_HELD);
+          continue;
+        }
+        let resumed: boolean;
+        try {
+          resumed = await autoResumeFailedStep(db, {
             taskId: task.id,
-            userId: task.userId,
             stepId: task.currentStepId,
             round: task.currentRound ?? 0,
-          },
-          {
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 5000 },
-            removeOnComplete: 100,
-            removeOnFail: 100,
-          },
-        );
-        log.info(
-          { taskId: task.id, providerId: task.providerId, attempt: task.autoResumeCount + 1 },
-          'provider recovered; auto-resumed',
-        );
+            providerId: task.providerId,
+            via,
+            watchSince: task.since ?? null,
+          });
+        } catch (err) {
+          // One task's failed resume must not hold the armed tasks after it back until the next tick.
+          if (err instanceof NewWorkHeld) {
+            log.info(
+              { taskId: task.id, providerId: task.providerId, state: err.state },
+              AUTO_RESUME_HELD,
+            );
+          } else if (err instanceof MaintenanceStateUnreadable) {
+            log.warn(
+              { taskId: task.id, providerId: task.providerId, err },
+              'provider recovered; auto-resume skipped, the maintenance state could not be read',
+            );
+          } else {
+            log.error(
+              { taskId: task.id, providerId: task.providerId, err },
+              'provider recovered; auto-resume failed',
+            );
+          }
+          continue;
+        }
+        if (resumed) {
+          await getTaskQueue().add(
+            TASK_JOB_NAMES.ADVANCE_STEP,
+            {
+              taskId: task.id,
+              userId: task.userId,
+              stepId: task.currentStepId,
+              round: task.currentRound ?? 0,
+            },
+            {
+              attempts: 3,
+              backoff: { type: 'exponential', delay: 5000 },
+              removeOnComplete: 100,
+              removeOnFail: 100,
+            },
+          );
+          log.info(
+            { taskId: task.id, providerId: task.providerId, attempt: task.autoResumeCount + 1 },
+            'provider recovered; auto-resumed',
+          );
+          continue;
+        }
+        // no-op (already resumed elsewhere) → the task is no longer failed; nothing to notify.
         continue;
       }
-      // no-op (already resumed elsewhere) → the task is no longer failed; nothing to notify.
-      continue;
-    }
-    if (watchMode === 'auto' && task.autoResumeCount >= ALLOWANCE_AUTO_RESUME_CAP) {
+      if (watchMode === 'auto' && task.autoResumeCount >= ALLOWANCE_AUTO_RESUME_CAP) {
+        log.info(
+          { taskId: task.id, cap: ALLOWANCE_AUTO_RESUME_CAP },
+          'provider recovered; auto-resume cap reached — notifying instead',
+        );
+      }
+      // Notify (mode 'notify', capped, or no step to resume): stamp the recovery signal. The
+      // provider id STAYS set so the notification can name the CLI — the row is already excluded
+      // from the armed query above by allowance_replenished_at being non-null.
+      await db
+        .update(schema.tasks)
+        .set({
+          allowanceReplenishedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.tasks.id, task.id));
+      await db.insert(schema.taskEvents).values({
+        taskId: task.id,
+        taskStepId: null,
+        eventType: 'task.allowance_replenished',
+        payload: { providerId: task.providerId, reason: task.reason ?? 'rate_limit', via },
+      });
       log.info(
-        { taskId: task.id, cap: ALLOWANCE_AUTO_RESUME_CAP },
-        'provider recovered; auto-resume cap reached — notifying instead',
+        { taskId: task.id, providerId: task.providerId, reason: task.reason ?? 'rate_limit' },
+        'provider recovered; notifying',
+      );
+    } catch (err) {
+      log.error(
+        { taskId: task.id, providerId: task.providerId, err },
+        'provider recovery failed for one task; going on with the others',
       );
     }
-    // Notify (mode 'notify', capped, or no step to resume): stamp the recovery signal. The
-    // provider id STAYS set so the notification can name the CLI — the row is already excluded
-    // from the armed query above by allowance_replenished_at being non-null.
-    await db
-      .update(schema.tasks)
-      .set({
-        allowanceReplenishedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.tasks.id, task.id));
-    await db.insert(schema.taskEvents).values({
-      taskId: task.id,
-      taskStepId: null,
-      eventType: 'task.allowance_replenished',
-      payload: { providerId: task.providerId, reason: task.reason ?? 'rate_limit', via },
-    });
-    log.info(
-      { taskId: task.id, providerId: task.providerId, reason: task.reason ?? 'rate_limit' },
-      'provider recovered; notifying',
-    );
   }
 }
 
