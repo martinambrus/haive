@@ -662,7 +662,9 @@ put-back this task recorded for the branch: a ref still at the old tip moves to 
 and a moved ref gets the worktree sync it never had, for the paths whose index entry still holds the
 old tip, and the hand-back again for the paths an earlier pass restored. The record notes when the
 worktree is done, so a later pass touches nothing. A record whose commit the branch no longer contains is dropped, and a git failure in any of
-this, a worktree status read included, fails the step rather than leave the worktree unsynced. The
+this, a worktree status read included, fails the step rather than leave the worktree unsynced. 99's
+push stays best effort but its put-back does not: a put-back that fails fails 99, and with a push
+asked for, the Retry that then finds nothing left to commit still puts back and pushes. The
 fork point is taken from the local base first: a record the local base holds ahead of origin is in
 the branch's history, and origin's copy would undo it. A pass that finds the feature's merge already
 open puts nothing back, since that merge's tip must not move.
