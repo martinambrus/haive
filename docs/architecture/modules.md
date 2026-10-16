@@ -73,7 +73,14 @@ the module loads again.
   it), the module counts as activated again, so its attempts start afresh, a start still running from
   before is not counted if it fails, and a module that is not running its jobs is tried again. A
   deactivation and activation that both fall between two passes are seen this way; any other write
-  to the row does the same to an idle module. A task type that uses the module, as its source or
+  to the row does the same to an idle module. Boot waits the same `MODULE_JOB_START_WAIT_MS` on each
+  module's schema ensure and job start: one still running then is named in a warn and boot goes on to
+  `haive-worker ready` without it (a failure within the wait still stops boot); a late ensure is held
+  back like a deactivated module, so the first pass ensures it again and then starts its jobs. At
+  shutdown one deadline, `MODULE_SHUTDOWN_WAIT_MS` (5 s), covers the reconcile pass in flight and every
+  module stop together, so the queue closes and the sandbox reap still run inside Docker's ~10 s grace;
+  a start that succeeds after the stops began stops itself, and a second signal waits on the shutdown
+  already running (a third exits at once). A task type that uses the module, as its source or
   through any step, is
   listed unavailable with the reason `module-deactivated`, and creating a task of it is refused with
   409 `module-deactivated`; the create reads the module rows `FOR KEY SHARE`, so a deactivation running
