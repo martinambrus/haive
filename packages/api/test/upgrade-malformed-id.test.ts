@@ -250,6 +250,20 @@ describe.each(SHELLS)('the $name upgrade', ({ prefix, held, status }) => {
     },
   );
 
+  it.each([
+    [held.toUpperCase(), PROVIDER],
+    [held, PROVIDER.toUpperCase()],
+  ])(
+    'answers the uppercase ids %s/%s with 404 before any database read, since an id names a container',
+    async (scope, provider) => {
+      const port = await listen(installTerminalShellWebSocket);
+
+      expect(await handshake(port, `${prefix}${scope}/${provider}`)).toBe('HTTP/1.1 404 Not Found');
+      expect(h.dbCalls).toBe(0);
+      expect(h.error).not.toHaveBeenCalled();
+    },
+  );
+
   it('answers well-formed ids nobody holds with 404, after reading the database (passes before and after)', async () => {
     const port = await listen(installTerminalShellWebSocket);
     const path = `${prefix}${randomUUID()}/${randomUUID()}`;
