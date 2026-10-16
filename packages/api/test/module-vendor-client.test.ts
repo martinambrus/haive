@@ -236,6 +236,34 @@ describe('the vendor client of the module executors', () => {
     },
   );
 
+  it.each(spellingsOf(ODD_TOKEN))(
+    'hands the executor a JSON answer that echoes the token %s with the token removed',
+    async (_name, echo) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => reply(200, `{"token":"${echo}","ok":1}`)),
+      );
+      const vendor = createVendorClient({
+        token: ODD_TOKEN,
+        apiHosts: [HOST],
+        access: 'read',
+        signal: new AbortController().signal,
+      });
+
+      const answer = await vendor.request({ method: 'GET', url: urlOf() });
+
+      expect(answer).toEqual({ status: 200, body: { token: '[redacted]', ok: 1 } });
+    },
+  );
+
+  it('hands the executor a text answer that echoes the token with the token removed', async () => {
+    const { vendor } = clientFor(reply(200, `issued to ${TOKEN}.`, 'text/plain'));
+
+    const answer = await vendor.request({ method: 'GET', url: urlOf() });
+
+    expect(answer).toEqual({ status: 200, body: 'issued to [redacted].' });
+  });
+
   it('fails an answer larger than 8 MiB without reading all of it', async () => {
     const chunk = new Uint8Array(1024 * 1024).fill(0x61);
     let pulled = 0;

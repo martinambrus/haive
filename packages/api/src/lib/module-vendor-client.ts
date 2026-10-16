@@ -224,9 +224,11 @@ export function createVendorClient(options: {
       if (read.cut) {
         throw new VendorError('vendor-error', 'the answer of the vendor is larger than the limit');
       }
-      if (read.text === '' || !isJson(response)) return { status, body: read.text };
+      // The executor never holds the token, not even one the vendor echoes in its answer.
+      const text = redactSecrets(read.text, [token]);
+      if (text === '' || !isJson(response)) return { status, body: text };
       try {
-        return { status, body: JSON.parse(read.text) as unknown };
+        return { status, body: JSON.parse(text) as unknown };
       } catch {
         throw new VendorError('vendor-error', 'the vendor answered JSON that cannot be read');
       }
