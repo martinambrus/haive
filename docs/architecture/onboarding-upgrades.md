@@ -651,7 +651,8 @@ when the move is refused, and the step's warning is rebuilt from those events on
 Retry shows it again; 12's form lists the paths before the choice. A pass first finishes the last
 put-back this task recorded for the branch: a ref still at the old tip moves to the recorded commit,
 and a moved ref gets the worktree sync it never had, for the paths whose index entry still holds the
-old tip. A record whose commit the branch no longer contains is dropped, and a git failure in any of
+old tip, and the hand-back again for the paths an earlier pass restored. The record notes when the
+worktree is done, so a later pass touches nothing. A record whose commit the branch no longer contains is dropped, and a git failure in any of
 this, a worktree status read included, fails the step rather than leave the worktree unsynced. The
 fork point is taken from the local base first: a record the local base holds ahead of origin is in
 the branch's history, and origin's copy would undo it. A pass that finds the feature's merge already
