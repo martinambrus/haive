@@ -2,7 +2,11 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { listIntegrationProviders, resolveTaskCategories } from '@haive/shared/integrations';
+import {
+  listIntegrationProviders,
+  lockTaskIntegrations,
+  resolveTaskCategories,
+} from '@haive/shared/integrations';
 import { getDb, type Database } from '../../db.js';
 import {
   removePreference,
@@ -76,6 +80,7 @@ taskIntegrationRoutes.put('/:id/integrations/:categoryId', async (c) => {
   await requireAllowedByRepository(db, connection, task.repositoryId);
 
   await db.transaction(async (tx) => {
+    await lockTaskIntegrations(tx, task.id);
     await tx
       .insert(schema.taskIntegrationChoices)
       .values({ taskId: task.id, ...pick })
@@ -106,6 +111,7 @@ taskIntegrationRoutes.delete('/:id/integrations/:categoryId', async (c) => {
   const task = await requireChangeableTask(db, c.req.param('id'), userId);
 
   await db.transaction(async (tx) => {
+    await lockTaskIntegrations(tx, task.id);
     await tx
       .delete(schema.taskIntegrationChoices)
       .where(
