@@ -25,10 +25,13 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   tree changed under it. As 00a's fast-forward does, the set-aside counts such tasks
   (`checkoutHoldingTasks` with `rootOnly`, this task left out), and each section that opens a merge
   there, or clears an earlier attempt's merge first, takes the repository's task-creation lock
-  (`lockRepositoryTasksKey`) and counts them again before it moves anything. A count above zero halts
-  the step with "N other task(s) working in this checkout; nothing was merged. Retry this step once
-  it/they finish(es)." and nothing is merged or aborted. A cross-branch merge runs in the shared
-  `<base>--base` worktree and is not fenced.
+  (`lockRepositoryTasksKey`) and counts them again before it moves anything. Every task's start takes
+  the same lock to move it from `created` to `queued` (`markQueuedForStart`), so none becomes a holder
+  between that count and the move; a create with a repository takes it before its insert, as every
+  other holder does, so no create inverts it with the repository row or the database-snapshot lock.
+  A count above zero halts the step with "N other task(s) working in this checkout; nothing was
+  merged. Retry this step once it/they finish(es)." and nothing is merged or aborted. A cross-branch
+  merge runs in the shared `<base>--base` worktree and is not fenced.
 - **A merge dir holds one task's merge at a time, by a claim and fenced sections.** A cross-branch
   merge runs in a worktree named from the base branch alone (`main--base`), shared by every task
   merging into that base, since git allows the branch in one worktree. A step takes the dir in
