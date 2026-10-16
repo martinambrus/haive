@@ -119,7 +119,7 @@ async function jobAfterRevive(
   const stepId = c.currentStepId;
   if (stepId === null) return { kind: 'none' };
   if (status === 'running') return { kind: 'advance', stepId };
-  if (status !== 'waiting_user') return { kind: 'none' };
+  if (status !== 'waiting_user' && status !== 'waiting_pr') return { kind: 'none' };
   const [step] = await tx
     .select({
       status: schema.taskSteps.status,

@@ -157,33 +157,36 @@ interface StalledCandidate {
   epoch: number;
 }
 
-/** Locks the task row, then re-checks the whole candidate predicate before bumping the epoch:
- *  a step a pass claimed since the candidate read is left to that pass. */
+/** Locks the rows (an answered form's first), then re-checks the whole candidate predicate before
+ *  bumping the epoch: a step a pass claimed since the candidate read is left to that pass. */
 async function redriveTask(
   db: Database,
   c: StalledCandidate,
   deps: StalledRedriveDeps,
   cutoff: Date,
 ): Promise<boolean> {
+  const answered = c.taskStatus !== 'running';
   const fenced = await db.transaction(async (tx) => {
+    const rowKey = and(
+      eq(schema.taskSteps.taskId, c.taskId),
+      eq(schema.taskSteps.stepId, c.stepId),
+      eq(schema.taskSteps.round, c.round),
+    );
+    const currentRow = (cond: SQLWrapper | undefined) =>
+      tx
+        .select({ one: sql`1` })
+        .from(schema.taskSteps)
+        .where(and(rowKey, cond));
+    // A Retry takes the step row before the task's, so an answered form's row is locked first.
+    if (answered && (await currentRow(answeredFormRow(cutoff)).for('update')).length === 0) {
+      return null;
+    }
     const locked = await tx
       .select({ id: schema.tasks.id })
       .from(schema.tasks)
       .where(eq(schema.tasks.id, c.taskId))
       .for('update');
     if (locked.length === 0) return null;
-    const currentRow = (cond: SQLWrapper | undefined) =>
-      tx
-        .select({ one: sql`1` })
-        .from(schema.taskSteps)
-        .where(
-          and(
-            eq(schema.taskSteps.taskId, c.taskId),
-            eq(schema.taskSteps.stepId, c.stepId),
-            eq(schema.taskSteps.round, c.round),
-            cond,
-          ),
-        );
     const [row] = await tx
       .update(schema.tasks)
       .set({
@@ -199,12 +202,16 @@ async function redriveTask(
           sql`${schema.tasks.currentStepId} IS NOT DISTINCT FROM ${c.stepId}`,
           eq(schema.tasks.currentRound, c.round),
           taskStale(cutoff),
-          c.taskStatus !== 'running'
+          answered
             ? exists(currentRow(answeredFormRow(cutoff)))
             : not(exists(currentRow(not(redrivableRow(cutoff))))),
         ),
       )
       .returning({ epoch: schema.tasks.orchestrationEpoch });
+    // The row's stamp throttles the next re-drive: a waiting_pr task's own is rewritten by the poller.
+    if (row && answered) {
+      await tx.update(schema.taskSteps).set({ updatedAt: new Date() }).where(rowKey);
+    }
     return row ?? null;
   });
   if (!fenced) return false;

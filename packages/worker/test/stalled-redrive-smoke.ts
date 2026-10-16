@@ -213,6 +213,7 @@ async function main(): Promise<void> {
       ...waitingPr,
       deadAt: new Date(),
     });
+    const waitingPrRetryTaskId = await makeTask('waiting-pr-retry', waitingPr);
 
     // Tasks queued to start, whose START may have been lost.
     const unstarted = (
@@ -277,6 +278,38 @@ async function main(): Promise<void> {
           .where(eq(schema.tasks.id, id))
       )[0]?.epoch;
 
+    const rowUpdatedAt = async (id: string) =>
+      (
+        await db
+          .select({ at: schema.taskSteps.updatedAt })
+          .from(schema.taskSteps)
+          .where(eq(schema.taskSteps.taskId, id))
+      )[0]?.at;
+
+    // A Retry writes the step row before the task row: the fence beside it has to wait, not deadlock.
+    let retryDone: Promise<string> | undefined;
+    const startRetry = async () => {
+      let held: () => void = () => undefined;
+      const holding = new Promise<void>((resolve) => (held = resolve));
+      retryDone = db
+        .transaction(async (tx) => {
+          await tx
+            .select({ id: schema.taskSteps.id })
+            .from(schema.taskSteps)
+            .where(eq(schema.taskSteps.taskId, waitingPrRetryTaskId))
+            .for('update');
+          held();
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          await tx
+            .update(schema.tasks)
+            .set({ updatedAt: new Date() })
+            .where(eq(schema.tasks.id, waitingPrRetryTaskId));
+          return 'committed';
+        })
+        .catch((err) => `failed: ${String(err)}`);
+      await holding;
+    };
+
     const advances: {
       taskId: string;
       userId: string;
@@ -307,6 +340,7 @@ async function main(): Promise<void> {
       // Simulates a step claimed by another pass between the candidates SELECT and this pass's
       // fence: flips the race tasks' step rows live, after the SELECT already ran.
       queuedTaskJobs: async () => {
+        if (retryDone === undefined) await startRetry();
         await db
           .update(schema.taskSteps)
           .set({ status: 'running', updatedAt: new Date() })
@@ -352,6 +386,7 @@ async function main(): Promise<void> {
       },
     };
 
+    const passStart = new Date();
     await redriveStalledTasks(db, deps, { staleMs: STALE_MS });
 
     check('a task with no current-step row is re-driven', (await epochOf(missingRowTaskId)) === 4);
@@ -522,6 +557,47 @@ async function main(): Promise<void> {
       (await epochOf(waitingPrSettledTaskId)) === 3 &&
         advances.every((a) => a.taskId !== waitingPrSettledTaskId),
     );
+    const retryAdvances = advances.filter((a) => a.taskId === waitingPrRetryTaskId);
+    check(
+      'a Retry that holds the step row, then writes the task row, is waited for by the fence, which then re-drives once',
+      (await retryDone) === 'committed' &&
+        (await epochOf(waitingPrRetryTaskId)) === 4 &&
+        retryAdvances.length === 1 &&
+        retryAdvances[0]?.epoch === 4,
+      { retry: await retryDone, epoch: await epochOf(waitingPrRetryTaskId), retryAdvances },
+    );
+    const touched = async (ids: string[]) =>
+      Promise.all(
+        ids.map(async (id) => ((await rowUpdatedAt(id))?.getTime() ?? 0) >= passStart.getTime()),
+      );
+    check(
+      'the row of an answered form the fence re-drove, waiting_user or waiting_pr, was touched in the fence',
+      (
+        await touched([
+          waitingUserAnsweredTaskId,
+          waitingPrAnsweredTaskId,
+          waitingPrIdleTaskId,
+          waitingPrPolledTaskId,
+        ])
+      ).every(Boolean),
+    );
+    check(
+      'the rows of a running task the fence re-drove were not touched',
+      (await touched([redriveTaskId, doneRowTaskId, skippedRowTaskId, answeredFormTaskId])).every(
+        (t) => !t,
+      ),
+    );
+    check(
+      'a row the fence left alone, a task taken or a form skipped before it, was not touched',
+      (
+        await touched([
+          waitingUserPickedUpTaskId,
+          waitingPrPickedUpTaskId,
+          waitingUserSettledTaskId,
+          waitingPrSettledTaskId,
+        ])
+      ).every((t) => !t),
+    );
     const [failedRow] = await db
       .select({ id: schema.taskSteps.id })
       .from(schema.taskSteps)
@@ -637,6 +713,52 @@ async function main(): Promise<void> {
         advancesFor(lostRunTaskId).length === 1 &&
         advancesFor(miningTaskId).length === 1,
       { starts, advances },
+    );
+    // The advances above were dropped before pickup: no job is queued and no row was written since.
+    const reDriven = [
+      ['waiting_pr answered form', waitingPrAnsweredTaskId],
+      ['waiting_pr answered form of an idle task', waitingPrIdleTaskId],
+      [
+        'waiting_pr answered form the poller wrote between the SELECT and the fence',
+        waitingPrPolledTaskId,
+      ],
+      ['waiting_user answered form', waitingUserAnsweredTaskId],
+    ] as const;
+    for (const [name, id] of reDriven) {
+      check(
+        `a second pass inside the cutoff leaves a re-driven ${name} at its new epoch, with no second advance`,
+        (await epochOf(id)) === 4 && advancesFor(id).length === 1,
+        { epoch: await epochOf(id), advances: advancesFor(id) },
+      );
+    }
+    await db
+      .update(schema.taskSteps)
+      .set({ updatedAt: longAgo })
+      .where(
+        inArray(schema.taskSteps.taskId, [
+          waitingPrAnsweredTaskId,
+          waitingPrIdleTaskId,
+          waitingUserAnsweredTaskId,
+        ]),
+      );
+    await db
+      .update(schema.tasks)
+      .set({ updatedAt: longAgo })
+      .where(eq(schema.tasks.id, waitingUserAnsweredTaskId));
+    await redriveStalledTasks(db, deps, { staleMs: STALE_MS });
+    for (const [name, id] of reDriven.filter(([, id]) => id !== waitingPrPolledTaskId)) {
+      check(
+        `once its row is older than the cutoff again, a re-driven ${name} is re-driven once more`,
+        (await epochOf(id)) === 5 &&
+          advancesFor(id).length === 2 &&
+          advancesFor(id)[1]?.epoch === 5,
+        { epoch: await epochOf(id), advances: advancesFor(id) },
+      );
+    }
+    check(
+      'a re-driven waiting_pr answered form whose row is still inside the cutoff is left alone beside them',
+      (await epochOf(waitingPrPolledTaskId)) === 4 &&
+        advancesFor(waitingPrPolledTaskId).length === 1,
     );
     const cancelled = async (
       title: string,

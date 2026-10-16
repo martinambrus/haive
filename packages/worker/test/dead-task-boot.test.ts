@@ -416,7 +416,19 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
         row: { status: 'waiting_form', waitingStartedAt: DEAD_AT, formValues: null },
         job: 'none',
       },
+      {
+        status: 'paused',
+        current: A,
+        row: { status: 'waiting_form', waitingStartedAt: null, formValues: { ok: true } },
+        job: 'none',
+      },
       { status: 'created', current: null, row: null, job: 'none' },
+      {
+        status: 'waiting_pr',
+        current: A,
+        row: { status: 'waiting_form', waitingStartedAt: null, formValues: { ok: true } },
+        job: 'advance',
+      },
       {
         status: 'waiting_pr',
         current: A,

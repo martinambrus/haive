@@ -921,6 +921,7 @@ async function main(): Promise<void> {
       ['created', { status: 'created' as const, currentStepId: null }, null],
       ['failed', { status: 'failed' as const }, 'failed'],
       ['waiting-pr', { status: 'waiting_pr' as const }, 'awaiting'],
+      ['waiting-pr-answered', { status: 'waiting_pr' as const }, 'answered'],
       ['waiting-awaiting', { status: 'waiting_user' as const }, 'awaiting'],
       ['waiting-answered', { status: 'waiting_user' as const }, 'answered'],
     ] as const) {
@@ -950,6 +951,7 @@ async function main(): Promise<void> {
       ['created', []],
       ['failed', []],
       ['waiting-pr', []],
+      ['waiting-pr-answered', [ADVANCE]],
       ['waiting-awaiting', []],
       ['waiting-answered', [ADVANCE]],
     ] as const) {
