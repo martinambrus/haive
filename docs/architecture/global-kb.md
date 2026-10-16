@@ -117,16 +117,24 @@ connection string writes an audit row (`global_kb.connection_string.update`,
 `connection_string_in_use` while the store the save leaves in place is the external one, refused
 with 400 alongside a new string, and audited as `{connectionStringSet: false}`. A save that sets the
 string writes it (and its audit row) after the embedding-width check and before the mode, so no
-process finds the external store without its string, and a refused save writes nothing. The one
-exception is a save that leaves the external store for the built-in one: it writes the mode first,
-so no process pairs the live external store with a string it is not switching to. Every
+process finds the external store without its string, and a refused save writes nothing. A new string
+in a save that leaves the store built-in is refused with 400 `connection_string_unused` (the page
+sends the string only while the external store is selected), and a re-sent stored string is
+skipped, so a save that leaves the external store never writes a string; a removal it asks for comes
+after the mode. A save that writes any of the eight other settings also records one
+`config.global_kb` row: `from` (read past the cache) and `to` for all eight, and a
+`connectionStringChanged` flag, with `partial: true` when a later write failed. It takes no advisory
+lock: the one api process runs the saves one after another (`serializeConfigSave`) and is the only
+writer of those keys. Every
 process reads the mode and the string fresh, past the 30 s caches (`resolveGlobalKbSettings`), so a
 switch or a removal reaches the worker at once; a reader that finds the external store reads the
 mode once more after the string, since leaving the external store writes the mode before it removes
-or replaces the string. The house-rules switch lives in
+the string. The house-rules switch lives in
 the admin console, and an admin who points the KB at an external store trusts every writer of that
 database: a row it marks enforced is honoured. The
-enrich task refuses to re-enrich an enforced entry, since a retry would demote it.
+enrich task refuses to re-enrich an enforced entry, since a retry would demote it, and reads the
+`kb_author` type again inside its task transaction, so a type disabled after the first check is
+still refused and the skeleton entry it wrote is removed.
 
 ## House rules in prompts
 

@@ -643,7 +643,8 @@ export default function GlobalKbPage() {
     const payload: Record<string, unknown> = loadedConfig.current
       ? changedFields(loadedConfig.current, current)
       : current;
-    if (cfg.connectionString.trim()) payload.connectionString = cfg.connectionString.trim();
+    if (cfg.mode === 'external' && cfg.connectionString.trim())
+      payload.connectionString = cfg.connectionString.trim();
     if (Object.keys(payload).length === 0) {
       setCfgMsg('Nothing changed.');
       return;

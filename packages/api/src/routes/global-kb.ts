@@ -388,6 +388,13 @@ async function putConfig(c: Context<AppEnv>) {
       'connection_string_set_and_clear',
     );
   }
+  if (given !== '' && given !== saved.connectionString && (d.mode ?? saved.mode) === 'internal') {
+    throw new HttpError(
+      400,
+      'the built-in store uses no connection string; send it with the external store, or leave it blank',
+      'connection_string_unused',
+    );
+  }
   if (clearing && (d.mode ?? saved.mode) === 'external') {
     throw new HttpError(
       409,
@@ -416,15 +423,27 @@ async function putConfig(c: Context<AppEnv>) {
       'embed_dimensions_with_store_change',
     );
   }
+  const storesString = isAdmin && given !== '' && given !== saved.connectionString;
+  const fields: [name: string, key: string, value: string | undefined][] = [
+    ['enabled', CONFIG_KEYS.GLOBAL_KB_ENABLED, isAdmin ? d.enabled?.toString() : undefined],
+    ['digestEnabled', CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, d.digestEnabled?.toString()],
+    ['mode', CONFIG_KEYS.GLOBAL_KB_MODE, isAdmin ? d.mode : undefined],
+    ['namespace', CONFIG_KEYS.GLOBAL_KB_NAMESPACE, isAdmin ? d.namespace : undefined],
+    ['ollamaUrl', CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl],
+    ['embedModel', CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel],
+    ['embedDimensions', CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, d.embedDimensions?.toString()],
+    [
+      'archiveRetentionDays',
+      CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
+      d.archiveRetentionDays?.toString(),
+    ],
+  ];
   const write = async () => {
-    // Leaving for the built-in store, the mode goes first so no reader pairs external with a string
-    // it is not switching to; otherwise the string goes first so external never lacks one.
-    const modeFirst = isAdmin && d.mode === 'internal' && saved.mode !== 'internal';
-    if (modeFirst) await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode!);
-    if (isAdmin && d.connectionString !== undefined && d.connectionString.trim().length > 0) {
+    // The string goes first, so no reader finds the external store without it.
+    if (storesString) {
       await secretsService.set(
         SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
-        d.connectionString.trim(),
+        given,
         'Global KB external connection string',
       );
       await recordAuditEvent(getDb(), {
@@ -434,25 +453,40 @@ async function putConfig(c: Context<AppEnv>) {
         metadata: { connectionStringSet: true },
       });
     }
-    if (isAdmin && d.enabled !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
-    if (d.digestEnabled !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, String(d.digestEnabled));
-    if (isAdmin && d.mode !== undefined && !modeFirst)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode);
-    if (isAdmin && d.namespace !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace);
-    if (d.ollamaUrl !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl);
-    if (d.embedModel !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel);
-    if (d.embedDimensions !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, String(d.embedDimensions));
-    if (d.archiveRetentionDays !== undefined)
-      await configService.set(
-        CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
-        String(d.archiveRetentionDays),
-      );
+    if (fields.every(([, , value]) => value === undefined)) return;
+    // Past the cache; serializeConfigSave let the previous save finish, so this is what it left.
+    const stored = await Promise.all(fields.map(([, key]) => configService.getFresh(key)));
+    const record = (
+      indexes: number[],
+      extra: { connectionStringChanged: boolean; partial?: true },
+    ) =>
+      recordAuditEvent(getDb(), {
+        actorUserId: c.get('userId'),
+        action: 'config.global_kb',
+        targetType: 'system',
+        metadata: {
+          from: Object.fromEntries(indexes.map((i) => [fields[i]![0], stored[i]])),
+          to: Object.fromEntries(indexes.map((i) => [fields[i]![0], fields[i]![2] ?? stored[i]])),
+          ...extra,
+        },
+      });
+    const written: number[] = [];
+    try {
+      for (const [i, [, key, value]] of fields.entries()) {
+        if (value === undefined) continue;
+        await configService.set(key, value);
+        written.push(i);
+      }
+    } catch (err) {
+      if (written.length > 0) {
+        await record(written, { connectionStringChanged: storesString, partial: true });
+      }
+      throw err;
+    }
+    await record(
+      fields.map((_, i) => i),
+      { connectionStringChanged: storesString || clearing },
+    );
   };
   if (dimsChange) await withVectorWidthLock(saved, d.embedDimensions!, write);
   else await write();
@@ -612,9 +646,8 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
-  const { runListSnapshot, customSteps } = await definitionForCreate(db, 'kb_author', {
-    generic: false,
-  });
+  // Refused here, a disabled type writes no skeleton; the task's transaction reads it again.
+  await definitionForCreate(db, 'kb_author', { generic: false });
 
   const taskId = randomUUID();
   const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {
@@ -650,6 +683,9 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
       await admitNewWork(tx);
       // Queuing takes this lock; taken before the insert, it inverts no lock the row's insert holds.
       if (data.repositoryId) await lockRepositoryTasksKey(tx, data.repositoryId);
+      const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'kb_author', {
+        generic: false,
+      });
       await tx.insert(schema.tasks).values({
         id: taskId,
         userId,
