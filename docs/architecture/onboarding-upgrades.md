@@ -612,7 +612,10 @@ and mode a set-aside captured ride in the merge state (`keptMetadata`, never the
 call that ends a merge restores them even when an earlier call set the files aside; a merge left
 open keeps them for its end. They are restored, and cleared, only after a re-sync that completed:
 `resyncHaiveProjections` answers whether both halves re-synced, and one that returned early (a merge
-or rebase open) or failed leaves `keptMetadata` in the state for a later settle. A cancelled task's merge ends elsewhere, and each ending restores them
+or rebase open) or failed leaves `keptMetadata` in the state. Only a later call that ends the same
+merge settles it. A merge that reached done, or a cancel that found the merge gone, settles nothing
+again, so the projection sweep recreates those files with its own owner and mode. Every other
+set-aside caller whose re-sync fails loses them the same way. A cancelled task's merge ends elsewhere, and each ending restores them
 too: the abort job, a cancel that finds the merge already gone, or the next task's merge that
 clears it, which takes them into its own state first. It reads no checkout-holding count, and a state file edited by
 hand halts it by name even when the incoming commit leaves that file alone, as it halts a refresh or
