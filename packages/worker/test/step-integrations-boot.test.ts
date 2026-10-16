@@ -9,6 +9,9 @@ vi.mock('../src/step-engine/task-type-seed.js', () => ({
   syncTaskTypeDefinitions: async () => ({}),
 }));
 vi.mock('../src/modules/intent.js', () => ({ syncModuleIntent: async () => undefined }));
+vi.mock('../src/modules/activation.js', () => ({
+  deactivatedModuleIds: async () => new Set<string>(),
+}));
 
 const DECLARED: IntegrationRequirement[] = [
   { id: 'pull-requests', category: 'forge', access: 'read' },
