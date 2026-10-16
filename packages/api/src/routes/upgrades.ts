@@ -37,6 +37,7 @@ import {
   isRenderContextSnapshot,
   originAgentTargets,
   readRenderContextColumn,
+  namesGitData,
   renderContextOrigin,
   renderContextProviderNames,
   rendersAt,
@@ -428,7 +429,10 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     }),
   );
   const foreignIds = new Set(foreignReasons.keys());
-  const ownArtifacts = liveArtifacts.filter((a) => !foreignIds.has(a.id));
+  // A row an earlier release recorded at a git-data path is one 01 skips and 02 refuses.
+  const ownArtifacts = liveArtifacts.filter(
+    (a) => !foreignIds.has(a.id) && !namesGitData(a.diskPath),
+  );
 
   // Pick the most recently-written version stamp among live rows. Rows
   // written before migration 0011 have null haive_version — return null in

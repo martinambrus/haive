@@ -40,6 +40,7 @@ import { hashPassword } from '../auth/password.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { recordAuditEvent } from '../lib/audit.js';
+import { isUuid } from '../lib/uuid.js';
 import { generateInviteToken, hashInviteToken } from '../lib/invites.js';
 
 const log = logger.child({ module: 'admin' });
@@ -188,6 +189,7 @@ adminRoutes.get('/audit', async (c) => {
   const action = q.action || undefined;
   const targetType = q.targetType || undefined;
   const actorUserId = q.actorUserId || undefined;
+  if (actorUserId && !isUuid(actorUserId)) throw new HttpError(400, 'actorUserId must be a UUID');
   const fromDate = q.from ? new Date(q.from) : undefined;
   const toDate = q.to ? new Date(q.to) : undefined;
   const limit = Math.min(200, Math.max(1, Number.parseInt(q.limit ?? '50', 10) || 50));

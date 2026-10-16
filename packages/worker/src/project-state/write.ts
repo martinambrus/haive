@@ -12,6 +12,7 @@ import {
   conflictSideValue,
   emptyProjectState,
   environmentUnitOf,
+  isCanonicalRepoPath,
   isClaimablePath,
   isClaimUnit,
   isEnvironmentUnit,
@@ -396,7 +397,8 @@ async function loadBase(
   if (Array.isArray(snapshot?.claims)) {
     for (const claim of snapshot.claims) {
       const path = (claim as { path?: unknown } | null)?.path;
-      if (typeof path === 'string' && isClaimablePath(path)) {
+      // Canonical, not claimable: a git-data claim an earlier release wrote is still removed.
+      if (typeof path === 'string' && isCanonicalRepoPath(path)) {
         files.push(`${PROJECT_STATE_DIR}/${claimFileName(path)}`);
       }
     }
