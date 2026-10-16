@@ -163,6 +163,7 @@ const send = (method: string, url: string, body?: unknown) =>
   });
 const put = (body: unknown) => send('PUT', '/global-kb/config', body);
 const written = () => h.set.mock.calls.map(([key, value]) => [key, value]);
+const actions = () => h.audits.map(({ row }) => (row as { action: string }).action);
 
 beforeEach(() => {
   h.set.mockClear();
@@ -421,7 +422,7 @@ describe('PUT /global-kb/config audit trail', () => {
     };
   });
 
-  it('records one event when an admin sets the connection string, and no part of the string', async () => {
+  it('records one event for the string and one for the settings when an admin sets it, and no part of the string', async () => {
     const res = await put({ ...PAGE, mode: 'external', connectionString: NEW_STRING });
 
     expect(res.status).toBe(200);
@@ -430,7 +431,7 @@ describe('PUT /global-kb/config audit trail', () => {
       NEW_STRING,
       expect.any(String),
     );
-    expect(h.audits).toHaveLength(1);
+    expect(actions()).toEqual(['global_kb.connection_string.update', 'config.global_kb']);
     expect(h.audits[0]?.table).toBe(schema.auditEvents);
     expect(h.audits[0]?.row).toEqual({
       actorUserId: ADMIN_ID,
@@ -440,7 +441,8 @@ describe('PUT /global-kb/config audit trail', () => {
       metadata: { connectionStringSet: true },
       createdAt: expect.anything(),
     });
-    expect(h.auditLog.info).toHaveBeenCalledTimes(1);
+    expect(h.audits[1]?.row).toMatchObject({ metadata: { connectionStringChanged: true } });
+    expect(h.auditLog.info).toHaveBeenCalledTimes(2);
     expect(h.auditLog.info.mock.calls[0]?.[0]).toMatchObject({
       actorUserId: ADMIN_ID,
       action: 'global_kb.connection_string.update',
@@ -457,14 +459,14 @@ describe('PUT /global-kb/config audit trail', () => {
       'sends it blank, as the page does while the field is untouched',
       { ...PAGE, connectionString: '  ' },
     ],
-  ])('records nothing when an admin saves other settings and %s', async (_how, body) => {
+  ])('records only the settings when an admin saves other settings and %s', async (_how, body) => {
     const res = await put(body);
 
     expect(res.status).toBe(200);
     expect(h.set).toHaveBeenCalled();
     expect(h.setSecret).not.toHaveBeenCalled();
-    expect(h.audits).toEqual([]);
-    expect(h.auditLog.info).not.toHaveBeenCalled();
+    expect(actions()).toEqual(['config.global_kb']);
+    expect(h.audits[0]?.row).toMatchObject({ metadata: { connectionStringChanged: false } });
   });
 
   it.each([
@@ -499,13 +501,12 @@ describe('PUT /global-kb/config audit trail', () => {
       expect(h.auditLog.info).not.toHaveBeenCalled();
     });
 
-    it('records nothing for the stored one re-sent, which is accepted and not written', async () => {
+    it('records only the settings for the stored one re-sent, which is accepted and not written', async () => {
       const res = await put({ ...PAGE, connectionString: STORED_STRING });
 
       expect(res.status).toBe(200);
       expect(h.setSecret).not.toHaveBeenCalled();
-      expect(h.audits).toEqual([]);
-      expect(h.auditLog.info).not.toHaveBeenCalled();
+      expect(actions()).toEqual(['config.global_kb']);
     });
   });
 });
@@ -528,7 +529,7 @@ describe('PUT /global-kb/config storing the connection string before the setting
     const res = await put({ mode: 'external', connectionString: NEW_STRING });
 
     expect(res.status).toBe(200);
-    expect(h.events).toEqual(['set-secret', 'audit', MODE]);
+    expect(h.events).toEqual(['set-secret', 'audit', MODE, 'audit']);
     expect(h.setSecret).toHaveBeenCalledTimes(1);
   });
 
@@ -547,7 +548,8 @@ describe('PUT /global-kb/config storing the connection string before the setting
     expect(res.status).toBe(200);
     expect(h.events.slice(0, 2)).toEqual(['set-secret', 'audit']);
     expect(h.events).toContain(MODE);
-    expect(h.events.filter((event) => event === 'audit')).toHaveLength(1);
+    expect(h.events.filter((event) => event === 'audit')).toHaveLength(2);
+    expect(h.events.at(-1)).toBe('audit');
   });
 
   it('keeps the single write of a save that sends only the mode', async () => {
@@ -555,7 +557,7 @@ describe('PUT /global-kb/config storing the connection string before the setting
     const res = await put({ mode: 'external' });
 
     expect(res.status).toBe(200);
-    expect(h.events).toEqual([MODE]);
+    expect(h.events).toEqual([MODE, 'audit']);
   });
 
   it('keeps the single write of a save that sends only the string', async () => {
@@ -592,12 +594,13 @@ describe('PUT /global-kb/config storing the connection string before the setting
       expect(h.events).toEqual([]);
     });
 
-    it('stores nothing and records nothing when the width is accepted either', async () => {
+    it('stores nothing for it when the width is accepted either, and records only the settings', async () => {
       const res = await put(RESEND);
 
       expect(res.status).toBe(200);
       expect(h.setSecret).not.toHaveBeenCalled();
-      expect(h.events).not.toContain('audit');
+      expect(h.events.filter((event) => event === 'audit')).toHaveLength(1);
+      expect(h.events.slice(-3)).toEqual(['audit', 'commit', 'close']);
       expect(h.events).toContain(MODE);
     });
   });
@@ -670,7 +673,9 @@ describe('PUT /global-kb/config removing the stored connection string', () => {
 
       expect(res.status).toBe(200);
       expect(h.deleteSecret).toHaveBeenCalledTimes(1);
-      expect(h.audits).toHaveLength(1);
+      expect(
+        actions().filter((action) => action === 'global_kb.connection_string.update'),
+      ).toHaveLength(1);
     },
   );
 
@@ -699,7 +704,8 @@ describe('PUT /global-kb/config removing the stored connection string', () => {
 
     expect(res.status).toBe(200);
     expect(h.events).toEqual([`set:${CONFIG_KEYS.GLOBAL_KB_MODE}`, 'delete-secret']);
-    expect(h.audits).toHaveLength(1);
+    expect(actions()).toEqual(['config.global_kb', 'global_kb.connection_string.update']);
+    expect(h.audits[0]?.row).toMatchObject({ metadata: { connectionStringChanged: true } });
   });
 
   it.each([
@@ -747,8 +753,7 @@ describe('PUT /global-kb/config removing the stored connection string', () => {
 
     expect(res.status).toBe(200);
     expect(h.deleteSecret).not.toHaveBeenCalled();
-    expect(h.audits).toEqual([]);
-    expect(h.auditLog.info).not.toHaveBeenCalled();
+    expect(actions()).toEqual(['config.global_kb']);
   });
 });
 
@@ -902,6 +907,98 @@ describe('PUT /global-kb/config with a different embedding width', () => {
 
     expect(h.connect).not.toHaveBeenCalled();
     expect(h.set).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PUT /global-kb/config settings audit', () => {
+  const ADMIN_ID = '00000000-0000-4000-8000-0000000000a1';
+
+  it('records one row with every setting before, read past the cache, and after', async () => {
+    h.flags.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, true);
+    h.flags.set(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, false);
+    const res = await put({ ...PAGE, enabled: false });
+
+    expect(res.status).toBe(200);
+    expect(h.audits).toHaveLength(1);
+    expect(h.audits[0]?.table).toBe(schema.auditEvents);
+    expect(h.audits[0]?.row).toEqual({
+      actorUserId: ADMIN_ID,
+      action: 'config.global_kb',
+      targetType: 'system',
+      targetId: null,
+      metadata: {
+        from: {
+          enabled: 'true',
+          digestEnabled: 'false',
+          mode: null,
+          namespace: null,
+          ollamaUrl: null,
+          embedModel: null,
+          embedDimensions: null,
+          archiveRetentionDays: null,
+        },
+        to: {
+          enabled: 'false',
+          digestEnabled: 'true',
+          mode: 'internal',
+          namespace: 'default',
+          ollamaUrl: 'http://ollama:11434',
+          embedModel: 'qwen3-embedding:4b',
+          embedDimensions: '2560',
+          archiveRetentionDays: '30',
+        },
+        connectionStringChanged: false,
+      },
+      createdAt: expect.anything(),
+    });
+  });
+
+  it('keeps what a regular user may not write at its stored value', async () => {
+    h.role = 'user';
+    h.flags.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, true);
+    const res = await put({ ...PAGE, digestEnabled: false });
+
+    expect(res.status).toBe(200);
+    expect(h.audits[0]?.row).toMatchObject({
+      action: 'config.global_kb',
+      metadata: {
+        from: { enabled: 'true', digestEnabled: null, mode: null, namespace: null },
+        to: { enabled: 'true', digestEnabled: 'false', mode: null, namespace: null },
+      },
+    });
+  });
+
+  it('records nothing for a save that writes no setting', async () => {
+    h.role = 'user';
+
+    expect((await put({ enabled: true, mode: 'internal' })).status).toBe(200);
+    expect(h.audits).toEqual([]);
+  });
+
+  it('records what was written before a failed write as partial, and fails the save', async () => {
+    h.set
+      .mockImplementationOnce(async () => {})
+      .mockImplementationOnce(async () => {})
+      .mockImplementationOnce(async () => {})
+      .mockRejectedValueOnce(new Error('redis down'));
+    const res = await put({ ...PAGE, enabled: false });
+
+    expect(res.status).toBe(500);
+    expect(h.audits).toHaveLength(1);
+    expect(h.audits[0]?.row).toMatchObject({
+      action: 'config.global_kb',
+      metadata: {
+        from: { enabled: null, digestEnabled: null, mode: null },
+        to: { enabled: 'false', digestEnabled: 'true', mode: 'internal' },
+        connectionStringChanged: false,
+        partial: true,
+      },
+    });
+    expect(Object.keys((h.audits[0]?.row as { metadata: { to: object } }).metadata.to)).toEqual([
+      'enabled',
+      'digestEnabled',
+      'mode',
+    ]);
   });
 });
 

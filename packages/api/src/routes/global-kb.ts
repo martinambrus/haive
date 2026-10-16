@@ -423,9 +423,24 @@ async function putConfig(c: Context<AppEnv>) {
       'embed_dimensions_with_store_change',
     );
   }
+  const storesString = isAdmin && given !== '' && given !== saved.connectionString;
+  const fields: [name: string, key: string, value: string | undefined][] = [
+    ['enabled', CONFIG_KEYS.GLOBAL_KB_ENABLED, isAdmin ? d.enabled?.toString() : undefined],
+    ['digestEnabled', CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, d.digestEnabled?.toString()],
+    ['mode', CONFIG_KEYS.GLOBAL_KB_MODE, isAdmin ? d.mode : undefined],
+    ['namespace', CONFIG_KEYS.GLOBAL_KB_NAMESPACE, isAdmin ? d.namespace : undefined],
+    ['ollamaUrl', CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl],
+    ['embedModel', CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel],
+    ['embedDimensions', CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, d.embedDimensions?.toString()],
+    [
+      'archiveRetentionDays',
+      CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
+      d.archiveRetentionDays?.toString(),
+    ],
+  ];
   const write = async () => {
     // The string goes first, so no reader finds the external store without it.
-    if (isAdmin && given !== '' && given !== saved.connectionString) {
+    if (storesString) {
       await secretsService.set(
         SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
         given,
@@ -438,25 +453,40 @@ async function putConfig(c: Context<AppEnv>) {
         metadata: { connectionStringSet: true },
       });
     }
-    if (isAdmin && d.enabled !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_ENABLED, String(d.enabled));
-    if (d.digestEnabled !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED, String(d.digestEnabled));
-    if (isAdmin && d.mode !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_MODE, d.mode);
-    if (isAdmin && d.namespace !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_NAMESPACE, d.namespace);
-    if (d.ollamaUrl !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL, d.ollamaUrl);
-    if (d.embedModel !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_MODEL, d.embedModel);
-    if (d.embedDimensions !== undefined)
-      await configService.set(CONFIG_KEYS.GLOBAL_KB_EMBED_DIMS, String(d.embedDimensions));
-    if (d.archiveRetentionDays !== undefined)
-      await configService.set(
-        CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS,
-        String(d.archiveRetentionDays),
-      );
+    if (fields.every(([, , value]) => value === undefined)) return;
+    // Past the cache; serializeConfigSave let the previous save finish, so this is what it left.
+    const stored = await Promise.all(fields.map(([, key]) => configService.getFresh(key)));
+    const record = (
+      indexes: number[],
+      extra: { connectionStringChanged: boolean; partial?: true },
+    ) =>
+      recordAuditEvent(getDb(), {
+        actorUserId: c.get('userId'),
+        action: 'config.global_kb',
+        targetType: 'system',
+        metadata: {
+          from: Object.fromEntries(indexes.map((i) => [fields[i]![0], stored[i]])),
+          to: Object.fromEntries(indexes.map((i) => [fields[i]![0], fields[i]![2] ?? stored[i]])),
+          ...extra,
+        },
+      });
+    const written: number[] = [];
+    try {
+      for (const [i, [, key, value]] of fields.entries()) {
+        if (value === undefined) continue;
+        await configService.set(key, value);
+        written.push(i);
+      }
+    } catch (err) {
+      if (written.length > 0) {
+        await record(written, { connectionStringChanged: storesString, partial: true });
+      }
+      throw err;
+    }
+    await record(
+      fields.map((_, i) => i),
+      { connectionStringChanged: storesString || clearing },
+    );
   };
   if (dimsChange) await withVectorWidthLock(saved, d.embedDimensions!, write);
   else await write();
