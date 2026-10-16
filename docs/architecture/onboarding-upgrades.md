@@ -484,7 +484,10 @@ key is null like the whole render file's (`isRtkConflict`).
 **The ledger follows the record: another install's claims are imported as markers.** The record
 carries one claim file per live row (`artifacts/<claimFileName(path)>`: path, portable template id,
 kind, schema version, template and written hashes, Haive version), written by 12, 02 and 04 through
-`writeProjectStateRecord`. The writer removes only a claim file the previous `base_snapshot` named
+`writeProjectStateRecord`. A claim names a relative, canonical path with no `.git` segment in any
+letter case (`isClaimablePath`): the codec refuses a record that claims git data, 02's
+`safeDiskRel` refuses such a path as a backstop, and 01 neither lists nor reads a ledger row
+imported before the rule. The writer removes only a claim file the previous `base_snapshot` named
 and the new render no longer produces, so a teammate's unsynced file is never touched, and it
 returns `{written, removed}` for 12 and 03 to stage. The sync reads those files back: it loads the
 live rows as claims (`loadRecordClaims`), merges the whole record (render and claims) three ways
@@ -521,7 +524,9 @@ source (`custom_bundles` has no unique index on it) collapse to the smallest nam
 since the codec refuses a source listed twice and would fail the whole write. A descriptor in the
 previous `base_snapshot` that no local bundle holds is kept while a claim's template id starts
 `custom:<encodeURIComponent(source)>:`, and removed (reported in `removed`) once none does; a
-descriptor file the base never named is not touched, like a claim file. The sync reads the descriptors
+descriptor file the base never named is not touched, like a claim file. A descriptor for a bundle
+that has no installed item can flap across pushes between two installs that disagree on holding the
+bundle: each write adds or removes it. The ledger is unaffected. The sync reads the descriptors
 into the base as the checkout holds them and leaves them out of the merge: a conflict row on one could
 not be answered by anybody, and `upgradeAdmission` would hold every upgrade for it.
 
