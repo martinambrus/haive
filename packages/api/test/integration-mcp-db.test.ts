@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { eq, like, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1559,7 +1559,6 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
   describe('C11 a stamp whose tools cannot be named', () => {
     const stamps: Array<[string, string, string]> = [
       ['two bindings with one requirement id', 'forge', 'forge'],
-      ['a prefixed tool name of 41 characters', 'source-repository2', 'mirror'],
       ['a prefixed tool name that starts with a digit', '2nd-source', 'mirror'],
     ];
 
@@ -1603,6 +1602,31 @@ describe.skipIf(!url)('the integration broker routes, on Postgres', () => {
       expect((await rows()).map((row) => [row.tool, row.connection_id])).toEqual([
         ['mirror_get_pull_request_state', secondConnection],
         ['source_get_pull_request_state', w.connectionId],
+      ]);
+    });
+
+    it('lists a prefixed name of 41 characters cut to 40 with a digest, and sends a call by it to its own connection', async () => {
+      const w = await seed();
+      const second = await createCredential(ownerId);
+      const secondConnection = await createConnection(ownerId, second.id);
+      const digest = createHash('sha256')
+        .update('source-repository2\nget_pull_request_state')
+        .digest('hex')
+        .slice(0, 8);
+      const cut = `source_repository2_get_pull_req_${digest}`;
+      await setStamp(w, [
+        binding(w.connectionId, 'read', { requirementId: 'source-repository2' }),
+        binding(secondConnection, 'read', { requirementId: 'mirror' }),
+      ]);
+
+      expect(namesOf(await list(w))).toEqual(['mirror_get_pull_request_state', cut]);
+      served(await call(w, cut, { prNumber: '42' }));
+
+      expect(vendor.calls.map((made) => made.headers.authorization)).toEqual([
+        `Bearer ${w.secret}`,
+      ]);
+      expect((await rows()).map((row) => [row.tool, row.connection_id])).toEqual([
+        [cut, w.connectionId],
       ]);
     });
   });
