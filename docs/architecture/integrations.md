@@ -474,10 +474,10 @@ title's `minLength: 1` is published too.
   `BaseForgeProvider`, so the worker's forge calls are bounded too.
 - **One scrub** (`redactSecrets`, `api/src/lib/module-vendor-client.ts`) removes the secrets from every
   vendor answer before a module executor sees it, and from every error text, every module result and
-  every forge success text the broker answers, in every spelling a
-  vendor's encoder may echo: each character as is, `%xx` or `\uXXXX` in either case, a slash as `\/`,
-  each also inside a JSON string; with a cut read, also a start of one, or of one of its escapes, left
-  at the end. Forge success text is scrubbed and never cut.
+  every forge success text the broker answers, in every spelling a vendor's encoder may echo: each
+  character, a letter or digit too, as is, `%xx` or `\uXXXX` in either case, a slash as `\/`, each
+  also inside a JSON string; with a cut read, also a start of one, or of one of its escapes, left at
+  the end. Forge success text is scrubbed and never cut.
 
 ### Module provider calls
 
