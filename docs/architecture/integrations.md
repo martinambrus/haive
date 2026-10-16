@@ -33,16 +33,36 @@ tools that share one are renamed; see Tool names).
 
 Auth kinds: `oauth2` (authorize/token/optional revoke URLs, read and write scopes, PKCE always,
 `clientRegistration`, optional `userInfo` = an https URL plus JSON pointers for the account id and
-label), `device` (device-code and token URLs, scopes, optional `userInfo`, without which it cannot
+label, optional `authorizeParams` = extra authorize-URL parameters such as Google's
+`access_type=offline`, each one printable line and never a name the sign-in sets itself:
+`response_type`, `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge[_method]`), `device` (device-code and token URLs, scopes, optional `userInfo`, without which it cannot
 sign anyone in), `token` (a form and help text).
 
 Ids: a core provider or category is `^[a-z0-9][a-z0-9_-]*$`, a module's is `module.<moduleId>.<id>`.
 `isCategoryId` accepts a module-grammar id or a registered core id only; the choice routes are
-stricter and accept only the core list (`listIntegrationCategories`). Core categories and their labels:
+stricter and accept only a registered category (`listIntegrationCategories`: the core list, then the
+categories loaded modules declare). Core categories and their labels:
 `rich-documents` Documents, `spreadsheets`, `file-storage` File storage, `mail` Email, `chat`,
-`issues` Issue tracking, `wiki`, `forge` Git forge. Only `forge` has providers today.
+`issues` Issue tracking, `wiki`, `forge` Git forge. Only `forge` has core providers.
 
-The registered providers are the five forges, in this order: `github`, `gitea`, `gitlab`,
+**Module providers and categories.** A module's manifest may declare `integrations` (provider specs)
+and `categories` (`{id, label, description?}`), full `module.<moduleId>.<local>` ids (local part at most 64
+characters); the manifest rules refuse another module's prefix, a provider category outside core plus the
+module's own, `forge`, an `mcp` surface, `selfHosted`, a provider with no usable sign-in (oauth2 with
+`userInfo` and `preregistered`, or device with `userInfo`), duplicate ids, a module provider without
+`apiHosts` (bare https hostnames), and a composable step requirement naming a `module.*` id the manifest does not
+declare or whose id is not `^[a-z][a-z0-9-]{0,15}$`. Provider specs parse strictly: an unknown or misplaced key
+is refused by name. The api's `mountModules` and the worker's `bootStepEngine` call
+`registerModuleIntegrations` (an idempotent replace behind the unchanged `listIntegrationProviders`,
+`getIntegrationProvider` and `listIntegrationCategories`, core first); the worker refuses at boot, naming the step,
+a requirement naming a module category or provider no loaded module declares. A module provider with no
+provider-config row is off, and enablement folds `modules.deactivated_at` in live, never cached:
+`providerState(db, id)` answers `enabled`, `disabled`, `module-deactivated`, `module-missing` (a module-grammar id
+nothing registers) or `unknown`. `GET /integrations/categories` lists the core categories, then those of active
+modules (`{id, label, description?, moduleId, moduleName}`); `GET /tasks/:id/integrations` lists the categories of
+core and active-module providers plus any category a choice row of the task already names.
+
+The core providers are the five forges, in this order: `github`, `gitea`, `gitlab`,
 `bitbucket_cloud`, `bitbucket_server` (`CORE_FORGE_PROVIDER_SPECS`, `@haive/shared/forge`). Each
 declares `forge`, a token method first, and two operations: `open_pull_request` (write) and
 `get_pull_request_state` (read). GitHub alone adds `device` and `oauth2`; its read and write scopes are
@@ -85,7 +105,10 @@ connections would have been a destructive migration. Consequences, all deliberat
   refused.
 - Signing in again to the same account updates the connection and its credential's secret in place,
   under `pg_advisory_xact_lock(integration-account:<user>:<provider>:<externalId>)` and `FOR UPDATE`,
-  keeping the credential's label, host and provider. A first forge sign-in creates a credential
+  keeping the credential's label, host and provider. A vendor that sends no new refresh token leaves the
+  stored one in place when the sign-in used the row's own method and OAuth client (re-encrypted with the new access
+  token; an unreadable one counts as none); under another method or client it is dropped, since a refresh would send
+  it with that issuer's credentials. A first forge sign-in creates a credential
   labelled `<Provider> OAuth (<login>)` on the sign-in endpoint's host.
 - "Use as connection" (`POST /integrations/providers/:id/link-credential`) turns an existing
   credential into a connection: forge only, provider enabled, own credential, the credential's forge
@@ -254,12 +277,15 @@ dispatches can carry (no `llm` or `agentMining` phase without a `toolProfile`). 
 spec leaves `toolProfile` unset resolves; recaps, the AI-fix agent, merges and the DAG never do. One
 resolution per dispatch, shared by every agent of a fan-out: a required requirement that does not
 resolve fails the step `integration-unresolved` naming it, its category and the reason (an optional one
-is dropped), a requirement that pins a provider is refused `integration-provider-pinned` until J6, and
-a missing signing key or tool names the broker could not list fail `integrations-no-signing-key` and
-`integration-tools-unlistable`. The run is written by `insertStampedRun`: one transaction that takes
-`lockTaskIntegrations` (the lock the choice PUT and DELETE take first), resolves again, records the
-grants from that resolution and inserts the run stamped with its bindings; a required binding lost
-since the first resolution writes nothing and fails the step. In a fan-out only the first run goes
+is dropped), a requirement that pins a provider is refused `integration-provider-pinned` until J6, a
+required requirement that resolved to a module provider fails `integration-provider-unsupported` (an
+optional one is left out, with no grant) until module providers can run calls (I6b), since the broker
+answers every call to one `provider-unavailable`, and a missing signing key or tool names the broker
+could not list fail `integrations-no-signing-key` and `integration-tools-unlistable`. The run is
+written by `insertStampedRun`: one transaction that takes `lockTaskIntegrations` (the lock the choice
+PUT and DELETE take first), resolves again, records the grants from that resolution and inserts the
+run stamped with its bindings; a required binding lost since the first resolution writes nothing and
+fails the step. In a fan-out only the first run goes
 through it: that run's stamp is the fan-out's, and every later agent is inserted with the same
 bindings, with no second resolution and no grant write, so a choice changed meanwhile applies from the
 next dispatch (an agent can then carry an account removed after the first insert, and the broker
@@ -387,9 +413,12 @@ follows an http(s) remote's host.
   before its CLI starts, rather than running
   without the tools its prompt names.
 - **Tool names** (`integrationTools`): a tool is named by its operation id; when two declared tools
-  share one, every holder becomes `<requirementId>_<opId>` (other characters replaced by `_`). Every
+  share one, every holder becomes `<requirementId>_<opId>` (other characters replaced by `_`), and such
+  a name longer than 40 characters keeps its first 31, then `_` and the first 8 hex characters of the
+  sha256 of `<requirementId>\n<opId>`, so a long operation id never leaves a step unlistable. Every
   declared name is checked against `TOOL_NAME_PATTERN` and for uniqueness even while the write switch
-  is off, and a bad name throws, naming the requirement and the operation, instead of being skipped.
+  is off, and a bad name (a leading digit, a collision) throws, naming the requirement and the
+  operation, instead of being skipped.
 
 ## The broker
 
@@ -408,8 +437,9 @@ title's `minLength: 1` is published too.
 - **call** matches the tool name against the stamp with every write tool included, so a write the
   switch has turned off is refused as `write-switched-off` with a row rather than as unknown; a name
   the stamp never declared answers 403 `undeclared-tool` and writes nothing. Each later refusal is a
-  row with its reason: `provider-unavailable` (no spec or disabled), `connection-unavailable` (gone,
-  not `connected`, another provider, shared, another user's, or its credential cannot be read),
+  row with its reason: `provider-unavailable` (no spec, disabled, or a module provider, which cannot run
+  calls before I6b), `connection-unavailable` (gone, not `connected`, another provider, shared, another
+  user's, or its credential cannot be read),
   `write-switched-off`, `invalid-arguments` (400), `no-remote` (409), `connection-not-for-repository`
   (the credential's host is not the task's remote, or it has none), `unsafe-api-base` (`apiBaseFits`,
   so older credentials saved before the rule are refused here rather than sent as is).

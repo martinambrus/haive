@@ -23,7 +23,8 @@ import {
   validateTaskTypeDefaults,
   type ComposableStepEntry,
   type CompositionIssue,
-  type PromptStepProblemKind,
+  type PromptStepIssue as CheckedPromptStepIssue,
+  type PromptStepIssueKind as CheckedPromptStepIssueKind,
   type TaskTypeAvailability,
   type TaskTypeDefaultsIssue,
   type TaskTypeModuleRef,
@@ -298,21 +299,11 @@ export function describeAvailability(availability: TaskTypeAvailability): string
   }
 }
 
-export type PromptStepIssueKind =
-  | PromptStepProblemKind
-  | 'template-empty'
-  | 'title-empty'
-  | 'prompt-step-orphan'
-  | 'prompt-step-missing';
+export type PromptStepIssueKind = CheckedPromptStepIssueKind | 'template-empty' | 'title-empty';
 
-export interface PromptStepIssue {
+export interface PromptStepIssue extends Omit<CheckedPromptStepIssue, 'kind' | 'message'> {
   kind: PromptStepIssueKind;
-  stepId: string;
-  index?: number;
-  raw?: string;
-  start?: number;
   message?: string;
-  param?: string;
 }
 
 const PROMPT_STEP_ISSUE_KINDS: ReadonlySet<string> = new Set<string>([

@@ -10,20 +10,21 @@ export const RECORD_WRITE_TABLES = {
   taskEvents: schema.taskEvents,
 };
 
-// VOLATILE: 02's wording; a run marked `recordWriteFails` fails loudly when it stops matching.
-const SWALLOWED_PREFIXES = [
-  'project state record write failed',
-  'the record was written, but retiring the files it replaces failed',
-];
+export const ROLLBACK_RECORD_WRITE_TABLES = {
+  taskSteps: schema.taskSteps,
+  projectStateConflicts: schema.projectStateConflicts,
+  projectStateSync: schema.projectStateSync,
+  projectStateOutbox: schema.projectStateOutbox,
+};
 
-/** Awaits a 02 apply, whose record write and retire block must have run, or with `recordWriteFails` failed. */
-export async function recordWritten<T extends { warnings: string[] }>(
+/** Awaits a 02, 04 or 12 apply, whose record write must have run, or with `recordWriteFails` failed. */
+export async function recordWritten<
+  T extends { warnings: string[]; recordWrite?: 'written' | 'failed' | 'skipped' },
+>(
   applied: Promise<T>,
   { recordWriteFails = false }: { recordWriteFails?: boolean } = {},
 ): Promise<T> {
   const out = await applied;
-  const swallowed = out.warnings.filter((w) => SWALLOWED_PREFIXES.some((p) => w.startsWith(p)));
-  if (recordWriteFails) expect(swallowed).not.toEqual([]);
-  else expect(swallowed).toEqual([]);
+  expect(out.recordWrite, out.warnings.join('\n')).toBe(recordWriteFails ? 'failed' : 'written');
   return out;
 }

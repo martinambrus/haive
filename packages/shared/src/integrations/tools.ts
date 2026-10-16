@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
+  TOOL_NAME_MAX_LENGTH,
   TOOL_NAME_PATTERN,
   integrationRequirementSchema,
   isCategoryId,
@@ -34,6 +36,17 @@ export function parseIntegrationBindings(raw: unknown): IntegrationBinding[] {
 }
 
 const toolName = (text: string): string => text.replace(/[^a-z0-9_]/g, '_');
+const NAME_DIGEST_LENGTH = 8;
+
+function prefixedToolName(requirementId: string, opId: string): string {
+  const name = toolName(`${requirementId}_${opId}`);
+  if (name.length <= TOOL_NAME_MAX_LENGTH) return name;
+  const digest = createHash('sha256')
+    .update(`${requirementId}\n${opId}`)
+    .digest('hex')
+    .slice(0, NAME_DIGEST_LENGTH);
+  return `${name.slice(0, TOOL_NAME_MAX_LENGTH - NAME_DIGEST_LENGTH - 1)}_${digest}`;
+}
 
 export function integrationTools(
   bindings: readonly IntegrationBinding[],
@@ -52,7 +65,7 @@ export function integrationTools(
   const named = declared.map(({ binding, op, base }) => ({
     binding,
     op,
-    name: (uses.get(base) ?? 0) > 1 ? toolName(`${binding.requirementId}_${op.opId}`) : base,
+    name: (uses.get(base) ?? 0) > 1 ? prefixedToolName(binding.requirementId, op.opId) : base,
   }));
   const taken = new Set<string>();
   for (const { binding, op, name } of named) {

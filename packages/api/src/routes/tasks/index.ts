@@ -53,7 +53,7 @@ import {
   loadPlanSkeletons,
 } from '@haive/shared/plan';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
-import { loadStepFlags, withTaskCustomSteps } from '../../lib/step-flags.js';
+import { loadStepFlags, loadTaskStepFlags } from '../../lib/step-flags.js';
 import {
   liveOnboardingMessage,
   liveOnboardingTaskId,
@@ -859,13 +859,14 @@ taskRoutes.get('/feature-suggestions', async (c) => {
 //     do today, so the columns need no backfill.
 //
 // User-scoped like its siblings. Static path — must stay ABOVE '/:id' so it is
-// not captured as a task id.
+// not captured as a task id. With no repositoryId it reads all of the user's tasks.
 taskRoutes.get('/last-cli', async (c) => {
   const userId = c.get('userId');
   const repositoryId = c.req.query('repositoryId')?.trim();
-  if (!repositoryId) return c.json({ cliProviderId: null, cliChoice: null, summaryChoice: null });
   const db = getDb();
-  const scope = and(eq(schema.tasks.userId, userId), eq(schema.tasks.repositoryId, repositoryId));
+  const scope = repositoryId
+    ? and(eq(schema.tasks.userId, userId), eq(schema.tasks.repositoryId, repositoryId))
+    : eq(schema.tasks.userId, userId);
   const [lastRun, cliChoice, summaryChoice] = await Promise.all([
     db.query.tasks.findFirst({
       where: and(scope, isNotNull(schema.tasks.cliProviderId)),
@@ -1012,7 +1013,7 @@ taskRoutes.get('/:id', async (c) => {
       asc(schema.taskSteps.createdAt),
       asc(schema.taskSteps.stepIndex),
     );
-  const flags = withTaskCustomSteps(await loadStepFlags(db), task);
+  const flags = await loadTaskStepFlags(db, task);
   const enriched = await enrichStepsWithCliPreferences(
     db,
     flags,

@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   CUSTOM_TOOLS_MAX_PER_STEP,
+  CUSTOM_TOOL_RESPONSE_MAX_BYTES,
+  CUSTOM_TOOL_RESPONSE_MIN_BYTES,
+  CUSTOM_TOOL_TIMEOUT_MAX_MS,
+  CUSTOM_TOOL_TIMEOUT_MIN_MS,
   customToolSchema,
   validateCustomTool,
   type CustomTool,
@@ -49,6 +53,8 @@ const NAME = {
   url: /^(tool )?url$/,
   scope: /^(search )?scope$/,
   topK: /\b(top ?k|results)\b/,
+  toolTimeout: /^timeout \(seconds\)$/,
+  responseCap: /^response cap \(kib\)$/,
   paramName: /^param(eter)? name$/,
   paramType: /^param(eter)? type$/,
   paramDescription: /^param(eter)? description$/,
@@ -356,5 +362,108 @@ describe('PromptStepEditor tools', () => {
     const message = squash(describePromptStepIssue(found[0]!));
     expect(squash(textOf(rowOf(m, bad.name)))).toContain(message);
     expect(squash(textOf(rowOf(m, ragTool.name)))).not.toContain(message);
+  });
+});
+
+describe('PromptStepEditor tool limits', () => {
+  const tooSlow: HttpGetTool = { ...httpTool, timeoutMs: 90_000, maxResponseBytes: 100 };
+  const kinds = (tool: CustomTool) =>
+    validateCustomTool(tool, { requiresRepository: true }).map((p) => p.kind);
+
+  it('shows the timeout in seconds and the response cap in KiB, bounded as the api bounds them', () => {
+    const m = mountEditor(withTools([httpTool]));
+    const timeout = field(m, NAME.toolTimeout);
+    expect(timeout.props.type).toBe('number');
+    expect(valueOf(timeout)).toBe(String(httpTool.timeoutMs / 1000));
+    expect(timeout.props.min).toBe(CUSTOM_TOOL_TIMEOUT_MIN_MS / 1000);
+    expect(timeout.props.max).toBe(CUSTOM_TOOL_TIMEOUT_MAX_MS / 1000);
+    const cap = field(m, NAME.responseCap);
+    expect(cap.props.type).toBe('number');
+    expect(valueOf(cap)).toBe(String(httpTool.maxResponseBytes / 1024));
+    expect(cap.props.min).toBe(CUSTOM_TOOL_RESPONSE_MIN_BYTES / 1024);
+    expect(cap.props.max).toBe(CUSTOM_TOOL_RESPONSE_MAX_BYTES / 1024);
+  });
+
+  it('writes what is typed as milliseconds and bytes, and keeps the rest of the tool', () => {
+    const m = mountEditor(withTools([httpTool]));
+    typeInto(m, NAME.toolTimeout, '20');
+    expect(m.tools()).toEqual([{ ...httpTool, timeoutMs: 20_000 }]);
+    typeInto(m, NAME.responseCap, '48');
+    expect(m.tools()).toEqual([{ ...httpTool, timeoutMs: 20_000, maxResponseBytes: 49_152 }]);
+    typeInto(m, NAME.toolTimeout, '1.5');
+    expect(m.tools()[0]).toMatchObject({ timeoutMs: 1_500 });
+    expect(customToolSchema.parse(m.tools()[0])).toEqual(m.tools()[0]);
+  });
+
+  it('holds a cleared field at 0, which save refuses, until another number is typed', () => {
+    const m = mountEditor(withTools([httpTool]));
+    typeInto(m, NAME.toolTimeout, '');
+    expect(valueOf(field(m, NAME.toolTimeout))).toBe('');
+    expect(m.tools()[0]).toMatchObject({ timeoutMs: 0 });
+    typeInto(m, NAME.responseCap, '');
+    expect(m.tools()[0]).toMatchObject({ maxResponseBytes: 0 });
+    typeInto(m, NAME.toolTimeout, '5');
+    expect(m.tools()[0]).toMatchObject({ timeoutMs: 5_000 });
+  });
+
+  it('offers the response cap and no timeout on a rag-query tool', () => {
+    const m = mountEditor(withTools([ragTool]));
+    expect(controls(m.root(), NAME.toolTimeout)).toHaveLength(0);
+    expect(valueOf(field(m, NAME.responseCap))).toBe(String(ragTool.maxResponseBytes / 1024));
+    typeInto(m, NAME.responseCap, '64');
+    expect(m.tools()).toEqual([{ ...ragTool, maxResponseBytes: CUSTOM_TOOL_RESPONSE_MAX_BYTES }]);
+  });
+
+  it('keeps the cap through a change of action, and brings the timeout back at its default', () => {
+    const m = mountEditor(withTools([httpTool]));
+    typeInto(m, NAME.responseCap, '48');
+    typeInto(m, NAME.action, 'rag-query');
+    expect(controls(m.root(), NAME.toolTimeout)).toHaveLength(0);
+    expect(valueOf(field(m, NAME.responseCap))).toBe('48');
+    typeInto(m, NAME.action, 'http-get');
+    expect(valueOf(field(m, NAME.toolTimeout))).toBe(String(httpTool.timeoutMs / 1000));
+    expect(valueOf(field(m, NAME.responseCap))).toBe('48');
+  });
+
+  it('mends a stored tool whose timeout and cap save refuses, without removing the tool', () => {
+    expect(kinds(tooSlow)).toEqual(['tool-timeout-out-of-range', 'tool-response-cap-out-of-range']);
+    const promptSteps = { a: withTools([tooSlow]) };
+    const found = promptStepIssues({
+      typeSlug: 't',
+      stepIds: ['custom.t.a'],
+      requiresRepository: true,
+      promptSteps,
+      catalog: catalogEntries(TEST_CATALOG),
+    });
+    const [timeoutProblem, capProblem] = found.map((issue) =>
+      squash(describePromptStepIssue(issue)),
+    );
+    expect(found.map((issue) => issue.kind)).toEqual(kinds(tooSlow));
+
+    const m = mountComposer(promptSteps);
+    click(m, NAME.editStep);
+    expect(valueOf(field(m, NAME.toolTimeout))).toBe('90');
+    expect(valueOf(field(m, NAME.responseCap))).toBe('0.09765625');
+    expect(squash(textOf(rowOf(m, tooSlow.name)))).toContain(timeoutProblem);
+    expect(squash(textOf(rowOf(m, tooSlow.name)))).toContain(capProblem);
+
+    typeInto(m, NAME.toolTimeout, '30');
+    typeInto(m, NAME.responseCap, '1');
+    expect(squash(textOf(m.root()))).not.toContain(timeoutProblem);
+    expect(squash(textOf(m.root()))).not.toContain(capProblem);
+    expect(squash(textOf(m.root()))).toContain('No problems');
+    expect(controls(m.root(), NAME.toolName)).toHaveLength(1);
+  });
+
+  it('judges a value typed above the bound as save does, instead of clamping it', () => {
+    const m = mountEditor(withTools([httpTool]));
+    typeInto(m, NAME.toolTimeout, '31');
+    expect(m.tools()[0]).toMatchObject({ timeoutMs: 31_000 });
+    expect(kinds(m.tools()[0]!)).toEqual(['tool-timeout-out-of-range']);
+    typeInto(m, NAME.responseCap, '65');
+    expect(kinds(m.tools()[0]!)).toEqual([
+      'tool-timeout-out-of-range',
+      'tool-response-cap-out-of-range',
+    ]);
   });
 });

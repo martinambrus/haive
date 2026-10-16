@@ -4,7 +4,8 @@ A module is a package named `@haive/module-<id>` (a workspace folder under `modu
 `@haive-module/<id>` (published to the registry; `modulePackageId` in `@haive/shared/modularity` is
 the one rule: `gen-modules` refuses a package that exports `./manifest` under any other name, and both
 loaders refuse at boot a manifest whose id does not match its name), whose
-`package.json` exports `./manifest` and any of `./routes` (api), `./steps`, `./ensure-schema`,
+`package.json` exports `./manifest` (which may also declare integration providers and categories, see
+[Integrations](integrations.md)) and any of `./routes` (api), `./steps`, `./ensure-schema`,
 `./jobs` and `./teardown` (worker), `./web` and `./dashboard` (web). `scripts/gen-modules.mjs` turns the installed
 ones into four gitignored registries (`packages/api/src/modules.generated.ts`,
 `packages/worker/src/modules.generated.ts`, `packages/web/src/generated/module-pages.ts` and
@@ -25,7 +26,16 @@ the module loads again.
   routes at `/m/<id>`, nav and pages, settings, dashboard widget, worker steps, jobs and database.
   A module whose manifest sets `apiRequiresAdmin` is listed for a non-admin with
   `compiledWeb: false`: its compiled pages answer not-found and its compiled dashboard widgets do not
-  render for that user, while its declared pages without data endpoints still do.
+  render for that user, while its declared pages without data endpoints still do. An admin's save of
+  its settings (`PUT /modules/<id>/settings/<kind>`) records `module.settings` with the names of the
+  fields that changed, never their values, since a module's setting can hold an API key; the
+  instance's own switches (`PUT /admin/config/*`) record `config.<name>` with the values before and
+  after. Saves of one switch, or of one module's settings kind, run one at a time under a
+  transaction-scoped advisory lock (`admin-config:<route>`, `module-settings:<id>:<kind>`), so each
+  row's `from` is what the save before it left; a save that waits longer than 30 s answers 503. The
+  read, the writes and the audit row share that one transaction's connection. A save that fails after
+  writing some fields still records them, with `partial: true`, and then fails. Audit rows are stamped
+  with `clock_timestamp()`, the moment they are written, not when their transaction began.
 - **Installed, deactivated.** The Active column on `/admin/modules`, or `PATCH /modules/:id` with
   `{"active": false}` (admin; audited as `module.deactivate`). It is refused with 409
   `module_tasks_open` while a live task's run list names one of the module's steps or its type is one

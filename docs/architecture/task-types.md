@@ -289,8 +289,8 @@ with it.
 - **Authoring and the switch.** An administrator adds tools in the prompt-step editor's Custom tools
   section (action, name, description, then the URL and query parameters or the scope and result count,
   and typed parameters); a new tool starts with the schema defaults, and switching its action keeps the
-  name and description. The editor shows no timeout or response cap: new tools take the defaults, and a
-  stored tool outside today's range is fixed by removing and adding it again.
+  name and description. Its timeout (seconds, http-get only) and response cap (KiB) fields hold the
+  same bounds the save checks, so a stored tool outside today's range is fixed in place.
   `GET /admin/task-types/:slug` carries `promptStepIssues`, the save checks run over an admin type's
   stored prompt steps (empty for other rows and while the step catalog is unsynced), so a stored tool
   that no longer passes the schema is named on load as `tool-no-longer-valid`.

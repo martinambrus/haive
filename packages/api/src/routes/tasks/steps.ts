@@ -54,7 +54,7 @@ import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../li
 import { getTaskQueue } from '../../queues.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
 import { refuseDeadTask } from '../../lib/task-dead.js';
-import { loadStepFlags, withTaskCustomSteps } from '../../lib/step-flags.js';
+import { loadStepFlags, loadTaskStepFlags } from '../../lib/step-flags.js';
 import {
   appendTaskEvent,
   enrichStepsWithActiveRole,
@@ -477,7 +477,7 @@ stepRoutes.get('/:id/steps', async (c) => {
       asc(schema.taskSteps.createdAt),
       asc(schema.taskSteps.stepIndex),
     );
-  const flags = withTaskCustomSteps(await loadStepFlags(db), task);
+  const flags = await loadTaskStepFlags(db, task);
   const enriched = await enrichStepsWithCliPreferences(
     db,
     flags,
@@ -1425,7 +1425,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // Skip is disabled across the workflow except on the steps that opt in
     // (metadata.allowSkip), plus 01-worktree-setup where the run list allows it (skip = run from
     // the project root instead of an isolated worktree/branch).
-    if (!isStepSkippable(withTaskCustomSteps(await loadStepFlags(db), task), stepId, task)) {
+    if (!isStepSkippable(await loadTaskStepFlags(db, task), stepId, task)) {
       throw new HttpError(409, 'This step cannot be skipped');
     }
     if (step.status !== 'failed' && step.status !== 'waiting_form') {
@@ -1743,9 +1743,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   // there is nothing here to reset and no job to re-drive. Gated on the dispatch catalog
   // so an unknown step id still 404s rather than accumulating choices nothing reads.
   if (!step) {
-    if (
-      withTaskCustomSteps(await loadStepFlags(db), task).get(stepId)?.dispatchesStepCli !== true
-    ) {
+    if ((await loadTaskStepFlags(db, task)).get(stepId)?.dispatchesStepCli !== true) {
       throw new HttpError(404, 'Step not found');
     }
     await writeStepCliChoice(db, choice);

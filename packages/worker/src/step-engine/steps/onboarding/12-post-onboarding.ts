@@ -159,6 +159,9 @@ interface PostOnboardingOutput {
   pushCredentialId: string | null;
   pushSetUpstream: boolean;
   branch: string | null;
+  /** What the project state record write did; 'failed' when it or the retire after it threw.
+   *  Optional because it is read back from a persisted output that may predate it. */
+  recordWrite?: 'written' | 'failed' | 'skipped';
 }
 
 /** Build the deterministic render context from step 07's detect output. Used
@@ -631,6 +634,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     // The files this step writes itself, which it stages by name below.
     const ownFiles: string[] = [];
     const ownRemoved: string[] = [];
+    let recordWrite: PostOnboardingOutput['recordWrite'] = 'skipped';
 
     const result = (): PostOnboardingOutput => ({
       commitPerformed,
@@ -642,6 +646,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       pushCredentialId,
       pushSetUpstream,
       branch,
+      recordWrite,
     });
 
     // Write the committed .haive-data/ mirror from the onboarding_* columns so a
@@ -664,6 +669,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             rtkChoiceRecorded,
           });
           recorded = true;
+          recordWrite = 'written';
           ownFiles.push(...state.written);
           ownRemoved.push(...state.removed);
           if ((await retireInstallManifest(ctx, warnings)) !== 'kept') {
@@ -677,6 +683,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           }
         } catch (err) {
           failIfColumnStale(err);
+          recordWrite = 'failed';
           if (err instanceof ProjectStateWriteError) {
             ownFiles.push(...err.written);
             ownRemoved.push(...err.removed);

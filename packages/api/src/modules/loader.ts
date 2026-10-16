@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
+import { sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { schema } from '@haive/database';
+import { isLockNotAvailable, schema } from '@haive/database';
 import {
   configService,
   MODULE_CONTROL_JOB_NAMES,
@@ -8,6 +9,7 @@ import {
   type ModuleTeardownPayload,
   type ModuleTeardownResult,
 } from '@haive/shared';
+import { registerModuleIntegrations } from '@haive/shared/integrations';
 import {
   collectFieldIds,
   diffModuleIntent,
@@ -57,6 +59,15 @@ const patchBodySchema = z
   .refine((body) => body.mode === undefined || !body.active);
 const purgeBodySchema = z.object({ confirm: z.string() });
 const TEARDOWN_WAIT_MS = 120_000;
+// A wait this long is a stuck holder, and every waiter holds a pooled connection meanwhile.
+const SETTINGS_LOCK_TIMEOUT_MS = 30_000;
+
+function lockBusyError(err: unknown): never {
+  if (isLockNotAvailable(err)) {
+    throw new HttpError(503, 'Another save of this setting is in progress; try again');
+  }
+  throw err;
+}
 
 function settingsOf(manifest: ModuleManifest, kind: ModuleSettingsKind) {
   return kind === 'global' ? manifest.globalSettings : manifest.adminSettings;
@@ -99,6 +110,7 @@ export async function mountModules(
       hasRoutes: entry.routes !== undefined,
     });
   }
+  registerModuleIntegrations(loaded);
 
   for (const [index, entry] of entries.entries()) {
     const { manifest } = loaded[index]!;
@@ -413,9 +425,44 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     const body = putBodySchema.parse(await c.req.json());
     const result = validateFormValues(settings.form, body.values);
     if (!result.success) throw new HttpError(400, result.issues.join('; '));
-    for (const [field, value] of Object.entries(result.data)) {
-      await configService.set(moduleSettingKey(id, kind, field), JSON.stringify(value));
-    }
+    // One save of a module's settings at a time, so each `changed` is against the save before.
+    const failure = await getDb()
+      .transaction(async (tx) => {
+        await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${SETTINGS_LOCK_TIMEOUT_MS}ms'`));
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`module-settings:${id}:${kind}`}, 0))`,
+        );
+        const changed: string[] = [];
+        let written = 0;
+        // Field names only: a module's settings can hold an API key.
+        const record = (extra?: { partial: true }) =>
+          recordAuditEvent(tx, {
+            actorUserId: c.get('userId'),
+            action: 'module.settings',
+            targetType: 'module',
+            targetId: null,
+            metadata: { moduleId: id, kind, changed, ...extra },
+          });
+        try {
+          for (const [field, value] of Object.entries(result.data)) {
+            const key = moduleSettingKey(id, kind, field);
+            const next = JSON.stringify(value);
+            const before = await configService.getFresh(key);
+            await configService.set(key, next);
+            written += 1;
+            if (before !== next) changed.push(field);
+          }
+        } catch (error) {
+          if (written === 0) throw error;
+          await record({ partial: true });
+          // Returned, not rethrown: a throw would roll the partial row back with the transaction.
+          return { error };
+        }
+        await record();
+        return undefined;
+      })
+      .catch(lockBusyError);
+    if (failure) throw failure.error;
     return c.json({ values: result.data });
   });
 

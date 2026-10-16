@@ -8,6 +8,7 @@ import { normalizeContent, sha256Hex } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { recordWritten, ROLLBACK_RECORD_WRITE_TABLES } from './support/upgrade-apply-record.js';
 
 // design-227.md Decision 3: a rollback writes the set its snapshot renders and keeps none of the ids it
 // restored, so a restored claim its snapshot does not render is outside the set, where upgrade-status
@@ -56,12 +57,10 @@ describe('R1: a rollback and the applicable set', () => {
     const fake = createFakeDb({
       repositories: schema.repositories,
       onboardingArtifacts: schema.onboardingArtifacts,
-      projectStateSync: schema.projectStateSync,
-      projectStateConflicts: schema.projectStateConflicts,
-      taskSteps: schema.taskSteps,
       cliProviders: schema.cliProviders,
       customBundles: schema.customBundles,
       customBundleItems: schema.customBundleItems,
+      ...ROLLBACK_RECORD_WRITE_TABLES,
     });
     fake.insert(schema.repositories, {
       id: REPO,
@@ -125,7 +124,7 @@ describe('R1: a rollback and the applicable set', () => {
       logger: { info: noop, warn: noop, error: noop, debug: noop },
     } as unknown as StepContext;
 
-    await upgradeRollbackStep.apply(ctx, { detected } as never);
+    await recordWritten(upgradeRollbackStep.apply(ctx, { detected } as never));
 
     expect(await readFile(join(repoPath, REMOVED), 'utf8')).toBe('SA\n');
     const live = fake

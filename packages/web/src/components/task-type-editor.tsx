@@ -116,6 +116,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
   const [formRevision, setFormRevision] = useState(0);
   const [loadedValues, setLoadedValues] = useState<FormValues | null>(null);
   const [changedRow, setChangedRow] = useState<AdminTaskType | null>(null);
+  const [leaving, setLeaving] = useState(false);
   const headingRef = useRef<HTMLHeadingElement>(null);
 
   const applyRow = useCallback((taskType: AdminTaskType) => {
@@ -217,7 +218,12 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
     initialValues !== undefined &&
     (Object.keys(values).some((k) => values[k] !== initialValues[k]) ||
       compositionChanged({ stepIds, loopLimits, promptSteps }, row ?? NO_COMPOSITION));
-  const leaveDialog = useUnsavedChangesGuard(dirty);
+  const leaveDialog = useUnsavedChangesGuard(dirty && !leaving);
+
+  function leaveTo(path: string) {
+    setLeaving(true);
+    router.push(path);
+  }
 
   function touch() {
     setSaved(false);
@@ -268,7 +274,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         const body = buildCreateBody(submitted, { stepIds, loopLimits, promptSteps });
         await createTaskType(body);
         forgetDraftConversation(null);
-        router.push(`/admin/task-types/${encodeURIComponent(body.slug)}`);
+        leaveTo(`/admin/task-types/${encodeURIComponent(body.slug)}`);
         return;
       }
       const body = buildUpdateBody(
@@ -485,7 +491,7 @@ export function TaskTypeEditor({ slug }: { slug: string | null }) {
         slug={deleteOpen && row ? row.slug : null}
         displayName={row?.displayName ?? ''}
         onClose={() => setDeleteOpen(false)}
-        onDeleted={() => router.push('/admin/task-types')}
+        onDeleted={() => leaveTo('/admin/task-types')}
       />
       {leaveDialog}
     </div>

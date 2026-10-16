@@ -128,7 +128,7 @@ describe('12-post-onboarding: a claim file a person deleted by hand', () => {
     const oldFile = `.haive-data/state/${claimFileName(OLD)}`;
 
     const first = await twelve();
-    expect(first.warnings.filter((w) => /record write failed/.test(w))).toEqual([]);
+    expect(first.recordWrite, first.warnings.join('\n')).toBe('written');
     expect(await tracked()).toContain(oldFile);
 
     await rm(path.join(repo, oldFile));
