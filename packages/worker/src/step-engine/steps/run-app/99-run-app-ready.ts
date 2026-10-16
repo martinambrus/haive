@@ -19,6 +19,7 @@ import { buildCommitDiffArtifact } from '../workflow/_commit-diff.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../../../repo/git-push.js';
 import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
+import { putBackProjections, warnStep } from '../../../project-state/branch-revert.js';
 
 // Git identity fallback when the user has no name/email on file — mirrors
 // 10-gate-3-commit so a commit-back never fails for a missing identity.
@@ -51,6 +52,8 @@ interface RunAppReadyDetect {
   dirtyFiles: number;
   diffArtifactPath: string | null;
   changedFileCount: number;
+  /** The branch 01 forked the worktree from; absent where 01 did not run or the output predates it. */
+  baseBranch?: string | null;
 }
 
 interface RunAppReadyApply {
@@ -148,7 +151,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
 
     // The runtime live-binds the per-task worktree; commit-back acts on it.
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
-    const worktreeOutput = prev?.output as { worktreePath?: string } | null;
+    const worktreeOutput = prev?.output as { worktreePath?: string; baseBranch?: string } | null;
     const workspacePath = worktreeOutput?.worktreePath ?? ctx.workspacePath;
     // The runtime must keep serving, so a corrupt repo degrades to "no git" (the
     // commit-back affordance hides) rather than failing the readiness step.
@@ -195,6 +198,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       dirtyFiles,
       diffArtifactPath,
       changedFileCount,
+      baseBranch: worktreeOutput?.baseBranch ?? null,
     };
   },
 
@@ -309,6 +313,14 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
               columns: { credentialsSecretId: true },
             })
           : null;
+        if (detected.baseBranch) {
+          const target = detected.baseBranch;
+          const branch = detected.branch;
+          await warnStep(
+            ctx,
+            await putBackProjections({ ctx, worktree: workspace, branch, target }),
+          );
+        }
         await pushBranch({
           cwd: workspace,
           branch: detected.branch,

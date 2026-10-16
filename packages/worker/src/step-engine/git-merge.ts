@@ -166,7 +166,7 @@ async function differingFrom(dir: string, ref: string): Promise<string[]> {
 }
 
 /** What the set-aside moves out of the checkout, the state record's directories included: the worker writes it, and `restoreKeptMetadata` skips what it no longer owns. */
-function isHaiveProjection(rel: string): boolean {
+export function isHaiveProjection(rel: string): boolean {
   return (
     rel === PROJECT_STATE_DIR ||
     rel.startsWith(`${PROJECT_STATE_DIR}/`) ||
