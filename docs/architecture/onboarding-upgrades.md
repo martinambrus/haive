@@ -646,8 +646,13 @@ dependency-ownership files stay as the branch has them. One commit built from a 
 the branch ref, and only while its tip is still the one judged; worktree files that still equal the
 old tip are restored and handed back to the sandbox user, and a file a person edited keeps its bytes
 with only its index entry moved. Each put-back is a `branch.projections_put_back` task event (its
-paths, commit, the tip before and the fork point), and the step's warning is rebuilt from those
-events on every pass, so a Retry shows it again; 12's form lists the paths before the choice. The
+paths, commit, the tip before and the fork point), written before the ref moves and taken back only
+when the move is refused, and the step's warning is rebuilt from those events on every pass, so a
+Retry shows it again; 12's form lists the paths before the choice. A pass first finishes the last
+put-back this task recorded for the branch: a ref still at the old tip moves to the recorded commit,
+and a moved ref gets the worktree sync it never had, for the paths whose index entry still holds the
+old tip. A record whose commit the branch no longer contains is dropped, and a git failure in any of
+this, a worktree status read included, fails the step rather than leave the worktree unsynced. The
 fork point is taken from the local base first: a record the local base holds ahead of origin is in
 the branch's history, and origin's copy would undo it. A pass that finds the feature's merge already
 open puts nothing back, since that merge's tip must not move.
