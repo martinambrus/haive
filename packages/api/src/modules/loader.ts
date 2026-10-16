@@ -413,9 +413,21 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     const body = putBodySchema.parse(await c.req.json());
     const result = validateFormValues(settings.form, body.values);
     if (!result.success) throw new HttpError(400, result.issues.join('; '));
+    const changed: string[] = [];
     for (const [field, value] of Object.entries(result.data)) {
-      await configService.set(moduleSettingKey(id, kind, field), JSON.stringify(value));
+      const key = moduleSettingKey(id, kind, field);
+      const next = JSON.stringify(value);
+      if ((await configService.getFresh(key)) !== next) changed.push(field);
+      await configService.set(key, next);
     }
+    // Field names only: a module's settings can hold an API key.
+    await recordAuditEvent(getDb(), {
+      actorUserId: c.get('userId'),
+      action: 'module.settings',
+      targetType: 'module',
+      targetId: null,
+      metadata: { moduleId: id, kind, changed },
+    });
     return c.json({ values: result.data });
   });
 

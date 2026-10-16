@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   stored: new Map<string, string>(),
+  audits: [] as Array<{ action: string; metadata?: Record<string, unknown> | null }>,
 }));
 
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
@@ -23,6 +24,14 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => ({}) }));
+vi.mock('../src/lib/audit.js', () => ({
+  recordAuditEvent: async (
+    _db: unknown,
+    event: { action: string; metadata?: Record<string, unknown> | null },
+  ) => {
+    h.audits.push(event);
+  },
+}));
 vi.mock('../src/modules/activation.js', () => ({
   deactivatedModuleIds: async () => new Set<string>(),
   isModuleDeactivated: async () => false,
@@ -63,5 +72,36 @@ describe('GET /modules/:id/settings/:kind', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { values: Record<string, unknown> };
     expect(body.values).toEqual({ apiUrl: 'https://default.example', limit: '9' });
+  });
+});
+
+describe('PUT /modules/:id/settings/:kind', () => {
+  const put = (values: Record<string, unknown>) =>
+    app.request('/modules/acme/settings/global', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values }),
+    });
+
+  it('records which fields changed, never their values', async () => {
+    h.stored.clear();
+    h.audits.length = 0;
+    h.stored.set('config:module:acme:global:apiUrl', JSON.stringify('https://default.example'));
+    const res = await put({ apiUrl: 'https://default.example', limit: 's3cr3t-limit' });
+    expect(res.status).toBe(200);
+    expect(h.audits).toEqual([
+      expect.objectContaining({
+        action: 'module.settings',
+        metadata: { moduleId: 'acme', kind: 'global', changed: ['limit'] },
+      }),
+    ]);
+    expect(JSON.stringify(h.audits)).not.toContain('s3cr3t-limit');
+  });
+
+  it('records nothing for a body it refuses', async () => {
+    h.audits.length = 0;
+    const res = await put({ limit: 42 });
+    expect(res.status).toBe(400);
+    expect(h.audits).toEqual([]);
   });
 });
