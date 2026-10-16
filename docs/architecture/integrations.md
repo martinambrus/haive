@@ -33,7 +33,9 @@ tools that share one are renamed; see Tool names).
 
 Auth kinds: `oauth2` (authorize/token/optional revoke URLs, read and write scopes, PKCE always,
 `clientRegistration`, optional `userInfo` = an https URL plus JSON pointers for the account id and
-label), `device` (device-code and token URLs, scopes, optional `userInfo`, without which it cannot
+label, optional `authorizeParams` = extra authorize-URL parameters such as Google's
+`access_type=offline`, each one printable line and never a name the sign-in sets itself:
+`response_type`, `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge[_method]`), `device` (device-code and token URLs, scopes, optional `userInfo`, without which it cannot
 sign anyone in), `token` (a form and help text).
 
 Ids: a core provider or category is `^[a-z0-9][a-z0-9_-]*$`, a module's is `module.<moduleId>.<id>`.
@@ -85,7 +87,8 @@ connections would have been a destructive migration. Consequences, all deliberat
   refused.
 - Signing in again to the same account updates the connection and its credential's secret in place,
   under `pg_advisory_xact_lock(integration-account:<user>:<provider>:<externalId>)` and `FOR UPDATE`,
-  keeping the credential's label, host and provider. A first forge sign-in creates a credential
+  keeping the credential's label, host and provider. A vendor that sends no new refresh token leaves the
+  stored one in place (re-encrypted with the new access token; an unreadable one counts as none). A first forge sign-in creates a credential
   labelled `<Provider> OAuth (<login>)` on the sign-in endpoint's host.
 - "Use as connection" (`POST /integrations/providers/:id/link-credential`) turns an existing
   credential into a connection: forge only, provider enabled, own credential, the credential's forge
