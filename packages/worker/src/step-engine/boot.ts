@@ -66,5 +66,7 @@ export async function bootStepEngine(db: Database): Promise<{
   await syncModuleIntent(db, loaded);
   const taskTypes = await syncTaskTypeDefinitions(db, stepRegistry, loaded);
   await publishWorkerBootReport(getRedis(), loaded, schemas, taskTypes);
-  return { loaded, entries, deactivated };
+  // Held back like a deactivated module: the first pass ensures its schema again, then starts its jobs.
+  const stillEnsuring = Object.keys(schemas).filter((id) => schemas[id] === 'pending');
+  return { loaded, entries, deactivated: new Set([...deactivated, ...stillEnsuring]) };
 }

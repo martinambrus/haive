@@ -4,7 +4,7 @@ import type { Redis } from 'ioredis';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { createRedisConnection } from '@haive/shared';
-import { MODULES_LOADED_WORKER_KEY } from '@haive/shared/modularity';
+import { MODULE_DEPENDENTS_CAP, MODULES_LOADED_WORKER_KEY } from '@haive/shared/modularity';
 import {
   moduleDatabaseName,
   openModuleDatabase,
@@ -434,9 +434,9 @@ describe.skipIf(!url || !redisUrl)('POST /modules/:id/purge on Postgres and Redi
       expect(await snapshot()).toEqual(before);
     });
 
-    it('more than 200 live tasks, listing 200 and saying the list is cut: 409', async () => {
+    it(`more than ${MODULE_DEPENDENTS_CAP} live tasks, listing ${MODULE_DEPENDENTS_CAP} and saying the list is cut: 409`, async () => {
       await db.insert(schema.tasks).values(
-        Array.from({ length: 201 }, (_, i) => ({
+        Array.from({ length: MODULE_DEPENDENTS_CAP + 1 }, (_, i) => ({
           userId: ACTOR,
           type: USED,
           title: `Task ${i}`,
@@ -447,7 +447,7 @@ describe.skipIf(!url || !redisUrl)('POST /modules/:id/purge on Postgres and Redi
       const res = await purge();
       const body = await json(res);
       expect([res.status, body.code]).toEqual([409, 'module_tasks_open']);
-      expect(body.tasks as unknown[]).toHaveLength(200);
+      expect(body.tasks as unknown[]).toHaveLength(MODULE_DEPENDENTS_CAP);
       expect(body.capped).toBe(true);
       expect(await snapshot()).toEqual(before);
     });

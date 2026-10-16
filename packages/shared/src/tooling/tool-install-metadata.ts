@@ -78,4 +78,4 @@ export const TOOL_NAME_LIST = Object.keys(TOOL_INSTALL_METADATA) as ToolName[];
  *  repo carries no rtk_version pin. Kept in sync with the ARG in the
  *  sandbox-image Dockerfile. Shared so the API can resolve an unpinned repo's
  *  effective RTK version for upgrade detection. */
-export const DEFAULT_RTK_VERSION = '0.37.2';
+export const DEFAULT_RTK_VERSION = '1.0.1';

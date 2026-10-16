@@ -11,6 +11,7 @@ import {
   pushBranch,
 } from '../../../repo/git-push.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
+import { putBackProjections, warnStep } from '../../../project-state/branch-revert.js';
 
 const MANUAL_CREDENTIAL_VALUE = '';
 
@@ -30,6 +31,8 @@ interface PushGateDetect {
   repositoryId: string | null;
   boundCredentialId: string | null;
   credentials: CredentialOption[];
+  /** The branch 01 forked the worktree from; absent where 01 did not run or the output predates it. */
+  baseBranch?: string | null;
 }
 
 interface PushGateApply {
@@ -56,8 +59,9 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
 
   async detect(ctx: StepContext): Promise<PushGateDetect> {
     const prev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '01-worktree-setup');
-    const worktreeOutput = prev?.output as { worktreePath?: string } | null;
+    const worktreeOutput = prev?.output as { worktreePath?: string; baseBranch?: string } | null;
     const workspacePath = worktreeOutput?.worktreePath ?? ctx.workspacePath;
+    const baseBranch = worktreeOutput?.baseBranch ?? null;
 
     const task = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
@@ -95,6 +99,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
         repositoryId,
         boundCredentialId: repo?.credentialsSecretId ?? null,
         credentials,
+        baseBranch,
       };
     }
 
@@ -120,6 +125,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       repositoryId,
       boundCredentialId: repo?.credentialsSecretId ?? null,
       credentials,
+      baseBranch,
     };
   },
 
@@ -274,6 +280,11 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
           .set(patch)
           .where(eq(schema.repositories.id, detected.repositoryId));
       }
+    }
+
+    if (detected.baseBranch) {
+      const target = detected.baseBranch;
+      await warnStep(ctx, await putBackProjections({ ctx, worktree: workspace, branch, target }));
     }
 
     const setUpstream = detected.hasOrigin ? values.setUpstream !== false : true;

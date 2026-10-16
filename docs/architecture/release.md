@@ -54,7 +54,9 @@ containers), cleanup, the plan mirror outbox (it resumes) and the price refresh.
 authority is `admitNewWork`: a read of the state past ConfigService's 30 s cache inside the
 transaction that records the work, under a shared
 database fence (`lockNewWorkFenceShared`, an advisory lock on `NEW_WORK_FENCE_KEY`); most routes
-also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). Every
+also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). An
+upload complete makes that read once more right before it claims its session, since the claim is a
+write, so a drain that began after the early check refuses with the session untouched. Every
 updater state write (`draining`, the recount's `maintenance`, and the return to `normal` on commit
 or rollback), like an administrator's maintenance write, takes the same fence exclusively
 (`setMaintenanceState`, `enterMaintenance`):

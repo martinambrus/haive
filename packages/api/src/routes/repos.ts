@@ -36,11 +36,17 @@ import {
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
+import {
+  cancelUploadSession,
+  isWholeFile,
+  withCompleteClaim,
+} from '../lib/upload-complete-claim.js';
 import { ROOT_WRITING_STEP_IDS } from '../lib/task-type-definition.js';
 import {
   ensureUploadsDir,
   uploadFileRel,
   uploadFileRelOrThrow,
+  uploadFinalRel,
   uploadsRel,
   uploadsStorageRoot,
 } from '../lib/uploads.js';
@@ -92,7 +98,11 @@ import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } f
 import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
-import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
+import {
+  admitNewWork,
+  assertNewWorkAllowed,
+  requireNewWorkAllowed,
+} from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import type { Context } from 'hono';
 import {
@@ -574,7 +584,7 @@ function sessionFromRow(row: typeof schema.repoUploads.$inferSelect) {
     totalSize: Number(row.totalSize),
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
-    status: row.status as 'uploading' | 'complete' | 'cancelled',
+    status: row.status as 'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping',
   };
 }
 
@@ -751,14 +761,8 @@ repoRoutes.post('/upload/:id/complete', requireNewWorkAllowed, async (c) => {
 
   const storageRoot = uploadsStorageRoot();
   const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Upload session archive');
-  // A link at that name now fails this check rather than reporting its target's size.
-  const onDisk = await lstatNoFollow(storageRoot, archiveRel);
-  if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
-    throw new HttpError(409, 'archive size mismatch on disk');
-  }
-
-  const finalRel = archiveRel.replace(/\.partial$/, '');
-  if (finalRel === archiveRel) {
+  const finalRel = uploadFinalRel(archiveRel);
+  if (finalRel === null) {
     throw new HttpError(500, 'archive path missing .partial suffix');
   }
   const finalPath = path.join(storageRoot, finalRel);
@@ -769,24 +773,35 @@ repoRoutes.post('/upload/:id/complete', requireNewWorkAllowed, async (c) => {
   });
   const branch = row.branch && row.branch.length > 0 ? row.branch : 'main';
 
-  const inserted = await db.transaction(async (tx) => {
-    await admitNewWork(tx);
-    await renameNoFollow(storageRoot, archiveRel, finalRel);
-    return tx
-      .insert(schema.repositories)
-      .values({
-        userId,
-        name: repoName,
-        source: 'upload',
-        localPath: null,
-        remoteUrl: null,
-        branch,
-        status: 'cloning',
-        credentialsSecretId: null,
-      })
-      .returning();
+  // The claim is a write, so a drain that began after the early check refuses before it.
+  await assertNewWorkAllowed();
+  const repo = await withCompleteClaim(db, schema.repoUploads, row.id, async (claim) => {
+    const size = Number(row.totalSize);
+    const staged = await isWholeFile(storageRoot, archiveRel, size);
+    if (!staged && !(await isWholeFile(storageRoot, finalRel, size))) {
+      throw new HttpError(409, 'archive size mismatch on disk');
+    }
+
+    return db.transaction(async (tx) => {
+      await admitNewWork(tx);
+      if (staged) await renameNoFollow(storageRoot, archiveRel, finalRel);
+      const [created] = await tx
+        .insert(schema.repositories)
+        .values({
+          userId,
+          name: repoName,
+          source: 'upload',
+          localPath: null,
+          remoteUrl: null,
+          branch,
+          status: 'cloning',
+          credentialsSecretId: null,
+        })
+        .returning();
+      await claim.write(tx, { status: 'complete', archivePath: finalPath, updatedAt: new Date() });
+      return created!;
+    });
   });
-  const repo = inserted[0]!;
 
   const queue = getRepoQueue();
   const payload: RepoJobPayload = {
@@ -808,11 +823,6 @@ repoRoutes.post('/upload/:id/complete', requireNewWorkAllowed, async (c) => {
     }),
   );
 
-  await db
-    .update(schema.repoUploads)
-    .set({ status: 'complete', archivePath: finalPath, updatedAt: new Date() })
-    .where(eq(schema.repoUploads.id, row.id));
-
   return c.json({ repository: repo, session: { id: row.id, status: 'complete' } }, 201);
 });
 
@@ -822,19 +832,19 @@ repoRoutes.delete('/upload/:id', async (c) => {
   const db = getDb();
 
   const row = await loadUploadSession(userId, uploadId);
-  // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
-  // unlink: the session is still cancelled, and a leftover partial is the sweeper's problem rather
-  // than a reason to refuse the cancel.
-  try {
-    const archiveRel = uploadFileRel(userId, row.archivePath);
-    if (archiveRel) await removeNoFollow(uploadsStorageRoot(), archiveRel);
-  } catch {
-    // absent, refused, or a path this api never wrote
+  if (row.status !== 'uploading') {
+    throw new HttpError(409, `session is ${row.status}`);
   }
-  await db
-    .update(schema.repoUploads)
-    .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(eq(schema.repoUploads.id, row.id));
+  // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
+  // unlink: the session is still cancelled, and a leftover partial is the upload reaper's to remove
+  // rather than a reason to refuse the cancel.
+  const archiveRel = uploadFileRel(userId, row.archivePath);
+  // An uploading session owns no completed file, so a final one here is a failed complete's.
+  const finalRel = archiveRel === null ? null : uploadFinalRel(archiveRel);
+  await cancelUploadSession(db, schema.repoUploads, row.id, uploadsStorageRoot(), [
+    archiveRel,
+    finalRel,
+  ]);
 
   return c.json({ ok: true });
 });

@@ -828,6 +828,8 @@ export interface Task {
   pausedByAdmin?: boolean;
   /** ISO time the worker marked the task dead; null otherwise. Read it through isTaskDead. */
   deadAt?: string | null;
+  /** List endpoint only: the stop that failed this task, or null. Read it through moduleStopBanner. */
+  stop?: { reason: string; moduleId: string | null } | null;
   /** Up/down vote score in [-5, +5], 0 by default. Shifts this task's fair-scheduling band
    *  so its AI agents are picked up sooner (or later) when slots are scarce; it is not a
    *  priority class, so an unvoted task still makes progress. Also the listing's primary

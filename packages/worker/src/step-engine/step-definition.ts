@@ -378,6 +378,13 @@ export interface MergeResolveSpec {
    *  history into a local commit, after which the push is rejected. They omit the flag,
    *  so an absent form field can never opt them in. */
   squashable?: boolean;
+  /** 12 only: puts the branch's Haive files back before its merge opens; returns warning notes. */
+  putBackBeforeMerge?(args: {
+    ctx: StepContext;
+    worktreePath: string | null;
+    featureBranch: string;
+    baseBranch: string;
+  }): Promise<string[]>;
   /** Sandbox timeout per fix-agent invocation. Defaults to 30 minutes. */
   timeoutMs?: number;
 }

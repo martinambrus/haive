@@ -5,6 +5,7 @@ import {
   resolveImageTag,
   type ImageTagResolution,
 } from '../src/sandbox/image-cache.js';
+import { sandboxCoreIdentity } from '../src/sandbox/sandbox-core-image.js';
 
 const baseParams = {
   name: 'claude-code' as const,
@@ -87,6 +88,23 @@ describe('resolveImageTag', () => {
     expect(renderDockerfile(before!)).not.toBe(renderDockerfile(after!));
     expect(before!.tag).not.toBe(after!.tag);
     expect(expectedHash(before!)).not.toBe(expectedHash(after!));
+  });
+
+  // The base rebuilds when its definition changes (sandbox-core-image.ts). Its tag, `:latest`,
+  // never does, so without the identity a per-CLI image built on the old base kept its tag and
+  // went on being served.
+  it('carries the base identity, so a new base definition moves the tag', () => {
+    const before = resolveImageTag({ ...baseParams, sandboxDockerfileExtra: null });
+    expect(renderDockerfile(before!)).toContain(
+      `LABEL haive.base-identity="${sandboxCoreIdentity()}"`,
+    );
+    process.env.RTK_RELEASE_VERSION = 'v9.9.9';
+    try {
+      const after = resolveImageTag({ ...baseParams, sandboxDockerfileExtra: null });
+      expect(after!.tag).not.toBe(before!.tag);
+    } finally {
+      delete process.env.RTK_RELEASE_VERSION;
+    }
   });
 
   it('is deterministic — identical inputs resolve to the identical tag', () => {

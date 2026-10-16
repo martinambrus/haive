@@ -228,6 +228,12 @@ prompts (the three merge steps' and `01-plan-merge`'s) say to leave exactly the 
 merges alone — `.haive-data/plan.json`, `plan.md` and `.haive-data/state/` (`HAIVE_OWN_FILES_LINE`);
 any other Haive path that conflicts stays the fixer's to resolve, or the merge could never close. The DAG level merge does not do this yet, so its prompt omits the line.
 
+Before 12's feature merge opens, in its pending and reopen passes, the branch's own changes to those
+files are put back to where it forked (`putBackBeforeMerge`, see
+[Onboarding template versioning](onboarding-upgrades.md)), so a task branch never carries an agent's
+edit of the record or the plan into the base. A base-sync round and a pass that finds the feature's
+merge open skip it.
+
 A DAG level merge records which files conflicted. The merge pass reads `unmergedPaths` while the
 merge it opened is still open, since the abort that follows clears them and nothing else keeps the
 list, and after the abort writes one `dag_issue.merge_conflict` task event in the transaction that

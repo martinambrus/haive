@@ -42,7 +42,10 @@ import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
 import { reapOrphanedAuthVolumes } from './sandbox/auth-volume-reaper.js';
 import { reapOrphanEnvTemplates } from './sandbox/env-template-reaper.js';
 import { reapStaleComposedImages } from './sandbox/composed-image-reaper.js';
-import { reapOrphanedSandboxImages } from './sandbox/sandbox-image-reaper.js';
+import {
+  reapOrphanedSandboxImages,
+  reapSupersededSandboxCores,
+} from './sandbox/sandbox-image-reaper.js';
 import { ensureOllamaModels } from './sandbox/ollama-provision.js';
 import { ensureDdevCa, ensureDdevRegistryCache } from './sandbox/ddev-runner.js';
 import { ensureSandboxCoreImage } from './sandbox/sandbox-core-image.js';
@@ -50,6 +53,7 @@ import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
 import { RuntimeRunnerReaper } from './sandbox/runtime-runner-reaper.js';
 import { startDatabaseSnapshotCleanup } from './repo/database-snapshots.js';
+import { startUploadReaper } from './repo/upload-reaper.js';
 import { AgentPreemptionSweeper } from './sandbox/agent-preemption.js';
 import { CliPriorityDecaySweeper } from './queues/cli-exec/priority-decay.js';
 import { clearAgentLeases } from './queues/cli-exec/agent-lease.js';
@@ -63,6 +67,7 @@ import {
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 import { bootStepEngine } from './step-engine/boot.js';
 import { MODULE_JOBS_RECONCILE_MS, startModuleJobs } from './modules/loader.js';
+import { guardShutdown } from './shutdown-guard.js';
 import { startModuleControlWorker } from './queues/module-control-queue.js';
 import { deactivatedModuleIds, moduleActivationState } from './modules/activation.js';
 
@@ -104,6 +109,10 @@ async function main(): Promise<void> {
   // removal existed, left them for good. Docker refuses one a container still uses.
   await reapOrphanedSandboxImages(getDb()).catch((err) => {
     logger.warn({ err }, 'orphaned sandbox-image reap on boot failed');
+  });
+  // Base images a rebuild superseded (`ensureSandboxCoreImage` rebuilds an out-of-date base).
+  await reapSupersededSandboxCores().catch((err) => {
+    logger.warn({ err }, 'superseded sandbox-base reap on boot failed');
   });
   // Drop runtime slot reservations left by the previous process. The reap above removed every
   // runtime runner, so a reservation from before this boot can only describe a boot that no
@@ -240,6 +249,7 @@ async function main(): Promise<void> {
   const runtimeRunnerReaper = new RuntimeRunnerReaper({ db: getDb() });
   runtimeRunnerReaper.start();
   const stopDatabaseSnapshotCleanup = startDatabaseSnapshotCleanup(getDb());
+  const stopUploadReaper = startUploadReaper(getDb());
   // Let the admission gate preempt a dead task's grace-runner for a waiting live task instead
   // of starving it behind the retry-cache (reuses the reaper's list/reap).
   // The waiter's vote score reaches the reaper here: it is what lets a boosted task reclaim a
@@ -271,7 +281,7 @@ async function main(): Promise<void> {
   const cliStreamLogReaper = new CliStreamLogReaper({ db: getDb() });
   cliStreamLogReaper.start();
 
-  // Held back if deactivated at the schema read or now; the first pass starts one active by then.
+  // Held back if deactivated at the schema read or now, or if its schema setup was still running; the first pass starts one active by then.
   const moduleJobs = await startModuleJobs(
     loadedModules,
     moduleEntries,
@@ -301,7 +311,7 @@ async function main(): Promise<void> {
 
   logger.info('haive-worker ready');
 
-  const shutdown = async (signal: string): Promise<void> => {
+  const runShutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'Worker shutting down');
     // Force-close BullMQ workers without waiting for in-flight jobs (CLI execs
     // can run for minutes; Docker SIGTERM grace is ~10s). Jobs left active are
@@ -311,6 +321,7 @@ async function main(): Promise<void> {
     ideReaper.stop();
     runtimeRunnerReaper.stop();
     stopDatabaseSnapshotCleanup();
+    stopUploadReaper();
     agentPreemptionSweeper.stop();
     cliPriorityDecaySweeper.stop();
     stalledTaskSweeper.stop();
@@ -318,11 +329,12 @@ async function main(): Promise<void> {
     cliStreamLogReaper.stop();
     stopRuntimeLimitsWatch();
     clearInterval(moduleJobsTimer);
-    await moduleJobsPass;
-    await moduleJobs.stopAll();
-    await terminalManager.stop().catch((err) => {
-      logger.warn({ err }, 'terminal manager stop failed');
-    });
+    await Promise.all([
+      moduleJobs.shutdown(moduleJobsPass),
+      terminalManager.stop().catch((err) => {
+        logger.warn({ err }, 'terminal manager stop failed');
+      }),
+    ]);
     await Promise.allSettled([
       repoWorker.close(true),
       bundleWorker.close(true),
@@ -346,6 +358,7 @@ async function main(): Promise<void> {
     await closeRedis();
     process.exit(0);
   };
+  const shutdown = guardShutdown(runShutdown, (code) => process.exit(code));
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));

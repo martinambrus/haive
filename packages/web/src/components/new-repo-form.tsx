@@ -39,7 +39,7 @@ interface UploadSession {
   totalSize: number;
   bytesReceived: number;
   chunkSize: number;
-  status: 'uploading' | 'complete' | 'cancelled';
+  status: 'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping';
 }
 
 async function chunkedUpload(opts: {
@@ -487,8 +487,9 @@ export function NewRepoForm() {
               className="block w-full text-sm text-neutral-300 file:mr-3 file:rounded-md file:border-0 file:bg-indigo-600 file:px-3 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-indigo-500"
             />
             <p className="text-xs text-neutral-500">
-              Supports .zip, .tar, and .tar.gz. Uploads are chunked and resumable on retry. The
-              archive is extracted server-side into the repo workspace.
+              Supports .zip, .tar, and .tar.gz. Uploads are sent in chunks; a failed upload starts
+              over, and an unfinished one is deleted after 24 hours. The archive is extracted
+              server-side into the repo workspace.
             </p>
             {uploadFile && (
               <div className="rounded-md border border-indigo-900 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">

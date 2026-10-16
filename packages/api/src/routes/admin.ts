@@ -786,6 +786,7 @@ const CODEX_APP_SERVER_FAILURE_LIMIT = 20;
 type CodexAppServerFailureRow = {
   taskId: string;
   taskTitle: string;
+  ownerId: string;
   providerId: string;
   providerLabel: string | null;
   stage: string | null;
@@ -807,6 +808,7 @@ adminRoutes.get('/config/codex-app-server', async (c) => {
   const rows = await getDb().execute<CodexAppServerFailureRow>(sql`
     SELECT t.id AS "taskId",
            t.title AS "taskTitle",
+           t.user_id AS "ownerId",
            v.key AS "providerId",
            p.label AS "providerLabel",
            v.value->>'stage' AS "stage",
@@ -823,7 +825,12 @@ adminRoutes.get('/config/codex-app-server', async (c) => {
        AND v.value->>'at' >= ${since}
      ORDER BY v.value->>'at' DESC
      LIMIT ${CODEX_APP_SERVER_FAILURE_LIMIT}`);
-  return c.json({ enabled, recentFailures: rows as unknown as CodexAppServerFailureRow[] });
+  return c.json({
+    enabled,
+    // GET /tasks/:id answers only a task's owner, so the page links just the viewer's own tasks.
+    viewerId: c.get('userId'),
+    recentFailures: rows as unknown as CodexAppServerFailureRow[],
+  });
 });
 
 adminRoutes.put('/config/codex-app-server', async (c) => {

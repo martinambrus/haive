@@ -4,12 +4,7 @@ import { Hono } from 'hono';
 import { eq, and } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { initDbUploadRequestSchema, type DbDumpFormat } from '@haive/shared';
-import {
-  lstatNoFollow,
-  openFileNoFollow,
-  removeNoFollow,
-  renameNoFollow,
-} from '@haive/shared/fs-safe';
+import { openFileNoFollow, renameNoFollow } from '@haive/shared/fs-safe';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -17,9 +12,15 @@ import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
 import {
+  cancelUploadSession,
+  isWholeFile,
+  withCompleteClaim,
+} from '../lib/upload-complete-claim.js';
+import {
   ensureUploadsDir,
   uploadFileRel,
   uploadFileRelOrThrow,
+  uploadFinalRel,
   uploadsRel,
   uploadsStorageRoot,
 } from '../lib/uploads.js';
@@ -71,7 +72,8 @@ function sessionFromRow(row: typeof schema.dbUploads.$inferSelect) {
     totalSize: Number(row.totalSize),
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
-    status: row.status as 'uploading' | 'complete' | 'cancelled' | 'consumed',
+    status: row.status as
+      'uploading' | 'completing' | 'complete' | 'cancelled' | 'consumed' | 'reaping',
   };
 }
 
@@ -242,25 +244,23 @@ dbDumpRoutes.post('/upload/:id/complete', async (c) => {
 
   const anchor = uploadsStorageRoot();
   const dumpRel = uploadFileRelOrThrow(userId, row.dumpPath, 'Dump path');
-  // A link at that name now fails this check rather than reporting its target's size.
-  const onDisk = await lstatNoFollow(anchor, dumpRel);
-  if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
-    throw new HttpError(409, 'dump size mismatch on disk');
-  }
-
-  const finalRel = dumpRel.replace(/\.partial$/, '');
-  if (finalRel === dumpRel) {
+  const finalRel = uploadFinalRel(dumpRel);
+  if (finalRel === null) {
     throw new HttpError(500, 'dump path missing .partial suffix');
   }
   const finalPath = path.join(anchor, finalRel);
-  await renameNoFollow(anchor, dumpRel, finalRel);
 
   // No import job here — the dump waits to be loaded by the task's env-boot /
   // import step, which deletes it immediately after `ddev import-db`.
-  await db
-    .update(schema.dbUploads)
-    .set({ status: 'complete', dumpPath: finalPath, updatedAt: new Date() })
-    .where(eq(schema.dbUploads.id, row.id));
+  await withCompleteClaim(db, schema.dbUploads, row.id, async (claim) => {
+    const size = Number(row.totalSize);
+    const staged = await isWholeFile(anchor, dumpRel, size);
+    if (!staged && !(await isWholeFile(anchor, finalRel, size))) {
+      throw new HttpError(409, 'dump size mismatch on disk');
+    }
+    if (staged) await renameNoFollow(anchor, dumpRel, finalRel);
+    await claim.write(db, { status: 'complete', dumpPath: finalPath, updatedAt: new Date() });
+  });
 
   return c.json({ session: { id: row.id, status: 'complete' } }, 201);
 });
@@ -271,15 +271,19 @@ dbDumpRoutes.delete('/upload/:id', async (c) => {
   const db = getDb();
 
   const row = await loadUploadSession(userId, uploadId);
+  if (row.status !== 'uploading') {
+    throw new HttpError(409, `session is ${row.status}`);
+  }
   // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
-  // unlink: the session is still cancelled, and a leftover partial is the sweeper's problem rather
-  // than a reason to refuse the cancel.
+  // unlink: the session is still cancelled, and a leftover partial is the upload reaper's to remove
+  // rather than a reason to refuse the cancel.
   const dumpRel = uploadFileRel(userId, row.dumpPath);
-  if (dumpRel) await removeNoFollow(uploadsStorageRoot(), dumpRel).catch(() => {});
-  await db
-    .update(schema.dbUploads)
-    .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(eq(schema.dbUploads.id, row.id));
+  // An uploading session owns no completed file, so a final one here is a failed complete's.
+  const finalRel = dumpRel === null ? null : uploadFinalRel(dumpRel);
+  await cancelUploadSession(db, schema.dbUploads, row.id, uploadsStorageRoot(), [
+    dumpRel,
+    finalRel,
+  ]);
 
   return c.json({ ok: true });
 });

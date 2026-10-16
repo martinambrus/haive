@@ -46,7 +46,7 @@ const BLOCKING_TASK_STATES = ['queued', 'running', 'paused', 'waiting_user', 'wa
 export const LIVE_TASK_STATES = ['created', ...BLOCKING_TASK_STATES] as const;
 
 /** The most rows either list of GET /blocking answers. */
-const BLOCKING_LIST_CAP = 200;
+export const BLOCKING_LIST_CAP = 200;
 
 const setStateSchema = z.object({ state: maintenanceStateSchema });
 
@@ -96,7 +96,7 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
       .leftJoin(schema.users, eq(schema.users.id, schema.repositories.userId))
       .where(eq(schema.repositories.status, 'cloning'))
       .orderBy(desc(schema.repositories.updatedAt))
-      .limit(BLOCKING_LIST_CAP),
+      .limit(BLOCKING_LIST_CAP + 1),
     db
       .select({
         id: schema.customBundles.id,
@@ -109,7 +109,7 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
       .leftJoin(schema.users, eq(schema.users.id, schema.customBundles.userId))
       .where(eq(schema.customBundles.status, 'syncing'))
       .orderBy(desc(schema.customBundles.updatedAt))
-      .limit(BLOCKING_LIST_CAP),
+      .limit(BLOCKING_LIST_CAP + 1),
     db
       .select({
         id: schema.cliProviders.id,
@@ -128,7 +128,7 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
         ),
       )
       .orderBy(desc(schema.cliProviders.updatedAt))
-      .limit(BLOCKING_LIST_CAP),
+      .limit(BLOCKING_LIST_CAP + 1),
   ]);
   const listed = [
     ...repositories.map((r) => ({ kind: 'repository' as const, ...r })),
@@ -146,9 +146,7 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
   ].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
   return {
     jobs: listed.slice(0, BLOCKING_LIST_CAP),
-    capped:
-      listed.length > BLOCKING_LIST_CAP ||
-      [repositories, bundles, providers].some((rows) => rows.length === BLOCKING_LIST_CAP),
+    capped: listed.length > BLOCKING_LIST_CAP,
   };
 }
 
@@ -161,7 +159,7 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
  */
 maintenanceRoutes.get('/blocking', async (c) => {
   const db = getDb();
-  const rows = await db
+  const fetched = await db
     .select({
       id: schema.tasks.id,
       title: schema.tasks.title,
@@ -184,7 +182,8 @@ maintenanceRoutes.get('/blocking', async (c) => {
       and(inArray(schema.tasks.status, [...BLOCKING_TASK_STATES]), isNull(schema.tasks.deadAt)),
     )
     .orderBy(desc(schema.tasks.updatedAt))
-    .limit(BLOCKING_LIST_CAP);
+    .limit(BLOCKING_LIST_CAP + 1);
+  const rows = fetched.slice(0, BLOCKING_LIST_CAP);
   const { jobs, capped: jobsCapped } = await listBlockingJobs(db);
   const fieldKey = await configService.getEncryptionKey();
 
@@ -216,7 +215,7 @@ maintenanceRoutes.get('/blocking', async (c) => {
     total: rows.length + jobs.length,
     // The listing is capped; say so rather than letting an operator read a truncated list as the
     // whole picture and force a drain that still had work behind it.
-    capped: rows.length === BLOCKING_LIST_CAP || jobsCapped,
+    capped: fetched.length > BLOCKING_LIST_CAP || jobsCapped,
     // GET /tasks/:id answers only a task's owner, so the page links just the viewer's own tasks.
     viewerId: c.get('userId'),
   });
