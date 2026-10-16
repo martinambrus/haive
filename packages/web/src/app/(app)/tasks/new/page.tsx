@@ -112,7 +112,8 @@ async function chunkedUploadDbDump(opts: {
 
 interface AttachmentOutcome {
   taskId: string;
-  started: boolean;
+  /** The start action's answer, or null when the call itself failed. */
+  start: { started: boolean; status: string } | null;
   total: number;
   failed: { name: string; message: string }[];
 }
@@ -678,7 +679,7 @@ export default function NewTaskPage() {
       if (deferStart) body.deferStart = true;
       const data = await api.post<{ task: Task }>('/tasks', body);
       const failed: AttachmentOutcome['failed'] = [];
-      let started = true;
+      let start: AttachmentOutcome['start'] = null;
       if (deferStart) {
         setAttachmentUploading(true);
         for (const f of attachmentFiles) {
@@ -694,16 +695,16 @@ export default function NewTaskPage() {
         setAttachmentUploading(false);
         // Started whatever the uploads did, so it is never left `created`; if this call fails,
         // the task page's Start is the retry.
-        started = await startTask(data.task.id).then(
-          () => true,
-          () => false,
+        start = await startTask(data.task.id).then(
+          ({ started, status }) => ({ started, status }),
+          () => null,
         );
       }
       if (origin) rememberTaskOrigin(`/tasks/${data.task.id}`, origin);
       if (failed.length > 0) {
         setAttachmentOutcome({
           taskId: data.task.id,
-          started,
+          start,
           total: attachmentFiles.length,
           failed,
         });
@@ -1352,9 +1353,11 @@ export default function NewTaskPage() {
             className="flex flex-col gap-2 rounded-md border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
           >
             <p>
-              {attachmentOutcome.started
+              {attachmentOutcome.start?.started
                 ? 'The task was created and started.'
-                : 'The task was created but could not be started. Open it and press Start.'}
+                : attachmentOutcome.start
+                  ? `The task was created but not started: it is ${attachmentOutcome.start.status} now.`
+                  : 'The task was created but could not be started. Open it and press Start.'}
             </p>
             <p>
               {attachmentOutcome.failed.length} of {attachmentOutcome.total} attachment(s) could not

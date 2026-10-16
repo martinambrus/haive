@@ -95,6 +95,7 @@ let holdParents = false;
 let holdUploads = false;
 let failUploads: Record<string, string> = {};
 let failStart = false;
+let startAnswer: { started: boolean; status: string } | null = null;
 const actions: Record<string, unknown>[] = [];
 
 const reply = (code: number, body: unknown) => ({
@@ -134,6 +135,7 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
   }
   if (call === 'POST /tasks/task-new/action') {
     if (failStart) return reply(409, { error: 'the queue is draining' });
+    if (startAnswer) return reply(200, { ok: true, ...startAnswer });
     actions.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>);
     return reply(200, { ok: true, started: true, status: 'queued' });
   }
@@ -156,6 +158,7 @@ beforeEach(() => {
   holdUploads = false;
   failUploads = {};
   failStart = false;
+  startAnswer = null;
   nav.pushed.length = 0;
   actions.length = 0;
 });
@@ -744,6 +747,16 @@ describe('a new task with attachments', () => {
     const view = await readyOnA(three());
     await submitForm(view);
     expect(page(view)).toContain('The task was created but could not be started.');
+    expect(page(view)).not.toContain('created and started');
+    expect(nav.pushed).toEqual([]);
+  });
+
+  it('says the task did not start when its start answers that it is no longer created', async () => {
+    failUploads = { 'b.md': 'too large' };
+    startAnswer = { started: false, status: 'cancelled' };
+    const view = await readyOnA(three());
+    await submitForm(view);
+    expect(page(view)).toContain('The task was created but not started: it is cancelled now.');
     expect(page(view)).not.toContain('created and started');
     expect(nav.pushed).toEqual([]);
   });
