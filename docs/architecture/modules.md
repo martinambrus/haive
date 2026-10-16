@@ -219,7 +219,8 @@ same states either way.
 appear nowhere (`scripts/smoke/scan-image.sh`, the token passed in its environment). The module names
 found in every layer, registry `@haive-module+<id>@<version>` and folder modules under
 `app/modules/<dir>/`, must equal the entitled set for the api and the worker and be a subset of the
-modules with web parts for the web image, and a non-directory entry under `app/modules/` other than
+modules with web parts for the web image. A folder's `package.json` is read in every layer that
+writes it, so a name a later layer overwrote still counts. A non-directory entry under `app/modules/` other than
 `.gitkeep` is refused. Every registry module in the expectation names its version (one without is a
 malformed expectation, exit 2). The api and worker images must carry exactly that version: another
 version, or a module linked in with no version to read, is an offender. The standalone web image has
