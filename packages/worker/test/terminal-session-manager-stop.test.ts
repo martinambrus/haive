@@ -1,6 +1,6 @@
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { TERMINAL_REQUEST_CHANNEL } from '@haive/shared';
+import { TERMINAL_REPLY_CHANNEL_PREFIX, TERMINAL_REQUEST_CHANNEL } from '@haive/shared';
 
 const h = vi.hoisted(() => {
   const log = {
@@ -49,9 +49,10 @@ async function startedManager(unsubscribe: (...channels: string[]) => Promise<un
     unsubscribe: vi.fn(unsubscribe),
     on: vi.fn(),
   };
+  const publish = vi.fn(async (_channel: string, _message: string) => 1);
   const mgr = new TerminalSessionManager({
     db: {} as never,
-    redis: {} as never,
+    redis: { publish } as never,
     subscriberRedis: subscriber as never,
     docker: {} as never,
   });
@@ -68,7 +69,7 @@ async function startedManager(unsubscribe: (...channels: string[]) => Promise<un
     });
     return ptyStream;
   };
-  return { mgr, subscriber, addSession };
+  return { mgr, subscriber, publish, addSession };
 }
 
 describe('terminal manager stop', () => {
@@ -122,5 +123,37 @@ describe('terminal manager stop', () => {
     ]);
     expect(h.log.warn).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('answers an open request that lands after stop began, and opens nothing', async () => {
+    const { mgr, subscriber, publish } = await startedManager(() => new Promise(() => {}));
+    const openSession = vi
+      .spyOn(mgr as unknown as { openSession: () => Promise<unknown> }, 'openSession')
+      .mockResolvedValue({
+        ok: true,
+        sessionId: 's9',
+        containerName: 'haive-shell-s9',
+        shell: 'bash',
+      });
+    const onMessage = subscriber.on.mock.calls[0]![1] as (channel: string, raw: string) => void;
+
+    void mgr.stop();
+    onMessage(
+      TERMINAL_REQUEST_CHANNEL,
+      JSON.stringify({
+        op: 'open',
+        correlationId: 'c1',
+        userId: 'u1',
+        cliProviderId: 'p1',
+        taskId: 't1',
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(openSession).not.toHaveBeenCalled();
+    expect(publish).toHaveBeenCalledTimes(1);
+    const [channel, message] = publish.mock.calls[0]!;
+    expect(channel).toBe(`${TERMINAL_REPLY_CHANNEL_PREFIX}c1`);
+    expect(JSON.parse(message)).toEqual({ ok: false, error: expect.any(String) });
   });
 });

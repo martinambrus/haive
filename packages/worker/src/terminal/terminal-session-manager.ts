@@ -168,11 +168,19 @@ export class TerminalSessionManager {
       const req = parseRequest(raw);
       if (!req) return;
       if (req.op === 'open') {
+        const replyChannel = `${TERMINAL_REPLY_CHANNEL_PREFIX}${req.correlationId}`;
+        if (!this.started) {
+          const refused: TerminalOpenResult = {
+            ok: false,
+            error: 'the worker is shutting down; open the terminal again once it is back',
+          };
+          await this.redis.publish(replyChannel, JSON.stringify(refused));
+          return;
+        }
         const reply = await this.openSession(req).catch((err): TerminalOpenResult => ({
           ok: false,
           error: err instanceof Error ? err.message : String(err),
         }));
-        const replyChannel = `${TERMINAL_REPLY_CHANNEL_PREFIX}${req.correlationId}`;
         await this.redis.publish(replyChannel, JSON.stringify(reply));
         return;
       }
