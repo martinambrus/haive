@@ -10,6 +10,7 @@ import type {
   ModuleDiff,
   ModuleIntentRow,
   PromptStepEntry,
+  PromptStepIssue,
   PublicTaskType,
   TaskTypeAvailability,
   TaskTypeUpdate,
@@ -1178,6 +1179,26 @@ export interface TaskToolUsageCounted {
   n: number;
 }
 
+/** Calls a broker served or refused, by outcome; `error` is shown as "failed". */
+export interface TaskCallOutcomeCounts {
+  ok: number;
+  refused: number;
+  error: number;
+  running: number;
+}
+
+/** An empty `tool` is a call to a name the step never declared. */
+export interface TaskCustomToolCall extends TaskCallOutcomeCounts {
+  tool: string;
+  action: string;
+}
+
+export interface TaskIntegrationCall extends TaskCallOutcomeCounts {
+  providerId: string;
+  tool: string;
+  access: 'read' | 'write';
+}
+
 /** What one step used, with the coverage counters a reader needs to judge the lists by: a step
  *  whose runs are all unobservable has empty lists that mean nothing. */
 export interface TaskToolUsageStep {
@@ -1205,6 +1226,9 @@ export interface TaskToolUsage {
     title: string;
     /** Null for a step with no attributed run — a dash, never a row of zeros. */
     usage: TaskToolUsageStep | null;
+    /** From the call log, not from `usage`: a step with calls can have `usage: null`. */
+    customTools: TaskCustomToolCall[];
+    integrations: TaskIntegrationCall[];
   }>;
   totals: TaskToolUsageStep;
   coverage: {
@@ -1214,6 +1238,8 @@ export interface TaskToolUsage {
     unobservable: number;
     unrecorded: number;
   };
+  /** Every call logged for the task, those no step owns included. */
+  callTotals: { customTools: TaskCustomToolCall[]; integrations: TaskIntegrationCall[] };
 }
 
 export async function getTaskToolUsage(taskId: string): Promise<TaskToolUsage> {
@@ -2442,6 +2468,11 @@ export const maintenanceApi = {
     ),
 };
 
+/** A prompt step as the api returns it: a row stored before tools existed has none. */
+export type StoredPromptStep = Omit<PromptStepEntry, 'tools'> & {
+  tools?: PromptStepEntry['tools'];
+};
+
 export interface AdminTaskType {
   slug: string;
   displayName: string;
@@ -2450,7 +2481,7 @@ export interface AdminTaskType {
   stepIds: string[] | null;
   preAnswerDefaults: Record<string, Record<string, unknown>>;
   stepLoopLimitDefaults: Record<string, number>;
-  promptSteps: Record<string, PromptStepEntry>;
+  promptSteps: Record<string, StoredPromptStep>;
   fixLoop: unknown;
   enabled: boolean;
   selectable: boolean;
@@ -2485,6 +2516,7 @@ export const getAdminTaskType = (slug: string) =>
     taskType: AdminTaskType;
     availability: TaskTypeAvailability;
     compositionIssues: CompositionIssue[];
+    promptStepIssues?: PromptStepIssue[];
   }>(`/admin/task-types/${encodeURIComponent(slug)}`);
 
 export const getTaskTypeCatalog = () => api.get<TaskTypeCatalog>('/admin/task-types/catalog');
@@ -2506,6 +2538,12 @@ export function changedTaskType(err: ApiError): AdminTaskType | null {
 
 export const deleteTaskType = (slug: string) =>
   api.delete<void>(`/admin/task-types/${encodeURIComponent(slug)}`);
+
+export const getCustomToolsSwitch = () =>
+  api.get<{ enabled: boolean }>('/admin/config/custom-tools');
+
+export const setCustomToolsSwitch = (enabled: boolean) =>
+  api.put<{ enabled: boolean }>('/admin/config/custom-tools', { enabled });
 
 /** The step every type_draft task cycles on; its revise loop re-targets itself, so submitting by step id is unambiguous. */
 export const TYPE_DRAFT_STEP_ID = '01-type-draft';

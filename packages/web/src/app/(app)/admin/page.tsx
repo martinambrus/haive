@@ -5,7 +5,12 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useState } from 'react';
 import { usePageTitle } from '@/lib/use-page-title';
 import { formatBytes } from '@/lib/format-bytes';
-import { api, type AdminHealthResponse } from '@/lib/api-client';
+import {
+  api,
+  getCustomToolsSwitch,
+  setCustomToolsSwitch,
+  type AdminHealthResponse,
+} from '@/lib/api-client';
 import { TabNav } from '@/components/tabs';
 import {
   Badge,
@@ -192,6 +197,8 @@ function AdminPageInner() {
   const [savingAgentRulesInjection, setSavingAgentRulesInjection] = useState(false);
   const [houseRulesEnabled, setHouseRulesEnabled] = useState<boolean | null>(null);
   const [savingHouseRules, setSavingHouseRules] = useState(false);
+  const [customToolsEnabled, setCustomToolsEnabled] = useState<boolean | null>(null);
+  const [savingCustomTools, setSavingCustomTools] = useState(false);
   const [prWorkflowEnabled, setPrWorkflowEnabled] = useState<boolean | null>(null);
   const [savingPrWorkflow, setSavingPrWorkflow] = useState(false);
   const [ragEmbedding, setRagEmbedding] = useState<RagEmbeddingSettings | null>(null);
@@ -337,6 +344,7 @@ function AdminPageInner() {
         ragEmbeddingData,
         agentRulesInjectionData,
         houseRulesData,
+        customToolsData,
       ] = await Promise.all([
         api.get<AdminHealthResponse>('/admin/health'),
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
@@ -382,6 +390,7 @@ function AdminPageInner() {
         api.get<RagEmbeddingSettings>('/admin/config/rag-embedding'),
         api.get<{ enabled: boolean }>('/admin/config/agent-rules-injection'),
         api.get<{ enabled: boolean }>('/admin/config/house-rules'),
+        getCustomToolsSwitch(),
       ]);
       setHealth(healthData);
       setMaxParallel(concurrencyData.maxParallelAgents);
@@ -392,6 +401,7 @@ function AdminPageInner() {
       setAgentIsolationEnabled(agentIsolationData.enabled);
       setAgentRulesInjectionEnabled(agentRulesInjectionData.enabled);
       setHouseRulesEnabled(houseRulesData.enabled);
+      setCustomToolsEnabled(customToolsData.enabled);
       setPrWorkflowEnabled(prWorkflowData.enabled);
       setSoftTimeoutEnabled(softTimeoutData.enabled);
       setSoftTimeoutPercentInput(String(softTimeoutData.percent));
@@ -729,6 +739,19 @@ function AdminPageInner() {
       setError((err as Error).message ?? 'Failed to update house rules');
     } finally {
       setSavingHouseRules(false);
+    }
+  }
+
+  async function setCustomTools(next: boolean) {
+    setSavingCustomTools(true);
+    try {
+      const result = await setCustomToolsSwitch(next);
+      setCustomToolsEnabled(result.enabled);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message ?? 'Failed to update custom tools');
+    } finally {
+      setSavingCustomTools(false);
     }
   }
 
@@ -2555,6 +2578,30 @@ function AdminPageInner() {
               {savingTaskTypes && <span className="text-xs text-neutral-500">saving…</span>}
             </label>
           </div>
+        </Card>
+      )}
+
+      {tab === 'workflow' && customToolsEnabled !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Custom tools</CardTitle>
+            <CardDescription>
+              Lets a prompt step call the tools written for it in the task type editor. Off: a step
+              that declares tools fails with a clear reason, and no tool call is answered. Takes
+              effect within ~30s; persists across restarts.
+            </CardDescription>
+          </CardHeader>
+          <label className="flex items-center gap-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={customToolsEnabled}
+              disabled={savingCustomTools}
+              onChange={(e) => void setCustomTools(e.target.checked)}
+              className="h-4 w-4"
+            />
+            {customToolsEnabled ? 'Enabled' : 'Disabled'}
+            {savingCustomTools && <span className="text-xs text-neutral-500">saving…</span>}
+          </label>
         </Card>
       )}
 

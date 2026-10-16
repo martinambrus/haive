@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { makeTree, names, registry } from './tree.mjs';
@@ -10,6 +10,7 @@ const REGISTRIES = [
   'packages/web/src/generated/module-pages.ts',
   'packages/web/src/generated/module-dashboard.ts',
 ];
+const LIST = 'packages/web/src/generated/modules.json';
 const WEB = ['./manifest', './routes', './web', './dashboard'];
 
 const generated = (tree) => REGISTRIES.map((rel) => tree.read(rel)).join('\n');
@@ -23,16 +24,21 @@ const setSpecs = (tree, specs) => {
   }
   return tree;
 };
-const specTree = (t, specs) =>
+const specTree = (t, specs, installedVersion = '1.0.0') =>
   setSpecs(
     makeTree(t, {
-      installed: { foo: { exports: WEB } },
+      installed: { foo: { exports: WEB, version: installedVersion } },
       api: registry('foo'),
       worker: registry('foo'),
       web: registry('foo'),
     }),
     specs,
   );
+const INSTALL_MAY_LAG = 'HAIVE_INSTALL_MAY_LAG';
+const lagging = (tree) => ({
+  ...tree,
+  run: (script, args = []) => tree.run(script, args, { [INSTALL_MAY_LAG]: '1' }),
+});
 
 describe('gen-modules: installed = depended on by api', () => {
   it('includes a module that api and worker both depend on', (t) => {
@@ -328,9 +334,33 @@ describe('gen-modules: a half-installed state fails loudly', () => {
     fails(tree, '@haive-module/foo', 'packages/worker/package.json');
   });
 
-  it('registry module declared as a range: names the package, the spec and the api', (t) => {
-    const tree = specTree(t, { api: '^1.0.0', worker: '^1.0.0', web: '^1.0.0' });
-    fails(tree, '@haive-module/foo', '"^1.0.0"', 'packages/api/package.json');
+  it('registry module declared as a range: names the package, the spec, the installed version and the api', (t) => {
+    const tree = specTree(t, { api: '^1.0.0', worker: '^1.0.0', web: '^1.0.0' }, '1.2.3');
+    fails(tree, '@haive-module/foo', '"^1.0.0"', '"1.2.3"', 'packages/api/package.json');
+  });
+
+  it('registry module declared as a range and not on disk yet: says it is not installed', (t) => {
+    const tree = setSpecs(makeTree(t, { api: registry('foo'), worker: registry('foo') }), {
+      api: '^1.0.0',
+      worker: '^1.0.0',
+    });
+    fails(tree, '@haive-module/foo', '"^1.0.0"', 'not installed');
+  });
+
+  it('registry module installed at another version than declared: names the package, both versions and the fix, and generates nothing', (t) => {
+    const tree = specTree(t, { api: '1.0.1', worker: '1.0.1', web: '1.0.1' });
+    fails(tree, '@haive-module/foo', '"1.0.1"', '"1.0.0"', 'pnpm install');
+    for (const rel of [...REGISTRIES, LIST]) assert.equal(tree.has(rel), false, rel);
+  });
+
+  it('registry module declared as a range: still refused when the install may lag', (t) => {
+    const tree = specTree(t, { api: '^1.0.0', worker: '^1.0.0', web: '^1.0.0' }, '1.2.3');
+    fails(lagging(tree), '@haive-module/foo', '"^1.0.0"', '"1.2.3"', 'packages/api/package.json');
+  });
+
+  it('registry module at another version in the worker: still refused when the install may lag', (t) => {
+    const tree = specTree(t, { worker: '1.0.1' });
+    fails(lagging(tree), '@haive-module/foo', '"1.0.0"', '"1.0.1"', 'packages/worker/package.json');
   });
 
   it('registry module at another version in the worker: names both specs and the worker', (t) => {
@@ -458,7 +488,7 @@ describe('gen-modules: registry modules (@haive-module/<id>)', () => {
 
   for (const version of ['1.0.0', '1.0.0-rc.1']) {
     it(`generates the registries from the exact version ${version} in api, worker and web`, (t) => {
-      const tree = specTree(t, { api: version, worker: version, web: version });
+      const tree = specTree(t, { api: version, worker: version, web: version }, version);
       const out = tree.run('gen-modules.mjs');
       assert.equal(out.status, 0, out.stderr);
       for (const rel of REGISTRIES.slice(0, 2)) {
@@ -468,6 +498,33 @@ describe('gen-modules: registry modules (@haive-module/<id>)', () => {
     });
   }
 
+  it('takes a declared version with build metadata as the installed one without it', (t) => {
+    const declared = '1.0.0+build.5';
+    const tree = specTree(t, { api: declared, worker: declared, web: declared }, '1.0.0');
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+  });
+
+  it('still refuses an installed prerelease that differs from the declared one', (t) => {
+    const tree = specTree(
+      t,
+      { api: '1.0.0-rc.2', worker: '1.0.0-rc.2', web: '1.0.0-rc.2' },
+      '1.0.0-rc.1',
+    );
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 1);
+    assert.ok(out.stderr.includes('"1.0.0-rc.1"'), out.stderr);
+  });
+
+  it('generates from the installed copy when the install may lag behind the declared version', (t) => {
+    const tree = lagging(specTree(t, { api: '1.1.0', worker: '1.1.0', web: '1.1.0' }));
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    for (const rel of REGISTRIES.slice(0, 2)) {
+      assert.match(tree.read(rel), /packageName: '@haive-module\/foo', source: 'registry'/);
+    }
+  });
+
   it('uses the exact-version pattern of scripts/module.mjs, character for character', () => {
     const literal = (file, pattern) =>
       pattern.exec(readFileSync(new URL(`../${file}`, import.meta.url), 'utf8'))?.[1];
@@ -476,6 +533,95 @@ describe('gen-modules: registry modules (@haive-module/<id>)', () => {
     assert.ok(copy, 'gen-modules.mjs has no EXACT_VERSION literal');
     assert.ok(original, 'module.mjs has no exact-version literal');
     assert.equal(copy, original);
+  });
+});
+
+describe('gen-modules: the list of web modules compiled in', () => {
+  const ALL = {
+    modules: {
+      abc: { exports: WEB },
+      bar: { exports: ['./manifest', './routes'] },
+      baz: { exports: WEB },
+      mid: { exports: ['./manifest', './dashboard'] },
+    },
+    installed: { foo: { exports: ['./manifest', './web'] } },
+    api: [...names('abc', 'bar', 'mid'), ...registry('foo')],
+    worker: [...names('abc', 'bar', 'mid'), ...registry('foo')],
+    web: [...names('abc', 'mid'), ...registry('foo')],
+  };
+  const FOUR = [
+    `// Generated by scripts/gen-modules.mjs. Do not edit.
+import type { ApiModuleEntry } from './modules/loader.js';
+import m0 from '@haive-module/foo/manifest';
+import m1 from '@haive/module-abc/manifest';
+import r1 from '@haive/module-abc/routes';
+import m2 from '@haive/module-bar/manifest';
+import r2 from '@haive/module-bar/routes';
+import m3 from '@haive/module-mid/manifest';
+
+export const moduleRegistry: readonly ApiModuleEntry[] = [
+  { packageName: '@haive-module/foo', source: 'registry', manifest: m0 },
+  { packageName: '@haive/module-abc', source: 'local', manifest: m1, routes: r1 },
+  { packageName: '@haive/module-bar', source: 'local', manifest: m2, routes: r2 },
+  { packageName: '@haive/module-mid', source: 'local', manifest: m3 },
+];
+`,
+    `// Generated by scripts/gen-modules.mjs. Do not edit.
+import type { WorkerModuleEntry } from './modules/loader.js';
+import m0 from '@haive-module/foo/manifest';
+import m1 from '@haive/module-abc/manifest';
+import m2 from '@haive/module-bar/manifest';
+import m3 from '@haive/module-mid/manifest';
+
+export const moduleRegistry: readonly WorkerModuleEntry[] = [
+  { packageName: '@haive-module/foo', source: 'registry', manifest: m0 },
+  { packageName: '@haive/module-abc', source: 'local', manifest: m1 },
+  { packageName: '@haive/module-bar', source: 'local', manifest: m2 },
+  { packageName: '@haive/module-mid', source: 'local', manifest: m3 },
+];
+`,
+    `// Generated by scripts/gen-modules.mjs. Do not edit.
+import w0 from '@haive-module/foo/web';
+import w1 from '@haive/module-abc/web';
+
+export const moduleWebPages = {
+  'foo': w0,
+  'abc': w1,
+} as const;
+`,
+    `// Generated by scripts/gen-modules.mjs. Do not edit.
+import d0 from '@haive/module-abc/dashboard';
+import d1 from '@haive/module-mid/dashboard';
+
+export const moduleDashboardWidgets = [
+  ...d0.map((widget) => ({ moduleId: 'abc', ...widget })),
+  ...d1.map((widget) => ({ moduleId: 'mid', ...widget })),
+] as const;
+`,
+  ];
+
+  it('lists each module with a web part by id, with its source and parts, and none that is api-only or not installed', (t) => {
+    const tree = makeTree(t, ALL);
+    const out = tree.run('gen-modules.mjs');
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(out.stdout, /present, not installed: pnpm module add baz/);
+    REGISTRIES.forEach((rel, i) => assert.equal(tree.read(rel), FOUR[i], rel));
+    const list = [
+      { id: 'abc', packageName: '@haive/module-abc', source: 'local', parts: ['dashboard', 'web'] },
+      { id: 'foo', packageName: '@haive-module/foo', source: 'registry', parts: ['web'] },
+      { id: 'mid', packageName: '@haive/module-mid', source: 'local', parts: ['dashboard'] },
+    ];
+    assert.equal(tree.read(LIST), `${JSON.stringify(list, null, 2)}\n`);
+  });
+
+  it('rewrites none of the five outputs when nothing changed', (t) => {
+    const tree = makeTree(t, ALL);
+    assert.equal(tree.run('gen-modules.mjs').status, 0);
+    const files = [...REGISTRIES, LIST].map((rel) => join(tree.root, rel));
+    const past = new Date('2001-01-01T00:00:00Z');
+    for (const file of files) utimesSync(file, past, past);
+    assert.equal(tree.run('gen-modules.mjs').status, 0);
+    for (const file of files) assert.equal(statSync(file).mtimeMs, past.getTime(), file);
   });
 });
 
@@ -493,5 +639,6 @@ describe('gen-modules: a tree with no module', () => {
     assert.equal(out.status, 0, out.stderr);
     REGISTRIES.forEach((rel, i) => assert.equal(tree.read(rel), EMPTY[i], rel));
     assert.equal(out.stdout, '');
+    assert.equal(tree.read(LIST), '[]\n');
   });
 });

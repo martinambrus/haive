@@ -102,8 +102,9 @@ describe('credentialUsableForPr', () => {
     expect(fits(null, 'bitbucket.org', 'https://github.com/acme/app.git')).toBe(false);
   });
 
-  it('lets an explicit provider decide for a public host, wherever the credential lives', () => {
-    expect(fits('gitea', 'git.example.com', 'https://codeberg.org/acme/app.git')).toBe(true);
+  it('lets an explicit provider decide for a public host, but only for a credential on that host', () => {
+    expect(fits('gitea', 'codeberg.org', 'https://codeberg.org/acme/app.git')).toBe(true);
+    expect(fits('gitea', 'git.example.com', 'https://codeberg.org/acme/app.git')).toBe(false);
     expect(fits('github', 'git.example.com', 'https://codeberg.org/acme/app.git')).toBe(false);
   });
 
@@ -182,7 +183,7 @@ describe('credentialUsableForPr', () => {
     expect(fits('nonsense', 'Git.Example.com', 'git@GIT.EXAMPLE.COM:acme/app.git')).toBe(false);
   });
 
-  it('answers as the worker did for every credential and remote of the grid, but for an ssh port and a host in other letter case', () => {
+  it('answers as the worker did for every credential and remote of the grid, but for an ssh port, a host in other letter case and a public remote reached by a credential of another host', () => {
     let bits = '';
     for (const provider of PROVIDERS) {
       for (const host of HOSTS) {
@@ -190,9 +191,33 @@ describe('credentialUsableForPr', () => {
       }
     }
     expect(bits).toHaveLength(1344);
-    expect([...bits].filter((bit) => bit === '1')).toHaveLength(174);
-    expect(sha(bits)).toBe('9af5b30df78a1f6e0d556af6dc65216cd9a5e2a7c79fb45c174c544bb4807bd9');
+    expect([...bits].filter((bit) => bit === '1')).toHaveLength(116);
+    expect(sha(bits)).toBe('02a87922b39bed270163d242d25cbc219ec5ee6686af11070cb8e9c09d09c9fd');
   });
+});
+
+describe('credentialUsableForPr: a token goes only to the host it belongs to', () => {
+  it.each([['https://gitlab.com/acme/app.git'], ['git@gitlab.com:acme/app.git']])(
+    'keeps a gitlab credential on gitlab.corp.example out of the gitlab.com remote %s',
+    (remote) => {
+      expect(fits('gitlab', 'gitlab.corp.example', remote)).toBe(false);
+    },
+  );
+
+  it.each([['https://github.com/acme/app.git'], ['git@github.com:acme/app.git']])(
+    'still takes a github.com credential, explicit or auto-detect, for the github.com remote %s',
+    (remote) => {
+      expect(fits('github', 'github.com', remote)).toBe(true);
+      expect(fits(null, 'github.com', remote)).toBe(true);
+    },
+  );
+
+  it.each([['https://git.corp:3000/o/r.git'], ['git@git.corp:o/r.git']])(
+    'still takes a self-hosted gitea credential on git.corp:3000 for %s',
+    (remote) => {
+      expect(fits('gitea', 'git.corp:3000', remote)).toBe(true);
+    },
+  );
 });
 
 describe('credentialApiHost', () => {

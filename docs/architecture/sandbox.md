@@ -2,6 +2,12 @@
 
 `packages/worker/src/sandbox/clawker-client.ts` wraps the clawker binary. The worker container mounts `/var/run/docker.sock` and uses Docker-in-Docker to spawn per-task containers. Only the cloned repository is bind-mounted into the per-task container. The worker filesystem and the user home directory are never exposed. CLI authentication files are copied into a named volume per task at startup and the volume is destroyed at task end. At worker boot `reapOrphanedAuthVolumes` removes a task's copy whose task ended, and an isolated provider's or a user's auth volumes once that row is gone, so a deleted provider or user leaves no CLI credential on the host. A login session still holding such a volume is removed with it, since its row went with the owner's and nothing else would. The owner is read back from the volume's name (`cliAuthVolumeOwner`, beside the builders).
 
+**A run sees only its own files.** `runInSandbox` writes a run's wrapper script and extra files (MCP
+configs, the `haive-custom` and `haive-integrations` token files) into the shared wrappers volume under
+the run's own directory and mounts each one by subpath at its sandbox path, read-only. The volume's
+root is never mounted: a whole-volume mount let any sandbox list the volume and read the token file of
+another live run, of any task or user.
+
 **The base image builds itself, and that is why there is no manual first-boot step.**
 `haive-cli-sandbox:latest` is built from `packages/worker/sandbox-image/` and pushed to no
 registry, so `docker image prune` — and a fresh checkout — leave docker resolving a

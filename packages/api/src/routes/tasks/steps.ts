@@ -44,6 +44,7 @@ import {
 import { getDb } from '../../db.js';
 import { rollupToolUsage } from '@haive/shared/stats-server';
 import { parseInvocationHistoryQuery } from './_invocation-history.js';
+import { loadCustomToolCalls, loadIntegrationCalls } from './_call-log.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
@@ -52,7 +53,7 @@ import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../li
 import { getTaskQueue } from '../../queues.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
 import { refuseDeadTask } from '../../lib/task-dead.js';
-import { loadStepFlags, withTaskCustomSteps } from '../../lib/step-flags.js';
+import { loadStepFlags, loadTaskStepFlags } from '../../lib/step-flags.js';
 import {
   appendTaskEvent,
   enrichStepsWithActiveRole,
@@ -449,7 +450,7 @@ stepRoutes.get('/:id/steps', async (c) => {
       asc(schema.taskSteps.createdAt),
       asc(schema.taskSteps.stepIndex),
     );
-  const flags = withTaskCustomSteps(await loadStepFlags(db), task);
+  const flags = await loadTaskStepFlags(db, task);
   const enriched = await enrichStepsWithCliPreferences(
     db,
     flags,
@@ -521,6 +522,7 @@ stepRoutes.get('/:id/steps/:stepId/rag-queries', async (c) => {
 // step badges (enrichStepsWithCliStats), so the panel reconciles with them; a step with no
 // attributed invocation carries `usage: null`, which the client renders as a dash and never as
 // zeros. Totals are summed here with the shared pure merge so the browser does no arithmetic.
+// The call groups come from the brokers' own logs, not from the rollup, so replaced runs count.
 stepRoutes.get('/:id/tool-usage', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -533,7 +535,7 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
   if (!task) throw new HttpError(404, 'Task not found');
 
   const inv = schema.cliInvocations;
-  const [rollup, stepRows] = await Promise.all([
+  const [rollup, stepRows, customCalls, integrationCalls] = await Promise.all([
     rollupToolUsage(db, {
       where: and(
         eq(inv.taskId, id),
@@ -558,6 +560,8 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
         asc(schema.taskSteps.createdAt),
         asc(schema.taskSteps.stepIndex),
       ),
+    loadCustomToolCalls(db, id),
+    loadIntegrationCalls(db, id),
   ]);
 
   const byStep = new Map<string, ToolUsageStepRow>();
@@ -612,6 +616,8 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
       round: s.round,
       title: s.title,
       usage: byStep.get(s.id) ?? null,
+      customTools: customCalls.byStep.get(s.id) ?? [],
+      integrations: integrationCalls.byStep.get(s.id) ?? [],
     })),
     totals,
     coverage: {
@@ -621,6 +627,7 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
       unobservable: totals.unobservable,
       unrecorded: totals.unrecorded,
     },
+    callTotals: { customTools: customCalls.all, integrations: integrationCalls.all },
   });
 });
 
@@ -1380,7 +1387,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     // Skip is disabled across the workflow except on the steps that opt in
     // (metadata.allowSkip), plus 01-worktree-setup where the run list allows it (skip = run from
     // the project root instead of an isolated worktree/branch).
-    if (!isStepSkippable(withTaskCustomSteps(await loadStepFlags(db), task), stepId, task)) {
+    if (!isStepSkippable(await loadTaskStepFlags(db, task), stepId, task)) {
       throw new HttpError(409, 'This step cannot be skipped');
     }
     if (step.status !== 'failed' && step.status !== 'waiting_form') {
@@ -1697,9 +1704,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   // there is nothing here to reset and no job to re-drive. Gated on the dispatch catalog
   // so an unknown step id still 404s rather than accumulating choices nothing reads.
   if (!step) {
-    if (
-      withTaskCustomSteps(await loadStepFlags(db), task).get(stepId)?.dispatchesStepCli !== true
-    ) {
+    if ((await loadTaskStepFlags(db, task)).get(stepId)?.dispatchesStepCli !== true) {
       throw new HttpError(404, 'Step not found');
     }
     await writeStepCliChoice(db, choice);

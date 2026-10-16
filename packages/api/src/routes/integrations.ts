@@ -165,6 +165,7 @@ integrationsRoutes.post('/providers/:id/connect', async (c) => {
       scopes,
       state,
       challenge,
+      authorizeParams: method.authorizeParams,
     }),
   });
 });

@@ -180,13 +180,19 @@ export async function ensureModuleSchemas(
   db: Database,
   loaded: readonly LoadedWorkerModule[],
   entries: readonly WorkerModuleEntry[],
-): Promise<Record<string, 'ok' | 'none'>> {
-  const result: Record<string, 'ok' | 'none'> = {};
+  deactivated: ReadonlySet<string>,
+): Promise<Record<string, 'ok' | 'none' | 'deactivated'>> {
+  const result: Record<string, 'ok' | 'none' | 'deactivated'> = {};
   for (const [index, module] of loaded.entries()) {
     const moduleId = module.manifest.id;
     const ensureSchema = entries[index]?.ensureSchema;
     if (!ensureSchema) {
       result[moduleId] = 'none';
+      continue;
+    }
+    // A restart after Tear down must not re-create the schema the teardown dropped.
+    if (deactivated.has(moduleId)) {
+      result[moduleId] = 'deactivated';
       continue;
     }
     await bootstrapModuleSchema(db, moduleId, ensureSchema);
@@ -198,6 +204,7 @@ export async function ensureModuleSchemas(
 export const MODULE_JOBS_RECONCILE_MS = 15_000;
 export const MODULE_JOB_START_WAIT_MS = 10_000;
 export const MODULE_JOB_STOP_WAIT_MS = 10_000;
+export const MODULE_REACTIVATION_ATTEMPTS = 3;
 
 const jobsStarted = new Set<string>();
 const teardownsRunning = new Set<string>();
@@ -217,7 +224,10 @@ export function beginModuleTeardown(moduleId: string): () => void {
 }
 
 export type ModuleJobsHandle = {
-  reconcile: (deactivated: ReadonlySet<string>) => Promise<void>;
+  reconcile: (
+    deactivated: ReadonlySet<string>,
+    stamps?: ReadonlyMap<string, number>,
+  ) => Promise<void>;
   stopAll: () => Promise<void>;
 };
 
@@ -302,12 +312,26 @@ export async function startModuleJobs(
   }
 
   const held = new Set<string>();
+  // Attempts made so far by a reactivation the next pass is to try again; that try takes them.
+  const attemptsMade = new Map<string, number>();
+  // A pass saw these deactivated or activated again while their start still ran: that start's outcome is not an attempt.
+  const endedWhileStarting = new Set<string>();
+  // Every activate and deactivate moves a module's updated_at, so one that fell between two passes shows as a changed stamp.
+  const seenStamps = new Map<string, number>();
+  const stampChanged = (moduleId: string, stamp: number | undefined): boolean => {
+    if (stamp === undefined) return false;
+    const before = seenStamps.get(moduleId);
+    seenStamps.set(moduleId, stamp);
+    return before !== undefined && before !== stamp;
+  };
   const reactivate = (
     moduleId: string,
     ensureSchema: WorkerModuleEntry['ensureSchema'],
     jobs: WorkerModuleEntry['jobs'],
   ): Promise<void> =>
     new Promise<void>((resolve) => {
+      const attempt = (attemptsMade.get(moduleId) ?? 0) + 1;
+      attemptsMade.delete(moduleId);
       starting.add(moduleId);
       const timer = setTimeout(() => {
         logger.warn(
@@ -324,27 +348,59 @@ export async function startModuleJobs(
             logger.info({ module: moduleId }, 'module jobs started: the module is active again');
           }
         } catch (err) {
-          logger.error(
-            { err, module: moduleId },
-            'module schema or jobs failed to start; deactivate and reactivate the module to try again',
-          );
+          if (endedWhileStarting.has(moduleId)) {
+            logger.warn(
+              { err, module: moduleId },
+              'module schema or jobs failed to start after the module was deactivated or activated again; its attempts start afresh',
+            );
+          } else if (attempt < MODULE_REACTIVATION_ATTEMPTS) {
+            attemptsMade.set(moduleId, attempt);
+            pending.add(moduleId);
+            logger.warn(
+              { err, module: moduleId, attempt },
+              `module schema or jobs failed to start (attempt ${attempt} of ${MODULE_REACTIVATION_ATTEMPTS}); trying again on the next pass`,
+            );
+          } else {
+            logger.error(
+              { err, module: moduleId },
+              'module schema or jobs failed to start; deactivate and reactivate the module to try again',
+            );
+          }
         } finally {
           if (!stops.has(moduleId)) jobsStarted.delete(moduleId);
           starting.delete(moduleId);
+          endedWhileStarting.delete(moduleId);
           clearTimeout(timer);
           resolve();
         }
       })();
     });
-  const reconcile = async (nowDeactivated: ReadonlySet<string>): Promise<void> => {
+  const reconcile = async (
+    nowDeactivated: ReadonlySet<string>,
+    stamps?: ReadonlyMap<string, number>,
+  ): Promise<void> => {
     await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
     for (const [index, module] of loaded.entries()) {
       const jobs = entries[index]?.jobs;
       const ensureSchema = entries[index]?.ensureSchema;
       const moduleId = module.manifest.id;
-      if ((!jobs && !ensureSchema) || stops.has(moduleId) || starting.has(moduleId)) continue;
+      if (!jobs && !ensureSchema) continue;
+      if (stampChanged(moduleId, stamps?.get(moduleId)) && !nowDeactivated.has(moduleId)) {
+        attemptsMade.delete(moduleId);
+        if (starting.has(moduleId)) endedWhileStarting.add(moduleId);
+        if (!stops.has(moduleId)) pending.add(moduleId);
+      }
+      if (starting.has(moduleId) && nowDeactivated.has(moduleId)) {
+        endedWhileStarting.add(moduleId);
+        pending.add(moduleId);
+        attemptsMade.delete(moduleId);
+        held.delete(moduleId);
+        continue;
+      }
+      if (stops.has(moduleId) || starting.has(moduleId)) continue;
       if (nowDeactivated.has(moduleId)) {
         pending.add(moduleId);
+        attemptsMade.delete(moduleId);
         held.delete(moduleId);
         continue;
       }
@@ -362,7 +418,8 @@ export async function startModuleJobs(
       }
       held.delete(moduleId);
       pending.delete(moduleId);
-      tornDown.delete(moduleId);
+      // A teardown no pass saw ended the earlier activation, so this one starts its own count.
+      if (tornDown.delete(moduleId)) attemptsMade.delete(moduleId);
       // Claimed before the first await, so a teardown that checks now is refused.
       jobsStarted.add(moduleId);
       await reactivate(moduleId, ensureSchema, jobs);
@@ -375,7 +432,7 @@ export async function startModuleJobs(
 export async function publishWorkerBootReport(
   redis: Redis,
   loaded: readonly LoadedWorkerModule[],
-  schemas: Record<string, 'ok' | 'none'>,
+  schemas: Record<string, 'ok' | 'none' | 'deactivated'>,
   taskTypes: Record<string, ModuleTaskTypeOutcome>,
 ): Promise<void> {
   await redis.set(

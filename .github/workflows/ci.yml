@@ -253,6 +253,15 @@ jobs:
           api test/integration-choice-routes-db.test.ts INTEGRATION_CHOICE_ROUTES_TEST_URL integration_choice_routes_test pg
           api test/integration-mcp-db.test.ts INTEGRATION_MCP_TEST_URL integration_mcp_test pg
           api test/tooling-app-auth-atomic-db.test.ts TOOLING_APP_AUTH_TEST_URL tooling_app_auth_test pg
+          api test/task-tool-usage-calls-db.test.ts TASK_TOOL_USAGE_TEST_URL task_tool_usage_test pg
+          api test/repo-delete-lock-order-db.test.ts REPO_DELETE_LOCK_ORDER_TEST_URL repo_delete_lock_order_test pg
+          api test/admin-config-pool-db.test.ts ADMIN_CONFIG_POOL_TEST_URL admin_config_pool_test pg
+          worker test/step-integrations-stamp-db.test.ts STEP_INTEGRATIONS_STAMP_TEST_URL step_integrations_stamp_test pg
+          worker test/step-integrations-dispatch-db.test.ts STEP_INTEGRATIONS_DISPATCH_TEST_URL step_integrations_dispatch_test pg
+          worker test/step-integrations-prompt-db.test.ts STEP_INTEGRATIONS_PROMPT_TEST_URL step_integrations_prompt_test pg
+          worker test/step-integrations-decisions-db.test.ts STEP_INTEGRATIONS_DECISIONS_TEST_URL step_integrations_decisions_test pg
+          api test/task-integration-lock-routes-db.test.ts TASK_INTEGRATION_LOCK_TEST_URL task_integration_lock_test pg
+          shared test/integrations-task-lock-db.test.ts INTEGRATIONS_TASK_LOCK_TEST_URL integrations_task_lock_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
@@ -372,10 +381,23 @@ jobs:
       - name: Build the production stage
         run: scripts/ci-retry.sh docker build --target production -f packages/${{ matrix.service }}/Dockerfile -t haive-${{ matrix.service }}-prod-check .
 
+      # A channel build proves which modules an image carries from this file before it pushes anything.
+      - name: The web image names the modules compiled into it
+        if: matrix.service == 'web'
+        run: |
+          docker run --rm --network none --entrypoint cat haive-web-prod-check /app/packages/web/modules.generated.json |
+            node -e "const m=JSON.parse(require('fs').readFileSync(0,'utf8'));
+                     const s=m.find((x)=>x.id==='statistics');
+                     if(!s||s.parts.join(',')!=='dashboard,web') throw new Error('statistics with parts dashboard and web is missing from the web image: '+JSON.stringify(m));
+                     console.log('ok: '+m.map((x)=>x.id).join(','));"
+
   compose-boot:
     name: docker compose up (fresh-host boot)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Compose builds through buildx bake, which refuses the npmrc build secret outside the project.
+    env:
+      BUILDX_BAKE_ENTITLEMENTS_FS: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -510,6 +532,9 @@ jobs:
     name: End-to-end (Playwright)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Compose builds through buildx bake, which refuses the npmrc build secret outside the project.
+    env:
+      BUILDX_BAKE_ENTITLEMENTS_FS: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

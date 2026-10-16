@@ -185,6 +185,87 @@ describe('authMethodSpecSchema', () => {
   });
 });
 
+describe('oauth2 authorizeParams', () => {
+  const NUL = String.fromCharCode(0);
+  const ESC = String.fromCharCode(27);
+  const DEL = String.fromCharCode(127);
+  const LINE_SEPARATOR = String.fromCharCode(0x2028);
+  const ZERO_WIDTH_SPACE = String.fromCharCode(0x200b);
+  const RIGHT_TO_LEFT_OVERRIDE = String.fromCharCode(0x202e);
+  const E_DIAERESIS = String.fromCharCode(0xeb);
+  const RESERVED = [
+    'response_type',
+    'client_id',
+    'redirect_uri',
+    'scope',
+    'state',
+    'code_challenge',
+    'code_challenge_method',
+  ];
+  const spellings = RESERVED.flatMap((name) => [
+    name,
+    name.toUpperCase(),
+    `${name.charAt(0).toUpperCase()}${name.slice(1)}`,
+  ]);
+  const parse = (authorizeParams: unknown) =>
+    authMethodSpecSchema.safeParse({ ...oauth, authorizeParams });
+
+  it('accepts provider parameters and keeps them in the order given', () => {
+    const authorizeParams = {
+      prompt: 'consent',
+      access_type: 'offline',
+      login_hint: `zo${E_DIAERESIS}@example.com`,
+    };
+    const parsed = parse(authorizeParams);
+
+    expect(parsed.data).toEqual({ ...oauth, authorizeParams });
+    expect(Object.keys((parsed.data as { authorizeParams: object }).authorizeParams)).toEqual([
+      'prompt',
+      'access_type',
+      'login_hint',
+    ]);
+  });
+
+  it('accepts an oauth2 method with none', () => {
+    expect(authMethodSpecSchema.safeParse(oauth).success).toBe(true);
+    expect(parse({}).success).toBe(true);
+  });
+
+  it.each(spellings)('refuses %s, which the sign-in sets itself', (name) => {
+    expect(parse({ access_type: 'offline', [name]: 'x' }).success).toBe(false);
+  });
+
+  it('points at the offending key and value, and at nothing else', () => {
+    const paths = (authorizeParams: unknown) =>
+      parse(authorizeParams).error?.issues.map((issue) => issue.path);
+
+    expect(paths({ access_type: 'offline', State: 'x' })).toEqual([['authorizeParams', 'State']]);
+    expect(paths({ prompt: 'a\nb', access_type: 'offline' })).toEqual([
+      ['authorizeParams', 'prompt'],
+    ]);
+  });
+
+  it.each([
+    ['a value with a line feed', { prompt: 'a\nb' }],
+    ['a value with a carriage return', { prompt: 'a\r\nb' }],
+    ['a value with a tab', { prompt: 'a\tb' }],
+    ['a value with a NUL', { prompt: `a${NUL}b` }],
+    ['a value with an escape character', { prompt: `a${ESC}[0mb` }],
+    ['a value with DEL', { prompt: `a${DEL}b` }],
+    ['a value with a line separator', { prompt: `a${LINE_SEPARATOR}b` }],
+    ['a value with a zero-width space', { prompt: `a${ZERO_WIDTH_SPACE}b` }],
+    ['a value with a right-to-left override', { prompt: `a${RIGHT_TO_LEFT_OVERRIDE}b` }],
+    ['a value that is not a string', { prompt: 1 }],
+    ['a key with a line feed', { 'access\ntype': 'offline' }],
+    ['a key with a NUL', { [`access${NUL}type`]: 'offline' }],
+    ['a key with a right-to-left override', { [`access${RIGHT_TO_LEFT_OVERRIDE}type`]: 'offline' }],
+    ['an empty key', { '': 'offline' }],
+    ['a list in place of the record', ['offline']],
+  ])('refuses %s', (_name, authorizeParams) => {
+    expect(parse(authorizeParams).success).toBe(false);
+  });
+});
+
 describe('integrationOperationSchema', () => {
   it('accepts a well formed operation', () => {
     expect(integrationOperationSchema.safeParse(op).success).toBe(true);

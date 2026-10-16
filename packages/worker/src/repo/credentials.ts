@@ -8,6 +8,23 @@ export interface DecryptedCredentials {
   host: string;
 }
 
+type DecryptableCredentialRow = Pick<
+  typeof schema.repoCredentials.$inferSelect,
+  'host' | 'usernameEncrypted' | 'secretEncrypted' | 'encryptedDek'
+>;
+
+export async function decryptCredentialRow(
+  row: DecryptableCredentialRow,
+): Promise<DecryptedCredentials> {
+  const masterKek = await secretsService.getMasterKek();
+  const dekHex = decryptDek(row.encryptedDek, masterKek);
+  return {
+    username: decrypt(row.usernameEncrypted, dekHex),
+    secret: decrypt(row.secretEncrypted, dekHex),
+    host: row.host,
+  };
+}
+
 export async function getDecryptedCredentials(
   db: Database,
   credentialsId: string,
@@ -20,11 +37,5 @@ export async function getDecryptedCredentials(
     ),
   });
   if (!row) throw new Error('Credentials not found');
-  const masterKek = await secretsService.getMasterKek();
-  const dekHex = decryptDek(row.encryptedDek, masterKek);
-  return {
-    username: decrypt(row.usernameEncrypted, dekHex),
-    secret: decrypt(row.secretEncrypted, dekHex),
-    host: row.host,
-  };
+  return decryptCredentialRow(row);
 }

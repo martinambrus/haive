@@ -95,6 +95,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
           : Reflect.get(target, prop, receiver),
     }),
     configService: {
+      getFresh: async (key: string) => (h.flags.has(key) ? String(h.flags.get(key)) : null),
       getBoolean: async (key: string, fallback: boolean) => h.flags.get(key) ?? fallback,
       set: h.set,
     },
@@ -416,6 +417,7 @@ describe('PUT /global-kb/config audit trail', () => {
       targetType: 'global_kb',
       targetId: null,
       metadata: { connectionStringSet: true },
+      createdAt: expect.anything(),
     });
     expect(h.auditLog.info).toHaveBeenCalledTimes(1);
     expect(h.auditLog.info.mock.calls[0]?.[0]).toMatchObject({
@@ -603,6 +605,7 @@ describe('PUT /global-kb/config removing the stored connection string', () => {
       targetType: 'global_kb',
       targetId: null,
       metadata: { connectionStringSet: false },
+      createdAt: expect.anything(),
     });
     expect(h.auditLog.info).toHaveBeenCalledTimes(1);
     expect(h.auditLog.info.mock.calls[0]?.[0]).toMatchObject({
@@ -898,6 +901,13 @@ describe('POST /global-kb/test-db', () => {
 });
 
 describe('/admin/config/house-rules', () => {
+  beforeEach(() => {
+    h.db = {
+      transaction: async (run: (tx: unknown) => unknown) =>
+        run({ execute: async () => [], insert: () => ({ values: async () => undefined }) }),
+    };
+  });
+
   it('reads on when nothing is stored, and off when it is switched off', async () => {
     const read = async () =>
       ((await (await send('GET', '/admin/config/house-rules')).json()) as { enabled: boolean })
