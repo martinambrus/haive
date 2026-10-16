@@ -67,6 +67,7 @@ import {
   taskBadgeKind,
   taskClockEndMs,
   taskMenuKeys,
+  taskNotStarted,
   taskStoppedAt,
 } from '@/lib/task-state';
 import { useGlobalPause } from '@/lib/use-global-pause';
@@ -2029,6 +2030,23 @@ export default function TaskDetailPage() {
       )}
 
       {deadNote && <DeadTaskBanner text={deadNote.text} />}
+
+      {taskNotStarted(task) && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-3 rounded-md border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+        >
+          <p className="min-w-0 flex-1">
+            <span className="font-semibold">This task has not started.</span> It was created without
+            being started so its attachments could be uploaded first; nothing runs on it until you
+            press Start.
+          </p>
+          <Button size="sm" onClick={() => void runAction('start')}>
+            <Play className="h-4 w-4" aria-hidden="true" />
+            Start
+          </Button>
+        </div>
+      )}
 
       {/* Task-scoped hold. The GLOBAL pause has its own app-wide banner, so it is not
           repeated here — this one means this task was paused, by you or by an administrator. */}
