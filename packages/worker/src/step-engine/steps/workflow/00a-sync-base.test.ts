@@ -18,9 +18,13 @@ const projections = vi.hoisted(() => ({
   restore: vi.fn(),
   seed: vi.fn(),
 }));
+// What a merge section asked of the database, in order.
+const trace = vi.hoisted(() => ({ order: [] as string[] }));
 vi.mock('@haive/database', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/database')>()),
-  lockRepositoryTasksKey: async () => undefined,
+  lockRepositoryTasksKey: async () => {
+    trace.order.push('lock');
+  },
 }));
 vi.mock('../../../plan/mirror.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../plan/mirror.js')>()),
@@ -70,7 +74,22 @@ vi.mock('../../left-open-merge.js', async (importOriginal) => ({
   noteAbortedByNext: async (_db: unknown, row: unknown) => row,
   takeLeftOpenKept: leftOpen.takeKept,
 }));
+// The real count, with the arguments it was asked with.
+const holdingCalls = vi.hoisted(() => [] as unknown[][]);
+vi.mock('../../../repo/refresh.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../repo/refresh.js')>();
+  return {
+    ...real,
+    checkoutHoldingTasks: (...args: Parameters<typeof real.checkoutHoldingTasks>) => {
+      holdingCalls.push(args);
+      trace.order.push('fence');
+      return real.checkoutHoldingTasks(...args);
+    },
+  };
+});
 beforeEach(() => {
+  holdingCalls.length = 0;
+  trace.order.length = 0;
   handBack.asRoot = false;
   handBack.chowned = [];
   claimFake.reset();
@@ -81,7 +100,10 @@ beforeEach(() => {
   projections.restore.mockReset();
   projections.seed.mockReset();
   projections.seed.mockResolvedValue(undefined);
-  projections.restore.mockResolvedValue({ outcome: 'clean' });
+  projections.restore.mockImplementation(async () => {
+    trace.order.push('restore');
+    return { outcome: 'clean' };
+  });
   leftOpen.takeKept.mockReset();
   leftOpen.takeKept.mockResolvedValue({});
 });
@@ -602,17 +624,30 @@ describe('00a-sync-base detect + apply (real git)', () => {
 
 // In-memory db backing merge_resolve_state for the divergence merge (mirrors the
 // 12-worktree-cleanup test's stub, trimmed to the clean-merge path).
-function makeMergeDb(repositoryId: string | null = null, initial: unknown = null) {
+function makeMergeDb(
+  repositoryId: string | null = null,
+  initial: unknown = null,
+  otherCheckoutTasks: { id: string }[] = [],
+) {
   let mergeState: unknown = initial;
+  let errorMessage: string | null = null;
+  const taskQueries: unknown[] = [];
   const setPatch = (patch: Record<string, unknown>) => {
     if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState;
+    if ('errorMessage' in patch) errorMessage = (patch.errorMessage as string | null) ?? null;
   };
   const db = {
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     // resolveGitEnv walks tasks -> repositories before users; an unlinked task means
     // the merge commit uses merge-resolver's FALLBACK_GIT_IDENTITY, as before.
     query: {
-      tasks: { findFirst: async () => ({ repositoryId }) },
+      tasks: {
+        findFirst: async () => ({ repositoryId }),
+        findMany: async (query: unknown) => {
+          taskQueries.push(query);
+          return otherCheckoutTasks;
+        },
+      },
       repositories: { findFirst: async () => undefined },
       users: { findFirst: async () => undefined },
       taskSteps: { findFirst: async () => ({ mergeResolveState: mergeState }) },
@@ -622,7 +657,7 @@ function makeMergeDb(repositoryId: string | null = null, initial: unknown = null
         where: () => ({
           returning: async () => {
             setPatch(patch);
-            return [{ id: 'step1', status: 'running', errorMessage: null }];
+            return [{ id: 'step1', status: 'running', errorMessage }];
           },
           then: (resolve: (v: unknown) => void) => {
             setPatch(patch);
@@ -634,6 +669,7 @@ function makeMergeDb(repositoryId: string | null = null, initial: unknown = null
   };
   return {
     db,
+    taskQueries,
     getState: () =>
       mergeState as { merged?: boolean; phase?: string; keptMetadata?: unknown } | null,
   };
@@ -902,6 +938,309 @@ describe('a merge a cancelled task left open in the checkout', () => {
       expect(out.state?.keptMetadata).toEqual(STALE_KEPT);
     },
   );
+});
+
+const HELD_ONE =
+  '1 other task is working in this checkout; nothing was merged. Retry this step once it finishes.';
+const HELD_TWO =
+  '2 other tasks are working in this checkout; nothing was merged. Retry this step once they finish.';
+
+/** A checkout whose main has diverged from origin's: a commit here, another there. */
+async function divergedCheckout() {
+  const { bare, seed } = await seedOrigin();
+  const local = await cloneLocal(bare);
+  await writeFile(path.join(local, 'local.txt'), 'L\n', 'utf8');
+  await git(local, ['add', '-A']);
+  await git(local, ['commit', '-m', 'local work']);
+  await advanceOrigin(seed, 'origin.txt');
+  return {
+    local,
+    cleanup: async () => {
+      for (const dir of [bare, seed, local]) await rm(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+const resolvingIn = (dir: string) => ({
+  mode: 'same-branch',
+  phase: 'resolving',
+  baseBranch: 'main',
+  featureBranch: 'origin/main',
+  mergeDir: dir,
+  sandboxMergeDir: dir,
+  fixInvocationId: null,
+  conflictRetries: 0,
+  pendingQuestion: null,
+  pushAfterMerge: false,
+  squashAfterMerge: false,
+  merged: false,
+  skipReason: null,
+  pushed: false,
+  mergeStage: 'feature',
+  baseSyncRounds: 0,
+});
+
+/** The merge phase of 00a over `local`, for a task whose repository has `others` working in the checkout itself. */
+async function mergePhaseBeside(
+  local: string,
+  others: { id: string }[],
+  phase: 'pending' | 'resolving' = 'pending',
+) {
+  const d = await syncBaseStep.detect!(mkCtx(local));
+  const state = phase === 'resolving' ? resolvingIn(local) : null;
+  if (state) claimFake.claims.set(local, { taskId: 't1', stepId: 'step1', title: '' });
+  const h = makeMergeDb('repo-1', state, others);
+  const step = syncBaseStep as unknown as StepDefinition;
+  const current = {
+    id: 'step1',
+    detectOutput: d,
+    formValues: { base: 'main', syncAction: 'merge' },
+    mergeResolveState: state,
+    status: 'running',
+  } as never;
+  const params = {
+    db: h.db,
+    taskId: 't1',
+    userId: 'u1',
+    repoPath: '',
+    workspacePath: '',
+    cliProviderId: null,
+    ignoreSavedStepClis: false,
+    stepDef: step,
+    providers: [{}],
+    deps: {},
+  } as never;
+  const out = await resolveMergePhase(h.db as never, step, current, mkCtx(local), params);
+  const why = out.resolved
+    ? ''
+    : out.result.status === 'failed'
+      ? out.result.error
+      : out.result.status;
+  return { out, why, h };
+}
+
+/** `setAsideHaiveProjections` as the real one treats its fence: held while it counts anyone, else the file set aside. */
+function asideReadingFence(afterRead?: (call: number) => void) {
+  let calls = 0;
+  projections.setAside.mockImplementation(
+    async (db: unknown, _id: string, _dir: string, fence?: (conn: unknown) => Promise<number>) => {
+      const holding = fence ? await fence(db) : 0;
+      afterRead?.((calls += 1));
+      return holding > 0
+        ? { outcome: 'held', holding }
+        : {
+            outcome: 'set-aside',
+            paths: [KEPT_FILE],
+            kept: new Map([[KEPT_FILE, { index: null }]]),
+          };
+    },
+  );
+}
+
+/** Nothing in the checkout moved: HEAD, the merge state and the working tree are as they were. */
+async function expectUntouched(local: string, head: string) {
+  expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+  expect(await gitCode(local, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+  expect(await git(local, ['status', '--porcelain'])).toBe('');
+}
+
+const keptPaths = (call: unknown[] | undefined) => [...(call?.[3] as Map<string, unknown>).keys()];
+
+describe('a same-branch merge while other tasks work in the checkout itself', () => {
+  it.each([
+    [1, HELD_ONE],
+    [2, HELD_TWO],
+  ])(
+    'a set-aside that counts %i other task(s) in the checkout halts the merge, and nothing moves',
+    async (count, wording) => {
+      const { local, cleanup } = await divergedCheckout();
+      try {
+        const head = (await git(local, ['rev-parse', 'HEAD'])).trim();
+        const others = Array.from({ length: count }, (_, i) => ({ id: `other-${i}` }));
+        // They are over by the time the section runs: the set-aside's count alone stops the merge.
+        asideReadingFence(() => (others.length = 0));
+        const { out, why, h } = await mergePhaseBeside(local, others);
+        expect(out.resolved).toBe(false);
+        expect(why).toBe(wording);
+        expect(h.getState()).toMatchObject({ phase: 'pending', merged: false });
+        expect(projections.setAside).toHaveBeenCalledTimes(1);
+        await expectUntouched(local, head);
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it("counts this repository's tasks that work in the checkout itself, leaving this task out", async () => {
+    const { local, cleanup } = await divergedCheckout();
+    try {
+      asideReadingFence();
+      await mergePhaseBeside(local, [{ id: 'other' }]);
+      expect(holdingCalls.length).toBeGreaterThan(0);
+      for (const [, repositoryId, opts] of holdingCalls) {
+        expect(repositoryId).toBe('repo-1');
+        expect(opts).toEqual({ excludeTaskId: 't1', rootOnly: true });
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it.each(['pending', 'resolving'] as const)(
+    'a section takes the repository task lock first, then checks the files, then the fence, before it opens (%s)',
+    async (phase) => {
+      const { local, cleanup } = await divergedCheckout();
+      try {
+        projections.setAside.mockResolvedValue({ outcome: 'clean' });
+        const { out } = await mergePhaseBeside(local, [], phase);
+        expect(out.resolved).toBe(true);
+        expect(trace.order).toEqual(['lock', 'restore', 'fence']);
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it('a task that starts working there after the set-aside holds the merge in its section, and the files go back', async () => {
+    const { local, cleanup } = await divergedCheckout();
+    try {
+      const head = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      const others: { id: string }[] = [];
+      asideReadingFence(() => others.push({ id: 'late' }));
+      const { out, why } = await mergePhaseBeside(local, others);
+      expect(out.resolved).toBe(false);
+      expect(why).toBe(HELD_ONE);
+      expect(projections.restore).toHaveBeenCalledTimes(1);
+      expect(projections.putBack).toHaveBeenCalledTimes(1);
+      expect(keptPaths(projections.putBack.mock.calls[0])).toEqual([KEPT_FILE]);
+      await expectUntouched(local, head);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it.each([
+    ['at the set-aside', true],
+    ['after the set-aside', false],
+  ])('the reopen of a resolving merge halts the same way %s', async (_when, atAside) => {
+    const { local, cleanup } = await divergedCheckout();
+    try {
+      const head = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      const others: { id: string }[] = atAside ? [{ id: 'other' }] : [];
+      asideReadingFence(() => {
+        others.length = 0;
+        if (!atAside) others.push({ id: 'late' });
+      });
+      const { out, why, h } = await mergePhaseBeside(local, others, 'resolving');
+      expect(out.resolved).toBe(false);
+      expect(why).toBe(HELD_ONE);
+      expect(h.getState()).toMatchObject({ phase: 'resolving', conflictRetries: 0 });
+      if (!atAside) {
+        expect(projections.putBack).toHaveBeenCalledTimes(1);
+        expect(keptPaths(projections.putBack.mock.calls[0])).toEqual([KEPT_FILE]);
+      }
+      await expectUntouched(local, head);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it.each(['pending', 'resolving'] as const)(
+    'a task found working there on the round after a rewritten file halts it and puts the first round back (%s)',
+    async (phase) => {
+      const { local, cleanup } = await divergedCheckout();
+      try {
+        const head = (await git(local, ['rev-parse', 'HEAD'])).trim();
+        const others: { id: string }[] = [];
+        projections.restore.mockResolvedValueOnce({ outcome: 'retry' });
+        asideReadingFence((call) => {
+          others.length = 0;
+          if (call === 1) others.push({ id: 'late' });
+        });
+        const { out, why } = await mergePhaseBeside(local, others, phase);
+        expect(out.resolved).toBe(false);
+        expect(why).toBe(HELD_ONE);
+        expect(projections.setAside).toHaveBeenCalledTimes(2);
+        expect(projections.putBack).toHaveBeenCalledTimes(1);
+        expect(keptPaths(projections.putBack.mock.calls[0])).toEqual([KEPT_FILE]);
+        await expectUntouched(local, head);
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it.each(['pending', 'resolving'] as const)(
+    "leaves an earlier attempt's open merge where it is, since clearing it moves the tree as well (%s)",
+    async (phase) => {
+      const { local, cleanup } = await divergedCheckout();
+      try {
+        await git(local, ['checkout', '-q', '-b', 'other', 'HEAD~1']);
+        await writeFile(path.join(local, 'conflict.txt'), 'other\n', 'utf8');
+        await git(local, ['add', '-A']);
+        await git(local, ['commit', '-m', 'other side']);
+        await git(local, ['checkout', '-q', 'main']);
+        await writeFile(path.join(local, 'conflict.txt'), 'main\n', 'utf8');
+        await git(local, ['add', '-A']);
+        await git(local, ['commit', '-m', 'main side']);
+        expect(await gitCode(local, ['merge', 'other'])).not.toBe(0);
+        const stale = (await git(local, ['rev-parse', 'MERGE_HEAD'])).trim();
+        const head = (await git(local, ['rev-parse', 'HEAD'])).trim();
+        const { out, why } = await mergePhaseBeside(local, [{ id: 'other-task' }], phase);
+        expect(out.resolved).toBe(false);
+        expect(why).toBe(HELD_ONE);
+        expect((await git(local, ['rev-parse', 'MERGE_HEAD'])).trim()).toBe(stale);
+        expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+        expect(trace.order).toEqual(['lock', 'fence']);
+        expect(leftOpen.takeKept).not.toHaveBeenCalled();
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it('a cross-branch merge runs in the shared base worktree, so no task in the checkout holds it', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await writeFile(path.join(local, 'local.txt'), 'L\n', 'utf8');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'local work']);
+    await advanceOrigin(seed, 'origin.txt');
+    await git(local, ['fetch', 'origin']);
+    await git(local, ['checkout', '-q', '-b', 'dev']);
+    try {
+      const h = makeMergeDb('repo-1', null, [{ id: 'other' }]);
+      const step = syncBaseStep as unknown as StepDefinition;
+      const current = {
+        id: 'step1',
+        detectOutput: { branchName: 'origin/main', baseBranch: 'main', parentBranch: 'dev' },
+        formValues: { base: 'main', syncAction: 'merge' },
+        mergeResolveState: null,
+        status: 'running',
+      } as never;
+      const params = {
+        db: h.db,
+        taskId: 't1',
+        userId: 'u1',
+        repoPath: '',
+        workspacePath: '',
+        cliProviderId: null,
+        ignoreSavedStepClis: false,
+        stepDef: step,
+      } as never;
+      const out = await resolveMergePhase(h.db as never, step, current, mkCtx(local), params);
+      expect(out.resolved).toBe(true);
+      expect(h.getState()).toMatchObject({ mode: 'cross-branch', phase: 'done', merged: true });
+      expect(h.taskQueries).toHaveLength(0);
+      expect(projections.setAside).not.toHaveBeenCalled();
+      expect(await gitCode(local, ['show', 'main:origin.txt'])).toBe(0);
+      expect((await git(local, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe('dev');
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
 });
 
 // Pure form / predicate tests (detect stubs — no git).

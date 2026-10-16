@@ -13,7 +13,6 @@ import type { CliProviderRecord } from '../src/cli-adapters/types.js';
 import type { DispatchRequest } from '../src/orchestrator/dispatcher.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import {
-  INTEGRATION_PROVIDER_UNSUPPORTED_REASON,
   insertStampedRun,
   resolveDispatchIntegrations,
   setComposableCatalog,
@@ -33,7 +32,6 @@ import {
   seedProvider,
   seedStepRow,
   seedWorld,
-  stampIsSqlNull,
 } from './support/step-integrations-db.js';
 
 const url = process.env.STEP_INTEGRATIONS_MODULE_PROVIDER_TEST_URL;
@@ -78,7 +76,6 @@ vi.mock('../src/orchestrator/dispatcher.js', async (importOriginal) => {
 
 import { advanceStep } from '../src/step-engine/step-runner.js';
 
-const UNSUPPORTED = 'integration-provider-unsupported';
 const MODULE_PROVIDER = 'module.fx.crm';
 const MODULE_CATEGORY = 'module.fx.docs';
 const MODULE_TOOL = 'docs_list';
@@ -329,24 +326,17 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
 
   const requestsOf = () =>
     h.requests as (DispatchRequest & { integrations?: IntegrationBinding[] })[];
-  const stepRow = async (taskId: string) => {
-    const [row] = await db
-      .select()
-      .from(schema.taskSteps)
-      .where(eq(schema.taskSteps.taskId, taskId));
-    return row!;
-  };
-  const miningRows = (taskStepId: string) =>
-    db
-      .select()
-      .from(schema.taskStepAgentMinings)
-      .where(eq(schema.taskStepAgentMinings.taskStepId, taskStepId));
 
-  async function expectNothingWritten(taskId: string) {
-    expect(await runsOf(db, taskId), 'cli_invocations rows').toEqual([]);
-    expect(await grantsOf(db, taskId), 'task grants').toEqual([]);
-    expect(enqueued, 'enqueues').toEqual([]);
-  }
+  const moduleBinding = (
+    connectionId: string,
+    requirement: IntegrationRequirement,
+  ): IntegrationBinding => ({
+    requirementId: requirement.id,
+    categoryId: requirement.category ?? null,
+    providerId: MODULE_PROVIDER,
+    connectionId,
+    access: requirement.access,
+  });
 
   const forgeBinding = (connectionId: string): IntegrationBinding => ({
     requirementId: FORGE_READ.id,
@@ -357,101 +347,103 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
   });
 
   describe('[M1] resolveDispatchIntegrations', () => {
-    it('[M1] exports the reason a failure text starts with, with its documented value', () => {
-      expect(INTEGRATION_PROVIDER_UNSUPPORTED_REASON).toBe(UNSUPPORTED);
-    });
-
     it.each([
-      ['a module category', DOCS_REQUIRED, MODULE_CATEGORY],
-      ['a core category the module lists', CORE_DOCS_REQUIRED, 'rich-documents'],
+      ['a module category', DOCS_REQUIRED],
+      ['a core category the module lists', CORE_DOCS_REQUIRED],
     ] as const)(
-      '[M1] fails a required requirement of %s, naming it, its category and the provider',
-      async (_label, requirement, category) => {
+      '[M1] binds a required requirement of %s to the module account',
+      async (_label, requirement) => {
         const w = await moduleWorld();
         await resolvesToModule(w, [requirement]);
 
         const result = await resolveDispatchIntegrations(db, w.taskId, [requirement]);
 
-        expect(result.ok, 'a module provider was given to the step').toBe(false);
-        if (result.ok) return;
-        expect(result.failure.startsWith(`${UNSUPPORTED}: `)).toBe(true);
-        expect(result.failure).toContain(requirement.id);
-        expect(result.failure).toContain(category);
-        expect(result.failure).toContain(MODULE_PROVIDER);
-        expect(result.failure).toContain('cannot run calls yet');
+        expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+        if (!result.ok) return;
+        expect(result.bindings).toEqual([moduleBinding(w.moduleConnectionId, requirement)]);
+        expect(result.resolutions.map((resolution) => resolution.requirementId)).toEqual([
+          requirement.id,
+        ]);
       },
     );
 
-    it('[M1] names the requirement that resolved to the module, not one that resolved to GitHub', async () => {
+    it('[M1] binds the requirement that resolved to the module beside the one that resolved to GitHub', async () => {
       const w = await mixedWorld();
       await resolvesToModule(w, [DOCS_REQUIRED]);
 
       const result = await resolveDispatchIntegrations(db, w.taskId, [FORGE_READ, DOCS_REQUIRED]);
 
-      expect(result.ok).toBe(false);
-      if (result.ok) return;
-      expect(result.failure.startsWith(`${UNSUPPORTED}: `)).toBe(true);
-      expect(result.failure).toContain(DOCS_REQUIRED.id);
-      expect(result.failure).not.toContain(FORGE_READ.id);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      expect(result.bindings).toEqual([
+        forgeBinding(w.connectionId),
+        moduleBinding(w.moduleConnectionId, DOCS_REQUIRED),
+      ]);
     });
 
-    it('[M1] names every required requirement that resolved to a module', async () => {
+    it('[M1] binds every required requirement that resolved to a module', async () => {
       const w = await moduleWorld();
       const mail: IntegrationRequirement = { id: 'mailbox', category: 'mail', access: 'read' };
       registerModuleIntegrations([fxModule([...DOCS_CATEGORIES, 'mail'])]);
 
       const result = await resolveDispatchIntegrations(db, w.taskId, [DOCS_REQUIRED, mail]);
 
-      expect(result.ok).toBe(false);
-      if (result.ok) return;
-      expect(result.failure).toContain(DOCS_REQUIRED.id);
-      expect(result.failure).toContain(mail.id);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      expect(result.bindings).toEqual([
+        moduleBinding(w.moduleConnectionId, DOCS_REQUIRED),
+        moduleBinding(w.moduleConnectionId, mail),
+      ]);
     });
 
     it.each([
       ['a module category', DOCS_OPTIONAL],
       ['a core category the module lists', CORE_DOCS_OPTIONAL],
     ] as const)(
-      '[M1] drops an optional requirement of %s and goes on with the rest',
+      '[M1] binds an optional requirement of %s too, beside the rest',
       async (_label, optional) => {
         const w = await mixedWorld();
         await resolvesToModule(w, [optional]);
 
         const result = await resolveDispatchIntegrations(db, w.taskId, [FORGE_READ, optional]);
 
-        expect(result.ok).toBe(true);
+        expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
         if (!result.ok) return;
-        expect(result.bindings).toEqual([forgeBinding(w.connectionId)]);
-        expect(result.resolutions.map((resolution) => resolution.requirementId)).toEqual([
-          FORGE_READ.id,
+        expect(result.bindings).toEqual([
+          forgeBinding(w.connectionId),
+          moduleBinding(w.moduleConnectionId, optional),
         ]);
       },
     );
 
-    it('[M1] carries nothing, and needs no signing key, when the only requirement is an optional module one', async () => {
+    it('[M1] needs the signing key when the only requirement is an optional module one, since it binds it', async () => {
       const w = await moduleWorld();
       await resolvesToModule(w, [DOCS_OPTIONAL]);
       delete process.env.CONFIG_ENCRYPTION_KEY;
 
       const result = await resolveDispatchIntegrations(db, w.taskId, [DOCS_OPTIONAL]);
 
-      expect(result).toMatchObject({ ok: true, bindings: [] });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.failure.startsWith('integrations-no-signing-key: ')).toBe(true);
     });
 
-    it('[M1] fails the required requirement, and does not name the optional one, when both resolve to the module', async () => {
+    it('[M1] binds the required and the optional requirement when both resolve to the module', async () => {
       const w = await moduleWorld();
       const optional = { ...DOCS_OPTIONAL, id: 'nice-to-have' };
       const required = { ...DOCS_REQUIRED, id: 'must-have' };
 
       const result = await resolveDispatchIntegrations(db, w.taskId, [optional, required]);
 
-      expect(result.ok).toBe(false);
-      if (result.ok) return;
-      expect(result.failure).toContain(required.id);
-      expect(result.failure).not.toContain(optional.id);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      expect(result.bindings).toEqual([
+        moduleBinding(w.moduleConnectionId, optional),
+        moduleBinding(w.moduleConnectionId, required),
+      ]);
     });
 
-    it('[M1] still refuses a requirement that pins the module provider as pinned, not as unsupported', async () => {
+    it('[M1] still refuses a requirement that pins the module provider as pinned (passes before and after)', async () => {
       const w = await moduleWorld();
       const pinned: IntegrationRequirement = {
         id: 'docs',
@@ -490,7 +482,7 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
       ['a module category', DOCS_REQUIRED],
       ['a core category the module lists', CORE_DOCS_REQUIRED],
     ] as const)(
-      '[M2] writes no grant and no row for a required requirement of %s',
+      '[M2] stamps the run with the module binding and records its grant for a required requirement of %s',
       async (_label, requirement) => {
         const w = await moduleWorld();
         const step = await seedStepRow(db, w.taskId);
@@ -500,17 +492,17 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
           requirement,
         ]);
 
-        expect(result, 'the run was stamped with a module provider').toHaveProperty('failure');
-        const failure = (result as { failure: string }).failure;
-        expect(failure.startsWith(`${UNSUPPORTED}: `)).toBe(true);
-        expect(failure).toContain(requirement.id);
-        expect(failure).toContain(MODULE_PROVIDER);
-        expect(await runsOf(db, w.taskId)).toEqual([]);
-        expect(await grantsOf(db, w.taskId)).toEqual([]);
+        expect(result, JSON.stringify(result)).not.toHaveProperty('failure');
+        const runs = await runsOf(db, w.taskId);
+        expect(runs).toHaveLength(1);
+        expect(runs[0]!.integrations).toEqual([moduleBinding(w.moduleConnectionId, requirement)]);
+        expect(await grantsOf(db, w.taskId)).toEqual([
+          { categoryId: requirement.category, connectionId: w.moduleConnectionId },
+        ]);
       },
     );
 
-    it('[M2] stamps the rest, and records no grant for the module, when an optional module requirement is dropped', async () => {
+    it('[M2] stamps the rest and the module binding, and records a grant for each, when an optional module requirement resolves', async () => {
       const w = await mixedWorld();
       const step = await seedStepRow(db, w.taskId);
       await resolvesToModule(w, [DOCS_OPTIONAL]);
@@ -522,13 +514,17 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
 
       const runs = await runsOf(db, w.taskId);
       expect(runs).toHaveLength(1);
-      expect(runs[0]!.integrations).toEqual([forgeBinding(w.connectionId)]);
+      expect(runs[0]!.integrations).toEqual([
+        forgeBinding(w.connectionId),
+        moduleBinding(w.moduleConnectionId, DOCS_OPTIONAL),
+      ]);
       expect(await grantsOf(db, w.taskId)).toEqual([
         { categoryId: 'forge', connectionId: w.connectionId },
+        { categoryId: MODULE_CATEGORY, connectionId: w.moduleConnectionId },
       ]);
     });
 
-    it('[M2] stamps SQL NULL, and records no grant, when the only requirement is an optional module one', async () => {
+    it('[M2] stamps the module binding, and records its grant, when the only requirement is an optional module one', async () => {
       const w = await moduleWorld();
       const step = await seedStepRow(db, w.taskId);
       await resolvesToModule(w, [DOCS_OPTIONAL]);
@@ -537,11 +533,13 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
 
       const runs = await runsOf(db, w.taskId);
       expect(runs).toHaveLength(1);
-      expect(await stampIsSqlNull(db, runs[0]!.id)).toBe(true);
-      expect(await grantsOf(db, w.taskId)).toEqual([]);
+      expect(runs[0]!.integrations).toEqual([moduleBinding(w.moduleConnectionId, DOCS_OPTIONAL)]);
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: MODULE_CATEGORY, connectionId: w.moduleConnectionId },
+      ]);
     });
 
-    it('[M2] writes no grant and no row when the task choice moves to the module account after the dispatch resolved GitHub', async () => {
+    it('[M2] stamps the module account, and records its grant, when the task choice moves to it after the dispatch resolved GitHub', async () => {
       const w = await forgeChoiceWorld();
       const step = await seedStepRow(db, w.taskId);
       const early = await resolveDispatchIntegrations(db, w.taskId, [FORGE_READ]);
@@ -558,17 +556,18 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
         FORGE_READ,
       ]);
 
-      expect(result, 'the run was stamped with the module account').toHaveProperty('failure');
-      const failure = (result as { failure: string }).failure;
-      expect(failure.startsWith(`${UNSUPPORTED}: `)).toBe(true);
-      expect(failure).toContain(FORGE_READ.id);
-      expect(failure).toContain('forge');
-      expect(failure).toContain(MODULE_PROVIDER);
-      expect(await runsOf(db, w.taskId)).toEqual([]);
-      expect(await grantsOf(db, w.taskId)).toEqual([]);
+      expect(result, JSON.stringify(result)).not.toHaveProperty('failure');
+      const runs = await runsOf(db, w.taskId);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]!.integrations).toEqual([
+        { ...moduleBinding(w.moduleConnectionId, FORGE_READ), categoryId: 'forge' },
+      ]);
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: 'forge', connectionId: w.moduleConnectionId },
+      ]);
     });
 
-    it('[M2] stamps SQL NULL, and records no grant, when an optional forge requirement moves to the module account', async () => {
+    it('[M2] stamps the module account, and records its grant, when an optional forge requirement moves to it', async () => {
       const w = await forgeChoiceWorld();
       const step = await seedStepRow(db, w.taskId);
       const early = await resolveDispatchIntegrations(db, w.taskId, [FORGE_OPTIONAL]);
@@ -579,8 +578,12 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
 
       const runs = await runsOf(db, w.taskId);
       expect(runs).toHaveLength(1);
-      expect(await stampIsSqlNull(db, runs[0]!.id)).toBe(true);
-      expect(await grantsOf(db, w.taskId)).toEqual([]);
+      expect(runs[0]!.integrations).toEqual([
+        { ...moduleBinding(w.moduleConnectionId, FORGE_OPTIONAL), categoryId: 'forge' },
+      ]);
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: 'forge', connectionId: w.moduleConnectionId },
+      ]);
     });
 
     it('[M2] still stamps a forge requirement with GitHub and records its grant while a module provider is registered (passes before and after)', async () => {
@@ -603,66 +606,79 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
   });
 
   describe('[M3] a dispatched step', () => {
-    it('[M3] an llm step with a required module requirement fails with the reason and writes nothing', async () => {
+    it('[M3] an llm step with a required module requirement waits on one run stamped with it, and its prompt names the module tool', async () => {
       const w = await moduleWorld();
       const stepId = declare([DOCS_REQUIRED]);
       await resolvesToModule(w, [DOCS_REQUIRED]);
-
-      const result = await advance(w, llmStep(stepId));
-
-      expect(result.status).toBe('failed');
-      const row = await stepRow(w.taskId);
-      expect(row.status).toBe('failed');
-      expect(row.errorMessage?.startsWith(`${UNSUPPORTED}: `)).toBe(true);
-      expect(row.errorMessage).toContain(DOCS_REQUIRED.id);
-      expect(row.errorMessage).toContain(MODULE_CATEGORY);
-      expect(row.errorMessage).toContain(MODULE_PROVIDER);
-      await expectNothingWritten(w.taskId);
-    }, 60_000);
-
-    it('[M3] a fan-out refuses every target with the reason, and fails the step with it', async () => {
-      const w = await moduleWorld();
-      const stepId = declare([DOCS_REQUIRED]);
-      await resolvesToModule(w, [DOCS_REQUIRED]);
-
-      const result = await advance(w, miningStep(stepId));
-
-      expect(result.status).toBe('failed');
-      const row = await stepRow(w.taskId);
-      expect(
-        row.errorMessage?.startsWith(`agent mining dispatched no agents: ${UNSUPPORTED}: `),
-      ).toBe(true);
-      const rows = await miningRows(row.id);
-      expect(rows).toHaveLength(AGENTS.length);
-      for (const mining of rows) {
-        expect(mining.status).toBe('failed');
-        expect(mining.errorMessage?.startsWith(`${UNSUPPORTED}: `)).toBe(true);
-      }
-      await expectNothingWritten(w.taskId);
-    }, 60_000);
-
-    it('[M3] an llm step goes on with GitHub alone when its optional module requirement is dropped', async () => {
-      const w = await mixedWorld();
-      const stepId = declare([FORGE_READ, DOCS_OPTIONAL]);
-      await resolvesToModule(w, [DOCS_OPTIONAL]);
 
       const result = await advance(w, llmStep(stepId));
 
       expect(result.status).toBe('waiting_cli');
       const runs = await runsOf(db, w.taskId);
       expect(runs).toHaveLength(1);
-      expect(runs[0]!.integrations).toEqual([forgeBinding(w.connectionId)]);
+      expect(runs[0]!.integrations).toEqual([moduleBinding(w.moduleConnectionId, DOCS_REQUIRED)]);
       expect(await grantsOf(db, w.taskId)).toEqual([
-        { categoryId: 'forge', connectionId: w.connectionId },
+        { categoryId: MODULE_CATEGORY, connectionId: w.moduleConnectionId },
       ]);
       expect(enqueued).toHaveLength(1);
       expect(requestsOf()).toHaveLength(1);
-      expect(requestsOf()[0]!.integrations).toEqual([forgeBinding(w.connectionId)]);
-      expect(runs[0]!.prompt).toContain('get_pull_request_state');
-      expect(runs[0]!.prompt).not.toContain(MODULE_TOOL);
+      expect(requestsOf()[0]!.integrations).toEqual([
+        moduleBinding(w.moduleConnectionId, DOCS_REQUIRED),
+      ]);
+      expect(runs[0]!.prompt).toContain(MODULE_TOOL);
     }, 60_000);
 
-    it('[M3] an llm step whose only requirement is an optional module one is sent unstamped', async () => {
+    it('[M3] a fan-out stamps every agent with the module binding and records one grant', async () => {
+      const w = await moduleWorld();
+      const stepId = declare([DOCS_REQUIRED]);
+      await resolvesToModule(w, [DOCS_REQUIRED]);
+
+      const result = await advance(w, miningStep(stepId));
+
+      expect(result.status).toBe('waiting_cli');
+      const runs = await runsOf(db, w.taskId);
+      expect(runs).toHaveLength(AGENTS.length);
+      for (const run of runs) {
+        expect(run.integrations).toEqual([moduleBinding(w.moduleConnectionId, DOCS_REQUIRED)]);
+      }
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: MODULE_CATEGORY, connectionId: w.moduleConnectionId },
+      ]);
+      expect(enqueued).toHaveLength(AGENTS.length);
+      for (const request of requestsOf()) {
+        expect(request.integrations).toEqual([moduleBinding(w.moduleConnectionId, DOCS_REQUIRED)]);
+      }
+    }, 60_000);
+
+    it('[M3] an llm step is stamped with GitHub and the optional module requirement together', async () => {
+      const w = await mixedWorld();
+      const stepId = declare([FORGE_READ, DOCS_OPTIONAL]);
+      await resolvesToModule(w, [DOCS_OPTIONAL]);
+
+      const result = await advance(w, llmStep(stepId));
+
+      expect(result.status).toBe('waiting_cli');
+      const runs = await runsOf(db, w.taskId);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]!.integrations).toEqual([
+        forgeBinding(w.connectionId),
+        moduleBinding(w.moduleConnectionId, DOCS_OPTIONAL),
+      ]);
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: 'forge', connectionId: w.connectionId },
+        { categoryId: MODULE_CATEGORY, connectionId: w.moduleConnectionId },
+      ]);
+      expect(enqueued).toHaveLength(1);
+      expect(requestsOf()).toHaveLength(1);
+      expect(requestsOf()[0]!.integrations).toEqual([
+        forgeBinding(w.connectionId),
+        moduleBinding(w.moduleConnectionId, DOCS_OPTIONAL),
+      ]);
+      expect(runs[0]!.prompt).toContain('get_pull_request_state');
+      expect(runs[0]!.prompt).toContain(MODULE_TOOL);
+    }, 60_000);
+
+    it('[M3] an llm step whose only requirement is an optional module one is stamped with it', async () => {
       const w = await moduleWorld();
       const stepId = declare([DOCS_OPTIONAL]);
       await resolvesToModule(w, [DOCS_OPTIONAL]);
@@ -672,14 +688,18 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
       expect(result.status).toBe('waiting_cli');
       const runs = await runsOf(db, w.taskId);
       expect(runs).toHaveLength(1);
-      expect(await stampIsSqlNull(db, runs[0]!.id)).toBe(true);
-      expect(await grantsOf(db, w.taskId)).toEqual([]);
+      expect(runs[0]!.integrations).toEqual([moduleBinding(w.moduleConnectionId, DOCS_OPTIONAL)]);
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: MODULE_CATEGORY, connectionId: w.moduleConnectionId },
+      ]);
       expect(enqueued).toHaveLength(1);
-      expect(requestsOf()[0]!.integrations ?? []).toEqual([]);
-      expect(runs[0]!.prompt).not.toContain(MODULE_TOOL);
+      expect(requestsOf()[0]!.integrations).toEqual([
+        moduleBinding(w.moduleConnectionId, DOCS_OPTIONAL),
+      ]);
+      expect(runs[0]!.prompt).toContain(MODULE_TOOL);
     }, 60_000);
 
-    it('[M3] a fan-out stamps every agent with GitHub alone when the optional module requirement is dropped', async () => {
+    it('[M3] a fan-out stamps every agent with GitHub and the optional module requirement', async () => {
       const w = await mixedWorld();
       const stepId = declare([FORGE_READ, DOCS_OPTIONAL]);
       await resolvesToModule(w, [DOCS_OPTIONAL]);
@@ -689,17 +709,20 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
       expect(result.status).toBe('waiting_cli');
       const runs = await runsOf(db, w.taskId);
       expect(runs).toHaveLength(AGENTS.length);
-      for (const run of runs) expect(run.integrations).toEqual([forgeBinding(w.connectionId)]);
+      const expected = [
+        forgeBinding(w.connectionId),
+        moduleBinding(w.moduleConnectionId, DOCS_OPTIONAL),
+      ];
+      for (const run of runs) expect(run.integrations).toEqual(expected);
       expect(await grantsOf(db, w.taskId)).toEqual([
         { categoryId: 'forge', connectionId: w.connectionId },
+        { categoryId: MODULE_CATEGORY, connectionId: w.moduleConnectionId },
       ]);
       expect(enqueued).toHaveLength(AGENTS.length);
-      for (const request of requestsOf()) {
-        expect(request.integrations).toEqual([forgeBinding(w.connectionId)]);
-      }
+      for (const request of requestsOf()) expect(request.integrations).toEqual(expected);
     }, 60_000);
 
-    it('[M3] a fan-out whose only requirement is an optional module one is sent unstamped', async () => {
+    it('[M3] a fan-out whose only requirement is an optional module one stamps every agent with it', async () => {
       const w = await moduleWorld();
       const stepId = declare([DOCS_OPTIONAL]);
       await resolvesToModule(w, [DOCS_OPTIONAL]);
@@ -709,10 +732,16 @@ describe.skipIf(!url)('a step whose requirement resolves to a module provider, o
       expect(result.status).toBe('waiting_cli');
       const runs = await runsOf(db, w.taskId);
       expect(runs).toHaveLength(AGENTS.length);
-      for (const run of runs) expect(await stampIsSqlNull(db, run.id)).toBe(true);
-      expect(await grantsOf(db, w.taskId)).toEqual([]);
+      for (const run of runs) {
+        expect(run.integrations).toEqual([moduleBinding(w.moduleConnectionId, DOCS_OPTIONAL)]);
+      }
+      expect(await grantsOf(db, w.taskId)).toEqual([
+        { categoryId: MODULE_CATEGORY, connectionId: w.moduleConnectionId },
+      ]);
       expect(enqueued).toHaveLength(AGENTS.length);
-      for (const request of requestsOf()) expect(request.integrations ?? []).toEqual([]);
+      for (const request of requestsOf()) {
+        expect(request.integrations).toEqual([moduleBinding(w.moduleConnectionId, DOCS_OPTIONAL)]);
+      }
     }, 60_000);
 
     it('[M3] a step that needs only GitHub is stamped as before while a module provider is registered (passes before and after)', async () => {

@@ -66,7 +66,7 @@ an upgrade on a repository with no reset and any earlier upgrade task, which POS
 refuses. A rollback is gated alike
 because it puts back files a reset removed. Each refusal has its own 409 text
 (`upgradeRefusalMessage`). An onboarding and an upgrade or rollback of one repository are created
-under one lock (`withRepositoryTaskLock`), each refusing the other inside it, so two requests at the
+under one lock (`withRepositoryTaskLock`, taken after the new-work fence), each refusing the other inside it, so two requests at the
 same moment cannot both start. The lock also takes the repository row and refuses while a reset holds
 the root claim ([Onboarding reset](onboarding-reset.md)), and an upgrade or rollback re-runs
 `upgradeAdmission` inside it, so a reset epoch stamped after the early check still refuses.

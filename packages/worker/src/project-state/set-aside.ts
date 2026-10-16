@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import { eq } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { lockRepositoryTasksKey, schema, type Database } from '@haive/database';
 import { HAIVE_DATA_FILES, logger } from '@haive/shared';
 import {
   chmodNoFollow,
@@ -517,6 +517,18 @@ async function setAsideDomain(
   return section ? section(restore) : db.transaction(restore);
 }
 
+/** With a fence the task-creation lock comes first, as in every other mover of the checkout: no task is created after the count. */
+const guardLock =
+  (
+    repositoryId: string,
+    fence: CheckoutFence | undefined,
+    domain: (tx: Tx) => Promise<unknown>,
+  ): RestoreGuard['lock'] =>
+  async (tx) => {
+    if (fence) await lockRepositoryTasksKey(tx, repositoryId);
+    await domain(tx);
+  };
+
 const stateGuard = (
   repositoryId: string,
   repoPath: string,
@@ -524,7 +536,7 @@ const stateGuard = (
   fence?: CheckoutFence,
 ): RestoreGuard => ({
   owns: (path) => path.startsWith(STATE_PREFIX),
-  lock: (tx) => lockProjectState(tx, repositoryId),
+  lock: guardLock(repositoryId, fence, (tx) => lockProjectState(tx, repositoryId)),
   offender: (tx) => stateOffender(tx, repositoryId, repoPath, state),
   mark: (tx) => markProjectStateDirty(tx, repositoryId),
   base: (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath }),
@@ -539,7 +551,7 @@ const planGuard = (
   fence?: CheckoutFence,
 ): RestoreGuard => ({
   owns: (path) => !path.startsWith(STATE_PREFIX),
-  lock: (tx) => lockPlanMirror(tx, repositoryId),
+  lock: guardLock(repositoryId, fence, (tx) => lockPlanMirror(tx, repositoryId)),
   offender: (tx) => planOffender(tx, repositoryId, repoPath, plan),
   mark: (tx) => markPlanMirrorDirty(tx, repositoryId),
   generation: async (tx) =>

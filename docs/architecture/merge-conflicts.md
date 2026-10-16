@@ -19,6 +19,19 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
 - **A person's own checkout is never written to.** The worker's `/host-fs` mount is read-write, so under
   `HOST_REPO_ROOT` nothing is put back from the index and a merge open for another ref is left alone:
   both halt and name what blocks them.
+- **A same-branch merge halts while another task works in the checkout.** A same-branch merge
+  (00a's divergence merge, 12's `merge_remove` on the base, `13-onboarding-push`) opens in the
+  repository's checkout itself, so a task working there without a worktree of its own would have its
+  tree changed under it. As 00a's fast-forward does, the set-aside counts such tasks
+  (`checkoutHoldingTasks` with `rootOnly`, this task left out), and each section that opens a merge
+  there, or clears an earlier attempt's merge first, takes the repository's task-creation lock
+  (`lockRepositoryTasksKey`) and counts them again before it moves anything. Every task's start takes
+  the same lock to move it from `created` to `queued` (`markQueuedForStart`), so none becomes a holder
+  between that count and the move; a create with a repository takes it before its insert, as every
+  other holder does, so no create inverts it with the repository row or the database-snapshot lock.
+  A count above zero halts the step with "N other task(s) working in this checkout; nothing was
+  merged. Retry this step once it/they finish(es)." and nothing is merged or aborted. A cross-branch
+  merge runs in the shared `<base>--base` worktree and is not fenced.
 - **A merge dir holds one task's merge at a time, by a claim and fenced sections.** A cross-branch
   merge runs in a worktree named from the base branch alone (`main--base`), shared by every task
   merging into that base, since git allows the branch in one worktree. A step takes the dir in
@@ -220,6 +233,23 @@ files are put back to where it forked (`putBackBeforeMerge`, see
 [Onboarding template versioning](onboarding-upgrades.md)), so a task branch never carries an agent's
 edit of the record or the plan into the base. A base-sync round and a pass that finds the feature's
 merge open skip it.
+
+A DAG level merge records which files conflicted. The merge pass reads `unmergedPaths` while the
+merge it opened is still open, since the abort that follows clears them and nothing else keeps the
+list, and after the abort writes one `dag_issue.merge_conflict` task event in the transaction that
+sets `merge_status = 'conflict'`: `{issueKey, level, paths, pathCount}`, `paths` capped at 20, both
+`null` when git could not list them. A pass that halts on a refused abort, or dies before that
+write, records neither, so the retry that re-enters the issue records the conflict once. Nothing
+reads it. It is what a change to how the sprint planner orders issues has to be
+measured against. MEASURED on the dev install (13 DAG plans, Jul-Aug 2026): 30 of 63 merged issues
+needed a merge-fix and all 30 were resolved, at 3.7 min each, while a DAG issue's median wall time
+is 32.3 min. So a same-level conflict is left to the merge-fix rather than prevented by ordering:
+moving an issue a level, or adding a contract-first level, costs several times the conflict it
+avoids. A warning on the DAG gate would inform nothing, since auto-continue submits that gate with
+its defaults (all 13 plans), and listing shared lists such as `.gitignore` in `estimated_files`
+would let `overlapRefinedEstimate` anchor the effort estimate on unrelated tasks. The visible
+colliders were list files (`.gitignore` in 5 plans, docs, `.ddev` ini files) and one shared PHP
+file; `docs/plans/blastloop-lessons.md` says what the event's data would reopen.
 
 The resolver checks for a committed merge before its budget halt, so a merge finished by hand after
 a halt finishes the step on a Retry.
