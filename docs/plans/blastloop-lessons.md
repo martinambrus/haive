@@ -1,6 +1,6 @@
 # What BlastLoop offers Haive: parallel DAG issues and shared files
 
-> **In progress** (2026-10-16): P0 in review as #814. One source is reviewed:
+> **Shipped** (2026-10-16): P0 merged as #814 (merge commit `b8a3fc780`). One source is reviewed:
 > github.com/rlshaw-ml/BlastLoop (MIT, v1.0.0, about 23 KB of prompt markdown, no code). Scope chosen
 > by the user on 2026-10-16: P0 only, record which files a DAG level merge conflicted on. P1 (shared-contract rule in the planner and the
 > advisor's SPLIT) and P2 (a same-level overlap guard) are NOT built: measured below, they would
