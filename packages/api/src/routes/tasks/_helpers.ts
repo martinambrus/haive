@@ -1,6 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
   decideTaskWorktree,
@@ -419,6 +419,32 @@ export async function findActiveCliInvocation(
     .orderBy(desc(schema.cliInvocations.createdAt))
     .limit(1);
   return rows[0] ?? null;
+}
+
+/** The runs of a task that GET /tasks/:id/tool-usage rolls up: not replaced, attributed to a step
+ *  or to a step's recap. */
+export function rolledUpRunsOf(taskId: string): SQL {
+  const inv = schema.cliInvocations;
+  return and(
+    eq(inv.taskId, taskId),
+    isNull(inv.supersededAt),
+    or(isNotNull(inv.taskStepId), isNotNull(inv.summaryForStepId)),
+  )!;
+}
+
+/** Digest of the rolled-up runs that have ended: which, when, and whether `tool_usage` is written.
+ *  Not their number, which stays put when a run is replaced and its replacement finishes. */
+export async function loadFinishedRunsRevision(
+  db: ReturnType<typeof getDb>,
+  taskId: string,
+): Promise<string> {
+  const inv = schema.cliInvocations;
+  const runState = sql`concat_ws(' ', ${inv.id}, ${inv.endedAt}, ${inv.toolUsage} is not null)`;
+  const [row] = await db
+    .select({ revision: sql<string | null>`md5(string_agg(${runState}, ',' order by ${inv.id}))` })
+    .from(inv)
+    .where(and(rolledUpRunsOf(taskId), isNotNull(inv.endedAt)));
+  return row?.revision ?? '';
 }
 
 /** `task_steps.id` of every step in `taskIds` that is WHOLLY parked on the agent gate: it holds

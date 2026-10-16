@@ -39,6 +39,7 @@ vi.mock('../src/routes/tasks/_helpers.js', async (importOriginal) => ({
   enrichStepsWithAgentCounts: async (_db: unknown, _id: unknown, rows: unknown[]) => rows,
   enrichStepsWithCliUsage: (_flags: unknown, rows: unknown[]) => rows,
   findActiveCliInvocation: async () => null,
+  loadFinishedRunsRevision: async () => '',
   sumTaskProviderBreakdown: async () => [],
   buildUpcomingCliSteps: async () => [],
 }));
