@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import type { UserInfoSpec } from '../modularity/integrations.js';
+import { AUTHORIZE_RESERVED_PARAMS, type UserInfoSpec } from '../modularity/integrations.js';
 import { OauthUnavailableError, OauthVendorError } from './errors.js';
 
 export const VENDOR_CALL_TIMEOUT_MS = 15_000;
@@ -187,6 +187,7 @@ export function buildAuthorizeUrl(input: {
   scopes: readonly string[];
   state: string;
   challenge: string;
+  authorizeParams?: Record<string, string>;
 }): string {
   const url = new URL(input.authorizeUrl);
   url.searchParams.set('response_type', 'code');
@@ -196,6 +197,9 @@ export function buildAuthorizeUrl(input: {
   url.searchParams.set('state', input.state);
   url.searchParams.set('code_challenge', input.challenge);
   url.searchParams.set('code_challenge_method', 'S256');
+  for (const [name, value] of Object.entries(input.authorizeParams ?? {})) {
+    if (!AUTHORIZE_RESERVED_PARAMS.has(name.toLowerCase())) url.searchParams.set(name, value);
+  }
   return url.toString();
 }
 

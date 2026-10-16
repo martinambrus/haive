@@ -43,6 +43,7 @@ const h = vi.hoisted(() => {
         scopes: { read: ['files.read'], write: ['files.write'] },
         pkce: true,
         clientRegistration: ['preregistered'],
+        authorizeParams: { access_type: 'offline', prompt: 'consent' },
         userInfo,
       },
       {
@@ -622,6 +623,26 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
       expect(ttl).toBeLessThanOrEqual(600);
     });
 
+    it("connect adds the provider's own authorize parameters after the OAuth ones", async () => {
+      const res = await connect(a);
+
+      expect(res.status).toBe(200);
+      const query = new URL(res.body.authorizeUrl as string).searchParams;
+      expect([...query.keys()]).toEqual([
+        'response_type',
+        'client_id',
+        'redirect_uri',
+        'scope',
+        'state',
+        'code_challenge',
+        'code_challenge_method',
+        'access_type',
+        'prompt',
+      ]);
+      expect(query.get('access_type')).toBe('offline');
+      expect(query.get('prompt')).toBe('consent');
+    });
+
     it('complete as the same user stores one connection with encrypted tokens and makes one token call', async () => {
       const res = await signInWithCode(a);
 
@@ -851,6 +872,52 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
       expect(await auditsOf(a.id, 'integration.connection.reconnect')).toHaveLength(1);
     });
 
+    it('signing in again with no new refresh token keeps the stored one under the new access token', async () => {
+      expect((await signInWithCode(a)).status).toBe(200);
+      stub.expiring = false;
+      expect((await signInWithCode(a)).status).toBe(200);
+
+      const rows = await connectionsOf(a.id);
+      expect(rows).toHaveLength(1);
+      expect(stub.issued[1]!.refresh).toBeNull();
+      expect(decryptConnectionTokens(rows[0]!, KEK)).toEqual({
+        accessToken: stub.issued[1]!.access,
+        refreshToken: stub.issued[0]!.refresh,
+      });
+    });
+
+    it('signing in again with a new refresh token replaces the stored one', async () => {
+      expect((await signInWithCode(a)).status).toBe(200);
+      expect((await signInWithCode(a)).status).toBe(200);
+
+      const rows = await connectionsOf(a.id);
+      expect(rows).toHaveLength(1);
+      expect(stub.issued[1]!.refresh).not.toBe(stub.issued[0]!.refresh);
+      expect(decryptConnectionTokens(rows[0]!, KEK)).toEqual({
+        accessToken: stub.issued[1]!.access,
+        refreshToken: stub.issued[1]!.refresh,
+      });
+    });
+
+    it('signing in again still works when the stored tokens cannot be read, and then holds no refresh token', async () => {
+      expect((await signInWithCode(a)).status).toBe(200);
+      const [before] = await connectionsOf(a.id);
+      await db
+        .update(schema.integrationConnections)
+        .set({ encryptedDek: encryptDek(generateDek(), 'cd'.repeat(32)) })
+        .where(eq(schema.integrationConnections.id, before!.id));
+      stub.expiring = false;
+      const again = await signInWithCode(a);
+
+      expect(again.status).toBe(200);
+      const rows = await connectionsOf(a.id);
+      expect(rows.map((row) => row.id)).toEqual([before!.id]);
+      expect(decryptConnectionTokens(rows[0]!, KEK)).toEqual({
+        accessToken: stub.issued[1]!.access,
+        refreshToken: null,
+      });
+    });
+
     it('a sign-in to another account of the same user is a second connection', async () => {
       await signInWithCode(a);
       stub.account = { id: '2002', label: 'user-a-second@stub.test' };
@@ -1030,6 +1097,23 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
       });
       expect(await getRedis().exists(deviceKeyOf(a.id))).toBe(0);
       expect(await credentialsOf(a.id)).toHaveLength(0);
+    });
+
+    it('a device sign-in again with no new refresh token keeps the stored one', async () => {
+      const first = await startDevice(a);
+      wait(5);
+      expect((await pollDevice(a, first.body.handle)).status).toBe(200);
+      stub.expiring = false;
+      const second = await startDevice(a);
+      wait(5);
+      expect((await pollDevice(a, second.body.handle)).status).toBe(200);
+
+      const rows = await connectionsOf(a.id);
+      expect(rows).toHaveLength(1);
+      expect(decryptConnectionTokens(rows[0]!, KEK)).toEqual({
+        accessToken: stub.issued[1]!.access,
+        refreshToken: stub.issued[0]!.refresh,
+      });
     });
 
     it('a poll before the interval has passed is answered locally, without a vendor call', async () => {
@@ -1362,6 +1446,15 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
       expect(authorize.searchParams.get('redirect_uri')).toBe(
         `${APP_ORIGIN}/settings/integrations/callback/github`,
       );
+      expect([...authorize.searchParams.keys()]).toEqual([
+        'response_type',
+        'client_id',
+        'redirect_uri',
+        'scope',
+        'state',
+        'code_challenge',
+        'code_challenge_method',
+      ]);
       const { code, state } = github.approve(authorizing.body.authorizeUrl as string);
 
       const res = await complete(a, { providerId: 'github', state, code });
