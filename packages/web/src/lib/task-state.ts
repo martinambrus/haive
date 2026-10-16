@@ -27,6 +27,11 @@ export function taskMenuKeys(task: TaskToneLike, opts: { stepRunning: boolean })
   return keys;
 }
 
+/** Created and never started: nothing queues it on its own, so its page offers Start. */
+export function taskNotStarted(task: TaskToneLike): boolean {
+  return task.status === 'created' && !isTaskDead(task);
+}
+
 /** Who the owner is told holds a paused task: an administrator's maintenance pause is not their own. */
 export function pausedByLabel(task: { pausedByAdmin?: boolean }): string {
   return task.pausedByAdmin ? 'Paused by an administrator' : 'Paused by you';

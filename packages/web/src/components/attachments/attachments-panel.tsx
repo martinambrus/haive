@@ -20,6 +20,11 @@ import { Button, Card } from '@/components/ui';
 /** How often the panel re-reads while an archive waits for the worker. */
 const EXPANSION_POLL_MS = 5000;
 
+interface UploadFailures {
+  total: number;
+  failed: { name: string; message: string }[];
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -73,6 +78,7 @@ export function AttachmentsPanel({
   const [items, setItems] = useState<TaskAttachment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string | null>(null);
+  const [uploadFailures, setUploadFailures] = useState<UploadFailures | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
 
@@ -104,18 +110,24 @@ export function AttachmentsPanel({
   async function onPick(files: FileList | null) {
     if (!files || files.length === 0) return;
     const picked = Array.from(files);
+    const failed: UploadFailures['failed'] = [];
     setError(null);
+    setUploadFailures(null);
     try {
       for (const [index, f] of picked.entries()) {
         // Named progress rather than a boolean: a folder is one click and many
         // requests, and "Uploading…" for two minutes says nothing about where it is.
         setUploading(`${attachmentUploadName(f)} (${index + 1} of ${picked.length})`);
-        await uploadTaskAttachment(taskId, f);
+        try {
+          await uploadTaskAttachment(taskId, f);
+        } catch (err) {
+          failed.push({
+            name: attachmentUploadName(f),
+            message: err instanceof Error ? err.message : 'Upload failed',
+          });
+        }
       }
-      await reload();
-    } catch (err) {
-      setError((err as Error).message ?? 'Upload failed');
-      // Whatever landed before the failure is real and is now on the task.
+      if (failed.length > 0) setUploadFailures({ total: picked.length, failed });
       await reload();
     } finally {
       setUploading(null);
@@ -227,6 +239,24 @@ export function AttachmentsPanel({
         </div>
         {uploading && <p className="text-xs text-indigo-300">Uploading {uploading}…</p>}
         {error && <p className="text-xs text-rose-400">{error}</p>}
+        {uploadFailures && (
+          <div role="alert" className="flex flex-col gap-1 text-xs text-rose-400">
+            <p>
+              {uploadFailures.failed.length} of {uploadFailures.total} attachment(s) could not be
+              uploaded:
+            </p>
+            <ul
+              aria-label="Attachments that failed to upload"
+              className="max-h-48 list-disc overflow-auto pl-5 [overflow-wrap:anywhere]"
+            >
+              {uploadFailures.failed.map((f, i) => (
+                <li key={i}>
+                  <span className="font-mono">{f.name}</span>: {f.message}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </Card>
 
       {items && items.length === 0 && (
