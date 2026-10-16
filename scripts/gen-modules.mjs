@@ -264,7 +264,7 @@ const webModuleFor = (pkg, part) => {
     );
     process.exit(1);
   }
-  return { name: pkg.name, id, source: pkg.source };
+  return { name: pkg.name, id, source: pkg.source, version: pkg.version };
 };
 const webModules = packages
   .filter((pkg) => pkg.exports?.['./web'] !== undefined)
@@ -315,8 +315,8 @@ for (const [part, mods] of [
   ['dashboard', dashboardModules],
   ['web', webModules],
 ]) {
-  for (const { name, id, source } of mods) {
-    const entry = compiledWeb.get(id) ?? { id, packageName: name, source, parts: [] };
+  for (const { name, id, source, version } of mods) {
+    const entry = compiledWeb.get(id) ?? { id, packageName: name, source, version, parts: [] };
     entry.parts.push(part);
     compiledWeb.set(id, entry);
   }
