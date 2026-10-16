@@ -824,6 +824,8 @@ export interface Task {
    *  derived here for the badge and the ?status=paused filter — same shape as slotWait, which
    *  is suppressed while this is set. */
   pausedAt?: string | null;
+  /** The pause in force is an administrator's, not the owner's own; absent on an older api. */
+  pausedByAdmin?: boolean;
   /** ISO time the worker marked the task dead; null otherwise. Read it through isTaskDead. */
   deadAt?: string | null;
   /** Up/down vote score in [-5, +5], 0 by default. Shifts this task's fair-scheduling band
@@ -2424,12 +2426,27 @@ export interface BlockingTask {
   hasLiveCli: boolean;
 }
 
+/** A background job a route queued, listed beside the tasks: it ends on its own and cannot be paused or stopped. */
+export interface BlockingJob {
+  kind: 'repository' | 'bundle' | 'cli_provider';
+  id: string;
+  name: string;
+  status: string;
+  updatedAt: string;
+  ownerId: string | null;
+  ownerName: string | null;
+  ownerEmail: string | null;
+}
+
 export interface BlockingResponse {
   tasks: BlockingTask[];
+  jobs: BlockingJob[];
   total: number;
   /** The listing is capped server-side. Rendered, because reading a truncated list as the whole
    *  picture is how a drain gets forced with work still behind it. */
   capped: boolean;
+  /** Who is looking: a task links only for its owner, since GET /tasks/:id answers no one else. */
+  viewerId: string;
 }
 
 export interface UpgradeRun {

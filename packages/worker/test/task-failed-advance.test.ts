@@ -1,6 +1,6 @@
 import type { Job } from 'bullmq';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { TASK_JOB_NAMES } from '@haive/shared';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CONFIG_KEYS, TASK_JOB_NAMES, configService, logger } from '@haive/shared';
 import { processTaskJob } from '../src/queues/task-queue.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
@@ -10,11 +10,31 @@ import type { StepDefinition } from '../src/step-engine/step-definition.js';
  *  advance's own row. */
 const h = vi.hoisted(() => {
   const state = {
+    taskStatus: 'failed',
     rowStatus: 'failed',
     reads: 0,
     writes: [] as string[],
   };
+  /** What the transaction that reopens the task reads of it: its type, repository and status. */
+  const taskRow = () => [{ type: 'workflow', repositoryId: null, status: state.taskStatus }];
+  const tx = {
+    execute: async () => undefined,
+    select: () => ({
+      from: () => ({
+        where: () => Object.assign(Promise.resolve(taskRow()), { limit: async () => taskRow() }),
+      }),
+    }),
+    update: () => {
+      state.writes.push('update');
+      throw new Error('an advance kept out writes nothing');
+    },
+    insert: () => {
+      state.writes.push('insert');
+      throw new Error('an advance kept out writes nothing');
+    },
+  };
   const db = {
+    transaction: async (fn: (handle: typeof tx) => unknown) => fn(tx),
     query: {
       tasks: {
         findFirst: async () => ({
@@ -22,7 +42,7 @@ const h = vi.hoisted(() => {
           userId: 'user-1',
           type: 'workflow',
           repositoryId: 'repo-1',
-          status: 'failed',
+          status: state.taskStatus,
           orchestrationEpoch: 5,
           metadata: null,
           cliProviderId: null,
@@ -93,6 +113,7 @@ function advanceJob(extra: Record<string, unknown> = {}): Job {
 
 describe('an advance queued before its task failed', () => {
   beforeEach(() => {
+    vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     h.state.reads = 0;
     h.state.writes = [];
   });
@@ -121,5 +142,146 @@ describe('an advance queued before its task failed', () => {
     // Past the guard the advance goes on to the step's own work, which this db does not serve.
     await processTaskJob(advanceJob({ formValues: { answer: 'yes' } }), 'tok').catch(() => {});
     expect(h.state.writes).not.toEqual([]);
+  });
+});
+
+describe('an answer to a form still parked, while the system is held', () => {
+  const answer = () => advanceJob({ formValues: { answer: 'yes' } });
+  /** The cached copy says `normal`: only the stored state, read past the cache, can hold. */
+  const stored = (state: string) => {
+    vi.spyOn(configService, 'get').mockResolvedValue('normal');
+    return vi.spyOn(configService, 'getFresh').mockClear().mockResolvedValue(state);
+  };
+
+  beforeEach(() => {
+    h.state.taskStatus = 'failed';
+    h.state.rowStatus = 'waiting_form';
+    h.state.reads = 0;
+    h.state.writes = [];
+  });
+
+  it('is let through to a failed task while the system is normal', async () => {
+    stored('normal');
+    await processTaskJob(answer(), 'tok').catch(() => {});
+    expect(h.state.writes).not.toEqual([]);
+  });
+
+  it.each(['draining', 'maintenance'])(
+    'is dropped by a failed task, which keeps it unwritten, while the system is %s',
+    async (state) => {
+      const read = stored(state);
+      const outcome = await processTaskJob(answer(), 'tok').then(
+        () => 'dropped',
+        () => 'ran',
+      );
+      expect(outcome).toBe('dropped');
+      expect(h.state.writes).toEqual([]);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(read).toHaveBeenCalledWith(CONFIG_KEYS.MAINTENANCE_STATE);
+    },
+  );
+
+  it.each(['waiting_user', 'running'])(
+    'is still let through to a %s task while the system drains',
+    async (taskStatus) => {
+      stored('draining');
+      h.state.taskStatus = taskStatus;
+      await processTaskJob(answer(), 'tok').catch(() => {});
+      expect(h.state.writes).not.toEqual([]);
+    },
+  );
+});
+
+describe('an answer to a form still parked, when the system turns held after the early check', () => {
+  const answer = () => advanceJob({ formValues: { answer: 'yes' } });
+  /** The first read, the early check's, says normal; the next says `state`. */
+  const turnsHeld = (state: string) => {
+    vi.spyOn(configService, 'get').mockResolvedValue('normal');
+    return vi
+      .spyOn(configService, 'getFresh')
+      .mockClear()
+      .mockResolvedValueOnce('normal')
+      .mockResolvedValue(state);
+  };
+
+  beforeEach(() => {
+    h.state.taskStatus = 'failed';
+    h.state.rowStatus = 'waiting_form';
+    h.state.reads = 0;
+    h.state.writes = [];
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(['draining', 'maintenance'])(
+    'is dropped by the transaction that would reopen the failed task, as at the early check, while the system is %s',
+    async (state) => {
+      const read = turnsHeld(state);
+      const info = vi.spyOn(logger, 'info');
+
+      await expect(processTaskJob(answer(), 'tok')).resolves.toBeUndefined();
+
+      expect(h.state.writes).toEqual([]);
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          taskId: 'task-1',
+          stepId: 'failed-advance-step',
+          newWorkHeld: true,
+        }),
+        'advance-step skipped: the task failed and nothing has reopened it',
+      );
+    },
+  );
+
+  it('reopens the task when the system is still normal under it', async () => {
+    vi.spyOn(configService, 'get').mockResolvedValue('normal');
+    vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
+
+    await processTaskJob(answer(), 'tok').catch(() => {});
+
+    expect(h.state.writes).not.toEqual([]);
+  });
+});
+
+describe('an answer to a form still parked, when the stored state cannot be read', () => {
+  const answer = () => advanceJob({ formValues: { answer: 'yes' } });
+  /** The reads in order: the early check's first, then the transaction that reopens the task. */
+  const reads = (...outcomes: (string | Error)[]) => {
+    vi.spyOn(configService, 'get').mockResolvedValue('normal');
+    const read = vi.spyOn(configService, 'getFresh').mockClear().mockResolvedValue('normal');
+    for (const outcome of outcomes) {
+      if (outcome instanceof Error) read.mockRejectedValueOnce(outcome);
+      else read.mockResolvedValueOnce(outcome);
+    }
+    return read;
+  };
+
+  beforeEach(() => {
+    h.state.taskStatus = 'failed';
+    h.state.rowStatus = 'waiting_form';
+    h.state.reads = 0;
+    h.state.writes = [];
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('goes on past the early check, which fails open, and reopens the task', async () => {
+    reads(new Error('redis went away'), 'normal');
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    await processTaskJob(answer(), 'tok').catch(() => {});
+
+    expect(h.state.writes).not.toEqual([]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'task-1', err: expect.any(Error) }),
+      expect.any(String),
+    );
+  });
+
+  it('fails the job rather than dropping the answer when the transaction that reopens the task cannot read it', async () => {
+    reads('normal', new Error('redis went away'));
+
+    await expect(processTaskJob(answer(), 'tok')).rejects.toMatchObject({
+      name: 'MaintenanceStateUnreadable',
+    });
   });
 });

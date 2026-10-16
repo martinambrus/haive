@@ -8,6 +8,7 @@ import { Badge, Button, Card, CardDescription, CardHeader, CardTitle } from '@/c
 import { CircleDot, FolderGit2 } from 'lucide-react';
 import { SlotWaitBadge } from '@/components/slot-wait-badge';
 import { isTaskDead } from '@/lib/step-banners';
+import { pausedByLabel } from '@/lib/task-state';
 import { TaskVote } from '@/components/task-vote';
 import { UsageStrip } from '@/components/usage-strip';
 import { formatDuration } from '@/lib/format-duration';
@@ -102,7 +103,7 @@ const TaskRow = memo(function TaskRow({ task }: { task: Task }) {
               ) : task.pausedAt ? (
                 <Badge
                   variant="warning"
-                  title={`Paused by you at ${new Date(task.pausedAt).toLocaleString()} — the orchestrator is not handing this task any work.`}
+                  title={`${pausedByLabel(task)} at ${new Date(task.pausedAt).toLocaleString()} — the orchestrator is not handing this task any work.`}
                 >
                   paused
                 </Badge>

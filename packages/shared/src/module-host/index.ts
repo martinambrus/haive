@@ -1,12 +1,8 @@
 import type { Database } from '@haive/database';
-import type { MaintenanceState } from '../system/maintenance.js';
 
 export type AppVariables = {
   userId: string;
   userRole: 'admin' | 'user';
-  /** Set by the maintenance gate on every request, so a handler can refuse new work while
-   *  draining without re-reading the config. */
-  maintenanceState: MaintenanceState;
 };
 
 export type AppEnv = {

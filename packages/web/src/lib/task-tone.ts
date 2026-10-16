@@ -4,8 +4,8 @@
  * Deliberately not `statusVariant` from the tasks page: that answers "which badge
  * variant", and a badge sits beside a status WORD that names the state. A tinted row has
  * no such word, so it folds in the two states that are not in `status` at all — a task
- * parked by the user (`pausedAt`) and one parked behind a capacity gate (`slotWait`) both
- * report `status: 'running'` while nothing is running.
+ * paused by its owner or an administrator (`pausedAt`) and one parked behind a capacity gate
+ * (`slotWait`) both report `status: 'running'` while nothing is running.
  *
  * The precedence is the tasks page's own (`app/(app)/tasks/page.tsx`, the badge block):
  * dead -> pausedAt -> slotWait -> status. Keep the two in step.

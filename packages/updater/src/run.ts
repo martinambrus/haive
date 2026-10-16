@@ -1,7 +1,13 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Sql } from 'postgres';
-import { CONFIG_KEYS, configService } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  configService,
+  NEW_WORK_FENCE_KEY,
+  parseMaintenanceState,
+  type MaintenanceState,
+} from '@haive/shared';
 import type { ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
 import { enterPhase, finishRun, mergeMetadata, type RunMetadata } from './journal.js';
@@ -32,8 +38,14 @@ export interface UpgradeContext {
   network: string;
   /** How long to wait for in-flight work before forcing. */
   drainDeadlineMs: number;
+  /** When that wait ends: fixed by the first drain wait and shared by every wait after it. */
+  drainDeadlineAt?: number;
+  /** Milliseconds between live-work counts and between recounts; 5000 when unset. */
+  drainPollMs?: number;
   /** Force past the drain deadline instead of failing. */
   forceDrain: boolean;
+  /** Set by phaseDraining when it forced past live work, so phaseMaintenance skips the recount. */
+  drainForced?: boolean;
   log: (event: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -96,7 +108,6 @@ async function awaitVersion(
   return { ok: false, saw, head };
 }
 
-/** Live work that still holds a maintenance window open. */
 /** Wait for Postgres to accept queries again.
  *
  *  The snapshot STOPS Postgres, which severs this process's own connection — and the journal lives
@@ -116,44 +127,124 @@ async function awaitDatabase(sql: Sql, timeoutMs = 120_000): Promise<void> {
   }
 }
 
-async function liveTaskCount(sql: Sql): Promise<number> {
+/** Live work that still holds a maintenance window open: tasks, and the background jobs a route queues. */
+export async function liveWorkCount(sql: Sql): Promise<number> {
+  // A dead task and a draft that never started run nothing; /admin/maintenance leaves both out too.
   const rows = await sql<{ n: string }[]>`
-    SELECT count(*)::text AS n FROM tasks
-     WHERE status IN ('created','queued','running','paused','waiting_user','waiting_pr')`;
+    SELECT (
+      (SELECT count(*) FROM tasks
+        WHERE status IN ('queued','running','paused','waiting_user','waiting_pr')
+          AND dead_at IS NULL)
+      + (SELECT count(*) FROM repositories WHERE status = 'cloning')
+      + (SELECT count(*) FROM custom_bundles WHERE status = 'syncing')
+      + (SELECT count(*) FROM cli_providers
+          WHERE sandbox_image_build_status = 'building' OR model_provision_status = 'provisioning')
+    )::text AS n`;
   return Number(rows[0]?.n ?? 0);
 }
 
-export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
-  await enterPhase(ctx.sql, ctx.runId, 'draining');
-  await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
-  ctx.log('draining', { deadlineMs: ctx.drainDeadlineMs });
+/** A session lock belongs to one connection, so lock and unlock share a reserved one. */
+async function underFence<T>(sql: Sql, work: (fence: Sql) => Promise<T>): Promise<T> {
+  const fence = await sql.reserve();
+  try {
+    await fence`SELECT pg_advisory_lock(hashtextextended(${NEW_WORK_FENCE_KEY}, 0))`;
+    try {
+      return await work(fence);
+    } finally {
+      await fence`SELECT pg_advisory_unlock(hashtextextended(${NEW_WORK_FENCE_KEY}, 0))`;
+    }
+  } finally {
+    fence.release();
+  }
+}
 
-  const deadline = Date.now() + ctx.drainDeadlineMs;
+async function setMaintenanceState(sql: Sql, state: MaintenanceState): Promise<void> {
+  await underFence(sql, () => configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state));
+}
+
+/** Recounts under the fence: a draining or held install with nothing live enters maintenance. */
+async function enterMaintenance(ctx: UpgradeContext): Promise<boolean> {
+  const { entered, state, live } = await underFence(ctx.sql, async (fence) => {
+    const state = parseMaintenanceState(
+      await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
+    );
+    // The updater's pool is one connection and the fence holds it, so the count runs on the fence.
+    const live = await liveWorkCount(fence);
+    const entered = state !== 'normal' && live === 0;
+    if (state === 'normal') await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
+    if (entered && state === 'draining') {
+      await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'maintenance');
+    }
+    return { entered, state, live };
+  });
+  if (!entered) ctx.log('drain-reopened', { state, live });
+  return entered;
+}
+
+function pause(ctx: UpgradeContext): Promise<unknown> {
+  return new Promise((resolve) => setTimeout(resolve, ctx.drainPollMs ?? 5000));
+}
+
+function drainDeadline(ctx: UpgradeContext): number {
+  return (ctx.drainDeadlineAt ??= Date.now() + ctx.drainDeadlineMs);
+}
+
+/** Ends a drain whose recount still finds admissions reopened once the one deadline has passed. */
+function reopenedAtDeadline(ctx: UpgradeContext): boolean {
+  if (!ctx.forceDrain) {
+    throw new Error(
+      `Admissions were reopened after ${Math.round(ctx.drainDeadlineMs / 1000)}s of draining. ` +
+        `Re-run with --force to enter maintenance anyway, or wait and try again.`,
+    );
+  }
+  ctx.log('drain-forced', { live: 0 });
+  return true;
+}
+
+/** Waits until no work is live; true when the deadline passed and the caller chose to force. */
+async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
+  const deadline = drainDeadline(ctx);
   for (;;) {
-    const live = await liveTaskCount(ctx.sql);
+    const live = await liveWorkCount(ctx.sql);
     if (live === 0) {
       ctx.log('drained', { live: 0 });
-      return;
+      return false;
     }
     if (Date.now() >= deadline) {
       // A deadline with no declared fallback is how maintenance windows get skipped: the operator
       // waits forever on somebody else's task. Forcing is a CHOICE the caller made, not a default.
       if (ctx.forceDrain) {
         ctx.log('drain-forced', { live });
-        return;
+        return true;
       }
       throw new Error(
-        `${live} task(s) are still live after ${Math.round(ctx.drainDeadlineMs / 1000)}s. ` +
+        `${live} task(s) or background job(s) are still live after ${Math.round(ctx.drainDeadlineMs / 1000)}s. ` +
           `Re-run with --force to stop them, or wait and try again.`,
       );
     }
-    await new Promise((r) => setTimeout(r, 5000));
+    await pause(ctx);
   }
+}
+
+export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
+  await enterPhase(ctx.sql, ctx.runId, 'draining');
+  await setMaintenanceState(ctx.sql, 'draining');
+  ctx.log('draining', { deadlineMs: ctx.drainDeadlineMs });
+  ctx.drainForced = await awaitDrain(ctx);
 }
 
 export async function phaseMaintenance(ctx: UpgradeContext): Promise<void> {
   await enterPhase(ctx.sql, ctx.runId, 'maintenance');
-  await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'maintenance');
+  let forced = ctx.drainForced === true;
+  while (!forced && !(await enterMaintenance(ctx))) {
+    await enterPhase(ctx.sql, ctx.runId, 'draining');
+    forced = await awaitDrain(ctx);
+    if (!forced && Date.now() >= drainDeadline(ctx)) forced = reopenedAtDeadline(ctx);
+    // Without this pause, a state rewritten again and again with nothing live spins the recount.
+    if (!forced) await pause(ctx);
+    await enterPhase(ctx.sql, ctx.runId, 'maintenance');
+  }
+  if (forced) await setMaintenanceState(ctx.sql, 'maintenance');
   ctx.log('maintenance');
 }
 
@@ -217,7 +308,7 @@ export async function rollback(ctx: UpgradeContext, reason: string): Promise<voi
   ctx.log('rollback', { to: ctx.fromVersion, reason });
   await setEnvVar(ctx.envFile, 'HAIVE_VERSION', ctx.fromVersion);
   await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion));
-  await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'normal');
+  await setMaintenanceState(ctx.sql, 'normal');
   await finishRun(ctx.sql, ctx.runId, 'rolled_back', reason);
   ctx.log('rolled-back', { version: ctx.fromVersion });
 }
@@ -240,7 +331,7 @@ export async function phaseCommit(ctx: UpgradeContext): Promise<void> {
   );
   ctx.log('destructive-data-migrations', { tail: out.split('\n').slice(-1)[0] ?? '' });
 
-  await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'normal');
+  await setMaintenanceState(ctx.sql, 'normal');
   await finishRun(ctx.sql, ctx.runId, 'done');
   ctx.log('done', { version: ctx.target.version });
 }
