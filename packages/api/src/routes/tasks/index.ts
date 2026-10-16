@@ -756,7 +756,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         .onConflictDoNothing();
     }
     await appendTaskEvent(handle, created.id, null, 'task.created', { userId });
-    return markQueuedForStart(handle, created.id);
+    return body.deferStart ? undefined : markQueuedForStart(handle, created.id);
   };
   let task: typeof schema.tasks.$inferSelect;
   let queued: typeof schema.tasks.$inferSelect | undefined;
@@ -1193,7 +1193,7 @@ taskRoutes.post('/:id/action', async (c) => {
     case 'start': {
       await assertNewWorkAllowed();
       refuseDeadTask(task);
-      // The second half of a two-phase create (POST /plan/build with
+      // The second half of a two-phase create (POST /plan/build or POST /tasks with
       // `deferStart`): the row was made unstarted so the caller could upload
       // attachments, and this enqueues it once they landed.
       //
