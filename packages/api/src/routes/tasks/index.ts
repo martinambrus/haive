@@ -768,7 +768,6 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
     // upgrade's lock. A workflow or run_app task on a repo mid-onboarding stays the caller's call.
     const repositoryId = body.repositoryId;
     ({ task, queued } = await withRepositoryTaskLock(db, repositoryId, async (tx) => {
-      await admitNewWork(tx);
       const liveId = await liveOnboardingTaskId(tx, userId, repositoryId);
       if (liveId) {
         throw new HttpError(409, liveOnboardingMessage(liveId));
@@ -779,7 +778,6 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
     }));
   } else {
     const create = async (tx: DbTx) => {
-      await admitNewWork(tx);
       const row = firstRow(await insertTask(tx));
       await pinDatabase(tx, row);
       return { task: row, queued: await settle(tx, row) };
@@ -790,7 +788,10 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
     ({ task, queued } =
       definition.takesRootLock && body.repositoryId
         ? await withRepositoryTaskLock(db, body.repositoryId, create)
-        : await db.transaction(create));
+        : await db.transaction(async (tx) => {
+            await admitNewWork(tx);
+            return create(tx);
+          }));
   }
 
   // `implements` ONLY. Taskable means "one task could implement this", which is

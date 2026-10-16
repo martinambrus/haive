@@ -876,16 +876,19 @@ function liveUpgradeMessage(taskId: string): string {
   return `An upgrade or rollback is already in progress for this repository (task ${taskId})`;
 }
 
-/** Run `work` in a transaction holding the repository's onboarding and upgrade lock, so the checks
- *  it makes and the insert it ends with cannot interleave with another creator's. The repository
- *  row is locked too, and a live root claim refuses: a reset that claims the root afterwards waits
- *  for this commit and finds the task among the writers it refuses for. */
+/** Run `work` in a transaction that admits the new work, then holds the repository's onboarding and
+ *  upgrade lock, so the checks it makes and the insert it ends with cannot interleave with another
+ *  creator's. The repository row is locked too, and a live root claim refuses: a reset that claims
+ *  the root afterwards waits for this commit and finds the task among the writers it refuses for. */
 export async function withRepositoryTaskLock<T>(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
   work: (tx: DbTx, repo: RepositoryForUpgrade) => Promise<T>,
 ): Promise<T> {
-  return db.transaction(async (tx) => work(tx, await lockRepositoryTasks(tx, repositoryId)));
+  return db.transaction(async (tx) => {
+    await admitNewWork(tx);
+    return work(tx, await lockRepositoryTasks(tx, repositoryId));
+  });
 }
 
 async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
@@ -945,7 +948,6 @@ export async function insertUpgradeTask<T>(
   insert: (tx: DbTx) => Promise<T>,
 ): Promise<T> {
   return withRepositoryTaskLock(db, repositoryId, async (tx, repo) => {
-    await admitNewWork(tx);
     await refuseBesideLiveUpgrade(tx, repositoryId);
     const admission = await upgradeAdmission(tx, userId, repo);
     if (!admission.admitted) {

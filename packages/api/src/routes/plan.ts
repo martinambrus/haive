@@ -54,7 +54,7 @@ import { appendPlanAnswer, humanPlanAction } from '@haive/shared/plan-resolution
 import { resolveRepoRoot } from './repos.js';
 import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
 import { requireAuth } from '../middleware/auth.js';
-import { requireNewWorkAllowed } from '../middleware/maintenance.js';
+import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { enqueuePlanTask, spawnPlanTask } from '../lib/spawn-plan-task.js';
 import { enqueueStart } from '../lib/task-start.js';
@@ -1263,6 +1263,7 @@ planRoutes.post('/:id/plan/merge', requireNewWorkAllowed, async (c) => {
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
   // Under the lock a Save/Pull integration and a cancel's discard take around the scratch worktree.
   const taskId = await getDb().transaction(async (tx) => {
+    await admitNewWork(tx);
     await lockPlanMerge(tx, repositoryId);
     // One live merge worktree per repository. A second conversation would build its
     // own on top of the first one's and neither could land.
@@ -1390,6 +1391,7 @@ planRoutes.post('/:id/plan/nodes/:nodeId/advisory', requireNewWorkAllowed, async
   const node = await requireNode(repositoryId, nodeId);
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
   const { taskId, created } = await getDb().transaction(async (tx) => {
+    await admitNewWork(tx);
     // Two clicks (including from two tabs) serialize on the node, so both
     // continue the same advisory. Its row commits before any queue delivery.
     const [locked] = await tx

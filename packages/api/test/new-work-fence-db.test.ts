@@ -1,6 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDatabase, schema, type Database } from '@haive/database';
+import { createDatabase, lockRepositoryRow, schema, type Database } from '@haive/database';
 
 const url = process.env.NEW_WORK_FENCE_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/new_work_fence_test'))
@@ -54,7 +54,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
 });
 
 import { Hono } from 'hono';
-import { TASK_JOB_NAMES } from '@haive/shared';
+import { lockNewWorkFenceShared, TASK_JOB_NAMES } from '@haive/shared';
 import { maintenanceRoutes } from '../src/routes/maintenance.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { retryTaskAtStep } from '../src/routes/tasks/steps.js';
@@ -131,6 +131,16 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       if (Date.now() > deadline) throw new Error('the request never waited for the new-work fence');
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
+  };
+  /** The advisory locks held by the backend that waits for the fence, which nobody holding the fence can take. */
+  const lockedWhileWaitingForTheFence = async () => {
+    const [row] = await db.execute<{ n: number }>(
+      sql`select count(*)::int as n from pg_locks
+           where locktype = 'advisory' and granted
+             and pid in (select pid from pg_locks
+                          where locktype = 'advisory' and not granted and mode = 'ShareLock')`,
+    );
+    return row?.n;
   };
   /** The updater writes the new state while it holds the fence, then lets go. */
   const drain = async () => {
@@ -292,6 +302,58 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       expect(await tasks()).toHaveLength(0);
       expect(h.queued).toEqual([]);
       expect(h.reads).toEqual(['normal', 'draining']);
+    });
+
+    it('holds no repository lock while it waits for a drain queued behind an admission, and is refused after it', async () => {
+      await holdFenceShared();
+      const write = put('/admin/maintenance', { state: 'draining' });
+      await untilBlocked('ExclusiveLock');
+      const request = create();
+      await untilBlocked();
+
+      expect(await lockedWhileWaitingForTheFence()).toBe(0);
+
+      await releaseFence();
+      expect(await answered(write)).toMatchObject({ status: 200 });
+      expect(await answered(request)).toEqual({
+        status: 503,
+        body: { error: REFUSAL, code: null },
+      });
+      expect(await tasks()).toHaveLength(0);
+    });
+
+    it('lets a revival that holds the fence shared take the repository lock, with a drain queued between them', async () => {
+      let proceed!: () => void;
+      const go = new Promise<void>((resolve) => (proceed = resolve));
+      let holding!: () => void;
+      const holds = new Promise<void>((resolve) => (holding = resolve));
+      const revival = db.transaction(async (tx) => {
+        await lockNewWorkFenceShared(tx);
+        holding();
+        await go;
+        await tx.execute(sql`set local lock_timeout = '300ms'`);
+        await lockRepositoryRow(tx, repositoryId);
+      });
+      try {
+        await holds;
+        const write = put('/admin/maintenance', { state: 'draining' });
+        await untilBlocked('ExclusiveLock');
+        const request = create();
+        await untilBlocked();
+
+        proceed();
+
+        await expect(revival).resolves.toBeUndefined();
+        expect(await answered(write)).toMatchObject({ status: 200 });
+        expect(await answered(request)).toEqual({
+          status: 503,
+          body: { error: REFUSAL, code: null },
+        });
+        expect(await tasks()).toHaveLength(0);
+      } finally {
+        proceed();
+        await revival.catch(() => undefined);
+      }
     });
   });
 
