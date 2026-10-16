@@ -22,6 +22,10 @@ import {
   type RepoResourceCleanupPayload,
 } from '@haive/shared';
 import { reconcileStrandedSyncingBundles } from '../data-migrations.js';
+import { resyncAfterTaskEnd } from '../project-state/set-aside.js';
+import { recordLeftOpenMerges } from '../step-engine/left-open-merge.js';
+import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
+import { discardPlanMerge } from '../step-engine/steps/plan/01-plan-merge.js';
 import {
   enqueueAdvance,
   enqueueCancel,
@@ -428,22 +432,15 @@ export const defaultCancelDeps: CancelRedriveDeps = {
 };
 
 export const CANCEL_REDRIVE_BATCH = 20;
-/** A teardown that fails every time is re-driven this often, then left for a person. */
+/** A teardown that fails every time is re-driven this often, then abandoned. */
 export const CANCEL_REDRIVE_MAX = 3;
 const CANCEL_REDRIVEN_EVENT = 'task.cancel_redriven';
-/** Older cancellations are left alone: many predate the finish record. */
+/** The re-drive leaves older cancellations alone: many predate the finish record. */
 export const CANCEL_REDRIVE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Queues a CANCEL for a task cancelled before the cutoff with no `task.cancel_finished`: the api commits the cancel before queueing. */
-export async function redriveCancelledTasks(
-  db: Database,
-  deps: CancelRedriveDeps = defaultCancelDeps,
-  opts: { staleMs: number },
-): Promise<number> {
-  const now = Date.now();
-  const cutoff = new Date(now - opts.staleMs);
-  const since = new Date(now - CANCEL_REDRIVE_LOOKBACK_MS);
-  const event = (type: string, ...more: ReturnType<typeof eq>[]) =>
+/** For `exists`: the events of one type on the task of the outer query. */
+function taskEventsOf(db: Database) {
+  return (type: string, ...more: ReturnType<typeof eq>[]) =>
     db
       .select({ one: sql`1` })
       .from(schema.taskEvents)
@@ -454,6 +451,18 @@ export async function redriveCancelledTasks(
           ...more,
         ),
       );
+}
+
+/** Queues a CANCEL for a task cancelled before the cutoff with no `task.cancel_finished`: the api commits the cancel before queueing. */
+export async function redriveCancelledTasks(
+  db: Database,
+  deps: CancelRedriveDeps = defaultCancelDeps,
+  opts: { staleMs: number },
+): Promise<number> {
+  const now = Date.now();
+  const cutoff = new Date(now - opts.staleMs);
+  const since = new Date(now - CANCEL_REDRIVE_LOOKBACK_MS);
+  const event = taskEventsOf(db);
   const candidates = await db
     .select({
       taskId: schema.tasks.id,
@@ -491,7 +500,7 @@ export async function redriveCancelledTasks(
       if (attempt >= CANCEL_REDRIVE_MAX) {
         log.warn(
           { taskId: t.taskId, attempt },
-          'last re-drive of a cancelled task whose teardown keeps failing; it is left for a person',
+          'last re-drive of a cancelled task whose teardown keeps failing; if it fails too, the teardown is abandoned',
         );
       } else {
         log.info(
@@ -504,6 +513,98 @@ export async function redriveCancelledTasks(
     }
   }
   return redriven;
+}
+
+async function abandonTeardown(db: Database, taskId: string, reason: string): Promise<void> {
+  // A throw stops here, before any release: the merge is unreported and the next pass retries.
+  await recordLeftOpenMerges(db, taskId);
+  const steps = [
+    ['releaseTaskMergeClaims', releaseTaskMergeClaims],
+    ['discardPlanMerge', discardPlanMerge],
+    ['resyncAfterTaskEnd', resyncAfterTaskEnd],
+  ] as const;
+  // A failed step is logged, not retried: the record below is what frees the dir (`liveClaimHolder`).
+  for (const [step, run] of steps) {
+    try {
+      await run(db, taskId);
+    } catch (err) {
+      log.warn(
+        { err, taskId, step },
+        'a teardown step failed for a cancelled task being abandoned',
+      );
+    }
+  }
+  await db.insert(schema.taskEvents).values({
+    taskId,
+    taskStepId: null,
+    eventType: 'task.cancel_finished',
+    payload: { source: 'worker', abandoned: true, reason },
+  });
+  log.warn(
+    { taskId, reason },
+    'abandoned the teardown of a cancelled task; its merge dir claims are released',
+  );
+}
+
+/** Finishes as abandoned the cancel of a task still holding a merge dir claim that the re-drive no
+ *  longer retries: capped with its last attempt past the cutoff, or cancelled before the window. */
+export async function abandonCancelledTeardowns(
+  db: Database,
+  deps: Pick<CancelRedriveDeps, 'queuedCancelTaskIds'> = defaultCancelDeps,
+  opts: { staleMs: number },
+): Promise<number> {
+  const now = Date.now();
+  const cutoff = new Date(now - opts.staleMs);
+  const since = new Date(now - CANCEL_REDRIVE_LOOKBACK_MS);
+  const event = taskEventsOf(db);
+  const attemptCount = sql`(select count(*)::int from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${schema.tasks.id} and ${schema.taskEvents.eventType} = ${CANCEL_REDRIVEN_EVENT})`;
+  const candidates = await db
+    .select({ taskId: schema.tasks.id, attempts: sql<number>`${attemptCount}` })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.status, 'cancelled'),
+        not(exists(event('task.cancel_finished'))),
+        exists(
+          db
+            .select({ one: sql`1` })
+            .from(schema.mergeDirClaims)
+            .where(eq(schema.mergeDirClaims.taskId, schema.tasks.id)),
+        ),
+        or(
+          and(
+            sql`${attemptCount} >= ${CANCEL_REDRIVE_MAX}`,
+            not(exists(event(CANCEL_REDRIVEN_EVENT, gte(schema.taskEvents.createdAt, cutoff)))),
+          ),
+          not(exists(event('task.cancelled', gt(schema.taskEvents.createdAt, since)))),
+        ),
+      ),
+    )
+    .orderBy(asc(schema.tasks.updatedAt))
+    .limit(CANCEL_REDRIVE_BATCH);
+  if (candidates.length === 0) return 0;
+
+  const queued = await deps.queuedCancelTaskIds();
+  if (queued === null) return 0;
+
+  let abandoned = 0;
+  for (const t of candidates) {
+    if (queued.has(t.taskId)) continue;
+    const reason =
+      t.attempts >= CANCEL_REDRIVE_MAX
+        ? 're-drive cap reached'
+        : 'cancelled before the re-drive window';
+    try {
+      await abandonTeardown(db, t.taskId, reason);
+      abandoned++;
+    } catch (err) {
+      log.error(
+        { err, taskId: t.taskId },
+        'the teardown of a cancelled task could not be abandoned',
+      );
+    }
+  }
+  return abandoned;
 }
 
 export interface RepoCleanupDeps {
@@ -624,6 +725,7 @@ export class StalledTaskSweeper {
   private readonly staleMs: number;
   private timer: NodeJS.Timeout | null = null;
   private inFlight = false;
+  private abandoning = false;
 
   constructor(opts: StalledTaskSweeperOptions) {
     this.db = opts.db;
@@ -655,10 +757,22 @@ export class StalledTaskSweeper {
     this.timer = null;
   }
 
+  // Its dir locks wait without bound behind a merge, so the sweep never waits for the pass.
+  private startAbandonPass(): void {
+    if (this.abandoning) return;
+    this.abandoning = true;
+    abandonCancelledTeardowns(this.db, defaultCancelDeps, { staleMs: this.staleMs })
+      .catch((err) => log.warn({ err }, 'abandoning cancelled task teardowns failed'))
+      .finally(() => {
+        this.abandoning = false;
+      });
+  }
+
   /** Exposed for deterministic tests. */
   async sweep(): Promise<{ redriven: number }> {
     let redriven = await redriveStalledTasks(this.db, defaultDeps, { staleMs: this.staleMs });
     redriven += await redriveCancelledTasks(this.db, defaultCancelDeps, { staleMs: this.staleMs });
+    this.startAbandonPass();
     redriven += await redriveRepoCleanups(this.db);
     await reconcileStrandedSyncingBundles(this.db);
     return { redriven };
