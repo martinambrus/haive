@@ -81,6 +81,7 @@ import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
 import { isTaskDead, loadTaskDead, refuseDeadTask } from '../../lib/task-dead.js';
 import { loadTaskStop } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
+import { isUuid } from '../../lib/uuid.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
@@ -117,6 +118,14 @@ export const taskRoutes = new Hono<AppEnv>();
 
 taskRoutes.use('*', requireAuth);
 
+function repositoryIdQuery(raw: string | undefined): string | undefined {
+  const repositoryId = raw?.trim() || undefined;
+  if (repositoryId && !isUuid(repositoryId)) {
+    throw new HttpError(400, 'repositoryId must be a UUID');
+  }
+  return repositoryId;
+}
+
 taskRoutes.get('/', async (c) => {
   const userId = c.get('userId');
   const db = getDb();
@@ -124,7 +133,7 @@ taskRoutes.get('/', async (c) => {
   // Server-side pagination + filtering so large projects ship only one slice to
   // the client (the web listing scrolls more pages in on demand). Mirrors the
   // global-kb /entries pattern: page/pageSize + count(*) + a filter facet.
-  const repositoryId = c.req.query('repositoryId')?.trim() || undefined;
+  const repositoryId = repositoryIdQuery(c.req.query('repositoryId'));
   const statusToken = c.req.query('status')?.trim();
   const q = c.req.query('q')?.trim();
   // `sort=updated` orders by last change instead of creation. The human listing wants
@@ -817,7 +826,7 @@ taskRoutes.post('/', async (c) => {
 // path isn't captured as a task id.
 taskRoutes.get('/feature-suggestions', async (c) => {
   const userId = c.get('userId');
-  const repositoryId = c.req.query('repositoryId')?.trim();
+  const repositoryId = repositoryIdQuery(c.req.query('repositoryId'));
   const q = c.req.query('q')?.trim();
   if (!repositoryId || !q || q.length < 2) return c.json({ suggestions: [] });
   const db = getDb();
@@ -859,7 +868,7 @@ taskRoutes.get('/feature-suggestions', async (c) => {
 // not captured as a task id. With no repositoryId it reads all of the user's tasks.
 taskRoutes.get('/last-cli', async (c) => {
   const userId = c.get('userId');
-  const repositoryId = c.req.query('repositoryId')?.trim();
+  const repositoryId = repositoryIdQuery(c.req.query('repositoryId'));
   const db = getDb();
   const scope = repositoryId
     ? and(eq(schema.tasks.userId, userId), eq(schema.tasks.repositoryId, repositoryId))
@@ -917,7 +926,7 @@ taskRoutes.get('/last-cli', async (c) => {
 // Static path — must stay ABOVE '/:id' so it is not captured as an id.
 taskRoutes.get('/estimation-accuracy', async (c) => {
   const userId = c.get('userId');
-  const repositoryId = c.req.query('repositoryId')?.trim();
+  const repositoryId = repositoryIdQuery(c.req.query('repositoryId'));
   if (!repositoryId) throw new HttpError(400, 'repositoryId is required');
   const db = getDb();
 

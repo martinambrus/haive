@@ -53,6 +53,7 @@ import { recordAuditEvent } from '../lib/audit.js';
 import { getGlobalKbSyncQueue } from '../queues.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
+import { isUuid } from '../lib/uuid.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -157,11 +158,9 @@ function lockBusyError(err: unknown): never {
   throw err;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 // Postgres refuses a non-uuid in a uuid comparison, and that error would answer 500.
 function entryIdParam(raw: string): string {
-  if (!UUID_RE.test(raw)) throw new HttpError(404, 'global KB entry not found');
+  if (!isUuid(raw)) throw new HttpError(404, 'global KB entry not found');
   return raw;
 }
 
@@ -733,6 +732,9 @@ globalKbRoutes.get('/entries', async (c) => {
   const category = c.req.query('category');
   const framework = c.req.query('framework');
   const sourceTaskId = c.req.query('sourceTaskId');
+  if (sourceTaskId && !isUuid(sourceTaskId)) {
+    throw new HttpError(400, 'sourceTaskId must be a UUID');
+  }
   const q = c.req.query('q')?.trim();
   const page = Math.max(1, Math.floor(Number(c.req.query('page') ?? '1')) || 1);
   const pageSize = Math.min(

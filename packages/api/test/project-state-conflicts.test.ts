@@ -326,6 +326,11 @@ describe('GET /repos/:id/project-state/conflicts/:conflictId', () => {
     expect(res.status).toBe(404);
   });
 
+  it('is a 404 for a question id that is not a uuid', async () => {
+    const res = await app.request(`/repos/${REPO}/project-state/conflicts/not-a-uuid`);
+    expect(res.status).toBe(404);
+  });
+
   it('is a 404 for a row of another repository, and for another user’s repository', async () => {
     const other = await app.request(`/repos/${REPO}/project-state/conflicts/${OTHER_REPO_ROW}`);
     expect(other.status).toBe(404);

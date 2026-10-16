@@ -7,6 +7,7 @@ import {
   CLI_PROVIDER_LIST,
   DISPLAY_CURRENCIES,
   PRICE_FEEDS,
+  cliProviderNameSchema,
   logger,
   normalizeModelKey,
   type CliProviderName,
@@ -109,6 +110,9 @@ cliPricingRoutes.get('/history', async (c) => {
   const modelKey = normalizeModelKey(c.req.query('modelKey'));
   if (!modelKey) throw new HttpError(400, 'modelKey is required');
   const providerParam = c.req.query('provider');
+  if (providerParam && !cliProviderNameSchema.safeParse(providerParam).success) {
+    throw new HttpError(400, 'provider must be a CLI provider name');
+  }
   const rows = await db
     .select()
     .from(schema.cliModelPrices)

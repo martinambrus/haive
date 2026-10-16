@@ -1,4 +1,5 @@
 import { HttpError } from '../../context.js';
+import { isUuid } from '../../lib/uuid.js';
 
 /** How many COMPLETED runs one page of a step's terminal history carries when the
  *  caller names no limit. A step can accumulate hundreds of invocations (156 on the
@@ -9,10 +10,6 @@ export const DEFAULT_INVOCATION_HISTORY_LIMIT = 20;
 /** Upper bound a caller may ask for. Deliberately modest: the point of the page is
  *  that the browser never holds the whole history at once. */
 export const MAX_INVOCATION_HISTORY_LIMIT = 100;
-
-/** A UUID, loosely — enough to reject a cursor that is not an id before it reaches
- *  Postgres, which errors on a malformed uuid literal rather than returning no rows. */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface InvocationHistoryQuery {
   /** Completed rows to return in this page. ACTIVE rows are always returned in full
@@ -52,7 +49,7 @@ export function parseInvocationHistoryQuery(raw: {
   }
   let cursor: string | null = null;
   if (raw.historyCursor !== undefined && raw.historyCursor !== '') {
-    if (!UUID_RE.test(raw.historyCursor)) throw new HttpError(400, 'historyCursor must be a UUID');
+    if (!isUuid(raw.historyCursor)) throw new HttpError(400, 'historyCursor must be a UUID');
     cursor = raw.historyCursor;
   }
   return { limit, cursor };
