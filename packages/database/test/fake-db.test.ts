@@ -520,6 +520,37 @@ describe('the timeouts a section sets on the fake', () => {
   });
 });
 
+describe('the shared advisory lock on the fake', () => {
+  const share = (db: Database) =>
+    db.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended(${'fence'}, 0))`);
+
+  it('is accepted inside a transaction and makes no section wait for another', async () => {
+    const { db } = setup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let entered!: () => void;
+    const firstIn = new Promise<void>((resolve) => (entered = resolve));
+
+    const first = db.transaction(async (tx) => {
+      await share(tx as unknown as Database);
+      entered();
+      await gate;
+    });
+    await firstIn;
+    await db.transaction(async (tx) => {
+      await share(tx as unknown as Database);
+    });
+
+    release();
+    await first;
+  });
+
+  it('is refused outside a transaction, since a transaction lock means nothing there', async () => {
+    const { db } = setup();
+    await expect(share(db)).rejects.toThrow('fake db: unsupported execute');
+  });
+});
+
 describe('the attachments lock on the fake', () => {
   it('lets one section in at a time per task, and never blocks another task', async () => {
     const { fake, db } = setup();

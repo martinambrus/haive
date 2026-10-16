@@ -1,15 +1,16 @@
-import { schema, type Database } from '@haive/database';
+import { schema, type DbTx } from '@haive/database';
 import { getDb } from '../db.js';
 import { HttpError } from '../context.js';
+import { admitNewWork } from '../middleware/maintenance.js';
 import { definitionForCreate } from './task-type-definition.js';
 import { enqueueStart, markQueuedForStart } from './task-start.js';
 
-/** Insert the task row and enqueue it. Mirrors global-kb's enrich endpoint —
- *  the established "UI button -> LLM work" path. */
+/** Insert the task row, seed it and queue it in one transaction, then enqueue START after the
+ *  commit. Mirrors global-kb's enrich endpoint — the established "UI button -> LLM work" path. */
 export async function spawnPlanTask(args: {
-  /** For a caller-owned transaction, use enqueue: false and call enqueuePlanTask
-   *  after commit. Allows creation to serialize with a node's other starts. */
-  db?: Pick<Database, 'insert' | 'select'>;
+  /** A caller-owned transaction, which queues the task; call enqueueStart once it commits.
+   *  Allows creation to serialize with a node's other starts. */
+  db?: DbTx;
   userId: string;
   repositoryId: string;
   type: 'plan_build' | 'plan_chat' | 'advisory' | 'plan_sequence' | 'plan_merge';
@@ -22,10 +23,11 @@ export async function spawnPlanTask(args: {
    *  Claude, through an explicit `01-plan-chat` preference saved days earlier. A CLI changed on the
    *  running task still wins, through the touched-marker rule the New Task form's switch uses. */
   ignoreSavedStepClis?: boolean;
-  /** Runs after the task row exists and BEFORE the job is enqueued. Anything a
+  /** Runs after the task row exists and BEFORE the job is enqueued, in the creating transaction
+   *  `tx`, where the row is invisible to every other handle until it commits. Anything a
    *  step's detect() must already see belongs here: once the job is on the
    *  queue the worker can pick it up immediately, and it does. */
-  seed?: (taskId: string) => Promise<void>;
+  seed?: (taskId: string, tx: DbTx) => Promise<void>;
   /** Default true. False creates the row and stops: the caller is going to write
    *  something the seed hook cannot express — a stream of uploaded files, whose
    *  count and success are only known to the client — and will enqueue with the
@@ -33,39 +35,47 @@ export async function spawnPlanTask(args: {
    *  what that action claims. */
   enqueue?: boolean;
 }): Promise<string> {
-  const db = args.db ?? getDb();
-  const { runListSnapshot, customSteps } = await definitionForCreate(db, args.type, {
-    generic: false,
-  });
-  const [task] = await db
-    .insert(schema.tasks)
-    .values({
-      userId: args.userId,
-      type: args.type,
-      title: args.title.slice(0, 512),
-      description: args.description ?? null,
-      repositoryId: args.repositoryId,
-      cliProviderId: args.cliProviderId,
-      ignoreSavedStepClis: args.ignoreSavedStepClis ?? false,
-      metadata: args.metadata,
-      autoContinue: true,
-      runListSnapshot,
-      customSteps,
-      status: 'created',
-    })
-    .returning();
-  if (!task) throw new HttpError(500, 'failed to create plan task');
+  const create = async (tx: DbTx): Promise<string> => {
+    await admitNewWork(tx);
+    const { runListSnapshot, customSteps } = await definitionForCreate(tx, args.type, {
+      generic: false,
+    });
+    const [task] = await tx
+      .insert(schema.tasks)
+      .values({
+        userId: args.userId,
+        type: args.type,
+        title: args.title.slice(0, 512),
+        description: args.description ?? null,
+        repositoryId: args.repositoryId,
+        cliProviderId: args.cliProviderId,
+        ignoreSavedStepClis: args.ignoreSavedStepClis ?? false,
+        metadata: args.metadata,
+        autoContinue: true,
+        runListSnapshot,
+        customSteps,
+        status: 'created',
+      })
+      .returning();
+    if (!task) throw new HttpError(500, 'failed to create plan task');
 
-  if (args.seed) await args.seed(task.id);
+    if (args.seed) await args.seed(task.id, tx);
+    if (args.enqueue !== false) await markQueuedForStart(tx, task.id);
+    return task.id;
+  };
+  if (args.db) return create(args.db);
 
-  if (args.enqueue === false) return task.id;
-
-  await enqueuePlanTask(task.id, args.userId);
-  return task.id;
+  const taskId = await getDb().transaction(create);
+  if (args.enqueue !== false) await enqueueStart(taskId, args.userId);
+  return taskId;
 }
 
 /** Called after a caller-owned transaction commits; never expose a queued job
  * whose task row is still invisible to the worker. The START claim is idempotent. */
 export async function enqueuePlanTask(taskId: string, userId: string): Promise<void> {
-  if (await markQueuedForStart(getDb(), taskId)) await enqueueStart(taskId, userId);
+  const queued = await getDb().transaction(async (tx) => {
+    await admitNewWork(tx);
+    return markQueuedForStart(tx, taskId);
+  });
+  if (queued) await enqueueStart(taskId, userId);
 }

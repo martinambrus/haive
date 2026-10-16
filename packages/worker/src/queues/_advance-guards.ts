@@ -47,19 +47,21 @@ export function staleSubmitAction(
 /** Whether a failed task keeps an advance out. A Retry, a Resume and the allowance auto-resume each
  *  set the task `running` before their advance runs, so a task still `failed` has not been reopened.
  *  An answer submitted to a form still parked is the exception: answering it is what reopens the
- *  task. An advance that carries no answer is not one, whatever the row says. A fix-loop gate answer
- *  sent after the task failed also gets through onto a `done` row, because the gate closes its row
- *  before it acts and a worker can die in between. */
+ *  task, so it is kept out too while new work is held. An advance that carries no answer is not one,
+ *  whatever the row says. A fix-loop gate answer sent after the task failed also gets through onto a
+ *  `done` row, because the gate closes its row before it acts and a worker can die in between; it
+ *  too is kept out while new work is held. */
 export function failedTaskRefusesAdvance(
   taskStatus: string,
   rowStatus: string | null | undefined,
   carriesFormValues: boolean,
   gateAnswerAfterFailure = false,
+  newWorkHeld = false,
 ): boolean {
   return (
     taskStatus === 'failed' &&
-    !(rowStatus === 'waiting_form' && carriesFormValues) &&
-    !(rowStatus === 'done' && gateAnswerAfterFailure)
+    !(rowStatus === 'waiting_form' && carriesFormValues && !newWorkHeld) &&
+    !(rowStatus === 'done' && gateAnswerAfterFailure && !newWorkHeld)
   );
 }
 

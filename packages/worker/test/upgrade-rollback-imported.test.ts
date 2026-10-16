@@ -80,7 +80,10 @@ describe('04 detect after an import', () => {
 
 describe('04 apply restoring a retired import marker', () => {
   it('inserts it as a marker, not as a rollback row', async () => {
-    const fake = createFakeDb({ onboardingArtifacts: schema.onboardingArtifacts });
+    const fake = createFakeDb({
+      onboardingArtifacts: schema.onboardingArtifacts,
+      repositories: schema.repositories,
+    });
     const importedAt = new Date('2026-09-20T00:00:00Z');
     const upgradeRow = fake.insert(schema.onboardingArtifacts, {
       userId: USER,

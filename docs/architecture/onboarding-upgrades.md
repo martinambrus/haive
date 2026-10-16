@@ -338,8 +338,11 @@ when `rtkLeftoversToRemove` holds, a recorded choice and the switch off; the ban
 strip all ask it, so the banner offers exactly what the upgrade will do.
 
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
-`rtk_enabled` wherever the context recorded a choice. One from before RTK recorded none and stays
-off, since the column defaults on. The RTK settings files (kind `rtk-config`) then read as
+`rtk_enabled` wherever the choice is recorded (`isRtkChoiceRecorded`): the context recorded one, or a
+person switched RTK on this install (`repositories.rtk_choice_made_at`, stamped by the Tooling page's
+PATCH when the value changes and by taking the team's value in the RTK question). A context from
+before RTK recorded none and, unless a person switched RTK since, stays off, since the column
+defaults on. The RTK settings files (kind `rtk-config`) then read as
 `obsolete` and go only under the rule above, and 03 records each removal (`deletedPaths`, `git rm
 --cached` while the path is still absent), or HEAD would keep the hook and every worktree checked
 out from it would restore it. Nothing records the ones a blank scaffold seeds (a row needs a task,
@@ -392,7 +395,8 @@ nothing. A repository never onboarded gets neither, since POST /tasks refuses it
 Switching RTK back on offers the settings files again, and the banner says so: an
 upgrade or a sync computed while it was off left their ids out of `applicable_template_ids`, so upgrade-status
 counts an RTK template as applicable again while RTK is on and the providers of the context 01
-renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders from too).
+renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders from too):
+for a context recovered from the last onboarding, the providers its step 07 recorded.
 Both resolve that context in one order (`renderContextOrigin`, `@haive/shared/project-state`).
 A writer (12, 02, 04) whose record write fails clears the column, so that order falls back to the
 snapshot its own rows carry rather than to a column it could not move (`writeProjectStateRecord`).
@@ -401,12 +405,16 @@ The step does not fail: it keeps a warning and reports `recordWrite: 'failed'` i
 A fenced write (02's) clears it only while it still holds a context 02 planned against: a sync
 that took the lock after the failed write and before the clear is newer than both, and stays.
 First comes the repository's render context column, whose RTK choice is its stored
-`rtkChoiceRecorded` and whose providers are its own or, for a column the project-state sync filled
+`rtkChoiceRecorded` or a person's switch (`rtk_choice_made_at`), as everywhere the choice is read,
+and whose providers are its own or, for a column the project-state sync filled
 with the portable fields alone, the owner's enabled ones. Then comes the newest snapshot that
 recorded the choice, ahead of one from before RTK (`pickSnapshotRow`, by `newestArtifactsFirst`),
 since an upgrade replaces only the paths it writes and rows from several runs stay live side by
-side. So the banner and the plan read the same context, and a repository whose snapshots all
-predate RTK stays quiet.
+side. Once a person has switched RTK, the switch is the choice, so the newest snapshot is read
+whatever it holds and an older row that recorded RTK no longer hands the plan an older framework
+or older targets. A rollback that takes the live rows' context picks the same way, and expands its
+applicable set with the switch, as every reader renders it. So the banner and the plan read the
+same context, and a repository whose snapshots all predate RTK stays quiet.
 
 **A key both installs changed is held for an answer, never settled for the column's side.** The
 project-state sync merges the checkout's record against the base it last synced from. A render key
@@ -459,9 +467,9 @@ the checkout deleted never makes a conflict: the sync returns `absent` before it
 
 **One question is not a render key: an imported RTK-off this install never applied.** A repository
 imported before the mirror import set `rtk_enabled` from the tooling it read holds the column's
-default `true` beside imported tooling that says `rtkEnabled: false`. The tooling page writes the
-column alone, so nothing says whether a person switched RTK back on since, and a migration would
-have to choose. `needsRtkQuestion` (`project-state/rtk-conflict.ts`, pure) asks exactly when the
+default `true` beside imported tooling that says `rtkEnabled: false`. Before `rtk_choice_made_at`
+(0208) the tooling page wrote the column alone, so nothing says whether a person switched RTK back on
+before then, and a migration would have to choose; the rule below does not read that stamp. `needsRtkQuestion` (`project-state/rtk-conflict.ts`, pure) asks exactly when the
 stored tooling says off, the column says on, no local `04-tooling-infrastructure` output equals that
 tooling (the test `holdImportedMcpServerLists` uses) and no row of the unit exists in any state, so
 an answered question is never asked again. `persistDetection` calls it after the mirror import and
@@ -474,7 +482,8 @@ job and `upgradeAdmission` take it (`isConflictUnit`, `blocksUpgrade`). The work
 under the same locks and the same busy, closed-row and different-answer rules, and writes no file:
 keep mine stamps the row and leaves the column; take theirs sets `rtk_enabled = false` through
 `rtkEnabledUpdate` (the columns the tooling page's PATCH writes, `rtk_enabled` and `updated_at`,
-which that route uses too) and stamps the row. Neither recomputes the applicable ids nor touches the
+which that route uses too), stamps `rtk_choice_made_at`, since taking the team's value is a choice,
+and stamps the row. Neither recomputes the applicable ids nor touches the
 rules files, since the PATCH does not: the next upgrade, which the answer releases, removes the RTK
 settings files and block as it does after any switch off. A pending row stops asking once RTK is off
 here by any route: every writer of `rtk_enabled = false` (the tooling page's PATCH, 04's save, the
@@ -644,12 +653,15 @@ checkout-holder check requires `dead_at IS NULL`, and its writer is refused as r
 `chrome-devtools-mcp-version` and `review-dimensions`, and nothing else. `app_auth` and
 `verify_commands` stay on the machine, since a committed login URL or command would be typed or run
 on a teammate's. `settings/rtk-enabled.json` is written, named in the base and counted as this install's value only
-while the render column's `rtkChoiceRecorded` is true (`withoutUnchosenRtk`): `rtk_enabled` is NOT
-NULL default true, so a default nobody chose must not travel or outvote a teammate's choice. Until
-then the sync takes the checkout's value with no conflict and keeps it out of the base, and the writer
-neither writes the file nor removes one the base names. Importing a record into a NULL column records
-the choice, as before. A tooling-page switch on a repository whose choice was never recorded
-therefore does not travel until step 12 or 02 records it. A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
+while the choice is recorded (`withoutUnchosenRtk`, `isRtkChoiceRecorded`): the render column's
+`rtkChoiceRecorded`, or `rtk_choice_made_at`, which a person's switch on the Tooling page stamps.
+`rtk_enabled` is NOT NULL default true, so a default nobody chose must not travel or outvote a
+teammate's choice. Until then the sync takes the checkout's value with no conflict and keeps it out
+of the base, and the writer neither writes the file nor removes one the base names. Importing a record
+into a NULL column records the choice, as before. A tooling-page switch therefore travels at the next
+record write. The first sync after it, on a sync row whose base never held the setting, keeps this
+install's value with no question and records the checkout's in the base, so later changes merge
+three-way as any setting does; with no sync row at all, the checkout's value still wins. A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
 not an empty list), and `environmentUnitOf` gives `project/environment.json` from
 `onboarding_environment` without its schema version. The writer plans them into the record and the
 base, and removes a file the base named that the record no longer holds. `settings/rtk-enabled.json`
@@ -676,7 +688,8 @@ the record dirty for the writer; any other missing file unsets its column where 
 here. **A base that holds no setting and no environment (no sync row, or one written before the record
 carried them) merges them as no base at all**: the checkout's value wins over a column nobody chose
 (`rtk_enabled` is NOT NULL default true, and would otherwise push B's default back over A's choice on
-B's first sync), and a set joins both lists. An RTK-off import closes the RTK question as converged
+B's first sync), except a switched `rtk-enabled` on an existing sync row, as above, and a set joins
+both lists. An RTK-off import closes the RTK question as converged
 (`convergeRtkQuestion`); the sync's own converge pass skips that question, whose base equals its local
 side (`isRtkQuestion`), since no merge contests that unit (a boolean cannot differ from base and both
 sides). When the merge leaves a value the checkout's file does not hold, the repository is marked dirty

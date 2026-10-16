@@ -21,7 +21,7 @@ vi.mock('../src/queues.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { DEFAULT_AGENT_RULES } from '@haive/shared';
+import { configService, DEFAULT_AGENT_RULES } from '@haive/shared';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -71,6 +71,7 @@ function patch(body: Record<string, unknown>) {
 beforeEach(() => {
   h.add.mockReset();
   h.add.mockResolvedValue(undefined);
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 });
 
 describe('saving an ollama provider without a model', () => {

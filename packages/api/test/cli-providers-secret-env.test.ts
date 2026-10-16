@@ -21,7 +21,7 @@ vi.mock('../src/queues.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { DEFAULT_AGENT_RULES, envelopeDecrypt, secretsService } from '@haive/shared';
+import { configService, DEFAULT_AGENT_RULES, envelopeDecrypt, secretsService } from '@haive/shared';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -68,6 +68,7 @@ beforeEach(() => {
   h.add.mockReset();
   h.add.mockResolvedValue(undefined);
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 });
 
 function secretValues(fake: ReturnType<typeof setup>): Record<string, string> {

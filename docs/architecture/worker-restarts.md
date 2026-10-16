@@ -60,6 +60,22 @@ START on the queue is no such job (`taskQueueOwed`): it only claims a task still
 start, so one a dead worker left `active` under its 30-minute lock would otherwise hold a claimed
 task for that long and then do nothing.
 
+**An answer whose advance was lost is re-driven.** The submit route saves a form's answers, clears
+its `waiting_started_at` and queues the advance; when that advance never reaches the queue, the row
+stays `waiting_form` with no park marker and nothing moves the task. The sweep takes such a current
+row (`answeredFormRow`) for a `running`, `waiting_user` or `waiting_pr` task once the row itself is
+older than the cutoff and the task queue holds no job for it, under the same fence: the status the
+pass read, the epoch, the step and round, and the row still an answered form. A parked form, an
+answer whose job is queued and an answer newer than the cutoff are left alone. For `waiting_pr` the
+task-level cutoff gives way to the row's, since the pull-request poller rewrites `tasks.updated_at`
+every few minutes. For a `waiting_user` or `waiting_pr` task the fence stamps the row's `updated_at`,
+so an advance dropped before pickup is re-driven once per cutoff rather than on every pass, and it
+locks that row before the task row, the order a Retry takes (the other order deadlocked); a Retry,
+Resume or CLI switch whose NOWAIT re-check meets that lock answers 503 and can be sent again. A
+`running` task's fence locks only the task row: it reads the row inside the update its epoch guards,
+and that update's stamp on the task throttles the next pass. A dead `waiting_user` or `waiting_pr` task revived
+with an answered form gets that advance at revival (`jobAfterRevive`).
+
 The same sweep covers the two other jobs that can be lost with nothing to notice. A task left
 `queued` past the cutoff with no START on the queue gets one, which the claim makes safe to
 duplicate; `created` is left alone, since a deferred-start draft waits there on purpose. Every
@@ -67,9 +83,11 @@ route that starts a task moves it from `created` to `queued` before it queues ST
 write that can fail (`markQueuedForStart`, `api/src/lib/task-start.ts`), under the repository's
 task-creation lock, since a queued task holds the checkout and a checkout move holds that lock. So a
 START that was lost or could not be queued is the sweep's to give, and the route answers as though
-it had been queued. POST /tasks inserts and queues in one transaction, so a creation that fails there leaves
-no task; a spawner that does not (a plan task's seed, the global-KB enrich across its own database)
-leaves one that failed partway `created`, where nothing starts it. And a `waiting_cli`
+it had been queued. POST /tasks, `spawnPlanTask` (its seed included) and the global-KB enrich each
+insert the task and claim its START in one transaction, so a creation that fails there leaves no
+task; the enrich writes its KB entry in its own database first
+and removes it again when the task transaction rolls back (an error anywhere inside it, the insert
+or a write after it); an error after the commit keeps it. And a `waiting_cli`
 current step with a run recorded before the cutoff that no cli-exec job owes, no run of its own
 running and no task-queue job, is recovered exactly as boot recovers a parked step
 (`recoverParkedStep`), bounded by `bornBefore`: only runs started or recorded before the cutoff are
@@ -138,8 +156,25 @@ then run after the pass it waited behind failed the step, so an advance on a `fa
 dropped (`failedTaskRefusesAdvance`): a Retry, a Resume and the allowance auto-resume each set the
 task `running` first. An answer submitted to a form still parked is the one exception, since
 answering it is what reopens the task; an advance onto that form that carries no answer is dropped
-like any other. A clarification answer is one of those, since it rides `task_events` rather than the
-job, so its route sets a failed task `running` itself before it queues the advance.
+like any other. While the system drains or is in maintenance (`refusesNewWork`, read past the config
+cache early in the job and again in the transaction that reopens the task, under the shared new-work
+fence a drain's write waits for) that exception closes, as does the fix-loop gate one below: the answer
+stays stored on its row and the advance is dropped, so an answer accepted while the task was live
+cannot reopen it during a drain. The early read fails open, since it only decides whether to try; the
+read under the fence fails closed: a state it cannot read writes nothing and throws
+`MaintenanceStateUnreadable`, so the job fails and is retried with the answer still on its row. A
+hold it sees also travels into the write that follows (`taskWriteTarget`, `held`): the task row is
+written only while it is not `failed`, so a task that failed after that read is not reopened either. Both
+answer routes read the task's status inside their own
+transaction, with no row lock (one taken before the step write would cross a Retry's order: step rows
+first, the task row last), and admit a failed task through the same fence, 503 while new work is
+held. Every admission takes the fence before any repository lock (`withRepositoryTaskLock` admits first, as do the
+plan merge and advisory routes), the order the worker's reopen and revival keep: the reverse order deadlocks once a
+drain's exclusive request queues between the two. Each route also sets the task `running` itself, in the transaction that writes the answer and
+before it queues the advance, so a drain that takes the fence right after counts it live (a
+clarification answer rides `task_events` rather than the job besides); it does so only when that read
+found the task failed: a task that fails after the read keeps the answer and stays failed until a
+Retry.
 
 A Retry's advance waits behind a pass still running, so that pass must not keep what the Retry
 reset. A task Retry's START, which only a task that never reached a step still takes, runs its first
@@ -171,7 +206,10 @@ administrator's Stop writes carries it: the task page names a stop as the cause 
 when that stamp equals the task's `completedAt` (`loadTaskStop`), since the event is written after
 the kill and a Retry that failed in between would otherwise read as the stop's. The allowance auto-resume
 (`autoResumeFailedStep`) writes in the same order, its claim on the failed task last, and a claim it
-loses takes back every write before it. A repository delete cancels its open tasks the same way:
+loses takes back every write before it. While new work is refused it does nothing at all, whatever status it read — no write,
+no job, no attempt spent — and the next poll resumes the task once the state is normal again. When the state cannot be read
+under the fence, or the resume throws anything else, that task stays failed with its watch armed and
+the poll goes on to the next armed task (`checkProviderRecovery`). A repository delete cancels its open tasks the same way:
 it locks their open step rows (by id) before it writes any task row (`cancelOpenTasksForRepo`), since
 taking the task rows first deadlocked it with a step Retry or a worker's step claim; the wait for those
 rows can let a Stop or a completion end a task, so it then re-reads and locks the task rows and cancels
@@ -275,7 +313,12 @@ when its whole run list does, a snapshot-less one when the step ids its last `ta
 step do. Judging a snapshot-less task by its current step alone revived one whose death named a step that was still
 missing, and its first job killed it again on every boot. `reviveDeadTask` clears the mark under the epoch
 compare-and-swap, records `task.revived`, and enqueues the job the task's status is owed: a start for a queued task,
-an advance for a running one, none for a form that is still parked.
+an advance for a running one, none for a form that is still parked. It first takes the shared new-work fence and
+reads the state past the cache: while new work is held, or the state cannot be read, it writes nothing (the updater
+starts the target worker in maintenance, so a revived task would otherwise run during verify and commit). A boot pass
+that held a revival back, failed one (a thrown write or a refused enqueue it put back) or could not run at all retries
+the revival alone every 30 s (`retryHeldRevivals`), never the boot-only marking or run supersede, until a pass holds
+none back and fails none; shutdown stops it.
 
 **Runs.** cli-exec ends a dead task's run instead of starting it (ended, superseded, exit 137): one dispatched after
 the mark, or requeued at run time, would otherwise still spend a CLI call. A run already started when the mark lands

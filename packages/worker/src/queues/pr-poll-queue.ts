@@ -1,5 +1,5 @@
 import { Queue, Worker } from 'bullmq';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
 import {
   CONFIG_KEYS,
   QUEUE_NAMES,
@@ -25,6 +25,7 @@ const POLL_JOB_NAME = 'pr-poll-tick';
 const POLL_CONCURRENCY = 4;
 const BACKOFF_BASE_MS = 5 * 60 * 1000;
 const BACKOFF_MAX_MS = 60 * 60 * 1000;
+const INT4_MAX = 2_147_483_647;
 
 /** Per-host 429 backoff, kept in-process (the poll worker is a singleton, cleared on
  *  restart where a fresh boot poll is fine). */
@@ -211,13 +212,33 @@ async function advancePrWaitStep(db: Database, task: PrWaitTask): Promise<void> 
       eq(schema.taskSteps.status, 'waiting_form'),
     ),
     orderBy: [desc(schema.taskSteps.round)],
-    columns: { id: true, round: true },
+    columns: { id: true, round: true, idleMs: true, waitingStartedAt: true },
   });
   if (!stepRow) return;
-  await db
+  const now = new Date();
+  const closedIdleMs = stepRow.waitingStartedAt
+    ? Math.max(0, now.getTime() - stepRow.waitingStartedAt.getTime())
+    : 0;
+  const closed = await db
     .update(schema.taskSteps)
-    .set({ formValues: {}, updatedAt: new Date() })
-    .where(eq(schema.taskSteps.id, stepRow.id));
+    .set({
+      formValues: {},
+      // idle_ms is an int4: a wait past ~24.8 days must not make this update throw and wedge the task.
+      idleMs: Math.min(stepRow.idleMs + closedIdleMs, INT4_MAX),
+      waitingStartedAt: null,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(schema.taskSteps.id, stepRow.id),
+        eq(schema.taskSteps.status, 'waiting_form'),
+        stepRow.waitingStartedAt
+          ? isNotNull(schema.taskSteps.waitingStartedAt)
+          : isNull(schema.taskSteps.waitingStartedAt),
+      ),
+    )
+    .returning({ id: schema.taskSteps.id });
+  if (closed.length === 0) return;
   await getTaskQueue().add(
     TASK_JOB_NAMES.ADVANCE_STEP,
     {

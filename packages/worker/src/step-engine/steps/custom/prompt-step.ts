@@ -20,7 +20,7 @@ import {
 export const PROMPT_STEP_OUTPUT_CAP_BYTES = 16 * 1024;
 /** Every quoted step output in one prompt together, however often the template repeats a token. */
 export const PROMPT_STEP_OUTPUTS_BUDGET_BYTES = 64 * 1024;
-/** Every field, task title and task description value in one prompt together, the same way. */
+/** Every field, title, description and account text in one prompt together, the same way. */
 export const PROMPT_STEP_VALUES_BUDGET_BYTES = 64 * 1024;
 const NO_STEP_OUTPUT = '(no output recorded for this step)';
 
@@ -39,8 +39,12 @@ export interface PromptStepOutput {
 export function capStepOutput(text: string, cap: number = PROMPT_STEP_OUTPUT_CAP_BYTES): string {
   const bytes = Buffer.from(text, 'utf8');
   if (bytes.length <= cap) return text;
-  const head = bytes.subarray(0, cap).toString('utf8').replace(/�+$/, '');
-  return `${head}\n[truncated: ${bytes.length - cap} more bytes not shown]`;
+  const notice = (shown: number): string =>
+    `\n[truncated: ${bytes.length - shown} more bytes not shown]`;
+  // notice(0) holds the most digits any notice can, so the head always leaves room for its own.
+  const room = Math.max(cap - Buffer.byteLength(notice(0)), 0);
+  const head = bytes.subarray(0, room).toString('utf8').replace(/�+$/, '');
+  return head + notice(Buffer.byteLength(head));
 }
 
 function stepOutputText(output: unknown, stepId: string): string {
@@ -74,10 +78,12 @@ function renderTemplate(
   detected: PromptStepDetect,
   formValues: FormValues,
   quote: boolean,
+  integrations: Readonly<Record<string, string>> = {},
 ): { rendered: string; quoted: boolean } {
   // Null-prototype: a field id such as `__proto__` must land as an own key, not hit the setter.
   const fields: Record<string, string> = Object.create(null) as Record<string, string>;
   const steps: Record<string, string> = Object.create(null) as Record<string, string>;
+  const accounts: Record<string, string> = Object.create(null) as Record<string, string>;
   const tokens = templateTokens(entry.template);
   const quotes = tokens.filter((token) => token.kind === 'step').length;
   const perQuote = Math.min(
@@ -86,12 +92,18 @@ function renderTemplate(
   );
   const values = tokens.filter(
     (token) =>
-      token.kind === 'field' || token.kind === 'task.title' || token.kind === 'task.description',
+      token.kind === 'field' ||
+      token.kind === 'integration' ||
+      token.kind === 'task.title' ||
+      token.kind === 'task.description',
   ).length;
   const perValue = Math.min(
     PROMPT_STEP_OUTPUT_CAP_BYTES,
     Math.floor(PROMPT_STEP_VALUES_BUDGET_BYTES / Math.max(values, 1)),
   );
+  for (const [id, account] of Object.entries(integrations)) {
+    accounts[id] = capStepOutput(account, perValue);
+  }
   for (const token of tokens) {
     if (token.kind === 'field') {
       fields[token.id] = capStepOutput(fieldText(formValues[token.id]), perValue);
@@ -110,12 +122,24 @@ function renderTemplate(
     taskTitle: capStepOutput(text(detected.taskTitle), perValue),
     taskDescription: capStepOutput(text(detected.taskDescription), perValue),
     steps,
+    integrations: accounts,
   });
   return { rendered, quoted: Object.keys(steps).length > 0 };
 }
 
-function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formValues: FormValues) {
-  const { rendered, quoted } = renderTemplate(entry, detected, formValues, true);
+function buildPrompt(
+  entry: PromptStepEntry,
+  detected: PromptStepDetect,
+  formValues: FormValues,
+  integrationAccounts?: Readonly<Record<string, string>>,
+) {
+  const { rendered, quoted } = renderTemplate(
+    entry,
+    detected,
+    formValues,
+    true,
+    integrationAccounts,
+  );
   const containment = entry.capabilities.includes('file_write')
     ? REPO_IS_DATA_ACTING_LINES
     : REPO_IS_DATA_ANSWER_LINES;
@@ -142,6 +166,15 @@ export function promptStepIntegrations(
   const entry = entries.get(stepDef);
   if (!entry) return undefined;
   return { requirements: entry.integrations ?? [], invalid: entry.invalidIntegrations ?? [] };
+}
+
+/** The ids of the requirements whose account a prompt step's template names with `{{integration:<id>.account}}`; none for any other step. */
+export function promptStepAccountIds(stepDef: object): string[] {
+  const entry = entries.get(stepDef);
+  if (!entry) return [];
+  return (entry.integrations ?? [])
+    .map(({ id }) => id)
+    .filter((id) => entry.template.includes(`{{integration:${id}.account}}`));
 }
 
 /** The text a file-writing prompt step's house rules read paths from: its template with the task's
@@ -217,8 +250,8 @@ export function buildPromptStep(
       requiredCapabilities: entry.capabilities,
       timeoutMs: entry.timeoutMs,
       ...(entry.agentPool ? { agentPool: entry.agentPool } : {}),
-      buildPrompt: ({ detected, formValues }) =>
-        buildPrompt(entry, detected as PromptStepDetect, formValues),
+      buildPrompt: ({ detected, formValues, integrationAccounts }) =>
+        buildPrompt(entry, detected as PromptStepDetect, formValues, integrationAccounts),
       bypassStub: () => `Test bypass: prompt step ${stepId} ran no agent.`,
     },
 

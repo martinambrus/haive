@@ -20,8 +20,9 @@ export interface TaskFence {
   reviveFailed?: boolean;
 }
 
-export function taskWriteTarget(taskId: string, fence?: TaskFence) {
-  const refused = fence !== undefined && !fence.reviveFailed;
+/** `held`: new work is held, so a failed task is not written, whatever the fence allows. */
+export function taskWriteTarget(taskId: string, fence?: TaskFence, held = false) {
+  const refused = held || (fence !== undefined && !fence.reviveFailed);
   return and(
     eq(schema.tasks.id, taskId),
     notInArray(schema.tasks.status, [

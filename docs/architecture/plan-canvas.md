@@ -126,7 +126,8 @@ not by `plan_node_tasks`: they neither implement a node nor touch its code. Read
 those metadata links in its open-task exclusion. The node detail names an open advisory so
 the panel offers **Continue research**. Advisory starts lock the plan node, reuse an existing
 open advisory, or insert the new task in that transaction through `spawnPlanTask`'s injected
-writer with `enqueue: false`; `enqueuePlanTask` delivers START only after commit. Two tabs
+writer, which claims its START (`markQueuedForStart`) in the same transaction; `enqueueStart`
+queues it only after commit, and a reused advisory is re-driven by `enqueuePlanTask`. Two tabs
 therefore continue one run. The advisory's final form writes with its detect-time node version,
 matching the question and body it actually showed: a direct answer or plan chat landing while
 it is parked must conflict rather than be overwritten with stale text or status. A freshly read

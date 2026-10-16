@@ -872,6 +872,14 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
 
     assertRagLockHeld(lock);
     await db.transaction(async (tx) => {
+      if (typeof body.rtkEnabled === 'boolean') {
+        const [stored] = await tx
+          .select({ rtkEnabled: schema.repositories.rtkEnabled })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, repositoryId))
+          .for('update');
+        if (stored?.rtkEnabled !== body.rtkEnabled) updates.rtkChoiceMadeAt = new Date();
+      }
       await tx
         .update(schema.repositories)
         .set(updates)

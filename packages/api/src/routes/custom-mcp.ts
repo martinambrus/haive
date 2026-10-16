@@ -1,6 +1,5 @@
 import { Hono } from 'hono';
 import { count, eq, sql } from 'drizzle-orm';
-import type { ZodError } from 'zod';
 import { schema, type DbTx } from '@haive/database';
 import { CONFIG_KEYS, configService, effectiveNetworkPolicy, logger } from '@haive/shared';
 import {
@@ -21,6 +20,7 @@ import {
   type GuardedResponse,
 } from '../lib/egress-guard.js';
 import { assertInvocationLive, claimsFromBearer } from '../lib/task-call-auth.js';
+import { cutToBytes, describeIssue } from '../lib/tool-call-text.js';
 import { sandboxBodyLimit } from '../middleware/sandbox-body-limit.js';
 import { executeRagSearch } from './rag.js';
 
@@ -28,7 +28,6 @@ const log = logger.child({ module: 'custom-mcp-routes' });
 
 const CALL_BUDGET = 50;
 const NO_RESULTS_TEXT = 'No results.';
-const TRUNCATED_MARK = '\n[truncated]';
 const ISSUE_MAX_LENGTH = 200;
 
 type Reason =
@@ -104,24 +103,6 @@ async function callsMade(db: DbTx, invocationId: string): Promise<number> {
     .from(schema.customToolCalls)
     .where(eq(schema.customToolCalls.cliInvocationId, invocationId));
   return row?.n ?? 0;
-}
-
-function describeIssue(error: ZodError): string {
-  const issue = error.issues[0];
-  const where = issue?.path.length ? `${issue.path.join('.')}: ` : '';
-  return `invalid arguments: ${where}${issue?.message ?? 'not accepted'}`.slice(
-    0,
-    ISSUE_MAX_LENGTH,
-  );
-}
-
-/** At most `maxBytes` of UTF-8, marked as cut, never ending inside a character. */
-function cutToBytes(text: string, maxBytes: number, alreadyCut = false): string {
-  const bytes = Buffer.from(text, 'utf8');
-  if (bytes.length <= maxBytes && !alreadyCut) return text;
-  let end = Math.min(bytes.length, maxBytes - Buffer.byteLength(TRUNCATED_MARK));
-  while (end > 0 && (bytes[end]! & 0b1100_0000) === 0b1000_0000) end -= 1;
-  return bytes.subarray(0, end).toString('utf8') + TRUNCATED_MARK;
 }
 
 function httpGetText(response: GuardedResponse, maxBytes: number): string {
@@ -213,7 +194,9 @@ customMcpRoutes.post('/call', async (c) => {
   }
 
   const args = customToolArgsSchema(tool).safeParse(body?.arguments ?? {});
-  if (!args.success) return refuse(400, 'invalid-arguments', describeIssue(args.error));
+  if (!args.success) {
+    return refuse(400, 'invalid-arguments', describeIssue(args.error, ISSUE_MAX_LENGTH));
+  }
 
   if (tool.action === 'http-get') {
     // requiresRepository only matters to the scope of a rag-query tool.

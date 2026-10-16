@@ -480,6 +480,106 @@ describe('the banner reads the context the plan reads', () => {
   });
 });
 
+describe('a switch a person made on this install counts as the team’s choice', () => {
+  const SWITCHED = new Date(1000);
+  const UNRECORDED_COLUMN = { ...PORTABLE_COLUMN, rtkChoiceRecorded: false };
+  const cellOf = (rows: RowState, history: HistoryState, live: boolean): Cell => ({
+    rows,
+    history,
+    source: 'git_https',
+    live,
+  });
+  const ORIGINS: [string, (live: boolean) => Cell, unknown][] = [
+    [
+      'a column that recorded no choice',
+      (live) => cellOf('none', 'recorded', live),
+      UNRECORDED_COLUMN,
+    ],
+    ['a snapshot from before RTK', (live) => cellOf('unrecorded', 'recorded', live), null],
+    ['a step 07 output from before RTK', (live) => cellOf('none', 'unrecorded', live), null],
+  ];
+
+  let dir: string;
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'upgrade-status-switched-'));
+    await writeRtkRepo(dir);
+  });
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function answer(cell: Cell, column: unknown, switched: boolean): Promise<string> {
+    seed(cell, dir, column);
+    state.snapshotGroups = [];
+    if (switched) {
+      state.repo = { ...(state.repo as Record<string, unknown>), rtkChoiceMadeAt: SWITCHED };
+    }
+    return answerFor();
+  }
+
+  it.each(ORIGINS.slice(0, 2))(
+    'offers the RTK settings files when RTK is on, from %s',
+    async (_name, cellFor, column) => {
+      const switched = await answer(cellFor(true), column, true);
+      const never = await answer(cellFor(true), column, false);
+
+      expect(switched).toMatch(/changed=\S*rtk\.claude-settings/);
+      expect(switched).toContain('available=true');
+      expect(never).not.toContain('rtk.');
+    },
+  );
+
+  it.each(ORIGINS)(
+    'reports the block left in AGENTS.md when RTK is off, from %s',
+    async (_name, cellFor, column) => {
+      const switched = await answer(cellFor(false), column, true);
+      const never = await answer(cellFor(false), column, false);
+
+      expect(switched).toContain('rtkBlocks=AGENTS.md');
+      expect(switched).toContain('available=true');
+      expect(never).toContain('rtkBlocks=-');
+    },
+  );
+
+  describe('from a step 07 output that names its providers', () => {
+    async function fromHistory(recorded: boolean, switched: boolean): Promise<string> {
+      seed(cellOf('none', recorded ? 'recorded' : 'unrecorded', true), dir, null);
+      state.snapshotGroups = [];
+      state.rows.set(schema.taskSteps, [
+        { recorded, enabledCliProviders: [{ name: 'claude-code' }] },
+      ]);
+      if (switched) {
+        state.repo = { ...(state.repo as Record<string, unknown>), rtkChoiceMadeAt: SWITCHED };
+      }
+      return answerFor();
+    }
+
+    it('offers the RTK settings files of its providers once a person switched RTK on', async () => {
+      const switched = await fromHistory(false, true);
+
+      expect(switched).toMatch(/changed=\S*rtk\.claude-settings/);
+      expect(switched).not.toContain('rtk.gemini-settings');
+      expect(switched).toContain('available=true');
+      expect(await fromHistory(false, false)).not.toContain('rtk.');
+    });
+
+    it('offers them for a step 07 output that recorded the choice', async () => {
+      expect(await fromHistory(true, false)).toMatch(/changed=\S*rtk\.claude-settings/);
+    });
+  });
+
+  it.each([ORIGINS[0]!, ORIGINS[2]!])(
+    'reports the settings files left behind when RTK is off, from %s',
+    async (_name, cellFor, column) => {
+      const switched = await answer(cellFor(false), column, true);
+      const never = await answer(cellFor(false), column, false);
+
+      expect(switched).toContain('rtkSettings=.claude/settings.json,.gemini/settings.json');
+      expect(never).toContain('rtkSettings=-');
+    },
+  );
+});
+
 /**
  * #242-1 and #234: the banner and 01 agree on which paths a repository's templates render to. A
  * custom item 01 cannot render (no agent target, no skills directory) is no upgrade, a live row of

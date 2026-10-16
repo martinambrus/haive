@@ -1,17 +1,19 @@
 import type { MiddlewareHandler } from 'hono';
 import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, type DbTx } from '@haive/database';
 import {
   CONFIG_KEYS,
   configService,
+  lockNewWorkFenceShared,
   locksOutNonAdmins,
   parseMaintenanceState,
+  refusesNewWork,
   type MaintenanceState,
 } from '@haive/shared';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { getAccessCookie } from '../auth/cookies.js';
 import { getDb } from '../db.js';
-import type { AppEnv } from '../context.js';
+import { HttpError, type AppEnv } from '../context.js';
 
 /**
  * Paths that stay reachable in every state, and each one is load-bearing:
@@ -62,7 +64,6 @@ export const maintenanceGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   const state: MaintenanceState = parseMaintenanceState(
     await configService.get(CONFIG_KEYS.MAINTENANCE_STATE),
   );
-  c.set('maintenanceState', state);
 
   if (!locksOutNonAdmins(state)) return next();
   if (ALWAYS_OPEN.some((p) => p.test(c.req.path))) return next();
@@ -76,4 +77,33 @@ export const maintenanceGate: MiddlewareHandler<AppEnv> = async (c, next) => {
     },
     503,
   );
+};
+
+export class NewWorkRefused extends HttpError {
+  constructor() {
+    super(
+      503,
+      'Haive is preparing for maintenance, so new work is not being started. Work already ' +
+        'running will finish.',
+    );
+  }
+}
+
+/** Throws the 503 a route that starts work answers once the system drains or is in maintenance. */
+export async function assertNewWorkAllowed(): Promise<void> {
+  // Past the cache: the updater sets the drain from another process and counts live work at once.
+  const state = parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
+  if (refusesNewWork(state)) throw new NewWorkRefused();
+}
+
+/** Call first in the transaction that writes the task: a state write waits for its commit. */
+export async function admitNewWork(tx: DbTx): Promise<void> {
+  await lockNewWorkFenceShared(tx);
+  await assertNewWorkAllowed();
+}
+
+/** A route that creates a task answers 503 once the system drains or is in maintenance. */
+export const requireNewWorkAllowed: MiddlewareHandler<AppEnv> = async (_c, next) => {
+  await assertNewWorkAllowed();
+  await next();
 };
