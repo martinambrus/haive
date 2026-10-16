@@ -109,8 +109,8 @@ export function fileBudget(
     : { maxBytes: MAX_FILE_BYTES, maxChunks: MAX_CHUNKS_PER_FILE };
 }
 
-/** Uncovered spans with less non-whitespace than this are not worth an embedding
- *  of their own — import blocks, closing braces, blank lines between functions. */
+/** A span between sections is a section of its own when its trimmed length reaches this; a
+ *  shorter span that is not blank joins a neighbouring section, see `assembleSections`. */
 const MIN_GAP_CHARS = 120;
 
 /* ------------------------------------------------------------------ */
@@ -611,7 +611,10 @@ function rustRanges(content: string): SectionRange[] {
  *  normally.
  *
  *  A range that strictly contains another is dropped in favour of the finer one,
- *  so a class yields its methods rather than one duplicate copy of both. */
+ *  so a class yields its methods rather than one duplicate copy of both.
+ *
+ *  A short span joins the section before it when it continues that section's last
+ *  line, holds no word character or ends the file, else the section after it. */
 export function assembleSections(content: string, ranges: SectionRange[]): RagSection[] {
   const kept = ranges.filter(
     (r) =>
@@ -622,16 +625,26 @@ export function assembleSections(content: string, ranges: SectionRange[]): RagSe
   );
   kept.sort((a, b) => a.start - b.start || a.end - b.end);
 
-  const sections: RagSection[] = [];
+  const slices: Array<{ sectionId: string; breadcrumb: string[]; from: number; to: number }> = [];
   let cursor = 0;
   let gapIndex = 0;
 
-  const pushGap = (from: number, to: number): void => {
-    if (to <= from) return;
+  const placeGap = (from: number, to: number, hasNext: boolean): number => {
     const text = content.slice(from, to);
-    if (text.trim().length < MIN_GAP_CHARS) return;
-    sections.push({ sectionId: `chunk-${gapIndex}`, content: text, breadcrumb: [] });
-    gapIndex += 1;
+    const length = text.trim().length;
+    if (length === 0) return to;
+    if (length >= MIN_GAP_CHARS) {
+      slices.push({ sectionId: `chunk-${gapIndex}`, breadcrumb: [], from, to });
+      gapIndex += 1;
+      return to;
+    }
+    const previous = slices[slices.length - 1];
+    const continuesLine = content[from - 1] !== '\n' && !/^\s*\n/.test(text);
+    if (previous && (!hasNext || continuesLine || !/[\p{L}\p{N}_]/u.test(text))) {
+      previous.to = from + text.trimEnd().length;
+      return to;
+    }
+    return from + text.length - text.trimStart().length;
   };
 
   for (const r of kept) {
@@ -641,17 +654,24 @@ export function assembleSections(content: string, ranges: SectionRange[]): RagSe
     // Partial overlaps (a regex that ran past its construct) would double-index
     // the shared bytes; skip the later range rather than emit them twice.
     if (from < cursor) continue;
-    pushGap(cursor, from);
-    sections.push({
+    const start = placeGap(cursor, from, true);
+    slices.push({
       sectionId: safeSectionId(r.sectionId),
-      content: content.slice(from, r.end),
       breadcrumb: r.breadcrumb,
+      from: start,
+      to: r.end,
     });
     cursor = r.end;
   }
-  pushGap(cursor, content.length);
+  placeGap(cursor, content.length, false);
 
-  return uniqueSectionIds(sections);
+  return uniqueSectionIds(
+    slices.map(({ sectionId, breadcrumb, from, to }) => ({
+      sectionId,
+      content: content.slice(from, to),
+      breadcrumb,
+    })),
+  );
 }
 
 export function extractCodeSections(content: string, filePath: string): RagSection[] {

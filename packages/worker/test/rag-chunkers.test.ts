@@ -280,7 +280,7 @@ describe('extractCodeSections — PHP signatures', () => {
     const [section] = extractCodeSections(`<?php\n\n${head}\n  return 1;\n}\n`, 'm.module');
 
     expect(section?.sectionId).toBe(`function-${name}`);
-    expect(section?.content.startsWith(head)).toBe(true);
+    expect(section?.content.startsWith(`<?php\n\n${head}`)).toBe(true);
   });
 
   it('reads abstract and final modifiers in any order and skips a method with no body', () => {
@@ -308,20 +308,26 @@ describe('extractCodeSections — PHP signatures', () => {
       'method-Base-stamp',
       'method-Base-Shouty',
     ]);
-    expect(byId.get('method-Base-sealed')!.startsWith('final public function sealed')).toBe(true);
+    expect(
+      byId
+        .get('method-Base-sealed')!
+        .startsWith(
+          '<?php\n\nabstract class Base {\n  abstract public function no_body($x);\n  final public function sealed',
+        ),
+    ).toBe(true);
     expect(byId.get('method-Base-stamp')!.startsWith('static protected final function')).toBe(true);
     expect(byId.get('method-Base-Shouty')!.startsWith('Public Static Function Shouty')).toBe(true);
   });
 });
 
 describe('extractCodeSections — JS and TS named constructs', () => {
-  // A section starts at the keyword, not at an export or async before it: that text is outside it.
+  // A short span before the keyword, such as an export, joins the section that follows it.
   it.each([
     [
       'a typed function with nested parentheses',
       'export function load(cb: (err: Error | null, rows: Row[]) => void, n = Math.max(1, 2)): Promise<void> {\n  return run(cb, n);\n}\n',
       'load',
-      'function load(cb:',
+      'export function load(cb:',
     ],
     [
       'generics and an indexed return type',
@@ -333,13 +339,13 @@ describe('extractCodeSections — JS and TS named constructs', () => {
       'an export default function',
       'export default function main(a: number): string {\n  return String(a);\n}\n',
       'main',
-      'function main(',
+      'export default function main(',
     ],
     [
       'a typed async arrow',
       'export const parse = async (raw: string): Promise<Item[]> => {\n  return read(raw);\n};\n',
       'parse',
-      'const parse = async (raw',
+      'export const parse = async (raw',
     ],
     [
       'a typed variable holding an arrow',
@@ -352,7 +358,7 @@ describe('extractCodeSections — JS and TS named constructs', () => {
 
     expect(section?.sectionId).toBe(`function-${name}`);
     expect(section?.content.startsWith(startsWith)).toBe(true);
-    expect(section?.content.endsWith('}')).toBe(true);
+    expect(section?.content).toMatch(/\}[;\s]*$/);
   });
 
   it('reads typed and untyped declarations side by side', () => {
@@ -579,8 +585,8 @@ describe('extractCodeSections — JS and TS named constructs', () => {
     const [section] = extractCodeSections(src, 'table.ts');
 
     expect(section?.sectionId).toBe(`function-${name}`);
-    expect(section?.content.startsWith(startsWith)).toBe(true);
-    expect(section?.content.endsWith('}')).toBe(true);
+    expect(section?.content.startsWith(`var t = {\n  ${startsWith}`)).toBe(true);
+    expect(section?.content).toMatch(/\}[;\s]*$/);
   });
 
   it('leaves a quoted key that is no identifier in the gap', () => {
@@ -605,13 +611,15 @@ describe('extractCodeSections — JS and TS named constructs', () => {
 describe('extractCodeSections — JS and TS leading comments', () => {
   const byId = (src: string, file: string) =>
     new Map(extractCodeSections(src, file).map((s) => [s.sectionId, s.content]));
+  // Long enough to stay a section of its own, so only the comment join decides what a construct takes.
+  const HEAD = `'use strict';\nvar banner = '${'x'.repeat(120)}';\n`;
 
   it.each([
     ['a // run', '// Adds two numbers.\n// Returns the sum.\n'],
     ['a block', '/* Adds two numbers. */\n'],
     ['a JSDoc block', '/**\n * Adds two numbers.\n * @returns {number}\n */\n'],
   ])('joins %s to the function it precedes', (_what, comment) => {
-    const js = `'use strict';\n\n${comment}function add(a, b) {\n  return a + b;\n}\n`;
+    const js = `${HEAD}\n${comment}function add(a, b) {\n  return a + b;\n}\n`;
 
     expect(byId(js, 'math.js').get('function-add')).toBe(
       `${comment}function add(a, b) {\n  return a + b;\n}`,
@@ -621,6 +629,7 @@ describe('extractCodeSections — JS and TS leading comments', () => {
   it('joins a comment to the member, the arrow and the class it precedes', () => {
     const js = [
       'var api = {',
+      `  banner: '${'x'.repeat(120)}',`,
       '  // Fetches one item.',
       '  fetch(url) {',
       '    return get(url);',
@@ -659,8 +668,7 @@ describe('extractCodeSections — JS and TS leading comments', () => {
 
   it('steps over export, default and async to reach the comment above them', () => {
     const ts = [
-      "'use strict';",
-      '',
+      HEAD,
       '/** Loads rows. */',
       'export async function load(n: number): Promise<Row[]> {',
       '  return fetchRows(n);',
@@ -695,8 +703,8 @@ describe('extractCodeSections — JS and TS leading comments', () => {
   });
 
   it.each([
-    ['a block', '/**\n * @file Math helpers.\n */\n'],
-    ['a // run', '// Math helpers.\n// Licensed under MIT.\n'],
+    ['a block', `/**\n * @file Math helpers.\n * ${'x'.repeat(120)}\n */\n`],
+    ['a // run', `// Math helpers.\n// ${'x'.repeat(120)}\n`],
   ])('keeps %s that opens the file out of the first function', (_what, header) => {
     const js = `${header}function first() {\n  return 1;\n}\n\n// Adds two numbers.\nfunction second() {\n  return 2;\n}\n`;
     const sections = byId(js, 'math.js');
@@ -708,8 +716,7 @@ describe('extractCodeSections — JS and TS leading comments', () => {
   });
 
   it('joins the comment of the first function when a header comment stands before it', () => {
-    const js =
-      '/* Licensed under MIT. */\n\n/** Adds two numbers. */\nfunction add(a, b) {\n  return a + b;\n}\n';
+    const js = `/* Licensed under MIT. ${'x'.repeat(120)} */\n\n/** Adds two numbers. */\nfunction add(a, b) {\n  return a + b;\n}\n`;
 
     expect(byId(js, 'math.js').get('function-add')).toBe(
       '/** Adds two numbers. */\nfunction add(a, b) {\n  return a + b;\n}',
@@ -718,8 +725,7 @@ describe('extractCodeSections — JS and TS leading comments', () => {
 
   it('leaves a comment out when a line of code stands between it and the construct', () => {
     const js = [
-      "'use strict';",
-      '',
+      HEAD,
       '// Describes the offset.',
       'var offset = 1;',
       '// Adds two numbers.',
@@ -736,8 +742,7 @@ describe('extractCodeSections — JS and TS leading comments', () => {
 
   it('reads the comment lines directly above, across blank lines before the construct only', () => {
     const js = [
-      "'use strict';",
-      '',
+      HEAD,
       'var offset = 1; // the offset',
       '// Split from the run below by a blank line.',
       '',
@@ -760,8 +765,7 @@ describe('extractCodeSections — JS and TS leading comments', () => {
   });
 
   it('reads a // run across CRLF line ends', () => {
-    const js =
-      "'use strict';\r\n\r\n// Adds.\r\n// Sums.\r\nfunction add(a, b) {\r\n  return a + b;\r\n}\r\n";
+    const js = `${HEAD.replaceAll('\n', '\r\n')}\r\n// Adds.\r\n// Sums.\r\nfunction add(a, b) {\r\n  return a + b;\r\n}\r\n`;
 
     expect(byId(js, 'math.js').get('function-add')).toBe(
       '// Adds.\r\n// Sums.\r\nfunction add(a, b) {\r\n  return a + b;\r\n}',
@@ -806,10 +810,203 @@ describe('extractCodeSections — JS and TS leading comments', () => {
   it('lets a JS class take the comment above it and a Java class not', () => {
     const box = 'class Box {\n  size = 1;\n}\n';
 
-    expect(byId(`'use strict';\n\n// A box.\n${box}`, 'Box.js').get('class-Box')).toBe(
+    expect(byId(`${HEAD}\n// A box.\n${box}`, 'Box.js').get('class-Box')).toBe(
       `// A box.\n${box.trim()}`,
     );
-    expect(byId(`package x;\n\n// A box.\n${box}`, 'Box.java').get('class-Box')).toBe(box.trim());
+    const javaHead = `package x;\nimport ${'x'.repeat(120)};\n`;
+    expect(byId(`${javaHead}\n// A box.\n${box}`, 'Box.java').get('class-Box')).toBe(box.trim());
+  });
+});
+
+describe('extractCodeSections — short spans between sections', () => {
+  const byId = (src: string, file: string) =>
+    new Map(extractCodeSections(src, file).map((s) => [s.sectionId, s.content]));
+  const withoutSpace = (text: string) => text.replace(/\s+/g, '');
+
+  const store = [
+    'export class Store {',
+    '  private cache = new Map<string, number>();',
+    '  readonly limit = 10;',
+    '',
+    '  get(key: string) {',
+    '    return this.cache.get(key);',
+    '  }',
+    '',
+    '  clear() {',
+    '    this.cache.clear();',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+  const handlers = [
+    'const handlers = {',
+    '  foo() { const marker = "}"; callCriticalThing(marker); },',
+    '  bar() {',
+    '    return 1;',
+    '  },',
+    '};',
+    '',
+  ].join('\n');
+  const decorated = [
+    'class Panel {',
+    '  open() {',
+    '    return 1;',
+    '  }',
+    '',
+    '  @Input()',
+    '  readonly size = 2;',
+    '',
+    '  close() {',
+    '    return 2;',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+  const property = [
+    '<?php',
+    'class Panel {',
+    '  public function open() {',
+    '    return 1;',
+    '  }',
+    '',
+    '  private $a = 1;',
+    '',
+    '  public function close() {',
+    '    return 2;',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+  const head =
+    '<?php\n\nnamespace App\\Lib;\n\nuse Foo\\Bar;\n\nfunction first() {\n  return 1;\n}\n\nfunction second() {\n  return 2;\n}\n';
+  const tail = 'function last() {\n  return 1;\n}\n\n// Keep this note with the function above.\n';
+  const python = 'def a():\n    return 1\n\n@cache\ndef b():\n    return 2\n';
+  const callback = [
+    'jQuery(function () {',
+    '  function open() {',
+    '    return 1;',
+    '  }',
+    '});',
+    '',
+    'function close() {',
+    '  return 2;',
+    '}',
+    '',
+  ].join('\n');
+
+  it('keeps the fields before the first method and the closing brace of a class', () => {
+    const sections = byId(store, 'store.ts');
+
+    expect(sections.get('function-get')).toContain('private cache = new Map<string, number>();');
+    expect(sections.get('function-get')).toContain('readonly limit = 10;');
+    expect(sections.get('function-clear')).toBe('clear() {\n    this.cache.clear();\n  }\n}');
+  });
+
+  it('keeps what follows a brace inside a string with the member that holds it', () => {
+    expect(byId(handlers, 'handlers.js').get('function-foo')).toContain(
+      'callCriticalThing(marker)',
+    );
+  });
+
+  it('puts a decorator and a field between two methods into the later method', () => {
+    const sections = byId(decorated, 'panel.ts');
+
+    expect(sections.get('function-close')!.startsWith('@Input()\n  readonly size = 2;')).toBe(true);
+    expect(sections.get('function-open')).not.toContain('@Input()');
+  });
+
+  it('puts a PHP property between two methods into the later method', () => {
+    const sections = byId(property, 'Panel.php');
+
+    expect(sections.get('method-Panel-close')).toContain('private $a = 1;');
+    expect(sections.get('method-Panel-open')).not.toContain('private $a = 1;');
+  });
+
+  it('puts a decorator between two Python functions into the later one', () => {
+    const sections = byId(python, 'jobs.py');
+
+    expect(sections.get('function-b')).toContain('@cache\ndef b():');
+    expect(sections.get('function-a')).not.toContain('@cache');
+  });
+
+  it('puts a short PHP head into the first section', () => {
+    expect(byId(head, 'm.module').get('function-first')).toBe(
+      '<?php\n\nnamespace App\\Lib;\n\nuse Foo\\Bar;\n\nfunction first() {\n  return 1;\n}',
+    );
+  });
+
+  it('puts a short note after the last section into that section', () => {
+    expect(byId(tail, 'last.js').get('function-last')).toContain(
+      '// Keep this note with the function above.',
+    );
+  });
+
+  it('keeps a closing line without a word with the section it closes', () => {
+    const sections = byId(callback, 'ready.js');
+
+    expect(sections.get('function-open')).toContain('\n});');
+    expect(sections.get('function-close')).toBe('function close() {\n  return 2;\n}');
+  });
+
+  it('reads letters outside ASCII as words, so a span of them leads the section after it', () => {
+    const js = 'function a() {\n  return 1;\n}\n名前;\nfunction b() {\n  return 2;\n}\n';
+    const sections = byId(js, 'names.js');
+
+    expect(sections.get('function-a')).toBe('function a() {\n  return 1;\n}');
+    expect(sections.get('function-b')!.startsWith('名前;\nfunction b() {')).toBe(true);
+  });
+
+  it.each([
+    ['a class with fields', store, 'store.ts'],
+    ['a brace inside a string', handlers, 'handlers.js'],
+    ['a decorator between methods', decorated, 'panel.ts'],
+    ['a PHP property between methods', property, 'Panel.php'],
+    ['a PHP head', head, 'm.module'],
+    ['a note after the last function', tail, 'last.js'],
+    ['a Python decorator', python, 'jobs.py'],
+    ['a closing line between functions', callback, 'ready.js'],
+    [
+      'a PHP class',
+      '<?php\nclass Foo {\n  public function bar() {\n    return 1;\n  }\n}\n',
+      'Foo.php',
+    ],
+    [
+      'a typed async arrow',
+      'export const parse = async (raw: string): Promise<Item[]> => {\n  return read(raw);\n};\n',
+      'mod.ts',
+    ],
+    [
+      'a double-quoted function',
+      'var t = {\n  "parent": function (a, b) {\n    return a + b;\n  },\n};\n',
+      'table.ts',
+    ],
+  ])('loses no text of %s', (_what, src, file) => {
+    const sections = extractCodeSections(src, file);
+
+    expect(sections.length).toBeGreaterThan(0);
+    expect(withoutSpace(sections.map((s) => s.content).join(''))).toBe(withoutSpace(src));
+  });
+
+  it('gives a file with no construct and fewer than 120 characters no section', () => {
+    const comment = (length: number) => `// ${'x'.repeat(length - 3)}\n`;
+
+    expect(extractCodeSections(comment(119), 'note.js')).toEqual([]);
+    expect(extractCodeSections(comment(120), 'note.js').map((s) => s.sectionId)).toEqual([
+      'chunk-0',
+    ]);
+  });
+
+  it('still numbers the spans of 120 characters or more as their own sections', () => {
+    const note = `// ${'x'.repeat(117)}\n`;
+    const js = `'use strict';\nfunction f() {\n  return 1;\n} // one\nfunction g() {\n  return 2;\n}\n${note}var x = 1;\nfunction h() {\n  return 3;\n}\n${note}`;
+
+    expect(extractCodeSections(js, 'f.js').map((s) => s.sectionId)).toEqual([
+      'function-f',
+      'function-g',
+      'chunk-0',
+      'function-h',
+      'chunk-1',
+    ]);
   });
 });
 
