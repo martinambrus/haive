@@ -294,6 +294,23 @@ async function addBundleJobOrMarkFailed(
   }
 }
 
+// Refreshes updated_at to hold the upload reaper off; refuses a session no longer uploading.
+async function claimUploadSession(db: ReturnType<typeof getDb>, uploadId: string): Promise<void> {
+  const claim = await db
+    .update(schema.customBundleUploads)
+    .set({ updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.customBundleUploads.id, uploadId),
+        eq(schema.customBundleUploads.status, 'uploading'),
+      ),
+    )
+    .returning({ id: schema.customBundleUploads.id });
+  if (claim.length === 0) {
+    throw new HttpError(409, 'session cancelled');
+  }
+}
+
 async function completedUploadBody(userId: string, sessionId: string) {
   const bundle = await loadBundle(userId, sessionId);
   const counts = await loadItemCounts([bundle.id]);
@@ -511,6 +528,7 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
   if (Number(row.bytesReceived) !== Number(row.totalSize)) {
     throw new HttpError(409, `incomplete: ${row.bytesReceived}/${row.totalSize} bytes`);
   }
+  await claimUploadSession(db, row.id);
 
   const anchor = bundleStorageRoot();
   const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Bundle archive', anchor);
@@ -603,7 +621,12 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
   await db
     .update(schema.customBundleUploads)
     .set({ status: 'complete', archivePath: finalArchive, updatedAt: new Date() })
-    .where(eq(schema.customBundleUploads.id, row.id));
+    .where(
+      and(
+        eq(schema.customBundleUploads.id, row.id),
+        eq(schema.customBundleUploads.status, 'uploading'),
+      ),
+    );
 
   return c.json(await completedUploadBody(userId, row.id), 201);
 });
@@ -614,17 +637,29 @@ bundleRoutes.delete('/uploads/:id', async (c) => {
   const db = getDb();
 
   const row = await loadUploadSession(userId, uploadId);
+  if (row.status !== 'uploading') {
+    throw new HttpError(409, `session is ${row.status}`);
+  }
+  const cancelled = await db
+    .update(schema.customBundleUploads)
+    .set({ status: 'cancelled', updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.customBundleUploads.id, row.id),
+        eq(schema.customBundleUploads.status, 'uploading'),
+      ),
+    )
+    .returning({ id: schema.customBundleUploads.id });
+  if (cancelled.length === 0) {
+    throw new HttpError(409, 'session is not uploading');
+  }
   if (row.archivePath) {
     // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
-    // unlink: the session is still cancelled, and a leftover partial is the sweeper's problem.
+    // unlink: the session is still cancelled, and the upload reaper removes a leftover partial.
     const anchor = bundleStorageRoot();
     const archiveRel = uploadFileRel(userId, row.archivePath, anchor);
     if (archiveRel) await removeNoFollow(anchor, archiveRel).catch(() => {});
   }
-  await db
-    .update(schema.customBundleUploads)
-    .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(eq(schema.customBundleUploads.id, row.id));
 
   return c.json({ ok: true });
 });
@@ -719,6 +754,7 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
   if (Number(row.bytesReceived) !== Number(row.totalSize)) {
     throw new HttpError(409, `incomplete: ${row.bytesReceived}/${row.totalSize} bytes`);
   }
+  await claimUploadSession(db, row.id);
   const anchor = bundleStorageRoot();
   const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Bundle archive', anchor);
   const onDisk = await lstatNoFollow(anchor, archiveRel);
@@ -762,7 +798,12 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
       archivePath: finalArchive,
       updatedAt: new Date(),
     })
-    .where(eq(schema.customBundleUploads.id, row.id));
+    .where(
+      and(
+        eq(schema.customBundleUploads.id, row.id),
+        eq(schema.customBundleUploads.status, 'uploading'),
+      ),
+    );
 
   const queue = getBundleQueue();
   const payload: BundleJobPayload = {

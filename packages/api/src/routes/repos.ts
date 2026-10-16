@@ -744,18 +744,38 @@ repoRoutes.post('/upload/:id/complete', async (c) => {
 
   const storageRoot = uploadsStorageRoot();
   const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Upload session archive');
-  // A link at that name now fails this check rather than reporting its target's size.
-  const onDisk = await lstatNoFollow(storageRoot, archiveRel);
-  if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
-    throw new HttpError(409, 'archive size mismatch on disk');
-  }
-
   const finalRel = archiveRel.replace(/\.partial$/, '');
   if (finalRel === archiveRel) {
     throw new HttpError(500, 'archive path missing .partial suffix');
   }
   const finalPath = path.join(storageRoot, finalRel);
-  await renameNoFollow(storageRoot, archiveRel, finalRel);
+
+  // The row names the finished file before the file moves; this one UPDATE decides between this
+  // complete, a cancel and the upload reaper, and whichever commits first wins.
+  const claim = await db
+    .update(schema.repoUploads)
+    .set({ status: 'complete', archivePath: finalPath, updatedAt: new Date() })
+    .where(and(eq(schema.repoUploads.id, row.id), eq(schema.repoUploads.status, 'uploading')))
+    .returning({ id: schema.repoUploads.id });
+  if (claim.length === 0) {
+    throw new HttpError(409, 'session cancelled');
+  }
+
+  try {
+    // A link at that name now fails this check rather than reporting its target's size.
+    const onDisk = await lstatNoFollow(storageRoot, archiveRel);
+    if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
+      throw new HttpError(409, 'archive size mismatch on disk');
+    }
+    await renameNoFollow(storageRoot, archiveRel, finalRel);
+  } catch (err) {
+    await db
+      .update(schema.repoUploads)
+      .set({ status: 'uploading', archivePath: row.archivePath, updatedAt: new Date() })
+      .where(and(eq(schema.repoUploads.id, row.id), eq(schema.repoUploads.status, 'complete')))
+      .catch(() => undefined);
+    throw err;
+  }
 
   const repoName = deriveRepoName({
     name: row.name ?? undefined,
@@ -798,11 +818,6 @@ repoRoutes.post('/upload/:id/complete', async (c) => {
     }),
   );
 
-  await db
-    .update(schema.repoUploads)
-    .set({ status: 'complete', archivePath: finalPath, updatedAt: new Date() })
-    .where(eq(schema.repoUploads.id, row.id));
-
   return c.json({ repository: repo, session: { id: row.id, status: 'complete' } }, 201);
 });
 
@@ -812,19 +827,26 @@ repoRoutes.delete('/upload/:id', async (c) => {
   const db = getDb();
 
   const row = await loadUploadSession(userId, uploadId);
+  if (row.status !== 'uploading') {
+    throw new HttpError(409, `session is ${row.status}`);
+  }
+  const cancelled = await db
+    .update(schema.repoUploads)
+    .set({ status: 'cancelled', updatedAt: new Date() })
+    .where(and(eq(schema.repoUploads.id, row.id), eq(schema.repoUploads.status, 'uploading')))
+    .returning({ id: schema.repoUploads.id });
+  if (cancelled.length === 0) {
+    throw new HttpError(409, 'session is not uploading');
+  }
   // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
-  // unlink: the session is still cancelled, and a leftover partial is the sweeper's problem rather
-  // than a reason to refuse the cancel.
+  // unlink: the session is still cancelled, and a leftover partial is the upload reaper's to remove
+  // rather than a reason to refuse the cancel.
   try {
     const archiveRel = uploadFileRel(userId, row.archivePath);
     if (archiveRel) await removeNoFollow(uploadsStorageRoot(), archiveRel);
   } catch {
     // absent, refused, or a path this api never wrote
   }
-  await db
-    .update(schema.repoUploads)
-    .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(eq(schema.repoUploads.id, row.id));
 
   return c.json({ ok: true });
 });

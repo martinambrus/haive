@@ -242,25 +242,40 @@ dbDumpRoutes.post('/upload/:id/complete', async (c) => {
 
   const anchor = uploadsStorageRoot();
   const dumpRel = uploadFileRelOrThrow(userId, row.dumpPath, 'Dump path');
-  // A link at that name now fails this check rather than reporting its target's size.
-  const onDisk = await lstatNoFollow(anchor, dumpRel);
-  if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
-    throw new HttpError(409, 'dump size mismatch on disk');
-  }
-
   const finalRel = dumpRel.replace(/\.partial$/, '');
   if (finalRel === dumpRel) {
     throw new HttpError(500, 'dump path missing .partial suffix');
   }
   const finalPath = path.join(anchor, finalRel);
-  await renameNoFollow(anchor, dumpRel, finalRel);
 
+  // The row names the finished dump before the file moves; this one UPDATE decides between this
+  // complete, a cancel and the upload reaper, and whichever commits first wins.
   // No import job here — the dump waits to be loaded by the task's env-boot /
   // import step, which deletes it immediately after `ddev import-db`.
-  await db
+  const claim = await db
     .update(schema.dbUploads)
     .set({ status: 'complete', dumpPath: finalPath, updatedAt: new Date() })
-    .where(eq(schema.dbUploads.id, row.id));
+    .where(and(eq(schema.dbUploads.id, row.id), eq(schema.dbUploads.status, 'uploading')))
+    .returning({ id: schema.dbUploads.id });
+  if (claim.length === 0) {
+    throw new HttpError(409, 'session cancelled');
+  }
+
+  try {
+    // A link at that name now fails this check rather than reporting its target's size.
+    const onDisk = await lstatNoFollow(anchor, dumpRel);
+    if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
+      throw new HttpError(409, 'dump size mismatch on disk');
+    }
+    await renameNoFollow(anchor, dumpRel, finalRel);
+  } catch (err) {
+    await db
+      .update(schema.dbUploads)
+      .set({ status: 'uploading', dumpPath: row.dumpPath, updatedAt: new Date() })
+      .where(and(eq(schema.dbUploads.id, row.id), eq(schema.dbUploads.status, 'complete')))
+      .catch(() => undefined);
+    throw err;
+  }
 
   return c.json({ session: { id: row.id, status: 'complete' } }, 201);
 });
@@ -271,15 +286,22 @@ dbDumpRoutes.delete('/upload/:id', async (c) => {
   const db = getDb();
 
   const row = await loadUploadSession(userId, uploadId);
-  // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
-  // unlink: the session is still cancelled, and a leftover partial is the sweeper's problem rather
-  // than a reason to refuse the cancel.
-  const dumpRel = uploadFileRel(userId, row.dumpPath);
-  if (dumpRel) await removeNoFollow(uploadsStorageRoot(), dumpRel).catch(() => {});
-  await db
+  if (row.status !== 'uploading') {
+    throw new HttpError(409, `session is ${row.status}`);
+  }
+  const cancelled = await db
     .update(schema.dbUploads)
     .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(eq(schema.dbUploads.id, row.id));
+    .where(and(eq(schema.dbUploads.id, row.id), eq(schema.dbUploads.status, 'uploading')))
+    .returning({ id: schema.dbUploads.id });
+  if (cancelled.length === 0) {
+    throw new HttpError(409, 'session is not uploading');
+  }
+  // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
+  // unlink: the session is still cancelled, and a leftover partial is the upload reaper's to remove
+  // rather than a reason to refuse the cancel.
+  const dumpRel = uploadFileRel(userId, row.dumpPath);
+  if (dumpRel) await removeNoFollow(uploadsStorageRoot(), dumpRel).catch(() => {});
 
   return c.json({ ok: true });
 });

@@ -280,8 +280,12 @@ describe('C1: a fault right after the zip bundle insert commits', () => {
 
   it('commits the bundle row and the upload link together, or neither', async () => {
     await stage(SESSION, 'zip bytes');
+    let uploadWrites = 0;
     fake.hooks.beforeUpdate = (table) => {
-      if (table === schema.customBundleUploads) throw new Error('the link write failed');
+      // The first write to the upload row is the claim; the one that fails is the link.
+      if (table === schema.customBundleUploads && (uploadWrites += 1) > 1) {
+        throw new Error('the link write failed');
+      }
     };
 
     expect((await complete(SESSION)).status).toBe(500);
