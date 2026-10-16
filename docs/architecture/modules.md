@@ -27,7 +27,12 @@ the module loads again.
   its settings (`PUT /modules/<id>/settings/<kind>`) records `module.settings` with the names of the
   fields that changed, never their values, since a module's setting can hold an API key; the
   instance's own switches (`PUT /admin/config/*`) record `config.<name>` with the values before and
-  after.
+  after. Saves of one switch, or of one module's settings kind, run one at a time under a
+  transaction-scoped advisory lock (`admin-config:<route>`, `module-settings:<id>:<kind>`), so each
+  row's `from` is what the save before it left; a save that waits longer than 30 s answers 503. The
+  read, the writes and the audit row share that one transaction's connection. A save that fails after
+  writing some fields still records them, with `partial: true`, and then fails. Audit rows are stamped
+  with `clock_timestamp()`, the moment they are written, not when their transaction began.
 - **Installed, deactivated.** The Active column on `/admin/modules`, or `PATCH /modules/:id` with
   `{"active": false}` (admin; audited as `module.deactivate`). It is refused with 409
   `module_tasks_open` while a live task's run list names one of the module's steps or its type is one
