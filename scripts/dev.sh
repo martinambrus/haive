@@ -64,6 +64,9 @@ elif [ -e /dev/dri/renderD128 ]; then
   FILES+=(-f docker-compose.vulkan.yml)
   GPU_MODE="Vulkan"
 fi
+# Compose builds through buildx bake, which refuses the npmrc build secret's file outside the
+# project (the /dev/null default, a HAIVE_NPMRC elsewhere) unless its file-system check is off.
+export BUILDX_BAKE_ENTITLEMENTS_FS=0
 dc() { docker compose "${FILES[@]}" "$@"; }
 
 gpu_note() {

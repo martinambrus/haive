@@ -378,6 +378,9 @@ jobs:
     name: docker compose up (fresh-host boot)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Compose builds through buildx bake, which refuses the npmrc build secret outside the project.
+    env:
+      BUILDX_BAKE_ENTITLEMENTS_FS: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -512,6 +515,9 @@ jobs:
     name: End-to-end (Playwright)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Compose builds through buildx bake, which refuses the npmrc build secret outside the project.
+    env:
+      BUILDX_BAKE_ENTITLEMENTS_FS: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
