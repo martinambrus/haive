@@ -174,10 +174,14 @@ for (const name of apiRegistryNames) {
 const apiImports = apiModules.flatMap((pkg, i) => [
   `import m${i} from '${pkg.name}/manifest';`,
   ...(pkg.exports['./routes'] !== undefined ? [`import r${i} from '${pkg.name}/routes';`] : []),
+  ...(pkg.exports['./integrations'] !== undefined
+    ? [`import i${i} from '${pkg.name}/integrations';`]
+    : []),
 ]);
 const apiEntries = apiModules.map((pkg, i) => {
   const routes = pkg.exports['./routes'] !== undefined ? `, routes: r${i}` : '';
-  return `  { packageName: '${pkg.name}', source: '${pkg.source}', manifest: m${i}${routes} },`;
+  const integrations = pkg.exports['./integrations'] !== undefined ? `, integrations: i${i}` : '';
+  return `  { packageName: '${pkg.name}', source: '${pkg.source}', manifest: m${i}${routes}${integrations} },`;
 });
 // A registry with no entry needs no type, and the file then carries no import at all.
 const apiBody =

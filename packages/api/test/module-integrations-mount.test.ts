@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import type { Database } from '@haive/database';
 import { getIntegrationProvider, registerModuleIntegrations } from '@haive/shared/integrations';
 import type { AppEnv } from '../src/context.js';
@@ -14,9 +15,10 @@ const untouchable = new Proxy(
   },
 ) as Database;
 
-const entryOf = (id: string, over: Record<string, unknown> = {}) => ({
-  packageName: `@haive/module-${id}`,
-  manifest: {
+const listDocs = { args: z.object({}), run: async () => ({}) };
+
+const entryOf = (id: string, over: Record<string, unknown> = {}) => {
+  const manifest = {
     id,
     name: `Module ${id}`,
     version: '1.0.0',
@@ -46,8 +48,14 @@ const entryOf = (id: string, over: Record<string, unknown> = {}) => ({
       },
     ],
     ...over,
-  },
-});
+  };
+  const executors = { [`module.${id}.crm`]: { list_docs: listDocs } };
+  return {
+    packageName: `@haive/module-${id}`,
+    manifest,
+    ...(manifest.integrations === undefined ? {} : { integrations: executors }),
+  };
+};
 
 describe('mountModules and the integrations of the modules', () => {
   afterEach(() => registerModuleIntegrations([]));

@@ -1,3 +1,4 @@
+import type { ZodType } from 'zod';
 import type { Database } from '@haive/database';
 
 export type AppVariables = {
@@ -25,6 +26,34 @@ export type ModuleRouteContext = {
 };
 
 export type ModuleSettingsKind = 'global' | 'admin';
+
+export interface IntegrationVendorRequest {
+  method: string;
+  url: string;
+  query?: Record<string, string>;
+  json?: unknown;
+  headers?: Record<string, string>;
+}
+
+/** Resolves for a 2xx answer only (the body is parsed JSON for a JSON content type, else text) and throws otherwise. */
+export interface IntegrationVendorClient {
+  request(options: IntegrationVendorRequest): Promise<{ status: number; body: unknown }>;
+}
+
+export interface IntegrationCall<TArgs = unknown> {
+  args: TArgs;
+  vendor: IntegrationVendorClient;
+  signal: AbortSignal;
+  account: { label: string | null; externalAccountId: string | null };
+}
+
+export interface IntegrationExecutor<TArgs = unknown> {
+  args: ZodType<TArgs>;
+  run(call: IntegrationCall<TArgs>): Promise<unknown>;
+}
+
+/** A module's executors by provider id, then operation id. */
+export type ModuleIntegrationExecutors = Record<string, Record<string, IntegrationExecutor>>;
 
 /** The ConfigService key a module setting is stored under; the api's settings routes write it. */
 export const moduleSettingKey = (moduleId: string, kind: ModuleSettingsKind, field: string) =>

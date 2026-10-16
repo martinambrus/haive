@@ -5,7 +5,8 @@ A module is a package named `@haive/module-<id>` (a workspace folder under `modu
 the one rule: `gen-modules` refuses a package that exports `./manifest` under any other name, and both
 loaders refuse at boot a manifest whose id does not match its name), whose
 `package.json` exports `./manifest` (which may also declare integration providers and categories, see
-[Integrations](integrations.md)) and any of `./routes` (api), `./steps`, `./ensure-schema`,
+[Integrations](integrations.md)) and any of `./routes` and `./integrations` (api, the executors of
+those providers), `./steps`, `./ensure-schema`,
 `./jobs` and `./teardown` (worker), `./web` and `./dashboard` (web). `scripts/gen-modules.mjs` turns the installed
 ones into four gitignored registries (`packages/api/src/modules.generated.ts`,
 `packages/worker/src/modules.generated.ts`, `packages/web/src/generated/module-pages.ts` and
