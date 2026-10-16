@@ -488,6 +488,7 @@ describe('the tasks the sweep takes, by task status and current row', () => {
     taskStatus: string;
     taskUpdatedAt: Date;
     row: { status: string; waitingStartedAt?: Date | null; updatedAt?: Date } | null;
+    deadAt?: Date;
   }
   const seed = (
     taskId: string,
@@ -505,7 +506,7 @@ describe('the tasks the sweep takes, by task status and current row', () => {
       const rowStatus = s.row?.status ?? null;
       const taken = takes({
         'task.status': s.taskStatus,
-        'task.deadAt': null,
+        'task.deadAt': s.deadAt ?? null,
         'task.currentStepId': 'step-a',
         'task.updatedAt': s.taskUpdatedAt,
         'step.id': rowId,
@@ -604,5 +605,60 @@ describe('the tasks the sweep takes, by task status and current row', () => {
   it('still leaves a running task on a parked form', async () => {
     const parked = { ...answered, waitingStartedAt: idle };
     expect(await advancedBy([seed('task', 'running', parked)])).toEqual([]);
+  });
+
+  it('still leaves a running task that moved since the cutoff to the pass that moved it', async () => {
+    expect(await advancedBy([seed('task', 'running', answered, new Date())])).toEqual([]);
+  });
+
+  describe('a waiting_pr task, which the pull-request poller rewrites every few minutes', () => {
+    const polled = new Date();
+
+    it('re-drives a task whose current form was answered, once at the bumped epoch, whatever the poller last wrote', async () => {
+      expect(await advancedBy([seed('task', 'waiting_pr', answered, polled)])).toEqual([
+        { taskId: 'task', epoch: 4 },
+      ]);
+    });
+
+    it('re-drives it the same when the task itself has been idle', async () => {
+      expect(await advancedBy([seed('task', 'waiting_pr', answered)])).toEqual([
+        { taskId: 'task', epoch: 4 },
+      ]);
+    });
+
+    it('leaves a task whose current form is parked to the person it waits on', async () => {
+      const parked = { ...answered, waitingStartedAt: idle };
+      expect(await advancedBy([seed('task', 'waiting_pr', parked, polled)])).toEqual([]);
+    });
+
+    it('leaves an answered form the task queue still owes a job', async () => {
+      expect(await advancedBy([seed('task', 'waiting_pr', answered, polled)], ['task'])).toEqual(
+        [],
+      );
+    });
+
+    it('leaves an answer written since the cutoff to its own advance', async () => {
+      const written = { ...answered, updatedAt: new Date() };
+      expect(await advancedBy([seed('task', 'waiting_pr', written, polled)])).toEqual([]);
+      expect(await advancedBy([seed('task', 'waiting_pr', written)])).toEqual([]);
+    });
+
+    it.each(['pending', 'running', 'waiting_cli', 'done', 'skipped', 'failed'])(
+      'leaves a task on a %s current row',
+      async (status) => {
+        expect(await advancedBy([seed('task', 'waiting_pr', { status }, polled)])).toEqual([]);
+        expect(await advancedBy([seed('task', 'waiting_pr', { status })])).toEqual([]);
+      },
+    );
+
+    it('leaves a task with no current row', async () => {
+      expect(await advancedBy([seed('task', 'waiting_pr', null, polled)])).toEqual([]);
+      expect(await advancedBy([seed('task', 'waiting_pr', null)])).toEqual([]);
+    });
+
+    it('leaves a dead task to its revival', async () => {
+      const dead = { ...seed('task', 'waiting_pr', answered, polled), deadAt: new Date() };
+      expect(await advancedBy([dead])).toEqual([]);
+    });
   });
 });
