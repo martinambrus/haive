@@ -29,6 +29,7 @@ const values = (over: Partial<PromptTemplateValues> = {}): PromptTemplateValues 
   taskTitle: 'Title',
   taskDescription: 'Description',
   steps: {},
+  integrations: {},
   ...over,
 });
 
@@ -307,7 +308,8 @@ describe('validatePromptStep', () => {
     ['reserved-marker-in-template', entry({ template: '  \n<haive_rules>' })],
     ['reserved-marker-in-template', entry({ template: '{{task.description}}<haive_rules>' })],
     ['reserved-marker-in-template', entry({ template: '[[HAI{{task.title}}VE_X' })],
-    ['integration-token', entry({ template: '{{integration:jira}}' })],
+    ['integration-not-declared', entry({ template: '{{integration:jira.account}}' })],
+    ['integration-property-unknown', entry({ template: '{{integration:jira}}' })],
     ['template-too-large', entry({ template: 'a'.repeat(PROMPT_STEP_TEMPLATE_MAX_BYTES + 1) })],
     ['timeout-out-of-range', entry({ timeoutMs: PROMPT_STEP_TIMEOUT_MIN_MS - 1 })],
     ['timeout-out-of-range', entry({ timeoutMs: PROMPT_STEP_TIMEOUT_MAX_MS + 1 })],
@@ -379,7 +381,7 @@ describe('validatePromptStep', () => {
         'unknown-token',
         'field-not-declared',
         'persona-id-invalid',
-        'integration-token',
+        'integration-property-unknown',
         'step-token-not-earlier',
         'step-token-not-own-line',
         'capability-not-allowed',
@@ -793,12 +795,11 @@ describe('tools on a prompt step', () => {
   });
 
   it('lists the new problem kinds with the old ones, without a repeat', () => {
-    expect(PROMPT_STEP_PROBLEM_KINDS.slice(0, 14)).toEqual([
+    expect(PROMPT_STEP_PROBLEM_KINDS.slice(0, 13)).toEqual([
       'unknown-token',
       'field-not-declared',
       'persona-id-invalid',
       'reserved-marker-in-template',
-      'integration-token',
       'template-too-large',
       'timeout-out-of-range',
       'capability-not-allowed',

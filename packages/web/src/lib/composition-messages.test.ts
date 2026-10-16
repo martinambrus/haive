@@ -423,8 +423,32 @@ describe('describePromptStepIssue', () => {
 
   it('keeps a backtick in the token from closing the code span', () => {
     expect(
-      describePromptStepIssue({ kind: 'integration-token', stepId: 's', raw: '{{a`b}}' }),
-    ).toBe('`` {{a`b}} `` is not supported yet.');
+      describePromptStepIssue({ kind: 'integration-not-declared', stepId: 's', raw: '{{a`b}}' }),
+    ).toContain('`` {{a`b}} `` names an integration');
+  });
+
+  it('says what is wrong with an integration token, and how to write one', () => {
+    const undeclared = describePromptStepIssue({
+      kind: 'integration-not-declared',
+      stepId: 's',
+      raw: '{{integration:ghost.account}}',
+    });
+    expect(undeclared).toContain('`{{integration:ghost.account}}`');
+    expect(undeclared).toMatch(/does not declare/);
+    const property = describePromptStepIssue({
+      kind: 'integration-property-unknown',
+      stepId: 's',
+      raw: '{{integration:docs.label}}',
+    });
+    expect(property).toContain('`{{integration:docs.label}}`');
+    expect(property).toContain('`{{integration:<id>.account}}`');
+    expect(`${undeclared}${property}`).not.toMatch(/not supported/i);
+  });
+
+  it('lists the integration token among the tokens of an unknown one', () => {
+    expect(
+      describePromptStepIssue({ kind: 'unknown-token', stepId: 's', raw: '{{bogus}}' }),
+    ).toContain('`integration:<id>.account`');
   });
 
   it('says what the client-only and set-level problems mean', () => {
