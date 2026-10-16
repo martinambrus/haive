@@ -22,11 +22,20 @@ function boundedSlug(slug: string): string {
 /** A setting or CLI name the record can hold as a file name. */
 export const isRecordName = (name: string): boolean => NAME.test(name);
 
-/** A repository path a claim may name: relative, canonical, and free of `..` and control
- *  characters. */
-export function isClaimablePath(path: string): boolean {
+/** A relative, canonical repository path with no `..` or control chars: what a claim file name is
+ *  built from, and all an earlier release asked of a claim. */
+export function isCanonicalRepoPath(path: string): boolean {
   if (path === '' || /[\u0000-\u001f\u007f\\]/.test(path)) return false;
   return path.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
+}
+
+/** Whether a path names git data: a `.git` segment in any letter case, as git refuses one on a
+ *  case-insensitive filesystem. */
+export const namesGitData = (path: string): boolean => /(^|\/)\.git(\/|$)/i.test(path);
+
+/** A repository path a claim may name: canonical, and outside git data. */
+export function isClaimablePath(path: string): boolean {
+  return isCanonicalRepoPath(path) && !namesGitData(path);
 }
 
 /** Flat on purpose, and with no leading dot: a tree mirroring `.claude/...` under `.haive-data`
