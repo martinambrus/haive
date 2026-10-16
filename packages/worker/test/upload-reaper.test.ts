@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   stat,
   symlink,
@@ -335,6 +336,93 @@ describe('A2: the row pass reaps a session left in completing', () => {
       expect(rowOf(kind, fresh.id).status).toBe('completing');
       expect(await readFile(fresh.file, 'utf8')).toBe('partial bytes');
     });
+  });
+});
+
+// A complete that failed after its move: the row names the partial, only the final file exists.
+async function movedFinal(kind: Kind, opts: { idleMs: number; status: string }): Promise<Session> {
+  const stale = await session(kind, opts);
+  const finished = stale.file.replace(/\.partial$/, '');
+  await rename(stale.file, finished);
+  return { id: stale.id, file: finished };
+}
+
+describe('A3: the row pass takes the finished file a complete left behind', () => {
+  const repos = KINDS[0]!;
+  const dumps = KINDS[1]!;
+  const bundles = KINDS[2]!;
+
+  describe.each([repos, dumps])('$name', (kind) => {
+    it.each(['uploading', 'completing'])(
+      'cancels a stale %s session whose only file is the final one, and removes it',
+      async (status) => {
+        const stale = await movedFinal(kind, { idleMs: TTL + MIN, status });
+
+        await reapAbandonedUploads(db());
+
+        expect(rowOf(kind, stale.id).status).toBe('cancelled');
+        expect(await exists(stale.file)).toBe(false);
+      },
+    );
+
+    it('keeps the final file of a session idle 23 h, whose complete may still be running', async () => {
+      const fresh = await movedFinal(kind, { idleMs: 23 * HOUR, status: 'completing' });
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, fresh.id).status).toBe('completing');
+      expect(await exists(fresh.file)).toBe(true);
+    });
+  });
+
+  it('removes a link at the final name as a link, and leaves its target', async () => {
+    const stale = await session(repos, { idleMs: TTL + MIN });
+    await rm(stale.file);
+    const finished = stale.file.replace(/\.partial$/, '');
+    const target = path.join(storage, 'target.bin');
+    await writeFile(target, 'the target');
+    await symlink(target, finished);
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(finished)).toBe(false);
+    expect(await readFile(target, 'utf8')).toBe('the target');
+  });
+
+  it('leaves a directory standing at the final name, and still cancels the session', async () => {
+    const stale = await session(repos, { idleMs: TTL + MIN });
+    await rm(stale.file);
+    const finished = stale.file.replace(/\.partial$/, '');
+    await mkdir(finished);
+
+    await reapAbandonedUploads(db());
+
+    expect(rowOf(repos, stale.id).status).toBe('cancelled');
+    expect((await stat(finished)).isDirectory()).toBe(true);
+  });
+
+  it('keeps a final-named file of a stale bundle session, whose final path belongs to the bundle', async () => {
+    const stale = await movedFinal(bundles, { idleMs: TTL + MIN, status: 'uploading' });
+
+    await reapAbandonedUploads(db());
+
+    expect(rowOf(bundles, stale.id).status).toBe('cancelled');
+    expect(await exists(stale.file)).toBe(true);
+  });
+
+  it('keeps the final file of a complete repository session beside the stale one it removes', async () => {
+    const stale = await movedFinal(repos, { idleMs: TTL + MIN, status: 'uploading' });
+    const done = await session(repos, {
+      idleMs: 3 * TTL,
+      status: 'complete',
+      name: repos.finished,
+    });
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(stale.file)).toBe(false);
+    expect(rowOf(repos, done.id).status).toBe('complete');
+    expect(await exists(done.file)).toBe(true);
   });
 });
 

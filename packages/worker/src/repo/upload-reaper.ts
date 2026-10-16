@@ -34,6 +34,8 @@ interface UploadKind {
     | typeof schema.customBundleUploads.archivePath;
   root: () => string;
   partial: RegExp;
+  // A bundle's final path belongs to the bundle; the others' final file sits beside the partial.
+  finalBesidePartial: boolean;
 }
 
 const KINDS: UploadKind[] = [
@@ -42,18 +44,21 @@ const KINDS: UploadKind[] = [
     pathColumn: schema.repoUploads.archivePath,
     root: repoRoot,
     partial: ARCHIVE_PARTIAL,
+    finalBesidePartial: true,
   },
   {
     table: schema.dbUploads,
     pathColumn: schema.dbUploads.dumpPath,
     root: repoRoot,
     partial: DUMP_PARTIAL,
+    finalBesidePartial: true,
   },
   {
     table: schema.customBundleUploads,
     pathColumn: schema.customBundleUploads.archivePath,
     root: bundleRoot,
     partial: ARCHIVE_PARTIAL,
+    finalBesidePartial: false,
   },
 ];
 
@@ -70,6 +75,10 @@ function ownedRel(root: string, userId: string, stored: string, shape: RegExp): 
     return null;
   }
   return split.rel;
+}
+
+function finalRelOf(partialRel: string): string {
+  return partialRel.replace(/\.partial$/, '');
 }
 
 async function removeFile(root: string, rel: string): Promise<boolean> {
@@ -94,10 +103,11 @@ async function reapIdleSessions(db: Database, kind: UploadKind, cutoff: Date): P
         continue;
       }
       await removeFile(kind.root(), rel);
+      if (kind.finalBesidePartial) await removeFile(kind.root(), finalRelOf(rel));
     } catch (err) {
       log.warn(
         { err, stored: row.stored },
-        'reaped upload left its partial; the file pass retries',
+        'reaped upload left a file; the file pass retries only a partial',
       );
     }
   }
@@ -204,7 +214,7 @@ async function claimDump(db: Database, dumpId: string, cutoff: Date): Promise<bo
   });
 }
 
-// A complete flips its row to the final path before it moves the partial, so a row touched inside
+// A complete claims its row, which stamps it, before it moves the partial, so a row touched inside
 // the window protects the partial of its session whatever its status or path.
 async function recentSessions(db: Database, ids: string[], cutoff: Date): Promise<Set<string>> {
   const recent = new Set<string>();

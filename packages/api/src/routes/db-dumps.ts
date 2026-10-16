@@ -16,6 +16,7 @@ import {
   ensureUploadsDir,
   uploadFileRel,
   uploadFileRelOrThrow,
+  uploadFinalRel,
   uploadsRel,
   uploadsStorageRoot,
 } from '../lib/uploads.js';
@@ -239,8 +240,8 @@ dbDumpRoutes.post('/upload/:id/complete', async (c) => {
 
   const anchor = uploadsStorageRoot();
   const dumpRel = uploadFileRelOrThrow(userId, row.dumpPath, 'Dump path');
-  const finalRel = dumpRel.replace(/\.partial$/, '');
-  if (finalRel === dumpRel) {
+  const finalRel = uploadFinalRel(dumpRel);
+  if (finalRel === null) {
     throw new HttpError(500, 'dump path missing .partial suffix');
   }
   const finalPath = path.join(anchor, finalRel);
@@ -281,7 +282,12 @@ dbDumpRoutes.delete('/upload/:id', async (c) => {
   // unlink: the session is still cancelled, and a leftover partial is the upload reaper's to remove
   // rather than a reason to refuse the cancel.
   const dumpRel = uploadFileRel(userId, row.dumpPath);
-  if (dumpRel) await removeNoFollow(uploadsStorageRoot(), dumpRel).catch(() => {});
+  if (dumpRel) {
+    await removeNoFollow(uploadsStorageRoot(), dumpRel).catch(() => {});
+    // An uploading session owns no completed file, so a final one here is a failed complete's.
+    const finalRel = uploadFinalRel(dumpRel);
+    if (finalRel) await removeNoFollow(uploadsStorageRoot(), finalRel).catch(() => {});
+  }
 
   return c.json({ ok: true });
 });

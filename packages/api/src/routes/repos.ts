@@ -42,6 +42,7 @@ import {
   ensureUploadsDir,
   uploadFileRel,
   uploadFileRelOrThrow,
+  uploadFinalRel,
   uploadsRel,
   uploadsStorageRoot,
 } from '../lib/uploads.js';
@@ -745,8 +746,8 @@ repoRoutes.post('/upload/:id/complete', async (c) => {
 
   const storageRoot = uploadsStorageRoot();
   const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Upload session archive');
-  const finalRel = archiveRel.replace(/\.partial$/, '');
-  if (finalRel === archiveRel) {
+  const finalRel = uploadFinalRel(archiveRel);
+  if (finalRel === null) {
     throw new HttpError(500, 'archive path missing .partial suffix');
   }
   const finalPath = path.join(storageRoot, finalRel);
@@ -827,11 +828,12 @@ repoRoutes.delete('/upload/:id', async (c) => {
   // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
   // unlink: the session is still cancelled, and a leftover partial is the upload reaper's to remove
   // rather than a reason to refuse the cancel.
-  try {
-    const archiveRel = uploadFileRel(userId, row.archivePath);
-    if (archiveRel) await removeNoFollow(uploadsStorageRoot(), archiveRel);
-  } catch {
-    // absent, refused, or a path this api never wrote
+  const archiveRel = uploadFileRel(userId, row.archivePath);
+  if (archiveRel) {
+    await removeNoFollow(uploadsStorageRoot(), archiveRel).catch(() => {});
+    // An uploading session owns no completed file, so a final one here is a failed complete's.
+    const finalRel = uploadFinalRel(archiveRel);
+    if (finalRel) await removeNoFollow(uploadsStorageRoot(), finalRel).catch(() => {});
   }
 
   return c.json({ ok: true });

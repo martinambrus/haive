@@ -506,6 +506,123 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
     }, 30_000);
   });
 
+  // A complete that failed after its move: the row names the partial, only the final file exists.
+  describe('the session pass and the finished file a complete left behind', () => {
+    const sessionRow = () => ({ userId, totalSize: 10, bytesReceived: 10, chunkSize: 10 });
+    const kinds = [
+      {
+        name: 'repo_uploads',
+        table: schema.repoUploads,
+        volume: 'repos',
+        partial: (id: string) => `${id}.zip.partial`,
+        insert: (id: string, stored: string, status: string, updatedAt: Date) =>
+          db.insert(schema.repoUploads).values({
+            ...sessionRow(),
+            id,
+            filename: 'a.zip',
+            archiveFormat: 'zip',
+            archivePath: stored,
+            status,
+            updatedAt,
+          }),
+      },
+      {
+        name: 'db_uploads',
+        table: schema.dbUploads,
+        volume: 'repos',
+        partial: (id: string) => `db-${id}.sql.partial`,
+        insert: (id: string, stored: string, status: string, updatedAt: Date) =>
+          db.insert(schema.dbUploads).values({
+            ...sessionRow(),
+            id,
+            filename: 'a.sql',
+            dumpFormat: 'sql',
+            dumpPath: stored,
+            status,
+            updatedAt,
+          }),
+      },
+      {
+        name: 'custom_bundle_uploads',
+        table: schema.customBundleUploads,
+        volume: 'bundles',
+        partial: (id: string) => `${id}.tar.gz.partial`,
+        insert: (id: string, stored: string, status: string, updatedAt: Date) =>
+          db.insert(schema.customBundleUploads).values({
+            ...sessionRow(),
+            id,
+            repositoryId: repoId,
+            name: 'kit',
+            filename: 'a.tar.gz',
+            archiveFormat: 'tar.gz',
+            archivePath: stored,
+            status,
+            updatedAt,
+          }),
+      },
+    ];
+    type Kind = (typeof kinds)[number];
+    const repos = kinds[0]!;
+    const dumps = kinds[1]!;
+    const bundles = kinds[2]!;
+
+    async function movedFinal(kind: Kind, status: string) {
+      const id = randomUUID();
+      const partial = path.join(root, kind.volume, '_uploads', userId, kind.partial(id));
+      const finished = partial.replace(/\.partial$/, '');
+      await writeFile(finished, 'finished bytes');
+      await kind.insert(id, partial, status, new Date(Date.now() - 25 * HOUR));
+      return { id, finished };
+    }
+
+    const statusOfRow = async (kind: Kind, id: string) => {
+      const [row] = await db
+        .select({ status: kind.table.status })
+        .from(kind.table)
+        .where(eq(kind.table.id, id));
+      return row!.status;
+    };
+
+    describe.each([repos, dumps])('$name', (kind) => {
+      it.each(['uploading', 'completing'])(
+        'cancels a stale %s session whose only file is the final one, and removes it',
+        async (status) => {
+          const stale = await movedFinal(kind, status);
+
+          await reapAbandonedUploads(db);
+
+          expect(await statusOfRow(kind, stale.id)).toBe('cancelled');
+          expect(await exists(stale.finished)).toBe(false);
+        },
+      );
+    });
+
+    it('keeps a final-named file of a stale bundle session, whose final path belongs to the bundle', async () => {
+      const stale = await movedFinal(bundles, 'uploading');
+
+      await reapAbandonedUploads(db);
+
+      expect(await statusOfRow(bundles, stale.id)).toBe('cancelled');
+      expect(await exists(stale.finished)).toBe(true);
+    });
+
+    it('keeps the final file of a complete repository session beside the stale one it removes', async () => {
+      const stale = await movedFinal(repos, 'uploading');
+      const doneId = randomUUID();
+      const done = path.join(root, 'repos', '_uploads', userId, `${doneId}.zip`);
+      await writeFile(done, 'archive bytes');
+      const old = new Date(Date.now() - 72 * HOUR);
+      await utimes(done, old, old);
+      await repos.insert(doneId, done, 'complete', old);
+
+      await reapAbandonedUploads(db);
+
+      expect(await exists(stale.finished)).toBe(false);
+      expect(await statusOfRow(repos, doneId)).toBe('complete');
+      expect(await exists(done)).toBe(true);
+    });
+  });
+
   describe('the file pass', () => {
     const kinds = [
       {

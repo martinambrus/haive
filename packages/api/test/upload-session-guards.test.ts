@@ -570,6 +570,96 @@ describe('U4: cancelling a session that is not uploading', () => {
   );
 });
 
+// A complete that failed after its move gives the session back to uploading, final file only.
+describe('A3: cancelling an uploading session takes the finished file a complete left behind', () => {
+  const finishable = [FAMILIES[0]!, FAMILIES[1]!];
+
+  it.each(finishable)(
+    '$name: removes the finished file and the partial when both are there',
+    async (family) => {
+      const staged = await stage(family);
+      await writeFile(staged.finished, CONTENT);
+
+      const res = await request(family.app, 'DELETE', family.cancelUrl(SESSION));
+
+      expect(res.status).toBe(200);
+      expect(rowOf(family).status).toBe('cancelled');
+      expect(await exists(staged.partial)).toBe(false);
+      expect(await exists(staged.finished)).toBe(false);
+    },
+  );
+
+  it.each(finishable)(
+    '$name: removes the file a complete moved before its last write failed',
+    async (family) => {
+      const staged = await stage(family);
+      let writes = 0;
+      // The claim is the first write to the upload row and the final write is the second.
+      fake.hooks.beforeUpdate = (table) => {
+        if (table === family.table && (writes += 1) === 2)
+          throw new Error('the final write failed');
+      };
+
+      const failed = await request(family.app, 'POST', family.completeUrl(SESSION));
+      fake.hooks.beforeUpdate = null;
+
+      expect(failed.status).toBe(500);
+      expect(rowOf(family)).toMatchObject({
+        status: 'uploading',
+        [family.pathKey]: staged.partial,
+      });
+      expect(await exists(staged.partial)).toBe(false);
+      expect(await readFile(staged.finished, 'utf8')).toBe(CONTENT);
+
+      const res = await request(family.app, 'DELETE', family.cancelUrl(SESSION));
+
+      expect(res.status).toBe(200);
+      expect(rowOf(family).status).toBe('cancelled');
+      expect(await exists(staged.finished)).toBe(false);
+    },
+  );
+
+  it.each(finishable)(
+    '$name: removes the finished file even when the partial cannot be removed',
+    async (family) => {
+      const staged = await stage(family);
+      await rm(staged.partial);
+      await mkdir(staged.partial);
+      await writeFile(path.join(staged.partial, 'inner.txt'), 'inner');
+      await writeFile(staged.finished, CONTENT);
+
+      const res = await request(family.app, 'DELETE', family.cancelUrl(SESSION));
+
+      expect(res.status).toBe(200);
+      expect(await exists(staged.finished)).toBe(false);
+      expect(await readFile(path.join(staged.partial, 'inner.txt'), 'utf8')).toBe('inner');
+    },
+  );
+
+  it.each(finishable)(
+    '$name: removes nothing, the finished file included, when a complete claims the session first',
+    async (family) => {
+      const staged = await stage(family);
+      await writeFile(staged.finished, CONTENT);
+      fake.hooks.beforeUpdate = async (table) => {
+        if (table !== family.table) return;
+        fake.hooks.beforeUpdate = null;
+        fake.patch(family.table, SESSION, {
+          status: 'completing',
+          updatedAt: new Date(),
+        });
+      };
+
+      const res = await request(family.app, 'DELETE', family.cancelUrl(SESSION));
+
+      expect(res.status).toBe(409);
+      expect(rowOf(family).status).toBe('completing');
+      expect(await exists(staged.partial)).toBe(true);
+      expect(await readFile(staged.finished, 'utf8')).toBe(CONTENT);
+    },
+  );
+});
+
 describe('A1: a bundle complete holds its session against a cancel', () => {
   const bundles = FAMILIES[2]!;
   const replaceUrl = `/${BUNDLE}/replace/${SESSION}/complete`;
