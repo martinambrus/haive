@@ -110,7 +110,9 @@ provider be called `oauth` or `connections`.
   scopes and the client id) for 600 s; one key per user and provider, so a new attempt replaces the
   old one and the keyspace stays bounded under `noeviction`.
 - **The callback is a web page**, `/settings/integrations/callback/<provider>`
-  (`oauthRedirectUri`, one helper for the authorize request and the admin page). It strips `code`
+  (`oauthRedirectUri`, one helper for the authorize request and the admin page). A module provider's
+  id holds dots, which the proxy's catch-all matcher takes for a static file, so `web/src/proxy.ts`
+  names this path in a second matcher entry: the page gets its CSP header and login redirect. It strips `code`
   and `state` from the address bar and POSTs once to `/integrations/oauth/complete`, never retrying a
   refusal; the web client's one resend after refreshing an expired cookie is the only repeat, and only
   that send reaches the attempt.
