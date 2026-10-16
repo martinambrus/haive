@@ -24,6 +24,7 @@ import type { StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { emitsLoop } from '../step-engine/steps/index.js';
 import { FIX_LOOP_TARGET_STEP_ID } from '../step-engine/steps/workflow/_fix-loop.js';
+import { markModuleSchemaReady, markModuleSchemaUnready } from './schema-ready.js';
 
 export type { ModuleSchemaContext, ModuleTeardownContext };
 
@@ -203,13 +204,17 @@ export async function ensureModuleSchemas(
     } else {
       result[moduleId] = 'pending';
       bootEnsuresRunning.add(moduleId);
+      markModuleSchemaUnready(moduleId);
       void ensuring
-        .catch((err: unknown) => {
-          logger.warn(
-            { err, module: moduleId },
-            'module schema bootstrap failed after boot went on without it',
-          );
-        })
+        .then(
+          () => markModuleSchemaReady(moduleId),
+          (err: unknown) => {
+            logger.warn(
+              { err, module: moduleId },
+              'module schema bootstrap failed after boot went on without it',
+            );
+          },
+        )
         .finally(() => bootEnsuresRunning.delete(moduleId));
     }
   }
@@ -441,7 +446,10 @@ export async function startModuleJobs(
       }, MODULE_JOB_START_WAIT_MS);
       void (async () => {
         try {
-          if (ensureSchema) await bootstrapModuleSchema(getDb(), moduleId, ensureSchema);
+          if (ensureSchema) {
+            await bootstrapModuleSchema(getDb(), moduleId, ensureSchema);
+            markModuleSchemaReady(moduleId);
+          }
           if (jobs && (await start(moduleId, jobs))) {
             logger.info({ module: moduleId }, 'module jobs started: the module is active again');
           }

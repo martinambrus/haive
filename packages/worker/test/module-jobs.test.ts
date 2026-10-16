@@ -35,6 +35,7 @@ const {
 } = await import('../src/modules/loader.js');
 const { ModuleTeardownRefusedError, runModuleTeardown } =
   await import('../src/queues/module-control-queue.js');
+const { moduleDeactivationMessage } = await import('../src/modules/activation.js');
 
 type Loaded = Parameters<typeof startModuleJobs>[0][number];
 type Entry = Parameters<typeof startModuleJobs>[1][number];
@@ -48,6 +49,12 @@ const deactivatedRowDb = {
   }),
   update: () => ({
     set: () => ({ where: () => ({ returning: async () => [{ tornDownAt: new Date() }] }) }),
+  }),
+} as unknown as Database;
+
+const activeRowDb = {
+  select: () => ({
+    from: () => ({ where: () => ({ limit: async () => [{ deactivatedAt: null }] }) }),
   }),
 } as unknown as Database;
 
@@ -1511,4 +1518,70 @@ describe('a teardown beside a boot schema ensure that outlived its wait', () => 
       expect(m.ensure).toHaveBeenCalledOnce();
     },
   );
+});
+
+describe('the steps of a module whose boot schema ensure outlived its wait', () => {
+  beforeEach(() => {
+    moduleDb.gate = undefined;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const bootLate = async (id: string) => {
+    const m = moduleWithHungStart(id, 'ensureSchema');
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const ensuring = ensureModuleSchemas({} as Database, [m.loaded], [m.entry], new Set());
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+    expect(await ensuring).toEqual({ [id]: 'pending' });
+    return m;
+  };
+
+  it('fail with a message naming the module while that ensure runs, and run once it has succeeded', async () => {
+    const m = await bootLate('gate-late');
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-late.x')).toMatch(
+      /gate-late.*schema setup.*module\.gate-late\.x/,
+    );
+
+    m.end().resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-late.x')).toBeNull();
+  });
+
+  it('keep failing after that ensure failed, until a reconcile pass has ensured the schema', async () => {
+    const m = await bootLate('gate-failed');
+    m.end().reject(new Error('ddl refused'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-failed.x')).toMatch(
+      /gate-failed.*schema setup/,
+    );
+
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['gate-failed']),
+    );
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(2);
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-failed.x')).toBeNull();
+    await stopAll();
+  });
+
+  it('name the deactivation, not the schema, when the module is also deactivated', async () => {
+    await bootLate('gate-off');
+    expect(await moduleDeactivationMessage(deactivatedRowDb, 'module.gate-off.x')).toMatch(
+      /gate-off is deactivated/,
+    );
+  });
+
+  it('run at once when the boot ensure ended within its wait', async () => {
+    const m = moduleWithSchema('gate-prompt');
+    expect(await ensureModuleSchemas({} as Database, [m.loaded], [m.entry], new Set())).toEqual({
+      'gate-prompt': 'ok',
+    });
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-prompt.x')).toBeNull();
+  });
 });
