@@ -26,6 +26,7 @@ import { getRedis } from '../redis.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
+import { isUuid } from '../lib/uuid.js';
 
 const log = logger.child({ module: 'terminal-shell-ws' });
 const WS_PATH_PREFIX = '/terminal-shell/';
@@ -67,6 +68,10 @@ export function installTerminalShellWebSocket(
     if (!isRepo && !isTask) return;
     if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {
       rejectUpgrade(socket, 403, 'Forbidden');
+      return;
+    }
+    if (hasMalformedId(rawUrl, isRepo ? repoPathPrefix : pathPrefix)) {
+      rejectUpgrade(socket, 404, 'Not Found');
       return;
     }
 
@@ -576,6 +581,11 @@ function parseTwoSegmentPath(rawUrl: string, pathPrefix: string): [string, strin
   const [a, b] = parts as [string, string];
   if (!a || !b) return null;
   return [a, b];
+}
+
+function hasMalformedId(rawUrl: string, pathPrefix: string): boolean {
+  const parsed = parseTwoSegmentPath(rawUrl, pathPrefix);
+  return parsed !== null && !parsed.every(isUuid);
 }
 
 export function extractIds(

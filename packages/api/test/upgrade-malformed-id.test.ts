@@ -56,9 +56,12 @@ import { installBrowserVncWebSocket } from '../src/routes/browser-vnc.js';
 import { installCliLoginBannerWebSocket } from '../src/routes/cli-login-banner.js';
 import { installCliStreamWebSocket } from '../src/routes/cli-stream.js';
 import { installIdeWebSocket } from '../src/routes/ide.js';
+import { installTerminalShellWebSocket } from '../src/routes/terminal-shell.js';
 import { installTerminalWebSocket } from '../src/routes/terminal.js';
 
 const TASK = '00000000-0000-4000-8000-0000000000c1';
+const ENDED_TASK = '00000000-0000-4000-8000-0000000000c2';
+const REPOSITORY = '00000000-0000-4000-8000-0000000000b1';
 const INVOCATION = '00000000-0000-4000-8000-0000000000d1';
 const CONTAINER = '00000000-0000-4000-8000-0000000000e1';
 const PROVIDER = '00000000-0000-4000-8000-0000000000f1';
@@ -93,6 +96,20 @@ const HANDLERS = [
   { name: 'ide', install: installIdeWebSocket, prefix: '/ide/' },
 ];
 const MALFORMED = ['abc', 'a'.repeat(36), '-'.repeat(36), `${TASK}0`];
+const SHELLS = [
+  {
+    name: 'terminal-shell',
+    prefix: '/terminal-shell/',
+    held: ENDED_TASK,
+    status: 'HTTP/1.1 409 Task is completed - terminal disabled',
+  },
+  {
+    name: 'terminal-repo-shell',
+    prefix: '/terminal-repo-shell/',
+    held: REPOSITORY,
+    status: 'HTTP/1.1 409 Repository is cloning - terminal unavailable',
+  },
+];
 
 let server: Server | null = null;
 
@@ -109,6 +126,8 @@ beforeEach(() => {
   });
   fake.insert(schema.users, { id: h.USER, status: 'active', tokenVersion: 0 });
   fake.insert(schema.tasks, { id: TASK, userId: h.USER });
+  fake.insert(schema.tasks, { id: ENDED_TASK, userId: h.USER, status: 'completed' });
+  fake.insert(schema.repositories, { id: REPOSITORY, userId: h.USER, status: 'cloning' });
   fake.insert(schema.cliInvocations, {
     id: INVOCATION,
     taskId: TASK,
@@ -216,3 +235,35 @@ describe.each(HELD)(
     });
   },
 );
+
+describe.each(SHELLS)('the $name upgrade', ({ prefix, held, status }) => {
+  const malformed = MALFORMED.flatMap((id) => [`${id}/${PROVIDER}`, `${held}/${id}`]);
+
+  it.each(malformed)(
+    'answers the malformed ids %s with 404, before any database read and without an error log',
+    async (ids) => {
+      const port = await listen(installTerminalShellWebSocket);
+
+      expect(await handshake(port, `${prefix}${ids}`)).toBe('HTTP/1.1 404 Not Found');
+      expect(h.dbCalls).toBe(0);
+      expect(h.error).not.toHaveBeenCalled();
+    },
+  );
+
+  it('answers well-formed ids nobody holds with 404, after reading the database (passes before and after)', async () => {
+    const port = await listen(installTerminalShellWebSocket);
+    const path = `${prefix}${randomUUID()}/${randomUUID()}`;
+
+    expect(await handshake(port, path)).toBe('HTTP/1.1 404 Not Found');
+    expect(h.dbCalls).toBeGreaterThan(0);
+    expect(h.error).not.toHaveBeenCalled();
+  });
+
+  it('goes on to the handler it always did for ids the user holds (passes before and after)', async () => {
+    const port = await listen(installTerminalShellWebSocket);
+
+    expect(await handshake(port, `${prefix}${held}/${PROVIDER}`)).toBe(status);
+    expect(h.dbCalls).toBeGreaterThan(0);
+    expect(h.error).not.toHaveBeenCalled();
+  });
+});
