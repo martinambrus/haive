@@ -100,6 +100,7 @@ const GITHUB = {
   repos: 'https://api.github.com/user/repos',
 };
 const ADMIN_CLIENT = { id: 'stub-admin-client-id', secret: 'stub-admin-client-secret' };
+const SECOND_CLIENT_ID = 'stub-admin-client-id-2';
 const GITHUB_CLIENT = { id: 'gh-env-client-id', secret: 'stub-env-client-secret' };
 const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
 const CORE_FORGES = ['github', 'gitea', 'gitlab', 'bitbucket_cloud', 'bitbucket_server'];
@@ -203,6 +204,7 @@ function installOauthVendor(
   const accessTokens = new Set<string>();
   let seq = 0;
   const control = {
+    clientId: o.clientId,
     account: { id: '1001', label: 'user-a@stub.test' } as Account,
     expiring: o.expiring,
     tokenDelayMs: 0,
@@ -251,13 +253,13 @@ function installOauthVendor(
         sha256(call.form.code_verifier ?? '') === entry.challenge &&
         call.form.redirect_uri === entry.redirectUri &&
         call.form.client_id === entry.clientId &&
-        call.form.client_id === o.clientId &&
+        call.form.client_id === control.clientId &&
         call.form.client_secret === o.clientSecret;
       return proven ? issue(entry.scope) : oauthError('invalid_grant');
     }
     if (call.form.grant_type === DEVICE_GRANT) {
       const scope = devices.get(call.form.device_code ?? '');
-      if (scope === undefined || call.form.client_id !== o.clientId) {
+      if (scope === undefined || call.form.client_id !== control.clientId) {
         return oauthError('incorrect_device_code');
       }
       control.devicePolls += 1;
@@ -281,7 +283,7 @@ function installOauthVendor(
     return oauthError('unsupported_grant_type');
   });
   vendor.on('POST', o.deviceUrl, (call) => {
-    if (call.form.client_id !== o.clientId) return oauthError('incorrect_client_credentials');
+    if (call.form.client_id !== control.clientId) return oauthError('incorrect_client_credentials');
     seq += 1;
     const deviceCode = `stub-device-code-${seq}`;
     devices.set(deviceCode, call.form.scope ?? '');
@@ -479,6 +481,11 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
       .insert(schema.integrationProviderConfigs)
       .values(values)
       .onConflictDoUpdate({ target: schema.integrationProviderConfigs.providerId, set: values });
+  }
+
+  async function replaceStubClient(clientId: string) {
+    await configureStub({ oauthClientId: clientId });
+    stub.clientId = clientId;
   }
 
   function useGithubClient(withSecret = false) {
@@ -918,6 +925,36 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
       });
     });
 
+    it('signing in again under another OAuth client keeps no refresh token the first client issued', async () => {
+      expect((await signInWithCode(a)).status).toBe(200);
+      await replaceStubClient(SECOND_CLIENT_ID);
+      stub.expiring = false;
+      expect((await signInWithCode(a)).status).toBe(200);
+
+      const rows = await connectionsOf(a.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.oauthClientId).toBe(SECOND_CLIENT_ID);
+      expect(decryptConnectionTokens(rows[0]!, KEK)).toEqual({
+        accessToken: stub.issued[1]!.access,
+        refreshToken: null,
+      });
+    });
+
+    it('signing in again under another OAuth client stores the refresh token that client sent', async () => {
+      expect((await signInWithCode(a)).status).toBe(200);
+      await replaceStubClient(SECOND_CLIENT_ID);
+      expect((await signInWithCode(a)).status).toBe(200);
+
+      const rows = await connectionsOf(a.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.oauthClientId).toBe(SECOND_CLIENT_ID);
+      expect(stub.issued[1]!.refresh).not.toBe(stub.issued[0]!.refresh);
+      expect(decryptConnectionTokens(rows[0]!, KEK)).toEqual({
+        accessToken: stub.issued[1]!.access,
+        refreshToken: stub.issued[1]!.refresh,
+      });
+    });
+
     it('a sign-in to another account of the same user is a second connection', async () => {
       await signInWithCode(a);
       stub.account = { id: '2002', label: 'user-a-second@stub.test' };
@@ -1113,6 +1150,20 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
       expect(decryptConnectionTokens(rows[0]!, KEK)).toEqual({
         accessToken: stub.issued[1]!.access,
         refreshToken: stub.issued[0]!.refresh,
+      });
+    });
+
+    it('signing in again by the web flow keeps no refresh token the device flow issued', async () => {
+      expect((await signInWithDevice(a, STUB_ID)).status).toBe(200);
+      stub.expiring = false;
+      expect((await signInWithCode(a)).status).toBe(200);
+
+      const rows = await connectionsOf(a.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.authMethod).toBe('oauth2');
+      expect(decryptConnectionTokens(rows[0]!, KEK)).toEqual({
+        accessToken: stub.issued[1]!.access,
+        refreshToken: null,
       });
     });
 

@@ -114,8 +114,15 @@ async function writeCredential(
 }
 
 /** Unreadable tokens (a replaced key) count as none, so a reconnect can still heal the row. */
-function storedRefreshToken(row: ConnectionRow | undefined, kek: string): string | null {
+function storedRefreshToken(
+  row: ConnectionRow | undefined,
+  method: Oauth2Method | DeviceMethod,
+  client: ResolvedOauthClient,
+  kek: string,
+): string | null {
   if (!row?.refreshTokenEncrypted) return null;
+  // A refresh uses the row's method and client, so a grant from another issuer would fail there.
+  if (row.authMethod !== method.kind || row.oauthClientId !== client.clientId) return null;
   try {
     return decryptConnectionTokens(row, kek).refreshToken;
   } catch {
@@ -196,7 +203,8 @@ export async function finishSignIn(input: {
             ...encryptConnectionTokens(
               {
                 accessToken: tokens.accessToken,
-                refreshToken: tokens.refreshToken ?? storedRefreshToken(existing, kek),
+                refreshToken:
+                  tokens.refreshToken ?? storedRefreshToken(existing, method, client, kek),
               },
               kek,
             ),
