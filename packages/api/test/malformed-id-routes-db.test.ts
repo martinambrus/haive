@@ -113,6 +113,39 @@ describe.skipIf(!url)('a request whose path id is not a uuid, on Postgres', () =
     expect(await repo.json()).toEqual({ error: 'Repository not found', code: null });
   });
 
+  describe('a repositoryId query that is not a uuid', () => {
+    const ROUTES = [
+      '/tasks?',
+      '/tasks/feature-suggestions?q=ab&',
+      '/tasks/last-cli?',
+      '/tasks/estimation-accuracy?',
+    ];
+
+    it.each(ROUTES)('answers GET %srepositoryId=abc with 400 and does not log', async (route) => {
+      const res = await get(`${route}repositoryId=abc`);
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'repositoryId must be a UUID', code: null });
+      expect(logged).not.toHaveBeenCalled();
+    });
+
+    it.each(ROUTES)(
+      'keeps answering GET %srepositoryId=<uuid> with 200, held or not (passes before and after)',
+      async (route) => {
+        for (const id of [repositoryId, repositoryId.toUpperCase(), randomUUID()]) {
+          expect((await get(`${route}repositoryId=${id}`)).status).toBe(200);
+        }
+      },
+    );
+
+    it.each(['', '%20'])(
+      'keeps reading GET /tasks?repositoryId=%s as no filter (passes before and after)',
+      async (value) => {
+        expect((await get(`/tasks?repositoryId=${value}`)).status).toBe(200);
+      },
+    );
+  });
+
   describe('the real errors Postgres raises, through the real handler', () => {
     const probe = new Hono<AppEnv>();
     probe.get('/drizzle/:id', async (c) =>
