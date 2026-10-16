@@ -633,6 +633,39 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
       expect(create!.status === 'fulfilled' && (create!.value as Response).status).toBe(201);
     });
 
+    it('never deadlocks a plan task spawned beside a creation that takes the lock and then the repository row', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let seeded!: () => void;
+      const inserted = new Promise<void>((resolve) => (seeded = resolve));
+      const pending: Promise<unknown>[] = [];
+      try {
+        pending.push(
+          spawnPlanTask({
+            userId: USER,
+            repositoryId: REPO,
+            type: 'plan_chat',
+            title: 'spawned beside a creation',
+            metadata: {},
+            cliProviderId: null,
+            seed: async () => {
+              seeded();
+              await gate;
+            },
+          }),
+        );
+        await Promise.race([inserted, ...pending]);
+        pending.push(db.transaction(async (tx) => void (await lockRepositoryRow(tx, REPO))));
+        await until(async () => (await locksOn('advisory', false)) > 0);
+      } finally {
+        release();
+        await Promise.allSettled(pending);
+      }
+      const [spawned, revival] = await Promise.allSettled(pending);
+      expect(revival!.status).toBe('fulfilled');
+      expect(spawned!.status).toBe('fulfilled');
+    });
+
     it('never deadlocks a create that pins a database against one that holds the lock first', async () => {
       await db.insert(schema.taskTypeDefinitions).values([
         typeRow('workflow', [], {
