@@ -76,10 +76,17 @@ the module loads again.
   to the row does the same to an idle module. Boot waits the same `MODULE_JOB_START_WAIT_MS` on each
   module's schema ensure and job start: one still running then is named in a warn and boot goes on to
   `haive-worker ready` without it (a failure within the wait still stops boot); a late ensure is held
-  back like a deactivated module, so the first pass ensures it again and then starts its jobs. At
+  back like a deactivated module, so the first pass ensures it again and then starts its jobs. Until an
+  ensure of such a module has succeeded (the late one or a pass's), its steps fail their row with a
+  message saying its schema setup has not finished on this worker (`modules/schema-ready.ts`, read by
+  the same gate as a deactivated module, whose own message still comes first), and Retry runs them
+  once it has; a boot that skips the ensure of a deactivated module marks it the same way, so after
+  Activate its steps wait for a pass's ensure too. At
   shutdown one deadline, `MODULE_SHUTDOWN_WAIT_MS` (5 s), covers the reconcile pass in flight and every
   module stop together, and the terminal manager's stop runs beside it under its own 5 s bound (it
-  refuses a terminal open from the moment it begins), so the queue closes and the sandbox reap still
+  refuses a terminal open from the moment it begins, and tears down the session of an open that was
+  already in flight and answers it refused; any open that fails after adding its session tears that
+  session down), so the queue closes and the sandbox reap still
   run inside Docker's ~10 s grace, and the shared Redis connections get 1 s to quit before they are
   dropped;
   a start that succeeds after the stops began stops itself, and a second signal waits on the shutdown
@@ -110,8 +117,11 @@ the module loads again.
 `module.teardown`) runs a deactivated module's `./teardown` hook in the worker, which drops the module's
 own data; it answers 409 `module_active` or `module_missing` for a module in any other state. The
 worker refuses it by name while this worker does not load the module, while the module's jobs or its
-schema setup still run (normally within one reconcile pass of the deactivation; a stop that outlives
-its wait keeps the refusal until it ends), and while an earlier teardown hook of the module still runs.
+schema setup still run (jobs normally stop within one reconcile pass of the deactivation, and a stop
+that outlives its wait keeps the refusal until it ends; a boot schema ensure that outlived its wait
+keeps it with no time limit, and the refusal says so), and while an earlier teardown hook of the module
+still runs. A teardown with a hook marks a module that has a schema ensure unready, so after Activate
+its steps fail with the schema-setup message until a pass has ensured the schema again.
 The hook has 10 minutes (`TEARDOWN_HOOK_TIMEOUT_MS`); past
 that the job fails, the hook may go on, and until it ends the module is held: no schema ensure, no job
 start and no second teardown, with one warning per hold in the worker log, and the hook can no longer
