@@ -110,6 +110,13 @@ async function chunkedUploadDbDump(opts: {
   return initial.id;
 }
 
+interface AttachmentOutcome {
+  taskId: string;
+  started: boolean;
+  total: number;
+  failed: { name: string; message: string }[];
+}
+
 export default function NewTaskPage() {
   usePageTitle('New task');
   const router = useRouter();
@@ -226,6 +233,7 @@ export default function NewTaskPage() {
   const dumpInputRef = useRef<HTMLInputElement>(null);
   const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
+  const [attachmentOutcome, setAttachmentOutcome] = useState<AttachmentOutcome | null>(null);
 
   /** The file and folder pickers ADD to one list. Replacing it would mean picking
    *  a folder silently discards the files picked a moment earlier. */
@@ -669,21 +677,38 @@ export default function NewTaskPage() {
       const deferStart = attachmentFiles.length > 0;
       if (deferStart) body.deferStart = true;
       const data = await api.post<{ task: Task }>('/tasks', body);
+      const failed: AttachmentOutcome['failed'] = [];
+      let started = true;
       if (deferStart) {
         setAttachmentUploading(true);
-        try {
-          for (const f of attachmentFiles) await uploadTaskAttachment(data.task.id, f);
-        } catch {
-          // The task is already created; the task page's Attachments panel is the
-          // retry surface, so navigate there rather than blocking on a failed file.
-        } finally {
-          setAttachmentUploading(false);
+        for (const f of attachmentFiles) {
+          try {
+            await uploadTaskAttachment(data.task.id, f);
+          } catch (e) {
+            failed.push({
+              name: attachmentUploadName(f),
+              message: e instanceof Error ? e.message : 'Upload failed',
+            });
+          }
         }
+        setAttachmentUploading(false);
         // Started whatever the uploads did, so it is never left `created`; if this call fails,
         // the task page's Start is the retry.
-        await startTask(data.task.id).catch(() => undefined);
+        started = await startTask(data.task.id).then(
+          () => true,
+          () => false,
+        );
       }
       if (origin) rememberTaskOrigin(`/tasks/${data.task.id}`, origin);
+      if (failed.length > 0) {
+        setAttachmentOutcome({
+          taskId: data.task.id,
+          started,
+          total: attachmentFiles.length,
+          failed,
+        });
+        return;
+      }
       router.push(`/tasks/${data.task.id}`);
     } catch (err) {
       setError((err as Error).message ?? 'Failed to create task');
@@ -1321,6 +1346,42 @@ export default function NewTaskPage() {
           </div>
         )}
 
+        {attachmentOutcome && (
+          <div
+            role="alert"
+            className="flex flex-col gap-2 rounded-md border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+          >
+            <p>
+              {attachmentOutcome.started
+                ? 'The task was created and started.'
+                : 'The task was created but could not be started. Open it and press Start.'}
+            </p>
+            <p>
+              {attachmentOutcome.failed.length} of {attachmentOutcome.total} attachment(s) could not
+              be uploaded:
+            </p>
+            <ul
+              aria-label="Attachments that failed to upload"
+              className="max-h-48 list-disc overflow-auto pl-5 [overflow-wrap:anywhere]"
+            >
+              {attachmentOutcome.failed.map((f, i) => (
+                <li key={i}>
+                  <span className="font-mono">{f.name}</span>: {f.message}
+                </li>
+              ))}
+            </ul>
+            <p>
+              <Link
+                href={`/tasks/${attachmentOutcome.taskId}`}
+                className="text-indigo-300 underline"
+              >
+                Open the task
+              </Link>{' '}
+              and add them again from its Attachments tab.
+            </p>
+          </div>
+        )}
+
         <FormError message={error} />
 
         <div>
@@ -1333,13 +1394,15 @@ export default function NewTaskPage() {
               (fields.onboardingGate && !!onboardingStatus?.onboardingTaskId)
             }
           >
-            {submitting
-              ? isRunApp
-                ? 'Starting...'
-                : 'Creating...'
-              : isRunApp
-                ? 'Start app'
-                : 'Create task'}
+            {attachmentOutcome
+              ? 'Created'
+              : submitting
+                ? isRunApp
+                  ? 'Starting...'
+                  : 'Creating...'
+                : isRunApp
+                  ? 'Start app'
+                  : 'Create task'}
           </Button>
         </div>
       </form>
