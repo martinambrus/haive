@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { Hono } from 'hono';
 import { and, desc, eq, gte, isNull, lte, sql, type SQL } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { isLockNotAvailable, schema } from '@haive/database';
 import {
   ALLOWANCE_WATCH_MODES,
   CONFIG_CONCURRENCY_CHANNEL,
@@ -418,6 +418,81 @@ adminRoutes.get('/health', async (c) => {
   });
 });
 
+type ConfigValue = boolean | number | string;
+type ConfigField = readonly [key: string, value: ConfigValue | undefined, fallback: ConfigValue];
+
+function parseStored(raw: string | null, fallback: ConfigValue): ConfigValue {
+  if (raw === null) return fallback;
+  if (typeof fallback === 'boolean') return raw === 'true' || raw === '1';
+  if (typeof fallback === 'number') {
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isNaN(parsed) ? fallback : parsed;
+  }
+  return raw;
+}
+
+// A wait this long is a stuck holder, and every waiter holds a pooled connection meanwhile.
+const CONFIG_LOCK_TIMEOUT_MS = 30_000;
+
+function lockBusyError(err: unknown): never {
+  if (isLockNotAvailable(err)) {
+    throw new HttpError(503, 'Another save of this setting is in progress; try again');
+  }
+  throw err;
+}
+
+/** Saves a config switch and audits its before and after values; no credential belongs here. */
+async function saveConfig(
+  userId: string,
+  route: string,
+  fields: Record<string, ConfigField>,
+): Promise<void> {
+  const entries = Object.entries(fields);
+  // One save of a switch at a time, so each row's `from` is what the save before it left.
+  const failure = await getDb()
+    .transaction(async (tx) => {
+      await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${CONFIG_LOCK_TIMEOUT_MS}ms'`));
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`admin-config:${route}`}, 0))`,
+      );
+      const stored = await Promise.all(entries.map(([, [key]]) => configService.getFresh(key)));
+      const changes = entries.map(([name, [, value, fallback]], i) => {
+        const from = parseStored(stored[i] ?? null, fallback);
+        return { name, from, to: value ?? from };
+      });
+      const record = (rows: typeof changes, extra?: { partial: true }) => {
+        const side = (which: 'from' | 'to') =>
+          entries.length === 1
+            ? rows[0]![which]
+            : Object.fromEntries(rows.map((row) => [row.name, row[which]]));
+        return recordAuditEvent(tx, {
+          actorUserId: userId,
+          action: `config.${route.replaceAll('-', '_')}`,
+          targetType: 'system',
+          metadata: { from: side('from'), to: side('to'), ...extra },
+        });
+      };
+      const written: typeof changes = [];
+      try {
+        // One key after another in the order given: six handlers wrote theirs in sequence before this.
+        for (const [i, [, [key, value]]] of entries.entries()) {
+          if (value === undefined) continue;
+          await configService.set(key, String(value));
+          written.push(changes[i]!);
+        }
+      } catch (error) {
+        if (written.length === 0) throw error;
+        await record(written, { partial: true });
+        // Returned, not rethrown: a throw would roll the partial row back with the transaction.
+        return { error };
+      }
+      await record(changes);
+      return undefined;
+    })
+    .catch(lockBusyError);
+  if (failure) throw failure.error;
+}
+
 const concurrencySchema = z.object({
   // 0 = auto (sized from the host budget the runtime pool leaves free); a positive value pins
   // it, with no upper limit — set per host.
@@ -431,7 +506,9 @@ adminRoutes.get('/config/concurrency', async (c) => {
 
 adminRoutes.put('/config/concurrency', async (c) => {
   const { maxParallelAgents } = concurrencySchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.MAX_PARALLEL_AGENTS, String(maxParallelAgents));
+  await saveConfig(c.get('userId'), 'concurrency', {
+    maxParallelAgents: [CONFIG_KEYS.MAX_PARALLEL_AGENTS, maxParallelAgents, 0],
+  });
   // Live-retune the worker's cli-exec queue concurrency without a restart.
   await configService.getRedis().publish(CONFIG_CONCURRENCY_CHANNEL, String(maxParallelAgents));
   log.info({ maxParallelAgents }, 'max parallel agents updated');
@@ -628,47 +705,50 @@ adminRoutes.get('/config/runtime-limits', async (c) => {
 
 adminRoutes.put('/config/runtime-limits', async (c) => {
   const body = runtimeLimitsSchema.parse(await c.req.json());
-  await Promise.all([
-    configService.set(CONFIG_KEYS.RESOURCE_LIMITS_ENABLED, body.enabled ? 'true' : 'false'),
-    configService.set(CONFIG_KEYS.RUNTIME_MEMORY_MB, String(body.memoryMb)),
-    configService.set(CONFIG_KEYS.RUNTIME_CPUS, String(body.cpus)),
-    configService.set(CONFIG_KEYS.MAX_CONCURRENT_RUNTIMES, String(body.maxConcurrent)),
-    configService.set(CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES, String(body.idleReapMinutes)),
-    configService.set(CONFIG_KEYS.RUNTIME_DDEV_WEIGHT_MB, String(body.ddevWeightMb)),
-    configService.set(CONFIG_KEYS.RUNTIME_APP_WEIGHT_MB, String(body.appWeightMb)),
-    configService.set(CONFIG_KEYS.AGENT_WEIGHT_MB, String(body.agentWeightMb)),
-    configService.set(CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB, String(body.browserWeightMb)),
-    configService.set(CONFIG_KEYS.AGENT_FLOOR, String(body.agentFloor)),
-    configService.set(
+  await saveConfig(c.get('userId'), 'runtime-limits', {
+    enabled: [CONFIG_KEYS.RESOURCE_LIMITS_ENABLED, body.enabled, true],
+    memoryMb: [CONFIG_KEYS.RUNTIME_MEMORY_MB, body.memoryMb, 0],
+    cpus: [CONFIG_KEYS.RUNTIME_CPUS, body.cpus, 0],
+    maxConcurrent: [CONFIG_KEYS.MAX_CONCURRENT_RUNTIMES, body.maxConcurrent, 0],
+    idleReapMinutes: [CONFIG_KEYS.RUNTIME_IDLE_REAP_MINUTES, body.idleReapMinutes, 180],
+    ddevWeightMb: [CONFIG_KEYS.RUNTIME_DDEV_WEIGHT_MB, body.ddevWeightMb, 0],
+    appWeightMb: [CONFIG_KEYS.RUNTIME_APP_WEIGHT_MB, body.appWeightMb, 0],
+    agentWeightMb: [CONFIG_KEYS.AGENT_WEIGHT_MB, body.agentWeightMb, 0],
+    browserWeightMb: [CONFIG_KEYS.RUNTIME_BROWSER_WEIGHT_MB, body.browserWeightMb, 0],
+    agentFloor: [CONFIG_KEYS.AGENT_FLOOR, body.agentFloor, 0],
+    agentPoolMeasuredEnabled: [
       CONFIG_KEYS.AGENT_POOL_MEASURED_ENABLED,
-      body.agentPoolMeasuredEnabled ? 'true' : 'false',
-    ),
-    configService.set(CONFIG_KEYS.AGENT_POOL_SAFETY_MB, String(body.agentPoolSafetyMb)),
-    configService.set(
-      CONFIG_KEYS.AGENT_RESERVE_ENABLED,
-      body.agentReserveEnabled ? 'true' : 'false',
-    ),
-    configService.set(
+      body.agentPoolMeasuredEnabled,
+      true,
+    ],
+    agentPoolSafetyMb: [CONFIG_KEYS.AGENT_POOL_SAFETY_MB, body.agentPoolSafetyMb, 0],
+    agentReserveEnabled: [CONFIG_KEYS.AGENT_RESERVE_ENABLED, body.agentReserveEnabled, true],
+    agentReserveMaxHoldMinutes: [
       CONFIG_KEYS.AGENT_RESERVE_MAX_HOLD_MINUTES,
-      String(body.agentReserveMaxHoldMinutes),
-    ),
-    configService.set(
+      body.agentReserveMaxHoldMinutes,
+      3,
+    ],
+    agentPreemptionEnabled: [
       CONFIG_KEYS.AGENT_PREEMPTION_ENABLED,
-      body.agentPreemptionEnabled ? 'true' : 'false',
-    ),
-    configService.set(
+      body.agentPreemptionEnabled,
+      true,
+    ],
+    agentPreemptionMinRunMinutes: [
       CONFIG_KEYS.AGENT_PREEMPTION_MIN_RUN_MINUTES,
-      String(body.agentPreemptionMinRunMinutes),
-    ),
-    configService.set(
+      body.agentPreemptionMinRunMinutes,
+      5,
+    ],
+    runtimePreemptionEnabled: [
       CONFIG_KEYS.RUNTIME_PREEMPTION_ENABLED,
-      body.runtimePreemptionEnabled ? 'true' : 'false',
-    ),
-    configService.set(
+      body.runtimePreemptionEnabled,
+      true,
+    ],
+    runtimePreemptionMaxWaitMinutes: [
       CONFIG_KEYS.RUNTIME_PREEMPTION_MAX_WAIT_MINUTES,
-      String(body.runtimePreemptionMaxWaitMinutes),
-    ),
-  ]);
+      body.runtimePreemptionMaxWaitMinutes,
+      10,
+    ],
+  });
   // Retune the admission gate AND the agent pool live (both subscribe to this channel); the
   // per-container caps re-read at the next runner start within the config cache.
   await configService.getRedis().publish(CONFIG_RUNTIME_LIMITS_CHANNEL, String(body.maxConcurrent));
@@ -687,7 +767,9 @@ adminRoutes.get('/config/steering', async (c) => {
 
 adminRoutes.put('/config/steering', async (c) => {
   const { enabled } = steeringSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.STEERING_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'steering', {
+    enabled: [CONFIG_KEYS.STEERING_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'global steering switch updated');
   return c.json({ enabled });
 });
@@ -744,7 +826,9 @@ adminRoutes.get('/config/codex-app-server', async (c) => {
 
 adminRoutes.put('/config/codex-app-server', async (c) => {
   const { enabled } = codexAppServerSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.CODEX_APP_SERVER_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'codex-app-server', {
+    enabled: [CONFIG_KEYS.CODEX_APP_SERVER_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'codex app-server steering switch updated');
   return c.json({ enabled });
 });
@@ -763,7 +847,9 @@ adminRoutes.get('/config/agent-isolation', async (c) => {
 
 adminRoutes.put('/config/agent-isolation', async (c) => {
   const { enabled } = agentIsolationSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.AGENT_ISOLATION_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'agent-isolation', {
+    enabled: [CONFIG_KEYS.AGENT_ISOLATION_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'agent-isolation switch updated');
   return c.json({ enabled });
 });
@@ -780,7 +866,9 @@ adminRoutes.get('/config/agent-rules-injection', async (c) => {
 
 adminRoutes.put('/config/agent-rules-injection', async (c) => {
   const { enabled } = agentRulesInjectionSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'agent-rules-injection', {
+    enabled: [CONFIG_KEYS.AGENT_RULES_INJECTION_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'agent-rules-injection switch updated');
   return c.json({ enabled });
 });
@@ -795,7 +883,9 @@ adminRoutes.get('/config/house-rules', async (c) => {
 
 adminRoutes.put('/config/house-rules', async (c) => {
   const { enabled } = houseRulesSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'house-rules', {
+    enabled: [CONFIG_KEYS.GLOBAL_KB_HOUSE_RULES_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'house-rules switch updated');
   return c.json({ enabled });
 });
@@ -813,7 +903,9 @@ adminRoutes.get('/config/pr-workflow', async (c) => {
 
 adminRoutes.put('/config/pr-workflow', async (c) => {
   const { enabled } = prWorkflowSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.PR_WORKFLOW_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'pr-workflow', {
+    enabled: [CONFIG_KEYS.PR_WORKFLOW_ENABLED, enabled, false],
+  });
   log.info({ enabled }, 'global PR-workflow switch updated');
   return c.json({ enabled });
 });
@@ -838,8 +930,10 @@ adminRoutes.get('/config/cli-soft-timeout', async (c) => {
 
 adminRoutes.put('/config/cli-soft-timeout', async (c) => {
   const { enabled, percent } = softTimeoutSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.CLI_SOFT_TIMEOUT_ENABLED, enabled ? 'true' : 'false');
-  await configService.set(CONFIG_KEYS.CLI_SOFT_TIMEOUT_PERCENT, String(percent));
+  await saveConfig(c.get('userId'), 'cli-soft-timeout', {
+    enabled: [CONFIG_KEYS.CLI_SOFT_TIMEOUT_ENABLED, enabled, true],
+    percent: [CONFIG_KEYS.CLI_SOFT_TIMEOUT_PERCENT, percent, 80],
+  });
   log.info({ enabled, percent }, 'cli soft timeout updated');
   return c.json({ enabled, percent });
 });
@@ -881,8 +975,18 @@ adminRoutes.put('/config/cli-timeout-ladder', async (c) => {
   if (usable.length === 0) {
     throw new HttpError(400, 'ladder must be comma-separated positive numbers, e.g. "1,1.33,2"');
   }
-  await configService.set(CONFIG_KEYS.CLI_TIMEOUT_BASE_MINUTES, String(baseMinutes));
-  await configService.set(CONFIG_KEYS.CLI_TIMEOUT_LADDER, usable.join(','));
+  await saveConfig(c.get('userId'), 'cli-timeout-ladder', {
+    baseMinutes: [
+      CONFIG_KEYS.CLI_TIMEOUT_BASE_MINUTES,
+      baseMinutes,
+      DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
+    ],
+    ladder: [
+      CONFIG_KEYS.CLI_TIMEOUT_LADDER,
+      usable.join(','),
+      DEFAULT_CLI_TIMEOUT_LADDER.join(','),
+    ],
+  });
   log.info({ baseMinutes, ladder: usable }, 'cli timeout ladder updated');
   return c.json({ baseMinutes, ladder: usable.join(','), rungs: usable });
 });
@@ -900,7 +1004,9 @@ adminRoutes.get('/config/usage-window', async (c) => {
 
 adminRoutes.put('/config/usage-window', async (c) => {
   const { enabled } = usageWindowSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.USAGE_WINDOW_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'usage-window', {
+    enabled: [CONFIG_KEYS.USAGE_WINDOW_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'global usage-window switch updated');
   return c.json({ enabled });
 });
@@ -925,8 +1031,10 @@ adminRoutes.get('/config/usage-alert', async (c) => {
 
 adminRoutes.put('/config/usage-alert', async (c) => {
   const { enabled, thresholdPct } = usageAlertSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.USAGE_ALERT_ENABLED, enabled ? 'true' : 'false');
-  await configService.set(CONFIG_KEYS.USAGE_ALERT_THRESHOLD_PCT, String(thresholdPct));
+  await saveConfig(c.get('userId'), 'usage-alert', {
+    enabled: [CONFIG_KEYS.USAGE_ALERT_ENABLED, enabled, true],
+    thresholdPct: [CONFIG_KEYS.USAGE_ALERT_THRESHOLD_PCT, thresholdPct, 10],
+  });
   log.info({ enabled, thresholdPct }, 'usage alert config updated');
   return c.json({ enabled, thresholdPct });
 });
@@ -945,7 +1053,9 @@ adminRoutes.get('/config/prompt-caching-1h', async (c) => {
 
 adminRoutes.put('/config/prompt-caching-1h', async (c) => {
   const { enabled } = promptCaching1hSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.PROMPT_CACHING_1H, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'prompt-caching-1h', {
+    enabled: [CONFIG_KEYS.PROMPT_CACHING_1H, enabled, false],
+  });
   log.info({ enabled }, 'global prompt-caching-1h switch updated');
   return c.json({ enabled });
 });
@@ -976,11 +1086,10 @@ adminRoutes.get('/config/cli-pricing', async (c) => {
 
 adminRoutes.put('/config/cli-pricing', async (c) => {
   const { autoUpdateEnabled, displayCurrency } = cliPricingSchema.parse(await c.req.json());
-  await configService.set(
-    CONFIG_KEYS.PRICING_AUTO_UPDATE_ENABLED,
-    autoUpdateEnabled ? 'true' : 'false',
-  );
-  await configService.set(CONFIG_KEYS.COST_DISPLAY_CURRENCY, displayCurrency);
+  await saveConfig(c.get('userId'), 'cli-pricing', {
+    autoUpdateEnabled: [CONFIG_KEYS.PRICING_AUTO_UPDATE_ENABLED, autoUpdateEnabled, true],
+    displayCurrency: [CONFIG_KEYS.COST_DISPLAY_CURRENCY, displayCurrency, 'USD'],
+  });
   log.info({ autoUpdateEnabled, displayCurrency }, 'global cli pricing settings updated');
   return c.json({ autoUpdateEnabled, displayCurrency, currencies: DISPLAY_CURRENCIES });
 });
@@ -998,7 +1107,9 @@ adminRoutes.get('/config/terseness', async (c) => {
 
 adminRoutes.put('/config/terseness', async (c) => {
   const { level } = tersenessSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.TERSENESS_LEVEL, level);
+  await saveConfig(c.get('userId'), 'terseness', {
+    level: [CONFIG_KEYS.TERSENESS_LEVEL, level, 'full'],
+  });
   log.info({ level }, 'global terseness level updated');
   return c.json({ level });
 });
@@ -1018,7 +1129,9 @@ adminRoutes.get('/config/step-guidance', async (c) => {
 
 adminRoutes.put('/config/step-guidance', async (c) => {
   const { enabled } = stepGuidanceSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.STEP_GUIDANCE_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'step-guidance', {
+    enabled: [CONFIG_KEYS.STEP_GUIDANCE_ENABLED, enabled, false],
+  });
   log.info({ enabled }, 'global step-guidance switch updated');
   return c.json({ enabled });
 });
@@ -1036,7 +1149,9 @@ adminRoutes.get('/config/spec-view', async (c) => {
 
 adminRoutes.put('/config/spec-view', async (c) => {
   const { mode } = specViewSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.SPEC_VIEW_MODE, mode);
+  await saveConfig(c.get('userId'), 'spec-view', {
+    mode: [CONFIG_KEYS.SPEC_VIEW_MODE, mode, 'toc'],
+  });
   log.info({ mode }, 'global spec view mode updated');
   return c.json({ mode });
 });
@@ -1066,10 +1181,10 @@ adminRoutes.get('/config/review-refute', async (c) => {
 
 adminRoutes.put('/config/review-refute', async (c) => {
   const { enabled, lenses } = reviewRefuteSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.REVIEW_REFUTE_ENABLED, enabled ? 'true' : 'false');
-  if (lenses !== undefined) {
-    await configService.set(CONFIG_KEYS.REVIEW_REFUTE_LENSES, String(lenses));
-  }
+  await saveConfig(c.get('userId'), 'review-refute', {
+    enabled: [CONFIG_KEYS.REVIEW_REFUTE_ENABLED, enabled, true],
+    lenses: [CONFIG_KEYS.REVIEW_REFUTE_LENSES, lenses, REFUTE_PANEL_LENSES],
+  });
   log.info({ enabled, lenses }, 'global review-refute switch updated');
   return c.json({
     enabled,
@@ -1103,10 +1218,10 @@ adminRoutes.get('/config/qa-verify', async (c) => {
 
 adminRoutes.put('/config/qa-verify', async (c) => {
   const { enabled, lenses } = qaVerifySchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.QA_VERIFY_ENABLED, enabled ? 'true' : 'false');
-  if (lenses !== undefined) {
-    await configService.set(CONFIG_KEYS.QA_VERIFY_LENSES, String(lenses));
-  }
+  await saveConfig(c.get('userId'), 'qa-verify', {
+    enabled: [CONFIG_KEYS.QA_VERIFY_ENABLED, enabled, true],
+    lenses: [CONFIG_KEYS.QA_VERIFY_LENSES, lenses, QA_VERIFY_PANEL_LENSES],
+  });
   log.info({ enabled, lenses }, 'global qa-verify switch updated');
   return c.json({
     enabled,
@@ -1128,7 +1243,9 @@ adminRoutes.get('/config/browser-access', async (c) => {
 
 adminRoutes.put('/config/browser-access', async (c) => {
   const { enabled } = browserAccessSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.BROWSER_DIRECT_ACCESS, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'browser-access', {
+    enabled: [CONFIG_KEYS.BROWSER_DIRECT_ACCESS, enabled, true],
+  });
   log.info({ enabled }, 'direct browser access switch updated');
   return c.json({ enabled });
 });
@@ -1148,7 +1265,9 @@ adminRoutes.get('/config/plan-canvas', async (c) => {
 
 adminRoutes.put('/config/plan-canvas', async (c) => {
   const { enabled } = planCanvasSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.PLAN_CANVAS_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'plan-canvas', {
+    enabled: [CONFIG_KEYS.PLAN_CANVAS_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'global plan-canvas switch updated');
   return c.json({ enabled });
 });
@@ -1165,10 +1284,10 @@ adminRoutes.get('/config/task-types', async (c) => {
 
 adminRoutes.put('/config/task-types', async (c) => {
   const { customEnabled, moduleEnabled } = taskTypesSchema.parse(await c.req.json());
-  await Promise.all([
-    configService.set(CONFIG_KEYS.CUSTOM_TASK_TYPES_ENABLED, customEnabled ? 'true' : 'false'),
-    configService.set(CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED, moduleEnabled ? 'true' : 'false'),
-  ]);
+  await saveConfig(c.get('userId'), 'task-types', {
+    customEnabled: [CONFIG_KEYS.CUSTOM_TASK_TYPES_ENABLED, customEnabled, false],
+    moduleEnabled: [CONFIG_KEYS.MODULE_TASK_TYPES_ENABLED, moduleEnabled, false],
+  });
   log.info({ customEnabled, moduleEnabled }, 'task type switches updated');
   return c.json({ customEnabled, moduleEnabled });
 });
@@ -1293,14 +1412,8 @@ adminRoutes.get('/config/registration-mode', async (c) => {
 
 adminRoutes.put('/config/registration-mode', async (c) => {
   const { mode } = registrationModeSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.REGISTRATION_MODE, mode);
-  // Audited, unlike the neighbouring config toggles: this one decides who can obtain an account
-  // at all, so "who opened self-signup, and when" is a question worth being able to answer.
-  await recordAuditEvent(getDb(), {
-    actorUserId: c.get('userId'),
-    action: 'config.registration_mode',
-    targetType: 'system',
-    metadata: { mode },
+  await saveConfig(c.get('userId'), 'registration-mode', {
+    mode: [CONFIG_KEYS.REGISTRATION_MODE, mode, 'closed'],
   });
   log.info({ mode }, 'registration mode updated');
   return c.json({ mode });
@@ -1335,13 +1448,13 @@ adminRoutes.get('/config/rag-embedding', async (c) => {
 
 adminRoutes.put('/config/rag-embedding', async (c) => {
   const body = ragEmbeddingSchema.parse(await c.req.json());
-  await Promise.all([
-    configService.set(CONFIG_KEYS.RAG_EMBED_TIMEOUT_MS, String(body.embedTimeoutMs)),
-    configService.set(CONFIG_KEYS.RAG_QUERY_EMBED_TIMEOUT_MS, String(body.queryTimeoutMs)),
-    configService.set(CONFIG_KEYS.RAG_EMBED_WARMUP_TIMEOUT_MS, String(body.warmupTimeoutMs)),
-    configService.set(CONFIG_KEYS.RAG_EMBED_BATCH_SIZE, String(body.batchSize)),
-    configService.set(CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED, body.strictEnabled ? 'true' : 'false'),
-  ]);
+  await saveConfig(c.get('userId'), 'rag-embedding', {
+    embedTimeoutMs: [CONFIG_KEYS.RAG_EMBED_TIMEOUT_MS, body.embedTimeoutMs, 240_000],
+    queryTimeoutMs: [CONFIG_KEYS.RAG_QUERY_EMBED_TIMEOUT_MS, body.queryTimeoutMs, 20_000],
+    warmupTimeoutMs: [CONFIG_KEYS.RAG_EMBED_WARMUP_TIMEOUT_MS, body.warmupTimeoutMs, 300_000],
+    batchSize: [CONFIG_KEYS.RAG_EMBED_BATCH_SIZE, body.batchSize, 8],
+    strictEnabled: [CONFIG_KEYS.RAG_EMBED_STRICT_ENABLED, body.strictEnabled, true],
+  });
   log.info(body, 'rag embedding budgets updated');
   return c.json(body);
 });
@@ -1358,7 +1471,9 @@ adminRoutes.get('/config/ide', async (c) => {
 
 adminRoutes.put('/config/ide', async (c) => {
   const { enabled } = ideEnabledSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.IDE_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'ide', {
+    enabled: [CONFIG_KEYS.IDE_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'global ide switch updated');
   return c.json({ enabled });
 });
@@ -1376,7 +1491,9 @@ adminRoutes.get('/config/debug-mode', async (c) => {
 
 adminRoutes.put('/config/debug-mode', async (c) => {
   const { enabled } = debugModeSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.DEBUG_MODE_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'debug-mode', {
+    enabled: [CONFIG_KEYS.DEBUG_MODE_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'global debug-mode switch updated');
   return c.json({ enabled });
 });
@@ -1395,7 +1512,9 @@ adminRoutes.get('/config/db-access', async (c) => {
 
 adminRoutes.put('/config/db-access', async (c) => {
   const { enabled } = dbAccessSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.DB_DIRECT_ACCESS, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'db-access', {
+    enabled: [CONFIG_KEYS.DB_DIRECT_ACCESS, enabled, true],
+  });
   log.info({ enabled }, 'direct database access switch updated');
   return c.json({ enabled });
 });
@@ -1413,7 +1532,9 @@ adminRoutes.get('/config/ddev-registry-cache', async (c) => {
 
 adminRoutes.put('/config/ddev-registry-cache', async (c) => {
   const { enabled } = ddevRegistryCacheSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'ddev-registry-cache', {
+    enabled: [CONFIG_KEYS.DDEV_REGISTRY_CACHE_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'ddev registry cache switch updated');
   return c.json({ enabled });
 });
@@ -1432,7 +1553,9 @@ adminRoutes.get('/config/allowance-watch', async (c) => {
 
 adminRoutes.put('/config/allowance-watch', async (c) => {
   const { mode } = allowanceWatchSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.ALLOWANCE_WATCH_MODE, mode);
+  await saveConfig(c.get('userId'), 'allowance-watch', {
+    mode: [CONFIG_KEYS.ALLOWANCE_WATCH_MODE, mode, 'notify'],
+  });
   log.info({ mode }, 'provider-outage watch mode updated');
   return c.json({ mode });
 });
@@ -1450,7 +1573,9 @@ adminRoutes.get('/config/ddev-control', async (c) => {
 
 adminRoutes.put('/config/ddev-control', async (c) => {
   const { enabled } = ddevControlSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'ddev-control', {
+    enabled: [CONFIG_KEYS.DDEV_CONTROL_MCP_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'ddev-control MCP switch updated');
   return c.json({ enabled });
 });
@@ -1465,13 +1590,8 @@ adminRoutes.get('/config/custom-tools', async (c) => {
 
 adminRoutes.put('/config/custom-tools', async (c) => {
   const { enabled } = customToolsSchema.parse(await c.req.json());
-  const from = await configService.getBoolean(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, true);
-  await configService.set(CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, enabled ? 'true' : 'false');
-  await recordAuditEvent(getDb(), {
-    actorUserId: c.get('userId'),
-    action: 'config.custom_tools',
-    targetType: 'system',
-    metadata: { from, to: enabled },
+  await saveConfig(c.get('userId'), 'custom-tools', {
+    enabled: [CONFIG_KEYS.CUSTOM_MCP_TOOLS_ENABLED, enabled, true],
   });
   log.info({ enabled }, 'custom tools switch updated');
   return c.json({ enabled });
@@ -1505,7 +1625,13 @@ adminRoutes.get('/config/chrome-mcp-timeout', async (c) => {
 
 adminRoutes.put('/config/chrome-mcp-timeout', async (c) => {
   const { timeoutMs } = chromeMcpTimeoutSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.CHROME_MCP_TOOL_TIMEOUT_MS, String(timeoutMs));
+  await saveConfig(c.get('userId'), 'chrome-mcp-timeout', {
+    timeoutMs: [
+      CONFIG_KEYS.CHROME_MCP_TOOL_TIMEOUT_MS,
+      timeoutMs,
+      DEFAULT_CHROME_MCP_TOOL_TIMEOUT_MS,
+    ],
+  });
   log.info({ timeoutMs }, 'chrome-devtools MCP tool timeout updated');
   return c.json({ timeoutMs });
 });
@@ -1525,7 +1651,9 @@ adminRoutes.get('/config/global-pause', async (c) => {
 
 adminRoutes.put('/config/global-pause', async (c) => {
   const { paused } = globalPauseSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.GLOBAL_PAUSE, paused ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'global-pause', {
+    paused: [CONFIG_KEYS.GLOBAL_PAUSE, paused, false],
+  });
   log.info({ paused }, 'global pause switch updated');
   return c.json({ paused });
 });
@@ -1550,7 +1678,9 @@ adminRoutes.get('/config/model-identity-strict', async (c) => {
 
 adminRoutes.put('/config/model-identity-strict', async (c) => {
   const { enabled } = modelIdentityStrictSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.MODEL_IDENTITY_STRICT, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'model-identity-strict', {
+    enabled: [CONFIG_KEYS.MODEL_IDENTITY_STRICT, enabled, false],
+  });
   log.info({ enabled }, 'strict model identity switch updated');
   return c.json({ enabled });
 });
@@ -1566,7 +1696,9 @@ adminRoutes.get('/config/fair-scheduling', async (c) => {
 
 adminRoutes.put('/config/fair-scheduling', async (c) => {
   const { enabled } = fairSchedulingSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.FAIR_SCHEDULING_ENABLED, enabled ? 'true' : 'false');
+  await saveConfig(c.get('userId'), 'fair-scheduling', {
+    enabled: [CONFIG_KEYS.FAIR_SCHEDULING_ENABLED, enabled, true],
+  });
   log.info({ enabled }, 'fair scheduling switch updated');
   return c.json({ enabled });
 });
@@ -1587,7 +1719,9 @@ adminRoutes.get('/config/max-agents-per-task', async (c) => {
 
 adminRoutes.put('/config/max-agents-per-task', async (c) => {
   const { maxAgentsPerTask } = maxAgentsPerTaskSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.MAX_PARALLEL_AGENTS_PER_TASK, String(maxAgentsPerTask));
+  await saveConfig(c.get('userId'), 'max-agents-per-task', {
+    maxAgentsPerTask: [CONFIG_KEYS.MAX_PARALLEL_AGENTS_PER_TASK, maxAgentsPerTask, 5],
+  });
   log.info({ maxAgentsPerTask }, 'max agents per task updated');
   return c.json({ maxAgentsPerTask });
 });
@@ -1608,7 +1742,9 @@ adminRoutes.get('/config/attachment-max-bytes', async (c) => {
 
 adminRoutes.put('/config/attachment-max-bytes', async (c) => {
   const { maxBytes } = attachmentMaxBytesSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES, String(maxBytes));
+  await saveConfig(c.get('userId'), 'attachment-max-bytes', {
+    maxBytes: [CONFIG_KEYS.TASK_ATTACHMENT_MAX_BYTES, maxBytes, DEFAULT_TASK_ATTACHMENT_MAX_BYTES],
+  });
   log.info({ maxBytes }, 'task attachment max bytes updated');
   return c.json({ maxBytes });
 });
@@ -1629,7 +1765,13 @@ adminRoutes.get('/config/cli-stream-log-retention', async (c) => {
 
 adminRoutes.put('/config/cli-stream-log-retention', async (c) => {
   const { retentionDays } = cliStreamLogRetentionSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.CLI_STREAM_LOG_RETENTION_DAYS, String(retentionDays));
+  await saveConfig(c.get('userId'), 'cli-stream-log-retention', {
+    retentionDays: [
+      CONFIG_KEYS.CLI_STREAM_LOG_RETENTION_DAYS,
+      retentionDays,
+      DEFAULT_CLI_STREAM_LOG_RETENTION_DAYS,
+    ],
+  });
   log.info({ retentionDays }, 'cli stream-log retention updated');
   return c.json({ retentionDays });
 });
@@ -1646,7 +1788,13 @@ adminRoutes.put('/config/cli-prompt-retention', async (c) => {
   // Same bounds and the same sweep as the transcript window, but its own number: blanking
   // a prompt stands down wave-agent retry recovery, which the transcript window does not.
   const { retentionDays } = cliStreamLogRetentionSchema.parse(await c.req.json());
-  await configService.set(CONFIG_KEYS.CLI_PROMPT_RETENTION_DAYS, String(retentionDays));
+  await saveConfig(c.get('userId'), 'cli-prompt-retention', {
+    retentionDays: [
+      CONFIG_KEYS.CLI_PROMPT_RETENTION_DAYS,
+      retentionDays,
+      DEFAULT_CLI_PROMPT_RETENTION_DAYS,
+    ],
+  });
   log.info({ retentionDays }, 'cli prompt retention updated');
   return c.json({ retentionDays });
 });
