@@ -409,8 +409,11 @@ and whose providers are its own or, for a column the project-state sync filled
 with the portable fields alone, the owner's enabled ones. Then comes the newest snapshot that
 recorded the choice, ahead of one from before RTK (`pickSnapshotRow`, by `newestArtifactsFirst`),
 since an upgrade replaces only the paths it writes and rows from several runs stay live side by
-side. So the banner and the plan read the same context, and a repository whose snapshots all
-predate RTK stays quiet.
+side. Once a person has switched RTK, the switch is the choice, so the newest snapshot is read
+whatever it holds and an older row that recorded RTK no longer hands the plan an older framework
+or older targets. A rollback that takes the live rows' context picks the same way, and expands its
+applicable set with the switch, as every reader renders it. So the banner and the plan read the
+same context, and a repository whose snapshots all predate RTK stays quiet.
 
 **A key both installs changed is held for an answer, never settled for the column's side.** The
 project-state sync merges the checkout's record against the base it last synced from. A render key
