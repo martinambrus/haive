@@ -12,6 +12,7 @@ import {
   type AdminHealthResponse,
 } from '@/lib/api-client';
 import { TabNav } from '@/components/tabs';
+import { ModuleTaskTitle } from '@/components/module-tasks-open-dialog';
 import {
   Badge,
   Button,
@@ -128,6 +129,7 @@ type RegistrationMode = 'open' | 'invite' | 'closed';
 type CodexAppServerFailure = {
   taskId: string;
   taskTitle: string;
+  ownerId: string;
   providerId: string;
   providerLabel: string | null;
   stage: string | null;
@@ -188,6 +190,7 @@ function AdminPageInner() {
   const [savingSteering, setSavingSteering] = useState(false);
   const [codexAppServerEnabled, setCodexAppServerEnabled] = useState<boolean | null>(null);
   const [codexAppServerFailures, setCodexAppServerFailures] = useState<CodexAppServerFailure[]>([]);
+  const [codexAppServerViewerId, setCodexAppServerViewerId] = useState<string | null>(null);
   const [savingCodexAppServer, setSavingCodexAppServer] = useState(false);
   const [agentIsolationEnabled, setAgentIsolationEnabled] = useState<boolean | null>(null);
   const [savingAgentIsolation, setSavingAgentIsolation] = useState(false);
@@ -349,7 +352,7 @@ function AdminPageInner() {
         api.get<AdminHealthResponse>('/admin/health'),
         api.get<{ maxParallelAgents: number }>('/admin/config/concurrency'),
         api.get<{ enabled: boolean }>('/admin/config/steering'),
-        api.get<{ enabled: boolean; recentFailures: CodexAppServerFailure[] }>(
+        api.get<{ enabled: boolean; viewerId: string; recentFailures: CodexAppServerFailure[] }>(
           '/admin/config/codex-app-server',
         ),
         api.get<{ enabled: boolean }>('/admin/config/agent-isolation'),
@@ -398,6 +401,7 @@ function AdminPageInner() {
       setSteeringEnabled(steeringData.enabled);
       setCodexAppServerEnabled(codexAppServerData.enabled);
       setCodexAppServerFailures(codexAppServerData.recentFailures);
+      setCodexAppServerViewerId(codexAppServerData.viewerId);
       setAgentIsolationEnabled(agentIsolationData.enabled);
       setAgentRulesInjectionEnabled(agentRulesInjectionData.enabled);
       setHouseRulesEnabled(houseRulesData.enabled);
@@ -1809,12 +1813,10 @@ function AdminPageInner() {
                     )}
                     <div className="mt-1 text-neutral-500">
                       {f.providerLabel ?? f.providerId} ·{' '}
-                      <Link
-                        href={`/tasks/${f.taskId}`}
-                        className="underline hover:text-neutral-300"
-                      >
-                        {f.taskTitle}
-                      </Link>
+                      <ModuleTaskTitle
+                        task={{ id: f.taskId, title: f.taskTitle, ownerId: f.ownerId }}
+                        viewerId={codexAppServerViewerId}
+                      />
                     </div>
                   </li>
                 ))}
