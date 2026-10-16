@@ -628,7 +628,7 @@ merge settles it. A merge that reached done, or a cancel that found the merge go
 again, so the projection sweep recreates those files with its own owner and mode. Every other
 set-aside caller whose re-sync fails loses them the same way. A cancelled task's merge ends elsewhere, and each ending restores them
 too: the abort job, a cancel that finds the merge already gone, or the next task's merge that
-clears it, which takes them into its own state first. It reads no checkout-holding count, and a state file edited by
+clears it, which takes them into its own state first. That clearing reads the checkout-holding count first, as a merge it opens does, and a state file edited by
 hand halts it by name even when the incoming commit leaves that file alone, as it halts a refresh or
 a Pull. An onboarding or upgrade that ends re-syncs at once
 (`resyncAfterTaskEnd`): the sync defers while such a task holds the checkout, so a change pending in
