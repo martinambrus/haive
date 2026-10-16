@@ -1022,7 +1022,7 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
   'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_OUTPUTS_BUDGET_BYTES':
     'a byte limit for all quoted step outputs together, not text',
   'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_VALUES_BUDGET_BYTES':
-    'a byte limit for all field and task values together, not text',
+    'a byte limit for all field, task and account values together, not text',
   'step-engine/steps/custom/prompt-step.ts#promptStepNamedText':
     'text house rules read file paths from, never sent to a CLI',
   'step-engine/steps/custom/prompt-step.ts#promptStepTools':

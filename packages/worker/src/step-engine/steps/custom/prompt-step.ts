@@ -20,7 +20,7 @@ import {
 export const PROMPT_STEP_OUTPUT_CAP_BYTES = 16 * 1024;
 /** Every quoted step output in one prompt together, however often the template repeats a token. */
 export const PROMPT_STEP_OUTPUTS_BUDGET_BYTES = 64 * 1024;
-/** Every field, task title and task description value in one prompt together, the same way. */
+/** Every field, title, description and account text in one prompt together, the same way. */
 export const PROMPT_STEP_VALUES_BUDGET_BYTES = 64 * 1024;
 const NO_STEP_OUTPUT = '(no output recorded for this step)';
 
@@ -79,6 +79,7 @@ function renderTemplate(
   // Null-prototype: a field id such as `__proto__` must land as an own key, not hit the setter.
   const fields: Record<string, string> = Object.create(null) as Record<string, string>;
   const steps: Record<string, string> = Object.create(null) as Record<string, string>;
+  const accounts: Record<string, string> = Object.create(null) as Record<string, string>;
   const tokens = templateTokens(entry.template);
   const quotes = tokens.filter((token) => token.kind === 'step').length;
   const perQuote = Math.min(
@@ -87,12 +88,18 @@ function renderTemplate(
   );
   const values = tokens.filter(
     (token) =>
-      token.kind === 'field' || token.kind === 'task.title' || token.kind === 'task.description',
+      token.kind === 'field' ||
+      token.kind === 'integration' ||
+      token.kind === 'task.title' ||
+      token.kind === 'task.description',
   ).length;
   const perValue = Math.min(
     PROMPT_STEP_OUTPUT_CAP_BYTES,
     Math.floor(PROMPT_STEP_VALUES_BUDGET_BYTES / Math.max(values, 1)),
   );
+  for (const [id, account] of Object.entries(integrations)) {
+    accounts[id] = capStepOutput(account, perValue);
+  }
   for (const token of tokens) {
     if (token.kind === 'field') {
       fields[token.id] = capStepOutput(fieldText(formValues[token.id]), perValue);
@@ -111,7 +118,7 @@ function renderTemplate(
     taskTitle: capStepOutput(text(detected.taskTitle), perValue),
     taskDescription: capStepOutput(text(detected.taskDescription), perValue),
     steps,
-    integrations,
+    integrations: accounts,
   });
   return { rendered, quoted: Object.keys(steps).length > 0 };
 }
