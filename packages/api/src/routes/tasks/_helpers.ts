@@ -421,6 +421,29 @@ export async function findActiveCliInvocation(
   return rows[0] ?? null;
 }
 
+/** Runs of the task whose result has landed: the ones GET /tasks/:id/tool-usage rolls up, once
+ *  they have an end. The result handler sets `tool_usage` in the same update as `ended_at`. */
+export async function loadFinishedRunCount(
+  db: ReturnType<typeof getDb>,
+  taskId: string,
+): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.cliInvocations)
+    .where(
+      and(
+        eq(schema.cliInvocations.taskId, taskId),
+        isNull(schema.cliInvocations.supersededAt),
+        isNotNull(schema.cliInvocations.endedAt),
+        or(
+          isNotNull(schema.cliInvocations.taskStepId),
+          isNotNull(schema.cliInvocations.summaryForStepId),
+        ),
+      ),
+    );
+  return row?.n ?? 0;
+}
+
 /** `task_steps.id` of every step in `taskIds` that is WHOLLY parked on the agent gate: it holds
  *  an invocation enqueued but not started (`started_at IS NULL`, not ended, not superseded) and
  *  none of its invocations is actually running — a job sitting in the cli-exec queue because

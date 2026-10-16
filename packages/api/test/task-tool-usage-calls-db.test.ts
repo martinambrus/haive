@@ -129,6 +129,7 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
   let stepB: string;
   let stepC: string;
   let resetStep: string;
+  let liveStep: string;
 
   const fetchBody = async (): Promise<Body> => {
     const res = await app.request(`/tasks/${TASK}/tool-usage`);
@@ -266,6 +267,7 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
         { taskId: STOPPED_TASK, stepId: 'tu-reset', stepIndex: 1, round: 0, title: 'Reset' },
         { taskId: STOPPED_TASK, stepId: 'tu-quiet', stepIndex: 2, round: 0, title: 'Quiet' },
         { taskId: NO_CALLS_TASK, stepId: 'tu-silent', stepIndex: 1, round: 0, title: 'Silent' },
+        { taskId: LIVE_TASK, stepId: 'tu-live', stepIndex: 1, round: 0, title: 'Live' },
       ])
       .returning({
         id: schema.taskSteps.id,
@@ -281,6 +283,7 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
     const decoyStep = pick(DECOY_TASK, 'tu-one');
     const foreignStep = pick(FOREIGN_TASK, 'tu-one');
     resetStep = pick(STOPPED_TASK, 'tu-reset');
+    liveStep = pick(LIVE_TASK, 'tu-live');
 
     const [live] = await db
       .insert(schema.cliInvocations)
@@ -546,6 +549,7 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
       return (await res.json()) as {
         loggedCallCount: number;
         runningCallCount: number;
+        finishedRunCount: number;
         steps: Array<{ cliInvocationCount: number }>;
       };
     };
@@ -640,6 +644,41 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
         .insert(schema.customToolCalls)
         .values(customRows(1, stepA, 'lookup', 'http-get', 'refused', ofLive));
       expect(await answer()).toEqual([3, 0]);
+    });
+
+    it('counts the runs of the task whose result has landed, and no other run', async () => {
+      const finished = async () => (await detail(LIVE_TASK)).finishedRunCount;
+      const endedAt = new Date('2026-10-16T09:00:00.000Z');
+      const add = async (over: Partial<typeof schema.cliInvocations.$inferInsert> = {}) => {
+        const [row] = await db
+          .insert(schema.cliInvocations)
+          .values({ taskId: LIVE_TASK, taskStepId: liveStep, mode: 'cli', prompt: 'p', ...over })
+          .returning({ id: schema.cliInvocations.id });
+        return row!.id;
+      };
+      expect(await finished()).toBe(0);
+
+      const running = await add();
+      expect(await finished()).toBe(0);
+
+      await db
+        .update(schema.cliInvocations)
+        .set({ endedAt })
+        .where(eq(schema.cliInvocations.id, running));
+      expect(await finished()).toBe(1);
+
+      await add({ endedAt, supersededAt: endedAt });
+      expect(await finished()).toBe(1);
+
+      await add({ taskStepId: null, summaryForStepId: liveStep, endedAt });
+      expect(await finished()).toBe(2);
+
+      await add({ taskStepId: null, endedAt });
+      expect(await finished()).toBe(2);
+
+      const usage = await app.request(`/tasks/${LIVE_TASK}/tool-usage`);
+      expect(((await usage.json()) as Body).coverage.total).toBe(2);
+      expect((await detail(TASK)).finishedRunCount).toBe(0);
     });
   });
 });

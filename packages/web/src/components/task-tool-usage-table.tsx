@@ -130,17 +130,19 @@ export function TaskToolUsageTable({ data }: { data: TaskToolUsage }) {
   );
 }
 
-/** Read on mount, then again when the task ends or its logged or running call count changes. */
+/** Read on mount, then again when the task ends, a run finishes, or a call count changes. */
 export function TaskToolUsagePanel({
   taskId,
   taskCompletedAt,
   loggedCallCount,
   runningCallCount,
+  finishedRunCount,
 }: {
   taskId: string;
   taskCompletedAt: string | null;
   loggedCallCount: number;
   runningCallCount: number;
+  finishedRunCount: number;
 }) {
   const [data, setData] = useState<TaskToolUsage | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -159,7 +161,7 @@ export function TaskToolUsagePanel({
     return () => {
       cancelled = true;
     };
-  }, [taskId, taskCompletedAt, loggedCallCount, runningCallCount]);
+  }, [taskId, taskCompletedAt, loggedCallCount, runningCallCount, finishedRunCount]);
 
   if (error && !data) return <p className="text-xs text-red-400">{error}</p>;
   if (!data) return <p className="text-xs text-neutral-500">Loading tool usage…</p>;

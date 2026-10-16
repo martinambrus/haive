@@ -82,6 +82,7 @@ const FIRST: Props = {
   taskCompletedAt: null,
   loggedCallCount: 2,
   runningCallCount: 2,
+  finishedRunCount: 0,
 };
 
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -147,6 +148,7 @@ describe('TaskToolUsagePanel', () => {
   it.each([
     ['logged call count', { loggedCallCount: 3 }],
     ['running call count', { runningCallCount: 1 }],
+    ['finished run count', { finishedRunCount: 1 }],
     ['completion time', { taskCompletedAt: DONE }],
     ['task', { taskId: 'task-2' }],
   ])('reads the task usage again when its %s changes', async (_name, change) => {
@@ -158,7 +160,7 @@ describe('TaskToolUsagePanel', () => {
   it('does not read it again when a rerender changes none of them', async () => {
     const panel = await mount();
     await panel.rerender({});
-    await panel.rerender({ loggedCallCount: 2, runningCallCount: 2 });
+    await panel.rerender({ loggedCallCount: 2, runningCallCount: 2, finishedRunCount: 0 });
     expect(net.getTaskToolUsage).toHaveBeenCalledTimes(1);
   });
 
