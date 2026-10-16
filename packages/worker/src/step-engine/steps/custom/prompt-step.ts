@@ -74,6 +74,7 @@ function renderTemplate(
   detected: PromptStepDetect,
   formValues: FormValues,
   quote: boolean,
+  integrations: Readonly<Record<string, string>> = {},
 ): { rendered: string; quoted: boolean } {
   // Null-prototype: a field id such as `__proto__` must land as an own key, not hit the setter.
   const fields: Record<string, string> = Object.create(null) as Record<string, string>;
@@ -110,12 +111,24 @@ function renderTemplate(
     taskTitle: capStepOutput(text(detected.taskTitle), perValue),
     taskDescription: capStepOutput(text(detected.taskDescription), perValue),
     steps,
+    integrations,
   });
   return { rendered, quoted: Object.keys(steps).length > 0 };
 }
 
-function buildPrompt(entry: PromptStepEntry, detected: PromptStepDetect, formValues: FormValues) {
-  const { rendered, quoted } = renderTemplate(entry, detected, formValues, true);
+function buildPrompt(
+  entry: PromptStepEntry,
+  detected: PromptStepDetect,
+  formValues: FormValues,
+  integrationAccounts?: Readonly<Record<string, string>>,
+) {
+  const { rendered, quoted } = renderTemplate(
+    entry,
+    detected,
+    formValues,
+    true,
+    integrationAccounts,
+  );
   const containment = entry.capabilities.includes('file_write')
     ? REPO_IS_DATA_ACTING_LINES
     : REPO_IS_DATA_ANSWER_LINES;
@@ -217,8 +230,8 @@ export function buildPromptStep(
       requiredCapabilities: entry.capabilities,
       timeoutMs: entry.timeoutMs,
       ...(entry.agentPool ? { agentPool: entry.agentPool } : {}),
-      buildPrompt: ({ detected, formValues }) =>
-        buildPrompt(entry, detected as PromptStepDetect, formValues),
+      buildPrompt: ({ detected, formValues, integrationAccounts }) =>
+        buildPrompt(entry, detected as PromptStepDetect, formValues, integrationAccounts),
       bypassStub: () => `Test bypass: prompt step ${stepId} ran no agent.`,
     },
 

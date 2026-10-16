@@ -1,4 +1,6 @@
-import type { Database, schema } from '@haive/database';
+import { inArray } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
+import { promptNamesAgentPath } from '@haive/shared';
 import {
   IntegrationToolNameError,
   getIntegrationProvider,
@@ -18,9 +20,13 @@ import {
   type ComposableStepEntry,
   type IntegrationRequirement,
 } from '@haive/shared/modularity';
+import { fenceOpener } from '@haive/shared/markdown-fences';
+import { providerLabel } from '../sandbox/mcp-surface.js';
+import { SANDBOX_WORKDIR } from '../sandbox/sandbox-runner.js';
 import type { StepRegistry } from './registry.js';
 import type { StepDefinition } from './step-definition.js';
 import { insertOwnedRun } from './step-ownership.js';
+import { SAFE_TITLE_CHARS, isSingleLine, survivesFence } from './steps/_untrusted-repo.js';
 import { promptStepIntegrations } from './steps/custom/prompt-step.js';
 
 export const INTEGRATION_UNRESOLVED_REASON = 'integration-unresolved';
@@ -225,4 +231,66 @@ export async function insertStampedRun(
       integrations: bindings.length > 0 ? bindings : null,
     });
   });
+}
+
+export const NO_ACCOUNT_TEXT = '(no account connected)';
+
+/** The label as the prompt will hold it (cut first, so what is judged is what is sent), or the provider's name when that is not one safe line. */
+function accountText(binding: IntegrationBinding, label: string | undefined): string {
+  const cut = label?.slice(0, SAFE_TITLE_CHARS);
+  return cut !== undefined &&
+    isSingleLine(cut) &&
+    survivesFence(cut) &&
+    fenceOpener(cut) === null &&
+    !promptNamesAgentPath(cut, SANDBOX_WORKDIR)
+    ? cut
+    : providerLabel(binding.providerId);
+}
+
+/** What `{{integration:<id>.account}}` renders for each requirement: the label of its account, or `NO_ACCOUNT_TEXT` when it resolved to none. */
+export function integrationAccountTexts(
+  requirements: readonly IntegrationRequirement[],
+  bindings: readonly IntegrationBinding[],
+  labels: ReadonlyMap<string, string>,
+): Record<string, string> {
+  return Object.fromEntries(
+    requirements.map(({ id }) => {
+      const binding = bindings.find((candidate) => candidate.requirementId === id);
+      return [
+        id,
+        binding === undefined
+          ? NO_ACCOUNT_TEXT
+          : accountText(binding, labels.get(binding.connectionId)),
+      ];
+    }),
+  );
+}
+
+/** The account texts of a dispatch, with every label read in one query; undefined when the step declares no integration. */
+export async function dispatchIntegrationAccounts(
+  db: Database,
+  requirements: readonly IntegrationRequirement[],
+  bindings: readonly IntegrationBinding[],
+): Promise<Record<string, string> | undefined> {
+  if (requirements.length === 0) return undefined;
+  const rows =
+    bindings.length === 0
+      ? []
+      : await db
+          .select({
+            id: schema.integrationConnections.id,
+            label: schema.integrationConnections.accountLabel,
+          })
+          .from(schema.integrationConnections)
+          .where(
+            inArray(
+              schema.integrationConnections.id,
+              bindings.map((binding) => binding.connectionId),
+            ),
+          );
+  return integrationAccountTexts(
+    requirements,
+    bindings,
+    new Map(rows.map((row) => [row.id, row.label])),
+  );
 }

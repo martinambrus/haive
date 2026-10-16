@@ -90,6 +90,7 @@ import { resolveDagPhase } from './dag-executor.js';
 import { learnedLadderBaseMs } from './dispatch-timeout.js';
 import { resolveMergePhase } from './merge-resolver.js';
 import {
+  dispatchIntegrationAccounts,
   insertStampedRun,
   invalidRequirementsFailure,
   resolveDispatchIntegrations,
@@ -927,6 +928,11 @@ async function resolveLlmPhase(
   // (truncationRetries) reaches the first pass too.
   const trailingTruncations = await countTrailingTruncations(db, current.id);
   const truncationRetries = stepDef.loop ? trailingTruncations : 0;
+  const integrationAccounts = await dispatchIntegrationAccounts(
+    db,
+    stamp.requirements,
+    stamp.bindings,
+  );
   let prompt =
     (upcomingIteration > 0 ||
       (truncationRetries > 0 && stepDef.loop?.iterationPromptCoversFirstPass)) &&
@@ -938,7 +944,7 @@ async function resolveLlmPhase(
           previousIterations,
           truncationRetries,
         })
-      : llmSpec.buildPrompt({ detected, formValues: formValues ?? {} });
+      : llmSpec.buildPrompt({ detected, formValues: formValues ?? {}, integrationAccounts });
   // Read before anything is appended: a marker in an attachment name, a ledger entry or learned
   // guidance is quoted text, not a persona the prompt step's author chose.
   const promptStepPersonaIds = isPromptStep(stepDef) ? templatePersonaIds(prompt) : undefined;
