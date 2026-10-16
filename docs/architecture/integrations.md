@@ -294,7 +294,8 @@ next dispatch (an agent can then carry an account removed after the first insert
 refuses its calls `connection-unavailable`). Bindings make the dispatch need an
 MCP-capable CLI, and the prompt names each provider (its id when the display name is not one safe line
 or names an agent path) with the tools the agent will see, write tools only while the owner's switch
-is on, never the account. The prompt and the CLI choice come from the first resolution and the stamp
+is on, never the account; a prompt step's template names it only through
+`{{integration:<id>.account}}` (see [Task types](task-types.md)). The prompt and the CLI choice come from the first resolution and the stamp
 from the second; tools/list follows the stamp, so a choice change landing between the two can only
 leave the prompt naming tools the agent is not offered.
 
