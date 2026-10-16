@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { HAIVE_DATA_DIR, HAIVE_DATA_FILES } from '@haive/shared';
 import { lstatNoFollow, removeNoFollow, type EntryKind } from '@haive/shared/fs-safe';
@@ -93,6 +93,17 @@ async function resolveTarget(
   return null;
 }
 
+async function changesBetween(repoPath: string, mergeBase: string, tip: string): Promise<Change[]> {
+  const diff = await gitRun(
+    repoPath,
+    ['diff-tree', '-r', '-z', '--no-renames', mergeBase, tip, '--', ...PROJECTION_PATHSPECS],
+    LITERAL,
+    LISTING,
+  );
+  if (diff.code !== 0) throw new Error(`git diff-tree failed: ${detail(diff)}`);
+  return parseRaw(diff.stdout).filter((c) => isHaiveProjection(c.path));
+}
+
 // Null when the branch changed none of them, shares no history with the target, or either is not here.
 async function readEdits(
   repoPath: string,
@@ -107,14 +118,7 @@ async function readEdits(
   if (found.code === 1) return null;
   if (found.code !== 0) throw new Error(`git merge-base failed: ${detail(found)}`);
   const mergeBase = found.stdout.trim();
-  const diff = await gitRun(
-    repoPath,
-    ['diff-tree', '-r', '-z', '--no-renames', mergeBase, tip, '--', ...PROJECTION_PATHSPECS],
-    LITERAL,
-    LISTING,
-  );
-  if (diff.code !== 0) throw new Error(`git diff-tree failed: ${detail(diff)}`);
-  const changes = parseRaw(diff.stdout).filter((c) => isHaiveProjection(c.path));
+  const changes = await changesBetween(repoPath, mergeBase, tip);
   return changes.length === 0 ? null : { mergeBase, tip, changes };
 }
 
@@ -186,11 +190,30 @@ interface WorktreeSync {
   edited: Change[];
 }
 
+// What a sync cut short has not reached: the changes whose index entry is still the one `tip` held.
+async function stillOnTip(
+  worktree: string,
+  tip: string,
+  changes: readonly Change[],
+): Promise<Change[]> {
+  const res = await gitRun(
+    worktree,
+    ['diff-index', '--cached', '-r', '-z', '--no-renames', tip, '--', ...PROJECTION_PATHSPECS],
+    LITERAL,
+    LISTING,
+  );
+  if (res.code !== 0) throw new Error(`git diff-index failed: ${detail(res)}`);
+  const moved = new Set(parseRaw(res.stdout).map((c) => c.path));
+  return changes.filter((c) => !moved.has(c.path));
+}
+
 // Read while HEAD is still the old tip: a path beside an edit keeps its file, and only its index moves.
+// With `movedFrom` the branch is past that tip already, so it plans what the index still holds of it.
 async function planSync(
   worktree: string | null,
   branch: string,
   changes: readonly Change[],
+  movedFrom: string | null = null,
 ): Promise<WorktreeSync | null> {
   if (worktree === null) return null;
   const { anchor, prefix } = workspaceAnchor(worktree);
@@ -198,6 +221,8 @@ async function planSync(
   if (held?.kind !== 'directory') return null;
   const head = await gitRun(worktree, ['symbolic-ref', '-q', 'HEAD']);
   if (head.code !== 0 || head.stdout.trim() !== `refs/heads/${branch}`) return null;
+  const pending = movedFrom === null ? changes : await stillOnTip(worktree, movedFrom, changes);
+  if (pending.length === 0) return null;
   const status = await gitRun(
     worktree,
     [
@@ -214,17 +239,18 @@ async function planSync(
     LITERAL,
     LISTING,
   );
-  if (status.code !== 0) return null;
+  if (status.code !== 0) throw new Error(`git status failed: ${detail(status)}`);
+  // Past the move the index differs from HEAD by design, so only an entry's worktree column marks an edit.
   const dirty = status.stdout
     .split('\0')
-    .filter((entry) => entry.length > 3)
+    .filter((entry) => entry.length > 3 && (movedFrom === null || entry[1] !== ' '))
     .map((entry) => entry.slice(3).replace(/\/$/, ''));
   const beside = (p: string) =>
     dirty.some((d) => d === p || d.startsWith(`${p}/`) || p.startsWith(`${d}/`));
   return {
     dir: worktree,
-    clean: changes.filter((c) => !beside(c.path)),
-    edited: changes.filter((c) => beside(c.path)),
+    clean: pending.filter((c) => !beside(c.path)),
+    edited: pending.filter((c) => beside(c.path)),
   };
 }
 
@@ -281,6 +307,148 @@ function messageFor(mergeBase: string, names: readonly string[]): string {
   ].join('\n');
 }
 
+interface Recorded {
+  branch: string;
+  commit: string;
+  preRevertSha: string;
+  mergeBase: string;
+}
+
+const isSha = (v: unknown): v is string =>
+  typeof v === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(v);
+
+function recordedOf(payload: unknown): Recorded | null {
+  const { branch, commit, preRevertSha, mergeBase } = (payload ?? {}) as Record<string, unknown>;
+  if (typeof branch !== 'string' || !isSha(commit) || !isSha(preRevertSha) || !isSha(mergeBase)) {
+    return null;
+  }
+  return { branch, commit, preRevertSha, mergeBase };
+}
+
+async function putBackPayloads(db: Database, taskId: string): Promise<unknown[]> {
+  const rows = await db
+    .select({ payload: schema.taskEvents.payload })
+    .from(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, taskId),
+        eq(schema.taskEvents.eventType, PROJECTIONS_PUT_BACK_EVENT),
+      ),
+    )
+    .orderBy(asc(schema.taskEvents.createdAt));
+  return rows.map((row) => row.payload);
+}
+
+async function record(ctx: RevertCtx, branch: string, revert: ProjectionRevert): Promise<void> {
+  await ctx.db.insert(schema.taskEvents).values({
+    taskId: ctx.taskId,
+    taskStepId: ctx.taskStepId,
+    eventType: PROJECTIONS_PUT_BACK_EVENT,
+    payload: {
+      branch,
+      ...revert,
+      paths: revert.paths.slice(0, EVENT_PATHS),
+      pathCount: revert.paths.length,
+    },
+  });
+}
+
+async function dropRecord(ctx: RevertCtx, commit: string): Promise<void> {
+  await ctx.db
+    .delete(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, ctx.taskId),
+        eq(schema.taskEvents.eventType, PROJECTIONS_PUT_BACK_EVENT),
+        sql`${schema.taskEvents.payload}->>'commit' = ${commit}`,
+      ),
+    );
+}
+
+// The record is written first, so a refusal here is the one case that takes it back.
+async function moveBranch(ctx: RevertCtx, branch: string, revert: ProjectionRevert): Promise<void> {
+  const moved = await gitRun(ctx.repoPath, [
+    'update-ref',
+    '-m',
+    'put back Haive project files',
+    `refs/heads/${branch}`,
+    revert.commit,
+    revert.preRevertSha,
+  ]);
+  if (moved.code !== 0) {
+    await dropRecord(ctx, revert.commit);
+    throw new Error(`${branch} moved while its Haive files were being put back: ${detail(moved)}`);
+  }
+}
+
+// A commit gone from the repository is in no history; git's other failures stop the pass, as in `readEdits`.
+async function isAncestor(repoPath: string, commit: string, tip: string): Promise<boolean> {
+  if ((await revParse(repoPath, `${commit}^{commit}`)) === null) return false;
+  const res = await gitRun(repoPath, ['merge-base', '--is-ancestor', commit, tip]);
+  if (res.code > 1) throw new Error(`git merge-base failed: ${detail(res)}`);
+  return res.code === 0;
+}
+
+function logPutBack(ctx: RevertCtx, branch: string, revert: ProjectionRevert): void {
+  ctx.logger.info(
+    {
+      branch,
+      commit: revert.commit,
+      preRevertSha: revert.preRevertSha,
+      paths: revert.paths.length,
+    },
+    "Haive's project files put back on the task branch",
+  );
+}
+
+/** Ends the put-back this task last recorded for `branch` if a pass was cut short in it, and drops
+ *  the record of one that never landed; null when this pass has a put-back of its own to make. */
+async function resumePutBack(args: {
+  ctx: RevertCtx;
+  worktree: string | null;
+  branch: string;
+}): Promise<ProjectionRevert | null> {
+  const { ctx, worktree, branch } = args;
+  if (!isBranchName(branch)) return null;
+  const recorded = (await putBackPayloads(ctx.db, ctx.taskId))
+    .map(recordedOf)
+    .filter((r): r is Recorded => r !== null && r.branch === branch)
+    .at(-1);
+  if (recorded === undefined) return null;
+  const tip = await revParse(ctx.repoPath, `refs/heads/${branch}^{commit}`);
+  if (tip === null) return null;
+  const { commit, preRevertSha, mergeBase } = recorded;
+  const landed = tip === commit;
+  const unmoved =
+    tip === preRevertSha && (await revParse(ctx.repoPath, `${commit}^`)) === preRevertSha;
+  if (!landed && !unmoved) {
+    if (!(await isAncestor(ctx.repoPath, commit, tip))) await dropRecord(ctx, commit);
+    return null;
+  }
+  const changes = await changesBetween(ctx.repoPath, mergeBase, preRevertSha);
+  const result = {
+    paths: changes.map((c) => display(c.path)).sort(),
+    commit,
+    preRevertSha,
+    mergeBase,
+  };
+  if (landed) {
+    const sync = await planSync(worktree, branch, changes, preRevertSha);
+    if (sync !== null) {
+      await refuseLinkedDataDir(ctx.repoPath, worktree, branch, tip);
+      await syncWorktree(sync, commit, preRevertSha);
+      logPutBack(ctx, branch, result);
+    }
+    return result;
+  }
+  await refuseLinkedDataDir(ctx.repoPath, worktree, branch, tip);
+  const sync = await planSync(worktree, branch, changes);
+  await moveBranch(ctx, branch, result);
+  if (sync) await syncWorktree(sync, commit, preRevertSha);
+  logPutBack(ctx, branch, result);
+  return result;
+}
+
 /** Puts every Haive file `branch` changed since it forked from `target` back, in one commit; null if none. */
 export async function revertHaiveProjectionsOnBranch(args: {
   ctx: RevertCtx;
@@ -289,6 +457,8 @@ export async function revertHaiveProjectionsOnBranch(args: {
   target: string | readonly string[];
 }): Promise<ProjectionRevert | null> {
   const { ctx, worktree, branch } = args;
+  const resumed = await resumePutBack({ ctx, worktree, branch });
+  if (resumed !== null) return resumed;
   const edits = await readEdits(ctx.repoPath, branch, args.target);
   if (edits === null) return null;
   await refuseLinkedDataDir(ctx.repoPath, worktree, branch, edits.tip);
@@ -303,34 +473,11 @@ export async function revertHaiveProjectionsOnBranch(args: {
   );
   if (made.code !== 0) throw new Error(`git commit-tree failed: ${detail(made)}`);
   const commit = made.stdout.trim();
-  const moved = await gitRun(ctx.repoPath, [
-    'update-ref',
-    '-m',
-    'put back Haive project files',
-    `refs/heads/${branch}`,
-    commit,
-    edits.tip,
-  ]);
-  if (moved.code !== 0) {
-    throw new Error(`${branch} moved while its Haive files were being put back: ${detail(moved)}`);
-  }
   const result = { paths: names, commit, preRevertSha: edits.tip, mergeBase: edits.mergeBase };
-  await ctx.db.insert(schema.taskEvents).values({
-    taskId: ctx.taskId,
-    taskStepId: ctx.taskStepId,
-    eventType: PROJECTIONS_PUT_BACK_EVENT,
-    payload: {
-      branch,
-      ...result,
-      paths: names.slice(0, EVENT_PATHS),
-      pathCount: names.length,
-    },
-  });
+  await record(ctx, branch, result);
+  await moveBranch(ctx, branch, result);
   if (sync) await syncWorktree(sync, commit, edits.tip);
-  ctx.logger.info(
-    { branch, commit, preRevertSha: edits.tip, paths: names.length },
-    "Haive's project files put back on the task branch",
-  );
+  logPutBack(ctx, branch, result);
   return result;
 }
 
@@ -372,18 +519,8 @@ function noteOf(payload: unknown): string | null {
 
 /** One warning note per time this task had Haive files put back, oldest first. */
 export async function projectionRevertNotes(db: Database, taskId: string): Promise<string[]> {
-  const rows = await db
-    .select({ payload: schema.taskEvents.payload })
-    .from(schema.taskEvents)
-    .where(
-      and(
-        eq(schema.taskEvents.taskId, taskId),
-        eq(schema.taskEvents.eventType, PROJECTIONS_PUT_BACK_EVENT),
-      ),
-    )
-    .orderBy(asc(schema.taskEvents.createdAt));
-  return rows.flatMap((row) => {
-    const note = noteOf(row.payload);
+  return (await putBackPayloads(db, taskId)).flatMap((payload) => {
+    const note = noteOf(payload);
     return note === null ? [] : [note];
   });
 }

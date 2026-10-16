@@ -3,6 +3,8 @@ import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
@@ -22,6 +24,20 @@ vi.mock('../step-engine/git-merge.js', async (importOriginal) => {
   };
 });
 
+/** Sees each git argv first: a result it returns stands in for git's, and a throw is a worker that died. */
+const inject = vi.hoisted(() => ({
+  hook: null as
+    null | ((args: string[]) => { stdout: string; stderr: string; code: number } | undefined),
+}));
+vi.mock('../repo/git-exec.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../repo/git-exec.js')>();
+  return {
+    ...real,
+    gitRun: async (...call: Parameters<typeof real.gitRun>) =>
+      inject.hook?.(call[1]) ?? real.gitRun(...call),
+  };
+});
+
 const load = () => import('./branch-revert.js');
 
 const exec = promisify(execFile);
@@ -38,6 +54,7 @@ const PUT_BACK_EVENT = 'branch.projections_put_back';
 const dirs: string[] = [];
 afterEach(async () => {
   handBack.calls.length = 0;
+  inject.hook = null;
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
@@ -113,7 +130,10 @@ function stubDb() {
   let warning: string | null = null;
   const db = {
     query: {
-      users: { findFirst: async () => undefined },
+      users: {
+        findFirst: async (): Promise<{ gitName: string; gitEmail: string } | undefined> =>
+          undefined,
+      },
       tasks: { findFirst: async () => ({ repositoryId: 'r1' }) },
       repositories: { findFirst: async () => ({ credentialsSecretId: null }) },
       taskSteps: { findFirst: async () => ({ id: 'ts-1', warningMessage: warning }) },
@@ -121,6 +141,17 @@ function stubDb() {
     insert: (table: unknown) => ({
       values: async (v: { eventType: string; payload: unknown }) => {
         if (table === schema.taskEvents) events.push(v);
+      },
+    }),
+    delete: (table: unknown) => ({
+      where: async (cond: SQL) => {
+        if (table !== schema.taskEvents) return;
+        const { params } = new PgDialect().sqlToQuery(cond);
+        for (let i = events.length - 1; i >= 0; i -= 1) {
+          const { commit } = events[i]!.payload as { commit?: unknown };
+          if (events[i]!.eventType === PUT_BACK_EVENT && params.includes(commit))
+            events.splice(i, 1);
+        }
       },
     }),
     update: () => ({
@@ -480,6 +511,346 @@ describe('revertHaiveProjectionsOnBranch', () => {
     ).rejects.toThrow(/feature\/x moved while/);
     expect(await at(parent, 'feature/x', 'late.txt')).toBe('late\n');
     expect(h.events).toEqual([]);
+  });
+});
+
+describe('a put-back cut short is resumed, not lost', () => {
+  type Stub = ReturnType<typeof stubDb>;
+  const commitsOf = (h: Stub) => h.events.map((e) => (e.payload as { commit: string }).commit);
+
+  async function pass(parent: string, wt: string, h: Stub) {
+    const { revertHaiveProjectionsOnBranch } = await load();
+    return revertHaiveProjectionsOnBranch({
+      ctx: stepCtx(parent, h.db),
+      worktree: wt,
+      branch: 'feature/x',
+      target: 'main',
+    });
+  }
+  const gate = (wt: string, bare: string) =>
+    ({
+      detected: {
+        hasGit: true,
+        workspacePath: wt,
+        branch: 'feature/x',
+        hasOrigin: true,
+        originUrl: bare,
+        recentCommits: '',
+        repositoryId: 'r1',
+        boundCredentialId: null,
+        credentials: [],
+        baseBranch: 'main',
+      },
+      formValues: { push: true, credentialId: '', setUpstream: true },
+      iteration: 0,
+      previousIterations: [],
+    }) as never;
+
+  /** The `nth` git call of `sub` fails the way git reports a failure. */
+  const failAt = (sub: string, nth = 1) => {
+    let seen = 0;
+    inject.hook = (args) => {
+      if (args[0] !== sub) return undefined;
+      seen += 1;
+      return seen === nth ? { stdout: '', stderr: `injected ${sub} failure`, code: 1 } : undefined;
+    };
+  };
+  /** The worker dies in its first git call of `sub`, before it sees a result. */
+  const dieAt = (sub: string) => {
+    inject.hook = (args) => {
+      if (args[0] !== sub) return undefined;
+      inject.hook = null;
+      throw new Error(`worker died at ${sub}`);
+    };
+  };
+
+  it('R1 a worktree sync that failed after the branch moved is finished by the Retry, with one event', async () => {
+    const { parent, wt, bare, forked } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const preRevert = await revOf(wt);
+    const h = stubDb();
+    failAt('restore');
+    await expect(gate4PushStep.apply(stepCtx(parent, h.db), gate(wt, bare))).rejects.toThrow(
+      /the worktree could not be brought to the new tip/,
+    );
+    expect(await revOf(parent, 'feature/x')).not.toBe(preRevert);
+    expect(h.events).toHaveLength(1);
+    expect(await readFile(path.join(wt, GLOBS), 'utf8')).toBe(await at(parent, preRevert, GLOBS));
+    await gate4PushStep.apply(stepCtx(parent, h.db), gate(wt, bare));
+    expect(await git(wt, ['status', '--porcelain'])).toBe('');
+    expect(await readFile(path.join(wt, GLOBS), 'utf8')).toBe(await at(parent, forked, GLOBS));
+    expect(h.events).toHaveLength(1);
+    expect(h.warning()).toContain(GLOBS);
+    expect(await at(bare, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
+    expect(handBack.calls).toEqual([[wt, preRevert]]);
+  });
+
+  it('R1 a file edited in between keeps its bytes, and only its index entry moves', async () => {
+    const { parent, wt } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const h = stubDb();
+    failAt('restore');
+    await expect(pass(parent, wt, h)).rejects.toThrow(/could not be brought to the new tip/);
+    await write(wt, { [GLOBS]: '["mine"]\n' });
+    await pass(parent, wt, h);
+    expect(await readFile(path.join(wt, GLOBS), 'utf8')).toBe('["mine"]\n');
+    expect(await git(wt, ['status', '--porcelain'])).toBe(` M ${GLOBS}\n`);
+    expect(handBack.calls).toEqual([]);
+    expect(h.events).toHaveLength(1);
+  });
+
+  it('R1 a sync cut short between its two restores is finished for the paths it had not reached', async () => {
+    const { parent, wt, forked } = await fixture({
+      [`${STATE}/dirthing/child`]: 'child\n',
+      [`${STATE}/filething`]: 'file\n',
+    });
+    await rm(path.join(wt, STATE, 'dirthing'), { recursive: true });
+    await rm(path.join(wt, STATE, 'filething'));
+    await write(wt, { [`${STATE}/dirthing`]: 'now a file\n', [`${STATE}/filething/inner`]: 'x\n' });
+    await git(wt, ['add', '-A']);
+    await git(wt, ['update-index', '--add', '--cacheinfo', `160000,${forked},${STATE}/sub`]);
+    await git(wt, ['commit', '-m', 'agent reshapes the record']);
+    const h = stubDb();
+    failAt('restore', 2);
+    await expect(pass(parent, wt, h)).rejects.toThrow(/could not be brought to the new tip/);
+    expect(await git(wt, ['status', '--porcelain'])).not.toBe('');
+    await pass(parent, wt, h);
+    expect(await forkedState(parent, 'feature/x')).toBe(await forkedState(parent, forked));
+    expect(await git(wt, ['status', '--porcelain'])).toBe('');
+    expect(await readFile(path.join(wt, STATE, 'dirthing', 'child'), 'utf8')).toBe('child\n');
+    expect(await readFile(path.join(wt, STATE, 'filething'), 'utf8')).toBe('file\n');
+    expect(h.events).toHaveLength(1);
+  });
+
+  it('R2 a death after the event and before the ref moves is finished by the Retry, with one event', async () => {
+    const { parent, wt, forked } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const preRevert = await revOf(wt);
+    const h = stubDb();
+    // A commit made afresh would have another author, so the Retry cannot pass off a new one as the recorded.
+    h.db.query.users.findFirst = async () => ({ gitName: 'First', gitEmail: 'first@haive.local' });
+    dieAt('update-ref');
+    await expect(pass(parent, wt, h)).rejects.toThrow(/worker died at update-ref/);
+    expect(await revOf(parent, 'feature/x')).toBe(preRevert);
+    expect(h.events).toHaveLength(1);
+    const [recorded] = commitsOf(h);
+    h.db.query.users.findFirst = async () => undefined;
+    const result = await pass(parent, wt, h);
+    expect(result).toEqual({
+      paths: [GLOBS],
+      commit: recorded,
+      preRevertSha: preRevert,
+      mergeBase: forked,
+    });
+    expect(await revOf(parent, 'feature/x')).toBe(recorded);
+    expect(await git(parent, ['log', '-1', '--format=%an', 'feature/x'])).toBe('First\n');
+    expect(h.events).toHaveLength(1);
+    expect(await git(wt, ['status', '--porcelain'])).toBe('');
+    expect(await readFile(path.join(wt, GLOBS), 'utf8')).toBe(await at(parent, forked, GLOBS));
+    expect(handBack.calls).toEqual([[wt, preRevert]]);
+  });
+
+  it('R3 a branch someone else moved after the event: the stale event goes, and a fresh put-back runs', async () => {
+    const { projectionRevertNotes } = await load();
+    const { parent, wt, forked } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const h = stubDb();
+    dieAt('update-ref');
+    await expect(pass(parent, wt, h)).rejects.toThrow(/worker died at update-ref/);
+    expect(h.events).toHaveLength(1);
+    const [stale] = commitsOf(h);
+    await commit(wt, { 'late.txt': 'late\n' }, 'a commit that raced it');
+    const raced = await revOf(wt);
+    const result = await pass(parent, wt, h);
+    expect(result?.commit).not.toBe(stale);
+    expect(commitsOf(h)).toEqual([result!.commit]);
+    expect(await revOf(parent, 'feature/x')).toBe(result!.commit);
+    expect(await revOf(parent, `${result!.commit}^`)).toBe(raced);
+    expect(await at(parent, 'feature/x', 'late.txt')).toBe('late\n');
+    expect(await at(parent, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
+    expect(await git(wt, ['status', '--porcelain'])).toBe('');
+    const notes = await projectionRevertNotes(h.db as never, 'task-1');
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(`commit ${result!.commit.slice(0, 7)}`);
+    expect(notes[0]).not.toContain(stale!.slice(0, 7));
+  });
+
+  it('R3 a branch rewound past the event: the event goes, and nothing else is touched', async () => {
+    const { parent, wt, forked } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const h = stubDb();
+    dieAt('update-ref');
+    await expect(pass(parent, wt, h)).rejects.toThrow(/worker died at update-ref/);
+    const other = {
+      eventType: PUT_BACK_EVENT,
+      payload: {
+        branch: 'other/branch',
+        commit: 'a'.repeat(40),
+        preRevertSha: 'b'.repeat(40),
+        mergeBase: 'c'.repeat(40),
+        paths: [],
+        pathCount: 0,
+      },
+    };
+    const unreadable = { eventType: PUT_BACK_EVENT, payload: { branch: 'feature/x', paths: 'x' } };
+    h.events.push(other, unreadable);
+    expect(h.events).toHaveLength(3);
+    await git(wt, ['reset', '-q', '--hard', forked]);
+    expect(await pass(parent, wt, h)).toBeNull();
+    expect(h.events).toEqual([other, unreadable]);
+    expect(await revOf(parent, 'feature/x')).toBe(forked);
+  });
+
+  it('a record whose commit is gone is dropped, and a failure of git in judging one keeps it', async () => {
+    const { parent, wt } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const h = stubDb();
+    h.events.push({
+      eventType: PUT_BACK_EVENT,
+      payload: {
+        branch: 'feature/x',
+        commit: 'd'.repeat(40),
+        preRevertSha: 'e'.repeat(40),
+        mergeBase: 'f'.repeat(40),
+        paths: [GLOBS],
+        pathCount: 1,
+      },
+    });
+    const first = await pass(parent, wt, h);
+    expect(commitsOf(h)).toEqual([first!.commit]);
+
+    await commit(wt, { 'late.txt': 'late\n' }, 'work after the put-back');
+    inject.hook = (args) =>
+      args[0] === 'merge-base'
+        ? { stdout: '', stderr: 'injected merge-base failure', code: 128 }
+        : undefined;
+    await expect(pass(parent, wt, h)).rejects.toThrow(/git merge-base failed: injected/);
+    expect(commitsOf(h)).toEqual([first!.commit]);
+    inject.hook = null;
+    expect(await pass(parent, wt, h)).toBeNull();
+    expect(commitsOf(h)).toEqual([first!.commit]);
+  });
+
+  it('a git status that fails stops the pass before the branch moves, and records nothing', async () => {
+    const { parent, wt } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const preRevert = await revOf(wt);
+    const h = stubDb();
+    inject.hook = (args) =>
+      args[1] === 'status'
+        ? { stdout: '', stderr: 'injected status failure', code: 128 }
+        : undefined;
+    await expect(pass(parent, wt, h)).rejects.toThrow(/git status failed: injected/);
+    inject.hook = null;
+    expect(await revOf(parent, 'feature/x')).toBe(preRevert);
+    expect(h.events).toEqual([]);
+  });
+
+  it('a resumed sync whose index read fails stops the pass and keeps the record', async () => {
+    const { parent, wt, forked } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const h = stubDb();
+    failAt('restore');
+    await expect(pass(parent, wt, h)).rejects.toThrow(/could not be brought to the new tip/);
+    inject.hook = (args) =>
+      args[0] === 'diff-index'
+        ? { stdout: '', stderr: 'injected diff-index failure', code: 128 }
+        : undefined;
+    await expect(pass(parent, wt, h)).rejects.toThrow(/git diff-index failed: injected/);
+    inject.hook = null;
+    expect(h.events).toHaveLength(1);
+    await pass(parent, wt, h);
+    expect(await readFile(path.join(wt, GLOBS), 'utf8')).toBe(await at(parent, forked, GLOBS));
+    expect(await git(wt, ['status', '--porcelain'])).toBe('');
+  });
+
+  it('R4 an update-ref that is refused leaves no event, and throws as before', async () => {
+    const { parent, wt } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const h = stubDb();
+    h.db.query.users.findFirst = async () => {
+      await commit(wt, { 'late.txt': 'late\n' }, 'a commit that raced it');
+      return undefined;
+    };
+    const recordedAtMove: number[] = [];
+    inject.hook = (args) => {
+      if (args[0] === 'update-ref') recordedAtMove.push(h.events.length);
+      return undefined;
+    };
+    await expect(pass(parent, wt, h)).rejects.toThrow(/feature\/x moved while/);
+    expect(recordedAtMove).toEqual([1]);
+    expect(h.events).toEqual([]);
+    expect(await at(parent, 'feature/x', 'late.txt')).toBe('late\n');
+  });
+
+  it('a .haive-data link halts the resumed put-back too, and nothing is written through it', async () => {
+    const elsewhere = await mkdtemp(path.join(tmpdir(), 'branch-revert-elsewhere-'));
+    dirs.push(elsewhere);
+    const decoy = path.join(elsewhere, 'state/settings/scope-exclude-globs.json');
+    await write(elsewhere, { 'state/settings/scope-exclude-globs.json': 'decoy\n' });
+    const link = async (wt: string) => {
+      await rm(path.join(wt, '.haive-data'), { recursive: true });
+      await symlink(elsewhere, path.join(wt, '.haive-data'));
+    };
+    const halted = /\.haive-data is a link in the worktree/;
+
+    const landed = await fixture();
+    await commit(landed.wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const first = stubDb();
+    failAt('restore');
+    await expect(pass(landed.parent, landed.wt, first)).rejects.toThrow(/could not be brought/);
+    const moved = await revOf(landed.parent, 'feature/x');
+    await link(landed.wt);
+    await expect(pass(landed.parent, landed.wt, first)).rejects.toThrow(halted);
+    expect(await revOf(landed.parent, 'feature/x')).toBe(moved);
+
+    const unmoved = await fixture();
+    await commit(unmoved.wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const tip = await revOf(unmoved.wt);
+    const second = stubDb();
+    dieAt('update-ref');
+    await expect(pass(unmoved.parent, unmoved.wt, second)).rejects.toThrow(/worker died/);
+    await link(unmoved.wt);
+    await expect(pass(unmoved.parent, unmoved.wt, second)).rejects.toThrow(halted);
+    expect(await revOf(unmoved.parent, 'feature/x')).toBe(tip);
+    expect(second.events).toHaveLength(1);
+
+    expect(await readFile(decoy, 'utf8')).toBe('decoy\n');
+  });
+
+  it('a put-back that finished is not redone: a later pass leaves the branch and the worktree alone', async () => {
+    const { parent, wt } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const h = stubDb();
+    const first = await pass(parent, wt, h);
+    const tip = await revOf(parent, 'feature/x');
+    await write(wt, { [GLOBS]: '["mine"]\n' });
+    await git(wt, ['add', GLOBS]);
+    handBack.calls.length = 0;
+    expect(await pass(parent, wt, h)).toEqual(first);
+    expect(await revOf(parent, 'feature/x')).toBe(tip);
+    expect(h.events).toHaveLength(1);
+    expect(await git(wt, ['status', '--porcelain'])).toBe(`M  ${GLOBS}\n`);
+    expect(await readFile(path.join(wt, GLOBS), 'utf8')).toBe('["mine"]\n');
+    expect(handBack.calls).toEqual([]);
+  });
+
+  it('a put-back that landed holds when the branch moves on, and a later edit gets its own', async () => {
+    const { parent, wt, forked } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const h = stubDb();
+    const first = await pass(parent, wt, h);
+    await commit(wt, { 'late.txt': 'late\n' }, 'work after the put-back');
+    const tip = await revOf(parent, 'feature/x');
+    expect(await pass(parent, wt, h)).toBeNull();
+    expect(await revOf(parent, 'feature/x')).toBe(tip);
+    expect(commitsOf(h)).toEqual([first!.commit]);
+    await commit(wt, stateFiles({ 'scope-exclude-globs': ['vendor/**', 'build/**'] }), 'again');
+    const second = await pass(parent, wt, h);
+    expect(second?.commit).not.toBe(first!.commit);
+    expect(commitsOf(h)).toEqual([first!.commit, second!.commit]);
+    expect(await at(parent, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
+    expect(await git(wt, ['status', '--porcelain'])).toBe('');
   });
 });
 
