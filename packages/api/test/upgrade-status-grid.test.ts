@@ -541,6 +541,33 @@ describe('a switch a person made on this install counts as the team’s choice',
     },
   );
 
+  describe('from a step 07 output that names its providers', () => {
+    async function fromHistory(recorded: boolean, switched: boolean): Promise<string> {
+      seed(cellOf('none', recorded ? 'recorded' : 'unrecorded', true), dir, null);
+      state.snapshotGroups = [];
+      state.rows.set(schema.taskSteps, [
+        { recorded, enabledCliProviders: [{ name: 'claude-code' }] },
+      ]);
+      if (switched) {
+        state.repo = { ...(state.repo as Record<string, unknown>), rtkChoiceMadeAt: SWITCHED };
+      }
+      return answerFor();
+    }
+
+    it('offers the RTK settings files of its providers once a person switched RTK on', async () => {
+      const switched = await fromHistory(false, true);
+
+      expect(switched).toMatch(/changed=\S*rtk\.claude-settings/);
+      expect(switched).not.toContain('rtk.gemini-settings');
+      expect(switched).toContain('available=true');
+      expect(await fromHistory(false, false)).not.toContain('rtk.');
+    });
+
+    it('offers them for a step 07 output that recorded the choice', async () => {
+      expect(await fromHistory(true, false)).toMatch(/changed=\S*rtk\.claude-settings/);
+    });
+  });
+
   it.each([ORIGINS[0]!, ORIGINS[2]!])(
     'reports the settings files left behind when RTK is off, from %s',
     async (_name, cellFor, column) => {

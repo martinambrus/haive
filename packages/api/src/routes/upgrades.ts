@@ -139,16 +139,24 @@ function snapshotProviderNames(providers: unknown): string[] {
 }
 
 /** The providers whose RTK settings files 01's render context reads, or null when it recorded no
- *  RTK choice: the column's own, else the caller's enabled ones, or the picked snapshot's. */
+ *  RTK choice: the column's own, else the caller's enabled ones, or the picked snapshot's, or those
+ *  the last onboarding's step 07 recorded. */
 function rtkProviderNames(
   origin: RenderContextOrigin<SnapshotRowFacts & { snapshotProviders: unknown }>,
   enabledNames: readonly string[],
+  history: HistoryDetect | null,
+  source: string,
+  rtkChoiceMadeAt: Date | null,
 ): string[] | null {
   if (origin.from === 'column') {
     return origin.rtkRecorded ? renderContextProviderNames(origin.column, enabledNames) : null;
   }
-  return origin.from === 'snapshot' && origin.rtkRecorded
-    ? snapshotProviderNames(origin.row.snapshotProviders)
+  if (origin.from === 'snapshot') {
+    return origin.rtkRecorded ? snapshotProviderNames(origin.row.snapshotProviders) : null;
+  }
+  const verdict = historyOrigin({ onboarding: history, source, rtkChoiceMadeAt });
+  return verdict.kind === 'onboarding' && verdict.rtkRecorded
+    ? snapshotProviderNames(history?.enabledCliProviders)
     : null;
 }
 
@@ -158,6 +166,7 @@ interface HistoryDetect {
   detected: boolean;
   rtkRecorded: boolean;
   agentTargets: unknown;
+  enabledCliProviders: unknown;
 }
 
 async function loadHistoryDetect(
@@ -181,6 +190,7 @@ async function loadHistoryDetect(
     .select({
       recorded: sql<boolean | null>`(${schema.taskSteps.detectOutput} -> 'rtkEnabled') is not null`,
       agentTargets: sql<unknown>`${schema.taskSteps.detectOutput} -> 'agentTargets'`,
+      enabledCliProviders: sql<unknown>`${schema.taskSteps.detectOutput} -> 'enabledCliProviders'`,
     })
     .from(schema.taskSteps)
     .where(
@@ -194,6 +204,7 @@ async function loadHistoryDetect(
     detected: generate !== undefined,
     rtkRecorded: generate?.recorded === true,
     agentTargets: generate?.agentTargets ?? null,
+    enabledCliProviders: generate?.enabledCliProviders ?? null,
   };
 }
 
@@ -549,7 +560,9 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     (applicableSet.has(id) || isPerRepoTemplateId(id)) && !nonCurrentCustom.has(id);
   // An upgrade run with RTK off left the RTK templates out of that snapshot, so with RTK back on they
   // apply again wherever the providers of the render context the upgrade uses read them.
-  const rtkProviders = repo.rtkEnabled ? rtkProviderNames(origin, enabledNames) : null;
+  const rtkProviders = repo.rtkEnabled
+    ? rtkProviderNames(origin, enabledNames, history, repo.source, repo.rtkChoiceMadeAt)
+    : null;
   if (rtkProviders) {
     for (const m of manifestCache) {
       if (m.templateKind === 'rtk-config' && rtkSettingsNeeded(m.templateId, rtkProviders)) {
