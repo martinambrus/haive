@@ -82,6 +82,7 @@ githubOauthRoutes.get('/repos', async (c) => {
   const token = decrypt(cred.secretEncrypted, dekHex);
 
   const repos: GithubRepoApi[] = [];
+  let truncated = false;
   for (let page = 1; page <= REPOS_PAGE_CAP; page += 1) {
     const url = new URL('https://api.github.com/user/repos');
     url.searchParams.set('per_page', String(REPOS_PER_PAGE));
@@ -112,6 +113,7 @@ githubOauthRoutes.get('/repos', async (c) => {
     const batch = (await res.json()) as GithubRepoApi[];
     repos.push(...batch);
     if (batch.length < REPOS_PER_PAGE) break;
+    if (page === REPOS_PAGE_CAP) truncated = /rel="next"/.test(res.headers.get('link') ?? '');
   }
 
   return c.json({
@@ -122,6 +124,6 @@ githubOauthRoutes.get('/repos', async (c) => {
       private: r.private,
       pushedAt: r.pushed_at,
     })),
-    truncated: repos.length === REPOS_PAGE_CAP * REPOS_PER_PAGE,
+    truncated,
   });
 });
