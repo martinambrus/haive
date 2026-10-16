@@ -45,11 +45,13 @@ import { ProviderBuildError } from '../cli-adapters/prompt-delivery.js';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { resolveTaskDispatch, type DispatchPlan } from '../orchestrator/dispatcher.js';
 import { houseRulesFor, houseRulesOptOut } from '../orchestrator/house-rules.js';
+import type { IntegrationBinding } from '@haive/shared/integrations';
 import {
   TEMPLATE_PERSONA_MARKER_PATTERN,
   describeInvalidTools,
   parsePinnedCustomSteps,
   parseStepId,
+  type IntegrationRequirement,
 } from '@haive/shared/modularity';
 import { moduleDeactivationMessage } from '../modules/activation.js';
 import { invalidToolsFailure, pinnedToolsFailure } from './steps/custom/pinned-tools.js';
@@ -87,6 +89,11 @@ import {
 import { resolveDagPhase } from './dag-executor.js';
 import { learnedLadderBaseMs } from './dispatch-timeout.js';
 import { resolveMergePhase } from './merge-resolver.js';
+import {
+  insertStampedRun,
+  resolveDispatchIntegrations,
+  stepIntegrationRequirements,
+} from './step-integrations.js';
 import {
   StepSupersededError,
   assertOwnsStep,
@@ -591,6 +598,55 @@ async function resolveCustomTools(
   return { names: tools.names };
 }
 
+type DispatchStamp = {
+  requirements: readonly IntegrationRequirement[];
+  bindings: IntegrationBinding[];
+  failure: string | null;
+};
+
+/** What a dispatch of this step carries from its declared integrations, or why it cannot; a dispatch with a toolProfile carries none. */
+async function resolveDispatchStamp(
+  db: Database,
+  taskId: string,
+  stepDef: StepDefinition,
+  toolProfile: 'rag_only' | 'none' | undefined,
+): Promise<DispatchStamp> {
+  const requirements = toolProfile === undefined ? stepIntegrationRequirements(stepDef) : [];
+  if (requirements.length === 0) return { requirements, bindings: [], failure: null };
+  const resolved = await resolveDispatchIntegrations(db, taskId, requirements);
+  return resolved.ok
+    ? { requirements, bindings: resolved.bindings, failure: null }
+    : { requirements, bindings: [], failure: resolved.failure };
+}
+
+function insertDispatchRun(
+  db: Database,
+  taskId: string,
+  stepRowId: string,
+  stamp: DispatchStamp,
+  values: typeof schema.cliInvocations.$inferInsert,
+): Promise<typeof schema.cliInvocations.$inferSelect | { failure: string }> {
+  return stamp.bindings.length > 0
+    ? insertStampedRun(db, taskId, stepRowId, values, stamp.requirements)
+    : insertOwnedRun(db, stepRowId, values);
+}
+
+async function failDispatch(
+  db: Database,
+  current: TaskStepRow,
+  message: string,
+): Promise<LlmResolved> {
+  const failed = await updateRow(db, current.id, {
+    status: 'failed',
+    errorMessage: message,
+    endedAt: new Date(),
+  });
+  return {
+    resolved: false,
+    result: { status: 'failed', row: failed, error: failed.errorMessage ?? message },
+  };
+}
+
 async function resolveLlmPhase(
   db: Database,
   stepDef: StepDefinition,
@@ -825,6 +881,9 @@ async function resolveLlmPhase(
     };
   }
 
+  const stamp = await resolveDispatchStamp(db, params.taskId, stepDef, llmSpec.toolProfile);
+  if (stamp.failure !== null) return failDispatch(db, current, stamp.failure);
+
   // Optional async setup the invocation depends on (e.g. 08a starting the
   // runner's headed browser so chrome-devtools MCP can connect). Idempotent;
   // a throw here fails the step like any dispatch error.
@@ -937,6 +996,7 @@ async function resolveLlmPhase(
     },
     toolProfile: llmSpec.toolProfile,
     ...(custom ? { customTools: custom.names, requiresMcp: true } : {}),
+    ...(stamp.bindings.length > 0 ? { integrations: stamp.bindings } : {}),
     agentPool: llmSpec.agentPool,
     ...(promptStepPersonaIds ? { promptStepPersonaIds } : {}),
     skipAgentRules: llmSpec.skipAgentRules,
@@ -1021,7 +1081,7 @@ async function resolveLlmPhase(
   // pre-insert for the same reason.
   const budget = await resolveDispatchTimeoutMs(db, current, llmSpec.timeoutMs);
   const invRow = await insertInvocationOrNull(() =>
-    insertOwnedRun(db, current.id, {
+    insertDispatchRun(db, params.taskId, current.id, stamp, {
       taskId: params.taskId,
       taskStepId: current.id,
       cliProviderId: plan.providerId,
@@ -1042,6 +1102,7 @@ async function resolveLlmPhase(
     );
     return { resolved: false, result: { status: 'waiting_cli', row: current } };
   }
+  if ('failure' in invRow) return failDispatch(db, current, invRow.failure);
   // Setup that must not run unless THIS job won. The insert above IS the reservation — the
   // live-per-step unique index makes it atomic where a `hasLiveInvocation` read cannot be —
   // so everything destructive belongs on this side of it. `prepare` cannot: it runs before
@@ -1928,6 +1989,29 @@ async function dispatchMiningAgents(
   // leaves `targets` only once settled, so a throw anywhere after the reservation releases it.
   let linking: { rowId: string; invocationId: string; linked: boolean } | null = null;
   try {
+    const stamp = await resolveDispatchStamp(db, params.taskId, stepDef, spec.toolProfile);
+    let refusal = stamp.failure;
+    const refuse = async (
+      dispatch: RunnerMiningDispatch,
+      target: MiningTarget,
+      message: string,
+    ): Promise<void> => {
+      const [refused] = await db
+        .update(schema.taskStepAgentMinings)
+        .set({
+          status: 'failed',
+          errorMessage: message,
+          endedAt: new Date(),
+          consumedAt: null,
+          ...dispatchRequirements(dispatch),
+          updatedAt: new Date(),
+        })
+        .where(sameMiningState(target))
+        .returning({ id: schema.taskStepAgentMinings.id });
+      targets.delete(dispatch.agentId);
+      if (refused) refusedRows++;
+      else lost++;
+    };
     // Per-SEAT provider selection. This used to resolve once for the whole fan-out, which
     // made every agent the same model wearing a different persona — so 08c's refuter panel
     // (three lenses, unanimity, fail-closed) was three identical models, and anything that
@@ -1973,6 +2057,10 @@ async function dispatchMiningAgents(
     for (const dispatch of dispatches) {
       const target = targets.get(dispatch.agentId);
       if (!target) continue;
+      if (refusal !== null) {
+        await refuse(dispatch, target, refusal);
+        continue;
+      }
       // The same augmentation `resolveLlmPhase` gives a single dispatch, in its order — the
       // attachments notice, the task ledger, then the admin terseness level — less learned
       // guidance, which is recorded per STEP and has no per-agent form. Fan-out sub-prompts are
@@ -2011,6 +2099,7 @@ async function dispatchMiningAgents(
           // marks; the dispatch names it and the dispatcher unions it with the marker ids.
           assignedAgentIds: dispatch.personaIds,
           toolProfile: spec.toolProfile,
+          ...(stamp.bindings.length > 0 ? { integrations: stamp.bindings } : {}),
           houseRules: houseRulesFor(stepDef.metadata.id, dispatch.roleKey ?? 'default'),
           invokeOpts: {
             cwd: params.workspacePath,
@@ -2024,25 +2113,15 @@ async function dispatchMiningAgents(
       }
 
       if (!plan || plan.mode === 'skip' || !plan.invocation || plan.invocation.kind !== 'cli') {
-        const [refused] = await db
-          .update(schema.taskStepAgentMinings)
-          .set({
-            status: 'failed',
-            errorMessage: buildFailure ?? `no cli provider available: ${plan?.reason}`,
-            endedAt: new Date(),
-            consumedAt: null,
-            ...requirements,
-            updatedAt: new Date(),
-          })
-          .where(sameMiningState(target))
-          .returning({ id: schema.taskStepAgentMinings.id });
-        targets.delete(dispatch.agentId);
-        if (refused) refusedRows++;
-        else lost++;
+        await refuse(
+          dispatch,
+          target,
+          buildFailure ?? `no cli provider available: ${plan?.reason}`,
+        );
         continue;
       }
 
-      const invRow = await insertOwnedRun(db, current.id, {
+      const invRow = await insertDispatchRun(db, params.taskId, current.id, stamp, {
         taskId: params.taskId,
         taskStepId: current.id,
         cliProviderId: plan.providerId,
@@ -2054,6 +2133,11 @@ async function dispatchMiningAgents(
         truncationRetry: appendNotice || replaysNotice,
         steerable: plan.invocation.spec.steerable === true,
       });
+      if ('failure' in invRow) {
+        refusal = invRow.failure;
+        await refuse(dispatch, target, refusal);
+        continue;
+      }
       linking = { rowId: target.id, invocationId: invRow.id, linked: false };
 
       // The prior run may have failed in transport or produced output apply() could not use; the

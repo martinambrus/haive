@@ -8,9 +8,10 @@ import {
 } from '../modules/loader.js';
 import { syncModuleIntent } from '../modules/intent.js';
 import { getRedis } from '../redis.js';
-import { assertCoreComposableCatalog } from './composable-core.js';
+import { CORE_COMPOSABLE_STEPS, assertCoreComposableCatalog } from './composable-core.js';
 import { stepRegistry } from './registry.js';
 import { syncStepCatalog } from './step-catalog.js';
+import { assertIntegrationsDeliverable, setComposableCatalog } from './step-integrations.js';
 import { syncTaskTypeDefinitions } from './task-type-seed.js';
 import { registerAllSteps } from './steps/index.js';
 
@@ -42,6 +43,12 @@ export async function bootStepEngine(
   const composables = new Map(
     loaded.flatMap((m) => m.composable.map((c) => [c.stepId, c] as const)),
   );
+  const catalog = new Map([
+    ...CORE_COMPOSABLE_STEPS.map((c) => [c.stepId, c] as const),
+    ...composables,
+  ]);
+  assertIntegrationsDeliverable(stepRegistry, catalog);
+  setComposableCatalog(catalog);
   await syncStepCatalog(db, stepRegistry, composables);
   const schemas = await ensureModuleSchemas(db, loaded, entries);
   // Before the seed: a module's task types read module-missing while its row is absent or missing.
