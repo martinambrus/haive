@@ -58,7 +58,7 @@ async function requireLiveOwner(tx: DbHandle, owner: MergeDirOwner): Promise<voi
 
 /** The task a claim holds the dir for, or null once the claim is stale: its task completed, its
  *  step skipped (a stale merge), or the task cancelled with its teardown recorded
- *  (`task.cancel_finished`, written after the release). */
+ *  (`task.cancel_finished`: a CANCEL writes it after the release, an abandoned one before it). */
 export async function liveClaimHolder(
   tx: DbHandle,
   claim: { taskId: string; taskStepId: string },
@@ -108,7 +108,7 @@ export async function otherLiveClaim(
 
 /** Take `mergeDir` for the pass's step before its first git write, committed ahead of it. Another
  *  task's claim holds unless that task is completed, that step skipped (a stale merge), or the task
- *  is cancelled with its teardown recorded (`task.cancel_finished`, written after the release). */
+ *  is cancelled with its teardown recorded (`task.cancel_finished`, see `liveClaimHolder`). */
 export async function claimMergeDir(db: Database, owner: MergeDirOwner): Promise<MergeDirClaim> {
   return inMergeDirLock(db, owner.mergeDir, async (tx) => {
     await requireLiveOwner(tx, owner);

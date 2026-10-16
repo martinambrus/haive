@@ -753,6 +753,24 @@ describe.skipIf(!url)(
         expect(enqueued).toHaveLength(AGENTS.length);
         expect(h.stampCalls, 'stamped inserts for 3 agents').toHaveLength(1);
       }, 60_000);
+
+      it('[D6+] stamps a step that is not a prompt step with the account the choice names at the insert, though it named another when the step started (passes before and after)', async () => {
+        const w = await choiceWorld();
+        const stepId = nextStepId();
+        await declare(stepId, [FORGE_READ]);
+        h.beforeRequest = () => putChoice(w.taskId, w.second);
+
+        const result = await advance(w, llmStep(stepId), [w.claude]);
+
+        expect(result.status).toBe('waiting_cli');
+        const runs = await runsOf(db, w.taskId);
+        expect(runs).toHaveLength(1);
+        expect(runs[0]!.integrations).toEqual(stampOf(w.second));
+        expect(await grantsOf(db, w.taskId)).toEqual([
+          { categoryId: 'forge', connectionId: w.second },
+        ]);
+        expect(enqueued).toHaveLength(1);
+      }, 60_000);
     });
 
     describe('[D7] dispatches that carry no integrations', () => {
