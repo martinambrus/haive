@@ -176,13 +176,15 @@ async function bootstrapModuleSchema(
   }
 }
 
+export type ModuleSchemaOutcome = 'ok' | 'none' | 'deactivated' | 'pending';
+
 export async function ensureModuleSchemas(
   db: Database,
   loaded: readonly LoadedWorkerModule[],
   entries: readonly WorkerModuleEntry[],
   deactivated: ReadonlySet<string>,
-): Promise<Record<string, 'ok' | 'none' | 'deactivated'>> {
-  const result: Record<string, 'ok' | 'none' | 'deactivated'> = {};
+): Promise<Record<string, ModuleSchemaOutcome>> {
+  const result: Record<string, ModuleSchemaOutcome> = {};
   for (const [index, module] of loaded.entries()) {
     const moduleId = module.manifest.id;
     const ensureSchema = entries[index]?.ensureSchema;
@@ -195,8 +197,18 @@ export async function ensureModuleSchemas(
       result[moduleId] = 'deactivated';
       continue;
     }
-    await bootstrapModuleSchema(db, moduleId, ensureSchema);
-    result[moduleId] = 'ok';
+    const ensuring = bootstrapModuleSchema(db, moduleId, ensureSchema);
+    if (await settledWithinStartWait(moduleId, ensuring)) {
+      result[moduleId] = 'ok';
+    } else {
+      result[moduleId] = 'pending';
+      void ensuring.catch((err: unknown) => {
+        logger.warn(
+          { err, module: moduleId },
+          'module schema bootstrap failed after boot went on without it',
+        );
+      });
+    }
   }
   return result;
 }
@@ -204,7 +216,35 @@ export async function ensureModuleSchemas(
 export const MODULE_JOBS_RECONCILE_MS = 15_000;
 export const MODULE_JOB_START_WAIT_MS = 10_000;
 export const MODULE_JOB_STOP_WAIT_MS = 10_000;
+export const MODULE_SHUTDOWN_WAIT_MS = 5_000;
 export const MODULE_REACTIVATION_ATTEMPTS = 3;
+
+function warnStartOutlivedWait(moduleId: string): void {
+  logger.warn(
+    { module: moduleId, waitMs: MODULE_JOB_START_WAIT_MS },
+    `module schema or jobs still starting after ${MODULE_JOB_START_WAIT_MS / 1000} s; going on without them`,
+  );
+}
+
+// True when `work` settles within the start wait (a failure rejects); false when the wait ends first, `work` goes on.
+function settledWithinStartWait(moduleId: string, work: Promise<unknown>): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      warnStartOutlivedWait(moduleId);
+      resolve(false);
+    }, MODULE_JOB_START_WAIT_MS);
+    void work.then(
+      () => {
+        clearTimeout(timer);
+        resolve(true);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
 
 const jobsStarted = new Set<string>();
 const teardownsRunning = new Set<string>();
@@ -229,6 +269,7 @@ export type ModuleJobsHandle = {
     stamps?: ReadonlyMap<string, number>,
   ) => Promise<void>;
   stopAll: () => Promise<void>;
+  shutdown: (inFlightPass: Promise<void> | null) => Promise<void>;
 };
 
 export async function startModuleJobs(
@@ -242,10 +283,14 @@ export async function startModuleJobs(
   // A start the pass went on without still runs; no pass begins another for that module.
   const starting = new Set<string>();
   const pending = new Set(deactivated);
+  // A pass saw these deactivated or activated again while their start still ran: that start's outcome is not an attempt.
+  const endedWhileStarting = new Set<string>();
+  let closing = false;
+  // A start that ends once shutdown began is in no stop list, so it stops itself and answers false.
   const start = async (
     moduleId: string,
     jobs: NonNullable<WorkerModuleEntry['jobs']>,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const stop = await jobs({
       moduleId,
       connection: getBullRedis(),
@@ -253,6 +298,9 @@ export async function startModuleJobs(
     });
     stops.set(moduleId, stop);
     jobsStarted.add(moduleId);
+    if (!closing) return true;
+    await stopJobs(moduleId);
+    return false;
   };
   const stopJobs = (moduleId: string): Promise<void> => {
     const running = stopping.get(moduleId);
@@ -291,17 +339,67 @@ export async function startModuleJobs(
   const stopModules = async (moduleIds: readonly string[]): Promise<void> => {
     await Promise.all(moduleIds.map((moduleId) => stopJobs(moduleId)));
   };
-  const stopAll = (): Promise<void> => stopModules([...stops.keys()]);
+  const stopAll = (): Promise<void> => {
+    closing = true;
+    return stopModules([...stops.keys()]);
+  };
+  const shutdown = (inFlightPass: Promise<void> | null): Promise<void> =>
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        logger.warn(
+          {
+            modules: [...new Set([...stopping.keys(), ...starting])],
+            waitMs: MODULE_SHUTDOWN_WAIT_MS,
+          },
+          `module jobs still pending after ${MODULE_SHUTDOWN_WAIT_MS / 1000} s of shutdown; going on without them`,
+        );
+        resolve();
+      }, MODULE_SHUTDOWN_WAIT_MS);
+      void Promise.allSettled([inFlightPass, stopAll()]).then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  const startAtBoot = async (
+    moduleId: string,
+    jobs: NonNullable<WorkerModuleEntry['jobs']>,
+  ): Promise<void> => {
+    jobsStarted.add(moduleId);
+    starting.add(moduleId);
+    const starts = start(moduleId, jobs).finally(() => {
+      starting.delete(moduleId);
+      endedWhileStarting.delete(moduleId);
+      if (!stops.has(moduleId)) jobsStarted.delete(moduleId);
+    });
+    if (await settledWithinStartWait(moduleId, starts)) return;
+    void starts.then(
+      (started) => {
+        if (started) {
+          logger.info({ module: moduleId }, 'module jobs started after boot went on without them');
+        }
+      },
+      (err: unknown) => {
+        pending.add(moduleId);
+        logger.warn(
+          { err, module: moduleId },
+          'module jobs failed to start after boot went on without them; the first reconcile pass tries again',
+        );
+      },
+    );
+  };
   for (const [index, module] of loaded.entries()) {
     const jobs = entries[index]?.jobs;
     if (!jobs) continue;
     const moduleId = module.manifest.id;
     if (deactivated.has(moduleId)) {
-      logger.info({ module: moduleId }, 'module jobs not started: the module is deactivated');
+      logger.info(
+        { module: moduleId },
+        'module jobs not started: the module is deactivated or its schema setup is still running',
+      );
       continue;
     }
     try {
-      await start(moduleId, jobs);
+      await startAtBoot(moduleId, jobs);
     } catch (err) {
       await stopAll();
       throw new Error(
@@ -314,8 +412,6 @@ export async function startModuleJobs(
   const held = new Set<string>();
   // Attempts made so far by a reactivation the next pass is to try again; that try takes them.
   const attemptsMade = new Map<string, number>();
-  // A pass saw these deactivated or activated again while their start still ran: that start's outcome is not an attempt.
-  const endedWhileStarting = new Set<string>();
   // Every activate and deactivate moves a module's updated_at, so one that fell between two passes shows as a changed stamp.
   const seenStamps = new Map<string, number>();
   const stampChanged = (moduleId: string, stamp: number | undefined): boolean => {
@@ -334,17 +430,13 @@ export async function startModuleJobs(
       attemptsMade.delete(moduleId);
       starting.add(moduleId);
       const timer = setTimeout(() => {
-        logger.warn(
-          { module: moduleId, waitMs: MODULE_JOB_START_WAIT_MS },
-          `module schema or jobs still starting after ${MODULE_JOB_START_WAIT_MS / 1000} s; going on without them`,
-        );
+        warnStartOutlivedWait(moduleId);
         resolve();
       }, MODULE_JOB_START_WAIT_MS);
       void (async () => {
         try {
           if (ensureSchema) await bootstrapModuleSchema(getDb(), moduleId, ensureSchema);
-          if (jobs) {
-            await start(moduleId, jobs);
+          if (jobs && (await start(moduleId, jobs))) {
             logger.info({ module: moduleId }, 'module jobs started: the module is active again');
           }
         } catch (err) {
@@ -381,6 +473,7 @@ export async function startModuleJobs(
   ): Promise<void> => {
     await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
     for (const [index, module] of loaded.entries()) {
+      if (closing) return;
       const jobs = entries[index]?.jobs;
       const ensureSchema = entries[index]?.ensureSchema;
       const moduleId = module.manifest.id;
@@ -426,13 +519,13 @@ export async function startModuleJobs(
     }
   };
 
-  return { reconcile, stopAll };
+  return { reconcile, stopAll, shutdown };
 }
 
 export async function publishWorkerBootReport(
   redis: Redis,
   loaded: readonly LoadedWorkerModule[],
-  schemas: Record<string, 'ok' | 'none' | 'deactivated'>,
+  schemas: Record<string, ModuleSchemaOutcome>,
   taskTypes: Record<string, ModuleTaskTypeOutcome>,
 ): Promise<void> {
   await redis.set(

@@ -63,6 +63,7 @@ import {
 import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 import { bootStepEngine } from './step-engine/boot.js';
 import { MODULE_JOBS_RECONCILE_MS, startModuleJobs } from './modules/loader.js';
+import { guardShutdown } from './shutdown-guard.js';
 import { startModuleControlWorker } from './queues/module-control-queue.js';
 import { deactivatedModuleIds, moduleActivationState } from './modules/activation.js';
 
@@ -265,7 +266,7 @@ async function main(): Promise<void> {
   const cliStreamLogReaper = new CliStreamLogReaper({ db: getDb() });
   cliStreamLogReaper.start();
 
-  // Held back if deactivated at the schema read or now; the first pass starts one active by then.
+  // Held back if deactivated at the schema read or now, or if its schema setup was still running; the first pass starts one active by then.
   const moduleJobs = await startModuleJobs(
     loadedModules,
     moduleEntries,
@@ -295,7 +296,7 @@ async function main(): Promise<void> {
 
   logger.info('haive-worker ready');
 
-  const shutdown = async (signal: string): Promise<void> => {
+  const runShutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'Worker shutting down');
     // Force-close BullMQ workers without waiting for in-flight jobs (CLI execs
     // can run for minutes; Docker SIGTERM grace is ~10s). Jobs left active are
@@ -311,8 +312,7 @@ async function main(): Promise<void> {
     cliStreamLogReaper.stop();
     stopRuntimeLimitsWatch();
     clearInterval(moduleJobsTimer);
-    await moduleJobsPass;
-    await moduleJobs.stopAll();
+    await moduleJobs.shutdown(moduleJobsPass);
     await terminalManager.stop().catch((err) => {
       logger.warn({ err }, 'terminal manager stop failed');
     });
@@ -339,6 +339,7 @@ async function main(): Promise<void> {
     await closeRedis();
     process.exit(0);
   };
+  const shutdown = guardShutdown(runShutdown, (code) => process.exit(code));
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
