@@ -155,18 +155,20 @@ async function handBackPlan(dir: string): Promise<HandBack | null> {
 }
 
 /** The paths the worktree holds differently from commit `ref`, as git listed them. */
-async function differingFrom(dir: string, ref: string): Promise<string[]> {
+async function differingFrom(dir: string, ref: string, strict = false): Promise<string[]> {
   const res = await gitRun(
     dir,
     ['diff', '--name-only', '-z', '--no-renames', ref],
     undefined,
     LISTING,
   );
-  return res.code === 0 ? nulPaths(res.stdout) : [];
+  if (res.code === 0) return nulPaths(res.stdout);
+  if (strict) throw new Error(`git diff failed: ${(res.stderr || res.stdout).trim()}`);
+  return [];
 }
 
 /** What the set-aside moves out of the checkout, the state record's directories included: the worker writes it, and `restoreKeptMetadata` skips what it no longer owns. */
-function isHaiveProjection(rel: string): boolean {
+export function isHaiveProjection(rel: string): boolean {
   return (
     rel === PROJECT_STATE_DIR ||
     rel.startsWith(`${PROJECT_STATE_DIR}/`) ||
@@ -183,9 +185,11 @@ async function handBackWritten(
   plan: HandBack,
   dir: string,
   names: readonly string[],
+  strict = false,
 ): Promise<void> {
   const seen = new Set<string>();
   const skipped: string[] = [];
+  const kept: string[] = [];
   let changed = false;
   for (const raw of names) {
     const name = utf8Name(raw);
@@ -206,11 +210,16 @@ async function handBackWritten(
         () => {
           changed = true;
         },
-        () => undefined,
+        () => {
+          kept.push(rel);
+        },
       );
     }
   }
   if (changed) await gitRun(dir, ['update-index', '-q', '--refresh']);
+  if (strict && kept.length > 0) {
+    throw new Error(`could not hand back to the sandbox user: ${kept.slice(0, 5).join(', ')}`);
+  }
   if (skipped.length > 0) {
     logger.warn(
       { dir, names: skipped.slice(0, 20), count: skipped.length },
@@ -220,10 +229,14 @@ async function handBackWritten(
 }
 
 /** After a fast-forward of `dir` from `before`: what the move wrote goes to the sandbox user, as
- *  `openMerge` does for a merge. */
-export async function handBackAfterMove(dir: string, before: string): Promise<void> {
+ *  `openMerge` does for a merge. `strict` throws on a path it could not hand back. */
+export async function handBackAfterMove(
+  dir: string,
+  before: string,
+  strict = false,
+): Promise<void> {
   const plan = await handBackPlan(dir);
-  if (plan) await handBackWritten(plan, dir, await differingFrom(dir, before));
+  if (plan) await handBackWritten(plan, dir, await differingFrom(dir, before, strict), strict);
 }
 
 /** git with `names`, as a latin1 listing holds them, in a NUL pathspec file: argv would carry a name
