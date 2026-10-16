@@ -99,13 +99,14 @@ async function main(): Promise<void> {
     const makeTask = async (
       title: string,
       opts: {
-        taskStatus?: 'running' | 'waiting_user' | 'queued' | 'created';
+        taskStatus?: 'running' | 'waiting_user' | 'waiting_pr' | 'queued' | 'created';
         taskUpdatedAt?: Date;
-        stepStatus?: 'pending' | 'waiting_cli' | 'done' | 'skipped' | 'failed';
+        stepStatus?: 'pending' | 'waiting_cli' | 'waiting_form' | 'done' | 'skipped' | 'failed';
         stepUpdatedAt?: Date;
         waitingStartedAt?: Date | null;
         noStepRow?: boolean;
         stepError?: string;
+        deadAt?: Date;
       } = {},
     ) => {
       const {
@@ -126,6 +127,7 @@ async function main(): Promise<void> {
           currentStepId: 'smoke-step',
           currentRound: 0,
           orchestrationEpoch: 3,
+          deadAt: opts.deadAt ?? null,
           createdAt: taskUpdatedAt,
           updatedAt: taskUpdatedAt,
         })
@@ -170,6 +172,90 @@ async function main(): Promise<void> {
       stepUpdatedAt: new Date(),
     });
     const doneRaceTaskId = await makeTask('done-race', { stepStatus: 'done' });
+    const answeredFormTaskId = await makeTask('answered-form', { stepStatus: 'waiting_form' });
+    const answeredFormQueuedTaskId = await makeTask('answered-form-queued', {
+      stepStatus: 'waiting_form',
+    });
+    const parkedFormTaskId = await makeTask('parked-form', {
+      stepStatus: 'waiting_form',
+      waitingStartedAt: new Date(),
+    });
+    const freshAnsweredFormTaskId = await makeTask('fresh-answered-form', {
+      stepStatus: 'waiting_form',
+      stepUpdatedAt: new Date(),
+    });
+    const waitingForm = { taskStatus: 'waiting_user', stepStatus: 'waiting_form' } as const;
+    const waitingUserAnsweredTaskId = await makeTask('waiting-user-answered', waitingForm);
+    const waitingUserAnsweredQueuedTaskId = await makeTask(
+      'waiting-user-answered-queued',
+      waitingForm,
+    );
+    const waitingUserParkedFormTaskId = await makeTask('waiting-user-parked-form', {
+      ...waitingForm,
+      waitingStartedAt: new Date(),
+    });
+    const waitingUserFreshAnswerTaskId = await makeTask('waiting-user-fresh-answer', {
+      ...waitingForm,
+      stepUpdatedAt: new Date(),
+    });
+    const waitingUserFreshTaskId = await makeTask('waiting-user-fresh-task', {
+      ...waitingForm,
+      taskUpdatedAt: new Date(),
+    });
+    const waitingUserDoneRowTaskId = await makeTask('waiting-user-done-row', {
+      taskStatus: 'waiting_user',
+      stepStatus: 'done',
+    });
+    const waitingUserNoRowTaskId = await makeTask('waiting-user-no-row', {
+      taskStatus: 'waiting_user',
+      noStepRow: true,
+    });
+    const waitingUserRaceTaskId = await makeTask('waiting-user-race', waitingForm);
+    const waitingUserPickedUpTaskId = await makeTask('waiting-user-picked-up', waitingForm);
+    const waitingUserSettledTaskId = await makeTask('waiting-user-settled', waitingForm);
+    // The pull-request poller rewrites a waiting_pr task every few minutes: written just now.
+    const waitingPr = {
+      taskStatus: 'waiting_pr',
+      stepStatus: 'waiting_form',
+      taskUpdatedAt: new Date(),
+    } as const;
+    const waitingPrAnsweredTaskId = await makeTask('waiting-pr-answered', waitingPr);
+    const waitingPrIdleTaskId = await makeTask('waiting-pr-idle', {
+      ...waitingPr,
+      taskUpdatedAt: longAgo,
+    });
+    const waitingPrAnsweredQueuedTaskId = await makeTask('waiting-pr-answered-queued', waitingPr);
+    const waitingPrParkedFormTaskId = await makeTask('waiting-pr-parked-form', {
+      ...waitingPr,
+      waitingStartedAt: new Date(),
+    });
+    const waitingPrFreshAnswerTaskId = await makeTask('waiting-pr-fresh-answer', {
+      ...waitingPr,
+      stepUpdatedAt: new Date(),
+    });
+    const waitingPrDoneRowTaskId = await makeTask('waiting-pr-done-row', {
+      ...waitingPr,
+      stepStatus: 'done',
+    });
+    const waitingPrNoRowTaskId = await makeTask('waiting-pr-no-row', {
+      ...waitingPr,
+      noStepRow: true,
+    });
+    const waitingPrRaceTaskId = await makeTask('waiting-pr-race', waitingPr);
+    const waitingPrPickedUpTaskId = await makeTask('waiting-pr-picked-up', {
+      ...waitingPr,
+      taskUpdatedAt: longAgo,
+    });
+    const waitingPrSettledTaskId = await makeTask('waiting-pr-settled', waitingPr);
+    const waitingPrPolledTaskId = await makeTask('waiting-pr-polled', {
+      ...waitingPr,
+      taskUpdatedAt: longAgo,
+    });
+    const waitingPrDeadTaskId = await makeTask('waiting-pr-dead', {
+      ...waitingPr,
+      deadAt: new Date(),
+    });
+    const waitingPrRetryTaskId = await makeTask('waiting-pr-retry', waitingPr);
 
     // Tasks queued to start, whose START may have been lost.
     const unstarted = (
@@ -234,6 +320,38 @@ async function main(): Promise<void> {
           .where(eq(schema.tasks.id, id))
       )[0]?.epoch;
 
+    const rowUpdatedAt = async (id: string) =>
+      (
+        await db
+          .select({ at: schema.taskSteps.updatedAt })
+          .from(schema.taskSteps)
+          .where(eq(schema.taskSteps.taskId, id))
+      )[0]?.at;
+
+    // A Retry writes the step row before the task row: the fence beside it has to wait, not deadlock.
+    let retryDone: Promise<string> | undefined;
+    const startRetry = async () => {
+      let held: () => void = () => undefined;
+      const holding = new Promise<void>((resolve) => (held = resolve));
+      retryDone = db
+        .transaction(async (tx) => {
+          await tx
+            .select({ id: schema.taskSteps.id })
+            .from(schema.taskSteps)
+            .where(eq(schema.taskSteps.taskId, waitingPrRetryTaskId))
+            .for('update');
+          held();
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          await tx
+            .update(schema.tasks)
+            .set({ updatedAt: new Date() })
+            .where(eq(schema.tasks.id, waitingPrRetryTaskId));
+          return 'committed';
+        })
+        .catch((err) => `failed: ${String(err)}`);
+      await holding;
+    };
+
     const advances: {
       taskId: string;
       userId: string;
@@ -264,24 +382,53 @@ async function main(): Promise<void> {
       // Simulates a step claimed by another pass between the candidates SELECT and this pass's
       // fence: flips the race tasks' step rows live, after the SELECT already ran.
       queuedTaskJobs: async () => {
+        if (retryDone === undefined) await startRetry();
         await db
           .update(schema.taskSteps)
           .set({ status: 'running', updatedAt: new Date() })
           .where(
             and(
-              inArray(schema.taskSteps.taskId, [raceTaskId, doneRaceTaskId]),
+              inArray(schema.taskSteps.taskId, [
+                raceTaskId,
+                doneRaceTaskId,
+                waitingUserRaceTaskId,
+                waitingPrRaceTaskId,
+              ]),
               eq(schema.taskSteps.stepId, 'smoke-step'),
               eq(schema.taskSteps.round, 0),
             ),
           );
+        // And a worker that picked up an answered form: the task reads running, the row not yet.
+        await db
+          .update(schema.tasks)
+          .set({ status: 'running' })
+          .where(inArray(schema.tasks.id, [waitingUserPickedUpTaskId, waitingPrPickedUpTaskId]));
+        // And a form skipped by hand, which leaves its updated_at as it was.
+        await db
+          .update(schema.taskSteps)
+          .set({ status: 'skipped' })
+          .where(
+            inArray(schema.taskSteps.taskId, [waitingUserSettledTaskId, waitingPrSettledTaskId]),
+          );
+        // And the pull-request poller, which writes the task and nothing else.
+        await db
+          .update(schema.tasks)
+          .set({ updatedAt: new Date() })
+          .where(eq(schema.tasks.id, waitingPrPolledTaskId));
         // A START this pass queued is on the queue for the next one.
         return {
-          steps: new Set([withJobTaskId]),
+          steps: new Set([
+            withJobTaskId,
+            answeredFormQueuedTaskId,
+            waitingUserAnsweredQueuedTaskId,
+            waitingPrAnsweredQueuedTaskId,
+          ]),
           starts: new Set([startQueuedTaskId, ...starts.map((st) => st.taskId)]),
         };
       },
     };
 
+    const passStart = new Date();
     await redriveStalledTasks(db, deps, { staleMs: STALE_MS });
 
     check('a task with no current-step row is re-driven', (await epochOf(missingRowTaskId)) === 4);
@@ -335,6 +482,164 @@ async function main(): Promise<void> {
       'a done row that finished recently is left to its own hand-off',
       (await epochOf(freshDoneRowTaskId)) === 3,
     );
+    const answeredAdvances = advances.filter((a) => a.taskId === answeredFormTaskId);
+    check(
+      'an answered form (no park marker), its advance lost, is re-driven once at the new epoch',
+      (await epochOf(answeredFormTaskId)) === 4 &&
+        answeredAdvances.length === 1 &&
+        answeredAdvances[0]?.stepId === 'smoke-step' &&
+        answeredAdvances[0]?.round === 0 &&
+        answeredAdvances[0]?.epoch === 4,
+      { epoch: await epochOf(answeredFormTaskId), answeredAdvances },
+    );
+    check('a parked form is left alone', (await epochOf(parkedFormTaskId)) === 3);
+    check(
+      'an answered form the queue still owes a job is left alone',
+      (await epochOf(answeredFormQueuedTaskId)) === 3,
+    );
+    check(
+      'an answered form written recently is left to its own advance',
+      (await epochOf(freshAnsweredFormTaskId)) === 3,
+    );
+    const waitingUserAdvances = advances.filter((a) => a.taskId === waitingUserAnsweredTaskId);
+    check(
+      'a waiting_user task with an answered form, its advance lost, is re-driven once at the new epoch',
+      (await epochOf(waitingUserAnsweredTaskId)) === 4 &&
+        waitingUserAdvances.length === 1 &&
+        waitingUserAdvances[0]?.stepId === 'smoke-step' &&
+        waitingUserAdvances[0]?.round === 0 &&
+        waitingUserAdvances[0]?.epoch === 4,
+      { epoch: await epochOf(waitingUserAnsweredTaskId), waitingUserAdvances },
+    );
+    check(
+      'a waiting_user task with a parked form is left alone',
+      (await epochOf(waitingUserParkedFormTaskId)) === 3,
+    );
+    check(
+      'a waiting_user task whose answered form the queue still owes a job is left alone',
+      (await epochOf(waitingUserAnsweredQueuedTaskId)) === 3,
+    );
+    check(
+      'a waiting_user task whose answer was written recently is left to its own advance',
+      (await epochOf(waitingUserFreshAnswerTaskId)) === 3,
+    );
+    check(
+      'a waiting_user task that moved recently is left to the pass that moved it',
+      (await epochOf(waitingUserFreshTaskId)) === 3,
+    );
+    check(
+      'a waiting_user task with a finished row, or none, is left alone',
+      (await epochOf(waitingUserDoneRowTaskId)) === 3 &&
+        (await epochOf(waitingUserNoRowTaskId)) === 3,
+    );
+    check(
+      'an answered form taken live between the SELECT and the fence is left alone',
+      (await epochOf(waitingUserRaceTaskId)) === 3 &&
+        advances.every((a) => a.taskId !== waitingUserRaceTaskId),
+    );
+    check(
+      'a waiting_user task a worker took between the SELECT and the fence is left alone',
+      (await epochOf(waitingUserPickedUpTaskId)) === 3 &&
+        advances.every((a) => a.taskId !== waitingUserPickedUpTaskId),
+    );
+    check(
+      'an answered form skipped between the SELECT and the fence is left alone',
+      (await epochOf(waitingUserSettledTaskId)) === 3 &&
+        advances.every((a) => a.taskId !== waitingUserSettledTaskId),
+    );
+    for (const [name, id] of [
+      ['written by the poller just now', waitingPrAnsweredTaskId],
+      ['idle itself', waitingPrIdleTaskId],
+      ['written by the poller between the SELECT and the fence', waitingPrPolledTaskId],
+    ] as const) {
+      const own = advances.filter((a) => a.taskId === id);
+      check(
+        `a waiting_pr task with an answered form, its advance lost, ${name}, is re-driven once at the new epoch`,
+        (await epochOf(id)) === 4 &&
+          own.length === 1 &&
+          own[0]?.stepId === 'smoke-step' &&
+          own[0]?.round === 0 &&
+          own[0]?.epoch === 4,
+        { epoch: await epochOf(id), own },
+      );
+    }
+    check(
+      'a waiting_pr task with a parked form is left alone',
+      (await epochOf(waitingPrParkedFormTaskId)) === 3,
+    );
+    check(
+      'a waiting_pr task whose answered form the queue still owes a job is left alone',
+      (await epochOf(waitingPrAnsweredQueuedTaskId)) === 3,
+    );
+    check(
+      'a waiting_pr task whose answer was written recently is left to its own advance',
+      (await epochOf(waitingPrFreshAnswerTaskId)) === 3,
+    );
+    check(
+      'a waiting_pr task with a finished row, or none, is left alone',
+      (await epochOf(waitingPrDoneRowTaskId)) === 3 && (await epochOf(waitingPrNoRowTaskId)) === 3,
+    );
+    check(
+      'a dead waiting_pr task with an answered form is left to its revival',
+      (await epochOf(waitingPrDeadTaskId)) === 3 &&
+        advances.every((a) => a.taskId !== waitingPrDeadTaskId),
+    );
+    check(
+      'a waiting_pr answered form taken live between the SELECT and the fence is left alone',
+      (await epochOf(waitingPrRaceTaskId)) === 3 &&
+        advances.every((a) => a.taskId !== waitingPrRaceTaskId),
+    );
+    check(
+      'a waiting_pr task a worker took between the SELECT and the fence is left alone',
+      (await epochOf(waitingPrPickedUpTaskId)) === 3 &&
+        advances.every((a) => a.taskId !== waitingPrPickedUpTaskId),
+    );
+    check(
+      'a waiting_pr answered form skipped between the SELECT and the fence is left alone',
+      (await epochOf(waitingPrSettledTaskId)) === 3 &&
+        advances.every((a) => a.taskId !== waitingPrSettledTaskId),
+    );
+    const retryAdvances = advances.filter((a) => a.taskId === waitingPrRetryTaskId);
+    check(
+      'a Retry that holds the step row, then writes the task row, is waited for by the fence, which then re-drives once',
+      (await retryDone) === 'committed' &&
+        (await epochOf(waitingPrRetryTaskId)) === 4 &&
+        retryAdvances.length === 1 &&
+        retryAdvances[0]?.epoch === 4,
+      { retry: await retryDone, epoch: await epochOf(waitingPrRetryTaskId), retryAdvances },
+    );
+    const touched = async (ids: string[]) =>
+      Promise.all(
+        ids.map(async (id) => ((await rowUpdatedAt(id))?.getTime() ?? 0) >= passStart.getTime()),
+      );
+    check(
+      'the row of an answered form the fence re-drove, waiting_user or waiting_pr, was touched in the fence',
+      (
+        await touched([
+          waitingUserAnsweredTaskId,
+          waitingPrAnsweredTaskId,
+          waitingPrIdleTaskId,
+          waitingPrPolledTaskId,
+        ])
+      ).every(Boolean),
+    );
+    check(
+      'the rows of a running task the fence re-drove were not touched',
+      (await touched([redriveTaskId, doneRowTaskId, skippedRowTaskId, answeredFormTaskId])).every(
+        (t) => !t,
+      ),
+    );
+    check(
+      'a row the fence left alone, a task taken or a form skipped before it, was not touched',
+      (
+        await touched([
+          waitingUserPickedUpTaskId,
+          waitingPrPickedUpTaskId,
+          waitingUserSettledTaskId,
+          waitingPrSettledTaskId,
+        ])
+      ).every((t) => !t),
+    );
     const [failedRow] = await db
       .select({ id: schema.taskSteps.id })
       .from(schema.taskSteps)
@@ -372,6 +677,13 @@ async function main(): Promise<void> {
       'a queued task the queue still owes a job, a fresh one and a draft get no START',
       [startQueuedTaskId, freshQueuedTaskId, draftTaskId].every((id) => startsFor(id).length === 0),
       starts,
+    );
+    check(
+      'a queued task and a draft are not re-driven as steps',
+      [lostStartTaskId, startQueuedTaskId, freshQueuedTaskId, draftTaskId].every((id) =>
+        advances.every((a) => a.taskId !== id),
+      ),
+      advances,
     );
 
     const runOf = async (id: string) =>
@@ -443,6 +755,52 @@ async function main(): Promise<void> {
         advancesFor(lostRunTaskId).length === 1 &&
         advancesFor(miningTaskId).length === 1,
       { starts, advances },
+    );
+    // The advances above were dropped before pickup: no job is queued and no row was written since.
+    const reDriven = [
+      ['waiting_pr answered form', waitingPrAnsweredTaskId],
+      ['waiting_pr answered form of an idle task', waitingPrIdleTaskId],
+      [
+        'waiting_pr answered form the poller wrote between the SELECT and the fence',
+        waitingPrPolledTaskId,
+      ],
+      ['waiting_user answered form', waitingUserAnsweredTaskId],
+    ] as const;
+    for (const [name, id] of reDriven) {
+      check(
+        `a second pass inside the cutoff leaves a re-driven ${name} at its new epoch, with no second advance`,
+        (await epochOf(id)) === 4 && advancesFor(id).length === 1,
+        { epoch: await epochOf(id), advances: advancesFor(id) },
+      );
+    }
+    await db
+      .update(schema.taskSteps)
+      .set({ updatedAt: longAgo })
+      .where(
+        inArray(schema.taskSteps.taskId, [
+          waitingPrAnsweredTaskId,
+          waitingPrIdleTaskId,
+          waitingUserAnsweredTaskId,
+        ]),
+      );
+    await db
+      .update(schema.tasks)
+      .set({ updatedAt: longAgo })
+      .where(eq(schema.tasks.id, waitingUserAnsweredTaskId));
+    await redriveStalledTasks(db, deps, { staleMs: STALE_MS });
+    for (const [name, id] of reDriven.filter(([, id]) => id !== waitingPrPolledTaskId)) {
+      check(
+        `once its row is older than the cutoff again, a re-driven ${name} is re-driven once more`,
+        (await epochOf(id)) === 5 &&
+          advancesFor(id).length === 2 &&
+          advancesFor(id)[1]?.epoch === 5,
+        { epoch: await epochOf(id), advances: advancesFor(id) },
+      );
+    }
+    check(
+      'a re-driven waiting_pr answered form whose row is still inside the cutoff is left alone beside them',
+      (await epochOf(waitingPrPolledTaskId)) === 4 &&
+        advancesFor(waitingPrPolledTaskId).length === 1,
     );
     const cancelled = async (
       title: string,

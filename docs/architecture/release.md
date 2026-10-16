@@ -29,3 +29,39 @@ still build) and adds the `db-migrate` one-shot that `docker-compose.yml` lacks 
 it from the dev override, so a published-image install would otherwise boot against an unmigrated
 database. `HAIVE_VERSION` has no default so the command fails rather than silently resolving
 `latest`; which version an install runs is the question every upgrade and rollback turns on.
+
+## The drain an upgrade runs first
+
+`haive upgrade` (the updater) sets `MAINTENANCE_STATE` to `draining`, waits until no work is live,
+then recounts under the fence described below and sets `maintenance` only from that recount: the
+fresh state must still be `draining` (or an administrator's `maintenance`, which it leaves as it is)
+with nothing live. A recount that finds work admitted after the count, or the state set back to
+`normal`, writes `draining` again (over `normal` only) and waits again, at least one poll interval.
+One `--drain-timeout` covers the first wait and every re-wait: past it, work still live or
+admissions still reopened stop the upgrade with an error, or with `--force` enter maintenance
+anyway. The journal (`upgrade_runs.phase`) reads `draining` during a re-wait and `maintenance` again
+on entry. Then the updater takes the snapshot. Live work (`liveWorkCount`) is a live task or a
+background job a route queued: a repository `cloning`, a bundle `syncing`, a CLI provider whose
+sandbox image is `building` or whose model is `provisioning`. `GET /admin/maintenance/blocking` and
+the admin maintenance page list both, so what the page shows is what the updater waits for; a job
+row stuck in its in-progress status holds the drain until the deadline, and `--force` passes it.
+Every api route that starts such work refuses with 503 while the state is `draining` or
+`maintenance`: the task routes, and every route that writes a job's in-progress status (repository
+create, upload and refresh, bundle create, upload, replace and sync, provider create, clone and image
+build, and a provider edit that rebuilds the image or downloads a model). Not fenced and not counted,
+since none holds a window open: interactive runtimes (IDE, browser, DDEV control, terminal and login
+containers), cleanup, the plan mirror outbox (it resumes) and the price refresh. The refusal's
+authority is `admitNewWork`: a read of the state past ConfigService's 30 s cache inside the
+transaction that records the work, under a shared
+database fence (`lockNewWorkFenceShared`, an advisory lock on `NEW_WORK_FENCE_KEY`); most routes
+also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). Every
+updater state write (`draining`, the recount's `maintenance`, and the return to `normal` on commit
+or rollback), like an administrator's maintenance write, takes the same fence exclusively
+(`setMaintenanceState`, `enterMaintenance`):
+it waits for every admission in flight, so the live-work count it reads next includes each task or
+job admitted before it, every admission after it reads the new state, and no write lands inside an
+administrator's write. Lifting the hold therefore needs Postgres: an updater that cannot reach it
+leaves its run `running`, and the next `haive upgrade` resumes into the commit or the rollback. The gate that
+locks non-admins out during `maintenance` keeps its cached read, so that lockout can lag by up to
+30 s. In the worker, the allowance auto-resume and an answer to a parked form do not reopen a
+failed task while new work is refused (see [Worker restarts](worker-restarts.md)).

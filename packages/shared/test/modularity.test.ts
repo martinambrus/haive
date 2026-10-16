@@ -310,6 +310,17 @@ describe('module package names', () => {
     const copy = new RegExp(literal!);
     for (const [name] of NAMES) expect(copy.exec(name)?.[1] ?? null).toBe(modulePackageId(name));
   });
+
+  it('is the rule scripts/channel-gate.mjs applies, name for name', () => {
+    const script = readFileSync(
+      new URL('../../../scripts/channel-gate.mjs', import.meta.url),
+      'utf8',
+    );
+    const literal = /^const MODULE_PACKAGE = \/(.+)\/;$/m.exec(script)?.[1];
+    expect(literal).toBeDefined();
+    const copy = new RegExp(literal!);
+    for (const [name] of NAMES) expect(copy.exec(name)?.[1] ?? null).toBe(modulePackageId(name));
+  });
 });
 
 describe('integrationRequirementSchema', () => {

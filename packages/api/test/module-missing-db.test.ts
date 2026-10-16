@@ -84,10 +84,6 @@ const CATALOG = [
 
 const app = new Hono<AppEnv>();
 app.onError(errorHandler);
-app.use(async (c, next) => {
-  c.set('maintenanceState', 'normal');
-  await next();
-});
 app.route('/admin/task-types', adminTaskTypeRoutes);
 app.route('/task-types', taskTypeRoutes);
 app.route('/tasks', taskRoutes);

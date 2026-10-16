@@ -46,7 +46,6 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { clampVoteScore } from '@haive/shared/fair-priority';
-import { refusesNewWork } from '@haive/shared';
 import {
   blockersOutsideSet,
   computePlanSequence,
@@ -67,6 +66,11 @@ import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
 import { getRedis } from '../../redis.js';
 import { requireAuth } from '../../middleware/auth.js';
+import {
+  admitNewWork,
+  assertNewWorkAllowed,
+  requireNewWorkAllowed,
+} from '../../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import {
@@ -94,6 +98,7 @@ import {
   enrichStepsWithCliUsage,
   enrichStepsWithSkipFlag,
   findActiveCliInvocation,
+  findAdminPausedTaskIds,
   findQueuedInvocationStepIds,
   loadFinishedRunCount,
   loadTaskTypeLabels,
@@ -347,6 +352,10 @@ taskRoutes.get('/', async (c) => {
     : [];
   // Steps whose CLI job is enqueued but not yet picked up — the agent-slot half of the wait.
   const queuedInvocationStepIds = await findQueuedInvocationStepIds(db, taskIds);
+  const adminPausedIds = await findAdminPausedTaskIds(
+    db,
+    rows.filter((r) => r.pausedAt).map((r) => r.id),
+  );
   const stepsByTask = new Map<string, (typeof stepRows)[number][]>();
   for (const s of stepRows) {
     const list = stepsByTask.get(s.taskId);
@@ -408,6 +417,7 @@ taskRoutes.get('/', async (c) => {
     return {
       ...t,
       typeLabel: typeLabels.get(t.type) ?? null,
+      pausedByAdmin: adminPausedIds.has(t.id),
       timing: { wallMs, workMs, idleMs, userActiveMs },
       tokenUsage: tokensByTask.get(t.id) ?? null,
       currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,
@@ -448,18 +458,8 @@ taskRoutes.get('/', async (c) => {
   return c.json({ tasks, total, page, pageSize, repositories, globalPause });
 });
 
-taskRoutes.post('/', async (c) => {
+taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
-  // Both non-normal states refuse NEW work while letting in-flight work finish — that is the
-  // whole point of draining, and it is why the state has three values rather than two. The gate
-  // has already resolved this for the request, so there is no second config read here.
-  if (refusesNewWork(c.get('maintenanceState'))) {
-    throw new HttpError(
-      503,
-      'Haive is preparing for maintenance, so new tasks are not being started. Work already ' +
-        'running will finish.',
-    );
-  }
   const body = createTaskRequestSchema.parse(await c.req.json());
   const db = getDb();
 
@@ -798,7 +798,10 @@ taskRoutes.post('/', async (c) => {
     ({ task, queued } =
       definition.takesRootLock && body.repositoryId
         ? await withRepositoryTaskLock(db, body.repositoryId, create)
-        : await db.transaction(create));
+        : await db.transaction(async (tx) => {
+            await admitNewWork(tx);
+            return create(tx);
+          }));
   }
 
   // `implements` ONLY. Taskable means "one task could implement this", which is
@@ -1059,11 +1062,13 @@ taskRoutes.get('/:id', async (c) => {
   });
   const globalPause = await configService.getBoolean(CONFIG_KEYS.GLOBAL_PAUSE, false);
   const typeLabels = await loadTaskTypeLabels(db, [task.type]);
+  const adminPausedIds = await findAdminPausedTaskIds(db, task.pausedAt ? [id] : []);
   // The pinned prompt steps fed the step flags above; the page never reads them, so they stay off the poll.
   const { customSteps: _pinned, ...taskFields } = task;
   const taskWithActive = {
     ...taskFields,
     typeLabel: typeLabels.get(task.type) ?? null,
+    pausedByAdmin: adminPausedIds.has(id),
     activeCliInvocationId: active?.id ?? null,
     activeCliStepId: active?.taskStepId ?? null,
     // Same derivation as the listing, over the rows already fetched above, so the header badge
@@ -1188,6 +1193,7 @@ taskRoutes.post('/:id/action', async (c) => {
 
   switch (body.action) {
     case 'start': {
+      await assertNewWorkAllowed();
       refuseDeadTask(task);
       // The second half of a two-phase create (POST /plan/build with
       // `deferStart`): the row was made unstarted so the caller could upload
@@ -1197,7 +1203,11 @@ taskRoutes.post('/:id/action', async (c) => {
       // atomically, so a second click matches no row and enqueues nothing —
       // guarding with a read-then-write instead would let two clicks both pass
       // the read and put the same task on the queue twice.
-      if (!(await markQueuedForStart(db, id))) {
+      const started = await db.transaction(async (tx) => {
+        await admitNewWork(tx);
+        return markQueuedForStart(tx, id);
+      });
+      if (!started) {
         return c.json({ ok: true, started: false, status: task.status });
       }
       await appendTaskEvent(db, id, null, 'task.started', { by: userId });
@@ -1221,6 +1231,7 @@ taskRoutes.post('/:id/action', async (c) => {
       await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });
     case 'retry': {
+      await assertNewWorkAllowed();
       refuseDeadTask(task);
       if (task.status !== 'failed') {
         throw new HttpError(409, `Cannot retry task in status ${task.status}`);
@@ -1295,6 +1306,7 @@ taskRoutes.post('/:id/action', async (c) => {
       // Bump the orchestration epoch so advance-step jobs enqueued before this retry are
       // dropped by the worker's epoch guard instead of running against the restarted task.
       await db.transaction(async (tx) => {
+        await admitNewWork(tx);
         await refuseReviveBesideLive(tx, id);
         await supersedeLiveRuns(tx, id, { failTask: false });
         await settleActiveStepsIn(tx, id);
@@ -1320,11 +1332,24 @@ taskRoutes.post('/:id/action', async (c) => {
       // deadline out indefinitely.
       if (task.pausedAt) return c.json({ ok: true, pausedAt: task.pausedAt.toISOString() });
       const pausedAt = new Date();
-      await db
-        .update(schema.tasks)
-        .set({ pausedAt, updatedAt: pausedAt })
-        .where(eq(schema.tasks.id, id));
-      await appendTaskEvent(db, id, null, 'task.paused', { by: userId });
+      const paused = await db.transaction(async (tx) => {
+        // Only the pause that changes the row is recorded.
+        const rows = await tx
+          .update(schema.tasks)
+          .set({ pausedAt, updatedAt: pausedAt })
+          .where(and(eq(schema.tasks.id, id), isNull(schema.tasks.pausedAt)))
+          .returning({ id: schema.tasks.id });
+        if (rows.length === 0) return false;
+        await appendTaskEvent(tx, id, null, 'task.paused', { by: userId });
+        return true;
+      });
+      if (!paused) {
+        const standing = await db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, id),
+          columns: { pausedAt: true },
+        });
+        return c.json({ ok: true, pausedAt: standing?.pausedAt?.toISOString() ?? null });
+      }
       // Nothing is killed and nothing is superseded: the CLI in flight runs to completion
       // and the worker's gates hold the task at the NEXT step / the next queued invocation.
       logger.info({ taskId: id }, 'task paused');
@@ -1332,8 +1357,13 @@ taskRoutes.post('/:id/action', async (c) => {
     }
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
-      await clearTaskPause(db, id);
-      await appendTaskEvent(db, id, null, 'task.resumed', { by: userId });
+      const resumed = await db.transaction(async (tx) => {
+        // Only the resume that changes the row is recorded.
+        if (!(await clearTaskPause(tx, id))) return false;
+        await appendTaskEvent(tx, id, null, 'task.resumed', { by: userId });
+        return true;
+      });
+      if (!resumed) return c.json({ ok: true, pausedAt: null });
       // No re-drive needed: the pause park re-enqueues its own delayed advance every
       // PAUSE_POLL_MS and the deferred cli-exec jobs re-deliver on their own, so both pick
       // the task back up within ~30s. Enqueuing an extra advance here would race the park

@@ -27,6 +27,11 @@ export function taskMenuKeys(task: TaskToneLike, opts: { stepRunning: boolean })
   return keys;
 }
 
+/** Who the owner is told holds a paused task: an administrator's maintenance pause is not their own. */
+export function pausedByLabel(task: { pausedByAdmin?: boolean }): string {
+  return task.pausedByAdmin ? 'Paused by an administrator' : 'Paused by you';
+}
+
 /** The state word a list shows for a task: `dead` ahead of the status it died in. */
 export function taskStatusWord(task: TaskToneLike): string {
   return isTaskDead(task) ? 'dead' : task.status;

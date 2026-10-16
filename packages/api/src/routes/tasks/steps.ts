@@ -46,6 +46,7 @@ import { rollupToolUsage } from '@haive/shared/stats-server';
 import { parseInvocationHistoryQuery } from './_invocation-history.js';
 import { loadCustomToolCalls, loadIntegrationCalls } from './_call-log.js';
 import { HttpError, type AppEnv } from '../../context.js';
+import { admitNewWork, assertNewWorkAllowed } from '../../middleware/maintenance.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
 import { cancelLiveRuns, reofferParkedSteps } from '../../lib/task-control.js';
@@ -69,6 +70,31 @@ import {
 /** Transaction handle (the callback arg of Database.transaction). A full Database is also
  *  assignable, so callers may pass either. Mirrors the same alias in @haive/database. */
 type DbHandle = Parameters<Parameters<Database['transaction']>[0]>[0];
+
+/** Admits the answer that reopens a failed task; no row lock, which would cross a Retry's. */
+async function admitAnswer(tx: DbHandle, taskId: string): Promise<boolean> {
+  const [row] = await tx
+    .select({ status: schema.tasks.status })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId));
+  if (row?.status !== 'failed') return false;
+  await admitNewWork(tx);
+  return true;
+}
+
+/** An admitted answer makes the task live in its own transaction, where a drain's count sees it. */
+async function reopenFailedTask(tx: DbHandle, taskId: string, now: Date): Promise<void> {
+  await tx
+    .update(schema.tasks)
+    .set({
+      status: 'running',
+      errorMessage: null,
+      completedAt: null,
+      ...CLEAR_ALLOWANCE_WATCH,
+      updatedAt: now,
+    })
+    .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed')));
+}
 
 /** Blank a set of step rows so the worker re-runs them from detect: supersede their live
  *  invocations, drop their agent minings, clear the wedged DAG level, and zero each row's
@@ -295,6 +321,7 @@ export async function retryTaskAtStep(
   ];
   const now = new Date();
   const moved = await db.transaction(async (tx) => {
+    await admitNewWork(tx);
     await refuseReviveBesideLive(tx, taskId);
     // Runs first and step rows after, the order a pass takes them in.
     const cancelled = await cancelLiveRuns(tx, taskId, 'user', now);
@@ -677,12 +704,13 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     columns: { id: true, status: true, type: true, repositoryId: true, deadAt: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
+  // The answer reopens a failed task, which is new work.
+  if (task.status === 'failed') await assertNewWorkAllowed();
   refuseDeadTask(task);
-  // Answering a failed upgrade's form revives it in the worker, which the index refuses there.
+  // Answering a failed upgrade's form revives it, which the index refuses; this names the live one.
   if (task.status === 'failed' && task.type === 'onboarding_upgrade' && task.repositoryId) {
     await refuseBesideLiveUpgrade(db, task.repositoryId);
   }
-  if (task.status === 'failed') await db.transaction((tx) => refuseReviveBesideLive(tx, id));
 
   // Target the row awaiting submission: filter to waiting_form + the latest round, so a
   // round > 0 parked form (a fix-loop escalation gate or a manual-mode fix round) is
@@ -708,19 +736,27 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
   const closedIdleMs = step.waitingStartedAt
     ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
     : 0;
-  await db
-    .update(schema.taskSteps)
-    .set({
-      formValues: body.values,
-      idleMs: step.idleMs + closedIdleMs,
-      waitingStartedAt: null,
-      updatedAt: now,
-    })
-    .where(eq(schema.taskSteps.id, step.id));
+  const writeAnswer = async (tx: DbHandle) => {
+    await tx
+      .update(schema.taskSteps)
+      .set({
+        formValues: body.values,
+        idleMs: step.idleMs + closedIdleMs,
+        waitingStartedAt: null,
+        updatedAt: now,
+      })
+      .where(eq(schema.taskSteps.id, step.id));
 
-  await appendTaskEvent(db, id, step.id, 'step.form_submitted', {
-    stepId,
-    fieldCount: Object.keys(body.values).length,
+    await appendTaskEvent(tx, id, step.id, 'step.form_submitted', {
+      stepId,
+      fieldCount: Object.keys(body.values).length,
+    });
+  };
+  await db.transaction(async (tx) => {
+    if (!(await admitAnswer(tx, id))) return writeAnswer(tx);
+    await refuseReviveBesideLive(tx, id);
+    await writeAnswer(tx);
+    await reopenFailedTask(tx, id, now);
   });
 
   const queue = getTaskQueue();
@@ -756,6 +792,8 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     columns: { id: true, status: true, deadAt: true },
   });
   if (!task) throw new HttpError(404, 'Task not found');
+  // The answer reopens a failed task, which is new work.
+  if (task.status === 'failed') await assertNewWorkAllowed();
   refuseDeadTask(task);
 
   const stepRows = await db
@@ -778,6 +816,7 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
     : 0;
   await db.transaction(async (tx) => {
+    const reopens = await admitAnswer(tx, id);
     await refuseReviveBesideLive(tx, id);
     // Persist the answer to task_events (NOT form_values) and close the idle period.
     await tx.insert(schema.taskEvents).values({
@@ -792,18 +831,10 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
       .where(eq(schema.taskSteps.id, step.id));
 
     await appendTaskEvent(tx, id, step.id, 'step.clarified', { stepId });
+    if (!reopens) return;
     // Answering reopens a task that failed while this form waited. The answer rides task_events
     // rather than the job, so the worker cannot tell this advance from one queued before the failure.
-    await tx
-      .update(schema.tasks)
-      .set({
-        status: 'running',
-        errorMessage: null,
-        completedAt: null,
-        ...CLEAR_ALLOWANCE_WATCH,
-        updatedAt: now,
-      })
-      .where(and(eq(schema.tasks.id, id), eq(schema.tasks.status, 'failed')));
+    await reopenFailedTask(tx, id, now);
   });
 
   const queue = getTaskQueue();
@@ -829,7 +860,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
   });
   if (!task) throw new HttpError(404, 'Task not found');
-  if (body.action !== 'abort') refuseDeadTask(task);
+  if (body.action !== 'abort') {
+    await assertNewWorkAllowed();
+    refuseDeadTask(task);
+  }
 
   // Act on the round the caller named. A fix-loop step recurs once per round
   // (round 0 = original pass), each rendered as its own row with its own
@@ -895,6 +929,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
 
     let newEpoch = 0;
     const activatedMeanwhile = await db.transaction(async (tx) => {
+      await admitNewWork(tx);
       await refuseReviveBesideLive(tx, id);
       const now = new Date();
       const downstreamToReset = downstream.filter((r) => r.status !== 'pending');
@@ -1093,6 +1128,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       );
       let newEpoch = task.orchestrationEpoch;
       const activatedMeanwhile = await db.transaction(async (tx) => {
+        await admitNewWork(tx);
         await refuseReviveBesideLive(tx, id);
         await tx
           .update(schema.taskStepAgentMinings)
@@ -1212,6 +1248,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     );
     const now = new Date();
     const moved = await db.transaction(async (tx) => {
+      await admitNewWork(tx);
       await refuseReviveBesideLive(tx, id);
       // Supersede ONLY the failed pass's invocation (latest non-superseded,
       // non-consumed). Prior passes are already consumed; with this superseded,
@@ -1315,6 +1352,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       [step.id],
     );
     const moved = await db.transaction(async (tx) => {
+      await admitNewWork(tx);
       await refuseReviveBesideLive(tx, id);
       // Supersede the failed pass's invocation, then preserve detect/form/values
       // and set the fix marker so advanceStep runs the fix agent next.
@@ -1400,6 +1438,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
       : 0;
     const moved = await db.transaction(async (tx) => {
+      await admitNewWork(tx);
       await refuseReviveBesideLive(tx, id);
       await tx
         .update(schema.taskSteps)
@@ -1730,18 +1769,25 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     return c.json({ ok: true, stepId, role, cliProviderId: body.cliProviderId });
   }
 
-  await writeStepCliChoice(db, choice);
+  const movesTask =
+    step.iterationCount === 0 && (step.status === 'waiting_form' || step.status === 'failed');
+  if (movesTask) await assertNewWorkAllowed();
 
-  // A CLI swap on the model-health canary rewrites the task default so every later
-  // step inherits the new model (see propagateModelHealthCliToTaskDefault). No-op
-  // for any other step or when the pref was cleared rather than set.
-  await propagateModelHealthCliToTaskDefault(db, {
-    taskId: id,
-    taskStepId: step.id,
-    stepId,
-    cliProviderId: body.cliProviderId ?? null,
-    by: userId,
-  });
+  const saveChoice = async (handle: Database | DbHandle) => {
+    await writeStepCliChoice(handle, choice);
+    // A CLI swap on the model-health canary rewrites the task default so every later
+    // step inherits the new model (see propagateModelHealthCliToTaskDefault). No-op
+    // for any other step or when the pref was cleared rather than set.
+    await propagateModelHealthCliToTaskDefault(handle, {
+      taskId: id,
+      taskStepId: step.id,
+      stepId,
+      cliProviderId: body.cliProviderId ?? null,
+      by: userId,
+    });
+  };
+  // A re-run saves the choice inside its fenced admission, so a refused one changes nothing.
+  if (!movesTask) await saveChoice(db);
 
   // Invalidate the step's cached detect/form so the next advance re-detects
   // against the newly-preferred CLI's metadata. Skipped if step is terminal, and
@@ -1757,7 +1803,6 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     // Retry does, so what the task leaves active elsewhere is reset. A pending row is only
     // invalidated: the task has either not reached it, where an advance queued from here would
     // run it out of order, or already queued the advance that claims it.
-    const movesTask = step.status !== 'pending';
     const leftActive = movesTask
       ? rowsLeftActive(
           await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, id)),
@@ -1770,6 +1815,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     const now = new Date();
     const contrib = computeFoldContribution(step, now.getTime());
     redrive = await db.transaction(async (tx) => {
+      if (movesTask) await admitNewWork(tx);
       // The repository lock first, in the order the worker's revivals take it, before any row lock.
       if (movesTask) await refuseReviveBesideLive(tx, id);
       // A failed step still carries its ended cli_invocation. Without superseding
@@ -1812,8 +1858,10 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
-      if (movesTask) return moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now);
-      return null;
+      if (!movesTask) return null;
+      const moved = await moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now);
+      await saveChoice(tx);
+      return moved;
     });
     if (redrive?.leftActive.some(isLive)) {
       const killed = await killTaskSandboxes(id);

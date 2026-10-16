@@ -56,6 +56,8 @@ const NOT_A_RESOURCE = [
   /haive-(?:task|rag|mcp|chrome-mcp-proxy|price-sync|runtime-tools|worker|data|ide-ensure|api-|access-|migrated-|import-|pre-migrate|pre-rename)/,
   // An MCP server name, and the files beside its script: a CLI and the stats module read them.
   /haive-(?:custom|integrations)\b/,
+  // The advisory lock key admission and a state write meet on: scoped to the install's own Postgres.
+  /haive-new-work-fence\b/,
 ];
 
 function sourceFiles(dir: string): string[] {

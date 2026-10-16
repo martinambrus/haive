@@ -13,6 +13,7 @@ vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: h.kill }));
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
 import { stepRoutes } from '../src/routes/tasks/steps.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -30,6 +31,7 @@ app.use('*', async (c, next) => {
 });
 app.route('/', stepRoutes);
 app.onError(errorHandler);
+vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 
 /** A task at `status` whose fan-out step failed with one agent left to re-run. */
 function setup(status: string) {
