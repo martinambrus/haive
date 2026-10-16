@@ -68,7 +68,7 @@ export function ModuleTaskTitle({
   task,
   viewerId,
 }: {
-  task: ModuleOpenTask;
+  task: Pick<ModuleOpenTask, 'id' | 'title' | 'ownerId'>;
   viewerId: string | null;
 }) {
   // GET /tasks/:id is owner-scoped: anyone else's task page is a 404.
