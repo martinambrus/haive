@@ -9,6 +9,7 @@ import { getRedis } from '../redis.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
+import { isUuid } from '../lib/uuid.js';
 
 const log = logger.child({ module: 'cli-stream-ws' });
 const WS_PATH_PREFIX = '/cli-stream/';
@@ -351,8 +352,7 @@ function extractInvocationId(rawUrl: string, pathPrefix: string): string | null 
   const pathOnly = qIdx === -1 ? rawUrl : rawUrl.slice(0, qIdx);
   if (!pathOnly.startsWith(pathPrefix)) return null;
   const remainder = pathOnly.slice(pathPrefix.length);
-  if (!remainder || remainder.includes('/')) return null;
-  return remainder;
+  return isUuid(remainder) ? remainder : null;
 }
 
 function parseCookieValue(header: string, name: string): string | null {

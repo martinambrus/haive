@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ONE_LIVE_UPGRADE_INDEX, schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
 import { markTaskRunningWithStep, markTaskWaiting } from '../src/queues/task-queue.js';
 
 vi.mock('../src/db.js', () => ({
@@ -83,7 +84,10 @@ function setup(
   return { fake, task, events, revive, reviveUnfenced, park };
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
+});
 
 describe('the worker reviving a failed onboarding or upgrade', () => {
   it.each([

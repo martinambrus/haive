@@ -26,6 +26,8 @@ vi.mock('@haive/shared', async (importOriginal) => {
     configService: {
       get: async (key: string) =>
         key === shared.CONFIG_KEYS.MAINTENANCE_STATE ? h.maintenance : null,
+      getFresh: async (key: string) =>
+        key === shared.CONFIG_KEYS.MAINTENANCE_STATE ? h.maintenance : null,
       getBoolean: async () => false,
     },
   };
@@ -234,10 +236,6 @@ describe.skipIf(!url)('task type draft routes on Postgres', () => {
     it('guards its own router, not only through the guard the app puts on /admin', async () => {
       const { taskTypeDraftRoutes } = await import('../src/routes/task-type-drafts.js');
       const bare = new Hono<AppEnv>();
-      bare.use(async (c, next) => {
-        c.set('maintenanceState', 'normal');
-        await next();
-      });
       bare.route(BASE, taskTypeDraftRoutes);
       bare.onError(errorHandler);
       const member = await sessionOf(memberId, 'user');

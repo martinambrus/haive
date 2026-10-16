@@ -22,6 +22,7 @@ import {
   captureFixBaseline,
   completeMergeHostSide,
   fixerLeftoversWarning,
+  handBackAfterMove,
   mergeCommitted,
   openMerge,
   recordFixerLeftovers,
@@ -1506,6 +1507,260 @@ describe('a root abort that cannot hand back a name', () => {
     } finally {
       asRoot.mockRestore();
       warn.mockRestore();
+      await rm(dir, REMOVE);
+    }
+  });
+});
+
+/** `main` behind `feature/x`, which edits `base.txt` and adds `top.txt` and `dir/sub/deep.txt`. */
+async function setupFastForward(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-ff-'));
+  await initRepo(dir);
+  await writeFile(path.join(dir, 'base.txt'), 'base\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await writeFile(path.join(dir, 'base.txt'), 'feature\n', 'utf8');
+  await writeFile(path.join(dir, 'top.txt'), 'top\n', 'utf8');
+  await mkdir(path.join(dir, 'dir', 'sub'), { recursive: true });
+  await writeFile(path.join(dir, 'dir', 'sub', 'deep.txt'), 'deep\n', 'utf8');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'feature']);
+  await git(dir, ['checkout', 'main']);
+  return dir;
+}
+
+const FAST_FORWARDED = ['base.txt', 'dir', 'dir/sub', 'dir/sub/deep.txt', 'top.txt'];
+
+describe('handBackAfterMove', () => {
+  it('hands each name a fast-forward wrote, and the directories above it, to the sandbox user', async () => {
+    const dir = await setupFastForward();
+    const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
+    const chowned: { rel: string; owner: { uid: number; gid: number } }[] = [];
+    vi.resetModules();
+    vi.doMock('@haive/shared/fs-safe', async (importOriginal) => {
+      const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+      return {
+        ...real,
+        lstatNoFollow: async (...args: Parameters<typeof real.lstatNoFollow>) => {
+          const info = await real.lstatNoFollow(...args);
+          return info && { ...info, stats: { ...info.stats, uid: 0 } };
+        },
+        chownNoFollow: async (
+          _anchor: string,
+          rel: string,
+          owner: { uid: number; gid: number },
+        ) => {
+          chowned.push({ rel, owner });
+        },
+      };
+    });
+    try {
+      const moved = await import('./git-merge.js');
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--ff-only', 'feature/x']);
+      await moved.handBackAfterMove(dir, before);
+      expect(chowned.map((c) => c.rel).sort()).toEqual(FAST_FORWARDED);
+      expect(chowned.every((c) => c.owner.uid === 1000 && c.owner.gid === 1000)).toBe(true);
+    } finally {
+      vi.doUnmock('@haive/shared/fs-safe');
+      vi.resetModules();
+      asRoot.mockRestore();
+      await rm(dir, REMOVE);
+    }
+  });
+});
+
+describe.runIf(process.getuid?.() === 0)(
+  'a root fast-forward in a tree the sandbox user owns',
+  () => {
+    it('hands what the move wrote, and the directories it created, to the tree owner', async () => {
+      const dir = await setupFastForward();
+      await exec('chown', ['-R', '1000:1000', dir]);
+      try {
+        const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        await git(dir, ['merge', '--ff-only', 'feature/x']);
+        expect(await ownersOf(dir, FAST_FORWARDED)).toEqual(
+          Object.fromEntries(FAST_FORWARDED.map((r) => [r, 0])),
+        );
+        await handBackAfterMove(dir, before);
+        expect(await ownersOf(dir, FAST_FORWARDED)).toEqual(
+          Object.fromEntries(FAST_FORWARDED.map((r) => [r, 1000])),
+        );
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    });
+  },
+);
+
+const RENDER_REL = '.haive-data/state/project/render.json';
+const PROJECTIONS = [RENDER_REL, '.haive-data/plan.json', '.haive-data/plan.md'];
+const STATE_DIRS = ['.haive-data/state/project', '.haive-data/state'];
+const AGENT_WRITTEN = [
+  '.haive-data/knowledge_base/note.md',
+  '.haive-data/learnings/lesson.md',
+  'top.txt',
+];
+const AGENT_DIRS = ['.haive-data', '.haive-data/knowledge_base', '.haive-data/learnings'];
+const ROOT = { uid: 0, gid: 0 };
+
+/** `feature/x` writes the projection files and `others`; with `conflict`, `main` has them all and both edit `base.txt`. */
+async function setupProjectionBranch(others: string[], conflict: boolean): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'gm-proj-'));
+  await initRepo(dir);
+  const write = async (rels: string[], text: string) => {
+    for (const rel of rels) {
+      await mkdir(path.dirname(path.join(dir, rel)), { recursive: true });
+      await writeFile(path.join(dir, rel), text, 'utf8');
+    }
+  };
+  await write(['base.txt', ...(conflict ? [...PROJECTIONS, ...others] : [])], 'base\n');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'init']);
+  await git(dir, ['checkout', '-b', 'feature/x']);
+  await write([...PROJECTIONS, ...others, ...(conflict ? ['base.txt'] : [])], 'feature\n');
+  await git(dir, ['add', '-A']);
+  await git(dir, ['commit', '-m', 'feature']);
+  await git(dir, ['checkout', 'main']);
+  if (conflict) {
+    await write(['base.txt'], 'main\n');
+    await git(dir, ['commit', '-am', 'main edit']);
+  }
+  return dir;
+}
+
+/** git-merge.js and set-aside.js over an fs-safe that reads every path as root's and records a chown in `owners` instead of making it. */
+async function loadAsRoot() {
+  const owners = new Map<string, number>();
+  const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
+  vi.resetModules();
+  vi.doMock('@haive/shared/fs-safe', async (importOriginal) => {
+    const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+    return {
+      ...real,
+      lstatNoFollow: async (...args: Parameters<typeof real.lstatNoFollow>) => {
+        const info = await real.lstatNoFollow(...args);
+        return info && { ...info, stats: { ...info.stats, uid: owners.get(args[1]) ?? 0 } };
+      },
+      chownNoFollow: async (_anchor: string, rel: string, owner: { uid: number; gid: number }) => {
+        owners.set(rel, owner.uid);
+      },
+    };
+  });
+  return {
+    owners,
+    merge: await import('./git-merge.js'),
+    aside: await import('../project-state/set-aside.js'),
+    done: () => {
+      vi.doUnmock('@haive/shared/fs-safe');
+      vi.resetModules();
+      asRoot.mockRestore();
+    },
+  };
+}
+
+/** What a set-aside captured of `RENDER_REL` while it sat untracked at 0600 in a 0700 directory. */
+const keptRender = () =>
+  new Map([
+    [
+      RENDER_REL,
+      {
+        bytes: Buffer.from('{}\n'),
+        index: null,
+        mode: 0o600,
+        owner: ROOT,
+        untracked: true,
+        parents: STATE_DIRS.map((p) => ({ path: p, owner: ROOT, mode: 0o700 })),
+      },
+    ],
+  ]);
+
+const ownerOf = (owners: Map<string, number>, rel: string) => [rel, owners.get(rel) ?? 0];
+
+/** The projections keep the owner and mode the set-aside captured, and `handed` still go to the sandbox user. */
+async function expectProjectionsKept(
+  dir: string,
+  owners: Map<string, number>,
+  handed: string[],
+): Promise<void> {
+  expect((await lstat(path.join(dir, RENDER_REL))).mode & 0o7777).toBe(0o600);
+  for (const rel of STATE_DIRS) {
+    expect((await lstat(path.join(dir, rel))).mode & 0o7777).toBe(0o700);
+  }
+  for (const rel of [...PROJECTIONS, ...STATE_DIRS]) {
+    expect(ownerOf(owners, rel)).toEqual([rel, 0]);
+  }
+  for (const rel of handed) expect(ownerOf(owners, rel)).toEqual([rel, 1000]);
+}
+
+describe("the hand-back leaves Haive's projection files to the worker", () => {
+  it('a fast-forward that newly tracks them keeps the owner and mode the set-aside captured', async () => {
+    const dir = await setupProjectionBranch(['top.txt'], false);
+    const { owners, merge, aside, done } = await loadAsRoot();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--ff-only', 'feature/x']);
+      await merge.handBackAfterMove(dir, before);
+      await aside.restoreKeptMetadata(dir, keptRender());
+      await expectProjectionsKept(dir, owners, ['top.txt', '.haive-data']);
+    } finally {
+      done();
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('a merge that newly tracks them keeps the owner and mode the set-aside captured', async () => {
+    const dir = await setupProjectionBranch(AGENT_WRITTEN, false);
+    const { owners, merge, aside, done } = await loadAsRoot();
+    try {
+      expect(await merge.openMerge(dir, 'feature/x', ['--no-edit'], COMMIT_ENV)).toEqual({
+        kind: 'merged',
+      });
+      await aside.restoreKeptMetadata(dir, keptRender());
+      await expectProjectionsKept(dir, owners, [...AGENT_WRITTEN, ...AGENT_DIRS]);
+    } finally {
+      done();
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('a merge in a worktree hands them to the sandbox user, since only the checkout is set aside', async () => {
+    const dir = await setupProjectionBranch(['top.txt'], false);
+    const wt = path.join(dir, '.haive/worktrees/wt');
+    await git(dir, ['worktree', 'add', '-b', 'wt-base', wt, 'main']);
+    const { owners, merge, done } = await loadAsRoot();
+    try {
+      expect(await merge.openMerge(wt, 'feature/x', ['--no-edit'], COMMIT_ENV)).toEqual({
+        kind: 'merged',
+      });
+      for (const rel of [...PROJECTIONS, ...STATE_DIRS, 'top.txt']) {
+        const at = `.haive/worktrees/wt/${rel}`;
+        expect(ownerOf(owners, at)).toEqual([at, 1000]);
+      }
+    } finally {
+      done();
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('an abort leaves the ones it rewrote to the worker too', async () => {
+    const dir = await setupProjectionBranch(AGENT_WRITTEN, true);
+    const { owners, merge, done } = await loadAsRoot();
+    try {
+      expect(await merge.openMerge(dir, 'feature/x', ['--no-edit'], COMMIT_ENV)).toEqual({
+        kind: 'conflict',
+      });
+      owners.clear();
+      expect(await merge.abortMerge(dir)).toEqual({ ok: true });
+      for (const rel of [...PROJECTIONS, ...STATE_DIRS]) {
+        expect(ownerOf(owners, rel)).toEqual([rel, 0]);
+      }
+      for (const rel of ['base.txt', ...AGENT_WRITTEN, ...AGENT_DIRS]) {
+        expect(ownerOf(owners, rel)).toEqual([rel, 1000]);
+      }
+    } finally {
+      done();
       await rm(dir, REMOVE);
     }
   });

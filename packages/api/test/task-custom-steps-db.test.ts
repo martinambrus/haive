@@ -23,6 +23,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
   configService: {
     get: async () => 'USD',
+    getFresh: async () => 'normal',
     getBoolean: async () => true,
   },
 }));

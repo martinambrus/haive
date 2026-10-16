@@ -7,6 +7,7 @@ import {
   configService,
   logger,
   parseAllowanceWatchMode,
+  refusesNewWork,
   type AuthMode,
   type CliProviderName,
 } from '@haive/shared';
@@ -35,6 +36,7 @@ import { refreshExpiringCliCredentials } from '../usage-window/credential-refres
 import { authDenialSeverity, nextAuthStrike } from '../usage-window/types.js';
 import type { UsageFetchContext, UsageFetchOutcome } from '../usage-window/types.js';
 import { getTaskQueue } from './task-queue.js';
+import { MaintenanceStateUnreadable, NewWorkHeld, readMaintenanceState } from './_revive-check.js';
 import { autoResumeFailedStep } from './_step-reset.js';
 import { pruneJobSchedulers } from './job-scheduler-prune.js';
 
@@ -43,6 +45,9 @@ import { pruneJobSchedulers } from './job-scheduler-prune.js';
 const ALLOWANCE_AUTO_RESUME_CAP = 3;
 
 const log = logger.child({ module: 'usage-poll' });
+
+const AUTO_RESUME_HELD =
+  'provider recovered; auto-resume held while the system drains or is in maintenance';
 
 // Gentle by design: a 5-hour/weekly window barely moves minute-to-minute, and the
 // claude endpoint 429s aggressive callers. ~5 min base + jitter, with per-provider
@@ -567,14 +572,42 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
       task.currentStepId &&
       task.autoResumeCount < ALLOWANCE_AUTO_RESUME_CAP
     ) {
-      const resumed = await autoResumeFailedStep(db, {
-        taskId: task.id,
-        stepId: task.currentStepId,
-        round: task.currentRound ?? 0,
-        providerId: task.providerId,
-        via,
-        watchSince: task.since ?? null,
-      });
+      // Past the config cache: the api that sets the state is another process.
+      const state = await readMaintenanceState(task.id);
+      if (refusesNewWork(state)) {
+        log.info({ taskId: task.id, providerId: task.providerId, state }, AUTO_RESUME_HELD);
+        continue;
+      }
+      let resumed: boolean;
+      try {
+        resumed = await autoResumeFailedStep(db, {
+          taskId: task.id,
+          stepId: task.currentStepId,
+          round: task.currentRound ?? 0,
+          providerId: task.providerId,
+          via,
+          watchSince: task.since ?? null,
+        });
+      } catch (err) {
+        // One task's failed resume must not hold the armed tasks after it back until the next tick.
+        if (err instanceof NewWorkHeld) {
+          log.info(
+            { taskId: task.id, providerId: task.providerId, state: err.state },
+            AUTO_RESUME_HELD,
+          );
+        } else if (err instanceof MaintenanceStateUnreadable) {
+          log.warn(
+            { taskId: task.id, providerId: task.providerId, err },
+            'provider recovered; auto-resume skipped, the maintenance state could not be read',
+          );
+        } else {
+          log.error(
+            { taskId: task.id, providerId: task.providerId, err },
+            'provider recovered; auto-resume failed',
+          );
+        }
+        continue;
+      }
       if (resumed) {
         await getTaskQueue().add(
           TASK_JOB_NAMES.ADVANCE_STEP,

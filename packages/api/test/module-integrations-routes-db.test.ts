@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { eq, inArray } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { createDatabase, schema, type Database } from '@haive/database';
 
 const url = process.env.MODULE_INTEGRATIONS_ROUTES_TEST_URL;
@@ -104,9 +105,12 @@ const manifestOf = (moduleId: string, over: Raw = {}): Raw => ({
   ...over,
 });
 
+const docsList = { args: z.object({}), run: async () => ({}) };
+
 const entryOf = (moduleId: string, over: Raw = {}) => ({
   packageName: `@haive/module-${moduleId}`,
   manifest: manifestOf(moduleId, over),
+  integrations: { [`module.${moduleId}.crm`]: { docs_list: docsList } },
 });
 
 const note = (reply: Reply) =>

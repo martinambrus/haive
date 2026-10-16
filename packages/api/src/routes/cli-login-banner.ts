@@ -30,6 +30,7 @@ import { getCliExecQueue, getCliExecQueueEvents, getUsagePollQueue } from '../qu
 import { attachContainerStream } from './terminal.js';
 import { execInContainer } from './docker-exec.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
+import { isUuid } from '../lib/uuid.js';
 
 const log = logger.child({ module: 'cli-login-banner-ws' });
 
@@ -1225,8 +1226,7 @@ function extractProviderId(rawUrl: string, pathPrefix: string): string | null {
   const pathOnly = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
   if (!pathOnly.startsWith(pathPrefix)) return null;
   const remainder = pathOnly.slice(pathPrefix.length);
-  if (!remainder || remainder.includes('/')) return null;
-  return remainder;
+  return isUuid(remainder) ? remainder : null;
 }
 
 function parseCookieValue(header: string, name: string): string | null {

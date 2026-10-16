@@ -250,8 +250,14 @@ jobs:
           shared test/integrations-resolution-db.test.ts INTEGRATIONS_RESOLUTION_TEST_URL integrations_resolution_test pg
           database test/integration-connection-keys.test.ts INTEGRATION_KEYS_TEST_URL integration_keys_test pg
           api test/admin-integrations-db.test.ts ADMIN_INTEGRATIONS_TEST_URL admin_integrations_test pg
+          api test/maintenance-routes-db.test.ts MAINTENANCE_API_TEST_URL maintenance_api_test pg
+          updater test/live-task-count-db.test.ts UPDATER_LIVE_COUNT_TEST_URL updater_live_count_test pg
+          api test/new-work-fence-db.test.ts NEW_WORK_FENCE_TEST_URL new_work_fence_test pg
+          updater test/new-work-fence-db.test.ts UPDATER_FENCE_TEST_URL updater_fence_test pg
           api test/integration-choice-routes-db.test.ts INTEGRATION_CHOICE_ROUTES_TEST_URL integration_choice_routes_test pg
           api test/integration-mcp-db.test.ts INTEGRATION_MCP_TEST_URL integration_mcp_test pg
+          api test/integration-mcp-module-db.test.ts INTEGRATION_MCP_MODULE_TEST_URL integration_mcp_module_test pg
+          api test/integration-mcp-module-extras-db.test.ts INTEGRATION_MCP_MODULE_EXTRAS_TEST_URL integration_mcp_module_extras_test pg
           api test/tooling-app-auth-atomic-db.test.ts TOOLING_APP_AUTH_TEST_URL tooling_app_auth_test pg
           api test/task-tool-usage-calls-db.test.ts TASK_TOOL_USAGE_TEST_URL task_tool_usage_test pg
           api test/repo-delete-lock-order-db.test.ts REPO_DELETE_LOCK_ORDER_TEST_URL repo_delete_lock_order_test pg
@@ -260,11 +266,15 @@ jobs:
           worker test/step-integrations-dispatch-db.test.ts STEP_INTEGRATIONS_DISPATCH_TEST_URL step_integrations_dispatch_test pg
           worker test/step-integrations-prompt-db.test.ts STEP_INTEGRATIONS_PROMPT_TEST_URL step_integrations_prompt_test pg
           worker test/step-integrations-decisions-db.test.ts STEP_INTEGRATIONS_DECISIONS_TEST_URL step_integrations_decisions_test pg
+          worker test/prompt-step-integrations-dispatch-db.test.ts PROMPT_STEP_INTEGRATIONS_TEST_URL prompt_step_integrations_test pg
+          worker test/prompt-step-account-token-db.test.ts PROMPT_STEP_ACCOUNT_TEST_URL prompt_step_account_test pg
           worker test/step-integrations-module-provider-db.test.ts STEP_INTEGRATIONS_MODULE_PROVIDER_TEST_URL step_integrations_module_provider_test pg
+          worker test/step-integrations-module-executors-db.test.ts STEP_INTEGRATIONS_MODULE_EXECUTORS_TEST_URL step_integrations_module_executors_test pg
           api test/task-integration-lock-routes-db.test.ts TASK_INTEGRATION_LOCK_TEST_URL task_integration_lock_test pg
           shared test/integrations-task-lock-db.test.ts INTEGRATIONS_TASK_LOCK_TEST_URL integrations_task_lock_test pg
           shared test/module-integrations-state-db.test.ts MODULE_INTEGRATIONS_STATE_TEST_URL module_integrations_state_test pg
           api test/module-integrations-routes-db.test.ts MODULE_INTEGRATIONS_ROUTES_TEST_URL module_integrations_routes_test pg
+          api test/malformed-id-routes-db.test.ts MALFORMED_ID_ROUTES_TEST_URL malformed_id_routes_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector

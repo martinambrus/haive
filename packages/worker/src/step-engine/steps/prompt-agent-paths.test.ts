@@ -1022,11 +1022,15 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
   'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_OUTPUTS_BUDGET_BYTES':
     'a byte limit for all quoted step outputs together, not text',
   'step-engine/steps/custom/prompt-step.ts#PROMPT_STEP_VALUES_BUDGET_BYTES':
-    'a byte limit for all field and task values together, not text',
+    'a byte limit for all field, task and account values together, not text',
   'step-engine/steps/custom/prompt-step.ts#promptStepNamedText':
     'text house rules read file paths from, never sent to a CLI',
   'step-engine/steps/custom/prompt-step.ts#promptStepTools':
     "a lookup of a prompt step's tool names; builds no prompt text",
+  'step-engine/steps/custom/prompt-step.ts#promptStepIntegrations':
+    "a lookup of a prompt step's declared integrations; builds no prompt text",
+  'step-engine/steps/custom/prompt-step.ts#promptStepAccountIds':
+    "a lookup of the requirement ids a prompt step's template names an account for; builds no prompt text",
   'step-engine/steps/workflow/_rag-usage.ts#buildRagUsagePrompt':
     '13-pr-wait llm builder, already scanned through the registry',
   'step-engine/steps/type-draft/_type-draft.ts#buildDraftPrompt':

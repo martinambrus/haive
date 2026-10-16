@@ -37,6 +37,7 @@ import {
   isRenderContextSnapshot,
   originAgentTargets,
   readRenderContextColumn,
+  namesGitData,
   renderContextOrigin,
   renderContextProviderNames,
   rendersAt,
@@ -56,6 +57,7 @@ import {
 } from '@haive/shared/rules-files';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import {
   ledgerImportedSince,
@@ -138,16 +140,24 @@ function snapshotProviderNames(providers: unknown): string[] {
 }
 
 /** The providers whose RTK settings files 01's render context reads, or null when it recorded no
- *  RTK choice: the column's own, else the caller's enabled ones, or the picked snapshot's. */
+ *  RTK choice: the column's own, else the caller's enabled ones, or the picked snapshot's, or those
+ *  the last onboarding's step 07 recorded. */
 function rtkProviderNames(
   origin: RenderContextOrigin<SnapshotRowFacts & { snapshotProviders: unknown }>,
   enabledNames: readonly string[],
+  history: HistoryDetect | null,
+  source: string,
+  rtkChoiceMadeAt: Date | null,
 ): string[] | null {
   if (origin.from === 'column') {
     return origin.rtkRecorded ? renderContextProviderNames(origin.column, enabledNames) : null;
   }
-  return origin.from === 'snapshot' && origin.rtkRecorded
-    ? snapshotProviderNames(origin.row.snapshotProviders)
+  if (origin.from === 'snapshot') {
+    return origin.rtkRecorded ? snapshotProviderNames(origin.row.snapshotProviders) : null;
+  }
+  const verdict = historyOrigin({ onboarding: history, source, rtkChoiceMadeAt });
+  return verdict.kind === 'onboarding' && verdict.rtkRecorded
+    ? snapshotProviderNames(history?.enabledCliProviders)
     : null;
 }
 
@@ -157,6 +167,7 @@ interface HistoryDetect {
   detected: boolean;
   rtkRecorded: boolean;
   agentTargets: unknown;
+  enabledCliProviders: unknown;
 }
 
 async function loadHistoryDetect(
@@ -180,6 +191,7 @@ async function loadHistoryDetect(
     .select({
       recorded: sql<boolean | null>`(${schema.taskSteps.detectOutput} -> 'rtkEnabled') is not null`,
       agentTargets: sql<unknown>`${schema.taskSteps.detectOutput} -> 'agentTargets'`,
+      enabledCliProviders: sql<unknown>`${schema.taskSteps.detectOutput} -> 'enabledCliProviders'`,
     })
     .from(schema.taskSteps)
     .where(
@@ -193,20 +205,22 @@ async function loadHistoryDetect(
     detected: generate !== undefined,
     rtkRecorded: generate?.recorded === true,
     agentTargets: generate?.agentTargets ?? null,
+    enabledCliProviders: generate?.enabledCliProviders ?? null,
   };
 }
 
 /** Whether 01's render context follows the repository's RTK switch, which it does only when the
- *  context it renders from recorded a choice: the column's stored flag, else the newest live
- *  snapshot, else the 07 detect output of the last completed onboarding, else, for a blank
- *  repository, the scaffold's own. */
+ *  context it renders from recorded a choice, or a person switched RTK on this install: the column's
+ *  stored flag, else the newest live snapshot, else the 07 detect output of the last completed
+ *  onboarding, else, for a blank repository, the scaffold's own. */
 function rtkChoiceFollowsLive(
   origin: RenderContextOrigin<SnapshotRowFacts>,
   history: HistoryDetect | null,
   source: string,
+  rtkChoiceMadeAt: Date | null,
 ): boolean {
   if (origin.from !== 'history') return origin.rtkRecorded;
-  const verdict = historyOrigin({ onboarding: history, source });
+  const verdict = historyOrigin({ onboarding: history, source, rtkChoiceMadeAt });
   return verdict.kind === 'blank' || (verdict.kind === 'onboarding' && verdict.rtkRecorded);
 }
 
@@ -291,6 +305,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       storagePath: true,
       localPath: true,
       rtkEnabled: true,
+      rtkChoiceMadeAt: true,
       source: true,
       renderContext: true,
       status: true,
@@ -406,6 +421,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     rows: liveArtifacts.map((a) =>
       refusedSnapshots.has(a.id) ? { ...a, hasSnapshot: false, rtkRecorded: false } : a,
     ),
+    rtkChoiceMadeAt: repo.rtkChoiceMadeAt,
   });
   const enabledNames = ruleProviderRows.filter((p) => p.enabled).map((p) => p.name);
   const history = origin.from === 'history' ? await loadHistoryDetect(db, repositoryId) : null;
@@ -425,7 +441,10 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     }),
   );
   const foreignIds = new Set(foreignReasons.keys());
-  const ownArtifacts = liveArtifacts.filter((a) => !foreignIds.has(a.id));
+  // A row an earlier release recorded at a git-data path is one 01 skips and 02 refuses.
+  const ownArtifacts = liveArtifacts.filter(
+    (a) => !foreignIds.has(a.id) && !namesGitData(a.diskPath),
+  );
 
   // Pick the most recently-written version stamp among live rows. Rows
   // written before migration 0011 have null haive_version — return null in
@@ -542,7 +561,9 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     (applicableSet.has(id) || isPerRepoTemplateId(id)) && !nonCurrentCustom.has(id);
   // An upgrade run with RTK off left the RTK templates out of that snapshot, so with RTK back on they
   // apply again wherever the providers of the render context the upgrade uses read them.
-  const rtkProviders = repo.rtkEnabled ? rtkProviderNames(origin, enabledNames) : null;
+  const rtkProviders = repo.rtkEnabled
+    ? rtkProviderNames(origin, enabledNames, history, repo.source, repo.rtkChoiceMadeAt)
+    : null;
   if (rtkProviders) {
     for (const m of manifestCache) {
       if (m.templateKind === 'rtk-config' && rtkSettingsNeeded(m.templateId, rtkProviders)) {
@@ -754,7 +775,10 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // An upgrade also takes out the RTK block (02-upgrade-apply) once RTK is switched off.
   const rtkRemoval =
     root !== null &&
-    rtkLeftoversToRemove(rtkChoiceFollowsLive(origin, history, repo.source), repo.rtkEnabled);
+    rtkLeftoversToRemove(
+      rtkChoiceFollowsLive(origin, history, repo.source, repo.rtkChoiceMadeAt),
+      repo.rtkEnabled,
+    );
   const rtkBlockLeftovers = root && rtkRemoval ? await rtkBlockFiles(root) : [];
   // No row records the RTK settings files a blank scaffold seeds, so no template comparison sees them.
   const rtkSettingsLeft =
@@ -875,16 +899,19 @@ function liveUpgradeMessage(taskId: string): string {
   return `An upgrade or rollback is already in progress for this repository (task ${taskId})`;
 }
 
-/** Run `work` in a transaction holding the repository's onboarding and upgrade lock, so the checks
- *  it makes and the insert it ends with cannot interleave with another creator's. The repository
- *  row is locked too, and a live root claim refuses: a reset that claims the root afterwards waits
- *  for this commit and finds the task among the writers it refuses for. */
+/** Run `work` in a transaction that admits the new work, then holds the repository's onboarding and
+ *  upgrade lock, so the checks it makes and the insert it ends with cannot interleave with another
+ *  creator's. The repository row is locked too, and a live root claim refuses: a reset that claims
+ *  the root afterwards waits for this commit and finds the task among the writers it refuses for. */
 export async function withRepositoryTaskLock<T>(
   db: ReturnType<typeof getDb>,
   repositoryId: string,
   work: (tx: DbTx, repo: RepositoryForUpgrade) => Promise<T>,
 ): Promise<T> {
-  return db.transaction(async (tx) => work(tx, await lockRepositoryTasks(tx, repositoryId)));
+  return db.transaction(async (tx) => {
+    await admitNewWork(tx);
+    return work(tx, await lockRepositoryTasks(tx, repositoryId));
+  });
 }
 
 async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
@@ -987,7 +1014,7 @@ export async function lastUpgradeRemovedContent(
  * `metadata.mode === 'rollback'` and reverts the most recent completed
  * onboarding_upgrade task for this repository.
  */
-upgradeRoutes.post('/:id/rollback-upgrade', async (c) => {
+upgradeRoutes.post('/:id/rollback-upgrade', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const repositoryId = c.req.param('id');
   const db = getDb();

@@ -33,6 +33,7 @@ import {
   listTaskTypes,
   attachmentUploadName,
   uploadTaskAttachment,
+  startTask,
   type CliProvider,
   type PlanBlocker,
   type OnboardingStatus,
@@ -665,8 +666,10 @@ export default function NewTaskPage() {
         setDumpUploading(false);
       }
 
+      const deferStart = attachmentFiles.length > 0;
+      if (deferStart) body.deferStart = true;
       const data = await api.post<{ task: Task }>('/tasks', body);
-      if (attachmentFiles.length > 0) {
+      if (deferStart) {
         setAttachmentUploading(true);
         try {
           for (const f of attachmentFiles) await uploadTaskAttachment(data.task.id, f);
@@ -676,6 +679,9 @@ export default function NewTaskPage() {
         } finally {
           setAttachmentUploading(false);
         }
+        // Started whatever the uploads did, so it is never left `created`; if this call fails,
+        // the task page's Start is the retry.
+        await startTask(data.task.id).catch(() => undefined);
       }
       if (origin) rememberTaskOrigin(`/tasks/${data.task.id}`, origin);
       router.push(`/tasks/${data.task.id}`);
@@ -816,7 +822,7 @@ export default function NewTaskPage() {
                 </div>
               )}
               {resetNote && <p className="text-amber-300">{resetNote}</p>}
-              {!statusLoading && !statusError && onboardingStatus && (
+              {!statusLoading && onboardingStatus && (
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center gap-2">
                     <span

@@ -88,6 +88,9 @@ const sent: string[] = [];
 const posted: Record<string, unknown>[] = [];
 let holdLastCli = false;
 let holdParents = false;
+let holdUploads = false;
+let failUploads = false;
+const actions: Record<string, unknown>[] = [];
 
 const reply = (code: number, body: unknown) => ({
   ok: code < 400,
@@ -107,7 +110,8 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
   if (
     HELD.test(call) ||
     (holdLastCli && path === '/tasks/last-cli') ||
-    (holdParents && call === 'GET /tasks')
+    (holdParents && call === 'GET /tasks') ||
+    (holdUploads && call === 'POST /tasks/task-new/attachments')
   ) {
     return new Promise((resolve) => {
       held.set(key, (code, body) => resolve(reply(code, body)));
@@ -116,6 +120,15 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
   if (path === '/tasks/last-cli') return reply(200, last);
   if (call === 'GET /tasks') {
     return reply(200, { tasks: PARENTS[url.searchParams.get('repositoryId') ?? ''] ?? [] });
+  }
+  if (call === 'POST /tasks/task-new/attachments') {
+    return failUploads
+      ? reply(500, { error: 'upload failed' })
+      : reply(201, { attachment: { id: url.searchParams.get('filename') } });
+  }
+  if (call === 'POST /tasks/task-new/action') {
+    actions.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>);
+    return reply(200, { ok: true, started: true, status: 'queued' });
   }
   if (call === 'POST /tasks') {
     posted.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>);
@@ -133,6 +146,9 @@ beforeEach(() => {
   posted.length = 0;
   holdLastCli = false;
   holdParents = false;
+  holdUploads = false;
+  failUploads = false;
+  actions.length = 0;
 });
 
 async function mount(): Promise<Renderer> {
@@ -393,6 +409,14 @@ describe('the onboarding status beside the repository select', () => {
       expect(buttons(view.tree(), /^re-run onboarding$/)).toHaveLength(1);
     });
 
+    it('keeps the verdict in view beside its failure', async () => {
+      const view = await resetA();
+      await release(view, RESET('repo-a'), 500, { error: 'reset failed for a' });
+      expect(page(view)).toContain('reset failed for a');
+      expect(page(view)).toContain('Will run: workflow');
+      expect(isDisabled(submit(view))).toBe(false);
+    });
+
     it('disables Retry while the status is being asked for again', async () => {
       const view = await resetA();
       // A failure that lands after the person came back to repo-a meets that repository's new ask.
@@ -456,6 +480,14 @@ describe('the onboarding status beside the repository select', () => {
       await answer(view, 'repo-b', 200, status({ onboarded: true }));
       expect(page(view)).not.toContain('mark failed for a');
       expect(page(view)).toContain('Will run: workflow');
+    });
+
+    it('keeps the verdict in view beside its failure', async () => {
+      const view = await markOnboarded();
+      await release(view, MARK('repo-a'), 500, { error: 'mark failed for a' });
+      expect(page(view)).toContain('mark failed for a');
+      expect(page(view)).toContain('Will run: onboarding');
+      expect(isDisabled(submit(view))).toBe(false);
     });
   });
 });
@@ -600,5 +632,58 @@ describe('the parent of a bug fix', () => {
     expect(posted).toEqual([
       expect.objectContaining({ repositoryId: 'repo-b', parentTaskId: 'task-b1' }),
     ]);
+  });
+});
+
+describe('a new task with attachments', () => {
+  const UPLOAD = (name: string) => `POST /tasks/task-new/attachments?filename=${name}`;
+  const START = 'POST /tasks/task-new/action';
+  const writes = () => sent.filter((call) => !call.startsWith('GET '));
+
+  async function readyOnA(files: File[]) {
+    const view = await mount();
+    pick(view, 'repo-a');
+    await answer(view, 'repo-a', 200, status({ onboarded: true }));
+    fire.type(controls(view.tree(), /^title$/)[0]!, 'A title');
+    fire.type(controls(view.tree(), /^description/)[0]!, 'A description');
+    const input = controls(view.tree(), /^attachments/)[0]!;
+    (input.props.onChange as (e: unknown) => void)({ target: { files } });
+    view.draw();
+    return view;
+  }
+  const two = () => [new File(['a'], 'a.md'), new File(['b'], 'b.md')];
+
+  it('creates the task unstarted, uploads every file, then starts it', async () => {
+    const view = await readyOnA(two());
+    await submitForm(view);
+    expect(posted).toEqual([expect.objectContaining({ deferStart: true })]);
+    expect(writes()).toEqual(['POST /tasks', UPLOAD('a.md'), UPLOAD('b.md'), START]);
+    expect(actions).toEqual([{ action: 'start' }]);
+  });
+
+  it('starts the task only once its uploads have landed', async () => {
+    holdUploads = true;
+    const view = await readyOnA([new File(['a'], 'a.md')]);
+    const submitted = submitForm(view);
+    await view.flush();
+    expect(writes()).toEqual(['POST /tasks', UPLOAD('a.md')]);
+    await release(view, UPLOAD('a.md'), 201, { attachment: { id: 'a.md' } });
+    await submitted;
+    expect(writes()).toEqual(['POST /tasks', UPLOAD('a.md'), START]);
+  });
+
+  it('still starts the task when an upload fails', async () => {
+    failUploads = true;
+    const view = await readyOnA(two());
+    await submitForm(view);
+    expect(writes()).toEqual(['POST /tasks', UPLOAD('a.md'), START]);
+  });
+
+  it('creates and starts a task with no attachments in one call', async () => {
+    const view = await readyOnA([]);
+    await submitForm(view);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).not.toHaveProperty('deferStart');
+    expect(writes()).toEqual(['POST /tasks']);
   });
 });

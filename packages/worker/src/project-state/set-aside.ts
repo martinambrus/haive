@@ -20,6 +20,7 @@ import {
   PROJECT_STATE_LIMITS,
   ProjectStateError,
   emptyProjectState,
+  isClaimablePath,
   renderProjectState,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
@@ -298,7 +299,12 @@ async function stateOffender(
     expected = renderProjectState({
       ...base,
       render: overlayRender(base.render, render, 'incoming'),
-      claims: overlayClaims(base.claims, claims, 'incoming'),
+      // A git-data claim the base lists is only there for the writer to remove its file.
+      claims: overlayClaims(
+        base.claims.filter((c) => isClaimablePath(c.path)),
+        claims,
+        'incoming',
+      ),
       settings: overlaySettings(base.settings, settings, 'incoming'),
       environment: overlayEnvironment(base.environment, settings, 'incoming'),
     });
@@ -712,7 +718,11 @@ async function setAsideOnce(
   const plan = dirty.paths.filter((p) => !p.startsWith(STATE_PREFIX));
 
   if (state.length > 0) {
-    await syncProjectStateFromCheckout(db, { repositoryId, repoPath }).catch((err: unknown) =>
+    await syncProjectStateFromCheckout(db, {
+      repositoryId,
+      repoPath,
+      refuseDuringGitOperation: true,
+    }).catch((err: unknown) =>
       logger.warn({ err, repositoryId }, 'project state not synced before a checkout move'),
     );
   }
@@ -807,21 +817,35 @@ async function isDirty(
 }
 
 /** After a move of the checkout: reads the new head's record and plan in, then writes what this install
- *  still has pending over them. A step that fails here leaves its mark raised, so the sweep retries it. */
+ *  still has pending over them. A step that fails here leaves its mark raised, so the sweep retries it.
+ *  Whether both halves re-synced: false while a merge or rebase is open, when either threw, or when the
+ *  state sync was held, superseded or refused or its pending write did not run. A sync deferred to a
+ *  live onboarding or upgrade counts as done: that task re-syncs when it ends. */
 export async function resyncHaiveProjections(
   db: Database,
   repositoryId: string,
   repoPath: string,
-): Promise<void> {
+): Promise<boolean> {
   // A merge or rebase still open holds an intermediate record: nothing is read in until it ends.
-  if (await gitOperationInProgress(repoPath)) return;
+  if (await gitOperationInProgress(repoPath)) return false;
+  let synced = true;
   try {
     restoreFaults.beforeResync?.('state');
-    await syncProjectStateFromCheckout(db, { repositoryId, repoPath });
-    if (await isDirty(db, schema.projectStateOutbox, repositoryId)) {
-      await refreshProjectState(db, repositoryId);
+    const { outcome } = await syncProjectStateFromCheckout(db, {
+      repositoryId,
+      repoPath,
+      refuseDuringGitOperation: true,
+    });
+    if (outcome === 'held' || outcome === 'superseded' || outcome === 'refused') synced = false;
+    if (
+      (await isDirty(db, schema.projectStateOutbox, repositoryId)) &&
+      !(await refreshProjectState(db, repositoryId)) &&
+      outcome !== 'deferred'
+    ) {
+      synced = false;
     }
   } catch (err) {
+    synced = false;
     logger.warn({ err, repositoryId }, 'project state not re-synced after a checkout move');
     await raiseMarkAfterFailure(db, schema.projectStateOutbox, repositoryId, markProjectStateDirty);
   }
@@ -832,9 +856,11 @@ export async function resyncHaiveProjections(
       await flushPlanMirrorForRepository(db, repositoryId);
     }
   } catch (err) {
+    synced = false;
     logger.warn({ err, repositoryId }, 'plan not re-synced after a checkout move');
     await raiseMarkAfterFailure(db, schema.planMirrorState, repositoryId, markPlanMirrorDirty);
   }
+  return synced;
 }
 
 /** The re-sync an onboarding or upgrade owes when it ends, since the sync deferred while it held the

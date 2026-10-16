@@ -1,4 +1,5 @@
 import {
+  CORE_INTEGRATION_CATEGORY_SPECS,
   CUSTOM_TOOL_PROBLEM_KINDS,
   CUSTOM_TOOL_RESPONSE_DEFAULT_BYTES,
   CUSTOM_TOOL_STRING_DEFAULT_LENGTH,
@@ -23,6 +24,10 @@ export type PromptSteps = Record<string, PromptStepEntry>;
 export type StoredPromptSteps = Record<string, StoredPromptStep>;
 export type ToolAction = CustomTool['action'];
 export type ParamType = CustomToolParam['type'];
+
+const CORE_CATEGORY_IDS: ReadonlySet<string> = new Set(
+  CORE_INTEGRATION_CATEGORY_SPECS.map((category) => category.id),
+);
 
 export const DEFAULT_PROMPT_STEP_TIMEOUT_MS = 5 * 60_000;
 export const PROMPT_STEP_TIMEOUT_MIN_MINUTES = PROMPT_STEP_TIMEOUT_MIN_MS / 60_000;
@@ -93,6 +98,7 @@ export function promptStepIssues(input: {
     { slug: typeSlug, stepIds, requiresRepository: input.requiresRepository },
     promptSteps,
     { composable: input.catalog },
+    CORE_CATEGORY_IDS,
   ).filter((issue) => issue.kind !== 'prompt-step-missing' && issue.kind !== 'prompt-step-orphan');
   const empty = stepIds.flatMap((stepId, index): PromptStepIssue[] => {
     const entry = byId.get(stepId);

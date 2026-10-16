@@ -72,7 +72,7 @@ import {
   PROJECT_STATE_DIR,
   bundleFileName,
   claimFileName,
-  isClaimablePath,
+  isCanonicalRepoPath,
   isRecordName,
   parsePlanConflictUnit,
   portableBundleSource,
@@ -92,6 +92,7 @@ import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } f
 import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
+import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import type { Context } from 'hono';
 import {
@@ -371,7 +372,7 @@ repoRoutes.get('/:id/database-snapshot', async (c) => {
   });
 });
 
-repoRoutes.post('/', async (c) => {
+repoRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const body = createRepoRequestSchema.parse(await c.req.json());
   const db = getDb();
@@ -403,20 +404,23 @@ repoRoutes.post('/', async (c) => {
     localPath: body.localPath,
   });
 
-  const inserted = await db
-    .insert(schema.repositories)
-    .values({
-      userId,
-      name: repoName,
-      source: body.source,
-      localPath,
-      remoteUrl: body.remoteUrl ?? null,
-      branch: body.branch ?? 'main',
-      status: 'cloning',
-      credentialsSecretId: body.credentialsId ?? null,
-      writable: body.source === 'local_path' ? (body.writable ?? false) : false,
-    })
-    .returning();
+  const inserted = await db.transaction(async (tx) => {
+    await admitNewWork(tx);
+    return tx
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: repoName,
+        source: body.source,
+        localPath,
+        remoteUrl: body.remoteUrl ?? null,
+        branch: body.branch ?? 'main',
+        status: 'cloning',
+        credentialsSecretId: body.credentialsId ?? null,
+        writable: body.source === 'local_path' ? (body.writable ?? false) : false,
+      })
+      .returning();
+  });
 
   const repo = inserted[0]!;
   const queue = getRepoQueue();
@@ -449,7 +453,7 @@ repoRoutes.post('/', async (c) => {
   return c.json({ repository: repo }, 201);
 });
 
-repoRoutes.post('/upload', async (c) => {
+repoRoutes.post('/upload', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const db = getDb();
 
@@ -484,19 +488,22 @@ repoRoutes.post('/upload', async (c) => {
     filename: archiveField.name,
   });
 
-  const inserted = await db
-    .insert(schema.repositories)
-    .values({
-      userId,
-      name: uploadRepoName,
-      source: 'upload',
-      localPath: null,
-      remoteUrl: null,
-      branch,
-      status: 'cloning',
-      credentialsSecretId: null,
-    })
-    .returning();
+  const inserted = await db.transaction(async (tx) => {
+    await admitNewWork(tx);
+    return tx
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: uploadRepoName,
+        source: 'upload',
+        localPath: null,
+        remoteUrl: null,
+        branch,
+        status: 'cloning',
+        credentialsSecretId: null,
+      })
+      .returning();
+  });
   const repo = inserted[0]!;
 
   const storageRoot = await ensureUploadsDir(userId);
@@ -726,7 +733,7 @@ repoRoutes.put('/upload/:id/chunk', async (c) => {
   return c.json({ session: sessionFromRow(updated[0]!) });
 });
 
-repoRoutes.post('/upload/:id/complete', async (c) => {
+repoRoutes.post('/upload/:id/complete', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const uploadId = c.req.param('id');
   const db = getDb();
@@ -755,7 +762,6 @@ repoRoutes.post('/upload/:id/complete', async (c) => {
     throw new HttpError(500, 'archive path missing .partial suffix');
   }
   const finalPath = path.join(storageRoot, finalRel);
-  await renameNoFollow(storageRoot, archiveRel, finalRel);
 
   const repoName = deriveRepoName({
     name: row.name ?? undefined,
@@ -763,19 +769,23 @@ repoRoutes.post('/upload/:id/complete', async (c) => {
   });
   const branch = row.branch && row.branch.length > 0 ? row.branch : 'main';
 
-  const inserted = await db
-    .insert(schema.repositories)
-    .values({
-      userId,
-      name: repoName,
-      source: 'upload',
-      localPath: null,
-      remoteUrl: null,
-      branch,
-      status: 'cloning',
-      credentialsSecretId: null,
-    })
-    .returning();
+  const inserted = await db.transaction(async (tx) => {
+    await admitNewWork(tx);
+    await renameNoFollow(storageRoot, archiveRel, finalRel);
+    return tx
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: repoName,
+        source: 'upload',
+        localPath: null,
+        remoteUrl: null,
+        branch,
+        status: 'cloning',
+        credentialsSecretId: null,
+      })
+      .returning();
+  });
   const repo = inserted[0]!;
 
   const queue = getRepoQueue();
@@ -2404,7 +2414,7 @@ export async function resetOnboardingArtifacts(
 
   for (const rel of ONBOARDING_RESET_FILES) await remove(rel, false);
   for (const diskPath of writtenHashes.keys()) {
-    if (isClaimablePath(diskPath))
+    if (isCanonicalRepoPath(diskPath))
       await remove(`${PROJECT_STATE_DIR}/${claimFileName(diskPath)}`, false);
   }
   for (const source of provenance.bundleSources ?? []) {
@@ -3121,7 +3131,7 @@ repoRoutes.delete('/:id', async (c) => {
   });
 });
 
-repoRoutes.post('/:id/refresh-tree', async (c) => {
+repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
@@ -3151,10 +3161,13 @@ repoRoutes.post('/:id/refresh-tree', async (c) => {
     );
   }
 
-  await db
-    .update(schema.repositories)
-    .set({ status: 'cloning', statusMessage: null, updatedAt: new Date() })
-    .where(eq(schema.repositories.id, id));
+  await db.transaction(async (tx) => {
+    await admitNewWork(tx);
+    await tx
+      .update(schema.repositories)
+      .set({ status: 'cloning', statusMessage: null, updatedAt: new Date() })
+      .where(eq(schema.repositories.id, id));
+  });
 
   const queue = getRepoQueue();
   const payload: RepoJobPayload = {

@@ -97,13 +97,20 @@ const withTools = (tools: unknown[], draft: Record<string, unknown> = {}) =>
   withStep({ tools }, draft);
 const withHttp = (over: Record<string, unknown>, draft: Record<string, unknown> = {}) =>
   withTools([{ ...httpTool, ...over }], draft);
+const requirement = (id: string, category: string) => ({ id, category, access: 'read' });
+const withIntegrations = (integrations: unknown[], draft: Record<string, unknown> = {}) =>
+  withStep({ integrations }, draft);
+const storedWith = (integrations: unknown[]) => ({
+  review: parsePromptSteps({ review: step('review', { integrations }) }).review,
+});
 
 type KindOf = PromptStepIssueKind | CompositionIssue['kind'] | TaskTypeDefaultsIssue['kind'];
 type Reach =
   | { reaches: () => unknown }
   | { schemaPath: string; refuses: () => unknown }
   // Raised for a stored step read back with a tool that no longer parses: no draft carries that.
-  | { stored: () => Record<string, unknown> };
+  // `categories` is the registry the check is given, which the check of a draft never is.
+  | { stored: () => Record<string, unknown>; categories?: ReadonlySet<string> };
 
 // Every kind the save path can answer is a key here: a kind added later without a row fails to compile.
 const KINDS: Record<KindOf, Reach> = {
@@ -113,7 +120,12 @@ const KINDS: Record<KindOf, Reach> = {
   'field-not-declared': { reaches: () => withStep({ template: 'Say {{field:topic}}' }) },
   'persona-id-invalid': { reaches: () => withStep({ template: 'Be {{agent:Bad_Id}}' }) },
   'reserved-marker-in-template': { reaches: () => withStep({ template: 'Say [[HAIVE_X]]' }) },
-  'integration-token': { reaches: () => withStep({ template: 'Say {{integration:x}}' }) },
+  'integration-not-declared': {
+    reaches: () => withStep({ template: 'Say {{integration:x.account}}' }),
+  },
+  'integration-property-unknown': {
+    reaches: () => withStep({ template: 'Say {{integration:x}}' }),
+  },
   'persona-without-repository': {
     reaches: () => withStep({ template: 'Be {{agent:reviewer}}' }, noRepo),
   },
@@ -139,6 +151,31 @@ const KINDS: Record<KindOf, Reach> = {
         review: step('review', { tools: [{ ...httpTool, description: 'd'.repeat(1025) }] }),
       }).review,
     }),
+  },
+  'integration-no-longer-valid': { stored: () => storedWith([{ nope: 1 }]) },
+  'integration-category-unknown': {
+    stored: () => storedWith([requirement('talk', 'chat')]),
+    categories: new Set(['forge', 'issues']),
+  },
+  'too-many-integrations': {
+    reaches: () =>
+      withIntegrations(
+        Array.from({ length: 9 }, (_, i) => requirement(`r${i}`, `module.demo.c${i}`)),
+      ),
+  },
+  'integration-provider-pinned': {
+    reaches: () => withIntegrations([{ id: 'gh', provider: 'github', access: 'read' }]),
+  },
+  'integration-category-duplicate': {
+    reaches: () =>
+      withIntegrations([requirement('first', 'issues'), requirement('second', 'issues')]),
+  },
+  'integration-id-duplicate': {
+    reaches: () => withIntegrations([requirement('same', 'issues'), requirement('same', 'chat')]),
+  },
+  'integration-id-invalid': { reaches: () => withIntegrations([requirement('1st', 'issues')]) },
+  'integration-without-repository': {
+    reaches: () => withIntegrations([requirement('prs', 'forge')], noRepo),
   },
   'tool-name-reserved': { reaches: () => withHttp({ name: 'rag_search' }) },
   'tool-name-duplicate': { reaches: () => withTools([httpTool, httpTool]) },
@@ -245,7 +282,13 @@ describe('PROMPT_STEP_DRAFTABLE_KEYS', () => {
     const excluded = Object.keys(promptStepEntrySchema.shape).filter(
       (key) => !(PROMPT_STEP_DRAFTABLE_KEYS as readonly string[]).includes(key),
     );
-    expect(excluded.sort()).toEqual(['agentPool', 'description', 'paramFormSchema', 'tools']);
+    expect(excluded.sort()).toEqual([
+      'agentPool',
+      'description',
+      'integrations',
+      'paramFormSchema',
+      'tools',
+    ]);
   });
 });
 
@@ -407,7 +450,7 @@ describe('validateTaskTypeDraft', () => {
     } else if ('stored' in how) {
       it('is raised for a stored step, and no draft can carry it', () => {
         const def = { slug: TYPE, stepIds: ['ta-a', 'ta-b', CUSTOM_ID], requiresRepository: true };
-        const issues = checkPromptSteps(def, how.stored() as never, catalog);
+        const issues = checkPromptSteps(def, how.stored() as never, catalog, how.categories);
         expect(issues.map((i) => [i.kind, i.stepId, i.index])).toEqual([[kind, CUSTOM_ID, 2]]);
         const forged = withStep({ invalidTools: ['forged'] });
         expect(kindsOf(validateTaskTypeDraft(forged, catalog).issues)).not.toContain(kind);
