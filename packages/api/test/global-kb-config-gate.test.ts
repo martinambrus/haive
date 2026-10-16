@@ -95,6 +95,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
           : Reflect.get(target, prop, receiver),
     }),
     configService: {
+      getFresh: async (key: string) => (h.flags.has(key) ? String(h.flags.get(key)) : null),
       getBoolean: async (key: string, fallback: boolean) => h.flags.get(key) ?? fallback,
       set: h.set,
     },

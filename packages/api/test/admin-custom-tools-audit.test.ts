@@ -21,6 +21,7 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
   configService: {
+    getFresh: async (key: string) => h.stored.get(key) ?? null,
     getBoolean: async (key: string, fallback = false) => {
       const value = h.stored.get(key);
       return value === undefined ? fallback : value === 'true';
