@@ -846,20 +846,13 @@ async function listExtractedFiles(
   const out: Array<{ path: string; size: number }> = [];
   let truncated = false;
   const walk = async (relDir: string, rel: string): Promise<void> => {
-    if (out.length >= FILES_LIST_CAP) {
-      truncated = true;
-      return;
-    }
     // Lenient: a directory that cannot be listed — absent, unreadable, or a link standing where a
     // directory should be — contributes nothing, which is exactly what the `catch` here did.
     const entries = await readdirNoFollow(anchor, relDir);
     if (entries === null) return;
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
-      if (out.length >= FILES_LIST_CAP) {
-        truncated = true;
-        return;
-      }
+      if (truncated) return;
       if (entry.name === '.git') continue;
       if (entry.name === '.DS_Store') continue;
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
@@ -873,6 +866,10 @@ async function listExtractedFiles(
       if (!entry.isFile()) continue;
       const info = await lstatNoFollow(anchor, `${relDir}/${entry.name}`);
       if (info?.kind !== 'file') continue;
+      if (out.length >= FILES_LIST_CAP) {
+        truncated = true;
+        return;
+      }
       out.push({ path: childRel, size: Number(info.stats.size) });
     }
   };
