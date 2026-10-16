@@ -1,5 +1,5 @@
 /** The New Task form's remembered CLI dropdown values, as `GET /tasks/last-cli` returns
- *  them. `null` = this repo has no recorded choice. */
+ *  them. `null` = no recorded choice for this repo, or across repos for a type that needs none. */
 export type LastCliChoice = { providerId: string | null } | null;
 export type LastSummaryCliChoice = { providerId: string | null; llmEnabled: boolean } | null;
 
