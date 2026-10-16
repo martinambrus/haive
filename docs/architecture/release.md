@@ -61,7 +61,11 @@ or rollback), like an administrator's maintenance write, takes the same fence ex
 it waits for every admission in flight, so the live-work count it reads next includes each task or
 job admitted before it, every admission after it reads the new state, and no write lands inside an
 administrator's write. Lifting the hold therefore needs Postgres: an updater that cannot reach it
-leaves its run `running`, and the next `haive upgrade` resumes into the commit or the rollback. The gate that
-locks non-admins out during `maintenance` keeps its cached read, so that lockout can lag by up to
-30 s. In the worker, the allowance auto-resume and an answer to a parked form do not reopen a
+leaves its run `running`, and the next `haive upgrade` resumes into the commit or the rollback. The admin
+page (`GET /admin/maintenance`) and the app banner (`GET /system/state`) read the state past the
+config cache, so a change shows at once; the gate that locks non-admins out during `maintenance`
+keeps its cached read, so that lockout can lag by up to 30 s. `PUT /admin/maintenance` writes its
+`maintenance.set_state` audit row inside its fenced transaction, before the state: a row that cannot
+be written refuses the change. The state itself lives in Redis, so a commit that fails after that
+write still leaves the new state without its row. In the worker, the allowance auto-resume and an answer to a parked form do not reopen a
 failed task while new work is refused (see [Worker restarts](worker-restarts.md)).

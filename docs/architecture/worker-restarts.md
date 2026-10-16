@@ -125,8 +125,12 @@ re-driven diagnosis is the row's `error_message` (with no guidance, see fix-loop
 to walk forward past the round its step had asked for. The verdict is recomputed from the stored
 output by the one function the tail itself routes with (`finishedRoutingVerdict`), so the two
 cannot disagree on precedence. An answered fix-loop gate is finished from its answer instead
-(`resolveFixLoopGate`): the gate writes its row `done` before it acts, so a verdict recomputed
-there would replace the person's decision with the step's own. On a task that failed before the
+(`resolveFixLoopGate`), so a verdict recomputed there cannot replace the person's decision with the
+step's own. An answer that reopens the task (continue, or accept with a next step) closes the gate,
+records the answer and points the task at its next step in one transaction, under the new-work fence
+and then the repository lock when the task had failed, so a refused or overtaken reopen leaves the
+gate parked with nothing recorded. Abort, an accept with no next step, a dead run list and a continue
+with no routable target close the row before they act. On a task that failed before the
 answer was sent, the pickup guard admits the answer onto the `done` row as it would onto the parked
 form (`gateAnswerSentAfterFailure`, the task's `completed_at` against the job's own timestamp); a
 failure after it was sent, such as a Stop, keeps it out. `advanceStep`'s own `done` short-circuit
