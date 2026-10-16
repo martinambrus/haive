@@ -541,31 +541,36 @@ export class TerminalSessionManager {
       log.warn({ err, sessionId }, 'pty stream error');
     });
 
-    await this.subscriber.subscribe(inChannel, ctlChannel);
+    try {
+      await this.subscriber.subscribe(inChannel, ctlChannel);
 
-    // Registry entry: worker writes container metadata only (HSETNX-style for
-    // startedAt so reuses don't overwrite). API alone owns `refcount` via
-    // HINCRBY +/-1 on WS attach/detach, and updates `lastSeenAt` on detach
-    // so the reaper's idle clock starts when the last tab disconnects. The
-    // worker does NOT touch refcount because openSession is called per-WS
-    // and overwriting would clobber sibling tab counts.
-    const key = ensureKey;
-    const now = Date.now();
-    await this.redis.hset(key, {
-      containerName: ensured.containerName,
-      shell: ensured.shell,
-      ...(ensured.gitCredMintedAt === undefined
-        ? {}
-        : {
-            scope,
-            scopeId,
-            userId: req.userId,
-            gitCredMintedAt: String(ensured.gitCredMintedAt),
-          }),
-    });
-    await this.redis.hsetnx(key, 'startedAt', String(now));
-    await this.redis.hsetnx(key, 'lastSeenAt', String(now));
-    await this.redis.hsetnx(key, 'refcount', '0');
+      // Registry entry: worker writes container metadata only (HSETNX-style for
+      // startedAt so reuses don't overwrite). API alone owns `refcount` via
+      // HINCRBY +/-1 on WS attach/detach, and updates `lastSeenAt` on detach
+      // so the reaper's idle clock starts when the last tab disconnects. The
+      // worker does NOT touch refcount because openSession is called per-WS
+      // and overwriting would clobber sibling tab counts.
+      const key = ensureKey;
+      const now = Date.now();
+      await this.redis.hset(key, {
+        containerName: ensured.containerName,
+        shell: ensured.shell,
+        ...(ensured.gitCredMintedAt === undefined
+          ? {}
+          : {
+              scope,
+              scopeId,
+              userId: req.userId,
+              gitCredMintedAt: String(ensured.gitCredMintedAt),
+            }),
+      });
+      await this.redis.hsetnx(key, 'startedAt', String(now));
+      await this.redis.hsetnx(key, 'lastSeenAt', String(now));
+      await this.redis.hsetnx(key, 'refcount', '0');
+    } catch (err) {
+      await this.teardownSession(session, 'open-failed').catch(() => undefined);
+      throw err;
+    }
 
     return {
       ok: true,
