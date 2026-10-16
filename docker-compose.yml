@@ -187,6 +187,11 @@ services:
       HOST_REPO_ROOT_REAL: ${HOST_REPO_ROOT:-${HOME}}
       REPO_STORAGE_ROOT: /var/lib/haive/repos
       BUNDLE_STORAGE_ROOT: /var/lib/haive/bundles
+      # The sandbox base's rtk pin, for the builds the worker runs itself (sandbox-core-image.ts):
+      # the same two variables as the cli-sandbox build args below, so a hand build and the
+      # worker's agree. Empty keeps the Dockerfile's own defaults.
+      RTK_RELEASE_VERSION: ${RTK_RELEASE_VERSION:-}
+      RTK_X86_64_MUSL_SHA256: ${RTK_X86_64_MUSL_SHA256:-}
     volumes:
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       - ${HOST_REPO_ROOT:-${HOME}}:/host-fs

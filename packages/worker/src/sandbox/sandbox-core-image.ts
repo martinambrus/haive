@@ -28,7 +28,10 @@ function contextDir(): string {
 
 /** Only forwarded when the operator actually pinned them, so an unset environment builds
  *  exactly what the Dockerfile's own ARG defaults produce — which is byte-for-byte what
- *  `pnpm docker sandbox-build` produces, since compose declares the same defaults. */
+ *  `pnpm docker sandbox-build` produces, since compose declares the same defaults. Compose
+ *  hands the worker the same two variables it hands that build, empty when unset: without
+ *  them the worker built and stamped the defaults, so an image built under an operator's pin
+ *  read as out of date and was rebuilt without it. */
 function resolveBuildArgs(): Record<string, string> {
   const args: Record<string, string> = {};
   const version = process.env.RTK_RELEASE_VERSION?.trim();

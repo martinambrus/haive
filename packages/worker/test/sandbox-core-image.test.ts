@@ -181,4 +181,16 @@ describe('sandboxCoreIdentity', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  // Compose hands the worker both rtk variables, empty when the operator pinned nothing, so an
+  // empty one must build, and stamp, exactly what an unset one does.
+  it('reads an empty rtk variable as unpinned, as compose passes it then', async () => {
+    const unset = sandboxCoreIdentity();
+    process.env.RTK_RELEASE_VERSION = '';
+    process.env.RTK_X86_64_MUSL_SHA256 = '';
+    expect(sandboxCoreIdentity()).toBe(unset);
+    const r = makeRunner({ exists: false });
+    await ensureSandboxCoreImage(CORE, r.runner);
+    expect(r.builds[0]?.buildArgs).toEqual({ HAIVE_CORE_IDENTITY: unset });
+  });
 });

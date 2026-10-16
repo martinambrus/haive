@@ -27,7 +27,9 @@ multi-minute build.
 **It also rebuilds itself when its definition changes.** The ensure used to build only a
 MISSING image, so an install that had the base kept it through every release that changed it,
 and an rtk bump reached fresh installs only. `sandboxCoreIdentity` hashes every file of the build
-context and the rtk build args an operator pinned; the build stamps it on the image
+context and the rtk build args an operator pinned (`RTK_RELEASE_VERSION`,
+`RTK_X86_64_MUSL_SHA256`, which compose hands the worker as well as the `cli-sandbox` build, or
+the worker would rebuild a pinned image under the defaults); the build stamps it on the image
 (`haive.core-identity`), and the ensure rebuilds an image carrying any other value, none
 included: a hand-run `pnpm docker sandbox-build` and an image from before the label carry none,
 so the worker rebuilds them once. Every per-CLI Dockerfile carries the same identity
