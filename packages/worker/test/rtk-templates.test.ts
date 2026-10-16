@@ -147,7 +147,7 @@ describe('buildRtkAwarenessBlock', () => {
     const block = buildRtkAwarenessBlock();
     expect(block).toContain(RTK_REF_MARKER_START);
     expect(block).toContain(RTK_REF_MARKER_END);
-    expect(block).toContain('rtk gain');
+    expect(block).toContain(RTK_SLIM);
     expect(block).not.toContain('@RTK.md');
   });
 });
@@ -331,11 +331,9 @@ describe('withoutRtkHookEntry', () => {
 });
 
 describe('RTK_SLIM body', () => {
-  it('mentions rtk gain for token savings inspection', () => {
-    expect(RTK_SLIM).toContain('rtk gain');
-  });
-
-  it('mentions rtk proxy for the bypass debugging path', () => {
-    expect(RTK_SLIM).toContain('rtk proxy');
+  it('names rtk proxy, the unfiltered re-run every sandbox rtk accepts', () => {
+    // A repository can pin 0.x, and 0.37.2 has no `rtk bypass`; 1.0 keeps `proxy` as its alias.
+    expect(RTK_SLIM).toContain('rtk proxy <cmd>');
+    expect(RTK_SLIM).not.toContain('rtk bypass');
   });
 });

@@ -84,7 +84,7 @@ import {
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
 import { isTaskDead, loadTaskDead, refuseDeadTask } from '../../lib/task-dead.js';
-import { loadTaskStop } from '../../lib/task-stop.js';
+import { loadTaskStop, loadTaskStops } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
 import { isUuid } from '../../lib/uuid.js';
 import { getTaskQueue } from '../../queues.js';
@@ -101,6 +101,7 @@ import {
   findActiveCliInvocation,
   findAdminPausedTaskIds,
   findQueuedInvocationStepIds,
+  loadFinishedRunsRevision,
   loadTaskTypeLabels,
   resolveCurrentStepCliProviderIds,
   sumTaskTokens,
@@ -392,6 +393,7 @@ taskRoutes.get('/', async (c) => {
     db,
     rows.map((r) => r.type),
   );
+  const stops = await loadTaskStops(db, rows);
   const tasks = rows.map((t) => {
     const steps = stepsByTask.get(t.id) ?? [];
     const startMs = t.startedAt ? t.startedAt.getTime() : null;
@@ -418,6 +420,7 @@ taskRoutes.get('/', async (c) => {
       ...t,
       typeLabel: typeLabels.get(t.type) ?? null,
       pausedByAdmin: adminPausedIds.has(t.id),
+      stop: stops.get(t.id) ?? null,
       timing: { wallMs, workMs, idleMs, userActiveMs },
       tokenUsage: tokensByTask.get(t.id) ?? null,
       currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,
@@ -533,16 +536,6 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
 
   if (body.databaseSnapshotId && body.dbUploadId) {
     throw new HttpError(400, 'Select either a saved database or an uploaded dump');
-  }
-  if (body.dbUploadId) {
-    const dump = await db.query.dbUploads.findFirst({
-      where: and(eq(schema.dbUploads.id, body.dbUploadId), eq(schema.dbUploads.userId, userId)),
-      columns: { id: true, status: true },
-    });
-    if (!dump) throw new HttpError(404, 'DB dump upload not found');
-    if (dump.status !== 'complete') {
-      throw new HttpError(409, `DB dump upload is ${dump.status}, not complete`);
-    }
   }
 
   if (
@@ -668,6 +661,19 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
   if (definition.repoOptional) metadata.anchorRepositoryId = body.repositoryId ?? null;
 
   const insertTask = async (handle: typeof db | DbTx) => {
+    if (body.dbUploadId) {
+      // FOR SHARE: the upload reaper's claim of this dump waits for this transaction, or has already
+      // committed and is what this read returns.
+      const [dump] = await handle
+        .select({ status: schema.dbUploads.status })
+        .from(schema.dbUploads)
+        .where(and(eq(schema.dbUploads.id, body.dbUploadId), eq(schema.dbUploads.userId, userId)))
+        .for('share');
+      if (!dump) throw new HttpError(404, 'DB dump upload not found');
+      if (dump.status !== 'complete') {
+        throw new HttpError(409, `DB dump upload is ${dump.status}, not complete`);
+      }
+    }
     const locked = await definitionForCreate(handle, body.type, { generic: true });
     // The lock and database decisions above came from the preflight read; refuse if an edit changed them since.
     if (
@@ -1114,6 +1120,7 @@ taskRoutes.get('/:id', async (c) => {
     providerBreakdown,
     loggedCallCount: callCounts.logged,
     runningCallCount: callCounts.running,
+    finishedRunsRevision: await loadFinishedRunsRevision(db, id),
     costDisplay,
     parentTask,
     childTasks,

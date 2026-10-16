@@ -3,9 +3,9 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import {
+  LEGACY_RTK_MD_BODY,
   LEGACY_RTK_MD_PATHS,
   LEGACY_RTK_MD_SHA256,
-  RTK_SLIM,
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
@@ -912,7 +912,7 @@ describe('resetOnboardingArtifacts', () => {
   it('takes back the legacy RTK.md files while they hold what 07 wrote', async () => {
     const root = await repo('reset-legacy-rtk-');
     await installArtifacts(root);
-    await writeRtk(root, RTK_SLIM);
+    await writeRtk(root, LEGACY_RTK_MD_BODY);
 
     const { removed, vacatedPaths } = await resetOnboardingArtifacts(root, withLegacyRtk());
 
@@ -927,7 +927,7 @@ describe('resetOnboardingArtifacts', () => {
   it('keeps a legacy RTK.md edited since 07 wrote it, and says so', async () => {
     const root = await repo('reset-legacy-rtk-edited-');
     await installArtifacts(root);
-    await writeRtk(root, `${RTK_SLIM}\nOur own note.\n`);
+    await writeRtk(root, `${LEGACY_RTK_MD_BODY}\nOur own note.\n`);
 
     const { removed, skipped } = await resetOnboardingArtifacts(root, withLegacyRtk());
 
@@ -941,7 +941,7 @@ describe('resetOnboardingArtifacts', () => {
   it('keeps an RTK.md no run claims, even one holding the same bytes', async () => {
     const root = await repo('reset-legacy-rtk-unclaimed-');
     await installArtifacts(root);
-    await writeRtk(root, RTK_SLIM);
+    await writeRtk(root, LEGACY_RTK_MD_BODY);
 
     const { skipped } = await resetOnboardingArtifacts(root, provenance());
 

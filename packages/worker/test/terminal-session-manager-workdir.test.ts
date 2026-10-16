@@ -1,8 +1,10 @@
 import { PassThrough } from 'node:stream';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
   TERMINAL_CTL_CHANNEL_PREFIX,
   TERMINAL_EXIT_KEY_PREFIX,
+  TERMINAL_REPLY_CHANNEL_PREFIX,
+  TERMINAL_REQUEST_CHANNEL,
   type TerminalOpenResult,
 } from '@haive/shared';
 
@@ -448,5 +450,72 @@ describe('restart shell', () => {
     const h = harness(ROOT);
     await h.sendCtl('nope', { type: 'restart_shell', userId: 'user-1' });
     expect(h.execs).toHaveLength(0);
+  });
+});
+
+describe('an open that fails after it added its session', () => {
+  const internals = (h: Harness) =>
+    h.mgr as unknown as {
+      sessions: Map<string, unknown>;
+      subscriber: { subscribe: Mock };
+      redis: { hset: Mock; publish: Mock };
+      handleSubscriberMessage: (channel: string, raw: string) => Promise<void>;
+    };
+
+  it.each(['subscribe', 'hset'] as const)(
+    'drops that session and ends its shell when the %s after the attach fails',
+    async (failing) => {
+      const h = harness(ROOT);
+      const mgr = internals(h);
+      const call = failing === 'subscribe' ? mgr.subscriber.subscribe : mgr.redis.hset;
+      call.mockRejectedValueOnce(new Error('Connection is closed.'));
+
+      await expect(h.openTask()).rejects.toThrow('Connection is closed.');
+
+      expect(mgr.sessions.size).toBe(0);
+      expect(h.attaches).toHaveLength(1);
+      expect(h.attaches[0]!.destroyed).toBe(true);
+    },
+  );
+
+  it('answers the failure, once that session is gone, while no stop has begun', async () => {
+    const h = harness(ROOT);
+    const mgr = internals(h);
+    await h.mgr.start();
+    mgr.redis.hset.mockRejectedValueOnce(new Error('OOM command not allowed'));
+    const replyChannel = `${TERMINAL_REPLY_CHANNEL_PREFIX}c-fail`;
+    let sessionsAtReply = -1;
+    mgr.redis.publish.mockImplementation(async (channel: string) => {
+      if (channel === replyChannel) sessionsAtReply = mgr.sessions.size;
+      return 0;
+    });
+
+    await mgr.handleSubscriberMessage(
+      TERMINAL_REQUEST_CHANNEL,
+      JSON.stringify({
+        op: 'open',
+        correlationId: 'c-fail',
+        userId: 'user-1',
+        cliProviderId: 'prov-1',
+        scope: 'task',
+        taskId: 'task-1',
+      }),
+    );
+
+    const replies = mgr.redis.publish.mock.calls.filter(([channel]) => channel === replyChannel);
+    expect(replies).toEqual([
+      [replyChannel, JSON.stringify({ ok: false, error: 'OOM command not allowed' })],
+    ]);
+    expect(sessionsAtReply).toBe(0);
+    expect(mgr.sessions.size).toBe(0);
+    expect(h.attaches[0]!.destroyed).toBe(true);
+  });
+
+  it('keeps the session and the shell of an open that succeeds', async () => {
+    const h = harness(ROOT);
+    const reply = await h.openTask();
+    expect(reply.ok).toBe(true);
+    expect(internals(h).sessions.size).toBe(1);
+    expect(h.attaches[0]!.destroyed).toBe(false);
   });
 });

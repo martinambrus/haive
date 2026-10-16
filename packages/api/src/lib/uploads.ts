@@ -86,3 +86,9 @@ export function uploadFileRelOrThrow(
   if (rel === null) throw new HttpError(409, `${what} is not in this user uploads directory`);
   return rel;
 }
+
+/** The rel a complete moves a partial to, or null for a rel that is none. */
+export function uploadFinalRel(partialRel: string): string | null {
+  const finalRel = partialRel.replace(/\.partial$/, '');
+  return finalRel === partialRel ? null : finalRel;
+}

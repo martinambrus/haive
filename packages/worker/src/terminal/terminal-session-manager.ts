@@ -40,6 +40,7 @@ import { resolveGitEnv, type GitEnvScope } from '../secrets/user-git-identity.js
 const log = logger.child({ module: 'terminal-session-manager' });
 
 const TMUX_SESSION = 'haive-task';
+const STOP_WAIT_MS = 5_000;
 
 interface SessionState {
   sessionId: string;
@@ -137,14 +138,29 @@ export class TerminalSessionManager {
   async stop(): Promise<void> {
     if (!this.started) return;
     this.started = false;
-    for (const session of this.sessions.values()) {
-      await this.teardownSession(session, 'manager-stop').catch(() => undefined);
-    }
-    this.sessions.clear();
-    await this.subscriber.unsubscribe(TERMINAL_REQUEST_CHANNEL).catch(() => undefined);
-    if (this.ownsSubscriber) {
-      await this.subscriber.quit().catch(() => undefined);
-    }
+    const stopping = (async () => {
+      for (const session of this.sessions.values()) {
+        await this.teardownSession(session, 'manager-stop').catch(() => undefined);
+      }
+      this.sessions.clear();
+      await this.subscriber.unsubscribe(TERMINAL_REQUEST_CHANNEL).catch(() => undefined);
+      if (this.ownsSubscriber) {
+        await this.subscriber.quit().catch(() => undefined);
+      }
+    })();
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        log.warn(
+          { sessions: [...this.sessions.keys()], waitMs: STOP_WAIT_MS },
+          `terminal manager still stopping after ${STOP_WAIT_MS / 1000} s; going on without it`,
+        );
+        resolve();
+      }, STOP_WAIT_MS);
+      void stopping.then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   private async handleSubscriberMessage(channel: string, raw: string): Promise<void> {
@@ -152,12 +168,28 @@ export class TerminalSessionManager {
       const req = parseRequest(raw);
       if (!req) return;
       if (req.op === 'open') {
+        const replyChannel = `${TERMINAL_REPLY_CHANNEL_PREFIX}${req.correlationId}`;
+        const refused: TerminalOpenResult = {
+          ok: false,
+          error: 'the worker is shutting down; open the terminal again once it is back',
+        };
+        if (!this.started) {
+          await this.redis.publish(replyChannel, JSON.stringify(refused));
+          return;
+        }
         const reply = await this.openSession(req).catch((err): TerminalOpenResult => ({
           ok: false,
           error: err instanceof Error ? err.message : String(err),
         }));
-        const replyChannel = `${TERMINAL_REPLY_CHANNEL_PREFIX}${req.correlationId}`;
-        await this.redis.publish(replyChannel, JSON.stringify(reply));
+        if (this.started) {
+          await this.redis.publish(replyChannel, JSON.stringify(reply));
+          return;
+        }
+        // stop() began while this open ran, and its own pass may have ended before this session was added.
+        for (const session of this.sessions.values()) {
+          await this.teardownSession(session, 'manager-stop').catch(() => undefined);
+        }
+        await this.redis.publish(replyChannel, JSON.stringify(refused));
         return;
       }
       if (req.op === 'close') {
@@ -509,31 +541,36 @@ export class TerminalSessionManager {
       log.warn({ err, sessionId }, 'pty stream error');
     });
 
-    await this.subscriber.subscribe(inChannel, ctlChannel);
+    try {
+      await this.subscriber.subscribe(inChannel, ctlChannel);
 
-    // Registry entry: worker writes container metadata only (HSETNX-style for
-    // startedAt so reuses don't overwrite). API alone owns `refcount` via
-    // HINCRBY +/-1 on WS attach/detach, and updates `lastSeenAt` on detach
-    // so the reaper's idle clock starts when the last tab disconnects. The
-    // worker does NOT touch refcount because openSession is called per-WS
-    // and overwriting would clobber sibling tab counts.
-    const key = ensureKey;
-    const now = Date.now();
-    await this.redis.hset(key, {
-      containerName: ensured.containerName,
-      shell: ensured.shell,
-      ...(ensured.gitCredMintedAt === undefined
-        ? {}
-        : {
-            scope,
-            scopeId,
-            userId: req.userId,
-            gitCredMintedAt: String(ensured.gitCredMintedAt),
-          }),
-    });
-    await this.redis.hsetnx(key, 'startedAt', String(now));
-    await this.redis.hsetnx(key, 'lastSeenAt', String(now));
-    await this.redis.hsetnx(key, 'refcount', '0');
+      // Registry entry: worker writes container metadata only (HSETNX-style for
+      // startedAt so reuses don't overwrite). API alone owns `refcount` via
+      // HINCRBY +/-1 on WS attach/detach, and updates `lastSeenAt` on detach
+      // so the reaper's idle clock starts when the last tab disconnects. The
+      // worker does NOT touch refcount because openSession is called per-WS
+      // and overwriting would clobber sibling tab counts.
+      const key = ensureKey;
+      const now = Date.now();
+      await this.redis.hset(key, {
+        containerName: ensured.containerName,
+        shell: ensured.shell,
+        ...(ensured.gitCredMintedAt === undefined
+          ? {}
+          : {
+              scope,
+              scopeId,
+              userId: req.userId,
+              gitCredMintedAt: String(ensured.gitCredMintedAt),
+            }),
+      });
+      await this.redis.hsetnx(key, 'startedAt', String(now));
+      await this.redis.hsetnx(key, 'lastSeenAt', String(now));
+      await this.redis.hsetnx(key, 'refcount', '0');
+    } catch (err) {
+      await this.teardownSession(session, 'open-failed').catch(() => undefined);
+      throw err;
+    }
 
     return {
       ok: true,

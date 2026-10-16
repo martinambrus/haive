@@ -64,6 +64,7 @@ import {
   enrichStepsWithSkipFlag,
   isStepSkippable,
   propagateModelHealthCliToTaskDefault,
+  rolledUpRunsOf,
 } from './_helpers.js';
 
 /** Transaction handle (the callback arg of Database.transaction). A full Database is also
@@ -561,14 +562,9 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
   });
   if (!task) throw new HttpError(404, 'Task not found');
 
-  const inv = schema.cliInvocations;
   const [rollup, stepRows, customCalls, integrationCalls] = await Promise.all([
     rollupToolUsage(db, {
-      where: and(
-        eq(inv.taskId, id),
-        isNull(inv.supersededAt),
-        or(isNotNull(inv.taskStepId), isNotNull(inv.summaryForStepId)),
-      )!,
+      where: rolledUpRunsOf(id),
       perStep: true,
     }),
     db

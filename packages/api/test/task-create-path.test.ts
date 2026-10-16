@@ -1,4 +1,7 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const url = process.env.TASK_CREATE_PATH_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/task_create_path_test'))
@@ -7,6 +10,8 @@ if (url && !new URL(url).pathname.startsWith('/task_create_path_test'))
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000e1');
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  repoQueue: { add: async (..._args: unknown[]) => undefined as unknown },
+  beforeRename: null as null | (() => void | Promise<void>),
   gdb: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
   beforeQueued: undefined as (() => Promise<void>) | undefined,
@@ -15,8 +20,19 @@ const h = vi.hoisted(() => ({
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({
   getTaskQueue: () => ({ add: h.add }),
+  getRepoQueue: () => h.repoQueue,
   getGlobalKbSyncQueue: () => ({ add: vi.fn() }),
 }));
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...real,
+    renameNoFollow: async (...args: Parameters<typeof real.renameNoFollow>) => {
+      await h.beforeRename?.();
+      return real.renameNoFollow(...args);
+    },
+  };
+});
 vi.mock('../src/lib/task-start.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/lib/task-start.js')>();
   return {
@@ -53,7 +69,7 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
     fn({ db: h.gdb, settings: { namespace: 'default' } }),
 }));
 
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, notExists, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import {
   createDatabase,
@@ -72,7 +88,7 @@ import { adminTaskTypeRoutes } from '../src/routes/task-types.js';
 import { globalKbRoutes } from '../src/routes/global-kb.js';
 import { planRoutes } from '../src/routes/plan.js';
 import { spawnPlanTask } from '../src/lib/spawn-plan-task.js';
-import { loadLiveRootWriters } from '../src/routes/repos.js';
+import { loadLiveRootWriters, repoRoutes } from '../src/routes/repos.js';
 import { definitionForCreate } from '../src/lib/task-type-definition.js';
 import { markQueuedForStart } from '../src/lib/task-start.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -479,6 +495,457 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
         locked: false,
       },
       'run_app/true': { ...none, snapshot: null, simplifyCode: true, pinned: true, locked: false },
+    });
+  });
+
+  describe('a completed dump the upload reaper claims while a task is created for it', () => {
+    const DUMP = '00000000-0000-4000-8000-0000000000e3';
+    const BLOCKED_WITHIN_MS = 10_000;
+    type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
+    let reaperDb: Database;
+
+    beforeAll(() => {
+      reaperDb = createDatabase(url as string);
+    });
+    afterAll(async () => {
+      await reaperDb.$client.end({ timeout: 5 });
+    });
+    beforeEach(async () => {
+      await db.insert(schema.dbUploads).values({
+        id: DUMP,
+        userId: USER,
+        filename: 'a.sql',
+        dumpFormat: 'sql',
+        totalSize: 10,
+        bytesReceived: 10,
+        chunkSize: 10,
+        dumpPath: `/tmp/uploads/db-${DUMP}.sql`,
+        status: 'complete',
+      });
+    });
+
+    const withDump = async () => post({ type: 'cp-plain', repositoryId: REPO, dbUploadId: DUMP });
+    const dumpStatus = async () =>
+      (await db.select().from(schema.dbUploads).where(eq(schema.dbUploads.id, DUMP)))[0]!.status;
+    const tasksNamingTheDump = async () =>
+      (await db.select().from(schema.tasks).where(eq(schema.tasks.dbUploadId, DUMP))).length;
+
+    const settle = <T>(run: Promise<T>) =>
+      run.then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+
+    const backendPid = async (tx: Tx) => {
+      const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      return row!.pid;
+    };
+
+    // Returns once a statement waits on a lock the backend `holderPid` holds, and throws when `ended`
+    // turns true first, as a statement that did not wait would.
+    async function untilBlockedBy(holderPid: number, ended: () => boolean) {
+      const deadline = Date.now() + BLOCKED_WITHIN_MS;
+      for (;;) {
+        if (ended()) throw new Error('the statement ended without waiting for the lock');
+        const [row] = await db.execute<{ blocked: number }>(sql`
+          select count(*)::int as blocked from pg_stat_activity
+          where wait_event_type = 'Lock' and ${holderPid}::int = any (pg_blocking_pids(pid))`);
+        if (row!.blocked > 0) return;
+        if (Date.now() > deadline) {
+          throw new Error(`nothing waited on pid ${holderPid} within ${BLOCKED_WITHIN_MS} ms`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+
+    // The reaper's claim of a completed dump (reapEndedDumps in the worker) on its own connection;
+    // `hold` keeps its transaction open, claim made, until `commit`.
+    function reapClaim(hold: boolean) {
+      let commit!: () => void;
+      const committing = new Promise<void>((resolve) => (commit = resolve));
+      if (!hold) commit();
+      let claimed!: (pid: number) => void;
+      const claimedPid = new Promise<number>((resolve) => (claimed = resolve));
+      const done = settle(
+        reaperDb.transaction(async (tx) => {
+          const pid = await backendPid(tx);
+          const [locked] = await tx
+            .select({ id: schema.dbUploads.id })
+            .from(schema.dbUploads)
+            .where(and(eq(schema.dbUploads.id, DUMP), eq(schema.dbUploads.status, 'complete')))
+            .for('update');
+          if (!locked) return 0;
+          const taken = await tx
+            .update(schema.dbUploads)
+            .set({ status: 'reaping', updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.dbUploads.id, DUMP),
+                eq(schema.dbUploads.status, 'complete'),
+                notExists(
+                  tx
+                    .select({ id: schema.tasks.id })
+                    .from(schema.tasks)
+                    .where(eq(schema.tasks.dbUploadId, DUMP)),
+                ),
+              ),
+            )
+            .returning({ id: schema.dbUploads.id });
+          claimed(pid);
+          await committing;
+          return taken.length;
+        }),
+      );
+      const pid = () =>
+        Promise.race([
+          claimedPid,
+          done.then(() => {
+            throw new Error('the reaper transaction ended before it made its claim');
+          }),
+        ]);
+      return { pid, commit, done };
+    }
+
+    // The route's database with a stop at its task insert: `before` the insert runs, or `after` it ran
+    // and before the transaction commits.
+    function stopAtTheTaskInsert(at: 'before' | 'after') {
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      let reach!: (pid: number) => void;
+      const reached = new Promise<number>((resolve) => (reach = resolve));
+      const stopHere = async (tx: Tx) => {
+        reach(await backendPid(tx));
+        await hold;
+      };
+      const wrapTx = (tx: Tx): Tx =>
+        new Proxy(tx, {
+          get(target, prop) {
+            const value = Reflect.get(target, prop, target);
+            if (prop !== 'insert') return typeof value === 'function' ? value.bind(target) : value;
+            return (table: typeof schema.tasks) => {
+              const query = target.insert(table);
+              if (table !== schema.tasks) return query;
+              return {
+                values: (values: never) => ({
+                  returning: async () => {
+                    if (at === 'before') await stopHere(target);
+                    const rows = await query.values(values).returning();
+                    if (at === 'after') await stopHere(target);
+                    return rows;
+                  },
+                }),
+              };
+            };
+          },
+        });
+      const stopped = new Proxy(db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== 'transaction') {
+            return typeof value === 'function' ? value.bind(target) : value;
+          }
+          return (fn: (tx: Tx) => Promise<unknown>) => target.transaction((tx) => fn(wrapTx(tx)));
+        },
+      });
+      return { db: stopped, release, reached };
+    }
+
+    it('answers 409 when the reaper claimed the dump first, once that claim commits', async () => {
+      const reaper = reapClaim(true);
+      const reaperPid = await reaper.pid();
+      const state = { ended: false };
+      const request = settle(withDump());
+      void request.then(() => (state.ended = true));
+      try {
+        await untilBlockedBy(reaperPid, () => state.ended);
+      } finally {
+        reaper.commit();
+        await reaper.done;
+        await request;
+      }
+
+      const outcome = await request;
+      expect(outcome.ok && outcome.value.status).toBe(409);
+      expect(outcome.ok && ((await outcome.value.json()) as { error: string }).error).toBe(
+        'DB dump upload is reaping, not complete',
+      );
+      expect(await reaper.done).toEqual({ ok: true, value: 1 });
+      expect(await dumpStatus()).toBe('reaping');
+      expect(await taskCount()).toBe(0);
+    }, 30_000);
+
+    it.each(['reaping', 'completing'])(
+      'answers 409 for a dump a dead worker or request left %s, and creates no task',
+      async (status) => {
+        await db.update(schema.dbUploads).set({ status }).where(eq(schema.dbUploads.id, DUMP));
+
+        const res = await withDump();
+
+        expect(res.status).toBe(409);
+        expect(((await res.json()) as { error: string }).error).toBe(
+          `DB dump upload is ${status}, not complete`,
+        );
+        expect(await taskCount()).toBe(0);
+      },
+    );
+
+    it.each(['before', 'after'] as const)(
+      'makes the reaper wait for a task transaction stopped %s its task insert, and keeps the dump',
+      async (at) => {
+        const gate = stopAtTheTaskInsert(at);
+        h.db = gate.db;
+        const request = settle(withDump());
+        const routePid = await Promise.race([
+          gate.reached,
+          request.then(() => {
+            throw new Error('the request ended before it reached its task insert');
+          }),
+        ]);
+        const reaper = reapClaim(false);
+        const state = { ended: false };
+        void reaper.done.then(() => (state.ended = true));
+        try {
+          await untilBlockedBy(routePid, () => state.ended);
+        } finally {
+          gate.release();
+          await request;
+          await reaper.done;
+        }
+
+        const outcome = await request;
+        expect(outcome.ok && outcome.value.status).toBe(201);
+        expect(await reaper.done).toEqual({ ok: true, value: 0 });
+        expect(await dumpStatus()).toBe('complete');
+        expect(await tasksNamingTheDump()).toBe(1);
+      },
+      30_000,
+    );
+  });
+
+  describe('an upload complete on Postgres', () => {
+    const UPLOAD = '00000000-0000-4000-8000-0000000000e4';
+    const MIN = 60_000;
+    const CONTENT = 'archive bytes';
+    const repoApp = new Hono<AppEnv>();
+    repoApp.route('/repos', repoRoutes);
+    repoApp.onError(errorHandler);
+    let storage: string;
+    let savedRoot: string | undefined;
+    let queued: unknown[][];
+
+    const partial = () => path.join(storage, '_uploads', USER, `${UPLOAD}.zip.partial`);
+    const final = () => path.join(storage, '_uploads', USER, `${UPLOAD}.zip`);
+    const exists = async (file: string) => (await stat(file).catch(() => null)) !== null;
+
+    beforeEach(async () => {
+      storage = await mkdtemp(path.join(tmpdir(), 'upload-complete-pg-'));
+      savedRoot = process.env.REPO_STORAGE_ROOT;
+      process.env.REPO_STORAGE_ROOT = storage;
+      queued = [];
+      h.repoQueue = { add: async (...args) => void queued.push(args) };
+      h.beforeRename = null;
+      await mkdir(path.dirname(partial()), { recursive: true });
+    });
+    afterEach(async () => {
+      h.beforeRename = null;
+      if (savedRoot === undefined) delete process.env.REPO_STORAGE_ROOT;
+      else process.env.REPO_STORAGE_ROOT = savedRoot;
+      await rm(storage, { recursive: true, force: true });
+    });
+
+    async function seed(status: string, ageMs: number, file: 'partial' | 'final') {
+      await writeFile(file === 'partial' ? partial() : final(), CONTENT);
+      await db.insert(schema.repoUploads).values({
+        id: UPLOAD,
+        userId: USER,
+        filename: 'a.zip',
+        archiveFormat: 'zip',
+        totalSize: CONTENT.length,
+        bytesReceived: CONTENT.length,
+        chunkSize: CONTENT.length,
+        archivePath: partial(),
+        status,
+        updatedAt: new Date(Date.now() - ageMs),
+      });
+    }
+    const uploadRow = async () =>
+      (await db.select().from(schema.repoUploads).where(eq(schema.repoUploads.id, UPLOAD)))[0]!;
+    const uploadedRepositories = async () =>
+      (
+        await db
+          .select()
+          .from(schema.repositories)
+          .where(
+            and(eq(schema.repositories.userId, USER), eq(schema.repositories.source, 'upload')),
+          )
+      ).length;
+    const setStamp = (stamp: Date) =>
+      db
+        .update(schema.repoUploads)
+        .set({ updatedAt: stamp })
+        .where(eq(schema.repoUploads.id, UPLOAD));
+    const complete = () => repoApp.request(`/repos/upload/${UPLOAD}/complete`, { method: 'POST' });
+
+    it('K1: a dead claim with its partial present: a repeat complete renames it and creates one repository', async () => {
+      await seed('completing', 11 * MIN, 'partial');
+
+      const res = await complete();
+
+      expect(res.status).toBe(201);
+      expect(await uploadedRepositories()).toBe(1);
+      expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      expect(await readFile(final(), 'utf8')).toBe(CONTENT);
+      expect(await exists(partial())).toBe(false);
+      expect(queued).toHaveLength(1);
+    });
+
+    it('K1: the same row with its file already at the final path: finishes without a move, with one repository', async () => {
+      await seed('completing', 11 * MIN, 'final');
+      h.beforeRename = () => {
+        throw new Error('no move was due');
+      };
+
+      const res = await complete();
+
+      expect(res.status).toBe(201);
+      expect(await uploadedRepositories()).toBe(1);
+      expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      expect(queued).toHaveLength(1);
+    });
+
+    it('K1: a fresh stamp answers 409 and changes nothing', async () => {
+      await seed('completing', 9 * MIN, 'partial');
+      const before = await uploadRow();
+
+      const res = await complete();
+
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe(
+        'a complete of this session is already running',
+      );
+      expect(await uploadedRepositories()).toBe(0);
+      expect(await uploadRow()).toEqual(before);
+      expect(await exists(partial())).toBe(true);
+      expect(queued).toHaveLength(0);
+    });
+
+    it('K1: a complete taken over before its final write answers 409, rolls its repository insert back, and a resume creates one', async () => {
+      await seed('uploading', 0, 'partial');
+      h.beforeRename = async () => {
+        h.beforeRename = null;
+        await setStamp(new Date(Date.now() + 5_000));
+      };
+
+      const res = await complete();
+
+      expect(res.status).toBe(409);
+      expect(await uploadedRepositories()).toBe(0);
+      expect(await uploadRow()).toMatchObject({ status: 'completing', archivePath: partial() });
+      expect(queued).toHaveLength(0);
+
+      await setStamp(new Date(Date.now() - 11 * MIN));
+      expect((await complete()).status).toBe(201);
+      expect(await uploadedRepositories()).toBe(1);
+    });
+
+    describe('the stamp compare-and-set', () => {
+      const claimLib = () => import('../src/lib/upload-complete-claim.js');
+      const done = (archivePath: string) => ({
+        status: 'complete' as const,
+        archivePath,
+        updatedAt: new Date(),
+      });
+      // A stamp is one millisecond: the takeover must not land in the same one.
+      const later = () => new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+      it('K5: matches its own claim row', async () => {
+        const { withCompleteClaim } = await claimLib();
+        await seed('uploading', 0, 'partial');
+
+        await withCompleteClaim(db, schema.repoUploads, UPLOAD, async (claim) => {
+          expect(await uploadRow()).toMatchObject({ status: 'completing', archivePath: partial() });
+          await claim.write(db, done(final()));
+        });
+
+        expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      });
+
+      it('K5: misses after a takeover, and leaves the row to the taker', async () => {
+        const { withCompleteClaim } = await claimLib();
+        await seed('uploading', 0, 'partial');
+
+        await withCompleteClaim(db, schema.repoUploads, UPLOAD, async (first) => {
+          await later();
+          await setStamp(new Date(Date.now() - 11 * MIN));
+          await withCompleteClaim(db, schema.repoUploads, UPLOAD, async (second) => {
+            await expect(first.write(db, done('first'))).rejects.toMatchObject({ status: 409 });
+            expect(await uploadRow()).toMatchObject({
+              status: 'completing',
+              archivePath: partial(),
+            });
+            await second.write(db, done(final()));
+          });
+        });
+
+        expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      });
+
+      it('K5: hands the session back on a failure, but not once another complete took it over', async () => {
+        const { withCompleteClaim } = await claimLib();
+        await seed('uploading', 0, 'partial');
+
+        await expect(
+          withCompleteClaim(db, schema.repoUploads, UPLOAD, async () => {
+            throw new Error('the first failed');
+          }),
+        ).rejects.toThrow('the first failed');
+        expect(await uploadRow()).toMatchObject({ status: 'uploading' });
+
+        let release!: () => void;
+        const hold = new Promise<void>((resolve) => (release = resolve));
+        let taken!: () => void;
+        const takenOver = new Promise<void>((resolve) => (taken = resolve));
+        let second!: Promise<void>;
+        await expect(
+          withCompleteClaim(db, schema.repoUploads, UPLOAD, async () => {
+            await later();
+            await setStamp(new Date(Date.now() - 11 * MIN));
+            second = withCompleteClaim(db, schema.repoUploads, UPLOAD, async (claim) => {
+              taken();
+              await hold;
+              await claim.write(db, done(final()));
+            });
+            await takenOver;
+            throw new Error('the first failed again');
+          }),
+        ).rejects.toThrow('the first failed again');
+        expect(await uploadRow()).toMatchObject({ status: 'completing' });
+
+        release();
+        await second;
+        expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      });
+
+      it('K6: renews its claim row while run works, and writes at the renewed stamp', async () => {
+        const { withCompleteClaim } = await claimLib();
+        await seed('uploading', 0, 'partial');
+        vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+        try {
+          await withCompleteClaim(db, schema.repoUploads, UPLOAD, async (claim) => {
+            const claimed = (await uploadRow()).updatedAt.getTime();
+            await vi.advanceTimersByTimeAsync(MIN);
+            await vi.waitFor(
+              async () => expect((await uploadRow()).updatedAt.getTime()).toBeGreaterThan(claimed),
+              { timeout: 3_000 },
+            );
+            await claim.write(db, done(final()));
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+
+        expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      });
     });
   });
 

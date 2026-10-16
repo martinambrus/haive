@@ -143,6 +143,8 @@ export interface DockerRunResult {
 export interface DockerInspectResult {
   exists: boolean;
   imageId: string | null;
+  /** The image's labels, when docker reported them. */
+  labels?: Record<string, string>;
 }
 
 export interface DockerRemoveResult {
@@ -323,6 +325,21 @@ async function spawnAndCollect(
   });
 }
 
+/** `{{json .Config.Labels}}`: an object of strings, or `null` for an image that has none. */
+function parseImageLabels(json: string): Record<string, string> {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, string] => typeof entry[1] === 'string',
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
 export const defaultDockerRunner: DockerRunner = {
   async build(opts) {
     // --progress=plain emits flat newline-delimited output. Without it docker
@@ -371,11 +388,18 @@ export const defaultDockerRunner: DockerRunner = {
   async inspect(tag) {
     const result = await spawnAndCollect(
       'docker',
-      ['image', 'inspect', '--format', '{{.Id}}', tag],
+      ['image', 'inspect', '--format', '{{.Id}}|{{json .Config.Labels}}', tag],
       { timeoutMs: 15_000 },
     );
     if (result.exitCode === 0) {
-      return { exists: true, imageId: result.stdout.trim() || null };
+      const out = result.stdout.trim();
+      const bar = out.indexOf('|');
+      const id = bar === -1 ? out : out.slice(0, bar);
+      return {
+        exists: true,
+        imageId: id || null,
+        labels: bar === -1 ? {} : parseImageLabels(out.slice(bar + 1)),
+      };
     }
     return { exists: false, imageId: null };
   },

@@ -237,7 +237,7 @@ export const installPluginsStep: StepDefinition<InstallPluginsDetect, InstallPlu
       ctx.taskId,
     );
     const sandboxWorkdir = SANDBOX_WORKDIR;
-    const authMounts = await resolveAuthMounts(ctx.db, provider, ctx.taskId);
+    const authMounts = await resolveAuthMounts(ctx.db, provider, ctx.taskId, sandboxImage);
     const gitData = await repoGitDataBoundary(repoMount, { hasWorktree, hasRepo });
     const mounts: DockerVolumeMount[] = [
       ...authMounts,

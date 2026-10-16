@@ -28,7 +28,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 
 import { Hono } from 'hono';
 import { encryptEmail } from '@haive/shared';
-import { maintenanceRoutes } from '../src/routes/maintenance.js';
+import { BLOCKING_LIST_CAP, maintenanceRoutes } from '../src/routes/maintenance.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -379,6 +379,54 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       expect(body.total).toBe(3);
       expect(body.capped).toBe(false);
     });
+  });
+
+  describe('GET /blocking, at the cap', () => {
+    it.each([
+      { seeded: BLOCKING_LIST_CAP, capped: false },
+      { seeded: BLOCKING_LIST_CAP + 1, capped: true },
+    ])(
+      'with $seeded blocking tasks, lists the cap of them and says capped is $capped',
+      async ({ seeded, capped }) => {
+        await db.insert(schema.tasks).values(
+          Array.from({ length: seeded }, (_, i) => ({
+            userId: OWNER,
+            type: TYPE,
+            title: `Task ${i}`,
+            status: 'running' as const,
+          })),
+        );
+
+        const body = await blocking();
+
+        expect(body.tasks).toHaveLength(BLOCKING_LIST_CAP);
+        expect(body.total).toBe(BLOCKING_LIST_CAP);
+        expect(body.capped).toBe(capped);
+      },
+    );
+
+    it.each([
+      { seeded: BLOCKING_LIST_CAP, capped: false },
+      { seeded: BLOCKING_LIST_CAP + 1, capped: true },
+    ])(
+      'with $seeded cloning repositories, lists the cap of them and says capped is $capped',
+      async ({ seeded, capped }) => {
+        await db.insert(schema.repositories).values(
+          Array.from({ length: seeded }, (_, i) => ({
+            userId: OWNER,
+            name: `cloning repo ${i}`,
+            source: 'local_path' as const,
+            status: 'cloning' as const,
+          })),
+        );
+
+        const body = await blocking();
+
+        expect(body.jobs).toHaveLength(BLOCKING_LIST_CAP);
+        expect(body.total).toBe(BLOCKING_LIST_CAP);
+        expect(body.capped).toBe(capped);
+      },
+    );
   });
 
   describe('GET /blocking, the viewer and the owners', () => {

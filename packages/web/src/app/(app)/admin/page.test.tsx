@@ -166,8 +166,13 @@ beforeEach(() => {
   net.unstubbed = [];
 });
 
-async function mount(customTools: unknown): Promise<Renderer> {
-  net.gets = { ...GETS, [CUSTOM_TOOLS_PATH]: customTools };
+const CODEX_APP_SERVER_PATH = '/admin/config/codex-app-server';
+
+async function mount(
+  customTools: unknown,
+  codexAppServer: unknown = GETS[CODEX_APP_SERVER_PATH],
+): Promise<Renderer> {
+  net.gets = { ...GETS, [CUSTOM_TOOLS_PATH]: customTools, [CODEX_APP_SERVER_PATH]: codexAppServer };
   const view = createRenderer(() => <AdminPage />);
   for (let i = 0; i < 5; i += 1) await view.flush();
   expect(net.unstubbed, 'requests the page made that this test does not stub').toEqual([]);
@@ -200,6 +205,57 @@ function findSwitch(view: Renderer, card: RegExp): Host {
   }
   throw new Error(`no switch on any tab of the admin page sits in a card matching ${card}`);
 }
+
+const failure = (taskId: string, ownerId: string, taskTitle: string) => ({
+  taskId,
+  taskTitle,
+  ownerId,
+  providerId: `provider-${taskId}`,
+  providerLabel: null,
+  stage: 'initialize',
+  detail: null,
+  source: 'runtime',
+  binaryVersion: '0.154.0',
+  providerCliVersion: null,
+  at: '2026-10-15T09:00:00.000Z',
+});
+
+function openTabWith(view: Renderer, text: RegExp): void {
+  const bar = findAll(view.tree(), (host) => host.tag === 'nav')[0];
+  for (const tab of bar ? buttons(view.tree(), /./, bar) : []) {
+    fire.click(tab);
+    view.draw();
+    if (text.test(textOf(view.tree()))) return;
+  }
+  throw new Error(`no tab of the admin page shows ${text}`);
+}
+
+const taskLinks = (view: Renderer): string[] =>
+  findAll(view.tree(), (host) => host.tag === 'a')
+    .map((host) => String(host.props.href))
+    .filter((href) => href.startsWith('/tasks/'));
+
+describe('admin page: Codex app-server failure card', () => {
+  const own = failure('task-own', 'admin-1', 'My task');
+  const theirs = failure('task-theirs', 'user-2', 'Their task');
+
+  it('links a failure only to a task the viewer owns', async () => {
+    const view = await mount(
+      { enabled: true },
+      { enabled: true, viewerId: 'admin-1', recentFailures: [own, theirs] },
+    );
+    openTabWith(view, /Recorded failures, last 30 days/);
+    expect(taskLinks(view)).toEqual(['/tasks/task-own']);
+    expect(textOf(view.tree())).toContain('Their task');
+  });
+
+  it('links no failure when the payload names no viewer', async () => {
+    const view = await mount({ enabled: true }, { enabled: true, recentFailures: [own, theirs] });
+    openTabWith(view, /Recorded failures, last 30 days/);
+    expect(taskLinks(view)).toEqual([]);
+    expect(textOf(view.tree())).toContain('My task');
+  });
+});
 
 describe('admin page: custom tools switch', () => {
   it('H9 finds the DDEV control switch of the page as it is today', async () => {
