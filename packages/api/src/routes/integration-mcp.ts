@@ -1,6 +1,5 @@
 import { Hono } from 'hono';
 import { count, eq, inArray, sql } from 'drizzle-orm';
-import type { ZodError } from 'zod';
 import { schema, type DbTx } from '@haive/database';
 import { logger } from '@haive/shared';
 import {
@@ -56,6 +55,7 @@ import {
   claimsFromBearer,
   type TaskCallClaims,
 } from '../lib/task-call-auth.js';
+import { cutToBytes, describeIssue } from '../lib/tool-call-text.js';
 import { jsonBodyLimit } from '../middleware/sandbox-body-limit.js';
 import { moduleExecutorOf } from '../modules/integration-executors.js';
 
@@ -63,7 +63,6 @@ const log = logger.child({ module: 'integration-mcp-routes' });
 
 const ERROR_TEXT_MAX_LENGTH = 400;
 const RESULT_TEXT_MAX_BYTES = 65_536;
-const TRUNCATED_MARK = '\n[truncated]';
 
 type Reason =
   | 'provider-unavailable'
@@ -184,24 +183,6 @@ function bindOperation(opId: string, args: unknown): BoundOperation {
 const isUnloadedModuleProvider = (binding: IntegrationBinding): boolean =>
   parseProviderId(binding.providerId)?.kind === 'module' &&
   getIntegrationProvider(binding.providerId) === undefined;
-
-function describeIssue(error: ZodError): string {
-  const issue = error.issues[0];
-  const where = issue?.path.length ? `${issue.path.join('.')}: ` : '';
-  return `invalid arguments: ${where}${issue?.message ?? 'not accepted'}`.slice(
-    0,
-    ERROR_TEXT_MAX_LENGTH,
-  );
-}
-
-/** At most `maxBytes` of UTF-8, marked as cut, never ending inside a character. */
-function cutToBytes(text: string, maxBytes: number): string {
-  const bytes = Buffer.from(text, 'utf8');
-  if (bytes.length <= maxBytes) return text;
-  let end = maxBytes - Buffer.byteLength(TRUNCATED_MARK);
-  while (end > 0 && (bytes[end]! & 0b1100_0000) === 0b1000_0000) end -= 1;
-  return bytes.subarray(0, end).toString('utf8') + TRUNCATED_MARK;
-}
 
 function vendorReason(err: ForgeError | VendorError): Reason {
   if (err instanceof VendorError) return err.reason;
@@ -428,7 +409,9 @@ integrationMcpRoutes.post('/call', async (c) => {
       return refuse(403, 'provider-unavailable', 'this provider is not available on this install');
     }
     const args = executor.args.safeParse(body?.arguments);
-    if (!args.success) return refuse(400, 'invalid-arguments', describeIssue(args.error));
+    if (!args.success) {
+      return refuse(400, 'invalid-arguments', describeIssue(args.error, ERROR_TEXT_MAX_LENGTH));
+    }
 
     const { accessToken } = await credentialOf(connection.id);
     const forms = tokenForms(accessToken);
