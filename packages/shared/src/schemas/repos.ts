@@ -135,7 +135,13 @@ export const initRepoUploadRequestSchema = z.object({
 
 export type InitRepoUploadRequest = z.infer<typeof initRepoUploadRequestSchema>;
 
-export const repoUploadStatusSchema = z.enum(['uploading', 'complete', 'cancelled']);
+export const repoUploadStatusSchema = z.enum([
+  'uploading',
+  'completing',
+  'complete',
+  'cancelled',
+  'reaping',
+]);
 
 export const repoUploadSessionSchema = z.object({
   id: z.string().uuid(),

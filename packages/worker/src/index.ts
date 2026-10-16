@@ -53,6 +53,7 @@ import { TerminalSessionReaper } from './sandbox/terminal-session-reaper.js';
 import { IdeSessionReaper } from './sandbox/ide-session-reaper.js';
 import { RuntimeRunnerReaper } from './sandbox/runtime-runner-reaper.js';
 import { startDatabaseSnapshotCleanup } from './repo/database-snapshots.js';
+import { startUploadReaper } from './repo/upload-reaper.js';
 import { AgentPreemptionSweeper } from './sandbox/agent-preemption.js';
 import { CliPriorityDecaySweeper } from './queues/cli-exec/priority-decay.js';
 import { clearAgentLeases } from './queues/cli-exec/agent-lease.js';
@@ -248,6 +249,7 @@ async function main(): Promise<void> {
   const runtimeRunnerReaper = new RuntimeRunnerReaper({ db: getDb() });
   runtimeRunnerReaper.start();
   const stopDatabaseSnapshotCleanup = startDatabaseSnapshotCleanup(getDb());
+  const stopUploadReaper = startUploadReaper(getDb());
   // Let the admission gate preempt a dead task's grace-runner for a waiting live task instead
   // of starving it behind the retry-cache (reuses the reaper's list/reap).
   // The waiter's vote score reaches the reaper here: it is what lets a boosted task reclaim a
@@ -319,6 +321,7 @@ async function main(): Promise<void> {
     ideReaper.stop();
     runtimeRunnerReaper.stop();
     stopDatabaseSnapshotCleanup();
+    stopUploadReaper();
     agentPreemptionSweeper.stop();
     cliPriorityDecaySweeper.stop();
     stalledTaskSweeper.stop();

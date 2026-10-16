@@ -13,8 +13,10 @@ import { users } from './auth.js';
 
 /** Chunked-upload session for a database dump. Mirrors repo_uploads, but the
  *  finished dump is imported into a task's ephemeral DB (then deleted) instead
- *  of extracted into a repository. status: uploading | complete | cancelled |
- *  consumed (set once the import step has loaded it and removed the file). */
+ *  of extracted into a repository. status: uploading | completing | complete | reaping |
+ *  cancelled | consumed (set once the import step has loaded it and removed the
+ *  file); reaping is a session or completed dump whose files a cancel or the upload reaper
+ *  is still removing. */
 export const dbUploads = pgTable(
   'db_uploads',
   {
