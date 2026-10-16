@@ -5,11 +5,19 @@ import { CONFIG_KEYS, TASK_JOB_NAMES, configService, logger } from '@haive/share
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 
-const h = vi.hoisted(() => ({ queued: [] as { name: string; data: unknown }[] }));
+const h = vi.hoisted(() => ({
+  queued: [] as { name: string; data: unknown }[],
+  failNextAdd: null as Error | null,
+}));
 
 vi.mock('../src/queues/task-queue.js', () => ({
   getTaskQueue: () => ({
     add: async (name: string, data: unknown) => {
+      if (h.failNextAdd) {
+        const failure = h.failNextAdd;
+        h.failNextAdd = null;
+        throw failure;
+      }
       h.queued.push({ name, data });
     },
   }),
@@ -115,6 +123,7 @@ function setup() {
 
 beforeEach(() => {
   h.queued = [];
+  h.failNextAdd = null;
 });
 
 describe('the allowance auto-resume of a task whose provider is back', () => {
@@ -342,5 +351,129 @@ describe('the allowance auto-resume when resuming one task throws', () => {
     expect(t.fake.rows(schema.taskEvents)).toMatchObject([
       { taskId: NEXT_TASK, eventType: 'task.auto_resumed' },
     ]);
+  });
+});
+
+describe('the provider recovery when one armed task fails on its own writes', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const dropped = new Error('connection terminated unexpectedly');
+
+  /** Two armed tasks. `first` changes the one handled first; the second is the one that must still be handled. */
+  function twoTasks(first: Record<string, unknown> = {}) {
+    const t = setup();
+    t.fake.insert(schema.tasks, { ...t.task(), id: NEXT_TASK });
+    t.fake.insert(schema.taskSteps, {
+      id: NEXT_ROW,
+      taskId: NEXT_TASK,
+      stepId: 'fan-out',
+      round: 0,
+      status: 'failed',
+    });
+    t.next.push({ ...t.armed, id: NEXT_TASK });
+    Object.assign(t.armed, first);
+    return t;
+  }
+  /** Fails the first write to `table` and no other. */
+  function breakOnce(
+    t: ReturnType<typeof setup>,
+    hook: 'beforeInsert' | 'beforeUpdate',
+    table: PgTable,
+  ) {
+    let broken = true;
+    t.fake.hooks[hook] = (written) => {
+      if (broken && written === table) {
+        broken = false;
+        throw dropped;
+      }
+    };
+  }
+  const expectLogged = (error: unknown) => {
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: TASK, providerId: PROVIDER, err: dropped }),
+      expect.any(String),
+    );
+  };
+  const advanceOfNext = [{ name: TASK_JOB_NAMES.ADVANCE_STEP, data: { taskId: NEXT_TASK } }];
+
+  it('goes on to the next armed task when the notify stamp of one cannot be written', async () => {
+    config('notify', 'normal');
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const t = twoTasks();
+    breakOnce(t, 'beforeUpdate', schema.tasks);
+
+    await checkProviderRecovery(t.db);
+
+    expectLogged(error);
+    expect(t.task().allowanceReplenishedAt).toBeNull();
+    expect(t.task(NEXT_TASK).allowanceReplenishedAt).toBeInstanceOf(Date);
+    expect(t.fake.rows(schema.taskEvents)).toMatchObject([
+      { taskId: NEXT_TASK, eventType: 'task.allowance_replenished' },
+    ]);
+  });
+
+  it('goes on to the next armed task when the notify event of one cannot be written', async () => {
+    config('notify', 'normal');
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const t = twoTasks();
+    breakOnce(t, 'beforeInsert', schema.taskEvents);
+
+    await checkProviderRecovery(t.db);
+
+    expectLogged(error);
+    expect(t.task(NEXT_TASK).allowanceReplenishedAt).toBeInstanceOf(Date);
+    expect(t.fake.rows(schema.taskEvents)).toMatchObject([
+      { taskId: NEXT_TASK, eventType: 'task.allowance_replenished' },
+    ]);
+  });
+
+  it('goes on to the next armed task when the queue refuses the advance of a resumed one', async () => {
+    config('auto', 'normal');
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const t = twoTasks();
+    h.failNextAdd = dropped;
+
+    await checkProviderRecovery(t.db);
+
+    expectLogged(error);
+    expect(t.task(NEXT_TASK)).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
+    expect(h.queued).toMatchObject(advanceOfNext);
+  });
+
+  it('goes on to the next armed task when the watch of one that never cleared cannot be dropped', async () => {
+    config('auto', 'normal');
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const t = twoTasks({ reason: 'server_error', since: null });
+    breakOnce(t, 'beforeUpdate', schema.tasks);
+
+    await checkProviderRecovery(t.db);
+
+    expectLogged(error);
+    expect(t.task()).toMatchObject({ awaitingAllowanceProviderId: PROVIDER });
+    expect(t.task(NEXT_TASK)).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
+    expect(h.queued).toMatchObject(advanceOfNext);
+  });
+
+  it('goes on to the next armed task when the backfilled reset of one cannot be saved', async () => {
+    config('auto', 'normal');
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const t = twoTasks({ resetAt: null });
+    t.fake.insert(schema.usageWindowSnapshots, {
+      providerId: PROVIDER,
+      userId: USER,
+      providerName: 'claude-code',
+      status: 'ok',
+      fetchedAt: new Date(),
+      fiveHourPct: 95,
+      fiveHourResetAt: new Date(Date.now() + 3_600_000),
+    });
+    breakOnce(t, 'beforeUpdate', schema.tasks);
+
+    await checkProviderRecovery(t.db);
+
+    expectLogged(error);
+    expect(t.task()).toMatchObject({ allowanceResetAt: expect.any(Date) });
+    expect(t.task(NEXT_TASK)).toMatchObject({ status: 'running', allowanceAutoResumeCount: 1 });
+    expect(h.queued).toMatchObject(advanceOfNext);
   });
 });
