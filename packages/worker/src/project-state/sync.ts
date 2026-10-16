@@ -409,7 +409,7 @@ async function importClaims(
   }: {
     repositoryId: string;
     repoPath: string;
-    repo: { userId: string; renderContext: unknown };
+    repo: { userId: string; renderContext: unknown; rtkChoiceMadeAt: Date | null };
     local: readonly ProjectStateClaim[];
     merged: readonly ProjectStateClaim[];
   },
@@ -732,7 +732,11 @@ export async function syncProjectStateFromCheckout(
     const imported = await importClaims(tx, {
       repositoryId,
       repoPath,
-      repo: { userId: repo.userId, renderContext: columnAfter },
+      repo: {
+        userId: repo.userId,
+        renderContext: columnAfter,
+        rtkChoiceMadeAt: repo.rtkChoiceMadeAt,
+      },
       local: localClaims,
       merged: merge.merged.claims,
     });

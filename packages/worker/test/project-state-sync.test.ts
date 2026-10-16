@@ -2509,6 +2509,20 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
     expect(row!.formValuesSnapshot).not.toHaveProperty('rtkChoiceRecorded');
   });
 
+  it.each([
+    ['records RTK in the marker once a person switched it', new Date(1000), true],
+    ['leaves RTK out of the marker while nobody chose it', null, false],
+  ] as const)('%s, over a column that recorded no choice', async (_name, madeAt, recorded) => {
+    const s = await setup({ column: column(BASE, false) });
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true, rtkChoiceMadeAt: madeAt });
+    await s.putRecord(withClaims(claim(AGENT, H('4'))));
+
+    await s.run();
+
+    const [row] = live(s);
+    expect(Object.hasOwn(row!.formValuesSnapshot as object, 'rtkEnabled')).toBe(recorded);
+  });
+
   it('keeps no bytes for a marker whose path holds other bytes', async () => {
     const s = await setup();
     await s.put(GUIDE, GUIDE_TEXT);

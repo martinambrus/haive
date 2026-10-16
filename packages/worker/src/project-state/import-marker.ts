@@ -3,6 +3,7 @@ import { schema, type Database } from '@haive/database';
 import {
   FOREIGN_TEMPLATE,
   PROJECT_STATE_IMPORT_STEP_ID,
+  isRtkChoiceRecorded,
   localTemplateId,
   readRenderContextColumn,
   type LocalBundle,
@@ -27,7 +28,7 @@ export interface MarkerContext {
 export async function loadMarkerContext(
   tx: Tx,
   repositoryId: string,
-  repo: { userId: string; renderContext: unknown },
+  repo: { userId: string; renderContext: unknown; rtkChoiceMadeAt: Date | null },
 ): Promise<MarkerContext> {
   const column = readRenderContextColumn(repo.renderContext);
   const providers =
@@ -44,7 +45,7 @@ export async function loadMarkerContext(
       column.kind === 'column'
         ? (recordableContext(
             renderContextFromColumn(column.column, providers),
-            column.column.rtkChoiceRecorded,
+            isRtkChoiceRecorded(column.column.rtkChoiceRecorded, repo.rtkChoiceMadeAt),
           ) as unknown as Record<string, unknown>)
         : null,
   };
