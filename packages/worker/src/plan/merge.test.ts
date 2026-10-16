@@ -3,13 +3,14 @@ import { mkdtemp, mkdir, rm, writeFile, readFile, lstat } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { planMirrorPayloadSchema } from '@haive/shared/schemas';
 import { renderPlanMarkdownFromMirror, serializePlanMirror } from '@haive/shared/plan';
 import { mergePlanMirror } from '@haive/shared/plan-mirror-merge';
 import type { PlanMirror } from '@haive/shared';
 import {
   PROJECT_STATE_DIR,
+  canonicalJson,
   claimFileName,
   emptyProjectState,
   mergeProjectState,
@@ -30,6 +31,24 @@ import {
   planMergeWorktreePath,
   removePlanMergeWorktree,
 } from './merge.js';
+
+// As the root worker, which the hand-back after a move is for: every path reads as the worker's own,
+// and a hand-back is recorded instead of made.
+const handBack = vi.hoisted(() => ({ asRoot: false, chowned: [] as string[] }));
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...real,
+    lstatNoFollow: async (...args: Parameters<typeof real.lstatNoFollow>) => {
+      const info = await real.lstatNoFollow(...args);
+      return handBack.asRoot && info ? { ...info, stats: { ...info.stats, uid: 0 } } : info;
+    },
+    chownNoFollow: async (...args: Parameters<typeof real.chownNoFollow>) => {
+      if (handBack.asRoot) handBack.chowned.push(args[1]);
+      else await real.chownNoFollow(...args);
+    },
+  };
+});
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -751,6 +770,31 @@ describe('mergeOriginInto: the project state record merges three-way', () => {
     expect(record.claims.map((c) => c.writtenHash)).toEqual(['h-theirs']);
   });
 
+  it.each(['ours', 'theirs'])(
+    'merges a record whose %s side holds a claim file at a git-data path, and drops the file',
+    async (side) => {
+      const legacy = claimAt('.git/config', 'h0');
+      const file = `${STATE_PREFIX}${claimFileName(legacy.path)}`;
+      const ours = stateFiles(recordOf({ render: baseRender({ framework: 'drupal' }) }));
+      const theirs = stateFiles(recordOf({ render: baseRender({ customAgentSpecs: theirsSpec }) }));
+      const { local, wt } = await relatedFilesPair(
+        stateFiles(base),
+        side === 'ours' ? { ...ours, [file]: canonicalJson(legacy) } : ours,
+        side === 'theirs' ? { ...theirs, [file]: canonicalJson(legacy) } : theirs,
+      );
+      const { attempt } = await mergeAndCommit(local, wt);
+
+      expect(attempt.clean).toBe(true);
+      expect(attempt.warnings).toEqual([]);
+      expect(await unmergedUnderState(wt)).toBe('');
+      const record = await committedRecord(wt);
+      expect(record.render?.framework).toBe('drupal');
+      expect(record.render?.customAgentSpecs).toEqual(theirsSpec);
+      expect((await git(wt, ['ls-files', '--', file])).trim()).toBe('');
+      await expect(lstat(path.join(wt, file))).rejects.toThrow();
+    },
+  );
+
   it('removes a file the record no longer holds when theirs deleted a unit ours changed', async () => {
     const claim = claimAt('.claude/agents/a.md', 'h0');
     const file = `${STATE_PREFIX}${claimFileName(claim.path)}`;
@@ -877,6 +921,34 @@ describe('landPlanMerge', () => {
     // fast-forward legal — and is the single-command undo.
     expect((await git(local, ['rev-parse', `${sha}^1`])).trim()).toBe(before);
     expect(await readFile(path.join(local, 'README.md'), 'utf8')).toContain('both sides');
+  });
+
+  it('hands what the fast-forward wrote to the sandbox user, as the root worker', async () => {
+    const { local } = await unrelatedPair();
+    await git(local, ['checkout', '-b', 'side']);
+    await write(local, 'README.md', '# edited\n');
+    await write(local, 'top.txt', 'top\n');
+    await write(local, 'dir/sub/deep.txt', 'deep\n');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'the merge result']);
+    const sha = (await git(local, ['rev-parse', 'HEAD'])).trim();
+    await git(local, ['checkout', 'main']);
+    const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
+    try {
+      handBack.asRoot = true;
+      await landPlanMerge(local, sha);
+      expect([...handBack.chowned].sort()).toEqual([
+        'README.md',
+        'dir',
+        'dir/sub',
+        'dir/sub/deep.txt',
+        'top.txt',
+      ]);
+    } finally {
+      handBack.asRoot = false;
+      handBack.chowned = [];
+      asRoot.mockRestore();
+    }
   });
 
   it('refuses rather than resetting when the checkout moved underneath', async () => {

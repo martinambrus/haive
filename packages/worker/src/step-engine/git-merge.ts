@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { schema, type Database } from '@haive/database';
+import { HAIVE_DATA_FILES } from '@haive/shared';
 import { logger } from '@haive/shared/logger';
 import {
   chmodNoFollow,
@@ -16,6 +17,7 @@ import {
   renameNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import { PROJECT_STATE_DIR } from '@haive/shared/project-state';
 import {
   secretMaskDeniesPath,
   type SecretMaskPolicy,
@@ -163,6 +165,16 @@ async function differingFrom(dir: string, ref: string): Promise<string[]> {
   return res.code === 0 ? nulPaths(res.stdout) : [];
 }
 
+/** What the set-aside moves out of the checkout, the state record's directories included: the worker writes it, and `restoreKeptMetadata` skips what it no longer owns. */
+function isHaiveProjection(rel: string): boolean {
+  return (
+    rel === PROJECT_STATE_DIR ||
+    rel.startsWith(`${PROJECT_STATE_DIR}/`) ||
+    rel === HAIVE_DATA_FILES.plan ||
+    rel === HAIVE_DATA_FILES.planMarkdown
+  );
+}
+
 /** A file the sandbox user must rewrite or a directory it must add to cannot stay root's: each of
  *  `names` and the directories above it that root owns go to the tree's owner. What another user
  *  owns, and every link, stays. A chown moves a file's ctime, which `merge --abort` reads as a
@@ -183,7 +195,9 @@ async function handBackWritten(
     }
     const parts = name.split('/');
     for (let i = 1; i <= parts.length; i += 1) {
-      const rel = `${plan.prefix}${parts.slice(0, i).join('/')}`;
+      const at = parts.slice(0, i).join('/');
+      if (plan.prefix === '' && isHaiveProjection(at)) continue;
+      const rel = `${plan.prefix}${at}`;
       if (seen.has(rel)) continue;
       seen.add(rel);
       const entry = await lstatNoFollow(plan.anchor, rel).catch(() => null);
@@ -203,6 +217,13 @@ async function handBackWritten(
       'names that are not UTF-8 stay owned by the worker after a merge',
     );
   }
+}
+
+/** After a fast-forward of `dir` from `before`: what the move wrote goes to the sandbox user, as
+ *  `openMerge` does for a merge. */
+export async function handBackAfterMove(dir: string, before: string): Promise<void> {
+  const plan = await handBackPlan(dir);
+  if (plan) await handBackWritten(plan, dir, await differingFrom(dir, before));
 }
 
 /** git with `names`, as a latin1 listing holds them, in a NUL pathspec file: argv would carry a name

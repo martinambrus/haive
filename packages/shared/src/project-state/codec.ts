@@ -1,7 +1,14 @@
 import { types } from 'node:util';
 import type { z } from 'zod';
 import { canonicalJson, sortedSet } from './canonical.js';
-import { bundleFileName, claimFileName, isClaimablePath, isRecordName } from './names.js';
+import {
+  bundleFileName,
+  claimFileName,
+  isCanonicalRepoPath,
+  isClaimablePath,
+  isRecordName,
+  namesGitData,
+} from './names.js';
 import {
   PROJECT_STATE_FORMAT,
   SET_SETTINGS,
@@ -28,7 +35,13 @@ export class ProjectStateError extends Error {
 }
 
 export type ProjectStateParse =
-  | { ok: true; record: ProjectStateRecord; ignored: string[] }
+  | {
+      ok: true;
+      record: ProjectStateRecord;
+      ignored: string[];
+      /** Claim files at a git-data path that an earlier release wrote: no claim, kept apart so a writer can remove them. */
+      gitDataClaims: ProjectStateClaim[];
+    }
   | { ok: false; reason: 'newer-format' | 'invalid'; problems: string[] };
 
 const CONFLICT_MARKER = /^(?:<{7}|>{7}|\|{7})(?: |$)|^={7}$/m;
@@ -296,6 +309,7 @@ export function parseProjectState(files: ReadonlyMap<string, string>): ProjectSt
   const record = emptyProjectState();
   const problems: string[] = [];
   const ignored: string[] = [];
+  const gitDataClaims: ProjectStateClaim[] = [];
   for (const rel of [...files.keys()].sort()) {
     if (rel === 'format.json') continue;
     const kind = kindOf(rel);
@@ -338,7 +352,13 @@ export function parseProjectState(files: ReadonlyMap<string, string>): ProjectSt
     } else if (kind.type === 'claim') {
       const parsed = claimSchema.safeParse(value);
       if (!parsed.success) problems.push(...issues(rel, parsed.error));
-      else if (!isClaimablePath(parsed.data.path)) {
+      else if (
+        isCanonicalRepoPath(parsed.data.path) &&
+        namesGitData(parsed.data.path) &&
+        claimFileName(parsed.data.path) === rel
+      ) {
+        gitDataClaims.push(parsed.data);
+      } else if (!isClaimablePath(parsed.data.path)) {
         problems.push(`${rel}: ${quote(parsed.data.path)} is not a repository path`);
       } else if (claimFileName(parsed.data.path) !== rel) {
         problems.push(`${rel}: is not the file for ${quote(parsed.data.path)}`);
@@ -353,5 +373,5 @@ export function parseProjectState(files: ReadonlyMap<string, string>): ProjectSt
   }
   problems.push(...projectStateProblems(record));
   if (problems.length > 0) return { ok: false, reason: 'invalid', problems };
-  return { ok: true, record: normalizeProjectState(record), ignored };
+  return { ok: true, record: normalizeProjectState(record), ignored, gitDataClaims };
 }

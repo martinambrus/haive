@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { CONFIG_KEYS, configService, logger } from '@haive/shared';
+import { listIntegrationCategories } from '@haive/shared/integrations';
 import {
   COMPOSABLE_STEP_GROUPS,
   checkPromptSteps,
@@ -30,6 +31,9 @@ import { HttpError, type AppEnv } from '../context.js';
 const log = logger.child({ module: 'task-types' });
 
 const BUILTIN_SLUGS: ReadonlySet<string> = new Set(schema.workflowTypeEnum.enumValues);
+
+const registeredCategoryIds = (): ReadonlySet<string> =>
+  new Set(listIntegrationCategories().map((category) => category.id));
 
 type Db = ReturnType<typeof getDb>;
 type DefinitionRow = typeof schema.taskTypeDefinitions.$inferSelect;
@@ -205,6 +209,7 @@ adminTaskTypeRoutes.get('/:slug', async (c) => {
           },
           parsePromptSteps(row.promptSteps),
           catalog,
+          registeredCategoryIds(),
         )
       : [];
   return c.json({
@@ -227,7 +232,7 @@ adminTaskTypeRoutes.post('/', async (c) => {
   const catalog = await loadCatalog(db);
   requireSynced(catalog);
   const promptSteps = body.promptSteps ?? {};
-  const promptIssues = checkPromptSteps(body, promptSteps, catalog);
+  const promptIssues = checkPromptSteps(body, promptSteps, catalog, registeredCategoryIds());
   if (promptIssues.length > 0) {
     return c.json({ error: 'Invalid prompt steps', issues: promptIssues }, 400);
   }
@@ -332,6 +337,7 @@ adminTaskTypeRoutes.patch('/:slug', async (c) => {
           { slug, stepIds, requiresRepository },
           promptSteps,
           catalog,
+          registeredCategoryIds(),
         );
         if (promptIssues.length > 0) {
           return { invalid: { error: 'Invalid prompt steps', issues: promptIssues } } as const;
