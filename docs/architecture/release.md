@@ -37,11 +37,13 @@ then sets `maintenance` and takes the snapshot. Every api route that starts work
 while the state is `draining` or `maintenance`. Its authority is `admitNewWork`: a read of the state
 past ConfigService's 30 s cache inside the transaction that records the work, under a shared
 database fence (`lockNewWorkFenceShared`, an advisory lock on `NEW_WORK_FENCE_KEY`); most routes
-also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). The
-updater's switch to
-`draining`, like an administrator's maintenance write, takes the same fence exclusively: it waits
-for every admission in flight, so the live-task count it reads next includes each task admitted
-before it, and every admission after it reads `draining`. The gate that
+also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). Every
+updater state write (`draining`, `maintenance`, and the return to `normal` on commit or rollback),
+like an administrator's maintenance write, takes the same fence exclusively (`setMaintenanceState`):
+it waits for every admission in flight, so the live-task count it reads next includes each task
+admitted before it, every admission after it reads the new state, and no write lands inside an
+administrator's write. Lifting the hold therefore needs Postgres: an updater that cannot reach it
+leaves its run `running`, and the next `haive upgrade` resumes into the commit or the rollback. The gate that
 locks non-admins out during `maintenance` keeps its cached read, so that lockout can lag by up to
 30 s. In the worker, the allowance auto-resume and an answer to a parked form do not reopen a
 failed task while new work is refused (see [Worker restarts](worker-restarts.md)).
