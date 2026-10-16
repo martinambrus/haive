@@ -41,7 +41,10 @@ vi.mock('@haive/shared', async (importOriginal) => ({
   },
 }));
 vi.mock('../src/db.js', () => ({
-  getDb: () => ({ select: () => ({ from: async () => h.intentRows }) }),
+  getDb: () => ({
+    select: () => ({ from: async () => h.intentRows }),
+    transaction: async (run: (tx: unknown) => unknown) => run({ execute: async () => [] }),
+  }),
 }));
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ get: async () => null }) }));
 vi.mock('../src/lib/audit.js', () => ({

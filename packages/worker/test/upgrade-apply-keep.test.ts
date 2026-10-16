@@ -16,6 +16,7 @@ import {
   type ApplySelections,
 } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { RECORD_WRITE_TABLES, recordWritten } from './support/upgrade-apply-record.js';
 
 // The keep choice (harness-amendment-227.md section 2): 02's form offers an obsolete Haive file the
 // choice to be kept and no longer tracked, and the apply supersedes its row and touches nothing else.
@@ -145,8 +146,7 @@ async function upgrade(paths: string[], templateId = 'agent.old') {
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
-    projectStateSync: schema.projectStateSync,
-    projectStateConflicts: schema.projectStateConflicts,
+    ...RECORD_WRITE_TABLES,
   });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
   const entries: UpgradePlanEntry[] = [];
@@ -190,12 +190,14 @@ async function upgrade(paths: string[], templateId = 'agent.old') {
   } as unknown as StepContext;
   const plan = planOf(entries);
   const apply = (formValues: Record<string, unknown>) =>
-    upgradeApplyStep.apply(ctx, {
-      detected: plan,
-      formValues,
-      iteration: 0,
-      previousIterations: [],
-    });
+    recordWritten(
+      upgradeApplyStep.apply(ctx, {
+        detected: plan,
+        formValues,
+        iteration: 0,
+        previousIterations: [],
+      }),
+    );
   const untracked = (out: unknown) =>
     (out as { untrackedRowIds?: string[] }).untrackedRowIds ?? null;
   const live = (diskPath: string) =>

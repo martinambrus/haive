@@ -28,6 +28,7 @@ import {
   removeStep,
 } from '@/lib/composition-order';
 import {
+  isToolIssue,
   newPromptStep,
   promptStepIssues,
   promptStepSlugOf,
@@ -64,7 +65,8 @@ const ICON_BUTTON = 'h-11 min-w-11 px-0';
 const NO_PROMPT_STEPS: PromptSteps = {};
 const NO_PROMPT_ISSUES: PromptStepIssue[] = [];
 
-const promptIssueKey = (i: PromptStepIssue) => `${i.kind}|${i.stepId}|${i.raw ?? ''}`;
+const promptIssueKey = (i: PromptStepIssue) =>
+  JSON.stringify([i.kind, i.stepId, i.raw ?? '', i.param ?? '']);
 
 function Chips({ label, tokens }: { label: string; tokens: string[] }) {
   if (tokens.length === 0) return null;
@@ -118,6 +120,10 @@ function dedupeIssues(issues: CompositionIssue[]): CompositionIssue[] {
     seen.add(key);
     return true;
   });
+}
+
+function dedupePromptIssues(issues: PromptStepIssue[]): PromptStepIssue[] {
+  return [...new Map(issues.map((i) => [promptIssueKey(i), i] as const)).values()];
 }
 
 function groupedSteps(catalog: TaskTypeCatalog, query: string) {
@@ -197,34 +203,43 @@ export function TaskTypeComposer({
     return <p className="text-sm text-neutral-400">Steps chosen at run time.</p>;
   }
 
-  const problems = compositionProblems({
-    stepIds,
-    loopLimits,
-    catalog: entries,
-    requiresRepository,
-  });
-  const composition = readOnly ? [] : dedupeIssues([...problems.composition, ...serverIssues]);
-  const defaults = readOnly ? [] : problems.defaults;
+  // The one list the summary and the announcement both count: a problem that comes up twice is one.
+  function problemsOf(
+    ids: string[],
+    limits: Record<string, number>,
+    server: { composition: CompositionIssue[]; prompt: PromptStepIssue[] },
+  ) {
+    if (readOnly) return { composition: [], defaults: [], prompt: [] };
+    const found = compositionProblems({
+      stepIds: ids,
+      loopLimits: limits,
+      catalog: entries,
+      requiresRepository,
+    });
+    return {
+      composition: dedupeIssues([...found.composition, ...server.composition]),
+      defaults: found.defaults,
+      prompt: dedupePromptIssues([
+        ...(typeSlug === undefined
+          ? []
+          : promptStepIssues({
+              typeSlug,
+              stepIds: ids,
+              requiresRepository,
+              promptSteps,
+              catalog: entries,
+            })),
+        ...server.prompt,
+      ]),
+    };
+  }
+  const {
+    composition,
+    defaults,
+    prompt: promptIssues,
+  } = problemsOf(stepIds, loopLimits, { composition: serverIssues, prompt: serverPromptIssues });
   const byRow = issuesByRow(composition);
   const generalIssues = composition.filter((i) => !('index' in i));
-  const promptIssues: PromptStepIssue[] = readOnly
-    ? []
-    : [
-        ...new Map(
-          [
-            ...(typeSlug === undefined
-              ? []
-              : promptStepIssues({
-                  typeSlug,
-                  stepIds,
-                  requiresRepository,
-                  promptSteps,
-                  catalog: entries,
-                })),
-            ...serverPromptIssues,
-          ].map((i) => [promptIssueKey(i), i] as const),
-        ).values(),
-      ];
   const promptByStep = new Map<string, PromptStepIssue[]>();
   for (const issue of promptIssues) {
     if (stepIds.includes(issue.stepId)) {
@@ -241,24 +256,9 @@ export function TaskTypeComposer({
     const pruned = pruneLoopLimits(loopLimits, next);
     onStepIdsChange(next);
     if (pruned !== loopLimits) onLoopLimitsChange(pruned);
-    const after = compositionProblems({
-      stepIds: next,
-      loopLimits: pruned,
-      catalog: entries,
-      requiresRepository,
-    });
-    const n =
-      after.composition.length +
-      after.defaults.length +
-      (readOnly || typeSlug === undefined
-        ? 0
-        : promptStepIssues({
-            typeSlug,
-            stepIds: next,
-            requiresRepository,
-            promptSteps,
-            catalog: entries,
-          }).length);
+    // The editor drops the server's verdicts on any edit, so the list after this one has none.
+    const after = problemsOf(next, pruned, { composition: [], prompt: [] });
+    const n = after.composition.length + after.defaults.length + after.prompt.length;
     setAnnouncement(`${message}; ${n === 0 ? 'no problems' : `${n} problem${n === 1 ? '' : 's'}`}`);
     if (focusTo) setFocus(focusTo);
   }
@@ -376,6 +376,12 @@ export function TaskTypeComposer({
             const promptSlug = typeSlug === undefined ? null : promptStepSlugOf(stepId, typeSlug);
             const promptEntry = promptSlug === null ? undefined : promptSteps[promptSlug];
             const rowPromptIssues = promptByStep.get(stepId) ?? [];
+            const toolRowIssues =
+              prompt && promptEntry && openStepId === stepId
+                ? rowPromptIssues.filter((issue) =>
+                    promptEntry.tools.some((tool) => isToolIssue(issue, tool)),
+                  )
+                : [];
             const limitEditable = !readOnly && entry?.loopBudgetEditable === true;
             return (
               <li
@@ -532,18 +538,21 @@ export function TaskTypeComposer({
                 {promptEntry && prompt && openStepId === stepId && (
                   <PromptStepEditor
                     entry={promptEntry}
+                    issues={toolRowIssues}
                     disabled={disabled}
                     onChange={(next) => prompt.set({ ...promptSteps, [promptEntry.slug]: next })}
                     onRemove={() => remove(index)}
                   />
                 )}
-                {rowPromptIssues.map((issue) => (
-                  <InlineMarkdown
-                    key={promptIssueKey(issue)}
-                    className="mt-2 text-xs text-red-300 [overflow-wrap:anywhere]"
-                    body={describePromptStepIssue(issue)}
-                  />
-                ))}
+                {rowPromptIssues
+                  .filter((issue) => !toolRowIssues.includes(issue))
+                  .map((issue) => (
+                    <InlineMarkdown
+                      key={promptIssueKey(issue)}
+                      className="mt-2 text-xs text-red-300 [overflow-wrap:anywhere]"
+                      body={describePromptStepIssue(issue)}
+                    />
+                  ))}
                 {rowIssues.map((issue) => {
                   const view = describeIssue(issue, {
                     stepIds,

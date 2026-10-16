@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { ComposableStepEntry, CustomTool, PromptStepEntry } from '@haive/shared/modularity';
+import type {
+  ComposableStepEntry,
+  CustomTool,
+  CustomToolParam,
+  PromptStepEntry,
+} from '@haive/shared/modularity';
+import { checkPromptSteps } from '@haive/shared/modularity';
 import { catalogEntries } from './composition-messages';
 import { TEST_CATALOG } from './composition-test-catalog';
 import {
@@ -172,6 +178,44 @@ describe('promptStepIssues', () => {
     ).toEqual(['timeout-out-of-range']);
   });
 
+  it('raises what the check of the api raises for the listed entries, whatever the repository setting', () => {
+    const tool: CustomTool = {
+      name: 'repo_status',
+      description: 'Fetches the status of one repository.',
+      action: 'http-get',
+      url: 'http://api.example.com/v1/status',
+      query: [],
+      params: [],
+      timeoutMs: 10_000,
+      maxResponseBytes: 32_768,
+    };
+    const stepIds = ['04-phase-0b-pre-planning', 'custom.t.a', 'custom.t.b'];
+    const promptSteps = {
+      a: entry('a', { template: 'Hi {{bogus}}', timeoutMs: 0, capabilities: ['file_write'] }),
+      b: entry('b', { template: '{{agent:reviewer}}\n{{step:custom.t.c}}', tools: [tool] }),
+    };
+    for (const requiresRepository of [true, false]) {
+      const found = issues(stepIds, promptSteps, requiresRepository);
+      expect(found.length).toBeGreaterThanOrEqual(4);
+      expect(found).toEqual(
+        checkPromptSteps({ slug: 't', stepIds, requiresRepository }, promptSteps, {
+          composable: base,
+        }),
+      );
+    }
+  });
+
+  it('puts the empty title and template of a step ahead of its other problems', () => {
+    const out = issues(['custom.t.a'], {
+      a: entry('a', { title: '', template: '', timeoutMs: 0 }),
+    });
+    expect(out.map((i) => i.kind)).toEqual([
+      'title-empty',
+      'template-empty',
+      'timeout-out-of-range',
+    ]);
+  });
+
   it('ignores a custom id with no entry and an entry that is not listed', () => {
     expect(issues(['custom.t.gone'], {})).toEqual([]);
     expect(issues(['04-phase-0b-pre-planning'], { a: entry('a', { template: '' }) })).toEqual([]);
@@ -194,6 +238,32 @@ describe('promptStepIssues', () => {
     ]);
     const passing = { ...tool, url: 'https://api.example.com/v1/status' };
     expect(issues(['custom.t.a'], { a: entry('a', { tools: [passing] }) })).toEqual([]);
+  });
+
+  it('names the parameter of each parameter problem, and of no other', () => {
+    const flag = (name: string): CustomToolParam => ({
+      name,
+      type: 'boolean',
+      description: 'A flag.',
+      required: false,
+    });
+    const tool: CustomTool = {
+      name: 'repo_status',
+      description: 'Fetches the status of one repository.',
+      action: 'http-get',
+      url: 'http://api.example.com/v1/status',
+      query: [],
+      params: [flag('a'), flag('b')],
+      timeoutMs: 10_000,
+      maxResponseBytes: 32_768,
+    };
+    const out = issues(['custom.t.a'], { a: entry('a', { tools: [tool] }) });
+    expect(out.map((i) => [i.kind, i.raw, i.param])).toEqual([
+      ['tool-url-not-https', 'repo_status', undefined],
+      ['tool-param-unused', 'repo_status', 'a'],
+      ['tool-param-unused', 'repo_status', 'b'],
+    ]);
+    expect(out[0]).not.toHaveProperty('param');
   });
 });
 
@@ -256,5 +326,33 @@ describe('listedPromptSteps and samePromptSteps', () => {
     expect(samePromptSteps({ a: entry('a') }, { a: entry('a', { title: 'x' }) })).toBe(false);
     expect(samePromptSteps({ a: entry('a') }, {})).toBe(false);
     expect(samePromptSteps({}, {})).toBe(true);
+  });
+
+  it('W6 reports a change when only the tools differ, and none when they read the same', () => {
+    const tool: CustomTool = {
+      name: 'repo_status',
+      description: 'Fetches the status of one repository.',
+      action: 'http-get',
+      url: 'https://api.example.com/v1/status',
+      query: [],
+      params: [],
+      timeoutMs: 10_000,
+      maxResponseBytes: 32_768,
+    };
+    const other: CustomTool = { ...tool, name: 'repo_list' };
+    const param: CustomToolParam = {
+      name: 'repo',
+      description: 'The repository.',
+      type: 'string',
+      required: true,
+      maxLength: 64,
+    };
+    const steps = (...tools: CustomTool[]) => ({ a: entry('a', { tools }) });
+    expect(samePromptSteps(steps(), steps(tool))).toBe(false);
+    expect(samePromptSteps(steps(tool), steps({ ...tool }))).toBe(true);
+    expect(samePromptSteps(steps(tool), steps({ ...tool, description: 'Another.' }))).toBe(false);
+    expect(samePromptSteps(steps(tool), steps({ ...tool, params: [param] }))).toBe(false);
+    expect(samePromptSteps(steps(tool, other), steps(other, tool))).toBe(false);
+    expect(samePromptSteps({ a: entry('a', { tools: undefined }) }, steps())).toBe(true);
   });
 });

@@ -45,5 +45,9 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/((?!_next|favicon.ico|.*\\..*).*)'],
+  matcher: [
+    '/((?!_next|favicon.ico|.*\\..*).*)',
+    // A module provider id holds dots, which the entry above takes for a static file.
+    '/settings/integrations/callback/:providerId',
+  ],
 };

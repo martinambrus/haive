@@ -23,7 +23,8 @@ import {
   validateTaskTypeDefaults,
   type ComposableStepEntry,
   type CompositionIssue,
-  type PromptStepProblemKind,
+  type PromptStepIssue as CheckedPromptStepIssue,
+  type PromptStepIssueKind as CheckedPromptStepIssueKind,
   type TaskTypeAvailability,
   type TaskTypeDefaultsIssue,
   type TaskTypeModuleRef,
@@ -298,19 +299,10 @@ export function describeAvailability(availability: TaskTypeAvailability): string
   }
 }
 
-export type PromptStepIssueKind =
-  | PromptStepProblemKind
-  | 'template-empty'
-  | 'title-empty'
-  | 'prompt-step-orphan'
-  | 'prompt-step-missing';
+export type PromptStepIssueKind = CheckedPromptStepIssueKind | 'template-empty' | 'title-empty';
 
-export interface PromptStepIssue {
+export interface PromptStepIssue extends Omit<CheckedPromptStepIssue, 'kind' | 'message'> {
   kind: PromptStepIssueKind;
-  stepId: string;
-  index?: number;
-  raw?: string;
-  start?: number;
   message?: string;
 }
 
@@ -334,6 +326,7 @@ export function promptStepIssuesOf(issues: unknown): PromptStepIssue[] {
 export function describePromptStepIssue(issue: PromptStepIssue): string {
   const token = issue.raw ? inlineCode(issue.raw) : 'A token';
   const tool = issue.raw ? `The tool ${inlineCode(issue.raw)}` : 'A tool';
+  const param = issue.param ? inlineCode(issue.param) : null;
   switch (issue.kind) {
     case 'title-empty':
       return 'Give the step a title.';
@@ -367,8 +360,6 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
       return `${token} names a step whose output can carry a person's words; only a step whose output an agent wrote can be quoted.`;
     case 'step-token-not-own-line':
       return `${token} must be alone on its line.`;
-    case 'tools-not-supported-yet':
-      return "Tools on a prompt step are not supported yet. Remove this step's tools to save it.";
     case 'tool-no-longer-valid':
       return issue.raw
         ? `${tool} no longer passes its checks; fix it or remove it.`
@@ -398,15 +389,19 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
     case 'tool-placeholder-outside-path':
       return `${tool} has a {placeholder} outside the path of its URL; a placeholder may only stand in the path, after the host.`;
     case 'tool-param-undeclared':
-      return `${tool} uses a name in its URL or query list that it does not declare as a parameter.`;
+      return param
+        ? `${tool} uses ${param} in its URL or query list but does not declare it as a parameter.`
+        : `${tool} uses a name in its URL or query list that it does not declare as a parameter.`;
     case 'tool-param-unused':
-      return `${tool} declares a parameter that its URL path and query list never use.`;
+      return param
+        ? `${tool} declares the parameter ${param}, but its URL path and query list never use it.`
+        : `${tool} declares a parameter that its URL path and query list never use.`;
     case 'tool-param-reused':
-      return `${tool} uses a parameter more than once; each parameter goes once in the URL path or the query list.`;
+      return `${tool} uses ${param ? `the parameter ${param}` : 'a parameter'} more than once; each parameter goes once in the URL path or the query list.`;
     case 'tool-param-duplicate':
-      return `${tool} declares two parameters with the same name.`;
+      return `${tool} declares two parameters ${param ? `named ${param}` : 'with the same name'}.`;
     case 'tool-param-invalid':
-      return `A parameter of ${issue.raw ? `the tool ${inlineCode(issue.raw)}` : 'a tool'} is not valid: its name follows the tool name rules, its description is 1 to ${CUSTOM_TOOL_PARAM_DESCRIPTION_MAX_LENGTH} characters, and its limits fit its type.`;
+      return `${param ? `The parameter ${param}` : 'A parameter'} of ${issue.raw ? `the tool ${inlineCode(issue.raw)}` : 'a tool'} is not valid: its name follows the tool name rules, its description is 1 to ${CUSTOM_TOOL_PARAM_DESCRIPTION_MAX_LENGTH} characters, and its limits fit its type.`;
     case 'tool-too-many-params':
       return `${tool} has more than ${CUSTOM_TOOL_PARAMS_MAX} parameters; remove some.`;
     case 'tool-timeout-out-of-range':

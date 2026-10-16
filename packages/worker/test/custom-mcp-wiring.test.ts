@@ -102,6 +102,7 @@ function dbFor(customSteps: unknown, stepId = STEP_ID, stepRow = true): Database
       envTemplates: { findFirst: async () => undefined },
       taskSteps: { findFirst: async () => (stepRow ? { output: null, stepId } : undefined) },
       repositories: { findFirst: async () => undefined },
+      cliInvocations: { findFirst: async () => undefined },
     },
   } as unknown as Database;
 }
@@ -622,6 +623,7 @@ describe('the pinned step', () => {
           },
         },
         repositories: { findFirst: async () => undefined },
+        cliInvocations: { findFirst: async () => undefined },
       },
     } as unknown as Database;
     await extra('claude-code', db, run({ customTools: undefined }));

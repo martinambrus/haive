@@ -66,7 +66,7 @@ describe('PromptStepEditor', () => {
       <PromptStepEditor entry={entry} disabled onChange={noop} onRemove={noop} />,
     );
     const controls = off.match(/<(button|input|textarea)\b[^>]*>/g) ?? [];
-    expect(controls.length).toBe(7);
+    expect(controls.length).toBe(8);
     for (const tag of controls) expect(tag).toContain('disabled=""');
   });
 });

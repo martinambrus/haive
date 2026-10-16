@@ -15,6 +15,7 @@ import {
 } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { appliedWrittenPaths } from '../src/step-engine/steps/onboarding-upgrade/03-upgrade-commit.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { recordWritten } from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -107,13 +108,16 @@ async function setup(installJson?: string) {
       debug: noop,
     },
   } as unknown as StepContext;
-  const apply = () =>
-    upgradeApplyStep.apply(ctx, {
-      detected: plan,
-      formValues: {},
-      iteration: 0,
-      previousIterations: [],
-    });
+  const apply = (opts?: { recordWriteFails?: boolean }) =>
+    recordWritten(
+      upgradeApplyStep.apply(ctx, {
+        detected: plan,
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      }),
+      opts,
+    );
   return {
     root,
     fake,
@@ -162,7 +166,7 @@ describe('02 reports the record files it wrote', () => {
       if (locks === 1) throw new Error('database refused');
     };
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     // The files stand on disk, where a later sync takes them as the intended context, while the
     // column and the sync row stayed as they were: the upgrade must still commit them.
@@ -303,7 +307,7 @@ describe('02 and .haive/install.json', () => {
       },
     });
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     expect(out.warnings).toContain(
       'the record was written, but retiring the files it replaces failed: database refused',
@@ -326,7 +330,7 @@ describe('02 and .haive/install.json', () => {
       },
     });
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     expect(existsSync(join(s.root, INSTALL))).toBe(false);
     expect(out.deletedPaths ?? []).not.toContain(INSTALL);
@@ -350,7 +354,7 @@ describe('02 and .haive/install.json', () => {
     await s.apply();
     await writeFile(join(s.root, INSTALL), '{"keep":true}');
     refuseRecordWriteOnce(s);
-    await s.apply();
+    await s.apply({ recordWriteFails: true });
     expect(s.retired()).toEqual([]);
     await rm(join(s.root, INSTALL));
 
@@ -508,7 +512,7 @@ describe('02 and .haive/install.json', () => {
       }
     };
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     expect(out.warnings).toContain('project state record write failed: database refused');
     expect(existsSync(join(s.root, INSTALL))).toBe(true);
@@ -521,7 +525,7 @@ describe('02 and .haive/install.json', () => {
     expect(existsSync(join(s.root, INSTALL))).toBe(false);
     refuseRecordWriteOnce(s);
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     expect(out.warnings).toEqual(['project state record write failed: database refused']);
     expect(out.deletedPaths).toContain(INSTALL);
@@ -540,7 +544,7 @@ describe('02 and .haive/install.json', () => {
     }
     refuseRecordWriteOnce(s);
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     expect(out.warnings).toEqual(['project state record write failed: database refused']);
     expect(out.deletedPaths ?? []).not.toContain(INSTALL);
@@ -556,7 +560,7 @@ describe('02 and .haive/install.json', () => {
     await put(join(s.root, INSTALL));
     refuseRecordWriteOnce(s);
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     expect(out.warnings).toEqual(['project state record write failed: database refused']);
     expect(out.deletedPaths ?? []).not.toContain(INSTALL);
@@ -574,7 +578,7 @@ describe('02 and .haive/install.json', () => {
       },
     });
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     expect(out.warnings).toEqual([
       'project state record write failed: database refused',
@@ -593,7 +597,7 @@ describe('02 and .haive/install.json', () => {
     await symlink(outside, join(s.root, '.haive'));
     refuseRecordWriteOnce(s);
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     expect(out.deletedPaths ?? []).not.toContain(INSTALL);
     expect(
@@ -615,7 +619,7 @@ describe('02 and .haive/install.json', () => {
       },
     });
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     expect(existsSync(join(s.root, INSTALL))).toBe(false);
     expect(out.warnings).toEqual([
@@ -853,7 +857,7 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
       }
     };
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     expect(out.warnings).toContain('project state record write failed: database refused');
     for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
@@ -870,7 +874,7 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
     }
     refuseRecordWriteOnce(s);
 
-    const out = await s.apply();
+    const out = await s.apply({ recordWriteFails: true });
 
     expect(out.warnings).toEqual(['project state record write failed: database refused']);
     for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
@@ -933,7 +937,7 @@ describe('02 and the legacy tooling mirror', () => {
         throw new Error('database refused');
       }
     };
-    const outFailed = await failed.apply();
+    const outFailed = await failed.apply({ recordWriteFails: true });
     expect(outFailed.warnings).toContain('project state record write failed: database refused');
     expect(existsSync(join(failed.root, TOOLING_LEGACY))).toBe(true);
     expect(outFailed.deletedPaths ?? []).not.toContain(TOOLING_LEGACY);

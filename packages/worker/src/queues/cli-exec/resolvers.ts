@@ -40,9 +40,19 @@ import {
   CUSTOM_MCP_TOKEN_PATH,
   CUSTOM_MCP_TOOLS_PATH,
 } from '../../sandbox/custom-mcp-server.js';
+import {
+  INTEGRATIONS_MCP_SERVER_JS,
+  INTEGRATIONS_MCP_SERVER_PATH,
+  INTEGRATIONS_MCP_TOKEN_PATH,
+} from '../../sandbox/integrations-mcp-server.js';
 import { CHROME_MCP_PROXY_JS, CHROME_MCP_PROXY_PATH } from '../../sandbox/chrome-mcp-proxy.js';
 import { DDEV_MCP_SERVER_JS, DDEV_MCP_SERVER_PATH } from '../../sandbox/ddev-mcp-server.js';
-import { resolveMcpSurface, type McpProfile, type McpSurface } from '../../sandbox/mcp-surface.js';
+import {
+  internalApiUrl,
+  resolveMcpSurface,
+  type McpProfile,
+  type McpSurface,
+} from '../../sandbox/mcp-surface.js';
 import { runnerBrowserCdpUrl } from '../../sandbox/ddev-runner.js';
 import { appRunnerBrowserCdpUrl } from '../../sandbox/app-runner.js';
 import { cliAdapterRegistry } from '../../cli-adapters/registry.js';
@@ -63,6 +73,7 @@ import { sandboxWorktreePath, splitRepoSubpath } from '../../repo/worktree-paths
 import { resolveSandboxImageTag } from './images.js';
 import { hasReadyLspBridge } from '../../lsp/configured-lsp.js';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { parseIntegrationBindings } from '@haive/shared/integrations';
 import { customToolInputSchema, parsePinnedCustomSteps } from '@haive/shared/modularity';
 import { pinnedToolsFailure } from '../../step-engine/steps/custom/pinned-tools.js';
 import { signTaskToken } from '@haive/shared/task-token';
@@ -236,7 +247,13 @@ export function networkPolicyReachesPackageRegistries(policy: CliNetworkPolicy |
   return !policy || policy.mode === 'full';
 }
 
-const CUSTOM_TOKEN_GRACE_SECONDS = 15 * 60;
+const RUN_TOKEN_GRACE_SECONDS = 15 * 60;
+
+/** A run's token outlives its timeout by a grace; a run with no timeout keeps the default lifetime of a task token. */
+const runTokenLifetime = (timeoutMs: number | undefined): { ttlSeconds?: number } =>
+  timeoutMs === undefined
+    ? {}
+    : { ttlSeconds: Math.ceil(timeoutMs / 1000) + RUN_TOKEN_GRACE_SECONDS };
 
 type CustomRun = Pick<
   CliExecJobPayload,
@@ -290,9 +307,7 @@ async function resolveCustomFiles(
       taskId,
       taskStepId: run.taskStepId,
       cliInvocationId: run.invocationId,
-      ...(run.timeoutMs === undefined
-        ? {}
-        : { ttlSeconds: Math.ceil(run.timeoutMs / 1000) + CUSTOM_TOKEN_GRACE_SECONDS }),
+      ...runTokenLifetime(run.timeoutMs),
     },
     process.env.CONFIG_ENCRYPTION_KEY as string,
   );
@@ -309,6 +324,47 @@ async function resolveCustomFiles(
       ),
     },
     { containerPath: CUSTOM_MCP_TOKEN_PATH, content: token },
+  ];
+}
+
+const INTEGRATIONS_UNWIRED_REASON = 'integrations-unwired';
+
+const integrationsUnwired = (cause: string): Error =>
+  new Error(
+    `${INTEGRATIONS_UNWIRED_REASON}: the integrations of this run cannot be wired because ${cause}. The CLI was not started; fix that, then retry the step.`,
+  );
+
+/** The haive-integrations script and this run's token as sandbox files; null for a run whose invocation carries no stamp, and throws when a stamped one cannot be wired. */
+async function resolveIntegrationsFiles(
+  db: Database,
+  taskId: string,
+  run: Pick<CustomRun, 'invocationId' | 'taskStepId' | 'timeoutMs'>,
+): Promise<SandboxExtraFile[] | null> {
+  const invocation = await db.query.cliInvocations.findFirst({
+    where: eq(schema.cliInvocations.id, run.invocationId),
+    columns: { integrations: true },
+  });
+  if (parseIntegrationBindings(invocation?.integrations).length === 0) return null;
+  const secret = process.env.CONFIG_ENCRYPTION_KEY;
+  if (!secret) {
+    throw integrationsUnwired(
+      "CONFIG_ENCRYPTION_KEY is not set on the worker, so the run's token cannot be signed",
+    );
+  }
+  if (run.taskStepId === null) throw integrationsUnwired('the run is not tied to a step');
+  const token = signTaskToken(
+    {
+      aud: 'integrations',
+      taskId,
+      taskStepId: run.taskStepId,
+      cliInvocationId: run.invocationId,
+      ...runTokenLifetime(run.timeoutMs),
+    },
+    secret,
+  );
+  return [
+    { containerPath: INTEGRATIONS_MCP_SERVER_PATH, content: INTEGRATIONS_MCP_SERVER_JS },
+    { containerPath: INTEGRATIONS_MCP_TOKEN_PATH, content: token },
   ];
 }
 
@@ -344,7 +400,7 @@ export async function resolveMcpExtraFiles(
   /** The invocation's effective egress. Required, like the two flags above: a default would let
    *  a new call site declare a server the sandbox cannot fetch. */
   networkPolicy: CliNetworkPolicy | null,
-  /** The run these files are for; only a prompt step's own run names custom tools. */
+  /** The run these files are for; only a prompt step's own run names custom tools, and its invocation row may carry integrations. */
   run?: CustomRun,
 ): Promise<McpResolution> {
   const empty: McpResolution = { files: [], extraArgs: [] };
@@ -360,6 +416,8 @@ export async function resolveMcpExtraFiles(
   const surface = await resolveMcpSurface(db, taskId, ragOnly, run?.customTools);
   const customFiles =
     run && surface.custom ? await resolveCustomFiles(db, taskId, run, surface.custom) : null;
+  const integrationsFiles =
+    run && !ragOnly ? await resolveIntegrationsFiles(db, taskId, run) : null;
 
   const ragLspAvailable =
     cliAdapterRegistry.has(providerName) &&
@@ -450,6 +508,9 @@ export async function resolveMcpExtraFiles(
     includeCustomTools: customFiles !== null,
     customServerPath: CUSTOM_MCP_SERVER_PATH,
     customApiUrl: surface.custom?.apiUrl,
+    includeIntegrations: integrationsFiles !== null,
+    integrationsServerPath: INTEGRATIONS_MCP_SERVER_PATH,
+    integrationsApiUrl: internalApiUrl(),
   });
 
   // User's custom MCP servers (.claude/mcp_settings.json) merged additively so
@@ -482,20 +543,25 @@ export async function resolveMcpExtraFiles(
     ...ddevFiles,
     ...chromeFiles,
     ...(customFiles ?? []),
+    ...(integrationsFiles ?? []),
   ];
 
   const config = buildMcpConfigForCli(providerName, servers, SANDBOX_USER_HOME, userServers);
-  if (!config) return empty;
 
-  // Best-effort for every run but one naming custom tools, which cannot start without its entry.
-  const requireWritten = (written: boolean): void => {
-    if (!written && surface.custom) {
-      throw unwired(
-        "the CLI's MCP configuration could not be written to its task volume",
-        surface.custom.tools,
-      );
-    }
+  // Best-effort for every run but one naming custom tools or carrying a stamp, which cannot start without its entry.
+  const requireWritten = (
+    written: boolean,
+    cause = "the CLI's MCP configuration could not be written to its task volume",
+  ): void => {
+    if (written) return;
+    if (surface.custom) throw unwired(cause, surface.custom.tools);
+    if (integrationsFiles !== null) throw integrationsUnwired(cause);
   };
+
+  if (!config) {
+    requireWritten(false, `${providerName} has no MCP configuration; use another CLI`);
+    return empty;
+  }
 
   // Only a `bind` config may become an extra file. Every other delivery mode names a path INSIDE
   // the CLI's auth-volume mount, where a bind mount is destructive in two ways at once — see the

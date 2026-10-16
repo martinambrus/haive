@@ -8,7 +8,9 @@ loaders refuse at boot a manifest whose id does not match its name), whose
 `./jobs` and `./teardown` (worker), `./web` and `./dashboard` (web). `scripts/gen-modules.mjs` turns the installed
 ones into four gitignored registries (`packages/api/src/modules.generated.ts`,
 `packages/worker/src/modules.generated.ts`, `packages/web/src/generated/module-pages.ts` and
-`module-dashboard.ts`), and the `dev`, `build` and `typecheck` scripts of the api, worker and web run
+`module-dashboard.ts`) plus `packages/web/src/generated/modules.json`, the web parts it compiled in (id,
+package, source, parts), which the web production image ships at `/app/packages/web/modules.generated.json`
+so a build can read back what an image carries; and the `dev`, `build` and `typecheck` scripts of the api, worker and web run
 it first, as do the `test` scripts of the api, worker and web.
 
 ## The four states
@@ -23,7 +25,16 @@ the module loads again.
   routes at `/m/<id>`, nav and pages, settings, dashboard widget, worker steps, jobs and database.
   A module whose manifest sets `apiRequiresAdmin` is listed for a non-admin with
   `compiledWeb: false`: its compiled pages answer not-found and its compiled dashboard widgets do not
-  render for that user, while its declared pages without data endpoints still do.
+  render for that user, while its declared pages without data endpoints still do. An admin's save of
+  its settings (`PUT /modules/<id>/settings/<kind>`) records `module.settings` with the names of the
+  fields that changed, never their values, since a module's setting can hold an API key; the
+  instance's own switches (`PUT /admin/config/*`) record `config.<name>` with the values before and
+  after. Saves of one switch, or of one module's settings kind, run one at a time under a
+  transaction-scoped advisory lock (`admin-config:<route>`, `module-settings:<id>:<kind>`), so each
+  row's `from` is what the save before it left; a save that waits longer than 30 s answers 503. The
+  read, the writes and the audit row share that one transaction's connection. A save that fails after
+  writing some fields still records them, with `partial: true`, and then fails. Audit rows are stamped
+  with `clock_timestamp()`, the moment they are written, not when their transaction began.
 - **Installed, deactivated.** The Active column on `/admin/modules`, or `PATCH /modules/:id` with
   `{"active": false}` (admin; audited as `module.deactivate`). It is refused with 409
   `module_tasks_open` while a live task's run list names one of the module's steps or its type is one
@@ -42,7 +53,10 @@ the module loads again.
   task it could not stop or whose kill or record failed. The code stays loaded: its api routes and
   settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget; compiled module
   pages and widgets render only for modules that list names) and the composer palette drops its steps.
-  The worker starts no job of a module that is deactivated when it boots, and a reconcile every 15 s
+  The worker neither ensures the schema of nor starts any job of a module that is deactivated when it
+  boots (so a restart after Tear down leaves the dropped schema dropped; it reads the deactivated set
+  at the schema step and again right before starting jobs, and holds back the union), and a reconcile
+  every 15 s
   (`MODULE_JOBS_RECONCILE_MS`, `modules/loader.ts`) stops the jobs of one deactivated since. A stop
   still running after `MODULE_JOB_STOP_WAIT_MS` (10 s) is logged once and left running: the pass goes
   on with the other modules, a later pass or the shutdown waits on that same stop instead of calling it
@@ -51,7 +65,15 @@ the module loads again.
   `MODULE_JOB_START_WAIT_MS` (10 s) is logged once and left running: the pass goes on, no later pass
   starts the module again meanwhile, and a late success counts as started, so a pass that sees the
   module deactivated by then stops it. A failed
-  ensure or start is logged and waits for the next deactivation and activation. A task type that uses the module, as its source or through any step, is
+  ensure or start is tried again on the next passes, at most `MODULE_REACTIVATION_ATTEMPTS` (3) per
+  reactivation; after the last one only a worker error log says so, until the next deactivation and
+  activation. A pass sees an activation by the module row's `updated_at` too, which every activate
+  and deactivate moves: when the stamp differs from the previous pass's (the first pass only records
+  it), the module counts as activated again, so its attempts start afresh, a start still running from
+  before is not counted if it fails, and a module that is not running its jobs is tried again. A
+  deactivation and activation that both fall between two passes are seen this way; any other write
+  to the row does the same to an idle module. A task type that uses the module, as its source or
+  through any step, is
   listed unavailable with the reason `module-deactivated`, and creating a task of it is refused with
   409 `module-deactivated`; the create reads the module rows `FOR KEY SHARE`, so a deactivation running
   at the same moment waits and then counts the new task. A task that reaches one of its steps later, after a Retry or a revive,
@@ -112,7 +134,11 @@ ones that export `./web` or `./dashboard`, so the api and the worker always load
 other combination is a half-installed state: `gen-modules` exits 1, naming the side and the
 `package.json` to change. It also exits 1 when a registry module's version is a range, or differs
 between the `package.json` files that depend on it: pnpm would install a copy per version while the
-generated imports follow the api's.
+generated imports follow the api's. And it exits 1 when the installed copy
+(`packages/api/node_modules/<name>`) is another version than the declared one, build metadata aside,
+since the generated lists would come from that old copy: run `pnpm install` (`pnpm docker rebuild` on
+the dev stack). `pnpm module add|remove` skip that one check (`HAIVE_INSTALL_MAY_LAG=1`), because their
+lockfile-only install leaves `node_modules` behind on purpose.
 
 A folder under `modules/` that exports `./manifest` and that nobody depends on is **present, not
 installed**. `gen-modules` prints `present, not installed: pnpm module add <id>`, leaves it out of
@@ -144,8 +170,24 @@ message names the fix.
 
 The registry form reads the package's exports with `pnpm view` (the lockfile-only step installs
 nothing, so the package is not on disk yet), adds the exact version to the same hosts, and moves a
-held dependency of another version in place. It resolves only once the `@haive-module` scope has a
-registry line in `.npmrc`.
+held dependency of another version in place. The root `.npmrc` points the `@haive-module` scope at
+GitHub Packages (`https://npm.pkg.github.com`) and holds no token: the token never lives in the
+repository, not even as a `${NPM_TOKEN}` placeholder (an unset one makes pnpm skip the whole file).
+On the host, put the auth line in your user `.npmrc` (`~/.npmrc`).
+
+**The image builds read the token from a BuildKit secret.** The api, worker and web deps stages run
+`pnpm install` with `--mount=type=secret,id=npmrc,target=/root/.npmrc`, so the token is in no layer,
+history entry, image config or build log, and a build with no secret behaves as before. In dev,
+`HAIVE_NPMRC` (unset by default) names an `.npmrc` holding the auth line: `docker-compose.dev.yml`
+passes it as the `npmrc` build secret to the dev-libs, api, worker and web builds and mounts it
+read-only at `/root/.npmrc` in db-migrate, whose install runs at start. It must name an existing
+file: Docker creates a missing bind source as a root-owned directory. Compose builds through
+buildx bake, which refuses a build secret file outside the project (the `/dev/null` default
+included) unless `BUILDX_BAKE_ENTITLEMENTS_FS=0`; `scripts/dev.sh` and the CI compose jobs set it, so
+a hand-run `docker compose build` fails on that secret. BuildKit reuses a cached
+install layer after the token is revoked or changed, so only an uncached install notices a
+revocation. `.dockerignore` keeps every nested `.npmrc`, `.env` and `.git` out of the build
+contexts (the root `.npmrc`, which the Dockerfiles copy, stays).
 
 A dependency change reaches the dev stack only through `pnpm docker rebuild` with no service name
 (see Build commands in `AGENTS.md`); a restart or a per-service rebuild is not enough. Recreating

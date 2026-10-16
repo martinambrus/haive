@@ -719,9 +719,9 @@ describe('tools on a prompt step', () => {
     expect(kinds(entry())).toEqual([]);
   });
 
-  it('no longer raises tools-not-supported-yet, though the kind stays listed', () => {
+  it('no longer knows tools-not-supported-yet: tools save clean and the kind is gone', () => {
     expect(validatePromptStep(entry({ tools: [httpTool] }), ctx)).toEqual([]);
-    expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tools-not-supported-yet');
+    expect(PROMPT_STEP_PROBLEM_KINDS).not.toContain('tools-not-supported-yet');
   });
 
   it('adds the problems of each tool, with the tool name as the raw text', () => {
@@ -740,6 +740,28 @@ describe('tools on a prompt step', () => {
       ['tool-name-reserved', 'rag_search'],
     ]);
     expect(found.every((p) => p.start === 0 && p.message.length > 0)).toBe(true);
+  });
+
+  it('carries the parameter a tool problem is about, and only on those problems', () => {
+    const unused = (name: string) => ({
+      name,
+      type: 'boolean' as const,
+      description: 'A flag.',
+      required: false,
+    });
+    const tool: CustomTool = {
+      ...httpTool,
+      url: 'http://api.example.com/v1/status',
+      params: [unused('a'), unused('b')],
+    };
+    const found = validatePromptStep(entry({ tools: [tool] }), ctx);
+    expect(found.map((p) => [p.kind, p.raw, p.param])).toEqual([
+      ['tool-url-not-https', 'repo_status', undefined],
+      ['tool-param-unused', 'repo_status', 'a'],
+      ['tool-param-unused', 'repo_status', 'b'],
+    ]);
+    expect(found[0]).not.toHaveProperty('param');
+    expect(validatePromptStep(entry({ template: '{{nope}}' }), ctx)[0]).not.toHaveProperty('param');
   });
 
   it('puts the list-level problems on the step', () => {
@@ -787,7 +809,6 @@ describe('tools on a prompt step', () => {
       'step-token-not-quotable',
       'step-token-not-own-line',
     ]);
-    expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tools-not-supported-yet');
     expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tool-no-longer-valid');
     expect(PROMPT_STEP_PROBLEM_KINDS).toContain('tool-url-not-https');
     expect(PROMPT_STEP_PROBLEM_KINDS).toContain('too-many-tools');
