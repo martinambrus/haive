@@ -111,14 +111,16 @@ const BY_AGENT = { 'scope-exclude-globs': ['vendor/**', 'dist/**'] };
 /** A repository on `main` with a state record, an `origin` that has it, and a `feature/x` worktree. */
 async function fixture(
   extra: Record<string, string> = {},
+  { sha256 = false }: { sha256?: boolean } = {},
 ): Promise<{ parent: string; wt: string; bare: string; forked: string }> {
   const parent = await mkdtemp(path.join(tmpdir(), 'branch-revert-'));
   const bare = await mkdtemp(path.join(tmpdir(), 'branch-revert-origin-'));
   dirs.push(parent, bare);
-  await git(bare, ['init', '-q', '--bare', '-b', 'main']);
+  const format = sha256 ? ['--object-format=sha256'] : [];
+  await git(bare, ['init', '-q', '--bare', '-b', 'main', ...format]);
   await git(bare, ['config', 'gc.auto', '0']);
   await git(bare, ['config', 'receive.autogc', 'false']);
-  await git(parent, ['init', '-q', '-b', 'main']);
+  await git(parent, ['init', '-q', '-b', 'main', ...format]);
   await git(parent, ['config', 'gc.auto', '0']);
   await commit(parent, { 'base.txt': 'base\n', ...stateFiles(AT_FORK), ...extra }, 'initial');
   await git(parent, ['remote', 'add', 'origin', bare]);
@@ -765,6 +767,17 @@ describe('a put-back cut short is resumed, not lost', () => {
     ]);
     await pass(parent, wt, h);
     expect(handBack.calls).toHaveLength(2);
+    expect(h.events).toHaveLength(1);
+  });
+
+  it('takes back a file the branch added in a SHA-256 repository', async () => {
+    const added = `${STATE}/settings/added-by-agent.json`;
+    const { parent, wt } = await fixture({}, { sha256: true });
+    await commit(wt, { [added]: '"agent"\n' }, 'agent adds a setting');
+    const h = stubDb();
+
+    await pass(parent, wt, h);
+    expect(await git(parent, ['ls-tree', '--name-only', 'feature/x', '--', added])).toBe('');
     expect(h.events).toHaveLength(1);
   });
 

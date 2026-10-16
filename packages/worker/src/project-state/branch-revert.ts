@@ -46,7 +46,6 @@ const FALLBACK_GIT_IDENTITY = {
 };
 const SUBJECT = "Put back Haive's project files to where this branch forked";
 const ZERO_MODE = '000000';
-const ZERO_SHA = '0'.repeat(40);
 const MESSAGE_PATHS = 50;
 const EVENT_PATHS = 100;
 const NOTE_PATHS = 10;
@@ -158,11 +157,8 @@ async function refuseLinkedDataDir(
 function indexRecords(changes: readonly Change[]): Buffer {
   const records = [...changes]
     .sort((a, b) => Number(b.srcMode === ZERO_MODE) - Number(a.srcMode === ZERO_MODE))
-    .map((c) =>
-      c.srcMode === ZERO_MODE
-        ? `${ZERO_MODE} ${ZERO_SHA}\t${c.path}\0`
-        : `${c.srcMode} ${c.srcSha}\t${c.path}\0`,
-    );
+    // An absent side's id is diff-tree's null id, as long as the repository's object format needs.
+    .map((c) => `${c.srcMode} ${c.srcSha}\t${c.path}\0`);
   return Buffer.from(records.join(''), 'latin1');
 }
 
