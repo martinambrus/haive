@@ -36,6 +36,9 @@ case "$1" in
     shift
     while [ "$1" = -f ]; do shift 2; done
     if [ "$1" = build ] && [ -n "$STUB_DOCKER_BUILD_FAILS" ]; then exit 1; fi
+    if [ -n "$STUB_BAKE_FS_ENFORCED" ] && [ "$BUILDX_BAKE_ENTITLEMENTS_FS" != 0 ]; then
+      echo "additional privileges requested: pass \\"--allow=fs.read=/dev/null\\" to grant requested privileges" >&2; exit 1
+    fi
     if [ "$1" = rm ] && [ -n "$STUB_DOCKER_RM_FAILS" ]; then exit 1; fi
     if [ "$1" = run ] && [ -n "$STUB_DOCKER_RUN_FAILS" ]; then exit 1; fi ;;
 esac
@@ -123,6 +126,17 @@ describe('dev.sh builds before it tears anything down', () => {
       const { out, calls } = run(t, args);
       assert.equal(out.status, 0, out.stdout + out.stderr);
       assert.deepEqual(calls, steps(volumes, after));
+    });
+  }
+});
+
+describe('dev.sh builds through a bake that checks file-system access', () => {
+  // Any compose call may build (up and run do when an image is missing), through a bake that
+  // refuses the npmrc secret file outside the project.
+  for (const args of [['rebuild'], ['rebuild', 'api'], ['up']]) {
+    it(`${args.join(' ')} builds with the npmrc secret outside the project`, (t) => {
+      const { out, calls } = run(t, args, { stub: { STUB_BAKE_FS_ENFORCED: '1' } });
+      assert.equal(out.status, 0, `${out.stderr} (calls: ${calls.join(', ')})`);
     });
   }
 });

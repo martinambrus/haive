@@ -1,0 +1,1328 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import {
+  act,
+  startTransition,
+  StrictMode,
+  use,
+  useCallback,
+  useState,
+  type ReactNode,
+} from 'react';
+import type { Root } from 'react-dom/client';
+
+// This package has no DOM library, so this is the smallest DOM that react-dom/client and focus need.
+type Listener = (event: FakeEvent) => void;
+type ListenerOptions = boolean | { capture?: boolean };
+
+class FakeEvent {
+  defaultPrevented = false;
+  stopped = false;
+  immediate = false;
+  target: unknown = null;
+  currentTarget: unknown = null;
+  key = '';
+  shiftKey = false;
+  constructor(
+    readonly type: string,
+    init: { key?: string; shiftKey?: boolean } = {},
+  ) {
+    Object.assign(this, init);
+  }
+  preventDefault() {
+    this.defaultPrevented = true;
+  }
+  stopPropagation() {
+    this.stopped = true;
+  }
+  stopImmediatePropagation() {
+    this.stopped = this.immediate = true;
+  }
+}
+
+class FakeTarget {
+  private listeners: { type: string; listener: Listener; capture: boolean }[] = [];
+  addEventListener(type: string, listener: Listener, options?: ListenerOptions) {
+    const capture = typeof options === 'boolean' ? options : !!options?.capture;
+    this.removeEventListener(type, listener, options);
+    this.listeners.push({ type, listener, capture });
+  }
+  removeEventListener(type: string, listener: Listener, options?: ListenerOptions) {
+    const capture = typeof options === 'boolean' ? options : !!options?.capture;
+    this.listeners = this.listeners.filter(
+      (l) => !(l.type === type && l.listener === listener && l.capture === capture),
+    );
+  }
+  protected parentTarget(): FakeTarget | null {
+    return null;
+  }
+  dispatchEvent(event: FakeEvent) {
+    event.target = this;
+    for (let at: FakeTarget | null = this; at && !event.stopped; at = at.parentTarget()) {
+      event.currentTarget = at;
+      for (const l of [...at.listeners]) {
+        if (l.type === event.type && !l.capture) l.listener(event);
+        if (event.immediate) break;
+      }
+    }
+    return !event.defaultPrevented;
+  }
+}
+
+type Compound = { tag: string; attrs: string[]; disabled: boolean };
+
+function parseSelector(selector: string): Compound[] {
+  return selector.split(',').map((part) => {
+    const text = part.trim();
+    const compound: Compound = { tag: '*', attrs: [], disabled: false };
+    let at = 0;
+    const tag = /^[a-z*][\w-]*/i.exec(text);
+    if (tag) {
+      compound.tag = tag[0].toLowerCase();
+      at = tag[0].length;
+    }
+    const token = /\[([\w-]+)\]|:(disabled)/y;
+    while (at < text.length) {
+      token.lastIndex = at;
+      const m = token.exec(text);
+      if (!m) throw new Error(`the test DOM does not support the selector "${selector}"`);
+      if (m[2]) compound.disabled = true;
+      else compound.attrs.push(m[1]!);
+      at = token.lastIndex;
+    }
+    return compound;
+  });
+}
+
+class FakeNode extends FakeTarget {
+  parentNode: FakeNode | null = null;
+  childNodes: FakeNode[] = [];
+  nodeValue: string | null = null;
+  constructor(
+    readonly nodeType: number,
+    readonly nodeName: string,
+    public ownerDocument: FakeDocument | null,
+  ) {
+    super();
+  }
+  protected override parentTarget(): FakeTarget | null {
+    return this.parentNode;
+  }
+  get firstChild(): FakeNode | null {
+    return this.childNodes[0] ?? null;
+  }
+  get lastChild(): FakeNode | null {
+    return this.childNodes.at(-1) ?? null;
+  }
+  get isConnected() {
+    let at: FakeNode = this;
+    while (at.parentNode) at = at.parentNode;
+    return at.nodeType === 9;
+  }
+  contains(other: FakeNode | null) {
+    for (let at = other; at; at = at.parentNode) if (at === this) return true;
+    return false;
+  }
+  insertBefore(child: FakeNode, before: FakeNode | null) {
+    child.parentNode?.removeChild(child);
+    const at = before ? this.childNodes.indexOf(before) : this.childNodes.length;
+    this.childNodes.splice(at, 0, child);
+    child.parentNode = this;
+    return child;
+  }
+  appendChild(child: FakeNode) {
+    return this.insertBefore(child, null);
+  }
+  removeChild(child: FakeNode) {
+    const at = this.childNodes.indexOf(child);
+    if (at < 0) throw new Error('the node to remove is not a child of this node');
+    this.childNodes.splice(at, 1);
+    child.parentNode = null;
+    return child;
+  }
+  set textContent(text: string) {
+    for (const child of [...this.childNodes]) this.removeChild(child);
+    if (text) this.appendChild(this.ownerDocument!.createTextNode(text));
+  }
+}
+
+const NATIVE = ['button', 'input', 'select', 'textarea', 'summary', 'iframe'];
+const tabindexOf = (el: FakeElement) => Number.parseInt(el.getAttribute('tabindex') ?? '', 10);
+
+class FakeElement extends FakeNode {
+  attrs = new Map<string, string>();
+  style = {};
+  type = '';
+  name = '';
+  checked = false;
+  constructor(
+    readonly localName: string,
+    doc: FakeDocument,
+  ) {
+    super(1, localName.toUpperCase(), doc);
+  }
+  get tagName() {
+    return this.nodeName;
+  }
+  setAttribute(name: string, value: unknown) {
+    this.attrs.set(name.toLowerCase(), String(value));
+  }
+  getAttribute(name: string) {
+    return this.attrs.get(name.toLowerCase()) ?? null;
+  }
+  hasAttribute(name: string) {
+    return this.attrs.has(name.toLowerCase());
+  }
+  removeAttribute(name: string) {
+    this.attrs.delete(name.toLowerCase());
+  }
+  get id() {
+    return this.getAttribute('id') ?? '';
+  }
+  get disabled() {
+    return this.hasAttribute('disabled');
+  }
+  get parentElement(): FakeElement | null {
+    return this.parentNode instanceof FakeElement ? this.parentNode : null;
+  }
+  get form(): FakeElement | null {
+    for (let at = this.parentElement; at; at = at.parentElement) {
+      if (at.localName === 'form') return at;
+    }
+    return null;
+  }
+  get children() {
+    return this.childNodes.filter((c): c is FakeElement => c instanceof FakeElement);
+  }
+  get isContentEditable() {
+    return this.getAttribute('contenteditable') === 'true';
+  }
+  private get native() {
+    return NATIVE.includes(this.localName) || (this.localName === 'a' && this.hasAttribute('href'));
+  }
+  get tabIndex() {
+    const given = tabindexOf(this);
+    return Number.isNaN(given) ? (this.native ? 0 : -1) : given;
+  }
+  getClientRects() {
+    for (let at: FakeNode | null = this; at; at = at.parentNode) {
+      if (at instanceof FakeElement && at.hasAttribute('hidden')) return [];
+    }
+    return this.isConnected ? [{}] : [];
+  }
+  get focusable() {
+    const listed = this.native || this.isContentEditable || !Number.isNaN(tabindexOf(this));
+    return listed && !this.disabled && this.getClientRects().length > 0;
+  }
+  get tabbable() {
+    const given = tabindexOf(this);
+    return this.focusable && (Number.isNaN(given) || given >= 0);
+  }
+  compareDocumentPosition(other: FakeElement) {
+    if (other === this) return 0;
+    if (this.contains(other)) return 20;
+    if (other.contains(this)) return 10;
+    const all = [doc.documentElement, ...doc.documentElement.descendants()];
+    return all.indexOf(other) > all.indexOf(this) ? 4 : 2;
+  }
+  focus() {
+    if (!this.focusable) return;
+    this.ownerDocument!.focused = this;
+    focusLog.push(nameOf(this));
+  }
+  matches(selector: string) {
+    return parseSelector(selector).some(
+      (c) =>
+        (c.tag === '*' || c.tag === this.localName) &&
+        (!c.disabled || this.disabled) &&
+        c.attrs.every((name) => this.hasAttribute(name)),
+    );
+  }
+  descendants(): FakeElement[] {
+    return this.children.flatMap((c) => [c, ...c.descendants()]);
+  }
+  querySelectorAll(selector: string) {
+    return this.descendants().filter((el) => el.matches(selector));
+  }
+}
+
+class FakeDocument extends FakeNode {
+  focused: FakeElement | null = null;
+  documentElement: FakeElement;
+  body: FakeElement;
+  constructor(readonly defaultView: FakeWindow) {
+    super(9, '#document', null);
+    this.documentElement = this.createElement('html');
+    this.body = this.createElement('body');
+    this.appendChild(this.documentElement);
+    this.documentElement.appendChild(this.body);
+  }
+  protected override parentTarget(): FakeTarget | null {
+    return this.defaultView;
+  }
+  get activeElement() {
+    return this.focused?.isConnected ? this.focused : this.body;
+  }
+  createElement(tag: string) {
+    return new FakeElement(tag, this);
+  }
+  createTextNode(text: string) {
+    const node = new FakeNode(3, '#text', this);
+    node.nodeValue = text;
+    return node;
+  }
+}
+
+class FakeWindow extends FakeTarget {
+  document: FakeDocument = new FakeDocument(this);
+  HTMLIFrameElement = class {};
+}
+
+const win = new FakeWindow();
+const doc = win.document;
+const focusLog: string[] = [];
+
+const byId = (id: string) => {
+  const found = doc.documentElement.descendants().find((el) => el.id === id);
+  if (!found) throw new Error(`no element #${id}`);
+  return found;
+};
+const panels = () => doc.documentElement.querySelectorAll('[data-haive-dialog]');
+
+function nameOf(el: FakeElement) {
+  const at = panels().findIndex((overlay) => overlay === el.parentElement);
+  if (at >= 0) return `panel ${at + 1}`;
+  return el === doc.body ? 'body' : `${el.localName}#${el.id}`;
+}
+const where = () => nameOf(doc.activeElement);
+const panel = (n = 1) => panels()[n - 1]!.children.at(-1)!;
+
+const isRadio = (el: FakeElement) => el.type === 'radio';
+const inGroup = (a: FakeElement, b: FakeElement) =>
+  !!a.name && a.name === b.name && a.form === b.form;
+const tabOrder = (el: FakeElement) => (el.tabIndex > 0 ? el.tabIndex : Number.MAX_SAFE_INTEGER);
+
+// One stop per radio group: its checked radio, else the first going forward and the last backward.
+function tabStops(from: FakeElement | null) {
+  const order = doc.documentElement
+    .descendants()
+    .filter((el) => el.tabbable)
+    .sort((a, b) => tabOrder(a) - tabOrder(b));
+  const radios = order.filter(isRadio);
+  return order.filter(
+    (el) =>
+      !isRadio(el) ||
+      (!(from && isRadio(from) && inGroup(from, el)) &&
+        !radios.some((r) => r !== el && r.checked && inGroup(r, el))),
+  );
+}
+
+function press(key: string, init: { shiftKey?: boolean } = {}) {
+  const event = new FakeEvent('keydown', { key, ...init });
+  act(() => {
+    doc.activeElement.dispatchEvent(event);
+  });
+  if (key === 'Tab' && !event.defaultPrevented) {
+    const all = [doc.documentElement, ...doc.documentElement.descendants()];
+    const from = doc.activeElement;
+    const order = tabStops(from);
+    const wrap = tabStops(null);
+    const cmp = (el: FakeElement) =>
+      tabOrder(el) - tabOrder(from) || all.indexOf(el) - all.indexOf(from);
+    const after = order.filter((el) => cmp(el) > 0);
+    const before = order.filter((el) => cmp(el) < 0);
+    (init.shiftKey ? (before.at(-1) ?? wrap.at(-1)) : (after[0] ?? wrap[0]))?.focus();
+  }
+  return event;
+}
+
+let root: Root;
+let container: FakeElement;
+let Dialog: typeof import('./dialog').Dialog;
+let flushSync: typeof import('react-dom').flushSync;
+let strict = false;
+
+beforeAll(async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  vi.stubGlobal('window', win);
+  vi.stubGlobal('document', doc);
+  vi.stubGlobal('Node', { DOCUMENT_POSITION_PRECEDING: 2, DOCUMENT_POSITION_FOLLOWING: 4 });
+  const { createRoot } = await import('react-dom/client');
+  ({ Dialog } = await import('./dialog'));
+  ({ flushSync } = await import('react-dom'));
+  container = doc.createElement('div');
+  doc.body.appendChild(container);
+  root = createRoot(container as unknown as Element);
+});
+afterAll(() => {
+  act(() => root.unmount());
+  vi.unstubAllGlobals();
+});
+afterEach(() => {
+  strict = false;
+  act(() => root.render(null));
+  doc.focused = null;
+  focusLog.length = 0;
+});
+
+const show = (tree: ReactNode) => {
+  act(() => root.render(strict ? <StrictMode>{tree}</StrictMode> : tree));
+};
+
+interface SceneProps {
+  open?: boolean;
+  mounted?: boolean;
+  opener?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  children?: ReactNode;
+}
+
+function Scene({
+  open = false,
+  mounted = true,
+  opener = true,
+  onOpenChange,
+  children,
+}: SceneProps) {
+  return (
+    <>
+      <button id="before">before</button>
+      {opener && <button id="opener">opener</button>}
+      <button id="after">after</button>
+      {mounted && (
+        <Dialog open={open} onOpenChange={onOpenChange ?? (() => {})}>
+          {children}
+        </Dialog>
+      )}
+    </>
+  );
+}
+
+function openDialog(children: ReactNode, props: SceneProps = {}) {
+  show(<Scene {...props}>{children}</Scene>);
+  byId('opener').focus();
+  show(
+    <Scene {...props} open>
+      {children}
+    </Scene>,
+  );
+}
+
+const buttons = (
+  <>
+    <button id="ok">ok</button>
+    <button id="cancel">cancel</button>
+  </>
+);
+
+const withField = (
+  <>
+    <input id="name" autoFocus />
+    <button id="cancel">cancel</button>
+  </>
+);
+
+const mixed = (
+  <>
+    <button id="x1" disabled>
+      disabled
+    </button>
+    <button id="x2" tabIndex={-1}>
+      skipped
+    </button>
+    <a id="x3">no href</a>
+    <a id="link" href="#x">
+      link
+    </a>
+    <input id="field" />
+    <select id="choice" />
+    <textarea id="notes" />
+    <div id="custom" tabIndex={0}>
+      custom
+    </div>
+    <button id="x4" disabled>
+      disabled
+    </button>
+    <button id="x5" tabIndex={-1}>
+      skipped
+    </button>
+    <a id="x6">no href</a>
+    <div id="x7" tabIndex={-1}>
+      inert
+    </div>
+  </>
+);
+
+const editorInTheMiddle = (
+  <>
+    <button id="top">top</button>
+    <div id="editor" contentEditable tabIndex={-1} suppressContentEditableWarning />
+    <button id="save">save</button>
+  </>
+);
+
+const editorLast = (
+  <>
+    <button id="top">top</button>
+    <button id="save">save</button>
+    <div id="editor" contentEditable tabIndex={-1} suppressContentEditableWarning />
+  </>
+);
+
+const editorFirst = (
+  <>
+    <div id="editor" contentEditable tabIndex={-1} suppressContentEditableWarning />
+    <button id="top">top</button>
+    <button id="save">save</button>
+  </>
+);
+
+const tabbableEditorLast = (
+  <>
+    <button id="top">top</button>
+    <button id="save">save</button>
+    <div id="editor" contentEditable suppressContentEditableWarning />
+  </>
+);
+
+const uneditableLast = (
+  <>
+    <button id="top">top</button>
+    <button id="save">save</button>
+    <div id="editor" contentEditable={false} />
+  </>
+);
+
+const swallowsTab = (
+  <>
+    <button id="top">top</button>
+    <input
+      id="swallow"
+      onKeyDown={(e) => {
+        if (e.key === 'Tab') e.preventDefault();
+      }}
+    />
+  </>
+);
+
+const hiddenAtTheEnds = (
+  <>
+    <button id="h1" hidden>
+      hidden
+    </button>
+    <button id="p">p</button>
+    <button id="q">q</button>
+    <button id="h2" hidden>
+      hidden
+    </button>
+  </>
+);
+
+const checkedAtTheEnd = (
+  <>
+    <button id="first">first</button>
+    <input id="r1" type="radio" name="g" defaultChecked />
+    <input id="r2" type="radio" name="g" />
+  </>
+);
+
+const checkedAtTheStart = (
+  <>
+    <input id="r1" type="radio" name="g" />
+    <input id="r2" type="radio" name="g" defaultChecked />
+    <button id="last">last</button>
+  </>
+);
+
+const noneCheckedAtTheEnd = (
+  <>
+    <button id="first">first</button>
+    <input id="r1" type="radio" name="g" />
+    <input id="r2" type="radio" name="g" />
+    <input id="r3" type="radio" name="g" />
+  </>
+);
+
+const noneCheckedAtTheStart = (
+  <>
+    <input id="r1" type="radio" name="g" />
+    <input id="r2" type="radio" name="g" />
+    <input id="r3" type="radio" name="g" />
+    <button id="last">last</button>
+  </>
+);
+
+const nameless = (
+  <>
+    <button id="first">first</button>
+    <input id="r1" type="radio" defaultChecked />
+    <input id="r2" type="radio" />
+  </>
+);
+
+const twoForms = (
+  <>
+    <button id="first">first</button>
+    <form>
+      <input id="r1" type="radio" name="g" defaultChecked />
+      <input id="r2" type="radio" name="g" />
+    </form>
+    <form>
+      <input id="r3" type="radio" name="g" />
+      <input id="r4" type="radio" name="g" />
+    </form>
+  </>
+);
+
+const onlyRadios = (
+  <>
+    <input id="r1" type="radio" name="g" />
+    <input id="r2" type="radio" name="g" defaultChecked />
+  </>
+);
+
+const summaryLast = (
+  <>
+    <button id="top">top</button>
+    <button id="save">save</button>
+    <details>
+      <summary id="more">more</summary>
+      <p>shown when opened</p>
+    </details>
+  </>
+);
+
+const iframeLast = (
+  <>
+    <button id="top">top</button>
+    <button id="save">save</button>
+    <iframe id="frame" />
+  </>
+);
+
+const positiveAndButton = (
+  <>
+    <button id="two" tabIndex={2}>
+      two
+    </button>
+    <button id="one" tabIndex={1}>
+      one
+    </button>
+    <button id="save">save</button>
+  </>
+);
+
+const positiveOnly = (
+  <>
+    <button id="two" tabIndex={2}>
+      two
+    </button>
+    <button id="one" tabIndex={1}>
+      one
+    </button>
+  </>
+);
+
+const forever = new Promise<void>(() => {});
+let reached = false;
+
+function Suspends() {
+  reached = true;
+  use(forever);
+  return null;
+}
+
+let renders = 0;
+
+function Counts() {
+  renders++;
+  return null;
+}
+
+function Waits({ gate, onSuspend }: { gate: Promise<void>; onSuspend: () => void }) {
+  // React resumes the same render when the promise settles in the microtask after a suspension.
+  if (!reached) queueMicrotask(onSuspend);
+  reached = true;
+  use(gate);
+  return null;
+}
+
+function Stack({ top }: { top: boolean }) {
+  return (
+    <Scene open>
+      <button id="a1">a1</button>
+      <button id="a2">a2</button>
+      <Dialog open={top} onOpenChange={() => {}}>
+        <button id="b1">b1</button>
+        <button id="b2">b2</button>
+      </Dialog>
+    </Scene>
+  );
+}
+
+function Pair({ below, above }: { below: boolean; above: boolean }) {
+  return (
+    <>
+      <button id="before">before</button>
+      <Dialog open={below} onOpenChange={() => {}}>
+        <button id="a1">a1</button>
+        <button id="a2">a2</button>
+      </Dialog>
+      <Dialog open={above} onOpenChange={() => {}}>
+        <button id="b1">b1</button>
+        <button id="b2">b2</button>
+      </Dialog>
+    </>
+  );
+}
+
+function Nested({ mounted, inner }: { mounted: boolean; inner: boolean }) {
+  return (
+    <>
+      <button id="before">before</button>
+      {mounted && (
+        <Dialog open onOpenChange={() => {}}>
+          <button id="a1">a1</button>
+          <button id="a2">a2</button>
+          <Dialog open={inner} onOpenChange={() => {}}>
+            <button id="b1">b1</button>
+          </Dialog>
+        </Dialog>
+      )}
+    </>
+  );
+}
+
+function openSecond() {
+  show(<Stack top={false} />);
+  byId('a2').focus();
+  focusLog.length = 0;
+  show(<Stack top />);
+}
+
+async function openByResumedTransition(children: ReactNode) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const userFocusesOpener = () => {
+    byId('opener').focus();
+    release();
+  };
+  reached = false;
+  renders = 0;
+  show(<Scene />);
+  byId('before').focus();
+  await act(async () => {
+    startTransition(() => {
+      root.render(
+        <Scene open>
+          <Counts />
+          <Waits gate={gate} onSuspend={userFocusesOpener} />
+          {children}
+        </Scene>,
+      );
+    });
+  });
+  expect(reached).toBe(true);
+  expect(renders).toBe(1);
+  expect(panels()).toHaveLength(1);
+}
+
+type OpenerState = 'enabled' | 'disabled' | 'removed';
+
+function Cascade({
+  top,
+  x,
+  onTop,
+}: {
+  top: boolean;
+  x: OpenerState;
+  onTop: (open: boolean) => void;
+}) {
+  return (
+    <Scene open>
+      <button id="y">y</button>
+      {x !== 'removed' && (
+        <button id="x" disabled={x === 'disabled'}>
+          x
+        </button>
+      )}
+      <Dialog open={top} onOpenChange={onTop}>
+        <button id="t1">t1</button>
+      </Dialog>
+    </Scene>
+  );
+}
+
+// A dialog open with a control x that opens a second one; the app closes it on request after `beforeClose`.
+function cascade(beforeClose?: () => void) {
+  let x: OpenerState = 'enabled';
+  const render = (top: boolean, next: OpenerState = x) => {
+    x = next;
+    show(
+      <Cascade
+        top={top}
+        x={x}
+        onTop={(open) => {
+          beforeClose?.();
+          render(open);
+        }}
+      />,
+    );
+  };
+  return render;
+}
+
+describe('Dialog focus', () => {
+  it('C1 opening focuses the panel, not the first control', () => {
+    openDialog(buttons);
+    expect(where()).toBe('panel 1');
+  });
+
+  it('C2 a child with autoFocus keeps the focus it took', () => {
+    openDialog(withField);
+    expect(where()).toBe('input#name');
+  });
+
+  it('C3 Tab from the last tabbable element goes to the first', () => {
+    openDialog(mixed);
+    byId('custom').focus();
+    press('Tab');
+    expect(where()).toBe('a#link');
+    press('Tab');
+    expect(where()).toBe('input#field');
+  });
+
+  it('C3 Shift+Tab from the first tabbable element goes to the last', () => {
+    openDialog(mixed);
+    byId('link').focus();
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('div#custom');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('textarea#notes');
+  });
+
+  it('C3 from the panel itself Tab goes to the first and Shift+Tab to the last', () => {
+    openDialog(mixed);
+    expect(where()).toBe('panel 1');
+    press('Tab');
+    expect(where()).toBe('a#link');
+    panel().focus();
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('div#custom');
+  });
+
+  it('C3 with nothing tabbable inside, Tab keeps focus on the panel', () => {
+    openDialog(<p>nothing to press</p>);
+    press('Tab');
+    expect(where()).toBe('panel 1');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('panel 1');
+  });
+
+  it('C3 an element the dialog does not list is left alone in the middle', () => {
+    openDialog(editorInTheMiddle);
+    byId('editor').focus();
+    press('Tab');
+    expect(where()).toBe('button#save');
+    byId('editor').focus();
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('button#top');
+  });
+
+  it('C3 an element the dialog does not list still wraps at either end', () => {
+    openDialog(editorLast);
+    byId('editor').focus();
+    press('Tab');
+    expect(where()).toBe('button#top');
+    openDialog(editorFirst);
+    byId('editor').focus();
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('button#save');
+  });
+
+  it('C3 hidden elements are not taken for the first or the last', () => {
+    openDialog(hiddenAtTheEnds);
+    byId('q').focus();
+    press('Tab');
+    expect(where()).toBe('button#p');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('button#q');
+  });
+
+  it('C3 a Tab that something inside already handled is left alone', () => {
+    openDialog(swallowsTab);
+    byId('swallow').focus();
+    press('Tab');
+    expect(where()).toBe('input#swallow');
+  });
+
+  it('C4 opening a second dialog moves focus into it and nowhere else', () => {
+    openSecond();
+    expect(where()).toBe('panel 2');
+    expect(focusLog).toEqual(['panel 2']);
+  });
+
+  it('C4 Tab in the top dialog wraps inside it and moves on in the middle', () => {
+    openSecond();
+    byId('b1').focus();
+    focusLog.length = 0;
+    press('Tab');
+    expect(where()).toBe('button#b2');
+    press('Tab');
+    expect(where()).toBe('button#b1');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('button#b2');
+    expect(focusLog.filter((name) => /#a\d/.test(name) || name === 'panel 1')).toEqual([]);
+  });
+
+  it('C4 the dialog below traps Tab again once the top one closes', () => {
+    openSecond();
+    show(<Stack top={false} />);
+    expect(where()).toBe('button#a2');
+    press('Tab');
+    expect(where()).toBe('button#a1');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('button#a2');
+  });
+
+  it('C4 closing the dialog below leaves the top one trapping Tab', () => {
+    show(<Pair below above={false} />);
+    show(<Pair below above />);
+    show(<Pair below={false} above />);
+    byId('b2').focus();
+    press('Tab');
+    expect(where()).toBe('button#b1');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('button#b2');
+  });
+
+  it('C11 closing the dialog below keeps focus inside the top one', () => {
+    show(<Pair below={false} above={false} />);
+    byId('before').focus();
+    show(<Pair below above={false} />);
+    show(<Pair below above />);
+    byId('b1').focus();
+    show(<Pair below={false} above />);
+    expect(where()).toBe('button#b1');
+  });
+
+  it('C12 unmounting a dialog with an open dialog inside gives focus back to the outer opener', () => {
+    show(<Nested mounted={false} inner={false} />);
+    byId('before').focus();
+    show(<Nested mounted inner={false} />);
+    byId('a2').focus();
+    show(<Nested mounted inner />);
+    show(<Nested mounted={false} inner={false} />);
+    expect(where()).toBe('button#before');
+  });
+
+  it('C12 closing two stacked dialogs in one update gives focus back to the lower opener', () => {
+    show(<Pair below={false} above={false} />);
+    byId('before').focus();
+    show(<Pair below above={false} />);
+    byId('a2').focus();
+    show(<Pair below above />);
+    show(<Pair below={false} above={false} />);
+    expect(where()).toBe('button#before');
+  });
+
+  it("C12 a dialog opened from inside one that closed first gives focus back to that one's opener", () => {
+    show(<Pair below={false} above={false} />);
+    byId('before').focus();
+    show(<Pair below above={false} />);
+    byId('a2').focus();
+    show(<Pair below above />);
+    show(<Pair below={false} above />);
+    show(<Pair below={false} above={false} />);
+    expect(where()).toBe('button#before');
+  });
+
+  it('C5 closing restores focus to the opener', () => {
+    openDialog(buttons);
+    byId('cancel').focus();
+    show(<Scene>{buttons}</Scene>);
+    expect(where()).toBe('button#opener');
+  });
+
+  it('C5 unmounting an open dialog restores focus to the opener', () => {
+    openDialog(buttons);
+    byId('cancel').focus();
+    show(<Scene mounted={false} />);
+    expect(where()).toBe('button#opener');
+  });
+
+  it('C5 closing restores the opener even when an autoFocus child took focus on open', () => {
+    openDialog(withField);
+    show(<Scene>{withField}</Scene>);
+    expect(where()).toBe('button#opener');
+  });
+
+  it('C5 a dialog that mounts already open takes focus and gives it back when it unmounts', () => {
+    show(<Scene mounted={false} />);
+    byId('opener').focus();
+    show(<Scene open>{buttons}</Scene>);
+    expect(where()).toBe('panel 1');
+    show(<Scene mounted={false} />);
+    expect(where()).toBe('button#opener');
+  });
+
+  it('C5 reopening remembers the new opener', () => {
+    openDialog(buttons);
+    byId('cancel').focus();
+    show(<Scene>{buttons}</Scene>);
+    byId('after').focus();
+    show(<Scene open>{buttons}</Scene>);
+    byId('cancel').focus();
+    show(<Scene>{buttons}</Scene>);
+    expect(where()).toBe('button#after');
+  });
+
+  it('C6 closing after the opener was removed throws nothing and focuses nothing in particular', () => {
+    openDialog(buttons);
+    show(
+      <Scene open opener={false}>
+        {buttons}
+      </Scene>,
+    );
+    expect(() => show(<Scene opener={false}>{buttons}</Scene>)).not.toThrow();
+    expect(where()).toBe('body');
+  });
+
+  it('C7 Escape closes and does not reach a window keydown listener', () => {
+    const onOpenChange = vi.fn();
+    const onWindow = vi.fn();
+    win.addEventListener('keydown', onWindow);
+    try {
+      openDialog(buttons, { onOpenChange });
+      press('Escape');
+      expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      expect(onWindow).not.toHaveBeenCalled();
+    } finally {
+      win.removeEventListener('keydown', onWindow);
+    }
+  });
+
+  it('C10 Escape closes only the top dialog of a stack', () => {
+    const below = vi.fn();
+    const above = vi.fn();
+    const stack = (top: boolean) => (
+      <>
+        <Dialog open onOpenChange={below}>
+          <button id="a1">a1</button>
+        </Dialog>
+        <Dialog open={top} onOpenChange={above}>
+          <button id="b1">b1</button>
+        </Dialog>
+      </>
+    );
+    show(stack(false));
+    show(stack(true));
+    press('Escape');
+    expect(above).toHaveBeenCalledExactlyOnceWith(false);
+    expect(below).not.toHaveBeenCalled();
+  });
+
+  it('C15 Escape closes only the top dialog when the one below registered its listener later', () => {
+    const below = vi.fn();
+    function Stacked({ onBelow }: { onBelow: () => void }) {
+      const [top, setTop] = useState(true);
+      // A browser flushes this close before the next listener on the same target runs.
+      const closeTop = useCallback(() => flushSync(() => setTop(false)), []);
+      return (
+        <>
+          <Dialog open onOpenChange={onBelow}>
+            <button id="a1">a1</button>
+          </Dialog>
+          <Dialog open={top} onOpenChange={closeTop}>
+            <button id="b1">b1</button>
+          </Dialog>
+        </>
+      );
+    }
+    show(<Stacked onBelow={() => below()} />);
+    // A new handler re-registers the lower dialog's listener after the top one's.
+    show(<Stacked onBelow={() => below()} />);
+    expect(panels()).toHaveLength(2);
+    press('Escape');
+    expect(panels()).toHaveLength(1);
+    expect(below).not.toHaveBeenCalled();
+  });
+
+  it('C8 re-rendering an open dialog does not move focus', () => {
+    openDialog(buttons);
+    byId('cancel').focus();
+    show(
+      <Scene open onOpenChange={() => {}}>
+        {buttons}
+      </Scene>,
+    );
+    expect(where()).toBe('button#cancel');
+  });
+
+  it('C9 under Strict Mode an autoFocus child keeps focus and closing restores the opener', () => {
+    strict = true;
+    show(<Scene mounted={false} />);
+    byId('opener').focus();
+    show(<Scene open>{withField}</Scene>);
+    expect(where()).toBe('input#name');
+    show(<Scene>{withField}</Scene>);
+    expect(where()).toBe('button#opener');
+  });
+
+  it('C13 (a) Tab from any radio of a last group with a checked radio wraps to the first stop', () => {
+    openDialog(checkedAtTheEnd);
+    for (const id of ['r1', 'r2']) {
+      byId(id).focus();
+      press('Tab');
+      expect(where(), `from ${id}`).toBe('button#first');
+    }
+  });
+
+  it('C13 (b) Shift+Tab from any radio of a first group with a checked radio wraps to the last stop', () => {
+    openDialog(checkedAtTheStart);
+    for (const id of ['r2', 'r1']) {
+      byId(id).focus();
+      press('Tab', { shiftKey: true });
+      expect(where(), `from ${id}`).toBe('button#last');
+    }
+  });
+
+  it('C13 (c) wrapping onto a group lands on its checked radio', () => {
+    openDialog(checkedAtTheStart);
+    byId('last').focus();
+    press('Tab');
+    expect(where()).toBe('input#r2');
+    openDialog(checkedAtTheEnd);
+    byId('first').focus();
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r1');
+  });
+
+  it('C13 (d) a first group with none checked: wrapping onto it lands on its first radio', () => {
+    openDialog(noneCheckedAtTheStart);
+    byId('last').focus();
+    press('Tab');
+    expect(where()).toBe('input#r1');
+    for (const id of ['r1', 'r2', 'r3']) {
+      byId(id).focus();
+      press('Tab', { shiftKey: true });
+      expect(where(), `from ${id}`).toBe('button#last');
+    }
+  });
+
+  it('C13 (d) a last group with none checked: wrapping onto it lands on its last radio', () => {
+    openDialog(noneCheckedAtTheEnd);
+    byId('first').focus();
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r3');
+    for (const id of ['r1', 'r2', 'r3']) {
+      byId(id).focus();
+      press('Tab');
+      expect(where(), `from ${id}`).toBe('button#first');
+    }
+  });
+
+  it('C13 (e) two nameless radios are two stops', () => {
+    openDialog(nameless);
+    byId('first').focus();
+    press('Tab');
+    expect(where()).toBe('input#r1');
+    press('Tab');
+    expect(where()).toBe('input#r2');
+    press('Tab');
+    expect(where()).toBe('button#first');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r2');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r1');
+  });
+
+  it('C13 (f) radios sharing a name in two forms are two groups', () => {
+    openDialog(twoForms);
+    byId('r1').focus();
+    press('Tab');
+    expect(where()).toBe('input#r3');
+    press('Tab');
+    expect(where()).toBe('button#first');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r4');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r1');
+  });
+
+  it('C13 (g) a dialog holding only a radio group keeps Tab on the group stop', () => {
+    openDialog(onlyRadios);
+    byId('r2').focus();
+    press('Tab');
+    expect(where()).toBe('input#r2');
+    press('Tab', { shiftKey: true });
+    expect(where()).toBe('input#r2');
+    byId('r1').focus();
+    press('Tab');
+    expect(where()).toBe('input#r2');
+  });
+
+  it('C14 a render that opens the dialog and is abandoned does not choose the opener', async () => {
+    reached = false;
+    show(<Scene />);
+    byId('before').focus();
+    await act(async () => {
+      startTransition(() => {
+        root.render(
+          <Scene open>
+            <Suspends />
+          </Scene>,
+        );
+      });
+    });
+    expect(reached).toBe(true);
+    expect(panels()).toHaveLength(0);
+    byId('opener').focus();
+    show(<Scene open>{buttons}</Scene>);
+    show(<Scene>{buttons}</Scene>);
+    expect(where()).toBe('button#opener');
+  });
+
+  it('C18 (a) a transition that suspends while opening takes the opener when it commits', async () => {
+    await openByResumedTransition(buttons);
+    show(<Scene>{buttons}</Scene>);
+    expect(where()).toBe('button#opener');
+  });
+
+  it('C18 (b) an autoFocus child still takes focus when that transition commits, and closing restores the opener', async () => {
+    await openByResumedTransition(withField);
+    expect(where()).toBe('input#name');
+    show(<Scene>{withField}</Scene>);
+    expect(where()).toBe('button#opener');
+  });
+
+  it('C16 (a) a summary is a tab stop: Tab reaches a last one and wraps from it', () => {
+    openDialog(summaryLast);
+    byId('save').focus();
+    expect(press('Tab').defaultPrevented).toBe(false);
+    expect(where()).toBe('summary#more');
+    expect(press('Tab').defaultPrevented).toBe(true);
+    expect(where()).toBe('button#top');
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(true);
+    expect(where()).toBe('summary#more');
+  });
+
+  it('C16 (b) a contenteditable host is a tab stop: Tab reaches a last one and wraps from it', () => {
+    openDialog(tabbableEditorLast);
+    byId('save').focus();
+    expect(press('Tab').defaultPrevented).toBe(false);
+    expect(where()).toBe('div#editor');
+    expect(press('Tab').defaultPrevented).toBe(true);
+    expect(where()).toBe('button#top');
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(true);
+    expect(where()).toBe('div#editor');
+  });
+
+  it('C16 (c) a contenteditable element Tab skips is not a stop: tabindex -1, contenteditable="false"', () => {
+    for (const scene of [editorLast, uneditableLast]) {
+      openDialog(scene);
+      byId('save').focus();
+      expect(press('Tab').defaultPrevented).toBe(true);
+      expect(where()).toBe('button#top');
+    }
+  });
+
+  it('C16 (d) an iframe is a tab stop: Tab reaches a last one', () => {
+    openDialog(iframeLast);
+    byId('save').focus();
+    expect(press('Tab').defaultPrevented).toBe(false);
+    expect(where()).toBe('iframe#frame');
+  });
+
+  it('C17 (a) positive tabindex stops come first, ascending: the dialog wraps at the ends of that order', () => {
+    openDialog(positiveAndButton);
+    byId('save').focus();
+    expect(press('Tab').defaultPrevented).toBe(true);
+    expect(where()).toBe('button#one');
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(true);
+    expect(where()).toBe('button#save');
+    byId('two').focus();
+    expect(press('Tab').defaultPrevented).toBe(false);
+    byId('two').focus();
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(false);
+    expect(where()).toBe('button#one');
+    expect(press('Tab').defaultPrevented).toBe(false);
+    expect(where()).toBe('button#two');
+  });
+
+  it('C17 (b) a dialog of positive tabindex stops only: Tab wraps from the highest to the lowest', () => {
+    openDialog(positiveOnly);
+    byId('two').focus();
+    expect(press('Tab').defaultPrevented).toBe(true);
+    expect(where()).toBe('button#one');
+    expect(press('Tab').defaultPrevented).toBe(false);
+    expect(where()).toBe('button#two');
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(false);
+    expect(where()).toBe('button#one');
+    expect(press('Tab', { shiftKey: true }).defaultPrevented).toBe(true);
+    expect(where()).toBe('button#two');
+  });
+
+  it('C19 (a) closing the top dialog whose opener was removed leaves the focus in the dialog below', () => {
+    const render = cascade();
+    render(false);
+    byId('x').focus();
+    render(true);
+    render(true, 'removed');
+    press('Escape');
+    expect(where()).toBe('panel 1');
+  });
+
+  it('C19 (b) closing the top dialog whose opener was disabled leaves the focus in the dialog below', () => {
+    const render = cascade();
+    render(false);
+    byId('x').focus();
+    render(true);
+    render(true, 'disabled');
+    press('Escape');
+    expect(where()).toBe('panel 1');
+  });
+
+  it('C19 (c) a control the app focused in the dialog below keeps the focus when the top one closes', () => {
+    const render = cascade(() => byId('y').focus());
+    render(false);
+    byId('x').focus();
+    render(true);
+    render(true, 'removed');
+    press('Escape');
+    expect(where()).toBe('button#y');
+  });
+
+  it('C19 (d) with no dialog below, closing after the opener was removed focuses nothing', () => {
+    const close = () => show(<Scene opener={false}>{buttons}</Scene>);
+    openDialog(buttons, { onOpenChange: close });
+    show(
+      <Scene open opener={false} onOpenChange={close}>
+        {buttons}
+      </Scene>,
+    );
+    focusLog.length = 0;
+    press('Escape');
+    expect(where()).toBe('body');
+    expect(focusLog).toEqual([]);
+  });
+
+  it('C19 (e) a dialog opened with nothing focused hands the focus to the dialog below when it closes', () => {
+    const render = cascade();
+    render(false);
+    doc.focused = null;
+    render(true);
+    press('Escape');
+    expect(where()).toBe('panel 1');
+  });
+
+  it('C19 (f) an opener outside the dialog below that takes the focus keeps it', () => {
+    const render = cascade();
+    render(false);
+    byId('after').focus();
+    render(true);
+    press('Escape');
+    expect(where()).toBe('button#after');
+  });
+});

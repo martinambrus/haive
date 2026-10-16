@@ -6,6 +6,7 @@ import {
   type LoadedWorkerModule,
   type WorkerModuleEntry,
 } from '../modules/loader.js';
+import { deactivatedModuleIds } from '../modules/activation.js';
 import { syncModuleIntent } from '../modules/intent.js';
 import { getRedis } from '../redis.js';
 import { CORE_COMPOSABLE_STEPS, assertCoreComposableCatalog } from './composable-core.js';
@@ -34,9 +35,11 @@ async function registerModulesOnce() {
   return moduleBoot;
 }
 
-export async function bootStepEngine(
-  db: Database,
-): Promise<{ loaded: LoadedWorkerModule[]; entries: readonly WorkerModuleEntry[] }> {
+export async function bootStepEngine(db: Database): Promise<{
+  loaded: LoadedWorkerModule[];
+  entries: readonly WorkerModuleEntry[];
+  deactivated: ReadonlySet<string>;
+}> {
   registerStepsOnce();
   assertCoreComposableCatalog(stepRegistry);
   const { loaded, entries } = await registerModulesOnce();
@@ -50,10 +53,11 @@ export async function bootStepEngine(
   assertIntegrationsDeliverable(stepRegistry, catalog);
   setComposableCatalog(catalog);
   await syncStepCatalog(db, stepRegistry, composables);
-  const schemas = await ensureModuleSchemas(db, loaded, entries);
+  const deactivated = await deactivatedModuleIds(db);
+  const schemas = await ensureModuleSchemas(db, loaded, entries, deactivated);
   // Before the seed: a module's task types read module-missing while its row is absent or missing.
   await syncModuleIntent(db, loaded);
   const taskTypes = await syncTaskTypeDefinitions(db, stepRegistry, loaded);
   await publishWorkerBootReport(getRedis(), loaded, schemas, taskTypes);
-  return { loaded, entries };
+  return { loaded, entries, deactivated };
 }

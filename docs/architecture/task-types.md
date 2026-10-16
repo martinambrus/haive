@@ -74,9 +74,10 @@ module's own step id is not checked when it registers (`step_catalog.step_id` is
 3. register module steps — after the static asserts, so the shared static lists stay authoritative for
    core ids only;
 4. `syncStepCatalog`;
-5. `ensureModuleSchemas`, then `syncModuleIntent` — before the seed, so a freshly installed module's
-   types do not read `module-missing` during boot, and after the schemas, so a failed schema bootstrap
-   is never recorded as loaded;
+5. `ensureModuleSchemas` (skipping, and reporting as `deactivated`, every module deactivated at boot),
+   then `syncModuleIntent` — before the seed, so a freshly installed module's types do not read
+   `module-missing` during boot, and after the schemas, so a failed schema bootstrap is never
+   recorded as loaded;
 6. `syncTaskTypeDefinitions`: built-ins, then module seeds, in one transaction;
 7. publish the worker's boot report (including each module's seeded, conflicting and invalid types).
 

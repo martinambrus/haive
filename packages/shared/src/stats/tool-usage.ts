@@ -131,6 +131,66 @@ export function sumToolUsageSteps(rows: ToolUsageStepRow[]): ToolUsageStepRow {
   return total;
 }
 
+/** Calls a broker served or refused, by outcome; `running` has not reported back. */
+export interface CallOutcomeCounts {
+  ok: number;
+  refused: number;
+  error: number;
+  running: number;
+}
+
+/** An empty `tool` is a call to a name the step does not declare, which the api never stores. */
+export interface CustomToolCallCount extends CallOutcomeCounts {
+  tool: string;
+  action: string;
+}
+
+function mergeCallCounts<T extends CallOutcomeCounts>(
+  lists: T[][],
+  identityOf: (entry: T) => string[],
+): T[] {
+  const byKey = new Map<string, T>();
+  for (const list of lists) {
+    for (const entry of list) {
+      const key = JSON.stringify(identityOf(entry));
+      const known = byKey.get(key);
+      if (known) {
+        known.ok += entry.ok;
+        known.refused += entry.refused;
+        known.error += entry.error;
+        known.running += entry.running;
+      } else byKey.set(key, { ...entry });
+    }
+  }
+  const calls = (entry: T) => entry.ok + entry.refused + entry.error + entry.running;
+  const compareIdentities = (a: T, b: T) => {
+    const left = identityOf(a);
+    const right = identityOf(b);
+    for (let i = 0; i < left.length; i += 1) {
+      const order = compareStrings(left[i] ?? '', right[i] ?? '');
+      if (order !== 0) return order;
+    }
+    return 0;
+  };
+  return [...byKey.values()].sort((a, b) => calls(b) - calls(a) || compareIdentities(a, b));
+}
+
+/** Merged by tool and action; the most calls first, then tool, then action. */
+export function sumCustomToolCalls(lists: CustomToolCallCount[][]): CustomToolCallCount[] {
+  return mergeCallCounts(lists, (entry) => [entry.tool, entry.action]);
+}
+
+export interface IntegrationCallCount extends CallOutcomeCounts {
+  providerId: string;
+  tool: string;
+  access: 'read' | 'write';
+}
+
+/** Merged by provider, tool and access; the most calls first, then in that order. */
+export function sumIntegrationCalls(lists: IntegrationCallCount[][]): IntegrationCallCount[] {
+  return mergeCallCounts(lists, (entry) => [entry.providerId, entry.tool, entry.access]);
+}
+
 /* ------------------------------------------------------------------ */
 /* Installed against used: the unused report                            */
 /* ------------------------------------------------------------------ */
