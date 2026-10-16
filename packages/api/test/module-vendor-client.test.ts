@@ -256,6 +256,23 @@ describe('the vendor client of the module executors', () => {
     },
   );
 
+  it('hands the executor a JSON answer whose \\u escapes spell a token of letters and digits with the token removed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => reply(200, '{"token":"\\u0061\\u0062\\u0063\\u0031\\u0032\\u0033"}')),
+    );
+    const vendor = createVendorClient({
+      token: 'abc123',
+      apiHosts: [HOST],
+      access: 'read',
+      signal: new AbortController().signal,
+    });
+
+    const answer = await vendor.request({ method: 'GET', url: urlOf() });
+
+    expect(answer).toEqual({ status: 200, body: { token: '[redacted]' } });
+  });
+
   it('hands the executor a text answer that echoes the token with the token removed', async () => {
     const { vendor } = clientFor(reply(200, `issued to ${TOKEN}.`, 'text/plain'));
 
@@ -340,6 +357,14 @@ describe('redactSecrets', () => {
     expect(redactSecrets(written.join(' | '), [odd])).toBe(
       '[redacted] | [redacted] | [redacted] | [redacted]',
     );
+  });
+
+  it.each([
+    ['percent-encoded', '%61%62%63%31%32%33'],
+    ['\\u-escaped', '\\u0061\\u0062\\u0063\\u0031\\u0032\\u0033'],
+    ['half escaped, half as is', 'a\\u0062c%31%32%33'],
+  ])('removes a token of letters and digits written %s', (_name, echo) => {
+    expect(redactSecrets(`note ${echo} end`, ['abc123'])).toBe('note [redacted] end');
   });
 
   it('leaves every other escape, in text or in JSON, and a near miss as they are', () => {

@@ -36,9 +36,8 @@ const hex = (value: number, width: number, upper: boolean): string => {
 };
 const literal = (text: string): string => text.replace(/[\\^$.*+?()[\]{}|/-]/g, '\\$&');
 
-/** The ways a vendor's encoder may write one character: as is, as %XX or \uXXXX of either case, a slash as \/, each also read inside a JSON string. */
+/** The ways a vendor's encoder may write one character, a letter or digit too: as is, as %XX or \uXXXX of either case, a slash as \/, each also read inside a JSON string. */
 function spellings(char: string): string[] {
-  if (/^[A-Za-z0-9]$/.test(char)) return [char];
   const bytes = [...Buffer.from(char)];
   const units = Array.from({ length: char.length }, (_, i) => char.charCodeAt(i));
   const written = [char, ...(char === '/' ? ['\\/'] : [])];
