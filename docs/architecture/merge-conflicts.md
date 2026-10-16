@@ -196,7 +196,9 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   then (`peekOpenMerge` before the abort, `noteAbortedByNext` after) settles
   the report of the same directory, head and merge head with `aborted-by-next` and warns on its step;
   for a same-branch merge it first takes what that task's set-aside kept into its own state
-  (`takeLeftOpenKept`), so its own end restores those files' owner and mode.
+  (`takeLeftOpenKept`), so its own end restores those files' owner and mode. That write commits on
+  its own before the abort, not with the section: once the merge is gone, nothing finds that task
+  again.
   A cancelled plan merge is the exception (`discardPlanMerge`, from `handleCancelTask`): the worker
   moves aside what the recorded fixers left, aborts the merge and removes the scratch worktree,
   unless another `plan_merge` task of the repository holds it, a live one or a failed one opened after it
