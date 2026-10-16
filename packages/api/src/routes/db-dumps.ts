@@ -4,18 +4,14 @@ import { Hono } from 'hono';
 import { eq, and } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { initDbUploadRequestSchema, type DbDumpFormat } from '@haive/shared';
-import {
-  lstatNoFollow,
-  openFileNoFollow,
-  removeNoFollow,
-  renameNoFollow,
-} from '@haive/shared/fs-safe';
+import { openFileNoFollow, removeNoFollow, renameNoFollow } from '@haive/shared/fs-safe';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
+import { isWholeFile, withCompleteClaim } from '../lib/upload-complete-claim.js';
 import {
   ensureUploadsDir,
   uploadFileRel,
@@ -71,7 +67,8 @@ function sessionFromRow(row: typeof schema.dbUploads.$inferSelect) {
     totalSize: Number(row.totalSize),
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
-    status: row.status as 'uploading' | 'complete' | 'cancelled' | 'consumed' | 'reaping',
+    status: row.status as
+      'uploading' | 'completing' | 'complete' | 'cancelled' | 'consumed' | 'reaping',
   };
 }
 
@@ -248,34 +245,17 @@ dbDumpRoutes.post('/upload/:id/complete', async (c) => {
   }
   const finalPath = path.join(anchor, finalRel);
 
-  // The row names the finished dump before the file moves; this one UPDATE decides between this
-  // complete, a cancel and the upload reaper, and whichever commits first wins.
   // No import job here — the dump waits to be loaded by the task's env-boot /
   // import step, which deletes it immediately after `ddev import-db`.
-  const claim = await db
-    .update(schema.dbUploads)
-    .set({ status: 'complete', dumpPath: finalPath, updatedAt: new Date() })
-    .where(and(eq(schema.dbUploads.id, row.id), eq(schema.dbUploads.status, 'uploading')))
-    .returning({ id: schema.dbUploads.id });
-  if (claim.length === 0) {
-    throw new HttpError(409, 'session cancelled');
-  }
-
-  try {
-    // A link at that name now fails this check rather than reporting its target's size.
-    const onDisk = await lstatNoFollow(anchor, dumpRel);
-    if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
+  await withCompleteClaim(db, schema.dbUploads, row.id, async (claim) => {
+    const size = Number(row.totalSize);
+    const staged = await isWholeFile(anchor, dumpRel, size);
+    if (!staged && !(await isWholeFile(anchor, finalRel, size))) {
       throw new HttpError(409, 'dump size mismatch on disk');
     }
-    await renameNoFollow(anchor, dumpRel, finalRel);
-  } catch (err) {
-    await db
-      .update(schema.dbUploads)
-      .set({ status: 'uploading', dumpPath: row.dumpPath, updatedAt: new Date() })
-      .where(and(eq(schema.dbUploads.id, row.id), eq(schema.dbUploads.status, 'complete')))
-      .catch(() => undefined);
-    throw err;
-  }
+    if (staged) await renameNoFollow(anchor, dumpRel, finalRel);
+    await claim.write(db, { status: 'complete', dumpPath: finalPath, updatedAt: new Date() });
+  });
 
   return c.json({ session: { id: row.id, status: 'complete' } }, 201);
 });

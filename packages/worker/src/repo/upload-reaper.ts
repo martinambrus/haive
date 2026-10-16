@@ -80,7 +80,7 @@ async function removeFile(root: string, rel: string): Promise<boolean> {
 
 async function reapIdleSessions(db: Database, kind: UploadKind, cutoff: Date): Promise<number> {
   const table = kind.table;
-  // Only a bundle complete parks a session in 'completing'; one that died there is reaped too.
+  // A complete parks its session in 'completing'; one that died there is reaped too.
   const claimed = await db
     .update(table)
     .set({ status: 'cancelled', updatedAt: new Date() })

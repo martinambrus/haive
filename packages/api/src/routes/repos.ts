@@ -36,6 +36,7 @@ import {
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
+import { isWholeFile, withCompleteClaim } from '../lib/upload-complete-claim.js';
 import { ROOT_WRITING_STEP_IDS } from '../lib/task-type-definition.js';
 import {
   ensureUploadsDir,
@@ -567,7 +568,7 @@ function sessionFromRow(row: typeof schema.repoUploads.$inferSelect) {
     totalSize: Number(row.totalSize),
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
-    status: row.status as 'uploading' | 'complete' | 'cancelled',
+    status: row.status as 'uploading' | 'completing' | 'complete' | 'cancelled',
   };
 }
 
@@ -750,53 +751,38 @@ repoRoutes.post('/upload/:id/complete', async (c) => {
   }
   const finalPath = path.join(storageRoot, finalRel);
 
-  // The row names the finished file before the file moves; this one UPDATE decides between this
-  // complete, a cancel and the upload reaper, and whichever commits first wins.
-  const claim = await db
-    .update(schema.repoUploads)
-    .set({ status: 'complete', archivePath: finalPath, updatedAt: new Date() })
-    .where(and(eq(schema.repoUploads.id, row.id), eq(schema.repoUploads.status, 'uploading')))
-    .returning({ id: schema.repoUploads.id });
-  if (claim.length === 0) {
-    throw new HttpError(409, 'session cancelled');
-  }
-
-  try {
-    // A link at that name now fails this check rather than reporting its target's size.
-    const onDisk = await lstatNoFollow(storageRoot, archiveRel);
-    if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
-      throw new HttpError(409, 'archive size mismatch on disk');
-    }
-    await renameNoFollow(storageRoot, archiveRel, finalRel);
-  } catch (err) {
-    await db
-      .update(schema.repoUploads)
-      .set({ status: 'uploading', archivePath: row.archivePath, updatedAt: new Date() })
-      .where(and(eq(schema.repoUploads.id, row.id), eq(schema.repoUploads.status, 'complete')))
-      .catch(() => undefined);
-    throw err;
-  }
-
   const repoName = deriveRepoName({
     name: row.name ?? undefined,
     filename: row.filename,
   });
   const branch = row.branch && row.branch.length > 0 ? row.branch : 'main';
 
-  const inserted = await db
-    .insert(schema.repositories)
-    .values({
-      userId,
-      name: repoName,
-      source: 'upload',
-      localPath: null,
-      remoteUrl: null,
-      branch,
-      status: 'cloning',
-      credentialsSecretId: null,
-    })
-    .returning();
-  const repo = inserted[0]!;
+  const repo = await withCompleteClaim(db, schema.repoUploads, row.id, async (claim) => {
+    const size = Number(row.totalSize);
+    const staged = await isWholeFile(storageRoot, archiveRel, size);
+    if (!staged && !(await isWholeFile(storageRoot, finalRel, size))) {
+      throw new HttpError(409, 'archive size mismatch on disk');
+    }
+    if (staged) await renameNoFollow(storageRoot, archiveRel, finalRel);
+
+    return db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(schema.repositories)
+        .values({
+          userId,
+          name: repoName,
+          source: 'upload',
+          localPath: null,
+          remoteUrl: null,
+          branch,
+          status: 'cloning',
+          credentialsSecretId: null,
+        })
+        .returning();
+      await claim.write(tx, { status: 'complete', archivePath: finalPath, updatedAt: new Date() });
+      return created!;
+    });
+  });
 
   const queue = getRepoQueue();
   const payload: RepoJobPayload = {

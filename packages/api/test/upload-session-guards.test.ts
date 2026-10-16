@@ -50,8 +50,9 @@ import type { AppEnv } from '../src/context.js';
 const SESSION = '00000000-0000-4000-8000-0000000000b1';
 const BUNDLE = '00000000-0000-4000-8000-0000000000c1';
 const REPO = '00000000-0000-4000-8000-0000000000f1';
-const HOUR = 60 * 60 * 1000;
-const STALE_MS = 24 * HOUR + 60_000;
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+const STALE_MS = 24 * HOUR + MIN;
 const CONTENT = 'archive bytes';
 
 type UploadTable =
@@ -76,6 +77,9 @@ interface Family {
   finished: (id: string) => string;
   columns: Record<string, unknown>;
   created: () => number;
+  // What one finished complete leaves: rows in `created()` and jobs on the queue.
+  made: number;
+  jobs: number;
 }
 
 let fake: ReturnType<typeof makeFake>;
@@ -93,6 +97,8 @@ const FAMILIES: Family[] = [
     finished: (id) => `_uploads/${USER}/${id}.zip`,
     columns: { filename: 'a.zip', archiveFormat: 'zip' },
     created: () => fake.rows(schema.repositories).length,
+    made: 1,
+    jobs: 1,
   },
   {
     name: 'db-dumps',
@@ -106,6 +112,8 @@ const FAMILIES: Family[] = [
     finished: (id) => `_uploads/${USER}/db-${id}.sql`,
     columns: { filename: 'a.sql', dumpFormat: 'sql' },
     created: () => 0,
+    made: 0,
+    jobs: 0,
   },
   {
     name: 'bundles',
@@ -125,6 +133,8 @@ const FAMILIES: Family[] = [
       archiveFormat: 'zip',
     },
     created: () => fake.rows(schema.customBundles).length,
+    made: 1,
+    jobs: 1,
   },
 ];
 
@@ -398,34 +408,37 @@ describe('U3: a cancel that lands after the claim is not overwritten with comple
     };
   }
 
-  it('bundles: the row stays cancelled', async () => {
+  it('bundles: the row stays cancelled, and the complete does not report success', async () => {
     const family = FAMILIES[2]!;
     await stage(family);
     cancelBeforeTheFinalWrite(family, 3);
 
-    await request(family.app, 'POST', family.completeUrl(SESSION));
+    const res = await request(family.app, 'POST', family.completeUrl(SESSION));
 
+    expect(res.status).toBe(409);
     expect(rowOf(family).status).toBe('cancelled');
   });
 
-  it('bundle replace: the row stays cancelled', async () => {
+  it('bundle replace: the row stays cancelled, and the complete does not report success', async () => {
     const family = FAMILIES[2]!;
     await seedZipBundle();
     await stage(family);
     fake.patch(schema.customBundleUploads, SESSION, { bundleId: BUNDLE });
     cancelBeforeTheFinalWrite(family, 2);
 
-    await request(family.app, 'POST', `/${BUNDLE}/replace/${SESSION}/complete`);
+    const res = await request(family.app, 'POST', `/${BUNDLE}/replace/${SESSION}/complete`);
 
+    expect(res.status).toBe(409);
     expect(rowOf(family).status).toBe('cancelled');
+    expect(queue.jobs).toHaveLength(0);
   });
 });
 
-describe('U3: a repository or dump session names the finished file before the file moves', () => {
+describe('F1: a repository or dump session reads complete only once its file has moved', () => {
   const rowAtTheMove = [FAMILIES[0]!, FAMILIES[1]!];
 
   it.each(rowAtTheMove)(
-    '$name: the row is complete and names the final path at the move',
+    '$name: at the move the row is completing and still names the partial; after it, complete and the final path',
     async (family) => {
       const staged = await stage(family);
       let seen: { status?: unknown; stored?: unknown } = {};
@@ -436,7 +449,11 @@ describe('U3: a repository or dump session names the finished file before the fi
       const res = await request(family.app, 'POST', family.completeUrl(SESSION));
 
       expect(res.status).toBe(201);
-      expect(seen).toEqual({ status: 'complete', stored: staged.finished });
+      expect(seen).toEqual({ status: 'completing', stored: staged.partial });
+      expect(rowOf(family)).toMatchObject({
+        status: 'complete',
+        [family.pathKey]: staged.finished,
+      });
     },
   );
 
@@ -705,7 +722,7 @@ describe('A1: a bundle complete that fails before it changes anything gives its 
     expect((await request(bundles.app, 'POST', bundles.completeUrl(SESSION))).status).toBe(201);
   });
 
-  it('create: a failure after the bundle exists leaves the session completing, and a repeat finishes it', async () => {
+  it('create: a failure after the bundle exists gives the session back, and a repeat finishes it', async () => {
     const staged = await stage(bundles);
     h.beforeRename = () => {
       h.beforeRename = null;
@@ -715,22 +732,12 @@ describe('A1: a bundle complete that fails before it changes anything gives its 
     const failed = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
 
     expect(failed.status).toBe(500);
-    expect(rowOf(bundles).status).toBe('completing');
+    expect(rowOf(bundles).status).toBe('uploading');
     expect(fake.rows(schema.customBundles).map((r) => r.id)).toEqual([SESSION]);
     expect((await request(bundles.app, 'POST', bundles.completeUrl(SESSION))).status).toBe(201);
     expect(rowOf(bundles).status).toBe('complete');
     expect(await readFile(staged.finished, 'utf8')).toBe(CONTENT);
     expect(queue.jobs).toHaveLength(1);
-  });
-
-  it('create: a repeat that fails leaves the session completing for the call that holds it', async () => {
-    const staged = await stage(bundles, { status: 'completing', at: 'partial' });
-    await rm(staged.partial);
-
-    const res = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
-
-    expect(res.status).toBe(409);
-    expect(rowOf(bundles).status).toBe('completing');
   });
 
   it('replace: a size mismatch answers 409 and the session is uploading again', async () => {
@@ -765,5 +772,226 @@ describe('A1: a bundle complete that fails before it changes anything gives its 
     expect(await readFile(staged.partial, 'utf8')).toBe(CONTENT);
     expect((await request(bundles.app, 'POST', replaceUrl)).status).toBe(200);
     expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+  });
+});
+
+describe('F1: a complete resumes the claim of a request that died, and leaves a live claim alone', () => {
+  // What a complete that died after its claim leaves: completing, naming the partial, stamped long ago.
+  async function deadClaim(family: Family, at: 'partial' | 'finished'): Promise<Staged> {
+    const staged = await stage(family, { status: 'completing', at, idleMs: 11 * MIN });
+    fake.patch(family.table, SESSION, { [family.pathKey]: staged.partial });
+    return staged;
+  }
+
+  it.each(FAMILIES)(
+    '$name: a dead claim with its partial present: a repeat complete finishes it, once',
+    async (family) => {
+      const staged = await deadClaim(family, 'partial');
+
+      const res = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+      expect(res.status).toBe(201);
+      expect(rowOf(family)).toMatchObject({
+        status: 'complete',
+        [family.pathKey]: staged.finished,
+      });
+      expect(await readFile(staged.finished, 'utf8')).toBe(CONTENT);
+      expect(await exists(staged.partial)).toBe(false);
+      expect(family.created()).toBe(family.made);
+      expect(queue.jobs).toHaveLength(family.jobs);
+    },
+  );
+
+  it.each(FAMILIES)(
+    '$name: a dead claim whose file already moved: a repeat complete finishes it without a move',
+    async (family) => {
+      const staged = await deadClaim(family, 'finished');
+      h.beforeRename = () => {
+        throw new Error('no move was due');
+      };
+
+      const res = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+      expect(res.status).toBe(201);
+      expect(rowOf(family)).toMatchObject({
+        status: 'complete',
+        [family.pathKey]: staged.finished,
+      });
+      expect(await readFile(staged.finished, 'utf8')).toBe(CONTENT);
+      expect(family.created()).toBe(family.made);
+      expect(queue.jobs).toHaveLength(family.jobs);
+    },
+  );
+
+  it.each(FAMILIES)('$name: a live claim answers 409 and changes nothing', async (family) => {
+    const staged = await stage(family, { status: 'completing', at: 'partial', idleMs: 9 * MIN });
+    const before = { ...rowOf(family) };
+
+    const res = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+    expect(res.status).toBe(409);
+    expect(await errorOf(res)).toBe('a complete of this session is already running');
+    expect(rowOf(family)).toEqual(before);
+    expect(await readFile(staged.partial, 'utf8')).toBe(CONTENT);
+    expect(family.created()).toBe(0);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  it.each(FAMILIES)(
+    '$name: a dead claim whose file is gone answers 409 and gives the session back',
+    async (family) => {
+      const staged = await deadClaim(family, 'partial');
+      await rm(staged.partial);
+
+      const res = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+      expect(res.status).toBe(409);
+      expect(rowOf(family).status).toBe('uploading');
+    },
+  );
+});
+
+describe('F2: one complete holds a session at a time', () => {
+  const bundles = FAMILIES[2]!;
+  const replaceUrl = `/${BUNDLE}/replace/${SESSION}/complete`;
+
+  // The row now carries another complete's stamp, as if that complete had taken the session over.
+  function takenOverAtWrite(family: Family, writes: number): void {
+    let seen = 0;
+    fake.hooks.beforeUpdate = (table) => {
+      if (table !== family.table || (seen += 1) !== writes) return;
+      fake.patch(family.table, SESSION, { updatedAt: new Date(Date.now() + 5_000) });
+    };
+  }
+  const staleAgain = () =>
+    fake.patch(schema.customBundleUploads, SESSION, { updatedAt: new Date(Date.now() - 11 * MIN) });
+
+  it.each(FAMILIES)(
+    '$name: a second complete while the first holds the claim answers 409 and moves nothing',
+    async (family) => {
+      const staged = await stage(family);
+      const seen = { second: null as Response | null, at: {} as Record<string, unknown> };
+      h.beforeRename = async () => {
+        h.beforeRename = null;
+        seen.second = await request(family.app, 'POST', family.completeUrl(SESSION));
+        seen.at = {
+          partial: await exists(staged.partial),
+          finished: await exists(staged.finished),
+          jobs: queue.jobs.length,
+        };
+      };
+
+      const first = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+      expect(seen.second?.status).toBe(409);
+      expect(await errorOf(seen.second!)).toBe('a complete of this session is already running');
+      expect(seen.at).toEqual({ partial: true, finished: false, jobs: 0 });
+      expect(first.status).toBe(201);
+      expect(rowOf(family).status).toBe('complete');
+      expect(family.created()).toBe(family.made);
+      expect(queue.jobs).toHaveLength(family.jobs);
+    },
+  );
+
+  it('replace: a second complete while the first holds the claim answers 409 and moves nothing', async () => {
+    const dir = await seedZipBundle();
+    const staged = await stage(bundles);
+    fake.patch(schema.customBundleUploads, SESSION, { bundleId: BUNDLE });
+    const seen = { second: null as Response | null, at: {} as Record<string, unknown> };
+    h.beforeRename = async () => {
+      h.beforeRename = null;
+      seen.second = await request(bundles.app, 'POST', replaceUrl);
+      seen.at = {
+        source: await readFile(path.join(dir, 'source.zip'), 'utf8'),
+        partial: await exists(staged.partial),
+        jobs: queue.jobs.length,
+      };
+    };
+
+    const first = await request(bundles.app, 'POST', replaceUrl);
+
+    expect(seen.second?.status).toBe(409);
+    expect(await errorOf(seen.second!)).toBe('a complete of this session is already running');
+    expect(seen.at).toEqual({ source: 'OLD-ARCHIVE', partial: true, jobs: 0 });
+    expect(first.status).toBe(200);
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it('repos: a complete taken over before its final write answers 409, and its repository insert is rolled back', async () => {
+    const family = FAMILIES[0]!;
+    await stage(family);
+    takenOverAtWrite(family, 2);
+
+    const res = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+    expect(res.status).toBe(409);
+    expect(family.created()).toBe(0);
+    expect(queue.jobs).toHaveLength(0);
+    expect(rowOf(family).status).toBe('completing');
+
+    fake.hooks.beforeUpdate = null;
+    fake.patch(family.table, SESSION, { updatedAt: new Date(Date.now() - 11 * MIN) });
+    expect((await request(family.app, 'POST', family.completeUrl(SESSION))).status).toBe(201);
+    expect(family.created()).toBe(1);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it('db-dumps: a complete taken over before its final write answers 409 and leaves the row to the taker', async () => {
+    const family = FAMILIES[1]!;
+    const staged = await stage(family);
+    takenOverAtWrite(family, 2);
+
+    const res = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+    expect(res.status).toBe(409);
+    expect(rowOf(family)).toMatchObject({ status: 'completing', dumpPath: staged.partial });
+
+    fake.hooks.beforeUpdate = null;
+    fake.patch(family.table, SESSION, { updatedAt: new Date(Date.now() - 11 * MIN) });
+    expect((await request(family.app, 'POST', family.completeUrl(SESSION))).status).toBe(201);
+    expect(rowOf(family)).toMatchObject({ status: 'complete', dumpPath: staged.finished });
+  });
+
+  it('create: a complete taken over before its link write answers 409 and rolls its bundle insert back', async () => {
+    await stage(bundles);
+    takenOverAtWrite(bundles, 2);
+
+    const res = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
+
+    expect(res.status).toBe(409);
+    expect(fake.rows(schema.customBundles)).toEqual([]);
+    expect(queue.jobs).toHaveLength(0);
+    expect(rowOf(bundles).status).toBe('completing');
+  });
+
+  it('create: a complete taken over before its final write answers 409, and the takeover leaves one bundle and one job', async () => {
+    await stage(bundles);
+    takenOverAtWrite(bundles, 3);
+
+    const res = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
+
+    expect(res.status).toBe(409);
+    expect(rowOf(bundles).status).toBe('completing');
+
+    fake.hooks.beforeUpdate = null;
+    staleAgain();
+    expect((await request(bundles.app, 'POST', bundles.completeUrl(SESSION))).status).toBe(201);
+    expect(rowOf(bundles).status).toBe('complete');
+    expect(fake.rows(schema.customBundles).map((r) => r.id)).toEqual([SESSION]);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it('replace: a complete taken over before its final write answers 409 and queues nothing', async () => {
+    await seedZipBundle();
+    await stage(bundles);
+    fake.patch(schema.customBundleUploads, SESSION, { bundleId: BUNDLE });
+    takenOverAtWrite(bundles, 2);
+
+    const res = await request(bundles.app, 'POST', replaceUrl);
+
+    expect(res.status).toBe(409);
+    expect(rowOf(bundles).status).toBe('completing');
+    expect(queue.jobs).toHaveLength(0);
   });
 });

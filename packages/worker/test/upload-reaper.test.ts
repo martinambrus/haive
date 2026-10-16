@@ -315,26 +315,26 @@ describe('U1: the row pass reaps an upload idle for 24 hours', () => {
   });
 });
 
-// A bundle complete parks its session in completing; one that died there is reaped like an upload.
-describe('A2: the row pass reaps a bundle session left in completing', () => {
-  const bundles = KINDS[2]!;
+// A complete parks its session in completing, naming the partial; one that died there is reaped.
+describe('A2: the row pass reaps a session left in completing', () => {
+  describe.each(KINDS)('$name', (kind) => {
+    it('takes a session idle 24 h + 1 min: it is cancelled and its partial is gone', async () => {
+      const stale = await session(kind, { idleMs: TTL + MIN, status: 'completing' });
 
-  it('takes a session idle 24 h + 1 min: it is cancelled and its partial is gone', async () => {
-    const stale = await session(bundles, { idleMs: TTL + MIN, status: 'completing' });
+      await reapAbandonedUploads(db());
 
-    await reapAbandonedUploads(db());
+      expect(rowOf(kind, stale.id).status).toBe('cancelled');
+      expect(await exists(stale.file)).toBe(false);
+    });
 
-    expect(rowOf(bundles, stale.id).status).toBe('cancelled');
-    expect(await exists(stale.file)).toBe(false);
-  });
+    it('keeps a session idle 23 h with its partial', async () => {
+      const fresh = await session(kind, { idleMs: 23 * HOUR, status: 'completing' });
 
-  it('keeps a session idle 23 h with its partial', async () => {
-    const fresh = await session(bundles, { idleMs: 23 * HOUR, status: 'completing' });
+      await reapAbandonedUploads(db());
 
-    await reapAbandonedUploads(db());
-
-    expect(rowOf(bundles, fresh.id).status).toBe('completing');
-    expect(await readFile(fresh.file, 'utf8')).toBe('partial bytes');
+      expect(rowOf(kind, fresh.id).status).toBe('completing');
+      expect(await readFile(fresh.file, 'utf8')).toBe('partial bytes');
+    });
   });
 });
 

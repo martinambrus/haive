@@ -217,7 +217,7 @@ describe('POST /tasks with an uploaded dump', () => {
     expect(h.add).not.toHaveBeenCalled();
   });
 
-  it.each(['uploading', 'cancelled', 'consumed', 'reaping'])(
+  it.each(['uploading', 'completing', 'cancelled', 'consumed', 'reaping'])(
     'answers 409 naming the status of a %s dump, and creates no task',
     async (status) => {
       const t = withDump(status);

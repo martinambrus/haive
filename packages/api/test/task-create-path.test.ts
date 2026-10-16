@@ -1,14 +1,34 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const url = process.env.TASK_CREATE_PATH_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/task_create_path_test'))
   throw new Error('Use a dedicated task_create_path_test database for create path tests');
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000e1');
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  repoQueue: { add: async (..._args: unknown[]) => undefined as unknown },
+  beforeRename: null as null | (() => void | Promise<void>),
+}));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => undefined }) }));
+vi.mock('../src/queues.js', () => ({
+  getTaskQueue: () => ({ add: async () => undefined }),
+  getRepoQueue: () => h.repoQueue,
+}));
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...real,
+    renameNoFollow: async (...args: Parameters<typeof real.renameNoFollow>) => {
+      await h.beforeRename?.();
+      return real.renameNoFollow(...args);
+    },
+  };
+});
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
@@ -26,7 +46,7 @@ import { Hono } from 'hono';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { adminTaskTypeRoutes } from '../src/routes/task-types.js';
-import { loadLiveRootWriters } from '../src/routes/repos.js';
+import { loadLiveRootWriters, repoRoutes } from '../src/routes/repos.js';
 import { definitionForCreate } from '../src/lib/task-type-definition.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -613,20 +633,20 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
       expect(await taskCount()).toBe(0);
     }, 30_000);
 
-    it('answers 409 for a dump a dead worker left reaping, and creates no task', async () => {
-      await db
-        .update(schema.dbUploads)
-        .set({ status: 'reaping' })
-        .where(eq(schema.dbUploads.id, DUMP));
+    it.each(['reaping', 'completing'])(
+      'answers 409 for a dump a dead worker or request left %s, and creates no task',
+      async (status) => {
+        await db.update(schema.dbUploads).set({ status }).where(eq(schema.dbUploads.id, DUMP));
 
-      const res = await withDump();
+        const res = await withDump();
 
-      expect(res.status).toBe(409);
-      expect(((await res.json()) as { error: string }).error).toBe(
-        'DB dump upload is reaping, not complete',
-      );
-      expect(await taskCount()).toBe(0);
-    });
+        expect(res.status).toBe(409);
+        expect(((await res.json()) as { error: string }).error).toBe(
+          `DB dump upload is ${status}, not complete`,
+        );
+        expect(await taskCount()).toBe(0);
+      },
+    );
 
     it.each(['before', 'after'] as const)(
       'makes the reaper wait for a task transaction stopped %s its task insert, and keeps the dump',
@@ -659,6 +679,212 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
       },
       30_000,
     );
+  });
+
+  describe('an upload complete on Postgres', () => {
+    const UPLOAD = '00000000-0000-4000-8000-0000000000e4';
+    const MIN = 60_000;
+    const CONTENT = 'archive bytes';
+    const repoApp = new Hono<AppEnv>();
+    repoApp.route('/repos', repoRoutes);
+    repoApp.onError(errorHandler);
+    let storage: string;
+    let savedRoot: string | undefined;
+    let queued: unknown[][];
+
+    const partial = () => path.join(storage, '_uploads', USER, `${UPLOAD}.zip.partial`);
+    const final = () => path.join(storage, '_uploads', USER, `${UPLOAD}.zip`);
+    const exists = async (file: string) => (await stat(file).catch(() => null)) !== null;
+
+    beforeEach(async () => {
+      storage = await mkdtemp(path.join(tmpdir(), 'upload-complete-pg-'));
+      savedRoot = process.env.REPO_STORAGE_ROOT;
+      process.env.REPO_STORAGE_ROOT = storage;
+      queued = [];
+      h.repoQueue = { add: async (...args) => void queued.push(args) };
+      h.beforeRename = null;
+      await mkdir(path.dirname(partial()), { recursive: true });
+    });
+    afterEach(async () => {
+      h.beforeRename = null;
+      if (savedRoot === undefined) delete process.env.REPO_STORAGE_ROOT;
+      else process.env.REPO_STORAGE_ROOT = savedRoot;
+      await rm(storage, { recursive: true, force: true });
+    });
+
+    async function seed(status: string, ageMs: number, file: 'partial' | 'final') {
+      await writeFile(file === 'partial' ? partial() : final(), CONTENT);
+      await db.insert(schema.repoUploads).values({
+        id: UPLOAD,
+        userId: USER,
+        filename: 'a.zip',
+        archiveFormat: 'zip',
+        totalSize: CONTENT.length,
+        bytesReceived: CONTENT.length,
+        chunkSize: CONTENT.length,
+        archivePath: partial(),
+        status,
+        updatedAt: new Date(Date.now() - ageMs),
+      });
+    }
+    const uploadRow = async () =>
+      (await db.select().from(schema.repoUploads).where(eq(schema.repoUploads.id, UPLOAD)))[0]!;
+    const uploadedRepositories = async () =>
+      (
+        await db
+          .select()
+          .from(schema.repositories)
+          .where(
+            and(eq(schema.repositories.userId, USER), eq(schema.repositories.source, 'upload')),
+          )
+      ).length;
+    const setStamp = (stamp: Date) =>
+      db
+        .update(schema.repoUploads)
+        .set({ updatedAt: stamp })
+        .where(eq(schema.repoUploads.id, UPLOAD));
+    const complete = () => repoApp.request(`/repos/upload/${UPLOAD}/complete`, { method: 'POST' });
+
+    it('K1: a dead claim with its partial present: a repeat complete renames it and creates one repository', async () => {
+      await seed('completing', 11 * MIN, 'partial');
+
+      const res = await complete();
+
+      expect(res.status).toBe(201);
+      expect(await uploadedRepositories()).toBe(1);
+      expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      expect(await readFile(final(), 'utf8')).toBe(CONTENT);
+      expect(await exists(partial())).toBe(false);
+      expect(queued).toHaveLength(1);
+    });
+
+    it('K1: the same row with its file already at the final path: finishes without a move, with one repository', async () => {
+      await seed('completing', 11 * MIN, 'final');
+      h.beforeRename = () => {
+        throw new Error('no move was due');
+      };
+
+      const res = await complete();
+
+      expect(res.status).toBe(201);
+      expect(await uploadedRepositories()).toBe(1);
+      expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      expect(queued).toHaveLength(1);
+    });
+
+    it('K1: a fresh stamp answers 409 and changes nothing', async () => {
+      await seed('completing', 9 * MIN, 'partial');
+      const before = await uploadRow();
+
+      const res = await complete();
+
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe(
+        'a complete of this session is already running',
+      );
+      expect(await uploadedRepositories()).toBe(0);
+      expect(await uploadRow()).toEqual(before);
+      expect(await exists(partial())).toBe(true);
+      expect(queued).toHaveLength(0);
+    });
+
+    it('K1: a complete taken over before its final write answers 409, rolls its repository insert back, and a resume creates one', async () => {
+      await seed('uploading', 0, 'partial');
+      h.beforeRename = async () => {
+        h.beforeRename = null;
+        await setStamp(new Date(Date.now() + 5_000));
+      };
+
+      const res = await complete();
+
+      expect(res.status).toBe(409);
+      expect(await uploadedRepositories()).toBe(0);
+      expect(await uploadRow()).toMatchObject({ status: 'completing', archivePath: partial() });
+      expect(queued).toHaveLength(0);
+
+      await setStamp(new Date(Date.now() - 11 * MIN));
+      expect((await complete()).status).toBe(201);
+      expect(await uploadedRepositories()).toBe(1);
+    });
+
+    describe('the stamp compare-and-set', () => {
+      const claimLib = () => import('../src/lib/upload-complete-claim.js');
+      const done = (archivePath: string) => ({
+        status: 'complete' as const,
+        archivePath,
+        updatedAt: new Date(),
+      });
+      // A stamp is one millisecond: the takeover must not land in the same one.
+      const later = () => new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+      it('K5: matches its own claim row', async () => {
+        const { withCompleteClaim } = await claimLib();
+        await seed('uploading', 0, 'partial');
+
+        await withCompleteClaim(db, schema.repoUploads, UPLOAD, async (claim) => {
+          expect(await uploadRow()).toMatchObject({ status: 'completing', archivePath: partial() });
+          await claim.write(db, done(final()));
+        });
+
+        expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      });
+
+      it('K5: misses after a takeover, and leaves the row to the taker', async () => {
+        const { withCompleteClaim } = await claimLib();
+        await seed('uploading', 0, 'partial');
+
+        await withCompleteClaim(db, schema.repoUploads, UPLOAD, async (first) => {
+          await later();
+          await setStamp(new Date(Date.now() - 11 * MIN));
+          await withCompleteClaim(db, schema.repoUploads, UPLOAD, async (second) => {
+            await expect(first.write(db, done('first'))).rejects.toMatchObject({ status: 409 });
+            expect(await uploadRow()).toMatchObject({
+              status: 'completing',
+              archivePath: partial(),
+            });
+            await second.write(db, done(final()));
+          });
+        });
+
+        expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      });
+
+      it('K5: hands the session back on a failure, but not once another complete took it over', async () => {
+        const { withCompleteClaim } = await claimLib();
+        await seed('uploading', 0, 'partial');
+
+        await expect(
+          withCompleteClaim(db, schema.repoUploads, UPLOAD, async () => {
+            throw new Error('the first failed');
+          }),
+        ).rejects.toThrow('the first failed');
+        expect(await uploadRow()).toMatchObject({ status: 'uploading' });
+
+        let release!: () => void;
+        const hold = new Promise<void>((resolve) => (release = resolve));
+        let taken!: () => void;
+        const takenOver = new Promise<void>((resolve) => (taken = resolve));
+        let second!: Promise<void>;
+        await expect(
+          withCompleteClaim(db, schema.repoUploads, UPLOAD, async () => {
+            await later();
+            await setStamp(new Date(Date.now() - 11 * MIN));
+            second = withCompleteClaim(db, schema.repoUploads, UPLOAD, async (claim) => {
+              taken();
+              await hold;
+              await claim.write(db, done(final()));
+            });
+            await takenOver;
+            throw new Error('the first failed again');
+          }),
+        ).rejects.toThrow('the first failed again');
+        expect(await uploadRow()).toMatchObject({ status: 'completing' });
+
+        release();
+        await second;
+        expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      });
+    });
   });
 
   describe('admin task type routes', () => {

@@ -240,7 +240,7 @@ describe('C1: a fault right after the zip bundle insert commits', () => {
     };
 
     expect((await complete(SESSION)).status).toBe(500);
-    expect(fake.rows(schema.customBundleUploads)[0]).toMatchObject({ status: 'completing' });
+    expect(fake.rows(schema.customBundleUploads)[0]).toMatchObject({ status: 'uploading' });
     expect2xx(await complete(SESSION));
 
     expect(fake.rows(schema.customBundles).map((r) => r.id)).toEqual([SESSION]);
@@ -284,7 +284,7 @@ describe('C1: a fault right after the zip bundle insert commits', () => {
     let uploadWrites = 0;
     fake.hooks.beforeUpdate = (table) => {
       // The first write to the upload row is the claim; the one that fails is the link.
-      if (table === schema.customBundleUploads && (uploadWrites += 1) > 1) {
+      if (table === schema.customBundleUploads && (uploadWrites += 1) === 2) {
         throw new Error('the link write failed');
       }
     };
@@ -293,6 +293,7 @@ describe('C1: a fault right after the zip bundle insert commits', () => {
 
     expect(fake.rows(schema.customBundles)).toEqual([]);
     expect(queue.jobs).toHaveLength(0);
+    expect(fake.rows(schema.customBundleUploads)[0]).toMatchObject({ status: 'uploading' });
 
     fake.hooks.beforeUpdate = null;
     expect2xx(await complete(SESSION));

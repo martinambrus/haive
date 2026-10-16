@@ -29,6 +29,7 @@ import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
+import { isWholeFile, withCompleteClaim } from '../lib/upload-complete-claim.js';
 import {
   ensureUploadsDir,
   uploadFileRel,
@@ -294,58 +295,6 @@ async function addBundleJobOrMarkFailed(
   }
 }
 
-// Moves the session to 'completing', which a cancel refuses and the upload reaper leaves for a day;
-// a repeat or resumed complete finds it there and claims it again. True when this call moved it.
-async function claimUploadSession(
-  db: ReturnType<typeof getDb>,
-  uploadId: string,
-): Promise<boolean> {
-  const inStatus = (status: string) =>
-    and(eq(schema.customBundleUploads.id, uploadId), eq(schema.customBundleUploads.status, status));
-  const moved = await db
-    .update(schema.customBundleUploads)
-    .set({ status: 'completing', updatedAt: new Date() })
-    .where(inStatus('uploading'))
-    .returning({ id: schema.customBundleUploads.id });
-  if (moved.length > 0) return true;
-  const held = await db
-    .update(schema.customBundleUploads)
-    .set({ updatedAt: new Date() })
-    .where(inStatus('completing'))
-    .returning({ id: schema.customBundleUploads.id });
-  if (held.length === 0) {
-    throw new HttpError(409, 'session cancelled');
-  }
-  return false;
-}
-
-// A failure of `run` hands a session this call moved back to uploading, as the repository and dump
-// completes do; a call that only resumed it leaves it as it found it.
-async function unclaimOnFailure<T>(
-  db: ReturnType<typeof getDb>,
-  uploadId: string,
-  moved: boolean,
-  run: () => Promise<T>,
-): Promise<T> {
-  try {
-    return await run();
-  } catch (err) {
-    if (moved) {
-      await db
-        .update(schema.customBundleUploads)
-        .set({ status: 'uploading', updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.customBundleUploads.id, uploadId),
-            eq(schema.customBundleUploads.status, 'completing'),
-          ),
-        )
-        .catch(() => undefined);
-    }
-    throw err;
-  }
-}
-
 async function completedUploadBody(userId: string, sessionId: string) {
   const bundle = await loadBundle(userId, sessionId);
   const counts = await loadItemCounts([bundle.id]);
@@ -572,14 +521,9 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
     `source.${archiveExt(row.archiveFormat as ArchiveFormat)}`,
   );
   const finalArchive = path.join(anchor, finalRel);
-  // A link at either name now fails these checks rather than reporting its target's size.
-  const wholeFileAt = async (rel: string) => {
-    const info = await lstatNoFollow(anchor, rel);
-    return info?.kind === 'file' && info.stats.size === Number(row.totalSize);
-  };
+  const wholeFileAt = (rel: string) => isWholeFile(anchor, rel, Number(row.totalSize));
 
-  const moved = await claimUploadSession(db, row.id);
-  const { staged, inserted } = await unclaimOnFailure(db, row.id, moved, async () => {
+  await withCompleteClaim(db, schema.customBundleUploads, row.id, async (claim) => {
     const staged = await wholeFileAt(archiveRel);
     if (!staged && !(await wholeFileAt(finalRel))) {
       throw new HttpError(409, 'archive size mismatch on disk');
@@ -605,67 +549,55 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
         })
         .onConflictDoNothing({ target: schema.customBundles.id })
         .returning();
-      await tx
-        .update(schema.customBundleUploads)
-        .set({ bundleId: row.id, updatedAt: new Date() })
-        .where(eq(schema.customBundleUploads.id, row.id));
+      await claim.write(tx, { bundleId: row.id });
       if (created) await markProjectStateDirty(tx, row.repositoryId);
       return created;
     });
-    return { staged, inserted };
-  });
 
-  if (staged) {
-    try {
-      // `createParents` walks the bundle directory into place, which is what the separate `mkdir`
-      // did — and both rels sit under the same anchor, so this move cannot cross a filesystem.
-      await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
-    } catch (err) {
-      if (!(await wholeFileAt(finalRel))) {
-        throw new HttpError(500, `failed to move archive: ${(err as Error).message}`);
+    if (staged) {
+      try {
+        // `createParents` walks the bundle directory into place, which is what the separate `mkdir`
+        // did — and both rels sit under the same anchor, so this move cannot cross a filesystem.
+        await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
+      } catch (err) {
+        if (!(await wholeFileAt(finalRel))) {
+          throw new HttpError(500, `failed to move archive: ${(err as Error).message}`);
+        }
       }
     }
-  }
 
-  const queue = getBundleQueue();
-  const jobId = `ingest-zip-${row.id}`;
-  if (inserted || !(await queue.getJob(jobId))) {
-    if (!inserted) {
-      await db
-        .update(schema.customBundles)
-        .set({ status: 'syncing', lastSyncError: null, updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.customBundles.id, row.id),
-            inArray(schema.customBundles.status, ['syncing', 'failed']),
-          ),
-        );
+    const queue = getBundleQueue();
+    const jobId = `ingest-zip-${row.id}`;
+    if (inserted || !(await queue.getJob(jobId))) {
+      if (!inserted) {
+        await db
+          .update(schema.customBundles)
+          .set({ status: 'syncing', lastSyncError: null, updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.customBundles.id, row.id),
+              inArray(schema.customBundles.status, ['syncing', 'failed']),
+            ),
+          );
+      }
+      const payload: BundleJobPayload = {
+        bundleId: row.id,
+        userId,
+        archivePath: finalArchive,
+        archiveFormat: row.archiveFormat as ArchiveFormat,
+      };
+      await addBundleJobOrMarkFailed(db, row.id, () =>
+        queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
+          jobId,
+          attempts: 1,
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        }),
+      );
     }
-    const payload: BundleJobPayload = {
-      bundleId: row.id,
-      userId,
-      archivePath: finalArchive,
-      archiveFormat: row.archiveFormat as ArchiveFormat,
-    };
-    await addBundleJobOrMarkFailed(db, row.id, () =>
-      queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
-        jobId,
-        attempts: 1,
-        removeOnComplete: 100,
-        removeOnFail: 100,
-      }),
-    );
-  }
 
-  await db
-    .update(schema.customBundleUploads)
-    .set({ status: 'complete', archivePath: finalArchive, updatedAt: new Date() })
-    .where(
-      and(
-        eq(schema.customBundleUploads.id, row.id),
-        eq(schema.customBundleUploads.status, 'completing'),
-      ),
-    );
+    await claim.write(db, { status: 'complete', archivePath: finalArchive, updatedAt: new Date() });
+  });
 
   return c.json(await completedUploadBody(userId, row.id), 201);
 });
@@ -805,11 +737,10 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
   const finalArchive = path.join(anchor, finalRel);
   const newExtracted = path.join(dir, 'extracted');
 
-  const moved = await claimUploadSession(db, row.id);
   // Overwrite source.<ext> before wiping the prior extracted/ tree, so a death between the two
   // leaves a complete archive. Keeping the bundle row + items table intact during the swap means
   // the UI can keep displaying the previous state until the worker re-parses.
-  await unclaimOnFailure(db, row.id, moved, async () => {
+  await withCompleteClaim(db, schema.customBundleUploads, row.id, async (claim) => {
     const onDisk = await lstatNoFollow(anchor, archiveRel);
     if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
       throw new HttpError(409, 'archive size mismatch on disk');
@@ -831,19 +762,7 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
       })
       .where(eq(schema.customBundles.id, bundleId));
 
-    await db
-      .update(schema.customBundleUploads)
-      .set({
-        status: 'complete',
-        archivePath: finalArchive,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.customBundleUploads.id, row.id),
-          eq(schema.customBundleUploads.status, 'completing'),
-        ),
-      );
+    await claim.write(db, { status: 'complete', archivePath: finalArchive, updatedAt: new Date() });
 
     const queue = getBundleQueue();
     const payload: BundleJobPayload = {
