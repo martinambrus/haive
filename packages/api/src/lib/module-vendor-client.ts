@@ -75,10 +75,7 @@ function withoutStart(text: string, secret: string): string {
       const forms = chars[taken];
       if (forms === undefined) continue;
       const left = text.length - at;
-      if (
-        taken > 0 &&
-        forms.some((form) => left < form.length && form.startsWith(text.slice(at)))
-      ) {
+      if (forms.some((form) => left < form.length && form.startsWith(text.slice(at)))) {
         return true;
       }
       for (const form of forms) {

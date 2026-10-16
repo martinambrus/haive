@@ -354,6 +354,18 @@ describe('redactSecrets', () => {
     expect(redactSecrets('read ab%25c', ['ab%cd'], true)).toBe('read [redacted]');
   });
 
+  it.each([
+    ['half a percent escape', '+ab/cd', 'read %2'],
+    ['half a \\u escape', '+ab/cd', 'read \\u00'],
+    ['the backslash of an escaped slash', '/ab+cd', 'read \\'],
+  ])("removes %s of the token's first character that a cut left at the end", (_n, token, text) => {
+    expect(redactSecrets(text, [token], true)).toBe('read [redacted]');
+  });
+
+  it("keeps an end that is no spelling of the token's first character", () => {
+    expect(redactSecrets('read %3', ['+ab/cd'], true)).toBe('read %3');
+  });
+
   it('keeps the end of a text that only looks like the start of a token, and every end when no cut was made', () => {
     expect(redactSecrets('read ab+x', [ODD_TOKEN], true)).toBe('read ab+x');
     expect(redactSecrets('read ab+c', [ODD_TOKEN])).toBe('read ab+c');
