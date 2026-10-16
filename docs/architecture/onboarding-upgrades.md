@@ -395,7 +395,8 @@ nothing. A repository never onboarded gets neither, since POST /tasks refuses it
 Switching RTK back on offers the settings files again, and the banner says so: an
 upgrade or a sync computed while it was off left their ids out of `applicable_template_ids`, so upgrade-status
 counts an RTK template as applicable again while RTK is on and the providers of the context 01
-renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders from too).
+renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07 renders from too):
+for a context recovered from the last onboarding, the providers its step 07 recorded.
 Both resolve that context in one order (`renderContextOrigin`, `@haive/shared/project-state`).
 A writer (12, 02, 04) whose record write fails clears the column, so that order falls back to the
 snapshot its own rows carry rather than to a column it could not move (`writeProjectStateRecord`).
