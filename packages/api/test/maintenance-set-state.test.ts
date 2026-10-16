@@ -130,6 +130,35 @@ describe('PUT /admin/maintenance', () => {
     expect(next).toBe('taken');
   });
 
+  it('writes the audit row inside the fence and before the state', async () => {
+    const t = setup();
+    t.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.auditEvents) t.events.push('audits');
+    };
+
+    expect((await put('draining')).status).toBe(200);
+
+    expect(t.events).toEqual([asks, 'reads', 'audits', 'writes draining', 'wrote']);
+  });
+
+  it('answers an error, changes no state and lets go of the fence when the audit row cannot be written', async () => {
+    const t = setup();
+    t.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.auditEvents) throw new Error('audit insert failed');
+    };
+
+    expect((await put('draining')).status).toBe(500);
+
+    expect(t.set).not.toHaveBeenCalled();
+    expect(t.events).toEqual([asks, 'reads']);
+    expect(t.fake.rows(schema.auditEvents)).toEqual([]);
+    const next = await Promise.race([
+      t.fake.db.transaction((tx) => tx.execute(FENCE)).then(() => 'taken'),
+      new Promise((resolve) => setTimeout(() => resolve('still held'), 500)),
+    ]);
+    expect(next).toBe('taken');
+  });
+
   it('refuses a state it does not know before it asks for anything', async () => {
     const t = setup();
 
