@@ -33,13 +33,21 @@ database. `HAIVE_VERSION` has no default so the command fails rather than silent
 ## The drain an upgrade runs first
 
 `haive upgrade` (the updater) sets `MAINTENANCE_STATE` to `draining`, waits until no task is live,
-then sets `maintenance` and takes the snapshot. Every api route that starts work refuses with 503
+then recounts under the fence described below and sets `maintenance` only from that recount: the
+fresh state must still be `draining` (or an administrator's `maintenance`, which it leaves as it is)
+with nothing live. A recount that finds a task admitted after the count, or the state set back to
+`normal`, writes `draining` again (over `normal` only) and waits again, at least one poll interval.
+One `--drain-timeout` covers the first wait and every re-wait: past it, a task still live or
+admissions still reopened stop the upgrade with an error, or with `--force` enter maintenance
+anyway. The journal (`upgrade_runs.phase`) reads `draining` during a re-wait and `maintenance` again
+on entry. Then the updater takes the snapshot. Every api route that starts work refuses with 503
 while the state is `draining` or `maintenance`. Its authority is `admitNewWork`: a read of the state
 past ConfigService's 30 s cache inside the transaction that records the work, under a shared
 database fence (`lockNewWorkFenceShared`, an advisory lock on `NEW_WORK_FENCE_KEY`); most routes
 also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). Every
-updater state write (`draining`, `maintenance`, and the return to `normal` on commit or rollback),
-like an administrator's maintenance write, takes the same fence exclusively (`setMaintenanceState`):
+updater state write (`draining`, the recount's `maintenance`, and the return to `normal` on commit
+or rollback), like an administrator's maintenance write, takes the same fence exclusively
+(`setMaintenanceState`, `enterMaintenance`):
 it waits for every admission in flight, so the live-task count it reads next includes each task
 admitted before it, every admission after it reads the new state, and no write lands inside an
 administrator's write. Lifting the hold therefore needs Postgres: an updater that cannot reach it
