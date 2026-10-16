@@ -212,3 +212,16 @@ An install that runs published images (`docker-compose.run.yml`, see
 [Cutting a release](release.md)) has no pnpm and no source checkout, so `pnpm module` does not
 exist there. Which modules it carries moves with the images it runs, and `/admin/modules` shows the
 same states either way.
+
+**The leak gate.** A per-customer channel's images are checked locally before anything is pushed:
+`node scripts/channel-gate.mjs --expect <expect.json> --token-file <file>`. The vendor npm token must
+appear nowhere (`scripts/smoke/scan-image.sh`, the token passed in its environment). The module names
+found in every layer, registry `@haive-module+<id>@<version>` and folder modules under
+`app/modules/<dir>/`, must equal the entitled set for the api and the worker and be a subset of the
+modules with web parts for the web image; a registry module must carry its expected version, and a
+non-directory entry under `app/modules/` other than `.gitkeep` is refused. The generated module
+registries, read inside the image with no network, must equal the expected sets; the api and the
+worker must carry `HAIVE_VERSION`; and no `.npmrc` in any layer may hold a credential (the D1b rule,
+which also finds an indented key). It exits 0 only when every image passed, 1 with one `OFFENDER`
+line per finding, and 2 when it could not look, offenders still printed; it never prints the token or
+an `.npmrc` value. A multi-platform `docker save` is refused (2): channel images are single-platform.
