@@ -2107,7 +2107,9 @@ export default function TaskDetailPage() {
         <div ref={stepsContainerRef} className="flex flex-col gap-3">
           {steps.length === 0 && !taskFinished && (
             <div className="text-sm text-neutral-500">
-              No steps recorded yet. The task worker will populate them once it starts.
+              {taskNotStarted(task)
+                ? 'No steps recorded yet. This task has not started; press Start above and the task worker will populate them.'
+                : 'No steps recorded yet. The task worker will populate them once it starts.'}
             </div>
           )}
           {steps.map((step) => {
