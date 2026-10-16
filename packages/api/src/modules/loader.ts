@@ -9,6 +9,7 @@ import {
   type ModuleTeardownPayload,
   type ModuleTeardownResult,
 } from '@haive/shared';
+import { registerModuleIntegrations } from '@haive/shared/integrations';
 import {
   collectFieldIds,
   diffModuleIntent,
@@ -109,6 +110,7 @@ export async function mountModules(
       hasRoutes: entry.routes !== undefined,
     });
   }
+  registerModuleIntegrations(loaded);
 
   for (const [index, entry] of entries.entries()) {
     const { manifest } = loaded[index]!;

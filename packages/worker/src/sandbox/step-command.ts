@@ -7,6 +7,7 @@ import { resolveInvocationRepoMount, resolveSandboxImageTag } from '../queues/cl
 import { resolveSecretMasks } from '../queues/cli-exec/secret-mask.js';
 import { repoGitDataBoundary } from '../queues/cli-exec/gitfile-mask.js';
 import { haiveDataBoundary } from '../queues/cli-exec/haive-data-boundary.js';
+import { worktreesBoundary } from '../queues/cli-exec/worktrees-boundary.js';
 import {
   AgentLeaseAbortedError,
   AgentLeaseTimeoutError,
@@ -76,6 +77,7 @@ export async function runStepCommandInSandbox(
   const mounts: DockerVolumeMount[] = [
     ...gitData.mounts,
     ...(await haiveDataBoundary(repoMount, { hasRepo })),
+    ...(await worktreesBoundary(repoMount, { hasWorktree, hasRepo })),
   ];
   if (repoMount) mounts.push(repoMount);
   const maskFiles = [

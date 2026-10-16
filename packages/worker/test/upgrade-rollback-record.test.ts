@@ -8,6 +8,7 @@ import { createFakeDb } from '@haive/database/testing';
 import { normalizeContent, sha256Hex } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
+import { recordWritten } from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -47,7 +48,11 @@ const UPGRADE = context({
 
 /** An upgrade that only created a file, rolled back. The repository holds the upgrade's context, the
  *  upgrade's own row (the newest, still live until the rollback retires it) and one older row. */
-async function rollback(older: Record<string, unknown> | null, installJson?: string) {
+async function rollback(
+  older: Record<string, unknown> | null,
+  installJson?: string,
+  refuseRecordWrite = false,
+) {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-rollback-record-'));
   dirs.push(root);
   await mkdir(join(root, '.claude/agents'), { recursive: true });
@@ -135,7 +140,19 @@ async function rollback(older: Record<string, unknown> | null, installJson?: str
     ],
     warnings: [],
   };
-  const out = await upgradeRollbackStep.apply(ctx, { detected } as never);
+  if (refuseRecordWrite) {
+    let refused = false;
+    fake.hooks.beforeLock = (key) => {
+      if (key.includes('project-state') && !refused) {
+        refused = true;
+        throw new Error('database refused');
+      }
+    };
+  }
+  const applied = upgradeRollbackStep.apply(ctx, { detected } as never);
+  const out = await (older === null
+    ? applied
+    : recordWritten(applied, { recordWriteFails: refuseRecordWrite }));
   return {
     root,
     out,
@@ -181,6 +198,26 @@ describe('the context a rollback records when the upgrade only created files', (
     await expect(readFile(join(root, RECORD_RENDER), 'utf8')).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+});
+
+describe('what a rollback reports its record write did', () => {
+  it('written, when the record is written', async () => {
+    const { out } = await rollback(BEFORE);
+
+    expect(out.recordWrite).toBe('written');
+  });
+
+  it('failed, when the write is refused', async () => {
+    const { out } = await rollback(BEFORE, undefined, true);
+
+    expect(out.recordWrite).toBe('failed');
+  });
+
+  it('skipped, when no row still live carries a context', async () => {
+    const { out } = await rollback(null);
+
+    expect(out.recordWrite).toBe('skipped');
   });
 });
 

@@ -10,6 +10,8 @@ import {
   CUSTOM_TOOL_TIMEOUT_MIN_MS,
   CUSTOM_TOOL_URL_MAX_LENGTH,
   CUSTOM_TOOLS_MAX_PER_STEP,
+  INTEGRATION_ID_MAX_LENGTH,
+  INTEGRATIONS_MAX_PER_STEP,
   PROMPT_STEP_PROBLEM_KINDS,
   PROMPT_STEP_TEMPLATE_MAX_BYTES,
   PROMPT_STEP_TIMEOUT_MAX_MS,
@@ -327,6 +329,7 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
   const token = issue.raw ? inlineCode(issue.raw) : 'A token';
   const tool = issue.raw ? `The tool ${inlineCode(issue.raw)}` : 'A tool';
   const param = issue.param ? inlineCode(issue.param) : null;
+  const integration = issue.raw ? `The integration ${inlineCode(issue.raw)}` : 'An integration';
   switch (issue.kind) {
     case 'title-empty':
       return 'Give the step a title.';
@@ -412,6 +415,24 @@ export function describePromptStepIssue(issue: PromptStepIssue): string {
       return `${tool} must return between ${RAG_QUERY_TOP_K_MIN} and ${RAG_QUERY_TOP_K_MAX} results.`;
     case 'tool-scope-needs-repository':
       return `${tool} searches the project, which needs a repository: turn on 'Requires a repository' or search the global knowledge base only.`;
+    case 'too-many-integrations':
+      return `A step can declare at most ${INTEGRATIONS_MAX_PER_STEP} integrations; remove some.`;
+    case 'integration-provider-pinned':
+      return `${integration} pins a provider; a prompt step names a category, and Haive resolves the account.`;
+    case 'integration-category-duplicate':
+      return `${integration} asks for a category that another integration of this step already asks for; a step gets one account per category.`;
+    case 'integration-id-duplicate':
+      return `${issue.raw ? `Two integrations are named ${inlineCode(issue.raw)}` : 'Two integrations have the same id'}; give each integration of a step its own id.`;
+    case 'integration-id-invalid':
+      return `${integration} needs an id that starts with a lowercase letter and uses only lowercase letters, digits and hyphens, up to ${INTEGRATION_ID_MAX_LENGTH} characters.`;
+    case 'integration-category-unknown':
+      return `${integration} asks for a category this install does not have.`;
+    case 'integration-without-repository':
+      return `${integration} works on a repository: turn on 'Requires a repository' or remove it.`;
+    case 'integration-no-longer-valid':
+      return issue.raw
+        ? `${integration} no longer passes its checks; fix it or remove it.`
+        : 'More integrations on this step no longer pass their checks; fix or remove them.';
     case 'prompt-step-orphan':
       return `${issue.stepId} is defined but is not in the step list.`;
     case 'prompt-step-missing':
