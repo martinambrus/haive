@@ -188,6 +188,43 @@ describe('02 reports the record files it wrote', () => {
   });
 });
 
+describe('02 reports what its record write did', () => {
+  it('written, when the record is written', async () => {
+    const s = await setup();
+
+    const out = await s.apply();
+
+    expect(out.recordWrite).toBe('written');
+  });
+
+  it('failed, when the write is refused', async () => {
+    const s = await setup();
+    refuseRecordWriteOnce(s);
+
+    const out = await s.apply({ recordWriteFails: true });
+
+    expect(out.recordWrite).toBe('failed');
+  });
+
+  it('failed, when only the retire block after the written record throws', async () => {
+    const s = await setup();
+    const select = s.fake.db.select;
+    s.fake.db.select = (fields) => ({
+      from: (table) => {
+        if (Object.keys(fields ?? {}).join() === 'onboardingTooling') {
+          throw new Error('database refused');
+        }
+        return select(fields).from(table);
+      },
+    });
+
+    const out = await s.apply({ recordWriteFails: true });
+
+    expect(s.column()).not.toBeNull();
+    expect(out.recordWrite).toBe('failed');
+  });
+});
+
 describe('02 and .haive/install.json', () => {
   const HAIVE_SHAPED = JSON.stringify({ schemaVersion: 1, templateSetHash: 'abc', templates: [] });
   const INSTALL = '.haive/install.json';

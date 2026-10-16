@@ -20,4 +20,33 @@ The `.haive-data` boundary (always on, agent sandboxes only): `haiveDataBoundary
 
 The whole directory is the unit because nothing narrower holds. MEASURED on Docker 29.8.2: with `.haive-data` read-only and `knowledge_base/` read-write, writes and creates under `state/` and the plan files fail (EROFS), `mv .haive-data` fails (EBUSY), KB writes work, and host-side rewrites underneath do not detach the mount; a mount of `state/` alone is beaten by `mv .haive-data` plus a forged `state/`, and per-file plan mounts are dropped by the mirror's own rename-over rewrites. Docker refuses a subpath that does not exist, so a missing `.haive-data/` and `learnings/` are created first, owned like the mount root. `knowledge_base/` is NEVER created there, because it is an onboarding marker: a missing one gets no mount, and so does a child that is a file or a link, which the read-only parent keeps an agent from replacing. A `.haive-data` that is itself a file or a link, or a mount root that is not a directory, refuses the run instead, since an agent could put a directory of its own in its place; docker's volume subpath follows a relative link inside the volume (MEASURED), so a worktree path turned into a link would otherwise mount the tree it points to with no boundary at all. A protected file with more hard links than names in the read-only part refuses the run too: an agent cannot make a new link across the mounts (`Cross-device link`, MEASURED), but one made before the boundary existed, from the checkout or a knowledge dir, lets it rewrite the record through that other name. Nothing created is ever removed: removing a stub after one run detached the mounts of sibling runs. Every lookup is a no-follow lstat walked from the repository-root anchor (`lookupInRepoMount`, which `repoGitDataBoundary` shares), so a worktree subpath is split into `<userId>/<repoId>` plus a relative prefix, and a malformed subpath throws instead of being looked up.
 
+The worktrees boundary (always on, agent sandboxes mounted at the repository root only):
+`worktreesBoundary` (`packages/worker/src/queues/cli-exec/worktrees-boundary.ts`) mounts
+`.haive/worktrees` READ-ONLY. A sandbox at the root (onboarding, steps before `01-worktree-setup`,
+plan tasks, `kb_author`, same-branch merge fixers) otherwise holds every other task's writable
+worktree. It also mounts `.haive` onto itself read-write. A mount point cannot be renamed, so
+`mv .haive` cannot move the real worktrees aside and plant new ones, and `.haive/kb-draft/` stays
+writable. A worktree invocation mounts the worktree itself, so it needs neither.
+
+MEASURED on a throwaway volume:
+
+- Writes, creates, links, `rm -rf` and `mv` of `.haive/worktrees` fail.
+- `mv .haive` fails with EBUSY.
+- `kb-draft` and repository-root writes work.
+- A `mv` of the worktrees to a sibling only copies them, which reading allows anyway. `.haive` is a
+  mount of its own, so a rename between it and the rest of the tree is cross-device: `mv` copies,
+  and a bare `rename(2)` gets EXDEV.
+
+A missing `.haive/worktrees` is created first, owned like the root, so a worktree added later
+appears inside the read-only mount. A `.haive` or `.haive/worktrees` that is a file or a link
+refuses the run. The check and the mount are separate steps, the same window the `.haive-data`
+boundary has.
+
+The boundary does not look for hard links, unlike the `.haive-data` one. A worktree is a full
+checkout, often with `node_modules`, so an inode count over every worktree would walk tens of
+thousands of files on every root-mounted invocation. No new link can be made across the mounts
+(`Cross-device link`, the same mount shape `.haive-data` measured). A link a root-mounted agent
+planted before the boundary existed survives, though: an alias of a worktree file in the writable
+checkout stays writable.
+
 Step 11 asks its agent to edit the knowledge base on every task, and a blank repository has no `knowledge_base/` by design. So in a task worktree its `prepare` creates the directory, owned like the worktree root, before the agent runs; an empty directory is never committed, so it cannot fake the marker. At the repository root (01 skipped) it creates nothing: it skips the KB-sync half and offers no local investigation (a global promotion still works), and records why in `kbSyncSkipped`.

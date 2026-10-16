@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, rm, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -159,7 +159,7 @@ const KINDS: CliExecInvocationKind[] = [
 ];
 
 describe.each(KINDS)('exec-core, kind %s: the boundary mounts an agent sandbox gets', (kind) => {
-  it('mounts .git and .haive-data under the repository root, ahead of the repository mount', async () => {
+  it('mounts .git, .haive-data and .haive/worktrees under the repository root, ahead of the repository mount', async () => {
     const repoMount = { source: 'haive_repos', target: WORKDIR, subpath: SUBPATH };
     stubs.invocation = { repoMount, hasWorktree: false, hasRepo: true };
 
@@ -172,10 +172,36 @@ describe.each(KINDS)('exec-core, kind %s: the boundary mounts an agent sandbox g
         ro(SUBPATH, '.haive-data'),
         rw(SUBPATH, '.haive-data/knowledge_base'),
         rw(SUBPATH, '.haive-data/learnings'),
+        rw(SUBPATH, '.haive'),
+        ro(SUBPATH, '.haive/worktrees'),
         repoMount,
         npmCacheMount(),
       ]);
     }
+  });
+
+  it('creates an absent .haive/worktrees before mounting it, and refuses to start on a link there', async () => {
+    const repoMount = { source: 'haive_repos', target: WORKDIR, subpath: SUBPATH };
+    stubs.invocation = { repoMount, hasWorktree: false, hasRepo: true };
+    await rm(path.join(repoDir, '.haive'), { recursive: true });
+
+    await executeByKind(db, payloadFor(kind), {} as never, {});
+
+    expect((await lstat(path.join(repoDir, '.haive/worktrees'))).isDirectory()).toBe(true);
+    for (const [, options] of stubs.runInSandbox.mock.calls) {
+      expect(options.extraMounts).toContainEqual(ro(SUBPATH, '.haive/worktrees'));
+    }
+
+    stubs.runInSandbox.mockClear();
+    await mkdir(path.join(repoDir, 'elsewhere/worktrees'), { recursive: true });
+    await rm(path.join(repoDir, '.haive'), { recursive: true });
+    await symlink(path.join(repoDir, 'elsewhere'), path.join(repoDir, '.haive'));
+
+    await expect(executeByKind(db, payloadFor(kind), {} as never, {})).rejects.toThrow(
+      /^\.haive in .* is a file or a link/,
+    );
+    expect(stubs.runInSandbox).not.toHaveBeenCalled();
+    expect(await readdir(path.join(repoDir, 'elsewhere/worktrees'))).toEqual([]);
   });
 
   it('masks the worktree gitfile and mounts the worktree’s own .haive-data', async () => {

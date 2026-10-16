@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { schema } from '@haive/database';
 import { CORE_FORGE_PROVIDER_SPECS } from '../src/forge/provider-specs.js';
@@ -50,6 +51,8 @@ const specsOf =
 
 const names = (tools: ReadonlyMap<string, unknown>): string[] => [...tools.keys()];
 const switchIs = (writeAllowed: boolean) => ({ writeAllowed: () => writeAllowed });
+const digestOf = (requirementId: string, opId: string): string =>
+  createHash('sha256').update(`${requirementId}\n${opId}`).digest('hex').slice(0, 8);
 
 function thrown(run: () => unknown): Error {
   try {
@@ -252,20 +255,48 @@ describe('integrationTools', () => {
     expect(tools.get('source_repository_get_pull_request_state')?.binding).toBe(fits);
   });
 
-  it('throws for a prefixed name of 41 characters, naming the requirement, the operation and the name', () => {
-    const bindings = [
-      bind('mirror', 'github', 'read', 0),
-      bind('source-repository2', 'gitlab', 'read', 1),
-    ];
-    const error = thrown(() => integrationTools(bindings, coreSpecOf, switchIs(false)));
+  it('lists a prefixed name of 41 characters cut to 40 with a digest, mapped to its binding', () => {
+    const mirror = bind('mirror', 'github', 'read', 0);
+    const cut = bind('source-repository2', 'gitlab', 'read', 1);
+    const tools = integrationTools([mirror, cut], coreSpecOf, switchIs(false));
+    const name = `source_repository2_get_pull_req_${digestOf('source-repository2', 'get_pull_request_state')}`;
 
     expect('source_repository2_get_pull_request_state').toHaveLength(41);
-    for (const part of [
-      'source-repository2',
-      'get_pull_request_state',
-      'source_repository2_get_pull_request_state',
-    ]) {
-      expect(error.message).toContain(part);
+    expect(name).toHaveLength(40);
+    expect(names(tools)).toEqual(['mirror_get_pull_request_state', name]);
+    expect(tools.get(name)?.binding).toBe(cut);
+  });
+
+  it('cuts a shared name past 40 characters to its first 31 and a digest, the same on every call', () => {
+    const opId = `a${'b'.repeat(39)}`;
+    const specs = specsOf({ p: [op(opId, 'read')], q: [op(opId, 'read')] });
+    const drive = bind('drive', 'p', 'read', 0);
+    const review = bind('documents-review', 'q', 'read', 1);
+    const cases = [
+      { binding: drive, prefixed: `drive_${opId}`, digest: digestOf('drive', opId) },
+      {
+        binding: review,
+        prefixed: `documents_review_${opId}`,
+        digest: digestOf('documents-review', opId),
+      },
+    ];
+
+    const tools = integrationTools([drive, review], specs, switchIs(false));
+    const listed = names(tools);
+
+    expect(listed).toHaveLength(2);
+    expect(new Set(listed).size).toBe(2);
+    cases.forEach(({ binding, prefixed, digest }, index) => {
+      const name = listed[index]!;
+      expect(name, binding.requirementId).toHaveLength(40);
+      expect(name, binding.requirementId).toMatch(TOOL_NAME);
+      expect(name.startsWith(prefixed.slice(0, 31)), binding.requirementId).toBe(true);
+      expect(name.endsWith(`_${digest}`), binding.requirementId).toBe(true);
+      expect(tools.get(name)?.binding, binding.requirementId).toBe(binding);
+    });
+    for (const writeAllowed of [false, true]) {
+      const again = integrationTools([drive, review], specs, switchIs(writeAllowed));
+      expect([...again.entries()]).toEqual([...tools.entries()]);
     }
   });
 
@@ -288,11 +319,11 @@ describe('integrationTools', () => {
 
   it("checks a write operation's name even while the write switch is off", () => {
     const write = op('w'.repeat(30), 'write');
-    const bindings = [bind('long-requirement', 'p', 'write', 0), bind('other', 'q', 'write', 1)];
+    const bindings = [bind('2nd-source', 'p', 'write', 0), bind('other', 'q', 'write', 1)];
     const specs = specsOf({ p: [write], q: [write] });
 
     expect(thrown(() => integrationTools(bindings, specs, switchIs(false))).message).toContain(
-      'long-requirement',
+      '2nd-source',
     );
   });
 
@@ -315,8 +346,8 @@ describe('integrationTools', () => {
       specsOf({ p: [op('Get_page', 'read')] }),
     ],
     [
-      'a prefixed name that is too long',
-      [bind('mirror', 'github', 'read', 0), bind('source-repository2', 'gitlab', 'read', 1)],
+      'a prefixed name that starts with a digit',
+      [bind('mirror', 'github', 'read', 0), bind('2nd-source', 'gitlab', 'read', 1)],
       coreSpecOf,
     ],
     [

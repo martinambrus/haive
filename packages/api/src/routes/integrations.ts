@@ -9,12 +9,15 @@ import {
   createPkcePair,
   exchangeAuthorizationCode,
   getIntegrationProvider,
+  listIntegrationModules,
   listIntegrationProviders,
+  loadDeactivatedModuleIds,
   loadProviderEnablement,
   oauthRedirectUri,
   resolveOauthClient,
   resolveOauthClientById,
 } from '@haive/shared/integrations';
+import { CORE_INTEGRATION_CATEGORY_SPECS } from '@haive/shared/modularity';
 import { requireAuth } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
@@ -136,6 +139,28 @@ integrationsRoutes.get('/providers', async (c) => {
     });
   }
   return c.json({ providers });
+});
+
+integrationsRoutes.get('/categories', async (c) => {
+  const deactivated = await loadDeactivatedModuleIds(getDb());
+  return c.json({
+    categories: [
+      ...CORE_INTEGRATION_CATEGORY_SPECS.map((spec) => ({
+        ...spec,
+        moduleId: null,
+        moduleName: null,
+      })),
+      ...listIntegrationModules()
+        .filter((module) => !deactivated.has(module.id))
+        .flatMap((module) =>
+          module.categories.map((category) => ({
+            ...category,
+            moduleId: module.id,
+            moduleName: module.name,
+          })),
+        ),
+    ],
+  });
 });
 
 integrationsRoutes.post('/providers/:id/connect', async (c) => {
