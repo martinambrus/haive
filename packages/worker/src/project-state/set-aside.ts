@@ -812,7 +812,9 @@ async function isDirty(
 
 /** After a move of the checkout: reads the new head's record and plan in, then writes what this install
  *  still has pending over them. A step that fails here leaves its mark raised, so the sweep retries it.
- *  Whether both halves re-synced: false while a merge or rebase is open, or when either threw. */
+ *  Whether both halves re-synced: false while a merge or rebase is open, when either threw, or when the
+ *  state sync was held, superseded or refused or its pending write did not run. A sync deferred to a
+ *  live onboarding or upgrade counts as done: that task re-syncs when it ends. */
 export async function resyncHaiveProjections(
   db: Database,
   repositoryId: string,
@@ -823,13 +825,18 @@ export async function resyncHaiveProjections(
   let synced = true;
   try {
     restoreFaults.beforeResync?.('state');
-    await syncProjectStateFromCheckout(db, {
+    const { outcome } = await syncProjectStateFromCheckout(db, {
       repositoryId,
       repoPath,
       refuseDuringGitOperation: true,
     });
-    if (await isDirty(db, schema.projectStateOutbox, repositoryId)) {
-      await refreshProjectState(db, repositoryId);
+    if (outcome === 'held' || outcome === 'superseded' || outcome === 'refused') synced = false;
+    if (
+      (await isDirty(db, schema.projectStateOutbox, repositoryId)) &&
+      !(await refreshProjectState(db, repositoryId)) &&
+      outcome !== 'deferred'
+    ) {
+      synced = false;
     }
   } catch (err) {
     synced = false;
