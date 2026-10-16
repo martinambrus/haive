@@ -465,11 +465,13 @@ export async function redriveCancelledTasks(
   const cutoff = new Date(now - opts.staleMs);
   const since = new Date(now - CANCEL_REDRIVE_LOOKBACK_MS);
   const event = taskEventsOf(db);
+  const attemptCount = sql`(select count(*)::int from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${schema.tasks.id} and ${schema.taskEvents.eventType} = ${CANCEL_REDRIVEN_EVENT})`;
   const candidates = await db
     .select({
       taskId: schema.tasks.id,
       userId: schema.tasks.userId,
-      attempts: sql<number>`(select count(*)::int from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${schema.tasks.id} and ${schema.taskEvents.eventType} = ${CANCEL_REDRIVEN_EVENT})`,
+      // Nested: a single-table select list renders its own top-level columns unqualified.
+      attempts: sql<number>`${attemptCount}`,
     })
     .from(schema.tasks)
     .where(
@@ -478,7 +480,7 @@ export async function redriveCancelledTasks(
         exists(event('task.cancelled', gt(schema.taskEvents.createdAt, since))),
         not(exists(event('task.cancelled', gte(schema.taskEvents.createdAt, cutoff)))),
         not(exists(event('task.cancel_finished'))),
-        sql`(select count(*) from ${schema.taskEvents} where ${schema.taskEvents.taskId} = ${schema.tasks.id} and ${schema.taskEvents.eventType} = ${CANCEL_REDRIVEN_EVENT}) < ${CANCEL_REDRIVE_MAX}`,
+        sql`${attemptCount} < ${CANCEL_REDRIVE_MAX}`,
       ),
     )
     .orderBy(asc(schema.tasks.updatedAt))

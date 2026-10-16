@@ -504,6 +504,10 @@ async function main(): Promise<void> {
       { type: 'task.cancel_redriven', at: minutesAgo(6) },
       { type: 'task.cancel_redriven', at: minutesAgo(4) },
     ]);
+    const retriedCancelId = await cancelled('retried-cancel', [
+      { type: 'task.cancelled', at: minutesAgo(10) },
+      { type: 'task.cancel_redriven', at: minutesAgo(8) },
+    ]);
     const notCancelledId = await cancelled(
       'not-cancelled',
       [{ type: 'task.cancelled', at: minutesAgo(10) }],
@@ -519,6 +523,7 @@ async function main(): Promise<void> {
       rerunningCancelId,
       ancientCancelId,
       exhaustedCancelId,
+      retriedCancelId,
       notCancelledId,
     ]);
     const cancelDeps = {
@@ -567,6 +572,23 @@ async function main(): Promise<void> {
       redrivenEvents.length === 1 &&
         (redrivenEvents[0]?.payload as { attempt?: number } | null)?.attempt === 1,
       redrivenEvents,
+    );
+    const retriedEvents = await db
+      .select({ payload: schema.taskEvents.payload })
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, retriedCancelId),
+          eq(schema.taskEvents.eventType, 'task.cancel_redriven'),
+        ),
+      )
+      .orderBy(asc(schema.taskEvents.createdAt));
+    check(
+      'a second re-drive counts the first: its event records attempt 2',
+      cancelsFor(retriedCancelId).length === 1 &&
+        retriedEvents.length === 2 &&
+        (retriedEvents[1]?.payload as { attempt?: number } | null)?.attempt === 2,
+      retriedEvents,
     );
 
     // The pass that gives up on a teardown the re-drive no longer retries, run beside the re-drive
