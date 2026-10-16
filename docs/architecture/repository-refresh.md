@@ -14,7 +14,7 @@ HEAD; git itself refuses a fast-forward that would overwrite a local change, but
 twice: once under the claim, and again with the fast-forward itself under the project-state lock
 (`lockProjectState`), and the set-aside reads it a third time under each of its own locks before it
 touches a file, so a task that starts while the refresh fetches or waits for that lock, and an
-upgrade still writing its record (which holds the same lock), keeps the checkout where it was. A task
+upgrade still writing its record (which holds the same lock), keeps the checkout where it was. A same-branch merge reads the same check before it opens a merge in the checkout ([Merge conflicts](merge-conflicts.md)). A task
 that starts after the fast-forward is not fenced out, since nothing that starts a task reads the claim:
 the window writer 1 in [Onboarding reset](onboarding-reset.md) leaves open for the reset. It loses nothing
 here either, since the fetch writes no working tree, the fast-forward stops at a change git sees and

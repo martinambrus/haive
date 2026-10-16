@@ -19,6 +19,16 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
 - **A person's own checkout is never written to.** The worker's `/host-fs` mount is read-write, so under
   `HOST_REPO_ROOT` nothing is put back from the index and a merge open for another ref is left alone:
   both halt and name what blocks them.
+- **A same-branch merge halts while another task works in the checkout.** A same-branch merge
+  (00a's divergence merge, 12's `merge_remove` on the base, `13-onboarding-push`) opens in the
+  repository's checkout itself, so a task working there without a worktree of its own would have its
+  tree changed under it. As 00a's fast-forward does, the set-aside counts such tasks
+  (`checkoutHoldingTasks` with `rootOnly`, this task left out), and each section that opens a merge
+  there, or clears an earlier attempt's merge first, takes the repository's task-creation lock
+  (`lockRepositoryTasksKey`) and counts them again before it moves anything. A count above zero halts
+  the step with "N other task(s) working in this checkout; nothing was merged. Retry this step once
+  it/they finish(es)." and nothing is merged or aborted. A cross-branch merge runs in the shared
+  `<base>--base` worktree and is not fenced.
 - **A merge dir holds one task's merge at a time, by a claim and fenced sections.** A cross-branch
   merge runs in a worktree named from the base branch alone (`main--base`), shared by every task
   merging into that base, since git allows the branch in one worktree. A step takes the dir in
