@@ -34,7 +34,7 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
 });
 
 import { Hono } from 'hono';
-import { and, eq, lt } from 'drizzle-orm';
+import { and, inArray, lt } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb, type FakeDbHandle, type FakeRow } from '@haive/database/testing';
 import { logger } from '@haive/shared';
@@ -279,8 +279,8 @@ async function seedZipBundle(): Promise<string> {
   return dir;
 }
 
-// What the worker's row pass does to a table: one UPDATE guarded on 'uploading' and the TTL, then
-// the partials of the rows it took are removed.
+// What the worker's row pass does to a table: one UPDATE guarded on 'uploading' or 'completing' and
+// the TTL, then the partials of the rows it took are removed.
 async function reap(family: Family): Promise<number> {
   const table = family.table as typeof schema.repoUploads;
   const stored = (family.table as unknown as Record<string, typeof table.archivePath>)[
@@ -290,7 +290,7 @@ async function reap(family: Family): Promise<number> {
   const claimed = await fake.db
     .update(table)
     .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(and(eq(table.status, 'uploading'), lt(table.updatedAt, cutoff)))
+    .where(and(inArray(table.status, ['uploading', 'completing']), lt(table.updatedAt, cutoff)))
     .returning({ stored });
   for (const row of claimed as { stored: string }[]) await rm(row.stored, { force: true });
   return claimed.length;
@@ -551,4 +551,219 @@ describe('U4: cancelling a session that is not uploading', () => {
       expect(await exists(staged.partial)).toBe(true);
     },
   );
+});
+
+describe('A1: a bundle complete holds its session against a cancel', () => {
+  const bundles = FAMILIES[2]!;
+  const replaceUrl = `/${BUNDLE}/replace/${SESSION}/complete`;
+
+  async function stageReplace(): Promise<string> {
+    const dir = await seedZipBundle();
+    await stage(bundles);
+    fake.patch(schema.customBundleUploads, SESSION, { bundleId: BUNDLE });
+    return dir;
+  }
+
+  // A client's cancel served while the complete is past its claim, at the archive move.
+  function cancelAtTheMove(): { response: Response | null } {
+    const seen: { response: Response | null } = { response: null };
+    h.beforeRename = async () => {
+      h.beforeRename = null;
+      seen.response = await request(bundles.app, 'DELETE', bundles.cancelUrl(SESSION));
+    };
+    return seen;
+  }
+
+  // A client's cancel served after the complete read the session and before its claim.
+  function cancelBeforeTheClaim(): void {
+    fake.hooks.beforeUpdate = async (table) => {
+      if (table !== bundles.table) return;
+      fake.hooks.beforeUpdate = null;
+      await request(bundles.app, 'DELETE', bundles.cancelUrl(SESSION));
+    };
+  }
+
+  const bundleIdOf = async (res: Response) =>
+    ((await res.json()) as { bundle: { id: string } }).bundle.id;
+
+  it('create: a cancel after the claim answers 409, and the complete ends complete with one bundle', async () => {
+    const staged = await stage(bundles);
+    const cancel = cancelAtTheMove();
+
+    const res = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
+
+    expect(cancel.response?.status).toBe(409);
+    expect(await errorOf(cancel.response!)).toBe('session is completing');
+    expect(res.status).toBe(201);
+    expect(rowOf(bundles).status).toBe('complete');
+    expect(fake.rows(schema.customBundles).map((r) => r.id)).toEqual([SESSION]);
+    expect(await readFile(staged.finished, 'utf8')).toBe(CONTENT);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it('create: a cancel before the claim leaves the complete answering 409 session cancelled, with no bundle', async () => {
+    await stage(bundles);
+    cancelBeforeTheClaim();
+
+    const res = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
+
+    expect(res.status).toBe(409);
+    expect(await errorOf(res)).toBe('session cancelled');
+    expect(rowOf(bundles).status).toBe('cancelled');
+    expect(fake.rows(schema.customBundles)).toEqual([]);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  it('create: a repeat after success answers 200 with the same bundle', async () => {
+    await stage(bundles);
+
+    const first = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
+    const second = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
+
+    expect([first.status, second.status]).toEqual([201, 200]);
+    expect(await bundleIdOf(second)).toBe(await bundleIdOf(first));
+    expect(fake.rows(schema.customBundles)).toHaveLength(1);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it('replace: a cancel after the claim answers 409, and the complete swaps the archive', async () => {
+    const dir = await stageReplace();
+    const cancel = cancelAtTheMove();
+
+    const res = await request(bundles.app, 'POST', replaceUrl);
+
+    expect(cancel.response?.status).toBe(409);
+    expect(await errorOf(cancel.response!)).toBe('session is completing');
+    expect(res.status).toBe(200);
+    expect(rowOf(bundles).status).toBe('complete');
+    expect(fake.rows(schema.customBundles).map((r) => r.id)).toEqual([BUNDLE]);
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it('replace: a cancel before the claim leaves the complete answering 409 session cancelled, and the archive alone', async () => {
+    const dir = await stageReplace();
+    cancelBeforeTheClaim();
+
+    const res = await request(bundles.app, 'POST', replaceUrl);
+
+    expect(res.status).toBe(409);
+    expect(await errorOf(res)).toBe('session cancelled');
+    expect(rowOf(bundles).status).toBe('cancelled');
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('OLD-ARCHIVE');
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  it('replace: a repeat after success keeps answering 409 session already completed, and queues nothing more', async () => {
+    const dir = await stageReplace();
+
+    const first = await request(bundles.app, 'POST', replaceUrl);
+    const second = await request(bundles.app, 'POST', replaceUrl);
+
+    expect([first.status, second.status]).toEqual([200, 409]);
+    expect(await errorOf(second)).toBe('session already completed');
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+    expect(fake.rows(schema.customBundles)).toHaveLength(1);
+    expect(queue.jobs).toHaveLength(1);
+  });
+});
+
+describe('A1: a bundle complete that fails before it changes anything gives its session back', () => {
+  const bundles = FAMILIES[2]!;
+  const replaceUrl = `/${BUNDLE}/replace/${SESSION}/complete`;
+
+  it('create: a size mismatch answers 409 and the session is uploading again', async () => {
+    const staged = await stage(bundles);
+    await writeFile(staged.partial, `${CONTENT} and a tail`);
+
+    const res = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
+
+    expect(res.status).toBe(409);
+    expect(await errorOf(res)).toBe('archive size mismatch on disk');
+    expect(rowOf(bundles)).toMatchObject({ status: 'uploading', archivePath: staged.partial });
+    expect(fake.rows(schema.customBundles)).toEqual([]);
+
+    await writeFile(staged.partial, CONTENT);
+    expect((await request(bundles.app, 'POST', bundles.completeUrl(SESSION))).status).toBe(201);
+    expect(rowOf(bundles).status).toBe('complete');
+  });
+
+  it('create: a failed bundle insert answers 500, leaves no bundle and gives the session back', async () => {
+    const staged = await stage(bundles);
+    fake.hooks.beforeInsert = (table) => {
+      if (table !== schema.customBundles) return;
+      fake.hooks.beforeInsert = null;
+      throw new Error('the insert failed');
+    };
+
+    const res = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
+
+    expect(res.status).toBe(500);
+    expect(rowOf(bundles)).toMatchObject({ status: 'uploading', archivePath: staged.partial });
+    expect(fake.rows(schema.customBundles)).toEqual([]);
+    expect(queue.jobs).toHaveLength(0);
+    expect((await request(bundles.app, 'POST', bundles.completeUrl(SESSION))).status).toBe(201);
+  });
+
+  it('create: a failure after the bundle exists leaves the session completing, and a repeat finishes it', async () => {
+    const staged = await stage(bundles);
+    h.beforeRename = () => {
+      h.beforeRename = null;
+      throw new Error('the move failed');
+    };
+
+    const failed = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
+
+    expect(failed.status).toBe(500);
+    expect(rowOf(bundles).status).toBe('completing');
+    expect(fake.rows(schema.customBundles).map((r) => r.id)).toEqual([SESSION]);
+    expect((await request(bundles.app, 'POST', bundles.completeUrl(SESSION))).status).toBe(201);
+    expect(rowOf(bundles).status).toBe('complete');
+    expect(await readFile(staged.finished, 'utf8')).toBe(CONTENT);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it('create: a repeat that fails leaves the session completing for the call that holds it', async () => {
+    const staged = await stage(bundles, { status: 'completing', at: 'partial' });
+    await rm(staged.partial);
+
+    const res = await request(bundles.app, 'POST', bundles.completeUrl(SESSION));
+
+    expect(res.status).toBe(409);
+    expect(rowOf(bundles).status).toBe('completing');
+  });
+
+  it('replace: a size mismatch answers 409 and the session is uploading again', async () => {
+    const dir = await seedZipBundle();
+    const staged = await stage(bundles);
+    fake.patch(schema.customBundleUploads, SESSION, { bundleId: BUNDLE });
+    await writeFile(staged.partial, `${CONTENT} and a tail`);
+
+    const res = await request(bundles.app, 'POST', replaceUrl);
+
+    expect(res.status).toBe(409);
+    expect(await errorOf(res)).toBe('archive size mismatch on disk');
+    expect(rowOf(bundles)).toMatchObject({ status: 'uploading', archivePath: staged.partial });
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('OLD-ARCHIVE');
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  it('replace: a failed move answers 500 and gives the session back with the archive untouched', async () => {
+    const dir = await seedZipBundle();
+    const staged = await stage(bundles);
+    fake.patch(schema.customBundleUploads, SESSION, { bundleId: BUNDLE });
+    h.beforeRename = () => {
+      h.beforeRename = null;
+      throw new Error('the move failed');
+    };
+
+    const res = await request(bundles.app, 'POST', replaceUrl);
+
+    expect(res.status).toBe(500);
+    expect(rowOf(bundles)).toMatchObject({ status: 'uploading', archivePath: staged.partial });
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('OLD-ARCHIVE');
+    expect(await readFile(staged.partial, 'utf8')).toBe(CONTENT);
+    expect((await request(bundles.app, 'POST', replaceUrl)).status).toBe(200);
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+  });
 });

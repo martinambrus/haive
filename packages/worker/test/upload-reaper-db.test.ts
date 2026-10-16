@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { reapAbandonedUploads } from '../src/repo/upload-reaper.js';
@@ -18,6 +18,7 @@ const ENDED = ['completed', 'failed', 'cancelled'] as const;
 
 describe.skipIf(!url)('the upload reaper against Postgres', () => {
   let db: Database;
+  let racer: Database;
   let root: string;
   let userId: string;
   let repoId: string;
@@ -25,6 +26,7 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
 
   beforeAll(async () => {
     db = createDatabase(url!);
+    racer = createDatabase(url!);
     root = await mkdtemp(path.join(tmpdir(), 'upload-reaper-db-'));
     for (const [env, dir] of [
       ['REPO_STORAGE_ROOT', 'repos'],
@@ -64,6 +66,7 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
     }
     await rm(root, { recursive: true, force: true });
     await db.$client.end({ timeout: 5 });
+    await racer.$client.end({ timeout: 5 });
   });
 
   const exists = async (file: string) => (await lstat(file).catch(() => null)) !== null;
@@ -127,6 +130,37 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
         });
       },
     });
+  }
+
+  type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
+  const BLOCKED_WITHIN_MS = 10_000;
+
+  const settle = <T>(run: Promise<T>) =>
+    run.then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+
+  const backendPid = async (tx: Tx) => {
+    const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+    return row!.pid;
+  };
+
+  // Returns once a statement waits on a lock the backend `holderPid` holds, and throws when `ended`
+  // turns true first, as a statement that did not wait would.
+  async function untilBlockedBy(holderPid: number, ended: () => boolean) {
+    const deadline = Date.now() + BLOCKED_WITHIN_MS;
+    for (;;) {
+      if (ended()) throw new Error('the statement ended without waiting for the lock');
+      const [row] = await db.execute<{ blocked: number }>(sql`
+        select count(*)::int as blocked from pg_stat_activity
+        where wait_event_type = 'Lock' and ${holderPid}::int = any (pg_blocking_pids(pid))`);
+      if (row!.blocked > 0) return;
+      if (Date.now() > deadline) {
+        throw new Error(`nothing waited on pid ${holderPid} within ${BLOCKED_WITHIN_MS} ms`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
   }
 
   describe('the claim of a completed dump', () => {
@@ -198,6 +232,158 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
       expect(await statusOf(fresh.id)).toBe('complete');
       expect(await exists(fresh.file)).toBe(true);
     });
+  });
+
+  describe('the claim of a completed dump beside a transaction that has not committed', () => {
+    async function endedLongAgo() {
+      const upload = await dump(5 * 24 * HOUR);
+      await link(upload.id, 'cancelled', 5 * 24 * HOUR);
+      return upload;
+    }
+
+    // The task route's transaction up to its commit: the dump read FOR SHARE, then a task naming it.
+    function holdTaskTransaction(dumpId: string, end: 'commit' | 'rollback') {
+      let proceed!: () => void;
+      const proceeding = new Promise<void>((resolve) => (proceed = resolve));
+      let inserted!: (pid: number) => void;
+      const insertedPid = new Promise<number>((resolve) => (inserted = resolve));
+      const done = settle(
+        racer.transaction(async (tx) => {
+          const pid = await backendPid(tx);
+          await tx
+            .select({ id: schema.dbUploads.id })
+            .from(schema.dbUploads)
+            .where(eq(schema.dbUploads.id, dumpId))
+            .for('share');
+          await tx.insert(schema.tasks).values({
+            userId,
+            dbUploadId: dumpId,
+            type: 'workflow',
+            title: 'task',
+            status: 'created',
+          });
+          inserted(pid);
+          await proceeding;
+          if (end === 'rollback') throw new Error('the task transaction rolled back');
+        }),
+      );
+      const pid = () =>
+        Promise.race([
+          insertedPid,
+          done.then(() => {
+            throw new Error('the task transaction ended before it held the dump');
+          }),
+        ]);
+      return { pid, proceed, done };
+    }
+
+    // The pass's database, with its claim transaction held open and uncommitted once the claim ran.
+    function holdingTheClaim(real: Database) {
+      let proceed!: () => void;
+      const proceeding = new Promise<void>((resolve) => (proceed = resolve));
+      let claimed!: (pid: number) => void;
+      const claimedPid = new Promise<number>((resolve) => (claimed = resolve));
+      const held = new Proxy(real, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== 'transaction')
+            return typeof value === 'function' ? value.bind(target) : value;
+          return (fn: (tx: Tx) => Promise<unknown>) =>
+            target.transaction(async (tx) => {
+              const result = await fn(tx);
+              claimed(await backendPid(tx));
+              await proceeding;
+              return result;
+            });
+        },
+      });
+      return { db: held, claimedPid, proceed };
+    }
+
+    function runPass(on: Database) {
+      const state = { ended: false };
+      const outcome = settle(reapAbandonedUploads(on));
+      void outcome.then(() => (state.ended = true));
+      return { state, outcome };
+    }
+
+    it('waits for a task transaction that inserted a task naming the dump, then keeps the dump', async () => {
+      const upload = await endedLongAgo();
+      const held = holdTaskTransaction(upload.id, 'commit');
+      const taskPid = await held.pid();
+      const pass = runPass(db);
+      try {
+        await untilBlockedBy(taskPid, () => pass.state.ended);
+        expect(await statusOf(upload.id)).toBe('complete');
+        expect(await exists(upload.file)).toBe(true);
+      } finally {
+        held.proceed();
+        await held.done;
+        await pass.outcome;
+      }
+
+      expect((await held.done).ok).toBe(true);
+      expect(await pass.outcome).toMatchObject({ ok: true, value: { dumps: 0 } });
+      expect(await statusOf(upload.id)).toBe('complete');
+      expect(await exists(upload.file)).toBe(true);
+    }, 30_000);
+
+    it('takes the dump once that task transaction rolls back instead', async () => {
+      const upload = await endedLongAgo();
+      const held = holdTaskTransaction(upload.id, 'rollback');
+      const taskPid = await held.pid();
+      const pass = runPass(db);
+      try {
+        await untilBlockedBy(taskPid, () => pass.state.ended);
+      } finally {
+        held.proceed();
+        await held.done;
+        await pass.outcome;
+      }
+
+      expect((await held.done).ok).toBe(false);
+      expect(await pass.outcome).toMatchObject({ ok: true, value: { dumps: 1 } });
+      expect(await statusOf(upload.id)).toBe('cancelled');
+      expect(await exists(upload.file)).toBe(false);
+    }, 30_000);
+
+    it('removes the file only after its claim commits, and a reader of the row waits for that claim', async () => {
+      const upload = await endedLongAgo();
+      const holding = holdingTheClaim(db);
+      const pass = runPass(holding.db);
+      let reader: Promise<unknown> = Promise.resolve();
+      try {
+        const reaperPid = await Promise.race([
+          holding.claimedPid,
+          pass.outcome.then(() => {
+            throw new Error('the pass ended without holding its claim open');
+          }),
+        ]);
+        expect(await exists(upload.file)).toBe(true);
+        expect(await statusOf(upload.id)).toBe('complete');
+
+        let readerEnded = false;
+        reader = settle(
+          racer.transaction((tx) =>
+            tx
+              .select({ status: schema.dbUploads.status })
+              .from(schema.dbUploads)
+              .where(eq(schema.dbUploads.id, upload.id))
+              .for('share'),
+          ),
+        );
+        void reader.then(() => (readerEnded = true));
+        await untilBlockedBy(reaperPid, () => readerEnded);
+      } finally {
+        holding.proceed();
+        await pass.outcome;
+        await reader;
+      }
+
+      expect(await reader).toEqual({ ok: true, value: [{ status: 'cancelled' }] });
+      expect(await statusOf(upload.id)).toBe('cancelled');
+      expect(await exists(upload.file)).toBe(false);
+    }, 30_000);
   });
 
   describe('the file pass', () => {

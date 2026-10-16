@@ -53,6 +53,7 @@ function setup() {
     taskDatabaseStates: schema.taskDatabaseStates,
     repositoryDatabaseStates: schema.repositoryDatabaseStates,
     databaseSnapshots: schema.databaseSnapshots,
+    dbUploads: schema.dbUploads,
   });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
   h.db = fake.db;
@@ -172,6 +173,61 @@ describe('POST /tasks', () => {
     expect(t.fake.rows(schema.tasks)).toHaveLength(0);
     expect(h.add).not.toHaveBeenCalled();
   });
+});
+
+describe('POST /tasks with an uploaded dump', () => {
+  const DUMP = '00000000-0000-4000-8000-0000000000d1';
+  function withDump(status: string) {
+    const t = setup();
+    t.fake.insert(schema.dbUploads, {
+      id: DUMP,
+      userId: USER,
+      filename: 'a.sql',
+      dumpFormat: 'sql',
+      totalSize: 1,
+      chunkSize: 1,
+      dumpPath: '/uploads/db-a.sql',
+      status,
+    });
+    return t;
+  }
+  const createWith = (dbUploadId: string) =>
+    post('/', {
+      type: 'workflow',
+      title: 'a task',
+      description: 'do it',
+      repositoryId: REPO,
+      dbUploadId,
+    });
+  const errorOf = async (res: Response) => ((await res.json()) as { error: string }).error;
+
+  it('links a complete dump to the task', async () => {
+    const t = withDump('complete');
+    const res = await createWith(DUMP);
+    expect(res.status).toBe(201);
+    expect(t.task()).toMatchObject({ dbUploadId: DUMP });
+  });
+
+  it('answers 404 for a dump that does not exist, and creates no task', async () => {
+    const t = withDump('complete');
+    const res = await createWith('00000000-0000-4000-8000-0000000000d2');
+    expect(res.status).toBe(404);
+    expect(await errorOf(res)).toBe('DB dump upload not found');
+    expect(t.fake.rows(schema.tasks)).toHaveLength(0);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it.each(['uploading', 'cancelled', 'consumed'])(
+    'answers 409 naming the status of a %s dump, and creates no task',
+    async (status) => {
+      const t = withDump(status);
+      const res = await createWith(DUMP);
+      expect(res.status).toBe(409);
+      expect(await errorOf(res)).toBe(`DB dump upload is ${status}, not complete`);
+      expect(t.fake.rows(schema.tasks)).toHaveLength(0);
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('the start action', () => {

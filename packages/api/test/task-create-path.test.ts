@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const url = process.env.TASK_CREATE_PATH_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/task_create_path_test'))
@@ -21,7 +21,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
   configService: { getBoolean: async () => true },
 }));
 
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, notExists, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { taskRoutes } from '../src/routes/tasks/index.js';
@@ -435,6 +435,215 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
       },
       'run_app/true': { ...none, snapshot: null, simplifyCode: true, pinned: true, locked: false },
     });
+  });
+
+  describe('a completed dump the upload reaper claims while a task is created for it', () => {
+    const DUMP = '00000000-0000-4000-8000-0000000000e3';
+    const BLOCKED_WITHIN_MS = 10_000;
+    type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
+    let reaperDb: Database;
+
+    beforeAll(() => {
+      reaperDb = createDatabase(url as string);
+    });
+    afterAll(async () => {
+      await reaperDb.$client.end({ timeout: 5 });
+    });
+    beforeEach(async () => {
+      await db.insert(schema.dbUploads).values({
+        id: DUMP,
+        userId: USER,
+        filename: 'a.sql',
+        dumpFormat: 'sql',
+        totalSize: 10,
+        bytesReceived: 10,
+        chunkSize: 10,
+        dumpPath: `/tmp/uploads/db-${DUMP}.sql`,
+        status: 'complete',
+      });
+    });
+
+    const withDump = async () => post({ type: 'cp-plain', repositoryId: REPO, dbUploadId: DUMP });
+    const dumpStatus = async () =>
+      (await db.select().from(schema.dbUploads).where(eq(schema.dbUploads.id, DUMP)))[0]!.status;
+    const tasksNamingTheDump = async () =>
+      (await db.select().from(schema.tasks).where(eq(schema.tasks.dbUploadId, DUMP))).length;
+
+    const settle = <T>(run: Promise<T>) =>
+      run.then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+
+    const backendPid = async (tx: Tx) => {
+      const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      return row!.pid;
+    };
+
+    // Returns once a statement waits on a lock the backend `holderPid` holds, and throws when `ended`
+    // turns true first, as a statement that did not wait would.
+    async function untilBlockedBy(holderPid: number, ended: () => boolean) {
+      const deadline = Date.now() + BLOCKED_WITHIN_MS;
+      for (;;) {
+        if (ended()) throw new Error('the statement ended without waiting for the lock');
+        const [row] = await db.execute<{ blocked: number }>(sql`
+          select count(*)::int as blocked from pg_stat_activity
+          where wait_event_type = 'Lock' and ${holderPid}::int = any (pg_blocking_pids(pid))`);
+        if (row!.blocked > 0) return;
+        if (Date.now() > deadline) {
+          throw new Error(`nothing waited on pid ${holderPid} within ${BLOCKED_WITHIN_MS} ms`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+
+    // The reaper's claim of a completed dump (reapEndedDumps in the worker) on its own connection;
+    // `hold` keeps its transaction open, claim made, until `commit`.
+    function reapClaim(hold: boolean) {
+      let commit!: () => void;
+      const committing = new Promise<void>((resolve) => (commit = resolve));
+      if (!hold) commit();
+      let claimed!: (pid: number) => void;
+      const claimedPid = new Promise<number>((resolve) => (claimed = resolve));
+      const done = settle(
+        reaperDb.transaction(async (tx) => {
+          const pid = await backendPid(tx);
+          const [locked] = await tx
+            .select({ id: schema.dbUploads.id })
+            .from(schema.dbUploads)
+            .where(and(eq(schema.dbUploads.id, DUMP), eq(schema.dbUploads.status, 'complete')))
+            .for('update');
+          if (!locked) return 0;
+          const taken = await tx
+            .update(schema.dbUploads)
+            .set({ status: 'cancelled', updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.dbUploads.id, DUMP),
+                eq(schema.dbUploads.status, 'complete'),
+                notExists(
+                  tx
+                    .select({ id: schema.tasks.id })
+                    .from(schema.tasks)
+                    .where(eq(schema.tasks.dbUploadId, DUMP)),
+                ),
+              ),
+            )
+            .returning({ id: schema.dbUploads.id });
+          claimed(pid);
+          await committing;
+          return taken.length;
+        }),
+      );
+      const pid = () =>
+        Promise.race([
+          claimedPid,
+          done.then(() => {
+            throw new Error('the reaper transaction ended before it made its claim');
+          }),
+        ]);
+      return { pid, commit, done };
+    }
+
+    // The route's database with a stop at its task insert: `before` the insert runs, or `after` it ran
+    // and before the transaction commits.
+    function stopAtTheTaskInsert(at: 'before' | 'after') {
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      let reach!: (pid: number) => void;
+      const reached = new Promise<number>((resolve) => (reach = resolve));
+      const stopHere = async (tx: Tx) => {
+        reach(await backendPid(tx));
+        await hold;
+      };
+      const wrapTx = (tx: Tx): Tx =>
+        new Proxy(tx, {
+          get(target, prop) {
+            const value = Reflect.get(target, prop, target);
+            if (prop !== 'insert') return typeof value === 'function' ? value.bind(target) : value;
+            return (table: typeof schema.tasks) => {
+              const query = target.insert(table);
+              if (table !== schema.tasks) return query;
+              return {
+                values: (values: never) => ({
+                  returning: async () => {
+                    if (at === 'before') await stopHere(target);
+                    const rows = await query.values(values).returning();
+                    if (at === 'after') await stopHere(target);
+                    return rows;
+                  },
+                }),
+              };
+            };
+          },
+        });
+      const stopped = new Proxy(db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== 'transaction') {
+            return typeof value === 'function' ? value.bind(target) : value;
+          }
+          return (fn: (tx: Tx) => Promise<unknown>) => target.transaction((tx) => fn(wrapTx(tx)));
+        },
+      });
+      return { db: stopped, release, reached };
+    }
+
+    it('answers 409 when the reaper claimed the dump first, once that claim commits', async () => {
+      const reaper = reapClaim(true);
+      const reaperPid = await reaper.pid();
+      const state = { ended: false };
+      const request = settle(withDump());
+      void request.then(() => (state.ended = true));
+      try {
+        await untilBlockedBy(reaperPid, () => state.ended);
+      } finally {
+        reaper.commit();
+        await reaper.done;
+        await request;
+      }
+
+      const outcome = await request;
+      expect(outcome.ok && outcome.value.status).toBe(409);
+      expect(outcome.ok && ((await outcome.value.json()) as { error: string }).error).toBe(
+        'DB dump upload is cancelled, not complete',
+      );
+      expect(await reaper.done).toEqual({ ok: true, value: 1 });
+      expect(await dumpStatus()).toBe('cancelled');
+      expect(await taskCount()).toBe(0);
+    }, 30_000);
+
+    it.each(['before', 'after'] as const)(
+      'makes the reaper wait for a task transaction stopped %s its task insert, and keeps the dump',
+      async (at) => {
+        const gate = stopAtTheTaskInsert(at);
+        h.db = gate.db;
+        const request = settle(withDump());
+        const routePid = await Promise.race([
+          gate.reached,
+          request.then(() => {
+            throw new Error('the request ended before it reached its task insert');
+          }),
+        ]);
+        const reaper = reapClaim(false);
+        const state = { ended: false };
+        void reaper.done.then(() => (state.ended = true));
+        try {
+          await untilBlockedBy(routePid, () => state.ended);
+        } finally {
+          gate.release();
+          await request;
+          await reaper.done;
+        }
+
+        const outcome = await request;
+        expect(outcome.ok && outcome.value.status).toBe(201);
+        expect(await reaper.done).toEqual({ ok: true, value: 0 });
+        expect(await dumpStatus()).toBe('complete');
+        expect(await tasksNamingTheDump()).toBe(1);
+      },
+      30_000,
+    );
   });
 
   describe('admin task type routes', () => {

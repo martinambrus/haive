@@ -240,6 +240,7 @@ describe('C1: a fault right after the zip bundle insert commits', () => {
     };
 
     expect((await complete(SESSION)).status).toBe(500);
+    expect(fake.rows(schema.customBundleUploads)[0]).toMatchObject({ status: 'completing' });
     expect2xx(await complete(SESSION));
 
     expect(fake.rows(schema.customBundles).map((r) => r.id)).toEqual([SESSION]);
@@ -483,7 +484,7 @@ describe('zip complete, the normal path', () => {
     });
   });
 
-  it('queues the job while the upload still reads uploading', async () => {
+  it('queues the job while the upload still reads completing', async () => {
     await stage(SESSION, 'zip bytes');
     let statusAtAdd: unknown;
     queue.state.onAdd = () => {
@@ -492,6 +493,6 @@ describe('zip complete, the normal path', () => {
 
     expect2xx(await complete(SESSION));
 
-    expect(statusAtAdd).toBe('uploading');
+    expect(statusAtAdd).toBe('completing');
   });
 });

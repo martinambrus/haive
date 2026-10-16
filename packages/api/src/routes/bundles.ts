@@ -137,7 +137,7 @@ function uploadSessionFromRow(
     totalSize: Number(row.totalSize),
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
-    status: row.status as 'uploading' | 'complete' | 'cancelled',
+    status: row.status as 'uploading' | 'completing' | 'complete' | 'cancelled',
   };
 }
 
@@ -294,20 +294,55 @@ async function addBundleJobOrMarkFailed(
   }
 }
 
-// Refreshes updated_at to hold the upload reaper off; refuses a session no longer uploading.
-async function claimUploadSession(db: ReturnType<typeof getDb>, uploadId: string): Promise<void> {
-  const claim = await db
+// Moves the session to 'completing', which a cancel refuses and the upload reaper leaves for a day;
+// a repeat or resumed complete finds it there and claims it again. True when this call moved it.
+async function claimUploadSession(
+  db: ReturnType<typeof getDb>,
+  uploadId: string,
+): Promise<boolean> {
+  const inStatus = (status: string) =>
+    and(eq(schema.customBundleUploads.id, uploadId), eq(schema.customBundleUploads.status, status));
+  const moved = await db
+    .update(schema.customBundleUploads)
+    .set({ status: 'completing', updatedAt: new Date() })
+    .where(inStatus('uploading'))
+    .returning({ id: schema.customBundleUploads.id });
+  if (moved.length > 0) return true;
+  const held = await db
     .update(schema.customBundleUploads)
     .set({ updatedAt: new Date() })
-    .where(
-      and(
-        eq(schema.customBundleUploads.id, uploadId),
-        eq(schema.customBundleUploads.status, 'uploading'),
-      ),
-    )
+    .where(inStatus('completing'))
     .returning({ id: schema.customBundleUploads.id });
-  if (claim.length === 0) {
+  if (held.length === 0) {
     throw new HttpError(409, 'session cancelled');
+  }
+  return false;
+}
+
+// A failure of `run` hands a session this call moved back to uploading, as the repository and dump
+// completes do; a call that only resumed it leaves it as it found it.
+async function unclaimOnFailure<T>(
+  db: ReturnType<typeof getDb>,
+  uploadId: string,
+  moved: boolean,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (moved) {
+      await db
+        .update(schema.customBundleUploads)
+        .set({ status: 'uploading', updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.customBundleUploads.id, uploadId),
+            eq(schema.customBundleUploads.status, 'completing'),
+          ),
+        )
+        .catch(() => undefined);
+    }
+    throw err;
   }
 }
 
@@ -528,7 +563,6 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
   if (Number(row.bytesReceived) !== Number(row.totalSize)) {
     throw new HttpError(409, `incomplete: ${row.bytesReceived}/${row.totalSize} bytes`);
   }
-  await claimUploadSession(db, row.id);
 
   const anchor = bundleStorageRoot();
   const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Bundle archive', anchor);
@@ -543,37 +577,42 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
     const info = await lstatNoFollow(anchor, rel);
     return info?.kind === 'file' && info.stats.size === Number(row.totalSize);
   };
-  const staged = await wholeFileAt(archiveRel);
-  if (!staged && !(await wholeFileAt(finalRel))) {
-    throw new HttpError(409, 'archive size mismatch on disk');
-  }
 
-  // Create the bundle row first, under the upload's id so a repeated complete finds it, with its
-  // storage_root and archive_path; then move the staged archive into the bundle's directory.
-  const inserted = await db.transaction(async (tx) => {
-    const [created] = await tx
-      .insert(schema.customBundles)
-      .values({
-        id: row.id,
-        userId,
-        repositoryId: row.repositoryId,
-        name: row.name,
-        sourceType: 'zip',
-        archiveFilename: row.filename,
-        archiveFormat: row.archiveFormat,
-        archivePath: finalArchive,
-        storageRoot: path.join(bundleDirFor(userId, row.id), 'extracted'),
-        enabledKinds: row.enabledKinds,
-        status: 'syncing',
-      })
-      .onConflictDoNothing({ target: schema.customBundles.id })
-      .returning();
-    await tx
-      .update(schema.customBundleUploads)
-      .set({ bundleId: row.id, updatedAt: new Date() })
-      .where(eq(schema.customBundleUploads.id, row.id));
-    if (created) await markProjectStateDirty(tx, row.repositoryId);
-    return created;
+  const moved = await claimUploadSession(db, row.id);
+  const { staged, inserted } = await unclaimOnFailure(db, row.id, moved, async () => {
+    const staged = await wholeFileAt(archiveRel);
+    if (!staged && !(await wholeFileAt(finalRel))) {
+      throw new HttpError(409, 'archive size mismatch on disk');
+    }
+
+    // Create the bundle row first, under the upload's id so a repeated complete finds it, with its
+    // storage_root and archive_path; then move the staged archive into the bundle's directory.
+    const inserted = await db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(schema.customBundles)
+        .values({
+          id: row.id,
+          userId,
+          repositoryId: row.repositoryId,
+          name: row.name,
+          sourceType: 'zip',
+          archiveFilename: row.filename,
+          archiveFormat: row.archiveFormat,
+          archivePath: finalArchive,
+          storageRoot: path.join(bundleDirFor(userId, row.id), 'extracted'),
+          enabledKinds: row.enabledKinds,
+          status: 'syncing',
+        })
+        .onConflictDoNothing({ target: schema.customBundles.id })
+        .returning();
+      await tx
+        .update(schema.customBundleUploads)
+        .set({ bundleId: row.id, updatedAt: new Date() })
+        .where(eq(schema.customBundleUploads.id, row.id));
+      if (created) await markProjectStateDirty(tx, row.repositoryId);
+      return created;
+    });
+    return { staged, inserted };
   });
 
   if (staged) {
@@ -624,7 +663,7 @@ bundleRoutes.post('/uploads/:id/complete', async (c) => {
     .where(
       and(
         eq(schema.customBundleUploads.id, row.id),
-        eq(schema.customBundleUploads.status, 'uploading'),
+        eq(schema.customBundleUploads.status, 'completing'),
       ),
     );
 
@@ -754,14 +793,8 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
   if (Number(row.bytesReceived) !== Number(row.totalSize)) {
     throw new HttpError(409, `incomplete: ${row.bytesReceived}/${row.totalSize} bytes`);
   }
-  await claimUploadSession(db, row.id);
   const anchor = bundleStorageRoot();
   const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Bundle archive', anchor);
-  const onDisk = await lstatNoFollow(anchor, archiveRel);
-  if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
-    throw new HttpError(409, 'archive size mismatch on disk');
-  }
-
   const dir = bundleDirFor(userId, bundleId);
   const finalRel = bundleRel(
     userId,
@@ -772,10 +805,17 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
   const finalArchive = path.join(anchor, finalRel);
   const newExtracted = path.join(dir, 'extracted');
 
+  const moved = await claimUploadSession(db, row.id);
   // Overwrite source.<ext> before wiping the prior extracted/ tree, so a death between the two
   // leaves a complete archive. Keeping the bundle row + items table intact during the swap means
   // the UI can keep displaying the previous state until the worker re-parses.
-  await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
+  await unclaimOnFailure(db, row.id, moved, async () => {
+    const onDisk = await lstatNoFollow(anchor, archiveRel);
+    if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
+      throw new HttpError(409, 'archive size mismatch on disk');
+    }
+    await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
+  });
   await removeNoFollow(anchor, extractedRel, { recursive: true });
 
   await db
@@ -801,7 +841,7 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
     .where(
       and(
         eq(schema.customBundleUploads.id, row.id),
-        eq(schema.customBundleUploads.status, 'uploading'),
+        eq(schema.customBundleUploads.status, 'completing'),
       ),
     );
 

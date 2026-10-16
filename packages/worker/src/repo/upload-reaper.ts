@@ -80,10 +80,11 @@ async function removeFile(root: string, rel: string): Promise<boolean> {
 
 async function reapIdleSessions(db: Database, kind: UploadKind, cutoff: Date): Promise<number> {
   const table = kind.table;
+  // Only a bundle complete parks a session in 'completing'; one that died there is reaped too.
   const claimed = await db
     .update(table)
     .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(and(eq(table.status, 'uploading'), lt(table.updatedAt, cutoff)))
+    .where(and(inArray(table.status, ['uploading', 'completing']), lt(table.updatedAt, cutoff)))
     .returning({ userId: table.userId, stored: kind.pathColumn });
   for (const row of claimed) {
     try {
@@ -144,7 +145,6 @@ async function reapEndedDumps(db: Database, cutoff: Date): Promise<number> {
         log.warn({ stored: dump.stored }, 'completed dump names a path that is not its own file');
         continue;
       }
-      // The claim checks the tasks again in its own statement: one linked since the read keeps it.
       const keptByTask = db
         .select({ id: schema.tasks.id })
         .from(schema.tasks)
@@ -157,17 +157,28 @@ async function reapEndedDumps(db: Database, cutoff: Date): Promise<number> {
             ),
           ),
         );
-      const [claimed] = await db
-        .update(schema.dbUploads)
-        .set({ status: 'cancelled', updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.dbUploads.id, dump.id),
-            eq(schema.dbUploads.status, 'complete'),
-            notExists(keptByTask),
-          ),
-        )
-        .returning({ id: schema.dbUploads.id });
+      // Lock the row first: an uncommitted task insert holds KEY SHARE on it, which the UPDATE does
+      // not wait for, and the statement after the lock sees that task once it commits.
+      const claimed = await db.transaction(async (tx) => {
+        const [locked] = await tx
+          .select({ id: schema.dbUploads.id })
+          .from(schema.dbUploads)
+          .where(and(eq(schema.dbUploads.id, dump.id), eq(schema.dbUploads.status, 'complete')))
+          .for('update');
+        if (!locked) return false;
+        const [taken] = await tx
+          .update(schema.dbUploads)
+          .set({ status: 'cancelled', updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.dbUploads.id, dump.id),
+              eq(schema.dbUploads.status, 'complete'),
+              notExists(keptByTask),
+            ),
+          )
+          .returning({ id: schema.dbUploads.id });
+        return taken !== undefined;
+      });
       if (!claimed) continue;
       reaped += 1;
       await removeFile(repoRoot(), rel);
