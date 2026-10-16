@@ -23,6 +23,8 @@ import {
 } from '@haive/shared';
 import { reconcileStrandedSyncingBundles } from '../data-migrations.js';
 import { resyncAfterTaskEnd } from '../project-state/set-aside.js';
+import { supersedeTaskRuns } from '../sandbox/cli-sandbox-fence.js';
+import { killCliSandboxesForTask, listCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
 import { recordLeftOpenMerges } from '../step-engine/left-open-merge.js';
 import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
 import { discardPlanMerge } from '../step-engine/steps/plan/01-plan-merge.js';
@@ -492,10 +494,17 @@ export async function redriveCancelledTasks(
     try {
       // Counted before the job exists: a lost count would let a failing teardown escape the cap.
       const attempt = Number(t.attempts ?? 0) + 1;
-      await db
+      const [counted] = await db
         .insert(schema.taskEvents)
-        .values({ taskId: t.taskId, eventType: CANCEL_REDRIVEN_EVENT, payload: { attempt } });
-      await deps.enqueueCancel(t.taskId, t.userId);
+        .values({ taskId: t.taskId, eventType: CANCEL_REDRIVEN_EVENT, payload: { attempt } })
+        .returning({ id: schema.taskEvents.id });
+      try {
+        await deps.enqueueCancel(t.taskId, t.userId);
+      } catch (err) {
+        // The queue refused the job, so no teardown ran: the attempt is given back.
+        await db.delete(schema.taskEvents).where(eq(schema.taskEvents.id, counted!.id));
+        throw err;
+      }
       redriven++;
       if (attempt >= CANCEL_REDRIVE_MAX) {
         log.warn(
@@ -515,15 +524,33 @@ export async function redriveCancelledTasks(
   return redriven;
 }
 
-async function abandonTeardown(db: Database, taskId: string, reason: string): Promise<void> {
+async function abandonTeardown(db: Database, taskId: string, reason: string): Promise<boolean> {
+  // As the CANCEL teardown does: a fixer still running may write into the dir.
+  await supersedeTaskRuns(db, taskId);
+  await killCliSandboxesForTask(taskId);
+  const sandboxesGone = (await listCliSandboxesForTask(taskId))?.length === 0;
+  if (!sandboxesGone) {
+    log.warn(
+      { taskId },
+      'a cancelled task being abandoned still has a sandbox, or docker could not list them; its claims are kept for the next pass',
+    );
+    return false;
+  }
   // A throw stops here, before any release: the merge is unreported and the next pass retries.
   await recordLeftOpenMerges(db, taskId);
+  // Before the release, so a pass cut off below leaves only stale claims (`liveClaimHolder`).
+  await db.insert(schema.taskEvents).values({
+    taskId,
+    taskStepId: null,
+    eventType: 'task.cancel_finished',
+    payload: { source: 'worker', abandoned: true, reason },
+  });
   const steps = [
     ['releaseTaskMergeClaims', releaseTaskMergeClaims],
     ['discardPlanMerge', discardPlanMerge],
     ['resyncAfterTaskEnd', resyncAfterTaskEnd],
   ] as const;
-  // A failed step is logged, not retried: the record below is what frees the dir (`liveClaimHolder`).
+  // A failed step is logged, not retried: the record above already freed the dir.
   for (const [step, run] of steps) {
     try {
       await run(db, taskId);
@@ -534,16 +561,11 @@ async function abandonTeardown(db: Database, taskId: string, reason: string): Pr
       );
     }
   }
-  await db.insert(schema.taskEvents).values({
-    taskId,
-    taskStepId: null,
-    eventType: 'task.cancel_finished',
-    payload: { source: 'worker', abandoned: true, reason },
-  });
   log.warn(
     { taskId, reason },
-    'abandoned the teardown of a cancelled task; its merge dir claims are released',
+    'abandoned the teardown of a cancelled task; its merge dir claims no longer hold',
   );
+  return true;
 }
 
 /** Finishes as abandoned the cancel of a task still holding a merge dir claim that the re-drive no
@@ -595,8 +617,7 @@ export async function abandonCancelledTeardowns(
         ? 're-drive cap reached'
         : 'cancelled before the re-drive window';
     try {
-      await abandonTeardown(db, t.taskId, reason);
-      abandoned++;
+      if (await abandonTeardown(db, t.taskId, reason)) abandoned++;
     } catch (err) {
       log.error(
         { err, taskId: t.taskId },
