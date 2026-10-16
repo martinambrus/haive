@@ -5,6 +5,7 @@ import type {
   CustomToolParam,
   PromptStepEntry,
 } from '@haive/shared/modularity';
+import { checkPromptSteps } from '@haive/shared/modularity';
 import { catalogEntries } from './composition-messages';
 import { TEST_CATALOG } from './composition-test-catalog';
 import {
@@ -175,6 +176,44 @@ describe('promptStepIssues', () => {
     expect(
       issues(['custom.t.a'], { a: entry('a', { timeoutMs: 31 * 60_000 }) }).map((i) => i.kind),
     ).toEqual(['timeout-out-of-range']);
+  });
+
+  it('raises what the check of the api raises for the listed entries, whatever the repository setting', () => {
+    const tool: CustomTool = {
+      name: 'repo_status',
+      description: 'Fetches the status of one repository.',
+      action: 'http-get',
+      url: 'http://api.example.com/v1/status',
+      query: [],
+      params: [],
+      timeoutMs: 10_000,
+      maxResponseBytes: 32_768,
+    };
+    const stepIds = ['04-phase-0b-pre-planning', 'custom.t.a', 'custom.t.b'];
+    const promptSteps = {
+      a: entry('a', { template: 'Hi {{bogus}}', timeoutMs: 0, capabilities: ['file_write'] }),
+      b: entry('b', { template: '{{agent:reviewer}}\n{{step:custom.t.c}}', tools: [tool] }),
+    };
+    for (const requiresRepository of [true, false]) {
+      const found = issues(stepIds, promptSteps, requiresRepository);
+      expect(found.length).toBeGreaterThanOrEqual(4);
+      expect(found).toEqual(
+        checkPromptSteps({ slug: 't', stepIds, requiresRepository }, promptSteps, {
+          composable: base,
+        }),
+      );
+    }
+  });
+
+  it('puts the empty title and template of a step ahead of its other problems', () => {
+    const out = issues(['custom.t.a'], {
+      a: entry('a', { title: '', template: '', timeoutMs: 0 }),
+    });
+    expect(out.map((i) => i.kind)).toEqual([
+      'title-empty',
+      'template-empty',
+      'timeout-out-of-range',
+    ]);
   });
 
   it('ignores a custom id with no entry and an entry that is not listed', () => {

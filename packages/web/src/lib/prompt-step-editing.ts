@@ -6,11 +6,11 @@ import {
   PROMPT_STEP_TIMEOUT_MAX_MS,
   PROMPT_STEP_TIMEOUT_MIN_MS,
   RAG_QUERY_TOP_K_DEFAULT,
+  checkPromptSteps,
   derivePromptStepComposable,
   isCustomStepId,
   promptStepId,
   rewriteStepTokens,
-  validatePromptStep,
   type ComposableStepEntry,
   type CustomTool,
   type CustomToolParam,
@@ -88,28 +88,21 @@ export function promptStepIssues(input: {
   const byId = new Map(
     Object.values(promptSteps).map((entry) => [promptStepId(typeSlug, entry.slug), entry]),
   );
-  const quotable = new Set([
-    ...[...input.catalog.values()]
-      .filter((e) => e.agentAuthoredOutput === true)
-      .map((e) => e.stepId),
-    ...byId.keys(),
-  ]);
-  const issues: PromptStepIssue[] = [];
-  stepIds.forEach((stepId, index) => {
+  // The editor adds and drops an entry together with its id, so a missing or unlisted one is the api's to report.
+  const checked = checkPromptSteps(
+    { slug: typeSlug, stepIds, requiresRepository: input.requiresRepository },
+    promptSteps,
+    { composable: input.catalog },
+  ).filter((issue) => issue.kind !== 'prompt-step-missing' && issue.kind !== 'prompt-step-orphan');
+  const empty = stepIds.flatMap((stepId, index): PromptStepIssue[] => {
     const entry = byId.get(stepId);
-    if (!entry) return;
-    if (entry.title.trim() === '') issues.push({ kind: 'title-empty', stepId, index });
-    if (entry.template.trim() === '') issues.push({ kind: 'template-empty', stepId, index });
-    for (const { kind, raw, start, param } of validatePromptStep(entry, {
-      typeSlug,
-      requiresRepository: input.requiresRepository,
-      stepIdsBefore: stepIds.slice(0, index),
-      quotableStepIds: quotable,
-    })) {
-      issues.push({ kind, stepId, index, raw, start, ...(param === undefined ? {} : { param }) });
-    }
+    if (!entry) return [];
+    return [
+      ...(entry.title.trim() === '' ? [{ kind: 'title-empty' as const, stepId, index }] : []),
+      ...(entry.template.trim() === '' ? [{ kind: 'template-empty' as const, stepId, index }] : []),
+    ];
   });
-  return issues;
+  return [...empty, ...checked];
 }
 
 /** A tool with the schema's defaults and blank text; a change of action keeps the shared fields. */

@@ -122,6 +122,10 @@ function dedupeIssues(issues: CompositionIssue[]): CompositionIssue[] {
   });
 }
 
+function dedupePromptIssues(issues: PromptStepIssue[]): PromptStepIssue[] {
+  return [...new Map(issues.map((i) => [promptIssueKey(i), i] as const)).values()];
+}
+
 function groupedSteps(catalog: TaskTypeCatalog, query: string) {
   const needle = query.trim().toLowerCase();
   const matches = catalog.steps.filter(
@@ -199,34 +203,43 @@ export function TaskTypeComposer({
     return <p className="text-sm text-neutral-400">Steps chosen at run time.</p>;
   }
 
-  const problems = compositionProblems({
-    stepIds,
-    loopLimits,
-    catalog: entries,
-    requiresRepository,
-  });
-  const composition = readOnly ? [] : dedupeIssues([...problems.composition, ...serverIssues]);
-  const defaults = readOnly ? [] : problems.defaults;
+  // The one list the summary and the announcement both count: a problem that comes up twice is one.
+  function problemsOf(
+    ids: string[],
+    limits: Record<string, number>,
+    server: { composition: CompositionIssue[]; prompt: PromptStepIssue[] },
+  ) {
+    if (readOnly) return { composition: [], defaults: [], prompt: [] };
+    const found = compositionProblems({
+      stepIds: ids,
+      loopLimits: limits,
+      catalog: entries,
+      requiresRepository,
+    });
+    return {
+      composition: dedupeIssues([...found.composition, ...server.composition]),
+      defaults: found.defaults,
+      prompt: dedupePromptIssues([
+        ...(typeSlug === undefined
+          ? []
+          : promptStepIssues({
+              typeSlug,
+              stepIds: ids,
+              requiresRepository,
+              promptSteps,
+              catalog: entries,
+            })),
+        ...server.prompt,
+      ]),
+    };
+  }
+  const {
+    composition,
+    defaults,
+    prompt: promptIssues,
+  } = problemsOf(stepIds, loopLimits, { composition: serverIssues, prompt: serverPromptIssues });
   const byRow = issuesByRow(composition);
   const generalIssues = composition.filter((i) => !('index' in i));
-  const promptIssues: PromptStepIssue[] = readOnly
-    ? []
-    : [
-        ...new Map(
-          [
-            ...(typeSlug === undefined
-              ? []
-              : promptStepIssues({
-                  typeSlug,
-                  stepIds,
-                  requiresRepository,
-                  promptSteps,
-                  catalog: entries,
-                })),
-            ...serverPromptIssues,
-          ].map((i) => [promptIssueKey(i), i] as const),
-        ).values(),
-      ];
   const promptByStep = new Map<string, PromptStepIssue[]>();
   for (const issue of promptIssues) {
     if (stepIds.includes(issue.stepId)) {
@@ -243,24 +256,9 @@ export function TaskTypeComposer({
     const pruned = pruneLoopLimits(loopLimits, next);
     onStepIdsChange(next);
     if (pruned !== loopLimits) onLoopLimitsChange(pruned);
-    const after = compositionProblems({
-      stepIds: next,
-      loopLimits: pruned,
-      catalog: entries,
-      requiresRepository,
-    });
-    const n =
-      after.composition.length +
-      after.defaults.length +
-      (readOnly || typeSlug === undefined
-        ? 0
-        : promptStepIssues({
-            typeSlug,
-            stepIds: next,
-            requiresRepository,
-            promptSteps,
-            catalog: entries,
-          }).length);
+    // The editor drops the server's verdicts on any edit, so the list after this one has none.
+    const after = problemsOf(next, pruned, { composition: [], prompt: [] });
+    const n = after.composition.length + after.defaults.length + after.prompt.length;
     setAnnouncement(`${message}; ${n === 0 ? 'no problems' : `${n} problem${n === 1 ? '' : 's'}`}`);
     if (focusTo) setFocus(focusTo);
   }
