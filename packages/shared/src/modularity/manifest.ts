@@ -29,7 +29,7 @@ const TASK_TYPE_SLUG_MAX_LENGTH = 128;
 /** Provider and category ids are varchar(256) in the integration tables. */
 const INTEGRATION_LOCAL_ID_MAX_LENGTH = 64;
 const CORE_CATEGORY_IDS: ReadonlySet<string> = new Set(CORE_INTEGRATION_CATEGORIES);
-/** A requirement id can prefix a tool name (`<id>_<opId>`), which TOOL_NAME_PATTERN bounds. */
+/** The id prefixes a shared tool name (`<id>_<opId>`), cut to the cap with a digest past it. */
 const REQUIREMENT_ID_PATTERN = /^[a-z][a-z0-9-]{0,15}$/;
 
 const endpointSchema = z
