@@ -19,6 +19,7 @@ import {
   type DbTx,
   initializeTaskDatabaseState,
   DatabaseSnapshotUnavailableError,
+  lockRepositoryTasksKey,
 } from '@haive/database';
 import { isTaskClass, knownTaskTypes, typesForClass } from '@haive/shared/stats';
 import {
@@ -799,6 +800,8 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         ? await withRepositoryTaskLock(db, body.repositoryId, create)
         : await db.transaction(async (tx) => {
             await admitNewWork(tx);
+            // Queuing takes this lock, and taken before the insert, as every holder does, it inverts no other.
+            if (body.repositoryId) await lockRepositoryTasksKey(tx, body.repositoryId);
             return create(tx);
           }));
   }

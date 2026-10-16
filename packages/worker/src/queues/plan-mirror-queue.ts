@@ -264,7 +264,7 @@ async function mergeInScratch(
     }
     const sha = await commitMerge(worktree, `Merge origin/${args.branch}`, args.identity);
     if (!sha) throw new Error('the merge produced no commit to fast-forward onto');
-    // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the move.
+    // Every task's start and every revival take this lock, so none lands between the fence and the move.
     await lockRepositoryTasksKey(tx, args.repositoryId);
     const check = await restoreProjectionsInTx(tx, args.repositoryId, args.repoPath);
     if (check.outcome === 'retry') return { landed: false, previousCommit, retry: true };
