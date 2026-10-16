@@ -175,7 +175,7 @@ describe('phaseMaintenance', () => {
   it('writes draining again, then maintenance, when an administrator changed the state', async () => {
     stored = 'normal';
 
-    await phaseMaintenance(context(fakeSql()));
+    await phaseMaintenance(context(fakeSql(), { drainDeadlineMs: 60_000 }));
 
     expect(fenceEvents()).toEqual([
       ...held('get', 'count', 'set:draining'),
@@ -332,6 +332,45 @@ describe('the drain wait, on a clock', () => {
     expect(outcome).toBe('entered');
     expect(logs).toContain('drain-forced');
     expect(took).toBeLessThanOrEqual(DEADLINE_MS + POLL_MS);
+  });
+
+  describe('a state that keeps being reopened with nothing live', () => {
+    const REOPENED_DEADLINE_MS = 10_000;
+
+    beforeEach(() => {
+      vi.spyOn(configService, 'getFresh').mockImplementation(async () => {
+        events.push('get');
+        return 'normal';
+      });
+    });
+
+    it('gives up at the one deadline', async () => {
+      const ctx = context(fakeSql(), {
+        drainDeadlineMs: REOPENED_DEADLINE_MS,
+        drainPollMs: POLL_MS,
+        forceDrain: false,
+      });
+
+      const { outcome, took } = await timed(ctx);
+
+      expect(outcome).toContain('Admissions were reopened after 10s');
+      expect(took).toBeLessThanOrEqual(REOPENED_DEADLINE_MS + POLL_MS);
+    });
+
+    it('enters maintenance at the one deadline with force chosen', async () => {
+      const ctx = context(fakeSql(), {
+        drainDeadlineMs: REOPENED_DEADLINE_MS,
+        drainPollMs: POLL_MS,
+        forceDrain: true,
+      });
+
+      const { outcome, took } = await timed(ctx);
+
+      expect(outcome).toBe('entered');
+      expect(logs).toContain('drain-forced');
+      expect(stateWrites().at(-1)).toBe('set:maintenance');
+      expect(took).toBeLessThanOrEqual(REOPENED_DEADLINE_MS + POLL_MS);
+    });
   });
 
   it('recounts no faster than once per poll interval while the state keeps being rewritten with nothing live', async () => {

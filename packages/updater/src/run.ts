@@ -179,10 +179,25 @@ function pause(ctx: UpgradeContext): Promise<unknown> {
   return new Promise((resolve) => setTimeout(resolve, ctx.drainPollMs ?? 5000));
 }
 
+function drainDeadline(ctx: UpgradeContext): number {
+  return (ctx.drainDeadlineAt ??= Date.now() + ctx.drainDeadlineMs);
+}
+
+/** Ends a drain whose recount still finds admissions reopened once the one deadline has passed. */
+function reopenedAtDeadline(ctx: UpgradeContext): boolean {
+  if (!ctx.forceDrain) {
+    throw new Error(
+      `Admissions were reopened after ${Math.round(ctx.drainDeadlineMs / 1000)}s of draining. ` +
+        `Re-run with --force to enter maintenance anyway, or wait and try again.`,
+    );
+  }
+  ctx.log('drain-forced', { live: 0 });
+  return true;
+}
+
 /** Waits until no task is live; true when the deadline passed and the caller chose to force. */
 async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
-  ctx.drainDeadlineAt ??= Date.now() + ctx.drainDeadlineMs;
-  const deadline = ctx.drainDeadlineAt;
+  const deadline = drainDeadline(ctx);
   for (;;) {
     const live = await liveTaskCount(ctx.sql);
     if (live === 0) {
@@ -218,6 +233,7 @@ export async function phaseMaintenance(ctx: UpgradeContext): Promise<void> {
   while (!forced && !(await enterMaintenance(ctx))) {
     await enterPhase(ctx.sql, ctx.runId, 'draining');
     forced = await awaitDrain(ctx);
+    if (!forced && Date.now() >= drainDeadline(ctx)) forced = reopenedAtDeadline(ctx);
     // Without this pause, a state rewritten again and again with nothing live spins the recount.
     if (!forced) await pause(ctx);
     await enterPhase(ctx.sql, ctx.runId, 'maintenance');
