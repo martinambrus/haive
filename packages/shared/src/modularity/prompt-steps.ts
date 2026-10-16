@@ -79,6 +79,12 @@ const integrationLabel = (requirement: unknown, index: number): string => {
   return typeof id === 'string' ? id : `#${index}`;
 };
 
+// A named tool keeps the detailed checks the tool editor shows, whatever else it breaks; anything else cannot be judged.
+const hasToolName = (tool: unknown): tool is CustomTool =>
+  typeof tool === 'object' &&
+  tool !== null &&
+  typeof (tool as { name?: unknown }).name === 'string';
+
 /** Reads the entry with its tools and integrations set aside: a tool that fails (or sits past the eighth) is named in `invalidTools`, a requirement that fails in `invalidIntegrations`; any other failure is null. */
 export function parsePromptStepEntry(value: unknown): ParsedPromptStepEntry | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
@@ -369,7 +375,14 @@ function integrationProblems(
   const problems: PromptStepProblem[] = [];
   const add = (kind: PromptStepProblemKind, message: string, raw = '') =>
     problems.push({ kind, message, raw, start: 0 });
-  const requirements = entry.integrations ?? [];
+  // The web editor checks the stored entry as it was read, so an item can be anything; one the schema cannot read is named, not judged.
+  const requirements: IntegrationRequirement[] = [];
+  const unreadable: string[] = [];
+  (entry.integrations ?? []).forEach((item: unknown, index) => {
+    const parsed = integrationRequirementSchema.safeParse(item);
+    if (parsed.success) requirements.push(parsed.data);
+    else unreadable.push(integrationLabel(item, index));
+  });
   if (requirements.length > INTEGRATIONS_MAX_PER_STEP) {
     add(
       'too-many-integrations',
@@ -429,7 +442,7 @@ function integrationProblems(
       );
     }
   }
-  const invalid = entry.invalidIntegrations ?? [];
+  const invalid = [...unreadable, ...(entry.invalidIntegrations ?? [])];
   for (const name of invalid.slice(0, INVALID_TOOLS_SHOWN)) {
     add(
       'integration-no-longer-valid',
@@ -569,10 +582,16 @@ export function validatePromptStep(
       'A prompt step can write files only in a task type that requires a repository.',
     );
   }
-  for (const problem of validateCustomTools(entry.tools ?? [], ctx)) {
+  const tools: CustomTool[] = [];
+  const untyped: string[] = [];
+  (entry.tools ?? []).forEach((tool: unknown, index) => {
+    if (hasToolName(tool)) tools.push(tool);
+    else untyped.push(toolLabel(tool, index));
+  });
+  for (const problem of validateCustomTools(tools, ctx)) {
     add(problem.kind, problem.message, { raw: problem.tool, start: 0, param: problem.param });
   }
-  const invalid = entry.invalidTools ?? [];
+  const invalid = [...untyped, ...(entry.invalidTools ?? [])];
   for (const name of invalid.slice(0, INVALID_TOOLS_SHOWN)) {
     add(
       'tool-no-longer-valid',
