@@ -47,6 +47,7 @@ import { RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { recordWritten, ROLLBACK_RECORD_WRITE_TABLES } from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -241,6 +242,7 @@ describe('rolling back a file an upgrade rewrote', () => {
       customBundles: schema.customBundles,
       customBundleItems: schema.customBundleItems,
       cliProviders: schema.cliProviders,
+      ...ROLLBACK_RECORD_WRITE_TABLES,
     });
     const kind = opts.rules ? CLI_RULES_TEMPLATE_KIND : 'agent';
     const templateId = opts.rules ? 'cli-rules' : 'agent.new';
@@ -300,7 +302,7 @@ describe('rolling back a file an upgrade rewrote', () => {
       newArtifactsToUndo: [],
       warnings: [],
     };
-    const apply = () => upgradeRollbackStep.apply(ctx, { detected } as never);
+    const apply = () => recordWritten(upgradeRollbackStep.apply(ctx, { detected } as never));
     const live = () =>
       fake
         .rows(schema.onboardingArtifacts)
@@ -422,6 +424,7 @@ describe('rolling back what an upgrade removed', () => {
       customBundles: schema.customBundles,
       customBundleItems: schema.customBundleItems,
       cliProviders: schema.cliProviders,
+      ...ROLLBACK_RECORD_WRITE_TABLES,
     });
     const templateId = rules ? 'cli-rules' : 'agent.gone';
     const kind = rules ? CLI_RULES_TEMPLATE_KIND : 'agent';
@@ -468,7 +471,7 @@ describe('rolling back what an upgrade removed', () => {
       newArtifactsToUndo: [],
       warnings: [],
     };
-    const apply = () => upgradeRollbackStep.apply(ctx, { detected } as never);
+    const apply = () => recordWritten(upgradeRollbackStep.apply(ctx, { detected } as never));
     return { root, path: join(root, rel), apply };
   }
 
