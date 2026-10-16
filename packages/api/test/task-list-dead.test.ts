@@ -60,7 +60,12 @@ describe.skipIf(!url)('GET /tasks status filters and dead tasks, on Postgres', (
     const res = await app.request(`/tasks${query}`);
     expect(res.status).toBe(200);
     return (await res.json()) as {
-      tasks: { id: string; timing: { wallMs: number; idleMs: number }; slotWait: SlotWait }[];
+      tasks: {
+        id: string;
+        timing: { wallMs: number; idleMs: number };
+        slotWait: SlotWait;
+        stop: { reason: string; moduleId: string | null } | null;
+      }[];
       total: number;
     };
   };
@@ -207,6 +212,126 @@ describe.skipIf(!url)('GET /tasks status filters and dead tasks, on Postgres', (
       expect(second.get(PARKED_ALIVE)?.idleMs).toBe(
         (first.get(PARKED_ALIVE)?.idleMs ?? 0) + SECOND,
       );
+    });
+  });
+
+  describe('a failed task an administrator stopped', () => {
+    const STOPPED = '00000000-0000-4000-8000-0000000000e1';
+    const OTHER_STOPPED = '00000000-0000-4000-8000-0000000000e2';
+    const NOT_STOPPED = '00000000-0000-4000-8000-0000000000e3';
+    const FAILED_AGAIN = '00000000-0000-4000-8000-0000000000e4';
+    const RUNNING_WITH_STOP = '00000000-0000-4000-8000-0000000000e5';
+    const FAILED = new Date('2026-10-14T11:00:00.000Z');
+    const AFTER_FAILURE = new Date('2026-10-14T11:00:01.000Z');
+    const BEFORE_FAILURE = new Date('2026-10-14T10:59:00.000Z');
+    const stopOf = async (id: string) => (await list()).tasks.find((t) => t.id === id)?.stop;
+    const stopEvent = (taskId: string, moduleId: string, createdAt: Date) => ({
+      taskId,
+      eventType: 'task.stopped',
+      payload: { reason: 'module_deactivated', moduleId },
+      createdAt,
+    });
+
+    beforeEach(async () => {
+      const failed = (id: string, over: Partial<typeof schema.tasks.$inferInsert> = {}) => ({
+        id,
+        userId: USER,
+        type: 'workflow',
+        title: id,
+        status: 'failed' as const,
+        errorMessage: 'Stopped by an administrator',
+        completedAt: FAILED,
+        ...over,
+      });
+      await db.insert(schema.tasks).values([
+        failed(STOPPED),
+        failed(OTHER_STOPPED),
+        failed(NOT_STOPPED, { errorMessage: 'It broke' }),
+        failed(FAILED_AGAIN),
+        {
+          id: RUNNING_WITH_STOP,
+          userId: USER,
+          type: 'workflow',
+          title: RUNNING_WITH_STOP,
+          status: 'running' as const,
+          startedAt: STARTED,
+        },
+      ]);
+      await db
+        .insert(schema.taskEvents)
+        .values([
+          stopEvent(STOPPED, 'alpha', AFTER_FAILURE),
+          stopEvent(OTHER_STOPPED, 'beta', AFTER_FAILURE),
+          stopEvent(FAILED_AGAIN, 'alpha', BEFORE_FAILURE),
+          stopEvent(RUNNING_WITH_STOP, 'alpha', AFTER_FAILURE),
+        ]);
+    });
+
+    it('carries the reason and module of the stop that failed it', async () => {
+      expect(await stopOf(STOPPED)).toEqual({ reason: 'module_deactivated', moduleId: 'alpha' });
+    });
+
+    it('gives each task of the page the stop of its own', async () => {
+      expect(await stopOf(OTHER_STOPPED)).toEqual({
+        reason: 'module_deactivated',
+        moduleId: 'beta',
+      });
+    });
+
+    it('carries no stop for a failed task nothing stopped', async () => {
+      expect(await stopOf(NOT_STOPPED)).toBeNull();
+    });
+
+    it('carries no stop for a task that failed again after the stop', async () => {
+      expect(await stopOf(FAILED_AGAIN)).toBeNull();
+    });
+
+    it('carries no stop for a task that has not failed, whatever stop it once had', async () => {
+      expect(await stopOf(RUNNING_WITH_STOP)).toBeNull();
+    });
+
+    it('keeps the stop of a task when another task of the page has far more newer stops', async () => {
+      const NOISY = '00000000-0000-4000-8000-0000000000e6';
+      await db.insert(schema.tasks).values({
+        id: NOISY,
+        userId: USER,
+        type: 'workflow',
+        title: NOISY,
+        status: 'failed' as const,
+        errorMessage: 'Stopped by an administrator',
+        completedAt: FAILED,
+      });
+      await db
+        .insert(schema.taskEvents)
+        .values(
+          Array.from({ length: 300 }, (_, i) =>
+            stopEvent(NOISY, 'noisy', new Date(AFTER_FAILURE.getTime() + (i + 1) * 1000)),
+          ),
+        );
+      expect(await stopOf(STOPPED)).toEqual({ reason: 'module_deactivated', moduleId: 'alpha' });
+      expect(await stopOf(NOISY)).toEqual({ reason: 'module_deactivated', moduleId: 'noisy' });
+    });
+
+    it('reads the newest stops of a task, not its oldest', async () => {
+      const MANY = '00000000-0000-4000-8000-0000000000e7';
+      await db.insert(schema.tasks).values({
+        id: MANY,
+        userId: USER,
+        type: 'workflow',
+        title: MANY,
+        status: 'failed' as const,
+        errorMessage: 'Stopped by an administrator',
+        completedAt: FAILED,
+      });
+      await db
+        .insert(schema.taskEvents)
+        .values([
+          ...Array.from({ length: 55 }, (_, i) =>
+            stopEvent(MANY, 'older', new Date(BEFORE_FAILURE.getTime() - i * 1000)),
+          ),
+          stopEvent(MANY, 'newest', AFTER_FAILURE),
+        ]);
+      expect(await stopOf(MANY)).toEqual({ reason: 'module_deactivated', moduleId: 'newest' });
     });
   });
 });
