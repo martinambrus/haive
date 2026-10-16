@@ -8,7 +8,9 @@ loaders refuse at boot a manifest whose id does not match its name), whose
 `./jobs` and `./teardown` (worker), `./web` and `./dashboard` (web). `scripts/gen-modules.mjs` turns the installed
 ones into four gitignored registries (`packages/api/src/modules.generated.ts`,
 `packages/worker/src/modules.generated.ts`, `packages/web/src/generated/module-pages.ts` and
-`module-dashboard.ts`), and the `dev`, `build` and `typecheck` scripts of the api, worker and web run
+`module-dashboard.ts`) plus `packages/web/src/generated/modules.json`, the web parts it compiled in (id,
+package, source, parts), which the web production image ships at `/app/packages/web/modules.generated.json`
+so a build can read back what an image carries; and the `dev`, `build` and `typecheck` scripts of the api, worker and web run
 it first, as do the `test` scripts of the api, worker and web.
 
 ## The four states

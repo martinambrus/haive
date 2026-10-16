@@ -264,7 +264,7 @@ const webModuleFor = (pkg, part) => {
     );
     process.exit(1);
   }
-  return { name: pkg.name, id };
+  return { name: pkg.name, id, source: pkg.source };
 };
 const webModules = packages
   .filter((pkg) => pkg.exports?.['./web'] !== undefined)
@@ -309,11 +309,30 @@ ${dashboardModules.map((mod, i) => `  ...d${i}.map((widget) => ({ moduleId: '${m
 ] as const;
 `;
 
+// The web image ships this list so a channel build can read back which module web parts it compiled in.
+const compiledWeb = new Map();
+for (const [part, mods] of [
+  ['dashboard', dashboardModules],
+  ['web', webModules],
+]) {
+  for (const { name, id, source } of mods) {
+    const entry = compiledWeb.get(id) ?? { id, packageName: name, source, parts: [] };
+    entry.parts.push(part);
+    compiledWeb.set(id, entry);
+  }
+}
+const compiledWebBody = `${JSON.stringify(
+  [...compiledWeb.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+  null,
+  2,
+)}\n`;
+
 for (const [out, body] of [
   [join(root, 'packages', 'api', 'src', 'modules.generated.ts'), apiBody],
   [join(root, 'packages', 'worker', 'src', 'modules.generated.ts'), workerBody],
   [join(root, 'packages', 'web', 'src', 'generated', 'module-pages.ts'), webBody],
   [join(root, 'packages', 'web', 'src', 'generated', 'module-dashboard.ts'), dashboardBody],
+  [join(root, 'packages', 'web', 'src', 'generated', 'modules.json'), compiledWebBody],
 ]) {
   let current = null;
   try {

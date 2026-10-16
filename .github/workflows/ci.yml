@@ -378,6 +378,16 @@ jobs:
       - name: Build the production stage
         run: scripts/ci-retry.sh docker build --target production -f packages/${{ matrix.service }}/Dockerfile -t haive-${{ matrix.service }}-prod-check .
 
+      # A channel build proves which modules an image carries from this file before it pushes anything.
+      - name: The web image names the modules compiled into it
+        if: matrix.service == 'web'
+        run: |
+          docker run --rm --network none --entrypoint cat haive-web-prod-check /app/packages/web/modules.generated.json |
+            node -e "const m=JSON.parse(require('fs').readFileSync(0,'utf8'));
+                     const s=m.find((x)=>x.id==='statistics');
+                     if(!s||s.parts.join(',')!=='dashboard,web') throw new Error('statistics with parts dashboard and web is missing from the web image: '+JSON.stringify(m));
+                     console.log('ok: '+m.map((x)=>x.id).join(','));"
+
   compose-boot:
     name: docker compose up (fresh-host boot)
     runs-on: ubuntu-latest
