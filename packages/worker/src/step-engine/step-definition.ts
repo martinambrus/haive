@@ -62,6 +62,9 @@ export interface LlmBuildArgs {
    *  but runs it for sequential gap-fill at iteration > 0. Optional; callers that
    *  don't track iterations omit it. */
   iteration?: number;
+  /** The text `{{integration:<id>.account}}` renders for each integration requirement id of the
+   *  step; set only on the dispatch of a step that declares integrations. */
+  integrationAccounts?: Readonly<Record<string, string>>;
 }
 
 export interface LlmInvocationSpec {

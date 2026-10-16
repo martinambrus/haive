@@ -232,6 +232,8 @@ export interface PromptTemplateValues {
   taskDescription: string;
   /** Each value arrives already fenced; it is inserted as it is. */
   steps: Readonly<Record<string, string>>;
+  /** The account each requirement id stands for, as text; the renderer keeps it to one line. */
+  integrations: Readonly<Record<string, string>>;
 }
 
 export class PromptTemplateRenderError extends Error {
@@ -247,6 +249,15 @@ export class PromptTemplateRenderError extends Error {
 const own = (record: Readonly<Record<string, string>>, key: string): string =>
   Object.hasOwn(record, key) ? record[key]! : '';
 
+const ACCOUNT_SUFFIX = '.account';
+
+/** The requirement id of an `{{integration:<id>.account}}` token, from what follows `integration:`; null for any other shape. */
+function accountRequirementId(body: string): string | null {
+  if (!body.endsWith(ACCOUNT_SUFFIX)) return null;
+  const id = body.slice(0, -ACCOUNT_SUFFIX.length);
+  return id !== '' && !id.includes('.') ? id : null;
+}
+
 function tokenValue(token: PromptTemplateToken, values: PromptTemplateValues): string | null {
   switch (token.kind) {
     case 'field':
@@ -257,6 +268,10 @@ function tokenValue(token: PromptTemplateToken, values: PromptTemplateValues): s
       return values.taskDescription;
     case 'step':
       return own(values.steps, token.id);
+    case 'integration': {
+      const requirementId = accountRequirementId(token.id);
+      return requirementId === null ? null : own(values.integrations, requirementId);
+    }
     default:
       return null;
   }
@@ -300,7 +315,8 @@ export function renderPromptTemplate(template: string, values: PromptTemplateVal
     if (token.kind === 'step' && !token.ownLine) {
       throw new PromptTemplateRenderError('step-token-not-own-line', token.raw);
     }
-    const text = token.kind === 'step' || token.ownLine ? value : collapseToLine(value);
+    const keepsLines = token.kind === 'step' || (token.ownLine && token.kind !== 'integration');
+    const text = keepsLines ? value : collapseToLine(value);
     dynamic.push([out.length, out.length + text.length]);
     out += text;
   }
@@ -313,7 +329,6 @@ export const PROMPT_STEP_PROBLEM_KINDS = [
   'field-not-declared',
   'persona-id-invalid',
   'reserved-marker-in-template',
-  'integration-token',
   'template-too-large',
   'timeout-out-of-range',
   'capability-not-allowed',
@@ -333,6 +348,8 @@ export const PROMPT_STEP_PROBLEM_KINDS = [
   'integration-category-unknown',
   'integration-without-repository',
   'integration-no-longer-valid',
+  'integration-not-declared',
+  'integration-property-unknown',
 ] as const;
 export type PromptStepProblemKind = (typeof PROMPT_STEP_PROBLEM_KINDS)[number];
 
@@ -487,6 +504,12 @@ export function validatePromptStep(
       .map((f) => f.id),
   );
   const earlier = new Set(ctx.stepIdsBefore);
+  const requirementIds = new Set(
+    (entry.integrations ?? []).flatMap((item: unknown) => {
+      const parsed = integrationRequirementSchema.safeParse(item);
+      return parsed.success ? [parsed.data.id] : [];
+    }),
+  );
   for (const token of tokens) {
     switch (token.kind) {
       case 'field':
@@ -510,9 +533,23 @@ export function validatePromptStep(
           );
         }
         break;
-      case 'integration':
-        add('integration-token', `${token.raw} is not supported yet.`, token);
+      case 'integration': {
+        const requirementId = accountRequirementId(token.id);
+        if (requirementId === null) {
+          add(
+            'integration-property-unknown',
+            `${token.raw} must be written {{integration:<id>.account}}; account is the only property an integration has.`,
+            token,
+          );
+        } else if (!requirementIds.has(requirementId)) {
+          add(
+            'integration-not-declared',
+            `${token.raw} names an integration the step does not declare.`,
+            token,
+          );
+        }
         break;
+      }
       case 'step':
         if (!earlier.has(token.id)) {
           add(
