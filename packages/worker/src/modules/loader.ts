@@ -196,6 +196,7 @@ export async function ensureModuleSchemas(
     // A restart after Tear down must not re-create the schema the teardown dropped.
     if (deactivated.has(moduleId)) {
       result[moduleId] = 'deactivated';
+      markModuleSchemaUnready(moduleId);
       continue;
     }
     const ensuring = bootstrapModuleSchema(db, moduleId, ensureSchema);

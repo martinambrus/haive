@@ -19,6 +19,7 @@ import {
   type LoadedWorkerModule,
   type WorkerModuleEntry,
 } from '../modules/loader.js';
+import { markModuleSchemaUnready } from '../modules/schema-ready.js';
 
 const log = logger.child({ module: 'module-control' });
 
@@ -144,6 +145,7 @@ export async function runModuleTeardown(
   if (teardown) {
     // The jobs reconcile starts nothing of this module while its hook drops data.
     const endTeardown = beginModuleTeardown(moduleId);
+    if (deps.entries[index]?.ensureSchema) markModuleSchemaUnready(moduleId);
     await runHook(
       db,
       moduleId,

@@ -1,4 +1,5 @@
-// Boot went on without these modules' schema ensures, and no ensure of theirs has succeeded since.
+// Boot skipped or outran these modules' schema ensures, or a teardown hook began on them,
+// and no ensure of theirs has succeeded since.
 const unready = new Set<string>();
 
 export function markModuleSchemaUnready(moduleId: string): void {

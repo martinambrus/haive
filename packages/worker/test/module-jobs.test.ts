@@ -1585,3 +1585,124 @@ describe('the steps of a module whose boot schema ensure outlived its wait', () 
     expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-prompt.x')).toBeNull();
   });
 });
+
+describe('the steps of a module whose schema a teardown or a restart may have left missing', () => {
+  beforeEach(() => {
+    moduleDb.gate = undefined;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const tearDown = async (id: string) => {
+    const m = moduleWithSchemaOnly(id);
+    expect(await ensureModuleSchemas({} as Database, [m.loaded], [m.entry], new Set())).toEqual({
+      [id]: 'ok',
+    });
+    const handle = await startModuleJobs([m.loaded], [m.entry]);
+    await handle.reconcile(new Set([id]));
+    const hook = vi.fn<Hook>(async () => {});
+    await runModuleTeardown(teardownDeps(m, hook), id);
+    expect(hook).toHaveBeenCalledOnce();
+    return { m, handle };
+  };
+
+  it('fail with a message naming the module once it is active again, and run once a pass has ensured the schema', async () => {
+    const { m, handle } = await tearDown('torn-gate');
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.torn-gate.x')).toMatch(
+      /torn-gate.*schema setup.*module\.torn-gate\.x/,
+    );
+
+    await handle.reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(2);
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.torn-gate.x')).toBeNull();
+    await handle.stopAll();
+  });
+
+  it('keep failing while the ensure after the teardown fails, and run once one succeeds', async () => {
+    const { m, handle } = await tearDown('torn-failed');
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    m.ensure.mockRejectedValueOnce(new Error('ddl refused'));
+
+    await handle.reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(2);
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.torn-failed.x')).toMatch(
+      /torn-failed.*schema setup/,
+    );
+
+    await handle.reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledTimes(3);
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.torn-failed.x')).toBeNull();
+    await handle.stopAll();
+  });
+
+  it('name the deactivation, not the schema, while the torn down module is still deactivated', async () => {
+    const { handle } = await tearDown('torn-off');
+    expect(await moduleDeactivationMessage(deactivatedRowDb, 'module.torn-off.x')).toMatch(
+      /torn-off is deactivated/,
+    );
+    await handle.stopAll();
+  });
+
+  it('fail after a boot that skipped the ensure of the deactivated module, until a pass has ensured it', async () => {
+    const m = moduleWithSchemaOnly('boot-off');
+    expect(
+      await ensureModuleSchemas({} as Database, [m.loaded], [m.entry], new Set(['boot-off'])),
+    ).toEqual({ 'boot-off': 'deactivated' });
+    expect(m.ensure).not.toHaveBeenCalled();
+    expect(await moduleDeactivationMessage(deactivatedRowDb, 'module.boot-off.x')).toMatch(
+      /boot-off is deactivated/,
+    );
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.boot-off.x')).toMatch(
+      /boot-off.*schema setup/,
+    );
+
+    const { reconcile, stopAll } = await startModuleJobs(
+      [m.loaded],
+      [m.entry],
+      new Set(['boot-off']),
+    );
+    await reconcile(new Set());
+    expect(m.ensure).toHaveBeenCalledOnce();
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.boot-off.x')).toBeNull();
+    await stopAll();
+  });
+
+  it('run at once after a teardown with no hook, which drops nothing', async () => {
+    const m = moduleWithSchemaOnly('torn-hookless');
+    await runModuleTeardown(
+      {
+        ...teardownDeps(
+          m,
+          vi.fn<Hook>(async () => {}),
+        ),
+        entries: [m.entry],
+      },
+      'torn-hookless',
+    );
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.torn-hookless.x')).toBeNull();
+  });
+
+  it.each(['teardown', 'boot'] as const)(
+    'run at once for a module with no schema ensure (%s)',
+    async (how) => {
+      const id = `no-schema-${how}`;
+      const m = moduleWithJobs(id);
+      if (how === 'teardown') {
+        await runModuleTeardown(
+          teardownDeps(
+            m,
+            vi.fn<Hook>(async () => {}),
+          ),
+          id,
+        );
+      } else {
+        expect(
+          await ensureModuleSchemas({} as Database, [m.loaded], [m.entry], new Set([id])),
+        ).toEqual({ [id]: 'none' });
+      }
+      expect(await moduleDeactivationMessage(activeRowDb, `module.${id}.x`)).toBeNull();
+    },
+  );
+});
