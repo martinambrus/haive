@@ -962,23 +962,27 @@ async function runLevelMerge(
       // else keeps the list. It is the record of whether issues of one level collide on shared
       // files (docs/architecture/merge-conflicts.md).
       const conflicted = await unmergedPaths(integration.path);
-      await db.insert(schema.taskEvents).values({
-        taskId: m.params.taskId,
-        taskStepId: m.current.id,
-        eventType: 'dag_issue.merge_conflict',
-        payload: {
-          issueKey: issue.issueKey,
-          level: issue.level,
-          paths: conflicted ? conflicted.slice(0, 20) : null,
-          pathCount: conflicted ? conflicted.length : null,
-        },
-      });
       const aborted = await abortMerge(integration.path);
       if (!aborted.ok) return haltUnaborted(m, issue.branchName!, aborted);
-      await db
-        .update(schema.taskDagIssues)
-        .set({ mergeStatus: 'conflict', updatedAt: new Date() })
-        .where(eq(schema.taskDagIssues.id, issue.id));
+      // Written with the status in one transaction, so a pass that halts or dies before it
+      // records neither, and the retry that re-enters records this conflict once.
+      await db.transaction(async (tx) => {
+        await tx
+          .update(schema.taskDagIssues)
+          .set({ mergeStatus: 'conflict', updatedAt: new Date() })
+          .where(eq(schema.taskDagIssues.id, issue.id));
+        await tx.insert(schema.taskEvents).values({
+          taskId: m.params.taskId,
+          taskStepId: m.current.id,
+          eventType: 'dag_issue.merge_conflict',
+          payload: {
+            issueKey: issue.issueKey,
+            level: issue.level,
+            paths: conflicted ? conflicted.slice(0, 20) : null,
+            pathCount: conflicted ? conflicted.length : null,
+          },
+        });
+      });
       issue.mergeStatus = 'conflict';
     }
   }

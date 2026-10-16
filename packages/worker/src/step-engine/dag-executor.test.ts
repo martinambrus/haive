@@ -48,6 +48,8 @@ vi.mock('../queues/cli-exec/secret-mask.js', async (importOriginal) => ({
 }));
 // A relocation whose index cannot be restored, while the index itself stays usable for the commit.
 const relocation = vi.hoisted(() => ({ holdIndex: false }));
+// An abort git refuses, once, leaving the merge open.
+const abortRefusal = vi.hoisted(() => ({ once: false }));
 vi.mock('./git-merge.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('./git-merge.js')>();
   return {
@@ -55,6 +57,11 @@ vi.mock('./git-merge.js', async (importOriginal) => {
     relocateFixerChanges: async (...args: Parameters<typeof real.relocateFixerChanges>) => {
       const out = await real.relocateFixerChanges(...args);
       return relocation.holdIndex && out ? { ...out, indexHeld: 'index.lock held' } : out;
+    },
+    abortMerge: async (...args: Parameters<typeof real.abortMerge>) => {
+      if (!abortRefusal.once) return real.abortMerge(...args);
+      abortRefusal.once = false;
+      return { ok: false as const, blocking: ['base.txt'], detail: 'abort refused' };
     },
   };
 });
@@ -1839,6 +1846,49 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
         0,
       );
     } finally {
+      await rm(issueDir, { recursive: true, force: true });
+      await rm(integrationDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a refused abort records no conflict event, so the retry that re-enters records it once', async () => {
+    const integrationDir = await setupConflictedIntegration(true);
+    const issueDir = await mkdtemp(path.join(tmpdir(), 'dag-issue-commit-'));
+    try {
+      await gitCode(integrationDir, ['merge', '--abort']);
+      await git(integrationDir, ['worktree', 'add', issueDir, 'main--ISSUE-1']);
+      // Each pass reads the issue as the database holds it: still unmerged, since the halted
+      // pass never wrote its status.
+      const pass = async () => {
+        const h = makeDagMergeWaitDb({
+          invocation: undefined,
+          integrationDir,
+          autoResolveConflicts: false,
+          issue: { mergeStatus: null, worktreePath: issueDir },
+        });
+        await resolveDagPhase(
+          h.db as never,
+          dagExecuteStep as never,
+          { id: 'step1', status: 'running', round: 0 } as never,
+          mergeCtx(integrationDir),
+          dispatchingParams as never,
+        );
+        return h;
+      };
+      abortRefusal.once = true;
+      const halted = await pass();
+      const haltedTypes = halted.events.map((e) => e.eventType);
+      expect(haltedTypes).toContain('merge.abort_failed');
+      expect(haltedTypes).not.toContain('dag_issue.merge_conflict');
+      expect(halted.issueUpdates.some((u) => u.mergeStatus === 'conflict')).toBe(false);
+      // The merge the refused abort left open is the one the retry finds and records.
+      const retried = await pass();
+      expect(retried.events.filter((e) => e.eventType === 'dag_issue.merge_conflict')).toHaveLength(
+        1,
+      );
+      expect(retried.issueUpdates.some((u) => u.mergeStatus === 'conflict')).toBe(true);
+    } finally {
+      abortRefusal.once = false;
       await rm(issueDir, { recursive: true, force: true });
       await rm(integrationDir, { recursive: true, force: true });
     }

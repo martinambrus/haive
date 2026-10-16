@@ -217,9 +217,11 @@ any other Haive path that conflicts stays the fixer's to resolve, or the merge c
 
 A DAG level merge records which files conflicted. The merge pass reads `unmergedPaths` while the
 merge it opened is still open, since the abort that follows clears them and nothing else keeps the
-list, and writes one `dag_issue.merge_conflict` task event per conflicting issue:
-`{issueKey, level, paths, pathCount}`, `paths` capped at 20, both `null` when git could not list
-them. Nothing reads it. It is what a change to how the sprint planner orders issues has to be
+list, and after the abort writes one `dag_issue.merge_conflict` task event in the transaction that
+sets `merge_status = 'conflict'`: `{issueKey, level, paths, pathCount}`, `paths` capped at 20, both
+`null` when git could not list them. A pass that halts on a refused abort, or dies before that
+write, records neither, so the retry that re-enters the issue records the conflict once. Nothing
+reads it. It is what a change to how the sprint planner orders issues has to be
 measured against. MEASURED on the dev install (13 DAG plans, Jul-Aug 2026): 30 of 63 merged issues
 needed a merge-fix and all 30 were resolved, at 3.7 min each, while a DAG issue's median wall time
 is 32.3 min. So a same-level conflict is left to the merge-fix rather than prevented by ordering:
