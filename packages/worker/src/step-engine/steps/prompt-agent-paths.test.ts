@@ -1027,6 +1027,8 @@ const NOT_A_DISPATCHED_PROMPT: Record<string, string> = {
     'text house rules read file paths from, never sent to a CLI',
   'step-engine/steps/custom/prompt-step.ts#promptStepTools':
     "a lookup of a prompt step's tool names; builds no prompt text",
+  'step-engine/steps/custom/prompt-step.ts#promptStepIntegrations':
+    "a lookup of a prompt step's declared integrations; builds no prompt text",
   'step-engine/steps/workflow/_rag-usage.ts#buildRagUsagePrompt':
     '13-pr-wait llm builder, already scanned through the registry',
   'step-engine/steps/type-draft/_type-draft.ts#buildDraftPrompt':

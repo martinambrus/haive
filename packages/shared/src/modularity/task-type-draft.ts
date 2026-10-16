@@ -74,6 +74,7 @@ export function checkPromptSteps(
   def: { slug: string; stepIds: readonly string[]; requiresRepository: boolean },
   promptSteps: Record<string, ParsedPromptStepEntry>,
   catalog: { composable: ReadonlyMap<string, ComposableStepEntry> },
+  integrationCategoryIds?: ReadonlySet<string>,
 ): PromptStepIssue[] {
   const issues: PromptStepIssue[] = [];
   const byId = new Map(
@@ -102,6 +103,7 @@ export function checkPromptSteps(
       requiresRepository: def.requiresRepository,
       stepIdsBefore: def.stepIds.slice(0, index),
       quotableStepIds,
+      integrationCategoryIds,
     });
     for (const { kind, message, raw, start, param } of problems) {
       issues.push({
