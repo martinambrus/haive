@@ -8,6 +8,7 @@ import {
   claimFileName,
   emptyProjectState,
   gitBlobId,
+  isClaimablePath,
   localTemplateId,
   normalizeProjectState,
   parseProjectState,
@@ -90,6 +91,22 @@ describe('claimFileName', () => {
     const name = claimFileName(`${'d'.repeat(120)}/${'é'.repeat(150)}.md`).split('/')[1]!;
     expect(Buffer.byteLength(name)).toBeLessThanOrEqual(255);
   });
+});
+
+describe('isClaimablePath and git data', () => {
+  it.each(['.git/config', 'sub/.git/hooks/x', '.GIT/config', 'a/.Git'])(
+    'refuses %s, which a git segment makes git data in any letter case',
+    (path) => {
+      expect(isClaimablePath(path)).toBe(false);
+    },
+  );
+
+  it.each(['.github/workflows/x.yml', '.gitignore', '.gitkeep', 'a.git/b'])(
+    'keeps %s, which only resembles git data',
+    (path) => {
+      expect(isClaimablePath(path)).toBe(true);
+    },
+  );
 });
 
 describe('renderProjectState and parseProjectState', () => {
@@ -213,6 +230,24 @@ describe('renderProjectState and parseProjectState', () => {
     const parsed = parseProjectState(damage(renderProjectState(record())));
     expect(parsed.ok).toBe(false);
     expect(!parsed.ok && parsed.problems).toContain(problem);
+  });
+
+  it('refuse a claim file naming git data, and return no record holding the claim', () => {
+    const name = claimFileName('.git/config');
+    const parsed = parseProjectState(
+      withFile(renderProjectState(record()), name, canonicalJson(claim('.git/config'))),
+    );
+    expect(parsed).toEqual({
+      ok: false,
+      reason: 'invalid',
+      problems: [`${name}: ".git/config" is not a repository path`],
+    });
+  });
+
+  it('refuse to write a claim naming git data', () => {
+    const inGit = record();
+    inGit.claims.push(claim('.git/config'));
+    expect(() => renderProjectState(inGit)).toThrow(ProjectStateError);
   });
 
   it('refuse a claim missing a field, naming it', () => {

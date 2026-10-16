@@ -98,6 +98,18 @@ describe('safeDiskRel', () => {
     }
   });
 
+  it('refuses a path inside git data, in any letter case, by returning null', () => {
+    for (const p of ['.git/config', 'sub/.git/hooks/x', '.GIT/config', 'a/.Git']) {
+      expect(safeDiskRel(p)).toBeNull();
+    }
+  });
+
+  it('keeps a path that only resembles git data', () => {
+    for (const p of ['.github/workflows/x.yml', '.gitignore', '.gitkeep', 'a.git/b']) {
+      expect(safeDiskRel(p)).toBe(p);
+    }
+  });
+
   // Counterintuitive and deliberate: a template ID is a COMPOSITE KEY that embeds a path, so it
   // passes this check while yielding a nonsense rel — its first segment contains `..` without
   // BEING `..`. The guard is "never hand an id to it", not "it will catch one".

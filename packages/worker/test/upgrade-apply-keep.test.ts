@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -153,7 +153,7 @@ async function upgrade(paths: string[], templateId = 'agent.old') {
   const rows: Record<string, string> = {};
   for (const diskPath of paths) {
     const body = bodyOf(diskPath);
-    await mkdir(join(root, '.claude/agents'), { recursive: true });
+    await mkdir(dirname(join(root, diskPath)), { recursive: true });
     await writeFile(join(root, diskPath), body);
     const row = fake.insert(schema.onboardingArtifacts, {
       userId: USER,
@@ -259,6 +259,22 @@ describe('O3: a file picked both to be removed and to be kept', () => {
     expect(await readFile(join(u.root, OLDER), 'utf8')).toBe(bodyOf(OLDER));
     expect(u.live(OLDER)).toBe(false);
     expect(u.untracked(out)).toEqual([u.rows[OLDER]]);
+  });
+});
+
+describe('a removal the plan holds for a path inside git data', () => {
+  const GIT = '.git/config';
+
+  it('leaves the file in place, removes nothing, and warns naming the path', async () => {
+    const u = await upgrade([GIT]);
+
+    const out = await u.apply({ selectedObsoleteRemovals: [u.entries[0]!.entryId] });
+
+    expect(await readFile(join(u.root, GIT), 'utf8')).toBe(bodyOf(GIT));
+    expect(out.warnings.some((w) => w.includes(GIT))).toBe(true);
+    expect(out.deletedCount).toBe(0);
+    expect(out.deletedPaths ?? []).toEqual([]);
+    expect(u.live(GIT)).toBe(true);
   });
 });
 
