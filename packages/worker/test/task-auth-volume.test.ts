@@ -18,6 +18,7 @@ import {
   type ProviderAuthCtx,
 } from '../src/sandbox/task-auth-volume.js';
 import type { McpServerSpec } from '../src/sandbox/mcp-config.js';
+import { CORE_IDENTITY_LABEL, sandboxCoreIdentity } from '../src/sandbox/sandbox-core-image.js';
 import type { CliProviderName } from '@haive/shared';
 import type {
   DockerRunner,
@@ -102,10 +103,15 @@ function makeRunner(
     },
     // Image inspect, not volume. ensureTaskAuthVolumes now guarantees the sandbox base
     // image before it probes readiness (a missing base makes the probe report "not ready"
-    // and the volume gets deleted), so a provisioned host reports it present — which is
-    // also what keeps the `build should not be called` guard above meaningful.
+    // and the volume gets deleted), so a provisioned host reports it present, built from the
+    // current definition — which is also what keeps the `build should not be called` guard
+    // above meaningful.
     async inspect() {
-      return { exists: true, imageId: 'sha256:test-base' };
+      return {
+        exists: true,
+        imageId: 'sha256:test-base',
+        labels: { [CORE_IDENTITY_LABEL]: sandboxCoreIdentity() },
+      };
     },
     async remove() {
       return { ok: true, stderr: '' };

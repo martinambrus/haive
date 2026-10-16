@@ -118,3 +118,9 @@ WORKDIR /haive/workdir
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/restore-claude.sh"]
 CMD ["bash"]
+
+# The definition this image was built from (`sandboxCoreIdentity` in
+# sandbox-core-image.ts). The worker rebuilds an image whose label differs, so a
+# release that changes this context reaches installs that already have the image.
+ARG HAIVE_CORE_IDENTITY=""
+LABEL haive.core-identity="${HAIVE_CORE_IDENTITY}"

@@ -1,7 +1,12 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  CORE_IDENTITY_LABEL,
   ensureSandboxCoreImage,
   SANDBOX_CORE_IMAGE_HEADLINE,
+  sandboxCoreIdentity,
 } from '../src/sandbox/sandbox-core-image.js';
 import type { DockerBuildOpts, DockerRunner } from '../src/sandbox/docker-runner.js';
 
@@ -14,9 +19,14 @@ interface Recorder {
   release: () => void;
 }
 
-/** `exists` answers every inspect. `gate` (when true) holds each build open until
+/** `exists` and `labels` answer every inspect. `gate` (when true) holds each build open until
  *  `release()` so a test can have several callers in flight at once. */
-function makeRunner(opts: { exists: boolean; exitCode?: number; gate?: boolean }): Recorder {
+function makeRunner(opts: {
+  exists: boolean;
+  labels?: Record<string, string>;
+  exitCode?: number;
+  gate?: boolean;
+}): Recorder {
   const inspects: string[] = [];
   const builds: DockerBuildOpts[] = [];
   let unblock = () => {};
@@ -25,7 +35,9 @@ function makeRunner(opts: { exists: boolean; exitCode?: number; gate?: boolean }
   const runner = {
     inspect: async (tag: string) => {
       inspects.push(tag);
-      return { exists: opts.exists, imageId: opts.exists ? 'sha256:abc' : null };
+      return opts.exists
+        ? { exists: true, imageId: 'sha256:abc', labels: opts.labels ?? {} }
+        : { exists: false, imageId: null };
     },
     build: async (buildOpts: DockerBuildOpts) => {
       builds.push(buildOpts);
@@ -47,14 +59,33 @@ function makeRunner(opts: { exists: boolean; exitCode?: number; gate?: boolean }
 afterEach(() => {
   delete process.env.RTK_RELEASE_VERSION;
   delete process.env.RTK_X86_64_MUSL_SHA256;
+  delete process.env.SANDBOX_CORE_CONTEXT;
 });
 
 describe('ensureSandboxCoreImage', () => {
-  it('does not build when the image is already on the host', async () => {
-    const r = makeRunner({ exists: true });
+  it('does not build when the image on the host carries the current identity', async () => {
+    const r = makeRunner({
+      exists: true,
+      labels: { [CORE_IDENTITY_LABEL]: sandboxCoreIdentity() },
+    });
     await ensureSandboxCoreImage(CORE, r.runner);
     expect(r.inspects).toEqual([CORE]);
     expect(r.builds).toHaveLength(0);
+  });
+
+  // What the label is for: an install that already had the base kept it through every release
+  // that changed what it is built from, so an rtk bump reached fresh installs only.
+  it('rebuilds an image built from another definition', async () => {
+    const r = makeRunner({ exists: true, labels: { [CORE_IDENTITY_LABEL]: 'an-older-one' } });
+    await ensureSandboxCoreImage(CORE, r.runner);
+    expect(r.builds).toHaveLength(1);
+    expect(r.builds[0]?.buildArgs?.HAIVE_CORE_IDENTITY).toBe(sandboxCoreIdentity());
+  });
+
+  it('rebuilds an image with no identity: a hand build, or one from before the label', async () => {
+    const r = makeRunner({ exists: true });
+    await ensureSandboxCoreImage(CORE, r.runner);
+    expect(r.builds).toHaveLength(1);
   });
 
   it('builds the core tag when the image is missing', async () => {
@@ -96,10 +127,10 @@ describe('ensureSandboxCoreImage', () => {
     expect(r.builds).toHaveLength(0);
   });
 
-  it('forwards rtk build args only when they are pinned', async () => {
+  it('forwards rtk build args only when they are pinned, beside the identity', async () => {
     const bare = makeRunner({ exists: false });
     await ensureSandboxCoreImage(CORE, bare.runner);
-    expect(bare.builds[0]?.buildArgs).toEqual({});
+    expect(bare.builds[0]?.buildArgs).toEqual({ HAIVE_CORE_IDENTITY: sandboxCoreIdentity() });
 
     process.env.RTK_RELEASE_VERSION = 'v0.99.0';
     process.env.RTK_X86_64_MUSL_SHA256 = 'deadbeef';
@@ -108,6 +139,7 @@ describe('ensureSandboxCoreImage', () => {
     expect(pinned.builds[0]?.buildArgs).toEqual({
       RTK_RELEASE_VERSION: 'v0.99.0',
       RTK_X86_64_MUSL_SHA256: 'deadbeef',
+      HAIVE_CORE_IDENTITY: sandboxCoreIdentity(),
     });
   });
 
@@ -123,5 +155,30 @@ describe('ensureSandboxCoreImage', () => {
     const err = await ensureSandboxCoreImage(CORE, again.runner).catch((e: unknown) => e);
     expect(String(err)).toContain('pnpm docker sandbox-build');
     expect(String(err)).toContain('pull access denied');
+  });
+});
+
+describe('sandboxCoreIdentity', () => {
+  // Every file of the context goes into the image (restore-claude.sh is COPYed), so an edit to any
+  // of them is a new definition, and a pinned rtk arg builds another image from the same files.
+  it('follows every file of the build context and the pinned build args', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'core-context-'));
+    try {
+      await mkdir(join(dir, 'sub'));
+      await writeFile(join(dir, 'Dockerfile'), 'FROM scratch\n');
+      await writeFile(join(dir, 'sub', 'helper.sh'), 'echo one\n');
+      process.env.SANDBOX_CORE_CONTEXT = dir;
+      const first = sandboxCoreIdentity();
+      expect(sandboxCoreIdentity()).toBe(first);
+
+      await writeFile(join(dir, 'sub', 'helper.sh'), 'echo two\n');
+      const edited = sandboxCoreIdentity();
+      expect(edited).not.toBe(first);
+
+      process.env.RTK_RELEASE_VERSION = 'v9.9.9';
+      expect(sandboxCoreIdentity()).not.toBe(edited);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

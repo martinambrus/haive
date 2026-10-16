@@ -42,7 +42,10 @@ import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
 import { reapOrphanedAuthVolumes } from './sandbox/auth-volume-reaper.js';
 import { reapOrphanEnvTemplates } from './sandbox/env-template-reaper.js';
 import { reapStaleComposedImages } from './sandbox/composed-image-reaper.js';
-import { reapOrphanedSandboxImages } from './sandbox/sandbox-image-reaper.js';
+import {
+  reapOrphanedSandboxImages,
+  reapSupersededSandboxCores,
+} from './sandbox/sandbox-image-reaper.js';
 import { ensureOllamaModels } from './sandbox/ollama-provision.js';
 import { ensureDdevCa, ensureDdevRegistryCache } from './sandbox/ddev-runner.js';
 import { ensureSandboxCoreImage } from './sandbox/sandbox-core-image.js';
@@ -104,6 +107,10 @@ async function main(): Promise<void> {
   // removal existed, left them for good. Docker refuses one a container still uses.
   await reapOrphanedSandboxImages(getDb()).catch((err) => {
     logger.warn({ err }, 'orphaned sandbox-image reap on boot failed');
+  });
+  // Base images a rebuild superseded (`ensureSandboxCoreImage` rebuilds an out-of-date base).
+  await reapSupersededSandboxCores().catch((err) => {
+    logger.warn({ err }, 'superseded sandbox-base reap on boot failed');
   });
   // Drop runtime slot reservations left by the previous process. The reap above removed every
   // runtime runner, so a reservation from before this boot can only describe a boot that no

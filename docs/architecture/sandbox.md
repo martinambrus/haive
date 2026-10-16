@@ -24,6 +24,22 @@ anyway. The in-flight promise is load-bearing rather than a boolean flag: cli-ex
 concurrency 5-7 and a flag set only on success lets every one of them start the same
 multi-minute build.
 
+**It also rebuilds itself when its definition changes.** The ensure used to build only a
+MISSING image, so an install that had the base kept it through every release that changed it,
+and an rtk bump reached fresh installs only. `sandboxCoreIdentity` hashes every file of the build
+context and the rtk build args an operator pinned; the build stamps it on the image
+(`haive.core-identity`), and the ensure rebuilds an image carrying any other value, none
+included: a hand-run `pnpm docker sandbox-build` and an image from before the label carry none,
+so the worker rebuilds them once. Every per-CLI Dockerfile carries the same identity
+(`LABEL haive.base-identity`, `image-cache.ts`), because its tag is a hash of its own text and
+names the base as `:latest`: without it a per-CLI image built on the old base kept its tag and
+went on being served. Its next use builds it on the new base. A failed rebuild throws, as a
+failed build of a missing image does, so no per-CLI image is built on a base that is out of date
+and then tagged as current. The base a rebuild replaces stays while a container or a per-CLI image
+built on it still uses it; the boot sweep `reapSupersededSandboxCores`
+(`sandbox-image-reaper.ts`) removes it, without `--force`, once neither does. One built before the
+label carries none, so the sweep cannot tell it from any other untagged image, and it stays.
+
 Two consequences worth keeping. The ensure is a no-op whenever `SANDBOX_IMAGE` names
 something other than the core tag, because building ours over an operator's pinned image
 would silently replace it — the "missing image" failure is then correctly theirs to fix.

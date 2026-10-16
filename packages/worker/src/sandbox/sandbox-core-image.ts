@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { logger } from '@haive/shared';
@@ -36,6 +38,31 @@ function resolveBuildArgs(): Record<string, string> {
   return args;
 }
 
+/** The label a build of SANDBOX_CORE_IMAGE stamps with `sandboxCoreIdentity()`. */
+export const CORE_IDENTITY_LABEL = 'haive.core-identity';
+
+/** What SANDBOX_CORE_IMAGE is built from: every file of its build context, by relative path,
+ *  and the build args an operator pinned. A build stamps it on the image (CORE_IDENTITY_LABEL)
+ *  and every per-CLI Dockerfile carries it (image-cache.ts), so a changed definition, a release
+ *  moving a pin or an edited Dockerfile, rebuilds the base and moves the per-CLI tags built on
+ *  it. Read on every call: the context is two small files, and a cached value would keep a
+ *  Dockerfile edit from taking effect until the worker restarted. */
+export function sandboxCoreIdentity(): string {
+  const dir = contextDir();
+  const files = readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.relative(dir, path.join(entry.parentPath, entry.name)))
+    .sort();
+  const hash = createHash('sha256');
+  for (const rel of files) {
+    hash
+      .update(`${rel}\0`)
+      .update(readFileSync(path.join(dir, rel)))
+      .update('\0');
+  }
+  return hash.update(JSON.stringify(resolveBuildArgs())).digest('hex');
+}
+
 /** In-flight build shared by every caller.
  *
  *  A promise rather than the boolean-set-on-success flag ddev-runner uses: cli-exec runs at
@@ -45,14 +72,22 @@ function resolveBuildArgs(): Record<string, string> {
 let inFlight: Promise<void> | null = null;
 
 async function ensureUnlocked(runner: DockerRunner): Promise<void> {
-  if ((await runner.inspect(SANDBOX_CORE_IMAGE)).exists) return;
+  const identity = sandboxCoreIdentity();
+  const current = await runner.inspect(SANDBOX_CORE_IMAGE);
+  const built = current.labels?.[CORE_IDENTITY_LABEL];
+  if (current.exists && built === identity) return;
 
   const dir = contextDir();
-  log.info({ image: SANDBOX_CORE_IMAGE, dir }, 'sandbox base image missing, building');
+  log.info(
+    { image: SANDBOX_CORE_IMAGE, dir, identity, built: built ?? null },
+    current.exists
+      ? 'sandbox base image out of date, rebuilding'
+      : 'sandbox base image missing, building',
+  );
   const result = await runner.build({
     contextDir: dir,
     tag: SANDBOX_CORE_IMAGE,
-    buildArgs: resolveBuildArgs(),
+    buildArgs: { ...resolveBuildArgs(), HAIVE_CORE_IDENTITY: identity },
     timeoutMs: BUILD_TIMEOUT_MS,
   });
 
@@ -65,9 +100,10 @@ async function ensureUnlocked(runner: DockerRunner): Promise<void> {
     throw new Error(
       `${SANDBOX_CORE_IMAGE_HEADLINE} — ${SANDBOX_CORE_IMAGE} is built locally from ${dir} ` +
         `and is published to no registry, so "docker image prune" or a fresh checkout removes ` +
-        `it and Docker then tries to pull a repository that does not exist. Haive tried to ` +
-        `rebuild it and the build itself failed. Run "pnpm docker sandbox-build" on the host, ` +
-        `then retry this step. Build output:\n${detail}`,
+        `it and Docker then tries to pull a repository that does not exist, and a release that ` +
+        `changes that directory leaves it out of date. Haive tried to rebuild it and the build ` +
+        `itself failed. Run "pnpm docker sandbox-build" on the host, then retry this step. ` +
+        `Build output:\n${detail}`,
     );
   }
 
@@ -78,15 +114,17 @@ async function ensureUnlocked(runner: DockerRunner): Promise<void> {
 }
 
 /**
- * Guarantee `haive-cli-sandbox:latest` exists on this host, building it if it does not.
+ * Guarantee `haive-cli-sandbox:latest` exists on this host and was built from the current
+ * definition (`sandboxCoreIdentity`), building it if not.
  *
  * Pass the image a caller is about to run so a host that pins its own base via
  * SANDBOX_IMAGE is left alone: building ours over an operator's tag would silently replace
  * their image. Callers that need the base by name (a `FROM` line, which ignores
  * SANDBOX_IMAGE) take the default.
  *
- * Present-image callers pay one `docker image inspect`; nothing is cached across calls
- * because the image can be pruned at any moment, which is the case this exists for.
+ * Present-image callers pay one `docker image inspect` and a read of the build context;
+ * nothing is cached across calls because the image can be pruned at any moment, which is
+ * the case this exists for.
  */
 export function ensureSandboxCoreImage(
   image: string = SANDBOX_CORE_IMAGE,
