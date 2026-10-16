@@ -831,9 +831,9 @@ bundleRoutes.post('/:id/sync', requireNewWorkAllowed, async (c) => {
 });
 
 /** Lazy file browser for a bundle's extracted/ tree. Returns flat
- *  `[{path,size}]` pairs (UI groups by `/`). Skips `.git/` to keep git-sourced
- *  bundles small and avoid leaking pack contents. Caps at 5000 entries to
- *  keep the response bounded; truncated flag tells the UI to warn the user. */
+ *  `[{path,size}]` pairs (UI groups by `/`). Lists regular files only and skips `.git/`
+ *  and `.DS_Store`, to keep git-sourced bundles small and avoid leaking pack contents.
+ *  Lists at most 5000 files; `truncated` says a file was left out, so the UI warns. */
 const FILES_LIST_CAP = 5000;
 
 async function listExtractedFiles(
