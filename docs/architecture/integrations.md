@@ -410,9 +410,12 @@ follows an http(s) remote's host.
   before its CLI starts, rather than running
   without the tools its prompt names.
 - **Tool names** (`integrationTools`): a tool is named by its operation id; when two declared tools
-  share one, every holder becomes `<requirementId>_<opId>` (other characters replaced by `_`). Every
+  share one, every holder becomes `<requirementId>_<opId>` (other characters replaced by `_`), and such
+  a name longer than 40 characters keeps its first 31, then `_` and the first 8 hex characters of the
+  sha256 of `<requirementId>\n<opId>`, so a long operation id never leaves a step unlistable. Every
   declared name is checked against `TOOL_NAME_PATTERN` and for uniqueness even while the write switch
-  is off, and a bad name throws, naming the requirement and the operation, instead of being skipped.
+  is off, and a bad name (a leading digit, a collision) throws, naming the requirement and the
+  operation, instead of being skipped.
 
 ## The broker
 
