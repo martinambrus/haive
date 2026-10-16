@@ -487,6 +487,13 @@ describe('comparePresence', () => {
     assert.deepEqual(check(names), ['alpha@0.3.0 is in the image, expected alpha@0.1.0']);
   });
 
+  it('fails a registry module linked into the image with no version to read', () => {
+    const names = A_API_NAMES.filter((n) => !n.includes('alpha@0.1.0'));
+    assert.deepEqual(check(names), [
+      'alpha is in the image with no version to read, expected alpha@0.1.0',
+    ]);
+  });
+
   it('compares no version for a local module, which the expectation gives none', () => {
     const names = [...A_API_NAMES, `${PNPM}/@haive-module+statistics@9.9.9/`];
     assert.deepEqual(check(names), ['registry module statistics is in the image but not expected']);

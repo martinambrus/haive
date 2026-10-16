@@ -252,7 +252,11 @@ export function comparePresence(key, footprint, folderNames, expect) {
   );
   for (const m of wanted) {
     if (m.version === undefined) continue;
-    for (const found of [...(registry.get(m.id) ?? [])].sort()) {
+    const versions = registry.get(m.id);
+    if (!web && m.source === 'registry' && versions?.size === 0) {
+      offend(`${m.id} is in the image with no version to read, expected ${m.id}@${m.version}`);
+    }
+    for (const found of [...(versions ?? [])].sort()) {
       if (found !== m.version) {
         offend(`${m.id}@${found} is in the image, expected ${m.id}@${m.version}`);
       }
