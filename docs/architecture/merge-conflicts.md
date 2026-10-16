@@ -185,8 +185,9 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   an abort git refused, a job that threw) leaves the report open with the reason shown and the button
   offered again; `moved`, `aborted` and `aborted-by-next` close it. For a same-branch merge both
   `moved` and `aborted` also put back the projections its set-aside moved away, with the owner and
-  mode it kept (`settleProjections`), and a `moved` reason then says so; a put-back that throws
-  fails the job, which is retried rather than settled. A cancel that finds such a merge already
+  mode it kept (`settleProjections`), and a `moved` reason then says so; a put-back that throws, or
+  whose re-sync did not finish, fails the job, which is retried rather than settled, so the report
+  stays open until the owner and mode go back. A cancel that finds such a merge already
   gone reports nothing but puts the files back the same way at once. A failure while recording a
   report throws, so the cancel is re-driven before `task.cancel_finished`; the page polls until that
   event is in and no abort it sent is still waiting. A resolver that clears a stale

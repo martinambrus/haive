@@ -404,19 +404,12 @@ describe('abortLeftMerge', () => {
       ]);
     });
 
-    it('keeps saying nothing was changed when a merge open there left nothing to put back', async () => {
+    it('stays open, and is retried, while Haive’s files could not be re-synced', async () => {
       git.revParse.mockResolvedValue(null);
       projections.settleProjections.mockResolvedValue(false);
       const { db, inserted } = settleFixture();
-      await abortLeftMerge(db, job);
-      expect(inserted).toEqual([
-        expect.objectContaining({
-          payload: expect.objectContaining({
-            outcome: 'moved',
-            reason: expect.stringContaining('nothing was changed'),
-          }),
-        }),
-      ]);
+      await expect(abortLeftMerge(db, job)).rejects.toThrow('not re-synced yet');
+      expect(inserted).toEqual([]);
     });
 
     it('settles an abort with its own reason', async () => {

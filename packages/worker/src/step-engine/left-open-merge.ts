@@ -375,6 +375,9 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
       changed = true;
       const save = saveByStepId(db, recorded.stepId);
       putBack = await settleProjections(db, task.repositoryId, recorded.state, save);
+      // The kept owner and mode are only put back by a settle that finished: the report stays open.
+      if (!putBack)
+        throw new Error("Haive's project files were not re-synced yet; abort again to retry");
     }
     const reason = putBack && decision.outcome === 'moved' ? movedReason(true) : decision.reason;
     await settle(db, taskId, target, decision.outcome, reason);
