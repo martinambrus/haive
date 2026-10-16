@@ -28,6 +28,7 @@ import {
   integrationTools,
   isProviderEnabled,
   parseIntegrationBindings,
+  writeAllowedBy,
   type ConnectionCredential,
   type IntegrationBinding,
   type IntegrationTool,
@@ -119,24 +120,6 @@ async function loadConnections(
       ),
     );
   return new Map(rows.map((row) => [row.id, row]));
-}
-
-/** A write operation is open when the task owner's switch for the provider is on. */
-async function writeAllowedBy(
-  db: Database,
-  ownerId: string,
-  connections: ReadonlyMap<string, Connection>,
-): Promise<(binding: IntegrationBinding) => boolean> {
-  const rows = await db
-    .select({
-      providerId: schema.integrationUserSettings.providerId,
-      writeEnabled: schema.integrationUserSettings.writeEnabled,
-    })
-    .from(schema.integrationUserSettings)
-    .where(eq(schema.integrationUserSettings.userId, ownerId));
-  const switches = new Map(rows.map((row) => [row.providerId, row.writeEnabled]));
-  return (binding) =>
-    switches.get(binding.providerId) === true && connections.has(binding.connectionId);
 }
 
 function declaredTools(
