@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   role: 'admin',
@@ -169,7 +169,13 @@ beforeEach(() => {
   h.setSecret.mockClear();
   h.deleteSecret.mockClear();
   h.connect.mockClear();
-  h.db = undefined;
+  h.db = {
+    insert: (table: unknown) => ({
+      values: async (row: unknown) => {
+        h.audits.push({ table, row });
+      },
+    }),
+  };
   h.audits = [];
   h.auditLog.info.mockClear();
   h.auditLog.error.mockClear();
@@ -181,6 +187,11 @@ beforeEach(() => {
   h.role = 'admin';
   h.flags = new Map();
   h.settings = { ...SAVED };
+});
+
+afterEach(() => {
+  // recordAuditEvent swallows a failed insert into this logger, so a broken audit would pass unseen.
+  expect(h.auditLog.error).not.toHaveBeenCalled();
 });
 
 describe('GET /global-kb/config', () => {
@@ -886,7 +897,7 @@ describe('POST /global-kb/test-db', () => {
     expect(await reached.json()).toEqual({ ok: true, message: 'External DB reachable' });
     expect(h.connect).toHaveBeenCalledWith(
       expect.objectContaining({ mode: 'external', connectionString: CONNECTION }),
-      undefined,
+      h.db,
     );
 
     h.connect.mockRejectedValueOnce(new Error('connect ECONNREFUSED 169.254.169.254:5432'));
