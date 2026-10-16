@@ -201,9 +201,10 @@ sandbox or loses the one it has. A Stop takes the Retry's steps in one transacti
 are killed only once it commits. No reader sees a run cancelled beside a step still running, and a
 Stop that fails leaves every run as it was and kills nothing. When the Stop's own update fails the
 task it returns that update's `completedAt` as `failedAt`, and the `task.stopped` event an
-administrator's Stop writes carries it: the task page names a stop as the cause of a failure only
-when that stamp equals the task's `completedAt` (`loadTaskStop`), since the event is written after
-the kill and a Retry that failed in between would otherwise read as the stop's. The allowance auto-resume
+administrator's Stop writes carries it: the task page and the task list name a stop as the cause of
+a failure only when that stamp equals the task's `completedAt` (`loadTaskStop`, and `loadTaskStops`
+for a page of the list in one query, both reading a task's newest 50 stops), since the event is
+written after the kill and a Retry that failed in between would otherwise read as the stop's. The allowance auto-resume
 (`autoResumeFailedStep`) writes in the same order, its claim on the failed task last, and a claim it
 loses takes back every write before it. While new work is refused it does nothing at all, whatever status it read — no write,
 no job, no attempt spent — and the next poll resumes the task once the state is normal again. When the state cannot be read
