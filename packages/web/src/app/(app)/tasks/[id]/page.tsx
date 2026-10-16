@@ -582,8 +582,8 @@ interface TaskDetailResponse {
   loggedCallCount?: number;
   /** Those of them still running. Absent on an older server. */
   runningCallCount?: number;
-  /** CLI runs of the task whose result has landed. Absent on an older server. */
-  finishedRunCount?: number;
+  /** Digest of the CLI runs of the task whose result has landed. Absent on an older server. */
+  finishedRunsRevision?: string;
   /** Currency + dated FX rate the server resolved for THIS task, so costs render the
    *  same on every later view. Absent on an older server: fall back to USD. */
   costDisplay?: CostDisplay | null;
@@ -699,7 +699,7 @@ export default function TaskDetailPage() {
   const [providerBreakdown, setProviderBreakdown] = useState<TaskProviderUsage[]>([]);
   const [loggedCallCount, setLoggedCallCount] = useState(0);
   const [runningCallCount, setRunningCallCount] = useState(0);
-  const [finishedRunCount, setFinishedRunCount] = useState(0);
+  const [finishedRunsRevision, setFinishedRunsRevision] = useState('');
   const [parentTask, setParentTask] = useState<LinkedTask | null>(null);
   const [childTasks, setChildTasks] = useState<LinkedTask[]>([]);
   const [promotedDraftCount, setPromotedDraftCount] = useState(0);
@@ -815,7 +815,7 @@ export default function TaskDetailPage() {
       setProviderBreakdown(data.providerBreakdown ?? []);
       setLoggedCallCount(data.loggedCallCount ?? 0);
       setRunningCallCount(data.runningCallCount ?? 0);
-      setFinishedRunCount(data.finishedRunCount ?? 0);
+      setFinishedRunsRevision(data.finishedRunsRevision ?? '');
       setCostDisplay(data.costDisplay ?? USD_DISPLAY);
       setParentTask(data.parentTask ?? null);
       setChildTasks(data.childTasks ?? []);
@@ -2195,7 +2195,7 @@ export default function TaskDetailPage() {
                   taskCompletedAt={task.completedAt ?? null}
                   loggedCallCount={loggedCallCount}
                   runningCallCount={runningCallCount}
-                  finishedRunCount={finishedRunCount}
+                  finishedRunsRevision={finishedRunsRevision}
                 />
               </div>
             </PersistedDetails>

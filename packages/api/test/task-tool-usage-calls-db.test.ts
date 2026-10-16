@@ -549,7 +549,7 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
       return (await res.json()) as {
         loggedCallCount: number;
         runningCallCount: number;
-        finishedRunCount: number;
+        finishedRunsRevision: string;
         steps: Array<{ cliInvocationCount: number }>;
       };
     };
@@ -646,9 +646,9 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
       expect(await answer()).toEqual([3, 0]);
     });
 
-    it('counts the runs of the task whose result has landed, and no other run', async () => {
-      const finished = async () => (await detail(LIVE_TASK)).finishedRunCount;
-      const endedAt = new Date('2026-10-16T09:00:00.000Z');
+    describe('finishedRunsRevision', () => {
+      const revision = async () => (await detail(LIVE_TASK)).finishedRunsRevision;
+      const at = (time: string) => new Date(`2026-10-16T${time}.000Z`);
       const add = async (over: Partial<typeof schema.cliInvocations.$inferInsert> = {}) => {
         const [row] = await db
           .insert(schema.cliInvocations)
@@ -656,29 +656,93 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
           .returning({ id: schema.cliInvocations.id });
         return row!.id;
       };
-      expect(await finished()).toBe(0);
+      const finishedRuns = async () => {
+        const [row] = (await db.execute(
+          sql`select count(*)::int as n from cli_invocations
+            where task_id = ${LIVE_TASK} and superseded_at is null and ended_at is not null
+              and (task_step_id is not null or summary_for_step_id is not null)`,
+        )) as unknown as Array<{ n: number }>;
+        return row!.n;
+      };
 
-      const running = await add();
-      expect(await finished()).toBe(0);
+      it('moves for a run of the task whose result has landed, and for no other run', async () => {
+        const none = await revision();
+        expect(none).toBe('');
 
-      await db
-        .update(schema.cliInvocations)
-        .set({ endedAt })
-        .where(eq(schema.cliInvocations.id, running));
-      expect(await finished()).toBe(1);
+        const running = await add();
+        expect(await revision()).toBe(none);
 
-      await add({ endedAt, supersededAt: endedAt });
-      expect(await finished()).toBe(1);
+        await db
+          .update(schema.cliInvocations)
+          .set({ endedAt: at('09:00:00') })
+          .where(eq(schema.cliInvocations.id, running));
+        const one = await revision();
+        expect(one).not.toBe(none);
+        expect(await revision()).toBe(one);
 
-      await add({ taskStepId: null, summaryForStepId: liveStep, endedAt });
-      expect(await finished()).toBe(2);
+        await add({ endedAt: at('09:00:00'), supersededAt: at('09:00:00') });
+        expect(await revision()).toBe(one);
 
-      await add({ taskStepId: null, endedAt });
-      expect(await finished()).toBe(2);
+        await add({ taskStepId: null, summaryForStepId: liveStep, endedAt: at('09:00:00') });
+        const two = await revision();
+        expect(two).not.toBe(one);
 
-      const usage = await app.request(`/tasks/${LIVE_TASK}/tool-usage`);
-      expect(((await usage.json()) as Body).coverage.total).toBe(2);
-      expect((await detail(TASK)).finishedRunCount).toBe(0);
+        await add({ taskStepId: null, endedAt: at('09:00:00') });
+        expect(await revision()).toBe(two);
+
+        const usage = await app.request(`/tasks/${LIVE_TASK}/tool-usage`);
+        expect(((await usage.json()) as Body).coverage.total).toBe(2);
+        expect((await detail(TASK)).finishedRunsRevision).toBe('');
+      });
+
+      it('moves when a finished run is replaced and its replacement finishes, though their number stays', async () => {
+        const replaced = await add({ endedAt: at('09:10:00'), toolUsage: OBSERVED });
+        const before = { number: await finishedRuns(), revision: await revision() };
+
+        await db
+          .update(schema.cliInvocations)
+          .set({ supersededAt: at('09:20:00') })
+          .where(eq(schema.cliInvocations.id, replaced));
+        await add({ endedAt: at('09:30:00'), toolUsage: OBSERVED });
+        const after = { number: await finishedRuns(), revision: await revision() };
+
+        expect(after.number).toBe(before.number);
+        expect(after.revision).not.toBe(before.revision);
+      });
+
+      it('moves when the record of a finished run is written after its end', async () => {
+        const ended = await add({ endedAt: at('09:40:00') });
+        const before = await revision();
+
+        await db
+          .update(schema.cliInvocations)
+          .set({ toolUsage: OBSERVED })
+          .where(eq(schema.cliInvocations.id, ended));
+        expect(await revision()).not.toBe(before);
+      });
+
+      it('moves when a finished run ends again', async () => {
+        const ended = await add({ endedAt: at('09:50:00'), toolUsage: OBSERVED });
+        const before = await revision();
+
+        await db
+          .update(schema.cliInvocations)
+          .set({ endedAt: at('09:55:00') })
+          .where(eq(schema.cliInvocations.id, ended));
+        expect(await revision()).not.toBe(before);
+      });
+
+      it('tells a replaced run from its replacement even when both ended at the same instant', async () => {
+        const replaced = await add({ endedAt: at('10:00:00'), toolUsage: OBSERVED });
+        const before = await revision();
+
+        await db
+          .update(schema.cliInvocations)
+          .set({ supersededAt: at('10:05:00') })
+          .where(eq(schema.cliInvocations.id, replaced));
+        await add({ endedAt: at('10:00:00'), toolUsage: OBSERVED });
+        expect(await revision()).not.toBe(before);
+      });
     });
   });
 });

@@ -136,13 +136,13 @@ export function TaskToolUsagePanel({
   taskCompletedAt,
   loggedCallCount,
   runningCallCount,
-  finishedRunCount,
+  finishedRunsRevision,
 }: {
   taskId: string;
   taskCompletedAt: string | null;
   loggedCallCount: number;
   runningCallCount: number;
-  finishedRunCount: number;
+  finishedRunsRevision: string;
 }) {
   const [data, setData] = useState<TaskToolUsage | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -161,7 +161,7 @@ export function TaskToolUsagePanel({
     return () => {
       cancelled = true;
     };
-  }, [taskId, taskCompletedAt, loggedCallCount, runningCallCount, finishedRunCount]);
+  }, [taskId, taskCompletedAt, loggedCallCount, runningCallCount, finishedRunsRevision]);
 
   if (error && !data) return <p className="text-xs text-red-400">{error}</p>;
   if (!data) return <p className="text-xs text-neutral-500">Loading tool usage…</p>;

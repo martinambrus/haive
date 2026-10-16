@@ -432,17 +432,19 @@ export function rolledUpRunsOf(taskId: string): SQL {
   )!;
 }
 
-/** Runs of the task whose result has landed: the ones GET /tasks/:id/tool-usage rolls up, once
- *  they have an end. The result handler sets `tool_usage` in the same update as `ended_at`. */
-export async function loadFinishedRunCount(
+/** Digest of the rolled-up runs that have ended: which, when, and whether `tool_usage` is written.
+ *  Not their number, which stays put when a run is replaced and its replacement finishes. */
+export async function loadFinishedRunsRevision(
   db: ReturnType<typeof getDb>,
   taskId: string,
-): Promise<number> {
+): Promise<string> {
+  const inv = schema.cliInvocations;
+  const runState = sql`concat_ws(' ', ${inv.id}, ${inv.endedAt}, ${inv.toolUsage} is not null)`;
   const [row] = await db
-    .select({ n: sql<number>`count(*)::int` })
-    .from(schema.cliInvocations)
-    .where(and(rolledUpRunsOf(taskId), isNotNull(schema.cliInvocations.endedAt)));
-  return row?.n ?? 0;
+    .select({ revision: sql<string | null>`md5(string_agg(${runState}, ',' order by ${inv.id}))` })
+    .from(inv)
+    .where(and(rolledUpRunsOf(taskId), isNotNull(inv.endedAt)));
+  return row?.revision ?? '';
 }
 
 /** `task_steps.id` of every step in `taskIds` that is WHOLLY parked on the agent gate: it holds
