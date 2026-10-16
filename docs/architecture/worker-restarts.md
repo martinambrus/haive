@@ -150,7 +150,9 @@ written only while it is not `failed`, so a task that failed after that read is 
 answer routes read the task's status inside their own
 transaction, with no row lock (one taken before the step write would cross a Retry's order: step rows
 first, the task row last), and admit a failed task through the same fence, 503 while new work is
-held. Each route also sets the task `running` itself, in the transaction that writes the answer and
+held. Every admission takes the fence before any repository lock (`withRepositoryTaskLock` admits first, as do the
+plan merge and advisory routes), the order the worker's reopen and revival keep: the reverse order deadlocks once a
+drain's exclusive request queues between the two. Each route also sets the task `running` itself, in the transaction that writes the answer and
 before it queues the advance, so a drain that takes the fence right after counts it live (a
 clarification answer rides `task_events` rather than the job besides); it does so only when that read
 found the task failed: a task that fails after the read keeps the answer and stays failed until a
@@ -293,7 +295,11 @@ when its whole run list does, a snapshot-less one when the step ids its last `ta
 step do. Judging a snapshot-less task by its current step alone revived one whose death named a step that was still
 missing, and its first job killed it again on every boot. `reviveDeadTask` clears the mark under the epoch
 compare-and-swap, records `task.revived`, and enqueues the job the task's status is owed: a start for a queued task,
-an advance for a running one, none for a form that is still parked.
+an advance for a running one, none for a form that is still parked. It first takes the shared new-work fence and
+reads the state past the cache: while new work is held, or the state cannot be read, it writes nothing (the updater
+starts the target worker in maintenance, so a revived task would otherwise run during verify and commit). A boot pass
+that held a revival back retries the revival alone every 30 s (`retryHeldRevivals`), never the boot-only marking or
+run supersede, until a pass holds none back; shutdown stops it.
 
 **Runs.** cli-exec ends a dead task's run instead of starting it (ended, superseded, exit 137): one dispatched after
 the mark, or requeued at run time, would otherwise still spend a CLI call. A run already started when the mark lands
