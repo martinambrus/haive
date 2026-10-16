@@ -25,6 +25,7 @@ import type {
   SubAgentInvocation,
   SubAgentSpec,
 } from '../cli-adapters/types.js';
+import type { IntegrationBinding } from '@haive/shared/integrations';
 import { TEMPLATE_PERSONA_MARKER_PATTERN } from '@haive/shared/modularity';
 import { splitSubAgentForProvider } from '../sub-agent-emulator/splitter.js';
 import {
@@ -168,6 +169,8 @@ export interface DispatchRequest {
   toolProfile?: 'rag_only' | 'none';
   /** The custom tools a prompt step's author defined, by name; set by that step's own dispatch only. */
   customTools?: string[];
+  /** The accounts a step's declared integrations resolved to; a non-empty list implies `requiresMcp`. */
+  integrations?: IntegrationBinding[];
   /** A provider whose CLI cannot host MCP servers is ineligible, as for a dispatch needing sub-agents. */
   requiresMcp?: boolean;
   /** Computed by resolveTaskDispatch. Exposed on the pure resolver only for
@@ -343,7 +346,13 @@ export async function resolveTaskDispatch(
     resolveInvocationUsesWorktreeGitBoundary(db, taskId, req.worktreeRel),
     req.toolProfile === 'none'
       ? emptyMcpSurface()
-      : resolveMcpSurface(db, taskId, req.toolProfile === 'rag_only', req.customTools),
+      : resolveMcpSurface(
+          db,
+          taskId,
+          req.toolProfile === 'rag_only',
+          req.customTools,
+          req.integrations,
+        ),
     resolveGlobalKbContext(db, taskId, { houseRules: houseRules !== undefined }),
     resolveAppReach(db, taskId),
     resolveCodexAppServerVerdicts(db, taskId),
@@ -594,6 +603,7 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
   const needsSubagents = req.input.capabilities.includes('subagents');
   const needsVision = req.input.capabilities.includes('vision');
 
+  const requiresMcp = req.requiresMcp === true || (req.integrations?.length ?? 0) > 0;
   let sawWithoutMcp = false;
   let sawWithMcp = false;
   for (const { provider, adapter } of dispatchCandidates(enabled, req.preferredProviderId ?? null, {
@@ -601,7 +611,7 @@ export function resolveDispatch(req: DispatchRequest): DispatchPlan {
     preferVision: req.preferVision,
     registry: req.registry,
   })) {
-    if (req.requiresMcp === true) {
+    if (requiresMcp) {
       if (!adapter.supportsMcp) {
         sawWithoutMcp = true;
         continue;
