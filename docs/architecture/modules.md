@@ -44,7 +44,10 @@ the module loads again.
   task it could not stop or whose kill or record failed. The code stays loaded: its api routes and
   settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget; compiled module
   pages and widgets render only for modules that list names) and the composer palette drops its steps.
-  The worker starts no job of a module that is deactivated when it boots, and a reconcile every 15 s
+  The worker neither ensures the schema of nor starts any job of a module that is deactivated when it
+  boots (so a restart after Tear down leaves the dropped schema dropped; it reads the deactivated set
+  at the schema step and again right before starting jobs, and holds back the union), and a reconcile
+  every 15 s
   (`MODULE_JOBS_RECONCILE_MS`, `modules/loader.ts`) stops the jobs of one deactivated since. A stop
   still running after `MODULE_JOB_STOP_WAIT_MS` (10 s) is logged once and left running: the pass goes
   on with the other modules, a later pass or the shutdown waits on that same stop instead of calling it
@@ -53,7 +56,15 @@ the module loads again.
   `MODULE_JOB_START_WAIT_MS` (10 s) is logged once and left running: the pass goes on, no later pass
   starts the module again meanwhile, and a late success counts as started, so a pass that sees the
   module deactivated by then stops it. A failed
-  ensure or start is logged and waits for the next deactivation and activation. A task type that uses the module, as its source or through any step, is
+  ensure or start is tried again on the next passes, at most `MODULE_REACTIVATION_ATTEMPTS` (3) per
+  reactivation; after the last one only a worker error log says so, until the next deactivation and
+  activation. A pass sees an activation by the module row's `updated_at` too, which every activate
+  and deactivate moves: when the stamp differs from the previous pass's (the first pass only records
+  it), the module counts as activated again, so its attempts start afresh, a start still running from
+  before is not counted if it fails, and a module that is not running its jobs is tried again. A
+  deactivation and activation that both fall between two passes are seen this way; any other write
+  to the row does the same to an idle module. A task type that uses the module, as its source or
+  through any step, is
   listed unavailable with the reason `module-deactivated`, and creating a task of it is refused with
   409 `module-deactivated`; the create reads the module rows `FOR KEY SHARE`, so a deactivation running
   at the same moment waits and then counts the new task. A task that reaches one of its steps later, after a Retry or a revive,
@@ -161,7 +172,10 @@ history entry, image config or build log, and a build with no secret behaves as 
 `HAIVE_NPMRC` (unset by default) names an `.npmrc` holding the auth line: `docker-compose.dev.yml`
 passes it as the `npmrc` build secret to the dev-libs, api, worker and web builds and mounts it
 read-only at `/root/.npmrc` in db-migrate, whose install runs at start. It must name an existing
-file: Docker creates a missing bind source as a root-owned directory. BuildKit reuses a cached
+file: Docker creates a missing bind source as a root-owned directory. Compose builds through
+buildx bake, which refuses a build secret file outside the project (the `/dev/null` default
+included) unless `BUILDX_BAKE_ENTITLEMENTS_FS=0`; `scripts/dev.sh` and the CI compose jobs set it, so
+a hand-run `docker compose build` fails on that secret. BuildKit reuses a cached
 install layer after the token is revoked or changed, so only an uncached install notices a
 revocation. `.dockerignore` keeps every nested `.npmrc`, `.env` and `.git` out of the build
 contexts (the root `.npmrc`, which the Dockerfiles copy, stays).

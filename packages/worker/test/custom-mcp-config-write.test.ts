@@ -72,6 +72,7 @@ const db = {
     envTemplates: { findFirst: async () => undefined },
     taskSteps: { findFirst: async () => ({ output: null, stepId: STEP_ID }) },
     repositories: { findFirst: async () => undefined },
+    cliInvocations: { findFirst: async () => undefined },
   },
 } as unknown as Database;
 

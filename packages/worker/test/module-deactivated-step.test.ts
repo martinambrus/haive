@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { computeStepContribution, computeTaskTiming } from '@haive/shared/timing';
-import { moduleDeactivationMessage } from '../src/modules/activation.js';
+import { moduleActivationState, moduleDeactivationMessage } from '../src/modules/activation.js';
 import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
@@ -414,6 +414,31 @@ describe.skipIf(!url)('module activation guard on Postgres', () => {
     expectNamedReason((await moduleDeactivationMessage(db, 'module.alpha.x')) ?? '');
     await expect(moduleDeactivationMessage(db, 'module.alpha-two.x')).resolves.toBeNull();
     await expect(moduleDeactivationMessage(db, 'module.ghost.x')).resolves.toBeNull();
+  });
+
+  it('reads the deactivated modules and the updated_at of every module in one query', async () => {
+    const at = new Date('2026-10-14T08:30:00.250Z');
+    await setModule('alpha', OFF);
+    await setModule('alpha-two', null);
+    await db
+      .update(schema.modules)
+      .set({ updatedAt: at })
+      .where(eq(schema.modules.moduleId, 'alpha'));
+    let selects = 0;
+    const counted = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'select') selects += 1;
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const state = await moduleActivationState(counted);
+
+    expect(selects).toBe(1);
+    expect(state.deactivated).toEqual(new Set(['alpha']));
+    expect([...state.stamps.keys()].sort()).toEqual(['alpha', 'alpha-two']);
+    expect(state.stamps.get('alpha')).toBe(at.getTime());
   });
 
   it('waits, when locking, for a deactivation that holds the row, then names the module', async () => {
