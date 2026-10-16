@@ -32,7 +32,11 @@ import { applyKbWrites } from '../src/step-engine/steps/onboarding/_kb-write.js'
 import { restoreRulesImportStubs } from '../src/step-engine/steps/onboarding/_rules-files.js';
 import { ensureGitExcludeEntry } from '../src/repo/git-init.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
-import { RECORD_WRITE_TABLES, recordWritten } from './support/upgrade-apply-record.js';
+import {
+  RECORD_WRITE_TABLES,
+  recordWritten,
+  ROLLBACK_RECORD_WRITE_TABLES,
+} from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -263,6 +267,7 @@ describe('04 and a rules file that is not UTF-8', () => {
       customBundles: schema.customBundles,
       customBundleItems: schema.customBundleItems,
       cliProviders: schema.cliProviders,
+      ...ROLLBACK_RECORD_WRITE_TABLES,
     });
     const prior = fake.insert(schema.onboardingArtifacts, {
       userId: USER,
@@ -323,7 +328,7 @@ describe('04 and a rules file that is not UTF-8', () => {
       newArtifactsToUndo: [],
       warnings: [],
     };
-    return upgradeRollbackStep.apply(ctx, { detected } as never);
+    return recordWritten(upgradeRollbackStep.apply(ctx, { detected } as never));
   }
 
   it('keeps every byte of an AGENTS.md whose region it would put back over the upgrade', async () => {

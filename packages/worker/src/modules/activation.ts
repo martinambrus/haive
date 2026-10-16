@@ -29,3 +29,22 @@ export async function deactivatedModuleIds(db: Database): Promise<Set<string>> {
     .where(isNotNull(schema.modules.deactivatedAt));
   return new Set(rows.map((row) => row.moduleId));
 }
+
+/** One read, so a module's stamp and its deactivation are of the same moment. */
+export async function moduleActivationState(
+  db: Database,
+): Promise<{ deactivated: Set<string>; stamps: Map<string, number> }> {
+  const rows = await db
+    .select({
+      moduleId: schema.modules.moduleId,
+      deactivatedAt: schema.modules.deactivatedAt,
+      updatedAt: schema.modules.updatedAt,
+    })
+    .from(schema.modules);
+  return {
+    deactivated: new Set(
+      rows.filter((row) => row.deactivatedAt !== null).map((row) => row.moduleId),
+    ),
+    stamps: new Map(rows.map((row) => [row.moduleId, row.updatedAt.getTime()])),
+  };
+}

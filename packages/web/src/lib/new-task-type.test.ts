@@ -235,6 +235,19 @@ describe('cliMemoryRepositoryId', () => {
     expect(cliMemoryRepositoryId(pickers, '')).toBeNull();
     expect(cliMemoryRepositoryId(newTaskFields(custom(), null), 'repo-1')).toBeNull();
   });
+
+  it('asks across repositories, as the empty string, only for a type that needs none', () => {
+    const fieldsOf = (over: Partial<PublicTaskType>) => newTaskFields(custom(over), null);
+    const repoless = fieldsOf({ requiresRepository: false, dispatchesCli: true });
+    expect(cliMemoryRepositoryId(repoless, '')).toBe('');
+    expect(cliMemoryRepositoryId(repoless, 'repo-1')).toBe('repo-1');
+    expect(
+      cliMemoryRepositoryId(fieldsOf({ requiresRepository: true, dispatchesCli: true }), ''),
+    ).toBeNull();
+    expect(
+      cliMemoryRepositoryId(fieldsOf({ requiresRepository: false, dispatchesCli: false }), ''),
+    ).toBeNull();
+  });
 });
 
 const BASE: Omit<NewTaskBodyInput, 'type' | 'fields' | 'title'> = {

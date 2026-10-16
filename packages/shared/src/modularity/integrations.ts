@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { formSchemaSchema } from '../schemas/form.js';
+import { HIDDEN_CHARACTER } from '../utils/hidden-characters.js';
 import { TOOL_NAME_PATTERN, isCategoryId, isProviderId } from './contracts.js';
 
 const httpsUrlSchema = z.string().refine((value) => {
@@ -27,10 +28,37 @@ export const userInfoSpecSchema = z.object({
 });
 export type UserInfoSpec = z.infer<typeof userInfoSpecSchema>;
 
+/** What buildAuthorizeUrl sets itself: a provider's own parameters may not take these names. */
+export const AUTHORIZE_RESERVED_PARAMS: ReadonlySet<string> = new Set([
+  'response_type',
+  'client_id',
+  'redirect_uri',
+  'scope',
+  'state',
+  'code_challenge',
+  'code_challenge_method',
+]);
+
+// HIDDEN_CHARACTER leaves TAB and LF allowed, and one line holds neither.
+const isPrintableLine = (text: string) => !HIDDEN_CHARACTER.test(text) && !/[\t\n]/.test(text);
+
+const authorizeParamsSchema = z.record(z.string(), z.string()).superRefine((params, ctx) => {
+  for (const [name, value] of Object.entries(params)) {
+    const fail = (message: string) => ctx.addIssue({ code: 'custom', message, path: [name] });
+    if (name === '') fail('the name must not be empty');
+    else if (!isPrintableLine(name)) fail('the name must be one printable line');
+    else if (AUTHORIZE_RESERVED_PARAMS.has(name.toLowerCase())) {
+      fail(`${name} is set by the sign-in itself and cannot be overridden`);
+    }
+    if (!isPrintableLine(value)) fail('the value must be one printable line');
+  }
+});
+
 export const authMethodSpecSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('oauth2'),
     authorizeUrl: httpsUrlSchema,
+    authorizeParams: authorizeParamsSchema.optional(),
     tokenUrl: httpsUrlSchema,
     revokeUrl: httpsUrlSchema.optional(),
     scopes: scopeSetSchema,

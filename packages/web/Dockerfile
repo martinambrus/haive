@@ -22,7 +22,9 @@ COPY packages/worker/package.json ./packages/worker/
 COPY packages/web/package.json ./packages/web/
 COPY packages/web-kit/package.json ./packages/web-kit/
 COPY modules ./modules
-RUN pnpm install --frozen-lockfile
+# The @haive-module registry token reaches pnpm only through this optional BuildKit secret: never
+# an ARG or ENV, and never a line in /app/.npmrc.
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc pnpm install --frozen-lockfile
 
 FROM deps AS builder
 ARG NEXT_PUBLIC_API_URL=http://localhost:3001
@@ -50,5 +52,7 @@ ENV PORT=3000
 COPY --from=builder /app/packages/web/public ./packages/web/public
 COPY --from=builder /app/packages/web/.next/standalone ./
 COPY --from=builder /app/packages/web/.next/static ./packages/web/.next/static
+# The module web parts this image compiled in; a channel build reads it back before it pushes.
+COPY --from=builder /app/packages/web/src/generated/modules.json ./packages/web/modules.generated.json
 EXPOSE 3000
 CMD ["node", "packages/web/server.js"]

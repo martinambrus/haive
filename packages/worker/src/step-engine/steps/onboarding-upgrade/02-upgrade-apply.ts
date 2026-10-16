@@ -458,6 +458,9 @@ export interface UpgradeApplyOutput {
   /** Every row this run untracked: superseded with its file left alone, so a rollback puts it back
    *  live. Optional likewise. */
   untrackedRowIds?: string[];
+  /** What the project state record write did; 'failed' when it or the retire block after it threw.
+   *  Optional because it is read back from a persisted output that may predate it. */
+  recordWrite?: 'written' | 'failed' | 'skipped';
 }
 
 /** What a row records about the bytes at its path. */
@@ -1822,6 +1825,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
     ctx.throwIfCancelled();
     let recordWritten = false;
+    let recordWrite: UpgradeApplyOutput['recordWrite'] = 'written';
     // Any entry this attempt saw there means an earlier record no longer proves this task removed it.
     const seenPresent = new Set<string>();
     // Voided in the database too, so a retry after a crash does not count those records again.
@@ -1900,6 +1904,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       const failed = recordWritten
         ? 'the record was written, but retiring the files it replaces failed'
         : 'project state record write failed';
+      recordWrite = 'failed';
       warnings.push(`${failed}: ${message}`);
       ctx.logger.warn({ err }, failed);
       // What this task removed, now or in an earlier attempt, is still listed.
@@ -1966,6 +1971,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       rtkBlockStrips,
       rtkBlockRestores,
       untrackedRowIds,
+      recordWrite,
     };
   },
 };

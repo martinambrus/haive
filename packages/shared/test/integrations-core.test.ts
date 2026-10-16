@@ -137,6 +137,61 @@ describe('buildAuthorizeUrl', () => {
     const url = new URL(buildAuthorizeUrl({ ...input, scopes: [] }));
     expect(url.searchParams.has('scope')).toBe(false);
   });
+
+  it("adds the provider's own parameters after the OAuth ones, in the order given", () => {
+    const url = new URL(
+      buildAuthorizeUrl({
+        ...input,
+        authorizeUrl: 'https://auth.example.com/authorize',
+        authorizeParams: { prompt: 'consent', access_type: 'offline', hd: 'example.com' },
+      }),
+    );
+    expect([...url.searchParams.keys()]).toEqual([
+      'response_type',
+      'client_id',
+      'redirect_uri',
+      'scope',
+      'state',
+      'code_challenge',
+      'code_challenge_method',
+      'prompt',
+      'access_type',
+      'hd',
+    ]);
+    expect(url.searchParams.get('access_type')).toBe('offline');
+    expect(url.searchParams.get('prompt')).toBe('consent');
+  });
+
+  it('keeps every parameter it sets itself whatever the provider asks, in any letter case', () => {
+    const names = [
+      'response_type',
+      'client_id',
+      'redirect_uri',
+      'scope',
+      'state',
+      'code_challenge',
+      'code_challenge_method',
+    ];
+    const hostile = Object.fromEntries(
+      names.flatMap((name) => [
+        [name, 'provider-value'],
+        [name.toUpperCase(), 'provider-value'],
+      ]),
+    );
+
+    expect(buildAuthorizeUrl({ ...input, authorizeParams: hostile })).toBe(
+      buildAuthorizeUrl(input),
+    );
+  });
+
+  it('percent-encodes a provider value, so it cannot add a parameter of its own', () => {
+    const url = new URL(
+      buildAuthorizeUrl({ ...input, authorizeParams: { login_hint: 'a&state=evil#frag' } }),
+    );
+    expect(url.searchParams.get('login_hint')).toBe('a&state=evil#frag');
+    expect(url.searchParams.getAll('state')).toEqual(['state-1']);
+    expect(url.hash).toBe('');
+  });
 });
 
 describe('exchangeAuthorizationCode', () => {

@@ -65,12 +65,16 @@ import { TerminalSessionManager } from './terminal/terminal-session-manager.js';
 import { bootStepEngine } from './step-engine/boot.js';
 import { MODULE_JOBS_RECONCILE_MS, startModuleJobs } from './modules/loader.js';
 import { startModuleControlWorker } from './queues/module-control-queue.js';
-import { deactivatedModuleIds } from './modules/activation.js';
+import { deactivatedModuleIds, moduleActivationState } from './modules/activation.js';
 
 async function main(): Promise<void> {
   const buildStamp = initBuildStamp();
   const { repoStoragePath, bundleStoragePath } = await bootstrap();
-  const { loaded: loadedModules, entries: moduleEntries } = await bootStepEngine(getDb());
+  const {
+    loaded: loadedModules,
+    entries: moduleEntries,
+    deactivated: deactivatedAtBoot,
+  } = await bootStepEngine(getDb());
   // Reap any cli sandbox containers left behind by a prior worker that died
   // mid-job (tsx watch restart, SIGKILL, OOM). BullMQ will redeliver the
   // job to this worker once its lock expires; we want a clean slate to
@@ -263,10 +267,11 @@ async function main(): Promise<void> {
   const cliStreamLogReaper = new CliStreamLogReaper({ db: getDb() });
   cliStreamLogReaper.start();
 
+  // Held back if deactivated at the schema read or now; the first pass starts one active by then.
   const moduleJobs = await startModuleJobs(
     loadedModules,
     moduleEntries,
-    await deactivatedModuleIds(getDb()),
+    new Set([...deactivatedAtBoot, ...(await deactivatedModuleIds(getDb()))]),
   );
   // After the module jobs: a teardown refuses a module whose jobs this worker started.
   const moduleControlWorker = startModuleControlWorker({
@@ -276,7 +281,8 @@ async function main(): Promise<void> {
   let moduleJobsPass: Promise<void> | null = null;
   const reconcileModuleJobs = async (): Promise<void> => {
     try {
-      await moduleJobs.reconcile(await deactivatedModuleIds(getDb()));
+      const { deactivated, stamps } = await moduleActivationState(getDb());
+      await moduleJobs.reconcile(deactivated, stamps);
     } catch (err) {
       logger.warn({ err }, 'module jobs reconcile skipped');
     }

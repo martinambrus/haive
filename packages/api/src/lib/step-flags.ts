@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CLI_DISPATCH_STEPS,
@@ -104,12 +105,13 @@ export async function loadStepFlags(
 
 /** The task's flags: the catalog's, plus one entry per prompt step the task pinned at creation.
  *  A prompt step always dispatches a CLI, cannot be skipped and has no roles. Returns a copy when
- *  it adds anything, so the cached catalog map is never written to. */
+ *  it adds anything, so the cached catalog map is never written to. `requiresRepository` is the
+ *  task type's flag, as the composer reads it. */
 export function withTaskCustomSteps(
   flags: StepFlagMap,
   task: {
     type: string;
-    repositoryId: string | null;
+    requiresRepository: boolean;
     runListSnapshot: readonly string[] | null;
     customSteps: Record<string, unknown> | null;
   },
@@ -130,10 +132,32 @@ export function withTaskCustomSteps(
       providerSensitive: false,
       cliRoles: null,
       stepIndex: index,
-      composable: derivePromptStepComposable(entry, task.type, task.repositoryId !== null),
+      composable: derivePromptStepComposable(entry, task.type, task.requiresRepository),
     });
   }
   return merged;
+}
+
+/** The task's flags, reading its type's repository flag only when the task pinned a prompt step. */
+export async function loadTaskStepFlags(
+  db: Pick<ReturnType<typeof getDb>, 'select'>,
+  task: {
+    type: string;
+    runListSnapshot: readonly string[] | null;
+    customSteps: Record<string, unknown> | null;
+  },
+): Promise<StepFlagMap> {
+  const flags = await loadStepFlags(db);
+  if (Object.keys(task.customSteps ?? {}).length === 0) return flags;
+  const [definition] = await db
+    .select({ requiresRepository: schema.taskTypeDefinitions.requiresRepository })
+    .from(schema.taskTypeDefinitions)
+    .where(eq(schema.taskTypeDefinitions.slug, task.type))
+    .limit(1);
+  return withTaskCustomSteps(flags, {
+    ...task,
+    requiresRepository: definition?.requiresRepository ?? true,
+  });
 }
 
 function issueKey(issue: CompositionIssue): string {

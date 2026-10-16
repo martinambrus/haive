@@ -134,6 +134,8 @@ for (const name of new Set([...registryNames(workerPackage), ...registryNames(we
 
 // Copy of the exact-version pattern in scripts/module.mjs; scripts/test/gen-modules.test.mjs pins the two equal.
 const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+// Set by scripts/module.mjs, whose lockfile-only install leaves node_modules behind: skips the installed-version check below.
+const INSTALL_MAY_LAG = 'HAIVE_INSTALL_MAY_LAG';
 for (const name of apiRegistryNames) {
   const apiSpec = apiPackage.dependencies[name];
   if (workerPackage.dependencies?.[name] === undefined) {
@@ -143,13 +145,27 @@ for (const name of apiRegistryNames) {
     process.exit(1);
   }
   const holders = hostsHolding(name);
+  const installed = registry.find((pkg) => pkg.name === name)?.version;
   if (
     !EXACT_VERSION.test(apiSpec) ||
     holders.some(({ pkg }) => pkg.dependencies[name] !== apiSpec)
   ) {
     const specs = holders.map(({ host, pkg }) => `${host}: "${pkg.dependencies[name]}"`);
+    const found = installed === undefined ? 'not installed' : `installed "${installed}"`;
     console.error(
-      `gen-modules: ${name} must be one exact version, the same in every package that depends on it (${specs.join(', ')}); change it in ${holders.map(({ file }) => file).join(', ')}`,
+      `gen-modules: ${name} must be one exact version, the same in every package that depends on it (${specs.join(', ')}; ${found}); change it in ${holders.map(({ file }) => file).join(', ')}`,
+    );
+    process.exit(1);
+  }
+  // npm drops build metadata (+...) when it stores a version, and semver ignores it in comparisons.
+  const core = (version) => version.split('+')[0];
+  if (
+    process.env[INSTALL_MAY_LAG] !== '1' &&
+    installed !== undefined &&
+    core(installed) !== core(apiSpec)
+  ) {
+    console.error(
+      `gen-modules: ${name} is declared as "${apiSpec}" but packages/api/node_modules/${name} is "${installed}", and the generated module lists would come from that old copy; run pnpm install (pnpm docker rebuild on the dev stack)`,
     );
     process.exit(1);
   }
@@ -248,7 +264,7 @@ const webModuleFor = (pkg, part) => {
     );
     process.exit(1);
   }
-  return { name: pkg.name, id };
+  return { name: pkg.name, id, source: pkg.source };
 };
 const webModules = packages
   .filter((pkg) => pkg.exports?.['./web'] !== undefined)
@@ -293,11 +309,30 @@ ${dashboardModules.map((mod, i) => `  ...d${i}.map((widget) => ({ moduleId: '${m
 ] as const;
 `;
 
+// The web image ships this list so a channel build can read back which module web parts it compiled in.
+const compiledWeb = new Map();
+for (const [part, mods] of [
+  ['dashboard', dashboardModules],
+  ['web', webModules],
+]) {
+  for (const { name, id, source } of mods) {
+    const entry = compiledWeb.get(id) ?? { id, packageName: name, source, parts: [] };
+    entry.parts.push(part);
+    compiledWeb.set(id, entry);
+  }
+}
+const compiledWebBody = `${JSON.stringify(
+  [...compiledWeb.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+  null,
+  2,
+)}\n`;
+
 for (const [out, body] of [
   [join(root, 'packages', 'api', 'src', 'modules.generated.ts'), apiBody],
   [join(root, 'packages', 'worker', 'src', 'modules.generated.ts'), workerBody],
   [join(root, 'packages', 'web', 'src', 'generated', 'module-pages.ts'), webBody],
   [join(root, 'packages', 'web', 'src', 'generated', 'module-dashboard.ts'), dashboardBody],
+  [join(root, 'packages', 'web', 'src', 'generated', 'modules.json'), compiledWebBody],
 ]) {
   let current = null;
   try {

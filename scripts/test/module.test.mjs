@@ -333,6 +333,16 @@ describe('module add @haive-module/<id>@<version>', () => {
     assert.deepEqual(tree.pnpmCalls(), [viewCall(tree, '1.1.0'), installFor(tree)]);
   });
 
+  it('moves the dependency over an installed copy of the older version, which the lockfile step leaves in place', (t) => {
+    const tree = makeTree(t, { ...registered, installed: { foo: { exports: APP } } });
+    const out = add(tree, APP, '@haive-module/foo@1.1.0');
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(out.stdout, /next, run "pnpm docker rebuild"/);
+    for (const rel of HOSTS)
+      assert.ok(tree.read(rel).includes('"@haive-module/foo": "1.1.0"'), rel);
+    assert.deepEqual(tree.pnpmCalls(), [viewCall(tree, '1.1.0'), installFor(tree)]);
+  });
+
   it('refuses a package whose exports have no ./manifest, naming it, and writes nothing', (t) => {
     const tree = makeTree(t);
     const before = tree.snapshot();
@@ -457,6 +467,17 @@ describe('module remove @haive-module/<id>', () => {
     assert.deepEqual(tree.pnpmCalls(), [installFor(tree)]);
     assert.match(out.stdout, /Missing, with its data kept/);
     assert.doesNotMatch(out.stdout, /modules\/foo/);
+  });
+
+  it('removes it while another registry module is installed at an older version than declared', (t) => {
+    const tree = makeTree(t, {
+      installed: { bar: { version: '0.9.0', exports: ['./manifest'] } },
+      api: registry('foo', 'bar'),
+      worker: registry('foo', 'bar'),
+    });
+    const out = tree.run('module.mjs', ['remove', '@haive-module/foo']);
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(out.stdout, /Missing, with its data kept/);
   });
 
   it('is undone byte for byte by add', (t) => {

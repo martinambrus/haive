@@ -146,6 +146,9 @@ interface RollbackDetect {
 
 interface RollbackOutput extends RollbackDetect {
   revertedCount: number;
+  /** What the project state record write did; 'failed' when it threw. Optional because it is read
+   *  back from a persisted output that may predate it. */
+  recordWrite?: 'written' | 'failed' | 'skipped';
 }
 
 interface RollbackRendering {
@@ -940,6 +943,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
     }
 
+    let recordWrite: RollbackOutput['recordWrite'] = recorded ? 'written' : 'skipped';
     try {
       if (recorded) {
         // A choice is what the plan of the upgrade being undone found, not what the value looks like:
@@ -958,6 +962,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       }
     } catch (err) {
       failIfColumnStale(err);
+      recordWrite = 'failed';
       const message = err instanceof Error ? err.message : String(err);
       warnings.push(`project state record write failed: ${message}`);
       ctx.logger.warn({ err }, 'project state record write failed');
@@ -972,6 +977,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       ...detected,
       warnings,
       revertedCount,
+      recordWrite,
     };
   },
 };

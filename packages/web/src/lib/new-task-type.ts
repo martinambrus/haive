@@ -141,8 +141,10 @@ export function newTaskFields(option: NewTaskTypeOption, inferred: string | null
   };
 }
 
+/** `''` asks across every repository, for a type that needs none; null asks nothing. */
 export function cliMemoryRepositoryId(fields: NewTaskFields, repositoryId: string): string | null {
-  return fields.cliPickers && repositoryId ? repositoryId : null;
+  if (!fields.cliPickers) return null;
+  return repositoryId || (fields.repository === 'optional' ? '' : null);
 }
 
 export interface NewTaskBodyInput {

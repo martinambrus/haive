@@ -12,11 +12,13 @@ with the task owner's own account, without the agent ever holding that account's
   **`integrations` task token** names that run, and **`integration_calls`** logs every attempt.
 
 What is live and what is not: providers, connections, sign-in, the write switch, the forge code,
-resolution, the choice routes and the broker (`/integration-mcp`, see The broker) are merged. Nothing
-yet declares a step requirement, writes a stamp, mints an `integrations` token or calls
-`recordTaskGrants` — the worker's dispatch wiring is the next step — so no agent can reach the broker
-yet, today no task grant exists in production and the resolver's grant tier is always empty. The task
-page has no Integrations section yet either.
+resolution, the choice routes, the broker (`/integration-mcp`, see The broker) and the exec side of the
+worker are merged: a run whose invocation row carries a stamp gets the `haive-integrations` MCP server
+and its own `integrations` token (see The call log, the stamp and the token), and the dispatch side is
+merged: a step whose catalog entry declares requirements is resolved, granted and stamped at dispatch
+(see Dispatch). No shipped step declares one yet (a module step can; prompt templates will with J6), so
+in production no agent reaches the broker and the resolver's grant tier stays empty. The task page has
+no Integrations section yet.
 
 ## Providers and categories
 
@@ -31,7 +33,9 @@ tools that share one are renamed; see Tool names).
 
 Auth kinds: `oauth2` (authorize/token/optional revoke URLs, read and write scopes, PKCE always,
 `clientRegistration`, optional `userInfo` = an https URL plus JSON pointers for the account id and
-label), `device` (device-code and token URLs, scopes, optional `userInfo`, without which it cannot
+label, optional `authorizeParams` = extra authorize-URL parameters such as Google's
+`access_type=offline`, each one printable line and never a name the sign-in sets itself:
+`response_type`, `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge[_method]`), `device` (device-code and token URLs, scopes, optional `userInfo`, without which it cannot
 sign anyone in), `token` (a form and help text).
 
 Ids: a core provider or category is `^[a-z0-9][a-z0-9_-]*$`, a module's is `module.<moduleId>.<id>`.
@@ -83,7 +87,10 @@ connections would have been a destructive migration. Consequences, all deliberat
   refused.
 - Signing in again to the same account updates the connection and its credential's secret in place,
   under `pg_advisory_xact_lock(integration-account:<user>:<provider>:<externalId>)` and `FOR UPDATE`,
-  keeping the credential's label, host and provider. A first forge sign-in creates a credential
+  keeping the credential's label, host and provider. A vendor that sends no new refresh token leaves the
+  stored one in place when the sign-in used the row's own method and OAuth client (re-encrypted with the new access
+  token; an unreadable one counts as none); under another method or client it is dropped, since a refresh would send
+  it with that issuer's credentials. A first forge sign-in creates a credential
   labelled `<Provider> OAuth (<login>)` on the sign-in endpoint's host.
 - "Use as connection" (`POST /integrations/providers/:id/link-credential`) turns an existing
   credential into a connection: forge only, provider enabled, own credential, the credential's forge
@@ -109,7 +116,9 @@ provider be called `oauth` or `connections`.
   scopes and the client id) for 600 s; one key per user and provider, so a new attempt replaces the
   old one and the keyspace stays bounded under `noeviction`.
 - **The callback is a web page**, `/settings/integrations/callback/<provider>`
-  (`oauthRedirectUri`, one helper for the authorize request and the admin page). It strips `code`
+  (`oauthRedirectUri`, one helper for the authorize request and the admin page). A module provider's
+  id holds dots, which the proxy's catch-all matcher takes for a static file, so `web/src/proxy.ts`
+  names this path in a second matcher entry: the page gets its CSP header and login redirect. It strips `code`
   and `state` from the address bar and POSTs once to `/integrations/oauth/complete`, never retrying a
   refusal; the web client's one resend after refreshing an expired cookie is the only repeat, and only
   that send reaches the attempt.
@@ -243,6 +252,29 @@ no-op when unchanged) and skips unresolved and provider-pinned results. The agre
 the grant is written FIRST and the stamped invocation inserted after it, in one transaction, so no run
 holds a connection without a grant.
 
+**Dispatch** (`worker/src/step-engine/step-integrations.ts`, the llm and fan-out sites of
+`step-runner.ts`). A step's requirements are its composable catalog entry's `integrations` (a
+`custom.*` step has none yet); boot refuses, naming the step, a declaration none of the step's
+dispatches can carry (no `llm` or `agentMining` phase without a `toolProfile`). Only a dispatch whose
+spec leaves `toolProfile` unset resolves; recaps, the AI-fix agent, merges and the DAG never do. One
+resolution per dispatch, shared by every agent of a fan-out: a required requirement that does not
+resolve fails the step `integration-unresolved` naming it, its category and the reason (an optional one
+is dropped), a requirement that pins a provider is refused `integration-provider-pinned` until J6, and
+a missing signing key or tool names the broker could not list fail `integrations-no-signing-key` and
+`integration-tools-unlistable`. The run is written by `insertStampedRun`: one transaction that takes
+`lockTaskIntegrations` (the lock the choice PUT and DELETE take first), resolves again, records the
+grants from that resolution and inserts the run stamped with its bindings; a required binding lost
+since the first resolution writes nothing and fails the step. In a fan-out only the first run goes
+through it: that run's stamp is the fan-out's, and every later agent is inserted with the same
+bindings, with no second resolution and no grant write, so a choice changed meanwhile applies from the
+next dispatch (an agent can then carry an account removed after the first insert, and the broker
+refuses its calls `connection-unavailable`). Bindings make the dispatch need an
+MCP-capable CLI, and the prompt names each provider (its id when the display name is not one safe line
+or names an agent path) with the tools the agent will see, write tools only while the owner's switch
+is on, never the account. The prompt and the CLI choice come from the first resolution and the stamp
+from the second; tools/list follows the stamp, so a choice change landing between the two can only
+leave the prompt naming tools the agent is not offered.
+
 **Repository allow-list.** `repositories.integrations_restricted` plus repository grants (category
 NULL) listing the allowed accounts. It fails closed on the flag, never on whether entries exist: entries
 cascade with their connection — deleting a Git credential is enough — so keying on entries would lift
@@ -300,9 +332,11 @@ codeberg.org as Gitea, bitbucket.org) is a `Map`, so a host named like an object
 forge; a self-hosted host's name cannot reveal its forge. Every host is lower case. An ssh, scp or git
 remote's port belongs to the transport and is dropped; an http(s) remote keeps its port.
 `parseRemote` takes everything between the host and the last segment as the owner (GitLab subgroups)
-and strips Bitbucket Server's `/scm/`. `credentialUsableForPr`: a public host's forge must equal the
-credential's; a self-hosted host needs a host match and an explicit provider; for an ssh/git remote the
-credential's port is not compared; comparisons ignore case. `credentialApiHost`: for an ssh/git remote
+and strips Bitbucket Server's `/scm/`. `credentialUsableForPr`: for a public host, the credential's forge
+must be that host's and the credential's own host (port dropped) must infer the same forge, so a
+self-hosted credential of the same forge never fits a public remote; a self-hosted host needs a host
+match and an explicit provider; for an ssh/git remote the credential's port is not compared;
+comparisons ignore case. `credentialApiHost`: for an ssh/git remote
 on the credential's host, the default API base keeps the credential's port (a token for
 `git.example.com:8443` used to go to `https://git.example.com/api/v1`); an http(s) remote's host stays
 authoritative.
@@ -318,11 +352,13 @@ appended to the stored text), and sit on the credential's host (port included) o
 forge's default API base (api.github.com, api.bitbucket.org). An edit reads, checks and writes under
 the row's lock, judging the value that will be stored against the new host. A plain-http self-hosted
 forge therefore cannot be given an http API base, and its default base is https, so its pull-request
-calls cannot reach it. The rule runs on create and edit only: a row stored before it keeps whatever base
-it had, and `resolveForgeContext` uses the stored value as is. With no stored base, the default follows
-an http(s) remote's host; for a public-host remote `credentialUsableForPr` compares forges, not hosts,
-so a self-hosted credential of the same forge chosen for a public-host repository sends its token to
-the public host. That gap is still open.
+calls cannot reach it. The rule runs on create and edit; a row stored before it may still hold another
+base, so `resolveForgeContext` (worker, PR open and poll) re-checks every use: before the token is
+decrypted it refuses, with a ForgeError naming the fix, a credential that does not fit the repository's
+remote (`credentialUsableForPr`) and a stored base that fails `apiBaseFits`. It reads the row once and
+decrypts that same row (`decryptCredentialRow`), so an edit landing between the check and the decrypt
+cannot pair the new token with the host and base that were checked. With no stored base, the default
+follows an http(s) remote's host.
 
 ## The call log, the stamp and the token
 
@@ -343,6 +379,18 @@ the public host. That gap is still open.
   (`{requirementId, categoryId|null, providerId, connectionId, access}`), NULL when none. One decision,
   one value: a run keeps the provider its prompt named, and the next dispatch resolves again.
   `parseIntegrationBindings` drops any entry that does not parse.
+- **The run's server** (`worker/src/queues/cli-exec/resolvers.ts`, `sandbox/integrations-mcp-server.ts`):
+  at exec, a run whose invocation row carries a non-empty stamp and whose MCP profile is full (not
+  `rag_only`, not `none`) gets the `haive-integrations` server: a script at
+  `/haive/haive-integrations-mcp.mjs` and a token file beside it holding an `integrations` token for
+  that task, step and invocation (lifetime: the run's timeout plus 15 min, the same rule as
+  `haive-custom`). The server's entry names only the api URL (`INTEGRATIONS_MCP_API_URL`), never the
+  token, so it is the same for every run of a task and the CLIs' merged configs do not churn. The
+  script lists `[]` on any failure and answers a refused call as a tool error; the broker decides. A
+  stamped run whose server cannot be delivered (no `CONFIG_ENCRYPTION_KEY`, no step, a config the
+  task volume did not take, a CLI with no MCP configuration such as amp) fails `integrations-unwired`
+  before its CLI starts, rather than running
+  without the tools its prompt names.
 - **Tool names** (`integrationTools`): a tool is named by its operation id; when two declared tools
   share one, every holder becomes `<requirementId>_<opId>` (other characters replaced by `_`). Every
   declared name is checked against `TOOL_NAME_PATTERN` and for uniqueness even while the write switch
@@ -422,9 +470,9 @@ uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
 8. The OAuth attempt is consumed before any vendor call or write; the exchange uses the starting client;
    no state-changing GET.
 9. Agent-reachable forge input is validated before a URL is built, and adapters re-check the PR number.
-10. A stored API base is https on the credential's own host or its forge's API host, for every
-    credential created or edited since the rule (9295cd3b3); older rows are not revalidated, and the
-    worker sends their stored base as is.
+10. A stored API base is https on the credential's own host or its forge's API host: checked on create
+    and edit since 9295cd3b3, and again on every use by the broker (`unsafe-api-base`) and by
+    `resolveForgeContext`, so an older row is refused rather than sent.
 11. GitLab authenticates with `Authorization: Bearer`.
 12. A forge request has its own deadline and takes the caller's; a stalled error body keeps its HTTP
     status.
@@ -434,3 +482,6 @@ uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
 15. `integration_calls` never stores arguments or results.
 16. The broker lists and runs only what the invocation's stamp declares and re-reads the write switches
     on every call; it never reads grants, and no token or its Basic form reaches a response, row or log.
+17. Only a dispatch stamps, under the task's integrations lock, with its grants in the same
+    transaction; the choice routes take that lock first; a provider-pinned requirement is refused at
+    dispatch until J6.

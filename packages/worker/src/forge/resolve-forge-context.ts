@@ -1,10 +1,12 @@
 import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import { getDecryptedCredentials } from '../repo/credentials.js';
+import { decryptCredentialRow } from '../repo/credentials.js';
 import {
   ForgeError,
+  apiBaseFits,
   credentialApiHost,
   credentialForgeProvider,
+  credentialUsableForPr,
   hostFromRemote,
   parseRemote,
   resolveForgeProvider,
@@ -14,7 +16,8 @@ import {
 /** Build a ForgeContext for a repo's PR/MR call: resolve the credential's forge
  *  provider + optional API-base override, parse the remote URL, and decrypt the
  *  token. Throws a ForgeError (surfaced to the user) when the credential has no
- *  provider set — a hostname alone can't reveal the forge software. */
+ *  provider set — a hostname alone can't reveal the forge software — or does not fit the
+ *  remote or its own API base, before the token is decrypted. */
 export async function resolveForgeContext(args: {
   db: Database;
   userId: string;
@@ -23,12 +26,20 @@ export async function resolveForgeContext(args: {
 }): Promise<ForgeContext> {
   const { db, userId, credentialId, remoteUrl } = args;
 
+  // One read serves the checks and the decrypt, so an edit between them cannot split the two.
   const row = await db.query.repoCredentials.findFirst({
     where: and(
       eq(schema.repoCredentials.id, credentialId),
       eq(schema.repoCredentials.userId, userId),
     ),
-    columns: { provider: true, host: true, apiBaseUrl: true },
+    columns: {
+      provider: true,
+      host: true,
+      apiBaseUrl: true,
+      usernameEncrypted: true,
+      secretEncrypted: true,
+      encryptedDek: true,
+    },
   });
   if (!row) throw new ForgeError('Credential not found for pull-request creation.');
 
@@ -41,7 +52,18 @@ export async function resolveForgeContext(args: {
     );
   }
 
-  const creds = await getDecryptedCredentials(db, credentialId, userId);
+  if (!credentialUsableForPr(row, remoteUrl)) {
+    throw new ForgeError(
+      "This credential is not for the repository's remote: its host and forge must match the remote's. Choose another credential, or edit this one's host and provider.",
+    );
+  }
+  if (!apiBaseFits(row)) {
+    throw new ForgeError(
+      "Edit the credential's API base: it must be https on the credential's host or its forge's API host.",
+    );
+  }
+
+  const creds = await decryptCredentialRow(row);
   const { host, owner, repo } = parseRemote(remoteUrl, provider);
   const impl = resolveForgeProvider(provider);
   const apiBase = (

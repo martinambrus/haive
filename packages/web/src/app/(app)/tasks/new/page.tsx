@@ -272,24 +272,43 @@ export default function NewTaskPage() {
     };
   }, []);
 
+  // The repository the status shows and the newest question asked about it: any other answer is stale.
+  const statusRepoId = useRef('');
+  const statusRequest = useRef(0);
+
   const refreshStatus = useCallback(async (repoId: string) => {
+    if (repoId !== statusRepoId.current) return;
+    const request = ++statusRequest.current;
+    const stale = () => request !== statusRequest.current;
     if (!repoId) {
       setOnboardingStatus(null);
       setStatusError(null);
+      setStatusLoading(false);
       return;
     }
     setStatusLoading(true);
     setStatusError(null);
     try {
       const res = await api.get<OnboardingStatus>(`/repos/${repoId}/onboarding-status`);
-      setOnboardingStatus(res);
+      if (!stale()) setOnboardingStatus(res);
     } catch (err) {
-      setOnboardingStatus(null);
-      setStatusError((err as Error).message ?? 'Failed to check onboarding status');
+      if (!stale()) {
+        setOnboardingStatus(null);
+        setStatusError((err as Error).message ?? 'Failed to check onboarding status');
+      }
     } finally {
-      setStatusLoading(false);
+      if (!stale()) setStatusLoading(false);
     }
   }, []);
+
+  function selectRepository(id: string) {
+    setRepositoryId(id);
+    setOnboardingStatus(null);
+    setStatusError(null);
+    setResetNote(null);
+    setParentTaskId('');
+    setParentOptions(null);
+  }
 
   useEffect(() => {
     if (presetAppliedRef.current || !queryRepoId || !repos) return;
@@ -300,7 +319,8 @@ export default function NewTaskPage() {
   }, [queryRepoId, repos]);
 
   useEffect(() => {
-    void refreshStatus(fields.onboardingStatus ? repositoryId : '');
+    statusRepoId.current = fields.onboardingStatus ? repositoryId : '';
+    void refreshStatus(statusRepoId.current);
   }, [repositoryId, refreshStatus, fields.onboardingStatus]);
 
   /**
@@ -380,7 +400,7 @@ export default function NewTaskPage() {
     };
   }, [planNodeIds, repositoryId, loadChatProposal]);
 
-  // QOL: preselect both CLI dropdowns from what this repo's last task CHOSE.
+  // QOL: preselect both CLI dropdowns from what this repo's last task CHOSE (any repo's with none picked).
   // Includes the choices a NULL fk cannot express — "(none)" on the main dropdown
   // and "(inherit)"/"(off)" on the summary one — which is what the server's
   // cli_choice_recorded / summary_cli_choice_recorded flags are for. A repo with no
@@ -389,11 +409,14 @@ export default function NewTaskPage() {
   // that task falls back instead of selecting a dead option.
   const memoryRepositoryId = cliMemoryRepositoryId(fields, repositoryId);
   useEffect(() => {
-    if (!memoryRepositoryId || !providers) return;
+    if (memoryRepositoryId === null || !providers) return;
     let cancelled = false;
+    const query = memoryRepositoryId
+      ? `?repositoryId=${encodeURIComponent(memoryRepositoryId)}`
+      : '';
     void api
       .get<{ cliChoice: LastCliChoice; summaryChoice: LastSummaryCliChoice }>(
-        `/tasks/last-cli?repositoryId=${encodeURIComponent(memoryRepositoryId)}`,
+        `/tasks/last-cli${query}`,
       )
       .then((res) => {
         if (cancelled) return;
@@ -499,10 +522,12 @@ export default function NewTaskPage() {
       if (res.skipped?.length) {
         notes.push(`Left alone: ${res.skipped.map((s) => `${s.path} (${s.reason})`).join(', ')}.`);
       }
-      if (notes.length) setResetNote(notes.join(' '));
+      if (notes.length && statusRepoId.current === repositoryId) setResetNote(notes.join(' '));
       await refreshStatus(repositoryId);
     } catch (err) {
-      setStatusError((err as Error).message ?? 'Failed to reset onboarding');
+      if (statusRepoId.current === repositoryId) {
+        setStatusError((err as Error).message ?? 'Failed to reset onboarding');
+      }
     } finally {
       setResetting(false);
     }
@@ -521,7 +546,9 @@ export default function NewTaskPage() {
       );
       await refreshStatus(repositoryId);
     } catch (err) {
-      setStatusError((err as Error).message ?? 'Failed to mark the repository onboarded');
+      if (statusRepoId.current === repositoryId) {
+        setStatusError((err as Error).message ?? 'Failed to mark the repository onboarded');
+      }
     } finally {
       setMarking(false);
     }
@@ -561,7 +588,7 @@ export default function NewTaskPage() {
       setError('Repository is required');
       return;
     }
-    if (fields.onboardingGate && !onboardingStatus) {
+    if (fields.onboardingGate && (!onboardingStatus || statusLoading)) {
       setError('Waiting for onboarding status check');
       return;
     }
@@ -746,7 +773,7 @@ export default function NewTaskPage() {
           <select
             id="repositoryId"
             value={repositoryId}
-            onChange={(e) => setRepositoryId(e.target.value)}
+            onChange={(e) => selectRepository(e.target.value)}
             className="h-10 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
             required={fields.repository === 'required'}
           >
@@ -771,7 +798,23 @@ export default function NewTaskPage() {
           {repositoryId && fields.onboardingStatus && (
             <div className="mt-1 rounded-md border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-xs">
               {statusLoading && <span className="text-neutral-400">Checking onboarding...</span>}
-              {statusError && <span className="text-red-400">{statusError}</span>}
+              {statusError && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-red-400">{statusError}</span>
+                  {/* A failed check leaves no verdict; a failed reset or mark keeps its button. */}
+                  {!onboardingStatus && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={statusLoading}
+                      onClick={() => void refreshStatus(repositoryId)}
+                    >
+                      Retry
+                    </Button>
+                  )}
+                </div>
+              )}
               {resetNote && <p className="text-amber-300">{resetNote}</p>}
               {!statusLoading && !statusError && onboardingStatus && (
                 <div className="flex flex-col gap-1">
@@ -1280,7 +1323,7 @@ export default function NewTaskPage() {
             disabled={
               submitting ||
               selectedType.disabled ||
-              (fields.onboardingGate && !onboardingStatus) ||
+              (fields.onboardingGate && (!onboardingStatus || statusLoading)) ||
               (fields.onboardingGate && !!onboardingStatus?.onboardingTaskId)
             }
           >

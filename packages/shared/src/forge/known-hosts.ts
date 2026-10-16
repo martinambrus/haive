@@ -107,7 +107,8 @@ export function credentialApiHost(credentialHost: string, remoteUrl: string): st
  *  from the credential's host) matches the repo's. For a self-hosted origin whose forge
  *  can't be inferred from the host, require a host match plus an explicit provider (which
  *  resolveForgeContext needs anyway). This keeps a GitHub credential out of a GitLab repo's
- *  picker while letting an "auto-detect" credential on a well-known host through. */
+ *  picker while letting an "auto-detect" credential on a well-known host through. On a public
+ *  origin the credential's own host must be that forge's too, so a token never leaves its host. */
 export function credentialUsableForPr(
   c: { provider: string | null; host: string },
   originUrl: string | null,
@@ -116,7 +117,12 @@ export function credentialUsableForPr(
   const originHost = hostFromRemote(originUrl);
   const repoForge = inferForgeProviderFromHost(originHost);
   const credForge = credentialForgeProvider(c.provider, c.host);
-  if (repoForge) return credForge === repoForge;
+  if (repoForge) {
+    return (
+      credForge === repoForge &&
+      inferForgeProviderFromHost(c.host.replace(/:\d+$/, '')) === repoForge
+    );
+  }
   // An ssh or git remote names no forge port, so a credential's :port (its API's) is not compared.
   const credHost = /^https?:\/\//i.test(originUrl.trim()) ? c.host : c.host.replace(/:\d+$/, '');
   return credHost.toLowerCase() === originHost.toLowerCase() && isForgeProviderName(c.provider);

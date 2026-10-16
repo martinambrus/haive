@@ -179,7 +179,11 @@ administrator's Stop writes carries it: the task page names a stop as the cause 
 when that stamp equals the task's `completedAt` (`loadTaskStop`), since the event is written after
 the kill and a Retry that failed in between would otherwise read as the stop's. The allowance auto-resume
 (`autoResumeFailedStep`) writes in the same order, its claim on the failed task last, and a claim it
-loses takes back every write before it. A pass a Stop cut off
+loses takes back every write before it. A repository delete cancels its open tasks the same way:
+it locks their open step rows (by id) before it writes any task row (`cancelOpenTasksForRepo`), since
+taking the task rows first deadlocked it with a step Retry or a worker's step claim; the wait for those
+rows can let a Stop or a completion end a task, so it then re-reads and locks the task rows and cancels
+only those still open. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and

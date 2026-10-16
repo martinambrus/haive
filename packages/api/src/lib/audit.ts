@@ -1,6 +1,6 @@
-import { schema } from '@haive/database';
+import { sql } from 'drizzle-orm';
+import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
-import { getDb } from '../db.js';
 
 const log = logger.child({ module: 'audit' });
 
@@ -23,7 +23,7 @@ export interface AuditEvent {
  *  user operation, which has already succeeded by the time this is called. Never
  *  pass secret/username plaintext in metadata. */
 export async function recordAuditEvent(
-  db: ReturnType<typeof getDb>,
+  db: Pick<Database, 'insert'>,
   event: AuditEvent,
 ): Promise<void> {
   log.info(
@@ -43,6 +43,8 @@ export async function recordAuditEvent(
       targetType: event.targetType,
       targetId: event.targetId ?? null,
       metadata: event.metadata ?? null,
+      // clock_timestamp(), not the default now(): inside a transaction now() is when it began.
+      createdAt: sql`clock_timestamp()`,
     });
   } catch (err) {
     log.error({ err, action: event.action }, 'failed to write audit event');
