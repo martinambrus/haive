@@ -84,6 +84,15 @@ A repository delete records its two cleanup jobs (per-project RAG databases, the
 
 A custom bundle left at `syncing` five minutes after its last update, with no waiting, active, delayed, prioritized or waiting-children job naming it, is marked `failed` with a reason by the same sweep (`reconcileStrandedSyncingBundles`), never re-driven: failed is what re-enables Resync and Replace ZIP. The update is guarded on the status and on that age, since a resync or a replace puts a bundle back at `syncing` with a fresh `updated_at`. The routes need it less often than before: a zip complete keys the bundle and its job (`ingest-zip-<uploadId>`) on the upload, so a repeated or resumed complete finds both instead of making a second bundle, and a job that cannot be queued marks its bundle failed at once (`addBundleJobOrMarkFailed`).
 
+An upload left unfinished is reaped by the worker's upload reaper (`repo/upload-reaper.ts`), which
+runs at boot and every 15 minutes. It has three passes:
+
+- **Sessions.** A repository, database-dump or bundle upload session idle for 24 hours (`status = 'uploading'`) is cancelled in one statement, and its `.partial` file is removed.
+- **Dumps.** A completed dump is removed 24 hours after the last task that links it ended (completed, failed or cancelled), or 24 hours after its own last update when no task links it. The claim re-checks the task links in the same statement, so a task linked meanwhile keeps the dump. A failed or cancelled task can still be retried within the 24 hours. A Retry after the dump was removed fails `01c1-restore-database` with a message saying so; it is never skipped silently.
+- **Orphan files.** Under `_uploads/<user>/` it removes only an exact session partial name older than 24 hours whose session has no row updated in the last 24 hours, so a complete that has just claimed its session keeps its file.
+
+The complete routes claim their session (`status` still `uploading`) before they touch the file, and write the row before the move. A complete that loses to the reaper answers 409, and a death mid-move leaves only a `.partial` for the file pass. Cancel answers 409 for a session that is not uploading and deletes nothing.
+
 **START claims the task, or does nothing.** `claimTaskStart` moves a `created` or `queued` task to
 `running`, pointed at its first step, in one statement fenced on the epoch START read. A START that
 finds the task anywhere else — redelivered after the task ran on, a second START a task Retry
