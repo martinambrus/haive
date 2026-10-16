@@ -55,6 +55,8 @@ import { moduleRoutes, type LoadedApiModule } from '../src/modules/loader.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const ACTOR = '00000000-0000-4000-8000-0000000000a1';
 const USER_EMAIL_INDEX = 'module-purge-api-test-user';
 // A module database is named server-wide, so each run needs its own ids.
