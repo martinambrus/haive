@@ -1,10 +1,17 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { sql } from 'drizzle-orm';
 import type { Database } from '@haive/database';
 import { resolveGlobalKbConnection, GLOBAL_KB_DB_NAME } from '../src/global-kb/connection.js';
 import { resolveRagConnection, ragDatabaseName } from '../src/rag/connection.js';
+
+// Store names take the install id at import, so a run of its own never drops another install's store.
+const installBefore = vi.hoisted(() => {
+  const before = process.env.HAIVE_INSTALL_ID;
+  process.env.HAIVE_INSTALL_ID = `race_${crypto.randomUUID().slice(0, 8)}`;
+  return before;
+});
 
 const RACE_PG_URL = process.env.RACE_PG_URL;
 
@@ -34,6 +41,8 @@ describe.skipIf(!RACE_PG_URL)('two creators of one fresh store, against a real P
     for (const name of [ragDatabaseName(project), GLOBAL_KB_DB_NAME]) {
       await db.execute(sql.raw(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`));
     }
+    if (installBefore === undefined) delete process.env.HAIVE_INSTALL_ID;
+    else process.env.HAIVE_INSTALL_ID = installBefore;
     await admin.end({ timeout: 5 });
   });
 
