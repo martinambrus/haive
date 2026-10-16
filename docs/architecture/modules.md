@@ -23,7 +23,11 @@ the module loads again.
   routes at `/m/<id>`, nav and pages, settings, dashboard widget, worker steps, jobs and database.
   A module whose manifest sets `apiRequiresAdmin` is listed for a non-admin with
   `compiledWeb: false`: its compiled pages answer not-found and its compiled dashboard widgets do not
-  render for that user, while its declared pages without data endpoints still do.
+  render for that user, while its declared pages without data endpoints still do. An admin's save of
+  its settings (`PUT /modules/<id>/settings/<kind>`) records `module.settings` with the names of the
+  fields that changed, never their values, since a module's setting can hold an API key; the
+  instance's own switches (`PUT /admin/config/*`) record `config.<name>` with the values before and
+  after.
 - **Installed, deactivated.** The Active column on `/admin/modules`, or `PATCH /modules/:id` with
   `{"active": false}` (admin; audited as `module.deactivate`). It is refused with 409
   `module_tasks_open` while a live task's run list names one of the module's steps or its type is one
