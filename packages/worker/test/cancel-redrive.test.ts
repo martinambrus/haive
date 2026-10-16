@@ -38,9 +38,12 @@ function makeDb(
   opts: { insertFails?: boolean } = {},
 ): {
   db: Database;
-  seen: { where?: unknown; limit?: number; inserted: unknown[] };
+  seen: { where?: unknown; limit?: number; inserted: unknown[]; deleted: number };
 } {
-  const seen: { where?: unknown; limit?: number; inserted: unknown[] } = { inserted: [] };
+  const seen: { where?: unknown; limit?: number; inserted: unknown[]; deleted: number } = {
+    inserted: [],
+    deleted: 0,
+  };
   const real = drizzle.mock();
   const outer = {
     from: () => ({
@@ -61,9 +64,17 @@ function makeDb(
     select: (fields: Parameters<typeof real.select>[0] & object) =>
       'taskId' in fields ? outer : real.select(fields),
     insert: () => ({
-      values: async (v: unknown) => {
-        if (opts.insertFails) throw new Error('db blinked');
-        seen.inserted.push(v);
+      values: (v: unknown) => ({
+        returning: async () => {
+          if (opts.insertFails) throw new Error('db blinked');
+          seen.inserted.push(v);
+          return [{ id: `event-${seen.inserted.length}` }];
+        },
+      }),
+    }),
+    delete: () => ({
+      where: async () => {
+        seen.deleted += 1;
       },
     }),
   };
@@ -162,7 +173,7 @@ describe('redriveCancelledTasks', () => {
   });
 
   it('carries on past a task whose enqueue keeps failing', async () => {
-    const { db } = makeDb([
+    const { db, seen } = makeDb([
       { taskId: 'task-1', userId: 'user-1' },
       { taskId: 'task-2', userId: 'user-2' },
     ]);
@@ -177,6 +188,7 @@ describe('redriveCancelledTasks', () => {
     );
     expect(n).toBe(1);
     expect(enqueued).toEqual(['task-2']);
+    expect(seen.deleted).toBe(1);
   });
 });
 
