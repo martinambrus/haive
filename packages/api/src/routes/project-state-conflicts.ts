@@ -15,15 +15,14 @@ import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { requireAuth } from '../middleware/auth.js';
 import { resolveProjectStateConflict } from '../lib/project-state-resolve.js';
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { isUuid } from '../lib/uuid.js';
 
 const answerSchema = z.strictObject({ answer: z.enum(PROJECT_STATE_ANSWERS) });
 
 export const projectStateConflictRoutes = new Hono<AppEnv>();
 
 async function requireOwnedRepository(userId: string, repositoryId: string): Promise<void> {
-  if (!UUID_RE.test(repositoryId)) throw new HttpError(404, 'Repository not found');
+  if (!isUuid(repositoryId)) throw new HttpError(404, 'Repository not found');
   const repo = await getDb().query.repositories.findFirst({
     where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
     columns: { id: true },
@@ -85,7 +84,7 @@ projectStateConflictRoutes.get(
     const repositoryId = c.req.param('id');
     const conflictId = c.req.param('conflictId');
     await requireOwnedRepository(c.get('userId'), repositoryId);
-    if (!UUID_RE.test(conflictId)) throw new HttpError(404, 'Question not found');
+    if (!isUuid(conflictId)) throw new HttpError(404, 'Question not found');
     const row = await getDb().query.projectStateConflicts.findFirst({
       where: and(
         eq(schema.projectStateConflicts.id, conflictId),
@@ -145,7 +144,7 @@ projectStateConflictRoutes.post(
     const repositoryId = c.req.param('id');
     const conflictId = c.req.param('conflictId');
     await requireOwnedRepository(userId, repositoryId);
-    if (!UUID_RE.test(conflictId)) throw new HttpError(404, 'Question not found');
+    if (!isUuid(conflictId)) throw new HttpError(404, 'Question not found');
     const { answer } = answerSchema.parse(await c.req.json().catch(() => ({})));
     let result: ProjectStateResolveResult | { kind: 'pending' };
     try {

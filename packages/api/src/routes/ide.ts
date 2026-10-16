@@ -25,6 +25,7 @@ import { ACCESS_COOKIE } from '../auth/cookies.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
+import { isCanonicalUuid } from '../lib/uuid.js';
 
 // Reverse-proxies task and repository code-server editors through the authenticated api,
 // exactly mirroring how the terminal/VNC routes proxy into per-task containers.
@@ -41,7 +42,6 @@ import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 
 const log = logger.child({ module: 'ide-proxy' });
 const WS_PATH_PREFIX = '/ide/';
-const UUID_RE = /^[0-9a-f-]{36}$/;
 const IDE_ENSURE_TIMEOUT_MS = 180_000;
 // Response headers that must not be forwarded verbatim. content-encoding/length
 // are dropped because undici's fetch auto-decodes the upstream body (we also force
@@ -96,7 +96,7 @@ async function targetBelongsToUser(target: IdeTarget): Promise<boolean> {
 export const repoIdeAccessRoutes = new Hono<AppEnv>();
 repoIdeAccessRoutes.post('/:id/ensure-ide', requireAuth, async (c) => {
   const id = c.req.param('id');
-  if (!UUID_RE.test(id)) throw new HttpError(404, 'Repository not found');
+  if (!isCanonicalUuid(id)) throw new HttpError(404, 'Repository not found');
   const target = ideTarget(id, c.get('userId'), true);
   if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Repository not found');
   const enabled = await configService.getBoolean(CONFIG_KEYS.IDE_ENABLED, true);
@@ -113,7 +113,7 @@ repoIdeAccessRoutes.post('/:id/ensure-ide', requireAuth, async (c) => {
 async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Response> {
   const userId = c.get('userId');
   const taskId = c.req.param('id');
-  if (!taskId || !UUID_RE.test(taskId)) throw new HttpError(404, 'Not found');
+  if (!taskId || !isCanonicalUuid(taskId)) throw new HttpError(404, 'Not found');
   const target = ideTarget(taskId, userId, repository);
   if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
 
@@ -349,7 +349,7 @@ function extractIdeTarget(rawUrl: string): { id: string; repository: boolean } |
   const parts = withoutQuery.slice(WS_PATH_PREFIX.length).split('/');
   const repository = parts[0] === 'repos';
   const id = parts[repository ? 1 : 0] ?? '';
-  return UUID_RE.test(id) ? { id, repository } : null;
+  return isCanonicalUuid(id) ? { id, repository } : null;
 }
 
 async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {
