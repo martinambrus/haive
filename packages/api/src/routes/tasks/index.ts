@@ -61,6 +61,7 @@ import {
   upgradeRefusalMessage,
 } from '../../lib/onboarding-state.js';
 import { enqueuePlanMirrorRefresh } from '../../lib/plan-mirror.js';
+import { loadLoggedCallCount } from './_call-log.js';
 import { currentStepLabel } from './_step-label.js';
 import { getDb } from '../../db.js';
 import { getRedis } from '../../redis.js';
@@ -1089,6 +1090,7 @@ taskRoutes.get('/:id', async (c) => {
     task.ignoreSavedStepClis,
     task.runListSnapshot,
   );
+  const callCounts = await loadLoggedCallCount(db, id);
   return c.json({
     task: taskWithActive,
     dead: await loadTaskDead(db, task),
@@ -1096,6 +1098,8 @@ taskRoutes.get('/:id', async (c) => {
     steps,
     upcomingCliSteps,
     providerBreakdown,
+    loggedCallCount: callCounts.logged,
+    runningCallCount: callCounts.running,
     costDisplay,
     parentTask,
     childTasks,

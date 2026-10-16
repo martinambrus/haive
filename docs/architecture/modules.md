@@ -170,7 +170,10 @@ history entry, image config or build log, and a build with no secret behaves as 
 `HAIVE_NPMRC` (unset by default) names an `.npmrc` holding the auth line: `docker-compose.dev.yml`
 passes it as the `npmrc` build secret to the dev-libs, api, worker and web builds and mounts it
 read-only at `/root/.npmrc` in db-migrate, whose install runs at start. It must name an existing
-file: Docker creates a missing bind source as a root-owned directory. BuildKit reuses a cached
+file: Docker creates a missing bind source as a root-owned directory. Compose builds through
+buildx bake, which refuses a build secret file outside the project (the `/dev/null` default
+included) unless `BUILDX_BAKE_ENTITLEMENTS_FS=0`; `scripts/dev.sh` and the CI compose jobs set it, so
+a hand-run `docker compose build` fails on that secret. BuildKit reuses a cached
 install layer after the token is revoked or changed, so only an uncached install notices a
 revocation. `.dockerignore` keeps every nested `.npmrc`, `.env` and `.git` out of the build
 contexts (the root `.npmrc`, which the Dockerfiles copy, stays).
