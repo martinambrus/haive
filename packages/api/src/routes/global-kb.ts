@@ -388,6 +388,13 @@ async function putConfig(c: Context<AppEnv>) {
       'connection_string_set_and_clear',
     );
   }
+  if (given !== '' && given !== saved.connectionString && (d.mode ?? saved.mode) === 'internal') {
+    throw new HttpError(
+      400,
+      'the built-in store uses no connection string; send it with the external store, or leave it blank',
+      'connection_string_unused',
+    );
+  }
   if (clearing && (d.mode ?? saved.mode) === 'external') {
     throw new HttpError(
       409,

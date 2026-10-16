@@ -321,6 +321,7 @@ describe('PUT /global-kb/config by an admin', () => {
   });
 
   it('writes the protected settings a full page save re-sends, as only a regular user is held back', async () => {
+    h.settings = { ...SAVED, connectionString: STORED_STRING };
     const res = await put({ ...PAGE, connectionString: STORED_STRING });
 
     expect(res.status).toBe(200);
@@ -339,7 +340,7 @@ describe('PUT /global-kb/config by an admin', () => {
   });
 
   it('stores a new connection string, trimmed, and never echoes it', async () => {
-    const res = await put({ connectionString: `  ${STORED_STRING}  ` });
+    const res = await put({ mode: 'external', connectionString: `  ${STORED_STRING}  ` });
 
     expect(res.status).toBe(200);
     expect(h.setSecret).toHaveBeenCalledWith(
@@ -348,6 +349,19 @@ describe('PUT /global-kb/config by an admin', () => {
       expect.any(String),
     );
     expect(JSON.stringify(await res.json())).not.toContain('secret');
+  });
+
+  it.each([
+    ['with none stored', null],
+    ['in place of the stored one', STORED_STRING],
+  ])('refuses a new connection string %s while the store stays internal', async (_how, stored) => {
+    h.settings = { ...SAVED, connectionString: stored };
+    const res = await put({ ...PAGE, connectionString: 'postgres://other:pw@elsewhere:5432/kb' });
+
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('connection_string_unused');
+    expect(h.set).not.toHaveBeenCalled();
+    expect(h.setSecret).not.toHaveBeenCalled();
   });
 
   describe('refuses external mode with 400 when no connection string is stored or given', () => {
@@ -412,7 +426,7 @@ describe('PUT /global-kb/config audit trail', () => {
   });
 
   it('records one event when an admin sets the connection string, and no part of the string', async () => {
-    const res = await put({ ...PAGE, connectionString: NEW_STRING });
+    const res = await put({ ...PAGE, mode: 'external', connectionString: NEW_STRING });
 
     expect(res.status).toBe(200);
     expect(h.setSecret).toHaveBeenCalledWith(
@@ -506,12 +520,13 @@ describe('PUT /global-kb/config storing the connection string before the setting
     expect(h.setSecret).toHaveBeenCalledTimes(1);
   });
 
-  it('writes the mode that leaves for the built-in store before it stores a string sent with it', async () => {
+  it('refuses a new string sent with the mode that leaves for the built-in store, and writes nothing', async () => {
     h.settings = { ...SAVED, mode: 'external', connectionString: STORED_STRING };
     const res = await put({ mode: 'internal', connectionString: NEW_STRING });
 
-    expect(res.status).toBe(200);
-    expect(h.events).toEqual([MODE, 'set-secret', 'audit']);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { code: string }).code).toBe('connection_string_unused');
+    expect(h.events).toEqual([]);
   });
 
   it('stores them ahead of every setting of a full page save too', async () => {
@@ -532,6 +547,7 @@ describe('PUT /global-kb/config storing the connection string before the setting
   });
 
   it('keeps the single write of a save that sends only the string', async () => {
+    h.settings = { ...SAVED, mode: 'external', connectionString: STORED_STRING };
     const res = await put({ connectionString: NEW_STRING });
 
     expect(res.status).toBe(200);
