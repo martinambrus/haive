@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '@haive/shared';
 import { HttpError, type AppEnv } from '../src/context.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -78,6 +78,10 @@ describe('errorHandler, a path id that is not a uuid', () => {
     return app;
   }
 
+  beforeEach(() => {
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -95,6 +99,37 @@ describe('errorHandler, a path id that is not a uuid', () => {
       const app = appThrowingOn('/:id/nodes/:nodeId', make('22P02'));
       expect((await app.request(`/${UUID}/nodes/abc`)).status).toBe(404);
       expect((await app.request(`/abc/nodes/${UUID}`)).status).toBe(404);
+    });
+
+    it('logs one warn line with the method, the route and the malformed param names, and no error line', async () => {
+      const logged = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+      const app = appThrowingOn('/:id/nodes/:nodeId', make('22P02'));
+      const res = await app.request(`/${UUID}/nodes/secret-value`);
+      expect(res.status).toBe(404);
+      expect(vi.mocked(logger.warn)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(logger.warn).mock.calls[0]?.[0]).toEqual({
+        method: 'GET',
+        route: '/:id/nodes/:nodeId',
+        params: ['nodeId'],
+      });
+      expect(JSON.stringify(vi.mocked(logger.warn).mock.calls)).not.toContain('secret-value');
+      expect(logged).not.toHaveBeenCalled();
+    });
+
+    it('names every malformed param on the warn line', async () => {
+      const app = appThrowingOn('/:id/nodes/:nodeId', make('22P02'));
+      expect((await app.request('/abc/nodes/def')).status).toBe(404);
+      expect(vi.mocked(logger.warn)).toHaveBeenCalledTimes(1);
+      const fields = vi.mocked(logger.warn).mock.calls[0]?.[0] as { params: string[] };
+      expect([...fields.params].sort()).toEqual(['id', 'nodeId']);
+    });
+
+    it('writes no warn line where it keeps a 500 (passes before and after)', async () => {
+      vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+      await appThrowingOn('/:id', make('22P02')).request(`/${UUID}`);
+      await appThrowingOn('/', make('22P02')).request('/');
+      await appThrowingOn('/:id', make('23505')).request('/abc');
+      expect(vi.mocked(logger.warn)).not.toHaveBeenCalled();
     });
 
     it('keeps a 500, logged, when every param is a uuid (passes before and after)', async () => {

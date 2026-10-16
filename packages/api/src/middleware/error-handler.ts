@@ -1,13 +1,14 @@
 import type { ErrorHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { routePath } from 'hono/route';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { ZodError } from 'zod';
 import { hasPgCode, isUniqueViolationOf, ONE_LIVE_UPGRADE_INDEX } from '@haive/database';
 import { logger } from '@haive/shared';
 import { HttpError, type AppEnv } from '../context.js';
+import { isUuid } from '../lib/uuid.js';
 
 const INVALID_TEXT_REPRESENTATION = '22P02';
-const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
   if (err instanceof HttpError) {
@@ -43,11 +44,17 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
     );
   }
   // 22P02 from a path id that is not a uuid is an unknown id, not a server fault.
-  if (
-    hasPgCode(err, INVALID_TEXT_REPRESENTATION) &&
-    Object.values(c.req.param()).some((value) => !UUID_TEXT.test(value))
-  ) {
-    return c.json({ error: 'Not found', code: null }, 404);
+  if (hasPgCode(err, INVALID_TEXT_REPRESENTATION)) {
+    const malformed = Object.entries(c.req.param())
+      .filter(([, value]) => !isUuid(value))
+      .map(([name]) => name);
+    if (malformed.length > 0) {
+      logger.warn(
+        { method: c.req.method, route: routePath(c), params: malformed },
+        'Malformed path id answered 404',
+      );
+      return c.json({ error: 'Not found', code: null }, 404);
+    }
   }
   logger.error({ err }, 'Unhandled API error');
   return c.json({ error: 'Internal server error' }, 500);
