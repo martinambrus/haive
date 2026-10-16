@@ -320,7 +320,7 @@ describe('PUT /global-kb/config by an admin', () => {
     expect(written()).toContainEqual([key, value]);
   });
 
-  it('writes the protected settings a full page save re-sends, as only a regular user is held back', async () => {
+  it('writes the protected settings a full page save re-sends, as only a regular user is held back, but not the stored string', async () => {
     h.settings = { ...SAVED, connectionString: STORED_STRING };
     const res = await put({ ...PAGE, connectionString: STORED_STRING });
 
@@ -332,11 +332,7 @@ describe('PUT /global-kb/config by an admin', () => {
         [CONFIG_KEYS.GLOBAL_KB_NAMESPACE, 'default'],
       ]),
     );
-    expect(h.setSecret).toHaveBeenCalledWith(
-      SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
-      STORED_STRING,
-      expect.any(String),
-    );
+    expect(h.setSecret).not.toHaveBeenCalled();
   });
 
   it('stores a new connection string, trimmed, and never echoes it', async () => {
@@ -471,6 +467,22 @@ describe('PUT /global-kb/config audit trail', () => {
     expect(h.auditLog.info).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['as stored', STORED_STRING],
+    ['with spaces around it', `  ${STORED_STRING}  `],
+  ])(
+    'stores nothing and records nothing when an admin re-sends the stored string %s',
+    async (_how, sent) => {
+      h.settings = { ...SAVED, mode: 'external', connectionString: STORED_STRING };
+      const res = await put({ connectionString: sent });
+
+      expect(res.status).toBe(200);
+      expect(h.setSecret).not.toHaveBeenCalled();
+      expect(h.audits).toEqual([]);
+      expect(h.auditLog.info).not.toHaveBeenCalled();
+    },
+  );
+
   describe('by a regular user', () => {
     beforeEach(() => {
       h.role = 'user';
@@ -580,14 +592,13 @@ describe('PUT /global-kb/config storing the connection string before the setting
       expect(h.events).toEqual([]);
     });
 
-    it('stores it once, with its one audit row, inside the lock after the width is read and before the mode', async () => {
+    it('stores nothing and records nothing when the width is accepted either', async () => {
       const res = await put(RESEND);
 
       expect(res.status).toBe(200);
-      expect(h.events.slice(0, 5)).toEqual(['begin', 'lock', 'read', 'set-secret', 'audit']);
+      expect(h.setSecret).not.toHaveBeenCalled();
+      expect(h.events).not.toContain('audit');
       expect(h.events).toContain(MODE);
-      expect(h.events.filter((event) => event === 'audit')).toHaveLength(1);
-      expect(h.setSecret).toHaveBeenCalledTimes(1);
     });
   });
 });
