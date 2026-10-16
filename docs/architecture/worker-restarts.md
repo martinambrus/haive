@@ -80,13 +80,14 @@ The same sweep covers the two other jobs that can be lost with nothing to notice
 `queued` past the cutoff with no START on the queue gets one, which the claim makes safe to
 duplicate; `created` is left alone, since a deferred-start draft waits there on purpose. Every
 route that starts a task moves it from `created` to `queued` before it queues START, after every
-write that can fail (`markQueuedForStart`, `api/src/lib/task-start.ts`), so a START that was lost
-or could not be queued is the sweep's to give, and the route answers as though it had been
-queued. POST /tasks, `spawnPlanTask` (its seed included) and the global-KB enrich each insert the
-task and claim its START in one transaction, so a creation that fails there leaves no task; the
-enrich writes its KB entry in its own database first and removes it again when the task transaction
-rolls back (an error anywhere inside it, the insert or a write after it); an error after the commit
-keeps it. And a `waiting_cli`
+write that can fail (`markQueuedForStart`, `api/src/lib/task-start.ts`), under the repository's
+task-creation lock, since a queued task holds the checkout and a checkout move holds that lock. So a
+START that was lost or could not be queued is the sweep's to give, and the route answers as though
+it had been queued. POST /tasks, `spawnPlanTask` (its seed included) and the global-KB enrich each
+insert the task and claim its START in one transaction, taking that lock before the insert, so a
+creation that fails there leaves no task; the enrich writes its KB entry in its own database first
+and removes it again when the task transaction rolls back (an error anywhere inside it, the insert
+or a write after it); an error after the commit keeps it. And a `waiting_cli`
 current step with a run recorded before the cutoff that no cli-exec job owes, no run of its own
 running and no task-queue job, is recovered exactly as boot recovers a parked step
 (`recoverParkedStep`), bounded by `bornBefore`: only runs started or recorded before the cutoff are

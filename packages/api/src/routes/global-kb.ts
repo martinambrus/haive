@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Hono, type Context } from 'hono';
 import { and, desc, eq, inArray, isNotNull, ne, sql, type SQL } from 'drizzle-orm';
-import { isLockNotAvailable, isRefusedStatement, schema } from '@haive/database';
+import {
+  isLockNotAvailable,
+  isRefusedStatement,
+  lockRepositoryTasksKey,
+  schema,
+} from '@haive/database';
 import {
   CONFIG_KEYS,
   GLOBAL_KB_JOB_NAMES,
@@ -643,6 +648,8 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
   try {
     queued = await db.transaction(async (tx) => {
       await admitNewWork(tx);
+      // Queuing takes this lock; taken before the insert, it inverts no lock the row's insert holds.
+      if (data.repositoryId) await lockRepositoryTasksKey(tx, data.repositoryId);
       await tx.insert(schema.tasks).values({
         id: taskId,
         userId,

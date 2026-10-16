@@ -486,7 +486,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         for (let attempt = 1; ; attempt++) {
           // A claimed section: no merge in this checkout interleaves, and a cancelled pass is refused.
           const moved = await withMergeDirSection(ctx.db, owner, async (tx) => {
-            // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the move.
+            // Every task's start and every revival take this lock, so none lands between the fence and the move.
             await lockRepositoryTasksKey(tx, repositoryId);
             const again = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
             if (again.outcome !== 'clean') return { again, res: null, holding: 0 };
