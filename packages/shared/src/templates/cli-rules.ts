@@ -28,9 +28,33 @@ export const RTK_REF_MARKER_START = '<!-- haive:rtk-ref -->';
 export const RTK_REF_MARKER_END = '<!-- /haive:rtk-ref -->';
 
 /** Slim RTK awareness body, inlined into AGENTS.md by the worker's `buildRtkAwarenessBlock`.
- *  Vendored from rtk-ai/rtk@v0.37.2 `src/hooks/init.rs` (RTK_SLIM constant). Re-vendor on rtk
- *  version bump. */
-export const RTK_SLIM = `# RTK (Rust Token Killer)
+ *  rtk 1.0.1's own RTK.md body (as `rtk init -g` writes it), reworded where 0.37.2 would make it
+ *  false, since one text serves every repository whatever rtk its sandbox runs: the core image
+ *  bakes DEFAULT_RTK_VERSION, an env-template image installs the repository's pin or the newest
+ *  release, and a pin can name any release, 0.x included. MEASURED in sandbox containers: 0.37.2
+ *  has no `rtk bypass` (1.0.1 still takes `rtk proxy` as its alias), and it marks cut output with
+ *  a count alone (`+21 more`) where 1.0.1 also names a recovery path (`rtk recall <hash>`).
+ *  Re-check both on an rtk version bump. */
+export const RTK_SLIM = `# Command output
+
+Command output here is condensed to save tokens, keeping every signal and
+dropping costly noise. Treat it as the complete result: run commands
+normally, and batch related commands into one call to avoid extra turns.
+Truncated results say how much they cut, and may name their recovery path;
+without one, re-run the command as \`rtk proxy <cmd>\` when you need the
+rest. Re-run it that way too when its result is unusable: empty when
+output was clearly expected, contradicting its exit code, or garbled.
+`;
+
+/** The files 07 wrote the RTK body to before bd9b94c0 inlined it into AGENTS.md. */
+export const LEGACY_RTK_MD_PATHS: readonly string[] = [
+  'RTK.md',
+  '.gemini/RTK.md',
+  '.claude/RTK.md',
+];
+/** The RTK body those runs wrote, `RTK_SLIM` until its rtk 1.0 rewording. Frozen, since it names
+ *  what is already on disk. */
+export const LEGACY_RTK_MD_BODY = `# RTK (Rust Token Killer)
 
 RTK is installed in this sandbox and proxies common dev commands so their
 output is compressed before it lands in your context. Most git, npm, pnpm,
@@ -49,15 +73,7 @@ Trust the hook. If a command output looks unexpectedly compact, that is RTK
 working as intended — re-run with \`rtk proxy <cmd>\` only when you suspect
 filtering is hiding a real signal.
 `;
-
-/** The files 07 wrote the RTK body to before bd9b94c0 inlined it into AGENTS.md. */
-export const LEGACY_RTK_MD_PATHS: readonly string[] = [
-  'RTK.md',
-  '.gemini/RTK.md',
-  '.claude/RTK.md',
-];
-/** `sha256Hex(normalizeContent(RTK_SLIM))` as those runs wrote it. Frozen: if RTK_SLIM is ever
- *  re-vendored, keep this literal, since it names what is already on disk. */
+/** `sha256Hex(normalizeContent(LEGACY_RTK_MD_BODY))`, frozen with it. */
 export const LEGACY_RTK_MD_SHA256 =
   'a1fb23c6477436be8b84a26435cf91f8b0f9a3f433a3081c7778b5b0835a2a54';
 

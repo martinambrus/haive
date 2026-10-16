@@ -19,7 +19,10 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 }));
 
 import { withImageTagLock } from '../src/queues/cli-exec/images.js';
-import { reapOrphanedSandboxImages } from '../src/sandbox/sandbox-image-reaper.js';
+import {
+  reapOrphanedSandboxImages,
+  reapSupersededSandboxCores,
+} from '../src/sandbox/sandbox-image-reaper.js';
 import type { DockerRunner } from '../src/sandbox/docker-runner.js';
 
 const REPO = 'haive-cli-sandbox';
@@ -88,5 +91,28 @@ describe('reapOrphanedSandboxImages', () => {
     const failing = { ...deps, listImageRefs: async () => Promise.reject(new Error('no docker')) };
     await expect(reapOrphanedSandboxImages(db, failing)).resolves.toBe(0);
     expect(removeCalls).toEqual([]);
+  });
+});
+
+describe('reapSupersededSandboxCores', () => {
+  it('removes what docker lets go, keeps a base still built on, and never throws', async () => {
+    const removed: string[] = [];
+    const deps = {
+      listSupersededCoreIds: async () => ['sha256:old', 'sha256:parent'],
+      remove: async (id: string) => {
+        removed.push(id);
+        return id === 'sha256:parent'
+          ? { ok: false, stderr: 'image has dependent child images' }
+          : { ok: true, stderr: '' };
+      },
+    };
+    await expect(reapSupersededSandboxCores(deps)).resolves.toBe(1);
+    expect(removed).toEqual(['sha256:old', 'sha256:parent']);
+
+    const failing = {
+      ...deps,
+      listSupersededCoreIds: async () => Promise.reject(new Error('no docker')),
+    };
+    await expect(reapSupersededSandboxCores(failing)).resolves.toBe(0);
   });
 });
