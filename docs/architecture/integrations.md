@@ -40,11 +40,29 @@ sign anyone in), `token` (a form and help text).
 
 Ids: a core provider or category is `^[a-z0-9][a-z0-9_-]*$`, a module's is `module.<moduleId>.<id>`.
 `isCategoryId` accepts a module-grammar id or a registered core id only; the choice routes are
-stricter and accept only the core list (`listIntegrationCategories`). Core categories and their labels:
+stricter and accept only a registered category (`listIntegrationCategories`: the core list, then the
+categories loaded modules declare). Core categories and their labels:
 `rich-documents` Documents, `spreadsheets`, `file-storage` File storage, `mail` Email, `chat`,
-`issues` Issue tracking, `wiki`, `forge` Git forge. Only `forge` has providers today.
+`issues` Issue tracking, `wiki`, `forge` Git forge. Only `forge` has core providers.
 
-The registered providers are the five forges, in this order: `github`, `gitea`, `gitlab`,
+**Module providers and categories.** A module's manifest may declare `integrations` (provider specs)
+and `categories` (`{id, label, description?}`), full `module.<moduleId>.<local>` ids (local part at most 64
+characters); the manifest rules refuse another module's prefix, a provider category outside core plus the
+module's own, `forge`, an `mcp` surface, `selfHosted`, a provider with no usable sign-in (oauth2 with
+`userInfo` and `preregistered`, or device with `userInfo`), duplicate ids, a module provider without
+`apiHosts` (bare https hostnames), and a composable step requirement naming a `module.*` id the manifest does not
+declare or whose id is not `^[a-z][a-z0-9-]{0,15}$`. Provider specs parse strictly: an unknown or misplaced key
+is refused by name. The api's `mountModules` and the worker's `bootStepEngine` call
+`registerModuleIntegrations` (an idempotent replace behind the unchanged `listIntegrationProviders`,
+`getIntegrationProvider` and `listIntegrationCategories`, core first); the worker refuses at boot, naming the step,
+a requirement naming a module category or provider no loaded module declares. A module provider with no
+provider-config row is off, and enablement folds `modules.deactivated_at` in live, never cached:
+`providerState(db, id)` answers `enabled`, `disabled`, `module-deactivated`, `module-missing` (a module-grammar id
+nothing registers) or `unknown`. `GET /integrations/categories` lists the core categories, then those of active
+modules (`{id, label, description?, moduleId, moduleName}`); `GET /tasks/:id/integrations` lists the categories of
+core and active-module providers plus any category a choice row of the task already names.
+
+The core providers are the five forges, in this order: `github`, `gitea`, `gitlab`,
 `bitbucket_cloud`, `bitbucket_server` (`CORE_FORGE_PROVIDER_SPECS`, `@haive/shared/forge`). Each
 declares `forge`, a token method first, and two operations: `open_pull_request` (write) and
 `get_pull_request_state` (read). GitHub alone adds `device` and `oauth2`; its read and write scopes are
