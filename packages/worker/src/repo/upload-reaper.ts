@@ -34,6 +34,8 @@ interface UploadKind {
     | typeof schema.customBundleUploads.archivePath;
   root: () => string;
   partial: RegExp;
+  // A reaping row names its partial or, for an ended dump, the finished file; null for the others.
+  finished: RegExp | null;
   // A bundle's final path belongs to the bundle; the others' final file sits beside the partial.
   finalBesidePartial: boolean;
 }
@@ -44,6 +46,7 @@ const KINDS: UploadKind[] = [
     pathColumn: schema.repoUploads.archivePath,
     root: repoRoot,
     partial: ARCHIVE_PARTIAL,
+    finished: null,
     finalBesidePartial: true,
   },
   {
@@ -51,6 +54,7 @@ const KINDS: UploadKind[] = [
     pathColumn: schema.dbUploads.dumpPath,
     root: repoRoot,
     partial: DUMP_PARTIAL,
+    finished: DUMP_FILE,
     finalBesidePartial: true,
   },
   {
@@ -58,6 +62,7 @@ const KINDS: UploadKind[] = [
     pathColumn: schema.customBundleUploads.archivePath,
     root: bundleRoot,
     partial: ARCHIVE_PARTIAL,
+    finished: null,
     finalBesidePartial: false,
   },
 ];
@@ -87,52 +92,27 @@ async function removeFile(root: string, rel: string): Promise<boolean> {
   return removeNoFollow(root, rel);
 }
 
-async function reapIdleSessions(db: Database, kind: UploadKind, cutoff: Date): Promise<number> {
+// A complete parks its session in 'completing'; one that died there is claimed too.
+async function claimIdleSessions(db: Database, kind: UploadKind, cutoff: Date): Promise<void> {
   const table = kind.table;
-  // A complete parks its session in 'completing'; one that died there is reaped too.
-  const claimed = await db
+  await db
     .update(table)
-    .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(and(inArray(table.status, ['uploading', 'completing']), lt(table.updatedAt, cutoff)))
-    .returning({ userId: table.userId, stored: kind.pathColumn });
-  for (const row of claimed) {
-    try {
-      const rel = ownedRel(kind.root(), row.userId, row.stored, kind.partial);
-      if (rel === null) {
-        log.warn({ stored: row.stored }, 'reaped upload names a path that is not its own partial');
-        continue;
-      }
-      await removeFile(kind.root(), rel);
-      if (kind.finalBesidePartial) await removeFile(kind.root(), finalRelOf(rel));
-    } catch (err) {
-      log.warn(
-        { err, stored: row.stored },
-        'reaped upload left a file; the file pass retries only a partial',
-      );
-    }
-  }
-  return claimed.length;
+    .set({ status: 'reaping', updatedAt: new Date() })
+    .where(and(inArray(table.status, ['uploading', 'completing']), lt(table.updatedAt, cutoff)));
 }
 
 // A failed or cancelled task can be retried, so a dump stays a day after its last task changed;
 // one no task names stays a day after the upload, since task creation follows it.
-// A claim parks the dump in 'reaping' until its file is gone, and every pass finishes those rows.
-async function reapEndedDumps(db: Database, cutoff: Date): Promise<number> {
+async function claimEndedDumps(db: Database, cutoff: Date): Promise<void> {
   const dumps = await db
     .select({
       id: schema.dbUploads.id,
       userId: schema.dbUploads.userId,
       stored: schema.dbUploads.dumpPath,
-      status: schema.dbUploads.status,
     })
     .from(schema.dbUploads)
-    .where(
-      or(
-        and(eq(schema.dbUploads.status, 'complete'), lt(schema.dbUploads.updatedAt, cutoff)),
-        eq(schema.dbUploads.status, 'reaping'),
-      ),
-    );
-  if (dumps.length === 0) return 0;
+    .where(and(eq(schema.dbUploads.status, 'complete'), lt(schema.dbUploads.updatedAt, cutoff)));
+  if (dumps.length === 0) return;
 
   const tasks = await db
     .select({
@@ -153,28 +133,64 @@ async function reapEndedDumps(db: Database, cutoff: Date): Promise<number> {
     }
   }
 
-  let reaped = 0;
   for (const dump of dumps) {
-    if (dump.status === 'complete' && pinned.has(dump.id)) continue;
+    if (pinned.has(dump.id)) continue;
     try {
-      const rel = ownedRel(repoRoot(), dump.userId, dump.stored, DUMP_FILE);
-      if (rel === null) {
+      if (ownedRel(repoRoot(), dump.userId, dump.stored, DUMP_FILE) === null) {
         log.warn({ stored: dump.stored }, 'completed dump names a path that is not its own file');
         continue;
       }
-      if (dump.status === 'complete' && !(await claimDump(db, dump.id, cutoff))) continue;
-      await removeFile(repoRoot(), rel);
-      const [done] = await db
-        .update(schema.dbUploads)
-        .set({ status: 'cancelled', updatedAt: new Date() })
-        .where(and(eq(schema.dbUploads.id, dump.id), eq(schema.dbUploads.status, 'reaping')))
-        .returning({ id: schema.dbUploads.id });
-      if (done !== undefined) reaped += 1;
+      await claimDump(db, dump.id, cutoff);
     } catch (err) {
-      log.warn({ err, dumpId: dump.id }, 'ended dump was not fully reaped');
+      log.warn({ err, dumpId: dump.id }, 'ended dump was not claimed');
     }
   }
-  return reaped;
+}
+
+// A row stays 'reaping' while any file stays; every pass finishes those rows, whatever their age.
+async function finishReaping(
+  db: Database,
+  kind: UploadKind,
+): Promise<{ sessions: number; dumps: number }> {
+  const table = kind.table;
+  const rows = await db
+    .select({ id: table.id, userId: table.userId, stored: kind.pathColumn })
+    .from(table)
+    .where(eq(table.status, 'reaping'));
+  const done = { sessions: 0, dumps: 0 };
+  for (const row of rows) {
+    try {
+      const own = (shape: RegExp) => ownedRel(kind.root(), row.userId, row.stored, shape);
+      const partialRel = own(kind.partial);
+      const rel = partialRel ?? (kind.finished === null ? null : own(kind.finished));
+      if (rel === null) {
+        log.warn({ stored: row.stored }, 'reaping upload names a path that is not its own file');
+      }
+      const files = rel === null ? [] : [rel];
+      if (partialRel !== null && kind.finalBesidePartial) files.push(finalRelOf(partialRel));
+      let gone = true;
+      for (const file of files) {
+        try {
+          await removeFile(kind.root(), file);
+        } catch (err) {
+          gone = false;
+          log.warn({ err, rel: file }, 'reaping upload file was not removed');
+        }
+      }
+      if (!gone) continue;
+      const [cancelled] = await db
+        .update(table)
+        .set({ status: 'cancelled', updatedAt: new Date() })
+        .where(and(eq(table.id, row.id), eq(table.status, 'reaping')))
+        .returning({ id: table.id });
+      if (cancelled === undefined) continue;
+      if (rel !== null && partialRel === null) done.dumps += 1;
+      else done.sessions += 1;
+    } catch (err) {
+      log.warn({ err, id: row.id }, 'reaping upload was not finished');
+    }
+  }
+  return done;
 }
 
 async function claimDump(db: Database, dumpId: string, cutoff: Date): Promise<boolean> {
@@ -268,29 +284,39 @@ async function reapOrphanPartials(db: Database, root: string, shapes: RegExp[]):
   return removed;
 }
 
-/** One reaper pass: idle sessions, ended dumps, then partials no session names. */
+/** One reaper pass: claim the idle and the ended, finish what is reaping, sweep orphan partials. */
 export async function reapAbandonedUploads(db: Database): Promise<UploadReapResult> {
   const cutoff = new Date(Date.now() - IDLE_MS);
   const result: UploadReapResult = { sessions: 0, dumps: 0, orphans: 0 };
-  const guarded = async (what: string, run: () => Promise<number>): Promise<number> => {
+  const guarded = async <T>(what: string, run: () => Promise<T>, skipped: T): Promise<T> => {
     try {
       return await run();
     } catch (err) {
       log.warn({ err }, `upload reaper skipped ${what}`);
-      return 0;
+      return skipped;
     }
   };
   for (const kind of KINDS) {
-    result.sessions += await guarded('an idle-session pass', () =>
-      reapIdleSessions(db, kind, cutoff),
-    );
+    await guarded('an idle-session pass', () => claimIdleSessions(db, kind, cutoff), undefined);
   }
-  result.dumps = await guarded('the ended-dump pass', () => reapEndedDumps(db, cutoff));
-  result.orphans += await guarded('the repository file pass', () =>
-    reapOrphanPartials(db, repoRoot(), [ARCHIVE_PARTIAL, DUMP_PARTIAL]),
+  await guarded('the ended-dump pass', () => claimEndedDumps(db, cutoff), undefined);
+  for (const kind of KINDS) {
+    const done = await guarded('a cleanup pass', () => finishReaping(db, kind), {
+      sessions: 0,
+      dumps: 0,
+    });
+    result.sessions += done.sessions;
+    result.dumps += done.dumps;
+  }
+  result.orphans += await guarded(
+    'the repository file pass',
+    () => reapOrphanPartials(db, repoRoot(), [ARCHIVE_PARTIAL, DUMP_PARTIAL]),
+    0,
   );
-  result.orphans += await guarded('the bundle file pass', () =>
-    reapOrphanPartials(db, bundleRoot(), [ARCHIVE_PARTIAL]),
+  result.orphans += await guarded(
+    'the bundle file pass',
+    () => reapOrphanPartials(db, bundleRoot(), [ARCHIVE_PARTIAL]),
+    0,
   );
   if (result.sessions + result.dumps + result.orphans > 0) {
     log.info(result, 'abandoned uploads reaped');

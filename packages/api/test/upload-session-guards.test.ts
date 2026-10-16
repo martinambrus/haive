@@ -34,7 +34,7 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
 });
 
 import { Hono } from 'hono';
-import { and, inArray, lt } from 'drizzle-orm';
+import { and, eq, inArray, lt } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb, type FakeDbHandle, type FakeRow } from '@haive/database/testing';
 import { logger } from '@haive/shared';
@@ -42,6 +42,10 @@ import { repoRoutes } from '../src/routes/repos.js';
 import { dbDumpRoutes } from '../src/routes/db-dumps.js';
 import { bundleRoutes } from '../src/routes/bundles.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
+import {
+  COMPLETE_CLAIM_RENEW_MS,
+  COMPLETE_CLAIM_STALE_MS,
+} from '../src/lib/upload-complete-claim.js';
 import type { AppEnv } from '../src/context.js';
 
 // A complete and a cancel race the upload reaper, and a cancel never takes a finished upload: the
@@ -289,8 +293,8 @@ async function seedZipBundle(): Promise<string> {
   return dir;
 }
 
-// What the worker's row pass does to a table: one UPDATE guarded on 'uploading' or 'completing' and
-// the TTL, then the partials of the rows it took are removed.
+// What the worker's pass does to a table: one UPDATE guarded on 'uploading' or 'completing' and the
+// TTL parks the rows it took in reaping, their partials are removed, and the rows turn cancelled.
 async function reap(family: Family): Promise<number> {
   const table = family.table as typeof schema.repoUploads;
   const stored = (family.table as unknown as Record<string, typeof table.archivePath>)[
@@ -299,10 +303,16 @@ async function reap(family: Family): Promise<number> {
   const cutoff = new Date(Date.now() - 24 * HOUR);
   const claimed = await fake.db
     .update(table)
-    .set({ status: 'cancelled', updatedAt: new Date() })
+    .set({ status: 'reaping', updatedAt: new Date() })
     .where(and(inArray(table.status, ['uploading', 'completing']), lt(table.updatedAt, cutoff)))
-    .returning({ stored });
-  for (const row of claimed as { stored: string }[]) await rm(row.stored, { force: true });
+    .returning({ id: table.id, stored });
+  for (const row of claimed as { id: string; stored: string }[]) {
+    await rm(row.stored, { force: true });
+    await fake.db
+      .update(table)
+      .set({ status: 'cancelled', updatedAt: new Date() })
+      .where(and(eq(table.id, row.id), eq(table.status, 'reaping')));
+  }
   return claimed.length;
 }
 
@@ -1072,8 +1082,8 @@ describe('F2: one complete holds a session at a time', () => {
     expect(queue.jobs).toHaveLength(1);
   });
 
-  it('replace: a complete taken over before its final write answers 409 and queues nothing', async () => {
-    await seedZipBundle();
+  it('replace: a complete taken over before its final write answers 409, queues nothing and leaves the bundle row alone', async () => {
+    const dir = await seedZipBundle();
     await stage(bundles);
     fake.patch(schema.customBundleUploads, SESSION, { bundleId: BUNDLE });
     takenOverAtWrite(bundles, 2);
@@ -1083,5 +1093,355 @@ describe('F2: one complete holds a session at a time', () => {
     expect(res.status).toBe(409);
     expect(rowOf(bundles).status).toBe('completing');
     expect(queue.jobs).toHaveLength(0);
+    expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+      status: 'active',
+      archiveFilename: 'kit.zip',
+      archivePath: path.join(dir, 'source.zip'),
+    });
   });
+});
+
+// A complete stops at the move, past its claim, until the test lets it go; with `failure` it then fails.
+function holdAtTheMove(failure?: Error): {
+  reachedBy: (request: Response | Promise<Response>) => Promise<void>;
+  release: () => void;
+} {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let reach!: () => void;
+  const reached = new Promise<void>((resolve) => (reach = resolve));
+  h.beforeRename = async () => {
+    h.beforeRename = null;
+    reach();
+    await released;
+    if (failure) throw failure;
+  };
+  return {
+    release,
+    reachedBy: (request) =>
+      Promise.race([
+        reached,
+        Promise.resolve(request).then((res) => {
+          throw new Error(`the complete ended with ${res.status} before it reached the move`);
+        }),
+      ]),
+  };
+}
+
+describe('L: a complete holds its claim by renewing it while it works', () => {
+  const replaceUrl = `/${BUNDLE}/replace/${SESSION}/complete`;
+  const stampOf = (family: Family) => (rowOf(family).updatedAt as Date).getTime();
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('L0: the claim is renewed every minute and goes stale after ten', () => {
+    expect([COMPLETE_CLAIM_RENEW_MS, COMPLETE_CLAIM_STALE_MS]).toEqual([MIN, 10 * MIN]);
+  });
+
+  it.each(FAMILIES)(
+    'L1 $name: a complete that outlives the stale window keeps its claim, and the first one finishes',
+    async (family) => {
+      const staged = await stage(family);
+      const gate = holdAtTheMove();
+      const first = request(family.app, 'POST', family.completeUrl(SESSION));
+      await gate.reachedBy(first);
+
+      await vi.advanceTimersByTimeAsync(11 * MIN);
+      const second = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+      expect(second.status).toBe(409);
+      expect(await errorOf(second)).toBe('a complete of this session is already running');
+      expect(rowOf(family).status).toBe('completing');
+      expect(await exists(staged.partial)).toBe(true);
+
+      gate.release();
+      const res = await first;
+
+      expect(res.status).toBe(201);
+      expect(rowOf(family)).toMatchObject({
+        status: 'complete',
+        [family.pathKey]: staged.finished,
+      });
+      expect(await readFile(staged.finished, 'utf8')).toBe(CONTENT);
+      expect(family.created()).toBe(family.made);
+      expect(queue.jobs).toHaveLength(family.jobs);
+    },
+  );
+
+  it('L1 replace: a complete that outlives the stale window keeps its claim, and swaps the archive', async () => {
+    const family = FAMILIES[2]!;
+    const dir = await seedZipBundle();
+    await stage(family);
+    fake.patch(schema.customBundleUploads, SESSION, { bundleId: BUNDLE });
+    const gate = holdAtTheMove();
+    const first = request(family.app, 'POST', replaceUrl);
+    await gate.reachedBy(first);
+
+    await vi.advanceTimersByTimeAsync(11 * MIN);
+    const second = await request(family.app, 'POST', replaceUrl);
+
+    expect(second.status).toBe(409);
+    expect(await errorOf(second)).toBe('a complete of this session is already running');
+    expect(rowOf(family).status).toBe('completing');
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('OLD-ARCHIVE');
+
+    gate.release();
+    const res = await first;
+
+    expect(res.status).toBe(200);
+    expect(rowOf(family).status).toBe('complete');
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it.each(FAMILIES)(
+    'L2 $name: a holder that stops renewing loses the claim to a takeover after the stale window',
+    async (family) => {
+      const staged = await stage(family);
+      const gate = holdAtTheMove();
+      const first = request(family.app, 'POST', family.completeUrl(SESSION));
+      await gate.reachedBy(first);
+      const claimed = stampOf(family);
+
+      await vi.advanceTimersByTimeAsync(5 * MIN);
+      expect(stampOf(family)).toBeGreaterThan(claimed);
+
+      // The holder dies here: the clock runs on and no tick of its lease fires.
+      vi.setSystemTime(Date.now() + 11 * MIN);
+      const second = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+      expect(second.status).toBe(201);
+      expect(rowOf(family)).toMatchObject({
+        status: 'complete',
+        [family.pathKey]: staged.finished,
+      });
+
+      gate.release();
+      expect((await first).status).toBeGreaterThanOrEqual(400);
+      expect(rowOf(family)).toMatchObject({
+        status: 'complete',
+        [family.pathKey]: staged.finished,
+      });
+      expect(family.created()).toBe(family.made);
+      // BullMQ keeps one job per id, which the fake queue does not.
+      expect(new Set(queue.jobs.map((job) => job.id)).size).toBe(family.jobs);
+    },
+  );
+
+  it.each(FAMILIES)('L6 $name: no renewal follows a complete that succeeded', async (family) => {
+    await stage(family);
+    expect((await request(family.app, 'POST', family.completeUrl(SESSION))).status).toBe(201);
+    let writes = 0;
+    fake.hooks.beforeUpdate = (table) => {
+      if (table === family.table) writes += 1;
+    };
+
+    await vi.advanceTimersByTimeAsync(10 * MIN);
+
+    expect(writes).toBe(0);
+  });
+
+  it.each(FAMILIES)('L6 $name: no renewal follows a complete that failed', async (family) => {
+    await stage(family);
+    h.beforeRename = () => {
+      throw new Error('the move failed');
+    };
+    expect((await request(family.app, 'POST', family.completeUrl(SESSION))).status).toBe(500);
+    let writes = 0;
+    fake.hooks.beforeUpdate = (table) => {
+      if (table === family.table) writes += 1;
+    };
+
+    await vi.advanceTimersByTimeAsync(10 * MIN);
+
+    expect(writes).toBe(0);
+  });
+
+  it('L3 repos: a renewal that finds the claim gone is the last one, and none follows the end of the complete', async () => {
+    const family = FAMILIES[0]!;
+    await stage(family);
+    const gate = holdAtTheMove();
+    const first = request(family.app, 'POST', family.completeUrl(SESSION));
+    await gate.reachedBy(first);
+    let writes = 0;
+    fake.hooks.beforeUpdate = (table) => {
+      if (table === family.table) writes += 1;
+    };
+    // Another complete took the session over: the row now carries its stamp.
+    fake.patch(family.table, SESSION, { updatedAt: new Date(Date.now() + 5_000) });
+
+    await vi.advanceTimersByTimeAsync(3 * MIN);
+
+    expect(writes).toBe(1);
+
+    gate.release();
+    expect((await first).status).toBe(409);
+    writes = 0;
+    await vi.advanceTimersByTimeAsync(10 * MIN);
+    expect(writes).toBe(0);
+    expect(rowOf(family).status).toBe('completing');
+  });
+
+  it('L7 repos: a renewal that fails is logged and retried by the next tick', async () => {
+    const family = FAMILIES[0]!;
+    await stage(family);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const gate = holdAtTheMove();
+    const first = request(family.app, 'POST', family.completeUrl(SESSION));
+    await gate.reachedBy(first);
+    const claimed = stampOf(family);
+    let failing = true;
+    fake.hooks.beforeUpdate = (table) => {
+      if (table === family.table && failing) throw new Error('the database blinked');
+    };
+
+    await vi.advanceTimersByTimeAsync(MIN);
+    expect(stampOf(family)).toBe(claimed);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    failing = false;
+    await vi.advanceTimersByTimeAsync(MIN);
+    expect(stampOf(family)).toBeGreaterThan(claimed);
+
+    gate.release();
+    expect((await first).status).toBe(201);
+    expect(rowOf(family).status).toBe('complete');
+  });
+
+  it('L4 repos: a renewal that lands as the final write starts does not fail the write', async () => {
+    const family = FAMILIES[0]!;
+    const staged = await stage(family);
+    let seen = 0;
+    let ticking = false;
+    // The claim is the first write to the upload row and the final write is the second.
+    fake.hooks.beforeUpdate = async (table) => {
+      if (table !== family.table || ticking || (seen += 1) !== 2) return;
+      ticking = true;
+      const before = stampOf(family);
+      await vi.advanceTimersByTimeAsync(MIN);
+      expect(stampOf(family)).toBeGreaterThan(before);
+      ticking = false;
+    };
+
+    const res = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+    expect(res.status).toBe(201);
+    expect(rowOf(family)).toMatchObject({ status: 'complete', [family.pathKey]: staged.finished });
+    expect(family.created()).toBe(1);
+  });
+
+  it.each(FAMILIES)(
+    'L5 $name: a complete that fails after renewing gives the session back',
+    async (family) => {
+      const staged = await stage(family);
+      const gate = holdAtTheMove(new Error('the move failed'));
+      const first = request(family.app, 'POST', family.completeUrl(SESSION));
+      await gate.reachedBy(first);
+      await vi.advanceTimersByTimeAsync(5 * MIN);
+
+      gate.release();
+      const res = await first;
+
+      expect(res.status).toBe(500);
+      expect(rowOf(family)).toMatchObject({
+        status: 'uploading',
+        [family.pathKey]: staged.partial,
+      });
+      expect(await readFile(staged.partial, 'utf8')).toBe(CONTENT);
+    },
+  );
+});
+
+describe('R2: a cancel leaves the session reaping while a file will not go', () => {
+  // A non-empty directory at a name cannot be removed as a file: the removal fails.
+  async function blockedAt(file: string): Promise<void> {
+    await rm(file, { force: true });
+    await mkdir(file);
+    await writeFile(path.join(file, 'inner.txt'), 'inner');
+  }
+
+  it.each([FAMILIES[0]!, FAMILIES[1]!])(
+    '$name: a finished file that cannot be removed leaves the row reaping, the partial gone',
+    async (family) => {
+      const staged = await stage(family);
+      await blockedAt(staged.finished);
+
+      const res = await request(family.app, 'DELETE', family.cancelUrl(SESSION));
+
+      expect(res.status).toBe(200);
+      expect(rowOf(family).status).toBe('reaping');
+      expect(await exists(staged.partial)).toBe(false);
+      expect(await readFile(path.join(staged.finished, 'inner.txt'), 'utf8')).toBe('inner');
+    },
+  );
+
+  it.each(FAMILIES)(
+    '$name: a partial that cannot be removed leaves the row reaping',
+    async (family) => {
+      const staged = await stage(family);
+      await blockedAt(staged.partial);
+
+      const res = await request(family.app, 'DELETE', family.cancelUrl(SESSION));
+
+      expect(res.status).toBe(200);
+      expect(rowOf(family).status).toBe('reaping');
+      expect(await readFile(path.join(staged.partial, 'inner.txt'), 'utf8')).toBe('inner');
+    },
+  );
+
+  it.each(FAMILIES)(
+    '$name: a row that names a path that is not its own is cancelled and the file is left',
+    async (family) => {
+      await stage(family);
+      const outside = path.join(storage, 'precious.bin');
+      await writeFile(outside, 'keep me');
+      fake.patch(family.table, SESSION, { [family.pathKey]: outside });
+
+      const res = await request(family.app, 'DELETE', family.cancelUrl(SESSION));
+
+      expect(res.status).toBe(200);
+      expect(rowOf(family).status).toBe('cancelled');
+      expect(await readFile(outside, 'utf8')).toBe('keep me');
+    },
+  );
+
+  it.each(FAMILIES)(
+    '$name: the row reads reaping while the files go, and cancelled once they are gone',
+    async (family) => {
+      const staged = await stage(family);
+      const seen: unknown[] = [];
+      fake.hooks.beforeUpdate = (table) => {
+        if (table === family.table) seen.push(rowOf(family).status);
+      };
+
+      const res = await request(family.app, 'DELETE', family.cancelUrl(SESSION));
+
+      expect(res.status).toBe(200);
+      expect(seen).toEqual(['uploading', 'reaping']);
+      expect(rowOf(family).status).toBe('cancelled');
+      expect(await exists(staged.partial)).toBe(false);
+    },
+  );
+
+  it.each(FAMILIES)(
+    '$name: a session left reaping refuses a complete and a second cancel',
+    async (family) => {
+      const staged = await stage(family, { status: 'reaping', at: 'partial' });
+
+      const complete = await request(family.app, 'POST', family.completeUrl(SESSION));
+      const cancel = await request(family.app, 'DELETE', family.cancelUrl(SESSION));
+
+      expect(complete.status).toBe(409);
+      expect(await errorOf(complete)).toBe('session cancelled');
+      expect(cancel.status).toBe(409);
+      expect(await errorOf(cancel)).toBe('session is reaping');
+      expect(rowOf(family).status).toBe('reaping');
+      expect(await readFile(staged.partial, 'utf8')).toBe(CONTENT);
+    },
+  );
 });

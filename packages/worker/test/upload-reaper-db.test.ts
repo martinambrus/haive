@@ -621,6 +621,125 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
       expect(await statusOfRow(repos, doneId)).toBe('complete');
       expect(await exists(done)).toBe(true);
     });
+
+    // A claim parks a session in reaping until every file it owns is gone, and every pass finishes
+    // those rows, whatever their age.
+    describe('a reaped session stays reaping until its files are gone', () => {
+      // A session row naming its partial, with the partial and the finished file beside it both on disk.
+      async function withBoth(kind: Kind, status: string, idleMs: number) {
+        const id = randomUUID();
+        const partial = path.join(root, kind.volume, '_uploads', userId, kind.partial(id));
+        const finished = partial.replace(/\.partial$/, '');
+        await writeFile(partial, 'partial bytes');
+        await writeFile(finished, 'finished bytes');
+        await kind.insert(id, partial, status, new Date(Date.now() - idleMs));
+        return { id, partial, finished };
+      }
+
+      describe.each([repos, dumps])('$name', (kind) => {
+        it('a stale session whose finished file cannot be removed stays reaping, and the next pass removes both files and cancels it', async () => {
+          const stale = await withBoth(kind, 'uploading', 25 * HOUR);
+          faults.removal = (rel) => !rel.endsWith('.partial');
+
+          const failed = await reapAbandonedUploads(db);
+
+          expect(await statusOfRow(kind, stale.id)).toBe('reaping');
+          expect(await exists(stale.finished)).toBe(true);
+          expect(await exists(stale.partial)).toBe(false);
+          expect(failed.sessions).toBe(0);
+
+          faults.removal = null;
+          const finished = await reapAbandonedUploads(db);
+
+          expect(await statusOfRow(kind, stale.id)).toBe('cancelled');
+          expect(await exists(stale.finished)).toBe(false);
+          expect(finished.sessions).toBe(1);
+        });
+
+        it('a stale session whose partial cannot be removed stays reaping, and its finished file still goes', async () => {
+          const stale = await withBoth(kind, 'completing', 25 * HOUR);
+          faults.removal = (rel) => rel.endsWith('.partial');
+
+          await reapAbandonedUploads(db);
+
+          expect(await statusOfRow(kind, stale.id)).toBe('reaping');
+          expect(await exists(stale.partial)).toBe(true);
+          expect(await exists(stale.finished)).toBe(false);
+
+          faults.removal = null;
+          await reapAbandonedUploads(db);
+
+          expect(await statusOfRow(kind, stale.id)).toBe('cancelled');
+          expect(await exists(stale.partial)).toBe(false);
+        });
+
+        it.each([
+          ['just now', 0],
+          ['five days ago', 120 * HOUR],
+        ])(
+          'finishes a row a dead worker left reaping with both its files, updated %s',
+          async (_when, idleMs) => {
+            const dead = await withBoth(kind, 'reaping', idleMs);
+
+            const result = await reapAbandonedUploads(db);
+
+            expect(await statusOfRow(kind, dead.id)).toBe('cancelled');
+            expect(await exists(dead.partial)).toBe(false);
+            expect(await exists(dead.finished)).toBe(false);
+            expect(result.sessions).toBe(1);
+          },
+        );
+      });
+
+      describe('a bundle session', () => {
+        it('keeps its bundle’s final path while its partial cannot be removed, and after the next pass cancels it', async () => {
+          const stale = await withBoth(bundles, 'uploading', 25 * HOUR);
+          faults.removal = (rel) => rel.endsWith('.partial');
+
+          await reapAbandonedUploads(db);
+
+          expect(await statusOfRow(bundles, stale.id)).toBe('reaping');
+          expect(await exists(stale.finished)).toBe(true);
+
+          faults.removal = null;
+          await reapAbandonedUploads(db);
+
+          expect(await statusOfRow(bundles, stale.id)).toBe('cancelled');
+          expect(await exists(stale.partial)).toBe(false);
+          expect(await exists(stale.finished)).toBe(true);
+        });
+
+        it('keeps its bundle’s final path when a dead worker left the row reaping', async () => {
+          const dead = await withBoth(bundles, 'reaping', 0);
+
+          await reapAbandonedUploads(db);
+
+          expect(await statusOfRow(bundles, dead.id)).toBe('cancelled');
+          expect(await exists(dead.partial)).toBe(false);
+          expect(await exists(dead.finished)).toBe(true);
+        });
+      });
+
+      it('leaves the completed dump a task links alone while a stale dump session stays reaping beside it', async () => {
+        const linked = await dump(5 * 24 * HOUR);
+        await link(linked.id, 'running', 5 * 24 * HOUR);
+        const stale = await withBoth(dumps, 'uploading', 25 * HOUR);
+        faults.removal = (rel) => rel.endsWith('.partial');
+
+        await reapAbandonedUploads(db);
+
+        expect(await statusOfRow(dumps, stale.id)).toBe('reaping');
+        expect(await statusOf(linked.id)).toBe('complete');
+        expect(await exists(linked.file)).toBe(true);
+
+        faults.removal = null;
+        await reapAbandonedUploads(db);
+
+        expect(await statusOfRow(dumps, stale.id)).toBe('cancelled');
+        expect(await statusOf(linked.id)).toBe('complete');
+        expect(await exists(linked.file)).toBe(true);
+      });
+    });
   });
 
   describe('the file pass', () => {

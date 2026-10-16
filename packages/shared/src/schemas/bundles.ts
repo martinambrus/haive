@@ -43,6 +43,7 @@ export const bundleUploadStatusSchema = z.enum([
   'completing',
   'complete',
   'cancelled',
+  'reaping',
 ]);
 
 export const bundleUploadSessionSchema = z.object({

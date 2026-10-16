@@ -4,14 +4,18 @@ import { Hono } from 'hono';
 import { eq, and } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { initDbUploadRequestSchema, type DbDumpFormat } from '@haive/shared';
-import { openFileNoFollow, removeNoFollow, renameNoFollow } from '@haive/shared/fs-safe';
+import { openFileNoFollow, renameNoFollow } from '@haive/shared/fs-safe';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
-import { isWholeFile, withCompleteClaim } from '../lib/upload-complete-claim.js';
+import {
+  cancelUploadSession,
+  isWholeFile,
+  withCompleteClaim,
+} from '../lib/upload-complete-claim.js';
 import {
   ensureUploadsDir,
   uploadFileRel,
@@ -270,24 +274,16 @@ dbDumpRoutes.delete('/upload/:id', async (c) => {
   if (row.status !== 'uploading') {
     throw new HttpError(409, `session is ${row.status}`);
   }
-  const cancelled = await db
-    .update(schema.dbUploads)
-    .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(and(eq(schema.dbUploads.id, row.id), eq(schema.dbUploads.status, 'uploading')))
-    .returning({ id: schema.dbUploads.id });
-  if (cancelled.length === 0) {
-    throw new HttpError(409, 'session is not uploading');
-  }
   // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
   // unlink: the session is still cancelled, and a leftover partial is the upload reaper's to remove
   // rather than a reason to refuse the cancel.
   const dumpRel = uploadFileRel(userId, row.dumpPath);
-  if (dumpRel) {
-    await removeNoFollow(uploadsStorageRoot(), dumpRel).catch(() => {});
-    // An uploading session owns no completed file, so a final one here is a failed complete's.
-    const finalRel = uploadFinalRel(dumpRel);
-    if (finalRel) await removeNoFollow(uploadsStorageRoot(), finalRel).catch(() => {});
-  }
+  // An uploading session owns no completed file, so a final one here is a failed complete's.
+  const finalRel = dumpRel === null ? null : uploadFinalRel(dumpRel);
+  await cancelUploadSession(db, schema.dbUploads, row.id, uploadsStorageRoot(), [
+    dumpRel,
+    finalRel,
+  ]);
 
   return c.json({ ok: true });
 });

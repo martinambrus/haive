@@ -29,7 +29,11 @@ import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
-import { isWholeFile, withCompleteClaim } from '../lib/upload-complete-claim.js';
+import {
+  cancelUploadSession,
+  isWholeFile,
+  withCompleteClaim,
+} from '../lib/upload-complete-claim.js';
 import {
   ensureUploadsDir,
   uploadFileRel,
@@ -138,7 +142,7 @@ function uploadSessionFromRow(
     totalSize: Number(row.totalSize),
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
-    status: row.status as 'uploading' | 'completing' | 'complete' | 'cancelled',
+    status: row.status as 'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping',
   };
 }
 
@@ -611,26 +615,11 @@ bundleRoutes.delete('/uploads/:id', async (c) => {
   if (row.status !== 'uploading') {
     throw new HttpError(409, `session is ${row.status}`);
   }
-  const cancelled = await db
-    .update(schema.customBundleUploads)
-    .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(
-      and(
-        eq(schema.customBundleUploads.id, row.id),
-        eq(schema.customBundleUploads.status, 'uploading'),
-      ),
-    )
-    .returning({ id: schema.customBundleUploads.id });
-  if (cancelled.length === 0) {
-    throw new HttpError(409, 'session is not uploading');
-  }
-  if (row.archivePath) {
-    // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
-    // unlink: the session is still cancelled, and the upload reaper removes a leftover partial.
-    const anchor = bundleStorageRoot();
-    const archiveRel = uploadFileRel(userId, row.archivePath, anchor);
-    if (archiveRel) await removeNoFollow(anchor, archiveRel).catch(() => {});
-  }
+  // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
+  // unlink: the session is still cancelled, and the upload reaper removes a leftover partial.
+  const anchor = bundleStorageRoot();
+  const archiveRel = uploadFileRel(userId, row.archivePath, anchor);
+  await cancelUploadSession(db, schema.customBundleUploads, row.id, anchor, [archiveRel]);
 
   return c.json({ ok: true });
 });
@@ -749,20 +738,26 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
     // A replace cannot resume past its rename, so a failure from here on gives the session back.
     await removeNoFollow(anchor, extractedRel, { recursive: true });
 
-    await db
-      .update(schema.customBundles)
-      .set({
-        archiveFilename: row.filename,
-        archiveFormat: row.archiveFormat,
+    // The bundle row moves only with the claim, so a complete that lost it leaves the row alone.
+    await db.transaction(async (tx) => {
+      await claim.write(tx, {
+        status: 'complete',
         archivePath: finalArchive,
-        storageRoot: newExtracted,
-        status: 'syncing',
-        lastSyncError: null,
         updatedAt: new Date(),
-      })
-      .where(eq(schema.customBundles.id, bundleId));
-
-    await claim.write(db, { status: 'complete', archivePath: finalArchive, updatedAt: new Date() });
+      });
+      await tx
+        .update(schema.customBundles)
+        .set({
+          archiveFilename: row.filename,
+          archiveFormat: row.archiveFormat,
+          archivePath: finalArchive,
+          storageRoot: newExtracted,
+          status: 'syncing',
+          lastSyncError: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.customBundles.id, bundleId));
+    });
 
     const queue = getBundleQueue();
     const payload: BundleJobPayload = {

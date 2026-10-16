@@ -884,6 +884,27 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
         await second;
         expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
       });
+
+      it('K6: renews its claim row while run works, and writes at the renewed stamp', async () => {
+        const { withCompleteClaim } = await claimLib();
+        await seed('uploading', 0, 'partial');
+        vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+        try {
+          await withCompleteClaim(db, schema.repoUploads, UPLOAD, async (claim) => {
+            const claimed = (await uploadRow()).updatedAt.getTime();
+            await vi.advanceTimersByTimeAsync(MIN);
+            await vi.waitFor(
+              async () => expect((await uploadRow()).updatedAt.getTime()).toBeGreaterThan(claimed),
+              { timeout: 3_000 },
+            );
+            await claim.write(db, done(final()));
+          });
+        } finally {
+          vi.useRealTimers();
+        }
+
+        expect(await uploadRow()).toMatchObject({ status: 'complete', archivePath: final() });
+      });
     });
   });
 

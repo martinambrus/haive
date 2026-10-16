@@ -920,20 +920,198 @@ describe('startUploadReaper', () => {
     };
 
     const stop = startUploadReaper(db());
-    await vi.waitFor(() => expect(claims).toBe(1), { timeout: 10_000 });
-    expect(rowOf(KINDS[0]!, stale.id).status).toBe('cancelled');
+    await vi.waitFor(() => expect(rowOf(KINDS[0]!, stale.id).status).toBe('cancelled'), {
+      timeout: 10_000,
+    });
+    // The pass wrote the stale row twice: the claim into reaping, then the finish.
+    expect(claims).toBe(2);
 
     // A tick that lands while the first pass still runs is dropped by the single-flight flag.
     await vi.waitFor(
       async () => {
         await vi.advanceTimersByTimeAsync(15 * MIN);
-        expect(claims).toBe(2);
+        expect(claims).toBe(3);
       },
       { timeout: 10_000 },
     );
 
     stop();
     await vi.advanceTimersByTimeAsync(45 * MIN);
-    expect(claims).toBe(2);
+    expect(claims).toBe(3);
+  });
+});
+
+// A claim parks a session in reaping until every file it owns is gone, and every pass finishes those
+// rows, whatever their age.
+describe('R1: a reaped session stays reaping until its files are gone', () => {
+  const repos = KINDS[0]!;
+  const dumps = KINDS[1]!;
+  const bundles = KINDS[2]!;
+  const finalOf = (file: string) => file.replace(/\.partial$/, '');
+
+  // A session whose partial and finished file are both on disk.
+  async function withBoth(kind: Kind, opts: { idleMs: number; status?: string }) {
+    const stale = await session(kind, opts);
+    const finished = finalOf(stale.file);
+    await writeFile(finished, 'finished bytes');
+    return { id: stale.id, partial: stale.file, finished };
+  }
+
+  describe.each([repos, dumps])('$name', (kind) => {
+    it('a stale session whose finished file cannot be removed stays reaping, and the next pass removes both files and cancels it', async () => {
+      const stale = await withBoth(kind, { idleMs: TTL + MIN });
+      guard.removal = (rel) => !rel.endsWith('.partial');
+
+      const failed = await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, stale.id).status).toBe('reaping');
+      expect(await exists(stale.finished)).toBe(true);
+      expect(await exists(stale.partial)).toBe(false);
+      expect(failed.sessions).toBe(0);
+
+      guard.removal = null;
+      const finished = await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, stale.id).status).toBe('cancelled');
+      expect(await exists(stale.finished)).toBe(false);
+      expect(await exists(stale.partial)).toBe(false);
+      expect(finished.sessions).toBe(1);
+    });
+
+    it('a stale session whose partial cannot be removed stays reaping, and its finished file still goes', async () => {
+      const stale = await withBoth(kind, { idleMs: TTL + MIN });
+      guard.removal = (rel) => rel.endsWith('.partial');
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, stale.id).status).toBe('reaping');
+      expect(await exists(stale.partial)).toBe(true);
+      expect(await exists(stale.finished)).toBe(false);
+
+      guard.removal = null;
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, stale.id).status).toBe('cancelled');
+      expect(await exists(stale.partial)).toBe(false);
+    });
+
+    it.each([
+      ['just now', 0],
+      ['five days ago', 5 * TTL],
+    ])(
+      'finishes a row a dead worker left reaping with both its files, updated %s',
+      async (_when, idleMs) => {
+        const dead = await withBoth(kind, { idleMs, status: 'reaping' });
+
+        const result = await reapAbandonedUploads(db());
+
+        expect(rowOf(kind, dead.id).status).toBe('cancelled');
+        expect(await exists(dead.partial)).toBe(false);
+        expect(await exists(dead.finished)).toBe(false);
+        expect(result.sessions).toBe(1);
+      },
+    );
+
+    it('finishes a reaping row that names no session file of its owner, and leaves that file', async () => {
+      const outside = path.join(storage, 'precious.bin');
+      await writeFile(outside, 'keep me');
+      const id = randomUUID();
+      fake.insert(kind.table, {
+        id,
+        userId: USER,
+        totalSize: 1,
+        bytesReceived: 1,
+        chunkSize: 1,
+        status: 'reaping',
+        updatedAt: new Date(),
+        [kind.pathKey]: outside,
+        ...kind.columns,
+      });
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, id).status).toBe('cancelled');
+      expect(await readFile(outside, 'utf8')).toBe('keep me');
+    });
+  });
+
+  describe('a bundle session', () => {
+    it('keeps its bundle’s final path while its partial cannot be removed, and after the next pass cancels it', async () => {
+      const stale = await withBoth(bundles, { idleMs: TTL + MIN });
+      guard.removal = (rel) => rel.endsWith('.partial');
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(bundles, stale.id).status).toBe('reaping');
+      expect(await exists(stale.finished)).toBe(true);
+
+      guard.removal = null;
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(bundles, stale.id).status).toBe('cancelled');
+      expect(await exists(stale.partial)).toBe(false);
+      expect(await exists(stale.finished)).toBe(true);
+    });
+
+    it('keeps its bundle’s final path when a dead worker left the row reaping', async () => {
+      const dead = await withBoth(bundles, { idleMs: MIN, status: 'reaping' });
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(bundles, dead.id).status).toBe('cancelled');
+      expect(await exists(dead.partial)).toBe(false);
+      expect(await exists(dead.finished)).toBe(true);
+    });
+  });
+
+  it('removes an ended dump whose own extension is partial, since the name is not a session partial', async () => {
+    const dump = await session(dumps, {
+      idleMs: 5 * TTL,
+      status: 'complete',
+      name: (id) => `db-${id}.partial`,
+    });
+    fake.insert(schema.tasks, {
+      id: randomUUID(),
+      userId: USER,
+      dbUploadId: dump.id,
+      status: 'cancelled',
+      updatedAt: new Date(Date.now() - 5 * TTL),
+    });
+
+    const result = await reapAbandonedUploads(db());
+
+    expect(rowOf(dumps, dump.id).status).toBe('cancelled');
+    expect(await exists(dump.file)).toBe(false);
+    expect(result.dumps).toBe(1);
+  });
+
+  it('leaves the completed dump a task links alone while a stale dump session stays reaping beside it', async () => {
+    const linked = await session(dumps, {
+      idleMs: 5 * TTL,
+      status: 'complete',
+      name: dumps.finished,
+    });
+    fake.insert(schema.tasks, {
+      id: randomUUID(),
+      userId: USER,
+      dbUploadId: linked.id,
+      status: 'running',
+      updatedAt: new Date(Date.now() - 5 * TTL),
+    });
+    const stale = await session(dumps, { idleMs: TTL + MIN });
+    guard.removal = (rel) => rel.endsWith('.partial');
+
+    await reapAbandonedUploads(db());
+
+    expect(rowOf(dumps, stale.id).status).toBe('reaping');
+    expect(rowOf(dumps, linked.id).status).toBe('complete');
+    expect(await exists(linked.file)).toBe(true);
+
+    guard.removal = null;
+    await reapAbandonedUploads(db());
+
+    expect(rowOf(dumps, stale.id).status).toBe('cancelled');
+    expect(rowOf(dumps, linked.id).status).toBe('complete');
+    expect(await exists(linked.file)).toBe(true);
   });
 });

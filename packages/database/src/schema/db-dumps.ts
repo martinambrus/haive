@@ -15,7 +15,8 @@ import { users } from './auth.js';
  *  finished dump is imported into a task's ephemeral DB (then deleted) instead
  *  of extracted into a repository. status: uploading | completing | complete | reaping |
  *  cancelled | consumed (set once the import step has loaded it and removed the
- *  file); reaping is a completed dump the upload reaper claimed and is removing. */
+ *  file); reaping is a session or completed dump whose files a cancel or the upload reaper
+ *  is still removing. */
 export const dbUploads = pgTable(
   'db_uploads',
   {

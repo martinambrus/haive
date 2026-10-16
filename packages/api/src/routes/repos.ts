@@ -36,7 +36,11 @@ import {
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
-import { isWholeFile, withCompleteClaim } from '../lib/upload-complete-claim.js';
+import {
+  cancelUploadSession,
+  isWholeFile,
+  withCompleteClaim,
+} from '../lib/upload-complete-claim.js';
 import { ROOT_WRITING_STEP_IDS } from '../lib/task-type-definition.js';
 import {
   ensureUploadsDir,
@@ -569,7 +573,7 @@ function sessionFromRow(row: typeof schema.repoUploads.$inferSelect) {
     totalSize: Number(row.totalSize),
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
-    status: row.status as 'uploading' | 'completing' | 'complete' | 'cancelled',
+    status: row.status as 'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping',
   };
 }
 
@@ -817,24 +821,16 @@ repoRoutes.delete('/upload/:id', async (c) => {
   if (row.status !== 'uploading') {
     throw new HttpError(409, `session is ${row.status}`);
   }
-  const cancelled = await db
-    .update(schema.repoUploads)
-    .set({ status: 'cancelled', updatedAt: new Date() })
-    .where(and(eq(schema.repoUploads.id, row.id), eq(schema.repoUploads.status, 'uploading')))
-    .returning({ id: schema.repoUploads.id });
-  if (cancelled.length === 0) {
-    throw new HttpError(409, 'session is not uploading');
-  }
   // Cancelling must succeed whatever the row's path looks like, so a refused shape only skips the
   // unlink: the session is still cancelled, and a leftover partial is the upload reaper's to remove
   // rather than a reason to refuse the cancel.
   const archiveRel = uploadFileRel(userId, row.archivePath);
-  if (archiveRel) {
-    await removeNoFollow(uploadsStorageRoot(), archiveRel).catch(() => {});
-    // An uploading session owns no completed file, so a final one here is a failed complete's.
-    const finalRel = uploadFinalRel(archiveRel);
-    if (finalRel) await removeNoFollow(uploadsStorageRoot(), finalRel).catch(() => {});
-  }
+  // An uploading session owns no completed file, so a final one here is a failed complete's.
+  const finalRel = archiveRel === null ? null : uploadFinalRel(archiveRel);
+  await cancelUploadSession(db, schema.repoUploads, row.id, uploadsStorageRoot(), [
+    archiveRel,
+    finalRel,
+  ]);
 
   return c.json({ ok: true });
 });

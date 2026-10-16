@@ -8,7 +8,7 @@ export type DbDumpFormat = z.infer<typeof dbDumpFormatSchema>;
 /** Chunked-upload session lifecycle for a DB dump. Mirrors the repo upload
  *  session; `completing` marks a session a complete request holds while it moves the file,
  *  `consumed` is set once the import step has loaded + deleted it, and `reaping` marks a
- *  completed dump the upload reaper has claimed and is still removing. */
+ *  session or completed dump whose files a cancel or the upload reaper is still removing. */
 export const dbUploadStatusSchema = z.enum([
   'uploading',
   'completing',
