@@ -80,6 +80,14 @@ describe('answering the RTK question: take theirs', () => {
     expect(s.fake.rows(schema.projectStateSync)).toEqual([]);
   });
 
+  it('records the answer as a switch a person made on this install', async () => {
+    const s = setup();
+
+    await s.answer('take_theirs');
+
+    expect(s.repo().rtkChoiceMadeAt).toBeInstanceOf(Date);
+  });
+
   it('answered again the same way returns the closed row and changes nothing', async () => {
     const s = setup();
     const first = await s.answer('take_theirs');
@@ -104,6 +112,7 @@ describe('answering the RTK question: take theirs', () => {
 
     expect(await s.answer('take_theirs')).toEqual({ kind: 'invalid' });
     expect(s.repo().rtkEnabled).toBe(true);
+    expect(s.repo().rtkChoiceMadeAt).toBeNull();
     expect(s.row().resolvedAt).toBeNull();
   });
 });
@@ -120,6 +129,7 @@ describe('answering the RTK question: keep mine', () => {
       conflict: { id: s.id, resolution: 'keep_mine' },
     });
     expect(s.repo().rtkEnabled).toBe(true);
+    expect(s.repo().rtkChoiceMadeAt).toBeNull();
     expect((s.repo().updatedAt as Date).getTime()).toBe(UPDATED.getTime());
     expect(s.row()).toMatchObject({ resolution: 'keep_mine', resolvedBy: OWNER });
   });

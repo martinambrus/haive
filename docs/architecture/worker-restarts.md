@@ -80,13 +80,14 @@ The same sweep covers the two other jobs that can be lost with nothing to notice
 `queued` past the cutoff with no START on the queue gets one, which the claim makes safe to
 duplicate; `created` is left alone, since a deferred-start draft waits there on purpose. Every
 route that starts a task moves it from `created` to `queued` before it queues START, after every
-write that can fail (`markQueuedForStart`, `api/src/lib/task-start.ts`), so a START that was lost
-or could not be queued is the sweep's to give, and the route answers as though it had been
-queued. POST /tasks, `spawnPlanTask` (its seed included) and the global-KB enrich each insert the
-task and claim its START in one transaction, so a creation that fails there leaves no task; the
-enrich writes its KB entry in its own database first and removes it again when the task transaction
-rolls back (an error anywhere inside it, the insert or a write after it); an error after the commit
-keeps it. And a `waiting_cli`
+write that can fail (`markQueuedForStart`, `api/src/lib/task-start.ts`), under the repository's
+task-creation lock, since a queued task holds the checkout and a checkout move holds that lock. So a
+START that was lost or could not be queued is the sweep's to give, and the route answers as though
+it had been queued. POST /tasks, `spawnPlanTask` (its seed included) and the global-KB enrich each
+insert the task and claim its START in one transaction, taking that lock before the insert, so a
+creation that fails there leaves no task; the enrich writes its KB entry in its own database first
+and removes it again when the task transaction rolls back (an error anywhere inside it, the insert
+or a write after it); an error after the commit keeps it. And a `waiting_cli`
 current step with a run recorded before the cutoff that no cli-exec job owes, no run of its own
 running and no task-queue job, is recovered exactly as boot recovers a parked step
 (`recoverParkedStep`), bounded by `bornBefore`: only runs started or recorded before the cutoff are
@@ -201,9 +202,10 @@ sandbox or loses the one it has. A Stop takes the Retry's steps in one transacti
 are killed only once it commits. No reader sees a run cancelled beside a step still running, and a
 Stop that fails leaves every run as it was and kills nothing. When the Stop's own update fails the
 task it returns that update's `completedAt` as `failedAt`, and the `task.stopped` event an
-administrator's Stop writes carries it: the task page names a stop as the cause of a failure only
-when that stamp equals the task's `completedAt` (`loadTaskStop`), since the event is written after
-the kill and a Retry that failed in between would otherwise read as the stop's. The allowance auto-resume
+administrator's Stop writes carries it: the task page and the task list name a stop as the cause of
+a failure only when that stamp equals the task's `completedAt` (`loadTaskStop`, and `loadTaskStops`
+for a page of the list in one query, both reading a task's newest 50 stops), since the event is
+written after the kill and a Retry that failed in between would otherwise read as the stop's. The allowance auto-resume
 (`autoResumeFailedStep`) writes in the same order, its claim on the failed task last, and a claim it
 loses takes back every write before it. While new work is refused it does nothing at all, whatever status it read — no write,
 no job, no attempt spent — and the next poll resumes the task once the state is normal again. When the state cannot be read

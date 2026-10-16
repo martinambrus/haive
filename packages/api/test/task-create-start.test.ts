@@ -150,6 +150,28 @@ describe('POST /tasks', () => {
     expect(starts()).toEqual([{ taskId: body.task.id, userId: USER }]);
   });
 
+  it('with deferStart creates the task unstarted, and the start action queues it once', async () => {
+    const t = setup();
+    const res = await post('/', {
+      type: 'workflow',
+      title: 'a task',
+      description: 'do it',
+      repositoryId: REPO,
+      deferStart: true,
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { task: { id: string; status: string } };
+    expect(body.task.status).toBe('created');
+    expect(t.task().status).toBe('created');
+    expect(h.add).not.toHaveBeenCalled();
+    const started = await post(`/${body.task.id}/action`, { action: 'start' });
+    expect(await started.json()).toMatchObject({ started: true, status: 'queued' });
+    const again = await post(`/${body.task.id}/action`, { action: 'start' });
+    expect(await again.json()).toMatchObject({ started: false, status: 'queued' });
+    expect(t.task().status).toBe('queued');
+    expect(starts()).toEqual([{ taskId: body.task.id, userId: USER }]);
+  });
+
   // The stalled re-driver gives a `queued` task with no START one, and leaves `created` alone.
   it('answers 201 with the task queued when its START cannot be queued', async () => {
     const t = setup();

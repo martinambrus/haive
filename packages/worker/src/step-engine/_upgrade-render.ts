@@ -100,11 +100,12 @@ export async function loadLiveArtifacts(
 
 /** The live snapshot to render from: the newest that recorded an RTK choice, since a snapshot from
  *  before RTK would keep the repository's RTK switch from reaching the upgrade, and the upgrade
- *  banner reads the same one. */
+ *  banner reads the same one. Once a person switched RTK, the newest of all. */
 export function pickRenderSnapshot(
   liveRows: ReadonlyArray<Pick<LiveArtifactRow, 'id' | 'generatedAt' | 'formValuesSnapshot'>>,
+  rtkChoiceMadeAt?: Date | null,
 ): Record<string, unknown> | null {
-  return pickSnapshotRow(liveRows.map(snapshotFacts))?.formValuesSnapshot ?? null;
+  return pickSnapshotRow(liveRows.map(snapshotFacts), rtkChoiceMadeAt)?.formValuesSnapshot ?? null;
 }
 
 function snapshotFacts(r: Pick<LiveArtifactRow, 'id' | 'generatedAt' | 'formValuesSnapshot'>) {
@@ -134,6 +135,7 @@ export async function resolveRenderContext(
     .select({
       renderContext: schema.repositories.renderContext,
       rtkEnabled: schema.repositories.rtkEnabled,
+      rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
       source: schema.repositories.source,
       name: schema.repositories.name,
     })
@@ -153,7 +155,13 @@ async function resolveFromRepository(
     logger: LoaderLogger;
   },
   repo:
-    | { renderContext: unknown; rtkEnabled: boolean; source: string; name: string | null }
+    | {
+        renderContext: unknown;
+        rtkEnabled: boolean;
+        rtkChoiceMadeAt: Date | null;
+        source: string;
+        name: string | null;
+      }
     | undefined,
 ): Promise<Omit<ResolvedRenderContext, 'column'> | null> {
   const { repositoryId, userId, liveRows, logger } = args;
@@ -164,7 +172,11 @@ async function resolveFromRepository(
       'upgrade-plan: render context column refused, reading it as NULL',
     );
   }
-  const origin = renderContextOrigin({ column, rows: liveRows.map(snapshotFacts) });
+  const origin = renderContextOrigin({
+    column,
+    rows: liveRows.map(snapshotFacts),
+    rtkChoiceMadeAt: repo?.rtkChoiceMadeAt,
+  });
   const loadProviderRows = () =>
     db
       .select({ name: schema.cliProviders.name, enabled: schema.cliProviders.enabled })
@@ -223,6 +235,7 @@ async function resolveFromRepository(
       ? { detected: detect !== null, rtkRecorded: detect?.rtkEnabled !== undefined }
       : null,
     source: repo?.source ?? '',
+    rtkChoiceMadeAt: repo?.rtkChoiceMadeAt,
   });
   if (history.kind === 'blank') {
     // A repository created BLANK has its scaffold seeded at init and has never
@@ -302,7 +315,8 @@ export interface ResolvedRenderContext {
 }
 
 /** A context that recorded an RTK choice follows the repository's live one, so switching RTK off
- *  reaches the upgrade. One from before RTK recorded none and stays off: the column defaults on. */
+ *  reaches the upgrade. One from before RTK recorded none and stays off, unless a person switched RTK
+ *  on this install: the column defaults on. */
 function withLiveRtk(
   repo: { rtkEnabled: boolean } | undefined,
   recorded: TemplateRenderContext,

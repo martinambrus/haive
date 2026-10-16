@@ -36,7 +36,10 @@ import {
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
 import { writeProjectStateRecord } from '../src/project-state/write.js';
-import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
+import {
+  rebaseProjectStateOnCheckout,
+  syncProjectStateFromCheckout,
+} from '../src/project-state/sync.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -381,6 +384,7 @@ async function setup(seed: Seed = {}) {
     });
     return { outcome: result.outcome as string, trace: events.slice(start) };
   };
+  const rebase = () => rebaseProjectStateOnCheckout(db, { repositoryId: REPO, repoPath: root });
   const write = (c: Json, rtkChoiceRecorded: boolean): Promise<readonly string[]> =>
     writeProjectStateRecord(db, {
       repositoryId: REPO,
@@ -436,6 +440,7 @@ async function setup(seed: Seed = {}) {
     putRecord,
     putRecordSync,
     run,
+    rebase,
     write,
     columnOf,
     syncRows,
@@ -1796,6 +1801,136 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
       expect(JSON.parse(await readFile(join(s.root, RTK_FILE), 'utf8'))).toBe(true);
       expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({ 'rtk-enabled': true });
     });
+
+    describe('that a person has since switched on this install', () => {
+      const SWITCHED = new Date(1000);
+      const OTHER_SETTING = { 'rtk-version': '0.1.0' };
+      const rtkOf = async (s: Setup): Promise<unknown> =>
+        JSON.parse(await readFile(join(s.root, RTK_FILE), 'utf8')) as unknown;
+      const switchedOn = (s: Setup) =>
+        s.fake.patch(schema.repositories, REPO, {
+          rtkEnabled: true,
+          rtkVersion: '0.1.0',
+          rtkChoiceMadeAt: SWITCHED,
+        });
+      const BASES: [string, () => unknown][] = [
+        ['a base that holds other settings', () => syncBase(OTHER_SETTING)],
+        ['a base that holds no setting and no environment', () => baseOf(BASE)],
+      ];
+
+      it.each(BASES)(
+        'keeps the switch over the other install’s value, with no conflict, over %s',
+        async (_name, base) => {
+          const s = await setup({ column: column(BASE, false), sync: { base: base() } });
+          switchedOn(s);
+          await s.putRecord(withSettings({ ...OTHER_SETTING, 'rtk-enabled': false }));
+
+          const { outcome } = await s.run();
+
+          expect(outcome).toBe('unchanged');
+          expect(repoRow(s).rtkEnabled).toBe(true);
+          expect(s.pending()).toEqual([]);
+          expect(dirtyMarks(s)).toHaveLength(1);
+        },
+      );
+
+      it('takes the record’s value on a first import with no sync row, as for every setting', async () => {
+        const s = await setup({ column: column(BASE, false) });
+        switchedOn(s);
+        await s.putRecord(withSettings({ ...OTHER_SETTING, 'rtk-enabled': false }));
+
+        const { outcome } = await s.run();
+
+        expect(outcome).toBe('applied');
+        expect(repoRow(s).rtkEnabled).toBe(false);
+        expect(s.pending()).toEqual([]);
+      });
+
+      it('keeps it through a second sync that runs before the writer does', async () => {
+        const s = await setup({
+          column: column(BASE, false),
+          sync: { base: syncBase(OTHER_SETTING) },
+        });
+        switchedOn(s);
+        await s.putRecord(withSettings({ ...OTHER_SETTING, 'rtk-enabled': false }));
+        await s.run();
+
+        const { outcome } = await s.run();
+
+        expect(outcome).toBe('unchanged');
+        expect(repoRow(s).rtkEnabled).toBe(true);
+        expect(s.pending()).toEqual([]);
+      });
+
+      it('asks the writer for the file when the record holds none', async () => {
+        const s = await setup({
+          column: column(BASE, false),
+          sync: { base: syncBase(OTHER_SETTING) },
+        });
+        switchedOn(s);
+        await s.putRecord(withSettings(OTHER_SETTING));
+
+        await s.run();
+
+        expect(repoRow(s).rtkEnabled).toBe(true);
+        expect(dirtyMarks(s)).toHaveLength(1);
+      });
+
+      it('then the writer brings the file to the switch, and a later change on the other install merges as any other', async () => {
+        const s = await setup({
+          column: column(BASE, false),
+          sync: { base: syncBase(OTHER_SETTING) },
+        });
+        switchedOn(s);
+        await s.putRecord(withSettings({ ...OTHER_SETTING, 'rtk-enabled': false }));
+        await s.run();
+
+        await s.write(contextA(), false);
+
+        expect(await rtkOf(s)).toBe(true);
+        expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toMatchObject({
+          'rtk-enabled': true,
+        });
+        await s.put(RTK_FILE, 'false\n');
+
+        const { outcome } = await s.run();
+
+        expect(outcome).toBe('applied');
+        expect(repoRow(s).rtkEnabled).toBe(false);
+        expect(s.pending()).toEqual([]);
+      });
+
+      it.each([
+        ['a person switched RTK here', SWITCHED, { 'rtk-enabled': false }],
+        ['nobody did', null, {}],
+      ])(
+        'a rebase onto the record keeps the value in the base when %s',
+        async (_name, rtkChoiceMadeAt, want) => {
+          const s = await setup({ column: column(BASE, false), sync: { base: baseOf(BASE) } });
+          s.fake.patch(schema.repositories, REPO, { rtkEnabled: true, rtkChoiceMadeAt });
+          await s.putRecord(withSettings({ 'rtk-enabled': false }));
+
+          await s.rebase();
+
+          expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual(want);
+        },
+      );
+
+      it('still asks when the choice is recorded in the column but nobody switched it, and the base never held it', async () => {
+        const s = await setup({
+          column: column(BASE, true),
+          sync: { base: syncBase(OTHER_SETTING) },
+        });
+        s.fake.patch(schema.repositories, REPO, { rtkEnabled: true, rtkVersion: '0.1.0' });
+        await s.putRecord(withSettings({ ...OTHER_SETTING, 'rtk-enabled': false }));
+
+        const { outcome } = await s.run();
+
+        expect(outcome).toBe('conflict');
+        expect(s.pending().map((r) => r.unit)).toEqual(['settings/rtk-enabled.json']);
+        expect(repoRow(s).rtkEnabled).toBe(true);
+      });
+    });
   });
 
   it('an imported RTK-off closes the pending RTK question as converged', async () => {
@@ -2372,6 +2507,20 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
     const accepted = (row!.formValuesSnapshot as { acceptedAgentIds: string[] }).acceptedAgentIds;
     expect(accepted).toEqual(['code-reviewer', 'qa-lead', 'security-auditor']);
     expect(row!.formValuesSnapshot).not.toHaveProperty('rtkChoiceRecorded');
+  });
+
+  it.each([
+    ['records RTK in the marker once a person switched it', new Date(1000), true],
+    ['leaves RTK out of the marker while nobody chose it', null, false],
+  ] as const)('%s, over a column that recorded no choice', async (_name, madeAt, recorded) => {
+    const s = await setup({ column: column(BASE, false) });
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true, rtkChoiceMadeAt: madeAt });
+    await s.putRecord(withClaims(claim(AGENT, H('4'))));
+
+    await s.run();
+
+    const [row] = live(s);
+    expect(Object.hasOwn(row!.formValuesSnapshot as object, 'rtkEnabled')).toBe(recorded);
   });
 
   it('keeps no bytes for a marker whose path holds other bytes', async () => {

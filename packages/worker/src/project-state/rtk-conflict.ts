@@ -16,8 +16,8 @@ export interface RtkQuestionInput {
   hasAnyRowForUnit: boolean;
 }
 
-/** The tooling page writes the column alone, so an imported RTK-off the column never took, with no
- *  local 04 run behind it, cannot be told from a person switching RTK back on since. */
+/** An imported RTK-off the column never took, with no local 04 run behind it, cannot be told from a
+ *  person switching RTK back on before `rtk_choice_made_at` existed; this rule does not read the stamp. */
 export function needsRtkQuestion(input: RtkQuestionInput): boolean {
   return (
     input.importedTooling?.rtkEnabled === false &&

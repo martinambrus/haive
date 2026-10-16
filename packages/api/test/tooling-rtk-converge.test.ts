@@ -118,3 +118,45 @@ describe('switching RTK off on the tooling page and a pending RTK question', () 
     expect(s.rowOf(REPO).resolvedAt).toBeNull();
   });
 });
+
+describe('the tooling page records a deliberate RTK switch', () => {
+  const stamp = () => s.fake.rows(schema.repositories).find((r) => r.id === REPO)!.rtkChoiceMadeAt;
+  const SWITCHED = new Date(1000);
+
+  it('stamps the switch in the write that changes the value', async () => {
+    expect((await patch({ rtkEnabled: false })).status).toBe(200);
+
+    expect(s.repoRtk()).toBe(false);
+    expect(stamp()).toBeInstanceOf(Date);
+  });
+
+  it('leaves it unset when the value is sent again unchanged, as the page does on every save', async () => {
+    expect((await patch({ rtkEnabled: true, rtkVersion: '0.42.4' })).status).toBe(200);
+
+    expect(stamp()).toBeNull();
+  });
+
+  it('leaves it unset for a request that does not touch RTK', async () => {
+    expect((await patch({ lspServers: ['pyright'], prWorkflowEnabled: false })).status).toBe(200);
+
+    expect(stamp()).toBeNull();
+  });
+
+  it('keeps the stamp when the switched value is sent again, and moves it on the next switch', async () => {
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: false, rtkChoiceMadeAt: SWITCHED });
+
+    await patch({ rtkEnabled: false });
+    expect(stamp()).toEqual(SWITCHED);
+
+    await patch({ rtkEnabled: true });
+    expect((stamp() as Date).getTime()).toBeGreaterThan(SWITCHED.getTime());
+  });
+
+  it('stamps nothing for a refused request', async () => {
+    expect((await patch({ verifyCommands: { build: 'make' }, rtkEnabled: false })).status).toBe(
+      400,
+    );
+
+    expect(stamp()).toBeNull();
+  });
+});

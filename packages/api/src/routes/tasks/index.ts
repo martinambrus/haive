@@ -19,6 +19,7 @@ import {
   type DbTx,
   initializeTaskDatabaseState,
   DatabaseSnapshotUnavailableError,
+  lockRepositoryTasksKey,
 } from '@haive/database';
 import { isTaskClass, knownTaskTypes, typesForClass } from '@haive/shared/stats';
 import {
@@ -83,7 +84,7 @@ import {
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
 import { isTaskDead, loadTaskDead, refuseDeadTask } from '../../lib/task-dead.js';
-import { loadTaskStop } from '../../lib/task-stop.js';
+import { loadTaskStop, loadTaskStops } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
 import { isUuid } from '../../lib/uuid.js';
 import { getTaskQueue } from '../../queues.js';
@@ -100,6 +101,7 @@ import {
   findActiveCliInvocation,
   findAdminPausedTaskIds,
   findQueuedInvocationStepIds,
+  loadFinishedRunsRevision,
   loadTaskTypeLabels,
   resolveCurrentStepCliProviderIds,
   sumTaskTokens,
@@ -391,6 +393,7 @@ taskRoutes.get('/', async (c) => {
     db,
     rows.map((r) => r.type),
   );
+  const stops = await loadTaskStops(db, rows);
   const tasks = rows.map((t) => {
     const steps = stepsByTask.get(t.id) ?? [];
     const startMs = t.startedAt ? t.startedAt.getTime() : null;
@@ -417,6 +420,7 @@ taskRoutes.get('/', async (c) => {
       ...t,
       typeLabel: typeLabels.get(t.type) ?? null,
       pausedByAdmin: adminPausedIds.has(t.id),
+      stop: stops.get(t.id) ?? null,
       timing: { wallMs, workMs, idleMs, userActiveMs },
       tokenUsage: tokensByTask.get(t.id) ?? null,
       currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,
@@ -756,7 +760,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         .onConflictDoNothing();
     }
     await appendTaskEvent(handle, created.id, null, 'task.created', { userId });
-    return markQueuedForStart(handle, created.id);
+    return body.deferStart ? undefined : markQueuedForStart(handle, created.id);
   };
   let task: typeof schema.tasks.$inferSelect;
   let queued: typeof schema.tasks.$inferSelect | undefined;
@@ -799,6 +803,8 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         ? await withRepositoryTaskLock(db, body.repositoryId, create)
         : await db.transaction(async (tx) => {
             await admitNewWork(tx);
+            // Queuing takes this lock, and taken before the insert, as every holder does, it inverts no other.
+            if (body.repositoryId) await lockRepositoryTasksKey(tx, body.repositoryId);
             return create(tx);
           }));
   }
@@ -1111,6 +1117,7 @@ taskRoutes.get('/:id', async (c) => {
     providerBreakdown,
     loggedCallCount: callCounts.logged,
     runningCallCount: callCounts.running,
+    finishedRunsRevision: await loadFinishedRunsRevision(db, id),
     costDisplay,
     parentTask,
     childTasks,
@@ -1193,7 +1200,7 @@ taskRoutes.post('/:id/action', async (c) => {
     case 'start': {
       await assertNewWorkAllowed();
       refuseDeadTask(task);
-      // The second half of a two-phase create (POST /plan/build with
+      // The second half of a two-phase create (POST /plan/build or POST /tasks with
       // `deferStart`): the row was made unstarted so the caller could upload
       // attachments, and this enqueues it once they landed.
       //

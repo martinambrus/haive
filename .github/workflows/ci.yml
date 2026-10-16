@@ -256,6 +256,8 @@ jobs:
           updater test/new-work-fence-db.test.ts UPDATER_FENCE_TEST_URL updater_fence_test pg
           api test/integration-choice-routes-db.test.ts INTEGRATION_CHOICE_ROUTES_TEST_URL integration_choice_routes_test pg
           api test/integration-mcp-db.test.ts INTEGRATION_MCP_TEST_URL integration_mcp_test pg
+          api test/integration-mcp-module-db.test.ts INTEGRATION_MCP_MODULE_TEST_URL integration_mcp_module_test pg
+          api test/integration-mcp-module-extras-db.test.ts INTEGRATION_MCP_MODULE_EXTRAS_TEST_URL integration_mcp_module_extras_test pg
           api test/tooling-app-auth-atomic-db.test.ts TOOLING_APP_AUTH_TEST_URL tooling_app_auth_test pg
           api test/task-tool-usage-calls-db.test.ts TASK_TOOL_USAGE_TEST_URL task_tool_usage_test pg
           api test/repo-delete-lock-order-db.test.ts REPO_DELETE_LOCK_ORDER_TEST_URL repo_delete_lock_order_test pg
@@ -267,6 +269,7 @@ jobs:
           worker test/prompt-step-integrations-dispatch-db.test.ts PROMPT_STEP_INTEGRATIONS_TEST_URL prompt_step_integrations_test pg
           worker test/prompt-step-account-token-db.test.ts PROMPT_STEP_ACCOUNT_TEST_URL prompt_step_account_test pg
           worker test/step-integrations-module-provider-db.test.ts STEP_INTEGRATIONS_MODULE_PROVIDER_TEST_URL step_integrations_module_provider_test pg
+          worker test/step-integrations-module-executors-db.test.ts STEP_INTEGRATIONS_MODULE_EXECUTORS_TEST_URL step_integrations_module_executors_test pg
           api test/task-integration-lock-routes-db.test.ts TASK_INTEGRATION_LOCK_TEST_URL task_integration_lock_test pg
           shared test/integrations-task-lock-db.test.ts INTEGRATIONS_TASK_LOCK_TEST_URL integrations_task_lock_test pg
           shared test/module-integrations-state-db.test.ts MODULE_INTEGRATIONS_STATE_TEST_URL module_integrations_state_test pg

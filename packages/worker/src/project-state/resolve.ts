@@ -205,7 +205,7 @@ async function answerRtkQuestion(
     if (typeof incoming !== 'boolean') return { kind: 'invalid' };
     await tx
       .update(schema.repositories)
-      .set(rtkEnabledUpdate(incoming))
+      .set({ ...rtkEnabledUpdate(incoming), rtkChoiceMadeAt: new Date() })
       .where(eq(schema.repositories.id, repositoryId));
   }
   await markProjectStateDirty(tx, repositoryId);
@@ -284,7 +284,7 @@ async function answerClaimQuestion(
     userId: string;
     answer: ProjectStateAnswer;
     row: typeof schema.projectStateConflicts.$inferSelect;
-    repo: { userId: string; renderContext: unknown };
+    repo: { userId: string; renderContext: unknown; rtkChoiceMadeAt: Date | null };
     repoPath: string;
     after: After;
     moved: () => ProjectStateResolveResult;
@@ -674,6 +674,7 @@ async function answerInTransaction(
         renderContext: schema.repositories.renderContext,
         storagePath: schema.repositories.storagePath,
         localPath: schema.repositories.localPath,
+        rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))

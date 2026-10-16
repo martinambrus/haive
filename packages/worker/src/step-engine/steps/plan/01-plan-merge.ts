@@ -654,7 +654,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
         // A file found rewritten ends the transaction unmoved and goes back to the set-aside.
         const moved = await ctx.db.transaction(async (tx) => {
           await lockPlanMerge(tx, repositoryId);
-          // Onboarding and upgrade creation and every revival take this lock, so none lands between the fence and the move.
+          // Every task's start and every revival take this lock, so none lands between the fence and the move.
           await lockRepositoryTasksKey(tx, repositoryId);
           const found = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
           if (found.outcome !== 'clean') return { found, holding: 0 };

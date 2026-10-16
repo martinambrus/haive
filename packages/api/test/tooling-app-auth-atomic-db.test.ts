@@ -194,6 +194,41 @@ describe.skipIf(!url)('PATCH /repositories/:id/tooling app-login credentials, on
     ]);
   });
 
+  describe('the RTK switch', () => {
+    const storedRtk = async () => {
+      const [row] = await db
+        .select({
+          rtkEnabled: schema.repositories.rtkEnabled,
+          madeAt: schema.repositories.rtkChoiceMadeAt,
+        })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId));
+      return row!;
+    };
+
+    it('is stamped when a save changes it, and not when a save sends it again', async () => {
+      expect((await patch({ rtkEnabled: true })).status).toBe(200);
+      expect(await storedRtk()).toMatchObject({ rtkEnabled: true, madeAt: null });
+
+      expect((await patch({ rtkEnabled: false })).status).toBe(200);
+      const switched = await storedRtk();
+      expect(switched.rtkEnabled).toBe(false);
+      expect(switched.madeAt).toBeInstanceOf(Date);
+
+      expect((await patch({ rtkEnabled: false, rtkVersion: '1.2.3' })).status).toBe(200);
+      expect((await storedRtk()).madeAt).toEqual(switched.madeAt);
+    });
+
+    it('is neither switched nor stamped when a later write of the same request throws', async () => {
+      h.outbox.fails = true;
+
+      const res = await patch({ rtkEnabled: false });
+
+      expect(res.status).toBe(500);
+      expect(await storedRtk()).toMatchObject({ rtkEnabled: true, madeAt: null });
+    });
+  });
+
   describe('when a later write of the same request throws after both credentials were written', () => {
     let written: unknown[];
     let res: Response;
