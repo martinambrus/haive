@@ -60,6 +60,20 @@ START on the queue is no such job (`taskQueueOwed`): it only claims a task still
 start, so one a dead worker left `active` under its 30-minute lock would otherwise hold a claimed
 task for that long and then do nothing.
 
+**An answer whose advance was lost is re-driven.** The submit route saves a form's answers, clears
+its `waiting_started_at` and queues the advance; when that advance never reaches the queue, the row
+stays `waiting_form` with no park marker and nothing moves the task. The sweep takes such a current
+row (`answeredFormRow`) for a `running`, `waiting_user` or `waiting_pr` task once the row itself is
+older than the cutoff and the task queue holds no job for it, under the same fence: the status the
+pass read, the epoch, the step and round, and the row still an answered form. A parked form, an
+answer whose job is queued and an answer newer than the cutoff are left alone. For `waiting_pr` the
+task-level cutoff gives way to the row's, since the pull-request poller rewrites `tasks.updated_at`
+every few minutes. The fence stamps the row's `updated_at`, so an advance dropped before pickup is
+re-driven once per cutoff rather than on every pass, and it locks that row before the task row, the
+order a Retry takes (the other order deadlocked); a Retry, Resume or CLI switch whose NOWAIT re-check
+meets that lock answers 503 and can be sent again. A dead `waiting_user` or `waiting_pr` task revived
+with an answered form gets that advance at revival (`jobAfterRevive`).
+
 The same sweep covers the two other jobs that can be lost with nothing to notice. A task left
 `queued` past the cutoff with no START on the queue gets one, which the claim makes safe to
 duplicate; `created` is left alone, since a deferred-start draft waits there on purpose. Every
@@ -68,8 +82,9 @@ write that can fail (`markQueuedForStart`, `api/src/lib/task-start.ts`), so a ST
 or could not be queued is the sweep's to give, and the route answers as though it had been
 queued. POST /tasks, `spawnPlanTask` (its seed included) and the global-KB enrich each insert the
 task and claim its START in one transaction, so a creation that fails there leaves no task; the
-enrich writes its KB entry in its own database first and removes it again when the task insert
-fails. And a `waiting_cli`
+enrich writes its KB entry in its own database first and removes it again when the task transaction
+rolls back (an error anywhere inside it, the insert or a write after it); an error after the commit
+keeps it. And a `waiting_cli`
 current step with a run recorded before the cutoff that no cli-exec job owes, no run of its own
 running and no task-queue job, is recovered exactly as boot recovers a parked step
 (`recoverParkedStep`), bounded by `bornBefore`: only runs started or recorded before the cutoff are
