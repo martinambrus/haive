@@ -88,7 +88,9 @@ connections would have been a destructive migration. Consequences, all deliberat
 - Signing in again to the same account updates the connection and its credential's secret in place,
   under `pg_advisory_xact_lock(integration-account:<user>:<provider>:<externalId>)` and `FOR UPDATE`,
   keeping the credential's label, host and provider. A vendor that sends no new refresh token leaves the
-  stored one in place (re-encrypted with the new access token; an unreadable one counts as none). A first forge sign-in creates a credential
+  stored one in place when the sign-in used the row's own method and OAuth client (re-encrypted with the new access
+  token; an unreadable one counts as none); under another method or client it is dropped, since a refresh would send
+  it with that issuer's credentials. A first forge sign-in creates a credential
   labelled `<Provider> OAuth (<login>)` on the sign-in endpoint's host.
 - "Use as connection" (`POST /integrations/providers/:id/link-credential`) turns an existing
   credential into a connection: forge only, provider enabled, own credential, the credential's forge
