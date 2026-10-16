@@ -10,6 +10,7 @@ import { createFakeDb } from '@haive/database/testing';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { recordWritten } from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -142,7 +143,7 @@ describe('12 writes the project state record whatever the artifact recording did
       rtkChoiceRecorded: true,
     });
     expect.soft(s.syncRows()).toHaveLength(1);
-    expect.soft(out.warnings.filter((w) => w.includes('project state record'))).toEqual([]);
+    expect.soft(out.recordWrite, out.warnings.join('\n')).toBe('written');
   });
 
   it('records no RTK choice for a 07 output from before RTK shipped', async () => {
@@ -153,6 +154,39 @@ describe('12 writes the project state record whatever the artifact recording did
     await s.apply();
 
     expect(s.column()).toMatchObject({ rtkEnabled: false, rtkChoiceRecorded: false });
+  });
+});
+
+describe('12 reports what its record write did', () => {
+  it('written, when the record is written', async () => {
+    const s = await setup('none');
+
+    const out = await s.apply();
+
+    expect(out.recordWrite).toBe('written');
+  });
+
+  it('failed, when the write is refused', async () => {
+    const s = await setup('none');
+    let refused = false;
+    s.fake.hooks.beforeLock = (key) => {
+      if (key.includes('project-state') && !refused) {
+        refused = true;
+        throw new Error('database refused');
+      }
+    };
+
+    const out = await recordWritten(s.apply(), { recordWriteFails: true });
+
+    expect(out.recordWrite).toBe('failed');
+  });
+
+  it('skipped, when 07 left no render context', async () => {
+    const s = await setup('none', null as unknown as Record<string, unknown>);
+
+    const out = await s.apply();
+
+    expect(out.recordWrite).toBe('skipped');
   });
 });
 
@@ -291,7 +325,7 @@ describe('12 retires .haive/install.json', () => {
       }
     };
 
-    const out = await s.apply();
+    const out = await recordWritten(s.apply(), { recordWriteFails: true });
 
     expect(out.warnings).toContain('project state record write failed: database refused');
     expect(existsSync(join(s.root, '.haive', 'install.json'))).toBe(true);
@@ -312,7 +346,7 @@ describe('12 retires .haive/install.json', () => {
     await rm(join(s.root, '.haive', 'install.json'));
     refuseRecordWrite(s);
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit(), { recordWriteFails: true });
 
     expect(out.warnings).toContain('project state record write failed: database refused');
     expect(out.stagedPaths).toContain('.haive/install.json');
@@ -329,7 +363,7 @@ describe('12 retires .haive/install.json', () => {
     await symlink(outside, join(s.root, '.haive'));
     refuseRecordWrite(s);
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit(), { recordWriteFails: true });
 
     expect(out.stagedPaths).not.toContain('.haive/install.json');
     expect(await trackedFiles(s.root)).toContain('.haive/install.json');
@@ -345,7 +379,7 @@ describe('12 retires .haive/install.json', () => {
     const s = await seededSetup(HAIVE_SHAPED);
     refuseRecordWrite(s);
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit(), { recordWriteFails: true });
 
     expect(out.warnings).toContain('project state record write failed: database refused');
     expect(out.warnings.filter((w) => w.includes('was not listed as removed'))).toEqual([]);
@@ -506,7 +540,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
       }
     };
 
-    const out = await s.apply();
+    const out = await recordWritten(s.apply(), { recordWriteFails: true });
 
     expect(out.warnings).toContain('project state record write failed: database refused');
     expect(existsSync(join(s.root, ENV_LEGACY))).toBe(true);
@@ -524,7 +558,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
       }
     };
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit(), { recordWriteFails: true });
 
     expect(out.warnings).toContain('project state record write failed: database refused');
     expect(out.commitPerformed).toBe(true);
@@ -623,7 +657,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
       }
     };
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit(), { recordWriteFails: true });
 
     expect(out.warnings).toContain('project state record write failed: database refused');
     expect(await trackedFiles(s.root)).toContain(TOOLING_LEGACY);

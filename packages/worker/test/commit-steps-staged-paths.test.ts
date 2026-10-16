@@ -13,6 +13,7 @@ import {
 } from '../src/step-engine/steps/onboarding/_stage-paths.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 import { upgradeCommitStep } from '../src/step-engine/steps/onboarding-upgrade/03-upgrade-commit.js';
+import { recordWritten } from './support/upgrade-apply-record.js';
 
 const stepOutputs = vi.hoisted(() => ({
   current: null as Record<string, { detect?: unknown; output?: unknown }> | null,
@@ -522,12 +523,15 @@ describe('commit steps stage only the paths their step outputs record', () => {
   it('9: 12 commits the project state files a failed record write left on disk', async () => {
     const repo = await seeded();
     await put(repo, { '.claude/agents/a.md': 'a\n' });
-    const out = await twelve(repo, {
-      '07-generate-files': {
-        detect: { ...(REFERENCE_CONTEXT as unknown as Record<string, unknown>) },
-        output: { wroteFiles: ['.claude/agents/a.md'], skippedFiles: [] },
-      },
-    });
+    const out = await recordWritten(
+      twelve(repo, {
+        '07-generate-files': {
+          detect: { ...(REFERENCE_CONTEXT as unknown as Record<string, unknown>) },
+          output: { wroteFiles: ['.claude/agents/a.md'], skippedFiles: [] },
+        },
+      }),
+      { recordWriteFails: true },
+    );
     expect(out.warnings.some((w) => w.startsWith('project state record write failed'))).toBe(true);
     expect(out.commitPerformed).toBe(true);
     const files = await tracked(repo);
