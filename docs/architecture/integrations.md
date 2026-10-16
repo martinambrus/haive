@@ -473,7 +473,8 @@ title's `minLength: 1` is published too.
   an error body up to 4 KiB, and the stream is cancelled past either. This is in the shared
   `BaseForgeProvider`, so the worker's forge calls are bounded too.
 - **One scrub** (`redactSecrets`, `api/src/lib/module-vendor-client.ts`) removes the secrets from every
-  error text, every module result and every forge success text the broker answers, in every spelling a
+  vendor answer before a module executor sees it, and from every error text, every module result and
+  every forge success text the broker answers, in every spelling a
   vendor's encoder may echo: each character as is, `%xx` or `\uXXXX` in either case, a slash as `\/`,
   each also inside a JSON string; with a cut read, also a start of one, or of one of its escapes, left
   at the end. Forge success text is scrubbed and never cut.
@@ -495,7 +496,8 @@ switch, budget row, deadline) and then:
   redirects (`vendor-redirect-refused`), lets a read operation send only GET or HEAD
   (`vendor-method-refused`), reads at most 8 MiB of an answer and 4 KiB of an error body, maps a
   non-2xx status to `vendor-auth`, `vendor-not-found`, `vendor-conflict`, `vendor-rate-limited` or
-  `vendor-error`, and parses a JSON answer;
+  `vendor-error`, and scrubs the token out of an answer before it parses one, so even an echo of it
+  never reaches the executor;
 - races the run against the 30 s deadline, so a run that ignores its signal still answers 504
   `timeout`, and aborts what it started once the call is recorded;
 - answers the result as JSON text, scrubbed of the token and cut to 64 KiB (`[truncated]` marks a
