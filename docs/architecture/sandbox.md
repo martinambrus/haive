@@ -24,6 +24,38 @@ anyway. The in-flight promise is load-bearing rather than a boolean flag: cli-ex
 concurrency 5-7 and a flag set only on success lets every one of them start the same
 multi-minute build.
 
+**It also rebuilds itself when its definition changes.** The ensure used to build only a
+MISSING image, so an install that had the base kept it through every release that changed it,
+and an rtk bump reached fresh installs only. `sandboxCoreIdentity` hashes every file of the build
+context and the rtk build args an operator pinned (`RTK_RELEASE_VERSION`,
+`RTK_X86_64_MUSL_SHA256`, which compose hands the worker as well as the `cli-sandbox` build, or
+the worker would rebuild a pinned image under the defaults); the build stamps it on the image
+(`haive.core-identity`), and the ensure rebuilds an image carrying any other value, none
+included: a hand-run `pnpm docker sandbox-build` and an image from before the label carry none,
+so the worker rebuilds them once. Every per-CLI Dockerfile carries the same identity
+(`LABEL haive.base-identity`, `image-cache.ts`), because its tag is a hash of its own text and
+names the base as `:latest`: without it a per-CLI image built on the old base kept its tag and
+went on being served. Its next use builds it on the new base. A failed rebuild throws, as a
+failed build of a missing image does, so no per-CLI image is built on a base that is out of date
+and then tagged as current. The base a rebuild replaces stays while a container or a per-CLI image
+built on it still uses it; the boot sweep `reapSupersededSandboxCores`
+(`sandbox-image-reaper.ts`) removes it, without `--force`, once neither does. One built before the
+label carries none, so the sweep cannot tell it from any other untagged image, and it stays.
+
+**rtk seeds a task's auth volume only with hooks the task's own image can run.**
+`seedRtkInTaskVolume` runs `rtk init -g` from the base image, but a task can run another rtk: an
+env-template image installs the repository's pin. A 1.0 seed writes codex a PreToolUse hook on
+`rtk hook codex`, which 0.x rejects with exit 2 and a usage error on stderr, and codex takes that
+as the hook blocking the tool call, so every shell command of a codex task pinned to 0.x would be
+refused. `resolveAuthMounts` therefore takes the image the CLI runs in, and the seed first asks
+that image (`imageRunsRtkHook`: `rtk hook <agent> --help`, by exit code, once per image). A CLI
+whose image runs its hook is seeded; one whose image cannot has rtk taken back out
+(`rtk init -g … --uninstall`, which removes only what its init wrote), since a seed for an
+earlier image of the same task may have written the hook. The seed is recorded per image, the
+slot's last-applied identity, because the image can change mid-task: a repository's rtk pin can
+move, and the next invocation then composes another image. A failed removal is not recorded, so
+the next invocation tries again.
+
 Two consequences worth keeping. The ensure is a no-op whenever `SANDBOX_IMAGE` names
 something other than the core tag, because building ours over an operator's pinned image
 would silently replace it — the "missing image" failure is then correctly theirs to fix.

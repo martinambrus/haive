@@ -1272,7 +1272,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect(h.kills).toEqual([]);
     });
 
-    describe('past the 200 tasks it lists', () => {
+    describe(`past the ${MODULE_DEPENDENTS_CAP} tasks it lists`, () => {
       beforeEach(async () => {
         await db
           .update(schema.tasks)
@@ -1281,9 +1281,9 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       });
 
       it.each([
-        { elsewhere: 200, older: 3, capped: true },
-        { elsewhere: 200, older: 1, capped: true },
-        { elsewhere: 199, older: 1, capped: false },
+        { elsewhere: MODULE_DEPENDENTS_CAP, older: 3, capped: true },
+        { elsewhere: MODULE_DEPENDENTS_CAP, older: 1, capped: true },
+        { elsewhere: MODULE_DEPENDENTS_CAP - 1, older: 1, capped: false },
       ])(
         'with $elsewhere other tasks and $older older ones in a step of the module: stops every older one, capped is $capped',
         async ({ elsewhere, older, capped }) => {

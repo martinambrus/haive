@@ -84,7 +84,7 @@ import {
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
 import { isTaskDead, loadTaskDead, refuseDeadTask } from '../../lib/task-dead.js';
-import { loadTaskStop } from '../../lib/task-stop.js';
+import { loadTaskStop, loadTaskStops } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
 import { isUuid } from '../../lib/uuid.js';
 import { getTaskQueue } from '../../queues.js';
@@ -393,6 +393,7 @@ taskRoutes.get('/', async (c) => {
     db,
     rows.map((r) => r.type),
   );
+  const stops = await loadTaskStops(db, rows);
   const tasks = rows.map((t) => {
     const steps = stepsByTask.get(t.id) ?? [];
     const startMs = t.startedAt ? t.startedAt.getTime() : null;
@@ -419,6 +420,7 @@ taskRoutes.get('/', async (c) => {
       ...t,
       typeLabel: typeLabels.get(t.type) ?? null,
       pausedByAdmin: adminPausedIds.has(t.id),
+      stop: stops.get(t.id) ?? null,
       timing: { wallMs, workMs, idleMs, userActiveMs },
       tokenUsage: tokensByTask.get(t.id) ?? null,
       currentWaitStartedAt: waitStart ? waitStart.toISOString() : null,

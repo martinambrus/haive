@@ -443,7 +443,7 @@ export async function executeByKind(
         : null;
       let authMounts: DockerVolumeMount[] = [];
       if (providerRow && cliAdapterRegistry.has(providerRow.name)) {
-        authMounts = await resolveAuthMounts(db, providerRow, payload.taskId);
+        authMounts = await resolveAuthMounts(db, providerRow, payload.taskId, sandboxImage);
       }
       // The task's own uploads dir (read-only) so the agent can read attachments the
       // prompt references — the worktree-only mount hides the repo-root .haive/ otherwise.
