@@ -287,7 +287,9 @@ module providers can run calls (I6b), since the broker answers every call to one
 `insertStampedRun`: one transaction that takes `lockTaskIntegrations` (the lock the choice PUT and
 DELETE take first), resolves again, records the grants from that resolution and inserts the run
 stamped with its bindings; a required binding lost since the first resolution writes nothing and
-fails the step. In a fan-out only the first run goes
+fails the step, and so does an account a prompt step's template names (`{{integration:<id>.account}}`)
+that now resolves to another connection than the prompt was built on, or appeared or went away
+(`integration-account-changed`). In a fan-out only the first run goes
 through it: that run's stamp is the fan-out's, and every later agent is inserted with the same
 bindings, with no second resolution and no grant write, so a choice changed meanwhile applies from the
 next dispatch (an agent can then carry an account removed after the first insert, and the broker
