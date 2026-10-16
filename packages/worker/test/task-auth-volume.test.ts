@@ -218,7 +218,7 @@ describe('ensureTaskAuthVolumes', () => {
           : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
     });
     // Seed an applied identity, then make the volume look refreshed.
-    await seedRtkInTaskVolume('task-inv', 'codex', runner);
+    await seedRtkInTaskVolume('task-inv', 'codex', null, runner);
     const seedsBefore = runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length;
     expect(seedsBefore).toBe(1);
 
@@ -226,7 +226,7 @@ describe('ensureTaskAuthVolumes', () => {
     expect(runner.createCalls).toContain(taskVol);
 
     // The same seed must now RUN again rather than skip on its recorded identity.
-    await seedRtkInTaskVolume('task-inv', 'codex', runner);
+    await seedRtkInTaskVolume('task-inv', 'codex', null, runner);
     expect(runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length).toBe(seedsBefore + 1);
     clearTaskAuthPreparationState('task-inv');
   });
@@ -241,11 +241,11 @@ describe('ensureTaskAuthVolumes', () => {
           ? { exitCode: 2, stdout: '', stderr: '', durationMs: 1, timedOut: false }
           : { exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false },
     });
-    await seedRtkInTaskVolume('task-iso', 'grok', runner);
+    await seedRtkInTaskVolume('task-iso', 'grok', null, runner);
     const before = runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length;
     await ensureTaskAuthVolumes(ctx('abc', 'codex'), 'task-iso', runner);
     // grok's volume was not touched, so its seed must still skip.
-    await seedRtkInTaskVolume('task-iso', 'grok', runner);
+    await seedRtkInTaskVolume('task-iso', 'grok', null, runner);
     expect(runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk')).length).toBe(before);
     clearTaskAuthPreparationState('task-iso');
   });
@@ -694,7 +694,7 @@ describe('seedRtkInTaskVolume', () => {
         timedOut: false,
       }),
     });
-    await seedRtkInTaskVolume('task-rtk-1', 'claude-code', runner);
+    await seedRtkInTaskVolume('task-rtk-1', 'claude-code', null, runner);
     const helper = runner.runCalls.find((c) => c.cmd[0] === 'sh');
     expect(helper).toBeDefined();
     expect(helper?.cmd[2]).toContain(`exit ${RTK_HELPER_MISSING_BINARY_EXIT}`);
@@ -716,7 +716,7 @@ describe('seedRtkInTaskVolume', () => {
     // observable via the logger — we assert the helper script path produced
     // the expected exit code; the worker code routes that through log.warn,
     // not log.info.
-    await seedRtkInTaskVolume('task-rtk-2', 'claude-code', runner);
+    await seedRtkInTaskVolume('task-rtk-2', 'claude-code', null, runner);
     expect(runner.runCalls).toHaveLength(1);
   });
 
@@ -724,7 +724,7 @@ describe('seedRtkInTaskVolume', () => {
     // MEASURED on rtk 0.37.2: `-g --gemini` alone stops at "Patch settings.json? [y/N]" and
     // the helper has no tty, so the hook is never registered.
     const runner = makeRunner();
-    await seedRtkInTaskVolume('task-rtk-3', 'gemini', runner);
+    await seedRtkInTaskVolume('task-rtk-3', 'gemini', null, runner);
     const helper = runner.runCalls.find((c) => c.cmd[0] === 'sh');
     expect(helper?.cmd[2]).toContain(`rtk init -g '--gemini' '--auto-patch'`);
   });
@@ -734,7 +734,7 @@ describe('seedRtkInTaskVolume', () => {
     // --auto-patch", which is what rtk had been asked for since this was written, so rtk
     // never ran for codex at all.
     const runner = makeRunner();
-    await seedRtkInTaskVolume('task-rtk-4', 'codex', runner);
+    await seedRtkInTaskVolume('task-rtk-4', 'codex', null, runner);
     const helper = runner.runCalls.find((c) => c.cmd[0] === 'sh');
     expect(helper?.cmd[2]).toContain(`rtk init -g '--codex'`);
     expect(helper?.cmd[2]).not.toContain('--auto-patch');
@@ -745,7 +745,7 @@ describe('seedRtkInTaskVolume', () => {
       ['claude-code', 'zai', 'ollama', 'muse', 'openrouter'] as const
     ).entries()) {
       const runner = makeRunner();
-      await seedRtkInTaskVolume(`task-rtk-fam-${i}`, provider, runner);
+      await seedRtkInTaskVolume(`task-rtk-fam-${i}`, provider, null, runner);
       const helper = runner.runCalls.find((c) => c.cmd[0] === 'sh');
       expect(helper?.cmd[2], provider).toContain(`rtk init -g '--auto-patch'`);
       expect(helper?.cmd[2], provider).not.toContain('--gemini');
@@ -757,7 +757,7 @@ describe('seedRtkInTaskVolume', () => {
     // The helper used to swallow it (`rtk init … || echo …`) and exit on the trailing
     // chown, so a rejected flag combination was recorded as a successful seed.
     const runner = makeRunner();
-    await seedRtkInTaskVolume('task-rtk-fail-exit', 'codex', runner);
+    await seedRtkInTaskVolume('task-rtk-fail-exit', 'codex', null, runner);
     const script = runner.runCalls[0]!.cmd[2]!;
     expect(script).toContain(`exit ${RTK_HELPER_INIT_FAILED_EXIT}`);
     // The ownership repair still runs first — a half-done seed must not leave root-owned
@@ -769,14 +769,16 @@ describe('seedRtkInTaskVolume', () => {
 
   it('skips entirely for amp (no rtk-native flag)', async () => {
     const runner = makeRunner();
-    await seedRtkInTaskVolume('task-rtk-6', 'amp', runner);
+    await seedRtkInTaskVolume('task-rtk-6', 'amp', null, runner);
     expect(runner.runCalls).toHaveLength(0);
   });
 
   it('coalesces concurrent sibling RTK seeding', async () => {
     const runner = makeRunner();
     await Promise.all(
-      Array.from({ length: 12 }, () => seedRtkInTaskVolume('task-rtk-concurrent', 'codex', runner)),
+      Array.from({ length: 12 }, () =>
+        seedRtkInTaskVolume('task-rtk-concurrent', 'codex', null, runner),
+      ),
     );
     expect(runner.runCalls).toHaveLength(1);
   });
@@ -785,13 +787,13 @@ describe('seedRtkInTaskVolume', () => {
   // sequential repeats a staggered fan-out produces run nothing.
   it('skips sequential repeats of the seed', async () => {
     const runner = makeRunner();
-    for (let i = 0; i < 6; i += 1) await seedRtkInTaskVolume('task-rtk-seq', 'codex', runner);
+    for (let i = 0; i < 6; i += 1) await seedRtkInTaskVolume('task-rtk-seq', 'codex', null, runner);
     expect(runner.runCalls).toHaveLength(1);
   });
 
   it('runs rtk init as the sandbox user, between two ownership repairs', async () => {
     const runner = makeRunner();
-    await seedRtkInTaskVolume('task-rtk-user', 'codex', runner);
+    await seedRtkInTaskVolume('task-rtk-user', 'codex', null, runner);
     const script = runner.runCalls[0]!.cmd[2]!;
     expect(script).toContain(`$AS_NODE env HOME='/home/node' rtk init -g '--codex'`);
     expect(script).toContain('AS_NODE="runuser -u node --"');
@@ -799,6 +801,43 @@ describe('seedRtkInTaskVolume', () => {
     // failing the seed.
     expect(script).toContain('else AS_NODE=""');
     expect(script.match(/chown -R 1000:1000/g)).toHaveLength(2);
+  });
+
+  // The seed runs rtk init from the helper image, and a task can run another rtk: an
+  // env-template image installs the repository's pin. MEASURED: 0.37.2 has no `hook codex` and
+  // rejects it with exit 2 and a usage error on stderr, which codex takes as a hook blocking
+  // the tool call, so a 1.0 seed blocked every shell command of a codex task pinned to 0.x.
+  it('does not seed a CLI whose image runs no `rtk hook` for it', async () => {
+    const runner = makeRunner({
+      runHandler: (o) => ({
+        exitCode: o.cmd[2]?.includes('rtk hook codex --help') ? 2 : 0,
+        stdout: '',
+        stderr: '',
+        durationMs: 1,
+        timedOut: false,
+      }),
+    });
+    await seedRtkInTaskVolume('task-rtk-old-pin', 'codex', 'haive-sandbox:pinned-0x', runner);
+    expect(runner.runCalls).toHaveLength(1);
+    expect(runner.runCalls[0]?.image).toBe('haive-sandbox:pinned-0x');
+    expect(runner.runCalls[0]?.cmd[2]).toContain('rtk hook codex --help');
+  });
+
+  it('seeds a CLI whose image runs its `rtk hook`, asking each image once', async () => {
+    const runner = makeRunner();
+    await seedRtkInTaskVolume('task-rtk-cur-1', 'codex', 'haive-sandbox:current', runner);
+    await seedRtkInTaskVolume('task-rtk-cur-2', 'codex', 'haive-sandbox:current', runner);
+    const probes = runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk hook codex --help'));
+    expect(probes).toHaveLength(1);
+    const seeds = runner.runCalls.filter((c) => c.cmd[2]?.includes('rtk init -g'));
+    expect(seeds).toHaveLength(2);
+  });
+
+  it('asks nothing of the helper image, whose rtk is the one that seeds', async () => {
+    const runner = makeRunner();
+    await seedRtkInTaskVolume('task-rtk-helper', 'codex', null, runner);
+    expect(runner.runCalls.some((c) => c.cmd[2]?.includes('--help'))).toBe(false);
+    expect(runner.runCalls).toHaveLength(1);
   });
 });
 

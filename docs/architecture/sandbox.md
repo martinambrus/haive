@@ -40,6 +40,15 @@ built on it still uses it; the boot sweep `reapSupersededSandboxCores`
 (`sandbox-image-reaper.ts`) removes it, without `--force`, once neither does. One built before the
 label carries none, so the sweep cannot tell it from any other untagged image, and it stays.
 
+**rtk seeds a task's auth volume only with hooks the task's own image can run.**
+`seedRtkInTaskVolume` runs `rtk init -g` from the base image, but a task can run another rtk: an
+env-template image installs the repository's pin. A 1.0 seed writes codex a PreToolUse hook on
+`rtk hook codex`, which 0.x rejects with exit 2 and a usage error on stderr, and codex takes that
+as the hook blocking the tool call, so every shell command of a codex task pinned to 0.x would be
+refused. `resolveAuthMounts` therefore takes the image the CLI runs in, and the seed first asks
+that image (`imageRunsRtkHook`: `rtk hook <agent> --help`, by exit code, once per image) and
+leaves a CLI whose image cannot run its hook unseeded.
+
 Two consequences worth keeping. The ensure is a no-op whenever `SANDBOX_IMAGE` names
 something other than the core tag, because building ours over an operator's pinned image
 would silently replace it — the "missing image" failure is then correctly theirs to fix.

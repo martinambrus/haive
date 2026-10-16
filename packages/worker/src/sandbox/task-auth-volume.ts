@@ -32,9 +32,9 @@ function userVolumeForCtx(ctx: ProviderAuthCtx, idx: number): string {
   return resolveCliAuthUserVolumeName(ctx, idx);
 }
 
-/** The `rtk init -g` arguments for one provider, or `undefined` when rtk has no mode for it
- *  (amp is not in rtk's agent list, so the project-level RTK.md + AGENTS.md @-ref written by
- *  step 07 is its only integration).
+/** The `rtk init -g` arguments for one provider and the agent its hooks run `rtk hook` for, or
+ *  `undefined` when rtk has no mode for it (amp is not in rtk's agent list, so the
+ *  project-level RTK.md + AGENTS.md @-ref written by step 07 is its only integration).
  *
  *  Whole argument lists rather than one mode flag, because `--auto-patch` is NOT universal
  *  and pretending it was is what broke this. MEASURED against rtk 0.37.2 in the sandbox
@@ -58,18 +58,20 @@ function userVolumeForCtx(ctx: ProviderAuthCtx, idx: number): string {
  *  been silently skipped. `grok` and `antigravity` stay out: rtk has an `--agent antigravity`
  *  mode, but where it writes has not been measured against antigravity's own
  *  `~/.gemini/antigravity-cli` mount, and a guess here writes into a live auth volume. */
-function rtkInitArgsFor(providerName: CliProviderName): string[] | undefined {
+function rtkInitFor(
+  providerName: CliProviderName,
+): { args: string[]; hookAgent: string } | undefined {
   switch (providerName) {
     case 'claude-code':
     case 'zai':
     case 'ollama':
     case 'muse':
     case 'openrouter':
-      return ['--auto-patch'];
+      return { args: ['--auto-patch'], hookAgent: 'claude' };
     case 'gemini':
-      return ['--gemini', '--auto-patch'];
+      return { args: ['--gemini', '--auto-patch'], hookAgent: 'gemini' };
     case 'codex':
-      return ['--codex'];
+      return { args: ['--codex'], hookAgent: 'codex' };
     case 'amp':
       return undefined;
     default:
@@ -643,6 +645,39 @@ export function resolveTaskAuthMounts(
   }));
 }
 
+/** Whether `image`'s rtk runs `rtk hook <agent>`, which every hook the seed writes calls. The
+ *  seed runs rtk init from HELPER_IMAGE, and a task can run another rtk: an env-template image
+ *  installs the repository's pin. MEASURED: 0.37.2 has no `hook codex` and rejects it with exit 2
+ *  and a usage error on stderr, which codex takes as a hook blocking the tool call, so a 1.0
+ *  seed blocked every shell command of a codex task pinned to 0.x. Asked of the image itself, by
+ *  exit code rather than by version, once per image and agent; a run that produced no status (a
+ *  spawn failure, a timeout) answers no and is asked again next time. */
+const rtkHookSupport = new Map<string, Promise<boolean>>();
+
+function imageRunsRtkHook(image: string, agent: string, runner: DockerRunner): Promise<boolean> {
+  if (image === HELPER_IMAGE) return Promise.resolve(true);
+  const key = `${image}|${agent}`;
+  const known = rtkHookSupport.get(key);
+  if (known) return known;
+  const probe = runner
+    .run({
+      image,
+      cmd: ['sh', '-c', `rtk hook ${agent} --help >/dev/null 2>&1`],
+      entrypoint: '',
+      timeoutMs: HELPER_TIMEOUT_MS,
+    })
+    .then((result) => {
+      if (result.exitCode === null) rtkHookSupport.delete(key);
+      return result.exitCode === 0;
+    })
+    .catch(() => {
+      rtkHookSupport.delete(key);
+      return false;
+    });
+  rtkHookSupport.set(key, probe);
+  return probe;
+}
+
 /**
  * Inject RTK hook configs into the per-task auth volume(s) for `providerName`.
  * Uses the rtk binary baked into the sandbox image; calls
@@ -650,6 +685,10 @@ export function resolveTaskAuthMounts(
  * handles idempotency, JSON deep-merge into a pre-existing settings.json
  * (claude-code creates one with theme/onboarding state on first login), and
  * the CLAUDE.md / AGENTS.md `@RTK.md` reference injection.
+ *
+ * `runtimeImage` is the image the CLI runs in, `null` when it runs the base itself (the
+ * runInSandbox fallback). A CLI whose image runs no `rtk hook` for it is not seeded, since
+ * the hooks would call a command its rtk rejects (`imageRunsRtkHook`).
  *
  * No-op when the provider has no rtk-supported flag (amp); callers should
  * additionally skip this entirely when `repositories.rtk_enabled=false`.
@@ -661,29 +700,41 @@ export function resolveTaskAuthMounts(
 export async function seedRtkInTaskVolume(
   taskId: string,
   providerName: CliProviderName,
+  runtimeImage: string | null,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<void> {
   // The seed writes the same thing every time for a given provider, so its identity is the
   // slot itself: applied once per task, not once per invocation.
   await applyAuthPreparationOnce(rtkSeedRuns, `${taskId}|${providerName}|rtk`, 'seeded', () =>
-    seedRtkInTaskVolumeUnlocked(taskId, providerName, runner),
+    seedRtkInTaskVolumeUnlocked(taskId, providerName, runtimeImage, runner),
   );
 }
 
 async function seedRtkInTaskVolumeUnlocked(
   taskId: string,
   providerName: CliProviderName,
+  runtimeImage: string | null,
   runner: DockerRunner,
 ): Promise<boolean> {
-  const initArgs = rtkInitArgsFor(providerName);
-  if (initArgs === undefined) {
+  const init = rtkInitFor(providerName);
+  if (init === undefined) {
     log.debug({ providerName }, 'rtk seed skipped: provider has no rtk-native mode');
     // Nothing to do for this provider, ever — record it so siblings do not re-derive it.
     return true;
   }
+  const initArgs = init.args;
   const meta = getCliProviderMetadata(providerName);
   if (meta.authConfigPaths.length === 0) {
     log.debug({ providerName }, 'rtk seed skipped: provider has no auth config paths');
+    return true;
+  }
+  const image = runtimeImage ?? HELPER_IMAGE;
+  if (!(await imageRunsRtkHook(image, init.hookAgent, runner))) {
+    log.warn(
+      { taskId, providerName, image, hookAgent: init.hookAgent },
+      "rtk seed skipped: the task's image runs an rtk without this CLI's hook",
+    );
+    // The image will not gain the hook mid-task, so record it: one warning per task.
     return true;
   }
 
