@@ -281,27 +281,36 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
     const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
     const commit = await gitRun(workspace, ['commit', '-m', message], commitEnv);
-    if (commit.code !== 0) {
-      const stderr = commit.stderr || commit.stdout;
-      if (/nothing to commit/i.test(stderr)) {
-        return {
-          finished: true,
-          committed: false,
-          commitSha: null,
-          pushed: false,
-          message: 'nothing to commit',
-        };
-      }
-      throw new Error(`git commit failed: ${stderr}`);
+    const commitErr = commit.stderr || commit.stdout;
+    const nothing = commit.code !== 0 && /nothing to commit/i.test(commitErr);
+    if (commit.code !== 0 && !nothing) throw new Error(`git commit failed: ${commitErr}`);
+    const pushTo = values.push && detected.hasOrigin ? detected.branch : null;
+    // With a push asked for, a Retry after a failed put-back finds its commit made and still pushes.
+    if (nothing && !pushTo) {
+      return {
+        finished: true,
+        committed: false,
+        commitSha: null,
+        pushed: false,
+        message: 'nothing to commit',
+      };
     }
-    const shaRes = await gitRun(workspace, ['rev-parse', 'HEAD']);
-    const commitSha = shaRes.code === 0 ? shaRes.stdout.trim() : null;
+    const shaRes = nothing ? null : await gitRun(workspace, ['rev-parse', 'HEAD']);
+    const commitSha = shaRes?.code === 0 ? shaRes.stdout.trim() : null;
 
     // Optional best-effort push: the commit is already safe on the branch, so a
     // push failure must never block teardown. Uses the repo's bound credential.
     let pushed = false;
     let pushNote = '';
-    if (values.push && detected.hasOrigin && detected.branch) {
+    if (pushTo) {
+      // Not best effort: a put-back that fails fails the step, and its Retry finishes it.
+      if (detected.baseBranch) {
+        const target = detected.baseBranch;
+        await warnStep(
+          ctx,
+          await putBackProjections({ ctx, worktree: workspace, branch: pushTo, target }),
+        );
+      }
       try {
         const task = await ctx.db.query.tasks.findFirst({
           where: eq(schema.tasks.id, ctx.taskId),
@@ -313,17 +322,9 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
               columns: { credentialsSecretId: true },
             })
           : null;
-        if (detected.baseBranch) {
-          const target = detected.baseBranch;
-          const branch = detected.branch;
-          await warnStep(
-            ctx,
-            await putBackProjections({ ctx, worktree: workspace, branch, target }),
-          );
-        }
         await pushBranch({
           cwd: workspace,
-          branch: detected.branch,
+          branch: pushTo,
           setUpstream: true,
           credentialId: repo?.credentialsSecretId ?? undefined,
           db: ctx.db,
@@ -339,10 +340,10 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     ctx.logger.info({ commitSha, pushed }, 'run-app session committed');
     return {
       finished: true,
-      committed: true,
+      committed: !nothing,
       commitSha,
       pushed,
-      message: `committed${pushed ? ' and pushed' : ''}${pushNote}`,
+      message: `${nothing ? 'nothing to commit' : 'committed'}${pushed ? ' and pushed' : ''}${pushNote}`,
     };
   },
 };

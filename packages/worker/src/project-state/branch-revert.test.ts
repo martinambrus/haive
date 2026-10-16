@@ -297,6 +297,43 @@ describe('the pushes Haive makes of a task branch put its Haive files back first
     expect(h.warning()).toContain(GLOBS);
   });
 
+  it('a put-back that fails fails the run-app ready gate, and its Retry puts back and pushes with nothing left to commit', async () => {
+    const { parent, wt, bare, forked } = await fixture();
+    await write(wt, { ...stateFiles(BY_AGENT), 'session.txt': 'session\n' });
+    const h = stubDb();
+    const args = {
+      detected: {
+        mode: 'none',
+        appUrl: null,
+        liveBrowser: null,
+        directAccess: false,
+        dbAccess: false,
+        workspacePath: wt,
+        hasGit: true,
+        branch: 'feature/x',
+        hasOrigin: true,
+        dirtyFiles: 2,
+        diffArtifactPath: null,
+        changedFileCount: 2,
+        baseBranch: 'main',
+      },
+      formValues: { commit: true, commitMessage: 'session edits', push: true },
+      iteration: 0,
+      previousIterations: [],
+    } as never;
+    handBack.failOnce = true;
+    await expect(runAppReadyStep.apply(stepCtx(parent, h.db), args)).rejects.toThrow(
+      /injected hand-back failure/,
+    );
+    expect(await git(bare, ['branch', '--list', 'feature/x'])).toBe('');
+
+    const out = await runAppReadyStep.apply(stepCtx(parent, h.db), args);
+    expect(out).toMatchObject({ committed: false, pushed: true });
+    expect(handBack.calls).toHaveLength(2);
+    expect(await at(bare, 'feature/x', 'session.txt')).toBe('session\n');
+    expect(await at(bare, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
+  });
+
   it('the run-app ready gate on the repository root itself has nothing to put back', async () => {
     const { parent, bare } = await fixture();
     await write(parent, stateFiles(BY_AGENT));
