@@ -6,6 +6,7 @@ import { FormRenderer } from '@/components/form-renderer';
 import { TaskTypeComposer } from '@/components/task-type-composer';
 import { Button, FormError } from '@/components/ui';
 import { draftStorageKey, TaskTypeCreatorPanel } from './task-type-creator-panel';
+import { TaskTypeDeleteDialog } from './task-type-delete-dialog';
 import { TaskTypeEditor } from './task-type-editor';
 
 // No DOM environment in this package, and the editor's save path has to change state: its hooks
@@ -19,6 +20,7 @@ const api = vi.hoisted(() => ({
   createTaskType: vi.fn(),
 }));
 const guard = vi.hoisted(() => ({ dirty: [] as boolean[] }));
+const router = vi.hoisted(() => ({ push: vi.fn() }));
 
 vi.mock('react', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react')>()),
@@ -45,7 +47,7 @@ vi.mock('react', async (importOriginal) => ({
     return hooks.slots[at];
   },
 }));
-vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock('next/navigation', () => ({ useRouter: () => router }));
 vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
 vi.mock('@/lib/use-unsaved-changes-guard', () => ({
   useUnsavedChangesGuard: (dirty: boolean) => {
@@ -204,12 +206,17 @@ async function mount(slug: string | null = 'tt-x') {
       { message: string } | undefined;
   const reload = () => flatten(tree).find((e) => e.type === Button && textOf(e) === 'Reload');
   const heading = () => flatten(tree).find((e) => e.type === 'h2');
+  const deleteDialog = () =>
+    flatten(tree).find((e) => e.type === TaskTypeDeleteDialog) as unknown as ReactElement<{
+      onDeleted: (slug: string) => void;
+    }>;
   return {
     form,
     composer,
     notice,
     reload,
     heading,
+    deleteDialog,
     panel,
     failure,
     text: () => textOf(tree),
@@ -239,6 +246,7 @@ async function mount(slug: string | null = 'tt-x') {
 }
 
 beforeEach(() => {
+  router.push.mockReset();
   for (const fn of Object.values(api)) fn.mockReset();
   api.getTaskTypeCatalog.mockResolvedValue(TEST_CATALOG);
   api.getAdminTaskType.mockResolvedValue({
@@ -637,6 +645,59 @@ describe('TaskTypeEditor loading a draft', () => {
       displayName: 'Second',
     });
     expect(view.composer().props.stepIds).toEqual(['custom.second-draft.list']);
+  });
+});
+
+describe('TaskTypeEditor leaving the page it saved or deleted from', () => {
+  const NEW_VALUES = {
+    slug: 'todo-audit',
+    displayName: 'Drafted name',
+    description: 'Drafted description',
+    requiresRepository: true,
+    enabled: true,
+    selectable: true,
+    sortOrder: 0,
+  };
+  // What the editor last asked of the guard when the router was told to go, once the page had drawn.
+  function guardWhenSent(view: Awaited<ReturnType<typeof mount>>) {
+    const seen: Array<boolean | undefined> = [];
+    router.push.mockImplementation(() => {
+      view.draw();
+      seen.push(guard.dirty.at(-1));
+    });
+    return seen;
+  }
+
+  it('lets go of the unsaved-changes guard before it goes to the type it created', async () => {
+    api.createTaskType.mockResolvedValue({ taskType: ROW });
+    const view = await mount(null);
+    view.load(promptDraft('todo-audit'));
+    expect(guard.dirty.at(-1)).toBe(true);
+    const seen = guardWhenSent(view);
+    await view.save(NEW_VALUES);
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledWith('/admin/task-types/todo-audit');
+    expect(seen).toEqual([false]);
+  });
+
+  it('lets go of the guard before it goes back to the list after a delete', async () => {
+    const view = await mount();
+    view.edit(FLAT);
+    expect(guard.dirty.at(-1)).toBe(true);
+    const seen = guardWhenSent(view);
+    view.deleteDialog().props.onDeleted('tt-x');
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledWith('/admin/task-types');
+    expect(seen).toEqual([false]);
+  });
+
+  it('keeps the guard when the create fails, and goes nowhere', async () => {
+    api.createTaskType.mockRejectedValue(new Error('Slug taken'));
+    const view = await mount(null);
+    view.load(promptDraft('todo-audit'));
+    await view.save(NEW_VALUES);
+    expect(router.push).not.toHaveBeenCalled();
+    expect(guard.dirty.at(-1)).toBe(true);
   });
 });
 

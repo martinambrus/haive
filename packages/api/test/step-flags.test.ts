@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { CLI_DISPATCH_STEPS, SKIPPABLE_STEP_IDS } from '@haive/shared';
-import { loadStepFlags, resetStepFlagsCache, withTaskCustomSteps } from '../src/lib/step-flags.js';
+import {
+  loadStepFlags,
+  loadTaskStepFlags,
+  resetStepFlagsCache,
+  withTaskCustomSteps,
+} from '../src/lib/step-flags.js';
 import { buildUpcomingCliSteps, enrichStepsWithCliUsage } from '../src/routes/tasks/_helpers.js';
 import { currentStepLabel } from '../src/routes/tasks/_step-label.js';
 import { isStepSkippable } from '../src/routes/tasks/_helpers.js';
@@ -142,7 +149,7 @@ describe('withTaskCustomSteps', () => {
     'custom.t.second': entry('second', 'Second step'),
   };
   const snapshot = ['a', 'custom.t.second', 'b', 'custom.t.first'];
-  const owner = { type: 't', repositoryId: null };
+  const owner = { type: 't', requiresRepository: false };
 
   it('answers custom ids from the task copy, at their snapshot position', async () => {
     const base = await loadStepFlags(fakeDb(() => [row('a'), row('b')]).db);
@@ -253,7 +260,7 @@ describe('withTaskCustomSteps and 01-worktree-setup', () => {
     const base = await loadStepFlags(fakeDb(() => [worktree]).db);
     const task = {
       type: 't',
-      repositoryId: 'r1',
+      requiresRepository: true,
       runListSnapshot: snapshot,
       customSteps: pinned(capabilities),
     };
@@ -266,5 +273,88 @@ describe('withTaskCustomSteps and 01-worktree-setup', () => {
 
   it('lets the worktree step go under a pinned step that only reads', async () => {
     expect(await skippable(['tool_use'])).toBe(true);
+  });
+});
+
+describe('a pinned step and the repository flag of its type', () => {
+  const customSteps = (capabilities: string[] = []) => ({
+    'custom.t.step': {
+      slug: 'step',
+      title: 'Step',
+      template: 'Do it',
+      capabilities,
+      timeoutMs: 300_000,
+    },
+  });
+  const snapshot = ['custom.t.step'];
+  const needs = (flags: Awaited<ReturnType<typeof loadStepFlags>>) =>
+    flags.get('custom.t.step')?.composable?.requires.map((r) => r.needs);
+
+  describe('withTaskCustomSteps', () => {
+    it('needs the repository when its type requires one, whether or not the task has one', async () => {
+      const base = await loadStepFlags(fakeDb(() => [row('a')]).db);
+      const task = {
+        type: 't',
+        repositoryId: null,
+        requiresRepository: true,
+        runListSnapshot: snapshot,
+        customSteps: customSteps(),
+      };
+      expect(needs(withTaskCustomSteps(base, task))).toEqual(['repository']);
+    });
+
+    it('needs no repository when its type needs none, even for a task that has one', async () => {
+      const base = await loadStepFlags(fakeDb(() => [row('a')]).db);
+      const task = {
+        type: 't',
+        repositoryId: 'r1',
+        requiresRepository: false,
+        runListSnapshot: snapshot,
+        customSteps: customSteps(),
+      };
+      expect(needs(withTaskCustomSteps(base, task))).toEqual([]);
+    });
+  });
+
+  describe('loadTaskStepFlags', () => {
+    function setup(definitions: Array<Record<string, unknown>>) {
+      const fake = createFakeDb({
+        stepCatalog: schema.stepCatalog,
+        taskTypeDefinitions: schema.taskTypeDefinitions,
+      });
+      fake.insert(schema.stepCatalog, row('a'));
+      for (const definition of definitions) fake.insert(schema.taskTypeDefinitions, definition);
+      return fake.db as never;
+    }
+    const pinned = { type: 't', runListSnapshot: snapshot, customSteps: customSteps() };
+
+    it('takes the flag from the definition of the type of the task', async () => {
+      const needing = await loadTaskStepFlags(
+        setup([{ slug: 't', requiresRepository: true }]),
+        pinned,
+      );
+      expect(needs(needing)).toEqual(['repository']);
+      resetStepFlagsCache();
+      const free = await loadTaskStepFlags(
+        setup([{ slug: 't', requiresRepository: false }]),
+        pinned,
+      );
+      expect(needs(free)).toEqual([]);
+    });
+
+    it('reads the flag of the type of the task and of no other', async () => {
+      const db = setup([
+        { slug: 'other', requiresRepository: false },
+        { slug: 't', requiresRepository: true },
+      ]);
+      expect(needs(await loadTaskStepFlags(db, pinned))).toEqual(['repository']);
+    });
+
+    it('reads no definition for a task that pinned no step', async () => {
+      const { db, state } = fakeDb(() => [row('a')]);
+      const flags = await loadTaskStepFlags(db, { ...pinned, customSteps: null });
+      expect([...flags.keys()]).toEqual(['a']);
+      expect(state.selects).toBe(1);
+    });
   });
 });
