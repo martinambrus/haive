@@ -409,6 +409,14 @@ describe('the onboarding status beside the repository select', () => {
       expect(buttons(view.tree(), /^re-run onboarding$/)).toHaveLength(1);
     });
 
+    it('keeps the verdict in view beside its failure', async () => {
+      const view = await resetA();
+      await release(view, RESET('repo-a'), 500, { error: 'reset failed for a' });
+      expect(page(view)).toContain('reset failed for a');
+      expect(page(view)).toContain('Will run: workflow');
+      expect(isDisabled(submit(view))).toBe(false);
+    });
+
     it('disables Retry while the status is being asked for again', async () => {
       const view = await resetA();
       // A failure that lands after the person came back to repo-a meets that repository's new ask.
@@ -472,6 +480,14 @@ describe('the onboarding status beside the repository select', () => {
       await answer(view, 'repo-b', 200, status({ onboarded: true }));
       expect(page(view)).not.toContain('mark failed for a');
       expect(page(view)).toContain('Will run: workflow');
+    });
+
+    it('keeps the verdict in view beside its failure', async () => {
+      const view = await markOnboarded();
+      await release(view, MARK('repo-a'), 500, { error: 'mark failed for a' });
+      expect(page(view)).toContain('mark failed for a');
+      expect(page(view)).toContain('Will run: onboarding');
+      expect(isDisabled(submit(view))).toBe(false);
     });
   });
 });

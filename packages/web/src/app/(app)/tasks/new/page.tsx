@@ -822,7 +822,7 @@ export default function NewTaskPage() {
                 </div>
               )}
               {resetNote && <p className="text-amber-300">{resetNote}</p>}
-              {!statusLoading && !statusError && onboardingStatus && (
+              {!statusLoading && onboardingStatus && (
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center gap-2">
                     <span
