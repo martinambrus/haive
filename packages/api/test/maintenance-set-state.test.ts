@@ -139,3 +139,14 @@ describe('PUT /admin/maintenance', () => {
     expect(t.set).not.toHaveBeenCalled();
   });
 });
+
+describe('GET /admin/maintenance', () => {
+  it('answers the stored state, read past the config cache', async () => {
+    setup(undefined, 'draining');
+
+    const res = await app.request('/admin/maintenance');
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ state: 'draining' });
+  });
+});

@@ -51,7 +51,7 @@ const BLOCKING_LIST_CAP = 200;
 const setStateSchema = z.object({ state: maintenanceStateSchema });
 
 maintenanceRoutes.get('/', async (c) => {
-  const state = parseMaintenanceState(await configService.get(CONFIG_KEYS.MAINTENANCE_STATE));
+  const state = parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
   return c.json({ state });
 });
 
