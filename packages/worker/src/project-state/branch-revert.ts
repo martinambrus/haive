@@ -207,6 +207,14 @@ async function stillOnTip(
   return changes.filter((c) => !moved.has(c.path));
 }
 
+async function syncable(worktree: string, branch: string): Promise<boolean> {
+  const { anchor, prefix } = workspaceAnchor(worktree);
+  const held = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''));
+  if (held?.kind !== 'directory') return false;
+  const head = await gitRun(worktree, ['symbolic-ref', '-q', 'HEAD']);
+  return head.code === 0 && head.stdout.trim() === `refs/heads/${branch}`;
+}
+
 // Read while HEAD is still the old tip: a path beside an edit keeps its file, and only its index moves.
 // With `movedFrom` the branch is past that tip already, so it plans what the index still holds of it.
 async function planSync(
@@ -215,12 +223,7 @@ async function planSync(
   changes: readonly Change[],
   movedFrom: string | null = null,
 ): Promise<WorktreeSync | null> {
-  if (worktree === null) return null;
-  const { anchor, prefix } = workspaceAnchor(worktree);
-  const held = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''));
-  if (held?.kind !== 'directory') return null;
-  const head = await gitRun(worktree, ['symbolic-ref', '-q', 'HEAD']);
-  if (head.code !== 0 || head.stdout.trim() !== `refs/heads/${branch}`) return null;
+  if (worktree === null || !(await syncable(worktree, branch))) return null;
   const pending = movedFrom === null ? changes : await stillOnTip(worktree, movedFrom, changes);
   if (pending.length === 0) return null;
   const status = await gitRun(
@@ -312,17 +315,21 @@ interface Recorded {
   commit: string;
   preRevertSha: string;
   mergeBase: string;
+  synced: boolean;
 }
 
 const isSha = (v: unknown): v is string =>
   typeof v === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(v);
 
 function recordedOf(payload: unknown): Recorded | null {
-  const { branch, commit, preRevertSha, mergeBase } = (payload ?? {}) as Record<string, unknown>;
+  const { branch, commit, preRevertSha, mergeBase, synced } = (payload ?? {}) as Record<
+    string,
+    unknown
+  >;
   if (typeof branch !== 'string' || !isSha(commit) || !isSha(preRevertSha) || !isSha(mergeBase)) {
     return null;
   }
-  return { branch, commit, preRevertSha, mergeBase };
+  return { branch, commit, preRevertSha, mergeBase, synced: synced === true };
 }
 
 async function putBackPayloads(db: Database, taskId: string): Promise<unknown[]> {
@@ -356,6 +363,22 @@ async function record(ctx: RevertCtx, branch: string, revert: ProjectionRevert):
 async function dropRecord(ctx: RevertCtx, commit: string): Promise<void> {
   await ctx.db
     .delete(schema.taskEvents)
+    .where(
+      and(
+        eq(schema.taskEvents.taskId, ctx.taskId),
+        eq(schema.taskEvents.eventType, PROJECTIONS_PUT_BACK_EVENT),
+        sql`${schema.taskEvents.payload}->>'commit' = ${commit}`,
+      ),
+    );
+}
+
+// The worktree has the put-back too, its hand-back included, so a later pass has nothing to finish.
+async function markSynced(ctx: RevertCtx, commit: string): Promise<void> {
+  await ctx.db
+    .update(schema.taskEvents)
+    .set({
+      payload: sql`${schema.taskEvents.payload} || ${JSON.stringify({ synced: true })}::jsonb`,
+    })
     .where(
       and(
         eq(schema.taskEvents.taskId, ctx.taskId),
@@ -433,18 +456,29 @@ async function resumePutBack(args: {
     mergeBase,
   };
   if (landed) {
+    if (recorded.synced) return result;
     const sync = await planSync(worktree, branch, changes, preRevertSha);
-    if (sync !== null) {
+    const pending = sync === null ? 0 : sync.clean.length + sync.edited.length;
+    // An earlier pass restored what is no longer pending and may have died before handing it back.
+    const handBackOnly =
+      pending < changes.length &&
+      (sync === null || sync.clean.length === 0) &&
+      worktree !== null &&
+      (await syncable(worktree, branch));
+    if (sync !== null || handBackOnly) {
       await refuseLinkedDataDir(ctx.repoPath, worktree, branch, tip);
-      await syncWorktree(sync, commit, preRevertSha);
-      logPutBack(ctx, branch, result);
     }
+    if (sync !== null) await syncWorktree(sync, commit, preRevertSha);
+    if (handBackOnly) await handBackAfterMove(worktree!, preRevertSha);
+    await markSynced(ctx, commit);
+    if (sync !== null) logPutBack(ctx, branch, result);
     return result;
   }
   await refuseLinkedDataDir(ctx.repoPath, worktree, branch, tip);
   const sync = await planSync(worktree, branch, changes);
   await moveBranch(ctx, branch, result);
   if (sync) await syncWorktree(sync, commit, preRevertSha);
+  await markSynced(ctx, commit);
   logPutBack(ctx, branch, result);
   return result;
 }
@@ -477,6 +511,7 @@ export async function revertHaiveProjectionsOnBranch(args: {
   await record(ctx, branch, result);
   await moveBranch(ctx, branch, result);
   if (sync) await syncWorktree(sync, commit, edits.tip);
+  await markSynced(ctx, commit);
   logPutBack(ctx, branch, result);
   return result;
 }

@@ -12,13 +12,17 @@ import { gate4PushStep } from '../step-engine/steps/workflow/11a-gate-4-push.js'
 import { runAppReadyStep } from '../step-engine/steps/run-app/99-run-app-ready.js';
 import type { StepContext } from '../step-engine/step-definition.js';
 
-const handBack = vi.hoisted(() => ({ calls: [] as unknown[][] }));
+const handBack = vi.hoisted(() => ({ calls: [] as unknown[][], failOnce: false }));
 vi.mock('../step-engine/git-merge.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../step-engine/git-merge.js')>();
   return {
     ...real,
     handBackAfterMove: async (...args: Parameters<typeof real.handBackAfterMove>) => {
       handBack.calls.push(args);
+      if (handBack.failOnce) {
+        handBack.failOnce = false;
+        throw new Error('injected hand-back failure');
+      }
       return real.handBackAfterMove(...args);
     },
   };
@@ -54,6 +58,7 @@ const PUT_BACK_EVENT = 'branch.projections_put_back';
 const dirs: string[] = [];
 afterEach(async () => {
   handBack.calls.length = 0;
+  handBack.failOnce = false;
   inject.hook = null;
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
@@ -154,14 +159,26 @@ function stubDb() {
         }
       },
     }),
-    update: () => ({
+    update: (table: unknown) => ({
       set: (patch: { warningMessage?: string | null }) => ({
-        where: () => ({
-          returning: async () => {
-            if ('warningMessage' in patch) warning = patch.warningMessage ?? null;
-            return [{ id: 'ts-1', warningMessage: warning }];
-          },
-        }),
+        where: (cond: SQL) => {
+          if (table === schema.taskEvents) {
+            const { params } = new PgDialect().sqlToQuery(cond);
+            for (const e of events) {
+              const { commit } = e.payload as { commit?: unknown };
+              if (e.eventType === PUT_BACK_EVENT && params.includes(commit)) {
+                e.payload = { ...(e.payload as object), synced: true };
+              }
+            }
+            return Promise.resolve();
+          }
+          return {
+            returning: async () => {
+              if ('warningMessage' in patch) warning = patch.warningMessage ?? null;
+              return [{ id: 'ts-1', warningMessage: warning }];
+            },
+          };
+        },
       }),
     }),
     select: () => ({
@@ -729,6 +746,26 @@ describe('a put-back cut short is resumed, not lost', () => {
     inject.hook = null;
     expect(await pass(parent, wt, h)).toBeNull();
     expect(commitsOf(h)).toEqual([first!.commit]);
+  });
+
+  it('a hand-back cut short after its restore is run again by the next pass, and not once it finished', async () => {
+    const { parent, wt } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const preRevert = await revOf(wt);
+    const h = stubDb();
+    handBack.failOnce = true;
+    await expect(pass(parent, wt, h)).rejects.toThrow(/injected hand-back failure/);
+    expect(await git(wt, ['status', '--porcelain'])).toBe('');
+    expect(handBack.calls).toEqual([[wt, preRevert]]);
+
+    await pass(parent, wt, h);
+    expect(handBack.calls).toEqual([
+      [wt, preRevert],
+      [wt, preRevert],
+    ]);
+    await pass(parent, wt, h);
+    expect(handBack.calls).toHaveLength(2);
+    expect(h.events).toHaveLength(1);
   });
 
   it('a git status that fails stops the pass before the branch moves, and records nothing', async () => {
