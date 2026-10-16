@@ -8,6 +8,7 @@ import { normalizeContent, sha256Hex } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { recordWritten } from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -113,7 +114,9 @@ async function viaRestoredSnapshot(restoredRtk: boolean | undefined, plan: Plan)
     newArtifactsToUndo: [],
     warnings: [],
   };
-  const out = await upgradeRollbackStep.apply(stepContext(fake, repoPath), { detected } as never);
+  const out = await recordWritten(
+    upgradeRollbackStep.apply(stepContext(fake, repoPath), { detected } as never),
+  );
   return { fake, out, restored: context(restoredRtk) };
 }
 
@@ -164,7 +167,9 @@ async function viaLiveRows(liveRtk: boolean | undefined, plan: Plan) {
     ],
     warnings: [],
   };
-  const out = await upgradeRollbackStep.apply(stepContext(fake, repoPath), { detected } as never);
+  const out = await recordWritten(
+    upgradeRollbackStep.apply(stepContext(fake, repoPath), { detected } as never),
+  );
   return { fake, out, restored: context(liveRtk) };
 }
 
@@ -177,7 +182,7 @@ describe.each(paths)('the RTK choice of a rollback that %s', (_name, run) => {
   /** The column after the rollback, once it is certain the restored context was recorded at all. */
   const recordedAs = async (held: boolean | undefined, plan: Plan): Promise<unknown> => {
     const { fake, out, restored } = await run(held, plan);
-    expect(out.warnings.filter((w) => w.includes('project state record'))).toEqual([]);
+    expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
     expect(fake.rows(schema.projectStateSync)).toHaveLength(1);
     const column = fake.rows(schema.repositories)[0]!.renderContext;
     expect(column).toMatchObject(restored);

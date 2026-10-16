@@ -20,7 +20,11 @@ import type {
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
-import { RECORD_WRITE_TABLES, recordWritten } from './support/upgrade-apply-record.js';
+import {
+  RECORD_WRITE_TABLES,
+  recordWritten,
+  ROLLBACK_RECORD_WRITE_TABLES,
+} from './support/upgrade-apply-record.js';
 
 const beforeRewrite = vi.hoisted(() => ({
   run: null as null | (() => Promise<void>),
@@ -113,6 +117,7 @@ async function setup({
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
     ...RECORD_WRITE_TABLES,
+    ...ROLLBACK_RECORD_WRITE_TABLES,
   });
   const live = (diskPath: string, content: string, templateKind = 'agent') =>
     fake.insert(schema.onboardingArtifacts, {
@@ -418,7 +423,7 @@ describe('an upgrade apply retried after it failed part-way', () => {
       warnings: [],
     };
 
-    await upgradeRollbackStep.apply(s.ctx, { detected } as never);
+    await recordWritten(upgradeRollbackStep.apply(s.ctx, { detected } as never));
 
     expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toBe(RAW_AGENTS);
   });

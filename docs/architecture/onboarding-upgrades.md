@@ -396,6 +396,8 @@ renders from read its file (`RTK_SETTINGS_READERS`, `@haive/shared`, the list 07
 Both resolve that context in one order (`renderContextOrigin`, `@haive/shared/project-state`).
 A writer (12, 02, 04) whose record write fails clears the column, so that order falls back to the
 snapshot its own rows carry rather than to a column it could not move (`writeProjectStateRecord`).
+The step does not fail: it keeps a warning and reports `recordWrite: 'failed'` in its output
+(`'written'`, or `'skipped'` when it had nothing to record), which tests read instead of the wording.
 A fenced write (02's) clears it only while it still holds a context 02 planned against: a sync
 that took the lock after the failed write and before the clear is newer than both, and stays.
 First comes the repository's render context column, whose RTK choice is its stored
