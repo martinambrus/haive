@@ -612,9 +612,8 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
 
-  const { runListSnapshot, customSteps } = await definitionForCreate(db, 'kb_author', {
-    generic: false,
-  });
+  // Refused here, a disabled type writes no skeleton; the task's transaction reads it again.
+  await definitionForCreate(db, 'kb_author', { generic: false });
 
   const taskId = randomUUID();
   const entry = await withGlobalKb(db, async ({ db: gdb, settings }) => {
@@ -650,6 +649,9 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
       await admitNewWork(tx);
       // Queuing takes this lock; taken before the insert, it inverts no lock the row's insert holds.
       if (data.repositoryId) await lockRepositoryTasksKey(tx, data.repositoryId);
+      const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'kb_author', {
+        generic: false,
+      });
       await tx.insert(schema.tasks).values({
         id: taskId,
         userId,

@@ -219,4 +219,23 @@ describe('POST /enrich pins the kb_author step list', () => {
     expect(fake.rows(schema.tasks)).toHaveLength(0);
     expect(fake.rows(globalKbEntries)).toHaveLength(0);
   });
+
+  it('creates no task, and removes the skeleton, when the type is disabled after the check at the door', async () => {
+    const enabled = h.definition.getMockImplementation()!;
+    h.definition.mockImplementation(async (...args: unknown[]) => {
+      if (fake.rows(globalKbEntries).length > 0) {
+        throw new HttpError(403, 'Task type kb_author is disabled');
+      }
+      return enabled(...args);
+    });
+    try {
+      expect((await enrich()).status).toBe(403);
+      expect(h.definition).toHaveBeenCalledTimes(2);
+      expect(h.definition.mock.calls[1]?.[0]).not.toBe(fake.db);
+      expect(fake.rows(schema.tasks)).toHaveLength(0);
+      expect(fake.rows(globalKbEntries)).toHaveLength(0);
+    } finally {
+      h.definition.mockImplementation(enabled);
+    }
+  });
 });
