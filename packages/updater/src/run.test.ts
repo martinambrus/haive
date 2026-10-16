@@ -156,7 +156,9 @@ describe('phaseMaintenance', () => {
   it('leaves draining as it is, and waits again, when a task is live under the fence', async () => {
     const ctx = context(fakeSql(undefined, 1), { forceDrain: false });
 
-    await expect(phaseMaintenance(ctx)).rejects.toThrow('1 task(s) are still live');
+    await expect(phaseMaintenance(ctx)).rejects.toThrow(
+      '1 task(s) or background job(s) are still live',
+    );
 
     expect(fenceEvents()).toEqual(['lock', 'get', 'count', 'unlock', 'count']);
     expect(logs).toEqual(['drain-reopened']);
@@ -166,7 +168,9 @@ describe('phaseMaintenance', () => {
     stored = 'normal';
     const ctx = context(fakeSql(undefined, 1), { forceDrain: false });
 
-    await expect(phaseMaintenance(ctx)).rejects.toThrow('1 task(s) are still live');
+    await expect(phaseMaintenance(ctx)).rejects.toThrow(
+      '1 task(s) or background job(s) are still live',
+    );
 
     expect(fenceEvents()).toEqual(['lock', 'get', 'count', 'set:draining', 'unlock', 'count']);
     expect(logs).toEqual(['drain-reopened']);
@@ -257,7 +261,9 @@ describe('the upgrade journal', () => {
   it('leaves the draining phase as its last word when the second wait gives up', async () => {
     const ctx = context(fakeSql(undefined, 1), { forceDrain: false });
 
-    await expect(phaseMaintenance(ctx)).rejects.toThrow('1 task(s) are still live');
+    await expect(phaseMaintenance(ctx)).rejects.toThrow(
+      '1 task(s) or background job(s) are still live',
+    );
 
     expect(journalPhases()).toEqual(['maintenance', 'draining']);
   });
@@ -316,7 +322,7 @@ describe('the drain wait, on a clock', () => {
 
     const { outcome, took } = await timed(ctx);
 
-    expect(outcome).toContain('task(s) are still live');
+    expect(outcome).toContain('task(s) or background job(s) are still live');
     expect(took).toBeLessThanOrEqual(DEADLINE_MS + POLL_MS);
   });
 

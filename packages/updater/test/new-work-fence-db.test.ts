@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import postgres, { type Sql } from 'postgres';
+import postgres, { type Sql, type TransactionSql } from 'postgres';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configService } from '@haive/shared';
 import { ensureJournal, finishRun, startRun } from '../src/journal.js';
@@ -53,8 +53,8 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
       log: (event: string, fields?: Record<string, unknown>) => logged.push({ event, fields }),
     }) as unknown as UpgradeContext;
 
-  /** An api request between taking the fence and committing its task. */
-  const admitTask = async () => {
+  /** An api request between taking the fence and committing the work it starts. */
+  const admit = async (write: (tx: TransactionSql) => PromiseLike<unknown>) => {
     const proceeding = new Promise<void>((resolve) => (proceed = resolve));
     let held!: () => void;
     const holding = new Promise<void>((resolve) => (held = resolve));
@@ -62,11 +62,24 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
       await tx`select pg_advisory_xact_lock_shared(hashtextextended(${FENCE}, 0))`;
       held();
       await proceeding;
-      await tx`INSERT INTO tasks (user_id, type, title, status)
-               VALUES (${OWNER}, ${TYPE}, 'Task', 'queued')`;
+      await write(tx);
     });
     await holding;
   };
+
+  const admitTask = () =>
+    admit(
+      (tx) =>
+        tx`INSERT INTO tasks (user_id, type, title, status)
+           VALUES (${OWNER}, ${TYPE}, 'Task', 'queued')`,
+    );
+
+  const admitRepository = () =>
+    admit(
+      (tx) =>
+        tx`INSERT INTO repositories (user_id, name, source, status)
+           VALUES (${OWNER}, ${TYPE}, 'local_path', 'cloning')`,
+    );
 
   /** An administrator's PUT /admin/maintenance: its transaction holds the fence exclusively. */
   const holdFence = async () => {
@@ -129,6 +142,13 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
 
   const endTasks = () => probe`UPDATE tasks SET status = 'completed' WHERE type = ${TYPE}`;
 
+  const cloningRepository = () =>
+    probe`INSERT INTO repositories (user_id, name, source, status)
+          VALUES (${OWNER}, ${TYPE}, 'local_path', 'cloning')`;
+
+  const endRepositories = () =>
+    probe`UPDATE repositories SET status = 'ready' WHERE user_id = ${OWNER}`;
+
   beforeAll(async () => {
     updater = postgres(url as string, { max: 1, max_lifetime: 0 });
     admission = postgres(url as string, { max: 1 });
@@ -147,6 +167,7 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
     inFlight = undefined;
     updating = undefined;
     await updater`DELETE FROM tasks WHERE type = ${TYPE}`;
+    await updater`DELETE FROM repositories WHERE user_id = ${OWNER}`;
     runId = await startRun(updater, {
       fromVersion: '1.0.0',
       toVersion: '1.1.0',
@@ -164,6 +185,7 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
     await releaseFence();
     await inFlight?.catch(() => undefined);
     await endTasks();
+    await endRepositories();
     await updating?.catch(() => undefined);
     await finishRun(updater, runId, 'rolled_back');
   });
@@ -186,6 +208,22 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
 
   it('waits for an admission already past the fence, and then counts the task it wrote', async () => {
     await admitTask();
+
+    const draining = phaseDraining(context());
+    await untilWaiting();
+    expect(written).toEqual([]);
+
+    proceed();
+    await inFlight;
+    await draining;
+
+    expect(written).toEqual(['draining']);
+    expect(logged).toContainEqual({ event: 'drain-forced', fields: { live: 1 } });
+    expect(await fenceIsFree()).toBe(true);
+  });
+
+  it('waits for an admission already past the fence, and then counts the repository it wrote', async () => {
+    await admitRepository();
 
     const draining = phaseDraining(context());
     await untilWaiting();
@@ -248,7 +286,23 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
 
       proceed();
       await inFlight;
-      await expect(entering).rejects.toThrow('1 task(s) are still live');
+      await expect(entering).rejects.toThrow('1 task(s) or background job(s) are still live');
+
+      expect(written).toEqual([]);
+      expect(await fenceIsFree()).toBe(true);
+    });
+
+    it('waits for an admission already past the fence, and then counts the repository it wrote', async () => {
+      stored = 'draining';
+      await admitRepository();
+
+      const entering = enter(upgrade({ drainDeadlineMs: 0 }));
+      await untilWaiting();
+      expect(written).toEqual([]);
+
+      proceed();
+      await inFlight;
+      await expect(entering).rejects.toThrow('1 task(s) or background job(s) are still live');
 
       expect(written).toEqual([]);
       expect(await fenceIsFree()).toBe(true);
@@ -328,6 +382,30 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
       expect(settled).toBe(false);
 
       await endTasks();
+      await updating;
+
+      expect(written).toEqual([]);
+      expect(logged.map((l) => l.event)).toEqual(['drain-reopened', 'drained', 'maintenance']);
+      expect(await fenceIsFree()).toBe(true);
+    });
+
+    it('waits for a repository that is cloning, as for a live task, and then enters without a write', async () => {
+      stored = 'maintenance';
+      await cloningRepository();
+
+      enter(upgrade());
+      await until(
+        () => settled || logged.some((l) => l.event === 'drain-reopened'),
+        'the drain to reopen',
+      );
+      expect(logged).toContainEqual({
+        event: 'drain-reopened',
+        fields: { state: 'maintenance', live: 1 },
+      });
+      expect(written).toEqual([]);
+      expect(settled).toBe(false);
+
+      await endRepositories();
       await updating;
 
       expect(written).toEqual([]);

@@ -40,7 +40,7 @@ export interface UpgradeContext {
   drainDeadlineMs: number;
   /** When that wait ends: fixed by the first drain wait and shared by every wait after it. */
   drainDeadlineAt?: number;
-  /** Milliseconds between live-task counts and between recounts; 5000 when unset. */
+  /** Milliseconds between live-work counts and between recounts; 5000 when unset. */
   drainPollMs?: number;
   /** Force past the drain deadline instead of failing. */
   forceDrain: boolean;
@@ -127,13 +127,19 @@ async function awaitDatabase(sql: Sql, timeoutMs = 120_000): Promise<void> {
   }
 }
 
-/** Live work that still holds a maintenance window open. */
-export async function liveTaskCount(sql: Sql): Promise<number> {
+/** Live work that still holds a maintenance window open: tasks, and the background jobs a route queues. */
+export async function liveWorkCount(sql: Sql): Promise<number> {
   // A dead task and a draft that never started run nothing; /admin/maintenance leaves both out too.
   const rows = await sql<{ n: string }[]>`
-    SELECT count(*)::text AS n FROM tasks
-     WHERE status IN ('queued','running','paused','waiting_user','waiting_pr')
-       AND dead_at IS NULL`;
+    SELECT (
+      (SELECT count(*) FROM tasks
+        WHERE status IN ('queued','running','paused','waiting_user','waiting_pr')
+          AND dead_at IS NULL)
+      + (SELECT count(*) FROM repositories WHERE status = 'cloning')
+      + (SELECT count(*) FROM custom_bundles WHERE status = 'syncing')
+      + (SELECT count(*) FROM cli_providers
+          WHERE sandbox_image_build_status = 'building' OR model_provision_status = 'provisioning')
+    )::text AS n`;
   return Number(rows[0]?.n ?? 0);
 }
 
@@ -163,7 +169,7 @@ async function enterMaintenance(ctx: UpgradeContext): Promise<boolean> {
       await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
     );
     // The updater's pool is one connection and the fence holds it, so the count runs on the fence.
-    const live = await liveTaskCount(fence);
+    const live = await liveWorkCount(fence);
     const entered = state !== 'normal' && live === 0;
     if (state === 'normal') await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
     if (entered && state === 'draining') {
@@ -195,11 +201,11 @@ function reopenedAtDeadline(ctx: UpgradeContext): boolean {
   return true;
 }
 
-/** Waits until no task is live; true when the deadline passed and the caller chose to force. */
+/** Waits until no work is live; true when the deadline passed and the caller chose to force. */
 async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
   const deadline = drainDeadline(ctx);
   for (;;) {
-    const live = await liveTaskCount(ctx.sql);
+    const live = await liveWorkCount(ctx.sql);
     if (live === 0) {
       ctx.log('drained', { live: 0 });
       return false;
@@ -212,7 +218,7 @@ async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
         return true;
       }
       throw new Error(
-        `${live} task(s) are still live after ${Math.round(ctx.drainDeadlineMs / 1000)}s. ` +
+        `${live} task(s) or background job(s) are still live after ${Math.round(ctx.drainDeadlineMs / 1000)}s. ` +
           `Re-run with --force to stop them, or wait and try again.`,
       );
     }

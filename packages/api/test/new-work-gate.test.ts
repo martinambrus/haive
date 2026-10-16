@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
@@ -7,6 +7,7 @@ const h = vi.hoisted(() => ({
   state: 'normal',
   dbCalls: 0,
   queued: [] as string[],
+  jobs: [] as string[],
 }));
 
 vi.mock('../src/db.js', () => ({
@@ -15,14 +16,26 @@ vi.mock('../src/db.js', () => ({
     return h.db;
   },
 }));
-vi.mock('../src/queues.js', () => ({
-  getTaskQueue: () => ({
+vi.mock('../src/queues.js', () => {
+  const jobQueue = () => ({
     add: async (name: string) => {
-      h.queued.push(name);
+      h.jobs.push(name);
     },
-  }),
-  getGlobalKbSyncQueue: () => ({ add: async () => undefined }),
-}));
+    getJob: async () => undefined,
+  });
+  return {
+    getTaskQueue: () => ({
+      add: async (name: string) => {
+        h.queued.push(name);
+      },
+    }),
+    getGlobalKbSyncQueue: () => ({ add: async () => undefined }),
+    getRepoQueue: jobQueue,
+    getBundleQueue: jobQueue,
+    getCliExecQueue: jobQueue,
+    getUsagePollQueue: jobQueue,
+  };
+});
 vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
 vi.mock('../src/lib/plan-mirror.js', () => ({
   enqueuePlanMirrorRefresh: vi.fn(),
@@ -48,15 +61,27 @@ vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
 }));
 
 import { readdirSync, readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
-import { createFakeDb } from '@haive/database/testing';
-import { configService, TASK_JOB_NAMES } from '@haive/shared';
+import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
+import {
+  BUNDLE_JOB_NAMES,
+  CLI_EXEC_JOB_NAMES,
+  configService,
+  DEFAULT_AGENT_RULES,
+  REPO_JOB_NAMES,
+  TASK_JOB_NAMES,
+} from '@haive/shared';
 import { globalKbEntries } from '@haive/shared/global-kb';
+import { bundleRoutes } from '../src/routes/bundles.js';
+import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { globalKbRoutes } from '../src/routes/global-kb.js';
 import { planRoutes } from '../src/routes/plan.js';
+import { repoRoutes } from '../src/routes/repos.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { taskTypeDraftRoutes } from '../src/routes/task-type-drafts.js';
 import { upgradeRoutes } from '../src/routes/upgrades.js';
@@ -1038,5 +1063,524 @@ describe.each([
         expect(written(fake)).toEqual(before);
       },
     );
+  });
+});
+
+describe('the routes that start a background job', () => {
+  const JOB_BUNDLE = '00000000-0000-4000-8000-0000000000f1';
+  const JOB_UPLOAD = '00000000-0000-4000-8000-0000000000f2';
+  const JOB_PROVIDER = '00000000-0000-4000-8000-0000000000f3';
+  const JOB_TABLES = {
+    repositories: schema.repositories,
+    repoUploads: schema.repoUploads,
+    tasks: schema.tasks,
+    customBundles: schema.customBundles,
+    customBundleUploads: schema.customBundleUploads,
+    customBundleItems: schema.customBundleItems,
+    projectStateOutbox: schema.projectStateOutbox,
+    cliProviders: schema.cliProviders,
+    cliProviderSecrets: schema.cliProviderSecrets,
+    cliPackageVersions: schema.cliPackageVersions,
+  };
+
+  const mountJobs = (target: Hono<AppEnv>) => {
+    target.route('/repositories', repoRoutes);
+    target.route('/bundles', bundleRoutes);
+    target.route('/cli-providers', cliProviderRoutes);
+    target.onError(errorHandler);
+    return target;
+  };
+  const jobs = mountJobs(new Hono<AppEnv>());
+  const gatedJobs = new Hono<AppEnv>();
+  gatedJobs.use('*', maintenanceGate);
+  mountJobs(gatedJobs);
+
+  const jsonRequest = (method: string, body?: unknown) => ({
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  /** The fake defaults only id and createdAt, and cannot group: a bundle's response needs both. */
+  const noRows = () => {
+    const query: Record<string, unknown> = {};
+    for (const method of ['where', 'groupBy']) query[method] = () => query;
+    query.then = (ok: (rows: unknown[]) => unknown, bad: (err: unknown) => unknown) =>
+      Promise.resolve([]).then(ok, bad);
+    return query;
+  };
+  const answersBundles = (handle: FakeDbHandle): FakeDbHandle => ({
+    ...handle,
+    insert: (table) => ({
+      values: (values) =>
+        handle
+          .insert(table)
+          .values(
+            table === schema.customBundles && !Array.isArray(values)
+              ? { updatedAt: new Date(), ...values }
+              : values,
+          ),
+    }),
+    select: (fields) => ({
+      from: (table) =>
+        table === schema.customBundleItems
+          ? (noRows() as never)
+          : handle.select(fields).from(table),
+    }),
+    transaction: (fn) => handle.transaction((tx) => fn(answersBundles(tx))),
+  });
+
+  let dirs: string[] = [];
+  const roots = { repo: process.env.REPO_STORAGE_ROOT, bundle: process.env.BUNDLE_STORAGE_ROOT };
+
+  afterEach(async () => {
+    for (const [name, value] of [
+      ['REPO_STORAGE_ROOT', roots.repo],
+      ['BUNDLE_STORAGE_ROOT', roots.bundle],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })));
+    dirs = [];
+  });
+
+  /** Every table a request could write, the storage volumes it could write to, and what it queued. */
+  async function jobFixture() {
+    const storage = await mkdtemp(join(tmpdir(), 'new-work-jobs-'));
+    dirs.push(storage);
+    const repoRoot = join(storage, 'repos');
+    const bundleRoot = join(storage, 'bundles');
+    await mkdir(repoRoot);
+    await mkdir(bundleRoot);
+    process.env.REPO_STORAGE_ROOT = repoRoot;
+    process.env.BUNDLE_STORAGE_ROOT = bundleRoot;
+    const fake = createFakeDb(JOB_TABLES);
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'repo',
+      source: 'git_https',
+      remoteUrl: 'https://example.com/r.git',
+      status: 'ready',
+    });
+    h.db = answersBundles(fake.db);
+    h.dbCalls = 0;
+    h.jobs = [];
+    const written = async () => [
+      Object.values(JOB_TABLES).map((table) => fake.rows(table)),
+      (await readdir(storage, { recursive: true })).sort(),
+      [...h.jobs],
+    ];
+    return { fake, repoRoot, bundleRoot, written };
+  }
+  type JobFixture = Awaited<ReturnType<typeof jobFixture>>;
+
+  /** What the updater's live-work count reads, off the rows the routes wrote. */
+  const inProgress = ({ fake }: JobFixture) =>
+    fake.rows(schema.repositories).filter((r) => r.status === 'cloning').length +
+    fake.rows(schema.customBundles).filter((r) => r.status === 'syncing').length +
+    fake
+      .rows(schema.cliProviders)
+      .filter(
+        (r) =>
+          r.sandboxImageBuildStatus === 'building' || r.modelProvisionStatus === 'provisioning',
+      ).length;
+
+  const stage = async (root: string, name: string) => {
+    const dir = join(root, '_uploads', USER);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, name), 'zip bytes');
+    return join(dir, name);
+  };
+  const bundle = (
+    { fake, bundleRoot }: JobFixture,
+    over: Record<string, unknown>,
+  ): Record<string, unknown> =>
+    fake.insert(schema.customBundles, {
+      id: JOB_BUNDLE,
+      userId: USER,
+      repositoryId: REPO,
+      name: 'kit',
+      storageRoot: join(bundleRoot, USER, JOB_BUNDLE, 'extracted'),
+      status: 'active',
+      updatedAt: new Date(),
+      ...over,
+    });
+  const bundleUpload = async ({ fake, bundleRoot }: JobFixture, over: Record<string, unknown>) =>
+    fake.insert(schema.customBundleUploads, {
+      id: JOB_UPLOAD,
+      userId: USER,
+      repositoryId: REPO,
+      name: 'kit',
+      enabledKinds: ['agent', 'skill'],
+      filename: 'kit.zip',
+      archiveFormat: 'zip',
+      totalSize: 9,
+      bytesReceived: 9,
+      chunkSize: 9,
+      archivePath: await stage(bundleRoot, `${JOB_UPLOAD}.zip.partial`),
+      status: 'uploading',
+      ...over,
+    });
+  const provider = ({ fake }: JobFixture, over: Record<string, unknown> = {}) =>
+    fake.insert(schema.cliProviders, {
+      id: JOB_PROVIDER,
+      userId: USER,
+      name: 'claude-code',
+      label: 'p',
+      rulesContent: DEFAULT_AGENT_RULES,
+      sandboxImageBuildStatus: 'idle',
+      modelProvisionStatus: 'idle',
+      ...over,
+    });
+
+  interface JobRoute {
+    name: string;
+    /** The rows and files the request needs in place. */
+    prepare?: (fx: JobFixture) => Promise<unknown> | unknown;
+    send: (app: Hono<AppEnv>) => Response | Promise<Response>;
+    status: number;
+    /** The queue jobs a request answered as usual adds. */
+    jobs: string[];
+    /** Refused by the route's first handler, before it reads anything. */
+    early: boolean;
+  }
+
+  const JOB_ROUTES: JobRoute[] = [
+    {
+      name: 'POST /repositories',
+      send: (app) =>
+        app.request('/repositories', jsonRequest('POST', { source: 'blank', name: 'fresh' })),
+      status: 201,
+      jobs: [REPO_JOB_NAMES.INIT],
+      early: true,
+    },
+    {
+      name: 'POST /repositories/upload',
+      send: (app) => {
+        const form = new FormData();
+        form.set('archive', new File([new Uint8Array(Buffer.from('PK\nan archive'))], 'a.zip'));
+        return app.request('/repositories/upload', { method: 'POST', body: form });
+      },
+      status: 201,
+      jobs: [REPO_JOB_NAMES.EXTRACT],
+      early: true,
+    },
+    {
+      name: 'POST /repositories/upload/:id/complete',
+      prepare: async ({ fake, repoRoot }) =>
+        fake.insert(schema.repoUploads, {
+          id: JOB_UPLOAD,
+          userId: USER,
+          filename: 'a.zip',
+          archiveFormat: 'zip',
+          totalSize: 9,
+          bytesReceived: 9,
+          chunkSize: 9,
+          archivePath: await stage(repoRoot, `${JOB_UPLOAD}.zip.partial`),
+          status: 'uploading',
+        }),
+      send: (app) => app.request(`/repositories/upload/${JOB_UPLOAD}/complete`, { method: 'POST' }),
+      status: 201,
+      jobs: [REPO_JOB_NAMES.EXTRACT],
+      early: true,
+    },
+    {
+      name: 'POST /repositories/:id/refresh-tree',
+      send: (app) => app.request(`/repositories/${REPO}/refresh-tree`, { method: 'POST' }),
+      status: 200,
+      jobs: [REPO_JOB_NAMES.REFRESH],
+      early: true,
+    },
+    {
+      name: 'POST /bundles',
+      send: (app) =>
+        app.request(
+          '/bundles',
+          jsonRequest('POST', {
+            repositoryId: REPO,
+            name: 'kit',
+            gitUrl: 'https://example.com/kit.git',
+            enabledKinds: ['agent', 'skill'],
+          }),
+        ),
+      status: 201,
+      jobs: [BUNDLE_JOB_NAMES.INGEST_GIT],
+      early: true,
+    },
+    {
+      name: 'POST /bundles/uploads/:id/complete',
+      prepare: (fx) => bundleUpload(fx, {}),
+      send: (app) => app.request(`/bundles/uploads/${JOB_UPLOAD}/complete`, { method: 'POST' }),
+      status: 201,
+      jobs: [BUNDLE_JOB_NAMES.INGEST_ZIP],
+      early: true,
+    },
+    {
+      name: 'POST /bundles/:id/replace/:uploadId/complete',
+      prepare: async (fx) => {
+        bundle(fx, { sourceType: 'zip', enabledKinds: ['agent', 'skill'] });
+        await bundleUpload(fx, { bundleId: JOB_BUNDLE });
+        const tree = join(fx.bundleRoot, USER, JOB_BUNDLE, 'extracted');
+        await mkdir(tree, { recursive: true });
+        await writeFile(join(tree, 'agent.md'), 'the current tree');
+      },
+      send: (app) =>
+        app.request(`/bundles/${JOB_BUNDLE}/replace/${JOB_UPLOAD}/complete`, { method: 'POST' }),
+      status: 200,
+      jobs: [BUNDLE_JOB_NAMES.INGEST_ZIP],
+      early: true,
+    },
+    {
+      name: 'POST /bundles/:id/sync',
+      prepare: (fx) =>
+        bundle(fx, { sourceType: 'git', gitUrl: 'https://example.com/kit.git', gitBranch: 'main' }),
+      send: (app) => app.request(`/bundles/${JOB_BUNDLE}/sync`, { method: 'POST' }),
+      status: 200,
+      jobs: [BUNDLE_JOB_NAMES.RESYNC_GIT],
+      early: true,
+    },
+    {
+      name: 'POST /cli-providers',
+      send: (app) =>
+        app.request(
+          '/cli-providers',
+          jsonRequest('POST', { name: 'claude-code', label: 'p', authMode: 'api_key' }),
+        ),
+      status: 201,
+      jobs: [CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE],
+      early: true,
+    },
+    {
+      name: 'PATCH /cli-providers/:id, which changes what the sandbox image is built from',
+      prepare: (fx) => provider(fx),
+      send: (app) =>
+        app.request(
+          `/cli-providers/${JOB_PROVIDER}`,
+          jsonRequest('PATCH', { sandboxDockerfileExtra: 'RUN true' }),
+        ),
+      status: 200,
+      jobs: [CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE],
+      early: false,
+    },
+    {
+      name: 'PATCH /cli-providers/:id, which changes the model an ollama provider pulls',
+      prepare: (fx) => provider(fx, { name: 'ollama', model: 'qwen3-coder:30b' }),
+      send: (app) =>
+        app.request(
+          `/cli-providers/${JOB_PROVIDER}`,
+          jsonRequest('PATCH', { model: 'llama3.1:8b' }),
+        ),
+      status: 200,
+      jobs: [CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL],
+      early: false,
+    },
+    {
+      name: 'POST /cli-providers/:id/sandbox-image/build',
+      prepare: (fx) => provider(fx),
+      send: (app) =>
+        app.request(`/cli-providers/${JOB_PROVIDER}/sandbox-image/build`, { method: 'POST' }),
+      status: 202,
+      jobs: [CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE],
+      early: true,
+    },
+    {
+      name: 'POST /cli-providers/:id/clone',
+      prepare: (fx) => provider(fx),
+      send: (app) => app.request(`/cli-providers/${JOB_PROVIDER}/clone`, { method: 'POST' }),
+      status: 201,
+      jobs: [CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE],
+      early: true,
+    },
+  ];
+
+  const start = async (route: JobRoute) => {
+    const fx = await jobFixture();
+    await route.prepare?.(fx);
+    return fx;
+  };
+
+  describe.each(JOB_ROUTES)('$name', (route) => {
+    it('starts the job and leaves the in-progress row the drain counts while the system is normal', async () => {
+      const fx = await start(route);
+      expect(inProgress(fx)).toBe(0);
+
+      const res = await route.send(jobs);
+
+      expect(res.status).toBe(route.status);
+      expect(h.jobs).toEqual(route.jobs);
+      expect(inProgress(fx)).toBeGreaterThan(0);
+    });
+
+    it('has written the in-progress row by the time the transaction that admits the job commits', async () => {
+      const fx = await start(route);
+      const atCommit: number[] = [];
+      fx.fake.hooks.beforeCommit = () => {
+        atCommit.push(inProgress(fx));
+      };
+
+      await route.send(jobs);
+
+      expect(atCommit[0]).toBeGreaterThan(0);
+    });
+
+    it.each(['draining', 'maintenance'])(
+      'answers 503 and writes and queues nothing while the system is %s',
+      async (state) => {
+        const fx = await start(route);
+        const before = await fx.written();
+        h.state = state;
+
+        const res = await route.send(jobs);
+
+        expect(res.status).toBe(503);
+        expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+        expect(await fx.written()).toEqual(before);
+        if (route.early) expect(h.dbCalls).toBe(0);
+      },
+    );
+
+    it('answers 503 and writes and queues nothing when the state turns draining after the early check', async () => {
+      const fx = await start(route);
+      const before = await fx.written();
+      const stored = turnsDrainingAfterTheEarlyCheck();
+
+      const res = await route.send(jobs);
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+      expect(await fx.written()).toEqual(before);
+      expect(stored).toHaveBeenCalledTimes(2);
+    });
+
+    describe('behind the real maintenance gate', () => {
+      it('starts the job when the cached copy and the stored state both say normal', async () => {
+        await start(route);
+        states('normal', 'normal');
+
+        const res = await route.send(gatedJobs);
+
+        expect(res.status).toBe(route.status);
+        expect(h.jobs).toEqual(route.jobs);
+      });
+
+      it.each(['draining', 'maintenance'])(
+        'answers 503 and writes and queues nothing when only the stored state is %s, the cached copy still saying normal',
+        async (stored) => {
+          const fx = await start(route);
+          const before = await fx.written();
+          states('normal', stored);
+
+          const res = await route.send(gatedJobs);
+
+          expect(res.status).toBe(503);
+          expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+          expect(await fx.written()).toEqual(before);
+        },
+      );
+    });
+  });
+
+  describe('POST /bundles/uploads/:id/complete repeated after the job it queued was lost', () => {
+    const lost = async () => {
+      const fx = await jobFixture();
+      bundle(fx, { id: JOB_UPLOAD, sourceType: 'zip', status: 'failed' });
+      await bundleUpload(fx, { bundleId: JOB_UPLOAD });
+      await rm(join(fx.bundleRoot, '_uploads'), { recursive: true });
+      const final = join(fx.bundleRoot, USER, JOB_UPLOAD);
+      await mkdir(final, { recursive: true });
+      await writeFile(join(final, 'source.zip'), 'zip bytes');
+      return fx;
+    };
+    const repeat = () =>
+      jobs.request(`/bundles/uploads/${JOB_UPLOAD}/complete`, { method: 'POST' });
+
+    it('queues the bundle again while the system is normal', async () => {
+      const fx = await lost();
+
+      expect((await repeat()).status).toBe(201);
+      expect(fx.fake.rows(schema.customBundles)[0]).toMatchObject({ status: 'syncing' });
+      expect(h.jobs).toEqual([BUNDLE_JOB_NAMES.INGEST_ZIP]);
+    });
+
+    it('answers 503 and leaves the bundle failed when the state turns draining after the first transaction', async () => {
+      const fx = await lost();
+      h.state = 'draining';
+      const stored = vi
+        .spyOn(configService, 'getFresh')
+        .mockClear()
+        .mockResolvedValueOnce('normal')
+        .mockResolvedValueOnce('normal');
+
+      const res = await repeat();
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: REFUSAL, code: null });
+      expect(fx.fake.rows(schema.customBundles)[0]).toMatchObject({ status: 'failed' });
+      expect(h.jobs).toEqual([]);
+      expect(stored).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('PATCH /cli-providers/:id while the system drains', () => {
+    beforeEach(() => {
+      h.state = 'draining';
+    });
+    const patch = (body: unknown) =>
+      jobs.request(`/cli-providers/${JOB_PROVIDER}`, jsonRequest('PATCH', body));
+
+    it('still saves an edit that starts no job', async () => {
+      const fx = await jobFixture();
+      provider(fx);
+
+      expect((await patch({ label: 'renamed' })).status).toBe(200);
+      expect(fx.fake.rows(schema.cliProviders)[0]).toMatchObject({ label: 'renamed' });
+      expect(h.jobs).toEqual([]);
+    });
+
+    it('still saves a model change that provisions nothing', async () => {
+      const fx = await jobFixture();
+      provider(fx, { model: 'sonnet' });
+
+      expect((await patch({ model: 'opus' })).status).toBe(200);
+      expect(fx.fake.rows(schema.cliProviders)[0]).toMatchObject({ model: 'opus' });
+      expect(h.jobs).toEqual([]);
+    });
+  });
+
+  describe('the code that starts such a job', () => {
+    const STARTS =
+      /\bgetRepoQueue\(|\bgetBundleQueue\(|CLI_EXEC_JOB_NAMES\.(BUILD_SANDBOX_IMAGE|PROVISION_OLLAMA_MODEL)\b/g;
+    const src = join(import.meta.dirname, '../src');
+    const starters = () =>
+      readdirSync(src, { recursive: true, encoding: 'utf8' })
+        .filter((file) => file.endsWith('.ts') && file !== 'queues.ts')
+        .map((file) => ({ file, text: readFileSync(join(src, file), 'utf8') }))
+        .map(({ file, text }) => ({ file, starts: text.match(STARTS)?.length ?? 0, text }))
+        .filter(({ starts }) => starts > 0)
+        .sort((a, b) => a.file.localeCompare(b.file));
+
+    it('sits only in files whose routes are gated and listed above, at the sites counted here', () => {
+      expect(
+        Object.fromEntries(starters().map(({ file, starts }) => [file, starts])),
+        'a file starts a job: gate its routes with requireNewWorkAllowed and admitNewWork, add them to JOB_ROUTES, and count the site here',
+      ).toEqual({ 'routes/bundles.ts': 4, 'routes/cli-providers.ts': 3, 'routes/repos.ts': 4 });
+    });
+
+    it('takes the new-work fence in every file that starts one', () => {
+      const unfenced = starters()
+        .filter(
+          ({ text }) =>
+            !/\badmitNewWork\(/.test(text) ||
+            !/\b(requireNewWorkAllowed|assertNewWorkAllowed)\b/.test(text),
+        )
+        .map(({ file }) => file);
+
+      expect(
+        unfenced,
+        'a file that starts a job must call assertNewWorkAllowed early and admitNewWork in the transaction that writes the in-progress status',
+      ).toEqual([]);
+    });
   });
 });

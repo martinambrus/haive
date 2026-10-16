@@ -91,7 +91,7 @@ export class NewWorkRefused extends HttpError {
 
 /** Throws the 503 a route that starts work answers once the system drains or is in maintenance. */
 export async function assertNewWorkAllowed(): Promise<void> {
-  // Past the cache: the updater sets the drain from another process and counts live tasks at once.
+  // Past the cache: the updater sets the drain from another process and counts live work at once.
   const state = parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
   if (refusesNewWork(state)) throw new NewWorkRefused();
 }

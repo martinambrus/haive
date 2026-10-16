@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -45,6 +45,9 @@ const BLOCKING_TASK_STATES = ['queued', 'running', 'paused', 'waiting_user', 'wa
 /** Also `created`: a draft runs nothing but would find its module deactivated once started. */
 export const LIVE_TASK_STATES = ['created', ...BLOCKING_TASK_STATES] as const;
 
+/** The most rows either list of GET /blocking answers. */
+const BLOCKING_LIST_CAP = 200;
+
 const setStateSchema = z.object({ state: maintenanceStateSchema });
 
 maintenanceRoutes.get('/', async (c) => {
@@ -71,6 +74,83 @@ maintenanceRoutes.put('/', async (c) => {
   log.info({ from: previous, to: state }, 'maintenance state changed');
   return c.json({ state, previous });
 });
+
+const jobOwner = {
+  ownerId: schema.users.id,
+  ownerName: schema.users.name,
+  ownerEmailEncrypted: schema.users.emailEncrypted,
+};
+
+/** The background jobs the updater counts beside the tasks; a provider with two in progress is one row. */
+async function listBlockingJobs(db: ReturnType<typeof getDb>) {
+  const [repositories, bundles, providers] = await Promise.all([
+    db
+      .select({
+        id: schema.repositories.id,
+        name: schema.repositories.name,
+        status: schema.repositories.status,
+        updatedAt: schema.repositories.updatedAt,
+        ...jobOwner,
+      })
+      .from(schema.repositories)
+      .leftJoin(schema.users, eq(schema.users.id, schema.repositories.userId))
+      .where(eq(schema.repositories.status, 'cloning'))
+      .orderBy(desc(schema.repositories.updatedAt))
+      .limit(BLOCKING_LIST_CAP),
+    db
+      .select({
+        id: schema.customBundles.id,
+        name: schema.customBundles.name,
+        status: schema.customBundles.status,
+        updatedAt: schema.customBundles.updatedAt,
+        ...jobOwner,
+      })
+      .from(schema.customBundles)
+      .leftJoin(schema.users, eq(schema.users.id, schema.customBundles.userId))
+      .where(eq(schema.customBundles.status, 'syncing'))
+      .orderBy(desc(schema.customBundles.updatedAt))
+      .limit(BLOCKING_LIST_CAP),
+    db
+      .select({
+        id: schema.cliProviders.id,
+        name: schema.cliProviders.label,
+        building: schema.cliProviders.sandboxImageBuildStatus,
+        provisioning: schema.cliProviders.modelProvisionStatus,
+        updatedAt: schema.cliProviders.updatedAt,
+        ...jobOwner,
+      })
+      .from(schema.cliProviders)
+      .leftJoin(schema.users, eq(schema.users.id, schema.cliProviders.userId))
+      .where(
+        or(
+          eq(schema.cliProviders.sandboxImageBuildStatus, 'building'),
+          eq(schema.cliProviders.modelProvisionStatus, 'provisioning'),
+        ),
+      )
+      .orderBy(desc(schema.cliProviders.updatedAt))
+      .limit(BLOCKING_LIST_CAP),
+  ]);
+  const listed = [
+    ...repositories.map((r) => ({ kind: 'repository' as const, ...r })),
+    ...bundles.map((r) => ({ kind: 'bundle' as const, ...r })),
+    ...providers.map(({ building, provisioning, ...r }) => ({
+      kind: 'cli_provider' as const,
+      ...r,
+      status: [
+        building === 'building' ? 'building' : null,
+        provisioning === 'provisioning' ? 'provisioning' : null,
+      ]
+        .filter(Boolean)
+        .join(' + '),
+    })),
+  ].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+  return {
+    jobs: listed.slice(0, BLOCKING_LIST_CAP),
+    capped:
+      listed.length > BLOCKING_LIST_CAP ||
+      [repositories, bundles, providers].some((rows) => rows.length === BLOCKING_LIST_CAP),
+  };
+}
 
 /**
  * What is still holding the window open.
@@ -104,7 +184,8 @@ maintenanceRoutes.get('/blocking', async (c) => {
       and(inArray(schema.tasks.status, [...BLOCKING_TASK_STATES]), isNull(schema.tasks.deadAt)),
     )
     .orderBy(desc(schema.tasks.updatedAt))
-    .limit(200);
+    .limit(BLOCKING_LIST_CAP);
+  const { jobs, capped: jobsCapped } = await listBlockingJobs(db);
   const fieldKey = await configService.getEncryptionKey();
 
   // A task with a live CLI is the one a drain actually has to wait for; a parked one is only
@@ -128,10 +209,14 @@ maintenanceRoutes.get('/blocking', async (c) => {
       ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
       hasLiveCli: withLiveCli.has(r.id),
     })),
-    total: rows.length,
+    jobs: jobs.map(({ ownerEmailEncrypted, ...r }) => ({
+      ...r,
+      ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
+    })),
+    total: rows.length + jobs.length,
     // The listing is capped; say so rather than letting an operator read a truncated list as the
     // whole picture and force a drain that still had work behind it.
-    capped: rows.length === 200,
+    capped: rows.length === BLOCKING_LIST_CAP || jobsCapped,
     // GET /tasks/:id answers only a task's owner, so the page links just the viewer's own tasks.
     viewerId: c.get('userId'),
   });

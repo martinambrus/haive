@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   maintenanceApi,
+  type BlockingJob,
   type BlockingResponse,
   type BlockingTask,
   type MaintenanceState,
@@ -25,7 +26,7 @@ const STATES: { value: MaintenanceState; label: string; help: string }[] = [
   {
     value: 'draining',
     label: 'Draining',
-    help: 'No new work is started (no new tasks, retries or resumes); work already running is left to finish. This is where you wait.',
+    help: 'No new work is started (no new tasks, retries or resumes, no repository imports, bundle syncs or image builds); work already running is left to finish. This is where you wait.',
   },
   {
     value: 'maintenance',
@@ -33,6 +34,12 @@ const STATES: { value: MaintenanceState; label: string; help: string }[] = [
     help: 'Everyone except administrators is locked out. Use it once the list below is empty — or once you have decided not to wait for it.',
   },
 ];
+
+const JOB_KIND_LABEL: Record<BlockingJob['kind'], string> = {
+  repository: 'Repository',
+  bundle: 'Bundle',
+  cli_provider: 'CLI provider',
+};
 
 const RUN_STATUS_VARIANT: Record<string, 'success' | 'warning' | 'error' | 'info'> = {
   done: 'success',
@@ -176,11 +183,11 @@ export default function MaintenancePage() {
         </div>
         {blocking?.capped ? (
           <p className="text-xs text-amber-400">
-            Showing the first {blocking.tasks.length}. There is more behind this list — it is not
-            the whole picture.
+            Showing the first {blocking.tasks.length + blocking.jobs.length}. There is more behind
+            this list — it is not the whole picture.
           </p>
         ) : null}
-        {blocking && blocking.tasks.length === 0 ? (
+        {blocking && blocking.tasks.length === 0 && blocking.jobs.length === 0 ? (
           <p className="text-sm text-neutral-400">Nothing is running. It is safe to upgrade.</p>
         ) : null}
         <div className="space-y-2">
@@ -234,6 +241,32 @@ export default function MaintenancePage() {
             </div>
           ))}
         </div>
+        {blocking && blocking.jobs.length > 0 ? (
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium text-neutral-300">Background jobs</h3>
+            <p className="text-xs text-neutral-500">
+              Repository imports, bundle syncs, sandbox image builds and model downloads. They end
+              on their own and cannot be paused here.
+            </p>
+            {blocking.jobs.map((j) => (
+              <div
+                key={`${j.kind}-${j.id}`}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-neutral-800 p-3"
+              >
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="truncate text-sm font-medium text-neutral-100">{j.name}</span>
+                    <Badge>{JOB_KIND_LABEL[j.kind]}</Badge>
+                    <Badge variant="info">{j.status}</Badge>
+                  </div>
+                  <div className="mt-1 text-xs text-neutral-500">
+                    {j.ownerName ?? j.ownerEmail ?? 'unknown owner'} · {shortTime(j.updatedAt)}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </Card>
 
       <Card className="space-y-4 p-5">

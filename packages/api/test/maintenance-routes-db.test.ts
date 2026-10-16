@@ -41,6 +41,16 @@ app.route('/admin/maintenance', maintenanceRoutes);
 
 interface Blocking {
   tasks: { id: string; hasLiveCli: boolean; ownerId: string | null; ownerEmail: string | null }[];
+  jobs: {
+    kind: string;
+    id: string;
+    name: string;
+    status: string;
+    updatedAt: string;
+    ownerId: string | null;
+    ownerName: string | null;
+    ownerEmail: string | null;
+  }[];
   viewerId: string;
   total: number;
   capped: boolean;
@@ -89,8 +99,63 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       .from(schema.auditEvents)
       .where(and(eq(schema.auditEvents.targetId, taskId), eq(schema.auditEvents.action, action)));
 
+  const repository = async (status: 'cloning' | 'ready' | 'error', name: string, at?: Date) => {
+    const [row] = await db
+      .insert(schema.repositories)
+      .values({
+        userId: OWNER,
+        name,
+        source: 'local_path',
+        status,
+        ...(at ? { updatedAt: at } : {}),
+      })
+      .returning();
+    return row!;
+  };
+  const bundle = async (
+    repositoryId: string,
+    status: 'active' | 'syncing' | 'failed',
+    name: string,
+    at?: Date,
+  ) => {
+    const [row] = await db
+      .insert(schema.customBundles)
+      .values({
+        userId: OWNER,
+        repositoryId,
+        name,
+        sourceType: 'git',
+        storageRoot: '/bundles/blocking-test',
+        status,
+        ...(at ? { updatedAt: at } : {}),
+      })
+      .returning();
+    return row!;
+  };
+  const provider = async (
+    build: 'idle' | 'building' | 'ready' | 'failed',
+    provision: 'idle' | 'provisioning' | 'ready' | 'failed',
+    label: string,
+    at?: Date,
+  ) => {
+    const [row] = await db
+      .insert(schema.cliProviders)
+      .values({
+        userId: OWNER,
+        name: 'claude-code',
+        label,
+        sandboxImageBuildStatus: build,
+        modelProvisionStatus: provision,
+        ...(at ? { updatedAt: at } : {}),
+      })
+      .returning();
+    return row!;
+  };
+
   const clean = async () => {
     await db.delete(schema.tasks).where(eq(schema.tasks.type, TYPE));
+    await db.delete(schema.repositories).where(eq(schema.repositories.userId, OWNER));
+    await db.delete(schema.cliProviders).where(eq(schema.cliProviders.userId, OWNER));
     await db.delete(schema.auditEvents).where(eq(schema.auditEvents.actorUserId, ADMIN));
   };
 
@@ -113,6 +178,7 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
         emailBlindIndex: BLIND_INDEXES[1]!,
         passwordHash: 'not-real',
         role: 'user',
+        name: 'Owner Name',
       },
     ]);
   });
@@ -204,6 +270,114 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       const body = await blocking();
       expect(body.tasks.map((t) => t.id)).toEqual([queued.id]);
       expect(body.total).toBe(1);
+    });
+  });
+
+  describe('GET /blocking, the background jobs', () => {
+    const at = (second: number) => new Date(Date.UTC(2026, 9, 16, 10, 0, second));
+
+    it('lists a repository that is cloning, a bundle that is syncing and a provider that is building or provisioning, newest first', async () => {
+      const host = await repository('ready', 'host repo');
+      const syncing = await bundle(host.id, 'syncing', 'syncing bundle', at(10));
+      const cloning = await repository('cloning', 'cloning repo', at(20));
+      const building = await provider('building', 'idle', 'building provider', at(30));
+      const provisioning = await provider('idle', 'provisioning', 'provisioning provider', at(40));
+
+      const { jobs } = await blocking();
+
+      expect(
+        jobs.map(({ kind, id, name, status, updatedAt }) => ({
+          kind,
+          id,
+          name,
+          status,
+          updatedAt,
+        })),
+      ).toEqual([
+        {
+          kind: 'cli_provider',
+          id: provisioning.id,
+          name: 'provisioning provider',
+          status: 'provisioning',
+          updatedAt: at(40).toISOString(),
+        },
+        {
+          kind: 'cli_provider',
+          id: building.id,
+          name: 'building provider',
+          status: 'building',
+          updatedAt: at(30).toISOString(),
+        },
+        {
+          kind: 'repository',
+          id: cloning.id,
+          name: 'cloning repo',
+          status: 'cloning',
+          updatedAt: at(20).toISOString(),
+        },
+        {
+          kind: 'bundle',
+          id: syncing.id,
+          name: 'syncing bundle',
+          status: 'syncing',
+          updatedAt: at(10).toISOString(),
+        },
+      ]);
+    });
+
+    it('names the owner of each, as it does for a task', async () => {
+      const host = await repository('cloning', 'cloning repo');
+      await bundle(host.id, 'syncing', 'syncing bundle');
+      await provider('building', 'idle', 'building provider');
+
+      const { jobs } = await blocking();
+
+      expect(jobs).toHaveLength(3);
+      for (const job of jobs) {
+        expect(job).toMatchObject({
+          ownerId: OWNER,
+          ownerName: 'Owner Name',
+          ownerEmail: 'owner@maintenance.test',
+        });
+      }
+    });
+
+    it('leaves out the ones that finished', async () => {
+      const host = await repository('ready', 'ready repo');
+      await repository('error', 'failed repo');
+      await bundle(host.id, 'active', 'active bundle');
+      await bundle(host.id, 'failed', 'failed bundle');
+      await provider('idle', 'idle', 'idle provider');
+      await provider('ready', 'ready', 'ready provider');
+      await provider('failed', 'failed', 'failed provider');
+
+      const body = await blocking();
+
+      expect(body.jobs).toEqual([]);
+      expect(body.total).toBe(0);
+    });
+
+    it('lists a provider once when its image is building and its model is provisioning', async () => {
+      const both = await provider('building', 'provisioning', 'busy provider');
+
+      const { jobs } = await blocking();
+
+      expect(jobs.map(({ id, status }) => ({ id, status }))).toEqual([
+        { id: both.id, status: 'building + provisioning' },
+      ]);
+    });
+
+    it('counts them in the total beside the tasks, and keeps the capped flag for the tasks list', async () => {
+      await task();
+      await repository('cloning', 'cloning repo');
+      await provider('building', 'idle', 'building provider');
+
+      const body = await blocking();
+
+      expect(body.tasks).toHaveLength(1);
+      expect(body.jobs).toHaveLength(2);
+      expect(body.total).toBe(3);
+      expect(body.capped).toBe(false);
     });
   });
 

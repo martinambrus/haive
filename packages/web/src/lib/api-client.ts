@@ -2426,8 +2426,21 @@ export interface BlockingTask {
   hasLiveCli: boolean;
 }
 
+/** A background job a route queued, listed beside the tasks: it ends on its own and cannot be paused or stopped. */
+export interface BlockingJob {
+  kind: 'repository' | 'bundle' | 'cli_provider';
+  id: string;
+  name: string;
+  status: string;
+  updatedAt: string;
+  ownerId: string | null;
+  ownerName: string | null;
+  ownerEmail: string | null;
+}
+
 export interface BlockingResponse {
   tasks: BlockingTask[];
+  jobs: BlockingJob[];
   total: number;
   /** The listing is capped server-side. Rendered, because reading a truncated list as the whole
    *  picture is how a drain gets forced with work still behind it. */

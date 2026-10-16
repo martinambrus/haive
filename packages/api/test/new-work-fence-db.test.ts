@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, lockRepositoryRow, schema, type Database } from '@haive/database';
 
@@ -18,13 +18,20 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
-vi.mock('../src/queues.js', () => ({
-  getTaskQueue: () => ({
+vi.mock('../src/queues.js', () => {
+  const queue = () => ({
     add: async (name: string) => {
       h.queued.push(name);
     },
-  }),
-}));
+  });
+  return {
+    getTaskQueue: queue,
+    getRepoQueue: queue,
+    getBundleQueue: queue,
+    getCliExecQueue: queue,
+    getUsagePollQueue: queue,
+  };
+});
 vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
@@ -54,8 +61,17 @@ vi.mock('@haive/shared', async (importOriginal) => {
 });
 
 import { Hono } from 'hono';
-import { lockNewWorkFenceShared, TASK_JOB_NAMES } from '@haive/shared';
+import {
+  BUNDLE_JOB_NAMES,
+  CLI_EXEC_JOB_NAMES,
+  lockNewWorkFenceShared,
+  REPO_JOB_NAMES,
+  TASK_JOB_NAMES,
+} from '@haive/shared';
+import { bundleRoutes } from '../src/routes/bundles.js';
+import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { maintenanceRoutes } from '../src/routes/maintenance.js';
+import { repoRoutes } from '../src/routes/repos.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { retryTaskAtStep } from '../src/routes/tasks/steps.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -66,6 +82,9 @@ const REFUSAL =
 
 const app = new Hono<AppEnv>();
 app.route('/tasks', taskRoutes);
+app.route('/repositories', repoRoutes);
+app.route('/bundles', bundleRoutes);
+app.route('/cli-providers', cliProviderRoutes);
 app.route('/admin/maintenance', maintenanceRoutes);
 app.onError(errorHandler);
 
@@ -172,7 +191,7 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
   const statusOf = async (id: string) =>
     (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, id) }))?.status;
 
-  /** The updater's live-work count (liveTaskCount, packages/updater/src/run.ts), for this user. */
+  /** The tasks clause of the updater's live-work count (liveWorkCount, packages/updater/src/run.ts), for this user. */
   const liveTasks = async () => {
     const [row] = await db.execute<{ n: number }>(
       sql`select count(*)::int as n from tasks
@@ -242,6 +261,11 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
     h.queued = [];
     requests = [];
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, USER));
+    await db.delete(schema.customBundles).where(eq(schema.customBundles.userId, USER));
+    await db.delete(schema.cliProviders).where(eq(schema.cliProviders.userId, USER));
+    await db
+      .delete(schema.repositories)
+      .where(and(eq(schema.repositories.userId, USER), ne(schema.repositories.id, repositoryId)));
   });
 
   afterEach(async () => {
@@ -367,6 +391,108 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
 
     expect(res).toEqual({ status: 503, body: { error: REFUSAL, code: null } });
     expect(h.reads).toEqual(['draining']);
+  });
+
+  describe.each([
+    {
+      name: 'POST /repositories',
+      prepare: async () => ({
+        path: '/repositories',
+        body: { source: 'blank', name: 'fence-repo' },
+      }),
+      status: 201,
+      job: REPO_JOB_NAMES.INIT,
+    },
+    {
+      name: 'POST /bundles/:id/sync',
+      prepare: async () => {
+        const [bundle] = await db
+          .insert(schema.customBundles)
+          .values({
+            userId: USER,
+            repositoryId,
+            name: 'fence-bundle',
+            sourceType: 'git',
+            gitUrl: 'https://example.com/kit.git',
+            storageRoot: '/bundles/fence',
+          })
+          .returning();
+        return { path: `/bundles/${bundle!.id}/sync`, body: {} };
+      },
+      status: 200,
+      job: BUNDLE_JOB_NAMES.RESYNC_GIT,
+    },
+    {
+      name: 'POST /cli-providers/:id/sandbox-image/build',
+      prepare: async () => {
+        const [provider] = await db
+          .insert(schema.cliProviders)
+          .values({ userId: USER, name: 'claude-code', label: 'fence-provider' })
+          .returning();
+        return { path: `/cli-providers/${provider!.id}/sandbox-image/build`, body: {} };
+      },
+      status: 202,
+      job: CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE,
+    },
+  ])('$name, which starts a background job', ({ prepare, status, job }) => {
+    /** The rows the updater's live-work count reads from the tables these routes write, for this user. */
+    const inProgress = async () => {
+      const [row] = await db.execute<{ n: number }>(
+        sql`select (
+              (select count(*) from repositories where user_id = ${USER} and status = 'cloning')
+              + (select count(*) from custom_bundles where user_id = ${USER} and status = 'syncing')
+              + (select count(*) from cli_providers where user_id = ${USER}
+                  and (sandbox_image_build_status = 'building'
+                       or model_provision_status = 'provisioning'))
+            )::int as n`,
+      );
+      return row?.n;
+    };
+    const rows = async () => [
+      await db.select().from(schema.repositories).where(eq(schema.repositories.userId, USER)),
+      await db.select().from(schema.customBundles).where(eq(schema.customBundles.userId, USER)),
+      await db.select().from(schema.cliProviders).where(eq(schema.cliProviders.userId, USER)),
+    ];
+
+    it('starts the job and leaves the row the drain counts while the state is normal', async () => {
+      const { path, body } = await prepare();
+
+      expect(await answered(post(path, body))).toMatchObject({ status });
+
+      expect(await inProgress()).toBe(1);
+      expect(h.queued).toEqual([job]);
+    });
+
+    it('waits for the fence, and starts the job when the state is still normal after it', async () => {
+      const { path, body } = await prepare();
+      await holdFence();
+      const request = post(path, body);
+      await untilBlocked();
+      expect(await inProgress()).toBe(0);
+
+      await releaseFence();
+
+      expect(await answered(request)).toMatchObject({ status });
+      expect(await inProgress()).toBe(1);
+    });
+
+    it('answers 503 and writes and queues nothing when the state turned draining while it waited for the fence', async () => {
+      const { path, body } = await prepare();
+      const before = await rows();
+      await holdFence();
+      const request = post(path, body);
+      await untilBlocked();
+
+      await drain();
+
+      expect(await answered(request)).toEqual({
+        status: 503,
+        body: { error: REFUSAL, code: null },
+      });
+      expect(await rows()).toEqual(before);
+      expect(h.queued).toEqual([]);
+      expect(h.reads).toEqual(['normal', 'draining']);
+    });
   });
 
   describe('POST /tasks/:id/action retry of a failed task', () => {
