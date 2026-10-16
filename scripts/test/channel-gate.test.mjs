@@ -61,7 +61,8 @@ const footprintOf = (...layers) => {
   return footprint;
 };
 const whats = (offenders) => offenders.map((o) => o.what);
-const STATISTICS_FOLDER = new Map([['statistics', '@haive/module-statistics']]);
+const layered = (...names) => names.map((name, layer) => ({ layer, name }));
+const STATISTICS_FOLDER = new Map([['statistics', layered('@haive/module-statistics')]]);
 
 const PNPM = 'app/node_modules/.pnpm';
 const ALPHA_DIR = `${PNPM}/@haive-module+alpha@0.1.0/node_modules/@haive-module/alpha`;
@@ -248,10 +249,9 @@ describe('scanLayerNames', () => {
     assert.deepEqual([...footprint.registry], [['alpha', new Set(['0.1.0'])]]);
     assert.deepEqual([...footprint.links], ['alpha']);
     assert.deepEqual([...footprint.folders.keys()], ['statistics']);
-    assert.deepEqual(footprint.folders.get('statistics'), {
-      layer: 0,
-      member: 'app/modules/statistics/package.json',
-    });
+    assert.deepEqual(footprint.folders.get('statistics'), [
+      { layer: 0, member: 'app/modules/statistics/package.json' },
+    ]);
     assert.deepEqual(footprint.npmrc, [{ layer: 0, member: 'app/.npmrc', name: 'app/.npmrc' }]);
     assert.equal(footprint.badComponents.size, 0);
   });
@@ -274,7 +274,7 @@ describe('scanLayerNames', () => {
     ]);
     assert.deepEqual(
       [...footprint.folders],
-      [['a', { layer: 0, member: 'app/modules/a/package.json' }]],
+      [['a', [{ layer: 0, member: 'app/modules/a/package.json' }]]],
     );
   });
 
@@ -292,10 +292,10 @@ describe('scanLayerNames', () => {
   });
 
   it('counts a folder seen as a directory entry, or only through something inside it', () => {
-    assert.deepEqual([...footprintOf(['app/modules/beta/']).folders], [['beta', null]]);
+    assert.deepEqual([...footprintOf(['app/modules/beta/']).folders], [['beta', []]]);
     assert.deepEqual(
       [...footprintOf(['app/modules/beta/dist/manifest.js']).folders],
-      [['beta', null]],
+      [['beta', []]],
     );
   });
 
@@ -316,28 +316,29 @@ describe('scanLayerNames', () => {
       [`${PNPM}/.wh.@haive-module+beta@0.1.0`, 'app/modules/.wh.beta'],
     );
     assert.deepEqual([...footprint.registry], [['beta', new Set(['0.1.0'])]]);
-    assert.deepEqual(footprint.folders.get('beta'), {
-      layer: 0,
-      member: 'app/modules/beta/package.json',
-    });
+    assert.deepEqual(footprint.folders.get('beta'), [
+      { layer: 0, member: 'app/modules/beta/package.json' },
+    ]);
   });
 
-  it('keeps the package.json of the topmost layer that holds one', () => {
+  it('keeps the package.json of every layer that holds one', () => {
     const footprint = footprintOf(
       ['app/modules/beta/package.json'],
       ['app/modules/beta/dist/a.js'],
       ['app/modules/beta/package.json'],
       ['app/modules/beta/dist/b.js'],
     );
-    assert.equal(footprint.folders.get('beta').layer, 2);
+    assert.deepEqual(footprint.folders.get('beta'), [
+      { layer: 0, member: 'app/modules/beta/package.json' },
+      { layer: 2, member: 'app/modules/beta/package.json' },
+    ]);
   });
 
   it('reads names with a leading ./ and keeps the listed name for tar', () => {
     const footprint = footprintOf(['./app/modules/beta/package.json', './app/.npmrc']);
-    assert.deepEqual(footprint.folders.get('beta'), {
-      layer: 0,
-      member: './app/modules/beta/package.json',
-    });
+    assert.deepEqual(footprint.folders.get('beta'), [
+      { layer: 0, member: './app/modules/beta/package.json' },
+    ]);
     assert.deepEqual(footprint.npmrc, [{ layer: 0, member: './app/.npmrc', name: 'app/.npmrc' }]);
   });
 
@@ -414,10 +415,21 @@ describe('comparePresence', () => {
   });
 
   it('fails a module folder that is installed nowhere, by the id its package.json names', () => {
-    const folders = new Map([...STATISTICS_FOLDER, ['beta', '@haive-module/beta']]);
+    const folders = new Map([...STATISTICS_FOLDER, ['beta', layered('@haive-module/beta')]]);
     const names = [...A_API_NAMES, 'app/modules/beta/', 'app/modules/beta/package.json'];
     assert.deepEqual(check(names, {}, { folders }), [
       'module folder beta (app/modules/beta) is in the image but not expected',
+    ]);
+  });
+
+  it('names every folder an unentitled module is found in', () => {
+    const folders = new Map([
+      ...STATISTICS_FOLDER,
+      ['one', layered('@haive/module-beta')],
+      ['two', layered('@haive/module-beta')],
+    ]);
+    assert.deepEqual(check(A_API_NAMES, {}, { folders }), [
+      'module folder beta (app/modules/one, app/modules/two) is in the image but not expected',
     ]);
   });
 
@@ -431,9 +443,9 @@ describe('comparePresence', () => {
   it('fails a folder with no package.json, and one whose package.json is no module', () => {
     const folders = new Map([
       ...STATISTICS_FOLDER,
-      ['empty', null],
-      ['other', 'left-pad'],
-      ['nameless', ''],
+      ['empty', layered()],
+      ['other', layered('left-pad')],
+      ['nameless', layered('')],
     ]);
     assert.deepEqual(check(A_API_NAMES, {}, { folders }), [
       'app/modules/empty has no package.json',
@@ -450,7 +462,7 @@ describe('comparePresence', () => {
       'app/modules/a/',
       'app/modules/a/package.json',
     ];
-    const folders = new Map([['a', '@haive/module-a']]);
+    const folders = new Map([['a', layered('@haive/module-a')]]);
     assert.deepEqual(check(names, { modules: [local] }, { folders }), []);
   });
 
@@ -520,7 +532,7 @@ describe('comparePresence', () => {
 
   it('takes the workspace link of a local folder named @haive-module/<id> for that folder', () => {
     const local = { packageName: '@haive-module/foo', source: 'local' };
-    const folders = new Map([['foo', '@haive-module/foo']]);
+    const folders = new Map([['foo', layered('@haive-module/foo')]]);
     const names = [
       'app/modules/foo/package.json',
       'app/packages/api/node_modules/@haive-module/foo',
@@ -537,6 +549,49 @@ describe('comparePresence', () => {
     assert.deepEqual(whats(comparePresence('api', footprint, STATISTICS_FOLDER, expectA())), [
       'registry module beta is in the image but not expected',
     ]);
+  });
+
+  describe('a module folder whose package.json is in several layers', () => {
+    const STATISTICS_NAME = '@haive/module-statistics';
+    const BETA = '@haive/module-beta';
+    const inLayers = (...names) =>
+      check(A_API_NAMES, {}, { folders: new Map([['statistics', layered(...names)]]) });
+
+    it('passes when every layer names the entitled module', () => {
+      assert.deepEqual(inLayers(STATISTICS_NAME, STATISTICS_NAME), []);
+    });
+
+    it('fails an unentitled module in a lower layer, naming the folder and the layer', () => {
+      assert.deepEqual(inLayers(BETA, STATISTICS_NAME), [
+        'module folder beta (app/modules/statistics in layer 0) is in the image but not expected',
+      ]);
+    });
+
+    it('fails an unentitled module in a higher layer, naming the folder and the layer', () => {
+      assert.deepEqual(inLayers(STATISTICS_NAME, BETA), [
+        'module folder beta (app/modules/statistics in layer 1) is in the image but not expected',
+      ]);
+    });
+
+    it('fails a name that is no module package in any layer, naming the folder and the layer', () => {
+      assert.deepEqual(inLayers('left-pad', STATISTICS_NAME, ''), [
+        'app/modules/statistics has a package.json named "" in layer 2, not a module package',
+        'app/modules/statistics has a package.json named "left-pad" in layer 0, not a module package',
+      ]);
+    });
+
+    it('prints an unentitled module found in several layers once, naming each', () => {
+      assert.deepEqual(inLayers(BETA, STATISTICS_NAME, BETA), [
+        'module folder beta (app/modules/statistics in layer 0, app/modules/statistics in layer 2) is in the image but not expected',
+      ]);
+    });
+
+    it('fails the web image the same way', () => {
+      const folders = new Map([['statistics', layered(BETA, STATISTICS_NAME)]]);
+      assert.deepEqual(check(A_API_NAMES, {}, { key: 'web', folders }), [
+        'module folder beta (app/modules/statistics in layer 0) is in the image but not expected',
+      ]);
+    });
   });
 
   describe('the web image', () => {
@@ -1311,6 +1366,41 @@ describe('the command line against a docker that answers', () => {
       'OFFENDER worker presence app/modules/evil is not a directory',
       'OFFENDER worker presence app/modules/x is not a directory',
     ]);
+  });
+
+  describe('a module folder whose package.json is written by more than one layer', () => {
+    const PACKAGE = 'app/modules/statistics/package.json';
+    const overwritten = (t, ...names) => {
+      const layers = names.map((name, i) => ({
+        ...(i === 0 ? CLEAN_LAYER : {}),
+        [PACKAGE]: JSON.stringify({ name }),
+      }));
+      return runGate(t, { files: GOOD_FILES, ...fakeImage(t, { layers }) });
+    };
+
+    it('exits 1 for an unentitled module in a lower layer that the entitled one overwrites', (t) => {
+      const result = overwritten(t, '@haive/module-beta', '@haive/module-statistics');
+      assert.equal(result.status, 1, result.stderr);
+      assert.deepEqual(result.stdout.trim().split('\n'), [
+        'OFFENDER api presence module folder beta (app/modules/statistics in layer 0) is in the image but not expected',
+        'OFFENDER worker presence module folder beta (app/modules/statistics in layer 0) is in the image but not expected',
+      ]);
+    });
+
+    it('exits 1 for a name that is no module package in a lower layer', (t) => {
+      const result = overwritten(t, 'left-pad', '@haive/module-statistics');
+      assert.equal(result.status, 1, result.stderr);
+      assert.deepEqual(result.stdout.trim().split('\n'), [
+        'OFFENDER api presence app/modules/statistics has a package.json named "left-pad" in layer 0, not a module package',
+        'OFFENDER worker presence app/modules/statistics has a package.json named "left-pad" in layer 0, not a module package',
+      ]);
+    });
+
+    it('exits 0 when both layers name the entitled module', (t) => {
+      const result = overwritten(t, '@haive/module-statistics', '@haive/module-statistics');
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, '');
+    });
   });
 
   it('prints the token nowhere even when the image carries it in a name the gate prints', (t) => {

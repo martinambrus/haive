@@ -172,9 +172,9 @@ export function scanLayerNames(footprint, layer, names) {
       parts[1] === 'modules' &&
       (parts.length > 3 || (isDir && parts.length === 3))
     ) {
-      if (!footprint.folders.has(parts[2])) footprint.folders.set(parts[2], null);
+      if (!footprint.folders.has(parts[2])) footprint.folders.set(parts[2], []);
       if (!isDir && parts.length === 4 && parts[3] === 'package.json') {
-        footprint.folders.set(parts[2], { layer, member });
+        footprint.folders.get(parts[2]).push({ layer, member });
       }
     }
     if (
@@ -208,16 +208,19 @@ export function comparePresence(key, footprint, folderNames, expect) {
   const wanted = expect.modules.filter((m) => !web || m.webParts.length > 0);
 
   const folders = new Map();
-  for (const [dir, name] of folderNames) {
-    const id = name === null ? null : idOf(name);
-    if (name === null) {
-      offend(`app/modules/${dir} has no package.json`);
-    } else if (id === null) {
-      offend(
-        `app/modules/${dir} has a package.json named ${JSON.stringify(name)}, not a module package`,
-      );
-    } else {
-      folders.set(id, dir);
+  for (const [dir, found] of folderNames) {
+    if (found.length === 0) offend(`app/modules/${dir} has no package.json`);
+    for (const { layer, name } of found) {
+      // The layer is named only where a dir holds several package.json files, to tell them apart.
+      const at = found.length > 1 ? ` in layer ${layer}` : '';
+      const id = idOf(name);
+      if (id === null) {
+        offend(
+          `app/modules/${dir} has a package.json named ${JSON.stringify(name)}${at}, not a module package`,
+        );
+      } else {
+        folders.set(id, [...(folders.get(id) ?? []), `app/modules/${dir}${at}`]);
+      }
     }
   }
   const registry = new Map(footprint.registry);
@@ -248,7 +251,7 @@ export function comparePresence(key, footprint, folderNames, expect) {
   compare(
     folders,
     'local',
-    (id) => `module folder ${id}${folders.has(id) ? ` (app/modules/${folders.get(id)})` : ''}`,
+    (id) => `module folder ${id}${folders.has(id) ? ` (${folders.get(id).join(', ')})` : ''}`,
   );
   for (const m of wanted) {
     if (m.version === undefined) continue;
@@ -526,9 +529,12 @@ async function checkLayers(key, ref, expect) {
       scanLayerNames(footprint, i, listed.stdout.toString('utf8').split('\n'));
     }
     const folderNames = new Map();
-    for (const [name, found] of footprint.folders) {
-      const text = found === null ? null : await readMember(blobs[found.layer], found.member);
-      folderNames.set(name, text === null ? null : packageNameOf(text));
+    for (const [dir, found] of footprint.folders) {
+      const names = [];
+      for (const { layer, member } of found) {
+        names.push({ layer, name: packageNameOf(await readMember(blobs[layer], member)) });
+      }
+      folderNames.set(dir, names);
     }
     const offenders = comparePresence(key, footprint, folderNames, expect);
     for (const file of footprint.npmrc) {
