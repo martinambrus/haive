@@ -146,6 +146,53 @@ describe.skipIf(!url)('a request whose path id is not a uuid, on Postgres', () =
     );
   });
 
+  describe('a bundle or credential query that is not a uuid', () => {
+    it.each([
+      ['/bundles?repositoryId=abc', 'repositoryId must be a UUID'],
+      ['/github-oauth/repos?credentialId=abc', 'credentialId must be a UUID'],
+    ])('answers GET %s with 400 and does not log', async (path, error) => {
+      const res = await get(path);
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error, code: null });
+      expect(logged).not.toHaveBeenCalled();
+    });
+
+    it('keeps answering GET /bundles?repositoryId=<uuid> with 200, held or not (passes before and after)', async () => {
+      for (const id of [repositoryId, repositoryId.toUpperCase(), randomUUID()]) {
+        const res = await get(`/bundles?repositoryId=${id}`);
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ bundles: [] });
+      }
+    });
+
+    it('keeps reading GET /bundles?repositoryId= as no filter (passes before and after)', async () => {
+      const res = await get('/bundles?repositoryId=');
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ bundles: [] });
+    });
+
+    it('keeps answering a credentialId that is a uuid nobody holds with 404 (passes before and after)', async () => {
+      for (const id of [randomUUID(), randomUUID().toUpperCase()]) {
+        const res = await get(`/github-oauth/repos?credentialId=${id}`);
+
+        expect(res.status).toBe(404);
+        expect(await res.json()).toEqual({ error: 'Credential not found', code: null });
+      }
+    });
+
+    it('keeps asking for a credentialId that is missing or empty (passes before and after)', async () => {
+      for (const query of ['', '?credentialId=']) {
+        const res = await get(`/github-oauth/repos${query}`);
+
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: 'credentialId is required', code: null });
+      }
+    });
+  });
+
   describe('the real errors Postgres raises, through the real handler', () => {
     const probe = new Hono<AppEnv>();
     probe.get('/drizzle/:id', async (c) =>
