@@ -268,7 +268,9 @@ export async function uploadTaskAttachment(
   });
   if (!res.ok) {
     const b = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(b.error ?? `Failed to upload ${file.name} (HTTP ${res.status})`);
+    throw new Error(
+      b.error ?? `Failed to upload ${attachmentUploadName(file)} (HTTP ${res.status})`,
+    );
   }
   const data = (await res.json()) as { attachment: TaskAttachment };
   return data.attachment;
