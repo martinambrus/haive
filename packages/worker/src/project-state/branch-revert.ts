@@ -208,6 +208,9 @@ async function syncable(worktree: string, branch: string): Promise<boolean> {
   const held = await lstatNoFollow(anchor, prefix.replace(/\/$/, ''));
   if (held?.kind !== 'directory') return false;
   const head = await gitRun(worktree, ['symbolic-ref', '-q', 'HEAD']);
+  // With -q only a detached HEAD exits 1; any other failure is git unable to read the worktree.
+  if (head.code !== 0 && head.code !== 1)
+    throw new Error(`git symbolic-ref failed: ${detail(head)}`);
   return head.code === 0 && head.stdout.trim() === `refs/heads/${branch}`;
 }
 
@@ -276,7 +279,7 @@ async function syncWorktree(plan: WorktreeSync, commit: string, preRevert: strin
       throw new Error(`the worktree could not be brought to the new tip: ${detail(res)}`);
     }
   }
-  if (plan.clean.length > 0) await handBackAfterMove(plan.dir, preRevert);
+  if (plan.clean.length > 0) await handBackAfterMove(plan.dir, preRevert, true);
   if (plan.edited.length > 0) {
     const realigned = await gitRun(
       plan.dir,
@@ -465,7 +468,7 @@ async function resumePutBack(args: {
       await refuseLinkedDataDir(ctx.repoPath, worktree, branch, tip);
     }
     if (sync !== null) await syncWorktree(sync, commit, preRevertSha);
-    if (handBackOnly) await handBackAfterMove(worktree!, preRevertSha);
+    if (handBackOnly) await handBackAfterMove(worktree!, preRevertSha, true);
     await markSynced(ctx, commit);
     if (sync !== null) logPutBack(ctx, branch, result);
     return result;

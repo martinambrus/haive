@@ -1569,6 +1569,40 @@ describe('handBackAfterMove', () => {
       await rm(dir, REMOVE);
     }
   });
+
+  it('strict fails on a name it cannot hand back, or a listing git refuses, which the default lets pass', async () => {
+    const dir = await setupFastForward();
+    const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
+    vi.resetModules();
+    vi.doMock('@haive/shared/fs-safe', async (importOriginal) => {
+      const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+      return {
+        ...real,
+        lstatNoFollow: async (...args: Parameters<typeof real.lstatNoFollow>) => {
+          const info = await real.lstatNoFollow(...args);
+          return info && { ...info, stats: { ...info.stats, uid: 0 } };
+        },
+        chownNoFollow: async (_anchor: string, rel: string) => {
+          if (rel === 'top.txt') throw new Error('injected chown failure');
+        },
+      };
+    });
+    try {
+      const moved = await import('./git-merge.js');
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--ff-only', 'feature/x']);
+      await moved.handBackAfterMove(dir, before);
+      await expect(moved.handBackAfterMove(dir, before, true)).rejects.toThrow(/top\.txt/);
+      await expect(moved.handBackAfterMove(dir, 'no-such-ref', true)).rejects.toThrow(
+        /git diff failed/,
+      );
+    } finally {
+      vi.doUnmock('@haive/shared/fs-safe');
+      vi.resetModules();
+      asRoot.mockRestore();
+      await rm(dir, REMOVE);
+    }
+  });
 });
 
 describe.runIf(process.getuid?.() === 0)(

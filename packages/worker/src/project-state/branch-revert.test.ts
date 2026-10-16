@@ -535,7 +535,7 @@ describe('revertHaiveProjectionsOnBranch', () => {
     await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
     const preRevert = await revOf(wt);
     await revert(parent, wt);
-    expect(handBack.calls).toEqual([[wt, preRevert]]);
+    expect(handBack.calls).toEqual([[wt, preRevert, true]]);
 
     const edited = await fixture();
     await commit(edited.wt, stateFiles(BY_AGENT), 'agent edits a setting');
@@ -638,7 +638,7 @@ describe('a put-back cut short is resumed, not lost', () => {
     expect(h.events).toHaveLength(1);
     expect(h.warning()).toContain(GLOBS);
     expect(await at(bare, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
-    expect(handBack.calls).toEqual([[wt, preRevert]]);
+    expect(handBack.calls).toEqual([[wt, preRevert, true]]);
   });
 
   it('R1 a file edited in between keeps its bytes, and only its index entry moves', async () => {
@@ -703,7 +703,7 @@ describe('a put-back cut short is resumed, not lost', () => {
     expect(h.events).toHaveLength(1);
     expect(await git(wt, ['status', '--porcelain'])).toBe('');
     expect(await readFile(path.join(wt, GLOBS), 'utf8')).toBe(await at(parent, forked, GLOBS));
-    expect(handBack.calls).toEqual([[wt, preRevert]]);
+    expect(handBack.calls).toEqual([[wt, preRevert, true]]);
   });
 
   it('R3 a branch someone else moved after the event: the stale event goes, and a fresh put-back runs', async () => {
@@ -795,12 +795,12 @@ describe('a put-back cut short is resumed, not lost', () => {
     handBack.failOnce = true;
     await expect(pass(parent, wt, h)).rejects.toThrow(/injected hand-back failure/);
     expect(await git(wt, ['status', '--porcelain'])).toBe('');
-    expect(handBack.calls).toEqual([[wt, preRevert]]);
+    expect(handBack.calls).toEqual([[wt, preRevert, true]]);
 
     await pass(parent, wt, h);
     expect(handBack.calls).toEqual([
-      [wt, preRevert],
-      [wt, preRevert],
+      [wt, preRevert, true],
+      [wt, preRevert, true],
     ]);
     await pass(parent, wt, h);
     expect(handBack.calls).toHaveLength(2);
@@ -828,6 +828,21 @@ describe('a put-back cut short is resumed, not lost', () => {
         ? { stdout: '', stderr: 'injected status failure', code: 128 }
         : undefined;
     await expect(pass(parent, wt, h)).rejects.toThrow(/git status failed: injected/);
+    inject.hook = null;
+    expect(await revOf(parent, 'feature/x')).toBe(preRevert);
+    expect(h.events).toEqual([]);
+  });
+
+  it('a HEAD read that fails other than on a detached HEAD stops the pass before the branch moves', async () => {
+    const { parent, wt } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const preRevert = await revOf(wt);
+    const h = stubDb();
+    inject.hook = (args) =>
+      args[0] === 'symbolic-ref'
+        ? { stdout: '', stderr: 'injected HEAD failure', code: 128 }
+        : undefined;
+    await expect(pass(parent, wt, h)).rejects.toThrow(/git symbolic-ref failed: injected/);
     inject.hook = null;
     expect(await revOf(parent, 'feature/x')).toBe(preRevert);
     expect(h.events).toEqual([]);
