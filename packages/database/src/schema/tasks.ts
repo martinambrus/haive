@@ -716,6 +716,15 @@ export interface MergeResolveState {
   /** The last fixer was cut at the output limit: the next one, automatic or a person's retry,
    *  carries the shrink notice. Cleared when that fixer is dispatched. */
   lastFixerCut?: boolean;
+  /** Owner and mode of the untracked projections a set-aside removed, by path; the merge's end gives them back. */
+  keptMetadata?: Record<
+    string,
+    {
+      owner?: { uid: number; gid: number };
+      mode?: number;
+      parents?: { path: string; owner: { uid: number; gid: number }; mode: number }[];
+    }
+  >;
 }
 
 export const taskEvents = pgTable(

@@ -9,6 +9,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { pollDeviceSignIn, startDeviceSignIn } from '../lib/integration-device.js';
 import { requireProvider } from '../lib/integration-provider.js';
+import { isUuid } from '../lib/uuid.js';
 
 const pollSchema = z.object({
   deviceCode: z.string().min(1).max(512),
@@ -62,6 +63,7 @@ githubOauthRoutes.get('/repos', async (c) => {
   const userId = c.get('userId');
   const credentialId = c.req.query('credentialId');
   if (!credentialId) throw new HttpError(400, 'credentialId is required');
+  if (!isUuid(credentialId)) throw new HttpError(400, 'credentialId must be a UUID');
 
   const db = getDb();
   const cred = await db.query.repoCredentials.findFirst({

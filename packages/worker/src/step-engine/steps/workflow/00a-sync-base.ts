@@ -9,7 +9,7 @@ import {
   gitRun,
   scrubSecret,
 } from '../../../repo/git-push.js';
-import { buildMergeFixPrompt } from '../../git-merge.js';
+import { buildMergeFixPrompt, handBackAfterMove } from '../../git-merge.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { seedPlanBaseFromCheckout } from '../../../plan/mirror.js';
 import { checkoutHoldingTasks } from '../../../repo/refresh.js';
@@ -564,6 +564,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         }
         throw err;
       }
+      if (onCurrent && res.code === 0) await handBackAfterMove(ctx.repoPath, before);
       if (repositoryId && res.code === 0) {
         await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
         await restoreKeptMetadata(ctx.repoPath, kept);

@@ -25,6 +25,7 @@ import {
   type SecretMaskSource,
 } from './git-merge.js';
 import { inMergeDirLock, liveClaimHolder } from './merge-dir-claim.js';
+import { settleProjections, type KeptMetadata } from './merge-projections.js';
 import { findWorktreePathClaimant } from '../repo/worktree-claims.js';
 import { addStepWarning } from './step-ownership.js';
 import type { TaskStepRow } from './step-runner.js';
@@ -53,6 +54,7 @@ interface RecordedMerge {
   stepId: string;
   fixInvocationId: string | null;
   fixBaseline: FixBaseline | FixBaselineUnavailable | null;
+  state: MergeResolveState | null;
 }
 
 /** HEAD and MERGE_HEAD of the merge open in `dir`, or null when none is. */
@@ -78,6 +80,7 @@ async function recordedMerges(db: Database, taskId: string): Promise<RecordedMer
       stepId: id,
       fixInvocationId: state.fixInvocationId,
       fixBaseline: state.fixBaseline ?? null,
+      state,
     });
   }
   const [task] = await db
@@ -113,6 +116,7 @@ async function recordedMerges(db: Database, taskId: string): Promise<RecordedMer
       stepId,
       fixInvocationId: ms.fixInvocationId ?? null,
       fixBaseline: ms.fixBaseline ?? null,
+      state: null,
     });
   }
   return merges;
@@ -174,6 +178,38 @@ async function settle(
   });
 }
 
+/** A cancel leaves the step `failed`, which `updateOwnedStep` refuses: write its state by id. */
+const saveByStepId = (db: Database, stepId: string) => async (state: MergeResolveState) => {
+  await db
+    .update(schema.taskSteps)
+    .set({ mergeResolveState: state, updatedAt: new Date() })
+    .where(eq(schema.taskSteps.id, stepId));
+};
+
+/** A merge gone before the cancel has no report: re-sync and put its files back here, never throwing. */
+async function settleGoneMerge(
+  db: Database,
+  taskId: string,
+  recorded: RecordedMerge,
+): Promise<void> {
+  const { state } = recorded;
+  if (state?.mode !== 'same-branch') return;
+  try {
+    const task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { repositoryId: true },
+    });
+    if (task?.repositoryId) {
+      await settleProjections(db, task.repositoryId, state, saveByStepId(db, recorded.stepId));
+    }
+  } catch (err) {
+    logger.warn(
+      { err, taskId, dir: recorded.dir },
+      "a cancelled task's project files not put back",
+    );
+  }
+}
+
 /** Report each merge the cancelled task's rows recorded that is still open in its directory and
  *  names the ref the task was merging. Once per directory and merge head, so a re-driven cancel
  *  adds nothing. Called once no sandbox of the task is left and before its claims are released; a
@@ -183,7 +219,7 @@ export async function recordLeftOpenMerges(db: Database, taskId: string): Promis
   for (const recorded of await recordedMerges(db, taskId)) {
     if (isHostCheckout(recorded.dir)) continue;
     // Under the dir's lock, so nobody clears or replaces the merge between the read and the report.
-    const payload = await inMergeDirLock(db, recorded.dir, async (tx) => {
+    const found = await inMergeDirLock(db, recorded.dir, async (tx) => {
       // On a re-driven cancel the claims may already be gone: a merge open under another task's
       // claim, or in a worktree a live task shares, is that task's, not this one's.
       const [claim] = await tx
@@ -193,7 +229,7 @@ export async function recordLeftOpenMerges(db: Database, taskId: string): Promis
       if (claim && claim.taskId !== taskId) return null;
       if (await worktreeSharer(db, recorded.dir, taskId)) return null;
       const open = await peekOpenMerge(recorded.dir);
-      if (!open) return null;
+      if (!open) return 'gone' as const;
       // A fetch may have moved a mutable ref (origin/<base>) since: the baseline names the commit.
       const baseline = recorded.fixBaseline;
       const fromBaseline =
@@ -212,7 +248,8 @@ export async function recordLeftOpenMerges(db: Database, taskId: string): Promis
       });
       return reported;
     });
-    if (payload) known.push({ ...payload, settled: null, refused: null });
+    if (found === 'gone') await settleGoneMerge(db, taskId, recorded);
+    else if (found) known.push({ ...found, settled: null, refused: null });
   }
 }
 
@@ -233,6 +270,9 @@ interface AbortDecision {
   leftovers?: FixerLeftovers | null;
 }
 
+const movedReason = (putBack: boolean) =>
+  `The merge the cancel left is no longer open in this directory (it was finished or aborted since); ${putBack ? 'Haive put its own project files back' : 'nothing was changed'}.`;
+
 /** Abort the merge a cancelled task left open in `payload.dir`, on the person's confirmed click.
  *  The directory must name a report of this task still unsettled. Under the directory's lock it
  *  refuses while a live task holds the directory, and aborts only a merge whose HEAD and MERGE_HEAD
@@ -244,7 +284,7 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
   try {
     const task = await db.query.tasks.findFirst({
       where: eq(schema.tasks.id, taskId),
-      columns: { status: true },
+      columns: { status: true, repositoryId: true },
     });
     if (task?.status !== 'cancelled') return;
     const target = (await taskLeftOpen(db, taskId)).find(
@@ -286,12 +326,7 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
           { taskId, runId: recorded?.fixInvocationId ?? randomUUID() },
           maskSource,
         );
-        return {
-          outcome: 'moved',
-          reason:
-            'The merge the cancel left is no longer open in this directory (it was finished or aborted since); nothing was changed.',
-          leftovers: unreported,
-        };
+        return { outcome: 'moved', reason: movedReason(false), leftovers: unreported };
       }
       const leftovers = baseline
         ? await relocateFixerChanges(
@@ -330,7 +365,22 @@ export async function abortLeftMerge(db: Database, payload: AbortLeftMergePayloa
         decision.leftovers,
       );
     }
-    await settle(db, taskId, target, decision.outcome, decision.reason);
+    let putBack = false;
+    if (
+      task.repositoryId &&
+      recorded?.state?.mode === 'same-branch' &&
+      (decision.outcome === 'aborted' || decision.outcome === 'moved')
+    ) {
+      // A retry reads the merge as moved and the settle is idempotent, so a throw here is retried.
+      changed = true;
+      const save = saveByStepId(db, recorded.stepId);
+      putBack = await settleProjections(db, task.repositoryId, recorded.state, save);
+      // The kept owner and mode are only put back by a settle that finished: the report stays open.
+      if (!putBack)
+        throw new Error("Haive's project files were not re-synced yet; abort again to retry");
+    }
+    const reason = putBack && decision.outcome === 'moved' ? movedReason(true) : decision.reason;
+    await settle(db, taskId, target, decision.outcome, reason);
   } catch (err) {
     logger.warn({ err, taskId, dir }, 'aborting the merge a cancel left open failed');
     // Once the merge is aborted a retry can only see it as moved: it reports what was moved aside
@@ -448,4 +498,34 @@ export async function noteAbortedByNext(
     );
   }
   return current;
+}
+
+/** Gives `save` what the cancelled owners of `open` in `dir` kept, then takes it off them. */
+export async function takeLeftOpenKept(
+  db: Database,
+  taskId: string,
+  dir: string,
+  open: OpenMerge,
+  save: (kept: KeptMetadata) => Promise<void>,
+): Promise<KeptMetadata> {
+  const kept: KeptMetadata = {};
+  const stepIds: string[] = [];
+  for (const owner of await leftOpenOwners(db, taskId, dir, open)) {
+    for (const { dir: mergeDir, state, stepId } of await recordedMerges(db, owner.taskId)) {
+      if (mergeDir !== dir || state?.mode !== 'same-branch' || !state.keptMetadata) continue;
+      Object.assign(kept, state.keptMetadata);
+      stepIds.push(stepId);
+    }
+  }
+  if (stepIds.length > 0) {
+    await save(kept);
+    await db
+      .update(schema.taskSteps)
+      .set({
+        mergeResolveState: sql`${schema.taskSteps.mergeResolveState} - 'keptMetadata'`,
+        updatedAt: new Date(),
+      })
+      .where(inArray(schema.taskSteps.id, stepIds));
+  }
+  return kept;
 }

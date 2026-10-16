@@ -146,6 +146,33 @@ describe('upgrade-status and the rules import', () => {
     expect(body.linkedRulesFiles).toBeUndefined();
   });
 
+  it('offers nothing for a live row at a git-data path an earlier release recorded', async () => {
+    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+    await mkdir(path.join(repo, '.git'));
+    const bytes = '[core]\n';
+    await writeFile(path.join(repo, '.git', 'config'), bytes, 'utf8');
+    const rows = state.rows.get(schema.onboardingArtifacts)!;
+    state.rows.set(schema.onboardingArtifacts, [
+      ...rows,
+      {
+        id: 'legacy-git',
+        diskPath: '.git/config',
+        templateId: 'plugin.unknown',
+        templateKind: 'plugin-file',
+        templateSchemaVersion: 1,
+        templateContentHash: 'h',
+        writtenHash: sha256Hex(bytes),
+        bundleItemId: null,
+        haiveVersion: null,
+        repositoryId: 'repo-1',
+        generatedAt: new Date(2),
+      },
+    ]);
+    const body = await status();
+    expect(body.hasUpgradeAvailable).toBe(false);
+    expect(body.obsoleteTemplateIds).toBeUndefined();
+  });
+
   it('offers no upgrade, and names the units, while a project state conflict is pending', async () => {
     expect((await status()).contestedUnits).toBeUndefined();
     state.rows.set(schema.projectStateConflicts, [

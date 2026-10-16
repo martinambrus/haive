@@ -16,6 +16,7 @@ import {
   environmentColumnOf,
   environmentUnitOf,
   intakeSettings,
+  isClaimablePath,
   isClaimUnit,
   isEnvironmentUnit,
   isPortableSettingName,
@@ -52,6 +53,7 @@ import {
   unionExpandedFor,
 } from '../step-engine/_upgrade-render.js';
 import { readStateTree } from '../plan/projection-merge.js';
+import { gitOperationInProgress } from '../repo/git-operation.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
 import { claimDiskHash } from './claim-disk.js';
 import { insertImportMarker, loadMarkerContext } from './import-marker.js';
@@ -66,7 +68,7 @@ import {
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 export type ProjectStateSyncOutcome =
-  'absent' | 'refused' | 'deferred' | 'superseded' | 'unchanged' | 'applied' | 'conflict';
+  'absent' | 'refused' | 'deferred' | 'superseded' | 'held' | 'unchanged' | 'applied' | 'conflict';
 
 export interface ProjectStateSyncResult {
   outcome: ProjectStateSyncOutcome;
@@ -155,6 +157,7 @@ type Checkout =
       kind: 'record';
       render: ProjectRender;
       claims: ProjectStateClaim[];
+      gitDataClaims: ProjectStateClaim[];
       bundles: ProjectStateBundle[];
       settings: Record<string, unknown>;
       environment: ProjectEnvironment | null;
@@ -183,7 +186,15 @@ function checkoutOf(files: Map<string, string> | null): Checkout {
   const { render, claims, bundles, settings, environment } = parsed.record;
   return render === null
     ? { kind: 'absent' }
-    : { kind: 'record', render, claims, bundles, settings, environment };
+    : {
+        kind: 'record',
+        render,
+        claims,
+        gitDataClaims: parsed.gitDataClaims,
+        bundles,
+        settings,
+        environment,
+      };
 }
 
 const recordOf = (render: ProjectRender | null): ProjectStateRecord => ({
@@ -357,9 +368,12 @@ export async function recomputeSyncedApplicableSets(db: Database): Promise<void>
   }
 }
 
+// A git-data claim the base lists is only there for the writer to remove its file; no merge reads it.
 const claimsOf = (snapshot: unknown): ProjectStateClaim[] => {
   const claims = (snapshot as { claims?: unknown } | null)?.claims;
-  return Array.isArray(claims) ? (claims as ProjectStateClaim[]) : [];
+  return Array.isArray(claims)
+    ? (claims as ProjectStateClaim[]).filter((claim) => isClaimablePath(claim.path))
+    : [];
 };
 
 const byPath = (claims: readonly ProjectStateClaim[]) => new Map(claims.map((c) => [c.path, c]));
@@ -548,7 +562,16 @@ function mergePortable(
  *  row and, for a repository with a claim, the applicable template ids, all in one transaction. */
 export async function syncProjectStateFromCheckout(
   db: Database,
-  { repositoryId, repoPath }: { repositoryId: string; repoPath: string },
+  {
+    repositoryId,
+    repoPath,
+    refuseDuringGitOperation,
+  }: {
+    repositoryId: string;
+    repoPath: string;
+    /** An open merge or rebase holds the read, and so does a checkout that changed since it was read. */
+    refuseDuringGitOperation?: boolean;
+  },
 ): Promise<ProjectStateSyncResult> {
   // The base goes first: a writer that finishes after it left a newer base for the lock to find.
   const seen = await readSyncRow(db, repositoryId);
@@ -562,6 +585,10 @@ export async function syncProjectStateFromCheckout(
 
   return db.transaction(async (tx): Promise<ProjectStateSyncResult> => {
     await lockProjectState(tx, repositoryId);
+    if (refuseDuringGitOperation) {
+      if (await gitOperationInProgress(repoPath)) return { outcome: 'held' };
+      if (!sameValue(checkout, await readCheckout(repoPath))) return { outcome: 'superseded' };
+    }
     // The row lock first: an upgrade's insert holds it, so the live-task read below sees that task.
     const [repo] = await tx
       .select({
@@ -732,7 +759,9 @@ export async function syncProjectStateFromCheckout(
         'imported MCP servers held until accepted on this install',
       );
     }
-    if (portable.stale || toolingStale) await markProjectStateDirty(tx, repositoryId);
+    if (portable.stale || toolingStale || checkout.gitDataClaims.length > 0) {
+      await markProjectStateDirty(tx, repositoryId);
+    }
     if (portable.rejected.length > 0) {
       logger.warn(
         { repositoryId, settings: portable.rejected },
@@ -748,7 +777,10 @@ export async function syncProjectStateFromCheckout(
         : `${CONFLICT_ERROR_PREFIX}${renderConflicts.map(({ unit }) => keyOf(unit)).join(', ')}`;
     const baseSnapshot = normalizeProjectState({
       ...recordOf(keptRender(checkout.render, baseRender, renderConflicts)),
-      claims: keptClaims(incomingClaims, baseClaims, claimConflicts),
+      claims: [
+        ...keptClaims(incomingClaims, baseClaims, claimConflicts),
+        ...checkout.gitDataClaims,
+      ],
       // Never merged: a conflict row on a descriptor could not be answered, and would block upgrades.
       bundles: checkout.bundles,
       settings: {

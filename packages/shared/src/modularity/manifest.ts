@@ -3,6 +3,7 @@ import { formSchemaSchema, statusSummaryItemSchema, type FormSchema } from '../s
 import {
   CORE_INTEGRATION_CATEGORIES,
   composableStepEntrySchema,
+  INTEGRATION_ID_PATTERN,
   type ComposableStepEntry,
   isCoreStepId,
   moduleTaskTypeSlug,
@@ -29,8 +30,6 @@ const TASK_TYPE_SLUG_MAX_LENGTH = 128;
 /** Provider and category ids are varchar(256) in the integration tables. */
 const INTEGRATION_LOCAL_ID_MAX_LENGTH = 64;
 const CORE_CATEGORY_IDS: ReadonlySet<string> = new Set(CORE_INTEGRATION_CATEGORIES);
-/** The id prefixes a shared tool name (`<id>_<opId>`), cut to the cap with a digest past it. */
-const REQUIREMENT_ID_PATTERN = /^[a-z][a-z0-9-]{0,15}$/;
 
 const endpointSchema = z
   .string()
@@ -299,7 +298,7 @@ function checkIntegrationDeclarations(
     (step.integrations ?? []).forEach((requirement, index) => {
       const { category, provider } = requirement;
       const at = ['composableSteps', stepIndex, 'integrations', index];
-      if (!REQUIREMENT_ID_PATTERN.test(requirement.id)) {
+      if (!INTEGRATION_ID_PATTERN.test(requirement.id)) {
         fail(
           [...at, 'id'],
           `step "${step.stepId}" requirement id "${requirement.id}" must be 1 to 16 characters: a lower case letter, then lower case letters, digits or hyphens`,
