@@ -263,13 +263,14 @@ async function judgeCandidate(db: Database, c: Candidate) {
   return { found, resolves: found.unresolved.length === 0 && found.outsideList === null };
 }
 
-/** One pass over the dead tasks whose steps are registered again: each is revived, or counted as held while new work is held. */
+/** One pass over the dead tasks whose steps are registered again: each is revived, counted as held while new work is held, or counted as failed when judging or reviving it throws. */
 export async function reviveDeadTasks(
   db: Database,
   deps: DeadTaskBootDeps = defaultDeps,
-): Promise<{ revived: number; held: number }> {
+): Promise<{ revived: number; held: number; failed: number }> {
   let revived = 0;
   let held = 0;
+  let failed = 0;
   for (const c of await readCandidates(db, isNotNull(schema.tasks.deadAt))) {
     try {
       if (!(await judgeCandidate(db, c)).resolves) continue;
@@ -277,16 +278,17 @@ export async function reviveDeadTasks(
       if (outcome === 'held') held += 1;
       else if (outcome) revived += 1;
     } catch (err) {
+      failed += 1;
       log.error({ err, taskId: c.id }, 'dead task reconciliation failed for a task');
     }
   }
   if (held > 0) {
     log.info({ held }, 'dead tasks not revived: new work is held or its state cannot be read');
   }
-  return { revived, held };
+  return { revived, held, failed };
 }
 
-/** Tries the revivals again every interval until a pass holds none back; the returned function stops it. */
+/** Tries the revivals again every interval until a pass holds none back and fails none; the returned function stops it. */
 export function retryHeldRevivals(
   db: Database,
   deps: DeadTaskBootDeps = defaultDeps,
@@ -297,8 +299,8 @@ export function retryHeldRevivals(
     if (running) return;
     running = true;
     reviveDeadTasks(db, deps)
-      .then(({ held }) => {
-        if (held === 0) clearInterval(timer);
+      .then(({ held, failed }) => {
+        if (held === 0 && failed === 0) clearInterval(timer);
       })
       .catch((err) => log.warn({ err }, 'retrying the held dead-task revivals failed'))
       .finally(() => {
@@ -312,7 +314,7 @@ export function retryHeldRevivals(
 export async function reconcileDeadTasks(
   db: Database,
   deps: DeadTaskBootDeps = defaultDeps,
-): Promise<{ marked: number; revived: number; held: number }> {
+): Promise<{ marked: number; revived: number; held: number; failed: number }> {
   let marked = 0;
   const live = await readCandidates(
     db,
@@ -342,7 +344,7 @@ export async function reconcileDeadTasks(
       log.error({ err, taskId: c.id }, 'dead task reconciliation failed for a task');
     }
   }
-  const { revived, held } = await reviveDeadTasks(db, deps);
+  const { revived, held, failed } = await reviveDeadTasks(db, deps);
   // No sandbox survives boot, so a run a dead task still has open is an orphan, and its requeued job would run it again.
   await db
     .transaction((tx) =>
@@ -363,5 +365,5 @@ export async function reconcileDeadTasks(
       ),
     )
     .catch((err) => log.error({ err }, 'ending the runs of dead tasks failed'));
-  return { marked, revived, held };
+  return { marked, revived, held, failed };
 }

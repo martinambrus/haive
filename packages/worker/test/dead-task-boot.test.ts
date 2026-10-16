@@ -585,7 +585,7 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       const fine = await makeDead();
       const { sent, deps } = recorder(refused);
 
-      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ revived: 1 });
+      await expect(reconcileDeadTasks(db, deps)).resolves.toMatchObject({ revived: 1, failed: 1 });
 
       expect(await task(refused)).toMatchObject({
         deadAt: DEAD_AT,
@@ -742,12 +742,12 @@ describe.skipIf(!url)('dead tasks at worker boot, on Postgres', () => {
       const { sent, deps } = recorder();
 
       stored('maintenance');
-      await expect(reviveDeadTasks(db, deps)).resolves.toEqual({ revived: 0, held: 1 });
+      await expect(reviveDeadTasks(db, deps)).resolves.toEqual({ revived: 0, held: 1, failed: 0 });
       expect(await task(held)).toMatchObject({ deadAt: DEAD_AT, orchestrationEpoch: 3 });
       expect(sent).toEqual([]);
 
       stored('normal');
-      await expect(reviveDeadTasks(db, deps)).resolves.toEqual({ revived: 1, held: 0 });
+      await expect(reviveDeadTasks(db, deps)).resolves.toEqual({ revived: 1, held: 0, failed: 0 });
 
       expect(await task(held)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
       expect(sent).toEqual([{ kind: 'start', taskId: held }]);

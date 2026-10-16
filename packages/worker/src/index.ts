@@ -259,9 +259,11 @@ async function main(): Promise<void> {
   // Periodic sibling of the boot-time redrive above.
   const stalledTaskSweeper = new StalledTaskSweeper({ db: getDb() });
   stalledTaskSweeper.start();
-  // A revival the boot pass held back while new work was held goes on being tried until one is not held back.
+  // A revival the boot pass held back, failed or never reached goes on being tried until a pass holds none back and fails none.
   const stopDeadTaskRevival =
-    deadTasks && deadTasks.held > 0 ? retryHeldRevivals(getDb()) : () => undefined;
+    !deadTasks || deadTasks.held > 0 || deadTasks.failed > 0
+      ? retryHeldRevivals(getDb())
+      : () => undefined;
   // Live-retune the runtime admission gate when the resource-limit config changes.
   const stopRuntimeLimitsWatch = startRuntimeLimitsWatch();
   // Age out persisted CLI transcripts. Nothing else deletes cli_invocations.stream_log,

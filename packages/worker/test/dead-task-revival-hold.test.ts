@@ -1,11 +1,12 @@
-import { getTableName } from 'drizzle-orm';
-import { PgDialect } from 'drizzle-orm/pg-core';
+import { Column, eq, getTableName, is, isNull, SQL, StringChunk } from 'drizzle-orm';
+import { PgDialect, type PgTable } from 'drizzle-orm/pg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService, logger, type WorkflowType } from '@haive/shared';
 import {
   DEAD_TASK_REVIVE_RETRY_MS,
+  reconcileDeadTasks,
   retryHeldRevivals,
   reviveDeadTask,
   reviveDeadTasks,
@@ -54,6 +55,19 @@ for (const [stepId, index] of [
   });
 }
 
+const isText = (chunk: unknown, value: string) =>
+  chunk instanceof StringChunk && chunk.value.join('') === value;
+
+// The fake db has no IS NOT DISTINCT FROM, which the revival's write puts on the step id: it is = value, or IS NULL.
+function withoutDistinctFrom(node: unknown): unknown {
+  if (!is(node, SQL)) return node;
+  const [column, operator, value] = node.queryChunks.filter((chunk) => !isText(chunk, ''));
+  if (is(column, Column) && isText(operator, ' IS NOT DISTINCT FROM ')) {
+    return value === null ? isNull(column) : eq(column, value);
+  }
+  return new SQL(node.queryChunks.map(withoutDistinctFrom) as SQL['queryChunks']);
+}
+
 /** Dead tasks whose run list resolves; `log` lists what each transaction sends, in order. */
 function setup(initialState: string | Error = 'normal') {
   const fake = createFakeDb({
@@ -69,8 +83,11 @@ function setup(initialState: string | Error = 'normal') {
   });
   const log: string[] = [];
   const dialect = new PgDialect();
+  let state = initialState;
   let failFence = false;
   let failSelects = 0;
+  let failUpdates = 0;
+  let failEnqueues = 0;
   const db = {
     ...fake.db,
     select: (...args: Parameters<typeof fake.db.select>) => {
@@ -96,6 +113,12 @@ function setup(initialState: string | Error = 'normal') {
               });
             },
           }),
+          update: (table: PgTable) => ({
+            set: (values: Record<string, unknown>) => ({
+              where: (cond: unknown) =>
+                tx.update(table).set(values).where(withoutDistinctFrom(cond)),
+            }),
+          }),
           execute: async (query: Parameters<typeof tx.execute>[0]) => {
             const text = dialect.sqlToQuery(query as never).sql;
             log.push(text);
@@ -107,6 +130,10 @@ function setup(initialState: string | Error = 'normal') {
   } as unknown as Database;
   fake.hooks.beforeUpdate = (table) => {
     log.push(`updates ${getTableName(table)}`);
+    if (failUpdates > 0) {
+      failUpdates -= 1;
+      throw new Error('database went away');
+    }
   };
   fake.hooks.beforeInsert = (table) => {
     log.push(`inserts ${getTableName(table)}`);
@@ -115,17 +142,20 @@ function setup(initialState: string | Error = 'normal') {
   vi.spyOn(configService, 'getFresh').mockImplementation(async () => {
     log.push(READS_STATE);
     await gate;
-    if (initialState instanceof Error) throw initialState;
-    return initialState;
+    if (state instanceof Error) throw state;
+    return state;
   });
   const sent: string[] = [];
+  const send = async (entry: string) => {
+    if (failEnqueues > 0) {
+      failEnqueues -= 1;
+      throw new Error('redis went away');
+    }
+    sent.push(entry);
+  };
   const deps: DeadTaskBootDeps = {
-    enqueueStart: async (taskId) => {
-      sent.push(`start ${taskId}`);
-    },
-    enqueueAdvance: async (taskId) => {
-      sent.push(`advance ${taskId}`);
-    },
+    enqueueStart: (taskId) => send(`start ${taskId}`),
+    enqueueAdvance: (taskId) => send(`advance ${taskId}`),
     redriveRetryDelaysMs: [],
   };
   const dead = (n: number, over: Record<string, unknown> = {}) =>
@@ -181,6 +211,15 @@ function setup(initialState: string | Error = 'normal') {
     failSelects: (n: number) => {
       failSelects = n;
     },
+    failUpdates: (n: number) => {
+      failUpdates = n;
+    },
+    failEnqueues: (n: number) => {
+      failEnqueues = n;
+    },
+    setState: (next: string | Error) => {
+      state = next;
+    },
     fences: () => log.filter((entry) => entry === FENCE).length,
   };
 }
@@ -209,8 +248,7 @@ describe('reviveDeadTask while new work is held', () => {
     const t = setup('normal');
     t.dead(1);
 
-    // The fake db cannot run the write that follows the lock; the order of what precedes it is read.
-    await reviveDeadTask(t.db, t.view(1), t.deps).catch(() => undefined);
+    await reviveDeadTask(t.db, t.view(1), t.deps);
 
     expect(t.log.slice(0, 3)).toEqual([FENCE, READS_STATE, 'locks tasks']);
   });
@@ -246,7 +284,11 @@ describe('a pass over the dead tasks while new work is held', () => {
     t.dead(3, { runListSnapshot: [A, 'module.fnf135.gone'] });
     const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
 
-    await expect(reviveDeadTasks(t.db, t.deps)).resolves.toEqual({ revived: 0, held: 2 });
+    await expect(reviveDeadTasks(t.db, t.deps)).resolves.toEqual({
+      revived: 0,
+      held: 2,
+      failed: 0,
+    });
 
     expect(t.log).toEqual([FENCE, READS_STATE, FENCE, READS_STATE]);
     t.untouched();
@@ -260,10 +302,65 @@ describe('a pass over the dead tasks while new work is held', () => {
     const t = setup('maintenance');
     const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
 
-    await expect(reviveDeadTasks(t.db, t.deps)).resolves.toEqual({ revived: 0, held: 0 });
+    await expect(reviveDeadTasks(t.db, t.deps)).resolves.toEqual({
+      revived: 0,
+      held: 0,
+      failed: 0,
+    });
 
     expect(info).not.toHaveBeenCalled();
     expect(t.log).toEqual([]);
+  });
+});
+
+describe('a pass over the dead tasks whose revival fails', () => {
+  it('counts a revival that throws as failed, neither held nor revived, and goes on to the next task', async () => {
+    const t = setup('normal');
+    t.dead(1);
+    t.dead(2);
+    t.failUpdates(1);
+
+    await expect(reviveDeadTasks(t.db, t.deps)).resolves.toEqual({
+      revived: 1,
+      held: 0,
+      failed: 1,
+    });
+
+    expect(t.task(1)).toMatchObject({ deadAt: DEAD_AT, orchestrationEpoch: 3 });
+    expect(t.task(2)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
+    expect(t.sent).toEqual([`start ${uuid(2)}`]);
+  });
+
+  it('counts a revival whose job cannot be queued as failed, with the task dead again at the bumped epoch', async () => {
+    const t = setup('normal');
+    t.dead(1);
+    t.failEnqueues(1);
+
+    await expect(reviveDeadTasks(t.db, t.deps)).resolves.toEqual({
+      revived: 0,
+      held: 0,
+      failed: 1,
+    });
+
+    expect(t.task(1)).toMatchObject({
+      deadAt: DEAD_AT,
+      deadReason: expect.any(String),
+      orchestrationEpoch: 4,
+    });
+    expect(t.sent).toEqual([]);
+  });
+
+  it('reports them from the boot pass when it held nothing back', async () => {
+    const t = setup('normal');
+    t.dead(1);
+    t.failUpdates(1);
+
+    await expect(reconcileDeadTasks(t.db, t.deps)).resolves.toMatchObject({
+      marked: 0,
+      revived: 0,
+      held: 0,
+      failed: 1,
+    });
   });
 });
 
@@ -308,6 +405,62 @@ describe('retryHeldRevivals', () => {
     await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
     expect(t.fences()).toBe(1);
     expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('stops once a pass revives what it held back', async () => {
+    vi.useFakeTimers();
+    const t = setup('maintenance');
+    t.dead(1);
+    retryHeldRevivals(t.db, t.deps);
+
+    await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+    expect(vi.getTimerCount()).toBe(1);
+    t.setState('normal');
+    await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+
+    expect(t.task(1)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
+    expect(t.sent).toEqual([`start ${uuid(1)}`]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('goes on after a pass whose revival throws, which is not a pass that revived everything', async () => {
+    vi.useFakeTimers();
+    const t = setup('maintenance');
+    t.dead(1);
+    await expect(reviveDeadTasks(t.db, t.deps)).resolves.toMatchObject({ held: 1 });
+    t.setState('normal');
+    t.failUpdates(1);
+    retryHeldRevivals(t.db, t.deps);
+
+    await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+    expect(t.task(1)).toMatchObject({ deadAt: DEAD_AT, orchestrationEpoch: 3 });
+    expect(t.sent).toEqual([]);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+    expect(t.task(1)).toMatchObject({ deadAt: null, orchestrationEpoch: 4 });
+    expect(t.sent).toEqual([`start ${uuid(1)}`]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('goes on after a pass whose job could not be queued, and revives the task it put back dead', async () => {
+    vi.useFakeTimers();
+    const t = setup('maintenance');
+    t.dead(1);
+    await expect(reviveDeadTasks(t.db, t.deps)).resolves.toMatchObject({ held: 1 });
+    t.setState('normal');
+    t.failEnqueues(1);
+    retryHeldRevivals(t.db, t.deps);
+
+    await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+    expect(t.task(1)).toMatchObject({ deadAt: DEAD_AT, orchestrationEpoch: 4 });
+    expect(t.sent).toEqual([]);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(DEAD_TASK_REVIVE_RETRY_MS);
+    expect(t.task(1)).toMatchObject({ deadAt: null, orchestrationEpoch: 5 });
+    expect(t.sent).toEqual([`start ${uuid(1)}`]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('starts no pass while the last one is still running', async () => {
