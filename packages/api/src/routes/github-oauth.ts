@@ -110,7 +110,17 @@ githubOauthRoutes.get('/repos', async (c) => {
       const errBody = await res.text().catch(() => '');
       throw new HttpError(502, `GitHub /user/repos failed (HTTP ${res.status}): ${errBody}`);
     }
-    const batch = (await res.json()) as GithubRepoApi[];
+    let batch: GithubRepoApi[];
+    try {
+      const parsed: unknown = await res.json();
+      if (!Array.isArray(parsed)) throw new Error('not a list');
+      batch = parsed as GithubRepoApi[];
+    } catch {
+      throw new HttpError(
+        502,
+        'GitHub /user/repos answered something other than a repository list',
+      );
+    }
     repos.push(...batch);
     if (batch.length < REPOS_PER_PAGE) break;
     if (page === REPOS_PAGE_CAP) truncated = /rel="next"/.test(res.headers.get('link') ?? '');

@@ -107,3 +107,21 @@ describe('the GitHub repository list says it is cut only when a repository was l
     expect(pagesRead).toEqual(ALL_PAGES);
   });
 });
+
+describe('a GitHub answer that is not a repository list', () => {
+  it.each([
+    ['a JSON object', JSON.stringify({ message: 'not a list' })],
+    ['a body that is not JSON', '<html>maintenance</html>'],
+  ])('answers 502 when GitHub sends %s', async (_kind, body) => {
+    vi.stubGlobal(
+      'fetch',
+      (async () =>
+        new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })) as typeof fetch,
+    );
+    const res = await app.request(`/repos?credentialId=${CREDENTIAL}`);
+    expect(res.status).toBe(502);
+  });
+});
