@@ -22,15 +22,26 @@ const OUTPUT = [
   'packages/shared/.tsbuildinfo',
 ];
 
+// Scratch a host run leaves in a package: a tmp directory and logs.
+const SCRATCH = ['a.log', 'packages/worker/a.log', 'packages/worker/tmp/a.txt', 'tmp/a.txt'];
+
 // Source whose names only resemble those patterns, and files every image build starts from.
 const SOURCE = [
   'package.json',
   'packages/web/package.json',
   'packages/web/src/tsbuildinfo.ts',
   'scripts/build-libs.sh',
-  ...['distance', 'rebuild', 'builder', 'coverage-gap', '.turbo-notes', '.nextcloud'].map(
-    (name) => `packages/web/src/${name}/a.ts`,
-  ),
+  ...[
+    'distance',
+    'rebuild',
+    'builder',
+    'coverage-gap',
+    '.turbo-notes',
+    '.nextcloud',
+    'tmpl',
+    'log',
+  ].map((name) => `packages/web/src/${name}/a.ts`),
+  'packages/web/src/changelog.ts',
 ];
 
 const put = (file, text) => {
@@ -47,7 +58,7 @@ describe('.dockerignore', () => {
   before(() => {
     dir = mkdtempSync(join(tmpdir(), 'haive-dockerignore-'));
     const context = join(dir, 'context');
-    for (const file of [...OUTPUT, ...SOURCE]) put(join(context, file), 'x\n');
+    for (const file of [...OUTPUT, ...SCRATCH, ...SOURCE]) put(join(context, file), 'x\n');
     put(join(context, '.dockerignore'), readFileSync(dockerignore));
     put(join(dir, 'Dockerfile'), 'FROM scratch\nCOPY . /ctx\n');
     const out = join(dir, 'out');
@@ -68,6 +79,13 @@ describe('.dockerignore', () => {
   it('keeps build output out of the build context at any depth', () => {
     assert.deepEqual(
       OUTPUT.filter((file) => reached.has(file)),
+      [],
+    );
+  });
+
+  it('keeps tmp directories and logs out of the build context at any depth', () => {
+    assert.deepEqual(
+      SCRATCH.filter((file) => reached.has(file)),
       [],
     );
   });
