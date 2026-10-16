@@ -48,6 +48,7 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
       sql: updater,
       runId,
       drainDeadlineMs: 0,
+      drainPollMs: 25,
       forceDrain: true,
       log: (event: string, fields?: Record<string, unknown>) => logged.push({ event, fields }),
     }) as unknown as UpgradeContext;
@@ -97,6 +98,20 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
     const deadline = Date.now() + 3_000;
     while (!done()) {
       if (Date.now() > deadline) throw new Error(`never saw ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  };
+
+  const journalPhase = async () => {
+    const [row] = await probe<{ phase: string }[]>`
+      SELECT phase FROM upgrade_runs WHERE id = ${runId}`;
+    return row?.phase;
+  };
+
+  const untilPhase = async (phase: string) => {
+    const deadline = Date.now() + 3_000;
+    while ((await journalPhase()) !== phase) {
+      if (Date.now() > deadline) throw new Error(`the journal never said ${phase}`);
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   };
@@ -235,7 +250,7 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
       await inFlight;
       await expect(entering).rejects.toThrow('1 task(s) are still live');
 
-      expect(written).toEqual(['draining']);
+      expect(written).toEqual([]);
       expect(await fenceIsFree()).toBe(true);
     });
 
@@ -268,24 +283,87 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
       expect(written).toEqual(['draining', 'draining', 'maintenance']);
       expect(logged.at(-1)?.event).toBe('maintenance');
       expect(await fenceIsFree()).toBe(true);
-    }, 20_000);
+    });
 
-    it.each(['normal', 'maintenance'])(
-      'writes draining again, then maintenance once, when an administrator chose %s and no task came',
-      async (chosen) => {
-        stored = chosen;
+    it('writes draining again, then maintenance once, when an administrator chose normal and no task came', async () => {
+      stored = 'normal';
 
-        await enter(upgrade());
+      await enter(upgrade());
 
-        expect(written).toEqual(['draining', 'maintenance']);
-        expect(logged).toEqual([
-          { event: 'drain-reopened', fields: { state: chosen, live: 0 } },
-          { event: 'drained', fields: { live: 0 } },
-          { event: 'maintenance' },
-        ]);
-        expect(await fenceIsFree()).toBe(true);
-      },
-    );
+      expect(written).toEqual(['draining', 'maintenance']);
+      expect(logged).toEqual([
+        { event: 'drain-reopened', fields: { state: 'normal', live: 0 } },
+        { event: 'drained', fields: { live: 0 } },
+        { event: 'maintenance' },
+      ]);
+      expect(await fenceIsFree()).toBe(true);
+    });
+
+    it('enters without writing draining, or anything, when an administrator chose maintenance and no task is live', async () => {
+      stored = 'maintenance';
+
+      await enter(upgrade());
+
+      expect(written).toEqual([]);
+      expect(stored).toBe('maintenance');
+      expect(logged).toEqual([{ event: 'maintenance' }]);
+      expect(await fenceIsFree()).toBe(true);
+    });
+
+    it('waits for a live task without writing draining when an administrator chose maintenance, and then enters without a write', async () => {
+      stored = 'maintenance';
+      await liveTask();
+
+      enter(upgrade());
+      await until(
+        () => settled || logged.some((l) => l.event === 'drain-reopened'),
+        'the drain to reopen',
+      );
+      expect(logged).toContainEqual({
+        event: 'drain-reopened',
+        fields: { state: 'maintenance', live: 1 },
+      });
+      expect(written).toEqual([]);
+      expect(stored).toBe('maintenance');
+      expect(settled).toBe(false);
+
+      await endTasks();
+      await updating;
+
+      expect(written).toEqual([]);
+      expect(logged.map((l) => l.event)).toEqual(['drain-reopened', 'drained', 'maintenance']);
+      expect(await fenceIsFree()).toBe(true);
+    });
+
+    it('records the draining phase while it waits again, and the maintenance phase once it enters', async () => {
+      stored = 'normal';
+      await liveTask();
+
+      enter(upgrade());
+      await untilPhase('draining');
+      expect(settled).toBe(false);
+
+      await endTasks();
+      await updating;
+
+      expect(await journalPhase()).toBe('maintenance');
+    });
+
+    it('recounts no faster than once per poll interval while the state keeps being rewritten with nothing live', async () => {
+      const interval = 100;
+      const recountAt: number[] = [];
+      vi.spyOn(configService, 'getFresh').mockImplementation(async () => {
+        recountAt.push(Date.now());
+        return recountAt.length < 4 ? 'normal' : stored;
+      });
+
+      await enter(upgrade({ drainPollMs: interval }));
+
+      const gaps = recountAt.slice(1).map((at, i) => at - (recountAt[i] ?? at));
+      expect(gaps).toHaveLength(3);
+      expect(Math.min(...gaps)).toBeGreaterThanOrEqual(interval * 0.9);
+      expect(written).toEqual(['draining', 'draining', 'draining', 'maintenance']);
+    });
 
     it('still enters maintenance past a live task, without a second wait, when the drain was forced', async () => {
       await liveTask();

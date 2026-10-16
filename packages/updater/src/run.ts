@@ -38,6 +38,10 @@ export interface UpgradeContext {
   network: string;
   /** How long to wait for in-flight work before forcing. */
   drainDeadlineMs: number;
+  /** When that wait ends: fixed by the first drain wait and shared by every wait after it. */
+  drainDeadlineAt?: number;
+  /** Milliseconds between live-task counts and between recounts; 5000 when unset. */
+  drainPollMs?: number;
   /** Force past the drain deadline instead of failing. */
   forceDrain: boolean;
   /** Set by phaseDraining when it forced past live work, so phaseMaintenance skips the recount. */
@@ -152,7 +156,7 @@ async function setMaintenanceState(sql: Sql, state: MaintenanceState): Promise<v
   await underFence(sql, () => configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state));
 }
 
-/** Recounts under the fence: only a draining install with nothing live enters maintenance. */
+/** Recounts under the fence: a draining or held install with nothing live enters maintenance. */
 async function enterMaintenance(ctx: UpgradeContext): Promise<boolean> {
   const { entered, state, live } = await underFence(ctx.sql, async (fence) => {
     const state = parseMaintenanceState(
@@ -160,17 +164,25 @@ async function enterMaintenance(ctx: UpgradeContext): Promise<boolean> {
     );
     // The updater's pool is one connection and the fence holds it, so the count runs on the fence.
     const live = await liveTaskCount(fence);
-    const entered = state === 'draining' && live === 0;
-    await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, entered ? 'maintenance' : 'draining');
+    const entered = state !== 'normal' && live === 0;
+    if (state === 'normal') await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
+    if (entered && state === 'draining') {
+      await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'maintenance');
+    }
     return { entered, state, live };
   });
   if (!entered) ctx.log('drain-reopened', { state, live });
   return entered;
 }
 
+function pause(ctx: UpgradeContext): Promise<unknown> {
+  return new Promise((resolve) => setTimeout(resolve, ctx.drainPollMs ?? 5000));
+}
+
 /** Waits until no task is live; true when the deadline passed and the caller chose to force. */
 async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
-  const deadline = Date.now() + ctx.drainDeadlineMs;
+  ctx.drainDeadlineAt ??= Date.now() + ctx.drainDeadlineMs;
+  const deadline = ctx.drainDeadlineAt;
   for (;;) {
     const live = await liveTaskCount(ctx.sql);
     if (live === 0) {
@@ -189,7 +201,7 @@ async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
           `Re-run with --force to stop them, or wait and try again.`,
       );
     }
-    await new Promise((r) => setTimeout(r, 5000));
+    await pause(ctx);
   }
 }
 
@@ -203,7 +215,13 @@ export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
 export async function phaseMaintenance(ctx: UpgradeContext): Promise<void> {
   await enterPhase(ctx.sql, ctx.runId, 'maintenance');
   let forced = ctx.drainForced === true;
-  while (!forced && !(await enterMaintenance(ctx))) forced = await awaitDrain(ctx);
+  while (!forced && !(await enterMaintenance(ctx))) {
+    await enterPhase(ctx.sql, ctx.runId, 'draining');
+    forced = await awaitDrain(ctx);
+    // Without this pause, a state rewritten again and again with nothing live spins the recount.
+    if (!forced) await pause(ctx);
+    await enterPhase(ctx.sql, ctx.runId, 'maintenance');
+  }
   if (forced) await setMaintenanceState(ctx.sql, 'maintenance');
   ctx.log('maintenance');
 }
