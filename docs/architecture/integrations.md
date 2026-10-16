@@ -16,9 +16,9 @@ resolution, the choice routes, the broker (`/integration-mcp`, see The broker) a
 worker are merged: a run whose invocation row carries a stamp gets the `haive-integrations` MCP server
 and its own `integrations` token (see The call log, the stamp and the token), and the dispatch side is
 merged: a step whose catalog entry declares requirements is resolved, granted and stamped at dispatch
-(see Dispatch). No shipped step declares one yet (a module step can; prompt templates will with J6), so
-in production no agent reaches the broker and the resolver's grant tier stays empty. The task page has
-no Integrations section yet.
+(see Dispatch). No shipped core step declares one; a module step can, and an admin's prompt step can
+declare `integrations` (see [Task types](task-types.md)), so only those reach the broker. The task page
+has no Integrations section yet.
 
 ## Providers and categories
 
@@ -253,15 +253,16 @@ the grant is written FIRST and the stamped invocation inserted after it, in one 
 holds a connection without a grant.
 
 **Dispatch** (`worker/src/step-engine/step-integrations.ts`, the llm and fan-out sites of
-`step-runner.ts`). A step's requirements are its composable catalog entry's `integrations` (a
-`custom.*` step has none yet); boot refuses, naming the step, a declaration none of the step's
-dispatches can carry (no `llm` or `agentMining` phase without a `toolProfile`). Only a dispatch whose
-spec leaves `toolProfile` unset resolves; recaps, the AI-fix agent, merges and the DAG never do. One
-resolution per dispatch, shared by every agent of a fan-out: a required requirement that does not
-resolve fails the step `integration-unresolved` naming it, its category and the reason (an optional one
-is dropped), a requirement that pins a provider is refused `integration-provider-pinned` until J6, and
-a missing signing key or tool names the broker could not list fail `integrations-no-signing-key` and
-`integration-tools-unlistable`. The run is written by `insertStampedRun`: one transaction that takes
+`step-runner.ts`). A step's requirements are its composable catalog entry's `integrations` (a prompt
+step's are its pinned entry's, and one that no longer parses fails the step
+`integration-requirement-invalid` before anything resolves); boot refuses, naming the step, a
+declaration none of the step's dispatches can carry (no `llm` or `agentMining` phase without a
+`toolProfile`). Only a dispatch whose spec leaves `toolProfile` unset resolves; recaps, the AI-fix
+agent, merges and the DAG never do. One resolution per dispatch, shared by every agent of a fan-out:
+a required requirement that does not resolve fails the step `integration-unresolved` naming it, its
+category and the reason (an optional one is dropped), a requirement that pins a provider is refused
+`integration-provider-pinned` until pins land (J6e), and a missing signing key or tool names the
+broker could not list fail `integrations-no-signing-key` and `integration-tools-unlistable`. The run is written by `insertStampedRun`: one transaction that takes
 `lockTaskIntegrations` (the lock the choice PUT and DELETE take first), resolves again, records the
 grants from that resolution and inserts the run stamped with its bindings; a required binding lost
 since the first resolution writes nothing and fails the step. In a fan-out only the first run goes
@@ -484,4 +485,4 @@ uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
     on every call; it never reads grants, and no token or its Basic form reaches a response, row or log.
 17. Only a dispatch stamps, under the task's integrations lock, with its grants in the same
     transaction; the choice routes take that lock first; a provider-pinned requirement is refused at
-    dispatch until J6.
+    dispatch until pins land (J6e).
