@@ -254,6 +254,7 @@ jobs:
           api test/integration-mcp-db.test.ts INTEGRATION_MCP_TEST_URL integration_mcp_test pg
           api test/tooling-app-auth-atomic-db.test.ts TOOLING_APP_AUTH_TEST_URL tooling_app_auth_test pg
           api test/repo-delete-lock-order-db.test.ts REPO_DELETE_LOCK_ORDER_TEST_URL repo_delete_lock_order_test pg
+          api test/admin-config-pool-db.test.ts ADMIN_CONFIG_POOL_TEST_URL admin_config_pool_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector

@@ -6,7 +6,11 @@ const h = vi.hoisted(() => ({
   audits: [] as unknown[],
 }));
 
-vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
+vi.mock('../src/db.js', () => ({
+  getDb: () => ({
+    transaction: async (run: (tx: unknown) => unknown) => run({ execute: async () => [] }),
+  }),
+}));
 vi.mock('../src/lib/audit.js', () => ({
   recordAuditEvent: async (_db: unknown, event: unknown) => void h.audits.push(event),
 }));

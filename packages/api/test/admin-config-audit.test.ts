@@ -2,18 +2,88 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const ADMIN_ID = '00000000-0000-4000-8000-0000000000a1';
 const SENTINEL = 'sentinel-credential-7f3c9a1e';
-const h = vi.hoisted(() => ({
-  stored: new Map<string, string>(),
-  cache: new Map<string, string | null>(),
-  writes: [] as Array<[string, string]>,
-  audits: [] as unknown[],
-  external: false,
-  writeFails: false,
-}));
+const h = vi.hoisted(() => {
+  const waiting = new Map<string, Array<() => void>>();
+  const state = {
+    stored: new Map<string, string>(),
+    cache: new Map<string, string | null>(),
+    writes: [] as Array<[string, string]>,
+    audits: [] as unknown[],
+    external: false,
+    writeFails: false,
+    failAfterWrites: null as number | null,
+    gate: null as Promise<void> | null,
+    onParked: () => {},
+    onQueued: () => {},
+    locks: [] as string[],
+    heldAtAudit: [] as boolean[],
+    statements: [] as string[],
+    lockFails: null as Error | null,
+    txRows: new Map<object, unknown[]>(),
+    auditOnTx: [] as boolean[],
+    waiting,
+    acquire: async (key: string) => {
+      const queue = waiting.get(key);
+      if (queue) {
+        state.onQueued();
+        await new Promise<void>((resolve) => queue.push(resolve));
+      } else {
+        waiting.set(key, []);
+      }
+      state.locks.push(key);
+    },
+    release: (key: string) => {
+      const next = waiting.get(key)?.shift();
+      if (next) next();
+      else waiting.delete(key);
+    },
+  };
+  return state;
+});
 
-vi.mock('../src/db.js', () => ({ getDb: () => ({ execute: async () => [] }) }));
+// A row audited on the transaction is kept only if the callback returns: a throw rolls it back.
+vi.mock('../src/db.js', () => ({
+  getDb: () => ({
+    execute: async () => [],
+    transaction: async (run: (tx: unknown) => Promise<unknown>) => {
+      let key: string | undefined;
+      const rows: unknown[] = [];
+      const tx = {
+        execute: async (query: { queryChunks: unknown[] }) => {
+          h.statements.push(
+            query.queryChunks
+              .map((chunk) =>
+                typeof chunk === 'string' ? '?' : (chunk as { value: string[] }).value.join(''),
+              )
+              .join(''),
+          );
+          const param = query.queryChunks.find(
+            (chunk): chunk is string => typeof chunk === 'string',
+          );
+          if (param === undefined) return [];
+          if (h.lockFails) throw h.lockFails;
+          key = param;
+          await h.acquire(key);
+          return [];
+        },
+      };
+      h.txRows.set(tx, rows);
+      try {
+        const result = await run(tx);
+        h.audits.push(...rows);
+        return result;
+      } finally {
+        if (key !== undefined) h.release(key);
+      }
+    },
+  }),
+}));
 vi.mock('../src/lib/audit.js', () => ({
-  recordAuditEvent: async (_db: unknown, event: unknown) => void h.audits.push(event),
+  recordAuditEvent: async (db: object, event: unknown) => {
+    h.heldAtAudit.push(h.waiting.size > 0);
+    h.auditOnTx.push(h.txRows.has(db));
+    (h.txRows.get(db) ?? h.audits).push(event);
+  },
 }));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
@@ -46,7 +116,15 @@ vi.mock('@haive/shared', async (importOriginal) => {
         return Number.isNaN(parsed) ? fallback : parsed;
       },
       set: async (key: string, value: string) => {
-        if (h.writeFails) throw new Error('redis is down');
+        if (h.gate) {
+          const gate = h.gate;
+          h.gate = null;
+          h.onParked();
+          await gate;
+        }
+        if (h.writeFails || h.writes.length === h.failAfterWrites) {
+          throw new Error('redis is down');
+        }
         h.writes.push([key, value]);
         h.stored.set(key, value);
         if (!h.external) h.cache.delete(key);
@@ -321,7 +399,34 @@ beforeEach(() => {
   h.audits = [];
   h.external = false;
   h.writeFails = false;
+  h.failAfterWrites = null;
+  h.gate = null;
+  h.onParked = () => {};
+  h.onQueued = () => {};
+  h.locks = [];
+  h.heldAtAudit = [];
+  h.statements = [];
+  h.lockFails = null;
+  h.txRows.clear();
+  h.auditOnTx = [];
+  h.waiting.clear();
 });
+
+/** The wait for an advisory lock running past `lock_timeout`, as drizzle reports it. */
+const lockTimedOut = () =>
+  new Error('Failed query: select pg_advisory_xact_lock(hashtextextended($1, 0))', {
+    cause: Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }),
+  });
+const LOCK_BUSY = 'Another save of this setting is in progress; try again';
+
+/** Holds the next config write until `open`, and says when a save is stuck inside it. */
+const parkNextWrite = () => {
+  let open!: () => void;
+  h.gate = new Promise<void>((resolve) => (open = resolve));
+  const parked = new Promise<void>((resolve) => (h.onParked = resolve));
+  return { parked, open };
+};
+const queuedBehindOther = () => new Promise<void>((resolve) => (h.onQueued = resolve));
 
 describe('every PUT /admin/config route', () => {
   it('is covered here, so a new switch cannot ship without its audit row', () => {
@@ -388,7 +493,80 @@ describe.each(ROUTES)('PUT /admin/config/$name', ({ name, initial, a, b }) => {
     expect((await put(name, a)).status).toBe(500);
     expect(h.audits).toEqual([]);
   });
+
+  it('saves one at a time, so the second records what the first wrote', async () => {
+    const park = parkNextWrite();
+    const queued = queuedBehindOther();
+    const first = put(name, a);
+    await park.parked;
+    const second = put(name, b);
+    await Promise.race([second, queued]);
+    park.open();
+
+    expect([(await first).status, (await second).status]).toEqual([200, 200]);
+    expect(h.audits).toEqual([event(name, initial, a), event(name, { ...initial, ...a }, b)]);
+    expect(h.locks).toEqual([`admin-config:${name}`, `admin-config:${name}`]);
+    expect(h.heldAtAudit, 'each row is written while the lock is held').toEqual([true, true]);
+    expect(h.auditOnTx, 'each row is written on the transaction that holds it').toEqual([
+      true,
+      true,
+    ]);
+  });
+
+  it('sets a lock timeout before it takes the lock', async () => {
+    expect((await put(name, a)).status).toBe(200);
+    expect(h.statements).toEqual([
+      expect.stringMatching(/^SET LOCAL lock_timeout = '[1-9]\d*ms'$/),
+      'select pg_advisory_xact_lock(hashtextextended(?, 0))',
+    ]);
+  });
+
+  it('answers 503 and writes nothing when the wait for the lock runs out', async () => {
+    h.lockFails = lockTimedOut();
+    const res = await put(name, a);
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: LOCK_BUSY, code: null });
+    expect([h.writes, h.audits]).toEqual([[], []]);
+  });
 });
+
+describe('PUT /admin/config when the lock fails for another reason', () => {
+  it('stays a 500, and writes nothing', async () => {
+    h.lockFails = new Error('terminating connection due to administrator command');
+
+    expect((await put('steering', { enabled: false })).status).toBe(500);
+    expect([h.writes, h.audits]).toEqual([[], []]);
+  });
+});
+
+describe.each(ROUTES.filter(({ a }) => Object.keys(a).length > 1))(
+  'PUT /admin/config/$name when a later write fails',
+  ({ name, initial, a }) => {
+    it('records the field it already wrote, marked partial, and still fails', async () => {
+      h.failAfterWrites = 1;
+      expect((await put(name, a)).status).toBe(500);
+
+      expect(h.audits).toHaveLength(1);
+      const [field] = Object.keys((h.audits[0] as { metadata: { to: Settings } }).metadata.to);
+      expect(h.audits).toEqual([
+        {
+          actorUserId: ADMIN_ID,
+          action: `config.${name.replaceAll('-', '_')}`,
+          targetType: 'system',
+          metadata: {
+            from: { [field!]: initial[field!] },
+            to: { [field!]: a[field!] },
+            partial: true,
+          },
+        },
+      ]);
+      expect(h.writes.map(([, value]) => value)).toEqual([String(a[field!])]);
+      expect(h.heldAtAudit, 'the row is written while the lock is held').toEqual([true]);
+      expect(h.auditOnTx, 'the row is written on the transaction that holds it').toEqual([true]);
+    });
+  },
+);
 
 describe('PUT /admin/config/cli-timeout-ladder', () => {
   it('records nothing for a ladder with no usable rung', async () => {

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { Hono } from 'hono';
 import { and, desc, eq, gte, isNull, lte, sql, type SQL } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { isLockNotAvailable, schema } from '@haive/database';
 import {
   ALLOWANCE_WATCH_MODES,
   CONFIG_CONCURRENCY_CHANNEL,
@@ -431,6 +431,16 @@ function parseStored(raw: string | null, fallback: ConfigValue): ConfigValue {
   return raw;
 }
 
+// A wait this long is a stuck holder, and every waiter holds a pooled connection meanwhile.
+const CONFIG_LOCK_TIMEOUT_MS = 30_000;
+
+function lockBusyError(err: unknown): never {
+  if (isLockNotAvailable(err)) {
+    throw new HttpError(503, 'Another save of this setting is in progress; try again');
+  }
+  throw err;
+}
+
 /** Saves a config switch and audits its before and after values; no credential belongs here. */
 async function saveConfig(
   userId: string,
@@ -438,25 +448,49 @@ async function saveConfig(
   fields: Record<string, ConfigField>,
 ): Promise<void> {
   const entries = Object.entries(fields);
-  const stored = await Promise.all(entries.map(([, [key]]) => configService.getFresh(key)));
-  // One key after another in the order given: six handlers wrote theirs in sequence before this.
-  for (const [, [key, value]] of entries) {
-    if (value !== undefined) await configService.set(key, String(value));
-  }
-  const changes = entries.map(([name, [, value, fallback]], i) => {
-    const from = parseStored(stored[i] ?? null, fallback);
-    return { name, from, to: value ?? from };
-  });
-  const side = (which: 'from' | 'to') =>
-    changes.length === 1
-      ? changes[0]![which]
-      : Object.fromEntries(changes.map((change) => [change.name, change[which]]));
-  await recordAuditEvent(getDb(), {
-    actorUserId: userId,
-    action: `config.${route.replaceAll('-', '_')}`,
-    targetType: 'system',
-    metadata: { from: side('from'), to: side('to') },
-  });
+  // One save of a switch at a time, so each row's `from` is what the save before it left.
+  const failure = await getDb()
+    .transaction(async (tx) => {
+      await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${CONFIG_LOCK_TIMEOUT_MS}ms'`));
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`admin-config:${route}`}, 0))`,
+      );
+      const stored = await Promise.all(entries.map(([, [key]]) => configService.getFresh(key)));
+      const changes = entries.map(([name, [, value, fallback]], i) => {
+        const from = parseStored(stored[i] ?? null, fallback);
+        return { name, from, to: value ?? from };
+      });
+      const record = (rows: typeof changes, extra?: { partial: true }) => {
+        const side = (which: 'from' | 'to') =>
+          entries.length === 1
+            ? rows[0]![which]
+            : Object.fromEntries(rows.map((row) => [row.name, row[which]]));
+        return recordAuditEvent(tx, {
+          actorUserId: userId,
+          action: `config.${route.replaceAll('-', '_')}`,
+          targetType: 'system',
+          metadata: { from: side('from'), to: side('to'), ...extra },
+        });
+      };
+      const written: typeof changes = [];
+      try {
+        // One key after another in the order given: six handlers wrote theirs in sequence before this.
+        for (const [i, [, [key, value]]] of entries.entries()) {
+          if (value === undefined) continue;
+          await configService.set(key, String(value));
+          written.push(changes[i]!);
+        }
+      } catch (error) {
+        if (written.length === 0) throw error;
+        await record(written, { partial: true });
+        // Returned, not rethrown: a throw would roll the partial row back with the transaction.
+        return { error };
+      }
+      await record(changes);
+      return undefined;
+    })
+    .catch(lockBusyError);
+  if (failure) throw failure.error;
 }
 
 const concurrencySchema = z.object({

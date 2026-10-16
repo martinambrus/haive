@@ -13,7 +13,12 @@ const h = vi.hoisted(() => ({
   }),
 }));
 
-vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
+vi.mock('../src/db.js', () => ({
+  getDb: () => ({
+    transaction: async (run: (tx: unknown) => unknown) =>
+      run({ execute: async () => [], insert: () => ({ values: async () => undefined }) }),
+  }),
+}));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
