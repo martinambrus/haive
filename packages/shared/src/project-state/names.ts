@@ -29,10 +29,13 @@ export function isCanonicalRepoPath(path: string): boolean {
   return path.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
 }
 
+/** Whether a path names git data: a `.git` segment in any letter case, as git refuses one on a
+ *  case-insensitive filesystem. */
+export const namesGitData = (path: string): boolean => /(^|\/)\.git(\/|$)/i.test(path);
+
 /** A repository path a claim may name: canonical, and outside git data. */
 export function isClaimablePath(path: string): boolean {
-  // Any letter case: git refuses a `.git` segment on a case-insensitive filesystem.
-  return isCanonicalRepoPath(path) && path.split('/').every((seg) => seg.toLowerCase() !== '.git');
+  return isCanonicalRepoPath(path) && !namesGitData(path);
 }
 
 /** Flat on purpose, and with no leading dot: a tree mirroring `.claude/...` under `.haive-data`
