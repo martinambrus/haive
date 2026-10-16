@@ -37,7 +37,7 @@ import {
 
 /**
  * Catches what reconcileOrphanedSteps cannot: a step its own re-drive enqueue failed to queue,
- * or any hand-off lost between boots, left `pending`/missing, finished with nothing after it, or
+ * or any hand-off lost between boots, left `pending`/missing/answered, finished with nothing after it, or
  * failed with the task still running; a task queued to start whose START was lost; and a step
  * parked on a run whose cli-exec job was; and a cancelled task whose teardown never finished.
  */
@@ -123,21 +123,30 @@ export const defaultDeps: StalledRedriveDeps = {
   queuedInvocationIds: readQueuedInvocationIds,
 };
 
-/** A current row that shows the task's hand-off was lost: pending and not parked, or finished
- *  (a job that died between the row's end and pointing the task on), and idle since `cutoff`. */
-function redrivableRow(cutoff: Date) {
+/** A current row that shows the task's hand-off was lost: pending or an answered form, unparked, or
+ *  finished (a job that died between the row's end and pointing the task on), idle since `cutoff`. */
+export function redrivableRow(cutoff: Date) {
   return and(
     lt(schema.taskSteps.updatedAt, cutoff),
     or(
-      and(eq(schema.taskSteps.status, 'pending'), isNull(schema.taskSteps.waitingStartedAt)),
+      and(
+        inArray(schema.taskSteps.status, ['pending', 'waiting_form']),
+        isNull(schema.taskSteps.waitingStartedAt),
+      ),
       inArray(schema.taskSteps.status, ['done', 'skipped']),
     ),
   )!;
 }
 
+/** A saved answer its advance never followed: the one row a waiting_user task is taken for. */
+function answeredFormRow(cutoff: Date) {
+  return and(eq(schema.taskSteps.status, 'waiting_form'), redrivableRow(cutoff))!;
+}
+
 interface StalledCandidate {
   taskId: string;
   userId: string;
+  taskStatus: (typeof schema.tasks.$inferSelect)['status'];
   stepId: string;
   round: number;
   epoch: number;
@@ -158,6 +167,18 @@ async function redriveTask(
       .where(eq(schema.tasks.id, c.taskId))
       .for('update');
     if (locked.length === 0) return null;
+    const currentRow = (cond: SQLWrapper | undefined) =>
+      tx
+        .select({ one: sql`1` })
+        .from(schema.taskSteps)
+        .where(
+          and(
+            eq(schema.taskSteps.taskId, c.taskId),
+            eq(schema.taskSteps.stepId, c.stepId),
+            eq(schema.taskSteps.round, c.round),
+            cond,
+          ),
+        );
     const [row] = await tx
       .update(schema.tasks)
       .set({
@@ -167,27 +188,15 @@ async function redriveTask(
       .where(
         and(
           eq(schema.tasks.id, c.taskId),
-          eq(schema.tasks.status, 'running'),
+          eq(schema.tasks.status, c.taskStatus),
           isNull(schema.tasks.deadAt),
           eq(schema.tasks.orchestrationEpoch, c.epoch),
           sql`${schema.tasks.currentStepId} IS NOT DISTINCT FROM ${c.stepId}`,
           eq(schema.tasks.currentRound, c.round),
           lt(schema.tasks.updatedAt, cutoff),
-          not(
-            exists(
-              tx
-                .select({ one: sql`1` })
-                .from(schema.taskSteps)
-                .where(
-                  and(
-                    eq(schema.taskSteps.taskId, c.taskId),
-                    eq(schema.taskSteps.stepId, c.stepId),
-                    eq(schema.taskSteps.round, c.round),
-                    not(redrivableRow(cutoff)),
-                  ),
-                ),
-            ),
-          ),
+          c.taskStatus === 'waiting_user'
+            ? exists(currentRow(answeredFormRow(cutoff)))
+            : not(exists(currentRow(not(redrivableRow(cutoff))))),
         ),
       )
       .returning({ epoch: schema.tasks.orchestrationEpoch });
@@ -225,7 +234,8 @@ function unstartedRun(taskStepId: SQLWrapper | string) {
 }
 
 /** One pass: re-drives each running task whose current step row is missing, pending and not
- *  parked, or finished, and fails one whose current row failed; queues a START for a task still
+ *  parked, an answered form, or finished, and a task waiting on a person whose current form was
+ *  answered; fails a running task whose current row failed; queues a START for a task still
  *  queued to start; and recovers a parked
  *  step whose recorded run no cli-exec job owes any more, as boot does. Each only while the task
  *  queue holds no job for the task. */
@@ -242,6 +252,7 @@ export async function redriveStalledTasks(
       stepId: schema.tasks.currentStepId,
       round: schema.tasks.currentRound,
       epoch: schema.tasks.orchestrationEpoch,
+      taskStatus: schema.tasks.status,
       rowId: schema.taskSteps.id,
       rowStatus: schema.taskSteps.status,
       rowError: schema.taskSteps.errorMessage,
@@ -257,14 +268,19 @@ export async function redriveStalledTasks(
     )
     .where(
       and(
-        eq(schema.tasks.status, 'running'),
         isNull(schema.tasks.deadAt),
         isNotNull(schema.tasks.currentStepId),
         lt(schema.tasks.updatedAt, cutoff),
         or(
-          isNull(schema.taskSteps.id),
-          redrivableRow(cutoff),
-          and(eq(schema.taskSteps.status, 'failed'), lt(schema.taskSteps.updatedAt, cutoff)),
+          and(
+            eq(schema.tasks.status, 'running'),
+            or(
+              isNull(schema.taskSteps.id),
+              redrivableRow(cutoff),
+              and(eq(schema.taskSteps.status, 'failed'), lt(schema.taskSteps.updatedAt, cutoff)),
+            ),
+          ),
+          and(eq(schema.tasks.status, 'waiting_user'), answeredFormRow(cutoff)),
         ),
       ),
     );

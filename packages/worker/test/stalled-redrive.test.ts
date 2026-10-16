@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { Database } from '@haive/database';
+import { getTableColumns } from 'drizzle-orm';
+import type { PgTable } from 'drizzle-orm/pg-core';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 
 const stubs = vi.hoisted(() => ({ finishFailedStep: vi.fn(async (..._args: unknown[]) => true) }));
 
@@ -10,6 +13,7 @@ vi.mock('../src/queues/task-queue.js', async (importOriginal) => ({
 
 import {
   defaultDeps,
+  redrivableRow,
   redriveStalledTasks,
   taskQueueOwed,
   type FailedStep,
@@ -84,6 +88,7 @@ interface Candidate {
   stepId: string;
   round: number;
   epoch: number;
+  taskStatus?: string;
   rowId?: string | null;
   rowStatus?: string | null;
   rowError?: string | null;
@@ -422,5 +427,182 @@ describe('taskQueueOwed', () => {
     ]);
     expect([...owed.steps].sort()).toEqual(['advancing', 'cancelling']);
     expect([...owed.starts]).toEqual(['claimed']);
+  });
+});
+
+describe('redrivableRow', () => {
+  const cutoff = new Date('2026-02-01T00:10:00Z');
+  const idle = new Date('2026-02-01T00:00:00Z');
+  const takes = createFakeDb({ taskSteps: schema.taskSteps }).compileWhere(
+    schema.taskSteps,
+    redrivableRow(cutoff),
+  );
+  const row = (status: string, over: Record<string, unknown> = {}) => ({
+    status,
+    waitingStartedAt: null,
+    updatedAt: idle,
+    ...over,
+  });
+
+  it('takes an answered form, whose advance the answer route never queued', () => {
+    expect(takes(row('waiting_form'))).toBe(true);
+  });
+
+  it('leaves a parked form to the person it waits on', () => {
+    expect(takes(row('waiting_form', { waitingStartedAt: idle }))).toBe(false);
+  });
+
+  it('leaves an answer written since the cutoff to its own advance', () => {
+    expect(takes(row('waiting_form', { updatedAt: new Date('2026-02-01T00:20:00Z') }))).toBe(false);
+  });
+
+  it.each(['pending', 'done', 'skipped'])('still takes a %s row', (status) => {
+    expect(takes(row(status))).toBe(true);
+  });
+
+  it.each(['running', 'waiting_cli', 'failed'])('still leaves a %s row', (status) => {
+    expect(takes(row(status))).toBe(false);
+  });
+
+  it('still leaves a parked pending row', () => {
+    expect(takes(row('pending', { waitingStartedAt: idle }))).toBe(false);
+  });
+});
+
+describe('the tasks the sweep takes, by task status and current row', () => {
+  const idle = new Date(Date.now() - 10 * 60_000);
+
+  const columnsOf = (prefix: string, table: PgTable) =>
+    Object.entries(getTableColumns(table)).map(([key, col]) => [`${prefix}.${key}`, col]);
+  /** The candidates query's LEFT JOIN as one table, so the fake db can run its condition over a task and its row. */
+  const joined = {
+    [Symbol.for('drizzle:Name')]: 'task_current_step',
+    [Symbol.for('drizzle:Columns')]: Object.fromEntries([
+      ...columnsOf('task', schema.tasks),
+      ...columnsOf('step', schema.taskSteps),
+    ]),
+  } as unknown as PgTable;
+
+  interface Seed {
+    taskId: string;
+    taskStatus: string;
+    taskUpdatedAt: Date;
+    row: { status: string; waitingStartedAt?: Date | null; updatedAt?: Date } | null;
+  }
+  const seed = (
+    taskId: string,
+    taskStatus: string,
+    row: Seed['row'],
+    taskUpdatedAt = idle,
+  ): Seed => ({ taskId, taskStatus, taskUpdatedAt, row });
+
+  /** What the candidates SELECT returns over these tasks: its own condition, run by the fake db. */
+  async function candidatesAmong(seeds: Seed[]): Promise<Candidate[]> {
+    const { whereCond } = await captureQuery();
+    const takes = createFakeDb({ taskSteps: schema.taskSteps }).compileWhere(joined, whereCond);
+    return seeds.flatMap((s) => {
+      const rowId = s.row ? `row-${s.taskId}` : null;
+      const rowStatus = s.row?.status ?? null;
+      const taken = takes({
+        'task.status': s.taskStatus,
+        'task.deadAt': null,
+        'task.currentStepId': 'step-a',
+        'task.updatedAt': s.taskUpdatedAt,
+        'step.id': rowId,
+        'step.status': rowStatus,
+        'step.waitingStartedAt': s.row?.waitingStartedAt ?? null,
+        'step.updatedAt': s.row ? (s.row.updatedAt ?? idle) : null,
+      });
+      return taken
+        ? [
+            {
+              taskId: s.taskId,
+              userId: 'user-1',
+              stepId: 'step-a',
+              round: 0,
+              epoch: 3,
+              taskStatus: s.taskStatus,
+              rowId,
+              rowStatus,
+            },
+          ]
+        : [];
+    });
+  }
+
+  async function advancedBy(seeds: Seed[], owed: string[] = []) {
+    const advances: { taskId: string; epoch: number }[] = [];
+    await redriveStalledTasks(
+      makeDb(await candidatesAmong(seeds), []),
+      {
+        enqueueAdvance: async (taskId, _userId, _stepId, _round, epoch) => {
+          advances.push({ taskId, epoch });
+        },
+        queuedTaskJobs: async () => owesSteps(...owed),
+        ...noLostWork,
+      },
+      { staleMs: 300_000 },
+    );
+    return advances;
+  }
+
+  const answered = { status: 'waiting_form' };
+
+  it('re-drives a waiting_user task whose current form was answered, once at the bumped epoch', async () => {
+    expect(await advancedBy([seed('task', 'waiting_user', answered)])).toEqual([
+      { taskId: 'task', epoch: 4 },
+    ]);
+  });
+
+  it('leaves a waiting_user task whose current form is parked to the person it waits on', async () => {
+    const parked = { ...answered, waitingStartedAt: idle };
+    expect(await advancedBy([seed('task', 'waiting_user', parked)])).toEqual([]);
+  });
+
+  it('leaves an answered form the task queue still owes a job', async () => {
+    expect(await advancedBy([seed('task', 'waiting_user', answered)], ['task'])).toEqual([]);
+  });
+
+  it('leaves an answer written since the cutoff to its own advance', async () => {
+    const written = { ...answered, updatedAt: new Date() };
+    expect(await advancedBy([seed('task', 'waiting_user', written)])).toEqual([]);
+  });
+
+  it('leaves a task that moved since the cutoff to the pass that moved it', async () => {
+    expect(await advancedBy([seed('task', 'waiting_user', answered, new Date())])).toEqual([]);
+  });
+
+  it.each(['pending', 'running', 'waiting_cli', 'done', 'skipped', 'failed'])(
+    'leaves a waiting_user task on a %s current row',
+    async (status) => {
+      expect(await advancedBy([seed('task', 'waiting_user', { status })])).toEqual([]);
+    },
+  );
+
+  it('leaves a waiting_user task with no current row', async () => {
+    expect(await advancedBy([seed('task', 'waiting_user', null)])).toEqual([]);
+  });
+
+  it.each(['created', 'queued', 'paused', 'completed', 'failed', 'cancelled'])(
+    'leaves a %s task with an answered form',
+    async (taskStatus) => {
+      expect(await advancedBy([seed('task', taskStatus, answered)])).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['an answered form', answered],
+    ['a pending row', { status: 'pending' }],
+    ['a finished row', { status: 'done' }],
+    ['no current row', null],
+  ])('still re-drives a running task on %s', async (_name, row) => {
+    expect(await advancedBy([seed('task', 'running', row)])).toEqual([
+      { taskId: 'task', epoch: 4 },
+    ]);
+  });
+
+  it('still leaves a running task on a parked form', async () => {
+    const parked = { ...answered, waitingStartedAt: idle };
+    expect(await advancedBy([seed('task', 'running', parked)])).toEqual([]);
   });
 });
