@@ -277,12 +277,15 @@ dispatches can carry (no `llm` or `agentMining` phase without a `toolProfile`). 
 spec leaves `toolProfile` unset resolves; recaps, the AI-fix agent, merges and the DAG never do. One
 resolution per dispatch, shared by every agent of a fan-out: a required requirement that does not
 resolve fails the step `integration-unresolved` naming it, its category and the reason (an optional one
-is dropped), a requirement that pins a provider is refused `integration-provider-pinned` until J6, and
-a missing signing key or tool names the broker could not list fail `integrations-no-signing-key` and
-`integration-tools-unlistable`. The run is written by `insertStampedRun`: one transaction that takes
-`lockTaskIntegrations` (the lock the choice PUT and DELETE take first), resolves again, records the
-grants from that resolution and inserts the run stamped with its bindings; a required binding lost
-since the first resolution writes nothing and fails the step. In a fan-out only the first run goes
+is dropped), a requirement that pins a provider is refused `integration-provider-pinned` until J6, a
+required requirement that resolved to a module provider fails `integration-provider-unsupported` (an
+optional one is left out, with no grant) until module providers can run calls (I6b), since the broker
+answers every call to one `provider-unavailable`, and a missing signing key or tool names the broker
+could not list fail `integrations-no-signing-key` and `integration-tools-unlistable`. The run is
+written by `insertStampedRun`: one transaction that takes `lockTaskIntegrations` (the lock the choice
+PUT and DELETE take first), resolves again, records the grants from that resolution and inserts the
+run stamped with its bindings; a required binding lost since the first resolution writes nothing and
+fails the step. In a fan-out only the first run goes
 through it: that run's stamp is the fan-out's, and every later agent is inserted with the same
 bindings, with no second resolution and no grant write, so a choice changed meanwhile applies from the
 next dispatch (an agent can then carry an account removed after the first insert, and the broker
@@ -434,8 +437,9 @@ title's `minLength: 1` is published too.
 - **call** matches the tool name against the stamp with every write tool included, so a write the
   switch has turned off is refused as `write-switched-off` with a row rather than as unknown; a name
   the stamp never declared answers 403 `undeclared-tool` and writes nothing. Each later refusal is a
-  row with its reason: `provider-unavailable` (no spec or disabled), `connection-unavailable` (gone,
-  not `connected`, another provider, shared, another user's, or its credential cannot be read),
+  row with its reason: `provider-unavailable` (no spec, disabled, or a module provider, which cannot run
+  calls before I6b), `connection-unavailable` (gone, not `connected`, another provider, shared, another
+  user's, or its credential cannot be read),
   `write-switched-off`, `invalid-arguments` (400), `no-remote` (409), `connection-not-for-repository`
   (the credential's host is not the task's remote, or it has none), `unsafe-api-base` (`apiBaseFits`,
   so older credentials saved before the rule are refused here rather than sent as is).
