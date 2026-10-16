@@ -16,6 +16,7 @@ import {
   isClaimUnit,
   isEnvironmentUnit,
   isRenderUnit,
+  isRtkChoiceRecorded,
   isRtkQuestion,
   isSettingUnit,
   sameValue,
@@ -493,12 +494,14 @@ export async function writeProjectStateColumn(
           reviewDimensions: schema.repositories.reviewDimensions,
           onboardingEnvironment: schema.repositories.onboardingEnvironment,
           onboardingTooling: schema.repositories.onboardingTooling,
+          rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
         })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
         .limit(1);
+      const rtkChosen = isRtkChoiceRecorded(column.rtkChoiceRecorded, repo?.rtkChoiceMadeAt);
       const settings = repo
-        ? withoutUnchosenRtk(portableSettingsOf(repo), column.rtkChoiceRecorded)
+        ? withoutUnchosenRtk(portableSettingsOf(repo), rtkChosen)
         : emptyProjectState().settings;
       const tooling = repo ? toolingUnitOf(repo.onboardingTooling) : null;
       if (tooling !== null) settings[TOOLING_UNIT_NAME] = tooling;
@@ -514,9 +517,7 @@ export async function writeProjectStateColumn(
           base.bundles,
           overlayClaims(claims, pendingClaims, 'incoming'),
         ),
-        baseFiles: column.rtkChoiceRecorded
-          ? base.files
-          : base.files.filter((f) => f !== RTK_SETTING_FILE),
+        baseFiles: rtkChosen ? base.files : base.files.filter((f) => f !== RTK_SETTING_FILE),
       };
     };
     // A first look only, so its failure must not clear the column: the files then wait for the locked read.

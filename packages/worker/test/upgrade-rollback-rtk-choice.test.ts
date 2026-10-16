@@ -38,7 +38,7 @@ const UPGRADED = { ...context(true), framework: 'laravel' };
  *  that names nothing is one stored before the question was recorded. */
 type Plan = { rtkFollowsLive?: boolean } | null;
 
-function database(plan: Plan) {
+function database(plan: Plan, repository: Record<string, unknown> = {}) {
   const fake = createFakeDb({
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
@@ -56,6 +56,7 @@ function database(plan: Plan) {
     name: 'acme',
     source: 'blank',
     renderContext: { ...UPGRADED, rtkChoiceRecorded: true },
+    ...repository,
   });
   if (plan !== null) {
     fake.insert(schema.taskSteps, {
@@ -90,9 +91,13 @@ function stepContext(fake: ReturnType<typeof database>, repoPath: string): StepC
 
 /** An upgrade that removed a file the rollback puts back from a prior row, which carries the context
  *  the rollback restores. */
-async function viaRestoredSnapshot(restoredRtk: boolean | undefined, plan: Plan) {
+async function viaRestoredSnapshot(
+  restoredRtk: boolean | undefined,
+  plan: Plan,
+  repository: Record<string, unknown> = {},
+) {
   const repoPath = await root();
-  const fake = database(plan);
+  const fake = database(plan, repository);
   const detected = {
     repositoryId: REPO,
     rolledBackFromTaskId: UPGRADE_TASK,
@@ -217,6 +222,38 @@ describe.each(paths)('the RTK choice of a rollback that %s', (_name, run) => {
     const column = await recordedAs(undefined, { rtkFollowsLive: true });
 
     expect(column).toEqual({ ...context(undefined), rtkChoiceRecorded: false });
+  });
+});
+
+describe('a rollback on an install where a person switched RTK', () => {
+  const settingsOfBase = (fake: ReturnType<typeof database>) =>
+    (fake.rows(schema.projectStateSync)[0]!.baseSnapshot as { settings: Record<string, unknown> })
+      .settings;
+
+  it('stores no recorded choice in the column, and the record still carries the switch', async () => {
+    const { fake, out } = await viaRestoredSnapshot(
+      false,
+      { rtkFollowsLive: false },
+      { rtkEnabled: true, rtkChoiceMadeAt: new Date(1000) },
+    );
+
+    expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
+    expect(fake.rows(schema.repositories)[0]!.renderContext).toEqual({
+      ...context(false),
+      rtkChoiceRecorded: false,
+    });
+    expect(settingsOfBase(fake)).toEqual({ 'rtk-enabled': true });
+  });
+
+  it('leaves the switch out of the record while nobody made it', async () => {
+    const { fake, out } = await viaRestoredSnapshot(
+      false,
+      { rtkFollowsLive: false },
+      { rtkEnabled: true },
+    );
+
+    expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
+    expect(settingsOfBase(fake)).toEqual({});
   });
 });
 

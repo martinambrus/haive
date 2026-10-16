@@ -20,6 +20,7 @@ import {
   isEnvironmentUnit,
   isPortableSettingName,
   isRenderUnit,
+  isRtkChoiceRecorded,
   isRtkQuestion,
   isSettingUnit,
   mergeProjectState,
@@ -473,13 +474,16 @@ function mergePortable(
   repo: Parameters<typeof portableSettingsOf>[0] & {
     onboardingEnvironment: unknown;
     renderContext: unknown;
+    rtkChoiceMadeAt: Date | null;
   },
   checkout: { settings: Record<string, unknown>; environment: ProjectEnvironment | null },
   row: { baseSnapshot: unknown } | null,
 ): PortableMerge {
   const previous = (row?.baseSnapshot ?? {}) as Partial<ProjectStateRecord>;
-  const rtkRecorded =
-    (repo.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true;
+  const rtkRecorded = isRtkChoiceRecorded(
+    (repo.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true,
+    repo.rtkChoiceMadeAt,
+  );
   const previousSettings = withoutUnchosenRtk(portableOf(previous.settings), rtkRecorded);
   const previousEnvironment = previous.environment ?? null;
   // The import of a record into a NULL column records the choice, so what it imports is kept in the base.
@@ -489,6 +493,16 @@ function mergePortable(
   const localEnvironment = environmentUnitOf(repo.onboardingEnvironment);
   const importable = repo.onboardingEnvironment == null || localEnvironment !== null;
   const intake = intakeSettings(checkout.settings, localSettings);
+  // The base never held the setting, so the checkout's value is no change made since the switch:
+  // this install's stands.
+  if (
+    repo.rtkChoiceMadeAt != null &&
+    row !== null &&
+    previousSettings['rtk-enabled'] === undefined &&
+    localSettings['rtk-enabled'] !== undefined
+  ) {
+    intake.incoming['rtk-enabled'] = localSettings['rtk-enabled'];
+  }
   const checkoutEnvironment = checkout.environment && normalizeEnvironment(checkout.environment);
   const record = (settings: Record<string, unknown>, environment: ProjectEnvironment | null) => ({
     ...emptyProjectState(),
@@ -593,6 +607,7 @@ export async function syncProjectStateFromCheckout(
         reviewDimensions: schema.repositories.reviewDimensions,
         onboardingEnvironment: schema.repositories.onboardingEnvironment,
         onboardingTooling: schema.repositories.onboardingTooling,
+        rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
@@ -862,13 +877,18 @@ async function applyRebase(
     return;
   }
   const [repo] = await tx
-    .select({ renderContext: schema.repositories.renderContext })
+    .select({
+      renderContext: schema.repositories.renderContext,
+      rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
+    })
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
   const rtkKept =
-    (repo?.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true ||
-    (repo?.renderContext ?? null) === null;
+    isRtkChoiceRecorded(
+      (repo?.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true,
+      repo?.rtkChoiceMadeAt,
+    ) || (repo?.renderContext ?? null) === null;
   const settings = Object.create(null) as Record<string, unknown>;
   for (const [name, value] of Object.entries(intakeSettings(checkout.settings, {}).accepted)) {
     if (rtkKept || name !== 'rtk-enabled') settings[name] = value;

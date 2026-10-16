@@ -197,16 +197,17 @@ async function loadHistoryDetect(
 }
 
 /** Whether 01's render context follows the repository's RTK switch, which it does only when the
- *  context it renders from recorded a choice: the column's stored flag, else the newest live
- *  snapshot, else the 07 detect output of the last completed onboarding, else, for a blank
- *  repository, the scaffold's own. */
+ *  context it renders from recorded a choice, or a person switched RTK on this install: the column's
+ *  stored flag, else the newest live snapshot, else the 07 detect output of the last completed
+ *  onboarding, else, for a blank repository, the scaffold's own. */
 function rtkChoiceFollowsLive(
   origin: RenderContextOrigin<SnapshotRowFacts>,
   history: HistoryDetect | null,
   source: string,
+  rtkChoiceMadeAt: Date | null,
 ): boolean {
   if (origin.from !== 'history') return origin.rtkRecorded;
-  const verdict = historyOrigin({ onboarding: history, source });
+  const verdict = historyOrigin({ onboarding: history, source, rtkChoiceMadeAt });
   return verdict.kind === 'blank' || (verdict.kind === 'onboarding' && verdict.rtkRecorded);
 }
 
@@ -291,6 +292,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       storagePath: true,
       localPath: true,
       rtkEnabled: true,
+      rtkChoiceMadeAt: true,
       source: true,
       renderContext: true,
       status: true,
@@ -406,6 +408,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     rows: liveArtifacts.map((a) =>
       refusedSnapshots.has(a.id) ? { ...a, hasSnapshot: false, rtkRecorded: false } : a,
     ),
+    rtkChoiceMadeAt: repo.rtkChoiceMadeAt,
   });
   const enabledNames = ruleProviderRows.filter((p) => p.enabled).map((p) => p.name);
   const history = origin.from === 'history' ? await loadHistoryDetect(db, repositoryId) : null;
@@ -754,7 +757,10 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   // An upgrade also takes out the RTK block (02-upgrade-apply) once RTK is switched off.
   const rtkRemoval =
     root !== null &&
-    rtkLeftoversToRemove(rtkChoiceFollowsLive(origin, history, repo.source), repo.rtkEnabled);
+    rtkLeftoversToRemove(
+      rtkChoiceFollowsLive(origin, history, repo.source, repo.rtkChoiceMadeAt),
+      repo.rtkEnabled,
+    );
   const rtkBlockLeftovers = root && rtkRemoval ? await rtkBlockFiles(root) : [];
   // No row records the RTK settings files a blank scaffold seeds, so no template comparison sees them.
   const rtkSettingsLeft =

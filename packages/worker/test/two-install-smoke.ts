@@ -2259,6 +2259,63 @@ async function main(): Promise<void> {
       askedOnA,
     );
 
+    // ---- a switch made on the Tooling page travels (D19) ------------------------------------------
+    // B's context predates RTK and its base never held the setting; A's committed record says off.
+    const switchRel = '.haive-data/state/settings/rtk-enabled.json';
+    const rtkOf = (install: Install) =>
+      rowsOf<{ rtk_enabled: boolean; stamped: boolean }>(
+        install.db,
+        sql`select rtk_enabled, rtk_choice_made_at is not null as stamped from repositories where id = ${install.repositoryId}`,
+      );
+    const askedAbout = (install: Install) =>
+      rowsOf<{ unit: string }>(
+        install.db,
+        sql`select unit from project_state_conflicts where repository_id = ${install.repositoryId} and unit = 'settings/rtk-enabled.json' and resolved_at is null`,
+      );
+    await b.db.execute(
+      sql`update repositories set rtk_enabled = true, rtk_choice_made_at = now(),
+        render_context = jsonb_set(render_context, '{rtkChoiceRecorded}', 'false')
+        where id = ${b.repositoryId}`,
+    );
+    await b.db.execute(
+      sql`update project_state_sync set base_snapshot = base_snapshot #- '{settings,rtk-enabled}'
+        where repository_id = ${b.repositoryId}`,
+    );
+    await markProjectStateDirty(b.db, b.repositoryId);
+    await sweepDirtyProjectStates(b.db);
+    const switchedOnB = await rtkOf(b);
+    const switchedFile = await readFile(path.join(b.repoPath, switchRel), 'utf8');
+    const askedOnB = await askedAbout(b);
+    check(
+      "B's switch survives its own sync and sweep: the column stays on, no question is asked and the record file says so",
+      'rows' in switchedOnB &&
+        switchedOnB.rows[0]?.rtk_enabled === true &&
+        switchedFile.trim() === 'true' &&
+        'rows' in askedOnB &&
+        askedOnB.rows.length === 0,
+      { switchedOnB, switchedFile, askedOnB },
+    );
+    git(b.repoPath, 'add', switchRel);
+    git(b.repoPath, 'commit', '-q', '--allow-empty', '-m', 'B switches RTK on');
+    git(b.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+    git(a.repoPath, 'pull', '-q', '--ff-only', 'origin', 'main');
+    await markProjectStateDirty(a.db, a.repositoryId);
+    await sweepDirtyProjectStates(a.db);
+    const switchedOnA = await rtkOf(a);
+    const fileOnA = await readFile(path.join(a.repoPath, switchRel), 'utf8');
+    const askedOnA2 = await askedAbout(a);
+    check(
+      "B's switch reaches A through git, and survives A's sync and sweep as the team's value, not A's own choice",
+      'rows' in switchedOnA &&
+        switchedOnA.rows[0]?.rtk_enabled === true &&
+        switchedOnA.rows[0]?.stamped === false &&
+        fileOnA.trim() === 'true' &&
+        git(a.repoPath, 'status', '--porcelain', '--', switchRel) === '' &&
+        'rows' in askedOnA2 &&
+        askedOnA2.rows.length === 0,
+      { switchedOnA, fileOnA, askedOnA2 },
+    );
+
     // ---- a plan Pull, a Save & push and 01's confirm set Haive's pending files aside (B3.1b-1) ----
     // Each check has its own remote and pair of installs, so a failing one leaves the next a clean start.
     // B's pending change is a render.json value Haive wrote and has not committed; A's commit touches it too.

@@ -34,6 +34,13 @@ export function isRenderContextSnapshot(value: unknown): boolean {
   return renderContextSnapshotSchema.safeParse(value).success;
 }
 
+/** Whether this install's RTK switch is a choice: the render context recorded one, or a person
+ *  switched RTK on the Tooling page (`repositories.rtk_choice_made_at`), whatever the context says. */
+export const isRtkChoiceRecorded = (
+  contextRecorded: boolean,
+  choiceMadeAt: Date | null | undefined,
+): boolean => contextRecorded || choiceMadeAt != null;
+
 /** RTK's block and settings files go only where the render context recorded an RTK choice and the
  *  switch is off: a context from before RTK made none, and its `false` is only a default. */
 export function rtkLeftoversToRemove(choiceRecorded: boolean, rtkEnabled: boolean): boolean {
@@ -86,11 +93,16 @@ export function historyOrigin(input: {
   /** Null when no onboarding completed. */
   onboarding: { detected: boolean; rtkRecorded: boolean } | null;
   source: string;
+  /** `repositories.rtk_choice_made_at`. Left out by a caller that reads only the kind. */
+  rtkChoiceMadeAt?: Date | null;
 }): HistoryOrigin {
-  const { onboarding, source } = input;
+  const { onboarding, source, rtkChoiceMadeAt } = input;
   if (onboarding === null) return source === 'blank' ? { kind: 'blank' } : { kind: 'none' };
   if (!onboarding.detected) return { kind: 'none' };
-  return { kind: 'onboarding', rtkRecorded: onboarding.rtkRecorded };
+  return {
+    kind: 'onboarding',
+    rtkRecorded: isRtkChoiceRecorded(onboarding.rtkRecorded, rtkChoiceMadeAt),
+  };
 }
 
 export type RenderContextColumnRead =
@@ -116,17 +128,30 @@ export type RenderContextOrigin<R extends SnapshotRowFacts> =
   | { from: 'history'; refused: string[] | null };
 
 /** Where an upgrade's render context comes from: the column, else the newest live snapshot, else
- *  the history. With a column, the RTK choice is its stored flag, never whether it holds one. */
+ *  the history. With a column, the RTK choice is its stored flag or a person's switch, never
+ *  whether it holds one. */
 export function renderContextOrigin<R extends SnapshotRowFacts>(input: {
   column: RenderContextColumnRead;
   rows: readonly R[];
+  /** `repositories.rtk_choice_made_at`, which the caller reads with the repository. */
+  rtkChoiceMadeAt: Date | null | undefined;
 }): RenderContextOrigin<R> {
-  const { column } = input;
+  const { column, rtkChoiceMadeAt } = input;
   if (column.kind === 'column') {
-    return { from: 'column', column: column.column, rtkRecorded: column.column.rtkChoiceRecorded };
+    return {
+      from: 'column',
+      column: column.column,
+      rtkRecorded: isRtkChoiceRecorded(column.column.rtkChoiceRecorded, rtkChoiceMadeAt),
+    };
   }
   const row = pickSnapshotRow(input.rows);
-  if (row) return { from: 'snapshot', row, rtkRecorded: row.rtkRecorded === true };
+  if (row) {
+    return {
+      from: 'snapshot',
+      row,
+      rtkRecorded: isRtkChoiceRecorded(row.rtkRecorded === true, rtkChoiceMadeAt),
+    };
+  }
   return { from: 'history', refused: column.kind === 'refused' ? column.problems : null };
 }
 

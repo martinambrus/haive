@@ -91,8 +91,10 @@ describe('integration tables', () => {
     expect(getTableConfig(account!.reference().foreignTable).name).toBe('integration_connections');
     expect(account?.onDelete).toBe('set null');
     const repositories = getTableConfig(schema.repositories);
-    const switchColumn = repositories.columns.at(-1);
-    expect(switchColumn?.name).toBe('integrations_restricted');
+    const names = repositories.columns.map((c) => c.name);
+    const at = names.indexOf('integrations_restricted');
+    expect(names[at - 1]).toBe('verify_commands');
+    const switchColumn = repositories.columns[at];
     expect(switchColumn?.notNull).toBe(true);
     expect(switchColumn?.default).toBe(false);
   });

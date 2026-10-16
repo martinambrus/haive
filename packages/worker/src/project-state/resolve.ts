@@ -205,7 +205,7 @@ async function answerRtkQuestion(
     if (typeof incoming !== 'boolean') return { kind: 'invalid' };
     await tx
       .update(schema.repositories)
-      .set(rtkEnabledUpdate(incoming))
+      .set({ ...rtkEnabledUpdate(incoming), rtkChoiceMadeAt: new Date() })
       .where(eq(schema.repositories.id, repositoryId));
   }
   await markProjectStateDirty(tx, repositoryId);
