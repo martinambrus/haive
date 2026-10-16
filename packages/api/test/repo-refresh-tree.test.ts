@@ -21,7 +21,7 @@ vi.mock('../src/queues.js', async (importOriginal) => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { REPO_JOB_NAMES } from '@haive/shared';
+import { configService, REPO_JOB_NAMES } from '@haive/shared';
 import { repoRoutes } from '../src/routes/repos.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -61,6 +61,7 @@ const status = (fake: ReturnType<typeof setup>) => fake.rows(schema.repositories
 beforeEach(() => {
   h.add.mockReset();
   h.add.mockResolvedValue(undefined);
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
 });
 
 describe('refreshing a repository', () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
 import {
+  pausedByLabel,
   taskBadgeKind,
   taskClockEndMs,
   taskMenuKeys,
@@ -130,6 +131,18 @@ describe('taskStatusWord', () => {
 
   it('keys on dead_at and never on a dead_reason that outlived it', () => {
     expect(taskStatusWord(COPY_ONLY)).toBe('running');
+  });
+});
+
+describe('pausedByLabel', () => {
+  it('says an administrator paused it when the api says so', () => {
+    expect(pausedByLabel({ pausedByAdmin: true })).toBe('Paused by an administrator');
+  });
+
+  it("keeps the owner's own pause as Paused by you", () => {
+    // NEGATIVE CONTROL: a version that always says an administrator fails these two.
+    expect(pausedByLabel({ pausedByAdmin: false })).toBe('Paused by you');
+    expect(pausedByLabel({})).toBe('Paused by you');
   });
 });
 

@@ -1,5 +1,14 @@
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
-import { locksOutNonAdmins, parseMaintenanceState, refusesNewWork } from './maintenance.js';
+import {
+  lockNewWorkFenceExclusive,
+  lockNewWorkFenceShared,
+  locksOutNonAdmins,
+  NEW_WORK_FENCE_KEY,
+  parseMaintenanceState,
+  refusesNewWork,
+} from './maintenance.js';
 
 describe('parseMaintenanceState', () => {
   it('accepts every real state', () => {
@@ -38,5 +47,44 @@ describe('locksOutNonAdmins', () => {
     // can still watch it.
     expect(locksOutNonAdmins('draining')).toBe(false);
     expect(locksOutNonAdmins('maintenance')).toBe(true);
+  });
+});
+
+describe('NEW_WORK_FENCE_KEY', () => {
+  // Admission and a state transition meet only by hashing this same string for their advisory lock.
+  it('is the string both sides hash', () => {
+    expect(NEW_WORK_FENCE_KEY).toBe('haive-new-work-fence');
+  });
+});
+
+describe('the fence statements', () => {
+  const sent = async (
+    lock: (tx: { execute: (query: SQL) => Promise<unknown> }) => Promise<void>,
+  ) => {
+    const queries: SQL[] = [];
+    await lock({
+      execute: async (query) => {
+        queries.push(query);
+      },
+    });
+    return queries.map((query) => new PgDialect().sqlToQuery(query));
+  };
+
+  it('takes the shared side as one transaction lock on the key', async () => {
+    expect(await sent(lockNewWorkFenceShared)).toMatchObject([
+      {
+        sql: 'select pg_advisory_xact_lock_shared(hashtextextended($1, 0))',
+        params: [NEW_WORK_FENCE_KEY],
+      },
+    ]);
+  });
+
+  it('takes the exclusive side as one transaction lock on the same key', async () => {
+    expect(await sent(lockNewWorkFenceExclusive)).toMatchObject([
+      {
+        sql: 'select pg_advisory_xact_lock(hashtextextended($1, 0))',
+        params: [NEW_WORK_FENCE_KEY],
+      },
+    ]);
   });
 });

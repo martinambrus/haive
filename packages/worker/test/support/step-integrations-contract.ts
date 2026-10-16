@@ -33,8 +33,10 @@ export interface StepIntegrations {
     stepRowId: string,
     values: RunValues,
     requirements: readonly IntegrationRequirement[],
+    named?: ReadonlyMap<string, string | null>,
   ): Promise<unknown>;
   INTEGRATION_UNRESOLVED_REASON: string;
+  INTEGRATION_ACCOUNT_CHANGED_REASON: string;
   INTEGRATION_PROVIDER_PINNED_REASON: string;
   INTEGRATION_TOOLS_UNLISTABLE_REASON: string;
   INTEGRATIONS_NO_SIGNING_KEY_REASON: string;

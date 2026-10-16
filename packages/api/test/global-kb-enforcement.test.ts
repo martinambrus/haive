@@ -29,7 +29,7 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
 }));
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
-  configService: { getBoolean: async () => h.houseRules },
+  configService: { getBoolean: async () => h.houseRules, getFresh: async () => 'normal' },
 }));
 vi.mock('@haive/shared/global-kb', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared/global-kb')>()),

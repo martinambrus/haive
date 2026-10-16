@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getTableName } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { configService } from '@haive/shared';
 import { autoResumeFailedStep } from '../src/queues/_step-reset.js';
 import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
 
@@ -67,6 +68,10 @@ function setup(taskStatus: 'failed' | 'running') {
   const one = (rows: Record<string, unknown>[], id: string) => rows.find((r) => r.id === id)!;
   return { fake, updated, resume, one };
 }
+
+beforeEach(() => {
+  vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
+});
 
 describe('the allowance auto-resume', () => {
   it('takes runs and agent rows, then the step, then the task, as a Retry does', async () => {
