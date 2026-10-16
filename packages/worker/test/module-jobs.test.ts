@@ -844,7 +844,9 @@ describe('the jobs reconcile', () => {
 
     expect(refusal).toBeInstanceOf(ModuleTeardownRefusedError);
     expect(refusal.message).toMatch(
-      new RegExp(`ensuring.*schema setup.*about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds`),
+      new RegExp(
+        `ensuring.*schema setup.*about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds.*schema setup has no time limit`,
+      ),
     );
     expect(hook).not.toHaveBeenCalled();
 
@@ -1505,7 +1507,9 @@ describe('a teardown beside a boot schema ensure that outlived its wait', () => 
       )) as Error;
       expect(hook).not.toHaveBeenCalled();
       expect(refusal).toBeInstanceOf(ModuleTeardownRefusedError);
-      expect(refusal.message).toMatch(new RegExp(`${id}.*schema setup.*still running`));
+      expect(refusal.message).toMatch(
+        new RegExp(`${id}.*schema setup.*still running.*schema setup has no time limit`),
+      );
       expect(moduleJobsStarted(id)).toBe(true);
 
       if (outcome === 'resolve') m.end().resolve();
