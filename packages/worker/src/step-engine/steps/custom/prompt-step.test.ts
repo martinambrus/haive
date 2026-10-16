@@ -182,9 +182,9 @@ describe('prompt step detect', () => {
     const big = 'x'.repeat(PROMPT_STEP_OUTPUT_CAP_BYTES * 2);
     const out = await def.detect!(ctx([[{ title: 'T', description: '' }], [{ output: big }]]));
     const capped = out.stepOutputs.a!;
-    expect(Buffer.byteLength(capped)).toBeLessThan(PROMPT_STEP_OUTPUT_CAP_BYTES + 200);
+    expect(Buffer.byteLength(capped)).toBeLessThanOrEqual(PROMPT_STEP_OUTPUT_CAP_BYTES);
     expect(capped).toContain('[truncated: ');
-    expect(capped.startsWith('x'.repeat(PROMPT_STEP_OUTPUT_CAP_BYTES))).toBe(true);
+    expect(capped.startsWith('x'.repeat(PROMPT_STEP_OUTPUT_CAP_BYTES - 64))).toBe(true);
   });
 
   it('loads each named step output as text, using the raw reply of a prompt step', async () => {
