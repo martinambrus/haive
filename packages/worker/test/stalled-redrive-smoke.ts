@@ -1,17 +1,25 @@
 /**
  * redriveStalledTasks against a real database, exercising the real WHERE and the transactional
- * fence's race-closing re-check. Throwaway users/tasks, deleted after.
+ * fence's race-closing re-check, and the pass that gives up on a cancelled task's teardown.
+ * Throwaway users/tasks, deleted after.
  */
+import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { and, eq, inArray } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { existsSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { and, asc, eq, inArray } from 'drizzle-orm';
+import { schema, type MergeResolveState } from '@haive/database';
 import { logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
 import {
+  abandonCancelledTeardowns,
   redriveCancelledTasks,
   redriveStalledTasks,
   type FailedStep,
 } from '../src/queues/stalled-redrive.js';
+import { liveClaimHolder } from '../src/step-engine/merge-dir-claim.js';
 
 const log = logger.child({ module: 'stalled-redrive-smoke' });
 
@@ -35,11 +43,45 @@ function check(name: string, ok: boolean, detail?: unknown): void {
 const STALE_MS = 5 * 60_000;
 const longAgo = new Date(Date.now() - 10 * 60_000);
 
+function git(dir: string, ...args: string[]): string {
+  return execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
+}
+
+function gitTry(dir: string, ...args: string[]): void {
+  try {
+    execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
+  } catch {
+    // a conflicted merge exits non-zero by design
+  }
+}
+
+/** A repository with a merge of `feat/a` into `main` left open on a conflict in conflict.txt. */
+async function conflictedRepo(root: string, name: string): Promise<string> {
+  const dir = path.join(root, name);
+  execFileSync('git', ['init', '-q', '-b', 'main', dir]);
+  git(dir, 'config', 'gc.auto', '0');
+  git(dir, 'config', 'user.email', 'smoke@test.local');
+  git(dir, 'config', 'user.name', 'smoke');
+  await writeFile(path.join(dir, 'conflict.txt'), 'base\n');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', 'base');
+  git(dir, 'checkout', '-q', '-b', 'feat/a');
+  await writeFile(path.join(dir, 'conflict.txt'), 'feature\n');
+  git(dir, 'commit', '-q', '-am', 'feature');
+  git(dir, 'checkout', '-q', 'main');
+  await writeFile(path.join(dir, 'conflict.txt'), 'main\n');
+  git(dir, 'commit', '-q', '-am', 'main');
+  gitTry(dir, 'merge', '--no-ff', 'feat/a');
+  if (!existsSync(path.join(dir, '.git', 'MERGE_HEAD'))) throw new Error('fixture merge not open');
+  return dir;
+}
+
 async function main(): Promise<void> {
   initDatabase(process.env.DATABASE_URL!);
   const db = getDb();
   const userId = randomUUID();
   const now = new Date();
+  let tmp: string | undefined;
 
   try {
     await db.insert(schema.users).values({
@@ -820,6 +862,10 @@ async function main(): Promise<void> {
       { type: 'task.cancel_redriven', at: minutesAgo(6) },
       { type: 'task.cancel_redriven', at: minutesAgo(4) },
     ]);
+    const retriedCancelId = await cancelled('retried-cancel', [
+      { type: 'task.cancelled', at: minutesAgo(10) },
+      { type: 'task.cancel_redriven', at: minutesAgo(8) },
+    ]);
     const notCancelledId = await cancelled(
       'not-cancelled',
       [{ type: 'task.cancelled', at: minutesAgo(10) }],
@@ -835,6 +881,7 @@ async function main(): Promise<void> {
       rerunningCancelId,
       ancientCancelId,
       exhaustedCancelId,
+      retriedCancelId,
       notCancelledId,
     ]);
     const cancelDeps = {
@@ -884,7 +931,320 @@ async function main(): Promise<void> {
         (redrivenEvents[0]?.payload as { attempt?: number } | null)?.attempt === 1,
       redrivenEvents,
     );
+    const retriedEvents = await db
+      .select({ payload: schema.taskEvents.payload })
+      .from(schema.taskEvents)
+      .where(
+        and(
+          eq(schema.taskEvents.taskId, retriedCancelId),
+          eq(schema.taskEvents.eventType, 'task.cancel_redriven'),
+        ),
+      )
+      .orderBy(asc(schema.taskEvents.createdAt));
+    check(
+      'a second re-drive counts the first: its event records attempt 2',
+      cancelsFor(retriedCancelId).length === 1 &&
+        retriedEvents.length === 2 &&
+        (retriedEvents[1]?.payload as { attempt?: number } | null)?.attempt === 2,
+      retriedEvents,
+    );
+
+    // The pass that gives up on a teardown the re-drive no longer retries, run beside the re-drive
+    // as the sweeper runs it, both reading the same CANCEL queue.
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60_000);
+    const ancient: Parameters<typeof cancelled>[1] = [{ type: 'task.cancelled', at: eightDaysAgo }];
+    const capped = (lastRedriveMinutesAgo: number): Parameters<typeof cancelled>[1] => [
+      { type: 'task.cancelled', at: minutesAgo(40) },
+      { type: 'task.cancel_redriven', at: minutesAgo(30) },
+      { type: 'task.cancel_redriven', at: minutesAgo(20) },
+      { type: 'task.cancel_redriven', at: minutesAgo(lastRedriveMinutesAgo) },
+    ];
+    const dirRoot = `/smoke/${randomBytes(4).toString('hex')}`;
+    let dirCount = 0;
+    const hold = async (
+      taskId: string,
+      opts: { mergeDir?: string; mergeResolveState?: MergeResolveState } = {},
+    ) => {
+      const n = (dirCount += 1);
+      const mergeDir = opts.mergeDir ?? `${dirRoot}/${n}--base`;
+      const [step] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId,
+          stepId: `merge-${n}`,
+          stepIndex: n,
+          title: 'merge',
+          status: 'failed',
+          ...(opts.mergeResolveState ? { mergeResolveState: opts.mergeResolveState } : {}),
+        })
+        .returning({ id: schema.taskSteps.id });
+      await db.insert(schema.mergeDirClaims).values({ mergeDir, taskId, taskStepId: step!.id });
+      return { taskId, taskStepId: step!.id };
+    };
+    const eventsOf = (taskId: string, type: string) =>
+      db
+        .select()
+        .from(schema.taskEvents)
+        .where(and(eq(schema.taskEvents.taskId, taskId), eq(schema.taskEvents.eventType, type)))
+        .orderBy(asc(schema.taskEvents.createdAt));
+    const claimsOf = (taskId: string) =>
+      db
+        .select({ mergeDir: schema.mergeDirClaims.mergeDir })
+        .from(schema.mergeDirClaims)
+        .where(eq(schema.mergeDirClaims.taskId, taskId));
+    const canon = (v: unknown) =>
+      JSON.stringify(Object.entries(v as object).sort(([a], [b]) => (a < b ? -1 : 1)));
+    const untouched = async (id: string) =>
+      (await claimsOf(id)).length === 1 &&
+      (await eventsOf(id, 'task.cancel_finished')).length === 0;
+    const abandonedAs = async (id: string, reason: string) => {
+      const finished = await eventsOf(id, 'task.cancel_finished');
+      return (
+        (await claimsOf(id)).length === 0 &&
+        finished.length === 1 &&
+        canon(finished[0]!.payload) === canon({ source: 'worker', abandoned: true, reason })
+      );
+    };
+
+    const c1 = await cancelled('c1 capped, last re-drive had its time', capped(10));
+    const c1Claims = [await hold(c1), await hold(c1)];
+    const c2 = await cancelled('c2 capped, last re-drive recent', capped(1));
+    const c2Claim = await hold(c2);
+    const c3a = await cancelled('c3a capped, CANCEL queued', capped(10));
+    await hold(c3a);
+    const c3b = await cancelled('c3b cancelled long ago, CANCEL queued', ancient);
+    await hold(c3b);
+    const c4 = await cancelled('c4 cancelled long ago, never re-driven', ancient);
+    const c4Claim = await hold(c4);
+    const c5a = await cancelled('c5a capped, no claim', capped(10));
+    const c5b = await cancelled('c5b cancelled long ago, no claim', ancient);
+    tmp = await mkdtemp(path.join(tmpdir(), 'haive-abandon-'));
+    const c6Dir = await conflictedRepo(tmp, 'c6');
+    const c6Head = git(c6Dir, 'rev-parse', 'HEAD');
+    const c6MergeHead = git(c6Dir, 'rev-parse', 'MERGE_HEAD');
+    const c6 = await cancelled('c6 merge left open', capped(10));
+    await hold(c6, {
+      mergeDir: c6Dir,
+      mergeResolveState: {
+        mode: 'same-branch',
+        phase: 'resolving',
+        baseBranch: 'main',
+        featureBranch: 'feat/a',
+        mergeDir: c6Dir,
+        sandboxMergeDir: c6Dir,
+        fixInvocationId: null,
+        conflictRetries: 1,
+        pendingQuestion: null,
+        pushAfterMerge: false,
+        merged: false,
+        skipReason: null,
+        pushed: false,
+      },
+    });
+    const x1 = await cancelled('x1 cancelled a minute ago', [
+      { type: 'task.cancelled', at: minutesAgo(1) },
+    ]);
+    await hold(x1);
+    const x1b = await cancelled('x1b cancelled a day ago, never re-driven', [
+      { type: 'task.cancelled', at: new Date(Date.now() - 24 * 60 * 60_000) },
+    ]);
+    await hold(x1b);
+    const x2 = await cancelled('x2 re-driven twice, its second CANCEL ran a minute ago', [
+      { type: 'task.cancel_redriven', at: minutesAgo(30) },
+      { type: 'task.cancel_redriven', at: minutesAgo(20) },
+      { type: 'task.cancelled', at: minutesAgo(1) },
+    ]);
+    await hold(x2);
+    const x3 = await cancelled('x3 not cancelled', capped(10), 'running');
+    await hold(x3);
+    const x4 = await cancelled('x4 teardown finished', [
+      ...capped(10),
+      { type: 'task.cancel_finished', at: minutesAgo(9) },
+    ]);
+    await hold(x4);
+    const x5 = await cancelled('x5 another task holding a dir', [], 'running');
+    await hold(x5);
+    const x6 = await cancelled('x6 capped, cancelled long ago', [
+      { type: 'task.cancelled', at: eightDaysAgo },
+      ...[1, 2, 3].map(
+        (n) =>
+          ({ type: 'task.cancel_redriven', at: new Date(+eightDaysAgo + n * 60_000) }) as const,
+      ),
+    ]);
+    await hold(x6);
+    const x7 = await cancelled('x7 cancelled long ago, re-driven once', [
+      { type: 'task.cancelled', at: eightDaysAgo },
+      { type: 'task.cancel_redriven', at: new Date(+eightDaysAgo + 60_000) },
+    ]);
+    await hold(x7);
+    const x8 = await cancelled('x8 cancelled long ago, re-driven twice', [
+      { type: 'task.cancelled', at: eightDaysAgo },
+      ...[1, 2].map(
+        (n) =>
+          ({ type: 'task.cancel_redriven', at: new Date(+eightDaysAgo + n * 60_000) }) as const,
+      ),
+    ]);
+    await hold(x8);
+
+    const queuedCancels = new Set([c3a, c3b]);
+    const sweptCancels: string[] = [];
+    const sweepCancels = async (queued: Set<string> | null) => {
+      const sweepDeps = {
+        enqueueCancel: async (taskId: string) => {
+          sweptCancels.push(taskId);
+        },
+        queuedCancelTaskIds: async () => queued,
+      };
+      await redriveCancelledTasks(db, sweepDeps, { staleMs: STALE_MS });
+      return abandonCancelledTeardowns(db, sweepDeps, { staleMs: STALE_MS });
+    };
+
+    check(
+      'C1 precondition: a cancelled task without task.cancel_finished is a live holder of each claim',
+      (await liveClaimHolder(db, c1Claims[0]!)) !== null &&
+        (await liveClaimHolder(db, c1Claims[1]!)) !== null,
+    );
+    const unreadable = await abandonCancelledTeardowns(
+      db,
+      { queuedCancelTaskIds: async () => null },
+      { staleMs: STALE_MS },
+    );
+    const keptWhileUnreadable =
+      unreadable === 0 &&
+      (await claimsOf(c1)).length === 2 &&
+      (await eventsOf(c1, 'task.cancel_finished')).length === 0;
+
+    await sweepCancels(queuedCancels);
+
+    // A control that expects a task left alone also expects the pass to have released its twins, so
+    // it cannot pass merely because the pass did nothing.
+    const released =
+      (await abandonedAs(c1, 're-drive cap reached')) &&
+      (await abandonedAs(c4, 'cancelled before the re-drive window'));
+
+    check('C1: the claim rows are gone', (await claimsOf(c1)).length === 0, await claimsOf(c1));
+    check(
+      'C1: one task.cancel_finished flagged abandoned, with the re-drive cap as its reason',
+      await abandonedAs(c1, 're-drive cap reached'),
+      await eventsOf(c1, 'task.cancel_finished'),
+    );
+    check(
+      'C1: liveClaimHolder no longer counts the task as a holder',
+      (await liveClaimHolder(db, c1Claims[0]!)) === null &&
+        (await liveClaimHolder(db, c1Claims[1]!)) === null,
+    );
+    check(
+      'C2: a capped teardown whose last re-drive is newer than the cutoff is untouched, its twin released',
+      released && (await untouched(c2)) && (await liveClaimHolder(db, c2Claim)) !== null,
+    );
+    check(
+      'C3: a teardown with a CANCEL still queued is untouched, capped or cancelled long ago, its twins released',
+      released && (await untouched(c3a)) && (await untouched(c3b)),
+    );
+    check(
+      'C4: a task cancelled before the re-drive window and never re-driven is released, saying so',
+      (await abandonedAs(c4, 'cancelled before the re-drive window')) &&
+        (await liveClaimHolder(db, c4Claim)) === null,
+      await eventsOf(c4, 'task.cancel_finished'),
+    );
+    check(
+      'C5: a task holding no claim gets no event, capped or cancelled long ago, its twins released',
+      released &&
+        (await eventsOf(c5a, 'task.cancel_finished')).length === 0 &&
+        (await eventsOf(c5b, 'task.cancel_finished')).length === 0,
+    );
+    const leftOpen = await eventsOf(c6, 'merge.left_open');
+    const c6Finished = await eventsOf(c6, 'task.cancel_finished');
+    check(
+      'C6: the merge the task left open is reported during the give-up',
+      leftOpen.length === 1 &&
+        canon(leftOpen[0]!.payload) ===
+          canon({ dir: c6Dir, ref: 'feat/a', head: c6Head, mergeHead: c6MergeHead }),
+      leftOpen,
+    );
+    check(
+      'C6: ...before the finish record, the merge itself left open and the claim released',
+      c6Finished.length === 1 &&
+        leftOpen.length === 1 &&
+        leftOpen[0]!.createdAt <= c6Finished[0]!.createdAt &&
+        existsSync(path.join(c6Dir, '.git', 'MERGE_HEAD')) &&
+        (await claimsOf(c6)).length === 0,
+    );
+    check(
+      'X0: with the CANCEL queue unreadable nothing is given up, and a later pass gives up',
+      keptWhileUnreadable && released,
+    );
+    check(
+      'X1: a cancel inside the re-drive window, fresh or never re-driven, is left to the re-drive',
+      released && (await untouched(x1)) && (await untouched(x1b)),
+    );
+    check(
+      'X2: a teardown re-driven fewer times than the cap is left to the re-drive',
+      released && (await untouched(x2)),
+    );
+    check('X3: a task that is not cancelled is untouched', released && (await untouched(x3)));
+    check(
+      'X4: a teardown that finished keeps its one record and is not touched again',
+      released &&
+        (await eventsOf(x4, 'task.cancel_finished')).length === 1 &&
+        (await claimsOf(x4)).length === 1,
+    );
+    check("X5: another task's claim is untouched", released && (await claimsOf(x5)).length === 1);
+    check(
+      'X6: a capped teardown cancelled before the window is given up as capped',
+      await abandonedAs(x6, 're-drive cap reached'),
+      await eventsOf(x6, 'task.cancel_finished'),
+    );
+    check(
+      'X7: no given-up task was also sent a CANCEL',
+      released && [c1, c4, c6, x6, x7, x8].every((id) => !sweptCancels.includes(id)),
+      sweptCancels,
+    );
+    check(
+      'X8: a teardown re-driven once or twice whose cancel left the window is given up as cancelled before it',
+      (await abandonedAs(x7, 'cancelled before the re-drive window')) &&
+        (await abandonedAs(x8, 'cancelled before the re-drive window')),
+      [await eventsOf(x7, 'task.cancel_finished'), await eventsOf(x8, 'task.cancel_finished')],
+    );
+
+    const snapshot = async () =>
+      JSON.stringify(
+        await Promise.all(
+          [c1, c4, c6, x6].map(async (id) => [
+            (await eventsOf(id, 'task.cancel_finished')).length,
+            (await eventsOf(id, 'merge.left_open')).length,
+            (await claimsOf(id)).length,
+          ]),
+        ),
+      );
+    const afterFirst = await snapshot();
+    // A claim that committed after the release read the task's claims: its finish record makes it stale.
+    const lateClaim = await hold(c1);
+    const afterLate = await snapshot();
+    const second = await sweepCancels(queuedCancels);
+    check(
+      'C7: a second sweep gives up nothing and writes nothing new, a late claim of a finished task included',
+      second === 0 &&
+        afterFirst ===
+          JSON.stringify([
+            [1, 0, 0],
+            [1, 0, 0],
+            [1, 1, 0],
+            [1, 0, 0],
+          ]) &&
+        afterLate ===
+          JSON.stringify([
+            [1, 0, 1],
+            [1, 0, 0],
+            [1, 1, 0],
+            [1, 0, 0],
+          ]) &&
+        (await snapshot()) === afterLate &&
+        (await liveClaimHolder(db, lateClaim)) === null,
+      { second, afterFirst, afterLate, afterSecond: await snapshot() },
+    );
   } finally {
+    if (tmp) await rm(tmp, { recursive: true, force: true });
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
     await db.delete(schema.users).where(eq(schema.users.id, userId));
   }
