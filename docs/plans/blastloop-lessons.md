@@ -63,8 +63,13 @@ parallel with no rule for files two slices both change (`PLANNER_RULES`, 06b-spr
 ## P0: record which files a DAG level merge conflicted on (chosen scope)
 
 In `runLevelMerge` (dag-executor.ts), merge pass, the branch where `openMerge` returned
-`{ kind: 'conflict' }`: before `abortMerge`, read `unmergedPaths(integration.path)` and insert one
-task event, following the `dag_issue.skipped` and `merge.abort_failed` inserts in the same file:
+`{ kind: 'conflict' }`: read `unmergedPaths(integration.path)` before `abortMerge`, which clears
+them, and record one task event, following the `dag_issue.skipped` and `merge.abort_failed` inserts
+in the same file. **As built** (Codex review on #814): the event is written after a successful
+abort, in one transaction with `merge_status = 'conflict'`. Inserting it before the abort, as first
+written here, let a pass that halted on a refused abort, or died before the status was written,
+leave the issue unmerged, and its retry inserted a second event. Now such a pass records neither
+and the retry records the conflict once.
 
 - `eventType: 'dag_issue.merge_conflict'` (namespace of `dag_issue.skipped`; nothing matches event
   types by prefix, checked in worker, api, web and shared).
@@ -76,8 +81,9 @@ task event, following the `dag_issue.skipped` and `merge.abort_failed` inserts i
 Not changed: `openMerge` keeps its `MergeOpen` contract (merge-resolver and the plan merge share it).
 `unmergedPaths` already reads with `-z` and decodes UTF-8, so its strings are safe in jsonb. Add
 `unmergedPaths` to the existing `./git-merge.js` import. Nothing reads the event; it is the record a
-person or a query uses, like `dag_issue.skipped`. The insert is not wrapped in try/catch, matching
-the neighbouring inserts: the `merge_status` update right after it uses the same connection.
+person or a query uses, like `dag_issue.skipped`. The insert is not wrapped in try/catch: it shares
+the transaction with the `merge_status` update, so a failure fails both, as the neighbouring inserts
+fail their step.
 
 Not extended to merge-resolver (12-worktree-cleanup, 00a-sync-base, 13-onboarding-push): its
 conflicts come from concurrent tasks, not sibling slices, and nothing needs that measurement yet.
@@ -90,7 +96,10 @@ refused in the merge pass halts with its reason and sends no fixer" (same harnes
 `autoResolveConflicts: false`. Assert one `h.events` entry with `eventType
 'dag_issue.merge_conflict'` and payload `{ issueKey: 'ISSUE-1', paths: ['base.txt'], pathCount: 1 }`
 (`issue.txt` merges cleanly and must not be listed), an issue update to `mergeStatus: 'conflict'`,
-no MERGE_HEAD left, and the step halted with "Merge halted".
+no MERGE_HEAD left, and the step halted with "Merge halted". **As built**, a second test ("a refused
+abort records no conflict event, so the retry that re-enters records it once") refuses the abort
+once through the `./git-merge.js` mock: that pass records `merge.abort_failed` and no conflict event,
+and a retry against the merge it left open records exactly one. It fails on the insert-first code.
 
 Docs: one paragraph in docs/architecture/merge-conflicts.md (it governs the DAG level merge): the
 event and its fields, and the measured reason parallel-issue conflicts are left to the merge-fix
