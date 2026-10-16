@@ -18,6 +18,7 @@ import { getRuntimeEnsureQueue, getRuntimeEnsureQueueEvents } from '../queues.js
 import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
+import { isCanonicalUuid } from '../lib/uuid.js';
 
 // Bridges the web noVNC panel to the headed-browser desktop inside a task's
 // runtime container: RFB-over-WebSocket on the client side, raw TCP to
@@ -165,7 +166,7 @@ function runVncBridge(ws: WebSocket, host: string, port: number, taskId: string)
 function extractTaskId(rawUrl: string, prefix: string): string | null {
   const withoutQuery = rawUrl.split('?')[0] ?? rawUrl;
   const id = withoutQuery.slice(prefix.length).replace(/\/+$/, '');
-  return /^[0-9a-f-]{36}$/.test(id) ? id : null;
+  return isCanonicalUuid(id) ? id : null;
 }
 
 /** Probe whether <host>:<port> accepts a TCP connection within `timeoutMs`. */

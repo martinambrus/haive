@@ -13,6 +13,7 @@ import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
 import { TerminalLogBuffer } from '../terminal/log-buffer.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
+import { isUuid } from '../lib/uuid.js';
 
 const log = logger.child({ module: 'terminal-ws' });
 const WS_PATH_PREFIX = '/terminal/';
@@ -352,8 +353,7 @@ function extractContainerId(rawUrl: string, pathPrefix: string): string | null {
   const pathOnly = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
   if (!pathOnly.startsWith(pathPrefix)) return null;
   const remainder = pathOnly.slice(pathPrefix.length);
-  if (!remainder || remainder.includes('/')) return null;
-  return remainder;
+  return isUuid(remainder) ? remainder : null;
 }
 
 function parseCookieValue(header: string, name: string): string | null {

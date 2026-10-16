@@ -72,7 +72,7 @@ import {
   PROJECT_STATE_DIR,
   bundleFileName,
   claimFileName,
-  isClaimablePath,
+  isCanonicalRepoPath,
   isRecordName,
   parsePlanConflictUnit,
   portableBundleSource,
@@ -2404,7 +2404,7 @@ export async function resetOnboardingArtifacts(
 
   for (const rel of ONBOARDING_RESET_FILES) await remove(rel, false);
   for (const diskPath of writtenHashes.keys()) {
-    if (isClaimablePath(diskPath))
+    if (isCanonicalRepoPath(diskPath))
       await remove(`${PROJECT_STATE_DIR}/${claimFileName(diskPath)}`, false);
   }
   for (const source of provenance.bundleSources ?? []) {
