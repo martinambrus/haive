@@ -5,6 +5,7 @@ import {
   CONFIG_KEYS,
   configService,
   NEW_WORK_FENCE_KEY,
+  parseMaintenanceState,
   type MaintenanceState,
 } from '@haive/shared';
 import type { ReleaseManifest } from '@haive/shared/release';
@@ -39,6 +40,8 @@ export interface UpgradeContext {
   drainDeadlineMs: number;
   /** Force past the drain deadline instead of failing. */
   forceDrain: boolean;
+  /** Set by phaseDraining when it forced past live work, so phaseMaintenance skips the recount. */
+  drainForced?: boolean;
   log: (event: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -131,12 +134,12 @@ export async function liveTaskCount(sql: Sql): Promise<number> {
 }
 
 /** A session lock belongs to one connection, so lock and unlock share a reserved one. */
-async function setMaintenanceState(sql: Sql, state: MaintenanceState): Promise<void> {
+async function underFence<T>(sql: Sql, work: (fence: Sql) => Promise<T>): Promise<T> {
   const fence = await sql.reserve();
   try {
     await fence`SELECT pg_advisory_lock(hashtextextended(${NEW_WORK_FENCE_KEY}, 0))`;
     try {
-      await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state);
+      return await work(fence);
     } finally {
       await fence`SELECT pg_advisory_unlock(hashtextextended(${NEW_WORK_FENCE_KEY}, 0))`;
     }
@@ -145,24 +148,41 @@ async function setMaintenanceState(sql: Sql, state: MaintenanceState): Promise<v
   }
 }
 
-export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
-  await enterPhase(ctx.sql, ctx.runId, 'draining');
-  await setMaintenanceState(ctx.sql, 'draining');
-  ctx.log('draining', { deadlineMs: ctx.drainDeadlineMs });
+async function setMaintenanceState(sql: Sql, state: MaintenanceState): Promise<void> {
+  await underFence(sql, () => configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state));
+}
 
+/** Recounts under the fence: only a draining install with nothing live enters maintenance. */
+async function enterMaintenance(ctx: UpgradeContext): Promise<boolean> {
+  const { entered, state, live } = await underFence(ctx.sql, async (fence) => {
+    const state = parseMaintenanceState(
+      await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
+    );
+    // The updater's pool is one connection and the fence holds it, so the count runs on the fence.
+    const live = await liveTaskCount(fence);
+    const entered = state === 'draining' && live === 0;
+    await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, entered ? 'maintenance' : 'draining');
+    return { entered, state, live };
+  });
+  if (!entered) ctx.log('drain-reopened', { state, live });
+  return entered;
+}
+
+/** Waits until no task is live; true when the deadline passed and the caller chose to force. */
+async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
   const deadline = Date.now() + ctx.drainDeadlineMs;
   for (;;) {
     const live = await liveTaskCount(ctx.sql);
     if (live === 0) {
       ctx.log('drained', { live: 0 });
-      return;
+      return false;
     }
     if (Date.now() >= deadline) {
       // A deadline with no declared fallback is how maintenance windows get skipped: the operator
       // waits forever on somebody else's task. Forcing is a CHOICE the caller made, not a default.
       if (ctx.forceDrain) {
         ctx.log('drain-forced', { live });
-        return;
+        return true;
       }
       throw new Error(
         `${live} task(s) are still live after ${Math.round(ctx.drainDeadlineMs / 1000)}s. ` +
@@ -173,9 +193,18 @@ export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
   }
 }
 
+export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
+  await enterPhase(ctx.sql, ctx.runId, 'draining');
+  await setMaintenanceState(ctx.sql, 'draining');
+  ctx.log('draining', { deadlineMs: ctx.drainDeadlineMs });
+  ctx.drainForced = await awaitDrain(ctx);
+}
+
 export async function phaseMaintenance(ctx: UpgradeContext): Promise<void> {
   await enterPhase(ctx.sql, ctx.runId, 'maintenance');
-  await setMaintenanceState(ctx.sql, 'maintenance');
+  let forced = ctx.drainForced === true;
+  while (!forced && !(await enterMaintenance(ctx))) forced = await awaitDrain(ctx);
+  if (forced) await setMaintenanceState(ctx.sql, 'maintenance');
   ctx.log('maintenance');
 }
 

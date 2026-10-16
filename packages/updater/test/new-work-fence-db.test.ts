@@ -5,7 +5,13 @@ import postgres, { type Sql } from 'postgres';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configService } from '@haive/shared';
 import { ensureJournal, finishRun, startRun } from '../src/journal.js';
-import { phaseCommit, phaseDraining, rollback, type UpgradeContext } from '../src/run.js';
+import {
+  phaseCommit,
+  phaseDraining,
+  phaseMaintenance,
+  rollback,
+  type UpgradeContext,
+} from '../src/run.js';
 
 vi.mock('../src/docker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/docker.js')>()),
@@ -29,11 +35,13 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
   let probe: Sql;
   let holder: Awaited<ReturnType<Sql['reserve']>> | undefined;
   let runId: string;
+  let stored: string;
   let written: string[];
   let logged: { event: string; fields?: Record<string, unknown> }[];
   let proceed: () => void;
   let inFlight: Promise<unknown> | undefined;
   let updating: Promise<unknown> | undefined;
+  let settled: boolean;
 
   const context = () =>
     ({
@@ -85,12 +93,26 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
     }
   };
 
+  const until = async (done: () => boolean, what: string) => {
+    const deadline = Date.now() + 3_000;
+    while (!done()) {
+      if (Date.now() > deadline) throw new Error(`never saw ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  };
+
   const fenceIsFree = async () => {
     const [row] = await probe<{ locked: boolean }[]>`
       SELECT pg_try_advisory_lock(hashtextextended(${FENCE}, 0)) AS locked`;
     if (row?.locked) await probe`SELECT pg_advisory_unlock(hashtextextended(${FENCE}, 0))`;
     return row?.locked === true;
   };
+
+  const liveTask = () =>
+    probe`INSERT INTO tasks (user_id, type, title, status)
+          VALUES (${OWNER}, ${TYPE}, 'Task', 'running')`;
+
+  const endTasks = () => probe`UPDATE tasks SET status = 'completed' WHERE type = ${TYPE}`;
 
   beforeAll(async () => {
     updater = postgres(url as string, { max: 1, max_lifetime: 0 });
@@ -104,6 +126,7 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
   });
 
   beforeEach(async () => {
+    stored = 'normal';
     written = [];
     logged = [];
     inFlight = undefined;
@@ -116,13 +139,16 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
     });
     vi.spyOn(configService, 'set').mockImplementation(async (_key, value) => {
       written.push(value);
+      stored = value;
     });
+    vi.spyOn(configService, 'getFresh').mockImplementation(async () => stored);
   });
 
   afterEach(async () => {
     proceed?.();
     await releaseFence();
     await inFlight?.catch(() => undefined);
+    await endTasks();
     await updating?.catch(() => undefined);
     await finishRun(updater, runId, 'rolled_back');
   });
@@ -157,6 +183,121 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
     expect(written).toEqual(['draining']);
     expect(logged).toContainEqual({ event: 'drain-forced', fields: { live: 1 } });
     expect(await fenceIsFree()).toBe(true);
+  });
+
+  describe('the maintenance transition', () => {
+    const upgrade = (over: Partial<UpgradeContext> = {}) =>
+      ({ ...context(), drainDeadlineMs: 60_000, forceDrain: false, ...over }) as UpgradeContext;
+
+    const enter = (ctx: UpgradeContext) => {
+      settled = false;
+      updating = phaseMaintenance(ctx);
+      updating.then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      return updating;
+    };
+
+    it('reads the state and writes maintenance once, under the fence, when draining with nothing live', async () => {
+      stored = 'draining';
+      const heldAt: string[] = [];
+      const holdsFence = async (what: string) => {
+        if (!(await fenceIsFree())) heldAt.push(what);
+      };
+      vi.spyOn(configService, 'getFresh').mockImplementation(async () => {
+        await holdsFence('read');
+        return stored;
+      });
+      vi.spyOn(configService, 'set').mockImplementation(async (_key, value) => {
+        await holdsFence('write');
+        written.push(value);
+        stored = value;
+      });
+
+      await enter(upgrade());
+
+      expect(heldAt).toEqual(['read', 'write']);
+      expect(written).toEqual(['maintenance']);
+      expect(logged.map((l) => l.event)).toEqual(['maintenance']);
+      expect(await fenceIsFree()).toBe(true);
+    });
+
+    it('waits for an admission already past the fence, and then counts the task it wrote', async () => {
+      stored = 'draining';
+      await admitTask();
+
+      const entering = enter(upgrade({ drainDeadlineMs: 0 }));
+      await untilWaiting();
+      expect(written).toEqual([]);
+
+      proceed();
+      await inFlight;
+      await expect(entering).rejects.toThrow('1 task(s) are still live');
+
+      expect(written).toEqual(['draining']);
+      expect(await fenceIsFree()).toBe(true);
+    });
+
+    it('goes back to the drain wait, not maintenance, when normal was chosen and an admission committed after the count', async () => {
+      const ctx = upgrade();
+      await phaseDraining(ctx);
+      expect(written).toEqual(['draining']);
+
+      stored = 'normal';
+      await admitTask();
+      proceed();
+      await inFlight;
+
+      enter(ctx);
+      await until(
+        () => settled || logged.some((l) => l.event === 'drain-reopened'),
+        'the drain to reopen',
+      );
+      expect(written).toEqual(['draining', 'draining']);
+      expect(logged).toContainEqual({
+        event: 'drain-reopened',
+        fields: { state: 'normal', live: 1 },
+      });
+      expect(settled).toBe(false);
+      expect(await fenceIsFree()).toBe(true);
+
+      await endTasks();
+      await updating;
+
+      expect(written).toEqual(['draining', 'draining', 'maintenance']);
+      expect(logged.at(-1)?.event).toBe('maintenance');
+      expect(await fenceIsFree()).toBe(true);
+    }, 20_000);
+
+    it.each(['normal', 'maintenance'])(
+      'writes draining again, then maintenance once, when an administrator chose %s and no task came',
+      async (chosen) => {
+        stored = chosen;
+
+        await enter(upgrade());
+
+        expect(written).toEqual(['draining', 'maintenance']);
+        expect(logged).toEqual([
+          { event: 'drain-reopened', fields: { state: chosen, live: 0 } },
+          { event: 'drained', fields: { live: 0 } },
+          { event: 'maintenance' },
+        ]);
+        expect(await fenceIsFree()).toBe(true);
+      },
+    );
+
+    it('still enters maintenance past a live task, without a second wait, when the drain was forced', async () => {
+      await liveTask();
+      const ctx = upgrade({ drainDeadlineMs: 0, forceDrain: true });
+      await phaseDraining(ctx);
+
+      await enter(ctx);
+
+      expect(written).toEqual(['draining', 'maintenance']);
+      expect(logged.map((l) => l.event)).toEqual(['draining', 'drain-forced', 'maintenance']);
+      expect(await fenceIsFree()).toBe(true);
+    });
   });
 
   describe.each([
