@@ -815,50 +815,51 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', async (c) => {
       throw new HttpError(409, 'archive size mismatch on disk');
     }
     await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
-  });
-  await removeNoFollow(anchor, extractedRel, { recursive: true });
+    // A replace cannot resume past its rename, so a failure from here on gives the session back.
+    await removeNoFollow(anchor, extractedRel, { recursive: true });
 
-  await db
-    .update(schema.customBundles)
-    .set({
-      archiveFilename: row.filename,
-      archiveFormat: row.archiveFormat,
-      archivePath: finalArchive,
-      storageRoot: newExtracted,
-      status: 'syncing',
-      lastSyncError: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.customBundles.id, bundleId));
+    await db
+      .update(schema.customBundles)
+      .set({
+        archiveFilename: row.filename,
+        archiveFormat: row.archiveFormat,
+        archivePath: finalArchive,
+        storageRoot: newExtracted,
+        status: 'syncing',
+        lastSyncError: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.customBundles.id, bundleId));
 
-  await db
-    .update(schema.customBundleUploads)
-    .set({
-      status: 'complete',
+    await db
+      .update(schema.customBundleUploads)
+      .set({
+        status: 'complete',
+        archivePath: finalArchive,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.customBundleUploads.id, row.id),
+          eq(schema.customBundleUploads.status, 'completing'),
+        ),
+      );
+
+    const queue = getBundleQueue();
+    const payload: BundleJobPayload = {
+      bundleId,
+      userId,
       archivePath: finalArchive,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(schema.customBundleUploads.id, row.id),
-        eq(schema.customBundleUploads.status, 'completing'),
-      ),
+      archiveFormat: row.archiveFormat as ArchiveFormat,
+    };
+    await addBundleJobOrMarkFailed(db, bundleId, () =>
+      queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
+        attempts: 1,
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      }),
     );
-
-  const queue = getBundleQueue();
-  const payload: BundleJobPayload = {
-    bundleId,
-    userId,
-    archivePath: finalArchive,
-    archiveFormat: row.archiveFormat as ArchiveFormat,
-  };
-  await addBundleJobOrMarkFailed(db, bundleId, () =>
-    queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
-      attempts: 1,
-      removeOnComplete: 100,
-      removeOnFail: 100,
-    }),
-  );
+  });
 
   const counts = await loadItemCounts([bundleId]);
   return c.json({
