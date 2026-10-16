@@ -100,11 +100,12 @@ export async function loadLiveArtifacts(
 
 /** The live snapshot to render from: the newest that recorded an RTK choice, since a snapshot from
  *  before RTK would keep the repository's RTK switch from reaching the upgrade, and the upgrade
- *  banner reads the same one. */
+ *  banner reads the same one. Once a person switched RTK, the newest of all. */
 export function pickRenderSnapshot(
   liveRows: ReadonlyArray<Pick<LiveArtifactRow, 'id' | 'generatedAt' | 'formValuesSnapshot'>>,
+  rtkChoiceMadeAt?: Date | null,
 ): Record<string, unknown> | null {
-  return pickSnapshotRow(liveRows.map(snapshotFacts))?.formValuesSnapshot ?? null;
+  return pickSnapshotRow(liveRows.map(snapshotFacts), rtkChoiceMadeAt)?.formValuesSnapshot ?? null;
 }
 
 function snapshotFacts(r: Pick<LiveArtifactRow, 'id' | 'generatedAt' | 'formValuesSnapshot'>) {

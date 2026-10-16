@@ -243,7 +243,8 @@ const historyOf = () =>
       rtkChoiceMadeAt?: Date | null;
     }) => History
   >('historyOrigin');
-const pickRow = () => added<(rows: Row[]) => Row | null>('pickSnapshotRow');
+const pickRow = () =>
+  added<(rows: Row[], rtkChoiceMadeAt?: Date | null) => Row | null>('pickSnapshotRow');
 const namesOf = () =>
   added<(column: Record<string, unknown>, enabledNames: string[]) => string[]>(
     'renderContextProviderNames',
@@ -458,6 +459,28 @@ describe('S1: renderContextOrigin: a person switched RTK on this install', () =>
     ).toMatchObject({ rtkRecorded: false });
   });
 
+  it.each([
+    ['absent', { kind: 'absent' }],
+    ['refused', { kind: 'refused', problems: ['the column is wrong'] }],
+  ] as [string, ColumnRead][])(
+    'renders from the newest snapshot, ahead of an older one that recorded RTK (column %s)',
+    (_name, column) => {
+      const recorded = row('a', 1, true, true);
+      const newer = row('b', 2, true, null);
+
+      expect(originOf()({ column, rows: [recorded, newer], rtkChoiceMadeAt: SWITCHED })).toEqual({
+        from: 'snapshot',
+        row: newer,
+        rtkRecorded: true,
+      });
+      expect(originOf()({ column, rows: [recorded, newer], rtkChoiceMadeAt: null })).toEqual({
+        from: 'snapshot',
+        row: recorded,
+        rtkRecorded: true,
+      });
+    },
+  );
+
   it('leaves a recorded choice recorded, and the history to a repository with nothing else', () => {
     const column: ColumnRead = { kind: 'column', column: full() };
 
@@ -566,6 +589,15 @@ describe('S3: pickSnapshotRow', () => {
     expect(pickRow()([row('a', null, true, null), row('b', 1, true, null)])).toEqual(
       row('b', 1, true, null),
     );
+  });
+
+  it('takes the newest row with a snapshot once a person switched RTK, whatever an older one recorded', () => {
+    const older = row('a', 1, true, true);
+    const newer = row('b', 2, true, null);
+
+    expect(pickRow()([older, newer], new Date(1000))).toEqual(newer);
+    expect(pickRow()([older, row('b', 2, false, false)], new Date(1000))).toEqual(older);
+    expect(pickRow()([older, newer], null)).toEqual(older);
   });
 
   it('does not change the rows it is given', () => {

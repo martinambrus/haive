@@ -616,6 +616,28 @@ describe('01 renders by the live RTK switch once a person has switched it on thi
     },
   );
 
+  it('renders from the newest snapshot, though an older one recorded RTK', async () => {
+    const seed = (fake: Fake) => {
+      seedLiveRow(fake, {
+        path: '.claude/agents/row-0.md',
+        snapshot: rowSnapshot('older-recorded', false),
+        at: 1000,
+      });
+      seedLiveRow(fake, {
+        path: '.claude/agents/row-1.md',
+        snapshot: rowSnapshot('newer-unrecorded'),
+        at: 2000,
+      });
+    };
+
+    expect((await planFor(null, seed, true).detect()).renderCtxSnapshot.framework).toBe(
+      'newer-unrecorded',
+    );
+    expect(
+      (await planOf({ column: null, live: true, seed }).detect()).renderCtxSnapshot.framework,
+    ).toBe('older-recorded');
+  });
+
   it('offers the RTK settings files of a column that recorded no choice, switch on', async () => {
     const detected = await planFor(
       portableOnly({ rtkChoiceRecorded: false }),

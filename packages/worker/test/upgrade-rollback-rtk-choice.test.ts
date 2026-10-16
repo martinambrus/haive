@@ -7,8 +7,9 @@ import { createFakeDb } from '@haive/database/testing';
 import { normalizeContent, sha256Hex } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
-import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { expandManifestFor, REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 import { recordWritten } from './support/upgrade-apply-record.js';
+import { rowSnapshot } from './support/upgrade-plan-grid.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -127,11 +128,15 @@ async function viaRestoredSnapshot(
 
 /** An upgrade that only created a file: nothing is restored from a prior row, so the context is the
  *  one the rows still live carry. */
-async function viaLiveRows(liveRtk: boolean | undefined, plan: Plan) {
+async function viaLiveRows(
+  liveRtk: boolean | undefined,
+  plan: Plan,
+  more: { repository?: Record<string, unknown>; rows?: Record<string, unknown>[] } = {},
+) {
   const repoPath = await root();
   await mkdir(join(repoPath, '.claude/agents'), { recursive: true });
   await writeFile(join(repoPath, CREATED), 'HAIVE\n', 'utf8');
-  const fake = database(plan);
+  const fake = database(plan, more.repository);
   const row = (over: Record<string, unknown>) =>
     fake.insert(schema.onboardingArtifacts, {
       userId: USER,
@@ -158,6 +163,7 @@ async function viaLiveRows(liveRtk: boolean | undefined, plan: Plan) {
     formValuesSnapshot: context(liveRtk),
     generatedAt: new Date('2026-01-01T00:00:00Z'),
   });
+  for (const over of more.rows ?? []) row(over);
   const detected = {
     repositoryId: REPO,
     rolledBackFromTaskId: UPGRADE_TASK,
@@ -254,6 +260,44 @@ describe('a rollback on an install where a person switched RTK', () => {
 
     expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
     expect(settingsOfBase(fake)).toEqual({});
+  });
+});
+
+describe('a rollback that takes the live rows’ context beside an older row that recorded RTK', () => {
+  const newerRow = {
+    taskId: ONBOARDING_TASK,
+    diskPath: '.claude/agents/newer.md',
+    templateId: 'agent.newer',
+    source: 'onboarding',
+    formValuesSnapshot: rowSnapshot('newer-unrecorded'),
+    generatedAt: new Date('2026-01-15T00:00:00Z'),
+  };
+  const ids = (rtkEnabled: boolean) =>
+    expandManifestFor({
+      ...rowSnapshot('newer-unrecorded'),
+      rtkEnabled,
+    } as unknown as Parameters<typeof expandManifestFor>[0]).map((r) => r.templateId);
+  const rtkOnly = ids(true).filter((id) => !ids(false).includes(id));
+
+  it('records the newest once a person switched RTK, and expands it with the switch', async () => {
+    expect(rtkOnly).not.toEqual([]);
+    const { fake, out } = await viaLiveRows(
+      false,
+      { rtkFollowsLive: false },
+      { repository: { rtkEnabled: true, rtkChoiceMadeAt: new Date(1000) }, rows: [newerRow] },
+    );
+
+    expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
+    const repo = fake.rows(schema.repositories)[0]!;
+    expect(repo.renderContext).toMatchObject({ framework: 'newer-unrecorded' });
+    expect(repo.applicableTemplateIds).toEqual(expect.arrayContaining(rtkOnly));
+  });
+
+  it('records the newest that recorded RTK while nobody switched it', async () => {
+    const { fake, out } = await viaLiveRows(false, { rtkFollowsLive: false }, { rows: [newerRow] });
+
+    expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
+    expect(fake.rows(schema.repositories)[0]!.renderContext).toMatchObject({ framework: null });
   });
 });
 

@@ -76,12 +76,17 @@ export interface SnapshotRowFacts {
 }
 
 /** The row an upgrade renders from: the newest that recorded an RTK choice (a snapshot from before
- *  RTK would keep the live RTK switch out of the plan), else the newest holding a snapshot. */
-export function pickSnapshotRow<R extends SnapshotRowFacts>(rows: readonly R[]): R | null {
+ *  RTK would keep the live RTK switch out of the plan), else the newest holding a snapshot. Once a
+ *  person switched RTK (`rtkChoiceMadeAt`) no snapshot is needed for that, so the newest holding one. */
+export function pickSnapshotRow<R extends SnapshotRowFacts>(
+  rows: readonly R[],
+  rtkChoiceMadeAt?: Date | null,
+): R | null {
   const newest = newestArtifactsFirst(rows);
-  return (
-    newest.find((r) => r.rtkRecorded === true) ?? newest.find((r) => r.hasSnapshot === true) ?? null
-  );
+  const recorded = isRtkChoiceRecorded(false, rtkChoiceMadeAt)
+    ? undefined
+    : newest.find((r) => r.rtkRecorded === true);
+  return recorded ?? newest.find((r) => r.hasSnapshot === true) ?? null;
 }
 
 export type HistoryOrigin =
@@ -144,7 +149,7 @@ export function renderContextOrigin<R extends SnapshotRowFacts>(input: {
       rtkRecorded: isRtkChoiceRecorded(column.column.rtkChoiceRecorded, rtkChoiceMadeAt),
     };
   }
-  const row = pickSnapshotRow(input.rows);
+  const row = pickSnapshotRow(input.rows, rtkChoiceMadeAt);
   if (row) {
     return {
       from: 'snapshot',
