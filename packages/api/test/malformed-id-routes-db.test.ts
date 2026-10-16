@@ -19,6 +19,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
   configService: {
     get: async () => null,
     getBoolean: async (_key: string, fallback: boolean) => fallback,
+    getEncryptionKey: async () => Buffer.alloc(32),
   },
 }));
 
@@ -190,6 +191,52 @@ describe.skipIf(!url)('a request whose path id is not a uuid, on Postgres', () =
         expect(res.status).toBe(400);
         expect(await res.json()).toEqual({ error: 'credentialId is required', code: null });
       }
+    });
+  });
+
+  describe('an audit or price-history query value an administrator sends malformed', () => {
+    let adminCookie: string;
+    const asAdmin = (path: string) =>
+      app.request(path, { headers: { host: 'localhost:3001', cookie: adminCookie } });
+
+    beforeAll(async () => {
+      const [admin] = await db
+        .insert(schema.users)
+        .values({
+          emailEncrypted: 'malformed-id-routes-admin@test.local',
+          emailBlindIndex: randomBytes(16).toString('hex'),
+          passwordHash: 'not-a-real-hash',
+          role: 'admin',
+        })
+        .returning({ id: schema.users.id });
+      userIds.push(admin!.id);
+      adminCookie = `${ACCESS_COOKIE}=${await signAccessToken({ sub: admin!.id, role: 'admin', tv: 0 })}`;
+    });
+
+    it.each([
+      ['/admin/audit?actorUserId=abc', 'actorUserId must be a UUID'],
+      [
+        '/cli-pricing/history?modelKey=some-model&provider=nope',
+        'provider must be a CLI provider name',
+      ],
+    ])('answers GET %s with 400 and does not log', async (path, error) => {
+      const res = await asAdmin(path);
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error, code: null });
+      expect(logged).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      `/admin/audit?actorUserId=${randomUUID()}`,
+      '/admin/audit?actorUserId=',
+      '/cli-pricing/history?modelKey=some-model&provider=codex',
+      '/cli-pricing/history?modelKey=some-model',
+    ])('keeps answering GET %s with 200 (passes before and after)', async (path) => {
+      const res = await asAdmin(path);
+
+      expect(res.status).toBe(200);
+      expect(logged).not.toHaveBeenCalled();
     });
   });
 
