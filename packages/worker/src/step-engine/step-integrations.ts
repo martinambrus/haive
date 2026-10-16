@@ -26,7 +26,6 @@ import { promptStepIntegrations } from './steps/custom/prompt-step.js';
 export const INTEGRATION_UNRESOLVED_REASON = 'integration-unresolved';
 export const INTEGRATION_PROVIDER_PINNED_REASON = 'integration-provider-pinned';
 export const INTEGRATION_REQUIREMENT_INVALID_REASON = 'integration-requirement-invalid';
-export const INTEGRATION_PROVIDER_UNSUPPORTED_REASON = 'integration-provider-unsupported';
 export const INTEGRATION_TOOLS_UNLISTABLE_REASON = 'integration-tools-unlistable';
 export const INTEGRATIONS_NO_SIGNING_KEY_REASON = 'integrations-no-signing-key';
 
@@ -137,38 +136,6 @@ function unresolvedFailure(resolutions: readonly IntegrationResolution[]): strin
     : null;
 }
 
-/** The api refuses calls to a module provider, so none is given to a step: a required requirement that resolved to one fails, an optional one is left out. */
-function withoutModuleProviders(
-  requirements: readonly IntegrationRequirement[],
-  resolutions: readonly IntegrationResolution[],
-): { resolutions: IntegrationResolution[]; failure: string | null } {
-  const optional = new Set(
-    requirements.flatMap((requirement) => (requirement.optional ? [requirement.id] : [])),
-  );
-  const lost: string[] = [];
-  const kept = resolutions.filter((resolution) => {
-    if (
-      resolution.status !== 'resolved' ||
-      parseProviderId(resolution.providerId)?.kind !== 'module'
-    ) {
-      return true;
-    }
-    if (!optional.has(resolution.requirementId)) {
-      lost.push(
-        `${resolution.requirementId} (${resolution.categoryId}) resolved to the module provider ${resolution.providerId}`,
-      );
-    }
-    return false;
-  });
-  return {
-    resolutions: kept,
-    failure:
-      lost.length > 0
-        ? `${INTEGRATION_PROVIDER_UNSUPPORTED_REASON}: ${lost.join('; ')}. Module providers cannot run calls yet. Choose another provider, then retry the step.`
-        : null,
-  };
-}
-
 export async function resolveDispatchIntegrations(
   db: Database,
   taskId: string,
@@ -181,11 +148,9 @@ export async function resolveDispatchIntegrations(
       failure: `${INTEGRATION_PROVIDER_PINNED_REASON}: ${pinned.id} pins the provider ${pinned.provider}, and a step cannot be given a pinned provider yet.`,
     };
   }
-  const found = await resolveStepIntegrations(db, { taskId }, requirements);
-  const unresolved = unresolvedFailure(found);
+  const resolutions = await resolveStepIntegrations(db, { taskId }, requirements);
+  const unresolved = unresolvedFailure(resolutions);
   if (unresolved !== null) return { ok: false, failure: unresolved };
-  const { resolutions, failure } = withoutModuleProviders(requirements, found);
-  if (failure !== null) return { ok: false, failure };
   const bindings = bindingsOf(resolutions);
   if (bindings.length === 0) return { ok: true, bindings, resolutions };
   if (!process.env.CONFIG_ENCRYPTION_KEY) {
@@ -213,11 +178,9 @@ export async function insertStampedRun(
 ): Promise<typeof schema.cliInvocations.$inferSelect | { failure: string }> {
   return db.transaction(async (tx) => {
     await lockTaskIntegrations(tx, taskId);
-    const found = await resolveStepIntegrations(tx, { taskId }, requirements);
-    const unresolved = unresolvedFailure(found);
+    const resolutions = await resolveStepIntegrations(tx, { taskId }, requirements);
+    const unresolved = unresolvedFailure(resolutions);
     if (unresolved !== null) return { failure: unresolved };
-    const { resolutions, failure } = withoutModuleProviders(requirements, found);
-    if (failure !== null) return { failure };
     await recordTaskGrants(tx, taskId, resolutions);
     const bindings = bindingsOf(resolutions);
     return insertOwnedRun(tx, stepRowId, {
