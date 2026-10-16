@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
@@ -23,7 +24,8 @@ if (url && !new URL(url).pathname.startsWith('/module_teardown_test'))
 
 const OFF = new Date('2026-10-14T08:00:00.000Z');
 const GONE = new Date('2026-10-14T07:00:00.000Z');
-const DB_MODULE = 'teardown-test-db';
+// A module database is named server-wide, so each run needs its own id (23 characters at most).
+const DB_MODULE = `teardown-test-db-${randomBytes(3).toString('hex')}`;
 
 type Hook = NonNullable<WorkerModuleEntry['teardown']>;
 

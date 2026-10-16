@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { eq, inArray, like, sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { Redis } from 'ioredis';
@@ -56,8 +57,9 @@ import type { AppEnv } from '../src/context.js';
 
 const ACTOR = '00000000-0000-4000-8000-0000000000a1';
 const USER_EMAIL_INDEX = 'module-purge-api-test-user';
-const ID = 'fixture';
-const OTHER = 'fixture-two';
+// A module database is named server-wide, so each run needs its own ids.
+const ID = `fixture-${randomBytes(3).toString('hex')}`;
+const OTHER = `${ID}-two`;
 const GONE = new Date('2026-10-14T08:00:00.000Z');
 const KEYS = {
   global: `config:module:${ID}:global:a`,
@@ -384,8 +386,8 @@ describe.skipIf(!url || !redisUrl)('POST /modules/:id/purge on Postgres and Redi
       ['an empty body', {}],
       ['a confirmation that is not a string', { confirm: 7 }],
       ['the wrong id', { confirm: OTHER }],
-      ['the id in another case', { confirm: 'Fixture' }],
-      ['the id with a space', { confirm: 'fixture ' }],
+      ['the id in another case', { confirm: ID.toUpperCase() }],
+      ['the id with a space', { confirm: `${ID} ` }],
       ['an empty confirmation', { confirm: '' }],
     ])('%s: 400', async (_label, body) => {
       await refused(await send(ID, body), 400, 'confirm_mismatch');
