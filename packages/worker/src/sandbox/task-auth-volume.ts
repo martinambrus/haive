@@ -37,20 +37,29 @@ function userVolumeForCtx(ctx: ProviderAuthCtx, idx: number): string {
  *  project-level RTK.md + AGENTS.md @-ref written by step 07 is its only integration).
  *
  *  Whole argument lists rather than one mode flag, because `--auto-patch` is NOT universal
- *  and pretending it was is what broke this. MEASURED against rtk 0.37.2 in the sandbox
- *  image, each combination run against a scratch HOME:
+ *  and pretending it was is what broke this. MEASURED against rtk 0.37.2 and again against
+ *  1.0.1 in the sandbox image, each combination run against a scratch HOME, with the same
+ *  results on both:
  *
  *    `-g --auto-patch`            exit 0  writes ~/.claude/{RTK.md,settings.json,CLAUDE.md}
  *    `-g --auto-patch --gemini`   exit 0  writes ~/.gemini/{GEMINI.md,hooks/,settings.json}
  *    `-g --gemini`                exit 0  but PROMPTS for the settings.json patch, and the
  *                                        helper has no tty, so the hook is never registered
  *    `-g --auto-patch --codex`    exit 1  "--codex cannot be combined with --auto-patch"
- *    `-g --codex`                 exit 0  writes ~/.codex/{RTK.md,AGENTS.md}
+ *    `-g --codex`                 exit 0  writes ~/.codex/{RTK.md,AGENTS.md}, and from 1.0
+ *                                        hooks.json, a PreToolUse hook on `rtk hook codex`
  *
  *  `--auto-patch` patches Claude Code's settings.json, and `--codex` is documented as "no
  *  Claude hook patching", so rtk rejects the pair outright — codex had been asking for both
  *  since this was written and rtk never ran for it. It is REQUIRED for the other two, which
  *  otherwise stop at an interactive prompt nothing can answer.
+ *
+ *  From 1.0 codex's shell commands are rewritten as well: codex 0.152 runs that hooks.json (its
+ *  `hooks` feature is stable and on), and Haive runs codex with
+ *  `--dangerously-bypass-approvals-and-sandbox`, so the rewrite raises no approval. Gemini's hook
+ *  answers `ask_user` from 1.0 where 0.37.2 answered `allow`; gemini's hook aggregator counts only
+ *  `ask` as asking, so the command still runs. A task whose own image runs an rtk without the
+ *  hook its CLI calls is not seeded at all (`imageRunsRtkHook`).
  *
  *  `ollama` sits with the claude family because it IS the claude binary pointed at another
  *  endpoint (see docs/architecture/cli-adapters.md) and its authConfigPaths are `~/.claude`,

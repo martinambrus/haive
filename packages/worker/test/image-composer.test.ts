@@ -182,10 +182,10 @@ describe('composeSandboxImage', () => {
         provider: claudeCodeProvider,
       });
       expect(result.dockerfileBody).toContain(
-        'https://github.com/rtk-ai/rtk/releases/download/v0.37.2/rtk-x86_64-unknown-linux-musl.tar.gz',
+        'https://github.com/rtk-ai/rtk/releases/download/v1.0.1/rtk-x86_64-unknown-linux-musl.tar.gz',
       );
       expect(result.dockerfileBody).toContain(
-        'https://github.com/rtk-ai/rtk/releases/download/v0.37.2/checksums.txt',
+        'https://github.com/rtk-ai/rtk/releases/download/v1.0.1/checksums.txt',
       );
       expect(result.dockerfileBody).toContain('sha256sum -c -');
       expect(result.dockerfileBody).toContain('install -m 0755');

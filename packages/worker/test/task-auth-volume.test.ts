@@ -721,7 +721,7 @@ describe('seedRtkInTaskVolume', () => {
   });
 
   it('asks gemini for the auto-patch, which is what answers its settings.json prompt', async () => {
-    // MEASURED on rtk 0.37.2: `-g --gemini` alone stops at "Patch settings.json? [y/N]" and
+    // MEASURED on rtk 0.37.2 and 1.0.1: `-g --gemini` alone stops at "Patch settings.json? [y/N]" and
     // the helper has no tty, so the hook is never registered.
     const runner = makeRunner();
     await seedRtkInTaskVolume('task-rtk-3', 'gemini', null, runner);

@@ -50,8 +50,14 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 # runs on glibc too; aarch64 has no asset, so we skip cleanly on non-x86_64 (the
 # per-CLI hook entries we still write in those repos will be no-ops since the
 # binary won't resolve on PATH).
-ARG RTK_RELEASE_VERSION=v0.37.2
-ARG RTK_X86_64_MUSL_SHA256=3dfb7a05636a68687ba1c5aa696fa8d5fcb494447ded86d9eb8b88b7100a37c6
+#
+# From 1.0 this default `rtk-<target>` asset links rtk-engine under BUSL-1.1 (the
+# CLI itself stays Apache-2.0). Its grant allows production use without charge,
+# a company's internal platform included, but not offering rtk to third parties
+# as a paid or hosted product or service. `rtk-oss-<target>` (1.0+) is the
+# Apache-2.0 edition with the same hooks and filters, minus the engine.
+ARG RTK_RELEASE_VERSION=v1.0.1
+ARG RTK_X86_64_MUSL_SHA256=5b919c3bccb799b67a61866d0e617410a4fcdf173e2614440e59de2fa2003436
 RUN set -eux; \
     arch="$(uname -m)"; \
     case "$arch" in \
