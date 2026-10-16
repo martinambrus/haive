@@ -253,10 +253,13 @@ both logs with detached ones included, so the panel opens for a task whose only 
 whose step rows are gone (`showsToolUsage`, `web/src/lib/call-log-cells.ts`); with no run in the
 rollup the total row shows a dash, not 0, in every column read from runs, and the footer says so
 (`web/src/components/task-tool-usage-table.tsx`). It also answers `runningCallCount`, those rows still
-`running`, from the same query; the panel (`TaskToolUsagePanel`) reads the usage again whenever either
-count changes on the page's 2 s poll, so a call that settles or a new call shows while the task runs.
-The columns read from runs refresh only then and when the task ends. A `running` count that never
-settles is a call a crash left unfinished.
+`running`, from the same query, and `finishedRunCount` (`loadFinishedRunCount`,
+`api/src/routes/tasks/_helpers.ts`): the rollup's own runs (`rolledUpRunsOf`, the predicate both
+routes share) that have an `ended_at`, which the worker's result update writes together with
+`tool_usage`. The panel (`TaskToolUsagePanel`) reads the usage again whenever any of the three changes
+on the page's 2 s poll, so a call that settles, a new call or a run that finishes shows while the task
+runs. A run cancelled in flight, or a record the boot backfill fills on an ended run, moves no count;
+those show when the task ends. A `running` count that never settles is a call a crash left unfinished.
 
 **The unused report compares what is installed with what the runs used, and it reads the
 installed half from disk by NAME only.** `shared/src/stats-server/tool-inventory.ts` walks the catalog's
