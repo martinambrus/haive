@@ -1,26 +1,45 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { VendorError, createVendorClient, tokenForms } from '../src/lib/module-vendor-client.js';
+import { VendorError, createVendorClient, redactSecrets } from '../src/lib/module-vendor-client.js';
 
 const TOKEN = 'tok-0123456789abcdef';
+const ODD_TOKEN = 'ab+cd/ef==';
 const HOST = 'docs.example.test';
 const urlOf = (path = '/v1/docs') => `https://${HOST}${path}`;
 
 type Body = ConstructorParameters<typeof Response>[0];
+type Access = 'read' | 'write';
 
 const reply = (status: number, body: Body, contentType = 'application/json') =>
   new Response(body, { status, headers: { 'content-type': contentType } });
 
-function clientFor(answer: Response | Error, apiHosts: string[] = [HOST]) {
-  const sent = vi.fn(async () => {
+const lowerEscapes = (text: string) =>
+  text.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
+
+// How a vendor's encoder may write a token that holds + / =.
+const spellingsOf = (token: string): Array<[string, string]> => [
+  ['as it is', token],
+  ['PHP-escaped', token.replaceAll('/', '\\/')],
+  ['.NET-escaped', token.replaceAll('+', '\\u002B')],
+  ['upper-case percent-encoded', encodeURIComponent(token)],
+  ['lower-case percent-encoded', lowerEscapes(encodeURIComponent(token))],
+];
+
+function clientFor(answer: Response | Error, apiHosts: string[] = [HOST], access: Access = 'read') {
+  const sent = vi.fn(async (_target: URL, _init: RequestInit) => {
     if (answer instanceof Error) throw answer;
     return answer;
   });
   vi.stubGlobal('fetch', sent);
   return {
     sent,
-    vendor: createVendorClient({ token: TOKEN, apiHosts, signal: new AbortController().signal }),
+    vendor: createVendorClient({
+      token: TOKEN,
+      apiHosts,
+      access,
+      signal: new AbortController().signal,
+    }),
   };
 }
 
@@ -44,6 +63,76 @@ describe('the vendor client of the module executors', () => {
     expect(error.reason).toBe('vendor-host-refused');
     expect(sent).not.toHaveBeenCalled();
   });
+
+  it.each([8443, 444, 80, 65535])(
+    'refuses port %i of a declared host as vendor-host-refused, and sends nothing',
+    async (port) => {
+      const { sent, vendor } = clientFor(reply(200, '{}'));
+
+      const error = await failure(
+        vendor.request({ method: 'GET', url: `https://${HOST}:${port}/v1/docs` }),
+      );
+
+      expect(error.reason).toBe('vendor-host-refused');
+      expect(sent).not.toHaveBeenCalled();
+    },
+  );
+
+  it('serves port 443 written out, which is the https default', async () => {
+    const { sent, vendor } = clientFor(reply(200, '{}'));
+
+    await vendor.request({ method: 'GET', url: `https://${HOST}:443/v1/docs` });
+
+    expect(String(sent.mock.calls[0]![0])).toBe(`https://${HOST}/v1/docs`);
+  });
+
+  it.each(['host', 'Host', 'HOST'])(
+    'never passes a caller %s header on, and sends the other headers',
+    async (name) => {
+      const { sent, vendor } = clientFor(reply(200, '{}'));
+
+      await vendor.request({
+        method: 'GET',
+        url: urlOf(),
+        headers: { [name]: 'evil.example.test', accept: 'application/json' },
+      });
+
+      const headers = sent.mock.calls[0]![1].headers as Headers;
+      expect([...headers.keys()].sort()).toEqual(['accept', 'authorization']);
+      expect(headers.get('authorization')).toBe(`Bearer ${TOKEN}`);
+    },
+  );
+
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'post', 'Delete'])(
+    'refuses %s of a read operation as vendor-method-refused, and sends nothing',
+    async (method) => {
+      const { sent, vendor } = clientFor(reply(200, '{}'), [HOST], 'read');
+
+      const error = await failure(vendor.request({ method, url: urlOf(), json: { a: 1 } }));
+
+      expect(error.reason).toBe('vendor-method-refused');
+      expect(sent).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['GET', 'HEAD', 'get', 'head'])('sends %s of a read operation', async (method) => {
+    const { sent, vendor } = clientFor(reply(200, '{}'), [HOST], 'read');
+
+    await vendor.request({ method, url: urlOf() });
+
+    expect(sent).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'])(
+    'sends %s of a write operation',
+    async (method) => {
+      const { sent, vendor } = clientFor(reply(200, '{}'), [HOST], 'write');
+
+      await vendor.request({ method, url: urlOf() });
+
+      expect(sent).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each([
     ['application/json', '{"a":1}', { a: 1 }],
@@ -81,6 +170,7 @@ describe('the vendor client of the module executors', () => {
     const vendor = createVendorClient({
       token: 'tok-0123456789\nabcdef',
       apiHosts: [HOST],
+      access: 'read',
       signal: new AbortController().signal,
     });
 
@@ -117,6 +207,7 @@ describe('the vendor client of the module executors', () => {
     const vendor = createVendorClient({
       token: odd,
       apiHosts: [HOST],
+      access: 'read',
       signal: new AbortController().signal,
     });
 
@@ -124,6 +215,26 @@ describe('the vendor client of the module executors', () => {
 
     expect(error.message).toBe('the vendor answered 500: [redacted] [redacted] [redacted]');
   });
+
+  it.each(spellingsOf(ODD_TOKEN))(
+    'removes the token from an error body that echoes it %s',
+    async (_name, echo) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => reply(400, `{"error":"bad credential ${echo}"}`)),
+      );
+      const vendor = createVendorClient({
+        token: ODD_TOKEN,
+        apiHosts: [HOST],
+        access: 'read',
+        signal: new AbortController().signal,
+      });
+
+      const error = await failure(vendor.request({ method: 'GET', url: urlOf() }));
+
+      expect(error.message).toBe('the vendor answered 400: {"error":"bad credential [redacted]"}');
+    },
+  );
 
   it('fails an answer larger than 8 MiB without reading all of it', async () => {
     const chunk = new Uint8Array(1024 * 1024).fill(0x61);
@@ -157,6 +268,7 @@ describe('the vendor client of the module executors', () => {
     const vendor = createVendorClient({
       token: TOKEN,
       apiHosts: [HOST],
+      access: 'read',
       signal: new AbortController().signal,
     });
 
@@ -168,10 +280,82 @@ describe('the vendor client of the module executors', () => {
     expect(redirected.reason).toBe('vendor-redirect-refused');
     expect(refused.reason).toBe('vendor-error');
   });
+});
 
-  it('lists the forms of a token a vendor may echo, longest first, each once', () => {
-    expect(tokenForms('abc')).toEqual(['abc']);
-    expect(tokenForms('a b"c')).toEqual(['a%20b%22c', 'a b\\"c', 'a b"c']);
-    expect(tokenForms('')).toEqual([]);
+describe('redactSecrets', () => {
+  it.each(spellingsOf(ODD_TOKEN))(
+    'removes a token written %s, in the text and inside a JSON string of it',
+    (_name, echo) => {
+      const text = `note ${echo} end`;
+
+      expect(redactSecrets(text, [ODD_TOKEN])).toBe('note [redacted] end');
+      expect(redactSecrets(JSON.stringify({ body: text }), [ODD_TOKEN])).toBe(
+        JSON.stringify({ body: 'note [redacted] end' }),
+      );
+    },
+  );
+
+  it('reads each character of the token its own way, a percent escape of either case among them', () => {
+    expect(redactSecrets('ab\\u002bcd\\/ef%3D%3d', [ODD_TOKEN])).toBe('[redacted]');
+    expect(redactSecrets('ab%2Bcd/ef\\u003d=', [ODD_TOKEN])).toBe('[redacted]');
+  });
+
+  it('removes a token with a quote, a backslash and non-ASCII characters in every way it can be written', () => {
+    const odd = `a"b\\c\u00e9\u20ac${String.fromCodePoint(0x1f600)} z`;
+    const written = [
+      odd,
+      JSON.stringify(odd).slice(1, -1),
+      encodeURIComponent(odd),
+      lowerEscapes(encodeURIComponent(odd)),
+    ];
+
+    expect(redactSecrets(written.join(' | '), [odd])).toBe(
+      '[redacted] | [redacted] | [redacted] | [redacted]',
+    );
+  });
+
+  it('leaves every other escape, in text or in JSON, and a near miss as they are', () => {
+    const text = '{"a":"\\u0041 %41 \\/ \\n","b":"ab+cd/ef=","c":"ab+cd/e"}';
+
+    expect(redactSecrets(text, [ODD_TOKEN])).toBe(text);
+  });
+
+  it('removes the longer secret whole when a shorter one starts it, and every secret there is', () => {
+    expect(redactSecrets('1 abcdef 2 abc 3 xyz', ['abc', 'xyz', 'abcdef'])).toBe(
+      '1 [redacted] 2 [redacted] 3 [redacted]',
+    );
+  });
+
+  it('has nothing to remove for no secret or an empty one', () => {
+    expect(redactSecrets('plain text', [])).toBe('plain text');
+    expect(redactSecrets('plain text', [''])).toBe('plain text');
+  });
+
+  it.each([
+    ['a start of the token', 'ab+c'],
+    ['a start of the token that ends in a slash', 'ab+cd/'],
+    ['a start of the lower-case percent-encoded form', 'ab%2bcd%2fef%3'],
+    ['half a percent escape', 'ab%2bcd%'],
+    ['half an escape of the .NET form', 'ab\\u002Bcd/ef\\u00'],
+    ['a start of the PHP form with its backslash', 'ab+cd\\'],
+    ['half an escape of the last character', 'ab+cd/ef=%3'],
+  ])('removes %s that a cut left at the end', (_name, tail) => {
+    expect(redactSecrets(`read ${tail}`, [ODD_TOKEN], true)).toBe('read [redacted]');
+  });
+
+  it('removes the start of a token of 3600 characters that a cut left at the end, however long it is', () => {
+    const token = 'ab+/'.repeat(900);
+
+    expect(redactSecrets(`read ${token.slice(0, 3500)}`, [token], true)).toBe('read [redacted]');
+  });
+
+  it('reads the %2 of a cut as half of the escape of a percent sign in the token, not as a percent sign', () => {
+    expect(redactSecrets('read ab%2', ['ab%cd'], true)).toBe('read [redacted]');
+    expect(redactSecrets('read ab%25c', ['ab%cd'], true)).toBe('read [redacted]');
+  });
+
+  it('keeps the end of a text that only looks like the start of a token, and every end when no cut was made', () => {
+    expect(redactSecrets('read ab+x', [ODD_TOKEN], true)).toBe('read ab+x');
+    expect(redactSecrets('read ab+c', [ODD_TOKEN])).toBe('read ab+c');
   });
 });

@@ -44,10 +44,9 @@ import {
   INTEGRATION_CALL_DEADLINE_MS,
 } from '../lib/integration-call-limits.js';
 import {
-  REDACTED,
   VendorError,
   createVendorClient,
-  tokenForms,
+  redactSecrets,
   type VendorReason,
 } from '../lib/module-vendor-client.js';
 import {
@@ -199,8 +198,8 @@ const secretsOf = ({ accessToken, username }: ConnectionCredential): string[] =>
     .filter((secret) => secret.length > 0)
     .sort((a, b) => b.length - a.length);
 
-const redact = (text: string, secrets: readonly string[]): string =>
-  secrets.reduce((out, secret) => out.split(secret).join(REDACTED), text);
+const textOf = (result: unknown, secrets: readonly string[]): string =>
+  redactSecrets(JSON.stringify(result) ?? 'null', secrets);
 
 function failureOf(
   err: unknown,
@@ -218,7 +217,7 @@ function failureOf(
     return {
       status: 502,
       reason: vendorReason(err),
-      message: redact(err.message, secrets).slice(0, ERROR_TEXT_MAX_LENGTH),
+      message: redactSecrets(err.message, secrets).slice(0, ERROR_TEXT_MAX_LENGTH),
     };
   }
   return { status: 500, reason: 'internal-error', message: 'the integration call failed' };
@@ -336,7 +335,7 @@ integrationMcpRoutes.post('/call', async (c) => {
       reason: failure.reason,
     };
     if (failure.reason === 'internal-error') {
-      const detail = redact(
+      const detail = redactSecrets(
         err instanceof Error ? (err.stack ?? err.message) : String(err),
         secrets,
       );
@@ -414,27 +413,41 @@ integrationMcpRoutes.post('/call', async (c) => {
     }
 
     const { accessToken } = await credentialOf(connection.id);
-    const forms = tokenForms(accessToken);
     const callId = await claim('running', null);
     const deadline = AbortSignal.timeout(INTEGRATION_CALL_DEADLINE_MS);
+    // A run that ignores its signal is raced against the deadline; `done` stops what it started once the call is recorded.
+    const done = new AbortController();
+    const signal = AbortSignal.any([deadline, done.signal]);
+    const expired = new Promise<never>((_resolve, reject) => {
+      deadline.addEventListener('abort', () => reject(deadline.reason), {
+        once: true,
+        signal: done.signal,
+      });
+    });
     let text: string;
     try {
-      const result = await executor.run({
-        args: args.data,
-        vendor: createVendorClient({
-          token: accessToken,
-          apiHosts: getIntegrationProvider(binding.providerId)?.apiHosts ?? [],
-          signal: deadline,
+      const result = await Promise.race([
+        executor.run({
+          args: args.data,
+          vendor: createVendorClient({
+            token: accessToken,
+            apiHosts: getIntegrationProvider(binding.providerId)?.apiHosts ?? [],
+            access: op.access,
+            signal,
+          }),
+          signal,
+          account: {
+            label: connection.accountLabel,
+            externalAccountId: connection.externalAccountId,
+          },
         }),
-        signal: deadline,
-        account: {
-          label: connection.accountLabel,
-          externalAccountId: connection.externalAccountId,
-        },
-      });
-      text = cutToBytes(redact(JSON.stringify(result) ?? 'null', forms), RESULT_TEXT_MAX_BYTES);
+        expired,
+      ]);
+      text = cutToBytes(textOf(result, [accessToken]), RESULT_TEXT_MAX_BYTES);
     } catch (err) {
-      return fail(err, callId, deadline, forms);
+      return fail(err, callId, deadline, [accessToken]);
+    } finally {
+      done.abort();
     }
     await finish(callId, 'ok', null);
     return c.json({ ok: true, text });
@@ -497,5 +510,5 @@ integrationMcpRoutes.post('/call', async (c) => {
     return fail(err, callId, deadline, secretsOf(credential));
   }
   await finish(callId, 'ok', null);
-  return c.json({ ok: true, text: JSON.stringify(result) });
+  return c.json({ ok: true, text: textOf(result, secretsOf(credential)) });
 });
