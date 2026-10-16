@@ -289,7 +289,10 @@ DELETE take first), resolves again, records the grants from that resolution and 
 stamped with its bindings; a required binding lost since the first resolution writes nothing and
 fails the step, and so does an account a prompt step's template names (`{{integration:<id>.account}}`)
 that now resolves to another connection than the prompt was built on, or appeared or went away
-(`integration-account-changed`). In a fan-out only the first run goes
+(`integration-account-changed`). A dispatch whose first resolution bound nothing (every requirement
+optional and unresolved) inserts its run unstamped with no second resolution, so the prompt's
+`(no account connected)` holds for that run and an account connected meanwhile applies from the next
+dispatch. In a fan-out only the first run goes
 through it: that run's stamp is the fan-out's, and every later agent is inserted with the same
 bindings, with no second resolution and no grant write, so a choice changed meanwhile applies from the
 next dispatch (an agent can then carry an account removed after the first insert, and the broker
