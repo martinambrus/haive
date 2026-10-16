@@ -1,6 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
   decideTaskWorktree,
@@ -421,6 +421,17 @@ export async function findActiveCliInvocation(
   return rows[0] ?? null;
 }
 
+/** The runs of a task that GET /tasks/:id/tool-usage rolls up: not replaced, attributed to a step
+ *  or to a step's recap. */
+export function rolledUpRunsOf(taskId: string): SQL {
+  const inv = schema.cliInvocations;
+  return and(
+    eq(inv.taskId, taskId),
+    isNull(inv.supersededAt),
+    or(isNotNull(inv.taskStepId), isNotNull(inv.summaryForStepId)),
+  )!;
+}
+
 /** Runs of the task whose result has landed: the ones GET /tasks/:id/tool-usage rolls up, once
  *  they have an end. The result handler sets `tool_usage` in the same update as `ended_at`. */
 export async function loadFinishedRunCount(
@@ -430,17 +441,7 @@ export async function loadFinishedRunCount(
   const [row] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(schema.cliInvocations)
-    .where(
-      and(
-        eq(schema.cliInvocations.taskId, taskId),
-        isNull(schema.cliInvocations.supersededAt),
-        isNotNull(schema.cliInvocations.endedAt),
-        or(
-          isNotNull(schema.cliInvocations.taskStepId),
-          isNotNull(schema.cliInvocations.summaryForStepId),
-        ),
-      ),
-    );
+    .where(and(rolledUpRunsOf(taskId), isNotNull(schema.cliInvocations.endedAt)));
   return row?.n ?? 0;
 }
 
