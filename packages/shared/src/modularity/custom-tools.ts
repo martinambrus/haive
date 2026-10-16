@@ -1,11 +1,11 @@
 import { z } from 'zod';
 import { collapseToLine } from '../utils/collapse-line.js';
 import { HIDDEN_CHARACTER } from '../utils/hidden-characters.js';
-import { TOOL_NAME_PATTERN } from './contracts.js';
+import { TOOL_NAME_MAX_LENGTH, TOOL_NAME_PATTERN } from './contracts.js';
 
 export const CUSTOM_TOOLS_MAX_PER_STEP = 8;
 export const CUSTOM_TOOL_PARAMS_MAX = 10;
-export const CUSTOM_TOOL_NAME_MAX_LENGTH = 40;
+export const CUSTOM_TOOL_NAME_MAX_LENGTH = TOOL_NAME_MAX_LENGTH;
 export const CUSTOM_TOOL_RESERVED_NAMES: readonly string[] = [
   'rag_search',
   'ddev_status',
