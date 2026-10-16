@@ -46,8 +46,13 @@ env-template image installs the repository's pin. A 1.0 seed writes codex a PreT
 `rtk hook codex`, which 0.x rejects with exit 2 and a usage error on stderr, and codex takes that
 as the hook blocking the tool call, so every shell command of a codex task pinned to 0.x would be
 refused. `resolveAuthMounts` therefore takes the image the CLI runs in, and the seed first asks
-that image (`imageRunsRtkHook`: `rtk hook <agent> --help`, by exit code, once per image) and
-leaves a CLI whose image cannot run its hook unseeded.
+that image (`imageRunsRtkHook`: `rtk hook <agent> --help`, by exit code, once per image). A CLI
+whose image runs its hook is seeded; one whose image cannot has rtk taken back out
+(`rtk init -g … --uninstall`, which removes only what its init wrote), since a seed for an
+earlier image of the same task may have written the hook. The seed is recorded per image, the
+slot's last-applied identity, because the image can change mid-task: a repository's rtk pin can
+move, and the next invocation then composes another image. A failed removal is not recorded, so
+the next invocation tries again.
 
 Two consequences worth keeping. The ensure is a no-op whenever `SANDBOX_IMAGE` names
 something other than the core tag, because building ours over an operator's pinned image

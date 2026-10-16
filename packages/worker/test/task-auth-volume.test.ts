@@ -807,7 +807,7 @@ describe('seedRtkInTaskVolume', () => {
   // env-template image installs the repository's pin. MEASURED: 0.37.2 has no `hook codex` and
   // rejects it with exit 2 and a usage error on stderr, which codex takes as a hook blocking
   // the tool call, so a 1.0 seed blocked every shell command of a codex task pinned to 0.x.
-  it('does not seed a CLI whose image runs no `rtk hook` for it', async () => {
+  it('takes rtk back out for a CLI whose image runs no `rtk hook` for it', async () => {
     const runner = makeRunner({
       runHandler: (o) => ({
         exitCode: o.cmd[2]?.includes('rtk hook codex --help') ? 2 : 0,
@@ -818,9 +818,54 @@ describe('seedRtkInTaskVolume', () => {
       }),
     });
     await seedRtkInTaskVolume('task-rtk-old-pin', 'codex', 'haive-sandbox:pinned-0x', runner);
-    expect(runner.runCalls).toHaveLength(1);
+    expect(runner.runCalls).toHaveLength(2);
     expect(runner.runCalls[0]?.image).toBe('haive-sandbox:pinned-0x');
     expect(runner.runCalls[0]?.cmd[2]).toContain('rtk hook codex --help');
+    expect(runner.runCalls[1]?.cmd[2]).toContain(`rtk init -g '--codex' '--uninstall'`);
+  });
+
+  // A repository's rtk pin can move mid-task, and its next invocation composes another image.
+  // Recorded per image, the seed follows that image's rtk both ways, and back again: a seed
+  // recorded per task left a 1.0 hook behind on a 0.x image, where codex blocks every command.
+  it('prepares the volume again whenever the task moves to another image', async () => {
+    const runner = makeRunner({
+      runHandler: (o) => ({
+        exitCode: o.image === 'haive-sandbox:moves-0x' && o.cmd[2]?.includes('--help') ? 2 : 0,
+        stdout: '',
+        stderr: '',
+        durationMs: 1,
+        timedOut: false,
+      }),
+    });
+    for (const image of ['moves-1x', 'moves-1x', 'moves-0x', 'moves-0x', 'moves-1x']) {
+      await seedRtkInTaskVolume('task-rtk-moves', 'codex', `haive-sandbox:${image}`, runner);
+    }
+    const preparations = runner.runCalls
+      .filter((c) => c.cmd[2]?.includes('rtk init -g'))
+      .map((c) => (c.cmd[2]!.includes('--uninstall') ? 'out' : 'in'));
+    expect(preparations).toEqual(['in', 'out', 'in']);
+  });
+
+  it('retries a removal that failed, since a hook left behind blocks the CLI', async () => {
+    let removals = 0;
+    const runner = makeRunner({
+      runHandler: (o) => {
+        const probe = o.cmd[2]?.includes('rtk hook codex --help') ?? false;
+        const removal = o.cmd[2]?.includes('--uninstall') ?? false;
+        if (removal) removals += 1;
+        return {
+          exitCode: probe ? 2 : removal && removals === 1 ? RTK_HELPER_INIT_FAILED_EXIT : 0,
+          stdout: '',
+          stderr: '',
+          durationMs: 1,
+          timedOut: false,
+        };
+      },
+    });
+    await seedRtkInTaskVolume('task-rtk-remove-retry', 'codex', 'haive-sandbox:retry-0x', runner);
+    await seedRtkInTaskVolume('task-rtk-remove-retry', 'codex', 'haive-sandbox:retry-0x', runner);
+    await seedRtkInTaskVolume('task-rtk-remove-retry', 'codex', 'haive-sandbox:retry-0x', runner);
+    expect(removals).toBe(2);
   });
 
   it('seeds a CLI whose image runs its `rtk hook`, asking each image once', async () => {

@@ -59,7 +59,7 @@ function userVolumeForCtx(ctx: ProviderAuthCtx, idx: number): string {
  *  `--dangerously-bypass-approvals-and-sandbox`, so the rewrite raises no approval. Gemini's hook
  *  answers `ask_user` from 1.0 where 0.37.2 answered `allow`; gemini's hook aggregator counts only
  *  `ask` as asking, so the command still runs. A task whose own image runs an rtk without the
- *  hook its CLI calls is not seeded at all (`imageRunsRtkHook`).
+ *  hook its CLI calls has rtk taken back out of its volume instead (`imageRunsRtkHook`).
  *
  *  `ollama` sits with the claude family because it IS the claude binary pointed at another
  *  endpoint (see docs/architecture/cli-adapters.md) and its authConfigPaths are `~/.claude`,
@@ -696,8 +696,10 @@ function imageRunsRtkHook(image: string, agent: string, runner: DockerRunner): P
  * the CLAUDE.md / AGENTS.md `@RTK.md` reference injection.
  *
  * `runtimeImage` is the image the CLI runs in, `null` when it runs the base itself (the
- * runInSandbox fallback). A CLI whose image runs no `rtk hook` for it is not seeded, since
- * the hooks would call a command its rtk rejects (`imageRunsRtkHook`).
+ * runInSandbox fallback), and the volume is prepared for that image: one whose rtk runs the
+ * CLI's hook is seeded, and one whose rtk cannot (`imageRunsRtkHook`) has rtk taken back out
+ * (`rtk init -g … --uninstall`), since a seed for an earlier image of the task may have
+ * written a hook that image's rtk rejects.
  *
  * No-op when the provider has no rtk-supported flag (amp); callers should
  * additionally skip this entirely when `repositories.rtk_enabled=false`.
@@ -712,17 +714,20 @@ export async function seedRtkInTaskVolume(
   runtimeImage: string | null,
   runner: DockerRunner = defaultDockerRunner,
 ): Promise<void> {
-  // The seed writes the same thing every time for a given provider, so its identity is the
-  // slot itself: applied once per task, not once per invocation.
-  await applyAuthPreparationOnce(rtkSeedRuns, `${taskId}|${providerName}|rtk`, 'seeded', () =>
-    seedRtkInTaskVolumeUnlocked(taskId, providerName, runtimeImage, runner),
+  // Its identity is the image: the same image is prepared once per task, not once per
+  // invocation, and the slot keeps the LAST image applied, so a task whose image changes is
+  // prepared again, every time it changes. A repository's rtk pin can move mid-task, and the
+  // next invocation then composes another image, whose rtk the hooks must follow.
+  const image = runtimeImage ?? HELPER_IMAGE;
+  await applyAuthPreparationOnce(rtkSeedRuns, `${taskId}|${providerName}|rtk`, image, () =>
+    seedRtkInTaskVolumeUnlocked(taskId, providerName, image, runner),
   );
 }
 
 async function seedRtkInTaskVolumeUnlocked(
   taskId: string,
   providerName: CliProviderName,
-  runtimeImage: string | null,
+  image: string,
   runner: DockerRunner,
 ): Promise<boolean> {
   const init = rtkInitFor(providerName);
@@ -731,21 +736,17 @@ async function seedRtkInTaskVolumeUnlocked(
     // Nothing to do for this provider, ever — record it so siblings do not re-derive it.
     return true;
   }
-  const initArgs = init.args;
   const meta = getCliProviderMetadata(providerName);
   if (meta.authConfigPaths.length === 0) {
     log.debug({ providerName }, 'rtk seed skipped: provider has no auth config paths');
     return true;
   }
-  const image = runtimeImage ?? HELPER_IMAGE;
-  if (!(await imageRunsRtkHook(image, init.hookAgent, runner))) {
-    log.warn(
-      { taskId, providerName, image, hookAgent: init.hookAgent },
-      "rtk seed skipped: the task's image runs an rtk without this CLI's hook",
-    );
-    // The image will not gain the hook mid-task, so record it: one warning per task.
-    return true;
-  }
+  // An image whose rtk cannot run the CLI's hook has rtk taken back OUT rather than left
+  // alone: a seed for an earlier image of this task may have written the hook, and codex
+  // blocks every shell command on one its rtk rejects. rtk's own uninstall removes only what
+  // its init wrote, and changes nothing in a volume it never seeded.
+  const supported = await imageRunsRtkHook(image, init.hookAgent, runner);
+  const initArgs = supported ? init.args : [...init.args, '--uninstall'];
 
   const mounts: DockerVolumeMount[] = meta.authConfigPaths.map((raw, idx) => ({
     source: cliAuthTaskVolumeName(taskId, providerName, idx),
@@ -791,6 +792,15 @@ async function seedRtkInTaskVolumeUnlocked(
     // rather than once per invocation of the fan-out.
     return true;
   }
+  if (result.exitCode === RTK_HELPER_INIT_FAILED_EXIT && !supported) {
+    // Unlike a failed seed, a failed removal can leave a hook that blocks the CLI, so it is
+    // not recorded and the next invocation tries again.
+    log.warn(
+      { taskId, providerName, image, stderr: result.stderr.slice(-500) },
+      'rtk removal failed — retrying at the next invocation',
+    );
+    return false;
+  }
   if (result.exitCode === RTK_HELPER_INIT_FAILED_EXIT) {
     log.warn(
       { taskId, providerName, args: initArgs, stderr: result.stderr.slice(-500) },
@@ -806,6 +816,13 @@ async function seedRtkInTaskVolumeUnlocked(
       'rtk seed helper exited non-zero',
     );
     return false;
+  }
+  if (!supported) {
+    log.warn(
+      { taskId, providerName, image, hookAgent: init.hookAgent },
+      "rtk taken out of the task auth volume: the task's image runs an rtk without this CLI's hook",
+    );
+    return true;
   }
   log.info({ taskId, providerName, args: initArgs }, 'rtk seeded in task auth volume');
   return true;
