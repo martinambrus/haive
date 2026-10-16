@@ -923,18 +923,16 @@ export async function resolveMergePhase(
     const metadata = { ...keptMetadataOf(kept), ...from.keptMetadata };
     return Object.keys(metadata).length > 0 ? { ...from, keptMetadata: metadata } : from;
   };
-  /** A cancelled task's merge was cleared: what its set-aside kept is saved into this step first. */
-  const clearedStale = async (dir: string, stale: OpenMerge): Promise<KeptMetadata> => {
-    const adopted = await takeLeftOpenKept(db, params.taskId, dir, stale, async (kept) => {
+  /** Saves into this step what a cancelled task's set-aside kept for the merge it left open in
+   *  `dir`, committed before that merge is aborted: once it is, nothing finds that task again. */
+  const takeStaleKept = (dir: string, stale: OpenMerge): Promise<KeptMetadata> =>
+    takeLeftOpenKept(db, params.taskId, dir, stale, async (kept) => {
       const row = await db.query.taskSteps.findFirst({
         where: eq(schema.taskSteps.id, current.id),
         columns: { mergeResolveState: true },
       });
       await saveMergeState(db, current.id, adoptKept(row!.mergeResolveState!, kept));
     });
-    current = await noteAbortedByNext(db, current, params.taskId, dir, stale);
-    return adopted;
-  };
 
   // --- init: snapshot the merge target + mode from the detect output ---
   if (!state) {
@@ -1059,16 +1057,18 @@ export async function resolveMergePhase(
       const held = staleOpen
         ? await relocateLeftOpenFixers(db, params.taskId, armed.mergeDir, staleOpen)
         : null;
-      if (held) return { kind: 'held' as const, held, armed };
+      if (held) return { kind: 'held' as const, held, armed, adopted: {} };
+      const adopted = staleOpen ? await takeStaleKept(armed.mergeDir, staleOpen) : {};
+      armed = adoptKept(armed, adopted);
       const cleared = await abortOtherMerge(armed.mergeDir, armed.featureBranch);
       const stale = cleared.ok ? await abortMerge(armed.mergeDir) : cleared;
-      if (!stale.ok) return { kind: 'unaborted' as const, stale, armed };
+      if (!stale.ok) return { kind: 'unaborted' as const, stale, armed, adopted };
       // Under the projection locks, so no sweep rewrites a file between this check and the merge.
       const again = repositoryId
         ? await restoreProjectionsInTx(tx, repositoryId, armed.mergeDir)
         : null;
       if (again && again.outcome !== 'clean') {
-        return { kind: 'aside' as const, again, armed, staleOpen };
+        return { kind: 'aside' as const, again, armed, staleOpen, adopted };
       }
       const opened = await openMerge(
         armed.mergeDir,
@@ -1091,9 +1091,11 @@ export async function resolveMergePhase(
         armed,
         staleOpen,
         warnings: settled.warnings,
+        adopted,
       };
     };
     let attempt = await mergeSection(repositoryId, pending.mergeDir, openPending);
+    pending = adoptKept(pending, attempt.adopted);
     // A file Haive rewrote since the set-aside sends it round again.
     for (
       let round = 1;
@@ -1104,7 +1106,13 @@ export async function resolveMergePhase(
       round++
     ) {
       if (attempt.staleOpen) {
-        pending = adoptKept(pending, await clearedStale(pending.mergeDir, attempt.staleOpen));
+        current = await noteAbortedByNext(
+          db,
+          current,
+          params.taskId,
+          pending.mergeDir,
+          attempt.staleOpen,
+        );
       }
       const refused = await setAside(repositoryId, pending.mergeDir);
       if (refused !== null) {
@@ -1114,6 +1122,7 @@ export async function resolveMergePhase(
         return haltFailed(db, current, why, 'haive files changed');
       }
       attempt = await mergeSection(repositoryId, pending.mergeDir, openPending);
+      pending = adoptKept(pending, attempt.adopted);
     }
     state = attempt.armed;
     if (attempt.kind === 'unaborted') {
@@ -1127,9 +1136,13 @@ export async function resolveMergePhase(
       return haltFailed(db, current, attempt.held, 'merge index held');
     }
     if (attempt.staleOpen) {
-      const adopted = await clearedStale(state.mergeDir, attempt.staleOpen);
-      pending = adoptKept(pending, adopted);
-      state = adoptKept(state, adopted);
+      current = await noteAbortedByNext(
+        db,
+        current,
+        params.taskId,
+        state.mergeDir,
+        attempt.staleOpen,
+      );
     }
     if (attempt.kind === 'aside') {
       await putBack(repositoryId, state.mergeDir);
@@ -1331,33 +1344,38 @@ export async function resolveMergePhase(
       const wasOpen = await peekOpenMerge(dir);
       const ours = wasOpen !== null && (await mergeOpenFor(dir, feature));
       const held = wasOpen ? await relocateLeftOpenFixers(db, params.taskId, dir, wasOpen) : null;
-      if (held) return { kind: 'held' as const, held };
-      const cleared = await abortOtherMerge(dir, feature);
-      if (!cleared.ok) return { kind: 'unaborted' as const, cleared };
+      if (held) return { kind: 'held' as const, held, adopted: {} };
       const staleOpen = ours ? null : wasOpen;
+      const adopted = staleOpen ? await takeStaleKept(dir, staleOpen) : {};
+      const cleared = await abortOtherMerge(dir, feature);
+      if (!cleared.ok) return { kind: 'unaborted' as const, cleared, adopted };
       if (!(await mergeOpenFor(dir, feature))) {
         const again = repositoryId ? await restoreProjectionsInTx(tx, repositoryId, dir) : null;
         if (again && again.outcome !== 'clean') {
-          return { kind: 'aside' as const, again, staleOpen };
+          return { kind: 'aside' as const, again, staleOpen, adopted };
         }
         const opened = await openMerge(dir, feature, ['-m', `Merge ${feature}`], commitEnv);
-        if (opened.kind === 'merged') return { kind: 'merged' as const, staleOpen, warnings: [] };
+        if (opened.kind === 'merged') {
+          return { kind: 'merged' as const, staleOpen, warnings: [], adopted };
+        }
         if (opened.kind === 'refused') {
-          return { kind: 'refused' as const, detail: opened.detail, staleOpen };
+          return { kind: 'refused' as const, detail: opened.detail, staleOpen, adopted };
         }
       }
       const settled = await settleOwnFiles(dir, feature, commitEnv);
       if (settled.merged) {
-        return { kind: 'merged' as const, staleOpen, warnings: settled.warnings };
+        return { kind: 'merged' as const, staleOpen, warnings: settled.warnings, adopted };
       }
       return {
         kind: 'ready' as const,
         fixBaseline: await captureFixBaseline(dir, baselineSource),
         staleOpen,
         warnings: settled.warnings,
+        adopted,
       };
     };
     let reopened = await mergeSection(repositoryId, dir, reopen);
+    state = adoptKept(state, reopened.adopted);
     for (
       let round = 1;
       repositoryId &&
@@ -1367,7 +1385,7 @@ export async function resolveMergePhase(
       round++
     ) {
       if (reopened.staleOpen) {
-        state = adoptKept(state, await clearedStale(dir, reopened.staleOpen));
+        current = await noteAbortedByNext(db, current, params.taskId, dir, reopened.staleOpen);
       }
       const refused = await setAside(repositoryId, dir);
       if (refused !== null) {
@@ -1377,6 +1395,7 @@ export async function resolveMergePhase(
         return haltFailed(db, current, why, 'haive files changed');
       }
       reopened = await mergeSection(repositoryId, dir, reopen);
+      state = adoptKept(state, reopened.adopted);
     }
     if (reopened.kind === 'unaborted') {
       await putBack(repositoryId, dir);
@@ -1389,7 +1408,7 @@ export async function resolveMergePhase(
       return haltFailed(db, current, reopened.held, 'merge index held');
     }
     if (reopened.staleOpen) {
-      state = adoptKept(state, await clearedStale(dir, reopened.staleOpen));
+      current = await noteAbortedByNext(db, current, params.taskId, dir, reopened.staleOpen);
     }
     if (reopened.kind === 'aside') {
       await putBack(repositoryId, dir);

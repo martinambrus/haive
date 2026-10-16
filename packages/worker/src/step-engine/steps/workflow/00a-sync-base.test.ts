@@ -63,6 +63,13 @@ vi.mock('../../merge-dir-claim.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../merge-dir-claim.js')>()),
   ...(await import('../../../../test/merge-dir-claim-fake.js')).mergeDirClaimOverrides(),
 }));
+const leftOpen = vi.hoisted(() => ({ takeKept: vi.fn() }));
+vi.mock('../../left-open-merge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../left-open-merge.js')>()),
+  relocateLeftOpenFixers: async () => null,
+  noteAbortedByNext: async (_db: unknown, row: unknown) => row,
+  takeLeftOpenKept: leftOpen.takeKept,
+}));
 beforeEach(() => {
   handBack.asRoot = false;
   handBack.chowned = [];
@@ -75,6 +82,8 @@ beforeEach(() => {
   projections.seed.mockReset();
   projections.seed.mockResolvedValue(undefined);
   projections.restore.mockResolvedValue({ outcome: 'clean' });
+  leftOpen.takeKept.mockReset();
+  leftOpen.takeKept.mockResolvedValue({});
 });
 
 const exec = promisify(execFile);
@@ -593,8 +602,8 @@ describe('00a-sync-base detect + apply (real git)', () => {
 
 // In-memory db backing merge_resolve_state for the divergence merge (mirrors the
 // 12-worktree-cleanup test's stub, trimmed to the clean-merge path).
-function makeMergeDb(repositoryId: string | null = null) {
-  let mergeState: unknown = null;
+function makeMergeDb(repositoryId: string | null = null, initial: unknown = null) {
+  let mergeState: unknown = initial;
   const setPatch = (patch: Record<string, unknown>) => {
     if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState;
   };
@@ -606,6 +615,7 @@ function makeMergeDb(repositoryId: string | null = null) {
       tasks: { findFirst: async () => ({ repositoryId }) },
       repositories: { findFirst: async () => undefined },
       users: { findFirst: async () => undefined },
+      taskSteps: { findFirst: async () => ({ mergeResolveState: mergeState }) },
     },
     update: () => ({
       set: (patch: Record<string, unknown>) => ({
@@ -788,6 +798,110 @@ describe('00a-sync-base divergence (real git + merge phase)', () => {
       [KEPT_FILE]: { owner: { uid: 0, gid: 0 }, mode: 0o600 },
     });
   });
+});
+
+const STALE_KEPT = { [KEPT_FILE]: { mode: 0o600 } };
+
+/** A diverged checkout with another ref's merge left open in it, and a pass in `phase` that dies
+ *  right after clearing that merge: what the step saved, and whether that merge was still open when
+ *  what its task kept was taken. */
+async function clearStaleMergeThenDie(phase: 'pending' | 'resolving') {
+  const { bare, seed } = await seedOrigin();
+  const local = await cloneLocal(bare);
+  await git(local, ['checkout', '-b', 'other']);
+  await writeFile(path.join(local, 'conflict.txt'), 'other\n', 'utf8');
+  await git(local, ['add', '-A']);
+  await git(local, ['commit', '-m', 'other side']);
+  await git(local, ['checkout', 'main']);
+  await writeFile(path.join(local, 'conflict.txt'), 'main\n', 'utf8');
+  await git(local, ['add', '-A']);
+  await git(local, ['commit', '-m', 'local work']);
+  await advanceOrigin(seed, 'origin.txt');
+  try {
+    const d = await syncBaseStep.detect!(mkCtx(local));
+    expect(await gitCode(local, ['merge', 'other'])).not.toBe(0);
+    const staleHead = (await git(local, ['rev-parse', 'MERGE_HEAD'])).trim();
+    let takenWhileOpen = false;
+    leftOpen.takeKept.mockImplementation(
+      async (
+        _db: unknown,
+        _taskId: string,
+        dir: string,
+        open: { mergeHead: string },
+        save: (kept: unknown) => Promise<void>,
+      ) => {
+        const head = (await git(dir, ['rev-parse', 'MERGE_HEAD'])).trim();
+        takenWhileOpen = open.mergeHead === staleHead && head === staleHead;
+        await save(STALE_KEPT);
+        return STALE_KEPT;
+      },
+    );
+    projections.restore.mockRejectedValue(new Error('worker died'));
+    const resolving =
+      phase === 'resolving'
+        ? {
+            mode: 'same-branch',
+            phase: 'resolving',
+            baseBranch: 'main',
+            featureBranch: 'origin/main',
+            mergeDir: local,
+            sandboxMergeDir: local,
+            fixInvocationId: null,
+            conflictRetries: 0,
+            pendingQuestion: null,
+            pushAfterMerge: false,
+            squashAfterMerge: false,
+            merged: false,
+            skipReason: null,
+            pushed: false,
+            mergeStage: 'feature',
+            baseSyncRounds: 0,
+          }
+        : null;
+    if (resolving) claimFake.claims.set(local, { taskId: 't1', stepId: 'step1', title: '' });
+    const h = makeMergeDb('repo-1', resolving);
+    const step = syncBaseStep as unknown as StepDefinition;
+    const current = {
+      id: 'step1',
+      detectOutput: d,
+      formValues: { base: 'main', syncAction: 'merge' },
+      mergeResolveState: resolving,
+      status: 'running',
+    } as never;
+    const params = {
+      db: h.db,
+      taskId: 't1',
+      userId: 'u1',
+      repoPath: '',
+      workspacePath: '',
+      cliProviderId: null,
+      ignoreSavedStepClis: false,
+      stepDef: step,
+      providers: [{}],
+      deps: {},
+    } as never;
+    await expect(
+      resolveMergePhase(h.db as never, step, current, mkCtx(local), params),
+    ).rejects.toThrow('worker died');
+    const staleGone = (await gitCode(local, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])) !== 0;
+    return { takenWhileOpen, staleGone, state: h.getState() };
+  } finally {
+    await rm(bare, { recursive: true, force: true });
+    await rm(seed, { recursive: true, force: true });
+    await rm(local, { recursive: true, force: true });
+  }
+}
+
+describe('a merge a cancelled task left open in the checkout', () => {
+  it.each(['pending', 'resolving'] as const)(
+    'has what that task kept saved into this step before it is aborted (%s)',
+    async (phase) => {
+      const out = await clearStaleMergeThenDie(phase);
+      expect(out.staleGone).toBe(true);
+      expect(out.takenWhileOpen).toBe(true);
+      expect(out.state?.keptMetadata).toEqual(STALE_KEPT);
+    },
+  );
 });
 
 // Pure form / predicate tests (detect stubs — no git).
