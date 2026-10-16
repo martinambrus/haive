@@ -10,6 +10,7 @@ import { mergePlanMirror } from '@haive/shared/plan-mirror-merge';
 import type { PlanMirror } from '@haive/shared';
 import {
   PROJECT_STATE_DIR,
+  canonicalJson,
   claimFileName,
   emptyProjectState,
   mergeProjectState,
@@ -750,6 +751,31 @@ describe('mergeOriginInto: the project state record merges three-way', () => {
     expect(record.settings['rtk-version']).toBe('3');
     expect(record.claims.map((c) => c.writtenHash)).toEqual(['h-theirs']);
   });
+
+  it.each(['ours', 'theirs'])(
+    'merges a record whose %s side holds a claim file at a git-data path, and drops the file',
+    async (side) => {
+      const legacy = claimAt('.git/config', 'h0');
+      const file = `${STATE_PREFIX}${claimFileName(legacy.path)}`;
+      const ours = stateFiles(recordOf({ render: baseRender({ framework: 'drupal' }) }));
+      const theirs = stateFiles(recordOf({ render: baseRender({ customAgentSpecs: theirsSpec }) }));
+      const { local, wt } = await relatedFilesPair(
+        stateFiles(base),
+        side === 'ours' ? { ...ours, [file]: canonicalJson(legacy) } : ours,
+        side === 'theirs' ? { ...theirs, [file]: canonicalJson(legacy) } : theirs,
+      );
+      const { attempt } = await mergeAndCommit(local, wt);
+
+      expect(attempt.clean).toBe(true);
+      expect(attempt.warnings).toEqual([]);
+      expect(await unmergedUnderState(wt)).toBe('');
+      const record = await committedRecord(wt);
+      expect(record.render?.framework).toBe('drupal');
+      expect(record.render?.customAgentSpecs).toEqual(theirsSpec);
+      expect((await git(wt, ['ls-files', '--', file])).trim()).toBe('');
+      await expect(lstat(path.join(wt, file))).rejects.toThrow();
+    },
+  );
 
   it('removes a file the record no longer holds when theirs deleted a unit ours changed', async () => {
     const claim = claimAt('.claude/agents/a.md', 'h0');

@@ -232,8 +232,31 @@ describe('renderProjectState and parseProjectState', () => {
     expect(!parsed.ok && parsed.problems).toContain(problem);
   });
 
-  it('refuse a claim file naming git data, and return no record holding the claim', () => {
-    const name = claimFileName('.git/config');
+  it('read a claim file at a git-data path an earlier release wrote apart from the claims', () => {
+    const legacy = [claim('.git/config'), claim('sub/.GIT/x')];
+    const files = legacy.reduce(
+      (all, c) => withFile(all, claimFileName(c.path), canonicalJson(c)),
+      renderProjectState(record()),
+    );
+    const parsed = parseProjectState(files);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.record.claims.map((c) => c.path)).toEqual([
+      '.claude/agents/code-reviewer.md',
+      'AGENTS.md',
+    ]);
+    expect(parsed.gitDataClaims.map((c) => c.path).sort()).toEqual(['.git/config', 'sub/.GIT/x']);
+    expect(parsed.ignored).toEqual([]);
+    expect(renderProjectState(parsed.record)).toEqual(renderProjectState(record()));
+  });
+
+  it('read no git-data claim file where the record holds none', () => {
+    const parsed = parseProjectState(renderProjectState(record()));
+    expect(parsed.ok && parsed.gitDataClaims).toEqual([]);
+  });
+
+  it('refuse a claim file at a git-data path under another file name', () => {
+    const name = 'artifacts/elsewhere~00000000.json';
     const parsed = parseProjectState(
       withFile(renderProjectState(record()), name, canonicalJson(claim('.git/config'))),
     );
