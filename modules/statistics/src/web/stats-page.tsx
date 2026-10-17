@@ -1362,6 +1362,14 @@ function StatsPageInner({ moduleId, api }: { moduleId: string; api: HostApi }) {
                     hint="ran before the record existed"
                     tone="text-neutral-400"
                   />
+                  {toolUsage.coverage.inFlight > 0 && (
+                    <StatTile
+                      label="Running"
+                      value={formatCount(toolUsage.coverage.inFlight)}
+                      hint="recorded when they end"
+                      tone="text-neutral-400"
+                    />
+                  )}
                 </div>
                 {toolUsage.coverage.byProvider.length > 0 && (
                   <div className="mt-6 overflow-x-auto">

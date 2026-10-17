@@ -230,7 +230,9 @@ IS for every codex, amp and gemini row. `invocationAttributionFilter` APPLIES, a
 reconciling rollup whose `total` must equal the runs the other tabs count.
 
 **Denominators are stated, never implied.** `total` is the reconciliation figure; `unrecorded`
-(a NULL column) and `unobservable` (`coverage: 'none'`) enter no "not used" sentence;
+(an ended run with a NULL column), `inFlight` (a run not ended yet, so not recorded yet: the task
+panel and the statistics page name them apart, never as "ran before the record existed") and
+`unobservable` (`coverage: 'none'`) enter no "not used" sentence;
 `observable` (full + partial, the partial ones flagged as floors) is the ONLY denominator such a
 sentence may cite, and `share` is `sampledRatio(runs, observable)` so a three-run window renders
 `n=3`. Assigned personas are counted on any RECORDED row — an assignment is a dispatch fact,
