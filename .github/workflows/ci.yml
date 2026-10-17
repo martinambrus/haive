@@ -263,6 +263,8 @@ jobs:
           api test/task-tool-usage-calls-db.test.ts TASK_TOOL_USAGE_TEST_URL task_tool_usage_test pg
           api test/repo-delete-lock-order-db.test.ts REPO_DELETE_LOCK_ORDER_TEST_URL repo_delete_lock_order_test pg
           api test/admin-config-pool-db.test.ts ADMIN_CONFIG_POOL_TEST_URL admin_config_pool_test pg
+          api test/admin-security-audit-db.test.ts ADMIN_SECURITY_AUDIT_TEST_URL admin_security_audit_test pg
+          api test/repo-credentials-audit-db.test.ts REPO_CREDENTIALS_AUDIT_TEST_URL repo_credentials_audit_test pg
           worker test/step-integrations-stamp-db.test.ts STEP_INTEGRATIONS_STAMP_TEST_URL step_integrations_stamp_test pg
           worker test/step-integrations-dispatch-db.test.ts STEP_INTEGRATIONS_DISPATCH_TEST_URL step_integrations_dispatch_test pg
           worker test/step-integrations-prompt-db.test.ts STEP_INTEGRATIONS_PROMPT_TEST_URL step_integrations_prompt_test pg
