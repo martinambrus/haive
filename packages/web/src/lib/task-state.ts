@@ -32,6 +32,20 @@ export function taskNotStarted(task: TaskToneLike): boolean {
   return task.status === 'created' && !isTaskDead(task);
 }
 
+/** The banner the task page shows while `taskNotStarted`: a bold lead, then the detail. */
+export const notStartedBanner = {
+  lead: 'This task has not started.',
+  detail:
+    'It was created without being started so its attachments could be uploaded first; nothing runs on it until you press Start.',
+} as const;
+
+/** What the task page's Steps tab says while the task has no step rows yet. */
+export function noStepsMessage(task: TaskToneLike): string {
+  return taskNotStarted(task)
+    ? 'No steps recorded yet. This task has not started; press Start above and the task worker will populate them.'
+    : 'No steps recorded yet. The task worker will populate them once it starts.';
+}
+
 /** Who the owner is told holds a paused task: an administrator's maintenance pause is not their own. */
 export function pausedByLabel(task: { pausedByAdmin?: boolean }): string {
   return task.pausedByAdmin ? 'Paused by an administrator' : 'Paused by you';

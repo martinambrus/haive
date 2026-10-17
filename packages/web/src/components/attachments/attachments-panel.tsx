@@ -16,6 +16,7 @@ import { deleteAttachmentConfirmation, deleteFolderConfirmation } from '@/lib/at
 import { pollForExpansion } from '@/lib/attachment-expansion';
 import { archiveExpansionBanner } from '@/lib/step-banners';
 import { Button, Card } from '@/components/ui';
+import { UploadFailureList } from './upload-failure-list';
 
 /** How often the panel re-reads while an archive waits for the worker. */
 const EXPANSION_POLL_MS = 5000;
@@ -77,6 +78,7 @@ export function AttachmentsPanel({
 }) {
   const [items, setItems] = useState<TaskAttachment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string | null>(null);
   const [uploadFailures, setUploadFailures] = useState<UploadFailures | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -112,6 +114,7 @@ export function AttachmentsPanel({
     const picked = Array.from(files);
     const failed: UploadFailures['failed'] = [];
     setError(null);
+    setDeleteError(null);
     setUploadFailures(null);
     try {
       for (const [index, f] of picked.entries()) {
@@ -136,12 +139,13 @@ export function AttachmentsPanel({
 
   async function onDelete(id: string) {
     if (!confirm(deleteAttachmentConfirmation(items ?? [], id))) return;
+    setDeleteError(null);
     setDeletingId(id);
     try {
       await deleteTaskAttachment(taskId, id);
       await reload();
     } catch (err) {
-      setError((err as Error).message ?? 'Delete failed');
+      setDeleteError((err as Error).message ?? 'Delete failed');
     } finally {
       setDeletingId(null);
     }
@@ -149,12 +153,13 @@ export function AttachmentsPanel({
 
   async function onDeleteFolder(name: string) {
     if (!confirm(deleteFolderConfirmation(items ?? [], name))) return;
+    setDeleteError(null);
     setDeletingId(name);
     try {
       await deleteTaskAttachmentFolder(taskId, name);
       await reload();
     } catch (err) {
-      setError((err as Error).message ?? 'Delete failed');
+      setDeleteError((err as Error).message ?? 'Delete failed');
     } finally {
       setDeletingId(null);
     }
@@ -239,22 +244,10 @@ export function AttachmentsPanel({
         </div>
         {uploading && <p className="text-xs text-indigo-300">Uploading {uploading}…</p>}
         {error && <p className="text-xs text-rose-400">{error}</p>}
+        {deleteError && <p className="text-xs text-rose-400">{deleteError}</p>}
         {uploadFailures && (
           <div role="alert" className="flex flex-col gap-1 text-xs text-rose-400">
-            <p>
-              {uploadFailures.failed.length} of {uploadFailures.total} attachment(s) could not be
-              uploaded:
-            </p>
-            <ul
-              aria-label="Attachments that failed to upload"
-              className="max-h-48 list-disc overflow-auto pl-5 [overflow-wrap:anywhere]"
-            >
-              {uploadFailures.failed.map((f, i) => (
-                <li key={i}>
-                  <span className="font-mono">{f.name}</span>: {f.message}
-                </li>
-              ))}
-            </ul>
+            <UploadFailureList total={uploadFailures.total} failed={uploadFailures.failed} />
           </div>
         )}
       </Card>

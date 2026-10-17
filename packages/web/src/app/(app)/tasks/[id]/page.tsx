@@ -63,6 +63,8 @@ import {
   type TaskStopRow,
 } from '@/lib/step-banners';
 import {
+  noStepsMessage,
+  notStartedBanner,
   pausedByLabel,
   taskBadgeKind,
   taskClockEndMs,
@@ -2041,9 +2043,7 @@ export default function TaskDetailPage() {
           className="flex flex-wrap items-center gap-3 rounded-md border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
         >
           <p className="min-w-0 flex-1">
-            <span className="font-semibold">This task has not started.</span> It was created without
-            being started so its attachments could be uploaded first; nothing runs on it until you
-            press Start.
+            <span className="font-semibold">{notStartedBanner.lead}</span> {notStartedBanner.detail}
           </p>
           <Button size="sm" onClick={() => void runAction('start')}>
             <Play className="h-4 w-4" aria-hidden="true" />
@@ -2106,11 +2106,7 @@ export default function TaskDetailPage() {
       {tab === 'steps' && (
         <div ref={stepsContainerRef} className="flex flex-col gap-3">
           {steps.length === 0 && !taskFinished && (
-            <div className="text-sm text-neutral-500">
-              {taskNotStarted(task)
-                ? 'No steps recorded yet. This task has not started; press Start above and the task worker will populate them.'
-                : 'No steps recorded yet. The task worker will populate them once it starts.'}
-            </div>
+            <div className="text-sm text-neutral-500">{noStepsMessage(task)}</div>
           )}
           {steps.map((step) => {
             // Re-entry rounds: the same stepId recurs once per round (round 0 = the
