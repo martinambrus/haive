@@ -2,6 +2,7 @@
  * A Postgres backend that dies under a query, against a live database: the caller is rejected,
  * the process survives it, and a short-lived store connection still closes. Nothing is written.
  */
+import { randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { sql } from 'drizzle-orm';
 import { createDatabase } from '@haive/database';
@@ -52,6 +53,7 @@ async function dropBackend(marker: string): Promise<number> {
   return 0;
 }
 
+const RUN_ID = randomBytes(6).toString('hex');
 const sleeper = (marker: string) => `select pg_sleep(5) /* ${marker} */`;
 
 async function settles(p: Promise<unknown>, ms: number): Promise<boolean> {
@@ -76,7 +78,7 @@ const errorCode = (err: unknown): string =>
 async function main(): Promise<void> {
   const db = createDatabase(url);
   try {
-    const marker = 'haive_drop_smoke_tx';
+    const marker = `haive_drop_smoke_tx_${RUN_ID}`;
     const [outcome, dropped] = await Promise.all([
       db
         .transaction(async (tx) => {
@@ -101,7 +103,7 @@ async function main(): Promise<void> {
       db,
       'drop-smoke',
     );
-    const ragMarker = 'haive_drop_smoke_rag';
+    const ragMarker = `haive_drop_smoke_rag_${RUN_ID}`;
     await Promise.all([rag!.pg.unsafe(sleeper(ragMarker)).catch(() => {}), dropBackend(ragMarker)]);
     check(
       'a RAG store connection closes after its backend dies',
@@ -112,7 +114,7 @@ async function main(): Promise<void> {
       { mode: 'external', connectionString: url, namespace: 'drop-smoke' } as GlobalKbSettings,
       db,
     );
-    const kbMarker = 'haive_drop_smoke_kb';
+    const kbMarker = `haive_drop_smoke_kb_${RUN_ID}`;
     await Promise.all([kb.pg.unsafe(sleeper(kbMarker)).catch(() => {}), dropBackend(kbMarker)]);
     check(
       'a global KB connection closes after its backend dies',
