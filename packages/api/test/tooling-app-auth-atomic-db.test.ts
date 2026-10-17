@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 
@@ -41,6 +41,23 @@ const KEK = 'ab'.repeat(32);
 const ACTION = 'repository.app_auth.update';
 const OLD = { username: 'old-user-4d2', password: 'old-pass-8e1' };
 const NEXT = { username: 'next-user-7a9', password: 'next-pass-3c6' };
+
+const refuseAuditInserts = async (db: Database) => {
+  await db.execute(
+    sql.raw(
+      "CREATE OR REPLACE FUNCTION refuse_audit_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'audit insert refused'; END $$;",
+    ),
+  );
+  await db.execute(
+    sql.raw(
+      'CREATE TRIGGER refuse_audit_insert BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION refuse_audit_insert();',
+    ),
+  );
+};
+const allowAuditInserts = async (db: Database) => {
+  await db.execute(sql.raw('DROP TRIGGER IF EXISTS refuse_audit_insert ON audit_events;'));
+  await db.execute(sql.raw('DROP FUNCTION IF EXISTS refuse_audit_insert();'));
+};
 
 describe.skipIf(!url)('PATCH /repositories/:id/tooling app-login credentials, on Postgres', () => {
   let db: Database;
@@ -256,6 +273,34 @@ describe.skipIf(!url)('PATCH /repositories/:id/tooling app-login credentials, on
     });
 
     it('records no event', async () => {
+      expect(await audited()).toEqual([]);
+    });
+  });
+
+  describe('when the audit insert is refused', () => {
+    let res: Response;
+
+    beforeEach(async () => {
+      await refuseAuditInserts(db);
+      res = await patch({
+        rtkVersion: '1.2.3',
+        appAuthUsername: NEXT.username,
+        appAuthPassword: NEXT.password,
+      });
+    });
+
+    afterEach(async () => {
+      await allowAuditInserts(db);
+    });
+
+    it('fails the request, leaving the stored pair and the setting as they were', async () => {
+      expect(res.status).toBe(500);
+      expect(await stored()).toEqual(OLD);
+      expect(await storedRtkVersion()).toBeNull();
+    });
+
+    it('records no event once the trigger is gone', async () => {
+      await allowAuditInserts(db);
       expect(await audited()).toEqual([]);
     });
   });

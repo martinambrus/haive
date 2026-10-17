@@ -39,12 +39,7 @@ import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import {
-  insertAuditEvent,
-  logAuditEvent,
-  recordAuditEvent,
-  type AuditEvent,
-} from '../lib/audit.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { isUuid } from '../lib/uuid.js';
 import { generateInviteToken, hashInviteToken } from '../lib/invites.js';
 
@@ -139,32 +134,37 @@ adminRoutes.post('/users', async (c) => {
   if (existing) throw new HttpError(409, 'Email already registered');
 
   const temporaryPassword = generateTemporaryPassword();
-  const inserted = await db
-    .insert(schema.users)
-    .values({
-      emailEncrypted: encryptEmail(body.email, fieldKey),
-      emailBlindIndex: blindIndex,
-      passwordHash: await hashPassword(temporaryPassword),
-      role: body.role,
-      mustChangePassword: true,
-    })
-    .returning({
-      id: schema.users.id,
-      role: schema.users.role,
-      status: schema.users.status,
-      tokenVersion: schema.users.tokenVersion,
-      createdAt: schema.users.createdAt,
-      updatedAt: schema.users.updatedAt,
-    });
-
-  await recordAuditEvent(db, {
-    actorUserId: c.get('userId'),
-    action: 'user.create',
-    targetType: 'user',
-    targetId: inserted[0]!.id,
-    // No email: this table is not encrypted, and the row it points at already holds the address.
-    metadata: { role: body.role },
+  const passwordHash = await hashPassword(temporaryPassword);
+  const { inserted, audit } = await db.transaction(async (tx) => {
+    const rows = await tx
+      .insert(schema.users)
+      .values({
+        emailEncrypted: encryptEmail(body.email, fieldKey),
+        emailBlindIndex: blindIndex,
+        passwordHash,
+        role: body.role,
+        mustChangePassword: true,
+      })
+      .returning({
+        id: schema.users.id,
+        role: schema.users.role,
+        status: schema.users.status,
+        tokenVersion: schema.users.tokenVersion,
+        createdAt: schema.users.createdAt,
+        updatedAt: schema.users.updatedAt,
+      });
+    const ev: AuditEvent = {
+      actorUserId: c.get('userId'),
+      action: 'user.create',
+      targetType: 'user',
+      targetId: rows[0]!.id,
+      // No email: this table is not encrypted, and the row it points at already holds the address.
+      metadata: { role: body.role },
+    };
+    await insertAuditEvent(tx, ev);
+    return { inserted: rows, audit: ev };
   });
+  logAuditEvent(audit);
   log.info({ userId: inserted[0]!.id, role: body.role }, 'user created by administrator');
 
   return c.json(
@@ -292,58 +292,70 @@ adminRoutes.post('/users/:id/action', async (c) => {
     if (target.id === callerUserId) {
       throw new HttpError(400, 'Cannot deactivate the calling admin');
     }
-    await db
-      .update(schema.users)
-      .set({
-        status: 'deactivated',
-        tokenVersion: target.tokenVersion + 1,
-        updatedAt: now,
-      })
-      .where(eq(schema.users.id, targetUserId));
-    await recordAuditEvent(db, {
+    const audit: AuditEvent = {
       actorUserId: callerUserId,
       action: 'user.deactivate',
       targetType: 'user',
       targetId: targetUserId,
+    };
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.users)
+        .set({
+          status: 'deactivated',
+          tokenVersion: target.tokenVersion + 1,
+          updatedAt: now,
+        })
+        .where(eq(schema.users.id, targetUserId));
+      await insertAuditEvent(tx, audit);
     });
+    logAuditEvent(audit);
     return c.json({ ok: true, action: 'deactivate' });
   }
 
   if (body.action === 'activate') {
-    await db
-      .update(schema.users)
-      .set({ status: 'active', updatedAt: now })
-      .where(eq(schema.users.id, targetUserId));
-    await recordAuditEvent(db, {
+    const audit: AuditEvent = {
       actorUserId: callerUserId,
       action: 'user.activate',
       targetType: 'user',
       targetId: targetUserId,
+    };
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.users)
+        .set({ status: 'active', updatedAt: now })
+        .where(eq(schema.users.id, targetUserId));
+      await insertAuditEvent(tx, audit);
     });
+    logAuditEvent(audit);
     return c.json({ ok: true, action: 'activate' });
   }
 
   if (body.action === 'reset_password') {
     const temporaryPassword = generateTemporaryPassword();
     const passwordHash = await hashPassword(temporaryPassword);
-    await db
-      .update(schema.users)
-      .set({
-        passwordHash,
-        tokenVersion: target.tokenVersion + 1,
-        // The admin has seen this password and has to pass it on out of band, so it is a shared
-        // secret from the moment it exists. Bumping tokenVersion only ends the old SESSION; this
-        // is what ends the password.
-        mustChangePassword: true,
-        updatedAt: now,
-      })
-      .where(eq(schema.users.id, targetUserId));
-    await recordAuditEvent(db, {
+    const audit: AuditEvent = {
       actorUserId: callerUserId,
       action: 'user.reset_password',
       targetType: 'user',
       targetId: targetUserId,
+    };
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.users)
+        .set({
+          passwordHash,
+          tokenVersion: target.tokenVersion + 1,
+          // The admin has seen this password and has to pass it on out of band, so it is a shared
+          // secret from the moment it exists. Bumping tokenVersion only ends the old SESSION; this
+          // is what ends the password.
+          mustChangePassword: true,
+          updatedAt: now,
+        })
+        .where(eq(schema.users.id, targetUserId));
+      await insertAuditEvent(tx, audit);
     });
+    logAuditEvent(audit);
     return c.json({ ok: true, action: 'reset_password', temporaryPassword });
   }
 
@@ -352,17 +364,21 @@ adminRoutes.post('/users/:id/action', async (c) => {
     if (target.id === callerUserId && body.role !== 'admin') {
       throw new HttpError(400, 'Cannot demote the calling admin');
     }
-    await db
-      .update(schema.users)
-      .set({ role: body.role, updatedAt: now })
-      .where(eq(schema.users.id, targetUserId));
-    await recordAuditEvent(db, {
+    const audit: AuditEvent = {
       actorUserId: callerUserId,
       action: 'user.set_role',
       targetType: 'user',
       targetId: targetUserId,
       metadata: { role: body.role },
+    };
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.users)
+        .set({ role: body.role, updatedAt: now })
+        .where(eq(schema.users.id, targetUserId));
+      await insertAuditEvent(tx, audit);
     });
+    logAuditEvent(audit);
     return c.json({ ok: true, action: 'set_role', role: body.role });
   }
 
@@ -1344,25 +1360,29 @@ adminRoutes.post('/invites', async (c) => {
     ? computeEmailBlindIndex(body.email, await secretsService.getEmailBlindIndexPepper())
     : null;
 
-  const inserted = await db
-    .insert(schema.userInvites)
-    .values({
-      emailBlindIndex,
-      tokenHash: hashInviteToken(token),
-      role: body.role,
-      createdBy: c.get('userId'),
-      expiresAt: new Date(Date.now() + body.expiresInHours * 3_600_000),
-    })
-    .returning({ id: schema.userInvites.id, expiresAt: schema.userInvites.expiresAt });
-
-  await recordAuditEvent(db, {
-    actorUserId: c.get('userId'),
-    action: 'invite.create',
-    targetType: 'invite',
-    targetId: inserted[0]!.id,
-    // The token is deliberately absent: an audit row is not a place to store a live credential.
-    metadata: { role: body.role, bound: emailBlindIndex !== null },
+  const { inserted, audit } = await db.transaction(async (tx) => {
+    const rows = await tx
+      .insert(schema.userInvites)
+      .values({
+        emailBlindIndex,
+        tokenHash: hashInviteToken(token),
+        role: body.role,
+        createdBy: c.get('userId'),
+        expiresAt: new Date(Date.now() + body.expiresInHours * 3_600_000),
+      })
+      .returning({ id: schema.userInvites.id, expiresAt: schema.userInvites.expiresAt });
+    const ev: AuditEvent = {
+      actorUserId: c.get('userId'),
+      action: 'invite.create',
+      targetType: 'invite',
+      targetId: rows[0]!.id,
+      // The token is deliberately absent: an audit row is not a place to store a live credential.
+      metadata: { role: body.role, bound: emailBlindIndex !== null },
+    };
+    await insertAuditEvent(tx, ev);
+    return { inserted: rows, audit: ev };
   });
+  logAuditEvent(audit);
   log.info({ inviteId: inserted[0]!.id, role: body.role }, 'invite created');
 
   return c.json(
@@ -1403,19 +1423,22 @@ adminRoutes.get('/invites', async (c) => {
 adminRoutes.delete('/invites/:id', async (c) => {
   const db = getDb();
   const id = c.req.param('id');
-  const updated = await db
-    .update(schema.userInvites)
-    .set({ revokedAt: new Date() })
-    .where(and(eq(schema.userInvites.id, id), isNull(schema.userInvites.revokedAt)))
-    .returning({ id: schema.userInvites.id });
-
-  if (updated.length === 0) throw new HttpError(404, 'No such outstanding invitation');
-  await recordAuditEvent(db, {
+  const audit: AuditEvent = {
     actorUserId: c.get('userId'),
     action: 'invite.revoke',
     targetType: 'invite',
     targetId: id,
+  };
+  await db.transaction(async (tx) => {
+    const updated = await tx
+      .update(schema.userInvites)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(schema.userInvites.id, id), isNull(schema.userInvites.revokedAt)))
+      .returning({ id: schema.userInvites.id });
+    if (updated.length === 0) throw new HttpError(404, 'No such outstanding invitation');
+    await insertAuditEvent(tx, audit);
   });
+  logAuditEvent(audit);
   return c.json({ ok: true });
 });
 
