@@ -9,6 +9,7 @@ const NO_RUN: TaskToolUsageStep = {
   partial: 0,
   unobservable: 0,
   unrecorded: 0,
+  inFlight: 0,
   personasAssigned: [],
   personasRead: [],
   skillsInvoked: [],
@@ -58,7 +59,15 @@ const usageData = (
     },
   ],
   totals,
-  coverage: { total: 0, observable: 0, partial: 0, unobservable: 0, unrecorded: 0, ...coverage },
+  coverage: {
+    total: 0,
+    observable: 0,
+    partial: 0,
+    unobservable: 0,
+    unrecorded: 0,
+    inFlight: 0,
+    ...coverage,
+  },
   callTotals: { customTools: [REFUSED], integrations: [] },
 });
 
@@ -127,6 +136,14 @@ describe('TaskToolUsageTable with runs in the rollup', () => {
         '7',
       ],
     ]);
+  });
+
+  it('names runs still in flight apart from runs that ran before the record', () => {
+    const note = noteOf(
+      render(usageData(RAN, RAN, { total: 4, observable: 2, unrecorded: 1, inFlight: 2 })),
+    );
+    expect(note).toContain('1 ran before this record existed.');
+    expect(note).toContain('2 still queued or running, recorded when they end.');
   });
 
   it('keeps the coverage note, its qualifiers and the call-log sentence', () => {

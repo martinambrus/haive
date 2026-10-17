@@ -116,7 +116,9 @@ export function TaskToolUsageTable({ data }: { data: TaskToolUsage }) {
             {data.coverage.unobservable > 0 &&
               ` ${data.coverage.unobservable} ran on a CLI whose output carries no tool events (amp, gemini, a sequential sub-agent script) and are listed as not observable.`}
             {data.coverage.unrecorded > 0 &&
-              ` ${data.coverage.unrecorded} ran before this record existed.`}{' '}
+              ` ${data.coverage.unrecorded} ran before this record existed.`}
+            {data.coverage.inFlight > 0 &&
+              ` ${data.coverage.inFlight} still queued or running, recorded when they end.`}{' '}
             Personas assigned by Haive are recorded only once the dispatch-side stamping ships;
             until then only the definition files an agent opened on its own appear. Opened is not
             applied. Custom tools and integrations count every call Haive logged for this task,

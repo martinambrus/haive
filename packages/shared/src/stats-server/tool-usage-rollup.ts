@@ -27,6 +27,7 @@ export interface ToolUsageCoverageRow {
   provider: string | null;
   total: number;
   recorded: number;
+  inFlight: number;
   observable: number;
   partial: number;
   unobservable: number;
@@ -147,6 +148,7 @@ export async function rollupToolUsage(
       select ${stepKey} as step_key, ${schema.cliProviders.name} as provider,
         count(*)::int as total,
         count(*) filter (where ${toolUsageRecorded()})::int as recorded,
+        count(*) filter (where ${inv.endedAt} is null and ${tu} is null)::int as in_flight,
         count(*) filter (where ${toolUsageObservable()})::int as observable,
         count(*) filter (where ${tu} ->> 'coverage' = 'partial')::int as partial,
         count(*) filter (where ${tu} ->> 'coverage' = 'none')::int as unobservable,
@@ -254,6 +256,7 @@ export async function rollupToolUsage(
       provider: text(r.provider),
       total: num(r.total),
       recorded: num(r.recorded),
+      inFlight: num(r.in_flight),
       observable: num(r.observable),
       partial: num(r.partial),
       unobservable: num(r.unobservable),

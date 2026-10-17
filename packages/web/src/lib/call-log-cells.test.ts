@@ -47,6 +47,7 @@ const USAGE: TaskToolUsageStep = {
   partial: 0,
   unobservable: 0,
   unrecorded: 0,
+  inFlight: 0,
   personasAssigned: [],
   personasRead: [],
   skillsInvoked: [],
@@ -73,6 +74,7 @@ const coverage = (total: number): TaskToolUsage['coverage'] => ({
   partial: 0,
   unobservable: 0,
   unrecorded: 0,
+  inFlight: 0,
 });
 
 describe('customToolsCell', () => {

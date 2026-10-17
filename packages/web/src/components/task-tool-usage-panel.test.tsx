@@ -52,6 +52,7 @@ const NO_RUN: TaskToolUsageStep = {
   partial: 0,
   unobservable: 0,
   unrecorded: 0,
+  inFlight: 0,
   personasAssigned: [],
   personasRead: [],
   skillsInvoked: [],
@@ -64,7 +65,7 @@ const answer = (call: { ok?: number; running?: number }): TaskToolUsage => ({
   taskId: 'task-1',
   steps: [],
   totals: NO_RUN,
-  coverage: { total: 0, observable: 0, partial: 0, unobservable: 0, unrecorded: 0 },
+  coverage: { total: 0, observable: 0, partial: 0, unobservable: 0, unrecorded: 0, inFlight: 0 },
   callTotals: {
     customTools: [
       { tool: 'lookup', action: 'http-get', ok: 0, refused: 0, error: 0, running: 0, ...call },

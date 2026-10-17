@@ -48,6 +48,7 @@ export interface ToolUsageStepRow {
   partial: number;
   unobservable: number;
   unrecorded: number;
+  inFlight: number;
   personasAssigned: ToolUsageCounted[];
   personasRead: ToolUsageCounted[];
   skillsInvoked: ToolUsageCounted[];
@@ -65,6 +66,7 @@ export function emptyToolUsageStepRow(): ToolUsageStepRow {
     partial: 0,
     unobservable: 0,
     unrecorded: 0,
+    inFlight: 0,
     personasAssigned: [],
     personasRead: [],
     skillsInvoked: [],
@@ -120,6 +122,7 @@ export function sumToolUsageSteps(rows: ToolUsageStepRow[]): ToolUsageStepRow {
     total.partial += row.partial;
     total.unobservable += row.unobservable;
     total.unrecorded += row.unrecorded;
+    total.inFlight += row.inFlight;
     total.toolCalls += row.toolCalls;
   }
   total.personasAssigned = mergeCounted(rows.map((r) => r.personasAssigned));

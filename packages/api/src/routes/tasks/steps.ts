@@ -602,7 +602,8 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
     row.observable += r.observable;
     row.partial += r.partial;
     row.unobservable += r.unobservable;
-    row.unrecorded += r.total - r.recorded;
+    row.inFlight += r.inFlight;
+    row.unrecorded += r.total - r.recorded - r.inFlight;
   }
   for (const r of rollup.personasAssigned) {
     if (r.stepKey) rowFor(r.stepKey).personasAssigned.push({ id: r.id, n: r.runs });
@@ -649,6 +650,7 @@ stepRoutes.get('/:id/tool-usage', async (c) => {
       partial: totals.partial,
       unobservable: totals.unobservable,
       unrecorded: totals.unrecorded,
+      inFlight: totals.inFlight,
     },
     callTotals: { customTools: customCalls.all, integrations: integrationCalls.all },
   });

@@ -168,6 +168,11 @@ describe('sumToolUsageSteps', () => {
     expect(sumToolUsageSteps([])).toEqual(emptyToolUsageStepRow());
   });
 
+  it('sums the runs still in flight', () => {
+    const total = sumToolUsageSteps([step({ inFlight: 1 }), step({ inFlight: 2 })]);
+    expect(total.inFlight).toBe(3);
+  });
+
   it('sums the counters and merges every list by id, ordered by count then id', () => {
     const total = sumToolUsageSteps([
       step({
@@ -209,6 +214,7 @@ describe('sumToolUsageSteps', () => {
       partial: 1,
       unobservable: 1,
       unrecorded: 1,
+      inFlight: 0,
       toolCalls: 14,
       personasAssigned: [
         { id: 'peer-reviewer', n: 3 },
