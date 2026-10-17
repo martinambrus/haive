@@ -835,8 +835,8 @@ bundleRoutes.post('/:id/sync', requireNewWorkAllowed, async (c) => {
 /** Lazy file browser for a bundle's extracted/ tree. Returns flat
  *  `[{path,size}]` pairs (UI groups by `/`). Lists regular files only and skips `.git/`
  *  and `.DS_Store`, to keep git-sourced bundles small and avoid leaking pack contents.
- *  Lists at most 5000 files; `truncated` says a file was left out, so the UI warns. */
-const FILES_LIST_CAP = 5000;
+ *  Lists at most FILES_LIST_CAP files; `truncated` says a file was left out, so the UI warns. */
+export const FILES_LIST_CAP = 5000;
 
 async function listExtractedFiles(
   anchor: string,
@@ -844,6 +844,7 @@ async function listExtractedFiles(
 ): Promise<{
   files: Array<{ path: string; size: number }>;
   truncated: boolean;
+  cap: number;
 }> {
   const out: Array<{ path: string; size: number }> = [];
   let truncated = false;
@@ -876,7 +877,7 @@ async function listExtractedFiles(
     }
   };
   await walk(rootRel, '');
-  return { files: out, truncated };
+  return { files: out, truncated, cap: FILES_LIST_CAP };
 }
 
 bundleRoutes.get('/:id/files', async (c) => {
@@ -887,10 +888,10 @@ bundleRoutes.get('/:id/files', async (c) => {
   const rootRel = bundleContentRel(userId, bundleId, row.storageRoot);
   // A stored root this route cannot place reads as an empty tree, the same answer a missing
   // directory already gave — the listing is a convenience, not a contract about what exists.
-  if (rootRel === null) return c.json({ files: [], truncated: false });
+  if (rootRel === null) return c.json({ files: [], truncated: false, cap: FILES_LIST_CAP });
   const exists = await lstatNoFollow(anchor, rootRel);
   if (exists?.kind !== 'directory') {
-    return c.json({ files: [], truncated: false });
+    return c.json({ files: [], truncated: false, cap: FILES_LIST_CAP });
   }
   const result = await listExtractedFiles(anchor, rootRel);
   return c.json(result);

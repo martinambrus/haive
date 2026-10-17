@@ -13,13 +13,14 @@ vi.mock('../src/middleware/auth.js', () => ({
 
 import { Hono } from 'hono';
 import { encrypt, encryptDek, generateDek, secretsService } from '@haive/shared';
-import { githubOauthRoutes } from '../src/routes/github-oauth.js';
+import { githubOauthRoutes, REPOS_PAGE_CAP, REPOS_PER_PAGE } from '../src/routes/github-oauth.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 const KEK = 'ab'.repeat(32);
 const CREDENTIAL = '00000000-0000-4000-8000-0000000000c1';
-const ALL_PAGES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const CAP = REPOS_PAGE_CAP * REPOS_PER_PAGE;
+const ALL_PAGES = Array.from({ length: REPOS_PAGE_CAP }, (_, i) => i + 1);
 
 const app = new Hono<AppEnv>();
 app.route('/', githubOauthRoutes);
@@ -62,7 +63,11 @@ async function listRepos(total: number) {
   vi.stubGlobal('fetch', githubWith(total));
   const res = await app.request(`/repos?credentialId=${CREDENTIAL}`);
   expect(res.status).toBe(200);
-  return (await res.json()) as { repos: Array<{ fullName: string }>; truncated: boolean };
+  return (await res.json()) as {
+    repos: Array<{ fullName: string }>;
+    truncated: boolean;
+    cap: number;
+  };
 }
 
 beforeEach(() => {
@@ -90,20 +95,22 @@ afterEach(() => {
 });
 
 describe('the GitHub repository list says it is cut only when a repository was left out', () => {
-  it('lists exactly 1000 repositories without the flag', async () => {
-    const body = await listRepos(1000);
+  it('lists exactly the cap without the flag', async () => {
+    const body = await listRepos(CAP);
 
-    expect(body.repos).toHaveLength(1000);
+    expect(body.repos).toHaveLength(CAP);
     expect(body.truncated).toBe(false);
+    expect(body.cap).toBe(CAP);
     expect(pagesRead).toEqual(ALL_PAGES);
   });
 
-  it('flags 1001 repositories, lists the first 1000 and reads no page past the cap', async () => {
-    const body = await listRepos(1001);
+  it('flags one repository past the cap, lists the first CAP and reads no page past it', async () => {
+    const body = await listRepos(CAP + 1);
 
-    expect(body.repos).toHaveLength(1000);
-    expect(body.repos.at(-1)?.fullName).toBe('acme/r999');
+    expect(body.repos).toHaveLength(CAP);
+    expect(body.repos.at(-1)?.fullName).toBe(`acme/r${CAP - 1}`);
     expect(body.truncated).toBe(true);
+    expect(body.cap).toBe(CAP);
     expect(pagesRead).toEqual(ALL_PAGES);
   });
 });

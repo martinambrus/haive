@@ -56,8 +56,8 @@ interface GithubRepoApi {
   pushed_at: string | null;
 }
 
-const REPOS_PAGE_CAP = 10;
-const REPOS_PER_PAGE = 100;
+export const REPOS_PAGE_CAP = 10;
+export const REPOS_PER_PAGE = 100;
 
 githubOauthRoutes.get('/repos', async (c) => {
   const userId = c.get('userId');
@@ -135,5 +135,6 @@ githubOauthRoutes.get('/repos', async (c) => {
       pushedAt: r.pushed_at,
     })),
     truncated,
+    cap: REPOS_PAGE_CAP * REPOS_PER_PAGE,
   });
 });
