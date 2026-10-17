@@ -261,15 +261,13 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
   // Two logs, because they have two audiences. The audit row is the security trail an admin can
   // query; the task event is what the OWNER sees on their own task page, so they learn who
   // stopped their work and why rather than finding it mysteriously halted.
-  const audit = async (metadata: Record<string, unknown>) => {
-    await recordAuditEvent(db, {
-      actorUserId,
-      action: `task.admin_${action}`,
-      targetType: 'task',
-      targetId: taskId,
-      metadata: { ownerUserId: task.userId, ...metadata },
-    });
-  };
+  const auditEvent = (metadata: Record<string, unknown>): AuditEvent => ({
+    actorUserId,
+    action: `task.admin_${action}`,
+    targetType: 'task',
+    targetId: taskId,
+    metadata: { ownerUserId: task.userId, ...metadata },
+  });
 
   switch (action) {
     case 'pause': {
@@ -280,6 +278,7 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
       // that stamp anchors the runtime reaper's paused-grace.
       if (task.pausedAt) return c.json({ ok: true, pausedAt: task.pausedAt.toISOString() });
       const pausedAt = new Date();
+      const ev = auditEvent({ pausedAt: pausedAt.toISOString() });
       const paused = await db.transaction(async (tx) => {
         // Only the pause that changes the row is recorded.
         const rows = await tx
@@ -293,6 +292,7 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
           byAdmin: true,
           reason: 'maintenance',
         });
+        await insertAuditEvent(tx, ev);
         return true;
       });
       if (!paused) {
@@ -302,18 +302,20 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
         });
         return c.json({ ok: true, pausedAt: standing?.pausedAt?.toISOString() ?? null });
       }
-      await audit({ pausedAt: pausedAt.toISOString() });
+      logAuditEvent(ev);
       return c.json({ ok: true, pausedAt: pausedAt.toISOString() });
     }
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
+      const ev = auditEvent({});
       const resumed = await db.transaction(async (tx) => {
         // Only the resume that changes the row is recorded.
         if (!(await clearTaskPause(tx, taskId))) return false;
         await appendTaskEvent(tx, taskId, null, 'task.resumed', { by: actorUserId, byAdmin: true });
+        await insertAuditEvent(tx, ev);
         return true;
       });
-      if (resumed) await audit({});
+      if (resumed) logAuditEvent(ev);
       return c.json({ ok: true, pausedAt: null });
     }
     case 'stop': {
@@ -329,7 +331,7 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
           reason: 'maintenance',
           ...result,
         });
-        await audit(result);
+        await recordAuditEvent(db, auditEvent(result));
         log.info({ taskId, ...result }, 'admin stopped a task for maintenance');
       }
       return c.json({ ok: true, ...result });
