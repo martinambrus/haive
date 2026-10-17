@@ -69,5 +69,8 @@ config cache, so a change shows at once; the gate that locks non-admins out duri
 keeps its cached read, so that lockout can lag by up to 30 s. `PUT /admin/maintenance` writes its
 `maintenance.set_state` audit row inside its fenced transaction, before the state: a row that cannot
 be written refuses the change. The state itself lives in Redis, so a commit that fails after that
-write still leaves the new state without its row. In the worker, the allowance auto-resume and an answer to a parked form do not reopen a
+write still leaves the new state without its row. A task the administrator pauses or resumes from that
+page gets its `task.admin_pause` or `task.admin_resume` row in the same transaction as the change, so a
+row that cannot be written undoes it; Stop's row stays best-effort, since the runs it stopped cannot be
+restarted. In the worker, the allowance auto-resume and an answer to a parked form do not reopen a
 failed task while new work is refused (see [Worker restarts](worker-restarts.md)).

@@ -27,7 +27,12 @@ import {
 } from '@haive/shared/module-host';
 import { HttpError, type AppEnv } from '../context.js';
 import { getDb } from '../db.js';
-import { recordAuditEvent } from '../lib/audit.js';
+import {
+  insertAuditEvent,
+  logAuditEvent,
+  recordAuditEvent,
+  type AuditEvent,
+} from '../lib/audit.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { getModuleControlQueue, getModuleControlQueueEvents } from '../queues.js';
 import { getRedis } from '../redis.js';
@@ -464,44 +469,57 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     const body = putBodySchema.parse(await c.req.json());
     const result = validateFormValues(settings.form, body.values);
     if (!result.success) throw new HttpError(400, result.issues.join('; '));
+    const entries = Object.entries(result.data).map(([field, value]) => ({
+      field,
+      key: moduleSettingKey(id, kind, field),
+      next: JSON.stringify(value),
+    }));
     // One save of a module's settings at a time, so each `changed` is against the save before.
-    const failure = await getDb()
+    const outcome = await getDb()
       .transaction(async (tx) => {
         await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${SETTINGS_LOCK_TIMEOUT_MS}ms'`));
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`module-settings:${id}:${kind}`}, 0))`,
         );
         const changed: string[] = [];
-        let written = 0;
-        // Field names only: a module's settings can hold an API key.
-        const record = (extra?: { partial: true }) =>
-          recordAuditEvent(tx, {
-            actorUserId: c.get('userId'),
-            action: 'module.settings',
-            targetType: 'module',
-            targetId: null,
-            metadata: { moduleId: id, kind, changed, ...extra },
-          });
-        try {
-          for (const [field, value] of Object.entries(result.data)) {
-            const key = moduleSettingKey(id, kind, field);
-            const next = JSON.stringify(value);
-            const before = await configService.getFresh(key);
-            await configService.set(key, next);
-            written += 1;
-            if (before !== next) changed.push(field);
-          }
-        } catch (error) {
-          if (written === 0) throw error;
-          await record({ partial: true });
-          // Returned, not rethrown: a throw would roll the partial row back with the transaction.
-          return { error };
+        for (const { field, key, next } of entries) {
+          if ((await configService.getFresh(key)) !== next) changed.push(field);
         }
-        await record();
-        return undefined;
+        // Field names only: a module's settings can hold an API key.
+        const event = (fields: string[], extra?: { partial: true }): AuditEvent => ({
+          actorUserId: c.get('userId'),
+          action: 'module.settings',
+          targetType: 'module',
+          targetId: null,
+          metadata: { moduleId: id, kind, changed: fields, ...extra },
+        });
+        const full = event(changed);
+        const written: string[] = [];
+        try {
+          // The row goes first: the change lives in Redis, which no rollback reaches.
+          await tx.transaction(async (savepoint) => {
+            // A write that fails after the first takes the full row back with the savepoint.
+            await insertAuditEvent(savepoint, full);
+            for (const { field, key, next } of entries) {
+              await configService.set(key, next);
+              written.push(field);
+            }
+          });
+        } catch (error) {
+          if (written.length === 0) throw error;
+          const partial = event(
+            changed.filter((field) => written.includes(field)),
+            { partial: true },
+          );
+          await insertAuditEvent(tx, partial);
+          // Returned, not rethrown: a throw would roll the partial row back with the transaction.
+          return { event: partial, error };
+        }
+        return { event: full };
       })
       .catch(lockBusyError);
-    if (failure) throw failure.error;
+    logAuditEvent(outcome.event);
+    if ('error' in outcome) throw outcome.error;
     return c.json({ values: result.data });
   });
 

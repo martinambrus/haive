@@ -8,8 +8,14 @@ const h = vi.hoisted(() => ({
 
 vi.mock('../src/db.js', () => ({
   getDb: () => ({
-    transaction: async (run: (tx: unknown) => unknown) =>
-      run({ execute: async () => [], insert: () => ({ values: async () => undefined }) }),
+    transaction: async (run: (tx: unknown) => unknown) => {
+      const tx = {
+        execute: async () => [],
+        insert: () => ({ values: async () => undefined }),
+        transaction: (inner: (t: unknown) => unknown) => inner(tx),
+      };
+      return run(tx);
+    },
   }),
 }));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({

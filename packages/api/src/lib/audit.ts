@@ -17,15 +17,7 @@ export interface AuditEvent {
   metadata?: Record<string, unknown> | null;
 }
 
-/** Dual-write an audit event: a pino line (stream — greppable, shippable) plus a
- *  durable audit_events row (survives log rotation). The DB insert is
- *  best-effort — an audit-write failure is itself logged but never breaks the
- *  user operation, which has already succeeded by the time this is called. Never
- *  pass secret/username plaintext in metadata. */
-export async function recordAuditEvent(
-  db: Pick<Database, 'insert'>,
-  event: AuditEvent,
-): Promise<void> {
+export function logAuditEvent(event: AuditEvent): void {
   log.info(
     {
       actorUserId: event.actorUserId,
@@ -36,16 +28,36 @@ export async function recordAuditEvent(
     },
     `audit: ${event.action}`,
   );
+}
+
+/** Throws on a failed insert, so inside a transaction a failed row fails the change; log after the commit. */
+export async function insertAuditEvent(
+  db: Pick<Database, 'insert'>,
+  event: AuditEvent,
+): Promise<void> {
+  await db.insert(schema.auditEvents).values({
+    actorUserId: event.actorUserId,
+    action: event.action,
+    targetType: event.targetType,
+    targetId: event.targetId ?? null,
+    metadata: event.metadata ?? null,
+    // clock_timestamp(), not the default now(): inside a transaction now() is when it began.
+    createdAt: sql`clock_timestamp()`,
+  });
+}
+
+/** Dual-write an audit event: a pino line (stream — greppable, shippable) plus a
+ *  durable audit_events row (survives log rotation). The DB insert is
+ *  best-effort — an audit-write failure is itself logged but never breaks the
+ *  user operation, which has already succeeded by the time this is called. Never
+ *  pass secret/username plaintext in metadata. */
+export async function recordAuditEvent(
+  db: Pick<Database, 'insert'>,
+  event: AuditEvent,
+): Promise<void> {
+  logAuditEvent(event);
   try {
-    await db.insert(schema.auditEvents).values({
-      actorUserId: event.actorUserId,
-      action: event.action,
-      targetType: event.targetType,
-      targetId: event.targetId ?? null,
-      metadata: event.metadata ?? null,
-      // clock_timestamp(), not the default now(): inside a transaction now() is when it began.
-      createdAt: sql`clock_timestamp()`,
-    });
+    await insertAuditEvent(db, event);
   } catch (err) {
     log.error({ err, action: event.action }, 'failed to write audit event');
   }

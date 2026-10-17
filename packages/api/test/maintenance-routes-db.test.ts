@@ -1,5 +1,5 @@
-import { and, eq } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { and, eq, sql } from 'drizzle-orm';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 
 const url = process.env.MAINTENANCE_API_TEST_URL;
@@ -99,6 +99,23 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       .from(schema.auditEvents)
       .where(and(eq(schema.auditEvents.targetId, taskId), eq(schema.auditEvents.action, action)));
 
+  const refuseAuditInserts = async () => {
+    await db.execute(
+      sql.raw(
+        "CREATE OR REPLACE FUNCTION refuse_audit_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'audit insert refused'; END $$;",
+      ),
+    );
+    await db.execute(
+      sql.raw(
+        'CREATE TRIGGER refuse_audit_insert BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION refuse_audit_insert();',
+      ),
+    );
+  };
+  const allowAuditInserts = async () => {
+    await db.execute(sql.raw('DROP TRIGGER IF EXISTS refuse_audit_insert ON audit_events;'));
+    await db.execute(sql.raw('DROP FUNCTION IF EXISTS refuse_audit_insert();'));
+  };
+
   const repository = async (status: 'cloning' | 'ready' | 'error', name: string, at?: Date) => {
     const [row] = await db
       .insert(schema.repositories)
@@ -185,6 +202,10 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
 
   beforeEach(async () => {
     await clean();
+  });
+
+  afterEach(async () => {
+    await allowAuditInserts();
   });
 
   afterAll(async () => {
@@ -521,6 +542,55 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       });
       expect(await events(busy.id, 'task.stopped')).toHaveLength(1);
       expect(await audits(busy.id, 'task.admin_stop')).toHaveLength(1);
+    });
+  });
+
+  describe('POST /tasks/:id/action pause and resume', () => {
+    it('pauses a task with one audit row and one event', async () => {
+      const busy = await task();
+
+      const res = await act(busy.id, 'pause');
+
+      expect(res.status).toBe(200);
+      expect(await events(busy.id, 'task.paused')).toHaveLength(1);
+      expect(await audits(busy.id, 'task.admin_pause')).toHaveLength(1);
+    });
+
+    it('refuses a pause whose audit row cannot be written, and changes nothing', async () => {
+      const busy = await task();
+      await refuseAuditInserts();
+
+      const res = await act(busy.id, 'pause');
+
+      expect(res.status).toBe(500);
+      const after = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, busy.id) });
+      expect(after?.pausedAt).toBeNull();
+      expect(await events(busy.id, 'task.paused')).toEqual([]);
+      await allowAuditInserts();
+      expect(await audits(busy.id, 'task.admin_pause')).toEqual([]);
+    });
+
+    it('resumes a paused task with one audit row', async () => {
+      const paused = await task({ pausedAt: new Date() });
+
+      const res = await act(paused.id, 'resume');
+
+      expect(res.status).toBe(200);
+      expect(await audits(paused.id, 'task.admin_resume')).toHaveLength(1);
+    });
+
+    it('refuses a resume whose audit row cannot be written, and changes nothing', async () => {
+      const paused = await task({ pausedAt: new Date() });
+      await refuseAuditInserts();
+
+      const res = await act(paused.id, 'resume');
+
+      expect(res.status).toBe(500);
+      const after = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, paused.id) });
+      expect(after?.pausedAt).toBeInstanceOf(Date);
+      expect(await events(paused.id, 'task.resumed')).toEqual([]);
+      await allowAuditInserts();
+      expect(await audits(paused.id, 'task.admin_resume')).toEqual([]);
     });
   });
 });

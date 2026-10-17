@@ -88,6 +88,8 @@ describe('resolveMcpSurface', () => {
   });
 
   it('names the custom tools a dispatch carries, and adds nothing to one that carries none', async () => {
+    // Both calls mint a RAG token whose exp is read from the clock.
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
     const withTools = await resolveMcpSurface(dbFor(null), 'task-1', false, [
       'repo_status',
       'house_rules',

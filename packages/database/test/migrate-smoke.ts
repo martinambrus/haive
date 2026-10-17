@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdtemp, readdir, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import postgres from 'postgres';
 
@@ -86,10 +87,11 @@ function urlFor(dbName: string): string {
 
 // `DROP DATABASE IF EXISTS` on a database that is not there is a NOTICE, not news.
 const admin = postgres(adminUrl, { max: 1, onnotice: () => {} });
+const RUN_ID = randomBytes(4).toString('hex');
 const created: string[] = [];
 
 async function freshDatabase(suffix: string): Promise<string> {
-  const name = `haive_migrate_smoke_${suffix}_${process.pid}`;
+  const name = `haive_migrate_smoke_${suffix}_${RUN_ID}`;
   await admin.unsafe(`DROP DATABASE IF EXISTS "${name}"`);
   await admin.unsafe(`CREATE DATABASE "${name}"`);
   created.push(name);
@@ -421,9 +423,9 @@ async function main(): Promise<void> {
   //     means. Refused by name instead, whichever install id named the store.
   for (const name of [
     'haive_kb_global',
-    'blank_kb_global',
-    'blank_rag_demo',
-    `${'a'.repeat(32)}_kb_global`,
+    `s${RUN_ID}_kb_global`,
+    `s${RUN_ID}_rag_demo`,
+    `${RUN_ID}${'a'.repeat(24)}_kb_global`,
   ]) {
     await ensureDatabase(name);
     const run = await runMigrate(urlFor(name));
@@ -431,7 +433,7 @@ async function main(): Promise<void> {
   }
   // An install id is at most 32 characters, so a longer prefix names no store and must migrate.
   {
-    const name = `${'a'.repeat(33)}_rag_prod`;
+    const name = `${RUN_ID}${'a'.repeat(25)}_rag_prod`;
     await ensureDatabase(name);
     const run = await runMigrate(urlFor(name));
     check('a 33-character prefix is not an install id: migrates', run.code === 0, {

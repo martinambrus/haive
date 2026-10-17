@@ -39,7 +39,12 @@ import { getDb } from '../db.js';
 import { hashPassword } from '../auth/password.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { recordAuditEvent } from '../lib/audit.js';
+import {
+  insertAuditEvent,
+  logAuditEvent,
+  recordAuditEvent,
+  type AuditEvent,
+} from '../lib/audit.js';
 import { isUuid } from '../lib/uuid.js';
 import { generateInviteToken, hashInviteToken } from '../lib/invites.js';
 
@@ -451,7 +456,7 @@ async function saveConfig(
 ): Promise<void> {
   const entries = Object.entries(fields);
   // One save of a switch at a time, so each row's `from` is what the save before it left.
-  const failure = await getDb()
+  const outcome = await getDb()
     .transaction(async (tx) => {
       await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${CONFIG_LOCK_TIMEOUT_MS}ms'`));
       await tx.execute(
@@ -462,37 +467,44 @@ async function saveConfig(
         const from = parseStored(stored[i] ?? null, fallback);
         return { name, from, to: value ?? from };
       });
-      const record = (rows: typeof changes, extra?: { partial: true }) => {
+      const event = (rows: typeof changes, extra?: { partial: true }): AuditEvent => {
         const side = (which: 'from' | 'to') =>
           entries.length === 1
             ? rows[0]![which]
             : Object.fromEntries(rows.map((row) => [row.name, row[which]]));
-        return recordAuditEvent(tx, {
+        return {
           actorUserId: userId,
           action: `config.${route.replaceAll('-', '_')}`,
           targetType: 'system',
           metadata: { from: side('from'), to: side('to'), ...extra },
-        });
+        };
       };
+      const full = event(changes);
       const written: typeof changes = [];
       try {
-        // One key after another in the order given: six handlers wrote theirs in sequence before this.
-        for (const [i, [, [key, value]]] of entries.entries()) {
-          if (value === undefined) continue;
-          await configService.set(key, String(value));
-          written.push(changes[i]!);
-        }
+        // The row goes first: the change lives in Redis, which no rollback reaches.
+        await tx.transaction(async (savepoint) => {
+          // A write that fails after the first takes the full row back with the savepoint.
+          await insertAuditEvent(savepoint, full);
+          // One key after another in the order given: six handlers wrote theirs in sequence before this.
+          for (const [i, [, [key, value]]] of entries.entries()) {
+            if (value === undefined) continue;
+            await configService.set(key, String(value));
+            written.push(changes[i]!);
+          }
+        });
       } catch (error) {
         if (written.length === 0) throw error;
-        await record(written, { partial: true });
+        const partial = event(written, { partial: true });
+        await insertAuditEvent(tx, partial);
         // Returned, not rethrown: a throw would roll the partial row back with the transaction.
-        return { error };
+        return { event: partial, error };
       }
-      await record(changes);
-      return undefined;
+      return { event: full };
     })
     .catch(lockBusyError);
-  if (failure) throw failure.error;
+  logAuditEvent(outcome.event);
+  if ('error' in outcome) throw outcome.error;
 }
 
 const concurrencySchema = z.object({
