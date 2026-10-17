@@ -114,4 +114,9 @@ describe('the worker entry point', () => {
     );
     expect(boot).not.toMatch(/await terminalManager\.stop\(\)/);
   });
+
+  it('bounds the shutdown sandbox reap with the budget and leaves the boot reap unbounded', () => {
+    expect(boot).toMatch(/reapAllCliSandboxes\(`worker \$\{signal\}`, SHUTDOWN_REAP_BUDGET_MS\)/);
+    expect(boot).toContain("reapAllCliSandboxes('worker boot')");
+  });
 });
