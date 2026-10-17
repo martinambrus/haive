@@ -55,17 +55,21 @@ export async function buildKnowledgeDiffArtifact(
     'status',
     '--porcelain',
     '-z',
+    // Otherwise git groups an untracked directory into one entry ("?? dir/"),
+    // which is not a readable file and would leave its entire diff empty.
+    '--untracked-files=all',
     '--',
     ...pathspecs,
   ]);
-  const entries = parsePorcelainZ(statusRes.stdout).slice(0, MAX_FILES);
+  const entries = parsePorcelainZ(statusRes.stdout);
+  const capped = entries.slice(0, MAX_FILES);
 
   const headShaRes = await gitRun(workspacePath, ['rev-parse', 'HEAD']);
   const headSha = headShaRes.code === 0 ? headShaRes.stdout.trim() : null;
 
   const kbFiles: CommitDiffFile[] = [];
   let used = 0;
-  for (const e of entries) {
+  for (const e of capped) {
     const file = await buildFileEntry(workspacePath, gitRun, e, TOTAL_CONTENT_BUDGET - used);
     used += file.oldContent.length + file.newContent.length;
     if (file.status !== 'deleted' && !file.binary && !file.truncated) {
@@ -77,8 +81,8 @@ export async function buildKnowledgeDiffArtifact(
   const files = [...kbFiles, ...extraFiles];
   const artifact: CommitDiffArtifact = {
     headSha,
-    fileCount: files.length,
-    truncated: false,
+    fileCount: entries.length + extraFiles.length,
+    truncated: entries.length > capped.length,
     files,
   };
 
