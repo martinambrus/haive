@@ -15,7 +15,7 @@ import { apiBaseFits } from '@haive/shared/forge';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { recordAuditEvent } from '../lib/audit.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 
 // Optional commit identity, mirroring the global one in `gitIdentityUpdateSchema`.
 const gitNameField = z
@@ -145,38 +145,42 @@ repoCredentialsRoutes.post('/', async (c) => {
   // The refine guarantees the pair is whole, so one non-empty half implies the other.
   const identitySet = Boolean(body.gitName?.length);
 
-  const inserted = await db
-    .insert(schema.repoCredentials)
-    .values({
-      userId,
-      label: body.label,
-      host: body.host,
-      provider: body.provider ? body.provider : null,
-      apiBaseUrl: body.apiBaseUrl?.trim() || null,
-      usernameEncrypted,
-      secretEncrypted,
-      encryptedDek,
-      gitName: identitySet ? (body.gitName ?? null) : null,
-      gitEmail: identitySet ? (body.gitEmail ?? null) : null,
-    })
-    .returning({
-      id: schema.repoCredentials.id,
-      label: schema.repoCredentials.label,
-      host: schema.repoCredentials.host,
-      provider: schema.repoCredentials.provider,
-      apiBaseUrl: schema.repoCredentials.apiBaseUrl,
-      gitName: schema.repoCredentials.gitName,
-      gitEmail: schema.repoCredentials.gitEmail,
-      createdAt: schema.repoCredentials.createdAt,
-    });
-
-  await recordAuditEvent(db, {
-    actorUserId: userId,
-    action: 'credential.create',
-    targetType: 'repo_credential',
-    targetId: inserted[0]?.id ?? null,
-    metadata: { host: body.host, label: body.label, identitySet },
+  const { inserted, audit } = await db.transaction(async (tx) => {
+    const rows = await tx
+      .insert(schema.repoCredentials)
+      .values({
+        userId,
+        label: body.label,
+        host: body.host,
+        provider: body.provider ? body.provider : null,
+        apiBaseUrl: body.apiBaseUrl?.trim() || null,
+        usernameEncrypted,
+        secretEncrypted,
+        encryptedDek,
+        gitName: identitySet ? (body.gitName ?? null) : null,
+        gitEmail: identitySet ? (body.gitEmail ?? null) : null,
+      })
+      .returning({
+        id: schema.repoCredentials.id,
+        label: schema.repoCredentials.label,
+        host: schema.repoCredentials.host,
+        provider: schema.repoCredentials.provider,
+        apiBaseUrl: schema.repoCredentials.apiBaseUrl,
+        gitName: schema.repoCredentials.gitName,
+        gitEmail: schema.repoCredentials.gitEmail,
+        createdAt: schema.repoCredentials.createdAt,
+      });
+    const ev: AuditEvent = {
+      actorUserId: userId,
+      action: 'credential.create',
+      targetType: 'repo_credential',
+      targetId: rows[0]?.id ?? null,
+      metadata: { host: body.host, label: body.label, identitySet },
+    };
+    await insertAuditEvent(tx, ev);
+    return { inserted: rows, audit: ev };
   });
+  logAuditEvent(audit);
   return c.json({ credential: inserted[0] }, 201);
 });
 
@@ -216,6 +220,20 @@ repoCredentialsRoutes.put('/:id', async (c) => {
   const newSecret = typeof body.secret === 'string' && body.secret.length > 0 ? body.secret : null;
   const masterKek = newUsername || newSecret !== null ? await secretsService.getMasterKek() : null;
 
+  const audit: AuditEvent = {
+    actorUserId: userId,
+    action: 'credential.update',
+    targetType: 'repo_credential',
+    targetId: id,
+    metadata: {
+      host: body.host,
+      label: body.label,
+      usernameChanged: Boolean(newUsername),
+      secretChanged: newSecret !== null,
+      identityChanged,
+    },
+  };
+
   // One lock from read to write, so an overlapping edit cannot change the row the check judged.
   const updated = await db.transaction(async (tx) => {
     const [existing] = await tx
@@ -240,7 +258,7 @@ repoCredentialsRoutes.put('/:id', async (c) => {
       if (newSecret !== null) update.secretEncrypted = encrypt(newSecret, dekHex);
     }
 
-    return tx
+    const rows = await tx
       .update(schema.repoCredentials)
       .set(update)
       .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
@@ -255,21 +273,10 @@ repoCredentialsRoutes.put('/:id', async (c) => {
         createdAt: schema.repoCredentials.createdAt,
         updatedAt: schema.repoCredentials.updatedAt,
       });
+    await insertAuditEvent(tx, audit);
+    return rows;
   });
-
-  await recordAuditEvent(db, {
-    actorUserId: userId,
-    action: 'credential.update',
-    targetType: 'repo_credential',
-    targetId: id,
-    metadata: {
-      host: body.host,
-      label: body.label,
-      usernameChanged: Boolean(newUsername),
-      secretChanged: newSecret !== null,
-      identityChanged,
-    },
-  });
+  logAuditEvent(audit);
   return c.json({ credential: updated[0] });
 });
 
@@ -277,16 +284,20 @@ repoCredentialsRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
-  const result = await db
-    .delete(schema.repoCredentials)
-    .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
-    .returning({ id: schema.repoCredentials.id });
-  if (result.length === 0) throw new HttpError(404, 'Credential not found');
-  await recordAuditEvent(db, {
+  const audit: AuditEvent = {
     actorUserId: userId,
     action: 'credential.delete',
     targetType: 'repo_credential',
     targetId: id,
+  };
+  await db.transaction(async (tx) => {
+    const result = await tx
+      .delete(schema.repoCredentials)
+      .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
+      .returning({ id: schema.repoCredentials.id });
+    if (result.length === 0) throw new HttpError(404, 'Credential not found');
+    await insertAuditEvent(tx, audit);
   });
+  logAuditEvent(audit);
   return c.json({ ok: true });
 });
