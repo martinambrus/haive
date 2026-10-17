@@ -19,14 +19,18 @@ import {
   parseMaintenanceState,
 } from '@haive/shared';
 import { getDb } from '../db.js';
-import { recordAuditEvent } from '../lib/audit.js';
+import {
+  insertAuditEvent,
+  logAuditEvent,
+  recordAuditEvent,
+  type AuditEvent,
+} from '../lib/audit.js';
 import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js';
 import { appendTaskEvent } from './tasks/_helpers.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
 const log = logger.child({ module: 'maintenance' });
-const auditLog = logger.child({ module: 'audit' });
 
 /**
  * Operator control for a maintenance window: set the state, see whose work is blocking it, and
@@ -59,34 +63,24 @@ maintenanceRoutes.get('/', async (c) => {
 maintenanceRoutes.put('/', async (c) => {
   const { state } = setStateSchema.parse(await c.req.json());
   const actorUserId = c.get('userId');
-  const previous = await getDb().transaction(async (tx) => {
+  const { event, previous } = await getDb().transaction(async (tx) => {
     await lockNewWorkFenceExclusive(tx);
     const replaced = parseMaintenanceState(
       await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
     );
-    // Unlike recordAuditEvent this insert throws, so a failed one leaves the state as it was.
-    await tx.insert(schema.auditEvents).values({
+    const ev: AuditEvent = {
       actorUserId,
       action: 'maintenance.set_state',
       targetType: 'system',
       targetId: null,
       metadata: { from: replaced, to: state },
-      createdAt: sql`clock_timestamp()`,
-    });
+    };
+    // A failed row throws here, so the state stays as it was.
+    await insertAuditEvent(tx, ev);
     await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state);
-    return replaced;
+    return { event: ev, previous: replaced };
   });
-  auditLog.info(
-    {
-      actorUserId,
-      action: 'maintenance.set_state',
-      targetType: 'system',
-      targetId: null,
-      from: previous,
-      to: state,
-    },
-    'audit: maintenance.set_state',
-  );
+  logAuditEvent(event);
   log.info({ from: previous, to: state }, 'maintenance state changed');
   return c.json({ state, previous });
 });
