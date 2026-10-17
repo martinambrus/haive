@@ -36,7 +36,7 @@ import {
   normalizeReviewDimensionIds,
 } from '@haive/shared/review';
 import { getDb } from '../db.js';
-import { recordAuditEvent } from '../lib/audit.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -870,6 +870,15 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       }
     }
 
+    const appAuthEvent: AuditEvent = {
+      actorUserId: userId,
+      action: 'repository.app_auth.update',
+      targetType: 'repository',
+      targetId: repositoryId,
+      metadata: Object.fromEntries(
+        appAuthWrites.map(({ suffix, value }) => [suffix, value ? 'set' : 'cleared']),
+      ),
+    };
     assertRagLockHeld(lock);
     await db.transaction(async (tx) => {
       if (typeof body.rtkEnabled === 'boolean') {
@@ -889,23 +898,13 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         if (value) await userSecretsService.set(userId, key, value, `App login ${suffix}`, tx);
         else await userSecretsService.delete(userId, key, tx);
       }
+      if (appAuthWrites.length > 0) await insertAuditEvent(tx, appAuthEvent);
       if (updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, userId);
       if (PORTABLE_SETTING_UPDATE_KEYS.some((key) => key in updates)) {
         await markProjectStateDirty(tx, repositoryId);
       }
     });
-    if (appAuthWrites.length > 0) {
-      // After the commit: a swallowed audit-insert failure would leave a transaction aborted.
-      await recordAuditEvent(db, {
-        actorUserId: userId,
-        action: 'repository.app_auth.update',
-        targetType: 'repository',
-        targetId: repositoryId,
-        metadata: Object.fromEntries(
-          appAuthWrites.map(({ suffix, value }) => [suffix, value ? 'set' : 'cleared']),
-        ),
-      });
-    }
+    if (appAuthWrites.length > 0) logAuditEvent(appAuthEvent);
     // A sync can write fallback rows between the probe and the clear; look once more after it.
     // Unfenced: the save has committed, and a lock lost by expiry leaves no sync to restore the flag.
     if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
