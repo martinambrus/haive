@@ -391,6 +391,7 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
       partial: 0,
       unobservable: 0,
       unrecorded: 0,
+      inFlight: 0,
       personasAssigned: [],
       personasRead: [],
       skillsInvoked: [],
@@ -409,7 +410,48 @@ describe.skipIf(!url)('GET /tasks/:id/tool-usage call groups, on Postgres', () =
       partial: 0,
       unobservable: 0,
       unrecorded: 0,
+      inFlight: 0,
     });
+  });
+
+  it('counts a run still in flight apart from an ended run with no record', async () => {
+    const FLIGHT_TASK = '00000000-0000-4000-8000-0000000000fa';
+    await db.insert(schema.tasks).values({
+      id: FLIGHT_TASK,
+      userId: USER,
+      type: 'workflow',
+      title: FLIGHT_TASK,
+      status: 'running',
+    });
+    const [flightStep] = await db
+      .insert(schema.taskSteps)
+      .values({ taskId: FLIGHT_TASK, stepId: 'tu-flight', stepIndex: 1, round: 0, title: 'Flight' })
+      .returning({ id: schema.taskSteps.id });
+    const run = {
+      taskId: FLIGHT_TASK,
+      taskStepId: flightStep!.id,
+      mode: 'cli' as const,
+      prompt: 'p',
+    };
+    const endedAt = new Date('2026-10-14T08:00:00.000Z');
+    await db
+      .insert(schema.cliInvocations)
+      .values([{ ...run, endedAt }, { ...run }, { ...run, endedAt, toolUsage: OBSERVED }]);
+    const res = await app.request(`/tasks/${FLIGHT_TASK}/tool-usage`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      coverage: Record<string, number>;
+      steps: Array<{ usage: Record<string, number> | null }>;
+    };
+    expect(body.coverage).toEqual({
+      total: 3,
+      observable: 1,
+      partial: 0,
+      unobservable: 0,
+      unrecorded: 1,
+      inFlight: 1,
+    });
+    expect(body.steps[0]!.usage).toMatchObject({ unrecorded: 1, inFlight: 1 });
   });
 
   it('adds nothing but the call groups to the answer', async () => {

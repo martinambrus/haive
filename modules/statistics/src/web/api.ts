@@ -476,10 +476,10 @@ export interface StatsCapped<T> {
   truncated: boolean;
 }
 
-/** How many of the window's runs the usage lists can speak for. `unrecorded` rows carry no
- *  record at all and `unobservable` ones ran on a CLI whose output carries no tool events
- *  (amp, gemini, the sequential sub-agent script); only `observable` runs — `partial` ones
- *  being floors — enter any "not used" reading. */
+/** How many of the window's runs the usage lists can speak for. `unrecorded` rows ended with no
+ *  record at all, `inFlight` ones have not ended yet, and `unobservable` ones ran on a CLI whose
+ *  output carries no tool events (amp, gemini, the sequential sub-agent script); only `observable`
+ *  runs — `partial` ones being floors — enter any "not used" reading. */
 export interface StatsToolUsageCoverage {
   total: number;
   recorded: number;
@@ -487,6 +487,7 @@ export interface StatsToolUsageCoverage {
   partial: number;
   unobservable: number;
   unrecorded: number;
+  inFlight: number;
   withLoaded: number;
   byProvider: Array<{
     provider: string | null;
@@ -496,6 +497,7 @@ export interface StatsToolUsageCoverage {
     partial: number;
     unobservable: number;
     unrecorded: number;
+    inFlight: number;
     withLoaded: number;
   }>;
   /** When the first assigned persona was recorded, whole history; null = never yet, which the

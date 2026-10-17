@@ -1278,8 +1278,8 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
    * coverage line cites an M no other tab recognises.
    *
    * The denominators are stated, never implied. `total` is the reconciliation figure; `unrecorded`
-   * (a NULL column) and `unobservable` (`coverage: 'none'` — amp, gemini, the sequential sub-agent
-   * script, plain output) enter no "not used" sentence; `observable` (full + partial, the partial
+   * (ended with a NULL column; runs not yet ended are `inFlight`) and `unobservable` (`coverage:
+   * 'none'` — amp, gemini, the sequential sub-agent script, plain output) enter no "not used" sentence; `observable` (full + partial, the partial
    * ones being floors) is the ONLY denominator such a sentence may cite, and `share` is
    * `sampledRatio(runs, observable)`, so a three-run window renders `n=3` and never a percentage.
    *
@@ -1336,6 +1336,7 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
       partial: 0,
       unobservable: 0,
       unrecorded: 0,
+      inFlight: 0,
       withLoaded: 0,
     });
     const coverage = emptyCoverage();
@@ -1351,7 +1352,8 @@ export default function createStatsRoutes(ctx: ModuleRouteContext): Hono<AppEnv>
         target.observable += r.observable;
         target.partial += r.partial;
         target.unobservable += r.unobservable;
-        target.unrecorded += r.total - r.recorded;
+        target.inFlight += r.inFlight;
+        target.unrecorded += r.total - r.recorded - r.inFlight;
         target.withLoaded += r.withLoaded;
       }
       byProvider.set(r.provider, bucket);

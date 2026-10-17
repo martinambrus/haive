@@ -1213,6 +1213,7 @@ export interface TaskToolUsageStep {
   partial: number;
   unobservable: number;
   unrecorded: number;
+  inFlight: number;
   personasAssigned: TaskToolUsageCounted[];
   personasRead: TaskToolUsageCounted[];
   skillsInvoked: TaskToolUsageCounted[];
@@ -1243,6 +1244,7 @@ export interface TaskToolUsage {
     partial: number;
     unobservable: number;
     unrecorded: number;
+    inFlight: number;
   };
   /** Every call logged for the task, those no step owns included. */
   callTotals: { customTools: TaskCustomToolCall[]; integrations: TaskIntegrationCall[] };

@@ -71,6 +71,7 @@ interface ToolUsageStats {
     partial: number;
     unobservable: number;
     unrecorded: number;
+    inFlight: number;
     withLoaded: number;
     byProvider: Array<{
       provider: string | null;
@@ -78,6 +79,7 @@ interface ToolUsageStats {
       observable: number;
       unobservable: number;
       unrecorded: number;
+      inFlight: number;
     }>;
     assignedRecordedSince: string | null;
   };
@@ -121,7 +123,14 @@ interface TaskToolUsage {
     personasAssigned: Array<{ id: string; n: number }>;
     mcp: Array<{ server: string; tool: string; calls: number }>;
   };
-  coverage: { total: number; observable: number; unobservable: number; unrecorded: number };
+  coverage: {
+    total: number;
+    observable: number;
+    partial: number;
+    unobservable: number;
+    unrecorded: number;
+    inFlight: number;
+  };
 }
 
 test.describe('tool-usage statistics', () => {
@@ -170,6 +179,7 @@ test.describe('tool-usage statistics', () => {
       partial: 0,
       unobservable: 2,
       unrecorded: 1,
+      inFlight: 0,
       withLoaded: 1,
     });
     // An assignment is a dispatch fact on any RECORDED row; the first such row dates the field.
@@ -262,6 +272,7 @@ test.describe('tool-usage statistics', () => {
       partial: 0,
       unobservable: 2,
       unrecorded: 1,
+      inFlight: 0,
     });
   });
 
