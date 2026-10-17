@@ -18,6 +18,7 @@ import type { PublicTaskType } from '@haive/shared/modularity';
 import { describePlanNodesForTask } from '@haive/shared/plan-describe';
 import { taskProposal } from '@/components/plan/plan-chat-turn';
 import { HoursMinutesInput } from '@/components/hours-minutes-input';
+import { UploadFailureList } from '@/components/attachments/upload-failure-list';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import {
   buildNewTaskBody,
@@ -1359,20 +1360,7 @@ export default function NewTaskPage() {
                   ? `The task was created but not started: it is ${attachmentOutcome.start.status} now.`
                   : 'The task was created but could not be started. Open it and press Start.'}
             </p>
-            <p>
-              {attachmentOutcome.failed.length} of {attachmentOutcome.total} attachment(s) could not
-              be uploaded:
-            </p>
-            <ul
-              aria-label="Attachments that failed to upload"
-              className="max-h-48 list-disc overflow-auto pl-5 [overflow-wrap:anywhere]"
-            >
-              {attachmentOutcome.failed.map((f, i) => (
-                <li key={i}>
-                  <span className="font-mono">{f.name}</span>: {f.message}
-                </li>
-              ))}
-            </ul>
+            <UploadFailureList total={attachmentOutcome.total} failed={attachmentOutcome.failed} />
             <p>
               <Link
                 href={`/tasks/${attachmentOutcome.taskId}`}

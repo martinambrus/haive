@@ -16,6 +16,7 @@ import { deleteAttachmentConfirmation, deleteFolderConfirmation } from '@/lib/at
 import { pollForExpansion } from '@/lib/attachment-expansion';
 import { archiveExpansionBanner } from '@/lib/step-banners';
 import { Button, Card } from '@/components/ui';
+import { UploadFailureList } from './upload-failure-list';
 
 /** How often the panel re-reads while an archive waits for the worker. */
 const EXPANSION_POLL_MS = 5000;
@@ -246,20 +247,7 @@ export function AttachmentsPanel({
         {deleteError && <p className="text-xs text-rose-400">{deleteError}</p>}
         {uploadFailures && (
           <div role="alert" className="flex flex-col gap-1 text-xs text-rose-400">
-            <p>
-              {uploadFailures.failed.length} of {uploadFailures.total} attachment(s) could not be
-              uploaded:
-            </p>
-            <ul
-              aria-label="Attachments that failed to upload"
-              className="max-h-48 list-disc overflow-auto pl-5 [overflow-wrap:anywhere]"
-            >
-              {uploadFailures.failed.map((f, i) => (
-                <li key={i}>
-                  <span className="font-mono">{f.name}</span>: {f.message}
-                </li>
-              ))}
-            </ul>
+            <UploadFailureList total={uploadFailures.total} failed={uploadFailures.failed} />
           </div>
         )}
       </Card>

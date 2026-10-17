@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import NewTaskPage from './page';
+import { UploadFailureList } from '@/components/attachments/upload-failure-list';
 import {
   buttons,
   controls,
@@ -38,6 +39,11 @@ vi.mock('lucide-react', () => ({ Lock: () => null, Unlock: () => null }));
 vi.mock('@/components/markdown/markdown-view', () => ({
   MarkdownView: ({ body }: { body: string }) => body,
 }));
+vi.mock('@/components/attachments/upload-failure-list', async (importOriginal) => {
+  const real =
+    await importOriginal<typeof import('@/components/attachments/upload-failure-list')>();
+  return { ...real, UploadFailureList: vi.fn(real.UploadFailureList) };
+});
 
 const status = (over: Record<string, unknown> = {}) => ({
   onboarded: false,
@@ -709,6 +715,12 @@ describe('a new task with attachments', () => {
     expect(failedFiles(view)).toEqual(['b.md: too large']);
     expect(page(view)).toContain('The task was created and started.');
     expect(page(view)).toContain('1 of 3 attachment(s) could not be uploaded:');
+    expect(UploadFailureList).toHaveBeenCalledWith(
+      expect.objectContaining({
+        total: 3,
+        failed: [{ name: 'b.md', message: 'too large' }],
+      }),
+    );
     expect(
       findAll(view.tree(), (h) => h.tag === 'a' && h.props.href === '/tasks/task-new'),
     ).toHaveLength(1);

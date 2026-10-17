@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { AttachmentsPanel } from './attachments-panel';
 import { createRenderer, findAll, textOf, type Renderer } from '../../../test/render-tree';
 import type { TaskAttachment } from '@/lib/api-client';
+import { UploadFailureList } from './upload-failure-list';
 
 // No DOM in this package: the panel runs through test/render-tree.ts, and the network is a stub of fetch.
 vi.mock('react', async (importOriginal) => ({
@@ -9,6 +10,10 @@ vi.mock('react', async (importOriginal) => ({
   ...(await import('../../../test/render-tree')).reactHooks,
 }));
 vi.mock('lucide-react', () => ({ ChevronDown: () => null, ChevronRight: () => null }));
+vi.mock('./upload-failure-list', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./upload-failure-list')>();
+  return { ...real, UploadFailureList: vi.fn(real.UploadFailureList) };
+});
 
 const TASK = 'task-1';
 const LIST = `GET /tasks/${TASK}/attachments`;
@@ -106,6 +111,12 @@ describe('uploading from the attachments panel', () => {
     expect(listings()).toBe(2);
     expect(failedFiles(view)).toEqual(['docs/b.md: too large']);
     expect(page(view)).toContain('1 of 3 attachment(s) could not be uploaded:');
+    expect(UploadFailureList).toHaveBeenCalledWith(
+      expect.objectContaining({
+        total: 3,
+        failed: [{ name: 'docs/b.md', message: 'too large' }],
+      }),
+    );
   });
 
   it('keeps the message of a failed upload on screen after the list has reloaded', async () => {
