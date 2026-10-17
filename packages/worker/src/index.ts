@@ -38,7 +38,7 @@ import {
 import { reconcileDeadTasks, retryHeldRevivals } from './queues/dead-task-boot.js';
 import { defaultDeps, redriveStalledTasks, StalledTaskSweeper } from './queues/stalled-redrive.js';
 import { closeRedis } from './redis.js';
-import { reapAllCliSandboxes } from './sandbox/cli-container-reaper.js';
+import { reapAllCliSandboxes, SHUTDOWN_REAP_BUDGET_MS } from './sandbox/cli-container-reaper.js';
 import { reapOrphanedAuthVolumes } from './sandbox/auth-volume-reaper.js';
 import { reapOrphanEnvTemplates } from './sandbox/env-template-reaper.js';
 import { reapStaleComposedImages } from './sandbox/composed-image-reaper.js';
@@ -352,7 +352,7 @@ async function main(): Promise<void> {
       closeCliExecQueue(),
       closePrPollQueue(),
     ]);
-    await reapAllCliSandboxes(`worker ${signal}`).catch((err) => {
+    await reapAllCliSandboxes(`worker ${signal}`, SHUTDOWN_REAP_BUDGET_MS).catch((err) => {
       logger.warn({ err }, 'cli sandbox reap on shutdown failed');
     });
     await closeRedis();
