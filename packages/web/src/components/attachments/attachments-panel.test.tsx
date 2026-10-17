@@ -34,12 +34,22 @@ let hold: { name: string; settle?: (code: number, body: unknown) => void } | nul
 let listed: TaskAttachment[] = [];
 let beforeDeleteReply: (() => void) | null = null;
 let deleteReply = { code: 500, error: 'locked' };
+let holdList: { settle?: () => void } | null = null;
 
 async function fakeFetch(input: unknown, init?: { method?: string }) {
   const url = new URL(String(input), 'http://localhost');
   const call = `${init?.method ?? 'GET'} ${url.pathname}`;
   sent.push(call);
-  if (call === LIST) return reply(200, { attachments: listed });
+  if (call === LIST) {
+    const held = holdList?.settle ? null : holdList;
+    if (held) {
+      const snapshot = structuredClone(listed);
+      return new Promise((resolve) => {
+        held.settle = () => resolve(reply(200, { attachments: snapshot }));
+      });
+    }
+    return reply(200, { attachments: listed });
+  }
   if (call.startsWith(`DELETE /tasks/${TASK}/attachments`)) {
     beforeDeleteReply?.();
     return reply(deleteReply.code, { error: deleteReply.error });
@@ -73,6 +83,7 @@ beforeEach(() => {
   listed = [];
   beforeDeleteReply = null;
   deleteReply = { code: 500, error: 'locked' };
+  holdList = null;
 });
 
 async function mount(): Promise<Renderer> {
@@ -250,6 +261,27 @@ describe('removing from the attachments panel', () => {
     expect(page(view)).toContain('1 file(s)');
     expect(page(view)).not.toContain('2 file(s)');
     expect(page(view)).toContain('locked');
+  });
+
+  it('keeps a removed file gone when an older poll read answers after the delete re-read', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    listed = [row('a.md'), row('bundle.zip')];
+    deleteReply = { code: 200, error: '' };
+    const view = await mount();
+    holdList = {};
+    vi.advanceTimersByTime(5000);
+    await view.flush();
+    expect(holdList.settle).toBeDefined();
+    beforeDeleteReply = () => {
+      listed = [row('bundle.zip')];
+    };
+    clickButton(view, 'Remove');
+    for (let i = 0; i < 3; i += 1) await view.flush();
+    expect(sent).toContain(`DELETE /tasks/${TASK}/attachments/a.md`);
+    expect(page(view)).not.toContain('a.md');
+    holdList.settle!();
+    for (let i = 0; i < 3; i += 1) await view.flush();
+    expect(page(view)).not.toContain('a.md');
   });
 
   it('drops a failed delete on the next upload', async () => {
