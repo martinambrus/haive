@@ -50,7 +50,9 @@ export async function insertAuditEvent(
  *  durable audit_events row (survives log rotation). The DB insert is
  *  best-effort — an audit-write failure is itself logged but never breaks the
  *  user operation, which has already succeeded by the time this is called. Never
- *  pass secret/username plaintext in metadata. */
+ *  pass secret/username plaintext in metadata. Not for security actions (users,
+ *  invites, credentials, secrets): those write insertAuditEvent inside the change's
+ *  transaction, so a row that cannot be written undoes the change. */
 export async function recordAuditEvent(
   db: Pick<Database, 'insert'>,
   event: AuditEvent,
