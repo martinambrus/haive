@@ -35,6 +35,8 @@ vi.mock('../src/db.js', () => ({
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ get: async () => h.report }) }));
 vi.mock('../src/lib/audit.js', () => ({
   recordAuditEvent: async (_db: unknown, event: unknown) => void h.audits.push(event),
+  insertAuditEvent: async (_db: unknown, event: unknown) => void h.audits.push(event),
+  logAuditEvent: () => {},
 }));
 vi.mock('../src/modules/activation.js', () => ({
   deactivatedModuleIds: async () => new Set<string>(),

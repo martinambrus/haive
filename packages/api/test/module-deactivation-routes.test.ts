@@ -43,12 +43,20 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 vi.mock('../src/db.js', () => ({
   getDb: () => ({
     select: () => ({ from: async () => h.intentRows }),
-    transaction: async (run: (tx: unknown) => unknown) => run({ execute: async () => [] }),
+    transaction: async (run: (tx: unknown) => unknown) => {
+      const tx = {
+        execute: async () => [],
+        transaction: (inner: (t: unknown) => unknown) => inner(tx),
+      };
+      return run(tx);
+    },
   }),
 }));
 vi.mock('../src/redis.js', () => ({ getRedis: () => ({ get: async () => null }) }));
 vi.mock('../src/lib/audit.js', () => ({
   recordAuditEvent: async (_db: unknown, event: unknown) => void h.audits.push(event),
+  insertAuditEvent: async (_db: unknown, event: unknown) => void h.audits.push(event),
+  logAuditEvent: () => {},
 }));
 vi.mock('../src/modules/activation.js', () => ({
   deactivatedModuleIds: async () => {
