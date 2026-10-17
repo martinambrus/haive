@@ -24,7 +24,7 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 
-async function scan(rtkEnabled: boolean) {
+async function scan(rtkEnabled: boolean, rtkChoiceMadeAt: Date | null = null) {
   const root = await mkdtemp(join(tmpdir(), 'mirror-rtk-'));
   dirs.push(root);
   await mkdir(join(root, '.haive-data'));
@@ -43,6 +43,7 @@ async function scan(rtkEnabled: boolean) {
     name: 'acme',
     source: 'git_https',
     rtkEnabled: true,
+    rtkChoiceMadeAt,
     onboardingTooling: null,
   });
   fake.insert(schema.projectStateConflicts, {
@@ -77,5 +78,14 @@ describe('the mirror import writing rtk_enabled and a pending RTK question', () 
     expect(fake.rows(schema.projectStateOutbox)).toEqual([
       expect.objectContaining({ repositoryId: REPO, revision: 1 }),
     ]);
+  });
+
+  it('keeps a person-switched RTK and its pending question, and still stores the tooling', async () => {
+    const fake = await scan(false, new Date(1000));
+
+    const repo = fake.rows(schema.repositories)[0]!;
+    expect(repo.rtkEnabled).toBe(true);
+    expect(repo.onboardingTooling).toMatchObject({ tooling: { rtkEnabled: false } });
+    expect(fake.rows(schema.projectStateConflicts)[0]).toMatchObject({ resolution: null });
   });
 });

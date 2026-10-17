@@ -42,6 +42,7 @@ import {
   ENVIRONMENT_UNIT,
   PROJECT_STATE_DIR,
   TOOLING_UNIT_NAME,
+  isRtkChoiceRecorded,
   settingFileName,
   withoutMachineLocalTooling,
 } from '@haive/shared/project-state';
@@ -153,6 +154,7 @@ async function importHaiveDataMirror(
       onboardingEnvironment: schema.repositories.onboardingEnvironment,
       onboardingTooling: schema.repositories.onboardingTooling,
       scopeExcludeGlobs: schema.repositories.scopeExcludeGlobs,
+      rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
     })
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
@@ -207,7 +209,12 @@ async function importHaiveDataMirror(
         const held = holdImportedMcpServers(local);
         heldMcpServers = held?.importedMcpServerNames ?? null;
         tooling.tooling = held ?? local;
-        if (typeof local.rtkEnabled === 'boolean') updates.rtkEnabled = local.rtkEnabled;
+        if (
+          typeof local.rtkEnabled === 'boolean' &&
+          !isRtkChoiceRecorded(false, repo.rtkChoiceMadeAt)
+        ) {
+          updates.rtkEnabled = local.rtkEnabled;
+        }
       }
       updates.onboardingTooling = tooling as unknown as Record<string, unknown>;
     }
