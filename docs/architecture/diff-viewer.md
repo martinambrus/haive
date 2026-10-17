@@ -5,6 +5,11 @@ current new content in the browser. `commit-diff.ts` builds inline and split row
 keeping their line numbers, text highlights and change maps derived from the same comparison.
 Editable knowledge files use the fetched live content, so a save updates these views too.
 
+Both artifact builders, `_commit-diff.ts` for gate 3 and `_knowledge-diff.ts` for the knowledge
+gates, list each changed file on its own, files inside a new untracked directory included, and
+stop at `MAX_FILES` (500). `fileCount` counts every changed file, listed or not, and `truncated`
+says the list was cut; the viewer shows that count and a "list truncated" mark.
+
 Whole lines retain their red/green background. A removed run followed by an added run also
 gets a `diffWordsWithSpace` comparison: only changed words, punctuation and whitespace receive
 the brighter background. Compare the entire replacement run before projecting spans onto
