@@ -393,7 +393,12 @@ export function NewRepoForm() {
                 )}
                 {!reposError && (
                   <div className="flex items-center gap-3 text-xs text-neutral-500">
-                    {reposTruncated && <span>Showing first 1000 — use filter or manual URL.</span>}
+                    {reposTruncated && (
+                      <span>
+                        Showing the 1000 most recently pushed repositories. The filter searches only
+                        these; enter any other repository&apos;s URL manually.
+                      </span>
+                    )}
                     <button type="button" className="underline" onClick={() => setManualUrl(true)}>
                       Enter URL manually
                     </button>
