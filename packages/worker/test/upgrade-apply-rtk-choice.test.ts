@@ -32,7 +32,10 @@ afterEach(async () => {
 });
 
 /** An RTK-off plan that adopts one agent file, over a repository whose AGENTS.md holds an RTK block. */
-async function setup(rtkFollowsLive: boolean | undefined) {
+async function setup(
+  rtkFollowsLive: boolean | undefined,
+  repo?: { rtkEnabled: boolean; rtkChoiceMadeAt: Date | null },
+) {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-apply-rtk-choice-'));
   dirs.push(root);
   await mkdir(join(root, '.claude', 'agents'), { recursive: true });
@@ -46,6 +49,15 @@ async function setup(rtkFollowsLive: boolean | undefined) {
     cliProviders: schema.cliProviders,
     ...RECORD_WRITE_TABLES,
   });
+  if (repo) {
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'acme',
+      source: 'git_https',
+      ...repo,
+    });
+  }
   const agentRow = fake.insert(schema.onboardingArtifacts, {
     userId: USER,
     repositoryId: REPO,
@@ -152,5 +164,41 @@ describe('02 over a context that recorded RTK off', () => {
     for (const row of rows) {
       expect(row.formValuesSnapshot).toMatchObject({ rtkEnabled: false });
     }
+  });
+});
+
+describe('02 after a person switched RTK since the plan', () => {
+  const STAMP = new Date(1000);
+  const switched = 'RTK was switched off after this upgrade was planned';
+
+  it.each([false, undefined])(
+    'refuses a plan that did not follow the switch (rtkFollowsLive %s)',
+    async (follows) => {
+      const s = await setup(follows, { rtkEnabled: false, rtkChoiceMadeAt: STAMP });
+
+      await expect(s.apply()).rejects.toThrow(switched);
+
+      expect(s.written()).toEqual([]);
+      expect(await readFile(join(s.root, 'AGENTS.md'), 'utf8')).toBe(AGENTS);
+      expect(await readFile(join(s.root, AGENT), 'utf8')).toBe(NEW);
+    },
+  );
+
+  it('applies a plan over a repository nobody switched', async () => {
+    const s = await setup(false, { rtkEnabled: false, rtkChoiceMadeAt: null });
+    await s.apply();
+    expect(s.written().length).toBeGreaterThan(0);
+  });
+
+  it('applies a followed plan whose value still holds', async () => {
+    const s = await setup(true, { rtkEnabled: false, rtkChoiceMadeAt: STAMP });
+    await s.apply();
+    expect(s.written().length).toBeGreaterThan(0);
+  });
+
+  it('refuses a followed plan whose value changed', async () => {
+    const s = await setup(true, { rtkEnabled: true, rtkChoiceMadeAt: STAMP });
+    await expect(s.apply()).rejects.toThrow('RTK was switched on after this upgrade was planned');
+    expect(s.written()).toEqual([]);
   });
 });

@@ -29,7 +29,7 @@ import {
   upsertRegion,
   type FormSchema,
 } from '@haive/shared';
-import { rtkLeftoversToRemove, sameValue } from '@haive/shared/project-state';
+import { isRtkChoiceRecorded, rtkLeftoversToRemove, sameValue } from '@haive/shared/project-state';
 import type { StepDefinition } from '../../step-definition.js';
 import {
   updateApplicableTemplateIds,
@@ -803,18 +803,24 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // The form parks between the plan and this apply, and RTK switched meanwhile leaves the plan's
     // RTK actions pointing the wrong way.
     const plannedRtk = plan.renderCtxSnapshot.rtkEnabled;
-    if (plan.rtkFollowsLive === true && typeof plannedRtk === 'boolean') {
-      const [repo] = await ctx.db
-        .select({ rtkEnabled: schema.repositories.rtkEnabled })
-        .from(schema.repositories)
-        .where(eq(schema.repositories.id, plan.repositoryId))
-        .limit(1);
-      if (repo && repo.rtkEnabled !== plannedRtk) {
-        throw new Error(
-          `RTK was switched ${repo.rtkEnabled ? 'on' : 'off'} after this upgrade was planned, so ` +
-            'its plan no longer holds. Retry the plan step to plan the upgrade again.',
-        );
-      }
+    const [liveRepo] = await ctx.db
+      .select({
+        rtkEnabled: schema.repositories.rtkEnabled,
+        rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
+      })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, plan.repositoryId))
+      .limit(1);
+    if (
+      liveRepo &&
+      (plan.rtkFollowsLive === true
+        ? typeof plannedRtk === 'boolean' && liveRepo.rtkEnabled !== plannedRtk
+        : isRtkChoiceRecorded(false, liveRepo.rtkChoiceMadeAt))
+    ) {
+      throw new Error(
+        `RTK was switched ${liveRepo.rtkEnabled ? 'on' : 'off'} after this upgrade was planned, so ` +
+          'its plan no longer holds. Retry the plan step to plan the upgrade again.',
+      );
     }
     // A sync that began before this upgrade was live can commit after 01 read the column; writing
     // this plan's context back would undo it. Read under the sync's lock: a sync in flight commits
