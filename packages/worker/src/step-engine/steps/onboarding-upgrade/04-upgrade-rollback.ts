@@ -946,14 +946,21 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     // restored render context. After a rollback the repo's gating may differ
     // (e.g. prior baseline didn't include LSP plugins) — recompute from
     // ground truth.
+    let chosen = false;
     if (recorded) {
+      // A choice is what the plan of the upgrade being undone found, not what the value looks like:
+      // a context from before RTK is stored with a synthesized `rtkEnabled: false`.
+      const plan = (
+        await loadPreviousStepOutput(ctx.db, detected.rolledBackFromTaskId, '01-upgrade-plan')
+      )?.output as Pick<UpgradePlanOutput, 'rtkFollowsLive'> | null | undefined;
+      chosen = plan?.rtkFollowsLive === true && typeof recorded.rtkEnabled === 'boolean';
       const restored = recorded as unknown as TemplateRenderContext;
       const applicableExpanded = await unionExpandedFor(ctx.db, {
         repositoryId: detected.repositoryId,
         userId: ctx.userId,
         // Every reader renders a person's RTK switch over the context's own value.
         renderCtx:
-          repo && isRtkChoiceRecorded(false, repo.rtkChoiceMadeAt)
+          repo && isRtkChoiceRecorded(chosen, repo.rtkChoiceMadeAt)
             ? { ...restored, rtkEnabled: repo.rtkEnabled }
             : restored,
         logger: ctx.logger,
@@ -964,17 +971,11 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     let recordWrite: RollbackOutput['recordWrite'] = recorded ? 'written' : 'skipped';
     try {
       if (recorded) {
-        // A choice is what the plan of the upgrade being undone found, not what the value looks like:
-        // a context from before RTK is stored with a synthesized `rtkEnabled: false`.
-        const plan = (
-          await loadPreviousStepOutput(ctx.db, detected.rolledBackFromTaskId, '01-upgrade-plan')
-        )?.output as Pick<UpgradePlanOutput, 'rtkFollowsLive'> | null | undefined;
         await writeProjectStateRecord(ctx.db, {
           repositoryId: detected.repositoryId,
           repoPath: ctx.repoPath,
           context: recorded as unknown as TemplateRenderContext,
-          rtkChoiceRecorded:
-            plan?.rtkFollowsLive === true && typeof recorded.rtkEnabled === 'boolean',
+          rtkChoiceRecorded: chosen,
         });
         await retireInstallManifest(ctx, warnings);
       }

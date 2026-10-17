@@ -1013,7 +1013,7 @@ async function main(): Promise<void> {
     const renderContextB =
       'rows' in columnB && columnB.rows.length === 1 ? columnB.rows[0]!.render_context : null;
     check(
-      "B's render_context holds the portable render fields of A's record, records its RTK choice and holds no per-install field",
+      "B's render_context holds the portable render fields of A's record, records the RTK choice A's record carries (its rtk-enabled.json) and holds no per-install field",
       wantRender !== null &&
         isDeepStrictEqual(
           asJson(renderContextB),
@@ -1169,6 +1169,26 @@ async function main(): Promise<void> {
         unchosenFile.trim() === 'false' &&
         git(b.repoPath, 'status', '--porcelain', '--', rtkRel) === '',
       { unchosenSync, unchosenColumn, unchosenFile },
+    );
+    const adoptedB = await rowsOf<{ flag: boolean | null; held: unknown; stamped: boolean }>(
+      b.db,
+      sql`select (r.render_context ->> 'rtkChoiceRecorded')::boolean as flag,
+        s.base_snapshot #> '{settings,rtk-enabled}' as held,
+        r.rtk_choice_made_at is not null as stamped
+        from repositories r join project_state_sync s on s.repository_id = r.id
+        where r.id = ${b.repositoryId}`,
+    );
+    check(
+      "B adopted A's value: the RTK choice is recorded in the column without a stamp, and the sync base holds A's file",
+      'rows' in adoptedB &&
+        adoptedB.rows[0]?.flag === true &&
+        adoptedB.rows[0]?.held === false &&
+        adoptedB.rows[0]?.stamped === false,
+      adoptedB,
+    );
+    await b.db.execute(
+      sql`update repositories set render_context = jsonb_set(render_context, '{rtkChoiceRecorded}', 'false')
+        where id = ${b.repositoryId}`,
     );
     await rm(path.join(b.repoPath, rtkRel));
     await b.db.execute(
@@ -2925,6 +2945,166 @@ async function main(): Promise<void> {
           git(origin, 'rev-parse', 'main') === sent &&
           (await fileOf(y, RECORD_RENDER)) === '{ edited by hand',
         saved.error,
+      );
+    }
+
+    // D24 / D25: an import records an RTK choice only from a record that carries one.
+    {
+      const origin = path.join(tmp!, 'rtk-source.git');
+      git(tmp!, 'init', '-q', '--bare', '-b', 'main', origin);
+      const seedDir = path.join(tmp!, 'rtk-source-seed');
+      git(tmp!, 'clone', '-q', `file://${origin}`, seedDir);
+      await writeFile(path.join(seedDir, 'README.md'), '# rtk\n');
+      git(seedDir, 'add', 'README.md');
+      git(seedDir, 'commit', '-q', '-m', 'seed');
+      git(seedDir, 'push', '-q', 'origin', 'HEAD:main');
+      const url = `file://${origin}`;
+      const userOfSource = randomUUID();
+      landUsers.push(userOfSource);
+      const source = await cloneInstall(
+        'A',
+        dbA!,
+        path.join(tmp!, 'rtk-source-a'),
+        url,
+        userOfSource,
+      );
+      const unrecordedRender = { ...RENDER_BASE, rtkChoiceRecorded: false };
+      await source.db
+        .update(schema.repositories)
+        .set({ renderContext: unrecordedRender })
+        .where(eq(schema.repositories.id, source.repositoryId));
+      await writeProjectStateColumn(source.db, {
+        repositoryId: source.repositoryId,
+        repoPath: source.repoPath,
+        column: unrecordedRender,
+      });
+      git(source.repoPath, 'add', '.haive-data/state');
+      git(source.repoPath, 'commit', '-q', '-m', 'A: a record that carries no RTK choice');
+      git(source.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+      check(
+        'S1: a source that never chose RTK commits a record without rtk-enabled.json',
+        (await fileOf(source, rtkRel)) === '' &&
+          git(source.repoPath, 'ls-files', '--', rtkRel) === '',
+        await fileOf(source, rtkRel),
+      );
+
+      const clone = await cloneInstall('B', dbB!, path.join(tmp!, 'rtk-clone-b'), url);
+      const stateOf = async (install: Install) => {
+        const got = await rowsOf<{
+          flag: boolean | null;
+          rtk: boolean;
+          stamped: boolean;
+          held: unknown;
+          repo_xmin: string;
+          sync_xmin: string | null;
+        }>(
+          install.db,
+          sql`select (r.render_context ->> 'rtkChoiceRecorded')::boolean as flag,
+            r.rtk_enabled as rtk,
+            r.rtk_choice_made_at is not null as stamped,
+            s.base_snapshot #> '{settings,rtk-enabled}' as held,
+            r.xmin::text as repo_xmin,
+            s.xmin::text as sync_xmin
+            from repositories r left join project_state_sync s on s.repository_id = r.id
+            where r.id = ${install.repositoryId}`,
+        );
+        return 'rows' in got ? (got.rows[0] ?? null) : null;
+      };
+      const pass = async (install: Install) => {
+        await markProjectStateDirty(install.db, install.repositoryId);
+        await sweepDirtyProjectStates(install.db);
+      };
+      const cloned = await stateOf(clone);
+      await pass(clone);
+      check(
+        'S1: a clone of that record records no RTK choice, its sweep writes no rtk-enabled.json and its checkout stays clean',
+        cloned?.flag === false &&
+          cloned.stamped === false &&
+          (await fileOf(clone, rtkRel)) === '' &&
+          git(clone.repoPath, 'status', '--porcelain', '--', rtkRel) === '' &&
+          dirtyOn(clone) === '',
+        { cloned, file: await fileOf(clone, rtkRel), status: dirtyOn(clone) },
+      );
+
+      await rm(path.join(clone.repoPath, rtkRel), { force: true });
+      await source.db.execute(
+        sql`update repositories set rtk_enabled = false, rtk_choice_made_at = now(),
+          render_context = jsonb_set(render_context, '{rtkChoiceRecorded}', 'true')
+          where id = ${source.repositoryId}`,
+      );
+      await markProjectStateDirty(source.db, source.repositoryId);
+      await sweepDirtyProjectStates(source.db);
+      pushFrom(source, 'A: switches RTK off', '.haive-data/state');
+      git(clone.repoPath, 'pull', '-q', '--ff-only', 'origin', 'main');
+      await pass(clone);
+      const adopted = await stateOf(clone);
+      const askedOfClone = await askedAbout(clone);
+      check(
+        'S1: and once the source commits a choice the clone adopts it: the column records it, RTK follows the file, the base holds it, no stamp, nothing asked',
+        adopted?.flag === true &&
+          adopted.rtk === false &&
+          adopted.held === false &&
+          adopted.stamped === false &&
+          'rows' in askedOfClone &&
+          askedOfClone.rows.length === 0,
+        { adopted, askedOfClone },
+      );
+
+      const settled = await stateOf(clone);
+      let syncWrote = false;
+      for (let i = 0; i < 3; i++) {
+        const before = await stateOf(clone);
+        const synced = await syncProjectStateFromCheckout(clone.db, {
+          repositoryId: clone.repositoryId,
+          repoPath: clone.repoPath,
+        });
+        const between = await stateOf(clone);
+        syncWrote ||=
+          synced.outcome !== 'unchanged' ||
+          before?.repo_xmin !== between?.repo_xmin ||
+          before?.sync_xmin !== between?.sync_xmin;
+        await pass(clone);
+      }
+      const after = await stateOf(clone);
+      const outbox = await rowsOf<{ clean: boolean }>(
+        clone.db,
+        sql`select written_revision >= revision as clean from project_state_outbox where repository_id = ${clone.repositoryId}`,
+      );
+      check(
+        'S2: three more syncs and sweeps after the adoption keep the column, the RTK value and the base, each sync is unchanged and writes nothing to repositories or project_state_sync, the file stays as committed and the outbox clean',
+        settled !== null &&
+          after !== null &&
+          !syncWrote &&
+          after.flag === settled.flag &&
+          after.rtk === settled.rtk &&
+          after.held === settled.held &&
+          git(clone.repoPath, 'status', '--porcelain', '--', rtkRel) === '' &&
+          'rows' in outbox &&
+          outbox.rows[0]?.clean === true,
+        { settled, after, syncWrote, outbox },
+      );
+
+      // S3: the source removes the file; a recorded clone brings it back, an unrecorded one does not.
+      git(source.repoPath, 'rm', '-q', '--', rtkRel);
+      git(source.repoPath, 'commit', '-q', '-m', 'A: removes rtk-enabled.json');
+      git(source.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+      git(clone.repoPath, 'pull', '-q', '--ff-only', 'origin', 'main');
+      await pass(clone);
+      check(
+        'S3: a recorded clone writes rtk-enabled.json again when the source removed it, with its own value',
+        (await fileOf(clone, rtkRel)).trim() === 'false',
+        await fileOf(clone, rtkRel),
+      );
+      await clone.db.execute(
+        sql`update repositories set render_context = jsonb_set(render_context, '{rtkChoiceRecorded}', 'false')
+          where id = ${clone.repositoryId}`,
+      );
+      await rm(path.join(clone.repoPath, rtkRel), { force: true });
+      await pass(clone);
+      check(
+        'S3: and an unrecorded one writes none',
+        (await fileOf(clone, rtkRel)) === '',
+        await fileOf(clone, rtkRel),
       );
     }
 

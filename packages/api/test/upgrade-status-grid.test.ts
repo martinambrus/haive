@@ -581,6 +581,53 @@ describe('a switch a person made on this install counts as the team’s choice',
 });
 
 /**
+ * An install that adopted a teammate's RTK value records the choice in its column (flag true), so the
+ * banner counts the RTK settings file a teammate's record installed as current; before, the column
+ * read as unrecorded and the same row read as a change to take out.
+ */
+describe('a column that records the RTK choice keeps the installed RTK settings current', () => {
+  let dir: string;
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'upgrade-status-adopted-'));
+    await writeRtkRepo(dir);
+  });
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const rtkRow = {
+    ...artifact('row-rtk', 1000, 'none'),
+    diskPath: '.claude/settings.json',
+    templateId: claudeRtk.templateId,
+    templateKind: 'rtk-config',
+    templateSchemaVersion: claudeRtk.schemaVersion,
+    templateContentHash: claudeRtk.contentHash,
+  };
+  async function answerWith(flag: boolean): Promise<string> {
+    seed({ rows: 'none', history: 'recorded', source: 'git_https', live: true }, dir, {
+      ...PORTABLE_COLUMN,
+      rtkChoiceRecorded: flag,
+    });
+    state.snapshotGroups = [];
+    state.rows.set(schema.onboardingArtifacts, [rtkRow]);
+    return answerFor();
+  }
+
+  it('offers the installed RTK settings as a change while the column records no choice', async () => {
+    const answer = await answerWith(false);
+
+    expect(answer).toMatch(/changed=\S*rtk\.claude-settings/);
+    expect(answer).toContain('available=true');
+  });
+
+  it('counts them as current once the column records the choice', async () => {
+    const answer = await answerWith(true);
+
+    expect(answer).not.toContain('rtk.claude-settings');
+  });
+});
+
+/**
  * #242-1 and #234: the banner and 01 agree on which paths a repository's templates render to. A
  * custom item 01 cannot render (no agent target, no skills directory) is no upgrade, a live row of
  * one 01 would remove is, and so is a row at a path the template no longer renders to, such as the

@@ -96,6 +96,7 @@ async function viaRestoredSnapshot(
   restoredRtk: boolean | undefined,
   plan: Plan,
   repository: Record<string, unknown> = {},
+  snapshot: Record<string, unknown> = context(restoredRtk),
 ) {
   const repoPath = await root();
   const fake = database(plan, repository);
@@ -114,7 +115,7 @@ async function viaRestoredSnapshot(
         priorTemplateContentHash: hashOf('GONE\n'),
         priorWrittenHash: hashOf('GONE\n'),
         priorWrittenContent: 'GONE\n',
-        priorFormValuesSnapshot: context(restoredRtk),
+        priorFormValuesSnapshot: snapshot,
       },
     ],
     newArtifactsToUndo: [],
@@ -260,6 +261,47 @@ describe('a rollback on an install where a person switched RTK', () => {
 
     expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
     expect(settingsOfBase(fake)).toEqual({});
+  });
+});
+
+describe('a rollback whose plan followed the live RTK switch, though nobody stamped it', () => {
+  const snapshotWith = (rtkEnabled: boolean) => ({
+    ...rowSnapshot('newer-unrecorded'),
+    rtkEnabled,
+  });
+  const idsOf = (rtkEnabled: boolean) =>
+    expandManifestFor(
+      snapshotWith(rtkEnabled) as unknown as Parameters<typeof expandManifestFor>[0],
+    ).map((r) => r.templateId);
+  const rtkOnly = idsOf(true).filter((id) => !idsOf(false).includes(id));
+  const heldAfter = async (restored: boolean, plan: Plan, live: boolean) => {
+    const { fake, out } = await viaRestoredSnapshot(
+      restored,
+      plan,
+      { rtkEnabled: live },
+      snapshotWith(restored),
+    );
+    expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
+    return fake.rows(schema.repositories)[0]!.applicableTemplateIds as string[];
+  };
+
+  it('expands without the RTK-only templates when restored on and live off', async () => {
+    expect(rtkOnly).not.toEqual([]);
+    const held = await heldAfter(true, { rtkFollowsLive: true }, false);
+
+    expect(held.filter((id) => rtkOnly.includes(id))).toEqual([]);
+  });
+
+  it('expands with every RTK-only template when restored off and live on', async () => {
+    expect(await heldAfter(false, { rtkFollowsLive: true }, true)).toEqual(
+      expect.arrayContaining(rtkOnly),
+    );
+  });
+
+  it('keeps the restored context’s own value when the plan found no choice', async () => {
+    expect(await heldAfter(true, { rtkFollowsLive: false }, false)).toEqual(
+      expect.arrayContaining(rtkOnly),
+    );
   });
 });
 

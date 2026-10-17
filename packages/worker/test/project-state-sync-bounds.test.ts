@@ -226,7 +226,7 @@ describe('syncProjectStateFromCheckout: the walk is bounded', () => {
 
       expect((await at.run()).outcome).toBe('applied');
 
-      expect(json(at.column())).toEqual(stored());
+      expect(json(at.column())).toEqual({ ...BASE, rtkChoiceRecorded: false });
       expect(json(at.rows()[0]?.baseSnapshot)).toEqual(baseOf());
 
       await writeFile(join(at.root, STATE, 'filler', 'one-more.txt'), 'x\n');
@@ -296,7 +296,7 @@ describe('syncProjectStateFromCheckout: the walk is bounded', () => {
 
       expect((await s.run()).outcome).toBe('applied');
 
-      expect(json(s.column())).toEqual(stored());
+      expect(json(s.column())).toEqual({ ...BASE, rtkChoiceRecorded: false });
     });
 
     it('reads no file once the bytes read have passed 16 MiB: the file that crosses is the last', async () => {

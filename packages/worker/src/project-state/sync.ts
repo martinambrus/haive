@@ -477,6 +477,8 @@ interface PortableMerge {
   baseEnvironment: ProjectEnvironment | null;
   /** The merge left a value the checkout's files do not hold, so the writer has to bring them to it. */
   stale: boolean;
+  /** The checkout holds a valid RTK choice that importing records: the column is new, or this install had recorded none. */
+  recordsRtkChoice: boolean;
   rejected: string[];
 }
 
@@ -497,10 +499,9 @@ function mergePortable(
     (repo.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true,
     repo.rtkChoiceMadeAt,
   );
+  // An install that recorded no choice leaves RTK out of the merge, so the checkout's valid value is imported, not contested.
   const previousSettings = withoutUnchosenRtk(portableOf(previous.settings), rtkRecorded);
   const previousEnvironment = previous.environment ?? null;
-  // The import of a record into a NULL column records the choice, so what it imports is kept in the base.
-  const rtkKept = rtkRecorded || repo.renderContext == null;
   const heldSettings = portableSettingsOf(repo);
   const localSettings = withoutUnchosenRtk(heldSettings, rtkRecorded);
   const localEnvironment = environmentUnitOf(repo.onboardingEnvironment);
@@ -516,6 +517,8 @@ function mergePortable(
   ) {
     intake.incoming['rtk-enabled'] = localSettings['rtk-enabled'];
   }
+  const recordsRtkChoice =
+    intake.accepted['rtk-enabled'] !== undefined && (repo.renderContext == null || !rtkRecorded);
   const checkoutEnvironment = checkout.environment && normalizeEnvironment(checkout.environment);
   const record = (settings: Record<string, unknown>, environment: ProjectEnvironment | null) => ({
     ...emptyProjectState(),
@@ -546,7 +549,7 @@ function mergePortable(
       contested.has(settingFileName(name)) || intake.rejected.includes(name)
         ? previousSettings[name]
         : intake.accepted[name];
-    if (kept !== undefined && (rtkKept || name !== 'rtk-enabled')) baseSettings[name] = kept;
+    if (kept !== undefined) baseSettings[name] = kept;
   }
   const mergedEnvironment = merge.merged.environment;
   if (importable && mergedEnvironment !== null && !sameValue(mergedEnvironment, localEnvironment)) {
@@ -568,6 +571,7 @@ function mergePortable(
       settingsDifferingFrom(merge.merged.settings, checkout.settings, contestedNames).length > 0 ||
       (importable && !environmentContested && !sameValue(mergedEnvironment, checkout.environment)),
     rejected: intake.rejected,
+    recordsRtkChoice,
   };
 }
 
@@ -706,14 +710,17 @@ export async function syncProjectStateFromCheckout(
     const merged = merge.merged.render;
     let wrote = false;
     let columnAfter: unknown = column;
-    if (
+    const flagFlips =
+      column !== null && portable.recordsRtkChoice && column.rtkChoiceRecorded !== true;
+    const renderMoved =
       merged !== null &&
-      (rebuilt !== null || !sameValue(merged, normalizeProjectState(local).render))
-    ) {
+      (rebuilt !== null || !sameValue(merged, normalizeProjectState(local).render));
+    if (renderMoved || flagFlips) {
       const next = renderContextColumnSchema.safeParse({
         ...column,
-        ...merged,
-        rtkChoiceRecorded: column === null ? true : column.rtkChoiceRecorded,
+        ...(renderMoved ? merged : {}),
+        rtkChoiceRecorded:
+          column === null ? portable.recordsRtkChoice : flagFlips || column.rtkChoiceRecorded,
       });
       if (!next.success) {
         const issues = next.error.issues.map(
@@ -740,14 +747,6 @@ export async function syncProjectStateFromCheckout(
       local: localClaims,
       merged: merge.merged.claims,
     });
-    if (wrote || imported) {
-      await writeApplicableTemplateIds(tx, {
-        repositoryId,
-        userId: repo.userId,
-        requireResolved: wrote,
-      });
-    }
-
     // Never merged: a column that holds tooling stands, and only an empty one takes the checkout's.
     const toolingUnit = toolingUnitFrom(checkout.settings[TOOLING_UNIT_NAME]);
     const toolingImport =
@@ -771,6 +770,13 @@ export async function syncProjectStateFromCheckout(
         .set({ ...updates, updatedAt: new Date() })
         .where(eq(schema.repositories.id, repositoryId));
       if (portable.updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, null);
+    }
+    if (wrote || imported) {
+      await writeApplicableTemplateIds(tx, {
+        repositoryId,
+        userId: repo.userId,
+        requireResolved: wrote,
+      });
     }
     if (toolingImport?.heldServers) {
       logger.warn(
@@ -898,23 +904,8 @@ async function applyRebase(
       .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
     return;
   }
-  const [repo] = await tx
-    .select({
-      renderContext: schema.repositories.renderContext,
-      rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
-    })
-    .from(schema.repositories)
-    .where(eq(schema.repositories.id, repositoryId))
-    .limit(1);
-  const rtkKept =
-    isRtkChoiceRecorded(
-      (repo?.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded === true,
-      repo?.rtkChoiceMadeAt,
-    ) || (repo?.renderContext ?? null) === null;
   const settings = Object.create(null) as Record<string, unknown>;
-  for (const [name, value] of Object.entries(intakeSettings(checkout.settings, {}).accepted)) {
-    if (rtkKept || name !== 'rtk-enabled') settings[name] = value;
-  }
+  Object.assign(settings, intakeSettings(checkout.settings, {}).accepted);
   const tooling = toolingUnitFrom(checkout.settings[TOOLING_UNIT_NAME]);
   if (tooling) settings[TOOLING_UNIT_NAME] = tooling;
   const synced = {
