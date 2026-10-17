@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { computeTaskTiming, type TaskTimingStep } from '@haive/shared/timing';
 import {
+  noStepsMessage,
+  notStartedBanner,
   pausedByLabel,
   taskBadgeKind,
   taskClockEndMs,
@@ -255,5 +257,25 @@ describe('task clocks', () => {
   it('reads an api that predates dead_at as alive', () => {
     expect(taskStoppedAt({ completedAt: null })).toBeNull();
     expect(taskClockEndMs({}, NOW)).toBe(NOW);
+  });
+});
+
+describe('task page copy', () => {
+  const GENERIC = 'No steps recorded yet. The task worker will populate them once it starts.';
+
+  it('pins the not-started banner', () => {
+    expect(notStartedBanner).toEqual({
+      lead: 'This task has not started.',
+      detail:
+        'It was created without being started so its attachments could be uploaded first; nothing runs on it until you press Start.',
+    });
+  });
+
+  it('pins the empty-steps message for a task that has not started, and the generic one otherwise', () => {
+    expect(noStepsMessage({ status: 'created' })).toBe(
+      'No steps recorded yet. This task has not started; press Start above and the task worker will populate them.',
+    );
+    expect(noStepsMessage({ status: 'running' })).toBe(GENERIC);
+    expect(noStepsMessage({ status: 'created', deadAt: DEAD_AT })).toBe(GENERIC);
   });
 });
