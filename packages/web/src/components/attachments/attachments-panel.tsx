@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { splitAttachmentPath } from '@haive/shared/attachments';
 import {
@@ -84,11 +84,17 @@ export function AttachmentsPanel({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
 
+  const loadSeq = useRef(0);
   const reload = useCallback(async () => {
+    // A poll read can answer after a delete's or an upload's own re-read; only the newest read lands.
+    const seq = ++loadSeq.current;
     try {
-      setItems(await listTaskAttachments(taskId));
+      const next = await listTaskAttachments(taskId);
+      if (seq !== loadSeq.current) return;
+      setItems(next);
       setError(null);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       setError((err as Error).message ?? 'Failed to load attachments');
     }
   }, [taskId]);
@@ -143,10 +149,10 @@ export function AttachmentsPanel({
     setDeletingId(id);
     try {
       await deleteTaskAttachment(taskId, id);
-      await reload();
     } catch (err) {
       setDeleteError((err as Error).message ?? 'Delete failed');
     } finally {
+      await reload();
       setDeletingId(null);
     }
   }
@@ -157,10 +163,10 @@ export function AttachmentsPanel({
     setDeletingId(name);
     try {
       await deleteTaskAttachmentFolder(taskId, name);
-      await reload();
     } catch (err) {
       setDeleteError((err as Error).message ?? 'Delete failed');
     } finally {
+      await reload();
       setDeletingId(null);
     }
   }

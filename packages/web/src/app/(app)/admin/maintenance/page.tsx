@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   maintenanceApi,
   type BlockingJob,
@@ -67,18 +67,23 @@ export default function MaintenancePage() {
   const [confirming, setConfirming] = useState(false);
   const [launched, setLaunched] = useState<string | null>(null);
 
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
+    // A poll read can answer after an action's own re-read; only the newest read lands.
+    const seq = ++loadSeq.current;
     try {
       const [s, b, u] = await Promise.all([
         maintenanceApi.get(),
         maintenanceApi.blocking(),
         maintenanceApi.upgradeStatus(),
       ]);
+      if (seq !== loadSeq.current) return;
       setState(s.state);
       setBlocking(b);
       setUpgrade(u);
       setError(null);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       // Expected, and not a bug, once an upgrade reaches its verify phase: this api is one of the
       // containers being replaced. Say that rather than showing a bare fetch failure.
       setError(err instanceof Error ? err.message : 'could not read the maintenance state');
