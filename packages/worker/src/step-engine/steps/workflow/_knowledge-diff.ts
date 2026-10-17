@@ -55,6 +55,9 @@ export async function buildKnowledgeDiffArtifact(
     'status',
     '--porcelain',
     '-z',
+    // Otherwise git groups an untracked directory into one entry ("?? dir/"),
+    // which is not a readable file and would leave its entire diff empty.
+    '--untracked-files=all',
     '--',
     ...pathspecs,
   ]);

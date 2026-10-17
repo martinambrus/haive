@@ -64,4 +64,38 @@ describe('buildKnowledgeDiffArtifact', () => {
     expect(artifact.fileCount).toBe(MAX_FILES + 2);
     expect(artifact.files.length).toBe(MAX_FILES + 2);
   });
+
+  it('lists the files inside a new directory one by one', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'knowledge-diff-'));
+    try {
+      await git(dir, ['init', '-b', 'main']);
+      await git(dir, ['config', 'gc.auto', '0']);
+      const kb = path.join(dir, KB_DIR);
+      await mkdir(kb, { recursive: true });
+      await writeFile(path.join(kb, 'tracked.md'), 'tracked\n');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'base']);
+      await mkdir(path.join(kb, 'new-topic'));
+      await writeFile(path.join(kb, 'new-topic', 'one.md'), 'one\n');
+      await writeFile(path.join(kb, 'new-topic', 'two.md'), 'two\n');
+      const written = await buildKnowledgeDiffArtifact(dir, gitRun, [extra('a'), extra('b')]);
+      const artifact = JSON.parse(await readFile(written, 'utf8')) as CommitDiffArtifact;
+
+      expect(artifact.fileCount).toBe(4);
+      expect(artifact.files.length).toBe(4);
+      expect(artifact.truncated).toBe(false);
+      for (const [name, text] of [
+        ['one.md', 'one\n'],
+        ['two.md', 'two\n'],
+      ]) {
+        const entryPath = `${KB_DIR}/new-topic/${name}`;
+        const file = artifact.files.find((f) => f.path === entryPath);
+        expect(file?.status).toBe('added');
+        expect(file?.newContent).toBe(text);
+        expect(file?.editPath).toBe(path.join(dir, entryPath));
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
