@@ -86,6 +86,14 @@ vi.mock('../src/db.js', () => ({
           await h.acquire(key);
           return [];
         },
+        transaction: async (inner: (child: object) => Promise<unknown>): Promise<unknown> => {
+          const child = { ...tx };
+          const childRows = [] as typeof rows;
+          h.txRows.set(child, childRows);
+          const result = await inner(child);
+          rows.push(...childRows);
+          return result;
+        },
       };
       h.txRows.set(tx, rows);
       try {
@@ -98,16 +106,14 @@ vi.mock('../src/db.js', () => ({
     },
   }),
 }));
-vi.mock('../src/lib/audit.js', () => ({
-  recordAuditEvent: async (
-    db: object,
-    event: { action: string; metadata?: Record<string, unknown> | null },
-  ) => {
+vi.mock('../src/lib/audit.js', () => {
+  const insertAuditEvent = async (db: object, event: unknown) => {
     h.heldAtAudit.push(h.waiting.size > 0);
     h.auditOnTx.push(h.txRows.has(db));
     (h.txRows.get(db) ?? h.audits).push(event);
-  },
-}));
+  };
+  return { recordAuditEvent: insertAuditEvent, insertAuditEvent, logAuditEvent: () => {} };
+});
 vi.mock('../src/modules/activation.js', () => ({
   deactivatedModuleIds: async () => new Set<string>(),
   isModuleDeactivated: async () => false,
@@ -290,8 +296,11 @@ describe('PUT /modules/:id/settings/:kind', () => {
         JSON.stringify('https://changed.example'),
         JSON.stringify('5'),
       ]);
-      expect(h.heldAtAudit, 'the row is written while the lock is held').toEqual([true]);
-      expect(h.auditOnTx, 'the row is written on the transaction that holds it').toEqual([true]);
+      expect(h.heldAtAudit, 'the row is written while the lock is held').toEqual([true, true]);
+      expect(h.auditOnTx, 'the row is written on the transaction that holds it').toEqual([
+        true,
+        true,
+      ]);
     });
 
     it('records nothing when its first write fails', async () => {

@@ -457,7 +457,8 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
       );
 
       expect(await auditRows()).toHaveLength(2);
-      expect(await stampedBefore(released), `rows stamped before ${released}`).toEqual([]);
+      // The first save writes its row before its held write, so only that one predates the release.
+      expect(await stampedBefore(released), `rows stamped before ${released}`).toHaveLength(1);
     }, 15_000);
 
     it('commits the row of a save whose second write fails, answers 5xx and frees the lock', async () => {
@@ -474,6 +475,22 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
           metadata: { moduleId: id, kind: 'global', changed: ['apiUrl'], partial: true },
         },
       ]);
+      expect(await leftovers()).toEqual({ advisory: 0, open: 0 });
+    });
+
+    it('refuses a save whose audit row cannot be written, and writes nothing', async () => {
+      const id = MODULE_IDS[0]!;
+      seedSettings(id);
+      const snapshot = [...h.stored];
+      await refuseAuditInserts();
+
+      const res = await putSettings(id, { apiUrl: 'https://changed.example', limit: '6' });
+
+      expect(res.status).toBe(500);
+      expect(h.written).toBe(0);
+      expect([...h.stored]).toEqual(snapshot);
+      await allowAuditInserts();
+      expect(await auditRows()).toEqual([]);
       expect(await leftovers()).toEqual({ advisory: 0, open: 0 });
     });
 
