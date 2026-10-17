@@ -530,10 +530,83 @@ describe('a cleared column', () => {
     expect(result.kind).toBe('resolved');
     expect(json(s.repoRow().renderContext)).toMatchObject({
       ...MINE,
-      rtkChoiceRecorded: true,
+      rtkChoiceRecorded: false,
     });
     expect(await s.fileText()).toBe(renderText(MINE));
   });
+
+  it('is rebuilt with no RTK choice when theirs is taken', async () => {
+    const s = await setup({ column: null });
+
+    const result = await s.answer('take_theirs');
+
+    expect(result.kind).toBe('resolved');
+    expect(json(s.repoRow().renderContext)).toMatchObject({ rtkChoiceRecorded: false });
+  });
+});
+
+describe('a column an answer created, which records no RTK choice', () => {
+  const RTK_FILE = join(STATE_DIR, 'settings/rtk-enabled.json');
+  const wholeFile = { '': { base: BASE, local: undefined, incoming: THEIRS } };
+  const paths: [string, () => Promise<Awaited<ReturnType<typeof setup>>>, string][] = [
+    [
+      'keeping mine for one key',
+      async () => {
+        const s = await setup({ column: null });
+        await s.answer('keep_mine');
+        return s;
+      },
+      'keep_mine',
+    ],
+    [
+      'taking theirs for one key',
+      async () => {
+        const s = await setup({ column: null });
+        await s.answer('take_theirs');
+        return s;
+      },
+      'take_theirs',
+    ],
+    [
+      'taking the whole file',
+      async () => {
+        const s = await setup({ column: null, rows: wholeFile });
+        await s.answer('take_theirs', s.ids['']);
+        return s;
+      },
+      'take_theirs',
+    ],
+  ];
+
+  it.each(paths)(
+    'stays as it is on the next sync of a record with no file, after %s',
+    async (_name, make) => {
+      const s = await make();
+      expect((json(s.repoRow().renderContext) as Json).rtkChoiceRecorded).toBe(false);
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+      const before = s.dump();
+
+      expect((await sync(s)).outcome).toBe('unchanged');
+
+      expect(s.dump()).toEqual(before);
+    },
+  );
+
+  it.each(paths)(
+    'adopts the file a record carries on the next sync, after %s',
+    async (_name, make) => {
+      const s = await make();
+      expect((json(s.repoRow().renderContext) as Json).rtkChoiceRecorded).toBe(false);
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+      await mkdir(dirname(join(s.root, RTK_FILE)), { recursive: true });
+      await writeFile(join(s.root, RTK_FILE), 'false\n');
+
+      expect((await sync(s)).outcome).toBe('applied');
+
+      expect((json(s.repoRow().renderContext) as Json).rtkChoiceRecorded).toBe(true);
+      expect(s.repoRow().rtkEnabled).toBe(false);
+    },
+  );
 });
 
 describe('the whole render file as one question', () => {
@@ -545,13 +618,13 @@ describe('the whole render file as one question', () => {
     expect(s.rowOf(s.ids['']!).resolvedAt).toBeNull();
   });
 
-  it('takes the teammate’s file as the column, with the RTK choice recorded', async () => {
+  it('takes the teammate’s file as the column, with no RTK choice recorded', async () => {
     const s = await setup({ column: null, rows });
 
     const result = await s.answer('take_theirs', s.ids['']);
 
     expect(result.kind).toBe('resolved');
-    expect(json(s.repoRow().renderContext)).toEqual({ ...THEIRS, rtkChoiceRecorded: true });
+    expect(json(s.repoRow().renderContext)).toEqual({ ...THEIRS, rtkChoiceRecorded: false });
     expect(s.syncRow().baseSnapshot).toEqual(baseOf(THEIRS));
     expect((await sync(s)).outcome).toBe('unchanged');
   });

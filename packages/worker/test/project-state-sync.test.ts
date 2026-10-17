@@ -35,7 +35,7 @@ import {
   type ProjectRender,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
-import { writeProjectStateRecord } from '../src/project-state/write.js';
+import { writeProjectStateColumn, writeProjectStateRecord } from '../src/project-state/write.js';
 import {
   rebaseProjectStateOnCheckout,
   syncProjectStateFromCheckout,
@@ -485,7 +485,7 @@ describe('syncProjectStateFromCheckout: the fixtures', () => {
 });
 
 describe('syncProjectStateFromCheckout: a first import', () => {
-  it('fills a NULL column with the record render unit and the RTK choice, and no per-install field', async () => {
+  it('fills a NULL column with the record render unit and no RTK choice, and no per-install field', async () => {
     const s = await setup();
     await s.putRecord(record(BASE));
 
@@ -493,7 +493,7 @@ describe('syncProjectStateFromCheckout: a first import', () => {
 
     expect(outcome).toBe('applied');
     const filled = json(s.columnOf()) as Json;
-    expect(filled).toEqual({ ...BASE, rtkChoiceRecorded: true });
+    expect(filled).toEqual({ ...BASE, rtkChoiceRecorded: false });
     expect(Object.keys(filled).sort()).toEqual([...PORTABLE_KEYS, 'rtkChoiceRecorded']);
     for (const key of PER_INSTALL_KEYS) expect(filled).not.toHaveProperty(key);
     expect(renderContextColumnSchema.safeParse(filled).success).toBe(true);
@@ -540,7 +540,7 @@ describe('syncProjectStateFromCheckout: a first import', () => {
     const { outcome } = await s.run();
 
     expect(outcome).toBe('applied');
-    expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: true });
+    expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: false });
   });
 
   it('reads a checkout whose root is reached through a link', async () => {
@@ -553,7 +553,7 @@ describe('syncProjectStateFromCheckout: a first import', () => {
     const { outcome } = await s.run({ repoPath: via });
 
     expect(outcome).toBe('applied');
-    expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: true });
+    expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: false });
   });
 
   it('takes the record over a different column that has no sync row, keeping the per-install fields and the RTK flag', async () => {
@@ -1247,7 +1247,7 @@ describe('syncProjectStateFromCheckout: a repository with a live onboarding or u
         const { outcome } = await s.run();
 
         expect(outcome).toBe('applied');
-        expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: true });
+        expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: false });
       },
     );
   });
@@ -1301,7 +1301,7 @@ describe('syncProjectStateFromCheckout: a repository with a live onboarding or u
     s.fake.patch(schema.tasks, taskId, { status: 'completed' });
 
     expect((await s.run()).outcome).toBe('applied');
-    expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: true });
+    expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: false });
   });
 
   it.each(['workflow', 'run_app', 'kb_author', 'plan_build'])(
@@ -1753,7 +1753,7 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
       sync: { base },
     });
 
-    it('takes the other install’s value, with no conflict, and keeps it out of the base', async () => {
+    it('adopts the other install’s value, with no conflict, and records it as the choice', async () => {
       const s = await setup(unrecorded());
       s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
       await s.putRecord(withSettings({ 'rtk-enabled': false }));
@@ -1762,12 +1762,27 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
 
       expect(outcome).toBe('applied');
       expect(repoRow(s).rtkEnabled).toBe(false);
+      expect((json(s.columnOf()) as Json).rtkChoiceRecorded).toBe(true);
       expect(s.pending()).toEqual([]);
-      expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({});
+      expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({ 'rtk-enabled': false });
       expect(dirtyMarks(s)).toEqual([]);
     });
 
-    it('then the next writer leaves the other install’s file as it is', async () => {
+    it('then the next writer, the install now recorded, leaves the other install’s file as it is', async () => {
+      const s = await setup(unrecorded());
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+      await s.putRecord(withSettings({ 'rtk-enabled': false }));
+      await s.run();
+      const before = await readFile(join(s.root, RTK_FILE), 'utf8');
+
+      await s.write(contextA(), true);
+
+      expect(await readFile(join(s.root, RTK_FILE), 'utf8')).toBe(before);
+      expect(JSON.parse(before)).toBe(false);
+      expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({ 'rtk-enabled': false });
+    });
+
+    it('a later rollback that writes the column unrecorded again leaves the file as it is', async () => {
       const s = await setup(unrecorded());
       s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
       await s.putRecord(withSettings({ 'rtk-enabled': false }));
@@ -1777,8 +1792,6 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
       await s.write(contextA(), false);
 
       expect(await readFile(join(s.root, RTK_FILE), 'utf8')).toBe(before);
-      expect(JSON.parse(before)).toBe(false);
-      expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({});
     });
 
     it('leaves the default alone when the record has no file, and asks for none', async () => {
@@ -1902,7 +1915,7 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
 
       it.each([
         ['a person switched RTK here', SWITCHED, { 'rtk-enabled': false }],
-        ['nobody did', null, {}],
+        ['nobody did', null, { 'rtk-enabled': false }],
       ])(
         'a rebase onto the record keeps the value in the base when %s',
         async (_name, rtkChoiceMadeAt, want) => {
@@ -1978,6 +1991,243 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
 
     expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({ 'rtk-version': '0.1.0' });
   });
+});
+
+describe('syncProjectStateFromCheckout: an RTK choice comes only from a record that carries one', () => {
+  const RTK_REL = 'settings/rtk-enabled.json';
+  const treeHasRtkFile = async (s: Setup) =>
+    Object.keys(await treeOf(s.root)).includes(`${STATE_DIR}/${RTK_REL}`);
+  const writeColumn = (s: Setup) =>
+    writeProjectStateColumn(s.fake.db as unknown as Database, {
+      repositoryId: REPO,
+      repoPath: s.root,
+      column: renderContextColumnSchema.parse(s.columnOf()),
+    });
+  const flagOf = (s: Setup) => (json(s.columnOf()) as Json).rtkChoiceRecorded;
+
+  describe('a column the sync creates', () => {
+    it('is flag false when the record holds no file, and the writer then emits no default', async () => {
+      const s = await setup();
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+      await s.putRecord(record(BASE));
+
+      const { outcome } = await s.run();
+
+      expect(outcome).toBe('applied');
+      expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: false });
+      expect(repoRow(s).rtkEnabled).toBe(true);
+      expect(await treeHasRtkFile(s)).toBe(false);
+
+      await writeColumn(s);
+
+      expect(await treeHasRtkFile(s)).toBe(false);
+    });
+
+    it.each([
+      [false, true],
+      [true, false],
+    ])(
+      'is flag true when the record holds %s: the value is taken, the base holds it, nothing is asked for',
+      async (file, was) => {
+        const s = await setup();
+        s.fake.patch(schema.repositories, REPO, { rtkEnabled: was });
+        await s.putRecord(withSettings({ 'rtk-enabled': file }));
+
+        const first = await s.run();
+
+        expect(first.outcome).toBe('applied');
+        expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: true });
+        expect(repoRow(s).rtkEnabled).toBe(file);
+        expect(json(s.syncRow()?.baseSnapshot)).toEqual(syncBase({ 'rtk-enabled': file }));
+        expect(dirtyMarks(s)).toEqual([]);
+        expect(s.pending()).toEqual([]);
+
+        const second = await s.run();
+
+        expect(second.outcome).toBe('unchanged');
+        expect(second.trace.filter(isWrite)).toEqual([]);
+      },
+    );
+
+    it.each([['"yes"\n'], ['1\n']])(
+      'is flag false when the file holds %j, and the default stays',
+      async (text) => {
+        const s = await setup();
+        s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+        await s.putRecord(record(BASE));
+        await s.put(`${STATE_DIR}/${RTK_REL}`, text);
+
+        await s.run();
+
+        expect(flagOf(s)).toBe(false);
+        expect(repoRow(s).rtkEnabled).toBe(true);
+        expect((json(s.syncRow()?.baseSnapshot) as Json).settings).not.toHaveProperty(
+          'rtk-enabled',
+        );
+      },
+    );
+
+    it.each([
+      [false, false],
+      [true, true],
+    ])(
+      'a column of flag %s, written with RTK on, leaves the file out or puts it in: %s',
+      async (flag, emitted) => {
+        const s = await setup({ column: { ...BASE, rtkChoiceRecorded: flag } });
+        s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+        await s.putRecord(record(BASE));
+
+        await writeColumn(s);
+
+        expect(await treeHasRtkFile(s)).toBe(emitted);
+      },
+    );
+
+    it('is flag true when a stamp is set and the record holds a valid file', async () => {
+      const s = await setup();
+      s.fake.patch(schema.repositories, REPO, {
+        rtkEnabled: true,
+        rtkChoiceMadeAt: new Date(1000),
+      });
+      await s.putRecord(withSettings({ 'rtk-enabled': false }));
+
+      await s.run();
+
+      expect(flagOf(s)).toBe(true);
+    });
+  });
+
+  describe('a column that exists, flag false, with no stamp', () => {
+    const unrecorded = (): Seed => ({ column: column(BASE, false), sync: { base: baseOf(BASE) } });
+
+    it.each([
+      [false, true],
+      [true, false],
+    ])(
+      'adopts a record that holds %s over this install’s %s, keeping every other field',
+      async (file, was) => {
+        const s = await setup(unrecorded());
+        s.fake.patch(schema.repositories, REPO, { rtkEnabled: was });
+        await s.putRecord(withSettings({ 'rtk-enabled': file }));
+        const before = json(s.columnOf()) as Json;
+
+        const first = await s.run();
+
+        expect(first.outcome).toBe('applied');
+        expect(json(s.columnOf())).toEqual({ ...before, rtkChoiceRecorded: true });
+        expect(repoRow(s).rtkEnabled).toBe(file);
+        expect(json(s.syncRow()?.baseSnapshot)).toEqual(syncBase({ 'rtk-enabled': file }));
+        expect(s.pending()).toEqual([]);
+        expect(dirtyMarks(s)).toEqual([]);
+        expectWritesUnderTheLock(first.trace);
+
+        const second = await s.run();
+
+        expect(second.outcome).toBe('unchanged');
+        expect(second.trace.filter(isWrite)).toEqual([]);
+      },
+    );
+
+    it.each([false, true])(
+      'adopts a record that holds %s that this install already agrees with: only the flag moves',
+      async (file) => {
+        const s = await setup(unrecorded());
+        s.fake.patch(schema.repositories, REPO, { rtkEnabled: file });
+        await s.putRecord(withSettings({ 'rtk-enabled': file }));
+        const before = json(s.columnOf()) as Json;
+
+        const first = await s.run();
+
+        expect(first.outcome).toBe('applied');
+        expect(json(s.columnOf())).toEqual({ ...before, rtkChoiceRecorded: true });
+        expect(repoRow(s).rtkEnabled).toBe(file);
+        expect(json(s.syncRow()?.baseSnapshot)).toEqual(syncBase({ 'rtk-enabled': file }));
+        expect(s.pending()).toEqual([]);
+        expectWritesUnderTheLock(first.trace);
+
+        const second = await s.run();
+
+        expect(second.outcome).toBe('unchanged');
+        expect(second.trace.filter(isWrite)).toEqual([]);
+      },
+    );
+
+    it('changes nothing when the record holds no file', async () => {
+      const s = await setup(unrecorded());
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+      await s.putRecord(withSettings({}));
+      const before = json(s.columnOf());
+
+      const { trace } = await s.run();
+
+      expect(json(s.columnOf())).toEqual(before);
+      expect(flagOf(s)).toBe(false);
+      expect(repoRow(s).rtkEnabled).toBe(true);
+      expect(writesTo(trace, 'repositories')).toEqual([]);
+      expect(dirtyMarks(s)).toEqual([]);
+    });
+
+    it('does not adopt a file that holds an invalid value', async () => {
+      const s = await setup(unrecorded());
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+      await s.putRecord(record(BASE));
+      await s.put(`${STATE_DIR}/${RTK_REL}`, '"yes"\n');
+
+      const { trace } = await s.run();
+
+      expect(flagOf(s)).toBe(false);
+      expect(repoRow(s).rtkEnabled).toBe(true);
+      expect(writesTo(trace, 'repositories')).toEqual([]);
+    });
+
+    it('leaves a switch a person made here as it is: no flag move, this install’s value wins', async () => {
+      const s = await setup({
+        column: column(BASE, false),
+        sync: { base: syncBase({ 'rtk-version': '0.1.0' }) },
+      });
+      s.fake.patch(schema.repositories, REPO, {
+        rtkEnabled: true,
+        rtkVersion: '0.1.0',
+        rtkChoiceMadeAt: new Date(1000),
+      });
+      await s.putRecord(withSettings({ 'rtk-version': '0.1.0', 'rtk-enabled': false }));
+
+      await s.run();
+
+      expect(flagOf(s)).toBe(false);
+      expect(repoRow(s).rtkEnabled).toBe(true);
+    });
+  });
+
+  it('keeps asking when the column is recorded, nobody switched it and the base never held the value', async () => {
+    const s = await setup({
+      column: column(BASE, true),
+      sync: { base: syncBase({ 'rtk-version': '0.1.0' }) },
+    });
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true, rtkVersion: '0.1.0' });
+    await s.putRecord(withSettings({ 'rtk-version': '0.1.0', 'rtk-enabled': false }));
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('conflict');
+    expect(s.pending().map((r) => r.unit)).toEqual(['settings/rtk-enabled.json']);
+  });
+
+  it.each([
+    ['this install is unrecorded', null],
+    ['a person switched RTK here', new Date(1000)],
+  ])(
+    'a rebase onto a record with a valid file puts it in the base when %s',
+    async (_name, stamp) => {
+      const s = await setup({ column: column(BASE, false), sync: { base: baseOf(BASE) } });
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: true, rtkChoiceMadeAt: stamp });
+      await s.putRecord(withSettings({ 'rtk-enabled': false }));
+
+      await s.rebase();
+
+      expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({ 'rtk-enabled': false });
+    },
+  );
 });
 
 describe('syncProjectStateFromCheckout: the onboarding tooling unit', () => {

@@ -760,7 +760,7 @@ async function answerInTransaction(
     if (column === null && !whole) {
       const rebuilt = await rebuildLocalRender(tx, repositoryId, onDisk);
       if (rebuilt === null) return moved();
-      column = { ...rebuilt, rtkChoiceRecorded: true };
+      column = { ...rebuilt, rtkChoiceRecorded: false };
     }
     const mine = whole
       ? undefined
@@ -775,7 +775,7 @@ async function answerInTransaction(
         ? {
             ...column,
             ...(chosen as Json),
-            rtkChoiceRecorded: column === null ? true : column.rtkChoiceRecorded,
+            rtkChoiceRecorded: column === null ? false : column.rtkChoiceRecorded,
           }
         : { ...column, [key]: chosen },
     );

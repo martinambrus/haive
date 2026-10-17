@@ -408,8 +408,9 @@ async function setup(seed: Seed = {}) {
     await mkdir(dirname(join(root, rel)), { recursive: true });
     await writeFile(join(root, rel), data);
   };
-  const putRecord = async (r: ProjectRender) => {
-    for (const [rel, text] of renderProjectState(record(r))) await put(`${STATE_DIR}/${rel}`, text);
+  const putRecord = async (r: ProjectRender, settings: Record<string, unknown> = {}) => {
+    const held = { ...record(r), settings: Object.assign(Object.create(null), settings) };
+    for (const [rel, text] of renderProjectState(held)) await put(`${STATE_DIR}/${rel}`, text);
   };
   const run = async () => {
     const start = events.length;
@@ -824,7 +825,7 @@ describe('D3: the context the set derives from is the one 01 renders', () => {
   it('completes a column holding no per-install field from the owner CLIs, and follows the live RTK switch', async () => {
     // A first import: claims from before the column, no column and no sync row.
     const s = await setup({ column: null, set: P, claims: BASE_CLAIMS, rtk: true });
-    await s.putRecord(TEAM);
+    await s.putRecord(TEAM, { 'rtk-enabled': true });
 
     const { outcome } = await s.run();
 
@@ -848,6 +849,49 @@ describe('D3: the context the set derives from is the one 01 renders', () => {
 
     expect(outcome).toBe('applied');
     expect(s.setOf()).toEqual(D1_SET);
+  });
+});
+
+describe('D3c: a record that carries the RTK switch moves the set with the switch', () => {
+  const unrecorded = (seed: Partial<Parameters<typeof setup>[0]> = {}) =>
+    setup({
+      column: column(BASE, { rtkEnabled: false, rtkChoiceRecorded: false }),
+      base: BASE,
+      set: P,
+      claims: BASE_CLAIMS,
+      rtk: true,
+      ...seed,
+    });
+
+  it('holds the RTK template when the record switches RTK on: a flag-only move recomputes the set', async () => {
+    const s = await unrecorded();
+    await s.putRecord(BASE, { 'rtk-enabled': true });
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(s.setOf()).toEqual(P_WITH_RTK);
+  });
+
+  it('holds no RTK template when the record switches RTK off, although it was on when the sync began', async () => {
+    const s = await unrecorded();
+    await s.putRecord(BASE, { 'rtk-enabled': false });
+
+    const { outcome } = await s.run();
+
+    expect(outcome).toBe('applied');
+    expect(s.setOf()).toEqual(P);
+    expect(s.rowOf().rtkEnabled).toBe(false);
+  });
+
+  it('leaves the set alone, and writes nothing to it, when the record holds no switch', async () => {
+    const s = await unrecorded();
+    await s.putRecord(BASE);
+
+    const { trace } = await s.run();
+
+    expect(s.setOf()).toEqual(P);
+    expect(writesTo(trace, 'repositories')).toEqual([]);
   });
 });
 
