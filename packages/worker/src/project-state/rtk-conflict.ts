@@ -3,7 +3,7 @@ import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger, type OnboardingToolingMirror } from '@haive/shared';
 import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
-import { RTK_ENABLED_UNIT, conflictSide } from '@haive/shared/project-state';
+import { RTK_ENABLED_UNIT, conflictSide, isRtkChoiceRecorded } from '@haive/shared/project-state';
 import { lockProjectState } from './write.js';
 
 export interface RtkQuestionInput {
@@ -14,12 +14,13 @@ export interface RtkQuestionInput {
   local04Toolings: readonly unknown[];
   /** A row for the unit of any resolution, so an answered question is never asked again. */
   hasAnyRowForUnit: boolean;
+  rtkChoiceMadeAt: Date | null;
 }
 
-/** An imported RTK-off the column never took, with no local 04 run behind it, cannot be told from a
- *  person switching RTK back on before `rtk_choice_made_at` existed; this rule does not read the stamp. */
+/** Asks only where nobody switched RTK (no `rtk_choice_made_at`); a stamped repository's column is a person's choice. */
 export function needsRtkQuestion(input: RtkQuestionInput): boolean {
   return (
+    !isRtkChoiceRecorded(false, input.rtkChoiceMadeAt) &&
     input.importedTooling?.rtkEnabled === false &&
     input.rtkEnabled === true &&
     !input.local04Toolings.some((t) => isDeepStrictEqual(t, input.importedTooling)) &&
@@ -43,13 +44,14 @@ export async function raiseRtkQuestion(db: Database, repositoryId: string): Prom
       .select({
         onboardingTooling: schema.repositories.onboardingTooling,
         rtkEnabled: schema.repositories.rtkEnabled,
+        rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
       .limit(1)
       // Every writer of rtk_enabled updates this row, so a question cannot be raised past a switch-off.
       .for('update');
-    if (repo && !repo.rtkEnabled) {
+    if (repo && (!repo.rtkEnabled || isRtkChoiceRecorded(false, repo.rtkChoiceMadeAt))) {
       await convergeRtkQuestion(tx, repositoryId, null);
       return false;
     }
@@ -89,6 +91,7 @@ export async function raiseRtkQuestion(db: Database, repositoryId: string): Prom
         rtkEnabled: repo.rtkEnabled,
         local04Toolings: local04.map((r) => (r.output as { tooling?: unknown } | null)?.tooling),
         hasAnyRowForUnit: rows.length > 0,
+        rtkChoiceMadeAt: repo.rtkChoiceMadeAt,
       })
     ) {
       return false;

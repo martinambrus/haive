@@ -40,6 +40,7 @@ const asked: RtkQuestionInput = {
   rtkEnabled: true,
   local04Toolings: [],
   hasAnyRowForUnit: false,
+  rtkChoiceMadeAt: null,
 };
 
 describe('needsRtkQuestion', () => {
@@ -68,13 +69,23 @@ describe('needsRtkQuestion', () => {
     expect(needsRtkQuestion({ ...asked, local04Toolings: [ON, undefined, null] })).toBe(true);
   });
 
+  it('does not ask once a person switched RTK, and still asks when no stamp is set', () => {
+    expect(needsRtkQuestion({ ...asked, rtkChoiceMadeAt: new Date(1000) })).toBe(false);
+    expect(needsRtkQuestion({ ...asked, rtkChoiceMadeAt: null })).toBe(true);
+  });
+
   it('does not ask when a row for the unit exists, answered or not', () => {
     expect(needsRtkQuestion({ ...asked, hasAnyRowForUnit: true })).toBe(false);
   });
 });
 
 function setup(
-  repos: { id: string; tooling?: unknown; rtkEnabled?: boolean }[] = [{ id: REPO, tooling: OFF }],
+  repos: {
+    id: string;
+    tooling?: unknown;
+    rtkEnabled?: boolean;
+    rtkChoiceMadeAt?: Date;
+  }[] = [{ id: REPO, tooling: OFF }],
 ) {
   const fake = createFakeDb({
     repositories: schema.repositories,
@@ -91,6 +102,7 @@ function setup(
       source: 'git_https',
       status: 'ready',
       rtkEnabled: r.rtkEnabled ?? true,
+      rtkChoiceMadeAt: r.rtkChoiceMadeAt ?? null,
       onboardingTooling:
         r.tooling === undefined || r.tooling === null
           ? null
@@ -190,6 +202,54 @@ describe('raiseRtkQuestion', () => {
     for (const id of [REPO, REPO_2, REPO_3]) expect(await raiseRtkQuestion(s.db, id)).toBe(false);
 
     expect(s.rows()).toHaveLength(0);
+  });
+});
+
+describe('a repository where a person switched RTK', () => {
+  const STAMP = new Date(1000);
+  const pendingFor = (s: ReturnType<typeof setup>, repositoryId: string) =>
+    s.fake.insert(schema.projectStateConflicts, {
+      repositoryId,
+      unit: RTK_ENABLED_UNIT,
+      base: conflictSide(true),
+      local: conflictSide(true),
+      incoming: conflictSide(false),
+    });
+
+  it('raiseRtkQuestion asks nothing of it, while an unstamped sibling is asked', async () => {
+    const s = setup([
+      { id: REPO, tooling: OFF, rtkChoiceMadeAt: STAMP },
+      { id: REPO_2, tooling: OFF },
+    ]);
+
+    expect(await raiseRtkQuestion(s.db, REPO)).toBe(false);
+    expect(await raiseRtkQuestion(s.db, REPO_2)).toBe(true);
+
+    expect(s.rows().map((r) => r.repositoryId)).toEqual([REPO_2]);
+  });
+
+  it('raiseRtkQuestion closes its pending question as converged', async () => {
+    const s = setup([{ id: REPO, tooling: OFF, rtkChoiceMadeAt: STAMP }]);
+    pendingFor(s, REPO);
+
+    expect(await raiseRtkQuestion(s.db, REPO)).toBe(false);
+
+    expect(s.rows()[0]).toMatchObject({ resolution: 'converged', resolvedBy: null });
+  });
+
+  it('the boot entry closes its pending question and asks the unstamped sibling', async () => {
+    const s = setup([
+      { id: REPO, tooling: OFF, rtkChoiceMadeAt: STAMP },
+      { id: REPO_2, tooling: OFF },
+    ]);
+    pendingFor(s, REPO);
+
+    await raiseRtkQuestions(s.db);
+
+    expect(s.rows().map((r) => [r.repositoryId, r.resolution])).toEqual([
+      [REPO, 'converged'],
+      [REPO_2, null],
+    ]);
   });
 });
 
