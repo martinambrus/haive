@@ -32,13 +32,18 @@ const uploaded: string[] = [];
 let failUploads: Record<string, string> = {};
 let hold: { name: string; settle?: (code: number, body: unknown) => void } | null = null;
 let listed: TaskAttachment[] = [];
+let beforeDeleteReply: (() => void) | null = null;
+let deleteReply = { code: 500, error: 'locked' };
 
 async function fakeFetch(input: unknown, init?: { method?: string }) {
   const url = new URL(String(input), 'http://localhost');
   const call = `${init?.method ?? 'GET'} ${url.pathname}`;
   sent.push(call);
   if (call === LIST) return reply(200, { attachments: listed });
-  if (call.startsWith(`DELETE /tasks/${TASK}/attachments`)) return reply(500, { error: 'locked' });
+  if (call.startsWith(`DELETE /tasks/${TASK}/attachments`)) {
+    beforeDeleteReply?.();
+    return reply(deleteReply.code, { error: deleteReply.error });
+  }
   if (call === UPLOAD) {
     const name = url.searchParams.get('filename') ?? '';
     uploaded.push(name);
@@ -66,6 +71,8 @@ beforeEach(() => {
   failUploads = {};
   hold = null;
   listed = [];
+  beforeDeleteReply = null;
+  deleteReply = { code: 500, error: 'locked' };
 });
 
 async function mount(): Promise<Renderer> {
@@ -195,7 +202,7 @@ describe('removing from the attachments panel', () => {
     expect(page(view)).toContain('locked');
     vi.advanceTimersByTime(5000);
     for (let i = 0; i < 3; i += 1) await view.flush();
-    expect(listings()).toBe(2);
+    expect(listings()).toBe(3);
     expect(page(view)).toContain('locked');
   });
 
@@ -209,7 +216,39 @@ describe('removing from the attachments panel', () => {
     expect(page(view)).toContain('locked');
     vi.advanceTimersByTime(5000);
     for (let i = 0; i < 3; i += 1) await view.flush();
+    expect(listings()).toBe(3);
+    expect(page(view)).toContain('locked');
+  });
+
+  it('re-reads the list after a failed delete, keeping its error', async () => {
+    listed = [row('first.md'), row('second.md')];
+    deleteReply = { code: 404, error: 'Attachment not found' };
+    beforeDeleteReply = () => {
+      listed = [row('second.md')];
+    };
+    const view = await mount();
+    clickButton(view, 'Remove');
+    await view.flush();
+    await view.flush();
     expect(listings()).toBe(2);
+    expect(page(view)).not.toContain('first.md');
+    expect(page(view)).toContain('second.md');
+    expect(page(view)).toContain('Attachment not found');
+  });
+
+  it('re-reads the list after a folder delete that failed partway, keeping its error', async () => {
+    listed = [row('docs/x.md'), row('docs/y.md')];
+    beforeDeleteReply = () => {
+      listed = [row('docs/y.md')];
+    };
+    const view = await mount();
+    expect(page(view)).toContain('2 file(s)');
+    clickButton(view, 'Remove folder');
+    await view.flush();
+    await view.flush();
+    expect(listings()).toBe(2);
+    expect(page(view)).toContain('1 file(s)');
+    expect(page(view)).not.toContain('2 file(s)');
     expect(page(view)).toContain('locked');
   });
 

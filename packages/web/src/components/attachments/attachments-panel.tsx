@@ -143,10 +143,10 @@ export function AttachmentsPanel({
     setDeletingId(id);
     try {
       await deleteTaskAttachment(taskId, id);
-      await reload();
     } catch (err) {
       setDeleteError((err as Error).message ?? 'Delete failed');
     } finally {
+      await reload();
       setDeletingId(null);
     }
   }
@@ -157,10 +157,10 @@ export function AttachmentsPanel({
     setDeletingId(name);
     try {
       await deleteTaskAttachmentFolder(taskId, name);
-      await reload();
     } catch (err) {
       setDeleteError((err as Error).message ?? 'Delete failed');
     } finally {
+      await reload();
       setDeletingId(null);
     }
   }
