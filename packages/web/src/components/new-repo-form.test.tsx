@@ -42,7 +42,7 @@ vi.mock('@/lib/api-client', () => ({
 }));
 
 const NOTE =
-  "Showing the 1000 most recently pushed repositories. The filter searches only these; enter any other repository's URL manually.";
+  "Showing the 37 most recently pushed repositories. The filter searches only these; enter any other repository's URL manually.";
 
 beforeAll(() => vi.stubGlobal('fetch', () => Promise.resolve(ok({}))));
 afterAll(() => vi.unstubAllGlobals());
@@ -81,9 +81,11 @@ describe('GitHub repository picker truncation note', () => {
         },
       ],
       truncated: true,
+      cap: 37,
     };
     const { root } = await mountOauth();
     expect(textOf(root())).toContain(NOTE);
+    expect(textOf(root())).not.toContain('1000');
   });
 
   it('shows no truncation note when the list is complete', async () => {

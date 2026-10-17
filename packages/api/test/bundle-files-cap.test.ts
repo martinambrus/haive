@@ -16,12 +16,12 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 
 import { Hono } from 'hono';
-import { bundleRoutes } from '../src/routes/bundles.js';
+import { bundleRoutes, FILES_LIST_CAP } from '../src/routes/bundles.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 const BUNDLE = '00000000-0000-4000-8000-0000000000c1';
-const CAP = 5000;
+const CAP = FILES_LIST_CAP;
 
 const app = new Hono<AppEnv>();
 app.route('/', bundleRoutes);
@@ -58,7 +58,7 @@ afterEach(async () => {
 async function listFiles() {
   const res = await app.request(`/${BUNDLE}/files`);
   expect(res.status).toBe(200);
-  return (await res.json()) as { files: Array<{ path: string }>; truncated: boolean };
+  return (await res.json()) as { files: Array<{ path: string }>; truncated: boolean; cap: number };
 }
 
 describe('the bundle file listing says it is cut only when a listable file was left out', () => {
@@ -72,16 +72,18 @@ describe('the bundle file listing says it is cut only when a listable file was l
     const body = await listFiles();
 
     expect(body.files).toHaveLength(CAP);
+    expect(body.cap).toBe(CAP);
     expect(body.truncated).toBe(false);
   }, 60_000);
 
-  it('flags one listable file past the cap and lists the first 5000', async () => {
+  it('flags one listable file past the cap and lists the first CAP files', async () => {
     await mkdir(path.join(tree, 'b'));
     await writeFile(path.join(tree, 'b', 'extra'), 'x');
 
     const body = await listFiles();
 
     expect(body.files).toHaveLength(CAP);
+    expect(body.cap).toBe(CAP);
     expect(body.files.map((f) => f.path)).not.toContain('b/extra');
     expect(body.truncated).toBe(true);
   }, 60_000);
@@ -95,7 +97,16 @@ describe('the bundle file listing says it is cut only when a listable file was l
     const body = await listFiles();
 
     expect(body.files).toHaveLength(CAP);
+    expect(body.cap).toBe(CAP);
     expect(body.files.map((f) => f.path)).not.toContain('zz/extra');
     expect(body.truncated).toBe(true);
+  }, 60_000);
+
+  it('answers an empty list with the cap when the bundle has no tree', async () => {
+    await rm(tree, { recursive: true, force: true });
+
+    const res = await app.request(`/${BUNDLE}/files`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toStrictEqual({ files: [], truncated: false, cap: CAP });
   }, 60_000);
 });

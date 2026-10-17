@@ -63,6 +63,7 @@ interface BundleFilesState {
   loading: boolean;
   files: BundleFileEntry[];
   truncated: boolean;
+  cap: number;
   error: string | null;
 }
 
@@ -152,17 +153,27 @@ export function BundleComposer({
   const loadBundleFiles = async (bundleId: string): Promise<void> => {
     setFilesByBundle((prev) => ({
       ...prev,
-      [bundleId]: { loading: true, files: [], truncated: false, error: null },
+      [bundleId]: { loading: true, files: [], truncated: false, cap: 0, error: null },
     }));
     try {
       const res = await fetch(`${API_BASE_URL}/bundles/${bundleId}/files`, {
         credentials: 'include',
       });
       if (!res.ok) throw new Error(`files fetch failed (${res.status})`);
-      const data = (await res.json()) as { files: BundleFileEntry[]; truncated: boolean };
+      const data = (await res.json()) as {
+        files: BundleFileEntry[];
+        truncated: boolean;
+        cap: number;
+      };
       setFilesByBundle((prev) => ({
         ...prev,
-        [bundleId]: { loading: false, files: data.files, truncated: data.truncated, error: null },
+        [bundleId]: {
+          loading: false,
+          files: data.files,
+          truncated: data.truncated,
+          cap: data.cap,
+          error: null,
+        },
       }));
     } catch (err) {
       setFilesByBundle((prev) => ({
@@ -171,6 +182,7 @@ export function BundleComposer({
           loading: false,
           files: [],
           truncated: false,
+          cap: 0,
           error: err instanceof Error ? err.message : String(err),
         },
       }));
@@ -567,7 +579,7 @@ export function BundleComposer({
                         )}
                         {fileState.truncated && (
                           <p className="mt-1 text-xs text-amber-400">
-                            Showing first 5000 entries — bundle has more files.
+                            Showing first {fileState.cap} entries — bundle has more files.
                           </p>
                         )}
                       </>

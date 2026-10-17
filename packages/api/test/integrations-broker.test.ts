@@ -1726,6 +1726,7 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
       );
       const listed = await call(a, 'GET', `/github-oauth/repos?credentialId=${credential.id}`);
       expect(listed.status).toBe(200);
+      const { REPOS_PAGE_CAP, REPOS_PER_PAGE } = await import('../src/routes/github-oauth.js');
       expect(listed.body).toEqual({
         repos: [
           {
@@ -1737,6 +1738,7 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
           },
         ],
         truncated: false,
+        cap: REPOS_PAGE_CAP * REPOS_PER_PAGE,
       });
 
       const requested = shortenTimeouts();

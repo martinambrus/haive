@@ -130,7 +130,7 @@ export function NewRepoForm() {
   const [repos, setRepos] = useState<GithubRepo[] | null>(null);
   const [reposLoading, setReposLoading] = useState(false);
   const [reposError, setReposError] = useState<string | null>(null);
-  const [reposTruncated, setReposTruncated] = useState(false);
+  const [reposCutAt, setReposCutAt] = useState<number | null>(null);
   const [repoFilter, setRepoFilter] = useState('');
   const [repoListOpen, setRepoListOpen] = useState(false);
   const [manualUrl, setManualUrl] = useState(false);
@@ -156,19 +156,19 @@ export function NewRepoForm() {
   useEffect(() => {
     setRepos(null);
     setReposError(null);
-    setReposTruncated(false);
+    setReposCutAt(null);
     setRepoFilter('');
     if (source !== 'github_oauth' || !credentialsId || manualUrl) return;
     let cancelled = false;
     setReposLoading(true);
     api
-      .get<{ repos: GithubRepo[]; truncated: boolean }>(
+      .get<{ repos: GithubRepo[]; truncated: boolean; cap: number }>(
         `/github-oauth/repos?credentialId=${encodeURIComponent(credentialsId)}`,
       )
       .then((data) => {
         if (cancelled) return;
         setRepos(data.repos);
-        setReposTruncated(data.truncated);
+        setReposCutAt(data.truncated ? data.cap : null);
       })
       .catch((err: ApiError) => {
         if (cancelled) return;
@@ -393,10 +393,10 @@ export function NewRepoForm() {
                 )}
                 {!reposError && (
                   <div className="flex items-center gap-3 text-xs text-neutral-500">
-                    {reposTruncated && (
+                    {reposCutAt !== null && (
                       <span>
-                        Showing the 1000 most recently pushed repositories. The filter searches only
-                        these; enter any other repository&apos;s URL manually.
+                        Showing the {reposCutAt} most recently pushed repositories. The filter
+                        searches only these; enter any other repository&apos;s URL manually.
                       </span>
                     )}
                     <button type="button" className="underline" onClick={() => setManualUrl(true)}>
