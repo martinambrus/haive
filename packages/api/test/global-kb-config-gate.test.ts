@@ -1038,8 +1038,14 @@ describe('POST /global-kb/test-db', () => {
 describe('/admin/config/house-rules', () => {
   beforeEach(() => {
     h.db = {
-      transaction: async (run: (tx: unknown) => unknown) =>
-        run({ execute: async () => [], insert: () => ({ values: async () => undefined }) }),
+      transaction: async (run: (tx: unknown) => unknown) => {
+        const tx = {
+          execute: async () => [],
+          insert: () => ({ values: async () => undefined }),
+          transaction: (inner: (t: unknown) => unknown) => inner(tx),
+        };
+        return run(tx);
+      },
     };
   });
 

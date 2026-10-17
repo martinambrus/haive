@@ -34,9 +34,13 @@ the module loads again.
   after. Saves of one switch, or of one module's settings kind, run one at a time under a
   transaction-scoped advisory lock (`admin-config:<route>`, `module-settings:<id>:<kind>`), so each
   row's `from` is what the save before it left; a save that waits longer than 30 s answers 503. The
-  read, the writes and the audit row share that one transaction's connection. A save that fails after
-  writing some fields still records them, with `partial: true`, and then fails. Audit rows are stamped
-  with `clock_timestamp()`, the moment they are written, not when their transaction began.
+  read and the audit row share that one transaction's connection, but the values live in Redis, which
+  no rollback reaches, so the row goes first: it is written inside a savepoint before the first value,
+  and a row that cannot be written fails the save with nothing changed. A save that fails after writing
+  some fields rolls the full row back, records the fields it wrote with `partial: true`, and then
+  fails. A commit that fails after a value was written still leaves that change without its row.
+  Audit rows are stamped with `clock_timestamp()`, the moment they are written, not when their
+  transaction began.
 - **Installed, deactivated.** The Active column on `/admin/modules`, or `PATCH /modules/:id` with
   `{"active": false}` (admin; audited as `module.deactivate`). It is refused with 409
   `module_tasks_open` while a live task's run list names one of the module's steps or its type is one

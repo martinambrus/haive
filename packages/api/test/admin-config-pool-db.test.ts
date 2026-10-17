@@ -201,6 +201,22 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
         (select count(*)::int from pg_stat_activity where datname = current_database() and state like 'idle in transaction%') as open`);
     return row;
   };
+  const refuseAuditInserts = async () => {
+    await control.execute(
+      sql.raw(
+        "CREATE OR REPLACE FUNCTION refuse_audit_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'audit insert refused'; END $$;",
+      ),
+    );
+    await control.execute(
+      sql.raw(
+        'CREATE TRIGGER refuse_audit_insert BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION refuse_audit_insert();',
+      ),
+    );
+  };
+  const allowAuditInserts = async () => {
+    await control.execute(sql.raw('DROP TRIGGER IF EXISTS refuse_audit_insert ON audit_events;'));
+    await control.execute(sql.raw('DROP FUNCTION IF EXISTS refuse_audit_insert();'));
+  };
 
   const allSettle = async (saves: Array<Response | Promise<Response>>): Promise<number[]> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -282,6 +298,7 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
 
   afterEach(async () => {
     h.hold?.open();
+    await allowAuditInserts();
     await pool.$client.end({ timeout: 5 });
     await control.delete(schema.auditEvents).where(eq(schema.auditEvents.actorUserId, actor));
   });
@@ -320,7 +337,8 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
       );
 
       expect(await auditRows()).toHaveLength(2);
-      expect(await stampedBefore(released), `rows stamped before ${released}`).toEqual([]);
+      // The first save writes its row before its held write, so only that one predates the release.
+      expect(await stampedBefore(released), `rows stamped before ${released}`).toHaveLength(1);
     }, 15_000);
 
     it('does not hold a save of another switch behind a parked one', async () => {
@@ -345,6 +363,19 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
           metadata: { from: { enabled: true }, to: { enabled: false }, partial: true },
         },
       ]);
+      expect(await leftovers()).toEqual({ advisory: 0, open: 0 });
+    });
+
+    it('refuses a save whose audit row cannot be written, and writes nothing', async () => {
+      await refuseAuditInserts();
+
+      expect((await putConfig('cli-soft-timeout', { enabled: false, percent: 50 })).status).toBe(
+        500,
+      );
+      expect(h.written).toBe(0);
+      expect([...h.stored]).toEqual([]);
+      await allowAuditInserts();
+      expect(await auditRows()).toEqual([]);
       expect(await leftovers()).toEqual({ advisory: 0, open: 0 });
     });
 
@@ -426,7 +457,8 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
       );
 
       expect(await auditRows()).toHaveLength(2);
-      expect(await stampedBefore(released), `rows stamped before ${released}`).toEqual([]);
+      // The first save writes its row before its held write, so only that one predates the release.
+      expect(await stampedBefore(released), `rows stamped before ${released}`).toHaveLength(1);
     }, 15_000);
 
     it('commits the row of a save whose second write fails, answers 5xx and frees the lock', async () => {
@@ -443,6 +475,22 @@ describe.skipIf(!url)('admin config saves on a real connection pool', () => {
           metadata: { moduleId: id, kind: 'global', changed: ['apiUrl'], partial: true },
         },
       ]);
+      expect(await leftovers()).toEqual({ advisory: 0, open: 0 });
+    });
+
+    it('refuses a save whose audit row cannot be written, and writes nothing', async () => {
+      const id = MODULE_IDS[0]!;
+      seedSettings(id);
+      const snapshot = [...h.stored];
+      await refuseAuditInserts();
+
+      const res = await putSettings(id, { apiUrl: 'https://changed.example', limit: '6' });
+
+      expect(res.status).toBe(500);
+      expect(h.written).toBe(0);
+      expect([...h.stored]).toEqual(snapshot);
+      await allowAuditInserts();
+      expect(await auditRows()).toEqual([]);
       expect(await leftovers()).toEqual({ advisory: 0, open: 0 });
     });
 
