@@ -1,8 +1,9 @@
 # What Parsimony offers Haive: measured change size, and the statistics to read it
 
 > **Not started** 2026-10-17. Five findings from Parsimony (parsimony.lasu.dev,
-> github.com/La5u/Parsimony), turned into phases. Nothing is approved. P0 gates everything else:
-> without a counter there is no number for any later phase to read.
+> github.com/La5u/Parsimony), turned into phases. Nothing is approved; one decision is made: the
+> counter parses with tree-sitter (2026-10-17). P0 gates everything else: without a counter there is
+> no number for any later phase to read.
 
 ## Context
 
@@ -72,12 +73,13 @@ both worker and statistics can import it):
   (`collectImplementationFiles` / `collectChangeSet`), and add exclusions for tests, docs, generated
   files, lockfiles and vendored or build output. List the touched and excluded paths in the result,
   as Parsimony does, so a wrong exclusion can be seen.
-- **Parser choice** is the first decision of this phase and is owed to the user: tree-sitter
-  (`web-tree-sitter` with WASM grammars for PHP, TypeScript/JavaScript and Python, so no native
-  build in the images) or a first cut on `git diff --numstat` lines. Lines are cheap and cover every
-  language, but they count formatting. Recommendation: tree-sitter, because a line count of the
-  simplifier's output mostly measures reformatting, and that is the question P0 must answer.
-  Adding a dependency follows the lockfile-only route, then `pnpm docker rebuild` with no service.
+- **Parser: tree-sitter** (decided with the user 2026-10-17). `web-tree-sitter` with WASM grammars
+  for PHP, TypeScript/JavaScript and Python, so no native build in the images. A
+  `git diff --numstat` line count was the cheaper alternative and was rejected: lines count
+  formatting, so a line count of the simplifier's output would mostly measure reformatting, and that
+  is the question P0 must answer. A language with no loaded grammar yields `null` per file, by the
+  parse-failure rule above. Adding the dependency follows the lockfile-only route, then
+  `pnpm docker rebuild` with no service.
 
 **Where it is measured.** On the worker host, against the integration worktree (git is unavailable
 in the sandbox, so this cannot run inside it):
