@@ -1300,24 +1300,23 @@ export async function squashMergeCommit(
   featureRef: string,
   onSkipped?: (reason: string) => void,
 ): Promise<string | null> {
+  const feature = await revParse(worktreePath, `${featureRef}^{commit}`);
+  if (feature) {
+    const contained = await gitRun(worktreePath, [
+      'merge-base',
+      '--is-ancestor',
+      feature,
+      baseShaBefore,
+    ]);
+    if (contained.code === 0) return null;
+    if (contained.code !== 1) throw new Error('Could not check feature ancestry before squash');
+  }
   const open = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (open.code === 0) return null;
   const head = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
   if (head.code !== 0) return null;
 
   const resetAlready = head.stdout.trim() === baseShaBefore;
-  const skip = (reason: string): null => {
-    if (resetAlready) throw new Error(`Cannot resume squash after reset: ${reason}.`);
-    const note = `Squash skipped; merge history kept: ${reason}.`;
-    logger.warn({ worktreePath, baseShaBefore, featureRef }, note);
-    onSkipped?.(note);
-    return null;
-  };
-  const feature = await revParse(worktreePath, featureRef);
-  if (resetAlready) {
-    const staged = await gitRun(worktreePath, ['diff', '--cached', '--quiet']);
-    if (staged.code === 0) return null;
-  }
   const headParents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', 'HEAD']);
   const headCommits = headParents.stdout.trim().split(/\s+/);
   const committedAlready =
@@ -1325,6 +1324,13 @@ export async function squashMergeCommit(
     headParents.code === 0 &&
     headCommits.length === 2 &&
     headCommits[1] === baseShaBefore;
+  const skip = (reason: string): null => {
+    if (resetAlready || committedAlready) throw new Error(`Cannot resume squash: ${reason}.`);
+    const note = `Squash skipped; merge history kept: ${reason}.`;
+    logger.warn({ worktreePath, baseShaBefore, featureRef }, note);
+    onSkipped?.(note);
+    return null;
+  };
   const candidate = resetAlready || committedAlready ? 'ORIG_HEAD' : 'HEAD';
   const parents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', candidate]);
   const commits = parents.stdout.trim().split(/\s+/);
@@ -1348,6 +1354,9 @@ export async function squashMergeCommit(
     return skip('the staged tree differs from the feature merge');
   }
   if (!resetAlready) {
+    const baseTree = await revParse(worktreePath, `${baseShaBefore}^{tree}`);
+    if (!baseTree) throw new Error('Could not read the base tree before squash');
+    if (mergedTree === baseTree) return skip('the feature merge has an empty net diff');
     const reset = await gitRun(worktreePath, ['reset', '--soft', baseShaBefore]);
     if (reset.code !== 0) {
       throw new Error(
@@ -1355,10 +1364,6 @@ export async function squashMergeCommit(
       );
     }
   }
-  // Nothing staged: the merge was a no-op ("Already up to date"), so there is no
-  // history to collapse. `git diff --cached --quiet` exits non-zero when it differs.
-  const staged = await gitRun(worktreePath, ['diff', '--cached', '--quiet']);
-  if (staged.code === 0) return null;
 
   const commit = await gitRun(worktreePath, ['commit', '-m', message], gitEnv);
   if (commit.code !== 0) {

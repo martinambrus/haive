@@ -494,9 +494,8 @@ async function finishMerge(
   params: AdvanceStepParams,
   state: MergeResolveState,
 ): Promise<MergeResolved> {
-  state = { ...state, merged: true };
   const squash = await squashFeatureMerge(db, current, ctx, params, state);
-  const squashed = squash.state;
+  const squashed = { ...squash.state, merged: true };
   current = squash.current;
   if (
     squashed.pushAfterMerge &&
@@ -534,7 +533,12 @@ async function squashFeatureMerge(
   // commit in place is the safe outcome: the work is integrated either way.
   if (!state.baseShaBefore) return { state, current };
 
-  const squashing: MergeResolveState = { ...state, phase: 'squashing' };
+  const squashing: MergeResolveState = {
+    ...state,
+    phase: 'squashing',
+    merged: false,
+    mergedAt: undefined,
+  };
   const userEnv = await resolveGitEnv(db, { userId: ctx.userId, taskId: ctx.taskId });
   const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
   const message = await buildSquashCommitMessage(db, ctx.taskId, state.featureBranch);
@@ -690,6 +694,8 @@ async function prePushSync(
         }
         const next: MergeResolveState = {
           ...state,
+          merged: false,
+          mergedAt: undefined,
           mergeStage: 'base-sync',
           featureBranch: `origin/${base}`,
           phase: 'pending',

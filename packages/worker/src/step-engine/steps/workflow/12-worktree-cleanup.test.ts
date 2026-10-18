@@ -302,9 +302,13 @@ function makeDb(
   let errorMessage: string | null = null;
   let warningMessage: string | null = null;
   const events: { eventType: string; payload: unknown }[] = [];
+  const stateWrites: MergeResolveState[] = [];
   const invocationInserts: { prompt?: string; truncationRetry?: boolean }[] = [];
   const applyPatch = (patch: Record<string, unknown>) => {
-    if ('mergeResolveState' in patch) mergeState = patch.mergeResolveState as MergeResolveState;
+    if ('mergeResolveState' in patch) {
+      mergeState = patch.mergeResolveState as MergeResolveState;
+      stateWrites.push(mergeState);
+    }
     if ('status' in patch) status = patch.status as string;
     if ('errorMessage' in patch) errorMessage = (patch.errorMessage as string | null) ?? null;
     if ('warningMessage' in patch) warningMessage = (patch.warningMessage as string | null) ?? null;
@@ -413,6 +417,7 @@ function makeDb(
   return {
     db,
     getState: () => mergeState,
+    stateWrites,
     getStatus: () => status,
     getWarning: () => warningMessage,
     /** A Retry clears the step's warning. */
@@ -4047,7 +4052,13 @@ describe('#280 fix1 squash warnings and halt', () => {
           mkParams(h.db),
         ),
       ).rejects.toThrow();
+      expect(h.stateWrites.every((row) => !row.merged || Boolean(row.mergedAt))).toBe(true);
       expect(h.getState()?.phase).toBe('squashing');
+      expect(
+        h.stateWrites
+          .filter((row) => row.phase === 'squashing')
+          .every((row) => !row.merged && !row.mergedAt),
+      ).toBe(true);
       expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
       expect(fetchProbe.pushes).toEqual([]);
     } finally {
