@@ -716,8 +716,10 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     const upstream = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
     const head = await gitRun(ctx.repoPath, ['rev-parse', 'HEAD']);
     const pushedHead = head.code === 0 ? head.stdout.trim() : null;
+    if (!pushedHead)
+      throw new Error('could not read HEAD; the merge is saved locally, retry the push');
     await pushBranch({
-      ...(pushedHead ? { sha: pushedHead } : {}),
+      sha: pushedHead,
       cwd: ctx.repoPath,
       branch: d.branch,
       setUpstream: upstream.code !== 0,
