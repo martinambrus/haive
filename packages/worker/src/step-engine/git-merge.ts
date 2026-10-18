@@ -1288,33 +1288,48 @@ export async function completeMergeHostSide(
   return mergeCommitted(worktreePath, branch);
 }
 
-/** Collapse a merge that has ALREADY landed in `worktreePath` into a single commit on
- *  the current branch: `reset --soft` back to the pre-merge tip, then one commit of the
- *  merged index. The tree is unchanged — only the history is.
- *
- *  Deliberately NOT `git merge --squash`, which never writes MERGE_HEAD: the whole
- *  conflict loop is built on that file (completeMergeHostSide requires it, and
- *  `git merge --abort` fails without it), so squashing at merge time would break
- *  conflict resolution and leave a conflicted index behind. Merging normally and
- *  collapsing afterwards leaves every one of those paths untouched.
- *
- *  Returns the new commit's sha, or null when there was nothing to collapse. Safe to
- *  re-enter after a crash: a half-done attempt (HEAD already reset, changes staged)
- *  finishes with the commit, and a completed one collapses to an identical tree again.
- *
- *  Never touches a LIVE merge — the conflict loop owns that until its own commit lands. */
+/** Collapse only the feature merge's own first-parent edge; resume a reset only when its
+ *  ORIG_HEAD and staged tree still prove the same merge. A live merge is left to its fixer. */
 export async function squashMergeCommit(
   worktreePath: string,
   baseShaBefore: string,
   message: string,
   gitEnv: Record<string, string>,
+  featureRef: string,
+  onSkipped?: (reason: string) => void,
 ): Promise<string | null> {
   const open = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (open.code === 0) return null;
   const head = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
   if (head.code !== 0) return null;
 
-  if (head.stdout.trim() !== baseShaBefore) {
+  const skip = (reason: string): null => {
+    const note = `Squash skipped; merge history kept: ${reason}.`;
+    logger.warn({ worktreePath, baseShaBefore, featureRef }, note);
+    onSkipped?.(note);
+    return null;
+  };
+  const feature = await revParse(worktreePath, featureRef);
+  const resetAlready = head.stdout.trim() === baseShaBefore;
+  if (resetAlready) {
+    const staged = await gitRun(worktreePath, ['diff', '--cached', '--quiet']);
+    if (staged.code === 0) return null;
+  }
+  const candidate = resetAlready ? 'ORIG_HEAD' : 'HEAD';
+  const parents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', candidate]);
+  const commits = parents.stdout.trim().split(/\s+/);
+  if (parents.code !== 0 || commits.length !== 3 || !feature || commits[2] !== feature) {
+    return skip('the tip is not a two-parent merge of the feature tip');
+  }
+  if (commits[1] !== baseShaBefore) {
+    return skip('the merge first parent differs from the recorded base tip');
+  }
+  const index = await gitRun(worktreePath, ['write-tree']);
+  const mergedTree = await revParse(worktreePath, `${commits[0]}^{tree}`);
+  if (index.code !== 0 || !mergedTree || index.stdout.trim() !== mergedTree) {
+    return skip('the staged tree differs from the feature merge');
+  }
+  if (!resetAlready) {
     const reset = await gitRun(worktreePath, ['reset', '--soft', baseShaBefore]);
     if (reset.code !== 0) {
       throw new Error(

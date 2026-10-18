@@ -620,6 +620,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     // so it proves containment for the branch deletes below — which `git branch -d`
     // cannot see, the original commits no longer being reachable from the base tip.
     let squashCommitSha: string | null = null;
+    let squashSkipReason: string | undefined;
     if (action === 'merge_remove') {
       const row = await ctx.db.query.taskSteps.findFirst({
         where: eq(schema.taskSteps.id, ctx.taskStepId),
@@ -629,6 +630,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       merged = st?.merged ?? false;
       mergeTarget = st?.baseBranch || null;
       squashCommitSha = st?.squashCommitSha ?? null;
+      squashSkipReason = st?.squashSkipReason;
       if (!merged) {
         // The merge did not run (e.g. the parent checkout is off the base branch).
         // Keep the worktree so the user can integrate manually.
@@ -770,6 +772,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
           ? `merged ${d.branchName} into ${mergeTarget} as one squashed commit ${squashCommitSha.slice(0, 7)}`
           : `merged ${d.branchName} into ${mergeTarget}`,
       );
+    if (squashSkipReason) parts.push(squashSkipReason);
     parts.push(`removed worktree ${d.worktreePath}`);
     if (branchDeleted) parts.push(`deleted branch ${d.branchName}`);
     if (issueBranchesDeleted > 0)

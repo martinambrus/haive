@@ -529,13 +529,26 @@ async function squashFeatureMerge(
     saveMergeState(tx, current.id, squashing),
   );
   const next = await inMergeDir(db, current, params, squashing.mergeDir, async (tx) => {
+    let skipped: string | undefined;
     const squashCommitSha = await squashMergeCommit(
       squashing.mergeDir,
       baseShaBefore,
       message,
       commitEnv,
+      squashing.featureBranch,
+      (reason) => {
+        skipped = reason;
+      },
     );
-    const squashed: MergeResolveState = { ...squashing, squashCommitSha };
+    if (skipped) {
+      await addStepWarning(tx, current, skipped);
+      await updateOwnedStep(tx, current.id, { statusMessage: skipped });
+    }
+    const squashed: MergeResolveState = {
+      ...squashing,
+      squashCommitSha,
+      ...(skipped ? { squashAfterMerge: false, squashSkipReason: skipped } : {}),
+    };
     await saveMergeState(tx, current.id, squashed);
     return squashed;
   });

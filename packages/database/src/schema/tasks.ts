@@ -678,6 +678,8 @@ export interface MergeResolveState {
    *  `git branch -d` cannot see that, because the original commits are no longer
    *  reachable from the base tip. */
   squashCommitSha?: string | null;
+  /** Why the merge history was kept instead of squashed. */
+  squashSkipReason?: string;
   /** Terminal outcome (set when phase==='done'): whether a merge commit landed. */
   merged: boolean;
   /** ISO time the merge COMMIT landed, stamped where `merged` first becomes true.

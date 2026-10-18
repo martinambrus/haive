@@ -1810,7 +1810,7 @@ describe('squashMergeCommit (real git)', () => {
       expect(await count(dir, 'main')).toBe(4);
       const mergedTree = (await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim();
 
-      const sha = await squashMergeCommit(dir, before, 'feat: squashed', COMMIT_ENV);
+      const sha = await squashMergeCommit(dir, before, 'feat: squashed', COMMIT_ENV, 'feature/x');
       expect(sha).toBeTruthy();
       expect(await count(dir, 'main')).toBe(2); // init + the single squash commit
       expect((await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(mergedTree);
@@ -1829,7 +1829,9 @@ describe('squashMergeCommit (real git)', () => {
       await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
       const after = (await git(dir, ['rev-parse', 'HEAD'])).trim();
       // A second merge of the same branch is "Already up to date" — nothing to collapse.
-      expect(await squashMergeCommit(dir, after, 'feat: nothing', COMMIT_ENV)).toBeNull();
+      expect(
+        await squashMergeCommit(dir, after, 'feat: nothing', COMMIT_ENV, 'feature/x'),
+      ).toBeNull();
       expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(after);
     } finally {
       await rm(dir, REMOVE);
@@ -1841,7 +1843,9 @@ describe('squashMergeCommit (real git)', () => {
     try {
       const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
       expect(await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x'])).not.toBe(0);
-      expect(await squashMergeCommit(dir, before, 'feat: nope', COMMIT_ENV)).toBeNull();
+      expect(
+        await squashMergeCommit(dir, before, 'feat: nope', COMMIT_ENV, 'feature/x'),
+      ).toBeNull();
       // The conflict loop still owns it: MERGE_HEAD and the markers survive.
       expect(await gitCode(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
       expect(await readFile(path.join(dir, 'base.txt'), 'utf8')).toContain('<<<<<<<');
@@ -1857,7 +1861,7 @@ describe('squashMergeCommit (real git)', () => {
       await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
       // Simulate a crash between the reset and the commit.
       await git(dir, ['reset', '--soft', before]);
-      const sha = await squashMergeCommit(dir, before, 'feat: resumed', COMMIT_ENV);
+      const sha = await squashMergeCommit(dir, before, 'feat: resumed', COMMIT_ENV, 'feature/x');
       expect(sha).toBeTruthy();
       expect(await count(dir, 'main')).toBe(2);
       expect((await git(dir, ['log', '-1', '--format=%s'])).trim()).toBe('feat: resumed');
@@ -1865,4 +1869,51 @@ describe('squashMergeCommit (real git)', () => {
       await rm(dir, REMOVE);
     }
   });
+});
+
+describe('#280 squash boundary', () => {
+  it.each(['before merge', 'after merge'])(
+    "preserves a person's commit %s without resetting",
+    async (when) => {
+      const dir = await setupCleanFeature();
+      try {
+        const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        if (when === 'before merge') {
+          await writeFile(path.join(dir, 'person.txt'), 'person\n');
+          await git(dir, ['add', 'person.txt']);
+          await git(dir, ['commit', '-m', 'person']);
+        }
+        await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+        if (when === 'after merge') {
+          await writeFile(path.join(dir, 'person.txt'), 'person\n');
+          await git(dir, ['add', 'person.txt']);
+          await git(dir, ['commit', '-m', 'person']);
+        }
+        const head = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+        await squashMergeCommit(dir, before, 'squashed', COMMIT_ENV, 'feature/x');
+        expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+        expect(await gitCode(dir, ['merge-base', '--is-ancestor', head, 'HEAD'])).toBe(0);
+        expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
+});
+
+it('skips a merge whose second parent is not the feature tip', async () => {
+  const dir = await setupCleanFeature();
+  try {
+    const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+    await git(dir, ['branch', 'other', 'feature/x~1']);
+    await git(dir, ['merge', '--no-ff', '--no-edit', 'other']);
+    const head = await git(dir, ['rev-parse', 'HEAD']);
+    const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+    expect(await squashMergeCommit(dir, before, 'unsafe', COMMIT_ENV, 'feature/x')).toBeNull();
+    expect(await git(dir, ['rev-parse', 'HEAD'])).toBe(head);
+    expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+  } finally {
+    await rm(dir, REMOVE);
+  }
 });

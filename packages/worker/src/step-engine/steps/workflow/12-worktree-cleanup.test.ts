@@ -3438,6 +3438,80 @@ describe('12 squash merge (real git)', () => {
     }
   });
 
+  it.each(['by hand', 'Retry with AI'])(
+    "keeps a person's base commit after a halt finished %s",
+    async (how) => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await divergeBase(parent, wt);
+        const before = (await git(parent, ['rev-parse', 'HEAD'])).trim();
+        const h = makeDb();
+        const seeded: MergeResolveState = {
+          mode: 'same-branch',
+          phase: 'resolving',
+          baseBranch: 'main',
+          featureBranch: 'feature/x',
+          mergeDir: parent,
+          sandboxMergeDir: parent,
+          fixInvocationId: null,
+          conflictRetries: 4,
+          pendingQuestion: null,
+          pushAfterMerge: false,
+          squashAfterMerge: true,
+          baseShaBefore: before,
+          merged: false,
+          skipReason: null,
+          pushed: false,
+        };
+        await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'merge']);
+        const run = (state: MergeResolveState, over: Record<string, unknown> = {}) =>
+          resolveMergePhase(
+            h.db as never,
+            step,
+            mkCurrent(det(wt), { action: 'merge_remove' }, state),
+            mkCtx(parent, h.db),
+            mkParams(h.db, over),
+          );
+        expect(await run(seeded)).toMatchObject({ resolved: false, result: { status: 'failed' } });
+        await h.db.update().set({ status: 'running' }).where(null);
+        await writeFile(path.join(parent, 'person.txt'), 'person\n');
+        await git(parent, ['add', 'person.txt']);
+        await git(parent, ['commit', '-m', 'person']);
+        const person = (await git(parent, ['rev-parse', 'HEAD'])).trim();
+        if (how === 'Retry with AI') {
+          await run(
+            { ...seeded, conflictRetries: 0 },
+            {
+              providers: [{ id: 'p1', enabled: true }],
+              deps: { enqueueCliInvocation: async () => {} },
+            },
+          );
+        } else {
+          await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'merge']);
+        }
+        await writeFile(path.join(parent, 'base.txt'), 'resolved\n');
+        await git(parent, ['add', 'base.txt']);
+        await git(parent, ['commit', '--no-edit']);
+        const merge = (await git(parent, ['rev-parse', 'HEAD'])).trim();
+        const reflog = await git(parent, ['reflog', '--format=%H %gs']);
+        expect((await run({ ...seeded, conflictRetries: 0 })).resolved).toBe(true);
+        expect((await git(parent, ['rev-parse', 'HEAD'])).trim()).toBe(merge);
+        expect(await gitCode(parent, ['merge-base', '--is-ancestor', person, 'HEAD'])).toBe(0);
+        expect(await git(parent, ['reflog', '--format=%H %gs'])).toBe(reflog);
+        expect(h.getWarning()).toContain('merge first parent differs');
+        expect(h.getState()?.squashSkipReason).toContain('merge first parent differs');
+        const applied = await worktreeCleanupStep.apply(
+          mkCtx(parent, h.db),
+          applyArgs(det(wt), { action: 'merge_remove' }),
+        );
+        expect(applied.message).toContain('merge first parent differs');
+        expect(h.getState()?.squashCommitSha).toBeFalsy();
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('keeps the merge commit and the full history when the box is unticked', async () => {
     const { parent, wt } = await setupWorktree();
     try {
