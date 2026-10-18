@@ -802,16 +802,17 @@ describe('12 merge phase + apply (real git)', () => {
       }
     });
 
-    it('a merge that halts keeps the claim for its Retry', async () => {
+    it('a merge that aborts before halting releases its claim', async () => {
       const { parent, wt } = await setupWorktree();
       try {
         await divergeBase(parent, wt);
         await git(parent, ['checkout', '-b', 'develop']);
         const { merge } = await runB(parent, wt);
         expect(merge.resolved).toBe(false);
-        const held = [...claimFake.claims.values()];
-        expect(held).toEqual([expect.objectContaining({ taskId: 't1', stepId: 'step1' })]);
-        expect(claimFake.released).toEqual([]);
+        expect(claimFake.claims.size).toBe(0);
+        expect(claimFake.released).toEqual([
+          { mergeDir: expect.stringContaining('main--base'), inSection: true },
+        ]);
       } finally {
         await rm(parent, { recursive: true, force: true });
       }
@@ -1181,6 +1182,7 @@ describe('12 merge fix-agent dispatch', () => {
       }
       expect(h.getState()?.fixInvocationId).toBeNull();
       expect(h.events.map((e) => e.eventType)).toEqual(['merge.abort_failed']);
+      expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
       expect(await readFile(path.join(parent, 'base.txt'), 'utf8')).toBe('half-resolved\n');
     } finally {
       await rm(parent, { recursive: true, force: true });
@@ -1209,6 +1211,7 @@ describe('12 merge fix-agent dispatch', () => {
       }
       expect(h.getState()?.fixInvocationId).toBeNull();
       expect(await readFile(path.join(parent, 'feature.txt'), 'utf8')).toBe('mine\n');
+      expect(claimFake.claims.has(parent)).toBe(false);
     } finally {
       await rm(parent, { recursive: true, force: true });
     }
@@ -1415,6 +1418,7 @@ describe('12 merge fix-agent dispatch', () => {
       expect(second).toMatchObject({ resolved: false, result: { status: 'failed' } });
       expect(h.getStatus()).toBe('failed');
       expect(h.getState()?.fixBaseline).toBeTruthy();
+      expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
       expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
     } finally {
       relocation.holdIndex = false;
@@ -3597,4 +3601,186 @@ describe('12 squash merge (real git)', () => {
       await rm(parent, { recursive: true, force: true });
     }
   });
+});
+
+describe('#280 halt claims', () => {
+  it.each(['budget', 'missing deps', 'dispatcher skip', 'fatal provider', 'put-back failure'])(
+    '%s releases the claim after no merge remains',
+    async (kind) => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await divergeBase(parent, wt);
+        const h = makeDb(
+          kind === 'fatal provider'
+            ? {
+                invocation: {
+                  id: 'inv1',
+                  endedAt: new Date(),
+                  exitCode: 1,
+                  errorMessage: 'rate limit exceeded',
+                },
+              }
+            : {},
+        );
+        const seeded: MergeResolveState = {
+          mode: 'same-branch',
+          phase: kind === 'put-back failure' ? 'pending' : 'resolving',
+          baseBranch: 'main',
+          featureBranch: 'feature/x',
+          mergeDir: parent,
+          sandboxMergeDir: parent,
+          fixInvocationId: kind === 'fatal provider' ? 'inv1' : null,
+          conflictRetries: kind === 'budget' ? 4 : 0,
+          pendingQuestion: null,
+          pushAfterMerge: false,
+          merged: false,
+          skipReason: null,
+          pushed: false,
+        };
+        if (kind !== 'put-back failure')
+          await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'merge']);
+        const testedStep =
+          kind === 'put-back failure'
+            ? ({
+                ...step,
+                mergeResolve: {
+                  ...step.mergeResolve!,
+                  putBackBeforeMerge: async () => {
+                    throw new Error('blocked');
+                  },
+                },
+              } as StepDefinition)
+            : step;
+        const out = await resolveMergePhase(
+          h.db as never,
+          testedStep,
+          mkCurrent(det(wt), { action: 'merge_remove' }, seeded),
+          mkCtx(parent, h.db),
+          mkParams(
+            h.db,
+            kind === 'dispatcher skip'
+              ? { providers: [], deps: { enqueueCliInvocation: async () => {} } }
+              : {},
+          ),
+        );
+        expect(out).toMatchObject({ resolved: false, result: { status: 'failed' } });
+        expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+        expect(claimFake.claims.has(parent)).toBe(false);
+        expect(claimFake.released).toContainEqual({ mergeDir: parent, inSection: true });
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+it('reacquires a released claim before Retry reopens a merge', async () => {
+  const { parent, wt } = await setupWorktree();
+  try {
+    await divergeBase(parent, wt);
+    const h = makeDb();
+    await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(det(wt), { action: 'merge_remove' }),
+      mkCtx(parent, h.db),
+      mkParams(h.db),
+    );
+    expect(claimFake.claims.has(parent)).toBe(false);
+    await h.db.update().set({ status: 'running' }).where(null);
+    const retry = mkCurrent(det(wt), { action: 'merge_remove' }, h.getState());
+    claimFake.claims.delete(parent);
+    const out = await resolveMergePhase(
+      h.db as never,
+      step,
+      retry,
+      mkCtx(parent, h.db),
+      mkParams(h.db, {
+        providers: [{ id: 'p1', enabled: true }],
+        deps: { enqueueCliInvocation: async () => {} },
+      }),
+    );
+    expect(out).toMatchObject({ resolved: false, result: { status: 'waiting_cli' } });
+    expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
+    expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+it('a failed halt release fails before recording the step failed', async () => {
+  const { parent, wt } = await setupWorktree();
+  try {
+    await writeFile(path.join(parent, 'feature.txt'), 'mine\n');
+    const h = makeDb();
+    claimFake.releaseError = new Error('release failed');
+    await expect(
+      resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }),
+        mkCtx(parent, h.db),
+        mkParams(h.db),
+      ),
+    ).rejects.toThrow('release failed');
+    expect(h.getStatus()).toBe('running');
+    expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+it('origin-keeps-advancing and push-failure halts release their claims', async () => {
+  const { parent, wt } = await setupWorktree();
+  const bare = await pushParentMainToOrigin(parent);
+  try {
+    await advanceOrigin(bare, 'new.txt', 'origin\n');
+    const h = makeDb();
+    const state: MergeResolveState = {
+      mode: 'same-branch',
+      phase: 'squashing',
+      baseBranch: 'main',
+      featureBranch: 'feature/x',
+      mergeDir: parent,
+      sandboxMergeDir: parent,
+      fixInvocationId: null,
+      conflictRetries: 0,
+      pendingQuestion: null,
+      pushAfterMerge: true,
+      merged: true,
+      skipReason: null,
+      pushed: false,
+      baseSyncRounds: 3,
+    };
+    await git(parent, ['merge', '--no-ff', 'feature/x', '-m', 'merge']);
+    const out = await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(det(wt), { action: 'merge_remove' }, state),
+      mkCtx(parent, h.db),
+      mkParams(h.db),
+    );
+    expect(out).toMatchObject({
+      resolved: false,
+      result: { status: 'failed', error: expect.stringContaining('keeps advancing') },
+    });
+    expect(claimFake.claims.has(parent)).toBe(false);
+    await h.db.update().set({ status: 'running' }).where(null);
+    await git(parent, ['remote', 'remove', 'origin']);
+    const pushed = await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(det(wt), { action: 'merge_remove' }, { ...state, phase: 'pushing' }),
+      mkCtx(parent, h.db),
+      mkParams(h.db),
+    );
+    expect(pushed).toMatchObject({
+      resolved: false,
+      result: { status: 'failed', error: expect.stringContaining('pushing') },
+    });
+    expect(claimFake.claims.has(parent)).toBe(false);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true });
+  }
 });

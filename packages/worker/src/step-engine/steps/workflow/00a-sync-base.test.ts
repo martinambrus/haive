@@ -1061,6 +1061,7 @@ describe('a same-branch merge while other tasks work in the checkout itself', ()
         asideReadingFence(() => (others.length = 0));
         const { out, why, h } = await mergePhaseBeside(local, others);
         expect(out.resolved).toBe(false);
+        expect(claimFake.claims.has(local)).toBe(false);
         expect(why).toBe(wording);
         expect(h.getState()).toMatchObject({ phase: 'pending', merged: false });
         expect(projections.setAside).toHaveBeenCalledTimes(1);
@@ -1109,6 +1110,7 @@ describe('a same-branch merge while other tasks work in the checkout itself', ()
       asideReadingFence(() => others.push({ id: 'late' }));
       const { out, why } = await mergePhaseBeside(local, others);
       expect(out.resolved).toBe(false);
+      expect(claimFake.claims.has(local)).toBe(false);
       expect(why).toBe(HELD_ONE);
       expect(projections.restore).toHaveBeenCalledTimes(1);
       expect(projections.putBack).toHaveBeenCalledTimes(1);
@@ -1133,6 +1135,7 @@ describe('a same-branch merge while other tasks work in the checkout itself', ()
       });
       const { out, why, h } = await mergePhaseBeside(local, others, 'resolving');
       expect(out.resolved).toBe(false);
+      expect(claimFake.claims.has(local)).toBe(false);
       expect(why).toBe(HELD_ONE);
       expect(h.getState()).toMatchObject({ phase: 'resolving', conflictRetries: 0 });
       if (!atAside) {
@@ -1159,6 +1162,7 @@ describe('a same-branch merge while other tasks work in the checkout itself', ()
         });
         const { out, why } = await mergePhaseBeside(local, others, phase);
         expect(out.resolved).toBe(false);
+        expect(claimFake.claims.has(local)).toBe(false);
         expect(why).toBe(HELD_ONE);
         expect(projections.setAside).toHaveBeenCalledTimes(2);
         expect(projections.putBack).toHaveBeenCalledTimes(1);
@@ -1188,6 +1192,7 @@ describe('a same-branch merge while other tasks work in the checkout itself', ()
         const head = (await git(local, ['rev-parse', 'HEAD'])).trim();
         const { out, why } = await mergePhaseBeside(local, [{ id: 'other-task' }], phase);
         expect(out.resolved).toBe(false);
+        expect(claimFake.claims.has(local)).toBe(false);
         expect(why).toBe(HELD_ONE);
         expect((await git(local, ['rev-parse', 'MERGE_HEAD'])).trim()).toBe(stale);
         expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(head);
@@ -1306,4 +1311,34 @@ describe('00a-sync-base mergeResolve.selectedMerge', () => {
     expect(syncBaseStep.mergeResolve!.selectedMerge({ syncAction: 'skip' })).toBe(false);
     expect(syncBaseStep.mergeResolve!.selectedMerge({})).toBe(false);
   });
+});
+
+it.each(['pending', 'resolving'] as const)(
+  'a refused projection releases its claim (%s)',
+  async (phase) => {
+    const { local, cleanup } = await divergedCheckout();
+    try {
+      projections.setAside.mockResolvedValue({ outcome: 'refused', reason: 'blocked' });
+      const { out } = await mergePhaseBeside(local, [], phase);
+      expect(out).toMatchObject({ resolved: false, result: { status: 'failed' } });
+      expect(claimFake.claims.has(local)).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  },
+);
+
+it('a failed plan-base read releases the claim without opening a merge', async () => {
+  const { local, cleanup } = await divergedCheckout();
+  try {
+    projections.seed.mockRejectedValue(new Error('unreadable'));
+    const { out } = await mergePhaseBeside(local, []);
+    expect(out).toMatchObject({
+      resolved: false,
+      result: { status: 'failed', error: expect.stringContaining('plan') },
+    });
+    expect(claimFake.claims.has(local)).toBe(false);
+  } finally {
+    await cleanup();
+  }
 });
