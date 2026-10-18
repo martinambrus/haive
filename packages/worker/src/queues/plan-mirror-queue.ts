@@ -361,10 +361,17 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
         return recoverAfterMoveFailure(getDb(), repo.id, repoPath, kept, before, err);
       }
       const upstream = await gitRun(repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
-      const head = await gitRun(repoPath, ['rev-parse', 'HEAD']);
+      const head = await gitRun(repoPath, [
+        'rev-parse',
+        '--verify',
+        `refs/heads/${branch}^{commit}`,
+      ]);
       const pushedHead = head.code === 0 ? head.stdout.trim() : null;
-      if (!pushedHead)
-        throw new Error('could not read HEAD; the plan commit is saved locally, retry the push');
+      if (!pushedHead) {
+        throw new Error(
+          'could not read branch tip; the plan commit is saved locally, retry the push',
+        );
+      }
       await pushBranch({
         sha: pushedHead,
         cwd: repoPath,

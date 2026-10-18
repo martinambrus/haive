@@ -5,6 +5,8 @@ const h = vi.hoisted(() => ({
   db: null as unknown,
   sha: 'a'.repeat(40),
   headReads: 0,
+  switched: false,
+  otherSha: 'b'.repeat(40),
   fail: false,
   empty: false,
   push: vi.fn(),
@@ -20,12 +22,19 @@ vi.mock('../src/repo/git-push.js', async (original) => ({
   detectOrigin: async () => true,
   pushBranch: h.push,
   gitRun: async (_cwd: string, args: string[]) => {
+    if (args.join(' ') === 'rev-parse --verify refs/heads/main^{commit}') {
+      return {
+        code: h.fail ? 128 : 0,
+        stdout: h.empty ? '' : h.sha,
+        stderr: '',
+      };
+    }
     if (args.join(' ') === 'rev-parse HEAD') {
       h.headReads += 1;
       if (h.headReads === 3)
         return {
           code: h.fail ? 128 : 0,
-          stdout: h.empty ? '' : 'unreadable',
+          stdout: h.empty ? '' : h.switched ? h.otherSha : 'unreadable',
           stderr: 'unreadable',
         };
       return { code: 0, stdout: h.sha, stderr: '' };
@@ -79,6 +88,9 @@ import { save } from '../src/queues/plan-mirror-queue.js';
 beforeEach(() => {
   vi.clearAllMocks();
   h.headReads = 0;
+  h.switched = false;
+  h.fail = false;
+  h.empty = false;
   h.recordError.mockResolvedValue(undefined);
   h.push.mockResolvedValue({});
   const db = {
@@ -128,8 +140,8 @@ describe('#280 fix2 plan pushes require a pinned sha', () => {
           previousIterations: [],
           llmOutput: undefined,
         }),
-      ).rejects.toThrow('could not read HEAD');
-      expect(h.headReads).toBe(3);
+      ).rejects.toThrow('could not read branch tip');
+      expect(h.headReads).toBe(2);
       expect(h.push).not.toHaveBeenCalled();
       expect(h.advance).not.toHaveBeenCalled();
       expect(h.remove).not.toHaveBeenCalled();
@@ -142,18 +154,65 @@ describe('#280 fix2 plan pushes require a pinned sha', () => {
       h.fail = kind === 'exit failure';
       h.empty = kind === 'empty output';
       await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
-        'could not read HEAD',
+        'could not read branch tip',
       );
-      expect(h.headReads).toBe(3);
+      expect(h.headReads).toBe(2);
       expect(h.push).not.toHaveBeenCalled();
       expect(h.advance).not.toHaveBeenCalled();
       expect(h.recordError).toHaveBeenCalledWith(
         h.db,
         'r1',
         expect.objectContaining({
-          message: 'could not read HEAD; the plan commit is saved locally, retry the push',
+          message: 'could not read branch tip; the plan commit is saved locally, retry the push',
         }),
       );
     },
   );
+});
+
+describe('#280 fix5 plan pushes pin the destination branch after a checkout switch', () => {
+  it('plan mirror pushes the destination sha and advances its base with that same sha', async () => {
+    h.switched = true;
+    const result = await save({ repositoryId: 'r1', userId: 'u1', push: true });
+    expect(result.pushed).toBe(true);
+    expect(h.headReads).toBeGreaterThanOrEqual(2);
+    expect(h.push).toHaveBeenCalledWith(expect.objectContaining({ sha: h.sha, branch: 'main' }));
+    expect(h.advance).toHaveBeenCalledWith(h.db, 'r1', '/repo', h.sha, 'main');
+  });
+
+  it('plan merge pushes the destination sha and advances its base with that same sha', async () => {
+    h.switched = true;
+    h.headReads = 1;
+    const ctx = {
+      db: h.db,
+      repoPath: '/repo',
+      taskId: 't1',
+      taskStepId: 's1',
+      userId: 'u1',
+    } as StepContext;
+    const detected = {
+      repositoryId: 'r1',
+      branch: 'main',
+      worktreePath: '/repo/merge',
+      worktreeRelPath: 'merge',
+      unrelated: false,
+      conflicts: [],
+      undecodable: 0,
+      attempts: 0,
+      transcript: [],
+      pendingGuidance: null,
+      mergeOpen: false,
+    } as Parameters<typeof planMergeStep.apply>[1]['detected'];
+    const result = await planMergeStep.apply(ctx, {
+      detected,
+      formValues: { decision: 'confirm' },
+      iteration: 0,
+      previousIterations: [],
+      llmOutput: undefined,
+    });
+    expect(result.pushed).toBe(true);
+    expect(h.headReads).toBeGreaterThanOrEqual(2);
+    expect(h.push).toHaveBeenCalledWith(expect.objectContaining({ sha: h.sha, branch: 'main' }));
+    expect(h.advance).toHaveBeenCalledWith(h.db, 'r1', '/repo', h.sha, 'main');
+  });
 });
