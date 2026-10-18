@@ -70,6 +70,24 @@ export async function revParse(dir: string, spec: string): Promise<string | null
   return res.code === 0 ? res.stdout.trim() : null;
 }
 
+export async function isCommitAncestor(
+  dir: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  if (ancestor === descendant) {
+    return true;
+  }
+  const result = await gitRun(dir, ['merge-base', '--is-ancestor', ancestor, descendant]);
+  if (result.code === 0) {
+    return true;
+  }
+  if (result.code === 1) {
+    return false;
+  }
+  throw new Error('Could not check feature ancestry before squash');
+}
+
 /** True while a merge of `ref` is open in `dir`. */
 export async function mergeOpenFor(dir: string, ref: string): Promise<boolean> {
   const head = await revParse(dir, 'MERGE_HEAD');
@@ -1301,10 +1319,23 @@ export async function squashMergeCommit(
   onSkipped?: (reason: string) => void,
   squashMergeSha?: string,
 ): Promise<string | null> {
-  const feature = await revParse(
+  const headParents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', 'HEAD']);
+  const headCommits = headParents.stdout.trim().split(/\s+/);
+  let feature = await revParse(
     worktreePath,
     squashMergeSha ? `${squashMergeSha}^2^{commit}` : `${featureRef}^{commit}`,
   );
+  if (feature && !squashMergeSha && headParents.code === 0) {
+    const featureMerge =
+      headCommits[0] === baseShaBefore ||
+      (headCommits.length === 2 && headCommits[1] === baseShaBefore)
+        ? 'ORIG_HEAD'
+        : 'HEAD';
+    const mergedFeature = await revParse(worktreePath, `${featureMerge}^2^{commit}`);
+    if (mergedFeature && (await isCommitAncestor(worktreePath, mergedFeature, feature))) {
+      feature = mergedFeature;
+    }
+  }
   if (feature) {
     const contained = await gitRun(worktreePath, [
       'merge-base',
@@ -1325,8 +1356,6 @@ export async function squashMergeCommit(
   }
 
   const resetAlready = head.stdout.trim() === baseShaBefore;
-  const headParents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', 'HEAD']);
-  const headCommits = headParents.stdout.trim().split(/\s+/);
   const committedAlready =
     !resetAlready &&
     headParents.code === 0 &&
@@ -1346,7 +1375,10 @@ export async function squashMergeCommit(
   const commits = parents.stdout.trim().split(/\s+/);
   const matchesMerge = squashMergeSha
     ? commits[0] === squashMergeSha
-    : Boolean(feature) && commits[2] === feature;
+    : parents.code === 0 &&
+      commits.length === 3 &&
+      feature !== null &&
+      (await isCommitAncestor(worktreePath, commits[2]!, feature));
   if (parents.code !== 0 || commits.length !== 3 || !matchesMerge) {
     return skip('the tip is not the recorded feature merge', restoreMerge);
   }

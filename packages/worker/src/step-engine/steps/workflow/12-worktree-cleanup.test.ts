@@ -4356,3 +4356,73 @@ describe('#280 fix3 squash recording', () => {
     }
   });
 });
+
+describe('#280 fix4 squash recording', () => {
+  it.each(['advanced', 'rewritten'])(
+    'handles a feature %s after landing before recording the merge sha',
+    async (kind) => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const before = (await git(parent, ['rev-parse', 'HEAD'])).trim();
+        await git(parent, ['merge', '--no-ff', 'feature/x', '-m', 'merge']);
+        const mergeSha = (await git(parent, ['rev-parse', 'HEAD'])).trim();
+        const tree = (await git(parent, ['rev-parse', 'HEAD^{tree}'])).trim();
+        if (kind === 'rewritten') {
+          await git(wt, ['reset', '--hard', before]);
+        }
+        await writeFile(path.join(wt, 'later.txt'), 'later feature work');
+        await git(wt, ['add', 'later.txt']);
+        await git(wt, ['commit', '-m', 'later feature work']);
+        const state: MergeResolveState = {
+          mode: 'same-branch',
+          phase: 'squashing',
+          baseBranch: 'main',
+          featureBranch: 'feature/x',
+          mergeDir: parent,
+          sandboxMergeDir: parent,
+          fixInvocationId: null,
+          conflictRetries: 0,
+          pendingQuestion: null,
+          pushAfterMerge: false,
+          squashAfterMerge: true,
+          baseShaBefore: before,
+          merged: false,
+          skipReason: null,
+          pushed: false,
+        };
+        const h = makeDb();
+        fetchProbe.intercept = (args) => {
+          if (args[0] === 'reset' && args[1] === '--soft') {
+            expect(h.getState()?.squashMergeSha).toBe(mergeSha);
+          }
+          return null;
+        };
+        const result = await resolveMergePhase(
+          h.db as never,
+          step,
+          mkCurrent(det(wt), { action: 'merge_remove' }, state),
+          mkCtx(parent, h.db),
+          mkParams(h.db),
+        );
+        expect(result.resolved).toBe(true);
+        expect(h.getState()?.phase).toBe('done');
+        if (kind === 'advanced') {
+          expect(h.getState()).toMatchObject({
+            squashMergeSha: mergeSha,
+            squashCommitSha: expect.stringMatching(/^[a-f0-9]{40}$/),
+          });
+          expect((await git(parent, ['rev-parse', 'HEAD^'])).trim()).toBe(before);
+        } else {
+          expect(h.getState()?.squashMergeSha).toBeUndefined();
+          expect(h.getState()?.squashCommitSha).toBeNull();
+          expect(h.getState()?.squashSkipReason).toContain('not the recorded feature merge');
+          expect((await git(parent, ['rev-parse', 'HEAD'])).trim()).toBe(mergeSha);
+        }
+        expect((await git(parent, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(tree);
+        expect(await gitCode(parent, ['show', 'HEAD:later.txt'])).not.toBe(0);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    },
+  );
+});

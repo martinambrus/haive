@@ -34,6 +34,7 @@ import {
   relocateFixerChanges,
   revParse,
   squashMergeCommit,
+  isCommitAncestor,
   unmergedPaths,
   type MergeAbort,
   type MergeOpen,
@@ -565,7 +566,8 @@ async function squashFeatureMerge(
         parents.code === 0 &&
         commits.length === 3 &&
         commits[1] === baseShaBefore &&
-        commits[2] === feature
+        feature !== null &&
+        (await isCommitAncestor(squashing.mergeDir, commits[2]!, feature))
       ) {
         squashing = { ...squashing, squashMergeSha: commits[0] };
       }
