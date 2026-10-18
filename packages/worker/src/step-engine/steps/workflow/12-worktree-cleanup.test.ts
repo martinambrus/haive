@@ -3797,6 +3797,29 @@ it.each(['origin-keeps-advancing', 'origin-keeps-advancing without squash', 'pus
         },
       });
       expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
+      if (kind === 'push-failure') await git(parent, ['remote', 'add', 'origin', `file://${bare}`]);
+      else await git(parent, ['merge', '--no-ff', '--no-edit', 'origin/main']);
+      await h.db.update().set({ status: 'running' }).where(null);
+      const retried = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, h.getState() ?? state),
+        mkCtx(parent, h.db),
+        mkParams(h.db),
+      );
+      expect(retried.resolved).toBe(true);
+      expect(h.getState()).toMatchObject({
+        phase: 'done',
+        pushed: true,
+        merged: true,
+        mergedAt: expect.any(String),
+      });
+      expect(claimFake.claims.has(parent)).toBe(false);
+      expect(claimFake.released).toContainEqual({ mergeDir: parent, inSection: true });
+      expect(await git(bare, ['rev-parse', 'main'])).toBe(await git(parent, ['rev-parse', 'main']));
+      expect(fetchProbe.pushes.at(-1)).toEqual(
+        expect.objectContaining({ sha: expect.stringMatching(/^[0-9a-f]{40}$/) }),
+      );
     } finally {
       await rm(parent, { recursive: true, force: true });
       await rm(bare, { recursive: true, force: true });
@@ -3848,6 +3871,25 @@ describe('#280 fix1 claims and push', () => {
       expect(fetchProbe.pushes).toEqual([]);
       expect(await git(bare, ['rev-parse', 'main'])).toBe(remoteBefore);
       expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
+      fetchProbe.intercept = null;
+      await h.db.update().set({ status: 'running' }).where(null);
+      const retried = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }, h.getState()),
+        mkCtx(parent, h.db),
+        mkParams(h.db),
+      );
+      expect(retried.resolved).toBe(true);
+      expect(h.getState()).toMatchObject({
+        phase: 'done',
+        pushed: true,
+        mergedAt: expect.any(String),
+      });
+      expect(claimFake.claims.has(parent)).toBe(false);
+      expect(claimFake.released).toContainEqual({ mergeDir: parent, inSection: true });
+      expect(fetchProbe.pushes).toHaveLength(1);
+      expect(await git(bare, ['rev-parse', 'main'])).toBe(await git(parent, ['rev-parse', 'main']));
     } finally {
       await rm(parent, { recursive: true, force: true });
       await rm(bare, { recursive: true, force: true });
@@ -3931,7 +3973,7 @@ describe('#280 fix1 claims and push', () => {
         expect(h.getState()?.pushed).toBe(true);
         expect(warnings).toHaveBeenCalledWith(
           expect.anything(),
-          expect.stringContaining('pushing the local base as-is'),
+          expect.stringContaining('could not record origin/main:'),
         );
         expect(fetchProbe.pushes).toEqual([
           expect.objectContaining({ sha: expect.stringMatching(/^[0-9a-f]{40}$/) }),
@@ -3943,13 +3985,21 @@ describe('#280 fix1 claims and push', () => {
     },
   );
 
-  it('sweeps leftover private refs for this step before fetching, preserving other steps', async () => {
+  it('sweeps leftover private refs inside the decision section, preserving other steps', async () => {
     const { parent, wt } = await setupWorktree();
     const bare = await pushParentMainToOrigin(parent);
     try {
       await git(parent, ['update-ref', 'refs/haive/pre-push/step1/leftover', 'HEAD']);
       await git(parent, ['update-ref', 'refs/haive/pre-push/other/leftover', 'HEAD']);
       let refsAtFetch = '';
+      const sweeps: number[] = [];
+      let promotions = 0;
+      fetchProbe.intercept = (argv) => {
+        if (argv[0] === 'update-ref' && argv[1] === 'refs/remotes/origin/main') promotions += 1;
+        if (argv[0] === 'for-each-ref' && argv.includes('refs/haive/pre-push/step1/'))
+          sweeps.push(claimFake.activeSections);
+        return null;
+      };
       fetchProbe.afterFetch = async () => {
         refsAtFetch = await git(parent, [
           'for-each-ref',
@@ -3958,7 +4008,9 @@ describe('#280 fix1 claims and push', () => {
         ]);
       };
       await mergeThenApply(parent, det(wt), { action: 'merge_remove', pushBase: true });
-      expect(refsAtFetch).not.toContain('refs/haive/pre-push/step1/leftover');
+      expect(refsAtFetch).toContain('refs/haive/pre-push/step1/leftover');
+      expect(sweeps).toEqual([1]);
+      expect(promotions).toBe(1);
       expect(refsAtFetch).toContain('refs/haive/pre-push/other/leftover');
       expect(
         (await git(parent, ['for-each-ref', '--format=%(refname)', 'refs/haive/pre-push/'])).trim(),
@@ -4065,4 +4117,87 @@ describe('#280 fix1 squash warnings and halt', () => {
       await rm(parent, { recursive: true, force: true });
     }
   });
+});
+
+it('#280 fix2 retries a pushing halt after its cross-branch base worktree vanished', async () => {
+  const { parent, wt } = await setupWorktree();
+  const bare = await pushParentMainToOrigin(parent);
+  const dir = path.join(parent, '.haive', 'worktrees', 'main--base');
+  try {
+    await git(parent, ['checkout', '-b', 'other']);
+    await git(parent, ['worktree', 'add', dir, 'main']);
+    await git(dir, ['merge', '--no-ff', 'feature/x', '-m', 'merge']);
+    const state: MergeResolveState = {
+      mode: 'cross-branch',
+      phase: 'pushing',
+      baseBranch: 'main',
+      featureBranch: 'feature/x',
+      mergeDir: dir,
+      sandboxMergeDir: dir,
+      fixInvocationId: null,
+      conflictRetries: 0,
+      pendingQuestion: null,
+      pushAfterMerge: true,
+      merged: true,
+      skipReason: null,
+      pushed: false,
+    };
+    const h = makeDb();
+    fetchProbe.intercept = (argv) =>
+      argv.includes('refs/heads/main^{commit}')
+        ? { code: 128, stdout: '', stderr: 'unreadable' }
+        : null;
+    const out = await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(det(wt), { action: 'merge_remove' }, state),
+      mkCtx(parent, h.db),
+      mkParams(h.db),
+    );
+    expect(out).toMatchObject({ resolved: false, result: { status: 'failed' } });
+    expect(claimFake.claims.get(dir)?.stepId).toBe('step1');
+    await git(parent, ['worktree', 'remove', dir]);
+    fetchProbe.intercept = null;
+    await h.db.update().set({ status: 'running' }).where(null);
+    const retried = await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(det(wt), { action: 'merge_remove' }, h.getState()),
+      mkCtx(parent, h.db),
+      mkParams(h.db),
+    );
+    expect(retried.resolved).toBe(true);
+    expect(h.getState()).toMatchObject({ phase: 'done', pushed: true });
+    expect(claimFake.claims.has(dir)).toBe(false);
+    expect(fetchProbe.pushes).toHaveLength(1);
+    expect(await git(bare, ['rev-parse', 'main'])).toBe(await git(parent, ['rev-parse', 'main']));
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true });
+  }
+});
+
+it('#280 fix2 leaves this step’s leftover refs untouched when its claim is lost during fetch', async () => {
+  const { parent, wt } = await setupWorktree();
+  const bare = await pushParentMainToOrigin(parent);
+  try {
+    const ref = 'refs/haive/pre-push/step1/leftover';
+    await git(parent, ['update-ref', ref, 'HEAD']);
+    fetchProbe.afterFetch = async () => {
+      claimFake.fenced = true;
+    };
+    await expect(
+      mergeThenApply(parent, det(wt), { action: 'merge_remove', pushBase: true }),
+    ).rejects.toBeInstanceOf(StepSupersededError);
+    expect(await gitCode(parent, ['rev-parse', '--verify', ref])).toBe(0);
+    expect(fetchProbe.pushes).toEqual([]);
+    expect(
+      (
+        await git(parent, ['for-each-ref', '--format=%(refname)', 'refs/haive/pre-push/step1/'])
+      ).trim(),
+    ).toBe(ref);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true });
+  }
 });

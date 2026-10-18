@@ -393,7 +393,7 @@ async function reachDone(
     };
     const sha = await inMergeDir(db, current, params, state.mergeDir, async (tx) => {
       await saveMergeState(tx, current.id, pushing);
-      const tip = await gitRun(state.mergeDir, [
+      const tip = await gitRun(ctx.repoPath, [
         'rev-parse',
         '--verify',
         `refs/heads/${state.baseBranch}^{commit}`,
@@ -654,16 +654,6 @@ async function prePushSync(
   const base = state.baseBranch;
   const fv = (current.formValues ?? {}) as { credentialId?: string };
   const refPrefix = `refs/haive/pre-push/${current.id}/`;
-  const leftovers = await gitRun(state.mergeDir, [
-    'for-each-ref',
-    '--format=%(refname)',
-    refPrefix,
-  ]);
-  if (leftovers.code === 0) {
-    for (const ref of leftovers.stdout.trim().split('\n').filter(Boolean)) {
-      await gitRun(state.mergeDir, ['update-ref', '-d', ref]);
-    }
-  }
   const fetchRef = `${refPrefix}${randomUUID()}`;
   let fetched: Awaited<ReturnType<typeof fetchForSync>>;
   let decision: { behind: number; next: MergeResolveState | null } | undefined;
@@ -676,47 +666,62 @@ async function prePushSync(
       fv.credentialId || undefined,
       fetchRef,
     );
-    if (fetched.ok) {
-      const checked = await inMergeDir<
-        { error: string } | { behind: number; next: MergeResolveState | null }
-      >(db, current, params, state.mergeDir, async (tx) => {
-        const tip = await revParse(state.mergeDir, fetchRef);
-        if (!tip) return { error: 'Pre-push fetch did not record a commit' };
-        const promoted = await gitRun(state.mergeDir, [
-          'update-ref',
-          `refs/remotes/origin/${base}`,
-          tip,
-        ]);
-        if (promoted.code !== 0) return { error: 'Could not update the fetched base ref' };
-        const behind = await countAhead(state.mergeDir, `${base}..origin/${base}`);
-        if (behind === 0 || (state.baseSyncRounds ?? 0) >= MAX_BASE_SYNC_ROUNDS) {
-          return { behind, next: null };
+    const checked = await inMergeDir<
+      { error: string } | { behind: number; next: MergeResolveState | null }
+    >(db, current, params, state.mergeDir, async (tx) => {
+      const leftovers = await gitRun(state.mergeDir, [
+        'for-each-ref',
+        '--format=%(refname)',
+        refPrefix,
+      ]);
+      if (leftovers.code === 0) {
+        for (const ref of leftovers.stdout
+          .trim()
+          .split('\n')
+          .filter((ref) => ref && ref !== fetchRef)) {
+          await gitRun(state.mergeDir, ['update-ref', '-d', ref]);
         }
-        const next: MergeResolveState = {
-          ...state,
-          merged: false,
-          mergedAt: undefined,
-          mergeStage: 'base-sync',
-          featureBranch: `origin/${base}`,
-          phase: 'pending',
-          fixInvocationId: null,
-          pendingQuestion: null,
-          conflictRetries: 0,
-          baseSyncRounds: (state.baseSyncRounds ?? 0) + 1,
+      }
+      if (!fetched.ok) return { error: `fetch failed: ${fetched.error}` };
+      const tip = await revParse(state.mergeDir, fetchRef);
+      if (!tip) return { error: `could not record origin/${base}: fetched commit unavailable` };
+      const promoted = await gitRun(state.mergeDir, [
+        'update-ref',
+        `refs/remotes/origin/${base}`,
+        tip,
+      ]);
+      if (promoted.code !== 0)
+        return {
+          error: `could not record origin/${base}: ${promoted.stderr || promoted.stdout}`.trim(),
         };
-        await saveMergeState(tx, current.id, next);
-        return { behind, next };
-      });
-      if ('error' in checked) fetched = { ok: false, error: checked.error };
-      else decision = checked;
-    }
+      const behind = await countAhead(state.mergeDir, `${base}..origin/${base}`);
+      if (behind === 0 || (state.baseSyncRounds ?? 0) >= MAX_BASE_SYNC_ROUNDS) {
+        return { behind, next: null };
+      }
+      const next: MergeResolveState = {
+        ...state,
+        merged: false,
+        mergedAt: undefined,
+        mergeStage: 'base-sync',
+        featureBranch: `origin/${base}`,
+        phase: 'pending',
+        fixInvocationId: null,
+        pendingQuestion: null,
+        conflictRetries: 0,
+        baseSyncRounds: (state.baseSyncRounds ?? 0) + 1,
+      };
+      await saveMergeState(tx, current.id, next);
+      return { behind, next };
+    });
+    if ('error' in checked) fetched = { ok: false, error: checked.error };
+    else decision = checked;
   } finally {
     await gitRun(state.mergeDir, ['update-ref', '-d', fetchRef]);
   }
   if (!fetched.ok) {
     ctx.logger.warn(
       { base, err: fetched.error },
-      'pre-push base sync: fetch failed; pushing the local base as-is',
+      `pre-push base sync: ${fetched.error}; pushing the local base as-is`,
     );
     return reachDone(db, current, ctx, params, state);
   }
@@ -905,7 +910,7 @@ async function halt(
   });
 }
 
-async function haltFailed(
+export async function haltFailed(
   db: Database,
   current: TaskStepRow,
   params: AdvanceStepParams,
