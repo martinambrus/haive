@@ -495,7 +495,13 @@ async function finishMerge(
   state: MergeResolveState,
 ): Promise<MergeResolved> {
   const squash = await squashFeatureMerge(db, current, ctx, params, state);
-  const squashed = { ...squash.state, merged: true };
+  let squashed = squash.state;
+  if ((squashed.mergeStage ?? 'feature') === 'feature' && squashed.phase !== 'squashing') {
+    squashed = { ...squashed, phase: 'squashing', merged: false, mergedAt: undefined };
+    await inMergeDir(db, current, params, squashed.mergeDir, (tx) =>
+      saveMergeState(tx, current.id, squashed),
+    );
+  }
   current = squash.current;
   if (
     squashed.pushAfterMerge &&
@@ -902,7 +908,11 @@ async function halt(
         open.stdout.trim() === feature);
     if (beforeRecord) await beforeRecord(tx);
     const landedUnpushed =
-      !state.pushed && (state.phase === 'squashing' || state.phase === 'pushing' || state.merged);
+      !state.pushed &&
+      (state.phase === 'squashing' ||
+        state.phase === 'pushing' ||
+        state.mergeStage === 'base-sync' ||
+        Boolean(state.squashCommitSha));
     if (!landedUnpushed && (open.code === 1 || (open.code === 0 && feature !== null && !own))) {
       await releaseMergeDir(tx, { mergeDir: state.mergeDir, stepId: current.id });
     }
