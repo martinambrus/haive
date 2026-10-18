@@ -224,9 +224,9 @@ export const externalKbSyncStep: StepDefinition<ExternalKbSyncDetect, ExternalKb
 
   async prepareForm(ctx, detected, _llmOutput): Promise<void> {
     // Post-llm, pre-form: the agent's edits are on disk now, so this is the first moment
-    // the gate's diff can be built. Always writes — an empty diff renders as "No changes
-    // to show" rather than a fetch error — and never throws, because a failed diff costs
-    // the gate its editability, not its decision.
+    // the gate's diff can be built. A failed git status writes no diff and clears the old one,
+    // so the viewer says it could not load the changes; never throws, because a failed diff
+    // costs the gate its editability, not its decision.
     if (!detected.knowledgeDiffArtifactPath) return;
     try {
       await buildKnowledgeDiffArtifact(detected.worktreePath, gitRun, [], {

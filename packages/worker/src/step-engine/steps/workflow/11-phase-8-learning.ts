@@ -1074,7 +1074,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
     // investigation are synthesized from the parsed output (those files are not
     // written until apply), so they are ALSO staged under `.haive/` — that staged
     // copy is what the viewer edits, and apply reads it back.
-    // Always writes — an empty diff renders as "No changes to show". Best-effort:
+    // A failed git status writes no diff and clears the old one. Best-effort:
     // never block the form on a diff-build error. A failure here costs the gate its
     // editability, not its drafts: apply falls back to the agent's own bodies.
     if (!detected.knowledgeDiffArtifactPath) return;

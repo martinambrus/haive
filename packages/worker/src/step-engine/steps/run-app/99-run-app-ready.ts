@@ -170,17 +170,26 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       const branchRes = await gitRun(workspacePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
       hasOrigin = await detectOrigin(workspacePath);
-      const status = await gitRun(workspacePath, ['--no-optional-locks', 'status', '--porcelain']);
-      dirtyFiles = status.stdout.split('\n').filter((l) => l.trim().length > 0).length;
-      if (dirtyFiles > 0) {
-        // Never fail the gate on a diff-build error — the viewer is simply hidden.
-        try {
+      // Never fail the gate on a diff-build error — the viewer is simply hidden.
+      try {
+        const status = await gitRun(workspacePath, [
+          '--no-optional-locks',
+          'status',
+          '--porcelain',
+        ]);
+        if (status.code !== 0) {
+          throw new Error(
+            `git status failed in ${workspacePath}: ${status.stderr.trim() || status.stdout.trim()}`,
+          );
+        }
+        dirtyFiles = status.stdout.split('\n').filter((l) => l.trim().length > 0).length;
+        if (dirtyFiles > 0) {
           const res = await buildCommitDiffArtifact(workspacePath, gitRun);
           diffArtifactPath = res.artifactPath;
           changedFileCount = res.changedFileCount;
-        } catch (err) {
-          ctx.logger.warn({ err }, 'run-app-ready: failed to build commit diff artifact');
         }
+      } catch (err) {
+        ctx.logger.warn({ err }, 'run-app-ready: failed to build commit diff artifact');
       }
     }
 
