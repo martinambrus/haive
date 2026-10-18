@@ -63,7 +63,28 @@ vi.mock('../../merge-dir-claim.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../merge-dir-claim.js')>()),
   ...(await import('../../../../test/merge-dir-claim-fake.js')).mergeDirClaimOverrides(),
 }));
-beforeEach(() => claimFake.reset());
+const fetchProbe = vi.hoisted(() => ({
+  sections: [] as number[],
+  afterFetch: null as (() => Promise<void>) | null,
+}));
+vi.mock('../../../repo/git-push.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../repo/git-push.js')>();
+  return {
+    ...real,
+    gitRun: async (...args: Parameters<typeof real.gitRun>) => {
+      const fetching = args[1].includes('fetch');
+      if (fetching) fetchProbe.sections.push(claimFake.activeSections);
+      const result = await real.gitRun(...args);
+      if (fetching) await fetchProbe.afterFetch?.();
+      return result;
+    },
+  };
+});
+beforeEach(() => {
+  claimFake.reset();
+  fetchProbe.sections = [];
+  fetchProbe.afterFetch = null;
+});
 
 // Pre-existing tests pass no providers, which this answers with skip as the real
 // dispatcher does; the real one needs ConfigService and the adapter registry.
@@ -2483,6 +2504,35 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
 });
 
 describe('12 pre-push base sync (origin advanced after 00a)', () => {
+  it('a claim lost during fetch leaves shared refs and FETCH_HEAD untouched', async () => {
+    const { parent, wt } = await setupWorktree();
+    const bare = await pushParentMainToOrigin(parent);
+    try {
+      await git(parent, ['fetch', 'origin', 'main']);
+      const remote = await git(parent, ['rev-parse', 'origin/main']);
+      const fetchHead = await readFile(path.join(parent, '.git', 'FETCH_HEAD'), 'utf8');
+      await advanceOrigin(bare, 'new.txt', 'new\n');
+      fetchProbe.afterFetch = async () => {
+        claimFake.claims.set(parent, { taskId: 'other', stepId: 'other-step', title: 'other' });
+      };
+      await expect(
+        mergeThenApply(parent, det(wt, { hasOrigin: true }), {
+          action: 'merge_remove',
+          pushBase: true,
+        }),
+      ).rejects.toBeInstanceOf(StepSupersededError);
+      expect(await git(parent, ['rev-parse', 'origin/main'])).toBe(remote);
+      expect(await readFile(path.join(parent, '.git', 'FETCH_HEAD'), 'utf8')).toBe(fetchHead);
+      expect(
+        (await git(parent, ['for-each-ref', '--format=%(refname)', 'refs/haive/pre-push/'])).trim(),
+      ).toBe('');
+      expect(claimFake.claims.get(parent)?.stepId).toBe('other-step');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
   it('(d) origin not advanced → pushes directly, no base-sync round', async () => {
     const { parent, wt } = await setupWorktree();
     const bare = await pushParentMainToOrigin(parent);
@@ -2496,6 +2546,7 @@ describe('12 pre-push base sync (origin advanced after 00a)', () => {
       expect(state?.pushed).toBe(true);
       expect(state?.mergeStage).toBe('feature'); // never entered a base-sync round
       expect(state?.baseSyncRounds ?? 0).toBe(0);
+      expect(fetchProbe.sections).toEqual([0]);
       expect(await gitCode(bare, ['show', 'main:feature.txt'])).toBe(0);
     } finally {
       await rm(parent, { recursive: true, force: true });

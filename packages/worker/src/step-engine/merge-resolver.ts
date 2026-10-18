@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import {
@@ -561,7 +562,7 @@ async function fetchForSync(
   cwd: string,
   base: string,
   credentialId: string | undefined,
-  run: typeof gitRun,
+  fetchRef: string,
 ): Promise<{ ok: boolean; error: string | null }> {
   const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
   const argv: string[] = [];
@@ -576,8 +577,16 @@ async function fetchForSync(
       return { ok: false, error: `credential load failed: ${(err as Error).message}` };
     }
   }
-  argv.push('fetch', '--end-of-options', 'origin', `refs/heads/${base}`);
-  const res = await run(cwd, argv, env);
+  argv.push(
+    'fetch',
+    '--no-write-fetch-head',
+    '--refmap=',
+    '--no-tags',
+    '--end-of-options',
+    'origin',
+    `refs/heads/${base}:${fetchRef}`,
+  );
+  const res = await gitRun(cwd, argv, env);
   if (res.code !== 0) {
     return {
       ok: false,
@@ -611,55 +620,70 @@ async function prePushSync(
 ): Promise<MergeResolved> {
   const base = state.baseBranch;
   const fv = (current.formValues ?? {}) as { credentialId?: string };
-  const fetched = await fetchForSync(
-    db,
-    ctx,
-    state.mergeDir,
-    base,
-    fv.credentialId || undefined,
-    (cwd, argv, env) =>
-      inMergeDir(db, current, params, state.mergeDir, () => gitRun(cwd, argv, env)),
-  );
+  const fetchRef = `refs/haive/pre-push/${current.id}/${randomUUID()}`;
+  let fetched: Awaited<ReturnType<typeof fetchForSync>>;
+  let decision: { behind: number; next: MergeResolveState | null } | undefined;
+  try {
+    fetched = await fetchForSync(
+      db,
+      ctx,
+      state.mergeDir,
+      base,
+      fv.credentialId || undefined,
+      fetchRef,
+    );
+    if (fetched.ok) {
+      decision = await inMergeDir(db, current, params, state.mergeDir, async (tx) => {
+        const tip = await revParse(state.mergeDir, fetchRef);
+        if (!tip) throw new Error('Pre-push fetch did not record a commit');
+        const promoted = await gitRun(state.mergeDir, [
+          'update-ref',
+          `refs/remotes/origin/${base}`,
+          tip,
+        ]);
+        if (promoted.code !== 0) throw new Error('Could not update the fetched base ref');
+        const behind = await countAhead(state.mergeDir, `${base}..origin/${base}`);
+        if (behind === 0 || (state.baseSyncRounds ?? 0) >= MAX_BASE_SYNC_ROUNDS) {
+          return { behind, next: null };
+        }
+        const next: MergeResolveState = {
+          ...state,
+          mergeStage: 'base-sync',
+          featureBranch: `origin/${base}`,
+          phase: 'pending',
+          fixInvocationId: null,
+          pendingQuestion: null,
+          conflictRetries: 0,
+          baseSyncRounds: (state.baseSyncRounds ?? 0) + 1,
+        };
+        await saveMergeState(tx, current.id, next);
+        return { behind, next };
+      });
+    }
+  } finally {
+    await gitRun(state.mergeDir, ['update-ref', '-d', fetchRef]);
+  }
   if (!fetched.ok) {
-    // A flaky link must never block the task: push the local base as-is. If origin did
-    // move, the push fails non-ff exactly as before — recoverable by retry.
     ctx.logger.warn(
       { base, err: fetched.error },
       'pre-push base sync: fetch failed; pushing the local base as-is',
     );
     return reachDone(db, current, ctx, params, state);
   }
-  const behind = await countAhead(state.mergeDir, `${base}..origin/${base}`);
-  if (behind === 0) {
-    // Origin has not moved since 00a-sync-base — push directly (today's behavior).
-    return reachDone(db, current, ctx, params, state);
-  }
-  const rounds = state.baseSyncRounds ?? 0;
-  if (rounds >= MAX_BASE_SYNC_ROUNDS) {
+  const { behind, next } = decision!;
+  if (behind === 0) return reachDone(db, current, ctx, params, state);
+  if (!next) {
     await settleGivenUp(db, current, params, state);
     const row = await halt(
       db,
       current,
-      `origin/${base} keeps advancing (${behind} commits behind after ${rounds} sync attempts). Pull ${base} and push it manually — the merge is saved locally.`,
+      `origin/${base} keeps advancing (${behind} commits behind after ${state.baseSyncRounds ?? 0} sync attempts). Pull ${base} and push it manually — the merge is saved locally.`,
     );
     return {
       resolved: false,
       result: { status: 'failed', row, error: row.errorMessage ?? 'origin moving' },
     };
   }
-  const next: MergeResolveState = {
-    ...state,
-    mergeStage: 'base-sync',
-    featureBranch: `origin/${base}`,
-    phase: 'pending',
-    fixInvocationId: null,
-    pendingQuestion: null,
-    conflictRetries: 0,
-    baseSyncRounds: rounds + 1,
-  };
-  await inMergeDir(db, current, params, state.mergeDir, (tx) =>
-    saveMergeState(tx, current.id, next),
-  );
   return resolveMergePhase(db, stepDef, { ...current, mergeResolveState: next }, ctx, params);
 }
 
