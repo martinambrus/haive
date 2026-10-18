@@ -90,9 +90,11 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   (`squashSkipReason`, shown by `12-worktree-cleanup`), so a squash never folds in a commit that is
   not the merge's own.
   The pre-push fetch also runs outside a section, into a ref only that pass names
-  (`refs/haive/pre-push/<step>/<uuid>`, no `FETCH_HEAD`, no tags); the section then sweeps the
-  step's older such refs, records `origin/<base>` and counts how far the base is behind, so a pass
-  that lost the claim moves no shared ref. A failure to record it warns and pushes the local base,
+  (`refs/haive/pre-push/<step>/<uuid>`, no `FETCH_HEAD`, no tags); the section then records
+  `origin/<base>` from it and counts how far the base is behind, so a pass that lost the claim moves
+  no shared ref. Each pass deletes its own ref when it ends; a crashed pass's leftovers are swept
+  only in the sections that end the step (`done`, or a halt), never at a pass's start, since two
+  passes of one step can be fetching at once. A failure to record it warns and pushes the local base,
   as a failed fetch does. The push runs outside a section, since it is network-bound, and sends the
   commit a section read from the base ref (read in the repository's own checkout, whose refs the
   base worktree shares; a tip that cannot be read halts the step rather than pushing by name, and
