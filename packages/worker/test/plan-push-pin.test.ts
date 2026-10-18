@@ -137,7 +137,7 @@ describe('#280 fix2 plan pushes require a pinned sha', () => {
   );
 
   it.each(['exit failure', 'empty output'])(
-    'fails and records the plan-mirror save error before push on %s',
+    '#280 fix3 fails and records the plan-mirror save error before push on %s',
     async (kind) => {
       h.fail = kind === 'exit failure';
       h.empty = kind === 'empty output';
@@ -150,7 +150,9 @@ describe('#280 fix2 plan pushes require a pinned sha', () => {
       expect(h.recordError).toHaveBeenCalledWith(
         h.db,
         'r1',
-        expect.objectContaining({ message: expect.stringContaining('could not read HEAD') }),
+        expect.objectContaining({
+          message: 'could not read HEAD; the plan commit is saved locally, retry the push',
+        }),
       );
     },
   );

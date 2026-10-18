@@ -1975,7 +1975,11 @@ describe('#280 fix1 squash recovery', () => {
         const index = await git(dir, ['write-tree']);
         await expect(
           squashMergeCommit(dir, before, 'unsafe', COMMIT_ENV, 'feature/x'),
-        ).rejects.toThrow();
+        ).rejects.toThrow(
+          kind === 'changed index'
+            ? `unstage or commit the other changes in ${dir}, then Retry`
+            : 'Cannot resume squash',
+        );
         expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(before);
         expect(await git(dir, ['write-tree'])).toBe(index);
         expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
@@ -2033,7 +2037,7 @@ describe('#280 fix2 squash decision order', () => {
       const reflog = await git(dir, ['reflog', '--format=%H %gs']);
       await expect(
         squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x'),
-      ).rejects.toThrow('Cannot resume squash');
+      ).rejects.toThrow(`restore the staged tree from the feature merge in ${dir}, then Retry`);
       expect(await git(dir, ['write-tree'])).toBe(index);
       expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
     } finally {
@@ -2060,7 +2064,11 @@ describe('#280 fix2 squash decision order', () => {
         const skipped = vi.fn();
         await expect(
           squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x', skipped),
-        ).rejects.toThrow('Cannot resume squash');
+        ).rejects.toThrow(
+          kind === 'missing ORIG_HEAD'
+            ? `restore ORIG_HEAD to the feature merge in ${dir}, then Retry`
+            : `restore HEAD to the squash commit in ${dir}, then Retry`,
+        );
         expect(skipped).not.toHaveBeenCalled();
         expect(await git(dir, ['rev-parse', 'HEAD'])).toBe(head);
         expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);

@@ -1319,7 +1319,10 @@ export async function squashMergeCommit(
   if (open.code === 0) return null;
   const head = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
   if (head.code !== 0) {
-    if (baseShaBefore) throw new Error('Cannot resume squash: HEAD is unreadable.');
+    if (baseShaBefore)
+      throw new Error(
+        `Cannot resume squash: HEAD is unreadable; restore the checkout in ${worktreePath}, then Retry.`,
+      );
     return null;
   }
 
@@ -1331,8 +1334,9 @@ export async function squashMergeCommit(
     headParents.code === 0 &&
     headCommits.length === 2 &&
     headCommits[1] === baseShaBefore;
-  const skip = (reason: string): null => {
-    if (resetAlready || committedAlready) throw new Error(`Cannot resume squash: ${reason}.`);
+  const skip = (reason: string, action: string): null => {
+    if (resetAlready || committedAlready)
+      throw new Error(`Cannot resume squash: ${reason}; ${action} in ${worktreePath}, then Retry.`);
     const note = `Squash skipped; merge history kept: ${reason}.`;
     logger.warn({ worktreePath, baseShaBefore, featureRef }, note);
     onSkipped?.(note);
@@ -1345,28 +1349,41 @@ export async function squashMergeCommit(
     ? commits[0] === squashMergeSha
     : Boolean(feature) && commits[2] === feature;
   if (parents.code !== 0 || commits.length !== 3 || !matchesMerge) {
-    return skip('the tip is not the recorded feature merge');
+    return skip(
+      'the tip is not the recorded feature merge',
+      'restore ORIG_HEAD to the feature merge',
+    );
   }
   if (commits[1] !== baseShaBefore) {
-    return skip('the merge first parent differs from the recorded base tip');
+    return skip(
+      'the merge first parent differs from the recorded base tip',
+      'restore ORIG_HEAD to the feature merge',
+    );
   }
   const mergedTree = await revParse(worktreePath, `${commits[0]}^{tree}`);
   if (committedAlready) {
     const headTree = await revParse(worktreePath, 'HEAD^{tree}');
     if (mergedTree && headTree === mergedTree) return head.stdout.trim();
-    return skip('the tip tree differs from the feature merge');
+    return skip('the tip tree differs from the feature merge', 'restore HEAD to the squash commit');
   }
   const index = await gitRun(worktreePath, ['write-tree']);
   if (index.code !== 0) {
     throw new Error(`git write-tree failed: ${index.stderr || index.stdout}`.trim());
   }
   if (!mergedTree || index.stdout.trim() !== mergedTree) {
-    return skip('the staged tree differs from the feature merge');
+    const baseTree = resetAlready ? await revParse(worktreePath, `${baseShaBefore}^{tree}`) : null;
+    return skip(
+      'the staged tree differs from the feature merge',
+      baseTree && index.stdout.trim() === baseTree
+        ? 'restore the staged tree from the feature merge'
+        : 'unstage or commit the other changes',
+    );
   }
   if (!resetAlready) {
     const baseTree = await revParse(worktreePath, `${baseShaBefore}^{tree}`);
     if (!baseTree) throw new Error('Could not read the base tree before squash');
-    if (mergedTree === baseTree) return skip('the feature merge has an empty net diff');
+    if (mergedTree === baseTree)
+      return skip('the feature merge has an empty net diff', 'restore the feature merge');
     const reset = await gitRun(worktreePath, ['reset', '--soft', baseShaBefore]);
     if (reset.code !== 0) {
       throw new Error(

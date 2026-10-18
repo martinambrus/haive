@@ -364,7 +364,7 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
       const head = await gitRun(repoPath, ['rev-parse', 'HEAD']);
       const pushedHead = head.code === 0 ? head.stdout.trim() : null;
       if (!pushedHead)
-        throw new Error('could not read HEAD; the merge is saved locally, retry the push');
+        throw new Error('could not read HEAD; the plan commit is saved locally, retry the push');
       await pushBranch({
         sha: pushedHead,
         cwd: repoPath,
