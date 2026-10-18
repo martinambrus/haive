@@ -1336,7 +1336,19 @@ export async function squashMergeCommit(
       feature = mergedFeature;
     }
   }
-  if (feature) {
+  const origParents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', 'ORIG_HEAD']);
+  const origCommits = origParents.stdout.trim().split(/\s+/);
+  const recoveringSquash =
+    (headParents.code === 0 &&
+      (headCommits[0] === baseShaBefore ||
+        (headCommits.length === 2 && headCommits[1] === baseShaBefore)) &&
+      origParents.code === 0 &&
+      origCommits.length === 3 &&
+      origCommits[1] === baseShaBefore) ||
+    (squashMergeSha !== undefined &&
+      ((headParents.code === 0 && headCommits[0] === squashMergeSha) ||
+        (origParents.code === 0 && origCommits[0] === squashMergeSha)));
+  if (feature && !recoveringSquash) {
     const contained = await gitRun(worktreePath, [
       'merge-base',
       '--is-ancestor',
