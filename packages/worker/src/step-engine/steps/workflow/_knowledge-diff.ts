@@ -1,4 +1,4 @@
-import { writeFileNoFollow } from '@haive/shared/fs-safe';
+import { removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import path from 'node:path';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
@@ -41,14 +41,18 @@ export const EXTERNAL_KB_DIFF_ARTIFACT_NAME = 'external-kb-diff.json';
  *  new side back. Deleted, binary and truncated files do not: there is nothing to
  *  edit, no text to show, and (for truncated) the content in hand is not the file.
  *
- *  Always writes, even with zero files, so the web viewer renders "No changes to
- *  show" rather than a fetch error. Returns the absolute artifact path. */
+ *  Writes even with zero files, so the web viewer renders "No changes to show" rather
+ *  than a fetch error. A failed git status throws and clears the old artifact instead, so the
+ *  viewer cannot show an earlier round's changes. Returns the absolute artifact path. */
 export async function buildKnowledgeDiffArtifact(
   workspacePath: string,
   gitRun: GitRun,
   extraFiles: CommitDiffFile[] = [],
   opts: { pathspecs?: readonly string[]; artifactName?: string } = {},
 ): Promise<string> {
+  const name = opts.artifactName ?? KNOWLEDGE_DIFF_ARTIFACT_NAME;
+  // Anchored at the repository root, not the worktree this is handed — see `workspaceAnchor`.
+  const wa = workspaceAnchor(workspacePath);
   const pathspecs = opts.pathspecs ?? [KB_DIR];
   const statusRes = await gitRun(workspacePath, [
     '--no-optional-locks',
@@ -62,6 +66,8 @@ export async function buildKnowledgeDiffArtifact(
     ...pathspecs,
   ]);
   if (statusRes.code !== 0) {
+    // Preserve the status error even if clearing the stale artifact fails.
+    await removeNoFollow(wa.anchor, `${wa.prefix}.haive/${name}`).catch(() => undefined);
     throw new Error(
       `git status failed in ${workspacePath}: ${statusRes.stderr.trim() || statusRes.stdout.trim()}`,
     );
@@ -91,9 +97,6 @@ export async function buildKnowledgeDiffArtifact(
     files,
   };
 
-  const name = opts.artifactName ?? KNOWLEDGE_DIFF_ARTIFACT_NAME;
-  // Anchored at the repository root, not the worktree this is handed — see `workspaceAnchor`.
-  const wa = workspaceAnchor(workspacePath);
   const artifactPath = path.join(workspacePath, '.haive', name);
   await writeFileNoFollow(wa.anchor, `${wa.prefix}.haive/${name}`, JSON.stringify(artifact), {
     createParents: true,

@@ -1,11 +1,16 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it, expect } from 'vitest';
 import { gitRun } from '../../../repo/git-exec.js';
-import { buildCommitDiffArtifact, buildFileEntry, parsePorcelainZ } from './_commit-diff.js';
+import {
+  buildCommitDiffArtifact,
+  buildFileEntry,
+  COMMIT_DIFF_ARTIFACT_NAME,
+  parsePorcelainZ,
+} from './_commit-diff.js';
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -18,6 +23,50 @@ const GIT_ENV = {
 const git = (dir: string, args: string[]) => exec('git', args, { cwd: dir, env: GIT_ENV });
 
 describe('buildCommitDiffArtifact', () => {
+  it('clears an earlier artifact on a failed git status', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'commit-diff-'));
+    try {
+      const artifactPath = path.join(dir, '.haive', COMMIT_DIFF_ARTIFACT_NAME);
+      await rm(artifactPath, { force: true });
+      await mkdir(path.dirname(artifactPath), { recursive: true });
+      await writeFile(artifactPath, JSON.stringify({ files: [{ path: 'previous-round.md' }] }));
+      const fakeGitRun = async () => ({
+        code: 128,
+        stdout: '',
+        stderr: 'fatal: index file corrupt',
+      });
+
+      await expect(buildCommitDiffArtifact(dir, fakeGitRun)).rejects.toThrow(
+        `git status failed in ${dir}: fatal: index file corrupt`,
+      );
+      await expect(readFile(artifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves the git status error when removing the artifact fails', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'diff-cleanup-'));
+    try {
+      const artifactPath = path.join(dir, '.haive', COMMIT_DIFF_ARTIFACT_NAME);
+      await mkdir(artifactPath, { recursive: true });
+      const child = path.join(artifactPath, 'keep.txt');
+      await writeFile(child, 'non-empty directory');
+      const fakeGitRun = async () => ({
+        code: 128,
+        stdout: '',
+        stderr: 'fatal: index file corrupt',
+      });
+
+      await expect(buildCommitDiffArtifact(dir, fakeGitRun)).rejects.toThrow(
+        `git status failed in ${dir}: fatal: index file corrupt`,
+      );
+      expect(await readFile(child, 'utf8')).toBe('non-empty directory');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects a failed git status instead of reporting no changes', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'commit-diff-'));
     try {

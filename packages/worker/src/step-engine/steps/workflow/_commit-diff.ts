@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { readFileNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { readFileNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
 /** Runs git in `cwd` and returns stdout/stderr/exit code. Matches the gitRun
@@ -194,6 +194,8 @@ export async function buildCommitDiffArtifact(
   workspacePath: string,
   gitRun: GitRun,
 ): Promise<CommitDiffResult> {
+  // Anchored at the repository root, not the worktree this is handed — see `workspaceAnchor`.
+  const wa = workspaceAnchor(workspacePath);
   const statusRes = await gitRun(workspacePath, [
     '--no-optional-locks',
     'status',
@@ -204,6 +206,10 @@ export async function buildCommitDiffArtifact(
     '--untracked-files=all',
   ]);
   if (statusRes.code !== 0) {
+    // Preserve the status error even if clearing the stale artifact fails.
+    await removeNoFollow(wa.anchor, `${wa.prefix}.haive/${COMMIT_DIFF_ARTIFACT_NAME}`).catch(
+      () => undefined,
+    );
     throw new Error(
       `git status failed in ${workspacePath}: ${statusRes.stderr.trim() || statusRes.stdout.trim()}`,
     );
@@ -229,8 +235,6 @@ export async function buildCommitDiffArtifact(
     files,
   };
 
-  // Anchored at the repository root, not the worktree this is handed — see `workspaceAnchor`.
-  const wa = workspaceAnchor(workspacePath);
   const artifactPath = path.join(workspacePath, '.haive', COMMIT_DIFF_ARTIFACT_NAME);
   await writeFileNoFollow(
     wa.anchor,
