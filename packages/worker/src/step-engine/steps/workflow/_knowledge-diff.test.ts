@@ -7,7 +7,12 @@ import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { describe, it, expect } from 'vitest';
 import { gitRun } from '../../../repo/git-exec.js';
 import { type CommitDiffArtifact, type CommitDiffFile, MAX_FILES } from './_commit-diff.js';
-import { buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
+import {
+  buildKnowledgeDiffArtifact,
+  EXTERNAL_KB_DIFF_ARTIFACT_NAME,
+  KB_COMMIT_DIFF_ARTIFACT_NAME,
+  KNOWLEDGE_DIFF_ARTIFACT_NAME,
+} from './_knowledge-diff.js';
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -49,6 +54,70 @@ async function artifactFor(untracked: number): Promise<CommitDiffArtifact> {
 }
 
 describe('buildKnowledgeDiffArtifact', () => {
+  it.each([undefined, KB_COMMIT_DIFF_ARTIFACT_NAME, EXTERNAL_KB_DIFF_ARTIFACT_NAME])(
+    'clears an earlier artifact on a failed git status (%s)',
+    async (artifactName) => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'knowledge-diff-'));
+      try {
+        const artifactPath = path.join(dir, '.haive', artifactName ?? KNOWLEDGE_DIFF_ARTIFACT_NAME);
+        await rm(artifactPath, { force: true });
+        await mkdir(path.dirname(artifactPath), { recursive: true });
+        await writeFile(artifactPath, JSON.stringify({ files: [extra('previous-round')] }));
+        const fakeGitRun = async () => ({
+          code: 128,
+          stdout: '',
+          stderr: 'fatal: index file corrupt',
+        });
+
+        await expect(
+          buildKnowledgeDiffArtifact(dir, fakeGitRun, [], { artifactName }),
+        ).rejects.toThrow(`git status failed in ${dir}: fatal: index file corrupt`);
+        await expect(readFile(artifactPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('preserves the git status error when removing the artifact fails', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'diff-cleanup-'));
+    try {
+      const artifactPath = path.join(dir, '.haive', KNOWLEDGE_DIFF_ARTIFACT_NAME);
+      await mkdir(artifactPath, { recursive: true });
+      const child = path.join(artifactPath, 'keep.txt');
+      await writeFile(child, 'non-empty directory');
+      const fakeGitRun = async () => ({
+        code: 128,
+        stdout: '',
+        stderr: 'fatal: index file corrupt',
+      });
+
+      await expect(buildKnowledgeDiffArtifact(dir, fakeGitRun)).rejects.toThrow(
+        `git status failed in ${dir}: fatal: index file corrupt`,
+      );
+      expect(await readFile(child, 'utf8')).toBe('non-empty directory');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a failed git status instead of reporting no changes', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'knowledge-diff-'));
+    try {
+      const fakeGitRun = async (_cwd: string, args: string[]) =>
+        args.includes('status')
+          ? { code: 128, stdout: '', stderr: 'fatal: index file corrupt' }
+          : { code: 0, stdout: 'a'.repeat(40), stderr: '' };
+      const built = buildKnowledgeDiffArtifact(dir, fakeGitRun).then(async (written) =>
+        JSON.parse(await readFile(written, 'utf8')),
+      );
+
+      await expect(built).rejects.toThrow(`git status failed in ${dir}: fatal: index file corrupt`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('reports the real count and truncated when the git list is cut', async () => {
     const artifact = await artifactFor(MAX_FILES + 1);
 

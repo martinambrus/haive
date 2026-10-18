@@ -4,6 +4,8 @@ const m = vi.hoisted(() => ({
   loadPreviousStepOutput: vi.fn(),
   ensureAppServing: vi.fn(),
   gitWorkspaceStatus: vi.fn(),
+  gitRun: vi.fn(),
+  detectOrigin: vi.fn(),
 }));
 
 vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
@@ -17,6 +19,11 @@ vi.mock('../workflow/_app-runtime.js', async (importOriginal) => ({
 vi.mock('../../../repo/git-workspace.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../repo/git-workspace.js')>()),
   gitWorkspaceStatus: m.gitWorkspaceStatus,
+}));
+vi.mock('../../../repo/git-push.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../repo/git-push.js')>()),
+  gitRun: m.gitRun,
+  detectOrigin: m.detectOrigin,
 }));
 
 import { TaskCancelledError } from '../../step-definition.js';
@@ -44,6 +51,8 @@ describe('run-app ready gate runtime bring-up', () => {
     m.loadPreviousStepOutput.mockReset().mockResolvedValue(null);
     m.ensureAppServing.mockReset();
     m.gitWorkspaceStatus.mockReset().mockResolvedValue('absent');
+    m.gitRun.mockReset();
+    m.detectOrigin.mockReset().mockResolvedValue(false);
     warn.mockClear();
   });
 
@@ -80,4 +89,34 @@ describe('run-app ready gate runtime bring-up', () => {
     const form = runAppReadyStep.form!(ctx, detected)!;
     expect(form.fields.map((f) => f.id)).toContain('commit');
   });
+
+  it.each([1, 2])(
+    'keeps serving and omits the diff when git status fails on call %i',
+    async (failedCall) => {
+      m.ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://app.local' });
+      m.gitWorkspaceStatus.mockResolvedValue('ok');
+      let statusCalls = 0;
+      m.gitRun.mockImplementation(async (_cwd: string, args: string[]) => {
+        if (!args.includes('status')) return { code: 0, stdout: 'main\n', stderr: '' };
+        statusCalls += 1;
+        return statusCalls === failedCall
+          ? { code: 128, stdout: '', stderr: 'fatal: index file corrupt' }
+          : { code: 0, stdout: ' M changed.txt\n', stderr: '' };
+      });
+
+      const detected = await detect();
+
+      expect(statusCalls).toBe(failedCall);
+      expect(detected).toMatchObject({
+        mode: 'host',
+        appUrl: 'http://app.local',
+        diffArtifactPath: null,
+      });
+      expect(warn).toHaveBeenCalledWith(
+        { err: new Error('git status failed in /repos/u/r: fatal: index file corrupt') },
+        'run-app-ready: failed to build commit diff artifact',
+      );
+      expect(runAppReadyStep.form!(ctx, detected)).not.toBeNull();
+    },
+  );
 });
