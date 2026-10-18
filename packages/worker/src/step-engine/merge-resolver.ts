@@ -495,7 +495,9 @@ async function finishMerge(
   state: MergeResolveState,
 ): Promise<MergeResolved> {
   state = { ...state, merged: true };
-  const squashed = await squashFeatureMerge(db, current, ctx, params, state);
+  const squash = await squashFeatureMerge(db, current, ctx, params, state);
+  const squashed = squash.state;
+  current = squash.current;
   if (
     squashed.pushAfterMerge &&
     !squashed.pushed &&
@@ -524,13 +526,13 @@ async function squashFeatureMerge(
   ctx: StepContext,
   params: AdvanceStepParams,
   state: MergeResolveState,
-): Promise<MergeResolveState> {
-  if (!state.squashAfterMerge) return state;
-  if ((state.mergeStage ?? 'feature') !== 'feature') return state;
-  if (state.squashCommitSha) return state; // already collapsed
+): Promise<{ state: MergeResolveState; current: TaskStepRow }> {
+  if (!state.squashAfterMerge) return { state, current };
+  if ((state.mergeStage ?? 'feature') !== 'feature') return { state, current };
+  if (state.squashCommitSha) return { state, current }; // already collapsed
   // A row written before baseShaBefore existed has no reset target. Leaving the merge
   // commit in place is the safe outcome: the work is integrated either way.
-  if (!state.baseShaBefore) return state;
+  if (!state.baseShaBefore) return { state, current };
 
   const squashing: MergeResolveState = { ...state, phase: 'squashing' };
   const userEnv = await resolveGitEnv(db, { userId: ctx.userId, taskId: ctx.taskId });
@@ -541,6 +543,7 @@ async function squashFeatureMerge(
   await inMergeDir(db, current, params, squashing.mergeDir, (tx) =>
     saveMergeState(tx, current.id, squashing),
   );
+  let updated = current;
   const next = await inMergeDir(db, current, params, squashing.mergeDir, async (tx) => {
     let skipped: string | undefined;
     const squashCommitSha = await squashMergeCommit(
@@ -554,7 +557,7 @@ async function squashFeatureMerge(
       },
     );
     if (skipped) {
-      await addStepWarning(tx, current, skipped);
+      updated = await addStepWarning(tx, current, skipped);
       await updateOwnedStep(tx, current.id, { statusMessage: skipped });
     }
     const squashed: MergeResolveState = {
@@ -575,9 +578,9 @@ async function squashFeatureMerge(
     },
     squashCommitSha
       ? 'feature merge squashed into a single commit on the base branch'
-      : 'squash requested but the merge left nothing to collapse',
+      : (next.squashSkipReason ?? 'squash requested but the merge left nothing to collapse'),
   );
-  return next;
+  return { state: next, current: updated };
 }
 
 /** Best-effort authenticated `git fetch origin <base>` (same credential the push uses).
@@ -1718,8 +1721,8 @@ export async function resolveMergePhase(
   }
 
   // Crash-recovery: a squash persisted as in-flight re-runs idempotently — the helper
-  // finishes a half-done reset (HEAD moved, changes staged) and re-collapses a completed
-  // one to an identical tree.
+  // finishes a proven half-done reset or recognises a completed squash by its parents
+  // and tree, without resetting or recommitting it.
   if (state.phase === 'squashing') {
     return finishMerge(db, stepDef, current, ctx, params, state);
   }

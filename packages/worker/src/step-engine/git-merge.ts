@@ -1289,7 +1289,8 @@ export async function completeMergeHostSide(
 }
 
 /** Collapse only the feature merge's own first-parent edge; resume a reset only when its
- *  ORIG_HEAD and staged tree still prove the same merge. A live merge is left to its fixer. */
+ *  ORIG_HEAD and staged tree still prove the same merge. A live merge is left to its fixer.
+ *  git merge --squash never writes MERGE_HEAD, which the conflict resolver needs. */
 export async function squashMergeCommit(
   worktreePath: string,
   baseShaBefore: string,
@@ -1303,19 +1304,27 @@ export async function squashMergeCommit(
   const head = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
   if (head.code !== 0) return null;
 
+  const resetAlready = head.stdout.trim() === baseShaBefore;
   const skip = (reason: string): null => {
+    if (resetAlready) throw new Error(`Cannot resume squash after reset: ${reason}.`);
     const note = `Squash skipped; merge history kept: ${reason}.`;
     logger.warn({ worktreePath, baseShaBefore, featureRef }, note);
     onSkipped?.(note);
     return null;
   };
   const feature = await revParse(worktreePath, featureRef);
-  const resetAlready = head.stdout.trim() === baseShaBefore;
   if (resetAlready) {
     const staged = await gitRun(worktreePath, ['diff', '--cached', '--quiet']);
     if (staged.code === 0) return null;
   }
-  const candidate = resetAlready ? 'ORIG_HEAD' : 'HEAD';
+  const headParents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', 'HEAD']);
+  const headCommits = headParents.stdout.trim().split(/\s+/);
+  const committedAlready =
+    !resetAlready &&
+    headParents.code === 0 &&
+    headCommits.length === 2 &&
+    headCommits[1] === baseShaBefore;
+  const candidate = resetAlready || committedAlready ? 'ORIG_HEAD' : 'HEAD';
   const parents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', candidate]);
   const commits = parents.stdout.trim().split(/\s+/);
   if (parents.code !== 0 || commits.length !== 3 || !feature || commits[2] !== feature) {
@@ -1324,9 +1333,17 @@ export async function squashMergeCommit(
   if (commits[1] !== baseShaBefore) {
     return skip('the merge first parent differs from the recorded base tip');
   }
-  const index = await gitRun(worktreePath, ['write-tree']);
   const mergedTree = await revParse(worktreePath, `${commits[0]}^{tree}`);
-  if (index.code !== 0 || !mergedTree || index.stdout.trim() !== mergedTree) {
+  if (committedAlready) {
+    const headTree = await revParse(worktreePath, 'HEAD^{tree}');
+    if (mergedTree && headTree === mergedTree) return head.stdout.trim();
+    return skip('the tip tree differs from the feature merge');
+  }
+  const index = await gitRun(worktreePath, ['write-tree']);
+  if (index.code !== 0) {
+    throw new Error(`git write-tree failed: ${index.stderr || index.stdout}`.trim());
+  }
+  if (!mergedTree || index.stdout.trim() !== mergedTree) {
     return skip('the staged tree differs from the feature merge');
   }
   if (!resetAlready) {

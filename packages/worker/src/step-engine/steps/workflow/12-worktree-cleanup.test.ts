@@ -69,6 +69,7 @@ const fetchProbe = vi.hoisted(() => ({
   intercept: null as
     ((argv: string[]) => { code: number; stdout: string; stderr: string } | null) | null,
   pushes: [] as unknown[],
+  upstreamError: null as string | null,
 }));
 vi.mock('../../../repo/git-push.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../repo/git-push.js')>();
@@ -76,7 +77,10 @@ vi.mock('../../../repo/git-push.js', async (importOriginal) => {
     ...real,
     pushBranch: async (...args: Parameters<typeof real.pushBranch>) => {
       fetchProbe.pushes.push(args[0]);
-      return real.pushBranch(...args);
+      const result = await real.pushBranch(...args);
+      return fetchProbe.upstreamError
+        ? { ...result, upstreamError: fetchProbe.upstreamError }
+        : result;
     },
     gitRun: async (...args: Parameters<typeof real.gitRun>) => {
       const intercepted = fetchProbe.intercept?.(args[1]);
@@ -95,6 +99,7 @@ beforeEach(() => {
   fetchProbe.afterFetch = null;
   fetchProbe.intercept = null;
   fetchProbe.pushes = [];
+  fetchProbe.upstreamError = null;
 });
 
 // Pre-existing tests pass no providers, which this answers with skip as the real
@@ -3956,6 +3961,97 @@ describe('#280 fix1 claims and push', () => {
     } finally {
       await rm(parent, { recursive: true, force: true });
       await rm(bare, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('#280 fix1 squash warnings and halt', () => {
+  it('keeps the skip warning when a later upstream warning is added', async () => {
+    const { parent, wt } = await setupWorktree();
+    const bare = await pushParentMainToOrigin(parent);
+    try {
+      const before = (await git(parent, ['rev-parse', 'HEAD'])).trim();
+      await writeFile(path.join(parent, 'person.txt'), 'person');
+      await git(parent, ['add', 'person.txt']);
+      await git(parent, ['commit', '-m', 'person']);
+      await git(parent, ['merge', '--no-ff', 'feature/x', '-m', 'merge']);
+      fetchProbe.upstreamError = 'tracking unavailable';
+      const h = makeDb();
+      const state: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'squashing',
+        baseBranch: 'main',
+        featureBranch: 'feature/x',
+        mergeDir: parent,
+        sandboxMergeDir: parent,
+        fixInvocationId: null,
+        conflictRetries: 0,
+        pendingQuestion: null,
+        pushAfterMerge: true,
+        squashAfterMerge: true,
+        baseShaBefore: before,
+        merged: true,
+        skipReason: null,
+        pushed: false,
+      };
+      expect(
+        (
+          await resolveMergePhase(
+            h.db as never,
+            step,
+            mkCurrent(det(wt), { action: 'merge_remove' }, state),
+            mkCtx(parent, h.db),
+            mkParams(h.db),
+          )
+        ).resolved,
+      ).toBe(true);
+      expect(h.getWarning()).toContain('merge first parent differs');
+      expect(h.getWarning()).toContain('tracking unavailable');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the claim and squashing state when reset recovery cannot prove its merge', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      const before = (await git(parent, ['rev-parse', 'HEAD'])).trim();
+      await git(parent, ['merge', '--no-ff', 'feature/x', '-m', 'merge']);
+      await git(parent, ['reset', '--soft', before]);
+      await rm(path.join(parent, '.git', 'ORIG_HEAD'));
+      const h = makeDb();
+      const state: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'squashing',
+        baseBranch: 'main',
+        featureBranch: 'feature/x',
+        mergeDir: parent,
+        sandboxMergeDir: parent,
+        fixInvocationId: null,
+        conflictRetries: 0,
+        pendingQuestion: null,
+        pushAfterMerge: true,
+        squashAfterMerge: true,
+        baseShaBefore: before,
+        merged: true,
+        skipReason: null,
+        pushed: false,
+      };
+      await expect(
+        resolveMergePhase(
+          h.db as never,
+          step,
+          mkCurrent(det(wt), { action: 'merge_remove' }, state),
+          mkCtx(parent, h.db),
+          mkParams(h.db),
+        ),
+      ).rejects.toThrow();
+      expect(h.getState()?.phase).toBe('squashing');
+      expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
+      expect(fetchProbe.pushes).toEqual([]);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
     }
   });
 });

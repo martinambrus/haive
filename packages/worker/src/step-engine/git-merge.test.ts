@@ -1917,3 +1917,87 @@ it('skips a merge whose second parent is not the feature tip', async () => {
     await rm(dir, REMOVE);
   }
 });
+
+describe('#280 fix1 squash recovery', () => {
+  it('recovers a committed squash without resetting or recommitting', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      await git(dir, ['reset', '--soft', before]);
+      await git(dir, ['commit', '-m', 'already squashed']);
+      const head = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+      const skipped = vi.fn();
+      expect(await squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x', skipped)).toBe(
+        head,
+      );
+      expect(skipped).not.toHaveBeenCalled();
+      expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it.each(['missing ORIG_HEAD', 'changed feature', 'changed index', 'changed first parent'])(
+    'throws after a reset with %s instead of silently skipping',
+    async (kind) => {
+      const dir = await setupCleanFeature();
+      try {
+        const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+        await git(dir, ['reset', '--soft', before]);
+        if (kind === 'missing ORIG_HEAD') await rm(path.join(dir, '.git', 'ORIG_HEAD'));
+        if (kind === 'changed feature')
+          await git(dir, ['update-ref', 'refs/heads/feature/x', before]);
+        if (kind === 'changed index') {
+          await writeFile(path.join(dir, 'extra.txt'), 'extra');
+          await git(dir, ['add', 'extra.txt']);
+        }
+        if (kind === 'changed first parent') {
+          const tree = (await git(dir, ['rev-parse', 'ORIG_HEAD^{tree}'])).trim();
+          const feature = (await git(dir, ['rev-parse', 'feature/x'])).trim();
+          const other = (
+            await git(dir, [
+              'commit-tree',
+              tree,
+              '-p',
+              feature + '~1',
+              '-p',
+              feature,
+              '-m',
+              'other',
+            ])
+          ).trim();
+          await git(dir, ['update-ref', 'ORIG_HEAD', other]);
+        }
+        const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+        const index = await git(dir, ['write-tree']);
+        await expect(
+          squashMergeCommit(dir, before, 'unsafe', COMMIT_ENV, 'feature/x'),
+        ).rejects.toThrow();
+        expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+        expect(await git(dir, ['write-tree'])).toBe(index);
+        expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
+
+  it('throws on write-tree failure before resetting', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const head = await git(dir, ['rev-parse', 'HEAD']);
+      await writeFile(path.join(dir, '.git', 'index.lock'), 'held');
+      await expect(
+        squashMergeCommit(dir, before, 'unsafe', COMMIT_ENV, 'feature/x'),
+      ).rejects.toThrow('write-tree');
+      expect(await git(dir, ['rev-parse', 'HEAD'])).toBe(head);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+});
