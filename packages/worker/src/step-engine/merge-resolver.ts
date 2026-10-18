@@ -931,8 +931,7 @@ async function halt(
       !state.pushed &&
       (state.phase === 'squashing' ||
         state.phase === 'pushing' ||
-        state.mergeStage === 'base-sync' ||
-        Boolean(state.squashCommitSha));
+        state.mergeStage === 'base-sync');
     if (!landedUnpushed && (open.code === 1 || (open.code === 0 && feature !== null && !own))) {
       await releaseMergeDir(tx, { mergeDir: state.mergeDir, stepId: current.id });
     }

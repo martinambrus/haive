@@ -1319,11 +1319,9 @@ export async function squashMergeCommit(
   if (open.code === 0) return null;
   const head = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
   if (head.code !== 0) {
-    if (baseShaBefore)
-      throw new Error(
-        `Cannot resume squash: HEAD is unreadable; restore the checkout in ${worktreePath}, then Retry.`,
-      );
-    return null;
+    throw new Error(
+      `Cannot resume squash: HEAD is unreadable; restore the checkout in ${worktreePath}, then Retry.`,
+    );
   }
 
   const resetAlready = head.stdout.trim() === baseShaBefore;
@@ -1342,6 +1340,7 @@ export async function squashMergeCommit(
     onSkipped?.(note);
     return null;
   };
+  const restoreMerge = `restore ORIG_HEAD to the feature merge${squashMergeSha ? ` ${squashMergeSha}` : ''}`;
   const candidate = resetAlready || committedAlready ? 'ORIG_HEAD' : 'HEAD';
   const parents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', candidate]);
   const commits = parents.stdout.trim().split(/\s+/);
@@ -1349,16 +1348,10 @@ export async function squashMergeCommit(
     ? commits[0] === squashMergeSha
     : Boolean(feature) && commits[2] === feature;
   if (parents.code !== 0 || commits.length !== 3 || !matchesMerge) {
-    return skip(
-      'the tip is not the recorded feature merge',
-      'restore ORIG_HEAD to the feature merge',
-    );
+    return skip('the tip is not the recorded feature merge', restoreMerge);
   }
   if (commits[1] !== baseShaBefore) {
-    return skip(
-      'the merge first parent differs from the recorded base tip',
-      'restore ORIG_HEAD to the feature merge',
-    );
+    return skip('the merge first parent differs from the recorded base tip', restoreMerge);
   }
   const mergedTree = await revParse(worktreePath, `${commits[0]}^{tree}`);
   if (committedAlready) {
@@ -1376,7 +1369,7 @@ export async function squashMergeCommit(
       'the staged tree differs from the feature merge',
       baseTree && index.stdout.trim() === baseTree
         ? 'restore the staged tree from the feature merge'
-        : 'unstage or commit the other changes',
+        : 'unstage the other changes',
     );
   }
   if (!resetAlready) {

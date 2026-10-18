@@ -1977,7 +1977,7 @@ describe('#280 fix1 squash recovery', () => {
           squashMergeCommit(dir, before, 'unsafe', COMMIT_ENV, 'feature/x'),
         ).rejects.toThrow(
           kind === 'changed index'
-            ? `unstage or commit the other changes in ${dir}, then Retry`
+            ? `unstage the other changes in ${dir}, then Retry`
             : 'Cannot resume squash',
         );
         expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(before);
