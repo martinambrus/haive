@@ -79,7 +79,9 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   with the merge commit's sha (`squashMergeSha`) ahead of any reset, so a crash between the reset and
   the commit re-enters it. `squashMergeCommit` decides in a fixed
   order, on parents, trees and ancestry only: a feature already contained in the base tip recorded
-  at the first open (`baseShaBefore`) has nothing to squash; HEAD at that tip is a reset already
+  at the first open (`baseShaBefore`) has nothing to squash, unless `ORIG_HEAD` or HEAD shows this
+  merge's interrupted squash (a two-parent commit on that tip, or the recorded merge), which goes to
+  the proofs below instead; HEAD at that tip is a reset already
   made, committed only when `ORIG_HEAD` is the recorded merge commit (or, for a row saved without
   one, a merge of base and feature) with the staged tree; HEAD with that tip as its one parent is a
   squash already made, accepted on the same proof against its tree. A feature branch that moved
