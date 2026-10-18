@@ -42,6 +42,7 @@ export async function mergeCommitted(worktreePath: string, branch: string): Prom
   const head = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (head.code === 0) return false; // merge still open (not committed)
   const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
+  if (status.code !== 0) return false;
   const unmerged = status.stdout.split('\n').some((l) => /^(DD|AU|UD|UA|DU|AA|UU) /.test(l));
   if (unmerged) return false;
   const ancestor = await gitRun(worktreePath, ['merge-base', '--is-ancestor', branch, 'HEAD']);
@@ -67,6 +68,24 @@ export async function unmergedPaths(dir: string): Promise<string[] | null> {
 export async function revParse(dir: string, spec: string): Promise<string | null> {
   const res = await gitRun(dir, ['rev-parse', '-q', '--verify', spec]);
   return res.code === 0 ? res.stdout.trim() : null;
+}
+
+export async function isCommitAncestor(
+  dir: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  if (ancestor === descendant) {
+    return true;
+  }
+  const result = await gitRun(dir, ['merge-base', '--is-ancestor', ancestor, descendant]);
+  if (result.code === 0) {
+    return true;
+  }
+  if (result.code === 1) {
+    return false;
+  }
+  throw new Error('Could not check feature ancestry before squash');
 }
 
 /** True while a merge of `ref` is open in `dir`. */
@@ -1288,33 +1307,120 @@ export async function completeMergeHostSide(
   return mergeCommitted(worktreePath, branch);
 }
 
-/** Collapse a merge that has ALREADY landed in `worktreePath` into a single commit on
- *  the current branch: `reset --soft` back to the pre-merge tip, then one commit of the
- *  merged index. The tree is unchanged — only the history is.
- *
- *  Deliberately NOT `git merge --squash`, which never writes MERGE_HEAD: the whole
- *  conflict loop is built on that file (completeMergeHostSide requires it, and
- *  `git merge --abort` fails without it), so squashing at merge time would break
- *  conflict resolution and leave a conflicted index behind. Merging normally and
- *  collapsing afterwards leaves every one of those paths untouched.
- *
- *  Returns the new commit's sha, or null when there was nothing to collapse. Safe to
- *  re-enter after a crash: a half-done attempt (HEAD already reset, changes staged)
- *  finishes with the commit, and a completed one collapses to an identical tree again.
- *
- *  Never touches a LIVE merge — the conflict loop owns that until its own commit lands. */
+/** Collapse only the feature merge's own first-parent edge; resume a reset only when its
+ *  ORIG_HEAD and staged tree still prove the same merge. A live merge is left to its fixer.
+ *  git merge --squash never writes MERGE_HEAD, which the conflict resolver needs. */
 export async function squashMergeCommit(
   worktreePath: string,
   baseShaBefore: string,
   message: string,
   gitEnv: Record<string, string>,
+  featureRef: string,
+  onSkipped?: (reason: string) => void,
+  squashMergeSha?: string,
 ): Promise<string | null> {
+  const headParents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', 'HEAD']);
+  const headCommits = headParents.stdout.trim().split(/\s+/);
+  let feature = await revParse(
+    worktreePath,
+    squashMergeSha ? `${squashMergeSha}^2^{commit}` : `${featureRef}^{commit}`,
+  );
+  if (feature && !squashMergeSha && headParents.code === 0) {
+    const featureMerge =
+      headCommits[0] === baseShaBefore ||
+      (headCommits.length === 2 && headCommits[1] === baseShaBefore)
+        ? 'ORIG_HEAD'
+        : 'HEAD';
+    const mergedFeature = await revParse(worktreePath, `${featureMerge}^2^{commit}`);
+    if (mergedFeature && (await isCommitAncestor(worktreePath, mergedFeature, feature))) {
+      feature = mergedFeature;
+    }
+  }
+  const origParents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', 'ORIG_HEAD']);
+  const origCommits = origParents.stdout.trim().split(/\s+/);
+  const recoveringSquash =
+    (headParents.code === 0 &&
+      (headCommits[0] === baseShaBefore ||
+        (headCommits.length === 2 && headCommits[1] === baseShaBefore)) &&
+      origParents.code === 0 &&
+      origCommits.length === 3 &&
+      origCommits[1] === baseShaBefore) ||
+    (squashMergeSha !== undefined &&
+      ((headParents.code === 0 && headCommits[0] === squashMergeSha) ||
+        (origParents.code === 0 && origCommits[0] === squashMergeSha)));
+  if (feature && !recoveringSquash) {
+    const contained = await gitRun(worktreePath, [
+      'merge-base',
+      '--is-ancestor',
+      feature,
+      baseShaBefore,
+    ]);
+    if (contained.code === 0) return null;
+    if (contained.code !== 1) throw new Error('Could not check feature ancestry before squash');
+  }
   const open = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (open.code === 0) return null;
   const head = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
-  if (head.code !== 0) return null;
+  if (head.code !== 0) {
+    throw new Error(
+      `Cannot resume squash: HEAD is unreadable; restore the checkout in ${worktreePath}, then Retry.`,
+    );
+  }
 
-  if (head.stdout.trim() !== baseShaBefore) {
+  const resetAlready = head.stdout.trim() === baseShaBefore;
+  const committedAlready =
+    !resetAlready &&
+    headParents.code === 0 &&
+    headCommits.length === 2 &&
+    headCommits[1] === baseShaBefore;
+  const skip = (reason: string, action: string): null => {
+    if (resetAlready || committedAlready)
+      throw new Error(`Cannot resume squash: ${reason}; ${action} in ${worktreePath}, then Retry.`);
+    const note = `Squash skipped; merge history kept: ${reason}.`;
+    logger.warn({ worktreePath, baseShaBefore, featureRef }, note);
+    onSkipped?.(note);
+    return null;
+  };
+  const restoreMerge = `restore ORIG_HEAD to the feature merge${squashMergeSha ? ` ${squashMergeSha}` : ''}`;
+  const candidate = resetAlready || committedAlready ? 'ORIG_HEAD' : 'HEAD';
+  const parents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', candidate]);
+  const commits = parents.stdout.trim().split(/\s+/);
+  const matchesMerge = squashMergeSha
+    ? commits[0] === squashMergeSha
+    : parents.code === 0 &&
+      commits.length === 3 &&
+      feature !== null &&
+      (await isCommitAncestor(worktreePath, commits[2]!, feature));
+  if (parents.code !== 0 || commits.length !== 3 || !matchesMerge) {
+    return skip('the tip is not the recorded feature merge', restoreMerge);
+  }
+  if (commits[1] !== baseShaBefore) {
+    return skip('the merge first parent differs from the recorded base tip', restoreMerge);
+  }
+  const mergedTree = await revParse(worktreePath, `${commits[0]}^{tree}`);
+  if (committedAlready) {
+    const headTree = await revParse(worktreePath, 'HEAD^{tree}');
+    if (mergedTree && headTree === mergedTree) return head.stdout.trim();
+    return skip('the tip tree differs from the feature merge', 'restore HEAD to the squash commit');
+  }
+  const index = await gitRun(worktreePath, ['write-tree']);
+  if (index.code !== 0) {
+    throw new Error(`git write-tree failed: ${index.stderr || index.stdout}`.trim());
+  }
+  if (!mergedTree || index.stdout.trim() !== mergedTree) {
+    const baseTree = resetAlready ? await revParse(worktreePath, `${baseShaBefore}^{tree}`) : null;
+    return skip(
+      'the staged tree differs from the feature merge',
+      baseTree && index.stdout.trim() === baseTree
+        ? 'restore the staged tree from the feature merge'
+        : 'unstage the other changes',
+    );
+  }
+  if (!resetAlready) {
+    const baseTree = await revParse(worktreePath, `${baseShaBefore}^{tree}`);
+    if (!baseTree) throw new Error('Could not read the base tree before squash');
+    if (mergedTree === baseTree)
+      return skip('the feature merge has an empty net diff', 'restore the feature merge');
     const reset = await gitRun(worktreePath, ['reset', '--soft', baseShaBefore]);
     if (reset.code !== 0) {
       throw new Error(
@@ -1322,10 +1428,6 @@ export async function squashMergeCommit(
       );
     }
   }
-  // Nothing staged: the merge was a no-op ("Already up to date"), so there is no
-  // history to collapse. `git diff --cached --quiet` exits non-zero when it differs.
-  const staged = await gitRun(worktreePath, ['diff', '--cached', '--quiet']);
-  if (staged.code === 0) return null;
 
   const commit = await gitRun(worktreePath, ['commit', '-m', message], gitEnv);
   if (commit.code !== 0) {

@@ -171,7 +171,7 @@ export async function inMergeDirUnlessClaimed<T>(
   });
 }
 
-/** Release the dir in the section that records the merge done. */
+/** Release the dir in the section that records completion or a halt without an owned open merge. */
 export async function releaseMergeDir(
   tx: DbHandle,
   owner: Pick<MergeDirOwner, 'mergeDir' | 'stepId'>,

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import {
@@ -11,6 +12,7 @@ import {
 import {
   MERGE_CLARIFICATION_ANSWERED_EVENT,
   MERGE_CLARIFICATION_ASKED_EVENT,
+  logger,
   type FormSchema,
 } from '@haive/shared';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
@@ -33,6 +35,7 @@ import {
   relocateFixerChanges,
   revParse,
   squashMergeCommit,
+  isCommitAncestor,
   unmergedPaths,
   type MergeAbort,
   type MergeOpen,
@@ -240,7 +243,7 @@ async function parkForGuidance(
 }
 
 async function setStepStatus(
-  db: Database,
+  db: DbHandle,
   stepRowId: string,
   patch: {
     status?: 'waiting_cli' | 'failed' | 'running';
@@ -337,6 +340,30 @@ async function taskRepositoryId(db: Database, taskId: string): Promise<string | 
   return task?.repositoryId ?? null;
 }
 
+async function sweepPrePushRefs(cwd: string, stepId: string): Promise<void> {
+  let refs: string[];
+  try {
+    const listed = await gitRun(cwd, [
+      'for-each-ref',
+      '--format=%(refname)',
+      `refs/haive/pre-push/${stepId}/`,
+    ]);
+    if (listed.code !== 0) throw new Error(listed.stderr || listed.stdout);
+    refs = listed.stdout.trim().split('\n').filter(Boolean);
+  } catch (err) {
+    logger.warn({ err, stepId, cwd }, 'could not list pre-push refs for cleanup');
+    return;
+  }
+  for (const ref of refs) {
+    try {
+      const deleted = await gitRun(cwd, ['update-ref', '-d', ref]);
+      if (deleted.code !== 0) throw new Error(deleted.stderr || deleted.stdout);
+    } catch (err) {
+      logger.warn({ err, stepId, cwd, ref }, 'could not delete pre-push ref');
+    }
+  }
+}
+
 function asideHalt(
   why:
     | { outcome: 'refused'; reason: string }
@@ -392,13 +419,23 @@ async function reachDone(
     };
     const sha = await inMergeDir(db, current, params, state.mergeDir, async (tx) => {
       await saveMergeState(tx, current.id, pushing);
-      const tip = await gitRun(state.mergeDir, [
+      const tip = await gitRun(ctx.repoPath, [
         'rev-parse',
         '--verify',
         `refs/heads/${state.baseBranch}^{commit}`,
       ]);
       return tip.code === 0 ? tip.stdout.trim() : undefined;
     });
+    if (!sha) {
+      return haltFailed(
+        db,
+        current,
+        params,
+        pushing,
+        `could not read ${state.baseBranch}'s tip; the merge is saved locally, retry`,
+        'base tip unreadable',
+      );
+    }
     const fv = (current.formValues ?? {}) as { credentialId?: string; setUpstream?: boolean };
     let upstreamError: string | undefined;
     try {
@@ -415,6 +452,8 @@ async function reachDone(
       const row = await halt(
         db,
         current,
+        params,
+        pushing,
         `Merge committed, but pushing '${state.baseBranch}' to origin failed: ${
           (err as Error).message
         } The merge is saved locally — retry the push.`,
@@ -445,6 +484,7 @@ async function reachDone(
   };
   const finished = state;
   const row = await inMergeDir(db, current, params, finished.mergeDir, async (tx) => {
+    await sweepPrePushRefs(ctx.repoPath, current.id);
     let updated = current;
     if (finished.mode === 'cross-branch') {
       const kept = await removeBaseWorktree(ctx.repoPath, finished.mergeDir);
@@ -481,7 +521,15 @@ async function finishMerge(
   params: AdvanceStepParams,
   state: MergeResolveState,
 ): Promise<MergeResolved> {
-  const squashed = await squashFeatureMerge(db, current, ctx, params, state);
+  const squash = await squashFeatureMerge(db, current, ctx, params, state);
+  let squashed = squash.state;
+  if ((squashed.mergeStage ?? 'feature') === 'feature' && squashed.phase !== 'squashing') {
+    squashed = { ...squashed, phase: 'squashing', merged: false, mergedAt: undefined };
+    await inMergeDir(db, current, params, squashed.mergeDir, (tx) =>
+      saveMergeState(tx, current.id, squashed),
+    );
+  }
+  current = squash.current;
   if (
     squashed.pushAfterMerge &&
     !squashed.pushed &&
@@ -510,31 +558,71 @@ async function squashFeatureMerge(
   ctx: StepContext,
   params: AdvanceStepParams,
   state: MergeResolveState,
-): Promise<MergeResolveState> {
-  if (!state.squashAfterMerge) return state;
-  if ((state.mergeStage ?? 'feature') !== 'feature') return state;
-  if (state.squashCommitSha) return state; // already collapsed
+): Promise<{ state: MergeResolveState; current: TaskStepRow }> {
+  if (!state.squashAfterMerge) return { state, current };
+  if ((state.mergeStage ?? 'feature') !== 'feature') return { state, current };
+  if (state.squashCommitSha) return { state, current }; // already collapsed
   // A row written before baseShaBefore existed has no reset target. Leaving the merge
   // commit in place is the safe outcome: the work is integrated either way.
-  if (!state.baseShaBefore) return state;
+  if (!state.baseShaBefore) return { state, current };
 
-  const squashing: MergeResolveState = { ...state, phase: 'squashing' };
+  let squashing: MergeResolveState = {
+    ...state,
+    phase: 'squashing',
+    merged: false,
+    mergedAt: undefined,
+  };
   const userEnv = await resolveGitEnv(db, { userId: ctx.userId, taskId: ctx.taskId });
   const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
   const message = await buildSquashCommitMessage(db, ctx.taskId, state.featureBranch);
   const baseShaBefore = state.baseShaBefore;
   // Committed ahead of the reset, so a crash between the reset and the commit re-enters here.
-  await inMergeDir(db, current, params, squashing.mergeDir, (tx) =>
-    saveMergeState(tx, current.id, squashing),
-  );
+  await inMergeDir(db, current, params, squashing.mergeDir, async (tx) => {
+    if (!squashing.squashMergeSha) {
+      const parents = await gitRun(squashing.mergeDir, [
+        'rev-list',
+        '--parents',
+        '-n',
+        '1',
+        'HEAD',
+      ]);
+      const commits = parents.stdout.trim().split(/\s+/);
+      const feature = await revParse(squashing.mergeDir, `${squashing.featureBranch}^{commit}`);
+      if (
+        parents.code === 0 &&
+        commits.length === 3 &&
+        commits[1] === baseShaBefore &&
+        feature !== null &&
+        (await isCommitAncestor(squashing.mergeDir, commits[2]!, feature))
+      ) {
+        squashing = { ...squashing, squashMergeSha: commits[0] };
+      }
+    }
+    await saveMergeState(tx, current.id, squashing);
+  });
+  let updated = current;
   const next = await inMergeDir(db, current, params, squashing.mergeDir, async (tx) => {
+    let skipped: string | undefined;
     const squashCommitSha = await squashMergeCommit(
       squashing.mergeDir,
       baseShaBefore,
       message,
       commitEnv,
+      squashing.featureBranch,
+      (reason) => {
+        skipped = reason;
+      },
+      squashing.squashMergeSha,
     );
-    const squashed: MergeResolveState = { ...squashing, squashCommitSha };
+    if (skipped) {
+      updated = await addStepWarning(tx, current, skipped);
+      await updateOwnedStep(tx, current.id, { statusMessage: skipped });
+    }
+    const squashed: MergeResolveState = {
+      ...squashing,
+      squashCommitSha,
+      ...(skipped ? { squashAfterMerge: false, squashSkipReason: skipped } : {}),
+    };
     await saveMergeState(tx, current.id, squashed);
     return squashed;
   });
@@ -548,9 +636,9 @@ async function squashFeatureMerge(
     },
     squashCommitSha
       ? 'feature merge squashed into a single commit on the base branch'
-      : 'squash requested but the merge left nothing to collapse',
+      : (next.squashSkipReason ?? 'squash requested but the merge left nothing to collapse'),
   );
-  return next;
+  return { state: next, current: updated };
 }
 
 /** Best-effort authenticated `git fetch origin <base>` (same credential the push uses).
@@ -561,7 +649,7 @@ async function fetchForSync(
   cwd: string,
   base: string,
   credentialId: string | undefined,
-  run: typeof gitRun,
+  fetchRef: string,
 ): Promise<{ ok: boolean; error: string | null }> {
   const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
   const argv: string[] = [];
@@ -576,8 +664,16 @@ async function fetchForSync(
       return { ok: false, error: `credential load failed: ${(err as Error).message}` };
     }
   }
-  argv.push('fetch', '--end-of-options', 'origin', `refs/heads/${base}`);
-  const res = await run(cwd, argv, env);
+  argv.push(
+    'fetch',
+    '--no-write-fetch-head',
+    '--refmap=',
+    '--no-tags',
+    '--end-of-options',
+    'origin',
+    `refs/heads/${base}:${fetchRef}`,
+  );
+  const res = await gitRun(cwd, argv, env);
   if (res.code !== 0) {
     return {
       ok: false,
@@ -611,55 +707,80 @@ async function prePushSync(
 ): Promise<MergeResolved> {
   const base = state.baseBranch;
   const fv = (current.formValues ?? {}) as { credentialId?: string };
-  const fetched = await fetchForSync(
-    db,
-    ctx,
-    state.mergeDir,
-    base,
-    fv.credentialId || undefined,
-    (cwd, argv, env) =>
-      inMergeDir(db, current, params, state.mergeDir, () => gitRun(cwd, argv, env)),
-  );
+  const fetchRef = `refs/haive/pre-push/${current.id}/${randomUUID()}`;
+  let fetched: Awaited<ReturnType<typeof fetchForSync>>;
+  let decision: { behind: number; next: MergeResolveState | null } | undefined;
+  try {
+    fetched = await fetchForSync(
+      db,
+      ctx,
+      state.mergeDir,
+      base,
+      fv.credentialId || undefined,
+      fetchRef,
+    );
+    const checked = await inMergeDir<
+      { error: string } | { behind: number; next: MergeResolveState | null }
+    >(db, current, params, state.mergeDir, async (tx) => {
+      if (!fetched.ok) return { error: `fetch failed: ${fetched.error}` };
+      const tip = await revParse(state.mergeDir, fetchRef);
+      if (!tip) return { error: `could not record origin/${base}: fetched commit unavailable` };
+      const promoted = await gitRun(state.mergeDir, [
+        'update-ref',
+        `refs/remotes/origin/${base}`,
+        tip,
+      ]);
+      if (promoted.code !== 0)
+        return {
+          error: `could not record origin/${base}: ${promoted.stderr || promoted.stdout}`.trim(),
+        };
+      const behind = await countAhead(state.mergeDir, `${base}..origin/${base}`);
+      if (behind === 0 || (state.baseSyncRounds ?? 0) >= MAX_BASE_SYNC_ROUNDS) {
+        return { behind, next: null };
+      }
+      const next: MergeResolveState = {
+        ...state,
+        merged: false,
+        mergedAt: undefined,
+        mergeStage: 'base-sync',
+        featureBranch: `origin/${base}`,
+        phase: 'pending',
+        fixInvocationId: null,
+        pendingQuestion: null,
+        conflictRetries: 0,
+        baseSyncRounds: (state.baseSyncRounds ?? 0) + 1,
+      };
+      await saveMergeState(tx, current.id, next);
+      return { behind, next };
+    });
+    if ('error' in checked) fetched = { ok: false, error: checked.error };
+    else decision = checked;
+  } finally {
+    await gitRun(state.mergeDir, ['update-ref', '-d', fetchRef]);
+  }
   if (!fetched.ok) {
-    // A flaky link must never block the task: push the local base as-is. If origin did
-    // move, the push fails non-ff exactly as before — recoverable by retry.
     ctx.logger.warn(
       { base, err: fetched.error },
-      'pre-push base sync: fetch failed; pushing the local base as-is',
+      `pre-push base sync: ${fetched.error}; pushing the local base as-is`,
     );
     return reachDone(db, current, ctx, params, state);
   }
-  const behind = await countAhead(state.mergeDir, `${base}..origin/${base}`);
-  if (behind === 0) {
-    // Origin has not moved since 00a-sync-base — push directly (today's behavior).
-    return reachDone(db, current, ctx, params, state);
-  }
-  const rounds = state.baseSyncRounds ?? 0;
-  if (rounds >= MAX_BASE_SYNC_ROUNDS) {
+  const { behind, next } = decision!;
+  if (behind === 0) return reachDone(db, current, ctx, params, state);
+  if (!next) {
     await settleGivenUp(db, current, params, state);
     const row = await halt(
       db,
       current,
-      `origin/${base} keeps advancing (${behind} commits behind after ${rounds} sync attempts). Pull ${base} and push it manually — the merge is saved locally.`,
+      params,
+      state,
+      `origin/${base} keeps advancing (${behind} commits behind after ${state.baseSyncRounds ?? 0} sync attempts). Pull ${base} and push it manually — the merge is saved locally.`,
     );
     return {
       resolved: false,
       result: { status: 'failed', row, error: row.errorMessage ?? 'origin moving' },
     };
   }
-  const next: MergeResolveState = {
-    ...state,
-    mergeStage: 'base-sync',
-    featureBranch: `origin/${base}`,
-    phase: 'pending',
-    fixInvocationId: null,
-    pendingQuestion: null,
-    conflictRetries: 0,
-    baseSyncRounds: rounds + 1,
-  };
-  await inMergeDir(db, current, params, state.mergeDir, (tx) =>
-    saveMergeState(tx, current.id, next),
-  );
   return resolveMergePhase(db, stepDef, { ...current, mergeResolveState: next }, ctx, params);
 }
 
@@ -790,21 +911,67 @@ async function dispatchFixAgent(
   return { kind: 'ok', invId };
 }
 
-function halt(db: Database, current: TaskStepRow, message: string): Promise<TaskStepRow> {
-  return setStepStatus(db, current.id, {
-    status: 'failed',
-    errorMessage: message,
-    endedAt: new Date(),
+async function halt(
+  db: Database,
+  current: TaskStepRow,
+  params: AdvanceStepParams,
+  state: MergeResolveState | null,
+  message: string,
+  beforeRecord?: (tx: DbHandle) => Promise<void>,
+): Promise<TaskStepRow> {
+  const record = (conn: DbHandle) =>
+    setStepStatus(conn, current.id, {
+      status: 'failed',
+      errorMessage: message,
+      endedAt: new Date(),
+    });
+  if (!state) {
+    return db.transaction(async (tx) => {
+      if (beforeRecord) await beforeRecord(tx);
+      return record(tx);
+    });
+  }
+  return inMergeDir(db, current, params, state.mergeDir, async (tx) => {
+    await sweepPrePushRefs(state.mergeDir, current.id);
+    const open = await gitRun(state.mergeDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+    const baseline = state.fixBaseline;
+    const feature =
+      open.code === 0 ? await revParse(state.mergeDir, `${state.featureBranch}^{commit}`) : null;
+    const mergeHead = open.stdout.trim();
+    let own =
+      open.code === 0 &&
+      ((baseline && 'mergeHead' in baseline && mergeHead === baseline.mergeHead) ||
+        mergeHead === feature);
+    if (!own && open.code === 0 && feature !== null) {
+      try {
+        own = await isCommitAncestor(state.mergeDir, mergeHead, feature);
+      } catch {
+        own = true;
+      }
+    }
+    if (beforeRecord) await beforeRecord(tx);
+    const landedUnpushed =
+      !state.pushed &&
+      (state.phase === 'squashing' ||
+        state.phase === 'pushing' ||
+        state.mergeStage === 'base-sync');
+    if (!landedUnpushed && (open.code === 1 || (open.code === 0 && feature !== null && !own))) {
+      await releaseMergeDir(tx, { mergeDir: state.mergeDir, stepId: current.id });
+    }
+    return record(tx);
   });
 }
 
-async function haltFailed(
+export async function haltFailed(
   db: Database,
   current: TaskStepRow,
+  params: AdvanceStepParams,
+  state: MergeResolveState | null,
   message: string,
   fallback: string,
+  beforeRecord?: (tx: DbHandle) => Promise<void>,
 ): Promise<MergeResolved> {
-  const row = await halt(db, current, message);
+  const row = await halt(db, current, params, state, message, beforeRecord);
   return {
     resolved: false,
     result: { status: 'failed', row, error: row.errorMessage ?? fallback },
@@ -815,12 +982,15 @@ async function haltFailed(
 function haltRefused(
   db: Database,
   current: TaskStepRow,
+  params: AdvanceStepParams,
   state: MergeResolveState,
   detail: string,
 ): Promise<MergeResolved> {
   return haltFailed(
     db,
     current,
+    params,
+    state,
     `git refused to merge ${state.featureBranch} into ${state.baseBranch}: ${detail}. Nothing was merged; clear what git names, then retry.`,
     'merge refused',
   );
@@ -831,6 +1001,7 @@ async function putBackBeforeFeatureMerge(
   db: Database,
   spec: MergeResolveSpec,
   current: TaskStepRow,
+  params: AdvanceStepParams,
   ctx: StepContext,
   state: MergeResolveState,
   worktreePath: string | null,
@@ -847,7 +1018,9 @@ async function putBackBeforeFeatureMerge(
     });
   } catch (err) {
     const message = `Nothing was merged: ${err instanceof Error ? err.message : String(err)}`;
-    return { halted: await haltFailed(db, current, message, 'haive files not put back') };
+    return {
+      halted: await haltFailed(db, current, params, state, message, 'haive files not put back'),
+    };
   }
   let updated = current;
   for (const note of notes) updated = await addStepWarning(db, updated, note);
@@ -859,24 +1032,33 @@ async function putBackBeforeFeatureMerge(
 async function haltUnaborted(
   db: Database,
   current: TaskStepRow,
-  taskId: string,
+  params: AdvanceStepParams,
   state: MergeResolveState,
   abort: Extract<MergeAbort, { ok: false }>,
   why?: string,
 ): Promise<MergeResolved> {
-  await db.insert(schema.taskEvents).values({
-    taskId,
-    taskStepId: current.id,
-    eventType: 'merge.abort_failed',
-    payload: {
-      featureBranch: state.featureBranch,
-      baseBranch: state.baseBranch,
-      blocking: abort.blocking.slice(0, 20),
-      detail: abort.detail,
-    },
-  });
   const note = abortFailureNote(abort);
-  return haltFailed(db, current, why ? `${why} ${note}` : note, 'merge abort failed');
+  return haltFailed(
+    db,
+    current,
+    params,
+    state,
+    why ? `${why} ${note}` : note,
+    'merge abort failed',
+    async (tx) => {
+      await tx.insert(schema.taskEvents).values({
+        taskId: params.taskId,
+        taskStepId: current.id,
+        eventType: 'merge.abort_failed',
+        payload: {
+          featureBranch: state.featureBranch,
+          baseBranch: state.baseBranch,
+          blocking: abort.blocking.slice(0, 20),
+          detail: abort.detail,
+        },
+      });
+    },
+  );
 }
 
 /** Merge the feature branch into its base with an LLM conflict-resolution loop.
@@ -1062,13 +1244,9 @@ export async function resolveMergePhase(
     await saveMergeState(db, current.id, state);
   }
 
-  // --- pending: attempt the merge; clean -> done, conflict -> resolving (live) ---
-  if (state.phase === 'pending') {
-    let pending = state;
-    // Taken before the first git write in the dir and kept until this merge is done, so no other
-    // task opens there between this one's sections.
+  if (state.phase !== 'done') {
     const claim = await claimMergeDir(db, {
-      mergeDir: pending.mergeDir,
+      mergeDir: state.mergeDir,
       stepId: current.id,
       taskId: params.taskId,
       epoch: params.epoch,
@@ -1077,14 +1255,22 @@ export async function resolveMergePhase(
       return haltFailed(
         db,
         current,
+        params,
+        null,
         `Task "${claim.holder.title}" (${claim.holder.id}) is still merging into ${state.baseBranch} in ${state.mergeDir}; retry once it finishes.`,
         'merge dir in use',
       );
     }
+  }
+
+  // --- pending: attempt the merge; clean -> done, conflict -> resolving (live) ---
+  if (state.phase === 'pending') {
+    let pending = state;
     const putBackFirst = await putBackBeforeFeatureMerge(
       db,
       spec,
       current,
+      params,
       ctx,
       pending,
       worktreePath,
@@ -1102,6 +1288,8 @@ export async function resolveMergePhase(
         return haltFailed(
           db,
           current,
+          params,
+          state,
           `The plan's base could not be read from the checkout (${(err as Error).message}); nothing was merged. Retry this step.`,
           'plan base unread',
         );
@@ -1109,7 +1297,7 @@ export async function resolveMergePhase(
       const stopped = await setAside(repositoryId, pending.mergeDir);
       if (stopped !== null) {
         await settleGivenUp(db, current, params, pending);
-        return haltFailed(db, current, asideHalt(stopped), 'haive files changed');
+        return haltFailed(db, current, params, state, asideHalt(stopped), 'haive files changed');
       }
     }
     const openPending = async (tx: Tx) => {
@@ -1199,7 +1387,7 @@ export async function resolveMergePhase(
       if (stopped !== null) {
         await putBack(repositoryId, pending.mergeDir);
         await settleGivenUp(db, current, params, pending);
-        return haltFailed(db, current, asideHalt(stopped), 'haive files changed');
+        return haltFailed(db, current, params, state, asideHalt(stopped), 'haive files changed');
       }
       attempt = await mergeSection(repositoryId, pending.mergeDir, openPending);
       pending = adoptKept(pending, attempt.adopted);
@@ -1208,12 +1396,12 @@ export async function resolveMergePhase(
     if (attempt.kind === 'unaborted') {
       await putBack(repositoryId, state.mergeDir);
       await settleGivenUp(db, current, params, pending);
-      return haltUnaborted(db, current, params.taskId, state, attempt.stale);
+      return haltUnaborted(db, current, params, state, attempt.stale);
     }
     if (attempt.kind === 'held') {
       await putBack(repositoryId, state.mergeDir);
       await settleGivenUp(db, current, params, pending);
-      return haltFailed(db, current, attempt.held, 'merge index held');
+      return haltFailed(db, current, params, state, attempt.held, 'merge index held');
     }
     if (attempt.staleOpen) {
       current = await noteAbortedByNext(
@@ -1227,7 +1415,14 @@ export async function resolveMergePhase(
     if (attempt.kind === 'aside') {
       await putBack(repositoryId, state.mergeDir);
       await settleGivenUp(db, current, params, pending);
-      return haltFailed(db, current, asideHalt(attempt.again), 'haive files changed');
+      return haltFailed(
+        db,
+        current,
+        params,
+        state,
+        asideHalt(attempt.again),
+        'haive files changed',
+      );
     }
     if (attempt.kind === 'opened') {
       current = await noteOwnFileFallbacks(db, current, ctx, state.mergeDir, attempt.warnings);
@@ -1238,7 +1433,7 @@ export async function resolveMergePhase(
     if (attempt.opened.kind === 'refused') {
       await putBack(repositoryId, state.mergeDir);
       await settleGivenUp(db, current, params, pending);
-      return haltRefused(db, current, state, attempt.opened.detail);
+      return haltRefused(db, current, params, state, attempt.opened.detail);
     }
     // Conflict: leave the mid-merge LIVE (no --abort) so the fix agent edits it.
     state = { ...state, phase: 'resolving' };
@@ -1297,7 +1492,14 @@ export async function resolveMergePhase(
         );
       }
       if (leftovers?.indexHeld) {
-        return haltFailed(db, current, fixerIndexHeldNote(leftovers.indexHeld), 'merge index held');
+        return haltFailed(
+          db,
+          current,
+          params,
+          state,
+          fixerIndexHeldNote(leftovers.indexHeld),
+          'merge index held',
+        );
       }
       const fix = parseFixResult(inv);
       const lastFixerCut =
@@ -1323,7 +1525,7 @@ export async function resolveMergePhase(
           return result;
         });
         state = refunded;
-        if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted);
+        if (!aborted.ok) return haltUnaborted(db, current, params, state, aborted);
       } else {
         // Fatal provider failure (rate-limit/quota, bad/expired auth, 5xx outage) will
         // not recover this run — abort the live merge and fail instead of spending the
@@ -1337,9 +1539,9 @@ export async function resolveMergePhase(
           const failedDir = state.mergeDir;
           const aborted = await section(failedDir, () => abortMerge(failedDir));
           const why = inv.errorMessage ?? 'fatal provider error';
-          if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+          if (!aborted.ok) return haltUnaborted(db, current, params, state, aborted, why);
           await settleGivenUp(db, current, params, state);
-          return haltFailed(db, current, why, 'fatal provider error');
+          return haltFailed(db, current, params, state, why, 'fatal provider error');
         }
         await db
           .update(schema.cliInvocations)
@@ -1380,7 +1582,7 @@ export async function resolveMergePhase(
           await saveMergeState(tx, current.id, idle);
           return result;
         });
-        if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted);
+        if (!aborted.ok) return haltUnaborted(db, current, params, state, aborted);
       }
     }
 
@@ -1395,16 +1597,16 @@ export async function resolveMergePhase(
     if (state.conflictRetries >= MAX_MERGE_CONFLICT_RETRIES) {
       const aborted = await section(dir, () => abortMerge(dir));
       const why = `Merge conflict merging ${state.featureBranch} into ${state.baseBranch}: auto-resolution exhausted after ${MAX_MERGE_CONFLICT_RETRIES} attempts. Resolve manually or use "Retry with AI".`;
-      if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+      if (!aborted.ok) return haltUnaborted(db, current, params, state, aborted, why);
       await settleGivenUp(db, current, params, state);
-      return haltFailed(db, current, why, 'merge conflict');
+      return haltFailed(db, current, params, state, why, 'merge conflict');
     }
     if (!params.providers || !params.deps) {
       const aborted = await section(dir, () => abortMerge(dir));
       const why = 'Merge conflict requires a CLI provider to resolve, but none were supplied.';
-      if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+      if (!aborted.ok) return haltUnaborted(db, current, params, state, aborted, why);
       await settleGivenUp(db, current, params, state);
-      return haltFailed(db, current, why, 'no provider');
+      return haltFailed(db, current, params, state, why, 'no provider');
     }
     // Recreate the live merge if it isn't open (after an abort or a crash). One open for another
     // ref is not this conflict, and a fixer must never be sent into it.
@@ -1416,6 +1618,7 @@ export async function resolveMergePhase(
       db,
       spec,
       current,
+      params,
       ctx,
       state,
       worktreePath,
@@ -1426,7 +1629,7 @@ export async function resolveMergePhase(
       const stopped = await setAside(repositoryId, dir);
       if (stopped !== null) {
         await settleGivenUp(db, current, params, state);
-        return haltFailed(db, current, asideHalt(stopped), 'haive files changed');
+        return haltFailed(db, current, params, state, asideHalt(stopped), 'haive files changed');
       }
     }
     const reopen = async (tx: Tx) => {
@@ -1489,7 +1692,7 @@ export async function resolveMergePhase(
       if (stopped !== null) {
         await putBack(repositoryId, dir);
         await settleGivenUp(db, current, params, state);
-        return haltFailed(db, current, asideHalt(stopped), 'haive files changed');
+        return haltFailed(db, current, params, state, asideHalt(stopped), 'haive files changed');
       }
       reopened = await mergeSection(repositoryId, dir, reopen);
       state = adoptKept(state, reopened.adopted);
@@ -1497,12 +1700,12 @@ export async function resolveMergePhase(
     if (reopened.kind === 'unaborted') {
       await putBack(repositoryId, dir);
       await settleGivenUp(db, current, params, state);
-      return haltUnaborted(db, current, params.taskId, state, reopened.cleared);
+      return haltUnaborted(db, current, params, state, reopened.cleared);
     }
     if (reopened.kind === 'held') {
       await putBack(repositoryId, dir);
       await settleGivenUp(db, current, params, state);
-      return haltFailed(db, current, reopened.held, 'merge index held');
+      return haltFailed(db, current, params, state, reopened.held, 'merge index held');
     }
     if (reopened.staleOpen) {
       current = await noteAbortedByNext(db, current, params.taskId, dir, reopened.staleOpen);
@@ -1510,7 +1713,14 @@ export async function resolveMergePhase(
     if (reopened.kind === 'aside') {
       await putBack(repositoryId, dir);
       await settleGivenUp(db, current, params, state);
-      return haltFailed(db, current, asideHalt(reopened.again), 'haive files changed');
+      return haltFailed(
+        db,
+        current,
+        params,
+        state,
+        asideHalt(reopened.again),
+        'haive files changed',
+      );
     }
     if (reopened.kind !== 'refused') {
       current = await noteOwnFileFallbacks(db, current, ctx, dir, reopened.warnings);
@@ -1520,7 +1730,7 @@ export async function resolveMergePhase(
     if (reopened.kind === 'refused') {
       await putBack(repositoryId, dir);
       await settleGivenUp(db, current, params, state);
-      return haltRefused(db, current, state, reopened.detail);
+      return haltRefused(db, current, params, state, reopened.detail);
     }
     const fixBaseline = reopened.fixBaseline;
     const guidance = await loadOutstandingMergeGuidance(db, params.taskId);
@@ -1561,9 +1771,9 @@ export async function resolveMergePhase(
     if (dispatched.kind === 'no_provider') {
       const aborted = await section(dir, () => abortMerge(dir));
       const why = 'No CLI provider available for merge conflict resolution.';
-      if (!aborted.ok) return haltUnaborted(db, current, params.taskId, state, aborted, why);
+      if (!aborted.ok) return haltUnaborted(db, current, params, state, aborted, why);
       await settleGivenUp(db, current, params, state);
-      return haltFailed(db, current, why, 'no provider');
+      return haltFailed(db, current, params, state, why, 'no provider');
     }
     // 'ok': the onInserted hook above already saved state.fixInvocationId.
     const row = await setStepStatus(db, current.id, {
@@ -1574,8 +1784,8 @@ export async function resolveMergePhase(
   }
 
   // Crash-recovery: a squash persisted as in-flight re-runs idempotently — the helper
-  // finishes a half-done reset (HEAD moved, changes staged) and re-collapses a completed
-  // one to an identical tree.
+  // finishes a proven half-done reset or recognises a completed squash by its parents
+  // and tree, without resetting or recommitting it.
   if (state.phase === 'squashing') {
     return finishMerge(db, stepDef, current, ctx, params, state);
   }

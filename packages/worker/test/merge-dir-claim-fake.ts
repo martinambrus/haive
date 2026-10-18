@@ -12,6 +12,7 @@ export interface MergeDirClaimFake {
   /** A release that fails, as a database error would. */
   releaseError: Error | null;
   sections: number;
+  activeSections: number;
   reset(): void;
 }
 
@@ -22,12 +23,14 @@ export function createMergeDirClaimFake(): MergeDirClaimFake {
     released: [],
     releaseError: null,
     sections: 0,
+    activeSections: 0,
     reset() {
       this.claims.clear();
       this.fenced = false;
       this.released = [];
       this.releaseError = null;
       this.sections = 0;
+      this.activeSections = 0;
     },
   };
 }
@@ -53,11 +56,13 @@ export function mergeDirClaimOverrides(fake: MergeDirClaimFake = claimFake) {
       if (fake.fenced || claim?.stepId !== owner.stepId)
         throw new StepSupersededError(owner.stepId);
       fake.sections += 1;
+      fake.activeSections += 1;
       open = true;
       try {
         return await fn(db);
       } finally {
         open = false;
+        fake.activeSections -= 1;
       }
     },
     inMergeDirUnlessClaimed: async <T>(

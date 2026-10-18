@@ -40,8 +40,9 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   a transaction of its own so the claim is committed ahead of the writes it covers. The claim is the
   same step's again on a re-entry, a Retry or a base-sync round, and the same task's from an earlier
   step. Another task's claim halts the step, naming that task, without touching its merge; the Retry
-  asks again. It is released only by the owning pass, in the section that removes the base worktree
-  and records `done`; by `handleCancelTask` once a docker listing shows no cli sandbox of the task left (the cancel
+  asks again. It is released by the owning pass, in the section that removes the base worktree and
+  records `done`, or in the section that records a halt leaving no merge of the step's own open or
+  landed and unpushed (nothing opened, git refused it, or it was aborted cleanly); by `handleCancelTask` once a docker listing shows no cli sandbox of the task left (the cancel
   first marks every unended run of the task superseded, so one still queued refuses to create its
   sandbox after the listing, and the listing counts created sandboxes as well as running ones; a run
   that read its last superseded check just before the cancel and creates its sandbox just after the
@@ -55,9 +56,12 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   claim takes the row over and its abort cleans the leftover. The event is written after the
   release, so it also covers a claim that committed after the release read the task's claims; a
   cancelled task without it still holds, since its fixer may still be running, until the stalled sweep gives its teardown up and writes the event with `abandoned: true` ([worker restarts](worker-restarts.md)). A
-  failed task keeps the claim, since its Retry resumes the merge it left open, and so does a crashed
-  worker's, which boot re-drives. Every host-side write to the dir in `merge-resolver.ts` runs in
-  `withMergeDirSection`: one transaction that holds the lock, reads the claim FOR UPDATE and requires
+  failed task keeps the claim while its own merge is open (`MERGE_HEAD` is the step's) or has landed
+  and is not yet pushed, and when git state cannot be read, since its Retry resumes it; so does a
+  crashed worker's, which boot re-drives. A Retry takes the claim again at every phase but `done`.
+  Every host-side write to the dir in `merge-resolver.ts` runs in `withMergeDirSection` except the
+  network-bound ones (the pre-push fetch and the push, below) and the re-sync of Haive's own files
+  that precedes the push: one transaction that holds the lock, reads the claim FOR UPDATE and requires
   it to be this step's, checks with a plain read (`taskWriteTarget`: the pass's epoch, and not
   failed, cancelled or completed) that the task is still live, and refuses with `StepSupersededError`
   before `fn` runs. The task row is not locked: a lock there deadlocked with a Retry, which writes
@@ -70,10 +74,33 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   the holder's own pool write). `fn` writes the database through its `tx` only: a pool write waits
   on a row the section holds, and the step row is never locked (a pass's own `updateOwnedStep` would
   wait on it). Reads a section needs (the secret-mask
-  policy, the squash message, a fetch credential) are made before it. The squash saves `squashing` in
-  a section of its own ahead of the reset, so a crash between the reset and the commit re-enters it.
-  The push runs outside a section, since it is network-bound, and sends the commit a section read
-  from the base ref (`<sha>:refs/heads/<base>`, with the upstream set afterwards; a failed upstream setup does not fail the push, it is logged and
+  policy, the squash message, a fetch credential) are made before it. A landed feature merge is saved as
+  `squashing` in a section of its own (squashed or not; the phase means "landed, not yet done"),
+  with the merge commit's sha (`squashMergeSha`) ahead of any reset, so a crash between the reset and
+  the commit re-enters it. `squashMergeCommit` decides in a fixed
+  order, on parents, trees and ancestry only: a feature already contained in the base tip recorded
+  at the first open (`baseShaBefore`) has nothing to squash, unless `ORIG_HEAD` or HEAD shows this
+  merge's interrupted squash (a two-parent commit on that tip, or the recorded merge), which goes to
+  the proofs below instead; HEAD at that tip is a reset already
+  made, committed only when `ORIG_HEAD` is the recorded merge commit (or, for a row saved without
+  one, a merge of base and feature) with the staged tree; HEAD with that tip as its one parent is a
+  squash already made, accepted on the same proof against its tree. A feature branch that moved
+  after the merge does not break either proof;
+  HEAD as the feature's merge is reset and recommitted unless its tree equals the base's. An
+  unproven reset or squash halts the step with its claim kept. Otherwise (a person's commit on
+  top of the merge, a moved base, an empty net diff) it keeps the merge commit and records why
+  (`squashSkipReason`, shown by `12-worktree-cleanup`), so a squash never folds in a commit that is
+  not the merge's own.
+  The pre-push fetch also runs outside a section, into a ref only that pass names
+  (`refs/haive/pre-push/<step>/<uuid>`, no `FETCH_HEAD`, no tags); the section then records
+  `origin/<base>` from it and counts how far the base is behind, so a pass that lost the claim moves
+  no shared ref. Each pass deletes its own ref when it ends; a crashed pass's leftovers are swept
+  only in the sections that end the step (`done`, or a halt), never at a pass's start, since two
+  passes of one step can be fetching at once. A failure to record it warns and pushes the local base,
+  as a failed fetch does. The push runs outside a section, since it is network-bound, and sends the
+  commit a section read from the base ref (read in the repository's own checkout, whose refs the
+  base worktree shares; a tip that cannot be read halts the step rather than pushing by name, and
+  the plan merge and plan mirror refuse the same way) (`<sha>:refs/heads/<base>`, with the upstream set afterwards; a failed upstream setup does not fail the push, it is logged and
   added to the step's warning), so a pass that
   lost the dir can push only what it merged. The directory is keyed rather than the repository
   because two repository rows can share one local path. The DAG executor needs none: its integration

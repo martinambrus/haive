@@ -23,6 +23,7 @@ import {
   completeMergeHostSide,
   fixerLeftoversWarning,
   handBackAfterMove,
+  isCommitAncestor,
   mergeCommitted,
   openMerge,
   recordFixerLeftovers,
@@ -1810,7 +1811,7 @@ describe('squashMergeCommit (real git)', () => {
       expect(await count(dir, 'main')).toBe(4);
       const mergedTree = (await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim();
 
-      const sha = await squashMergeCommit(dir, before, 'feat: squashed', COMMIT_ENV);
+      const sha = await squashMergeCommit(dir, before, 'feat: squashed', COMMIT_ENV, 'feature/x');
       expect(sha).toBeTruthy();
       expect(await count(dir, 'main')).toBe(2); // init + the single squash commit
       expect((await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(mergedTree);
@@ -1829,7 +1830,9 @@ describe('squashMergeCommit (real git)', () => {
       await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
       const after = (await git(dir, ['rev-parse', 'HEAD'])).trim();
       // A second merge of the same branch is "Already up to date" — nothing to collapse.
-      expect(await squashMergeCommit(dir, after, 'feat: nothing', COMMIT_ENV)).toBeNull();
+      expect(
+        await squashMergeCommit(dir, after, 'feat: nothing', COMMIT_ENV, 'feature/x'),
+      ).toBeNull();
       expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(after);
     } finally {
       await rm(dir, REMOVE);
@@ -1841,7 +1844,9 @@ describe('squashMergeCommit (real git)', () => {
     try {
       const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
       expect(await gitCode(dir, ['merge', '--no-ff', '--no-edit', 'feature/x'])).not.toBe(0);
-      expect(await squashMergeCommit(dir, before, 'feat: nope', COMMIT_ENV)).toBeNull();
+      expect(
+        await squashMergeCommit(dir, before, 'feat: nope', COMMIT_ENV, 'feature/x'),
+      ).toBeNull();
       // The conflict loop still owns it: MERGE_HEAD and the markers survive.
       expect(await gitCode(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
       expect(await readFile(path.join(dir, 'base.txt'), 'utf8')).toContain('<<<<<<<');
@@ -1857,7 +1862,7 @@ describe('squashMergeCommit (real git)', () => {
       await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
       // Simulate a crash between the reset and the commit.
       await git(dir, ['reset', '--soft', before]);
-      const sha = await squashMergeCommit(dir, before, 'feat: resumed', COMMIT_ENV);
+      const sha = await squashMergeCommit(dir, before, 'feat: resumed', COMMIT_ENV, 'feature/x');
       expect(sha).toBeTruthy();
       expect(await count(dir, 'main')).toBe(2);
       expect((await git(dir, ['log', '-1', '--format=%s'])).trim()).toBe('feat: resumed');
@@ -1865,4 +1870,472 @@ describe('squashMergeCommit (real git)', () => {
       await rm(dir, REMOVE);
     }
   });
+});
+
+describe('#280 squash boundary', () => {
+  it.each(['before merge', 'after merge'])(
+    "preserves a person's commit %s without resetting",
+    async (when) => {
+      const dir = await setupCleanFeature();
+      try {
+        const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        if (when === 'before merge') {
+          await writeFile(path.join(dir, 'person.txt'), 'person\n');
+          await git(dir, ['add', 'person.txt']);
+          await git(dir, ['commit', '-m', 'person']);
+        }
+        await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+        if (when === 'after merge') {
+          await writeFile(path.join(dir, 'person.txt'), 'person\n');
+          await git(dir, ['add', 'person.txt']);
+          await git(dir, ['commit', '-m', 'person']);
+        }
+        const head = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+        await squashMergeCommit(dir, before, 'squashed', COMMIT_ENV, 'feature/x');
+        expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+        expect(await gitCode(dir, ['merge-base', '--is-ancestor', head, 'HEAD'])).toBe(0);
+        expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
+});
+
+it('skips a merge whose second parent is not an ancestor of the feature tip', async () => {
+  const dir = await setupCleanFeature();
+  try {
+    const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+    await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+    await git(dir, ['update-ref', 'refs/heads/feature/x', 'feature/x~1']);
+    const head = await git(dir, ['rev-parse', 'HEAD']);
+    const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+    expect(await squashMergeCommit(dir, before, 'unsafe', COMMIT_ENV, 'feature/x')).toBeNull();
+    expect(await git(dir, ['rev-parse', 'HEAD'])).toBe(head);
+    expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+  } finally {
+    await rm(dir, REMOVE);
+  }
+});
+
+describe('#280 fix1 squash recovery', () => {
+  it('recovers a committed squash without resetting or recommitting', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      await git(dir, ['reset', '--soft', before]);
+      await git(dir, ['commit', '-m', 'already squashed']);
+      const head = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+      const skipped = vi.fn();
+      expect(await squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x', skipped)).toBe(
+        head,
+      );
+      expect(skipped).not.toHaveBeenCalled();
+      expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it.each(['missing ORIG_HEAD', 'changed feature', 'changed index', 'changed first parent'])(
+    'throws after a reset with %s instead of silently skipping',
+    async (kind) => {
+      const dir = await setupCleanFeature();
+      try {
+        const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+        await git(dir, ['reset', '--soft', before]);
+        if (kind === 'missing ORIG_HEAD') await rm(path.join(dir, '.git', 'ORIG_HEAD'));
+        if (kind === 'changed feature')
+          await git(dir, ['update-ref', 'refs/heads/feature/x', 'feature/x~1']);
+        if (kind === 'changed index') {
+          await writeFile(path.join(dir, 'extra.txt'), 'extra');
+          await git(dir, ['add', 'extra.txt']);
+        }
+        if (kind === 'changed first parent') {
+          const tree = (await git(dir, ['rev-parse', 'ORIG_HEAD^{tree}'])).trim();
+          const feature = (await git(dir, ['rev-parse', 'feature/x'])).trim();
+          const other = (
+            await git(dir, [
+              'commit-tree',
+              tree,
+              '-p',
+              feature + '~1',
+              '-p',
+              feature,
+              '-m',
+              'other',
+            ])
+          ).trim();
+          await git(dir, ['update-ref', 'ORIG_HEAD', other]);
+        }
+        const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+        const index = await git(dir, ['write-tree']);
+        await expect(
+          squashMergeCommit(dir, before, 'unsafe', COMMIT_ENV, 'feature/x'),
+        ).rejects.toThrow(
+          kind === 'changed index'
+            ? `unstage the other changes in ${dir}, then Retry`
+            : 'Cannot resume squash',
+        );
+        expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+        expect(await git(dir, ['write-tree'])).toBe(index);
+        expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
+
+  it('throws on write-tree failure before resetting', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const head = await git(dir, ['rev-parse', 'HEAD']);
+      await writeFile(path.join(dir, '.git', 'index.lock'), 'held');
+      await expect(
+        squashMergeCommit(dir, before, 'unsafe', COMMIT_ENV, 'feature/x'),
+      ).rejects.toThrow('write-tree');
+      expect(await git(dir, ['rev-parse', 'HEAD'])).toBe(head);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+});
+
+describe('#280 fix2 squash decision order', () => {
+  it('returns null for an ancestor feature even with staged changes and a different HEAD', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await writeFile(path.join(dir, 'person.txt'), 'person');
+      await git(dir, ['add', 'person.txt']);
+      const index = await git(dir, ['write-tree']);
+      const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+      expect(await squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x')).toBeNull();
+      expect(await git(dir, ['write-tree'])).toBe(index);
+      expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+      await git(dir, ['commit', '-m', 'person']);
+      expect(await squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x')).toBeNull();
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it('throws for a reset whose index was emptied', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      await git(dir, ['reset', '--soft', before]);
+      await git(dir, ['read-tree', before]);
+      const index = await git(dir, ['write-tree']);
+      const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+      await expect(
+        squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x'),
+      ).rejects.toThrow(`restore the staged tree from the feature merge in ${dir}, then Retry`);
+      expect(await git(dir, ['write-tree'])).toBe(index);
+      expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+
+  it.each(['amended tree', 'missing ORIG_HEAD'])(
+    'throws for an unproven completed squash: %s',
+    async (kind) => {
+      const dir = await setupCleanFeature();
+      try {
+        const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+        await git(dir, ['reset', '--soft', before]);
+        await git(dir, ['commit', '-m', 'squashed']);
+        if (kind === 'amended tree') {
+          await writeFile(path.join(dir, 'person.txt'), 'person');
+          await git(dir, ['add', 'person.txt']);
+          await git(dir, ['commit', '--amend', '--no-edit']);
+        } else await rm(path.join(dir, '.git', 'ORIG_HEAD'));
+        const head = await git(dir, ['rev-parse', 'HEAD']);
+        const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+        const skipped = vi.fn();
+        await expect(
+          squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x', skipped),
+        ).rejects.toThrow(
+          kind === 'missing ORIG_HEAD'
+            ? `restore ORIG_HEAD to the feature merge in ${dir}, then Retry`
+            : `restore HEAD to the squash commit in ${dir}, then Retry`,
+        );
+        expect(skipped).not.toHaveBeenCalled();
+        expect(await git(dir, ['rev-parse', 'HEAD'])).toBe(head);
+        expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
+
+  it('keeps an empty-net-diff feature merge with a reason and no reset', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['checkout', 'feature/x']);
+      await git(dir, ['rm', 'one.txt', 'two.txt']);
+      await git(dir, ['commit', '-m', 'revert feature']);
+      await git(dir, ['checkout', 'main']);
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const head = await git(dir, ['rev-parse', 'HEAD']);
+      const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+      const skipped = vi.fn();
+      expect(
+        await squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x', skipped),
+      ).toBeNull();
+      expect(skipped).toHaveBeenCalledWith(expect.stringContaining('empty net diff'));
+      expect(await git(dir, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+      expect(await gitCode(dir, ['merge-base', '--is-ancestor', 'feature/x', 'HEAD'])).toBe(0);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+});
+
+describe('#280 fix3 squash recovery', () => {
+  it.each(['reset', 'commit'])(
+    'proves the recorded merge after %s when the feature moves',
+    async (point) => {
+      const dir = await setupCleanFeature();
+      try {
+        const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+        const mergeSha = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        const tree = (await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim();
+        const moved = (
+          await git(dir, ['commit-tree', tree, '-p', 'feature/x', '-m', 'later feature work'])
+        ).trim();
+        await git(dir, ['update-ref', 'refs/heads/feature/x', moved]);
+        await git(dir, ['reset', '--soft', before]);
+        if (point === 'commit') await git(dir, ['commit', '-m', 'squashed']);
+        const head = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        const sha = await squashMergeCommit(
+          dir,
+          before,
+          'retry',
+          COMMIT_ENV,
+          'feature/x',
+          undefined,
+          mergeSha,
+        );
+        expect(sha).toBeTruthy();
+        expect((await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(tree);
+        expect((await git(dir, ['rev-parse', 'HEAD^'])).trim()).toBe(before);
+        if (point === 'commit') expect(sha).toBe(head);
+        expect(await count(dir, 'main')).toBe(2);
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
+
+  it('throws when HEAD cannot be read after the reset', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      await git(dir, ['reset', '--soft', before]);
+      await git(dir, ['update-ref', '-d', 'refs/heads/main']);
+      await expect(
+        squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x'),
+      ).rejects.toThrow('HEAD');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+});
+
+describe('#280 fix4 legacy squash recovery', () => {
+  it.each([
+    'landed',
+    'reset',
+    'commit',
+    'contained',
+    'rewritten',
+    'reset on merge base',
+    'commit on merge base',
+    'missing proof on merge base',
+  ])('handles a moved feature without a recorded merge sha: %s', async (point) => {
+    const dir = await setupCleanFeature();
+    try {
+      if (point.endsWith('on merge base')) {
+        await git(dir, ['merge', '--no-ff', 'feature/x~1', '-m', 'prior merge']);
+      }
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      const mergeSha = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      const tree = (await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim();
+      await git(dir, ['checkout', 'feature/x']);
+      if (point === 'rewritten') {
+        await git(dir, ['reset', '--hard', before]);
+      }
+      await writeFile(path.join(dir, 'later.txt'), 'later feature work');
+      await git(dir, ['add', 'later.txt']);
+      await git(dir, ['commit', '-m', 'later feature work']);
+      await git(dir, ['checkout', 'main']);
+      if (point === 'reset' || point === 'commit' || point.endsWith('on merge base')) {
+        await git(dir, ['reset', '--soft', before]);
+      }
+      if (point === 'commit' || point === 'commit on merge base') {
+        await git(dir, ['commit', '-m', 'already squashed']);
+      }
+      if (point === 'contained') {
+        await git(dir, ['update-ref', 'ORIG_HEAD', mergeSha]);
+      }
+      if (point === 'missing proof on merge base') {
+        await rm(path.join(dir, '.git', 'ORIG_HEAD'));
+        await expect(
+          squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x'),
+        ).rejects.toThrow('Cannot resume squash');
+        expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+        expect((await git(dir, ['write-tree'])).trim()).toBe(tree);
+        return;
+      }
+      const head = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+      const skipped = vi.fn();
+      const sha = await squashMergeCommit(
+        dir,
+        point === 'contained' ? mergeSha : before,
+        'retry',
+        COMMIT_ENV,
+        'feature/x',
+        skipped,
+      );
+      if (point === 'rewritten' || point === 'contained') {
+        expect(sha).toBeNull();
+        expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+        expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+        if (point === 'rewritten') {
+          expect(skipped).toHaveBeenCalledWith(
+            expect.stringContaining('not the recorded feature merge'),
+          );
+        } else {
+          expect(skipped).not.toHaveBeenCalled();
+        }
+      } else {
+        expect(sha).toBeTruthy();
+        expect(skipped).not.toHaveBeenCalled();
+        expect((await git(dir, ['rev-parse', 'HEAD^'])).trim()).toBe(before);
+        expect(await count(dir, 'main')).toBe(point.endsWith('on merge base') ? 4 : 2);
+        if (point === 'commit' || point === 'commit on merge base') {
+          expect(sha).toBe(head);
+          expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+        }
+      }
+      expect((await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(tree);
+      expect(await gitCode(dir, ['show', 'HEAD:later.txt'])).not.toBe(0);
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+});
+
+it('#280 fix4 throws when git cannot check ancestry', async () => {
+  const dir = await setupCleanFeature();
+  try {
+    const feature = (await git(dir, ['rev-parse', 'feature/x'])).trim();
+    await expect(isCommitAncestor(dir, '0'.repeat(40), feature)).rejects.toThrow(
+      'Could not check feature ancestry before squash',
+    );
+  } finally {
+    await rm(dir, REMOVE);
+  }
+});
+
+describe('#280 fix7 interrupted squash before containment', () => {
+  it.each(['reset', 'commit'])(
+    'throws for a legacy %s after the feature is rewound into the base',
+    async (point) => {
+      const dir = await setupCleanFeature();
+      try {
+        const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+        const mergeSha = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        const tree = (await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim();
+        await git(dir, ['reset', '--soft', before]);
+        if (point === 'commit') {
+          await git(dir, ['commit', '-m', 'already squashed']);
+        }
+        await git(dir, ['update-ref', 'refs/heads/feature/x', before]);
+        expect(
+          await gitCode(dir, ['merge-base', '--is-ancestor', 'ORIG_HEAD^2', 'feature/x']),
+        ).toBe(1);
+        const head = await git(dir, ['rev-parse', 'HEAD']);
+        const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+        const skipped = vi.fn();
+        await expect(
+          squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x', skipped),
+        ).rejects.toThrow('Cannot resume squash');
+        expect(skipped).not.toHaveBeenCalled();
+        expect(await git(dir, ['rev-parse', 'HEAD'])).toBe(head);
+        expect((await git(dir, ['rev-parse', 'ORIG_HEAD'])).trim()).toBe(mergeSha);
+        expect((await git(dir, ['write-tree'])).trim()).toBe(tree);
+        expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
+
+  it.each(['landed', 'reset', 'commit'])(
+    'proves a recorded %s merge after the feature is rewound into the base',
+    async (point) => {
+      const dir = await setupCleanFeature();
+      try {
+        const before = (await git(dir, ['rev-parse', 'feature/x~1'])).trim();
+        const tree = (await git(dir, ['rev-parse', 'feature/x^{tree}'])).trim();
+        const mergeSha = (
+          await git(dir, ['commit-tree', tree, '-p', before, '-p', before + '~1', '-m', 'merge'])
+        ).trim();
+        await git(dir, ['reset', '--hard', mergeSha]);
+        if (point !== 'landed') {
+          await git(dir, ['reset', '--soft', before]);
+        }
+        if (point === 'commit') {
+          await git(dir, ['commit', '-m', 'already squashed']);
+        }
+        await git(dir, ['update-ref', 'refs/heads/feature/x', before + '~1']);
+        expect(await gitCode(dir, ['merge-base', '--is-ancestor', mergeSha + '^2', before])).toBe(
+          0,
+        );
+        const head = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        const reflog = await git(dir, ['reflog', '--format=%H %gs']);
+        const skipped = vi.fn();
+        const sha = await squashMergeCommit(
+          dir,
+          before,
+          'retry',
+          COMMIT_ENV,
+          'feature/x',
+          skipped,
+          mergeSha,
+        );
+        expect(sha).toBeTruthy();
+        expect(skipped).not.toHaveBeenCalled();
+        expect((await git(dir, ['rev-parse', 'HEAD'])).trim()).toBe(sha);
+        expect((await git(dir, ['rev-parse', 'HEAD^'])).trim()).toBe(before);
+        expect((await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(tree);
+        expect((await git(dir, ['status', '--porcelain'])).trim()).toBe('');
+        if (point === 'commit') {
+          expect(sha).toBe(head);
+          expect(await git(dir, ['reflog', '--format=%H %gs'])).toBe(reflog);
+        }
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
 });

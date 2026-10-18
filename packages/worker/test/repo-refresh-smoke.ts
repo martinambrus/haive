@@ -2947,7 +2947,7 @@ async function main(): Promise<void> {
         const row = (await db.query.taskSteps.findFirst({
           where: eq(schema.taskSteps.id, ctx.taskStepId),
         }))!;
-        // The pending phase takes the claim itself; a state mid-way through the fixer loop is past it.
+        // Every unfinished phase takes the claim again; seed the claim a fixer already holds.
         if (state) {
           await claimMergeDir(db, {
             mergeDir: c.dest,
