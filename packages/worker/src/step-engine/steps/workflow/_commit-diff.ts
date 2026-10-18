@@ -203,6 +203,11 @@ export async function buildCommitDiffArtifact(
     // which is not a readable file and would leave its entire diff empty.
     '--untracked-files=all',
   ]);
+  if (statusRes.code !== 0) {
+    throw new Error(
+      `git status failed in ${workspacePath}: ${statusRes.stderr.trim() || statusRes.stdout.trim()}`,
+    );
+  }
   const entries = parsePorcelainZ(statusRes.stdout);
 
   const headShaRes = await gitRun(workspacePath, ['rev-parse', 'HEAD']);

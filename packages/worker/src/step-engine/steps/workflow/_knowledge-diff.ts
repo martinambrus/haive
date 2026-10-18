@@ -61,6 +61,11 @@ export async function buildKnowledgeDiffArtifact(
     '--',
     ...pathspecs,
   ]);
+  if (statusRes.code !== 0) {
+    throw new Error(
+      `git status failed in ${workspacePath}: ${statusRes.stderr.trim() || statusRes.stdout.trim()}`,
+    );
+  }
   const entries = parsePorcelainZ(statusRes.stdout);
   const capped = entries.slice(0, MAX_FILES);
 

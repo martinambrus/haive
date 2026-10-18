@@ -17,6 +17,24 @@ const GIT_ENV = {
 };
 const git = (dir: string, args: string[]) => exec('git', args, { cwd: dir, env: GIT_ENV });
 
+describe('buildCommitDiffArtifact', () => {
+  it('rejects a failed git status instead of reporting no changes', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'commit-diff-'));
+    try {
+      const fakeGitRun = async (_cwd: string, args: string[]) =>
+        args.includes('status')
+          ? { code: 128, stdout: '', stderr: 'fatal: index file corrupt' }
+          : { code: 0, stdout: 'a'.repeat(40), stderr: '' };
+
+      await expect(buildCommitDiffArtifact(dir, fakeGitRun)).rejects.toThrow(
+        `git status failed in ${dir}: fatal: index file corrupt`,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('parsePorcelainZ', () => {
   it('reads a plain, an untracked and a deleted record', () => {
     expect(parsePorcelainZ(' M a.php\0?? b.php\0 D c.php\0')).toEqual([

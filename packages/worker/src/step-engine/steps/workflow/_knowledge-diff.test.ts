@@ -49,6 +49,23 @@ async function artifactFor(untracked: number): Promise<CommitDiffArtifact> {
 }
 
 describe('buildKnowledgeDiffArtifact', () => {
+  it('rejects a failed git status instead of reporting no changes', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'knowledge-diff-'));
+    try {
+      const fakeGitRun = async (_cwd: string, args: string[]) =>
+        args.includes('status')
+          ? { code: 128, stdout: '', stderr: 'fatal: index file corrupt' }
+          : { code: 0, stdout: 'a'.repeat(40), stderr: '' };
+      const built = buildKnowledgeDiffArtifact(dir, fakeGitRun).then(async (written) =>
+        JSON.parse(await readFile(written, 'utf8')),
+      );
+
+      await expect(built).rejects.toThrow(`git status failed in ${dir}: fatal: index file corrupt`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('reports the real count and truncated when the git list is cut', async () => {
     const artifact = await artifactFor(MAX_FILES + 1);
 
