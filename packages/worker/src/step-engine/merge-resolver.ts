@@ -400,6 +400,16 @@ async function reachDone(
       ]);
       return tip.code === 0 ? tip.stdout.trim() : undefined;
     });
+    if (!sha) {
+      return haltFailed(
+        db,
+        current,
+        params,
+        pushing,
+        `could not read ${state.baseBranch}'s tip; the merge is saved locally, retry`,
+        'base tip unreadable',
+      );
+    }
     const fv = (current.formValues ?? {}) as { credentialId?: string; setUpstream?: boolean };
     let upstreamError: string | undefined;
     try {
@@ -417,7 +427,7 @@ async function reachDone(
         db,
         current,
         params,
-        state,
+        pushing,
         `Merge committed, but pushing '${state.baseBranch}' to origin failed: ${
           (err as Error).message
         } The merge is saved locally — retry the push.`,
@@ -484,6 +494,7 @@ async function finishMerge(
   params: AdvanceStepParams,
   state: MergeResolveState,
 ): Promise<MergeResolved> {
+  state = { ...state, merged: true };
   const squashed = await squashFeatureMerge(db, current, ctx, params, state);
   if (
     squashed.pushAfterMerge &&
@@ -635,7 +646,18 @@ async function prePushSync(
 ): Promise<MergeResolved> {
   const base = state.baseBranch;
   const fv = (current.formValues ?? {}) as { credentialId?: string };
-  const fetchRef = `refs/haive/pre-push/${current.id}/${randomUUID()}`;
+  const refPrefix = `refs/haive/pre-push/${current.id}/`;
+  const leftovers = await gitRun(state.mergeDir, [
+    'for-each-ref',
+    '--format=%(refname)',
+    refPrefix,
+  ]);
+  if (leftovers.code === 0) {
+    for (const ref of leftovers.stdout.trim().split('\n').filter(Boolean)) {
+      await gitRun(state.mergeDir, ['update-ref', '-d', ref]);
+    }
+  }
+  const fetchRef = `${refPrefix}${randomUUID()}`;
   let fetched: Awaited<ReturnType<typeof fetchForSync>>;
   let decision: { behind: number; next: MergeResolveState | null } | undefined;
   try {
@@ -648,15 +670,17 @@ async function prePushSync(
       fetchRef,
     );
     if (fetched.ok) {
-      decision = await inMergeDir(db, current, params, state.mergeDir, async (tx) => {
+      const checked = await inMergeDir<
+        { error: string } | { behind: number; next: MergeResolveState | null }
+      >(db, current, params, state.mergeDir, async (tx) => {
         const tip = await revParse(state.mergeDir, fetchRef);
-        if (!tip) throw new Error('Pre-push fetch did not record a commit');
+        if (!tip) return { error: 'Pre-push fetch did not record a commit' };
         const promoted = await gitRun(state.mergeDir, [
           'update-ref',
           `refs/remotes/origin/${base}`,
           tip,
         ]);
-        if (promoted.code !== 0) throw new Error('Could not update the fetched base ref');
+        if (promoted.code !== 0) return { error: 'Could not update the fetched base ref' };
         const behind = await countAhead(state.mergeDir, `${base}..origin/${base}`);
         if (behind === 0 || (state.baseSyncRounds ?? 0) >= MAX_BASE_SYNC_ROUNDS) {
           return { behind, next: null };
@@ -674,6 +698,8 @@ async function prePushSync(
         await saveMergeState(tx, current.id, next);
         return { behind, next };
       });
+      if ('error' in checked) fetched = { ok: false, error: checked.error };
+      else decision = checked;
     }
   } finally {
     await gitRun(state.mergeDir, ['update-ref', '-d', fetchRef]);
@@ -845,7 +871,12 @@ async function halt(
       errorMessage: message,
       endedAt: new Date(),
     });
-  if (!state) return record(db);
+  if (!state) {
+    return db.transaction(async (tx) => {
+      if (beforeRecord) await beforeRecord(tx);
+      return record(tx);
+    });
+  }
   return inMergeDir(db, current, params, state.mergeDir, async (tx) => {
     const open = await gitRun(state.mergeDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
     const baseline = state.fixBaseline;
@@ -856,7 +887,9 @@ async function halt(
       ((baseline && 'mergeHead' in baseline && open.stdout.trim() === baseline.mergeHead) ||
         open.stdout.trim() === feature);
     if (beforeRecord) await beforeRecord(tx);
-    if (open.code === 1 || (open.code === 0 && feature !== null && !own)) {
+    const landedUnpushed =
+      !state.pushed && (state.phase === 'squashing' || state.phase === 'pushing' || state.merged);
+    if (!landedUnpushed && (open.code === 1 || (open.code === 0 && feature !== null && !own))) {
       await releaseMergeDir(tx, { mergeDir: state.mergeDir, stepId: current.id });
     }
     return record(tx);
