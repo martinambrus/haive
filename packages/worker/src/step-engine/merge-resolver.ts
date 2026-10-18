@@ -539,7 +539,7 @@ async function squashFeatureMerge(
   // commit in place is the safe outcome: the work is integrated either way.
   if (!state.baseShaBefore) return { state, current };
 
-  const squashing: MergeResolveState = {
+  let squashing: MergeResolveState = {
     ...state,
     phase: 'squashing',
     merged: false,
@@ -550,9 +550,28 @@ async function squashFeatureMerge(
   const message = await buildSquashCommitMessage(db, ctx.taskId, state.featureBranch);
   const baseShaBefore = state.baseShaBefore;
   // Committed ahead of the reset, so a crash between the reset and the commit re-enters here.
-  await inMergeDir(db, current, params, squashing.mergeDir, (tx) =>
-    saveMergeState(tx, current.id, squashing),
-  );
+  await inMergeDir(db, current, params, squashing.mergeDir, async (tx) => {
+    if (!squashing.squashMergeSha) {
+      const parents = await gitRun(squashing.mergeDir, [
+        'rev-list',
+        '--parents',
+        '-n',
+        '1',
+        'HEAD',
+      ]);
+      const commits = parents.stdout.trim().split(/\s+/);
+      const feature = await revParse(squashing.mergeDir, `${squashing.featureBranch}^{commit}`);
+      if (
+        parents.code === 0 &&
+        commits.length === 3 &&
+        commits[1] === baseShaBefore &&
+        commits[2] === feature
+      ) {
+        squashing = { ...squashing, squashMergeSha: commits[0] };
+      }
+    }
+    await saveMergeState(tx, current.id, squashing);
+  });
   let updated = current;
   const next = await inMergeDir(db, current, params, squashing.mergeDir, async (tx) => {
     let skipped: string | undefined;
@@ -565,6 +584,7 @@ async function squashFeatureMerge(
       (reason) => {
         skipped = reason;
       },
+      squashing.squashMergeSha,
     );
     if (skipped) {
       updated = await addStepWarning(tx, current, skipped);

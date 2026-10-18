@@ -1299,8 +1299,12 @@ export async function squashMergeCommit(
   gitEnv: Record<string, string>,
   featureRef: string,
   onSkipped?: (reason: string) => void,
+  squashMergeSha?: string,
 ): Promise<string | null> {
-  const feature = await revParse(worktreePath, `${featureRef}^{commit}`);
+  const feature = await revParse(
+    worktreePath,
+    squashMergeSha ? `${squashMergeSha}^2^{commit}` : `${featureRef}^{commit}`,
+  );
   if (feature) {
     const contained = await gitRun(worktreePath, [
       'merge-base',
@@ -1314,7 +1318,10 @@ export async function squashMergeCommit(
   const open = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (open.code === 0) return null;
   const head = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
-  if (head.code !== 0) return null;
+  if (head.code !== 0) {
+    if (baseShaBefore) throw new Error('Cannot resume squash: HEAD is unreadable.');
+    return null;
+  }
 
   const resetAlready = head.stdout.trim() === baseShaBefore;
   const headParents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', 'HEAD']);
@@ -1334,8 +1341,11 @@ export async function squashMergeCommit(
   const candidate = resetAlready || committedAlready ? 'ORIG_HEAD' : 'HEAD';
   const parents = await gitRun(worktreePath, ['rev-list', '--parents', '-n', '1', candidate]);
   const commits = parents.stdout.trim().split(/\s+/);
-  if (parents.code !== 0 || commits.length !== 3 || !feature || commits[2] !== feature) {
-    return skip('the tip is not a two-parent merge of the feature tip');
+  const matchesMerge = squashMergeSha
+    ? commits[0] === squashMergeSha
+    : Boolean(feature) && commits[2] === feature;
+  if (parents.code !== 0 || commits.length !== 3 || !matchesMerge) {
+    return skip('the tip is not the recorded feature merge');
   }
   if (commits[1] !== baseShaBefore) {
     return skip('the merge first parent differs from the recorded base tip');

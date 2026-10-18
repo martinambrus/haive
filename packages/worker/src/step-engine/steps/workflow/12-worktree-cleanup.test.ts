@@ -4263,3 +4263,96 @@ describe('#280 fix3 base-sync exhaustion', () => {
     }
   });
 });
+
+describe('#280 fix3 squash recording', () => {
+  it.each(['reset', 'commit'])(
+    'resumes after %s with a moved feature using the persisted merge sha',
+    async (point) => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const before = (await git(parent, ['rev-parse', 'HEAD'])).trim();
+        await git(parent, ['merge', '--no-ff', 'feature/x', '-m', 'merge']);
+        const mergeSha = (await git(parent, ['rev-parse', 'HEAD'])).trim();
+        const tree = (await git(parent, ['rev-parse', 'HEAD^{tree}'])).trim();
+        await writeFile(path.join(wt, 'later.txt'), 'later feature work');
+        await git(wt, ['add', 'later.txt']);
+        await git(wt, ['commit', '-m', 'later feature work']);
+        await git(parent, ['reset', '--soft', before]);
+        if (point === 'commit') await git(parent, ['commit', '-m', 'squashed']);
+        const head = (await git(parent, ['rev-parse', 'HEAD'])).trim();
+        const state: MergeResolveState = {
+          mode: 'same-branch',
+          phase: 'squashing',
+          baseBranch: 'main',
+          featureBranch: 'feature/x',
+          mergeDir: parent,
+          sandboxMergeDir: parent,
+          fixInvocationId: null,
+          conflictRetries: 0,
+          pendingQuestion: null,
+          pushAfterMerge: false,
+          squashAfterMerge: true,
+          baseShaBefore: before,
+          squashMergeSha: mergeSha,
+          merged: false,
+          skipReason: null,
+          pushed: false,
+        };
+        const h = makeDb();
+        const result = await resolveMergePhase(
+          h.db as never,
+          step,
+          mkCurrent(det(wt), { action: 'merge_remove' }, state),
+          mkCtx(parent, h.db),
+          mkParams(h.db),
+        );
+        expect(result.resolved).toBe(true);
+        expect(h.getState()).toMatchObject({
+          phase: 'done',
+          merged: true,
+          mergedAt: expect.any(String),
+          squashMergeSha: mergeSha,
+          squashCommitSha: expect.stringMatching(/^[a-f0-9]{40}$/),
+        });
+        expect((await git(parent, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(tree);
+        expect(await gitCode(parent, ['show', 'HEAD:later.txt'])).not.toBe(0);
+        if (point === 'commit') expect(h.getState()?.squashCommitSha).toBe(head);
+        expect(h.stateWrites.every((row) => !row.merged || Boolean(row.mergedAt))).toBe(true);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('records the feature merge sha before the soft reset', async () => {
+    const { parent, wt } = await setupWorktree();
+    try {
+      const h = makeDb();
+      let recorded = false;
+      fetchProbe.intercept = (args) => {
+        if (args[0] === 'reset' && args[1] === '--soft') {
+          expect(h.getState()).toMatchObject({
+            phase: 'squashing',
+            squashMergeSha: expect.stringMatching(/^[a-f0-9]{40}$/),
+          });
+          recorded = true;
+        }
+        return null;
+      };
+      const result = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove', squashMerge: true }),
+        mkCtx(parent, h.db),
+        mkParams(h.db),
+      );
+      expect(result.resolved).toBe(true);
+      expect(recorded).toBe(true);
+      expect(h.getState()).toMatchObject({
+        squashMergeSha: (await git(parent, ['rev-parse', 'ORIG_HEAD'])).trim(),
+      });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+});

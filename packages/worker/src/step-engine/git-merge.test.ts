@@ -2094,3 +2094,56 @@ describe('#280 fix2 squash decision order', () => {
     }
   });
 });
+
+describe('#280 fix3 squash recovery', () => {
+  it.each(['reset', 'commit'])(
+    'proves the recorded merge after %s when the feature moves',
+    async (point) => {
+      const dir = await setupCleanFeature();
+      try {
+        const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+        const mergeSha = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        const tree = (await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim();
+        const moved = (
+          await git(dir, ['commit-tree', tree, '-p', 'feature/x', '-m', 'later feature work'])
+        ).trim();
+        await git(dir, ['update-ref', 'refs/heads/feature/x', moved]);
+        await git(dir, ['reset', '--soft', before]);
+        if (point === 'commit') await git(dir, ['commit', '-m', 'squashed']);
+        const head = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+        const sha = await squashMergeCommit(
+          dir,
+          before,
+          'retry',
+          COMMIT_ENV,
+          'feature/x',
+          undefined,
+          mergeSha,
+        );
+        expect(sha).toBeTruthy();
+        expect((await git(dir, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(tree);
+        expect((await git(dir, ['rev-parse', 'HEAD^'])).trim()).toBe(before);
+        if (point === 'commit') expect(sha).toBe(head);
+        expect(await count(dir, 'main')).toBe(2);
+      } finally {
+        await rm(dir, REMOVE);
+      }
+    },
+  );
+
+  it('throws when HEAD cannot be read after the reset', async () => {
+    const dir = await setupCleanFeature();
+    try {
+      const before = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+      await git(dir, ['merge', '--no-ff', '--no-edit', 'feature/x']);
+      await git(dir, ['reset', '--soft', before]);
+      await git(dir, ['update-ref', '-d', 'refs/heads/main']);
+      await expect(
+        squashMergeCommit(dir, before, 'retry', COMMIT_ENV, 'feature/x'),
+      ).rejects.toThrow('HEAD');
+    } finally {
+      await rm(dir, REMOVE);
+    }
+  });
+});
