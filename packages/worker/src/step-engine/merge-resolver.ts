@@ -12,6 +12,7 @@ import {
 import {
   MERGE_CLARIFICATION_ANSWERED_EVENT,
   MERGE_CLARIFICATION_ASKED_EVENT,
+  logger,
   type FormSchema,
 } from '@haive/shared';
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
@@ -339,6 +340,30 @@ async function taskRepositoryId(db: Database, taskId: string): Promise<string | 
   return task?.repositoryId ?? null;
 }
 
+async function sweepPrePushRefs(cwd: string, stepId: string): Promise<void> {
+  let refs: string[];
+  try {
+    const listed = await gitRun(cwd, [
+      'for-each-ref',
+      '--format=%(refname)',
+      `refs/haive/pre-push/${stepId}/`,
+    ]);
+    if (listed.code !== 0) throw new Error(listed.stderr || listed.stdout);
+    refs = listed.stdout.trim().split('\n').filter(Boolean);
+  } catch (err) {
+    logger.warn({ err, stepId, cwd }, 'could not list pre-push refs for cleanup');
+    return;
+  }
+  for (const ref of refs) {
+    try {
+      const deleted = await gitRun(cwd, ['update-ref', '-d', ref]);
+      if (deleted.code !== 0) throw new Error(deleted.stderr || deleted.stdout);
+    } catch (err) {
+      logger.warn({ err, stepId, cwd, ref }, 'could not delete pre-push ref');
+    }
+  }
+}
+
 function asideHalt(
   why:
     | { outcome: 'refused'; reason: string }
@@ -459,6 +484,7 @@ async function reachDone(
   };
   const finished = state;
   const row = await inMergeDir(db, current, params, finished.mergeDir, async (tx) => {
+    await sweepPrePushRefs(ctx.repoPath, current.id);
     let updated = current;
     if (finished.mode === 'cross-branch') {
       const kept = await removeBaseWorktree(ctx.repoPath, finished.mergeDir);
@@ -681,8 +707,7 @@ async function prePushSync(
 ): Promise<MergeResolved> {
   const base = state.baseBranch;
   const fv = (current.formValues ?? {}) as { credentialId?: string };
-  const refPrefix = `refs/haive/pre-push/${current.id}/`;
-  const fetchRef = `${refPrefix}${randomUUID()}`;
+  const fetchRef = `refs/haive/pre-push/${current.id}/${randomUUID()}`;
   let fetched: Awaited<ReturnType<typeof fetchForSync>>;
   let decision: { behind: number; next: MergeResolveState | null } | undefined;
   try {
@@ -697,19 +722,6 @@ async function prePushSync(
     const checked = await inMergeDir<
       { error: string } | { behind: number; next: MergeResolveState | null }
     >(db, current, params, state.mergeDir, async (tx) => {
-      const leftovers = await gitRun(state.mergeDir, [
-        'for-each-ref',
-        '--format=%(refname)',
-        refPrefix,
-      ]);
-      if (leftovers.code === 0) {
-        for (const ref of leftovers.stdout
-          .trim()
-          .split('\n')
-          .filter((ref) => ref && ref !== fetchRef)) {
-          await gitRun(state.mergeDir, ['update-ref', '-d', ref]);
-        }
-      }
       if (!fetched.ok) return { error: `fetch failed: ${fetched.error}` };
       const tip = await revParse(state.mergeDir, fetchRef);
       if (!tip) return { error: `could not record origin/${base}: fetched commit unavailable` };
@@ -920,6 +932,7 @@ async function halt(
     });
   }
   return inMergeDir(db, current, params, state.mergeDir, async (tx) => {
+    await sweepPrePushRefs(state.mergeDir, current.id);
     const open = await gitRun(state.mergeDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
     const baseline = state.fixBaseline;
     const feature =

@@ -21,6 +21,7 @@ import {
   MERGE_CLARIFICATION_ANSWERED_EVENT,
   MERGE_CLARIFICATION_ASKED_EVENT,
   configService,
+  logger as sharedLogger,
   extractFormDefaults,
   validateFormValues,
   type PlanMirror,
@@ -34,7 +35,11 @@ import {
   type ProjectRender,
 } from '@haive/shared/project-state';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
-import { loadOutstandingMergeGuidance, resolveMergePhase } from '../../merge-resolver.js';
+import {
+  haltFailed,
+  loadOutstandingMergeGuidance,
+  resolveMergePhase,
+} from '../../merge-resolver.js';
 import { HAIVE_OWN_FILES_LINE } from '../../git-merge.js';
 import { StepSupersededError } from '../../step-ownership.js';
 import { resolveTaskDispatch } from '../../../orchestrator/dispatcher.js';
@@ -3995,7 +4000,7 @@ describe('#280 fix1 claims and push', () => {
     },
   );
 
-  it('sweeps leftover private refs inside the decision section, preserving other steps', async () => {
+  it('#280 fix6 sweeps leftover private refs only in the done section, preserving other steps', async () => {
     const { parent, wt } = await setupWorktree();
     const bare = await pushParentMainToOrigin(parent);
     try {
@@ -4005,7 +4010,10 @@ describe('#280 fix1 claims and push', () => {
       const sweeps: number[] = [];
       let promotions = 0;
       fetchProbe.intercept = (argv) => {
-        if (argv[0] === 'update-ref' && argv[1] === 'refs/remotes/origin/main') promotions += 1;
+        if (argv[0] === 'update-ref' && argv[1] === 'refs/remotes/origin/main') {
+          promotions += 1;
+          expect(sweeps).toEqual([]);
+        }
         if (argv[0] === 'for-each-ref' && argv.includes('refs/haive/pre-push/step1/'))
           sweeps.push(claimFake.activeSections);
         return null;
@@ -4167,6 +4175,8 @@ it('#280 fix2 retries a pushing halt after its cross-branch base worktree vanish
     expect(out).toMatchObject({ resolved: false, result: { status: 'failed' } });
     expect(claimFake.claims.get(dir)?.stepId).toBe('step1');
     await git(parent, ['worktree', 'remove', dir]);
+    const leftover = 'refs/haive/pre-push/step1/crashed';
+    await git(parent, ['update-ref', leftover, 'HEAD']);
     fetchProbe.intercept = null;
     await h.db.update().set({ status: 'running' }).where(null);
     const retried = await resolveMergePhase(
@@ -4177,6 +4187,7 @@ it('#280 fix2 retries a pushing halt after its cross-branch base worktree vanish
       mkParams(h.db),
     );
     expect(retried.resolved).toBe(true);
+    expect(await gitCode(parent, ['rev-parse', '--verify', leftover])).not.toBe(0);
     expect(h.getState()).toMatchObject({ phase: 'done', pushed: true });
     expect(claimFake.claims.has(dir)).toBe(false);
     expect(fetchProbe.pushes).toHaveLength(1);
@@ -4421,6 +4432,212 @@ describe('#280 fix4 squash recording', () => {
         expect((await git(parent, ['rev-parse', 'HEAD^{tree}'])).trim()).toBe(tree);
         expect(await gitCode(parent, ['show', 'HEAD:later.txt'])).not.toBe(0);
       } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe('#280 fix6 pre-push ref lifetime', () => {
+  it('keeps both fetched tips until two concurrent passes finish their decision sections', async () => {
+    const { parent, wt } = await setupWorktree();
+    const bare = await pushParentMainToOrigin(parent);
+    try {
+      await writeFile(path.join(wt, 'base.txt'), 'feature edit\n');
+      await git(wt, ['commit', '-am', 'feature edit']);
+      await git(parent, ['merge', '--no-ff', 'feature/x', '-m', 'merge']);
+      await advanceOrigin(bare, 'base.txt', 'origin edit\n');
+      const fetchedTip = (await git(bare, ['rev-parse', 'main'])).trim();
+      const firstFetched = Promise.withResolvers<void>();
+      const secondFetched = Promise.withResolvers<void>();
+      const firstDecided = Promise.withResolvers<void>();
+      let fetches = 0;
+      let promotions = 0;
+      const privateRefs: string[] = [];
+      fetchProbe.intercept = (argv) => {
+        if (argv.includes('fetch')) privateRefs.push(argv.at(-1)!.split(':')[1]!);
+        if (argv[0] === 'update-ref' && argv[1] === 'refs/remotes/origin/main') {
+          expect(argv[2]).toBe(fetchedTip);
+          promotions += 1;
+        }
+        return null;
+      };
+      fetchProbe.afterFetch = async () => {
+        fetches += 1;
+        if (fetches === 1) {
+          firstFetched.resolve();
+          await secondFetched.promise;
+        } else {
+          secondFetched.resolve();
+          await firstDecided.promise;
+        }
+      };
+      const h = makeDb();
+      const warnings = vi.fn();
+      const ctx = mkCtx(parent, h.db);
+      ctx.logger = { ...ctx.logger, warn: warnings } as unknown as StepContext['logger'];
+      const state: MergeResolveState = {
+        mode: 'same-branch',
+        phase: 'squashing',
+        baseBranch: 'main',
+        featureBranch: 'feature/x',
+        mergeDir: parent,
+        sandboxMergeDir: parent,
+        fixInvocationId: null,
+        conflictRetries: 0,
+        pendingQuestion: null,
+        pushAfterMerge: true,
+        merged: false,
+        skipReason: null,
+        pushed: false,
+      };
+      const current = mkCurrent(det(wt), { action: 'merge_remove' }, state);
+      const params = mkParams(h.db, {
+        providers: [{ id: 'p1', enabled: true }],
+        deps: { enqueueCliInvocation: async () => {} },
+      });
+      const pass = () => resolveMergePhase(h.db as never, step, current, ctx, params);
+      const first = pass();
+      await firstFetched.promise;
+      const second = pass();
+      let firstResult;
+      let secondTipCode;
+      try {
+        firstResult = await first;
+        secondTipCode = await gitCode(parent, ['rev-parse', '--verify', privateRefs[1]!]);
+      } finally {
+        firstDecided.resolve();
+      }
+      const secondResult = await second;
+      expect(firstResult).toMatchObject({ resolved: false, result: { status: 'waiting_cli' } });
+      expect(secondTipCode).toBe(0);
+      expect(secondResult).toMatchObject({ resolved: false, result: { status: 'waiting_cli' } });
+      expect(promotions).toBe(2);
+      expect(await git(parent, ['rev-parse', 'origin/main'])).toBe(`${fetchedTip}\n`);
+      expect(warnings).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('pushing the local base as-is'),
+      );
+      expect(fetchProbe.pushes).toEqual([]);
+      expect(
+        await git(parent, ['for-each-ref', '--format=%(refname)', 'refs/haive/pre-push/']),
+      ).toBe('');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['done', 'halt'] as const)(
+    'sweeps crashed-pass refs at %s without touching other steps',
+    async (ending) => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        const own = 'refs/haive/pre-push/step1/leftover';
+        const other = 'refs/haive/pre-push/step10/leftover';
+        await git(parent, ['update-ref', own, 'HEAD']);
+        await git(parent, ['update-ref', other, 'HEAD']);
+        const sweeps: number[] = [];
+        fetchProbe.intercept = (argv) => {
+          if (argv[0] === 'for-each-ref' && argv.includes('refs/haive/pre-push/step1/')) {
+            sweeps.push(claimFake.activeSections);
+          }
+          return null;
+        };
+        const h = makeDb();
+        const state: MergeResolveState = {
+          mode: 'same-branch',
+          phase: 'pushing',
+          baseBranch: 'main',
+          featureBranch: 'feature/x',
+          mergeDir: parent,
+          sandboxMergeDir: parent,
+          fixInvocationId: null,
+          conflictRetries: 0,
+          pendingQuestion: null,
+          pushAfterMerge: false,
+          merged: true,
+          skipReason: null,
+          pushed: false,
+        };
+        const current = mkCurrent(det(wt), { action: 'merge_remove' }, state);
+        const result =
+          ending === 'done'
+            ? await resolveMergePhase(
+                h.db as never,
+                step,
+                current,
+                mkCtx(parent, h.db),
+                mkParams(h.db),
+              )
+            : await haltFailed(h.db as never, current, mkParams(h.db), state, 'blocked', 'blocked');
+        expect(result.resolved).toBe(ending === 'done');
+        expect(sweeps).toEqual([1]);
+        expect(
+          await git(parent, ['for-each-ref', '--format=%(refname)', 'refs/haive/pre-push/']),
+        ).toBe(`${other}\n`);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['done', 'halt'] as const)(
+    'logs a failed ref deletion and continues the %s section',
+    async (ending) => {
+      const { parent, wt } = await setupWorktree();
+      const warn = vi.spyOn(sharedLogger, 'warn');
+      try {
+        const locked = 'refs/haive/pre-push/step1/a-locked';
+        const leftover = 'refs/haive/pre-push/step1/leftover';
+        await git(parent, ['update-ref', locked, 'HEAD']);
+        await git(parent, ['update-ref', leftover, 'HEAD']);
+        fetchProbe.intercept = (argv) =>
+          argv[0] === 'update-ref' && argv[1] === '-d' && argv[2] === locked
+            ? { code: 128, stdout: '', stderr: 'locked ref' }
+            : null;
+        const h = makeDb();
+        const state: MergeResolveState = {
+          mode: 'same-branch',
+          phase: 'pushing',
+          baseBranch: 'main',
+          featureBranch: 'feature/x',
+          mergeDir: parent,
+          sandboxMergeDir: parent,
+          fixInvocationId: null,
+          conflictRetries: 0,
+          pendingQuestion: null,
+          pushAfterMerge: false,
+          merged: true,
+          skipReason: null,
+          pushed: false,
+        };
+        const current = mkCurrent(det(wt), { action: 'merge_remove' }, state);
+        const result =
+          ending === 'done'
+            ? await resolveMergePhase(
+                h.db as never,
+                step,
+                current,
+                mkCtx(parent, h.db),
+                mkParams(h.db),
+              )
+            : await haltFailed(h.db as never, current, mkParams(h.db), state, 'blocked', 'blocked');
+        expect(result.resolved).toBe(ending === 'done');
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ ref: locked }),
+          expect.any(String),
+        );
+        expect(await gitCode(parent, ['rev-parse', '--verify', locked])).toBe(0);
+        expect(await gitCode(parent, ['rev-parse', '--verify', leftover])).not.toBe(0);
+        if (ending === 'done') {
+          expect(claimFake.released).toContainEqual({ mergeDir: parent, inSection: true });
+        } else {
+          expect(h.getStatus()).toBe('failed');
+          expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
+        }
+      } finally {
+        warn.mockRestore();
         await rm(parent, { recursive: true, force: true });
       }
     },
