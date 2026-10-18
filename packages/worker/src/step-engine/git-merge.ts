@@ -42,6 +42,7 @@ export async function mergeCommitted(worktreePath: string, branch: string): Prom
   const head = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (head.code === 0) return false; // merge still open (not committed)
   const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
+  if (status.code !== 0) return false;
   const unmerged = status.stdout.split('\n').some((l) => /^(DD|AU|UD|UA|DU|AA|UU) /.test(l));
   if (unmerged) return false;
   const ancestor = await gitRun(worktreePath, ['merge-base', '--is-ancestor', branch, 'HEAD']);
