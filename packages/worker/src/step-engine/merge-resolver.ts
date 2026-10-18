@@ -924,10 +924,18 @@ async function halt(
     const baseline = state.fixBaseline;
     const feature =
       open.code === 0 ? await revParse(state.mergeDir, `${state.featureBranch}^{commit}`) : null;
-    const own =
+    const mergeHead = open.stdout.trim();
+    let own =
       open.code === 0 &&
-      ((baseline && 'mergeHead' in baseline && open.stdout.trim() === baseline.mergeHead) ||
-        open.stdout.trim() === feature);
+      ((baseline && 'mergeHead' in baseline && mergeHead === baseline.mergeHead) ||
+        mergeHead === feature);
+    if (!own && open.code === 0 && feature !== null) {
+      try {
+        own = await isCommitAncestor(state.mergeDir, mergeHead, feature);
+      } catch {
+        own = true;
+      }
+    }
     if (beforeRecord) await beforeRecord(tx);
     const landedUnpushed =
       !state.pushed &&
