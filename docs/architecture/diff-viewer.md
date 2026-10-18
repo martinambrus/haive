@@ -11,10 +11,12 @@ stop at `MAX_FILES` (500). `fileCount` counts every changed file, listed or not,
 says the list was cut; the viewer shows that count and a "list truncated" mark.
 
 An empty list means git listed no changes, never that git failed. When `git status` exits
-non-zero, both builders delete their earlier artifact and throw. Every caller catches that, so
-the step goes on: gate 3, the KB commit and run-app leave the artifact path unset and hide the
+non-zero, both builders delete their earlier artifact and throw. Every caller catches the
+builder's throw: gate 3, the KB commit and run-app leave the artifact path unset and hide the
 viewer, while the learning and external-KB gates keep the path predicted in detect, so the
-viewer reports "Could not load changes" instead of a stale diff or "No changes to show".
+viewer reports "Could not load changes" instead of a stale diff or "No changes to show". Gate 3
+and the KB commit also run their own `git status` in detect, outside that catch, so a status that
+keeps failing fails those steps there before any diff is built.
 
 Whole lines retain their red/green background. A removed run followed by an added run also
 gets a `diffWordsWithSpace` comparison: only changed words, punctuation and whitespace receive
