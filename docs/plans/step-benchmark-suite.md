@@ -119,8 +119,12 @@ Candidate steps, to be cut down by P0: onboarding `01-env-detect`, `06_5-agent-d
   fixture repo plus a tar of the untracked `.haive/` state), `detect_output`, form values, the
   upstream outputs the step reads, the rendered prompt, the prompt hash, and a hash of the step's
   prompt-building source. Off by default; never on for user repositories without asking.
-- **Runner.** `pnpm bench run --step <id> --fixture <name> --cli <provider> --effort <level> --k 2`.
-  It restores the fixture into a throwaway workspace and sandbox, sets the CLI choice and effort,
+- **Runner.** `pnpm bench run --step <id> --fixture <name> --cli <provider> --model <id>
+  --effort <level> --k 2`. The model lives on `cli_providers.model`, and the per-step choice holds
+  only a provider id and effort, so the runner clones the named provider into a benchmark-only
+  provider row with `model` set and points the step's choice at that clone. The user's own provider
+  rows are never edited, so a matrix can never run whichever model one happens to be configured
+  with. It restores the fixture into a throwaway workspace and sandbox, sets the CLI choice and effort,
   re-renders the prompt from current step code (so a result always measures Haive as it is now),
   runs the step's dispatch phase (+ `apply` when the output is files), grades it (P3), and writes
   one result row.
