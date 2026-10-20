@@ -42,10 +42,12 @@ What exists to build on:
 - `task_steps.detect_output` and `task_steps.output` (`packages/database/src/schema/tasks.ts`),
   `cli_invocations.prompt`, `dispatch_prompt`, `token_usage`, `cost`, `model_identity`,
   `duration_ms`.
-- `task_step_cli_choices.effort_level` holds the effort picked per (task, step, role). Adapters
-  turn it into the CLI's own lever (`effortEnv`, e.g. `CLAUDE_CODE_EFFORT_LEVEL` in
-  `cli-adapters/claude-code.ts`; codex passes `effort` to the app-server turn in
-  `queues/cli-exec/exec-core.ts`).
+- `cli_invocations.effort` (jsonb `{ level, source }`) records the effort that actually reached
+  the CLI and where it came from (`step`, `provider`, `scale_max`, `dropped`, `none`); NULL on
+  legacy rows. `task_step_cli_choices.effort_level` holds only the current choice per (task, step,
+  role), and its next write erases the history. Adapters turn the level into the CLI's own lever
+  (`effortEnv`, e.g. `CLAUDE_CODE_EFFORT_LEVEL` in `cli-adapters/claude-code.ts`; codex passes
+  `effort` to the app-server turn in `queues/cli-exec/exec-core.ts`).
 - `CLI_DISPATCH_STEPS` (`packages/shared/src/step-engine/types.ts`) lists every step that
   dispatches a CLI, asserted against the worker registry at boot.
 - `refactoring-economics-lessons` D2 proposes one replay harness for its P1 and `parsimony-lessons`
@@ -55,20 +57,24 @@ What exists to build on:
 
 ## P0 — Token and time estimates, on the machine with the benchmark tasks
 
-Run before anything is built. Every query reads only completed runs: `ended_at IS NOT NULL`,
-`exit_code = 0`, `superseded_at IS NULL`. Killed runs record wrong token usage
+Run before anything is built. Every query reads only successful runs, by the step runner's own
+predicate (`step-runner.ts`): `ended_at IS NOT NULL`, `exit_code = 0`, `trim(error_message)` null or
+empty, plus `superseded_at IS NULL`. Exit code alone is not enough: a codex app-server run or a
+stream without a success result can exit 0 with an error recorded, and such partial runs would
+understate tokens and time. Killed runs record wrong token usage
 (`refactoring-economics-lessons`, Found not fixed: the `getTokenUsage` fallback in
 `queues/cli-exec/stream.ts`), so they would skew every figure.
 
 1. **Per-step cost table.** For every step id in `CLI_DISPATCH_STEPS` that has rows: number of
    invocations, median and p80 of input, output, cache-read and cache-write tokens, `duration_ms`,
    and `cost.costUsd` (notional where `billable` is false). Group by step id, CLI provider,
-   `model_identity.served`, and effort. Join `cli_invocations.task_step_id → task_steps`, and
-   `task_step_cli_choices` on (task, step, role) for effort.
-2. **Confirm where effort is recorded per invocation.** `task_step_cli_choices` is per task and
-   step and can change mid-task, so read whether the effort that actually ran is recoverable per
-   invocation (the adapter's env or args, as stored on the row). If it is not, record it as a gap.
-   Step 1's effort grouping is then approximate, and P1's capture must stamp effort itself.
+   `model_identity.served`, and `cli_invocations.effort->>'level'`. Attribute each row to its step
+   by `coalesce(task_step_id, summary_for_step_id)`, the fold the statistics rollups use, so recap
+   invocations count. Never join `task_step_cli_choices` for effort: it holds only the current
+   choice and would relabel earlier runs.
+2. **Count rows with unknown effort.** Rows where `cli_invocations.effort` is NULL (legacy) are
+   grouped as effort `unknown`, never guessed. If most of a step's history is unknown, that step's
+   effort comparison waits for P4's own runs.
 3. **Repeat counts.** Per step: invocations per task (one, a few, or fan-out). Fan-out steps (agent
    mining, DAG execute, per-topic knowledge acquisition) are benchmarked per unit (one agent, one
    topic, one issue), never whole.
@@ -115,12 +121,13 @@ Candidate steps, to be cut down by P0: onboarding `01-env-detect`, `06_5-agent-d
 - **Staleness.** When a step's source hash differs from a fixture's, the runner refuses to mix new
   results with old ones and reports the fixture as stale. Re-capture is one cheap run of the
   upstream steps on the fixture repo, not a benchmark.
-- **Replay at zero tokens.** The recorder from the CLI context-capture method (base-URL redirect
-  inside the sandbox image) can return recorded responses keyed by prompt hash. Grader and
-  `apply` changes then re-run without any model call. Model and effort comparisons always run live.
+- **Replay at zero tokens.** Every cell and every repeat gets the same prompt, so a prompt hash
+  cannot identify a response. A replay re-uses the raw output stored on one chosen result row
+  (that row's id is the key) and runs `apply` and the grader on it. Grader and `apply` changes then
+  re-run without any model call. Model and effort comparisons always run live.
 
 **Check.** A fixture captured from a real run replays to an output of the same shape. The same
-fixture with the recorder gives a byte-identical grade twice. A stale fixture is refused.
+result row replayed twice gives a byte-identical grade. A stale fixture is refused.
 
 **Rollback.** The switch defaults off and the runner is a separate entry point. Revert the commits
 and delete the result store.
@@ -203,7 +210,8 @@ benchmarks marked as not comparable (no noise baseline). A row in `benchmarks/RE
 
 ## Not verified
 
-- Whether the effort that ran is stored per invocation (P0 step 2).
+- How many historical rows on the benchmark machine have a NULL `cli_invocations.effort`
+  (P0 step 2).
 - Whether every candidate step's `llm` phase can run alone from a fixture, or some read state
   outside the workspace and the step rows (RAG tables, global KB, runtime containers). P1 lists
   each such read per step before capturing it; a step that reads live services needs those in the
