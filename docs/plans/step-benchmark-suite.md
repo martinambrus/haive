@@ -66,8 +66,9 @@ understate tokens and time. Killed runs record wrong token usage
 `queues/cli-exec/stream.ts`), so they would skew every figure.
 
 1. **Per-step cost table.** For every step id in `CLI_DISPATCH_STEPS` that has rows: number of
-   invocations, median and p80 of input, output, cache-read and cache-write tokens, `duration_ms`,
-   and `cost.costUsd` (notional where `billable` is false). Group by step id, CLI provider,
+   invocations, median and p80 of input, output, cache-read and cache-write tokens, wall time as
+   `ended_at - started_at` (the expression `modules/statistics/src/routes.ts` uses, since
+   `duration_ms` is null on some successful rows), and `cost.costUsd` (notional where `billable` is false). Group by step id, CLI provider,
    model, and effort. Model is `coalesce(model_identity.served, model_identity.requested)`, else
    `unknown`: codex `exec` records only `requested` and its app-server records `served` only on a
    reroute (`docs/architecture/cli-adapters.md`), so grouping on `served` alone would merge every
@@ -127,11 +128,15 @@ Candidate steps, to be cut down by P0: onboarding `01-env-detect`, `06_5-agent-d
   skill) and stores that agent's dispatch input, and the result row carries the agent id. The
   capture point for those is the mining dispatch, not `llm`. `dagExecute` steps are out of scope.
 - **Result row.** step id, fixture, mining agent id (when any), fixture hash, prompt hash,
-  step-source hash, CLI provider, requested and served model, effort level and source, CLI version, git sha, run index, tokens, cost, duration, grade breakdown,
+  step-source hash, `haive_build` stamp (`worker/src/build-stamp.ts`: `commit:` or `tree:` of the
+  working copy, so a dirty checkout gets its own id), CLI provider, requested and served model,
+  effort level and source, CLI version, git sha, run index, tokens, cost, duration, grade breakdown,
   and the raw output. Stored apart from live tables (own table or JSONL under the repo's
   gitignored `tmp/`), so nothing in the live workflow reads it.
 - **Staleness.** When a step's source hash differs from a fixture's, the runner refuses to mix new
-  results with old ones and reports the fixture as stale. Re-capture is one cheap run of the
+  results with old ones and reports the fixture as stale. Results are compared only within one `haive_build`: a
+  change to a shared prompt helper, adapter, `apply` or grader leaves the step-source hash and the
+  git sha unchanged on a dirty tree, but not the build stamp. Re-capture is one cheap run of the
   upstream steps on the fixture repo, not a benchmark.
 - **Replay at zero tokens.** Every cell and every repeat gets the same prompt, so a prompt hash
   cannot identify a response. A replay re-uses the raw output stored on one chosen result row
