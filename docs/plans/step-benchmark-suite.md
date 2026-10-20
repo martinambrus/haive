@@ -75,9 +75,11 @@ understate tokens and time. Killed runs record wrong token usage
    codex model into one bucket. Effort is `unrecorded` where the `effort` column is NULL (legacy
    rows), else `effort->>'level'` together with `effort->>'source'`: a recorded null level with
    source `none` (the CLI has no knob) or `dropped` (the CLI ran its own default) is a known
-   setting, not missing history. Attribute each row to its step
-   by `coalesce(task_step_id, summary_for_step_id)`, the fold the statistics rollups use, so recap
-   invocations count. Never join `task_step_cli_choices` for effort: it holds only the current
+   setting, not missing history. Samples come only from rows with a
+   `task_step_id`: those are the dispatches the runner repeats. Recap invocations
+   (`summary_for_step_id`, `docs/architecture/step-summaries.md`) are not samples; they go into a
+   separate per-step spend total, attributed by `coalesce(task_step_id, summary_for_step_id)` as
+   the statistics rollups do, used only for the check below. Never join `task_step_cli_choices` for effort: it holds only the current
    choice and would relabel earlier runs.
 2. **Count rows with unrecorded effort or unknown model.** Such rows stay in their own buckets,
    never guessed. If most of a step's history is unknown, that step's
@@ -97,8 +99,8 @@ understate tokens and time. Killed runs record wrong token usage
    × scale factor`, k = 2 plus an expected 20% third runs (P4). Sum over steps, convert with step 4's
    ratio to weeks of allowance, and write the table into this plan's **Decided** section.
 
-**Check.** The table covers every step that has rows; its total for one step agrees with that
-step's sum on the statistics page for the same window; the allowance ratio is measured, not
+**Check.** The table covers every step that has rows; for one step, sample spend plus recap
+spend agrees with that step's sum on the statistics page for the same window; the allowance ratio is measured, not
 assumed.
 
 **Output.** Steps chosen for the first matrix, ranked by cost and by how much a weak result there
@@ -200,8 +202,10 @@ A and B are swapped on at least 9 of 10 fixed pairs.
    effort-insensitive and leaves the effort sweep.
 5. **More fixtures before more repeats.** Several small fixtures at k = 2 beat few at k = 5 for the
    same tokens. Add fixtures (other trap sets on the P2 repo) before raising k.
-6. **Reporting.** Per (step, model, effort): grade mean with a bootstrap interval, pass^k for
-   reliability-type steps, median tokens, cost and wall time. A grade-per-token view per step,
+6. **Reporting.** Per (step, model, effort): grade mean and run count n, with an interval built
+   from the pooled A/A standard deviation (mean ± t × sd_pooled / √n), never a bootstrap over the
+   cell's own two or three runs, which collapses to zero width when they agree. A bootstrap is used
+   only across fixtures, once a cell has several. pass^k for reliability-type steps, median tokens, cost and wall time. A grade-per-token view per step,
    because a cheaper effort that scores within the floor is the useful answer.
 
 **Check.** A/A floors are recorded per step before any comparison is published; every published
