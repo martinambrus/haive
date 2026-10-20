@@ -68,12 +68,18 @@ understate tokens and time. Killed runs record wrong token usage
 1. **Per-step cost table.** For every step id in `CLI_DISPATCH_STEPS` that has rows: number of
    invocations, median and p80 of input, output, cache-read and cache-write tokens, `duration_ms`,
    and `cost.costUsd` (notional where `billable` is false). Group by step id, CLI provider,
-   `model_identity.served`, and `cli_invocations.effort->>'level'`. Attribute each row to its step
+   model, and effort. Model is `coalesce(model_identity.served, model_identity.requested)`, else
+   `unknown`: codex `exec` records only `requested` and its app-server records `served` only on a
+   reroute (`docs/architecture/cli-adapters.md`), so grouping on `served` alone would merge every
+   codex model into one bucket. Effort is `unrecorded` where the `effort` column is NULL (legacy
+   rows), else `effort->>'level'` together with `effort->>'source'`: a recorded null level with
+   source `none` (the CLI has no knob) or `dropped` (the CLI ran its own default) is a known
+   setting, not missing history. Attribute each row to its step
    by `coalesce(task_step_id, summary_for_step_id)`, the fold the statistics rollups use, so recap
    invocations count. Never join `task_step_cli_choices` for effort: it holds only the current
    choice and would relabel earlier runs.
-2. **Count rows with unknown effort.** Rows where `cli_invocations.effort` is NULL (legacy) are
-   grouped as effort `unknown`, never guessed. If most of a step's history is unknown, that step's
+2. **Count rows with unrecorded effort or unknown model.** Such rows stay in their own buckets,
+   never guessed. If most of a step's history is unknown, that step's
    effort comparison waits for P4's own runs.
 3. **Repeat counts.** Per step: invocations per task (one, a few, or fan-out). Fan-out steps (agent
    mining, DAG execute, per-topic knowledge acquisition) are benchmarked per unit (one agent, one
@@ -113,9 +119,15 @@ Candidate steps, to be cut down by P0: onboarding `01-env-detect`, `06_5-agent-d
 - **Runner.** `pnpm bench run --step <id> --fixture <name> --cli <provider> --effort <level> --k 2`.
   It restores the fixture into a throwaway workspace and sandbox, sets the CLI choice and effort,
   re-renders the prompt from current step code (so a result always measures Haive as it is now),
-  runs `llm` (+ `apply` when the output is files), grades it (P3), and writes one result row.
-- **Result row.** step id, fixture, fixture hash, prompt hash, step-source hash, CLI provider,
-  served model, effort, CLI version, git sha, run index, tokens, cost, duration, grade breakdown,
+  runs the step's dispatch phase (+ `apply` when the output is files), grades it (P3), and writes
+  one result row.
+- **Two dispatch shapes.** Steps with `llm` run that phase once. Steps that dispatch through
+  `agentMining` (`08c-code-review`, plan-build `01-plan-build`, part of `09_5-skill-generation`)
+  run ONE mining agent per sample: the fixture names the agent (reviewer dimension, plan node,
+  skill) and stores that agent's dispatch input, and the result row carries the agent id. The
+  capture point for those is the mining dispatch, not `llm`. `dagExecute` steps are out of scope.
+- **Result row.** step id, fixture, mining agent id (when any), fixture hash, prompt hash,
+  step-source hash, CLI provider, requested and served model, effort level and source, CLI version, git sha, run index, tokens, cost, duration, grade breakdown,
   and the raw output. Stored apart from live tables (own table or JSONL under the repo's
   gitignored `tmp/`), so nothing in the live workflow reads it.
 - **Staleness.** When a step's source hash differs from a fixture's, the runner refuses to mix new
