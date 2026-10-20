@@ -133,16 +133,22 @@ Candidate steps, to be cut down by P0: onboarding `01-env-detect`, `06_5-agent-d
   step-source hash, `haive_build` stamp (`worker/src/build-stamp.ts`: `commit:` or `tree:` of the
   working copy, so a dirty checkout gets its own id), CLI provider, requested and served model,
   effort level and source, CLI version, git sha, run index, tokens, cost, duration, grade breakdown,
-  and the raw output. Stored apart from live tables (own table or JSONL under the repo's
+  the raw output, and the workspace diff the dispatch left (tracked and untracked files against
+  the restored fixture), since a step with `file_write` such as `07-phase-2-implement` edits the
+  tree directly and its `apply` reads only the textual summary. Stored apart from live tables (own table or JSONL under the repo's
   gitignored `tmp/`), so nothing in the live workflow reads it.
+- **Cohort.** A matrix pins each CLI's version for its whole duration. The cell key is (step,
+  model, effort, CLI version, `haive_build`), and a cell whose rows mix versions is refused, since
+  a CLI upgrade between weekly allowances changes prompt handling, tools and output parsing.
 - **Staleness.** When a step's source hash differs from a fixture's, the runner refuses to mix new
   results with old ones and reports the fixture as stale. Results are compared only within one `haive_build`: a
   change to a shared prompt helper, adapter, `apply` or grader leaves the step-source hash and the
   git sha unchanged on a dirty tree, but not the build stamp. Re-capture is one cheap run of the
   upstream steps on the fixture repo, not a benchmark.
 - **Replay at zero tokens.** Every cell and every repeat gets the same prompt, so a prompt hash
-  cannot identify a response. A replay re-uses the raw output stored on one chosen result row
-  (that row's id is the key) and runs `apply` and the grader on it. Grader and `apply` changes then
+  cannot identify a response. A replay restores the fixture, applies the workspace diff stored on
+  one chosen result row (that row's id is the key), and runs `apply` and the grader on that row's
+  raw output. Grader and `apply` changes then
   re-run without any model call. Model and effort comparisons always run live.
 
 **Check.** A fixture captured from a real run replays to an output of the same shape. The same
@@ -181,6 +187,11 @@ scores 0%, and a hand-written output that misses the two hardest traps scores in
    hallucinated facts counted.
 3. **LLM judge, only for what is left** (prose quality, plan structure). Pairwise A vs B, run in both
    orders, judged by a model from another family than both contestants. No absolute 1-10 scores.
+   A pairwise verdict depends on the opponent, so it is not a per-run grade: verdicts go into their
+   own record (run A, run B, order, winner or tie) and are reported as win rates per pair of
+   cells. The per-run grade on a result row comes only from layers 1 and 2, and only that grade
+   feeds P4's means, A/A spread and intervals. A/A for the judge is a cell judged against itself,
+   whose win rate should sit near 50%.
 
 DDEV: no DDEV task. If environment setup is worth measuring, a **micro DDEV fixture** — the P2 app
 with `01-env-detect`'s DDEV output graded by `ddev config` validating, `ddev start`, HTTP 200 and the
