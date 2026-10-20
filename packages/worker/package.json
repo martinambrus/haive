@@ -62,7 +62,7 @@
     "@haive/database": "workspace:*",
     "@haive/module-statistics": "workspace:*",
     "@haive/shared": "workspace:*",
-    "bullmq": "^6.3.11",
+    "bullmq": "^6.3.16",
     "dockerode": "^5.0.1",
     "drizzle-orm": "0.45.2",
     "ioredis": "^6.0.0",
@@ -70,7 +70,7 @@
     "picomatch": "4.0.7",
     "tinyglobby": "^0.2.17",
     "yaml": "^2.9.1",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/dockerode": "^4.0.1",

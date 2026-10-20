@@ -33,17 +33,17 @@
     "@haive/database": "workspace:*",
     "@haive/module-statistics": "workspace:*",
     "@haive/shared": "workspace:*",
-    "@hono/node-server": "^2.1.3",
+    "@hono/node-server": "^2.1.5",
     "archiver": "^8.0.0",
     "bcrypt": "^6.0.0",
-    "bullmq": "^6.3.11",
+    "bullmq": "^6.3.16",
     "dockerode": "^5.0.1",
     "drizzle-orm": "0.45.2",
     "hono": "^4.13.12",
     "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.2",
     "ws": "^8.22.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",
