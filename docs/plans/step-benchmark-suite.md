@@ -33,8 +33,8 @@ code, CLI adapter, sandbox, agent rules and retrieval — not models on arbitrar
 ## Approach
 
 Benchmark single LLM steps on **frozen inputs**. A fixture holds everything one step reads when its
-`llm` phase is dispatched. A runner restores the fixture, runs only that step's `llm` (and `apply`,
-where the output is files), grades the result, and records it. Upstream variance cannot reach the
+`llm` phase, or one of its mining agents, is dispatched. A runner restores the fixture, runs only
+that dispatch (and `apply`, where the output is files), grades the result, and records it. Upstream variance cannot reach the
 step, one run takes minutes, and the matrix can be sized to a weekly allowance.
 
 What exists to build on:
