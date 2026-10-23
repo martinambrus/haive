@@ -1275,6 +1275,32 @@ describe('extractCodeSections — class names', () => {
   });
 });
 
+describe('extractCodeSections — a keyword in a comment', () => {
+  const ids = (src: string, file: string) => extractCodeSections(src, file).map((s) => s.sectionId);
+  const REAL = 'function real() {\n  return 1;\n}\n';
+
+  it.each([
+    ['if', 'if ($x) {'],
+    ['while', 'while ($x) {'],
+    ['foreach', 'foreach ($xs as $x) {'],
+    ['switch', 'switch ($x) {'],
+  ])(
+    'finds no PHP function named %s after a comment that ends with the word function',
+    (_n, head) => {
+      const php = `<?php\n// call this function\n${head}\n  y();\n}\n\n${REAL}`;
+
+      expect(ids(php, 'call.module')).toEqual(['function-real']);
+    },
+  );
+
+  it('finds no function in a Java comment that ends with the word function', () => {
+    const java =
+      'public class Box {\n  // the mapping function\n  Box(int x) {\n    this.x = x;\n  }\n}\n';
+
+    expect(ids(java, 'Box.java')).toEqual(['class-Box']);
+  });
+});
+
 describe('chunkSection', () => {
   it('splits a long section without losing any region', () => {
     const content = markedBody(10_000);

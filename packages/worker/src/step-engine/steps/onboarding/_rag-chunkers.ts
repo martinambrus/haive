@@ -589,7 +589,7 @@ function phpRanges(content: string): SectionRange[] {
   // Functions (standalone and methods)
   const fileDoc = ranges.find((r) => r.sectionId === 'file-docblock');
   const funcRe = new RegExp(PHP_FUNCTION_HEAD, 'gi');
-  while ((match = funcRe.exec(content)) !== null) {
+  while ((match = funcRe.exec(code)) !== null) {
     const brace = bodyAfterParams(code, match.index + match[0].length - 1, BLOCK_TAIL);
     const end = brace === null ? null : braceBlockEnd(code, brace);
     if (end === null) continue;
@@ -728,7 +728,7 @@ function jsRanges(content: string, members: boolean): SectionRange[] {
   for (const { source, arrow, member } of JS_FORMS) {
     if (member && !members) continue;
     const formRe = new RegExp(source, 'gm');
-    while ((match = formRe.exec(content)) !== null) {
+    while ((match = formRe.exec(code)) !== null) {
       const name = match[1]!;
       if (JS_CONTROL_NAMES.has(name)) continue;
       const last = match.index + match[0].length - 1;
