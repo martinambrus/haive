@@ -240,6 +240,257 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
 }
 
 /* ------------------------------------------------------------------ */
+/* Comment and string masking                                          */
+/* ------------------------------------------------------------------ */
+
+type Span = [from: number, to: number];
+
+const PHP_OPEN_TAG = /<\?(?:php(?=\s|$)|=)/gi;
+const PHP_HEREDOC = /<<<[ \t]*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|([A-Za-z_]\w*))\r?\n/y;
+const REGEX_AFTER_WORD =
+  /^(?:return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/;
+const BARE_NAME = /^[A-Za-z_$][\w$]*$/;
+const WORD_START = /[\p{L}_$]/u;
+const WORD_CHAR = /[\p{L}\p{N}_$]/u;
+
+/** A regex literal longer than this is not read as one: a '/' that opens none would otherwise scan
+ *  to the end of its line from every call. */
+const MAX_REGEX_CHARS = 1000;
+
+/** Index just past the quote that closes the string opening at `open`, else the end of the text. */
+function quotedEnd(text: string, open: number): number {
+  for (let i = open + 1; i < text.length; i += 1) {
+    if (text[i] === '\\') i += 1;
+    else if (text[i] === text[open]) return i + 1;
+  }
+  return text.length;
+}
+
+/** `quotedEnd` for a JS string, which ends where its line does when it has no closing quote. */
+function lineStringEnd(text: string, open: number): number {
+  for (let i = open + 1; i < text.length; i += 1) {
+    if (text[i] === '\\') i += 1;
+    else if (text[i] === text[open]) return i + 1;
+    else if (text[i] === '\n') return i;
+  }
+  return text.length;
+}
+
+/** Index just past the '}' that closes the '{' at `open`; a quoted string inside is skipped. */
+function interpolationEnd(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i += 1) {
+    if (text[i] === '"' || text[i] === "'") i = quotedEnd(text, i) - 1;
+    else if (text[i] === '{') depth += 1;
+    else if (text[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return text.length;
+}
+
+function phpDoubleQuotedEnd(text: string, open: number): number {
+  for (let i = open + 1; i < text.length; i += 1) {
+    if (text[i] === '\\') i += 1;
+    else if (text[i] === '"') return i + 1;
+    else if (text[i] === '{' && text[i + 1] === '$') i = interpolationEnd(text, i) - 1;
+    else if (text[i] === '$' && text[i + 1] === '{') i = interpolationEnd(text, i + 1) - 1;
+  }
+  return text.length;
+}
+
+/** The body of the string that opens at `open` and ends at `end`, quotes out. */
+function stringBody(text: string, open: number, end: number): Span {
+  return [open + 1, end - 1 > open && text[end - 1] === text[open] ? end - 1 : end];
+}
+
+/** The body and the end (just past the closing label) of the heredoc or nowdoc opening at `open`. */
+function heredocAt(text: string, open: number): { body: Span; end: number } | null {
+  PHP_HEREDOC.lastIndex = open;
+  const m = PHP_HEREDOC.exec(text);
+  if (!m) return null;
+  const label = (m[1] ?? m[2] ?? m[3])!;
+  const bodyStart = open + m[0].length;
+  for (let line = bodyStart; line < text.length;) {
+    let at = line;
+    while (text[at] === ' ' || text[at] === '\t') at += 1;
+    if (text.startsWith(label, at) && !WORD_CHAR.test(text[at + label.length] ?? ' ')) {
+      return { body: [bodyStart, line], end: at + label.length };
+    }
+    const newline = text.indexOf('\n', line);
+    if (newline < 0) break;
+    line = newline + 1;
+  }
+  return { body: [bodyStart, text.length], end: text.length };
+}
+
+/** The spans of a PHP file that are not code: inline HTML, comments, strings and heredocs. A file
+ *  with no open tag is read as PHP from its first byte. */
+function phpNonCode(text: string): Span[] {
+  const spans: Span[] = [];
+  const openAfter = (from: number): RegExpExecArray | null => {
+    PHP_OPEN_TAG.lastIndex = from;
+    return PHP_OPEN_TAG.exec(text);
+  };
+  let tag = openAfter(0);
+  if (tag) spans.push([0, tag.index]);
+  let i = tag ? tag.index + tag[0].length : 0;
+  while (i < text.length) {
+    const c = text[i];
+    const next = text[i + 1];
+    const heredoc = c === '<' ? heredocAt(text, i) : null;
+    if (c === '?' && next === '>') {
+      tag = openAfter(i + 2);
+      spans.push([i + 2, tag ? tag.index : text.length]);
+      i = tag ? tag.index + tag[0].length : text.length;
+    } else if ((c === '/' && next === '/') || (c === '#' && next !== '[')) {
+      const from = i + (c === '#' ? 1 : 2);
+      i = from;
+      while (i < text.length && text[i] !== '\n' && !(text[i] === '?' && text[i + 1] === '>'))
+        i += 1;
+      spans.push([from, i]);
+    } else if (c === '/' && next === '*') {
+      const close = text.indexOf('*/', i + 2);
+      spans.push([
+        i + (text.startsWith('/**', i) && text[i + 3] !== '/' ? 3 : 2),
+        close < 0 ? text.length : close,
+      ]);
+      i = close < 0 ? text.length : close + 2;
+    } else if (c === "'" || c === '"' || c === '`') {
+      const end = c === '"' ? phpDoubleQuotedEnd(text, i) : quotedEnd(text, i);
+      spans.push(stringBody(text, i, end));
+      i = end;
+    } else if (heredoc) {
+      spans.push(heredoc.body);
+      i = heredoc.end;
+    } else i += 1;
+  }
+  return spans;
+}
+
+/** Index of the '/' that closes the regex literal opening at `open`, or -1 when its line ends first. */
+function regexClose(text: string, open: number): number {
+  let inClass = false;
+  const limit = Math.min(text.length, open + MAX_REGEX_CHARS);
+  for (let i = open + 1; i < limit; i += 1) {
+    if (text[i] === '\n') return -1;
+    if (text[i] === '\\') i += 1;
+    else if (text[i] === '[') inClass = true;
+    else if (text[i] === ']') inClass = false;
+    else if (text[i] === '/' && !inClass) return i;
+  }
+  return -1;
+}
+
+/** Whether a '/' after the token `prev` opens a regex literal rather than divides: `prev` is a word,
+ *  '' after a literal or a number, its punctuation otherwise, and null at the start of the text. */
+function regexMayStart(prev: string | null): boolean {
+  if (prev === null) return true;
+  if (WORD_START.test(prev[0] ?? '')) return REGEX_AFTER_WORD.test(prev);
+  return prev !== '' && ![')', ']', '}', '>', '<'].includes(prev);
+}
+
+/** The spans of a JS, TS or Java file that are not code: comments, strings, template literals (their
+ *  `${}` expressions too) and regex literals. A string that is a bare name stays: it may be a key. */
+function jsNonCode(text: string): Span[] {
+  const spans: Span[] = [];
+  // The open template literals and `${` expressions, innermost last: -1 is template text, n >= 1
+  // the braces open in an expression. Spans are recorded for the outermost template only.
+  const frames: number[] = [];
+  let templateOpen = 0;
+  let prev: string | null = null;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i]!;
+    const next = text[i + 1];
+    const top = frames[frames.length - 1];
+    if (top === -1) {
+      if (c === '\\') i += 2;
+      else if (c === '$' && next === '{') {
+        frames.push(1);
+        prev = '{';
+        i += 2;
+      } else {
+        i += 1;
+        if (c === '`') {
+          frames.pop();
+          if (frames.length === 0) {
+            spans.push([templateOpen + 1, i - 1]);
+            prev = '';
+          }
+        }
+      }
+    } else if (/\s/.test(c)) i += 1;
+    else if (c === '/' && (next === '/' || next === '*')) {
+      const close = text.indexOf(next === '/' ? '\n' : '*/', i + 2);
+      const bodyEnd = close < 0 ? text.length : close;
+      if (frames.length === 0) spans.push([i + 2, bodyEnd]);
+      i = next === '*' && close >= 0 ? close + 2 : bodyEnd;
+    } else if (c === '/') {
+      const close = regexMayStart(prev) && next !== '>' ? regexClose(text, i) : -1;
+      if (close < 0) {
+        prev = c;
+        i += 1;
+      } else {
+        if (frames.length === 0) spans.push([i + 1, close]);
+        i = close + 1;
+        while (/[a-z]/.test(text[i] ?? '')) i += 1;
+        prev = '';
+      }
+    } else if (c === "'" || c === '"') {
+      const end = lineStringEnd(text, i);
+      const body = stringBody(text, i, end);
+      if (frames.length === 0 && !BARE_NAME.test(text.slice(body[0], body[1]))) spans.push(body);
+      prev = '';
+      i = end;
+    } else if (c === '`') {
+      if (frames.length === 0) templateOpen = i;
+      frames.push(-1);
+      i += 1;
+    } else if (c === '{' || c === '}') {
+      if (top !== undefined) {
+        frames[frames.length - 1] = top + (c === '{' ? 1 : -1);
+        if (frames[frames.length - 1] === 0) frames.pop();
+      }
+      prev = c;
+      i += 1;
+    } else if (WORD_START.test(c)) {
+      let end = i + 1;
+      while (end < text.length && WORD_CHAR.test(text[end]!)) end += 1;
+      prev = text.slice(i, end);
+      i = end;
+    } else if (c >= '0' && c <= '9') {
+      let end = i + 1;
+      while (end < text.length && /[\w.]/.test(text[end]!)) end += 1;
+      prev = '';
+      i = end;
+    } else if (c === '=' && next === '>') {
+      prev = '=>';
+      i += 2;
+    } else {
+      prev = c;
+      i += 1;
+    }
+  }
+  if (frames.length > 0) spans.push([templateOpen + 1, text.length]);
+  return spans;
+}
+
+/** `content` with the body of every comment and string blanked, so that a pattern or a brace count
+ *  cannot match inside one: PHP loses its inline HTML and heredocs too, JS its template and regex
+ *  literals. Same length and line ends; the delimiters stay. */
+export function maskNonCode(content: string, syntax: 'php' | 'js'): string {
+  let masked = '';
+  let cursor = 0;
+  for (const [from, to] of syntax === 'php' ? phpNonCode(content) : jsNonCode(content)) {
+    masked += content.slice(cursor, from) + content.slice(from, to).replace(/[^\r\n]/g, ' ');
+    cursor = to;
+  }
+  return masked + content.slice(cursor);
+}
+
+/* ------------------------------------------------------------------ */
 /* Code section extraction (regex fallback)                            */
 /* ------------------------------------------------------------------ */
 
@@ -262,8 +513,7 @@ function braceBlockEnd(content: string, start: number): number | null {
 /** End offset of the brace block a match opens. Every pattern below ends AT its
  *  opening '{', so that brace is the last character of the match. */
 function blockEndFromMatch(content: string, m: RegExpExecArray): number | null {
-  const braceStart = content.indexOf('{', m.index + m[0].length - 1);
-  return braceBlockEnd(content, braceStart);
+  return braceBlockEnd(content, m.index + m[0].length - 1);
 }
 
 /** A longer parameter list is not read as a signature: a '(' inside a string would otherwise
@@ -273,6 +523,7 @@ const MAX_PARAMS_CHARS = 4000;
 /** Index just past the ')' that closes the '(' at `open`, or null. A quoted string is skipped, so
  *  `advance("(")` does not leave a parenthesis open. */
 function parenEnd(content: string, open: number): number | null {
+  if (content[open] !== '(') return null;
   const limit = Math.min(content.length, open + MAX_PARAMS_CHARS);
   let depth = 0;
   for (let i = open; i < limit; i += 1) {
@@ -310,6 +561,7 @@ const PHP_FUNCTION_HEAD = String.raw`(\/\*\*(?!\/)(?:(?!\*\/)[\s\S])*\*\/\s*)?(?
 
 function phpRanges(content: string): SectionRange[] {
   const ranges: SectionRange[] = [];
+  const code = maskNonCode(content, 'php');
 
   // File docblock
   const docMatch = /^<\?php\s*(\/\*\*[\s\S]*?\*\/)/.exec(content);
@@ -330,7 +582,7 @@ function phpRanges(content: string): SectionRange[] {
   const classRe = /class\s+(\w+)[^{;]*\{/g;
   let match: RegExpExecArray | null;
   while ((match = classRe.exec(content)) !== null) {
-    const end = blockEndFromMatch(content, match);
+    const end = blockEndFromMatch(code, match);
     if (end !== null) classes.push({ name: match[1]!, start: match.index, end });
   }
 
@@ -338,8 +590,8 @@ function phpRanges(content: string): SectionRange[] {
   const fileDoc = ranges.find((r) => r.sectionId === 'file-docblock');
   const funcRe = new RegExp(PHP_FUNCTION_HEAD, 'gi');
   while ((match = funcRe.exec(content)) !== null) {
-    const brace = bodyAfterParams(content, match.index + match[0].length - 1, BLOCK_TAIL);
-    const end = brace === null ? null : braceBlockEnd(content, brace);
+    const brace = bodyAfterParams(code, match.index + match[0].length - 1, BLOCK_TAIL);
+    const end = brace === null ? null : braceBlockEnd(code, brace);
     if (end === null) continue;
     const name = match[2]!;
     // The file docblock stays its own section even when the function follows it directly.
@@ -449,6 +701,7 @@ function commentRunStart(content: string, start: number, headerAt: number): numb
 
 function jsRanges(content: string, members: boolean): SectionRange[] {
   const ranges: SectionRange[] = [];
+  const code = maskNonCode(content, 'js');
   let match: RegExpExecArray | null;
   const headerAt = content.search(/\S/);
   // Java shares this reader but is read as before: no members, no comment join.
@@ -459,7 +712,7 @@ function jsRanges(content: string, members: boolean): SectionRange[] {
   const classes: Array<{ name: string; start: number; end: number }> = [];
   const classRe = /class\s+(\w+)(?:\s+extends\s+\w+)?\s*\{/g;
   while ((match = classRe.exec(content)) !== null) {
-    const end = blockEndFromMatch(content, match);
+    const end = blockEndFromMatch(code, match);
     if (end !== null) {
       classes.push({ name: match[1]!, start: match.index, end });
       ranges.push({
@@ -480,15 +733,13 @@ function jsRanges(content: string, members: boolean): SectionRange[] {
       if (JS_CONTROL_NAMES.has(name)) continue;
       const last = match.index + match[0].length - 1;
       const brace =
-        content[last] === '{'
-          ? last
-          : bodyAfterParams(content, last, arrow ? ARROW_TAIL : BLOCK_TAIL);
+        code[last] === '{' ? last : bodyAfterParams(code, last, arrow ? ARROW_TAIL : BLOCK_TAIL);
       if (brace === null) continue;
       if (arrow) {
         TYPE_MEMBER.lastIndex = brace + 1;
-        if (TYPE_MEMBER.test(content)) continue;
+        if (TYPE_MEMBER.test(code)) continue;
       }
-      const end = braceBlockEnd(content, brace);
+      const end = braceBlockEnd(code, brace);
       if (end === null) continue;
       const start = match.index + match[0].search(/\S/);
       const owner = member ? classes.find((c) => start > c.start && end <= c.end) : undefined;

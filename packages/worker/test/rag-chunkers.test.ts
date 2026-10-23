@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
+  assembleSections,
   extractMarkdownSections,
   extractCodeSections,
+  maskNonCode,
   chunkSection,
   capChunks,
   contextHeader,
@@ -773,12 +775,8 @@ describe('extractCodeSections — JS and TS leading comments', () => {
   });
 
   it('leaves a comment out when another section reaches into it', () => {
-    // A brace inside a string unbalances `tail`, so its range ends at the `}` in the comment below it.
-    const reaching = [
-      'function tail(text) {',
-      "  if (text[0] === '{') return text;",
-      '  return null;',
-      '}',
+    const src = [
+      'function tail() {}',
       '/**',
       ' * Closes with a `}` in prose.',
       ' */',
@@ -787,10 +785,25 @@ describe('extractCodeSections — JS and TS leading comments', () => {
       '}',
       '',
     ].join('\n');
-    // A function in the comment is a section of its own, and the commented function must not contain it.
+    const sections = assembleSections(src, [
+      { sectionId: 'function-tail', start: 0, end: src.indexOf('prose'), breadcrumb: [] },
+      {
+        sectionId: 'function-escape',
+        start: src.indexOf('function escape'),
+        commentStart: src.indexOf('/**'),
+        end: src.lastIndexOf('}') + 1,
+        breadcrumb: [],
+      },
+    ]);
+
+    expect(sections.find((s) => s.sectionId === 'function-escape')?.content).toBe(
+      'function escape(s) {\n  return s;\n}',
+    );
+  });
+
+  it('gives a function named in a comment no section, so the comment joins the function after it', () => {
     const example = [
-      "'use strict';",
-      '',
+      HEAD,
       '/**',
       ' * @example',
       ' *   function sample() { return 1; }',
@@ -800,11 +813,12 @@ describe('extractCodeSections — JS and TS leading comments', () => {
       '}',
       '',
     ].join('\n');
+    const sections = byId(example, 'real.js');
 
-    expect(byId(reaching, 'tail.js').get('function-escape')).toBe(
-      'function escape(s) {\n  return s;\n}',
+    expect(sections.has('function-sample')).toBe(false);
+    expect(sections.get('function-real')).toBe(
+      '/**\n * @example\n *   function sample() { return 1; }\n */\nfunction real() {\n  return 2;\n}',
     );
-    expect(byId(example, 'real.js').get('function-real')).toBe('function real() {\n  return 2;\n}');
   });
 
   it('lets a JS class take the comment above it and a Java class not', () => {
@@ -1007,6 +1021,202 @@ describe('extractCodeSections — short spans between sections', () => {
       'function-h',
       'chunk-1',
     ]);
+  });
+});
+
+describe('maskNonCode', () => {
+  const blank = (text: string) => text.replace(/[^\r\n]/g, ' ');
+  const shape = (text: string) => text.replace(/[^\r\n]/g, 'x');
+
+  it.each([
+    ['php', "<?php\r\n// é𝒜 {\r\n$a = '{';\r\n?>\r\n<b>{</b>\r\n"],
+    ['js', "var a = '{'; // é𝒜 }\r\nvar b = `x\r\n${y}`;\r\n/*\r\n } */\r\n"],
+  ] as const)('keeps the length and the line ends of %s source', (syntax, src) => {
+    const masked = maskNonCode(src, syntax);
+
+    expect(masked).not.toBe(src);
+    expect(shape(masked)).toBe(shape(src));
+  });
+
+  // Every brace below sits in a comment, a string or inline HTML; `$ok = 1;` is code after it.
+  it.each([
+    ['a // comment', '// {'],
+    ['a # comment', '# }'],
+    ['a block comment', '/* { */'],
+    ['a docblock', '/** } */'],
+    ['a single-quoted string', "$a = '{';"],
+    ['a double-quoted string', '$a = "}";'],
+    ['an escaped quote', "$a = 'it\\'s {';"],
+    ['an interpolation holding quotes', String.raw`$a = "say \"{\" {$b['}']} {$c["{"]}";`],
+    ['a backtick string', '$a = `echo {`;'],
+    ['a heredoc', '$a = <<<EOT\n{ "}"\nEOT;'],
+    ['an indented heredoc closing', '$a = <<<EOT\n  {\n  EOT;'],
+    ['a nowdoc', "$a = <<<'EOT'\n{ $b }\nEOT;"],
+    ['inline HTML', '?>\n<div>{</div>\n<?php'],
+    ['inline HTML around an echo tag', '?><b>{</b><?= $x ?><i>}</i><?php'],
+    ['a // comment that a close tag ends', '// a ?> } <?php'],
+  ])('blanks %s of a PHP file', (_what, snippet) => {
+    const src = `<?php\n${snippet}\n$ok = 1;\n`;
+    const masked = maskNonCode(src, 'php');
+
+    expect(masked).not.toMatch(/[{}]/);
+    expect(masked).toContain('$ok = 1;');
+    expect(shape(masked)).toBe(shape(src));
+  });
+
+  it('blanks the text before the first open tag and keeps the code after a close tag', () => {
+    expect(maskNonCode('#!/usr/bin/env php\n{\n<?php $ok = 1;', 'php')).toBe(
+      `${blank('#!/usr/bin/env php')}\n${blank('{')}\n<?php $ok = 1;`,
+    );
+    expect(maskNonCode('<?php $a = 1; ?>\n{\n<?php $ok = 2;', 'php')).toBe(
+      `<?php $a = 1; ?>\n${blank('{')}\n<?php $ok = 2;`,
+    );
+  });
+
+  it('reads a file with no open tag as PHP from its first byte', () => {
+    expect(maskNonCode("function f() { return '{'; }\n", 'php')).toBe(
+      `function f() { return '${blank('{')}'; }\n`,
+    );
+  });
+
+  it('keeps delimiters, the docblock opener and an attribute', () => {
+    expect(maskNonCode("<?php\n/** Doc */\n/* c */\n# d\n#[Attr('x')]\n", 'php')).toBe(
+      `<?php\n/**${blank(' Doc ')}*/\n/*${blank(' c ')}*/\n#${blank(' d')}\n#[Attr('${blank('x')}')]\n`,
+    );
+  });
+
+  // Every brace below sits in a comment, a string, a template or a regex literal.
+  it.each([
+    ['a // comment', '// {'],
+    ['a block comment', '/* } */'],
+    ['a single-quoted string', "var a = '{';"],
+    ['a double-quoted string', 'var a = "}";'],
+    ['an escaped quote', "var a = 'it\\'s {';"],
+    ['a string with no closing quote', "var a = '{"],
+    ['a template', 'var a = `{`;'],
+    ['a template holding expressions', "var a = `a ${ f({ x: '}' }) } ${ `n${'{'}` } {`;"],
+    ['a regex class', 'var a = /[{}]/g;'],
+    ['an escaped slash in a regex', 'var a = /\\/{/;'],
+    ['a regex after return', 'return /{/.test(s);'],
+    ['a regex after a parenthesis', 'f(/{/);'],
+    ['a regex after a comma', 'f(a, /}/);'],
+    ['a regex after an arrow', 'var f = () => /}/;'],
+  ])('blanks %s of a JS file', (_what, snippet) => {
+    const src = `${snippet}\nok();\n`;
+    const masked = maskNonCode(src, 'js');
+
+    expect(masked).not.toMatch(/[{}]/);
+    expect(masked).toContain('ok();');
+    expect(shape(masked)).toBe(shape(src));
+  });
+
+  it('reads a slash as division or markup, not as a regex, after an operand', () => {
+    for (const src of [
+      'x = a / b / c;\n',
+      'x = (a + b) / 2 + y[0] / 3 + 4 / 5;\n',
+      'var h = <p>{a}</p> <b>{b}</b>;\nvar i = <br />;\n',
+    ]) {
+      expect(maskNonCode(src, 'js')).toBe(src);
+    }
+  });
+
+  it('keeps a string that is a bare name, as a key reads as a name', () => {
+    expect(maskNonCode("var t = { 'a_b': 1, \"c\": 2, 'd e': 3 };\n", 'js')).toBe(
+      `var t = { 'a_b': 1, "c": 2, '${blank('d e')}': 3 };\n`,
+    );
+  });
+
+  it('ends an unterminated template at the end of the text and a string at the end of its line', () => {
+    expect(maskNonCode('var a = `x {\nok();', 'js')).toBe(`var a = \`${blank('x {\nok();')}`);
+    expect(maskNonCode("var a = 'x {\nok();", 'js')).toBe(`var a = '${blank('x {')}\nok();`);
+  });
+
+  it('scans a long run of slashes that open no regex in linear time', () => {
+    const src = `x=${'/['.repeat(60_000)}\n`;
+
+    expect(maskNonCode(src, 'js').length).toBe(src.length);
+  });
+});
+
+describe('extractCodeSections — braces that are not code', () => {
+  const NEXT = 'function next_one() {\n  return 1;\n}';
+  const sectionsOf = (src: string, file: string) =>
+    new Map(extractCodeSections(src, file).map((s) => [s.sectionId, s.content]));
+
+  it.each([
+    ['a // comment', '  // {'],
+    ['a block comment', '  /* } */'],
+    ['a block comment that ends its line on the brace', '  /*\n}\n  */'],
+    ['a single-quoted string', "  var s = '{';"],
+    ['a double-quoted string', '  var s = "}";'],
+    ['a template literal', '  var s = `{`;'],
+    ['a template literal that ends its line on the brace', '  var s = `\n}\n`;'],
+    ['a regex literal', '  var s = /}/;'],
+  ])('ends a JS function at its own closing brace past %s', (_what, body) => {
+    const src = `function host(v) {\n${body}\n  return 'end-of-host';\n}\n\n${NEXT}\n`;
+    const sections = sectionsOf(src, 'host.js');
+
+    expect([...sections.keys()]).toEqual(['function-host', 'function-next_one']);
+    expect(sections.get('function-host')).toContain("'end-of-host'");
+    expect(sections.get('function-next_one')).toBe(NEXT);
+  });
+
+  it.each([
+    ['a // comment', '  // {'],
+    ['a # comment', '  # }'],
+    ['a block comment', '  /* { */'],
+    ['a block comment that ends its line on the brace', '  /*\n}\n  */'],
+    ['a single-quoted string', "  $s = '{';"],
+    ['a double-quoted string', '  $s = "}";'],
+    ['a heredoc', '  $s = <<<EOT\n{\nEOT;'],
+    ['a nowdoc', "  $s = <<<'EOT'\n}\nEOT;"],
+    ['a double-quoted string over two lines', '  $s = "a\n}";'],
+    ['inline HTML', '  ?>\n<b>{</b>\n<?php'],
+  ])('ends a PHP function at its own closing brace past %s', (_what, body) => {
+    const src = `<?php\nfunction host($v) {\n${body}\n  return 'end-of-host';\n}\n\n${NEXT}\n`;
+    const sections = sectionsOf(src, 'host.module');
+
+    expect([...sections.keys()]).toEqual(['function-host', 'function-next_one']);
+    expect(sections.get('function-host')).toContain("'end-of-host'");
+    expect(sections.get('function-next_one')).toBe(NEXT);
+  });
+
+  it('ends an object-literal member at its own closing brace', () => {
+    const src = [
+      'var api = {',
+      '  first() {',
+      "    var s = '}';",
+      "    return 'end-of-first';",
+      '  },',
+      '  second() {',
+      '    return 2;',
+      '  },',
+      '};',
+      '',
+    ].join('\n');
+    const sections = sectionsOf(src, 'api.js');
+
+    expect([...sections.keys()]).toEqual(['function-first', 'function-second']);
+    expect(sections.get('function-first')).toContain("'end-of-first'");
+    expect(sections.get('function-second')).toBe('second() {\n    return 2;\n  },\n};');
+  });
+
+  it.each([
+    ['a JS comment', '// function fake(a) {\nif (x) {\n  y();\n}\n', 'fake.js'],
+    ['a JS string', "var s = 'function fake(a) {';\nif (x) {\n  y();\n}\n", 'fake.js'],
+    [
+      'a template literal',
+      'var s = `\nfunction fake(a) {\n}\n`;\nif (x) {\n  y();\n}\n',
+      'fake.js',
+    ],
+    ['a PHP comment', '<?php\n// function fake($a) {\nif ($x) {\n  y();\n}\n', 'fake.module'],
+    [
+      'PHP inline HTML',
+      '<?php\n?>\n<script>function fake(a) {}</script>\n<?php\nif ($x) {\n  y();\n}\n',
+      'fake.php',
+    ],
+  ])('finds no function in %s', (_what, src, file) => {
+    expect(extractCodeSections(src, file).map((s) => s.sectionId)).not.toContain('function-fake');
   });
 });
 
