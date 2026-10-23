@@ -3864,7 +3864,7 @@ async function maybeEnqueueStepSummary(
       return; // no agent text to summarize
     }
     // Only while still enabled: resolveDispatch merely ORDERS the preferred provider first,
-    // so an id matching nothing falls through to an arbitrary one instead of failing.
+    // so an id matching nothing falls through to the default provider instead of failing.
     const summaryProvider = task?.summaryCliProviderId
       ? providers.find((p) => p.id === task.summaryCliProviderId && p.enabled)
       : undefined;
