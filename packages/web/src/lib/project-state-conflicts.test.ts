@@ -44,30 +44,31 @@ describe('the RTK question', () => {
     expect(isRtkConflict({ unit: 'project/render.json' })).toBe(false);
   });
 
-  it('keep mine says RTK stays on here and no file is written', () => {
+  it('keep mine says RTK stays on here and the choice is recorded in its record file', () => {
     const c = answerConfirmation('keep_mine', null, UNIT);
     expect(c.confirmLabel).toBe('Keep mine');
     expect(c.body).toBe(
-      'RTK command compression stays on in this install. No repository file is written.',
+      "RTK command compression stays on in this install. This install's choice is recorded in the project's record file, .haive-data/state/settings/rtk-enabled.json. Commit and push that file if it changed, so your teammate gets it.",
     );
-    expect(c.body).not.toContain('Commit and push');
   });
 
   it('take theirs says RTK is switched off here as the other install has it', () => {
     const c = answerConfirmation('take_theirs', null, UNIT);
     expect(c.confirmLabel).toBe('Take theirs');
     expect(c.body).toContain('switched off in this install, as the other install has it');
-    expect(c.body).toContain('No repository file is written');
+    expect(c.body).toContain('.haive-data/state/settings/rtk-enabled.json');
+    expect(c.body).not.toContain('No repository file is written');
   });
 
-  it('reports each answer as what happened to RTK, never as a record file written', () => {
+  it('reports each answer as what happened to RTK and where the choice is recorded', () => {
+    const recorded =
+      "This install's choice is recorded in `.haive-data/state/settings/rtk-enabled.json`. Commit and push that file if it changed, so your teammate gets it.";
     expect(resolutionNotice([], ['keep_mine'])).toBe(
-      'RTK command compression stays on in this install.',
+      `RTK command compression stays on in this install. ${recorded}`,
     );
     expect(resolutionNotice([], ['take_theirs'])).toBe(
-      'RTK command compression is switched off in this install.',
+      `RTK command compression is switched off in this install. ${recorded}`,
     );
-    expect(resolutionNotice([], ['keep_mine'])).not.toContain('Commit and push');
   });
 
   it('adds the record file notice only for a render answer beside it', () => {

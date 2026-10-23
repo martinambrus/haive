@@ -177,12 +177,12 @@ export function answerConfirmation(
       ? {
           title: "Keep this install's value",
           confirmLabel: 'Keep mine',
-          body: `${label} stays on in this install. No repository file is written.`,
+          body: `${label} stays on in this install. This install's choice is recorded in the project's record file, ${recordFileOf(unit)}. Commit and push that file if it changed, so your teammate gets it.`,
         }
       : {
           title: "Take the other install's value",
           confirmLabel: 'Take theirs',
-          body: `${label} is switched off in this install, as the other install has it. This is the same as unticking it on the tooling page, and the next upgrade offers to remove its files. No repository file is written.`,
+          body: `${label} is switched off in this install, as the other install has it. This is the same as unticking it on the tooling page, and the next upgrade offers to remove its files. This install's choice is recorded in the project's record file, ${recordFileOf(unit)}. Commit and push that file if it changed, so your teammate gets it.`,
         };
   }
   if (answer === 'keep_mine') {
@@ -243,6 +243,11 @@ export function resolutionNotice(
     notices.push('RTK command compression is switched off in this install.');
   } else if (rtkAnswered.includes('keep_mine')) {
     notices.push('RTK command compression stays on in this install.');
+  }
+  if (rtkAnswered.length > 0) {
+    notices.push(
+      `This install's choice is recorded in \`${recordFileOf(RTK_ENABLED_UNIT)}\`. Commit and push that file if it changed, so your teammate gets it.`,
+    );
   }
   return notices.length > 0 ? notices.join(' ') : null;
 }
