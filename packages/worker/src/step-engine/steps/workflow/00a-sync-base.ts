@@ -52,6 +52,8 @@ interface SyncBaseDetect {
   hasOrigin: boolean;
   fetchOk: boolean;
   fetchError: string | null;
+  /** Set when the fetch worked but the local base could not be compared with origin/<base>, the counts then being 0 and meaning nothing. */
+  compareError: string | null;
   /** Local base behind / ahead of origin/<base> (0 when not fetched). */
   behindBy: number;
   aheadBy: number;
@@ -106,11 +108,17 @@ async function fetchOrigin(
   return { ok: true, error: null };
 }
 
-async function countCommits(repoPath: string, range: string): Promise<number> {
+async function countCommits(
+  repoPath: string,
+  range: string,
+): Promise<{ count: number; error: string | null }> {
   const res = await gitRun(repoPath, ['rev-list', '--count', range]);
-  if (res.code !== 0) return 0;
-  const n = Number.parseInt(res.stdout.trim() || '0', 10);
-  return Number.isFinite(n) ? n : 0;
+  const count = Number.parseInt(res.stdout.trim(), 10);
+  if (res.code === 0 && Number.isFinite(count)) return { count, error: null };
+  return {
+    count: 0,
+    error: (res.stderr || res.stdout).trim().slice(0, 500) || `git exited ${res.code}`,
+  };
 }
 
 async function taskRepositoryId(ctx: StepContext): Promise<string | null> {
@@ -139,6 +147,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       hasOrigin: false,
       fetchOk: false,
       fetchError: null,
+      compareError: null,
       behindBy: 0,
       aheadBy: 0,
       diverged: false,
@@ -185,16 +194,20 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     if (!fetch.ok) {
       return { ...empty, ...baseFields, hasOrigin: true, fetchOk: false, fetchError: fetch.error };
     }
-    const behindBy = await countCommits(ctx.repoPath, `${base}..origin/${base}`);
-    const aheadBy = await countCommits(ctx.repoPath, `origin/${base}..${base}`);
+    const behind = await countCommits(ctx.repoPath, `${base}..origin/${base}`);
+    const ahead = await countCommits(ctx.repoPath, `origin/${base}..${base}`);
+    const compareError = behind.error ?? ahead.error;
+    if (compareError !== null) {
+      return { ...empty, ...baseFields, hasOrigin: true, fetchOk: true, compareError };
+    }
     return {
       ...empty,
       ...baseFields,
       hasOrigin: true,
       fetchOk: true,
-      behindBy,
-      aheadBy,
-      diverged: behindBy > 0 && aheadBy > 0,
+      behindBy: behind.count,
+      aheadBy: ahead.count,
+      diverged: behind.count > 0 && ahead.count > 0,
     };
   },
 
@@ -227,6 +240,14 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         id: 'fetchFailed',
         label: 'Could not reach origin',
         body: `Couldn't fetch origin: ${detected.fetchError ?? 'unknown error'}. Continuing with the local **${base}** (possibly stale). Fix connectivity or credentials and Retry this step to re-sync.`,
+        variant: 'warning',
+      });
+    } else if (detected.compareError) {
+      fields.push({
+        type: 'note',
+        id: 'compareFailed',
+        label: 'Could not compare with origin',
+        body: `Couldn't compare **${base}** with \`origin/${base}\`: ${detected.compareError}. Continuing with the local **${base}** (possibly stale). Retry this step to re-sync.`,
         variant: 'warning',
       });
     } else if (detected.diverged) {
@@ -285,7 +306,10 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     // user should see; everything else (clean fast-forward, up to date, no origin) has
     // nothing to weigh, so auto-submit it — posting the base default — to keep a clean
     // sync hands-free. autoContinue still auto-answers the gated cases when it is on.
-    const autoSubmit = !(detected.hasOrigin && (detected.diverged || !detected.fetchOk));
+    const autoSubmit = !(
+      detected.hasOrigin &&
+      (detected.diverged || !detected.fetchOk || Boolean(detected.compareError))
+    );
     return {
       title: 'Sync base with origin',
       description:
@@ -362,6 +386,16 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         strategy: 'skipped',
         behindBy: 0,
         reason: `fetch failed: ${d.fetchError ?? 'unknown'}`,
+      };
+    }
+
+    if (base === d.baseBranch && d.compareError) {
+      return {
+        synced: false,
+        base,
+        strategy: 'skipped',
+        behindBy: 0,
+        reason: `could not compare ${base} with origin/${base}: ${d.compareError}`,
       };
     }
 
