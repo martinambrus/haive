@@ -17,6 +17,7 @@ import type { PlanNodeTaskRole, PlanTaskProposal } from '@haive/shared';
 import type { PublicTaskType } from '@haive/shared/modularity';
 import { describePlanNodesForTask } from '@haive/shared/plan-describe';
 import { taskProposal } from '@/components/plan/plan-chat-turn';
+import { stepCliProviderIds } from '@/lib/step-cli-providers';
 import { HoursMinutesInput } from '@/components/hours-minutes-input';
 import { UploadFailureList } from '@/components/attachments/upload-failure-list';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
@@ -32,12 +33,14 @@ import {
   getPlanMessages,
   getPlanNode,
   listTaskTypes,
+  getSavedStepClis,
   attachmentUploadName,
   uploadTaskAttachment,
   startTask,
   type CliProvider,
   type PlanBlocker,
   type OnboardingStatus,
+  type UpcomingCliStep,
   type Repository,
   type Task,
   type TaskListResponse,
@@ -117,6 +120,42 @@ interface AttachmentOutcome {
   start: { started: boolean; status: string } | null;
   total: number;
   failed: { name: string; message: string }[];
+}
+
+function SavedStepClis({
+  steps,
+  providers,
+}: {
+  steps: UpcomingCliStep[];
+  providers: CliProvider[];
+}) {
+  const enabledProviderIds = new Set(providers.filter((p) => p.enabled).map((p) => p.id));
+  const rows = steps.flatMap((step) => {
+    const ids = stepCliProviderIds({ step, taskCliProviderId: null, enabledProviderIds });
+    return ids.length > 0 ? [{ step, ids }] : [];
+  });
+  if (rows.length === 0) return null;
+  return (
+    <div className="rounded-md border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-xs">
+      <p className="text-neutral-400">
+        With no default CLI, a step that has a saved CLI of its own still uses it:
+      </p>
+      <ul className="mt-1 flex flex-col gap-0.5 text-neutral-300">
+        {rows.map(({ step, ids }) => (
+          <li key={step.stepId} className="break-words">
+            {step.title}{' '}
+            <span className="font-mono text-[11px] text-neutral-600">{step.stepId}</span>
+            {' — '}
+            {ids
+              .map((id) => providers.find((p) => p.id === id))
+              .filter((p): p is CliProvider => p !== undefined)
+              .map((p) => `${p.label} (${p.name})`)
+              .join(', ')}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 export default function NewTaskPage() {
@@ -222,6 +261,10 @@ export default function NewTaskPage() {
           : 'onboarding'
         : null;
   const fields = newTaskFields(selectedType, inferredType);
+  const savedStepsSlug = selectedType.kind === 'custom' ? selectedType.value : inferredType;
+  const [savedSteps, setSavedSteps] = useState<{ slug: string; steps: UpcomingCliStep[] } | null>(
+    null,
+  );
 
   const [resetting, setResetting] = useState(false);
   const [resetNote, setResetNote] = useState<string | null>(null);
@@ -448,6 +491,21 @@ export default function NewTaskPage() {
       cancelled = true;
     };
   }, [memoryRepositoryId, providers]);
+
+  useEffect(() => {
+    if (!fields.cliPickers || !savedStepsSlug) return;
+    let cancelled = false;
+    getSavedStepClis(savedStepsSlug)
+      .then((res) => {
+        if (!cancelled) setSavedSteps({ slug: savedStepsSlug, steps: res.steps });
+      })
+      .catch(() => {
+        /* non-fatal: no list */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fields.cliPickers, savedStepsSlug]);
 
   // Feature/area autocomplete: once >=2 chars are typed and a repo is selected,
   // fetch prior feature names for that repo (substring match) so the user reuses
@@ -1086,7 +1144,7 @@ export default function NewTaskPage() {
                   }}
                   className="h-10 min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                 >
-                  <option value="">(none — deterministic steps only)</option>
+                  <option value="">(none — no default CLI)</option>
                   {(providers ?? []).map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.label} ({p.name})
@@ -1131,6 +1189,12 @@ export default function NewTaskPage() {
                 for this task only — your saved choices are left untouched. A step you change during
                 the task runs on its new CLI.
               </p>
+              {cliProviderId === '' &&
+                !ignoreSavedStepClis &&
+                savedSteps !== null &&
+                savedSteps.slug === savedStepsSlug && (
+                  <SavedStepClis steps={savedSteps.steps} providers={providers ?? []} />
+                )}
             </div>
 
             <div className="flex flex-col gap-1.5">

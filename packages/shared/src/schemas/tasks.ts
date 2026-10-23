@@ -73,7 +73,7 @@ export const createTaskRequestSchema = z
      *  effort (work + user-active) in the task UI. All task types. */
     estimatedTimeHours: z.number().positive().max(1000).optional(),
     repositoryId: z.string().uuid().optional(),
-    /** Explicit `null` means "no CLI, deterministic steps only" and is a STATED
+    /** Explicit `null` means "no default CLI" and is a STATED
      *  choice; omitting the field states nothing. The create handler stores the
      *  same value either way and records the difference in tasks.cli_choice_recorded,
      *  which is what makes the New Task form's dropdown remember "(none)". */
