@@ -20,8 +20,11 @@ import {
 import { readStepCatalog, type StepCatalogRead } from '@haive/shared/modularity-server';
 import { getDb } from '../db.js';
 import { recordAuditEvent } from '../lib/audit.js';
+import { buildUpcomingCliSteps } from './tasks/_helpers.js';
+import { loadStepFlags, withTaskCustomSteps } from '../lib/step-flags.js';
 import {
   acceptsSavedDatabase,
+  definitionForCreate,
   readModuleStates,
   restoresDatabase,
 } from '../lib/task-type-definition.js';
@@ -478,4 +481,35 @@ taskTypeRoutes.get('/', async (c) => {
     });
   });
   return c.json({ taskTypes });
+});
+
+taskTypeRoutes.get('/:slug/saved-step-clis', async (c) => {
+  const db = getDb();
+  const slug = c.req.param('slug');
+  const definition = await definitionForCreate(db, slug, { generic: true });
+  const flags = withTaskCustomSteps(await loadStepFlags(db), {
+    type: slug,
+    requiresRepository: definition.requiresRepository,
+    runListSnapshot: definition.runListSnapshot,
+    customSteps: definition.customSteps,
+  });
+  const upcoming = await buildUpcomingCliSteps(
+    db,
+    flags,
+    c.get('userId'),
+    null,
+    slug,
+    [],
+    false,
+    definition.runListSnapshot,
+  );
+  const holdsSaved = (values: Record<string, string | null> | undefined) =>
+    Object.values(values ?? {}).some((value) => value !== null);
+  const steps = upcoming.filter(
+    (step) =>
+      step.preferredCliProviderId !== null ||
+      holdsSaved(step.cliRoleProviders) ||
+      holdsSaved(step.miningSeatProviders),
+  );
+  return c.json({ steps });
 });

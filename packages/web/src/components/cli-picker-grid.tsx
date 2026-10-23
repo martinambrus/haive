@@ -70,7 +70,7 @@ export function CliPickerGrid({
   const cliLabelClass = 'truncate text-xs font-medium text-neutral-400';
   const cliOptions = (
     <>
-      <option value="">(none — deterministic only)</option>
+      <option value="">(none — use the default)</option>
       {providers.map((p) => (
         <option key={p.id} value={p.id} disabled={!p.enabled}>
           {p.label} ({p.name}){!p.enabled ? ' — disabled' : ''}
