@@ -116,20 +116,33 @@ connection string writes an audit row (`global_kb.connection_string.update`,
 "keep"; removing the stored one takes an explicit `clearConnectionString: true`, refused with 409
 `connection_string_in_use` while the store the save leaves in place is the external one, refused
 with 400 alongside a new string, and audited as `{connectionStringSet: false}`. A save that sets the
-string writes it (and its audit row) after the embedding-width check and before the mode, so no
-process finds the external store without its string, and a refused save writes nothing. A new string
-in a save that leaves the store built-in is refused with 400 `connection_string_unused` (the page
-sends the string only while the external store is selected), and a re-sent stored string is
-skipped, so a save that leaves the external store never writes a string; a removal it asks for comes
-after the mode. A save that writes any of the eight other settings also records one
+string writes its audit row and then the string, after the embedding-width check and before the
+mode, so no process finds the external store without its string, and a refused save writes nothing.
+A new string in a save that leaves the store built-in is refused with 400 `connection_string_unused`
+(the page sends the string only while the external store is selected), and a re-sent stored string
+is skipped, so a save that leaves the external store never writes a string; a removal it asks for
+comes after the mode. A save that writes any of the eight other settings also records one
 `config.global_kb` row: `from` (read past the cache) and `to` for all eight, and a
-`connectionStringChanged` flag, with `partial: true` when a later write failed. It takes no advisory
+`connectionStringChanged` flag (true only when this save stored a new string: the removal runs after
+this row and has its own), with `partial: true` when a later write failed. It takes no advisory
 lock: the one api process runs the saves one after another (`serializeConfigSave`) and is the only
-writer of those keys. Every
-process reads the mode and the string fresh, past the 30 s caches (`resolveGlobalKbSettings`), so a
-switch or a removal reaches the worker at once; a reader that finds the external store reads the
-mode once more after the string, since leaving the external store writes the mode before it removes
-the string. The house-rules switch lives in
+writer of those keys. Each of the three changes (the string, the settings, the removal) runs in its
+own transaction that inserts its row first and then makes the change. The secrets service writes
+`system_secrets` on its own connection and the settings go to Redis, so no rollback reaches either:
+a row that cannot be inserted fails the save with 500 before its change, and a change that fails
+rolls its row back, so no row claims a change that did not happen. The settings row goes in a
+savepoint before the first key; a write that fails after some keys rolls the full row back, commits
+the `partial: true` row for the keys written, and then fails the save. The pino line is logged after
+the commit. A commit that fails after the change was written leaves that change without its row,
+and the save answers 500: an omission in a window of one round trip, never a false claim
+(`global-kb-config-audit-db.test.ts` pins it with a trigger that fails at commit). Writing the
+change first and its row second has the same window plus one at the row insert, and a refused row
+could not leave the change untouched, so the row goes first. The transactions are separate, so a
+later failure never takes an earlier change's row with it: a save that stored the string and then
+failed on the settings keeps both. Every process reads the mode and the string fresh, past the 30 s
+caches (`resolveGlobalKbSettings`), so a switch or a removal reaches the worker at once; a reader
+that finds the external store reads the mode once more after the string, since leaving the external
+store writes the mode before it removes the string. The house-rules switch lives in
 the admin console, and an admin who points the KB at an external store trusts every writer of that
 database: a row it marks enforced is honoured. The
 enrich task refuses to re-enrich an enforced entry, since a retry would demote it, and reads the
