@@ -85,7 +85,21 @@ const refuseSecret = async (db: Database) => {
     ),
   );
 };
+const refuseAuditAtCommit = async (db: Database) => {
+  await db.execute(
+    sql.raw(
+      "CREATE OR REPLACE FUNCTION refuse_gkb_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'commit refused'; END $$;",
+    ),
+  );
+  await db.execute(
+    sql.raw(
+      'CREATE CONSTRAINT TRIGGER refuse_gkb_commit AFTER INSERT ON audit_events DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_gkb_commit();',
+    ),
+  );
+};
 const dropTriggers = async (db: Database) => {
+  await db.execute(sql.raw('DROP TRIGGER IF EXISTS refuse_gkb_commit ON audit_events;'));
+  await db.execute(sql.raw('DROP FUNCTION IF EXISTS refuse_gkb_commit();'));
   await db.execute(sql.raw('DROP TRIGGER IF EXISTS refuse_gkb_audit ON audit_events;'));
   await db.execute(sql.raw('DROP FUNCTION IF EXISTS refuse_gkb_audit();'));
   await db.execute(sql.raw('DROP TRIGGER IF EXISTS refuse_gkb_secret ON system_secrets;'));
@@ -335,5 +349,35 @@ describe.skipIf(!url)('PUT /global-kb/config writes its audit row first, on Post
       false,
     );
     expect(all[1]!.metadata).toEqual({ connectionStringSet: false });
+  });
+
+  it('W1: a commit that fails after the string was stored leaves it without a row and answers 500', async () => {
+    await armExternalWithOld();
+    await refuseAuditAtCommit(db);
+    const res = await put({ connectionString: NEW });
+    expect(res.status).toBe(500);
+    await dropTriggers(db);
+    expect(await storedSecret()).toBe(NEW);
+    expect(await rows()).toEqual([]);
+  });
+
+  it('W2: a commit that fails after the settings were written leaves them without a row and answers 500', async () => {
+    await refuseAuditAtCommit(db);
+    const res = await put({ digestEnabled: false, archiveRetentionDays: 7 });
+    expect(res.status).toBe(500);
+    await dropTriggers(db);
+    expect(redisValues.get(CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED)).toBe('false');
+    expect(redisValues.get(CONFIG_KEYS.GLOBAL_KB_ARCHIVE_RETENTION_DAYS)).toBe('7');
+    expect(await rows()).toEqual([]);
+  });
+
+  it('W3: a commit that fails after the string was removed leaves it without a row and answers 500', async () => {
+    await setSecretDirectly(OLD);
+    await refuseAuditAtCommit(db);
+    const res = await put({ clearConnectionString: true });
+    expect(res.status).toBe(500);
+    await dropTriggers(db);
+    expect(await storedSecret()).toBeNull();
+    expect(await rows()).toEqual([]);
   });
 });
