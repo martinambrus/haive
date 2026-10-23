@@ -1,9 +1,9 @@
 /**
  * Task class — the axis statistics group by.
  *
- * `tasks.type` alone is a poor axis. It has eleven built-in types that mean four different KINDS
+ * `tasks.type` alone is a poor axis. It has twelve built-in types that mean four different KINDS
  * of thing, and a `workflow` task splits further by `execution_path` into paths whose cost
- * differs by an order of magnitude. Grouping a chart by the raw type produces eleven thin
+ * differs by an order of magnitude. Grouping a chart by the raw type produces twelve thin
  * series nobody can read, and hides that "setup" work is overhead rather than delivery.
  * Admin-authored types (the column is text) are not built-ins and count as `other`.
  *

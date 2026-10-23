@@ -3619,7 +3619,7 @@ function StepCardImpl({
     !taskCancelled && !taskDead && taskStatus !== 'completed' && !isDownstreamOfActive;
   // Only steps that actually dispatch a CLI (llm | agentMining | dagExecute) get a
   // provider picker; deterministic steps never consume a per-step provider, so the
-  // picker would be a dead control. usesCli comes from CLI_DISPATCH_STEP_IDS.
+  // picker would be a dead control. usesCli comes from step_catalog.
   const showCliPicker =
     !taskCancelled && !taskDead && ACTIONABLE_STATUSES.has(step.status) && step.usesCli;
   // Deterministic actionable steps show a subtle note in place of the picker so
