@@ -84,13 +84,13 @@ afterEach(async () => {
   await rm(base, { recursive: true, force: true });
 });
 
-async function installShim(failStatus: boolean): Promise<void> {
+async function installShim(failArg: string | null): Promise<void> {
   const script = [
     '#!/bin/sh',
     `echo "$*" >> '${logFile}'`,
-    failStatus
-      ? 'for a in "$@"; do if [ "$a" = status ]; then echo "fatal: simulated status failure" >&2; exit 128; fi; done'
-      : '',
+    failArg === null
+      ? ''
+      : `for a in "$@"; do if [ "$a" = '${failArg}' ]; then echo "fatal: simulated failure" >&2; exit 128; fi; done`,
     `exec ${REAL_GIT} "$@"`,
     '',
   ].join('\n');
@@ -98,7 +98,18 @@ async function installShim(failStatus: boolean): Promise<void> {
   await chmod(path.join(shimDir, 'git'), 0o755);
 }
 
-async function snapshot(failStatus: boolean) {
+interface Snapshot {
+  gitAvailable: boolean | null;
+  tracked: boolean | null;
+  uncommitted: boolean | null;
+  committed: boolean;
+  pushed: boolean | null;
+  branch: string | null;
+  hasOrigin: boolean | null;
+  originUrl: string | null;
+}
+
+async function snapshot(failArg: string | null = null): Promise<Snapshot> {
   const fake = createFakeDb({
     repositories: schema.repositories,
     planMirrorState: schema.planMirrorState,
@@ -106,38 +117,38 @@ async function snapshot(failStatus: boolean) {
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', storagePath: root });
   fake.insert(schema.planMirrorState, { repositoryId: REPO, revision: 1, writtenRevision: 1 });
   h.db = fake.db;
-  await installShim(failStatus);
+  await installShim(failArg);
   process.env.PATH = `${shimDir}:${savedPath}`;
   try {
     const res = await app.request(`/${REPO}/plan/snapshot`);
     expect(res.status).toBe(200);
-    return (await res.json()) as {
-      uncommitted: boolean | null;
-      committed: boolean;
-      pushed: boolean | null;
-    };
+    return (await res.json()) as Snapshot;
   } finally {
     process.env.PATH = savedPath;
   }
 }
 
-async function sawRevList(): Promise<boolean> {
-  return (await readFile(logFile, 'utf8')).split('\n').some((line) => line.includes('rev-list'));
+async function ran(sub: string): Promise<boolean> {
+  return (await readFile(logFile, 'utf8')).split('\n').some((line) => line.includes(sub));
 }
 
 describe('the plan snapshot git state', () => {
   it('reads clean and pushed', async () => {
-    expect(await snapshot(false)).toMatchObject({
+    expect(await snapshot()).toMatchObject({
+      gitAvailable: true,
+      tracked: true,
       uncommitted: false,
       committed: true,
       pushed: true,
+      branch: 'main',
+      hasOrigin: true,
     });
-    expect(await sawRevList()).toBe(true);
+    expect(await ran('rev-list')).toBe(true);
   });
 
   it('reads an edited plan as uncommitted', async () => {
     await writeFile(path.join(root, HAIVE_DATA_FILES.planMarkdown), 'edited\n');
-    expect(await snapshot(false)).toMatchObject({
+    expect(await snapshot()).toMatchObject({
       uncommitted: true,
       committed: false,
       pushed: null,
@@ -148,7 +159,7 @@ describe('the plan snapshot git state', () => {
     await writeFile(path.join(root, 'other.txt'), 'x\n');
     git('add', 'other.txt');
     git('commit', '-q', '-m', 'other');
-    expect(await snapshot(false)).toMatchObject({
+    expect(await snapshot()).toMatchObject({
       uncommitted: false,
       committed: true,
       pushed: false,
@@ -156,11 +167,74 @@ describe('the plan snapshot git state', () => {
   });
 
   it('claims nothing when git status fails', async () => {
-    expect(await snapshot(true)).toMatchObject({
+    expect(await snapshot('status')).toMatchObject({
       uncommitted: null,
       committed: false,
       pushed: null,
     });
-    expect(await sawRevList()).toBe(false);
+    expect(await ran('rev-list')).toBe(false);
+  });
+
+  it('reports every git fact unknown when the work-tree probe fails, and reads nothing more', async () => {
+    expect(await snapshot('--is-inside-work-tree')).toEqual({
+      revision: 1,
+      writtenRevision: 1,
+      snapshotState: 'written',
+      snapshotWritten: true,
+      lastError: null,
+      filesExist: true,
+      gitAvailable: null,
+      tracked: null,
+      uncommitted: null,
+      committed: false,
+      pushed: null,
+      branch: null,
+      hasOrigin: null,
+      originUrl: null,
+    });
+    for (const sub of ['ls-files', 'status', 'remote', 'branch', 'rev-list']) {
+      expect(await ran(sub)).toBe(false);
+    }
+  });
+
+  it('reports the origin unknown when reading it fails', async () => {
+    expect(await snapshot('get-url')).toMatchObject({
+      gitAvailable: true,
+      hasOrigin: null,
+      originUrl: null,
+      tracked: true,
+      uncommitted: false,
+      committed: true,
+      pushed: true,
+    });
+  });
+
+  it('reports tracking unknown when ls-files fails', async () => {
+    expect(await snapshot('--error-unmatch')).toMatchObject({
+      tracked: null,
+      committed: false,
+      pushed: null,
+    });
+  });
+
+  it('reads a repository without an origin as a definite negative', async () => {
+    git('remote', 'remove', 'origin');
+    expect(await snapshot()).toMatchObject({ hasOrigin: false, originUrl: null, pushed: null });
+  });
+
+  it('reads untracked plan files as not tracked', async () => {
+    git('rm', '-q', '--cached', HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown);
+    git('commit', '-q', '-m', 'untrack');
+    expect(await snapshot()).toMatchObject({ tracked: false, committed: false });
+  });
+
+  it('reads a branch as null when it cannot be read', async () => {
+    expect(await snapshot('--show-current')).toMatchObject({
+      branch: null,
+      tracked: true,
+      uncommitted: false,
+      committed: true,
+      pushed: true,
+    });
   });
 });
