@@ -1220,6 +1220,61 @@ describe('extractCodeSections — braces that are not code', () => {
   });
 });
 
+describe('extractCodeSections — class names', () => {
+  const ids = (src: string, file: string) => extractCodeSections(src, file).map((s) => s.sectionId);
+  const REAL = 'class Real {\n  public function one($x) {\n    return $x;\n  }\n}\n';
+
+  it.each([
+    ['a docblock', '/**\n * Base class for export UI.\n */\n'],
+    ['a // comment', '// This class is the owner.\n'],
+    ['a # comment', '# a class name goes here\n'],
+    ['a block comment', '/* The class is documented below. */\n'],
+    ['a block comment holding a class body', '/* class Fake { */\n'],
+  ])(
+    'names a PHP method after the class that holds it, not after a word in %s',
+    (_what, before) => {
+      const sections = extractCodeSections(`<?php\n${before}${REAL}`, 'Real.php');
+      const method = sections.find((s) => s.content.includes('function one'));
+
+      expect(method?.sectionId).toBe('method-Real-one');
+      expect(method?.breadcrumb).toEqual(['class Real', 'function one']);
+    },
+  );
+
+  it('names a PHP function that no class holds after itself, whatever a comment before it says of a class', () => {
+    const php = [
+      '<?php',
+      "define('X', 1);",
+      '',
+      '/**',
+      ' * Style the .button class or leave it alone.',
+      ' */',
+      '',
+      '/**',
+      ' * Picks one.',
+      ' */',
+      'function pick() {',
+      '  return 1;',
+      '}',
+      '',
+    ].join('\n');
+
+    expect(ids(php, 'pick.module')).toEqual(['function-pick']);
+  });
+
+  it('names a method after a class declared with upper-case keywords', () => {
+    const php = '<?php\nCLASS Real {\n  PUBLIC FUNCTION one($x) {\n    return $x;\n  }\n}\n';
+
+    expect(ids(php, 'Real.php')).toEqual(['method-Real-one']);
+  });
+
+  it('reads no JS class from a comment that ends with the word class', () => {
+    const js = '// Skip class Foo\n{\n  run();\n}\n\nfunction real() {\n  return 1;\n}\n';
+
+    expect(ids(js, 'skip.js')).not.toContain('class-Foo');
+  });
+});
+
 describe('chunkSection', () => {
   it('splits a long section without losing any region', () => {
     const content = markedBody(10_000);

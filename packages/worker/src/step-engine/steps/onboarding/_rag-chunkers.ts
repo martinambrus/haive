@@ -579,9 +579,9 @@ function phpRanges(content: string): SectionRange[] {
   // duplicate every method inside them. They exist only to name the method that
   // sits within, so a chunk can say which class it belongs to.
   const classes: Array<{ name: string; start: number; end: number }> = [];
-  const classRe = /class\s+(\w+)[^{;]*\{/g;
+  const classRe = /class\s+(\w+)[^{;]*\{/gi;
   let match: RegExpExecArray | null;
-  while ((match = classRe.exec(content)) !== null) {
+  while ((match = classRe.exec(code)) !== null) {
     const end = blockEndFromMatch(code, match);
     if (end !== null) classes.push({ name: match[1]!, start: match.index, end });
   }
@@ -711,7 +711,7 @@ function jsRanges(content: string, members: boolean): SectionRange[] {
   // Classes. Their extents also name the class a member sits in.
   const classes: Array<{ name: string; start: number; end: number }> = [];
   const classRe = /class\s+(\w+)(?:\s+extends\s+\w+)?\s*\{/g;
-  while ((match = classRe.exec(content)) !== null) {
+  while ((match = classRe.exec(code)) !== null) {
     const end = blockEndFromMatch(code, match);
     if (end !== null) {
       classes.push({ name: match[1]!, start: match.index, end });
