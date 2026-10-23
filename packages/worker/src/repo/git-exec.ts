@@ -10,7 +10,14 @@ export interface GitRunResult {
   stdout: string;
   stderr: string;
   code: number;
+  /** Set with GIT_NO_EXIT: Node's error code, e.g. `ENOENT` or `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`, or the signal, e.g. `SIGKILL`. */
+  noExit?: string;
 }
+
+/** The `code` of a run that ended without an exit status: git could not start, a signal other than
+ *  the time limit ended it, or its output outgrew the buffer. No exit status is negative, so a
+ *  reader that takes exit 1 for "no" never takes this for an answer. */
+export const GIT_NO_EXIT = -1;
 
 /** execFile kills a child whose output outgrows its buffer, 1 MiB by default, and a merge or a
  *  commit killed that way is left half-written; git's output grows with the repository. */
@@ -51,6 +58,10 @@ export function gitDefaultTimeoutMs(argv: readonly string[]): number {
 function timedOutLine(argv: readonly string[], timeout: number): string {
   const at = gitSubcommandIndex(argv);
   return `git ${at === -1 ? '' : argv[at]} timed out after ${Math.round(timeout / 1000)} s`;
+}
+
+function withLine(stderr: string, line: string): string {
+  return `${stderr}${stderr === '' || stderr.endsWith('\n') ? '' : '\n'}${line}\n`;
 }
 
 /** Node's timeout kill is a SIGTERM with no exit code; a maxBuffer kill carries a string code. */
@@ -104,14 +115,23 @@ export async function gitRun(
     if (timeout > 0 && killedByTimeout(e)) {
       return {
         stdout: (e.stdout ?? '').toString(),
-        stderr: `${stderr}${stderr === '' || stderr.endsWith('\n') ? '' : '\n'}${timedOutLine(argv, timeout)}\n`,
+        stderr: withLine(stderr, timedOutLine(argv, timeout)),
         code: 124,
+      };
+    }
+    if (typeof e.code !== 'number') {
+      const noExit = typeof e.code === 'string' ? e.code : (e.signal ?? 'unknown');
+      return {
+        stdout: (e.stdout ?? '').toString(),
+        stderr: withLine(stderr, `git ended without an exit status in ${cwd} (${noExit})`),
+        code: GIT_NO_EXIT,
+        noExit,
       };
     }
     return {
       stdout: (e.stdout ?? '').toString(),
       stderr,
-      code: typeof e.code === 'number' ? e.code : 1,
+      code: e.code,
     };
   }
 }
