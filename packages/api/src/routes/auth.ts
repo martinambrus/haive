@@ -25,6 +25,7 @@ import {
 import { setAuthCookies, clearAuthCookies, getRefreshCookie } from '../auth/cookies.js';
 import { checkInvite, hashInviteToken } from '../lib/invites.js';
 import { decideRegistration } from '../lib/registration.js';
+import { reserveAuthAttempt } from '../lib/auth-throttle.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -60,10 +61,11 @@ async function issueTokens(
 
 authRoutes.post('/register', async (c) => {
   const body = registerRequestSchema.parse(await c.req.json());
-  const db = getDb();
   const fieldKey = await configService.getEncryptionKey();
   const pepper = await secretsService.getEmailBlindIndexPepper();
   const blindIndex = computeEmailBlindIndex(body.email, pepper);
+  const attempt = await reserveAuthAttempt(c, 'register', blindIndex);
+  const db = getDb();
 
   const passwordHash = await hashPassword(body.password);
   const emailEncrypted = encryptEmail(body.email, fieldKey);
@@ -181,6 +183,7 @@ authRoutes.post('/register', async (c) => {
     expiresAt,
   });
   setAuthCookies(c, accessToken, refreshToken);
+  await attempt.refund();
 
   return c.json(
     {
@@ -220,10 +223,11 @@ authRoutes.get('/registration-status', async (c) => {
 
 authRoutes.post('/login', async (c) => {
   const body = loginRequestSchema.parse(await c.req.json());
-  const db = getDb();
   const fieldKey = await configService.getEncryptionKey();
   const pepper = await secretsService.getEmailBlindIndexPepper();
   const blindIndex = computeEmailBlindIndex(body.email, pepper);
+  const attempt = await reserveAuthAttempt(c, 'login', blindIndex);
+  const db = getDb();
 
   const user = await db.query.users.findFirst({
     where: eq(schema.users.emailBlindIndex, blindIndex),
@@ -246,6 +250,7 @@ authRoutes.post('/login', async (c) => {
     expiresAt,
   });
   setAuthCookies(c, accessToken, refreshToken);
+  await attempt.refund();
 
   return c.json({
     user: {
