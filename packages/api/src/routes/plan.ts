@@ -135,13 +135,20 @@ async function requireNode(repositoryId: string, nodeId: string) {
   return node;
 }
 
-async function gitRead(cwd: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
+async function gitRead(
+  cwd: string,
+  args: string[],
+): Promise<{ ok: boolean; stdout: string; code: number | null }> {
   try {
     const { stdout } = await exec('git', hardenGitArgs(args), { cwd, timeout: 5_000 });
-    return { ok: true, stdout: stdout.toString().trim() };
+    return { ok: true, stdout: stdout.toString().trim(), code: 0 };
   } catch (err) {
-    const e = err as { stdout?: string };
-    return { ok: false, stdout: (e.stdout ?? '').toString().trim() };
+    const e = err as { stdout?: string; code?: unknown };
+    return {
+      ok: false,
+      stdout: (e.stdout ?? '').toString().trim(),
+      code: typeof e.code === 'number' ? e.code : null,
+    };
   }
 }
 
@@ -337,8 +344,8 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
       ).every(Boolean)
     : false;
 
-  let gitAvailable = false;
-  let tracked = false;
+  let gitAvailable: boolean | null = false;
+  let tracked: boolean | null = false;
   let uncommitted: boolean | null = false;
   let branch: string | null = null;
   let pushed: boolean | null = null;
@@ -346,12 +353,19 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
   // `repositories.remote_url`, because it is git that push and pull obey — a
   // column saying otherwise would offer the user a button that cannot work.
   let originUrl: string | null = null;
+  let hasOrigin: boolean | null = false;
   if (repoRoot) {
     const inside = await gitRead(repoRoot, ['rev-parse', '--is-inside-work-tree']);
-    gitAvailable = inside.ok && inside.stdout === 'true';
-    if (gitAvailable) {
+    gitAvailable = inside.ok ? inside.stdout === 'true' : null;
+    if (gitAvailable === null) {
+      tracked = null;
+      uncommitted = null;
+      hasOrigin = null;
+    } else if (gitAvailable) {
       const origin = await gitRead(repoRoot, ['remote', 'get-url', 'origin']);
       originUrl = origin.ok ? origin.stdout || null : null;
+      if (origin.ok) hasOrigin = origin.stdout.length > 0;
+      else hasOrigin = origin.code === 2 ? false : null;
       const [trackedResults, status, branchResult, upstream] = await Promise.all([
         Promise.all(
           paths.map((rel) => gitRead(repoRoot, ['ls-files', '--error-unmatch', '--', rel])),
@@ -360,10 +374,11 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
         gitRead(repoRoot, ['branch', '--show-current']),
         gitRead(repoRoot, ['rev-parse', '--abbrev-ref', '@{upstream}']),
       ]);
-      tracked = trackedResults.every((result) => result.ok);
+      if (trackedResults.some((result) => result.code === 1)) tracked = false;
+      else tracked = trackedResults.every((result) => result.ok) ? true : null;
       uncommitted = status.ok ? status.stdout.length > 0 : null;
       branch = branchResult.ok ? branchResult.stdout || null : null;
-      if (tracked && uncommitted === false && upstream.ok) {
+      if (tracked === true && uncommitted === false && upstream.ok) {
         const ahead = await gitRead(repoRoot, ['rev-list', '--count', '@{upstream}..HEAD']);
         pushed = ahead.ok ? Number(ahead.stdout) === 0 : null;
       }
@@ -385,10 +400,10 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
     gitAvailable,
     tracked,
     uncommitted,
-    committed: filesExist && tracked && uncommitted === false,
+    committed: filesExist && tracked === true && uncommitted === false,
     pushed,
     branch,
-    hasOrigin: originUrl !== null,
+    hasOrigin,
     originUrl,
   });
 });

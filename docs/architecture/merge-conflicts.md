@@ -61,7 +61,7 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   release, so it also covers a claim that committed after the release read the task's claims; a
   cancelled task without it still holds, since its fixer may still be running, until the stalled sweep gives its teardown up and writes the event with `abandoned: true` ([worker restarts](worker-restarts.md)). A
   failed task keeps the claim while its own merge is open (`MERGE_HEAD` is the step's) or has landed
-  and is not yet pushed, and when git state cannot be read, since its Retry resumes it; so does a
+  and is not yet pushed, and when git state cannot be read (git could not run, `GIT_NO_EXIT`, included), since its Retry resumes it; so does a
   crashed worker's, which boot re-drives. A Retry takes the claim again at every phase but `done`.
   Every host-side write to the dir in `merge-resolver.ts` runs in `withMergeDirSection` except the
   network-bound ones (the pre-push fetch and the push, below) and the re-sync of Haive's own files

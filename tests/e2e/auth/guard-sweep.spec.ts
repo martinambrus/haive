@@ -20,6 +20,9 @@ const PROTECTED_API_ROUTES: ApiRoute[] = [
   // returned one.
 
   { method: 'GET', path: '/cli-providers' },
+  { method: 'GET', path: '/cli-providers/catalog' },
+  { method: 'POST', path: '/cli-providers/catalog/claude-code/refresh-versions' },
+  { method: 'GET', path: '/cli-providers/catalog/claude-code/refresh-versions/1' },
   { method: 'POST', path: '/cli-providers', body: {} },
   { method: 'GET', path: `/cli-providers/${FAKE_UUID}` },
   { method: 'PATCH', path: `/cli-providers/${FAKE_UUID}`, body: {} },
@@ -62,10 +65,7 @@ const PROTECTED_API_ROUTES: ApiRoute[] = [
   },
 ];
 
-const PUBLIC_API_ROUTES: ApiRoute[] = [
-  { method: 'GET', path: '/health' },
-  { method: 'GET', path: '/cli-providers/catalog' },
-];
+const PUBLIC_API_ROUTES: ApiRoute[] = [{ method: 'GET', path: '/health' }];
 
 const PROTECTED_WEB_PATHS = [
   '/dashboard',

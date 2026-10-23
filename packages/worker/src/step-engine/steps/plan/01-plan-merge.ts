@@ -204,7 +204,10 @@ async function loadConversation(
 
 async function currentBranch(repoPath: string): Promise<string> {
   const res = await gitRun(repoPath, ['branch', '--show-current']);
-  return res.code === 0 ? res.stdout.trim() : '';
+  if (res.code !== 0) {
+    throw new Error(`git branch failed in ${repoPath}: ${res.stderr.trim() || res.stdout.trim()}`);
+  }
+  return res.stdout.trim();
 }
 
 async function mergeIsOpen(worktreePath: string): Promise<boolean> {

@@ -10,7 +10,8 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  * It evaluates `where` rather than ignoring it, because the code under test rides on it: a
  * children lookup that ignored its filter would hand back a sibling archive's row and delete the
  * wrong folder. It supports exactly the conditions callers build — `and` and `or` of `eq` / `ne` /
- * `gt` / `lt` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL never matching the last five —
+ * `gt` / `lt` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL never matching the last five,
+ * and a jsonb column's key that holds a string (`jsonb_typeof(column -> 'key') = 'string'`) —
  * and throws on anything else, so a drizzle upgrade or a new query shape fails loudly instead of
  * matching every row. Of an update's SQL values it evaluates `<column> + <integer>` and stores any
  * other as it is. The foreign-key cascade is read off the schema.
@@ -226,6 +227,27 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
       ) {
         const parts = ch.filter((_, i) => i % 2 === 0).map(compile);
         return (row) => parts.some((part) => part(row));
+      }
+      const member = ch[3];
+      if (
+        ch.length === 5 &&
+        text(ch[0]) === 'jsonb_typeof(' &&
+        is(ch[1], Column) &&
+        text(ch[2]) === ' -> ' &&
+        typeof member === 'string' &&
+        text(ch[4]) === "::text) = 'string'"
+      ) {
+        const jsonKey = keyOf.get(ch[1]);
+        if (jsonKey !== undefined) {
+          return (row) => {
+            const doc = row[jsonKey];
+            return (
+              typeof doc === 'object' &&
+              doc !== null &&
+              typeof (doc as Record<string, unknown>)[member] === 'string'
+            );
+          };
+        }
       }
       const [col, op, val] = ch;
       const key = is(col, Column) ? keyOf.get(col) : undefined;

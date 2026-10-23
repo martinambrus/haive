@@ -6,6 +6,7 @@ vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
 
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { FIX_LOOP_ACTION_FIELD } from '@haive/shared';
 import { stopActiveCliInvocations } from '../src/lib/task-control.js';
 
 const TASK = '00000000-0000-4000-8000-000000000001';
@@ -81,6 +82,33 @@ describe('stopping a task', () => {
     const { completedAt } = fake.rows(schema.tasks)[0]!;
     expect(completedAt).toBeInstanceOf(Date);
     expect(result.failedAt).toBe((completedAt as Date).toISOString());
+  });
+
+  it.each([
+    ['fails a pending row that holds a fix-loop gate answer', { [FIX_LOOP_ACTION_FIELD]: 'x' }, 1],
+    ['leaves a pending row that holds another form answer', { note: 'keep me' }, 0],
+    ['leaves a pending row whose gate field is not a string', { [FIX_LOOP_ACTION_FIELD]: 3 }, 0],
+    ['leaves a pending row that holds no answer', null, 0],
+  ])('%s', async (_name, formValues, stopped) => {
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+      cliInvocations: schema.cliInvocations,
+    });
+    fake.insert(schema.tasks, { id: TASK, status: 'running' });
+    fake.insert(schema.taskSteps, {
+      taskId: TASK,
+      stepId: '08b-test-management',
+      round: 1,
+      status: 'pending',
+      formValues,
+    });
+    const result = await stopActiveCliInvocations(fake.db as never, TASK, { failTask: true });
+    expect(result).toMatchObject({ cancelled: 0, stopped });
+    expect(fake.rows(schema.taskSteps)[0]).toMatchObject({
+      status: stopped ? 'failed' : 'pending',
+    });
+    expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: stopped ? 'failed' : 'running' });
   });
 
   it.each([

@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile, readFile, lstat } from 'node:fs/promises';
+import { execFile, execFileSync } from 'node:child_process';
+import { mkdtemp, mkdir, rm, writeFile, readFile, lstat, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -30,6 +30,7 @@ import {
   mergeOriginInto,
   planMergeWorktreePath,
   removePlanMergeWorktree,
+  unlandedResolvedMerge,
 } from './merge.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
 
@@ -173,6 +174,73 @@ describe('divergence', () => {
     expect(d.unrelated).toBe(false);
     expect(d.behind).toBe(1);
     expect(d.ahead).toBe(0);
+  });
+});
+
+describe('divergence on a failed git read', () => {
+  const REAL_GIT = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+
+  async function withShim<T>(body: string, run: () => Promise<T>): Promise<T> {
+    const shimDir = await mkdtemp(path.join(tmpdir(), 'planmerge-shim-'));
+    dirs.push(shimDir);
+    await writeFile(
+      path.join(shimDir, 'git'),
+      ['#!/bin/sh', body, `exec ${REAL_GIT} "$@"`, ''].join('\n'),
+    );
+    await chmod(path.join(shimDir, 'git'), 0o755);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    try {
+      return await run();
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  }
+
+  const failing = (sub: string): string =>
+    `for a in "$@"; do if [ "$a" = '${sub}' ]; then echo "fatal: simulated failure" >&2; exit 128; fi; done`;
+
+  it.each([
+    ['rev-list', /git rev-list failed in/],
+    ['merge-base', /git merge-base failed in/],
+    ['rev-parse', /git rev-parse failed in/],
+  ])('rejects when %s fails', async (sub, message) => {
+    const { local } = await unrelatedPair();
+    await expect(withShim(failing(sub), () => divergence(local, 'main'))).rejects.toThrow(message);
+  });
+
+  it('rejects when rev-list prints a count that is not a number', async () => {
+    const { local } = await unrelatedPair();
+    const body = `for a in "$@"; do if [ "$a" = 'rev-list' ]; then echo garbage; exit 0; fi; done`;
+    await expect(withShim(body, () => divergence(local, 'main'))).rejects.toThrow(
+      /git rev-list failed in/,
+    );
+  });
+
+  it('rejects in a directory that is not a git repository', async () => {
+    const outer = await mkdtemp(path.join(tmpdir(), 'planmerge-notrepo-'));
+    dirs.push(outer);
+    const inner = path.join(outer, 'inner');
+    await mkdir(inner);
+    const saved = process.env.GIT_CEILING_DIRECTORIES;
+    process.env.GIT_CEILING_DIRECTORIES = outer;
+    try {
+      await expect(divergence(inner, 'main')).rejects.toThrow(/git \S+ failed in/);
+    } finally {
+      if (saved === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+      else process.env.GIT_CEILING_DIRECTORIES = saved;
+    }
+  });
+
+  it('reads a missing origin ref as unrelated with nothing to pull', async () => {
+    const { local } = await unrelatedPair();
+    await git(local, ['update-ref', '-d', 'refs/remotes/origin/main']);
+    const head = Number.parseInt((await git(local, ['rev-list', '--count', 'HEAD'])).trim(), 10);
+    await expect(divergence(local, 'main')).resolves.toEqual({
+      ahead: head,
+      behind: 0,
+      unrelated: true,
+    });
   });
 });
 
@@ -983,6 +1051,59 @@ describe('landPlanMerge', () => {
 
     await expect(landPlanMerge(local, sha!)).rejects.toThrow(/uncommitted changes \(README\.md\)/);
     expect(await readFile(path.join(local, 'README.md'), 'utf8')).toBe('edited meanwhile\n');
+  });
+});
+
+describe('unlandedResolvedMerge', () => {
+  async function mergedInScratch(): Promise<{ local: string; wt: string; sha: string }> {
+    const local = await mkdtemp(path.join(tmpdir(), 'planmerge-unlanded-'));
+    dirs.push(local);
+    await git(local, ['init', '-b', 'main']);
+    await quietGit(local);
+    await write(local, 'a.txt', 'a\n');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'root']);
+    await git(local, ['branch', 'feature']);
+    await git(local, ['switch', 'feature']);
+    await write(local, 'b.txt', 'b\n');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'feature']);
+    await git(local, ['switch', 'main']);
+    const wt = await ensurePlanMergeWorktree(local);
+    await git(wt, ['merge', '--no-ff', '-m', 'merge feature', 'feature']);
+    const sha = (await git(wt, ['rev-parse', 'HEAD'])).trim();
+    return { local, wt, sha };
+  }
+
+  it('names the merge until it lands, then null', async () => {
+    const { local, wt, sha } = await mergedInScratch();
+    const head = (await git(local, ['rev-parse', 'main'])).trim();
+    expect(
+      await unlandedResolvedMerge({ repoPath: local, worktreePath: wt, branch: 'main' }),
+    ).toEqual({
+      sha,
+      head,
+    });
+    await git(local, ['merge', '--ff-only', sha]);
+    expect(
+      await unlandedResolvedMerge({ repoPath: local, worktreePath: wt, branch: 'main' }),
+    ).toBeNull();
+  });
+
+  it('throws when git cannot run in the repository', async () => {
+    const { local, wt } = await mergedInScratch();
+    const gone = path.join(local, 'never-created');
+    await expect(
+      unlandedResolvedMerge({ repoPath: gone, worktreePath: wt, branch: 'main' }),
+    ).rejects.toThrow(/git merge-base failed/);
+  });
+
+  it('throws when git cannot run in the worktree', async () => {
+    const { local } = await mergedInScratch();
+    const gone = path.join(local, 'never-created');
+    await expect(
+      unlandedResolvedMerge({ repoPath: local, worktreePath: gone, branch: 'main' }),
+    ).rejects.toThrow(/git rev-parse failed/);
   });
 });
 

@@ -141,6 +141,14 @@ async function flushCurrentPlanMirror(
   throw new Error('the plan changed repeatedly while its snapshot was being saved; try again');
 }
 
+async function currentBranch(repoPath: string): Promise<string | null> {
+  const res = await gitRun(repoPath, ['branch', '--show-current']);
+  if (res.code !== 0) {
+    throw new Error(`git branch failed in ${repoPath}: ${res.stderr.trim() || res.stdout.trim()}`);
+  }
+  return res.stdout.trim() || null;
+}
+
 export interface IntegrateOutcome {
   landed: boolean;
   previousCommit: string | null;
@@ -312,8 +320,10 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
       identity,
     });
 
-    const branchResult = await gitRun(repoPath, ['branch', '--show-current']);
-    const branch = branchResult.code === 0 ? branchResult.stdout.trim() || null : null;
+    // The commit has landed: only a push needs the branch, so a failed read fails only a push.
+    const branch = payload.push
+      ? await currentBranch(repoPath)
+      : await currentBranch(repoPath).catch(() => null);
     let pushed = false;
     if (payload.push) {
       if (!branch) throw new Error('cannot push a plan snapshot from a detached HEAD');
@@ -442,8 +452,7 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
     if (!(await detectOrigin(repoPath))) {
       throw new Error('this repository has no origin remote to pull from');
     }
-    const branchResult = await gitRun(repoPath, ['branch', '--show-current']);
-    const branch = branchResult.code === 0 ? branchResult.stdout.trim() : '';
+    const branch = await currentBranch(repoPath);
     if (!branch) throw new Error('cannot pull onto a detached HEAD');
     // The set-aside replaces plan.json, which a row stamped before 0196 takes its base from.
     await seedPlanBaseFromCheckout(db, repo.id, repoPath);

@@ -4,13 +4,21 @@ import type { Sql } from 'postgres';
 import {
   CONFIG_KEYS,
   configService,
+  drainTaskStatuses,
   NEW_WORK_FENCE_KEY,
   parseMaintenanceState,
   type MaintenanceState,
 } from '@haive/shared';
 import type { ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
-import { enterPhase, finishRun, mergeMetadata, type RunMetadata } from './journal.js';
+import {
+  enterPhase,
+  finishRun,
+  mergeMetadata,
+  readFoundState,
+  recordFoundState,
+  type RunMetadata,
+} from './journal.js';
 import { decideResume, type UpgradePhase } from './phases.js';
 
 export interface UpgradeContext {
@@ -46,6 +54,8 @@ export interface UpgradeContext {
   forceDrain: boolean;
   /** Set by phaseDraining when it forced past live work, so phaseMaintenance skips the recount. */
   drainForced?: boolean;
+  /** The maintenance state at the last look (draining phase, then each recount); the waits use it. */
+  lastState?: MaintenanceState;
   log: (event: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -128,12 +138,12 @@ async function awaitDatabase(sql: Sql, timeoutMs = 120_000): Promise<void> {
 }
 
 /** Live work that still holds a maintenance window open: tasks, and the background jobs a route queues. */
-export async function liveWorkCount(sql: Sql): Promise<number> {
+export async function liveWorkCount(sql: Sql, state: MaintenanceState = 'normal'): Promise<number> {
   // A dead task and a draft that never started run nothing; /admin/maintenance leaves both out too.
   const rows = await sql<{ n: string }[]>`
     SELECT (
       (SELECT count(*) FROM tasks
-        WHERE status IN ('queued','running','paused','waiting_user','waiting_pr')
+        WHERE status = ANY(${drainTaskStatuses(state)}::task_status[])
           AND dead_at IS NULL)
       + (SELECT count(*) FROM repositories WHERE status = 'cloning')
       + (SELECT count(*) FROM custom_bundles WHERE status = 'syncing')
@@ -163,14 +173,20 @@ async function setMaintenanceState(sql: Sql, state: MaintenanceState): Promise<v
 }
 
 /** Writes draining over normal only: a draining or maintenance an administrator set is already a hold. */
-async function holdDraining(sql: Sql): Promise<MaintenanceState> {
-  return underFence(sql, async () => {
+async function holdDraining(ctx: UpgradeContext): Promise<MaintenanceState> {
+  return underFence(ctx.sql, async (fence) => {
     const found = parseMaintenanceState(
       await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
     );
+    await recordFoundState(fence, ctx.runId, found);
     if (found === 'normal') await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
     return found;
   });
+}
+
+/** Read from the journal, not the context: a restarted updater never ran the draining phase. */
+async function restoreMaintenanceState(ctx: UpgradeContext): Promise<void> {
+  await setMaintenanceState(ctx.sql, await readFoundState(ctx.sql, ctx.runId));
 }
 
 /** Recounts under the fence: a draining or held install with nothing live enters maintenance. */
@@ -179,8 +195,9 @@ async function enterMaintenance(ctx: UpgradeContext): Promise<boolean> {
     const state = parseMaintenanceState(
       await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
     );
+    ctx.lastState = state;
     // The updater's pool is one connection and the fence holds it, so the count runs on the fence.
-    const live = await liveWorkCount(fence);
+    const live = await liveWorkCount(fence, state);
     const entered = state !== 'normal' && live === 0;
     if (state === 'normal') await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
     if (entered && state === 'draining') {
@@ -216,7 +233,7 @@ function reopenedAtDeadline(ctx: UpgradeContext): boolean {
 async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
   const deadline = drainDeadline(ctx);
   for (;;) {
-    const live = await liveWorkCount(ctx.sql);
+    const live = await liveWorkCount(ctx.sql, ctx.lastState);
     if (live === 0) {
       ctx.log('drained', { live: 0 });
       return false;
@@ -239,7 +256,8 @@ async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
 
 export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
   await enterPhase(ctx.sql, ctx.runId, 'draining');
-  const found = await holdDraining(ctx.sql);
+  const found = await holdDraining(ctx);
+  ctx.lastState = found;
   ctx.log('draining', { deadlineMs: ctx.drainDeadlineMs, found });
   ctx.drainForced = await awaitDrain(ctx);
 }
@@ -319,7 +337,7 @@ export async function rollback(ctx: UpgradeContext, reason: string): Promise<voi
   ctx.log('rollback', { to: ctx.fromVersion, reason });
   await setEnvVar(ctx.envFile, 'HAIVE_VERSION', ctx.fromVersion);
   await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion));
-  await setMaintenanceState(ctx.sql, 'normal');
+  await restoreMaintenanceState(ctx);
   await finishRun(ctx.sql, ctx.runId, 'rolled_back', reason);
   ctx.log('rolled-back', { version: ctx.fromVersion });
 }
@@ -342,7 +360,7 @@ export async function phaseCommit(ctx: UpgradeContext): Promise<void> {
   );
   ctx.log('destructive-data-migrations', { tail: out.split('\n').slice(-1)[0] ?? '' });
 
-  await setMaintenanceState(ctx.sql, 'normal');
+  await restoreMaintenanceState(ctx);
   await finishRun(ctx.sql, ctx.runId, 'done');
   ctx.log('done', { version: ctx.target.version });
 }

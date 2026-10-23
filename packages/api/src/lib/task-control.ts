@@ -1,5 +1,6 @@
 import { and, eq, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { FIX_LOOP_ACTION_FIELD } from '@haive/shared';
 import { getDb } from '../db.js';
 import { killTaskSandboxes } from './sandbox-kill.js';
 
@@ -120,8 +121,18 @@ const parkFoldedIntoIdle = () =>
   sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
         greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`;
 
+/** The worker's gate-answer test (`readFixLoopGateAction`). */
+const holdsGateAnswer = sql`jsonb_typeof(${schema.taskSteps.formValues} -> ${FIX_LOOP_ACTION_FIELD}::text) = 'string'`;
+/** SQL NULL, never `{}`: an empty object reads as an answered form. */
+export const withoutGateAnswer = sql`CASE WHEN ${holdsGateAnswer} THEN NULL ELSE ${schema.taskSteps.formValues} END`;
+const reofferGate = {
+  formValues: withoutGateAnswer,
+  pauseFormOnRetry: sql`${schema.taskSteps.pauseFormOnRetry} OR coalesce(${holdsGateAnswer}, false)`,
+};
+
 /** Put a restarting task's parked rows, other than `exclude`, back to `pending` with what they
- *  held: a form keeps its schema and answers, a runtime park its detection. */
+ *  held: a form keeps its schema and answers, a runtime park its detection. A fix-loop gate loses
+ *  its saved decision and stops at its form, so the gate asks again. */
 export async function reofferParkedSteps(
   tx: DbHandle,
   taskId: string,
@@ -145,6 +156,7 @@ export async function reofferParkedSteps(
       waitingStartedAt: null,
       statusMessage: null,
       updatedAt: now,
+      ...reofferGate,
     })
     .where(parked)
     .returning({ id: schema.taskSteps.id });
@@ -176,7 +188,7 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
   await failStuckSteps(tx, taskId, 'user', now);
   await tx
     .update(schema.taskSteps)
-    .set({ status: 'pending', waitingStartedAt: null, updatedAt: now })
+    .set({ status: 'pending', waitingStartedAt: null, updatedAt: now, ...reofferGate })
     .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.status, 'waiting_form')));
 }
 
@@ -189,7 +201,8 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
  *  failTask branch never fired, and Stop was a silent no-op while the 15s park poll kept
  *  re-parking the step forever. The park marker is what identifies that row precisely (an
  *  ordinary not-yet-run downstream step has status pending with a NULL marker, and must not be
- *  failed). */
+ *  failed). A pending row that still holds a fix-loop gate's saved answer is stuck the same way,
+ *  with no marker: no pass owns it and the worker cannot apply the answer. */
 function failStuckSteps(
   db: ReturnType<typeof getDb> | DbHandle,
   taskId: string,
@@ -220,6 +233,7 @@ function failStuckSteps(
         or(
           inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
           and(eq(schema.taskSteps.status, 'pending'), isNotNull(schema.taskSteps.waitingStartedAt)),
+          and(eq(schema.taskSteps.status, 'pending'), holdsGateAnswer),
         ),
       ),
     )

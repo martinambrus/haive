@@ -2255,6 +2255,14 @@ it('#280 fix4 throws when git cannot check ancestry', async () => {
   }
 });
 
+it('#315 throws when git could not run the ancestry check', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'git-merge-missing-'));
+  await rm(dir, REMOVE);
+  await expect(isCommitAncestor(dir, 'a'.repeat(40), 'b'.repeat(40))).rejects.toThrow(
+    'Could not check feature ancestry before squash',
+  );
+});
+
 describe('#280 fix7 interrupted squash before containment', () => {
   it.each(['reset', 'commit'])(
     'throws for a legacy %s after the feature is rewound into the base',

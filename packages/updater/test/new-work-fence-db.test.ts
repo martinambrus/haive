@@ -4,11 +4,12 @@ import { join } from 'node:path';
 import postgres, { type Sql, type TransactionSql } from 'postgres';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configService } from '@haive/shared';
-import { ensureJournal, finishRun, startRun } from '../src/journal.js';
+import { ensureJournal, enterPhase, finishRun, startRun } from '../src/journal.js';
 import {
   phaseCommit,
   phaseDraining,
   phaseMaintenance,
+  resume,
   rollback,
   type UpgradeContext,
 } from '../src/run.js';
@@ -139,6 +140,10 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
   const liveTask = () =>
     probe`INSERT INTO tasks (user_id, type, title, status)
           VALUES (${OWNER}, ${TYPE}, 'Task', 'running')`;
+
+  const taskIn = (status: string) =>
+    probe`INSERT INTO tasks (user_id, type, title, status)
+          VALUES (${OWNER}, ${TYPE}, 'Task', ${status})`;
 
   const endTasks = () => probe`UPDATE tasks SET status = 'completed' WHERE type = ${TYPE}`;
 
@@ -544,6 +549,147 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
       });
     });
 
+    describe('what the drain counts under a maintenance an administrator chose', () => {
+      const STILL_LIVE = '1 task(s) or background job(s) are still live';
+      const strict = () => upgrade({ drainDeadlineMs: 0, forceDrain: false });
+
+      it.each(['waiting_user', 'waiting_pr', 'paused'])(
+        'does not wait for a task parked in %s',
+        async (status) => {
+          stored = 'maintenance';
+          await taskIn(status);
+          const ctx = strict();
+
+          await expect(phaseDraining(ctx)).resolves.toBeUndefined();
+
+          expect(logged).toContainEqual({ event: 'drained', fields: { live: 0 } });
+          expect(ctx.drainForced).toBe(false);
+          expect(written).toEqual([]);
+
+          await expect(enter(ctx)).resolves.toBeUndefined();
+
+          expect(logged.at(-1)?.event).toBe('maintenance');
+          expect(logged.map((l) => l.event)).not.toContain('drain-reopened');
+          expect(stored).toBe('maintenance');
+        },
+      );
+
+      it.each(['queued', 'running'])('still waits for a %s task', async (status) => {
+        stored = 'maintenance';
+        await taskIn(status);
+
+        await expect(phaseDraining(strict())).rejects.toThrow(STILL_LIVE);
+      });
+
+      it('counts the running task and not the parked one beside it', async () => {
+        stored = 'maintenance';
+        await taskIn('waiting_user');
+        await taskIn('running');
+
+        await expect(phaseDraining(strict())).rejects.toThrow(STILL_LIVE);
+      });
+
+      it.each([
+        ['a repository that is cloning', () => cloningRepository()],
+        [
+          'a bundle that is syncing',
+          async () => {
+            const [repo] = await probe<{ id: string }[]>`
+              INSERT INTO repositories (user_id, name, source, status)
+              VALUES (${OWNER}, ${TYPE}, 'local_path', 'ready') RETURNING id`;
+            await probe`INSERT INTO custom_bundles (user_id, repository_id, name, source_type, storage_root, status)
+                        VALUES (${OWNER}, ${repo!.id}, ${TYPE}, 'git', '/bundles/updater-fence', 'syncing')`;
+          },
+        ],
+      ])('still waits for %s', async (_name, seed) => {
+        stored = 'maintenance';
+        await seed();
+
+        await expect(phaseDraining(strict())).rejects.toThrow(STILL_LIVE);
+      });
+
+      describe('with one task in every live status', () => {
+        const seedAll = async () => {
+          for (const status of ['queued', 'running', 'paused', 'waiting_user', 'waiting_pr'])
+            await taskIn(status);
+        };
+
+        it('counts only the running work under maintenance', async () => {
+          stored = 'maintenance';
+          await seedAll();
+
+          await expect(phaseDraining(strict())).rejects.toThrow('2 task(s)');
+        });
+
+        it.each(['draining', 'normal'])('counts all five under %s', async (found) => {
+          stored = found;
+          await seedAll();
+
+          await expect(phaseDraining(strict())).rejects.toThrow('5 task(s)');
+        });
+      });
+
+      it('counts neither a dead running task nor a task that was never started', async () => {
+        stored = 'maintenance';
+        await probe`INSERT INTO tasks (user_id, type, title, status, dead_at)
+                    VALUES (${OWNER}, ${TYPE}, 'Task', 'running', now())`;
+        await taskIn('created');
+
+        await phaseDraining(strict());
+
+        expect(logged).toContainEqual({ event: 'drained', fields: { live: 0 } });
+      });
+
+      it('counts the same work again at the recount', async () => {
+        stored = 'maintenance';
+        await taskIn('waiting_user');
+        const ctx = upgrade({ drainDeadlineMs: 0, forceDrain: false });
+        await phaseDraining(ctx).catch(() => undefined);
+        ctx.drainDeadlineAt = Date.now() + 30_000;
+
+        await taskIn('running');
+        enter(ctx);
+        await until(
+          () => settled || logged.some((l) => l.event === 'drain-reopened'),
+          'the drain to reopen',
+        );
+        expect(logged).toContainEqual({
+          event: 'drain-reopened',
+          fields: { state: 'maintenance', live: 1 },
+        });
+
+        await probe`UPDATE tasks SET status = 'completed' WHERE status = 'running' AND type = ${TYPE}`;
+        await updating;
+
+        expect(logged.at(-1)?.event).toBe('maintenance');
+        const [parked] = await probe<{ status: string }[]>`
+          SELECT status FROM tasks WHERE type = ${TYPE} AND status = 'waiting_user'`;
+        expect(parked?.status).toBe('waiting_user');
+      });
+
+      it('counts a recount that runs alone by the state it reads', async () => {
+        stored = 'maintenance';
+        await taskIn('waiting_user');
+
+        await enter(upgrade({ drainDeadlineMs: 0, forceDrain: false }));
+
+        expect(logged.map((l) => l.event)).toEqual(['maintenance']);
+        expect(stored).toBe('maintenance');
+      });
+
+      it('keeps forcing past a running task when force was chosen', async () => {
+        stored = 'maintenance';
+        await liveTask();
+        const ctx = upgrade({ drainDeadlineMs: 0, forceDrain: true });
+
+        await phaseDraining(ctx);
+
+        expect(logged).toContainEqual({ event: 'drain-forced', fields: { live: 1 } });
+        expect(ctx.drainForced).toBe(true);
+        expect(written).toEqual([]);
+      });
+    });
+
     it('still enters maintenance past a live task, without a second wait, when the drain was forced', async () => {
       await liveTask();
       const ctx = upgrade({ drainDeadlineMs: 0, forceDrain: true });
@@ -608,6 +754,97 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
       expect(written).toEqual(['normal']);
       expect(logged.at(-1)?.event).toBe(finished);
       expect(await fenceIsFree()).toBe(true);
+    });
+
+    describe('the state an upgrade puts back', () => {
+      it.each(['draining', 'maintenance'])(
+        'ends with the %s it found, not with normal',
+        async (found) => {
+          stored = found;
+          const ctx = upgrade();
+          await phaseDraining(ctx);
+          await phaseMaintenance(ctx);
+
+          await run(ctx);
+
+          expect(stored).toBe(found);
+          expect(written).not.toContain('normal');
+          expect(logged.at(-1)?.event).toBe(finished);
+          expect(await fenceIsFree()).toBe(true);
+        },
+      );
+
+      it('ends with normal when it found normal', async () => {
+        stored = 'normal';
+        const ctx = upgrade();
+        await phaseDraining(ctx);
+        await phaseMaintenance(ctx);
+
+        await run(ctx);
+
+        expect(stored).toBe('normal');
+        expect(written).toEqual(['draining', 'maintenance', 'normal']);
+      });
+
+      it('puts back what the first draining phase found when that phase runs again', async () => {
+        stored = 'normal';
+        const ctx = upgrade();
+        await phaseDraining(ctx);
+        await phaseDraining(ctx);
+
+        await run(ctx);
+
+        expect(stored).toBe('normal');
+      });
+
+      it('puts back normal when the run never recorded what it found', async () => {
+        stored = 'maintenance';
+
+        await run(upgrade());
+
+        expect(stored).toBe('normal');
+      });
+
+      describe.each([
+        ['draining', 'reverse'],
+        ['maintenance', 'reverse'],
+        ['snapshot', 'reverse'],
+        ['migrate', 'reverse'],
+        ['verify', 'reverse'],
+        ['commit', 'forward'],
+      ] as const)('a restarted updater, the journal last saying %s (%s)', (phase, _direction) => {
+        it.each(['maintenance', 'draining', 'normal'])(
+          'puts back the %s the first updater found',
+          async (found) => {
+            stored = found;
+            await phaseDraining(upgrade());
+            await enterPhase(updater, runId, phase);
+            const restarted = postgres(url as string, { max: 1, max_lifetime: 0 });
+            try {
+              const ctx2 = {
+                sql: restarted,
+                runId,
+                drainDeadlineMs: 0,
+                drainPollMs: 25,
+                forceDrain: true,
+                log: (event: string, fields?: Record<string, unknown>) =>
+                  logged.push({ event, fields }),
+                envFile: join(envDir, '.env'),
+                fromVersion: '1.0.0',
+                target: { version: '1.1.0' },
+                registry: 'registry.test',
+                network: 'network.test',
+              } as unknown as UpgradeContext;
+
+              await resume(ctx2, phase);
+            } finally {
+              await restarted.end({ timeout: 5 });
+            }
+
+            expect(stored).toBe(found);
+          },
+        );
+      });
     });
   });
 });

@@ -407,7 +407,7 @@ async function moveBranch(ctx: RevertCtx, branch: string, revert: ProjectionReve
 async function isAncestor(repoPath: string, commit: string, tip: string): Promise<boolean> {
   if ((await revParse(repoPath, `${commit}^{commit}`)) === null) return false;
   const res = await gitRun(repoPath, ['merge-base', '--is-ancestor', commit, tip]);
-  if (res.code > 1) throw new Error(`git merge-base failed: ${detail(res)}`);
+  if (res.code !== 0 && res.code !== 1) throw new Error(`git merge-base failed: ${detail(res)}`);
   return res.code === 0;
 }
 
