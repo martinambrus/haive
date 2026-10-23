@@ -55,6 +55,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
 import { Hono } from 'hono';
 import { TASK_JOB_NAMES } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
+import { settleActiveSteps } from '../src/lib/task-control.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -101,7 +102,10 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
       body: JSON.stringify(body ?? {}),
     });
 
-  const seedTask = async (status: 'running' | 'waiting_user') => {
+  const seedTask = async (
+    status: (typeof schema.tasks.$inferInsert)['status'],
+    over: Partial<typeof schema.tasks.$inferInsert> = {},
+  ) => {
     const [row] = await db
       .insert(schema.tasks)
       .values({
@@ -112,6 +116,7 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
         currentStepId: STEP,
         currentRound: 1,
         orchestrationEpoch: 3,
+        ...over,
       })
       .returning();
     return row!;
@@ -210,17 +215,141 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
     expect(h.queued[0]!.payload).toMatchObject({ stepId: STEP, round: 1, epoch: 4 });
   });
 
+  const retryByTask = (id: string) => post(`/tasks/${id}/action`, { action: 'retry' });
+  const retryByStep = (id: string) =>
+    post(`/tasks/${id}/steps/${STEP}/action`, { action: 'retry', round: 1 });
+
   describe.each([
     {
       name: 'a pending row with no marker, answer or schema',
-      task: 'running' as const,
       row: { formSchema: null, formValues: null },
     },
+    { name: 're-offered never-answered gate', row: { formValues: null } },
+  ])('Stop over $name', ({ row: over }) => {
+    it('fails the row and the task and queues nothing', async () => {
+      const task = await seedTask('running');
+      const row = await seedRow(task.id, over);
+      const before = await rowOf(row.id);
+
+      expect(await stop(task.id)).toEqual({
+        status: 200,
+        body: { ok: true, killed: 0, cancelled: 0, stopped: 1 },
+      });
+
+      const after = await rowOf(row.id);
+      expect(after.status).toBe('failed');
+      expect(after.errorMessage).toBe('Stopped by user');
+      expect(after.endedAt).not.toBeNull();
+      expect(after.startedAt).toBeNull();
+      expect(after.waitingStartedAt).toBeNull();
+      expect(after.formSchema).toEqual(before.formSchema);
+      expect(after.formValues).toEqual(before.formValues);
+      const t = await taskOf(task.id);
+      expect(t.status).toBe('failed');
+      expect(t.errorMessage).toBe('Stopped by user');
+      expect(t.completedAt).not.toBeNull();
+      expect(t.orchestrationEpoch).toBe(3);
+      expect(h.queued).toEqual([]);
+    });
+
+    it('answers a second Stop with nothing stopped and changes nothing', async () => {
+      const task = await seedTask('running');
+      const row = await seedRow(task.id, over);
+      expect((await stop(task.id)).body).toMatchObject({ stopped: 1 });
+      const rowBefore = await rowOf(row.id);
+      const taskBefore = await taskOf(task.id);
+
+      expect(await stop(task.id)).toEqual({
+        status: 200,
+        body: { ok: true, killed: 0, cancelled: 0, stopped: 0 },
+      });
+
+      expect(await rowOf(row.id)).toEqual(rowBefore);
+      expect(await taskOf(task.id)).toEqual(taskBefore);
+      expect(h.queued).toEqual([]);
+    });
+
+    it.each([
+      ['the task endpoint', retryByTask],
+      ['the step endpoint', retryByStep],
+    ])('lets Retry through %s re-run the stopped row', async (_name, retry) => {
+      const task = await seedTask('running');
+      const row = await seedRow(task.id, over);
+      await stop(task.id);
+      expect((await rowOf(row.id)).status).toBe('failed');
+
+      const res = await retry(task.id);
+
+      expect(res.status).toBe(200);
+      const after = await rowOf(row.id);
+      expect(after.status).toBe('pending');
+      expect(after.errorMessage).toBeNull();
+      expect(after.endedAt).toBeNull();
+      expect(after.formSchema).toBeNull();
+      expect(after.formValues).toBeNull();
+      const t = await taskOf(task.id);
+      expect(t.status).toBe('running');
+      expect(t.orchestrationEpoch).toBe(4);
+      expect(h.queued).toHaveLength(1);
+      expect(h.queued[0]!.name).toBe(TASK_JOB_NAMES.ADVANCE_STEP);
+      expect(h.queued[0]!.payload).toMatchObject({ stepId: STEP, round: 1, epoch: 4 });
+    });
+  });
+
+  describe.each([
     {
-      name: 'a re-offered never-answered gate',
-      task: 'running' as const,
-      row: { formValues: null },
+      name: 'a pending row that is not the current row',
+      task: ['running', { currentStepId: '09-other' }],
+      rows: [{ stepId: '09-other', status: 'done' }, {}],
     },
+    {
+      name: 'a pending row of an earlier round',
+      task: ['running', { currentRound: 2 }],
+      rows: [{ round: 2, status: 'done' }, {}],
+    },
+    {
+      name: 'a current pending row of a waiting_user task',
+      task: ['waiting_user', {}],
+      rows: [{}],
+    },
+    { name: 'a current pending row of a queued task', task: ['queued', {}], rows: [{}] },
+    { name: 'a current pending row of a failed task', task: ['failed', {}], rows: [{}] },
+    {
+      name: 'a current pending row of a dead running task',
+      task: ['running', { deadAt: new Date(), deadReason: 'gone' }],
+      rows: [{}],
+    },
+    { name: 'a current row that is done', task: ['running', {}], rows: [{ status: 'done' }] },
+    { name: 'a current row that is skipped', task: ['running', {}], rows: [{ status: 'skipped' }] },
+    { name: 'a pointer with no row', task: ['running', {}], rows: [] },
+  ] as {
+    name: string;
+    task: [(typeof schema.tasks.$inferInsert)['status'], Partial<typeof schema.tasks.$inferInsert>];
+    rows: Partial<typeof schema.taskSteps.$inferInsert>[];
+  }[])('Stop over $name', ({ task: [taskStatus, taskOver], rows }) => {
+    it('stops nothing and changes nothing', async () => {
+      const task = await seedTask(taskStatus, taskOver);
+      const seeded = [];
+      for (const [i, over] of rows.entries()) {
+        seeded.push(
+          await seedRow(task.id, { runSeq: i + 1, formSchema: null, formValues: null, ...over }),
+        );
+      }
+      const before = await Promise.all(seeded.map((r) => rowOf(r.id)));
+      const taskBefore = await taskOf(task.id);
+
+      expect(await stop(task.id)).toEqual({
+        status: 200,
+        body: { ok: true, killed: 0, cancelled: 0, stopped: 0 },
+      });
+
+      expect(await Promise.all(seeded.map((r) => rowOf(r.id)))).toEqual(before);
+      expect(await taskOf(task.id)).toEqual(taskBefore);
+      expect(h.queued).toEqual([]);
+    });
+  });
+
+  describe.each([
     {
       name: 'a waiting_form row of a waiting_user task that holds the answer',
       task: 'waiting_user' as const,
@@ -240,6 +369,41 @@ describe.skipIf(!url)('Stop over a fix-loop gate row on Postgres', () => {
       expect(await rowOf(row.id)).toEqual(before);
       expect((await taskOf(task.id)).status).toBe(taskStatus);
     });
+  });
+
+  it('fails a running current row and leaves a downstream pending row that is not current', async () => {
+    const task = await seedTask('running');
+    const current = await seedRow(task.id, {
+      status: 'running',
+      formSchema: null,
+      formValues: null,
+      startedAt: new Date(),
+    });
+    const downstream = await seedRow(task.id, {
+      stepId: '09-downstream',
+      runSeq: 6,
+      formSchema: null,
+      formValues: null,
+    });
+
+    expect(await stop(task.id)).toEqual({
+      status: 200,
+      body: { ok: true, killed: 0, cancelled: 0, stopped: 1 },
+    });
+
+    expect((await rowOf(current.id)).status).toBe('failed');
+    expect((await rowOf(downstream.id)).status).toBe('pending');
+    expect((await taskOf(task.id)).status).toBe('failed');
+  });
+
+  it('keeps settleActiveSteps from failing the pending current row of a running task', async () => {
+    const task = await seedTask('running');
+    const row = await seedRow(task.id, { formSchema: null, formValues: null });
+    const before = await rowOf(row.id);
+
+    await settleActiveSteps(db, task.id);
+
+    expect(await rowOf(row.id)).toEqual(before);
   });
 
   it('Cancel ends the wedge', async () => {

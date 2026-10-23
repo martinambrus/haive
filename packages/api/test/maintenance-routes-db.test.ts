@@ -556,6 +556,35 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       expect(await audits(stuck.id, 'task.admin_stop')).toHaveLength(1);
     });
 
+    it('records them when it failed the current step that had not started', async () => {
+      const wedged = await task({ currentStepId: '07-phase-2-implement', currentRound: 0 });
+      const [row] = await db
+        .insert(schema.taskSteps)
+        .values({
+          taskId: wedged.id,
+          stepId: '07-phase-2-implement',
+          stepIndex: 7,
+          round: 0,
+          title: 'Implement',
+          status: 'pending',
+        })
+        .returning();
+
+      expect(await (await act(wedged.id, 'stop')).json()).toMatchObject({
+        cancelled: 0,
+        stopped: 1,
+      });
+
+      expect(await events(wedged.id, 'task.stopped')).toHaveLength(1);
+      expect(await audits(wedged.id, 'task.admin_stop')).toHaveLength(1);
+      const step = await db.query.taskSteps.findFirst({
+        where: eq(schema.taskSteps.id, row!.id),
+      });
+      expect(step?.status).toBe('failed');
+      const after = await db.query.tasks.findFirst({ where: eq(schema.tasks.id, wedged.id) });
+      expect(after?.status).toBe('failed');
+    });
+
     it('records nothing a second time once the first stop ended everything', async () => {
       const busy = await task();
       await run(busy.id, { startedAt: new Date() });

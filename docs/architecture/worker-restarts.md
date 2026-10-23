@@ -220,9 +220,21 @@ supersede, and every few seconds after (`run-superseded.ts`); a run that reads s
 sandbox or loses the one it has. A Stop takes the Retry's steps in one transaction
 (`stopActiveCliInvocations`): runs, steps, a second sweep of runs, then the task, and the sandboxes
 are killed only once it commits. The steps it fails are the `running` and `waiting_cli` ones, a
-`pending` one with a park marker (a pause or a runtime slot), and a `pending` one that still holds a
-fix-loop gate's saved answer, the shape a task was left in before a Retry dropped that answer; any
-other `pending` row is a step not yet run and stays. No reader sees a run cancelled beside a step still running, and a
+`pending` one with a park marker (a pause, a runtime slot or a module's schema setup), a `pending`
+one that still holds a fix-loop gate's saved answer, the shape a task was left in before a Retry
+dropped that answer, and, when the Stop also fails the task, the `pending` row a `running` task that
+is not dead points at (its current step and round): a hand-off or a Retry left it for an advance
+that has not claimed it or whose job was lost, and a Stop used to answer 0 there. The pointer is
+read in a plain statement before the steps are written and never locked, since the task row comes
+after the step rows here as in a Retry. A Retry's own settle takes the first three only, since it
+would fail the row it has just reset. Any other `pending` row is a step not yet run and stays, and
+so does a task whose current row does not exist yet (a hand-off wrote the pointer and the advance
+has not created the row): the api cannot create a step row, and failing only the task would send its
+Retry down the START replay. What a Stop leaves there, a `failed` row and a `failed` task at the
+same epoch, the worker does not touch: an advance for it, at that epoch or an older one, is refused
+(`failedTaskRefusesAdvance`), a START claims only a `created` or `queued` task, the stalled sweep
+takes `running` tasks (and answered forms of waiting ones), and a claim flips only a `pending` row
+and refuses a failed task, so the next write to the row is a Retry's reset. No reader sees a run cancelled beside a step still running, and a
 Stop that fails leaves every run as it was and kills nothing. When the Stop's own update fails the
 task it returns that update's `completedAt` as `failedAt`, and the `task.stopped` event an
 administrator's Stop writes carries it: the task page and the task list name a stop as the cause of

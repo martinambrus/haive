@@ -57,7 +57,7 @@ export async function supersedeLiveRuns(
   // owner-initiated path is unchanged.
   const by = opts.actor === 'admin' ? 'an administrator' : 'user';
   const first = await cancelLiveRuns(tx, taskId, by, now);
-  const failed = await failStuckSteps(tx, taskId, by, now);
+  const failed = await failStuckSteps(tx, taskId, by, now, opts.failTask);
   // A pass records a run only under its row's lock, so the step writes above waited for any run
   // being recorded, and this ends it.
   const late = await cancelLiveRuns(tx, taskId, by, now);
@@ -185,11 +185,32 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
       ),
     )
     .for('update');
-  await failStuckSteps(tx, taskId, 'user', now);
+  await failStuckSteps(tx, taskId, 'user', now, false);
   await tx
     .update(schema.taskSteps)
     .set({ status: 'pending', waitingStartedAt: null, updatedAt: now, ...reofferGate })
     .where(and(eq(schema.taskSteps.taskId, taskId), eq(schema.taskSteps.status, 'waiting_form')));
+}
+
+/** A plain read, never `.for()`: a Stop writes the task row after the step rows, as a Retry does,
+ *  so locking it first would deadlock. */
+async function pendingCurrentRow(db: ReturnType<typeof getDb> | DbHandle, taskId: string) {
+  const [task] = await db
+    .select({ stepId: schema.tasks.currentStepId, round: schema.tasks.currentRound })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.id, taskId),
+        eq(schema.tasks.status, 'running'),
+        isNull(schema.tasks.deadAt),
+      ),
+    );
+  if (!task?.stepId) return undefined;
+  return and(
+    eq(schema.taskSteps.status, 'pending'),
+    eq(schema.taskSteps.stepId, task.stepId),
+    eq(schema.taskSteps.round, task.round),
+  );
 }
 
 /** Fail whatever step is stuck in running/waiting_cli. This covers BOTH a CLI step (whose
@@ -202,13 +223,17 @@ export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise
  *  re-parking the step forever. The park marker is what identifies that row precisely (an
  *  ordinary not-yet-run downstream step has status pending with a NULL marker, and must not be
  *  failed). A pending row that still holds a fix-loop gate's saved answer is stuck the same way,
- *  with no marker: no pass owns it and the worker cannot apply the answer. */
-function failStuckSteps(
+ *  with no marker: no pass owns it and the worker cannot apply the answer. With `failingTask`
+ *  (Stop), so is the pending row a running task points at; a Retry's settle passes false, since it
+ *  would fail the row it has just reset. */
+async function failStuckSteps(
   db: ReturnType<typeof getDb> | DbHandle,
   taskId: string,
   by: string,
   now: Date,
+  failingTask: boolean,
 ) {
+  const pointedAt = failingTask ? await pendingCurrentRow(db, taskId) : undefined;
   return db
     .update(schema.taskSteps)
     .set({
@@ -234,6 +259,7 @@ function failStuckSteps(
           inArray(schema.taskSteps.status, ['running', 'waiting_cli']),
           and(eq(schema.taskSteps.status, 'pending'), isNotNull(schema.taskSteps.waitingStartedAt)),
           and(eq(schema.taskSteps.status, 'pending'), holdsGateAnswer),
+          pointedAt,
         ),
       ),
     )

@@ -88,7 +88,7 @@ describe('stopping a task', () => {
     ['fails a pending row that holds a fix-loop gate answer', { [FIX_LOOP_ACTION_FIELD]: 'x' }, 1],
     ['leaves a pending row that holds another form answer', { note: 'keep me' }, 0],
     ['leaves a pending row whose gate field is not a string', { [FIX_LOOP_ACTION_FIELD]: 3 }, 0],
-    ['leaves a pending row that holds no answer', null, 0],
+    ['leaves a pending row that holds no answer when the task points at no row', null, 0],
   ])('%s', async (_name, formValues, stopped) => {
     const fake = createFakeDb({
       tasks: schema.tasks,
@@ -127,5 +127,72 @@ describe('stopping a task', () => {
     const result = await stopActiveCliInvocations(fake.db as never, TASK, opts);
     expect(result).toMatchObject({ cancelled: 1, stopped: 1, failedAt: null });
     expect(fake.rows(schema.tasks)[0]).toMatchObject(task);
+  });
+
+  describe('a pending row with no park marker', () => {
+    const POINTER = { currentStepId: '08b-test-management', currentRound: 1 };
+    const seed = (
+      task: Record<string, unknown>,
+      row: Record<string, unknown> = {},
+      opts: { failTask: boolean } = { failTask: true },
+    ) => {
+      const fake = createFakeDb({
+        tasks: schema.tasks,
+        taskSteps: schema.taskSteps,
+        cliInvocations: schema.cliInvocations,
+      });
+      fake.insert(schema.tasks, { id: TASK, status: 'running', ...POINTER, ...task });
+      fake.insert(schema.taskSteps, {
+        taskId: TASK,
+        stepId: '08b-test-management',
+        round: 1,
+        status: 'pending',
+        formValues: null,
+        ...row,
+      });
+      return { fake, stop: () => stopActiveCliInvocations(fake.db as never, TASK, opts) };
+    };
+
+    it('is failed when it is the current row of a running task', async () => {
+      const { fake, stop } = seed({});
+      const result = await stop();
+      expect(result).toMatchObject({ cancelled: 0, stopped: 1 });
+      const row = fake.rows(schema.taskSteps)[0]!;
+      expect(row).toMatchObject({ status: 'failed', errorMessage: 'Stopped by user' });
+      expect(row.endedAt).toBeInstanceOf(Date);
+      expect(row.startedAt ?? null).toBeNull();
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({
+        status: 'failed',
+        errorMessage: 'Stopped by user',
+      });
+    });
+
+    it.each([
+      ['is not the current row', {}, { stepId: '09-other' }],
+      ['belongs to an earlier round', { currentRound: 2 }, {}],
+      ['belongs to a task that is waiting_user', { status: 'waiting_user' }, {}],
+      ['belongs to a task that is queued', { status: 'queued' }, {}],
+      ['belongs to a task that already failed', { status: 'failed' }, {}],
+      ['belongs to a dead task', { deadAt: EARLIER }, {}],
+      ['is current but done', {}, { status: 'done' }],
+      ['is current but skipped', {}, { status: 'skipped' }],
+      ['is current but failed', {}, { status: 'failed' }],
+      ['is current but waiting for a form', {}, { status: 'waiting_form' }],
+    ])('is left alone when it %s', async (_name, task, row) => {
+      const { fake, stop } = seed(task, row);
+      const taskBefore = { ...fake.rows(schema.tasks)[0] };
+      const rowBefore = { ...fake.rows(schema.taskSteps)[0] };
+      const result = await stop();
+      expect(result).toMatchObject({ cancelled: 0, stopped: 0 });
+      expect(fake.rows(schema.taskSteps)[0]).toEqual(rowBefore);
+      expect(fake.rows(schema.tasks)[0]).toEqual(taskBefore);
+    });
+
+    it('is left alone when the stop does not fail the task', async () => {
+      const { fake, stop } = seed({}, {}, { failTask: false });
+      expect(await stop()).toMatchObject({ stopped: 0 });
+      expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ status: 'pending' });
+      expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running' });
+    });
   });
 });
