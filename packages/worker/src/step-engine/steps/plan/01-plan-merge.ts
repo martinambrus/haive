@@ -21,7 +21,7 @@ import {
   type FixBaseline,
   type FixBaselineUnavailable,
 } from '../../git-merge.js';
-import { HAIVE_OWN_FILES_LINE } from '../../git-merge.js';
+import { HAIVE_OWN_FILES_LINE, handBackAfterMove } from '../../git-merge.js';
 import { isSingleLine, REPO_IS_DATA_MERGE_LINES, survivesFence } from '../_untrusted-repo.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import {
@@ -637,6 +637,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     const kept: KeptFiles = new Map();
     const before = (await gitRun(ctx.repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
     let refusal: string | null = null;
+    let movedFrom: string | null = null;
     try {
       for (let attempt = 1; ; attempt++) {
         const aside = await setAsideHaiveProjections(ctx.db, repositoryId, ctx.repoPath, fence);
@@ -657,11 +658,12 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
           // Every task's start and every revival take this lock, so none lands between the fence and the move.
           await lockRepositoryTasksKey(tx, repositoryId);
           const found = await restoreProjectionsInTx(tx, repositoryId, ctx.repoPath);
-          if (found.outcome !== 'clean') return { found, holding: 0 };
+          if (found.outcome !== 'clean') return { found, holding: 0, from: null };
           const holding = await fence(tx);
-          if (holding === 0) await landPlanMerge(ctx.repoPath, sha);
-          return { found, holding };
+          const from = holding === 0 ? await landPlanMerge(ctx.repoPath, sha) : null;
+          return { found, holding, from };
         });
+        if (moved.from !== null) movedFrom = moved.from;
         if (moved.holding > 0) {
           refusal = otherTasksWorking(moved.holding);
           break;
@@ -678,6 +680,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       }
       if (refusal === null) {
         result.landed = true;
+        if (movedFrom !== null) await handBackAfterMove(ctx.repoPath, movedFrom);
 
         // The merge brought in the other side's plan.json; fold it into the database and
         // rewrite both files from there, so what is pushed is the union rather than

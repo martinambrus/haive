@@ -76,7 +76,7 @@ vi.mock('../src/plan/merge.js', async (original) => ({
   ...(await original<typeof import('../src/plan/merge.js')>()),
   conflictedPaths: async () => ({ paths: [], undecodable: 0 }),
   commitMerge: async () => h.sha,
-  landPlanMerge: async () => {},
+  landPlanMerge: async () => h.sha,
   removePlanMergeWorktree: h.remove,
   fetchOrigin: async () => {},
   divergence: async () => ({ behind: 0, ahead: 1 }),
