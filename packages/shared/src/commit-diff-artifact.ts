@@ -1,5 +1,7 @@
 export type CommitDiffStatus = 'added' | 'modified' | 'deleted' | 'renamed';
 
+export type CommitDiffLink = 'symlink' | 'gitlink';
+
 export interface CommitDiffFile {
   /** Repo-relative path (the new path for renames). */
   path: string;
@@ -13,6 +15,9 @@ export interface CommitDiffFile {
   /** A side could not be read: git exited non-zero or the working file could not be opened;
    *  contents are omitted. Absent means both sides were read. */
   unreadable?: boolean;
+  /** The new side is a link, not a file; its text is a symlink's target or a submodule's
+   *  `Subproject commit <sha>`. Such a file has no `editPath`. */
+  link?: CommitDiffLink;
   oldContent: string;
   newContent: string;
   /** Absolute path the web viewer may WRITE this file's new side back to, via

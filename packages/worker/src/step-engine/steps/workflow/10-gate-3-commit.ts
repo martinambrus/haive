@@ -99,7 +99,12 @@ function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPo
         (file.oldPath !== undefined && secretMaskDeniesPath(policy, file.oldPath)),
     );
   const files = artifact.files.map((file) => {
-    const metadata = { path: file.path, oldPath: file.oldPath, status: file.status };
+    const metadata = {
+      path: file.path,
+      oldPath: file.oldPath,
+      status: file.status,
+      link: file.link,
+    };
     // Do not relay a masked file through the host-built diff, even when masking is off.
     // Conservatively omit tracked secret paths too; generation needs no credential bytes.
     if (

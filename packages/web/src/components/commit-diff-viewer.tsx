@@ -610,6 +610,11 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
                     )}
                     {selectedFile.binary && <span className="text-yellow-400">binary</span>}
                     {selectedFile.unreadable && <span className="text-yellow-400">unreadable</span>}
+                    {selectedFile.link && (
+                      <span className="text-neutral-400">
+                        {selectedFile.link === 'gitlink' ? 'submodule' : 'symlink'}
+                      </span>
+                    )}
                     {selectedFile.truncated && !selectedFile.binary && (
                       <span className="text-yellow-400">too large</span>
                     )}
