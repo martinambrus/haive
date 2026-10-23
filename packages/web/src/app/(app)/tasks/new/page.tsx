@@ -1185,9 +1185,9 @@ export default function NewTaskPage() {
                 </span>
               </div>
               <p className="text-xs text-neutral-500">
-                Ignores your saved per-step CLI choices and defaults every step to the CLI above,
-                for this task only — your saved choices are left untouched. A step you change during
-                the task runs on its new CLI.
+                With the lock on, your saved per-step CLI choices are ignored and every step
+                defaults to the CLI above, for this task only — your saved choices are left
+                untouched. A step you change during the task runs on its new CLI.
               </p>
               {cliProviderId === '' &&
                 !ignoreSavedStepClis &&

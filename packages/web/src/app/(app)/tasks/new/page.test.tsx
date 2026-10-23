@@ -915,4 +915,10 @@ describe('the steps that keep a saved CLI under the none option', () => {
     expect(textOf(none)).toBe('(none — no default CLI)');
     expect(textOf(none)).not.toMatch(/deterministic/i);
   });
+
+  it('says the saved choices are ignored only with the lock on', async () => {
+    const view = await mount();
+    expect(page(view)).toContain('With the lock on, your saved per-step CLI choices are ignored');
+    expect(page(view)).not.toContain('Ignores your saved per-step CLI choices');
+  });
 });
