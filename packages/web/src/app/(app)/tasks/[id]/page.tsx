@@ -66,6 +66,7 @@ import {
   noStepsMessage,
   notStartedBanner,
   pausedByLabel,
+  pausedResumeHint,
   taskBadgeKind,
   taskClockEndMs,
   taskMenuKeys,
@@ -2060,7 +2061,7 @@ export default function TaskDetailPage() {
           {new Date(task.pausedAt).toLocaleString()}. Any CLI run that was already in flight
           finishes, and nothing new starts — the concurrency goes to your other tasks. The
           environment stays up, though another task may reclaim its runtime slot while this one is
-          held. Press Resume to continue where it stopped.
+          held. {pausedResumeHint(task)}
         </div>
       )}
 
@@ -2142,6 +2143,7 @@ export default function TaskDetailPage() {
                   taskId={task.id}
                   taskStatus={task.status}
                   taskDead={taskDead}
+                  pauseLocked={task.pauseLocked === true}
                   taskCompletedAt={taskStoppedAt(task)}
                   taskRepositoryId={task.repositoryId}
                   userActiveDisplayMs={
@@ -2662,6 +2664,8 @@ interface StepCardProps {
   taskStatus: TaskStatus;
   /** Dead (see isTaskDead): nothing runs on it, so the card offers no way to advance it. */
   taskDead: boolean;
+  /** An administrator's pause the viewer cannot lift: no copy on the card may tell them to resume. */
+  pauseLocked: boolean;
   /** Caps step timers when the task ended without the step itself ending. */
   taskCompletedAt: string | null;
   taskRepositoryId: string | null;
@@ -3528,6 +3532,7 @@ function StepCardImpl({
   taskId,
   taskStatus,
   taskDead,
+  pauseLocked,
   taskCompletedAt,
   taskRepositoryId,
   userActiveDisplayMs,
@@ -3576,7 +3581,8 @@ function StepCardImpl({
   // slot" line would otherwise promise a slot nothing is handing out. Cheap to read per card — the
   // hook shares ONE poller across every consumer on the page.
   const globalPaused = useGlobalPause();
-  const park = parkBanner(step, { taskEnded, paused: globalPaused, dead: taskDead });
+  // A locked pause takes the same neutral copy: the stored per-task line tells the viewer to resume it.
+  const park = parkBanner(step, { taskEnded, paused: globalPaused || pauseLocked, dead: taskDead });
   const failure = failureBanner(step);
   // The live browser/VNC needs a running task runtime; once the task is completed or
   // cancelled that runtime is torn down (cleanup/teardown), so hide the browser

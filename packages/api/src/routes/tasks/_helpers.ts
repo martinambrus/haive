@@ -1136,6 +1136,11 @@ export async function findAdminPausedTaskIds(
   return new Set([...newest].filter(([, byAdmin]) => byAdmin).map(([taskId]) => taskId));
 }
 
+/** An administrator's pause is lifted only by an administrator. */
+export function adminPauseLocks(pausedByAdmin: boolean, role: string | undefined): boolean {
+  return pausedByAdmin && role !== 'admin';
+}
+
 /** The model-health canary validates THE task's model, so swapping the CLI on a
  *  canary step (typically because the canary rejected the original model) is a
  *  task-level decision, not a per-step one: rewrite tasks.cli_provider_id so every
