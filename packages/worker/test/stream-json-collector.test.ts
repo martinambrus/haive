@@ -208,11 +208,87 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     });
   });
 
-  it('does not inflate live cache_read across turns (max, not sum); cache_creation sums', () => {
-    // Each Anthropic assistant turn re-reports the FULL cached prefix it read, so
-    // summing cache_read per turn over-counts several-fold on the live snapshot
-    // (1000+1500+1800=4300) before the result event reconciles it. cache_read must
-    // be the running MAX (1800); cache_creation is a distinct per-turn write (summed).
+  const usageOf = (i: number, o: number, r: number, w: number) => ({
+    input_tokens: i,
+    output_tokens: o,
+    cache_read_input_tokens: r,
+    cache_creation_input_tokens: w,
+  });
+  const blockEvent = (
+    id: string,
+    block: unknown,
+    usage: unknown,
+    parent: string | null = null,
+  ) => ({
+    type: 'assistant',
+    parent_tool_use_id: parent,
+    message: { id, content: [block], usage },
+  });
+  const toolResult = { type: 'user', message: { content: [{ type: 'tool_result' }] } };
+  const killedRunEvents = () => {
+    const u1 = usageOf(5, 100, 1000, 400);
+    const u2 = usageOf(7, 200, 1400, 300);
+    const u3 = usageOf(2, 50, 1700, 100);
+    return [
+      blockEvent('msg_1', { type: 'thinking', thinking: 'a' }, u1),
+      blockEvent('msg_1', { type: 'text', text: 'b' }, u1),
+      blockEvent('msg_1', { type: 'tool_use', id: 'toolu_1', name: 'Read', input: {} }, u1),
+      toolResult,
+      blockEvent('msg_2', { type: 'text', text: 'c' }, u2),
+      blockEvent('msg_2', { type: 'tool_use', id: 'toolu_2', name: 'Read', input: {} }, u2),
+      toolResult,
+      blockEvent('msg_3', { type: 'text', text: 'd' }, u3),
+    ];
+  };
+
+  it('killed run: counts each message once across its several events, all four buckets summed', () => {
+    const c = createStreamJsonCollector();
+    feed(c, killedRunEvents());
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 14,
+      outputTokens: 350,
+      totalTokens: 5264,
+      cacheReadTokens: 4100,
+      cacheCreationTokens: 800,
+    });
+  });
+
+  it('live reading equals what the result then reports', () => {
+    const c = createStreamJsonCollector();
+    feed(c, killedRunEvents());
+    const live = c.getTokenUsage();
+    feed(c, [
+      {
+        type: 'result',
+        subtype: 'success',
+        result: 'done',
+        usage: usageOf(14, 350, 4100, 800),
+      },
+    ]);
+    expect(c.getTokenUsage()).toEqual(live);
+  });
+
+  it('interleaved message ids (parallel sub-agents) are each counted once', () => {
+    const ua = usageOf(3, 30, 300, 30);
+    const ub = usageOf(4, 40, 400, 40);
+    const c = createStreamJsonCollector();
+    feed(c, [
+      blockEvent('msg_a', { type: 'text', text: 'a1' }, ua, 'toolu_1'),
+      blockEvent('msg_b', { type: 'text', text: 'b1' }, ub, 'toolu_2'),
+      blockEvent('msg_a', { type: 'text', text: 'a2' }, ua, 'toolu_1'),
+      blockEvent('msg_b', { type: 'text', text: 'b2' }, ub, 'toolu_2'),
+    ]);
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 7,
+      outputTokens: 70,
+      totalTokens: 847,
+      cacheReadTokens: 700,
+      cacheCreationTokens: 70,
+    });
+  });
+
+  it('sums cache_read per event when events carry no message.id (amp), like the CLI result', () => {
+    // An event without an id is its own message, so each one is summed in full.
     const c = createStreamJsonCollector();
     feed(c, [
       {
@@ -246,8 +322,8 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     expect(c.getTokenUsage()).toEqual({
       inputTokens: 14,
       outputTokens: 60,
-      totalTokens: 14 + 60 + 1800 + 800,
-      cacheReadTokens: 1800,
+      totalTokens: 5174,
+      cacheReadTokens: 4300,
       cacheCreationTokens: 800,
     });
   });

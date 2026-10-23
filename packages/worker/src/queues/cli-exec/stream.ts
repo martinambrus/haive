@@ -3,7 +3,7 @@
 /* ------------------------------------------------------------------ */
 
 import type { CliTokenUsage, CompactionEvent, InvocationToolUsage } from '@haive/shared';
-import { normalizeClaudeUsage } from '../../cli-executor/usage-extract.js';
+import { normalizeClaudeUsage, sumTokenUsage } from '../../cli-executor/usage-extract.js';
 import { createToolUsageTally, type ToolUsageTally } from '../../cli-executor/tool-usage.js';
 import { buildOutputTruncationMessage, classifyStreamFailure } from './failure-class.js';
 import { isPlaceholderModel, type StreamModelReport } from './model-identity.js';
@@ -37,8 +37,8 @@ interface StreamJsonCollector {
    *  stream got mangled (chunk corruption, partial flush, mixed protocol). */
   getMalformedLineCount: () => number;
   /** Token usage: the result event's usage when present (claude/zai — wins,
-   *  never summed with assistant usages), else the sum of assistant-event
-   *  usages (amp emits no result usage). Null when nothing reported. */
+   *  never summed with assistant usages), else the sum of the per-message
+   *  assistant usages (amp emits no result usage). Null when nothing reported. */
   getTokenUsage: () => CliTokenUsage | null;
   /** Model time from the LAST `result` event's `duration_api_ms` (cumulative across a steered
    *  run's turns, like its usage). Null when no result event carried one. */
@@ -109,16 +109,9 @@ export function createStreamJsonCollector(
   let resultTerminalReason: string | null = null;
   let resultUsage: CliTokenUsage | null = null;
   let resultApiDurationMs: number | null = null;
-  // Live fallback (mid-stream snapshots, before the authoritative `result` event
-  // arrives): sum fresh input/output across assistant turns. Cache is asymmetric:
-  // each Anthropic turn re-reports the FULL cached prefix it read, so cache_read
-  // is taken as the running MAX (summing it inflates the live total several-fold);
-  // cache_creation is a distinct one-time write per turn, so it is summed.
-  let assistantInputSum = 0;
-  let assistantOutputSum = 0;
-  let assistantCacheReadMax = 0;
-  let assistantCacheCreationSum = 0;
-  let sawAssistantUsage = false;
+  // Live fallback before the `result` event: one usage per assistant message.id, summed like the
+  // CLI's own result (a message arrives as one event per content block, each repeating its usage).
+  const assistantUsageByMessage = new Map<string | CliTokenUsage, CliTokenUsage>();
   // Model identity. `requestedModel` comes from the init event (what the binary
   // asked for) and `servedModel` from the assistant events (what the endpoint
   // returned) — they are NOT the same value and can disagree, which is the entire
@@ -314,15 +307,11 @@ export function createStreamJsonCollector(
         servedModel = msg.model.trim();
       }
       // Amp's usage placement is undocumented — accept both message.usage and
-      // a top-level usage, preferring message.usage, counted ONCE per event.
+      // a top-level usage, preferring message.usage, counted ONCE per message.
       const usage = normalizeClaudeUsage(msg?.usage ?? event.usage);
-      if (usage) {
-        sawAssistantUsage = true;
-        assistantInputSum += usage.inputTokens;
-        assistantOutputSum += usage.outputTokens;
-        assistantCacheReadMax = Math.max(assistantCacheReadMax, usage.cacheReadTokens ?? 0);
-        assistantCacheCreationSum += usage.cacheCreationTokens ?? 0;
-      }
+      // An event without a usable id (amp) is its own message.
+      if (usage)
+        assistantUsageByMessage.set(typeof msg?.id === 'string' && msg.id ? msg.id : usage, usage);
       const content = msg?.content as unknown[] | undefined;
       if (Array.isArray(content)) {
         for (const block of content) {
@@ -493,23 +482,10 @@ export function createStreamJsonCollector(
         buffer = '';
       }
       // The result event's usage is authoritative and already cumulative — prefer
-      // it outright. Before it arrives (live snapshots), build the fallback from
-      // summed input/output + the LAST turn's cache (see the accumulator note).
+      // it outright. Before it arrives (live snapshots), use the per-message fallback.
       let assistantUsage: CliTokenUsage | null = null;
-      if (sawAssistantUsage) {
-        assistantUsage = {
-          inputTokens: assistantInputSum,
-          outputTokens: assistantOutputSum,
-          totalTokens:
-            assistantInputSum +
-            assistantOutputSum +
-            assistantCacheReadMax +
-            assistantCacheCreationSum,
-        };
-        if (assistantCacheReadMax > 0) assistantUsage.cacheReadTokens = assistantCacheReadMax;
-        if (assistantCacheCreationSum > 0)
-          assistantUsage.cacheCreationTokens = assistantCacheCreationSum;
-      }
+      for (const u of assistantUsageByMessage.values())
+        assistantUsage = sumTokenUsage(assistantUsage, u);
       const base = resultUsage ?? assistantUsage;
       if (!base) return null;
       return costUsd !== null ? { ...base, costUsd } : base;
