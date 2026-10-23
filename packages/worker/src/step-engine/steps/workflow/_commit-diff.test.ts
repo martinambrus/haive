@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -217,4 +217,84 @@ describe('the gate-3 diff entry for a moved file', () => {
       expect(file).toEqual(MOVED);
     },
   );
+});
+
+describe('an unreadable side of a changed file', () => {
+  const failing =
+    (sub: string): typeof gitRun =>
+    (cwd, args) =>
+      args[0] === sub ? Promise.resolve({ code: 128, stdout: '', stderr: '' }) : gitRun(cwd, args);
+
+  async function repo(act: (dir: string) => Promise<void>): Promise<void> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'commit-diff-'));
+    try {
+      await git(dir, ['init', '-b', 'main']);
+      await git(dir, ['config', 'gc.auto', '0']);
+      await writeFile(path.join(dir, 'a.txt'), 'original\n');
+      await writeFile(path.join(dir, 'old.php'), 'moved\n');
+      await writeFile(path.join(dir, 'gone.txt'), 'deleted\n');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'base']);
+      await act(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it.each(['show', 'cat-file'])(
+    'flags a file whose git %s fails, with both sides empty',
+    async (sub) => {
+      await repo(async (dir) => {
+        await writeFile(path.join(dir, 'a.txt'), 'changed\n');
+        await writeFile(path.join(dir, 'new.php'), 'moved\n');
+        await rm(path.join(dir, 'gone.txt'));
+        const entries = [
+          { x: ' ', y: 'M', path: 'a.txt' },
+          { x: ' ', y: 'D', path: 'gone.txt' },
+          { x: 'R', y: ' ', path: 'new.php', oldPath: 'old.php' },
+        ];
+        for (const entry of entries) {
+          const file = await buildFileEntry(dir, failing(sub), entry, 1_000_000);
+          expect(file.unreadable).toBe(true);
+          expect(file.oldContent).toBe('');
+          expect(file.newContent).toBe('');
+        }
+      });
+    },
+  );
+
+  it('flags a tracked file replaced by a link and an untracked link', async () => {
+    await repo(async (dir) => {
+      await unlink(path.join(dir, 'a.txt'));
+      await symlink('old.php', path.join(dir, 'a.txt'));
+      await symlink('old.php', path.join(dir, 'untracked-link'));
+      const built = await buildCommitDiffArtifact(dir, gitRun);
+      const byPath = new Map(built.artifact.files.map((f) => [f.path, f]));
+
+      expect(byPath.get('a.txt')?.unreadable).toBe(true);
+      expect(byPath.get('untracked-link')?.unreadable).toBe(true);
+    });
+  });
+
+  it('leaves the flag off a readable modified file and a zero-byte added file', async () => {
+    await repo(async (dir) => {
+      await writeFile(path.join(dir, 'a.txt'), 'changed\n');
+      await writeFile(path.join(dir, 'empty.txt'), '');
+      const built = await buildCommitDiffArtifact(dir, gitRun);
+
+      expect(built.artifact.files).toHaveLength(2);
+      for (const file of built.artifact.files) expect('unreadable' in file).toBe(false);
+    });
+  });
+
+  it('carries the flag into the written artifact', async () => {
+    await repo(async (dir) => {
+      await writeFile(path.join(dir, 'a.txt'), 'changed\n');
+      const built = await buildCommitDiffArtifact(dir, failing('show'));
+      const written = JSON.parse(await readFile(built.artifactPath, 'utf8'));
+
+      expect(written.fileCount).toBe(1);
+      expect(written.files[0].unreadable).toBe(true);
+    });
+  });
 });

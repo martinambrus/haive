@@ -167,4 +167,36 @@ describe('buildKnowledgeDiffArtifact', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('gives no editPath to a knowledge file whose git read fails', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'knowledge-diff-'));
+    try {
+      await git(dir, ['init', '-b', 'main']);
+      await git(dir, ['config', 'gc.auto', '0']);
+      const kb = path.join(dir, KB_DIR);
+      await mkdir(kb, { recursive: true });
+      await writeFile(path.join(kb, 'tracked.md'), 'tracked\n');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'base']);
+      await writeFile(path.join(kb, 'tracked.md'), 'changed\n');
+      const failShow: typeof gitRun = (cwd, args) =>
+        args[0] === 'show'
+          ? Promise.resolve({ code: 128, stdout: '', stderr: '' })
+          : gitRun(cwd, args);
+      const run = async (g: typeof gitRun) =>
+        (
+          JSON.parse(
+            await readFile(await buildKnowledgeDiffArtifact(dir, g), 'utf8'),
+          ) as CommitDiffArtifact
+        ).files[0];
+
+      const broken = await run(failShow);
+      expect(broken?.unreadable).toBe(true);
+      expect(broken?.editPath).toBeUndefined();
+      const ok = await run(gitRun);
+      expect(ok?.editPath).toBe(path.join(dir, KB_DIR, 'tracked.md'));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
