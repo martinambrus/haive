@@ -49,7 +49,12 @@ import { HttpError, type AppEnv } from '../../context.js';
 import { admitNewWork, assertNewWorkAllowed } from '../../middleware/maintenance.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
-import { cancelLiveRuns, clearTaskPause, reofferParkedSteps } from '../../lib/task-control.js';
+import {
+  cancelLiveRuns,
+  clearTaskPause,
+  reofferParkedSteps,
+  withoutGateAnswer,
+} from '../../lib/task-control.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
@@ -1850,6 +1855,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           status: 'pending',
           detectOutput: null,
           formSchema: null,
+          formValues: withoutGateAnswer,
           statusMessage: null,
           startedAt: null,
           endedAt: null,
