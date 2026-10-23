@@ -190,6 +190,10 @@
     "./system": {
       "types": "./dist/system/index.d.ts",
       "import": "./dist/system/index.js"
+    },
+    "./commit-diff-artifact": {
+      "types": "./dist/commit-diff-artifact.d.ts",
+      "import": "./dist/commit-diff-artifact.js"
     }
   },
   "scripts": {

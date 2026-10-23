@@ -39,7 +39,7 @@ import { loadRepoStackAnchors, techAnchorFacets } from '../_repo-stack.js';
 import { buildTaskHistoryDigest, type TaskHistoryDigest } from './_task-history-digest.js';
 import { KNOWLEDGE_DIFF_ARTIFACT_NAME, buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
 import { revertKnowledgeBase } from './_kb-commit.js';
-import type { CommitDiffFile } from './_commit-diff.js';
+import type { CommitDiffFile } from '@haive/shared/commit-diff-artifact';
 import {
   loadOutstandingLearningInstruction,
   recordLearningAccepted,
@@ -925,9 +925,18 @@ async function investigationDiffFile(
   const wa = workspaceAnchor(worktree);
   let oldContent = '';
   try {
-    oldContent = (await readTextNoFollow(wa.anchor, `${wa.prefix}${rel}`)) ?? '';
+    // Strict: only absence reads as null (a new file); a link, a pipe or a refused read throws.
+    oldContent = (await readTextNoFollow(wa.anchor, `${wa.prefix}${rel}`, { strict: true })) ?? '';
   } catch {
-    // not there yet -> a new file
+    return {
+      path: rel,
+      status: 'modified',
+      binary: false,
+      truncated: false,
+      unreadable: true,
+      oldContent: '',
+      newContent: '',
+    };
   }
   return {
     path: rel,

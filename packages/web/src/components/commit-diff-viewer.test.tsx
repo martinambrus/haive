@@ -1,3 +1,4 @@
+import type { CommitDiffFile, CommitDiffStatus } from '@haive/shared/commit-diff-artifact';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { CommitDiffViewer } from './commit-diff-viewer';
 import { createRenderer, findAll, fire, textOf, type Renderer } from '../../test/render-tree';
@@ -7,7 +8,7 @@ vi.mock('react', async (importOriginal) => ({
   ...(await import('../../test/render-tree')).reactHooks,
 }));
 
-let files: Array<Record<string, unknown>> = [];
+let files: CommitDiffFile[] = [];
 
 async function fakeFetch() {
   return {
@@ -30,7 +31,11 @@ beforeAll(() => {
 });
 afterAll(() => vi.unstubAllGlobals());
 
-const file = (path: string, status: string, extra: Record<string, unknown> = {}) => ({
+const file = (
+  path: string,
+  status: CommitDiffStatus,
+  extra: Partial<CommitDiffFile> = {},
+): CommitDiffFile => ({
   path,
   status,
   binary: false,
@@ -40,7 +45,7 @@ const file = (path: string, status: string, extra: Record<string, unknown> = {})
   ...extra,
 });
 
-async function mount(list: Array<Record<string, unknown>>): Promise<Renderer> {
+async function mount(list: CommitDiffFile[]): Promise<Renderer> {
   files = list;
   const view = createRenderer(() => <CommitDiffViewer taskId="t1" artifactPath="diff.json" />);
   for (let i = 0; i < 3; i += 1) await view.flush();
@@ -103,5 +108,46 @@ describe('the diff viewer shows an unreadable file as unreadable', () => {
     expect(textOf(view.tree())).toContain('three');
     await click('bad.txt');
     expect(textOf(view.tree())).toContain(MESSAGE);
+  });
+});
+
+describe('the diff viewer names a link and shows what it points at', () => {
+  it('a symlink: its badge, both targets and no failure message', async () => {
+    const view = await mount([
+      file('link', 'modified', {
+        link: 'symlink',
+        oldContent: 'target-one',
+        newContent: 'target-two',
+      }),
+    ]);
+    const text = textOf(view.tree());
+    expect(text).toContain('symlink');
+    expect(text).toContain('target-one');
+    expect(text).toContain('target-two');
+    expect(text).not.toContain('Could not read');
+  });
+
+  it('a submodule: its badge and both pinned commits', async () => {
+    const view = await mount([
+      file('sub', 'modified', {
+        link: 'gitlink',
+        oldContent: 'Subproject commit aaaaaaa\n',
+        newContent: 'Subproject commit bbbbbbb\n',
+      }),
+    ]);
+    const text = textOf(view.tree());
+    expect(text).toContain('submodule');
+    expect(text).toContain('Subproject commit aaaaaaa');
+    expect(text).toContain('Subproject commit bbbbbbb');
+    expect(text).not.toContain('Could not read');
+  });
+
+  it('a regular file carries no link badge', async () => {
+    const view = await mount([
+      file('a.txt', 'modified', { oldContent: 'one\n', newContent: 'two\n' }),
+    ]);
+    const text = textOf(view.tree());
+    expect(text).not.toContain('symlink');
+    expect(text).not.toContain('submodule');
   });
 });
