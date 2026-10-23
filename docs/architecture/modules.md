@@ -78,15 +78,45 @@ the module loads again.
   it), the module counts as activated again, so its attempts start afresh, a start still running from
   before is not counted if it fails, and a module that is not running its jobs is tried again. A
   deactivation and activation that both fall between two passes are seen this way; any other write
-  to the row does the same to an idle module. Boot waits the same `MODULE_JOB_START_WAIT_MS` on each
+  to the row does the same to an idle module. Activating a module also runs a pass at once: the api
+  publishes its id on `MODULE_ACTIVATED_CHANNEL` when the activation has committed (never awaited, so
+  a Redis outage cannot fail the request), the worker's `startModuleActivationWatch` hears it and its
+  `ModulePassScheduler` (`modules/pass-scheduler.ts`) starts the pass without waiting for the
+  interval. A request that arrives while a pass runs makes exactly one more pass run right after it,
+  since the activation may have committed after that pass read the rows, and the 15 s interval stays
+  as the fallback for a message that never arrives. Boot waits the same `MODULE_JOB_START_WAIT_MS` on each
   module's schema ensure and job start: one still running then is named in a warn and boot goes on to
   `haive-worker ready` without it (a failure within the wait still stops boot); a late ensure is held
   back like a deactivated module, so the first pass ensures it again and then starts its jobs. Until an
-  ensure of such a module has succeeded (the late one or a pass's), its steps fail their row with a
-  message saying its schema setup has not finished on this worker (`modules/schema-ready.ts`, read by
-  the same gate as a deactivated module, whose own message still comes first), and Retry runs them
-  once it has; a boot that skips the ensure of a deactivated module marks it the same way, so after
-  Activate its steps wait for a pass's ensure too. At
+  ensure of such a module has succeeded (the late one or a pass's), a step of it that is about to
+  start parks instead of failing. The flag is in `modules/schema-ready.ts` and `moduleSchemaWaitMessage`
+  (`modules/activation.ts`) reads it after the deactivation gate, so a step of a deactivated module
+  still fails its row with that module's own message. The row goes `pending` with the park marker
+  (`waiting_started_at`) and a line saying the module's schema is being set up, or naming its
+  teardown hook while one runs, or saying the setup failed and is no longer retried once the
+  attempts below are spent; a delayed advance every `MODULE_SCHEMA_POLL_MS` (5 s) looks again, so the
+  step starts by itself once an ensure has succeeded, and no row fails and nothing needs a Retry. It
+  is the pause park (`handleAdvanceStep`, see [Worker restarts](worker-restarts.md)), and a pause wins
+  over it. A step already past its start (a form answer, a finished CLI run, a fan-out continuation)
+  keeps its row as it is, and only its advance is put off by the same delayed job; a START hands its
+  first step to the advance path so the park is written there. The park has no bound of its own: a
+  setup that cannot succeed leaves the step parked until the module is deactivated and activated
+  again or the task is stopped, and the line says so. A boot that skips the ensure of a deactivated
+  module marks it the same way, so after Activate its steps wait for a pass's ensure too. A schema
+  ensure has a deadline, `MODULE_SCHEMA_ENSURE_TIMEOUT_MS` (10 minutes), over the whole
+  setup, the open of the module database included, and a setup that runs out of it counts as
+  failed. The database it opened is closed first (which drains for up to 5 s) and only then does the
+  setup reject; a database that opens after the deadline is closed and the ensure never runs on it;
+  a setup that settles late is ignored and never marks the schema ready. What it leaves behind:
+  the module stays marked not ready, so its steps keep waiting; the boot's hold (`bootEnsuresRunning`)
+  or the pass's claim (`jobsStarted`, `starting`) is released, so a teardown is no longer refused for
+  it; the attempt counts toward `MODULE_REACTIVATION_ATTEMPTS`, so the next active pass ensures
+  again, at most three times per reactivation, and after the third the flag reads failed (only the
+  worker error log and the waiting steps' line say so) until a deactivation and an activation try
+  again. On the server a statement the ensure had already sent finishes or fails by itself and its
+  transaction rolls back, since no COMMIT arrives; a waiter on the schema lock stays until the lock
+  is free, because closing the pool does not cancel it (measured); and whatever the ensure
+  committed on its own stays, so an ensure must be idempotent. At
   shutdown one deadline, `MODULE_SHUTDOWN_WAIT_MS` (5 s), covers the reconcile pass in flight and every
   module stop together, and the terminal manager's stop runs beside it under its own 5 s bound (it
   refuses a terminal open from the moment it begins, and tears down the session of an open that was
@@ -124,9 +154,10 @@ own data; it answers 409 `module_active` or `module_missing` for a module in any
 worker refuses it by name while this worker does not load the module, while the module's jobs or its
 schema setup still run (jobs normally stop within one reconcile pass of the deactivation, and a stop
 that outlives its wait keeps the refusal until it ends; a boot schema ensure that outlived its wait
-keeps it with no time limit, and the refusal says so), and while an earlier teardown hook of the module
-still runs. A teardown with a hook marks a module that has a schema ensure unready, so after Activate
-its steps fail with the schema-setup message until a pass has ensured the schema again.
+keeps it until it ends or its deadline runs out, and the refusal says so), and while an earlier
+teardown hook of the module still runs. A teardown with a hook marks a module that has a schema
+ensure unready, so after Activate its steps park until a pass has ensured the schema again, and
+while the hook still runs (past its timeout it holds the module) their line names the hook.
 The hook has 10 minutes (`TEARDOWN_HOOK_TIMEOUT_MS`); past
 that the job fails, the hook may go on, and until it ends the module is held: no schema ensure, no job
 start and no second teardown, with one warning per hold in the worker log, and the hook can no longer
