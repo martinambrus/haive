@@ -2,13 +2,14 @@ import { spawn } from 'node:child_process';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { LIVE_TASK_STATUSES, schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   CONTAINER_FAMILY,
   configService,
   containerName,
   decryptEmail,
+  drainTaskStatuses,
   getHaiveVersion,
   installId,
   isDevVersion,
@@ -44,12 +45,9 @@ export const maintenanceRoutes = new Hono<AppEnv>();
 maintenanceRoutes.use('*', requireAuth);
 maintenanceRoutes.use('*', requireAdmin);
 
-/** Task states that still hold a maintenance window open. `waiting_user` counts: a task parked on
- *  a form is live work whose owner will come back to it, and stopping it loses their place. */
-const BLOCKING_TASK_STATES = ['queued', 'running', 'paused', 'waiting_user', 'waiting_pr'] as const;
-
-/** Also `created`: a draft runs nothing but would find its module deactivated once started. */
-export const LIVE_TASK_STATES = ['created', ...BLOCKING_TASK_STATES] as const;
+/** Every unfinished status. `created` is in: a draft runs nothing but would find its module
+ *  deactivated once started. */
+export const LIVE_TASK_STATES = LIVE_TASK_STATUSES;
 
 /** The most rows either list of GET /blocking answers. */
 export const BLOCKING_LIST_CAP = 200;
@@ -178,6 +176,7 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
  */
 maintenanceRoutes.get('/blocking', async (c) => {
   const db = getDb();
+  const state = parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
   const fetched = await db
     .select({
       id: schema.tasks.id,
@@ -197,9 +196,7 @@ maintenanceRoutes.get('/blocking', async (c) => {
     .from(schema.tasks)
     .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
     // A dead task runs nothing, and none of this page's actions reach it; its owner cancels it.
-    .where(
-      and(inArray(schema.tasks.status, [...BLOCKING_TASK_STATES]), isNull(schema.tasks.deadAt)),
-    )
+    .where(and(inArray(schema.tasks.status, drainTaskStatuses(state)), isNull(schema.tasks.deadAt)))
     .orderBy(desc(schema.tasks.updatedAt))
     .limit(BLOCKING_LIST_CAP + 1);
   const rows = fetched.slice(0, BLOCKING_LIST_CAP);

@@ -52,9 +52,17 @@ background job a route queued: a repository `cloning`, a bundle `syncing`, a CLI
 sandbox image is `building` or whose model is `provisioning`. `GET /admin/maintenance/blocking` and
 the admin maintenance page list both, so what the page shows is what the updater waits for; a job
 row stuck in its in-progress status holds the drain until the deadline, and `--force` passes it.
-The count has no state predicate, so work held by a `maintenance` the updater kept counts too: that
-state locks non-admin owners out, so a `waiting_user` task of theirs cannot move, and it holds the
-drain, like a `waiting_pr` task, until the deadline or `--force`.
+Which tasks count depends on the state in force (`drainTaskStatuses`, in `@haive/shared`). Over
+`normal` or `draining` they are `queued`, `running`, `paused`, `waiting_user` and `waiting_pr`: the
+owners can still come back to a parked task. Under a `maintenance` the updater kept, only `queued`
+and `running` count, plus the background jobs: that state locks non-admin owners out
+(`locksOutNonAdmins`), so a task parked on one of them cannot be finished and would hold the drain
+until the deadline. The wait counts by the state the draining phase left in force and the recount by
+the state it reads under the fence, so the two agree (a recount that counted more would reopen a
+drain the wait had ended). `GET /admin/maintenance/blocking` reads the state past the cache and
+lists the same statuses through the same function, so the page shows exactly what the updater waits
+for, and under `maintenance` a parked task is not listed. An administrator's own parked task is not
+told apart from the others, though its owner could still answer it.
 Every api route that starts such work refuses with 503 while the state is `draining` or
 `maintenance`: the task routes, and every route that writes a job's in-progress status (repository
 create, upload and refresh, bundle create, upload, replace and sync, provider create, clone and image

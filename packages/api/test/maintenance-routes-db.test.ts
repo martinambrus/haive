@@ -12,6 +12,8 @@ const KEY = '11'.repeat(32);
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  state: 'normal' as string,
+  stateKeys: [] as string[],
   spawn: undefined as unknown as ReturnType<typeof vi.fn>,
   actor: { id: '00000000-0000-4000-8000-0000000000a1', role: 'admin' },
 }));
@@ -34,11 +36,17 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
-  configService: { getEncryptionKey: async () => KEY, getFresh: async () => 'normal' },
+  configService: {
+    getEncryptionKey: async () => KEY,
+    getFresh: async (key: string) => {
+      h.stateKeys.push(key);
+      return h.state;
+    },
+  },
 }));
 
 import { Hono } from 'hono';
-import { encryptEmail } from '@haive/shared';
+import { CONFIG_KEYS, encryptEmail } from '@haive/shared';
 import { EventEmitter } from 'node:events';
 import { BLOCKING_LIST_CAP, maintenanceRoutes } from '../src/routes/maintenance.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
@@ -216,6 +224,8 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
 
   beforeEach(async () => {
     h.actor = { id: ADMIN, role: 'admin' };
+    h.state = 'normal';
+    h.stateKeys = [];
     await clean();
   });
 
@@ -902,6 +912,65 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       expect((await postUpgrade()).status).toBe(500);
       expect(h.spawn).not.toHaveBeenCalled();
       expect(await startAudits()).toEqual([]);
+    });
+  });
+
+  describe('GET /blocking per maintenance state', () => {
+    const seed = async () => {
+      const ids: Record<string, string> = {};
+      const add = async (key: string, over: Partial<typeof schema.tasks.$inferInsert>) => {
+        ids[key] = (await task({ title: key, ...over })).id;
+      };
+      await add('queued', { status: 'queued' });
+      await add('running', { status: 'running' });
+      await add('waiting_user', { status: 'waiting_user' });
+      await add('waiting_pr', { status: 'waiting_pr' });
+      await add('paused', { status: 'paused' });
+      await add('running_paused_at', { status: 'running', pausedAt: new Date() });
+      await add('dead', { status: 'running', deadAt: new Date() });
+      await add('created', { status: 'created' });
+      await repository('cloning', 'cloning repo');
+      return ids;
+    };
+    const listed = async (ids: Record<string, string>) => {
+      const body = await blocking();
+      const byId = new Map(Object.entries(ids).map(([key, id]) => [id, key]));
+      return {
+        body,
+        keys: body.tasks.map((t) => byId.get(t.id)).sort(),
+      };
+    };
+
+    it('in maintenance lists only the tasks that can still run, not the parked ones', async () => {
+      h.state = 'maintenance';
+      const ids = await seed();
+      const { body, keys } = await listed(ids);
+      expect(keys).toEqual(['queued', 'running', 'running_paused_at']);
+      expect(body.jobs.map((j) => j.kind)).toContain('repository');
+      expect(body.total).toBe(3 + body.jobs.length);
+    });
+
+    it.each(['draining', 'normal'])(
+      'in %s lists every live task but dead and draft ones',
+      async (state) => {
+        h.state = state;
+        const ids = await seed();
+        const { body, keys } = await listed(ids);
+        expect(keys).toEqual([
+          'paused',
+          'queued',
+          'running',
+          'running_paused_at',
+          'waiting_pr',
+          'waiting_user',
+        ]);
+        expect(body.total).toBe(6 + body.jobs.length);
+      },
+    );
+
+    it('reads the maintenance state past the cache', async () => {
+      await blocking();
+      expect(h.stateKeys).toContain(CONFIG_KEYS.MAINTENANCE_STATE);
     });
   });
 });
