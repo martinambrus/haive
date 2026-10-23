@@ -1218,31 +1218,43 @@ async function cleanupTaskEnvImage(
   });
 }
 
-async function killSandboxContainersByTaskLabel(taskId: string): Promise<number> {
+export async function killSandboxContainersByTaskLabel(taskId: string): Promise<number> {
   const { spawn } = await import('node:child_process');
   const list = await new Promise<string>((resolve) => {
     let stdout = '';
     const child = spawn('docker', ['ps', '-q', '--filter', `label=haive.task.id=${taskId}`]);
-    child.stdout.on('data', (b: Buffer) => {
-      stdout += b.toString('utf8');
-    });
-    child.on('close', () => resolve(stdout));
-    child.on('error', () => resolve(''));
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       child.kill('SIGKILL');
       resolve(stdout);
     }, 10_000);
+    child.stdout.on('data', (b: Buffer) => {
+      stdout += b.toString('utf8');
+    });
+    child.on('close', () => {
+      clearTimeout(timer);
+      resolve(stdout);
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve('');
+    });
   });
   const ids = list.split(/\s+/).filter((s) => s.length > 0);
   if (ids.length === 0) return 0;
   await new Promise<void>((resolve) => {
     const child = spawn('docker', ['rm', '-f', ...ids]);
-    child.on('close', () => resolve());
-    child.on('error', () => resolve());
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       child.kill('SIGKILL');
       resolve();
     }, 30_000);
+    child.on('close', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve();
+    });
   });
   return ids.length;
 }

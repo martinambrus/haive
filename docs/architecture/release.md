@@ -32,11 +32,13 @@ database. `HAIVE_VERSION` has no default so the command fails rather than silent
 
 ## The drain an upgrade runs first
 
-`haive upgrade` (the updater) sets `MAINTENANCE_STATE` to `draining`, waits until no work is live,
-then recounts under the fence described below and sets `maintenance` only from that recount: the
-fresh state must still be `draining` (or an administrator's `maintenance`, which it leaves as it is)
-with nothing live. A recount that finds work admitted after the count, or the state set back to
-`normal`, writes `draining` again (over `normal` only) and waits again, at least one poll interval.
+`haive upgrade` (the updater) reads `MAINTENANCE_STATE` under the fence described below and writes
+`draining` over `normal` only: a `draining` or `maintenance` an administrator already set stays as it
+is (the `draining` log line carries what it `found`). It then waits until no work is live, recounts
+under the fence and sets `maintenance` only from that recount: the fresh state must still be
+`draining` (or an administrator's `maintenance`, which it leaves as it is) with nothing live. A
+recount that finds work admitted after the count, or the state set back to `normal`, writes
+`draining` again (over `normal` only) and waits again, at least one poll interval.
 One `--drain-timeout` covers the first wait and every re-wait: past it, work still live or
 admissions still reopened stop the upgrade with an error, or with `--force` enter maintenance
 anyway. The journal (`upgrade_runs.phase`) reads `draining` during a re-wait and `maintenance` again
@@ -45,6 +47,9 @@ background job a route queued: a repository `cloning`, a bundle `syncing`, a CLI
 sandbox image is `building` or whose model is `provisioning`. `GET /admin/maintenance/blocking` and
 the admin maintenance page list both, so what the page shows is what the updater waits for; a job
 row stuck in its in-progress status holds the drain until the deadline, and `--force` passes it.
+The count has no state predicate, so work held by a `maintenance` the updater kept counts too: that
+state locks non-admin owners out, so a `waiting_user` task of theirs cannot move, and it holds the
+drain, like a `waiting_pr` task, until the deadline or `--force`.
 Every api route that starts such work refuses with 503 while the state is `draining` or
 `maintenance`: the task routes, and every route that writes a job's in-progress status (repository
 create, upload and refresh, bundle create, upload, replace and sync, provider create, clone and image
@@ -72,5 +77,25 @@ be written refuses the change. The state itself lives in Redis, so a commit that
 write still leaves the new state without its row. A task the administrator pauses or resumes from that
 page gets its `task.admin_pause` or `task.admin_resume` row in the same transaction as the change, so a
 row that cannot be written undoes it; Stop's row stays best-effort, since the runs it stopped cannot be
-restarted. In the worker, the allowance auto-resume and an answer to a parked form do not reopen a
-failed task while new work is refused (see [Worker restarts](worker-restarts.md)).
+restarted. A pause an administrator makes is theirs to lift. The newest `task.paused` event says who made
+the pause in force (`byAdmin`, `findAdminPausedTaskIds`); while it is an administrator's, the owner's
+Resume answers 409 `paused_by_admin` and keeps the pause, judged after the clear inside the resume's
+transaction so that a pause placed since the route read it is the one refused. An owner's Retry of a failed
+task revives it but leaves that pause standing, since a 409 there would strand a task that
+`GET /admin/maintenance/blocking` omits (it lists no failed task); Cancel still clears any pause, and an
+administrator may lift it from either route. `GET /tasks/:id` carries `pauseLocked` (the pause is an
+administrator's and the viewer is not one), which hides the task page's Resume and changes its banner.
+In the worker, the allowance auto-resume and an answer to a parked form do not reopen a failed task while
+new work is refused (see [Worker restarts](worker-restarts.md)).
+
+While an upgrade run is live, `PUT /admin/maintenance` refuses any change: 409 `upgrade_running`,
+naming the run. Right after the exclusive fence is granted it reads `upgrade_runs` for a `running`
+row (`findLiveUpgradeRun`, the row the updater's own `findLiveRun` finds and resumes), before it
+reads the state or writes anything. The updater inserts that row before its first fenced write, and
+a write lands before or after a fenced section, never inside it, so a change that follows the
+updater's first write always sees the run. An install that never upgraded has no `upgrade_runs`
+table, which reads as no run; any other failed read answers 500 with the state untouched. A refusal
+writes no audit row. The row stays `running` until the commit or the rollback finishes it, so an
+updater that died keeps the refusal in place until the next `./haive upgrade --version <v>` resumes
+it. The admin page disables the three state buttons, and says which run holds them, while
+`GET /admin/maintenance/upgrade` lists one `running`.

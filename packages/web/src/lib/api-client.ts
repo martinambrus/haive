@@ -828,6 +828,8 @@ export interface Task {
   pausedAt?: string | null;
   /** The pause in force is an administrator's, not the owner's own; absent on an older api. */
   pausedByAdmin?: boolean;
+  /** The pause in force is an administrator's and the viewer is not one; absent on an older api. */
+  pauseLocked?: boolean;
   /** ISO time the worker marked the task dead; null otherwise. Read it through isTaskDead. */
   deadAt?: string | null;
   /** List endpoint only: the stop that failed this task, or null. Read it through moduleStopBanner. */
@@ -1056,10 +1058,10 @@ export interface TaskStep {
    *  have this as false. Used to hide the retry button on auto-skips. */
   manuallySkipped: boolean;
   /** True when the step opts into the user-facing Skip action (server-enforced
-   *  via SKIPPABLE_STEP_IDS). Drives whether the Skip button is shown. */
+   *  from step_catalog). Drives whether the Skip button is shown. */
   canSkip: boolean;
   /** True when this step ever dispatches a CLI (llm | agentMining | dagExecute),
-   *  from CLI_DISPATCH_STEP_IDS. Deterministic steps (false) never consume a
+   *  from step_catalog. Deterministic steps (false) never consume a
    *  per-step provider, so the step card hides the CLI picker for them and shows
    *  a "runs without an AI CLI" note instead. */
   usesCli: boolean;
@@ -1813,7 +1815,8 @@ export interface PlanSnapshotHealth {
   filesExist: boolean;
   gitAvailable: boolean;
   tracked: boolean;
-  uncommitted: boolean;
+  /** null = git status failed, so nothing is claimed: committed is false and pushed null. */
+  uncommitted: boolean | null;
   committed: boolean;
   /** null = no/freshly unknown upstream; false = local commits are ahead. */
   pushed: boolean | null;
@@ -2681,6 +2684,9 @@ export const postModulePurge = (moduleId: string, confirm: string) =>
   api.post<ModulePurgeResponse>(`/modules/${encodeURIComponent(moduleId)}/purge`, { confirm });
 
 export const listTaskTypes = () => api.get<{ taskTypes: PublicTaskType[] }>('/task-types');
+
+export const getSavedStepClis = (slug: string) =>
+  api.get<{ steps: UpcomingCliStep[] }>(`/task-types/${encodeURIComponent(slug)}/saved-step-clis`);
 
 export interface IntegrationPreference {
   categoryId: string;

@@ -340,7 +340,7 @@ strip all ask it, so the banner offers exactly what the upgrade will do.
 **Switching RTK off reaches the upgrade.** 01's render context takes the repository's live
 `rtk_enabled` wherever the choice is recorded (`isRtkChoiceRecorded`): the context recorded one, or a
 person switched RTK on this install (`repositories.rtk_choice_made_at`, stamped by the Tooling page's
-PATCH when the value changes and by taking the team's value in the RTK question). A context the
+PATCH when the value changes and by either answer to the RTK question). A context the
 project-state sync filled records one only from a record that carries `settings/rtk-enabled.json`
 (below). A context from before RTK recorded none and, unless a person switched RTK since or a record
 carrying the setting was imported, stays off, since the column defaults on. The RTK settings files
@@ -477,28 +477,33 @@ imported before the mirror import set `rtk_enabled` from the tooling it read hol
 default `true` beside imported tooling that says `rtkEnabled: false`. Before `rtk_choice_made_at`
 (0208) the tooling page wrote the column alone, so nothing says whether a person switched RTK back on
 before then, and a migration would have to choose. `needsRtkQuestion` (`project-state/rtk-conflict.ts`, pure) asks exactly when
-nobody has switched RTK on this install (a stamped column is a person's choice, and it travels), the
+this install recorded no RTK choice (no `rtk_choice_made_at` and no `rtkChoiceRecorded` in its render
+context: a recorded choice is this install's own, and it travels), the
 stored tooling says off, the column says on, no local `04-tooling-infrastructure` output equals that
 tooling (the test `holdImportedMcpServerLists` uses) and no row of the unit exists in any state, so
 an answered question is never asked again. The legacy `tooling.json` import takes the blob's
-`rtkEnabled` only under the same condition. `persistDetection` calls it after the mirror import and
+`rtkEnabled` only under the same condition. `persistDetection` calls it after the project-state sync and the fallback mirror import, which supply
+the tooling and the choice it weighs, and
 the boot entry `raiseRtkQuestions` (convergent) calls it for every repository; each writes one
 pending row of unit `settings/rtk-enabled.json` (`RTK_ENABLED_UNIT`; base and local `{"v": true}`,
 incoming `{"v": false}`) under `lockProjectState`, `ON CONFLICT DO NOTHING` on the pending index, and
 there is no migration. The unit is no render unit: the writer overlay, the sync's converge pass and
 `loadPendingRenderConflicts` skip it, while the api list and one-row reads, the `RESOLVE_PROJECT_STATE`
 job and `upgradeAdmission` take it (`isConflictUnit`, `blocksUpgrade`). The worker answers it
-under the same locks and the same busy, closed-row and different-answer rules, and writes no file:
-keep mine stamps the row and leaves the column; take theirs sets `rtk_enabled = false` through
-`rtkEnabledUpdate` (the columns the tooling page's PATCH writes, `rtk_enabled` and `updated_at`,
-which that route uses too), stamps `rtk_choice_made_at`, since taking the team's value is a choice,
-and stamps the row. Neither recomputes the applicable ids nor touches the
-rules files, since the PATCH does not: the next upgrade, which the answer releases, removes the RTK
-settings files and block as it does after any switch off. A pending row stops asking once RTK is off
+under the same locks and the same busy, closed-row and different-answer rules, and writes no file
+itself. Either answer is this install's choice and stamps `rtk_choice_made_at`, so the next record
+write carries `settings/rtk-enabled.json` with it and a teammate's file can no longer override it:
+keep mine leaves the column; take theirs sets `rtk_enabled = false` through `rtkEnabledUpdate` (the
+columns the tooling page's PATCH writes, `rtk_enabled` and `updated_at`, which that route uses too).
+Both stamp the row. Neither recomputes the applicable ids nor touches the rules files, since the
+PATCH does not: after take theirs, the next upgrade, which the answer releases, removes the RTK
+settings files and block as it does after any switch off; after keep mine, RTK stays on and the
+upgrade renders it on. A pending row stops asking once RTK is off
 here by any route: every writer of `rtk_enabled = false` (the tooling page's PATCH, 04's save, the
 mirror import) stamps it `converged` in the transaction that writes the column
 (`convergeRtkQuestion`), and `raiseRtkQuestion` and the boot entry do the same for a column that is
-already off or that a person has switched (`rtk_choice_made_at` set), which closes a row raised
+already off or whose choice is recorded (`rtk_choice_made_at` set, or `rtkChoiceRecorded` in the
+render context), which closes a row raised
 before the question read the stamp. The banner words it from the unit, since its
 key is null like the whole render file's (`isRtkConflict`).
 
@@ -688,8 +693,8 @@ open puts nothing back, since that merge's tip must not move.
 `verify_commands` stay on the machine, since a committed login URL or command would be typed or run
 on a teammate's. `settings/rtk-enabled.json` is written, named in the base and counted as this install's value only
 while the choice is recorded (`withoutUnchosenRtk`, `isRtkChoiceRecorded`): the render column's
-`rtkChoiceRecorded`, or `rtk_choice_made_at`, which a person's switch on the Tooling page stamps, so
-that switch travels at the next record write. `rtk_enabled` is NOT NULL default true, so a default
+`rtkChoiceRecorded`, or `rtk_choice_made_at`, which a person's switch on the Tooling page and either
+answer to the RTK question stamp, so that choice travels at the next record write. `rtk_enabled` is NOT NULL default true, so a default
 nobody chose must not travel or outvote a teammate's choice. Until then the sync takes the checkout's
 value with no conflict, and the writer neither writes the file nor removes one the base names. A
 record that carries a valid file records the choice for the install that imports it, in the
@@ -704,7 +709,7 @@ recorded by the flag alone, so a rollback whose plan predates it can write the f
 the next sync adopts again while the file stands. The first sync after a switch, on a sync row whose
 base never held the setting, keeps this install's value with no question and records the checkout's
 in the base, so later changes merge three-way as any setting does; with no sync row at all, the
-checkout's value still wins. A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
+checkout's value still wins, even over a stamped choice (running-list item `FNF[rtk-first-import]`). A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
 not an empty list), and `environmentUnitOf` gives `project/environment.json` from
 `onboarding_environment` without its schema version. The writer plans them into the record and the
 base, and removes a file the base named that the record no longer holds. `settings/rtk-enabled.json`

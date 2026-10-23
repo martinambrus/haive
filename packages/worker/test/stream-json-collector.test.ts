@@ -176,6 +176,7 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
       cacheReadTokens: 200,
       cacheCreationTokens: 100,
       costUsd: 0.12,
+      peakPromptTokens: 3,
     });
   });
 
@@ -205,14 +206,93 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
       outputTokens: 100,
       totalTokens: 16386,
       cacheCreationTokens: 16256,
+      peakPromptTokens: 16266,
     });
   });
 
-  it('does not inflate live cache_read across turns (max, not sum); cache_creation sums', () => {
-    // Each Anthropic assistant turn re-reports the FULL cached prefix it read, so
-    // summing cache_read per turn over-counts several-fold on the live snapshot
-    // (1000+1500+1800=4300) before the result event reconciles it. cache_read must
-    // be the running MAX (1800); cache_creation is a distinct per-turn write (summed).
+  const usageOf = (i: number, o: number, r: number, w: number) => ({
+    input_tokens: i,
+    output_tokens: o,
+    cache_read_input_tokens: r,
+    cache_creation_input_tokens: w,
+  });
+  const blockEvent = (
+    id: string,
+    block: unknown,
+    usage: unknown,
+    parent: string | null = null,
+  ) => ({
+    type: 'assistant',
+    parent_tool_use_id: parent,
+    message: { id, content: [block], usage },
+  });
+  const toolResult = { type: 'user', message: { content: [{ type: 'tool_result' }] } };
+  const killedRunEvents = () => {
+    const u1 = usageOf(5, 100, 1000, 400);
+    const u2 = usageOf(7, 200, 1400, 300);
+    const u3 = usageOf(2, 50, 1700, 100);
+    return [
+      blockEvent('msg_1', { type: 'thinking', thinking: 'a' }, u1),
+      blockEvent('msg_1', { type: 'text', text: 'b' }, u1),
+      blockEvent('msg_1', { type: 'tool_use', id: 'toolu_1', name: 'Read', input: {} }, u1),
+      toolResult,
+      blockEvent('msg_2', { type: 'text', text: 'c' }, u2),
+      blockEvent('msg_2', { type: 'tool_use', id: 'toolu_2', name: 'Read', input: {} }, u2),
+      toolResult,
+      blockEvent('msg_3', { type: 'text', text: 'd' }, u3),
+    ];
+  };
+
+  it('killed run: counts each message once across its several events, all four buckets summed', () => {
+    const c = createStreamJsonCollector();
+    feed(c, killedRunEvents());
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 14,
+      outputTokens: 350,
+      totalTokens: 5264,
+      cacheReadTokens: 4100,
+      cacheCreationTokens: 800,
+      peakPromptTokens: 1802,
+    });
+  });
+
+  it('live reading equals what the result then reports', () => {
+    const c = createStreamJsonCollector();
+    feed(c, killedRunEvents());
+    const live = c.getTokenUsage();
+    feed(c, [
+      {
+        type: 'result',
+        subtype: 'success',
+        result: 'done',
+        usage: usageOf(14, 350, 4100, 800),
+      },
+    ]);
+    expect(c.getTokenUsage()).toEqual(live);
+  });
+
+  it('interleaved message ids (parallel sub-agents) are each counted once', () => {
+    const ua = usageOf(3, 30, 300, 30);
+    const ub = usageOf(4, 40, 400, 40);
+    const c = createStreamJsonCollector();
+    feed(c, [
+      blockEvent('msg_a', { type: 'text', text: 'a1' }, ua, 'toolu_1'),
+      blockEvent('msg_b', { type: 'text', text: 'b1' }, ub, 'toolu_2'),
+      blockEvent('msg_a', { type: 'text', text: 'a2' }, ua, 'toolu_1'),
+      blockEvent('msg_b', { type: 'text', text: 'b2' }, ub, 'toolu_2'),
+    ]);
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 7,
+      outputTokens: 70,
+      totalTokens: 847,
+      cacheReadTokens: 700,
+      cacheCreationTokens: 70,
+      peakPromptTokens: 444,
+    });
+  });
+
+  it('sums cache_read per event when events carry no message.id (amp), like the CLI result', () => {
+    // An event without an id is its own message, so each one is summed in full.
     const c = createStreamJsonCollector();
     feed(c, [
       {
@@ -246,9 +326,10 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     expect(c.getTokenUsage()).toEqual({
       inputTokens: 14,
       outputTokens: 60,
-      totalTokens: 14 + 60 + 1800 + 800,
-      cacheReadTokens: 1800,
+      totalTokens: 5174,
+      cacheReadTokens: 4300,
       cacheCreationTokens: 800,
+      peakPromptTokens: 1805,
     });
   });
 
@@ -261,7 +342,12 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
         message: { content: [] },
       },
     ]);
-    expect(c.getTokenUsage()).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 });
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+      peakPromptTokens: 10,
+    });
   });
 
   it('prefers message.usage when both placements exist on one event', () => {
@@ -273,7 +359,12 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
         message: { usage: { input_tokens: 1, output_tokens: 2 }, content: [] },
       },
     ]);
-    expect(c.getTokenUsage()).toEqual({ inputTokens: 1, outputTokens: 2, totalTokens: 3 });
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 1,
+      outputTokens: 2,
+      totalTokens: 3,
+      peakPromptTokens: 1,
+    });
   });
 
   it('captures usage from a non-success result event (tokens were still burned)', () => {
@@ -298,6 +389,66 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     const plain = createStreamJsonCollector();
     plain.onChunk('not json at all');
     expect(plain.getTokenUsage()).toBeNull();
+  });
+
+  const peakRunEvents = () => [
+    blockEvent('msg_1', { type: 'thinking', thinking: 'a' }, usageOf(10, 100, 50000, 30000)),
+    blockEvent('msg_1', { type: 'text', text: 'b' }, usageOf(10, 100, 50000, 30000)),
+    toolResult,
+    blockEvent('msg_2', { type: 'text', text: 'c' }, usageOf(8, 200, 85000, 15000)),
+    toolResult,
+    blockEvent('msg_3', { type: 'text', text: 'd' }, usageOf(6, 300, 110000, 10000)),
+  ];
+  const peakResult = {
+    type: 'result',
+    subtype: 'success',
+    result: 'done',
+    usage: usageOf(24, 600, 245000, 55000),
+  };
+
+  it('records the largest single-message prompt beside the cumulative result usage', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [...peakRunEvents(), peakResult]);
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 24,
+      outputTokens: 600,
+      totalTokens: 300624,
+      cacheReadTokens: 245000,
+      cacheCreationTokens: 55000,
+      peakPromptTokens: 120006,
+    });
+  });
+
+  it('records the same peak for a killed run that never produced a result', () => {
+    const c = createStreamJsonCollector();
+    feed(c, peakRunEvents());
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 24,
+      outputTokens: 600,
+      totalTokens: 300624,
+      cacheReadTokens: 245000,
+      cacheCreationTokens: 55000,
+      peakPromptTokens: 120006,
+    });
+  });
+
+  it('counts a sub-agent message toward the peak', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      ...peakRunEvents(),
+      blockEvent('msg_sub', { type: 'text', text: 's' }, usageOf(4, 10, 200000, 5000), 'toolu_9'),
+      peakResult,
+    ]);
+    expect(c.getTokenUsage()?.peakPromptTokens).toBe(205004);
+  });
+
+  it('leaves peakPromptTokens absent when assistant events report zero usage', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      blockEvent('msg_z', { type: 'text', text: 'z' }, { input_tokens: 0, output_tokens: 0 }),
+      peakResult,
+    ]);
+    expect(c.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
   });
 });
 

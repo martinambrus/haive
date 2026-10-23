@@ -353,3 +353,34 @@ describe('answering an environment question', () => {
     expect((await s.answer('take_theirs')).kind).toBe('invalid');
   });
 });
+
+describe('answering an ordinary rtk-enabled conflict', () => {
+  const rtkSeed = (over: Partial<Seed> = {}): Seed => ({
+    unit: 'settings/rtk-enabled.json',
+    base: true,
+    local: false,
+    incoming: true,
+    file: 'true\n',
+    columns: { rtkEnabled: false },
+    baseRecord: record({ 'rtk-enabled': true }),
+    ...over,
+  });
+
+  it('keep mine goes through the settings path: the file and the base take the column', async () => {
+    const s = await setup(rtkSeed());
+
+    const result = await s.answer('keep_mine');
+
+    expect(result).toMatchObject({ kind: 'resolved', written: [s.rel] });
+    expect(JSON.parse((await s.file())!)).toBe(false);
+    expect(s.base().settings['rtk-enabled']).toBe(false);
+    expect(s.repo().rtkEnabled).toBe(false);
+  });
+
+  it('is moved, and left open, when the checkout file no longer holds the other value', async () => {
+    const s = await setup(rtkSeed({ file: 'false\n' }));
+
+    expect((await s.answer('take_theirs')).kind).toBe('moved');
+    expect(s.repo().rtkChoiceMadeAt ?? null).toBeNull();
+  });
+});

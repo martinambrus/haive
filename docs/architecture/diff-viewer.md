@@ -18,6 +18,40 @@ viewer reports "Could not load changes" instead of a stale diff or "No changes t
 and the KB commit also run their own `git status` in detect, outside that catch, so a status that
 keeps failing fails those steps there before any diff is built.
 
+A file that could not be read is not an empty file. `buildFileEntry` sets `unreadable` on its
+entry when `git ls-tree -l HEAD -- <path>` exits non-zero or lists no blob or submodule there,
+when `git show HEAD:<path>` exits non-zero, or when the working file cannot be opened (a FIFO, a
+file that vanished, a permission error), and it drops both contents, as it does for a binary or
+oversized file. It keys on git's exit code and record layout, never on its message. Left empty,
+the side that did read would diff against nothing: a modified file would render as all-added or
+all-removed and a deleted file as an empty deletion. The viewer shows "Could not read this file"
+instead of a diff, gate 3 gives the commit-message generator the path and status only ("content
+unavailable"), and the knowledge builders set no `editPath`, so the file cannot be edited. The
+field is absent when both sides were read, which covers every artifact an older worker wrote and
+every learning entry the learning step synthesizes. Its investigation entry is read from the path
+it will be written to with a strict read: nothing there, or no directory yet, is a new file, and a
+link, a pipe or a refused read flags the entry the same way.
+
+A link is not an unreadable file. A symlink reads as its target text: the old side is the blob git
+holds, the new side is `readLinkNoFollow` on the working path, which reads the link without
+following it. A submodule reads as `Subproject commit <sha>` on each side, the text `git diff`
+prints for one. The old sha comes from the tree entry `ls-tree -l` lists (mode 160000), asked
+before any blob is read, so a commit that also sits in the superproject's object store is not
+shown as a patch. The new sha is the index entry or, when git reports the checkout as moved on
+disk (`Y` is `M`) or as an intent to add (`Y` is `A`, whose index entry is the empty blob), the
+commit `git rev-parse HEAD` answers inside the checkout. That directory is opened without
+following links and handed to git as a descriptor, so a name swapped after the check cannot
+redirect it, and an uninitialised submodule, an empty directory where git answers with the
+superproject's own HEAD, is never asked. Paths reach git as `:(literal)` pathspecs. Such an entry
+sets `link` (`symlink` or `gitlink`) for its new side: the viewer names it with a badge, gate 3
+passes it to the commit-message generator beside the target text, and the knowledge builders set
+no `editPath`, since the text is a target, not a file's bytes. A submodule whose own working tree
+is dirty but whose commit has not moved reads as no change, because the commit would not record
+the rest. A repository nobody added as a submodule (git lists it as `dir/`), a conflicted gitlink
+and a gitlink path that now holds a pipe stay unreadable. `CommitDiffFile` and
+`CommitDiffArtifact` are declared once, in `@haive/shared/commit-diff-artifact`, and the builders
+and the viewer both import them; a new field goes there.
+
 Whole lines retain their red/green background. A removed run followed by an added run also
 gets a `diffWordsWithSpace` comparison: only changed words, punctuation and whitespace receive
 the brighter background. Compare the entire replacement run before projecting spans onto
@@ -38,6 +72,7 @@ In split mode both panes move together. Selecting another file remounts the pane
 their scroll position.
 
 `commit-diff.test.ts` covers span reconstruction, uncommented settings, shifted comments,
-whitespace, Unicode and marker grouping. `tests/e2e/tasks/commit-diff.spec.ts` exercises the
-real task page with a completed fixture and a mocked artifact: both views, marker navigation,
-scroll synchronisation, fullscreen, file switching and narrow-screen containment.
+whitespace, Unicode and marker grouping. `commit-diff-viewer.test.tsx` draws the viewer through
+the DOM-less test renderer for the unreadable and link states. `tests/e2e/tasks/commit-diff.spec.ts`
+exercises the real task page with a completed fixture and a mocked artifact: both views, marker
+navigation, scroll synchronisation, fullscreen, file switching and narrow-screen containment.

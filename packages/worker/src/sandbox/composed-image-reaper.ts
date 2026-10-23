@@ -87,10 +87,15 @@ function dockerLines(args: string[], timeoutMs = 15_000): Promise<string[]> {
   return new Promise((resolve) => {
     let stdout = '';
     const child = spawn('docker', args);
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve([]);
+    }, timeoutMs);
     child.stdout.on('data', (b: Buffer) => {
       stdout += b.toString('utf8');
     });
     child.on('close', () => {
+      clearTimeout(timer);
       resolve(
         stdout
           .split('\n')
@@ -98,11 +103,10 @@ function dockerLines(args: string[], timeoutMs = 15_000): Promise<string[]> {
           .filter((l) => l.length > 0),
       );
     });
-    child.on('error', () => resolve([]));
-    setTimeout(() => {
-      child.kill('SIGKILL');
+    child.on('error', () => {
+      clearTimeout(timer);
       resolve([]);
-    }, timeoutMs);
+    });
   });
 }
 

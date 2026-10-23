@@ -249,6 +249,7 @@ jobs:
           shared test/integrations-refresh-db.test.ts INTEGRATIONS_REFRESH_TEST_URL integrations_refresh_test pg
           shared test/integrations-clients-db.test.ts INTEGRATIONS_CLIENTS_TEST_URL integrations_clients_test pg
           shared test/integrations-resolution-db.test.ts INTEGRATIONS_RESOLUTION_TEST_URL integrations_resolution_test pg
+          shared test/rtk-converge-db.test.ts RTK_CONVERGE_TEST_URL rtk_converge_test pg
           database test/integration-connection-keys.test.ts INTEGRATION_KEYS_TEST_URL integration_keys_test pg
           api test/admin-integrations-db.test.ts ADMIN_INTEGRATIONS_TEST_URL admin_integrations_test pg
           api test/maintenance-routes-db.test.ts MAINTENANCE_API_TEST_URL maintenance_api_test pg
@@ -265,6 +266,7 @@ jobs:
           api test/admin-config-pool-db.test.ts ADMIN_CONFIG_POOL_TEST_URL admin_config_pool_test pg
           api test/admin-security-audit-db.test.ts ADMIN_SECURITY_AUDIT_TEST_URL admin_security_audit_test pg
           api test/repo-credentials-audit-db.test.ts REPO_CREDENTIALS_AUDIT_TEST_URL repo_credentials_audit_test pg
+          api test/global-kb-config-audit-db.test.ts GLOBAL_KB_CONFIG_AUDIT_TEST_URL global_kb_config_audit_test pg
           worker test/step-integrations-stamp-db.test.ts STEP_INTEGRATIONS_STAMP_TEST_URL step_integrations_stamp_test pg
           worker test/step-integrations-dispatch-db.test.ts STEP_INTEGRATIONS_DISPATCH_TEST_URL step_integrations_dispatch_test pg
           worker test/step-integrations-prompt-db.test.ts STEP_INTEGRATIONS_PROMPT_TEST_URL step_integrations_prompt_test pg

@@ -7,15 +7,21 @@ function runDocker(args: string[], timeoutMs: number): Promise<string> {
   return new Promise<string>((resolve) => {
     let stdout = '';
     const child = spawn('docker', args);
-    child.stdout.on('data', (b: Buffer) => {
-      stdout += b.toString('utf8');
-    });
-    child.on('close', () => resolve(stdout));
-    child.on('error', () => resolve(stdout));
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       child.kill('SIGKILL');
       resolve(stdout);
     }, timeoutMs);
+    child.stdout.on('data', (b: Buffer) => {
+      stdout += b.toString('utf8');
+    });
+    child.on('close', () => {
+      clearTimeout(timer);
+      resolve(stdout);
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve(stdout);
+    });
   });
 }
 

@@ -219,7 +219,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
   flags: StepFlagMap,
   userId: string,
   steps: T[],
-  taskId: string,
+  taskId: string | null,
   ignoreSaved = false,
 ): Promise<
   (T & {
@@ -251,11 +251,11 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
   // When the task opted out of saved per-step prefs (ignore_saved_step_clis), gate each
   // surfaced pref by its (step, role) marker; untouched steps fall back to the task provider.
   const touchedByStep =
-    ignoreSaved && stepIds.length > 0
+    ignoreSaved && stepIds.length > 0 && taskId !== null
       ? ((await loadTouchedRoles(db, [taskId])).get(taskId) ?? new Map<string, Set<string>>())
       : new Map<string, Set<string>>();
   const choicesByStep =
-    stepIds.length > 0
+    stepIds.length > 0 && taskId !== null
       ? ((await loadTaskCliChoices(db, [taskId])).get(taskId) ??
         new Map<string, Map<string, TaskCliChoice>>())
       : new Map<string, Map<string, TaskCliChoice>>();
@@ -966,7 +966,7 @@ export async function buildUpcomingCliSteps(
   db: ReturnType<typeof getDb>,
   flags: StepFlagMap,
   userId: string,
-  taskId: string,
+  taskId: string | null,
   taskType: string,
   existingStepIds: Iterable<string>,
   ignoreSaved = false,
@@ -1134,6 +1134,11 @@ export async function findAdminPausedTaskIds(
     if (!newest.has(taskId)) newest.set(taskId, payload?.byAdmin === true);
   }
   return new Set([...newest].filter(([, byAdmin]) => byAdmin).map(([taskId]) => taskId));
+}
+
+/** An administrator's pause is lifted only by an administrator. */
+export function adminPauseLocks(pausedByAdmin: boolean, role: string | undefined): boolean {
+  return pausedByAdmin && role !== 'admin';
 }
 
 /** The model-health canary validates THE task's model, so swapping the CLI on a

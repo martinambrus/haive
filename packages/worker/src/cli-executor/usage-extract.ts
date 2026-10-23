@@ -25,6 +25,8 @@ export function sumTokenUsage(
   if (cacheCreation > 0) out.cacheCreationTokens = cacheCreation;
   const cost = (a.costUsd ?? 0) + (b.costUsd ?? 0);
   if (cost > 0) out.costUsd = cost;
+  const peak = Math.max(a.peakPromptTokens ?? 0, b.peakPromptTokens ?? 0);
+  if (peak > 0) out.peakPromptTokens = peak;
   return out;
 }
 

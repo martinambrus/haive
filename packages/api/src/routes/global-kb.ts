@@ -55,7 +55,7 @@ import {
   releaseEmbedModelIfUnused,
 } from '@haive/shared/rag';
 import { getDb } from '../db.js';
-import { recordAuditEvent } from '../lib/audit.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getGlobalKbSyncQueue } from '../queues.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
@@ -359,11 +359,21 @@ function serializeConfigSave<T>(run: () => Promise<T>): Promise<T> {
 
 globalKbRoutes.put('/config', (c) => serializeConfigSave(() => putConfig(c)));
 
+// The secrets service writes on its own connection, beyond any rollback: the row goes first.
+async function auditedChange(event: AuditEvent, change: () => Promise<void>) {
+  await getDb().transaction(async (tx) => {
+    await insertAuditEvent(tx, event);
+    await change();
+  });
+  logAuditEvent(event);
+}
+
 async function putConfig(c: Context<AppEnv>) {
   const parsed = configSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid global KB config', 'invalid_body');
   const d = parsed.data;
   const isAdmin = c.get('userRole') === 'admin';
+  const actorUserId = c.get('userId');
   const saved = await resolveGlobalKbSettings();
   const given = d.connectionString?.trim() ?? '';
   const clearing = d.clearConnectionString === true;
@@ -442,63 +452,71 @@ async function putConfig(c: Context<AppEnv>) {
   const write = async () => {
     // The string goes first, so no reader finds the external store without it.
     if (storesString) {
-      await secretsService.set(
-        SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
-        given,
-        'Global KB external connection string',
+      await auditedChange(
+        {
+          actorUserId,
+          action: 'global_kb.connection_string.update',
+          targetType: 'global_kb',
+          metadata: { connectionStringSet: true },
+        },
+        () =>
+          secretsService.set(
+            SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
+            given,
+            'Global KB external connection string',
+          ),
       );
-      await recordAuditEvent(getDb(), {
-        actorUserId: c.get('userId'),
-        action: 'global_kb.connection_string.update',
-        targetType: 'global_kb',
-        metadata: { connectionStringSet: true },
-      });
     }
     if (fields.every(([, , value]) => value === undefined)) return;
     // Past the cache; serializeConfigSave let the previous save finish, so this is what it left.
     const stored = await Promise.all(fields.map(([, key]) => configService.getFresh(key)));
-    const record = (
-      indexes: number[],
-      extra: { connectionStringChanged: boolean; partial?: true },
-    ) =>
-      recordAuditEvent(getDb(), {
-        actorUserId: c.get('userId'),
-        action: 'config.global_kb',
-        targetType: 'system',
-        metadata: {
-          from: Object.fromEntries(indexes.map((i) => [fields[i]![0], stored[i]])),
-          to: Object.fromEntries(indexes.map((i) => [fields[i]![0], fields[i]![2] ?? stored[i]])),
-          ...extra,
-        },
-      });
+    const event = (indexes: number[], extra?: { partial: true }): AuditEvent => ({
+      actorUserId,
+      action: 'config.global_kb',
+      targetType: 'system',
+      metadata: {
+        from: Object.fromEntries(indexes.map((i) => [fields[i]![0], stored[i]])),
+        to: Object.fromEntries(indexes.map((i) => [fields[i]![0], fields[i]![2] ?? stored[i]])),
+        connectionStringChanged: storesString,
+        ...extra,
+      },
+    });
+    const full = event(fields.map((_, i) => i));
     const written: number[] = [];
-    try {
-      for (const [i, [, key, value]] of fields.entries()) {
-        if (value === undefined) continue;
-        await configService.set(key, value);
-        written.push(i);
+    const outcome = await getDb().transaction(async (tx) => {
+      try {
+        await tx.transaction(async (savepoint) => {
+          await insertAuditEvent(savepoint, full);
+          for (const [i, [, key, value]] of fields.entries()) {
+            if (value === undefined) continue;
+            await configService.set(key, value);
+            written.push(i);
+          }
+        });
+      } catch (error) {
+        if (written.length === 0) throw error;
+        const partial = event(written, { partial: true });
+        await insertAuditEvent(tx, partial);
+        // Returned, not rethrown: a throw would roll the partial row back with the transaction.
+        return { event: partial, error };
       }
-    } catch (err) {
-      if (written.length > 0) {
-        await record(written, { connectionStringChanged: storesString, partial: true });
-      }
-      throw err;
-    }
-    await record(
-      fields.map((_, i) => i),
-      { connectionStringChanged: storesString || clearing },
-    );
+      return { event: full };
+    });
+    logAuditEvent(outcome.event);
+    if ('error' in outcome) throw outcome.error;
   };
   if (dimsChange) await withVectorWidthLock(saved, d.embedDimensions!, write);
   else await write();
   if (isAdmin && clearing) {
-    await secretsService.delete(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
-    await recordAuditEvent(getDb(), {
-      actorUserId: c.get('userId'),
-      action: 'global_kb.connection_string.update',
-      targetType: 'global_kb',
-      metadata: { connectionStringSet: false },
-    });
+    await auditedChange(
+      {
+        actorUserId,
+        action: 'global_kb.connection_string.update',
+        targetType: 'global_kb',
+        metadata: { connectionStringSet: false },
+      },
+      () => secretsService.delete(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING),
+    );
   }
   return c.json(await configResponse(await resolveGlobalKbSettings(), c.get('userRole')));
 }

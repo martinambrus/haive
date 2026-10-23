@@ -91,6 +91,7 @@ import { isUuid } from '../../lib/uuid.js';
 import { REPOSITORY_BUSY, boundedLockWait } from '../../lib/repository-busy.js';
 import { getTaskQueue } from '../../queues.js';
 import {
+  adminPauseLocks,
   appendTaskEvent,
   buildUpcomingCliSteps,
   currentStepParkedSql,
@@ -1083,6 +1084,7 @@ taskRoutes.get('/:id', async (c) => {
     ...taskFields,
     typeLabel: typeLabels.get(task.type) ?? null,
     pausedByAdmin: adminPausedIds.has(id),
+    pauseLocked: adminPauseLocks(adminPausedIds.has(id), c.get('userRole')),
     activeCliInvocationId: active?.id ?? null,
     activeCliStepId: active?.taskStepId ?? null,
     // Same derivation as the listing, over the rows already fetched above, so the header badge
@@ -1250,6 +1252,13 @@ taskRoutes.post('/:id/action', async (c) => {
       if (task.status !== 'failed') {
         throw new HttpError(409, `Cannot retry task in status ${task.status}`);
       }
+      // Retry lifts only the hold it read, and never an administrator's: a 409 would strand a
+      // failed task, which the maintenance list omits.
+      const liftPause =
+        task.pausedAt &&
+        !adminPauseLocks((await findAdminPausedTaskIds(db, [id])).has(id), c.get('userRole'))
+          ? task.pausedAt
+          : undefined;
       // A task that stopped on a step re-runs that step. START replays the task from its first
       // step, which only a task that never reached one still needs.
       const [target] = task.currentStepId
@@ -1266,7 +1275,7 @@ taskRoutes.post('/:id/action', async (c) => {
             .limit(1)
         : [];
       if (target) {
-        await retryTaskAtStep(db, id, userId, target);
+        await retryTaskAtStep(db, id, userId, target, { liftPause });
         return c.json({ ok: true, status: 'running' });
       }
       // Clear in-flight work FIRST. A retry restarts the task from step 0, and the
@@ -1309,9 +1318,6 @@ taskRoutes.post('/:id/action', async (c) => {
             // full task restart → fresh auto-resume budget
             allowanceAutoResumeCount: 0,
             ...CLEAR_ALLOWANCE_WATCH,
-            // Retrying a paused task means "run it". Leaving the hold set would restart the task
-            // straight into the pause park, with Retry apparently doing nothing.
-            pausedAt: null,
             orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
             updatedAt: new Date(),
           })
@@ -1327,6 +1333,9 @@ taskRoutes.post('/:id/action', async (c) => {
         await clearMessages(tx);
         const [moved] = await requeue(tx);
         if (!moved) throw new HttpError(409, 'The task is no longer failed; reload it');
+        // Retrying a paused task means "run it". Leaving the hold set would restart the task
+        // straight into the pause park, with Retry apparently doing nothing.
+        if (liftPause) await clearTaskPause(tx, id, liftPause);
       });
       // Answering a parked form revives the task, so its pass can open a row between the settle
       // above and the bump. None can at the old epoch after it, so settle once more.
@@ -1374,6 +1383,10 @@ taskRoutes.post('/:id/action', async (c) => {
       const resumed = await db.transaction(async (tx) => {
         // Only the resume that changes the row is recorded.
         if (!(await clearTaskPause(tx, id))) return false;
+        // Judged after the clear so a pause placed since the route's read is the one refused.
+        if (adminPauseLocks((await findAdminPausedTaskIds(tx, [id])).has(id), c.get('userRole'))) {
+          throw new HttpError(409, 'Paused by an administrator', 'paused_by_admin');
+        }
         await appendTaskEvent(tx, id, null, 'task.resumed', { by: userId });
         return true;
       });

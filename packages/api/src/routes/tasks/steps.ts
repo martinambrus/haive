@@ -49,7 +49,7 @@ import { HttpError, type AppEnv } from '../../context.js';
 import { admitNewWork, assertNewWorkAllowed } from '../../middleware/maintenance.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
-import { cancelLiveRuns, reofferParkedSteps } from '../../lib/task-control.js';
+import { cancelLiveRuns, clearTaskPause, reofferParkedSteps } from '../../lib/task-control.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
@@ -252,7 +252,7 @@ async function moveTaskToStep(
   >,
   leftActive: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
-  opts: { fromFailed?: boolean } = {},
+  opts: { fromFailed?: boolean; liftPause?: Date } = {},
 ) {
   // The task leaves `failed` here for every caller, so the revival checks sit here too.
   await refuseReviveBesideLive(tx, taskId);
@@ -269,8 +269,6 @@ async function moveTaskToStep(
       currentRound: step.round,
       orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
       ...CLEAR_ALLOWANCE_WATCH,
-      // A task Retry means "run it", so a hold left on the failed task goes with it.
-      ...(opts.fromFailed ? { pausedAt: null } : {}),
       updatedAt: now,
     })
     .where(
@@ -282,6 +280,8 @@ async function moveTaskToStep(
   if (!bumped) {
     throw new HttpError(409, opts.fromFailed ? RETRY_RACED_MESSAGE : ENDED_TASK_MESSAGE);
   }
+  // A task Retry means "run it", so the hold it read goes with it.
+  if (opts.liftPause) await clearTaskPause(tx, taskId, opts.liftPause);
   const late = await rowsActivatedMeanwhile(tx, taskId, [step.id]);
   await resetRowsForRerun(tx, taskId, late, now);
   return { epoch: bumped.epoch, leftActive: [...leftActive, ...late] };
@@ -303,6 +303,7 @@ export async function retryTaskAtStep(
   taskId: string,
   userId: string,
   target: typeof schema.taskSteps.$inferSelect,
+  opts: { liftPause?: Date } = {},
 ): Promise<{ epoch: number }> {
   const rows = await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, taskId));
   const downstream = rows.filter(
@@ -343,7 +344,10 @@ export async function retryTaskAtStep(
           isNotNull(schema.taskSteps.statusMessage),
         ),
       );
-    const result = await moveTaskToStep(tx, taskId, target, [], now, { fromFailed: true });
+    const result = await moveTaskToStep(tx, taskId, target, [], now, {
+      fromFailed: true,
+      liftPause: opts.liftPause,
+    });
     const touched = [...reset, ...result.leftActive];
     await tx.insert(schema.taskEvents).values({
       taskId,

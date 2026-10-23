@@ -29,6 +29,24 @@ const reply = (code: number, body: unknown) => ({
 
 let state = 'normal';
 let holdState: { settle?: () => void } | null = null;
+let runs: Array<Record<string, unknown>> = [];
+
+const upgradeRun = (status: string) => ({
+  id: '11111111-2222-4333-8444-555555555555',
+  from_version: '8.8.8',
+  to_version: '9.9.9',
+  phase: 'migrating',
+  status,
+  error: null,
+  started_at: '2026-10-01T10:00:00.000Z',
+  ended_at: status === 'running' ? null : '2026-10-01T10:05:00.000Z',
+});
+const occurrences = (text: string, part: string) => text.split(part).length - 1;
+const reasonNote = (view: Renderer) =>
+  findAll(
+    view.tree(),
+    (h) => h.tag === 'p' && textOf(h).includes('9.9.9') && textOf(h).includes('migrating'),
+  );
 
 async function fakeFetch(input: unknown, init?: { method?: string; body?: string }) {
   const call = `${init?.method ?? 'GET'} ${new URL(String(input), 'http://localhost').pathname}`;
@@ -56,7 +74,7 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
       canUpgrade: false,
       devBuild: true,
       installDirConfigured: false,
-      runs: [],
+      runs: structuredClone(runs),
     });
   }
   return reply(404, { error: `not stubbed: ${call}` });
@@ -67,6 +85,7 @@ afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
   state = 'normal';
   holdState = null;
+  runs = [];
 });
 afterEach(() => vi.useRealTimers());
 
@@ -97,5 +116,54 @@ describe('maintenance page state', () => {
     for (let i = 0; i < 3; i += 1) await view.flush();
     expect(stateButton(view, 'Draining').props.disabled).toBe(true);
     expect(stateButton(view, 'Normal').props.disabled).toBe(false);
+  });
+});
+
+describe('maintenance page while an upgrade run is live', () => {
+  const LABELS = ['Normal', 'Draining', 'Maintenance'];
+
+  it('disables all three state buttons and names the run as the reason', async () => {
+    runs = [upgradeRun('running')];
+    state = 'draining';
+    const view = await mount();
+
+    expect(LABELS.map((label) => stateButton(view, label).props.disabled)).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    const text = textOf(view.tree());
+    expect(occurrences(text, '9.9.9')).toBeGreaterThanOrEqual(2);
+    expect(occurrences(text, 'migrating')).toBeGreaterThanOrEqual(2);
+    expect(reasonNote(view)).toHaveLength(1);
+  });
+
+  it('leaves the other states selectable and shows no reason when only finished runs exist', async () => {
+    runs = [upgradeRun('done'), upgradeRun('rolled_back'), upgradeRun('failed')];
+    const view = await mount();
+
+    expect(LABELS.map((label) => stateButton(view, label).props.disabled)).toEqual([
+      true,
+      false,
+      false,
+    ]);
+    expect(occurrences(textOf(view.tree()), '9.9.9')).toBe(3);
+    expect(reasonNote(view)).toHaveLength(0);
+  });
+
+  it('enables the buttons again when a later poll reports the run finished', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    runs = [upgradeRun('running')];
+    const view = await mount();
+    expect(stateButton(view, 'Draining').props.disabled).toBe(true);
+
+    runs = [upgradeRun('done')];
+    vi.advanceTimersByTime(5000);
+    for (let i = 0; i < 3; i += 1) await view.flush();
+
+    expect(stateButton(view, 'Draining').props.disabled).toBe(false);
+    expect(stateButton(view, 'Maintenance').props.disabled).toBe(false);
+    expect(occurrences(textOf(view.tree()), '9.9.9')).toBe(1);
+    expect(reasonNote(view)).toHaveLength(0);
   });
 });

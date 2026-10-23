@@ -19,7 +19,9 @@ protects infrastructure when the current copy is broken or removes the framework
 deterministic: the worker builds the commit-diff snapshot from the same staged, unstaged and
 untracked files `git add -A` will include. The message invocation receives bounded before/after
 excerpts from that snapshot, with unchanged edges stripped so edits near the end of large files
-remain visible. Binary files and oversized content carry metadata only; truncation is explicit.
+remain visible. Binary files, oversized content and files that could not be read carry metadata
+only; truncation is explicit. A symlink or a submodule carries its target text with a `link` mark,
+so a file turned into a link does not read as a content change.
 The snapshot is against HEAD, because this message describes the pending commit rather than
 the whole task's changes already committed by DAG execution or prior fix rounds.
 

@@ -29,6 +29,7 @@ import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js
 import { appendTaskEvent } from './tasks/_helpers.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { findLiveUpgradeRun } from '../lib/upgrade-run.js';
 
 const log = logger.child({ module: 'maintenance' });
 
@@ -65,6 +66,14 @@ maintenanceRoutes.put('/', async (c) => {
   const actorUserId = c.get('userId');
   const { event, previous } = await getDb().transaction(async (tx) => {
     await lockNewWorkFenceExclusive(tx);
+    const live = await findLiveUpgradeRun(tx);
+    if (live) {
+      throw new HttpError(
+        409,
+        `An upgrade from ${live.fromVersion} to ${live.toVersion} is running (run ${live.id}, phase ${live.phase}), so the maintenance state cannot be changed by hand until it ends. If the updater has stopped, run ./haive upgrade --version ${live.toVersion} in the install directory to finish or undo it.`,
+        'upgrade_running',
+      );
+    }
     const replaced = parseMaintenanceState(
       await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
     );
@@ -546,28 +555,32 @@ maintenanceRoutes.post('/upgrade', async (c) => {
  *  Mirrors `lib/sandbox-kill.ts`'s shape — spawn, buffer, kill on a deadline — but does NOT
  *  swallow the failure, because unlike a best-effort sandbox sweep this one has a person waiting
  *  for an answer. */
-function runDockerClient(
+export function runDockerClient(
   args: string[],
 ): Promise<{ ok: boolean; containerId: string; stderr: string }> {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
     const child = spawn('docker', args);
+    // Generous: `docker run -d` returns as soon as the container starts, but it PULLS the updater
+    // image first if this host has never seen it.
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve({ ok: false, containerId: '', stderr: 'docker run timed out' });
+    }, 300_000).unref();
     child.stdout.on('data', (b: Buffer) => {
       stdout += b.toString('utf8');
     });
     child.stderr.on('data', (b: Buffer) => {
       stderr += b.toString('utf8');
     });
-    child.on('close', (code) =>
-      resolve({ ok: code === 0, containerId: stdout.trim().slice(0, 64), stderr: stderr.trim() }),
-    );
-    child.on('error', (err) => resolve({ ok: false, containerId: '', stderr: String(err) }));
-    // Generous: `docker run -d` returns as soon as the container starts, but it PULLS the updater
-    // image first if this host has never seen it.
-    setTimeout(() => {
-      child.kill('SIGKILL');
-      resolve({ ok: false, containerId: '', stderr: 'docker run timed out' });
-    }, 300_000).unref();
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, containerId: stdout.trim().slice(0, 64), stderr: stderr.trim() });
+    });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ ok: false, containerId: '', stderr: String(err) });
+    });
   });
 }

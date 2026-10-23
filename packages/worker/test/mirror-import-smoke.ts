@@ -3,7 +3,7 @@
  * choice they carry, against a database. One throwaway user and temp directory, deleted after.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -20,6 +20,8 @@ import {
 import { handleScan } from '../src/repo/clone.js';
 import { raiseRtkQuestions } from '../src/project-state/rtk-conflict.js';
 import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
+import { sweepDirtyProjectStates } from '../src/project-state/refresh.js';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 
 const log = logger.child({ module: 'mirror-import-smoke' });
 
@@ -239,6 +241,140 @@ async function main(): Promise<void> {
       'a question still pending once RTK is off is closed as converged',
       closedRows.length === 1 && closedRows[0]!.resolution === 'converged',
       closedRows,
+    );
+
+    // D2: keeping mine is this install's own choice, so a later record file adopts nothing.
+    const stateFolder = path.join(tmp, 'rtk-keep-record');
+    await mkdir(path.join(stateFolder, '.haive-data'), { recursive: true });
+    const keepFiles = renderProjectState({
+      ...emptyProjectState(),
+      render: {
+        projectInfo: {},
+        framework: 'unknown',
+        acceptedAgentIds: [],
+        customAgentSpecs: [],
+        lspLanguages: [],
+      } as never,
+      settings: { 'onboarding-tooling': { ragMode: 'none', rtkEnabled: false } },
+      environment: { envDetectData: { project: { name: 'keep' } }, confirmedValues: {} },
+    });
+    for (const [rel, text] of keepFiles) {
+      await mkdir(path.dirname(path.join(stateFolder, PROJECT_STATE_DIR, rel)), {
+        recursive: true,
+      });
+      await writeFile(path.join(stateFolder, PROJECT_STATE_DIR, rel), text);
+    }
+    const [keepRepo] = await db
+      .insert(schema.repositories)
+      .values({ userId, name: 'rtk-keep-record', source: 'local_path', localPath: stateFolder })
+      .returning({ id: schema.repositories.id });
+    const keepScan = () =>
+      handleScan(
+        { repositoryId: keepRepo!.id, userId, source: 'local_path', localPath: stateFolder },
+        db,
+      );
+    await keepScan();
+    await raiseRtkQuestions(db);
+    const recordRows = await askedAbout(keepRepo!.id);
+    check('a record naming RTK off asks once', recordRows.length === 1, recordRows.length);
+    await resolveProjectStateConflict(db, {
+      repositoryId: keepRepo!.id,
+      userId,
+      conflictId: recordRows[0]!.id,
+      answer: 'keep_mine',
+    });
+    const stamped = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, keepRepo!.id),
+      columns: { rtkChoiceMadeAt: true },
+    });
+    check('keeping mine records the choice', stamped?.rtkChoiceMadeAt instanceof Date, stamped);
+    const rtkFile = path.join(stateFolder, PROJECT_STATE_DIR, 'settings', 'rtk-enabled.json');
+    await mkdir(path.dirname(rtkFile), { recursive: true });
+    await writeFile(rtkFile, 'false\n');
+    await keepScan();
+    const afterRow = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, keepRepo!.id),
+      columns: { rtkEnabled: true, renderContext: true },
+    });
+    check(
+      'a later rtk-enabled file adopts nothing and asks nothing',
+      afterRow?.rtkEnabled === true &&
+        (afterRow.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded ===
+          false &&
+        (await askedAbout(keepRepo!.id)).length === 1,
+      { afterRow, asked: (await askedAbout(keepRepo!.id)).length },
+    );
+    await markProjectStateDirty(db, keepRepo!.id);
+    await sweepDirtyProjectStates(db);
+    const written = (await readFile(rtkFile, 'utf8')).trim();
+    check("and the next record write carries this install's choice", written === 'true', written);
+
+    // G, H: the question is weighed after the record is synced.
+    const recordFolder = async (name: string, settings: Record<string, unknown>) => {
+      const folder = path.join(tmp, name);
+      await mkdir(path.join(folder, '.haive-data'), { recursive: true });
+      const recordFiles = renderProjectState({
+        ...emptyProjectState(),
+        render: {
+          projectInfo: {},
+          framework: 'unknown',
+          acceptedAgentIds: [],
+          customAgentSpecs: [],
+          lspLanguages: [],
+        } as never,
+        settings,
+        environment: { envDetectData: { project: { name } }, confirmedValues: {} },
+      });
+      for (const [rel, text] of recordFiles) {
+        await mkdir(path.dirname(path.join(folder, PROJECT_STATE_DIR, rel)), { recursive: true });
+        await writeFile(path.join(folder, PROJECT_STATE_DIR, rel), text);
+      }
+      return folder;
+    };
+    const gFolder = await recordFolder('rtk-record-clone', {
+      'onboarding-tooling': { ragMode: 'none', rtkEnabled: false },
+    });
+    const [gRepo] = await db
+      .insert(schema.repositories)
+      .values({ userId, name: 'rtk-record-clone', source: 'local_path', localPath: gFolder })
+      .returning({ id: schema.repositories.id });
+    await handleScan(
+      { repositoryId: gRepo!.id, userId, source: 'local_path', localPath: gFolder },
+      db,
+    );
+    const gRows = await askedAbout(gRepo!.id);
+    check(
+      'a record-based clone is asked about its RTK-off at scan time',
+      gRows.length === 1 && gRows[0]!.resolution === null && (await rtkOf(gRepo!.id)) === true,
+      gRows,
+    );
+
+    const hFolder = await recordFolder('rtk-stale-adopts', { 'rtk-enabled': true });
+    const [hRepo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: 'rtk-stale-adopts',
+        source: 'local_path',
+        localPath: hFolder,
+        onboardingTooling: JSON.parse(tooling()),
+      })
+      .returning({ id: schema.repositories.id });
+    await handleScan(
+      { repositoryId: hRepo!.id, userId, source: 'local_path', localPath: hFolder },
+      db,
+    );
+    const hAfter = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, hRepo!.id),
+      columns: { renderContext: true },
+    });
+    const hRows = await askedAbout(hRepo!.id);
+    check(
+      "a stale RTK-off blob that adopts the team's choice is not asked about",
+      hRows.length === 0 &&
+        (hAfter?.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded ===
+          true,
+      { hRows, hAfter },
     );
 
     // E: a checkout holding a record carries its units; a stale legacy file does not outrank them.

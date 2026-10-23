@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -858,5 +858,47 @@ describe('10-gate-3-commit persisted changed paths', () => {
     const paths = stored[0]?.changedPaths ?? [];
     expect(paths).toEqual(expect.arrayContaining(['c d.txt', 'é.txt']));
     expect(paths.filter((p) => p.startsWith('"'))).toEqual([]);
+  });
+});
+
+describe('10-gate-3-commit unreadable file', () => {
+  async function replacedWith(replace: (file: string) => Promise<unknown>): Promise<{
+    context: string;
+    entry?: { note?: string; link?: string; before?: string; after?: string };
+  }> {
+    const repo = await seedRepo();
+    await writeFile(path.join(repo, 'a.txt'), 'distinctive-original-text\n');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-q', '-m', 'text']);
+    await unlink(path.join(repo, 'a.txt'));
+    await replace(path.join(repo, 'a.txt'));
+    const detected = await gate3CommitStep.detect!(mkCtx(repo));
+    const context = detected.commitMessageContext!;
+    const entry = (
+      JSON.parse(context).files as {
+        path: string;
+        note?: string;
+        link?: string;
+        before?: string;
+        after?: string;
+      }[]
+    ).find((f) => f.path === 'a.txt');
+    return { context, entry };
+  }
+
+  it('withholds the content of a tracked file replaced by a pipe', async () => {
+    const { context, entry } = await replacedWith((file) => exec('mkfifo', [file]));
+
+    expect(entry?.note).toBe('content unavailable');
+    expect(context).not.toContain('distinctive-original-text');
+  });
+
+  it('gives the generator a tracked file replaced by a link as the text and the target', async () => {
+    const { entry } = await replacedWith((file) => symlink('elsewhere', file));
+
+    expect(entry?.note).toBeUndefined();
+    expect(entry?.link).toBe('symlink');
+    expect(entry?.before).toBe('distinctive-original-text\n');
+    expect(entry?.after).toBe('elsewhere');
   });
 });

@@ -57,6 +57,12 @@ interface Selected {
   error: string | null;
 }
 
+function attachedTitle(entry: Selected, draftTaskId: string | null): string | undefined {
+  return draftTaskId !== null && entry.state === 'done'
+    ? 'Already attached to the draft task'
+    : undefined;
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -82,7 +88,7 @@ export function PlanStarter({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
-  /** The unstarted draft a partial upload left behind. Its presence is what makes
+  /** The unstarted draft a failed upload or a refused start left behind. Its presence is what makes
    *  a retry reuse the SAME task: creating a second one would leave the user with
    *  two half-built plans and no way to tell which is which. */
   const [draftTaskId, setDraftTaskId] = useState<string | null>(null);
@@ -148,7 +154,7 @@ export function PlanStarter({
     try {
       // With no files there is nothing to race, so the ordinary single-shot
       // create still applies and the user is not asked to wait for two calls.
-      const deferStart = files.length > 0;
+      const deferStart = files.length > 0 || draftTaskId !== null;
       setProgress(deferStart ? (draftTaskId ? 'Retrying…' : 'Creating the task…') : null);
       // Reuse the draft a previous attempt left unstarted. The upload loop below
       // skips rows already marked done, so a retry re-sends only what failed.
@@ -166,7 +172,6 @@ export function PlanStarter({
             }),
           )
         ).taskId;
-      if (deferStart) setDraftTaskId(taskId);
 
       if (!deferStart) return onNavigate(`/tasks/${taskId}`);
 
@@ -200,12 +205,23 @@ export function PlanStarter({
           `${failed} of ${files.length} file(s) failed to upload, so the build was NOT started. Nothing was lost — the draft task is waiting. Fix the files listed above and press "Retry the failed uploads" (only those are re-sent), or open the draft and attach them there.`,
         );
         setProgress(null);
+        setDraftTaskId(taskId);
         setBusy(false);
         return;
       }
 
       setProgress('Starting the build…');
-      await startTask(taskId);
+      try {
+        await startTask(taskId);
+      } catch (e) {
+        setError(
+          `The task was created but could not be started (${e instanceof Error ? e.message : 'Failed to start the build'}). Nothing was lost — the draft task is waiting with every file attached. Press "Retry starting the build", or open the draft and press Start.`,
+        );
+        setProgress(null);
+        setDraftTaskId(taskId);
+        setBusy(false);
+        return;
+      }
       onNavigate(`/tasks/${taskId}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to start the build');
@@ -388,7 +404,8 @@ export function PlanStarter({
                     onChange={(e) => patch(index, { description: e.target.value })}
                     placeholder="What is this? (optional)"
                     className="h-7 min-w-40 flex-1 text-xs"
-                    disabled={busy}
+                    disabled={busy || (draftTaskId !== null && entry.state === 'done')}
+                    title={attachedTitle(entry, draftTaskId)}
                   />
                   {/* The state is on the row that has it, so a single failure in
                       a batch of eight is visible rather than summarised away. */}
@@ -403,7 +420,8 @@ export function PlanStarter({
                   )}
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || (draftTaskId !== null && entry.state === 'done')}
+                    title={attachedTitle(entry, draftTaskId)}
                     aria-label={`Remove ${attachmentUploadName(entry.file)}`}
                     onClick={() => setFiles((prev) => prev.filter((_, i) => i !== index))}
                     className="text-neutral-500 hover:text-neutral-200 disabled:opacity-40"
@@ -435,9 +453,13 @@ export function PlanStarter({
               disabled={busy || !canDescribe}
               onClick={() => void describeAndBuild()}
             >
-              {draftTaskId ? 'Retry the failed uploads' : 'Draft a plan from this'}
+              {draftTaskId
+                ? files.some((f) => f.state === 'failed' || f.state === 'uploading')
+                  ? 'Retry the failed uploads'
+                  : 'Retry starting the build'
+                : 'Draft a plan from this'}
             </Button>
-            {/* The draft a partial upload left behind. An escape hatch, not the
+            {/* The draft a failed upload or a refused start left behind. An escape hatch, not the
                 main route: pressing Retry above is the shorter path, and this is
                 for someone who would rather finish on the task page. A client-side
                 Link rather than a plain anchor: a full document load would drop the

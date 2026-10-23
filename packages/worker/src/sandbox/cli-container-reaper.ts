@@ -107,11 +107,16 @@ function listSandboxIdsByFilter(filter: string, signal?: AbortSignal): Promise<s
       '--format',
       `{{.ID}}\t{{.Label "${INSTALL_LABEL}"}}`,
     ]);
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve([]);
+    }, 10_000);
     signal?.addEventListener('abort', () => child.kill('SIGKILL'), { once: true });
     child.stdout.on('data', (b: Buffer) => {
       stdout += b.toString('utf8');
     });
     child.on('close', () => {
+      clearTimeout(timer);
       const ids: string[] = [];
       for (const line of stdout.split('\n')) {
         if (line.trim().length === 0) continue;
@@ -120,11 +125,10 @@ function listSandboxIdsByFilter(filter: string, signal?: AbortSignal): Promise<s
       }
       resolve(ids);
     });
-    child.on('error', () => resolve([]));
-    setTimeout(() => {
-      child.kill('SIGKILL');
+    child.on('error', () => {
+      clearTimeout(timer);
       resolve([]);
-    }, 10_000);
+    });
   });
 }
 
@@ -134,12 +138,18 @@ function rmForce(ids: string[], signal?: AbortSignal): Promise<void> {
     // are untouched). Critical for the DinD DDEV runners: each declares an anon
     // /var/lib/docker (1-2GB of nested images); reaping without -v orphans it.
     const child = spawn('docker', ['rm', '-f', '-v', ...ids]);
-    signal?.addEventListener('abort', () => child.kill('SIGKILL'), { once: true });
-    child.on('close', () => resolve());
-    child.on('error', () => resolve());
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       child.kill('SIGKILL');
       resolve();
     }, 30_000);
+    signal?.addEventListener('abort', () => child.kill('SIGKILL'), { once: true });
+    child.on('close', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve();
+    });
   });
 }

@@ -1,12 +1,13 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import type { CommitDiffArtifact, CommitDiffFile } from '@haive/shared/commit-diff-artifact';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { describe, it, expect } from 'vitest';
 import { gitRun } from '../../../repo/git-exec.js';
-import { type CommitDiffArtifact, type CommitDiffFile, MAX_FILES } from './_commit-diff.js';
+import { MAX_FILES } from './_commit-diff.js';
 import {
   buildKnowledgeDiffArtifact,
   EXTERNAL_KB_DIFF_ARTIFACT_NAME,
@@ -163,6 +164,68 @@ describe('buildKnowledgeDiffArtifact', () => {
         expect(file?.newContent).toBe(text);
         expect(file?.editPath).toBe(path.join(dir, entryPath));
       }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('gives no editPath to a knowledge file whose git read fails', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'knowledge-diff-'));
+    try {
+      await git(dir, ['init', '-b', 'main']);
+      await git(dir, ['config', 'gc.auto', '0']);
+      const kb = path.join(dir, KB_DIR);
+      await mkdir(kb, { recursive: true });
+      await writeFile(path.join(kb, 'tracked.md'), 'tracked\n');
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'base']);
+      await writeFile(path.join(kb, 'tracked.md'), 'changed\n');
+      const failShow: typeof gitRun = (cwd, args) =>
+        args[0] === 'show'
+          ? Promise.resolve({ code: 128, stdout: '', stderr: '' })
+          : gitRun(cwd, args);
+      const run = async (g: typeof gitRun) =>
+        (
+          JSON.parse(
+            await readFile(await buildKnowledgeDiffArtifact(dir, g), 'utf8'),
+          ) as CommitDiffArtifact
+        ).files[0];
+
+      const broken = await run(failShow);
+      expect(broken?.unreadable).toBe(true);
+      expect(broken?.editPath).toBeUndefined();
+      const ok = await run(gitRun);
+      expect(ok?.editPath).toBe(path.join(dir, KB_DIR, 'tracked.md'));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('gives no editPath to a knowledge link, which has no text to edit', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'knowledge-diff-'));
+    try {
+      await git(dir, ['init', '-b', 'main']);
+      await git(dir, ['config', 'gc.auto', '0']);
+      const kb = path.join(dir, KB_DIR);
+      await mkdir(kb, { recursive: true });
+      await writeFile(path.join(kb, 'tracked.md'), 'tracked\n');
+      await symlink('tracked.md', path.join(kb, 'alias.md'));
+      await git(dir, ['add', '-A']);
+      await git(dir, ['commit', '-m', 'base']);
+      await writeFile(path.join(kb, 'tracked.md'), 'changed\n');
+      await unlink(path.join(kb, 'alias.md'));
+      await symlink('elsewhere.md', path.join(kb, 'alias.md'));
+      const written = await buildKnowledgeDiffArtifact(dir, gitRun);
+      const files = (JSON.parse(await readFile(written, 'utf8')) as CommitDiffArtifact).files;
+      const byPath = new Map(files.map((f) => [f.path, f]));
+
+      expect(byPath.get(`${KB_DIR}/alias.md`)).toMatchObject({
+        link: 'symlink',
+        oldContent: 'tracked.md',
+        newContent: 'elsewhere.md',
+      });
+      expect(byPath.get(`${KB_DIR}/alias.md`)?.editPath).toBeUndefined();
+      expect(byPath.get(`${KB_DIR}/tracked.md`)?.editPath).toBe(path.join(kb, 'tracked.md'));
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

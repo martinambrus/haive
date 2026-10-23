@@ -11,6 +11,7 @@ import {
   isClaimUnit,
   isEnvironmentUnit,
   isPlanUnit,
+  isRtkQuestion,
   isSettingUnit,
   parsePlanConflictUnit,
 } from '@haive/shared/project-state-conflicts';
@@ -79,13 +80,16 @@ function planSideMarkdown(field: string, value: unknown): string {
   return fencedCode(JSON.stringify(value, null, 2) ?? 'null', 'json');
 }
 
-export const isRtkConflict = (conflict: { unit: string }): boolean =>
-  conflict.unit === RTK_ENABLED_UNIT;
+export const isRtkConflict = (
+  conflict: Pick<ProjectStateConflictBody, 'unit' | 'base' | 'local'>,
+): boolean => isRtkQuestion(conflict);
 
 export const isClaimConflict = (conflict: { unit: string }): boolean => isClaimUnit(conflict.unit);
 
 /** A setting or the environment, RTK's question aside: answered like a render key, into its own file. */
-export const isSettingConflict = (conflict: { unit: string }): boolean =>
+export const isSettingConflict = (
+  conflict: Pick<ProjectStateConflictBody, 'unit' | 'base' | 'local'>,
+): boolean =>
   !isRtkConflict(conflict) && (isSettingUnit(conflict.unit) || isEnvironmentUnit(conflict.unit));
 
 /** The file a claim question is about: a claim unit names its file only through the claim its sides hold. */
@@ -157,6 +161,7 @@ export function answerConfirmation(
   key: string | null,
   unit?: string,
   claimPath?: string | null,
+  rtkQuestion?: boolean,
 ): { title: string; body: string; confirmLabel: string } {
   const label = conflictKeyLabel(key, unit, claimPath);
   if (unit !== undefined && isPlanUnit(unit)) {
@@ -172,17 +177,17 @@ export function answerConfirmation(
           body: `This plan switches to your teammate's value, and \`${PLAN_FILE}\` is rewritten with it. This install's own value is dropped.`,
         };
   }
-  if (unit === RTK_ENABLED_UNIT) {
+  if (rtkQuestion === true && unit !== undefined) {
     return answer === 'keep_mine'
       ? {
           title: "Keep this install's value",
           confirmLabel: 'Keep mine',
-          body: `${label} stays on in this install. No repository file is written.`,
+          body: `${label} stays on in this install. This install's choice is recorded in the project's record file, ${recordFileOf(unit)}. Commit and push that file if it changed, so your teammate gets it.`,
         }
       : {
           title: "Take the other install's value",
           confirmLabel: 'Take theirs',
-          body: `${label} is switched off in this install, as the other install has it. This is the same as unticking it on the tooling page, and the next upgrade offers to remove its files. No repository file is written.`,
+          body: `${label} is switched off in this install, as the other install has it. This is the same as unticking it on the tooling page, and the next upgrade offers to remove its files. This install's choice is recorded in the project's record file, ${recordFileOf(unit)}. Commit and push that file if it changed, so your teammate gets it.`,
         };
   }
   if (answer === 'keep_mine') {
@@ -243,6 +248,11 @@ export function resolutionNotice(
     notices.push('RTK command compression is switched off in this install.');
   } else if (rtkAnswered.includes('keep_mine')) {
     notices.push('RTK command compression stays on in this install.');
+  }
+  if (rtkAnswered.length > 0) {
+    notices.push(
+      `This install's choice is recorded in \`${recordFileOf(RTK_ENABLED_UNIT)}\`. Commit and push that file if it changed, so your teammate gets it.`,
+    );
   }
   return notices.length > 0 ? notices.join(' ') : null;
 }

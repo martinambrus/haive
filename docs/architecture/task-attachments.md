@@ -6,7 +6,12 @@ builder's first step reads the uploads dir and the worker picks a job up immedia
 files through the ordinary attachment route and finalizes with the `start` task action, which
 claims `status = 'created'` in one atomic UPDATE (a second click matches no row and enqueues
 nothing). An upload that fails therefore cannot start anything — the draft is the repair
-surface, reachable from its Attachments tab. `POST /tasks` takes the same `deferStart`, and the
+surface, reachable from its Attachments tab. The plan starter
+(`web/src/components/plan/plan-starter.tsx`) keeps that draft's id whenever a press leaves one,
+after a failed upload or a refused `start`, so its next press re-sends only the rows not yet
+uploaded and sends `start` to the SAME task; a form that forgot the id after a refused `start`
+made a second build with no attachments while the first stayed `created` holding all of them.
+`POST /tasks` takes the same `deferStart`, and the
 New Task page sends it only when files are picked; there the rule differs: the page tries every
 file, then sends `start` whatever the uploads did (the task page's Attachments panel is the retry
 surface). When any upload failed it stays put and names each failed file with its error, says

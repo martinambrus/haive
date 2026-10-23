@@ -7,8 +7,8 @@ export type LastSummaryCliChoice = { providerId: string | null; llmEnabled: bool
  *  with a provider id. */
 export const SUMMARY_CLI_OFF = 'off';
 
-/** Both dropdowns use '' for their no-provider option — "(none — deterministic steps
- *  only)" on the main one, "(inherit — same CLI as the step)" on the summary one. */
+/** Both dropdowns use '' for their no-provider option — "(none — no default CLI)" on the
+ *  main one, "(inherit — same CLI as the step)" on the summary one. */
 const NO_PROVIDER = '';
 
 function knownProvider(id: string | null, providerIds: readonly string[]): string {

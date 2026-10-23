@@ -469,7 +469,12 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
         '--porcelain',
         '--untracked-files=no',
       ]);
-      if (dirty.code === 0 && dirty.stdout.trim().length > 0) {
+      if (dirty.code !== 0) {
+        throw new Error(
+          `git status failed in ${repoPath}: ${dirty.stderr.trim() || dirty.stdout.trim()}`,
+        );
+      }
+      if (dirty.stdout.trim().length > 0) {
         throw new Error('this checkout has uncommitted changes; commit or discard them first');
       }
 

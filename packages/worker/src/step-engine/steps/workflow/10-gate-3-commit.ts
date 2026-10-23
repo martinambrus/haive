@@ -1,14 +1,11 @@
 import { assertDependencyCommitSafe } from './_dependency-policy.js';
 import type { FormSchema } from '@haive/shared';
+import type { CommitDiffArtifact } from '@haive/shared/commit-diff-artifact';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
-import {
-  buildCommitDiffArtifact,
-  parsePorcelainZ,
-  type CommitDiffArtifact,
-} from './_commit-diff.js';
+import { buildCommitDiffArtifact, parsePorcelainZ } from './_commit-diff.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { fencedAgentBlock, REPO_IS_DATA_ONE_CLASS_LINES } from '../_untrusted-repo.js';
 import { taskSecretMaskPolicy } from '../../../queues/cli-exec/secret-mask.js';
@@ -102,7 +99,12 @@ function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPo
         (file.oldPath !== undefined && secretMaskDeniesPath(policy, file.oldPath)),
     );
   const files = artifact.files.map((file) => {
-    const metadata = { path: file.path, oldPath: file.oldPath, status: file.status };
+    const metadata = {
+      path: file.path,
+      oldPath: file.oldPath,
+      status: file.status,
+      link: file.link,
+    };
     // Do not relay a masked file through the host-built diff, even when masking is off.
     // Conservatively omit tracked secret paths too; generation needs no credential bytes.
     if (
@@ -114,7 +116,8 @@ function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPo
     if (protectedChanged && file.status !== 'deleted') {
       return { ...metadata, note: 'content withheld: a protected file was removed in this change' };
     }
-    if (file.binary || file.truncated) return { ...metadata, note: 'content unavailable' };
+    if (file.binary || file.truncated || file.unreadable)
+      return { ...metadata, note: 'content unavailable' };
     return { ...metadata, ...changedExcerpt(file.oldContent, file.newContent) };
   });
   const text = JSON.stringify({

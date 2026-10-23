@@ -1,10 +1,9 @@
 import { removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import path from 'node:path';
+import type { CommitDiffArtifact, CommitDiffFile } from '@haive/shared/commit-diff-artifact';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
-  type CommitDiffArtifact,
-  type CommitDiffFile,
   type GitRun,
   MAX_FILES,
   TOTAL_CONTENT_BUDGET,
@@ -38,8 +37,9 @@ export const EXTERNAL_KB_DIFF_ARTIFACT_NAME = 'external-kb-diff.json';
  *  since by then the learnings are written files like any other.
  *
  *  Every git-side text file gets an `editPath`, so the gate's viewer can write the
- *  new side back. Deleted, binary and truncated files do not: there is nothing to
- *  edit, no text to show, and (for truncated) the content in hand is not the file.
+ *  new side back. Deleted, binary, truncated, unreadable and link files do not: there is nothing to
+ *  edit, no text to show, and (for truncated or unreadable) the content in hand is not the file;
+ *  a link's text is its target, not the file's own bytes.
  *
  *  Writes even with zero files, so the web viewer renders "No changes to show" rather
  *  than a fetch error. A failed git status throws and clears the old artifact instead, so the
@@ -83,7 +83,13 @@ export async function buildKnowledgeDiffArtifact(
   for (const e of capped) {
     const file = await buildFileEntry(workspacePath, gitRun, e, TOTAL_CONTENT_BUDGET - used);
     used += file.oldContent.length + file.newContent.length;
-    if (file.status !== 'deleted' && !file.binary && !file.truncated) {
+    if (
+      file.status !== 'deleted' &&
+      !file.binary &&
+      !file.truncated &&
+      !file.unreadable &&
+      !file.link
+    ) {
       file.editPath = path.join(workspacePath, file.path);
     }
     kbFiles.push(file);

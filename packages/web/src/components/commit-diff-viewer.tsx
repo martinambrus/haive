@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CommitDiffArtifact, CommitDiffStatus } from '@haive/shared/commit-diff-artifact';
 import { api, API_BASE_URL, type ApiError } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import {
@@ -12,30 +13,6 @@ import {
   type InlineRow,
   type SplitRow,
 } from '@/components/commit-diff';
-
-// Mirrors the worker artifact shape written by _commit-diff.ts.
-type CommitDiffStatus = 'added' | 'modified' | 'deleted' | 'renamed';
-
-interface CommitDiffFile {
-  path: string;
-  oldPath?: string;
-  status: CommitDiffStatus;
-  binary: boolean;
-  truncated: boolean;
-  oldContent: string;
-  newContent: string;
-  /** Set by the worker for files this gate lets the user correct in place (the
-   *  knowledge gates). Absent — every file of the gate-3 commit diff — renders
-   *  read-only. */
-  editPath?: string;
-}
-
-interface CommitDiffArtifact {
-  headSha: string | null;
-  fileCount: number;
-  truncated: boolean;
-  files: CommitDiffFile[];
-}
 
 interface CommitDiffViewerProps {
   taskId: string;
@@ -388,7 +365,8 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
     () => artifact?.files.find((f) => f.path === selected) ?? null,
     [artifact, selected],
   );
-  const renderable = selectedFile && !selectedFile.binary && !selectedFile.truncated;
+  const renderable =
+    selectedFile && !selectedFile.binary && !selectedFile.truncated && !selectedFile.unreadable;
   // What the file says NOW: the fetched disk content once we have it, else the
   // artifact's copy. Everything downstream (both diff views, the editor seed, the
   // unsaved marker) reads this one value.
@@ -631,6 +609,12 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
                       </span>
                     )}
                     {selectedFile.binary && <span className="text-yellow-400">binary</span>}
+                    {selectedFile.unreadable && <span className="text-yellow-400">unreadable</span>}
+                    {selectedFile.link && (
+                      <span className="text-neutral-400">
+                        {selectedFile.link === 'gitlink' ? 'submodule' : 'symlink'}
+                      </span>
+                    )}
                     {selectedFile.truncated && !selectedFile.binary && (
                       <span className="text-yellow-400">too large</span>
                     )}
@@ -706,6 +690,10 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
                       // would otherwise collapse the box to two lines.
                       className="min-h-[320px] flex-1 resize-none bg-neutral-950 p-2 font-mono text-[11px] leading-tight text-neutral-200 outline-none"
                     />
+                  ) : selectedFile.unreadable ? (
+                    <div className="p-4 text-xs text-neutral-400">
+                      Could not read this file — diff not shown.
+                    </div>
                   ) : selectedFile.binary ? (
                     <div className="p-4 text-xs text-neutral-400">
                       Binary file — diff not shown.
