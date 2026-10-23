@@ -302,6 +302,47 @@ async function gcTrap(): Promise<Ctx> {
   return c;
 }
 
+/** A superproject with one registered submodule, whose gitlink origin has moved on. */
+async function submoduleScenario(): Promise<{
+  c: Ctx;
+  sub: (...args: string[]) => Promise<string>;
+}> {
+  const c = await fresh();
+  const sub0 = path.join(c.dir, 'sub0');
+  const sup = path.join(c.dir, 'sup');
+  const bare = path.join(c.dir, 'sup-origin.git');
+  const w2 = path.join(c.dir, 'w2');
+  const env = { ...process.env, ...hermetic };
+  await buildRepo(c.dir, 'sub0');
+  const g = await buildRepo(c.dir, 'sup');
+  await g('-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub0, 'sub');
+  await g('commit', '-q', '-m', 'add sub');
+  await run('git', ['clone', '-q', '--bare', sup, bare], { env });
+  await g('remote', 'add', 'origin', bare);
+  await g('fetch', '-q', 'origin');
+  await run(
+    'git',
+    ['-c', 'protocol.file.allow=always', 'clone', '-q', '--recurse-submodules', bare, w2],
+    {
+      env,
+    },
+  );
+  const g2 = gitAt(w2);
+  const gsub = gitAt(path.join(w2, 'sub'));
+  await writeFile(path.join(w2, 'sub', 'n.txt'), 'n');
+  await gsub('add', '-A');
+  await gsub('commit', '-q', '-m', 'sub2');
+  await gsub('push', '-q', sub0, 'HEAD:refs/heads/next');
+  await g2('add', 'sub');
+  await g2('commit', '-q', '-m', 'bump');
+  await g2('push', '-q', 'origin', 'HEAD:main');
+  await g('-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '-q');
+  return {
+    c: { ...c, repo: sup, g, cfg: (key, value) => g('config', '--local', '--add', key, value) },
+    sub: gitAt(path.join(sup, 'sub')),
+  };
+}
+
 const CASES: { id: string; setup: () => Promise<Fixture> }[] = [
   {
     id: 'askpass-ls-remote',
@@ -439,6 +480,64 @@ const CASES: { id: string; setup: () => Promise<Fixture> }[] = [
     setup: async () => {
       const c = await gcTrap();
       return fx(c, ['fetch', '--end-of-options', 'origin', 'refs/heads/news'], 'recentobjects');
+    },
+  },
+  {
+    id: 'editor-commit-without-message',
+    setup: async () => {
+      const c = await fresh();
+      await writeFile(path.join(c.repo, 'a.txt'), 'edited\n');
+      await c.g('add', '-A');
+      await c.cfg('core.editor', await c.script('editor', 'exit 0'));
+      return fx(c, ['commit'], 'editor');
+    },
+  },
+  {
+    id: 'editor-merge-continue',
+    setup: async () => {
+      const c = await fresh();
+      await c.g('checkout', '-q', '-b', 'other', 'HEAD~1');
+      await writeFile(path.join(c.repo, 'a.txt'), 'other\n');
+      await c.g('commit', '-q', '-am', 'other');
+      await c.g('checkout', '-q', 'main');
+      await c.g('merge', '--no-edit', 'other').catch(() => undefined);
+      await writeFile(path.join(c.repo, 'a.txt'), 'resolved\n');
+      await c.g('add', '-A');
+      await c.cfg('core.editor', await c.script('editor', 'exit 0'));
+      return fx(c, ['merge', '--continue'], 'editor');
+    },
+  },
+  {
+    id: 'editor-sequence-rebase-i',
+    setup: async () => {
+      const c = await fresh();
+      await c.cfg('sequence.editor', await c.script('seqeditor', 'exit 0'));
+      return fx(c, ['rebase', '-i', 'HEAD~1'], 'seqeditor');
+    },
+  },
+  {
+    id: 'submodule-recursion-fetch',
+    setup: async () => {
+      const { c, sub } = await submoduleScenario();
+      const hook = await c.script('sub-uploadpack', 'exec git-upload-pack "$@"');
+      await sub('config', 'remote.origin.uploadpack', hook);
+      return fx(c, ['fetch', '--end-of-options', 'origin', 'refs/heads/main'], 'sub-uploadpack');
+    },
+  },
+  {
+    id: 'submodule-recursion-push',
+    setup: async () => {
+      const { c, sub } = await submoduleScenario();
+      await sub('checkout', '-q', '-b', 'work');
+      await writeFile(path.join(c.repo, 'sub', 'w.txt'), 'w');
+      await sub('add', '-A');
+      await sub('commit', '-q', '-m', 'work');
+      await c.g('add', 'sub');
+      await c.g('commit', '-q', '-m', 'bump to a local submodule commit');
+      const hook = await c.script('sub-receivepack', 'exec git-receive-pack "$@"');
+      await sub('config', 'remote.origin.receivepack', hook);
+      await c.cfg('push.recurseSubmodules', 'on-demand');
+      return fx(c, ['push', 'origin', 'main'], 'sub-receivepack');
     },
   },
 ];
