@@ -99,3 +99,7 @@ writes no audit row. The row stays `running` until the commit or the rollback fi
 updater that died keeps the refusal in place until the next `./haive upgrade --version <v>` resumes
 it. The admin page disables the three state buttons, and says which run holds them, while
 `GET /admin/maintenance/upgrade` lists one `running`.
+
+The updater creates the journal table itself, at every start: `ensureJournal` runs
+`UPGRADE_JOURNAL_DDL`, which `@haive/database` exports once and the api's tests build the table
+from, so nothing keeps a copy of it.

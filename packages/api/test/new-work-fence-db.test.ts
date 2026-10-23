@@ -1,6 +1,12 @@
 import { and, eq, ne, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDatabase, lockRepositoryRow, schema, type Database } from '@haive/database';
+import {
+  createDatabase,
+  lockRepositoryRow,
+  schema,
+  UPGRADE_JOURNAL_DDL,
+  type Database,
+} from '@haive/database';
 
 const url = process.env.NEW_WORK_FENCE_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/new_work_fence_test'))
@@ -76,25 +82,6 @@ import { taskRoutes } from '../src/routes/tasks/index.js';
 import { retryTaskAtStep } from '../src/routes/tasks/steps.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
-
-const JOURNAL_DDL = `
-CREATE TABLE IF NOT EXISTS "upgrade_runs" (
-  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  "from_version" text NOT NULL,
-  "to_version" text NOT NULL,
-  "channel" text NOT NULL DEFAULT 'public',
-  "phase" text NOT NULL,
-  "status" text NOT NULL,
-  "error" text,
-  "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
-  "started_at" timestamp NOT NULL DEFAULT now(),
-  "updated_at" timestamp NOT NULL DEFAULT now(),
-  "ended_at" timestamp
-);
-CREATE UNIQUE INDEX IF NOT EXISTS "upgrade_runs_one_live_idx"
-  ON "upgrade_runs" ((1)) WHERE "status" = 'running';
-CREATE INDEX IF NOT EXISTS "upgrade_runs_started_at_idx" ON "upgrade_runs" ("started_at");
-`;
 
 const REFUSAL =
   'Haive is preparing for maintenance, so new work is not being started. Work already running will finish.';
@@ -590,7 +577,7 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
     };
 
     beforeEach(async () => {
-      await db.$client.unsafe(JOURNAL_DDL).simple();
+      await db.$client.unsafe(UPGRADE_JOURNAL_DDL).simple();
       await db.execute(sql`delete from upgrade_runs`);
       await db
         .delete(schema.auditEvents)
