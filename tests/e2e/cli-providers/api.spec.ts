@@ -3,8 +3,15 @@ import { API_BASE } from '../helpers/auth.js';
 import { expect, test } from '../helpers/fixtures.js';
 
 test.describe('cli providers', () => {
-  test('GET /cli-providers/catalog is public and lists all providers', async ({ request }) => {
-    const res = await request.get(`${API_BASE}/cli-providers/catalog`);
+  test('GET /cli-providers/catalog requires auth and lists all providers when signed in', async ({
+    page,
+    request,
+    users,
+  }) => {
+    const anonymous = await request.get(`${API_BASE}/cli-providers/catalog`);
+    expect(anonymous.status()).toBe(401);
+    await users.register(page.request, { prefix: 'cli-catalog' });
+    const res = await page.request.get(`${API_BASE}/cli-providers/catalog`);
     expect(res.status()).toBe(200);
     const body = (await res.json()) as {
       providers: Array<{
