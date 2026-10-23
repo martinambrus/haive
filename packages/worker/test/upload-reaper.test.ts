@@ -995,6 +995,27 @@ describe('the finished-archive pass', () => {
     expect(await exists(a.file)).toBe(true);
   });
 
+  it('keeps a legacy archive named by its session id while its owner has a cloning repository', async () => {
+    const a = await archive({ repo: null });
+    repository(randomUUID(), 'cloning');
+    await reapAbandonedUploads(db());
+    expect(await exists(a.file)).toBe(true);
+  });
+
+  it('removes a legacy archive whose owner has no cloning repository', async () => {
+    const a = await archive({ repo: null });
+    repository(randomUUID(), 'ready');
+    await reapAbandonedUploads(db());
+    expect(await exists(a.file)).toBe(false);
+  });
+
+  it('removes the archive of an errored repository although its owner has a cloning one', async () => {
+    const a = await archive({ repo: 'error' });
+    repository(randomUUID(), 'cloning');
+    await reapAbandonedUploads(db());
+    expect(await exists(a.file)).toBe(false);
+  });
+
   it('keeps an archive younger than 24 h even with no repository row', async () => {
     const a = await archive({ repo: null, ageMs: 23 * HOUR });
     await reapAbandonedUploads(db());

@@ -970,6 +970,29 @@ describe.skipIf(!url)('the finished repository archive pass against Postgres', (
 
     expect(await exists(file)).toBe(!removed);
   });
+
+  it('keeps a legacy archive whose owner has a cloning repository and removes it once none is', async () => {
+    const file = await archive(null);
+    const cloningId = randomUUID();
+    await db.insert(schema.repositories).values({
+      id: cloningId,
+      userId,
+      name: 'archive-test',
+      source: 'upload',
+      storagePath: path.join(root, userId, cloningId),
+      status: 'cloning',
+    });
+
+    await reapAbandonedUploads(db);
+    expect(await exists(file)).toBe(true);
+
+    await db
+      .update(schema.repositories)
+      .set({ status: 'ready' })
+      .where(eq(schema.repositories.id, cloningId));
+    await reapAbandonedUploads(db);
+    expect(await exists(file)).toBe(false);
+  });
 });
 
 describe.skipIf(!url)('the tasks.db_upload_id index', () => {

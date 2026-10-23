@@ -7,7 +7,6 @@ import {
   gte,
   inArray,
   lt,
-  ne,
   notExists,
   notInArray,
   or,
@@ -322,20 +321,32 @@ async function recentSessions(db: Database, ids: string[], cutoff: Date): Promis
   return recent;
 }
 
-// The ids of a finished archive's repositories that still need it: anything but a missing or failed one.
-async function liveRepositories(db: Database, ids: string[]): Promise<Set<string>> {
+// The ids of a finished archive's repositories that still need it: anything but a failed one. An
+// id no repository carries may be a legacy archive named by its upload session, so it stays while
+// its owner has a repository still cloning.
+async function liveRepositories(
+  db: Database,
+  ids: string[],
+  owner: string,
+  cloningOwners: () => Promise<Set<string>>,
+): Promise<Set<string>> {
   const rows = await db
-    .select({ id: schema.repositories.id })
+    .select({ id: schema.repositories.id, status: schema.repositories.status })
     .from(schema.repositories)
-    .where(and(inArray(schema.repositories.id, ids), ne(schema.repositories.status, 'error')));
-  return new Set(rows.map((row) => row.id));
+    .where(inArray(schema.repositories.id, ids));
+  const known = new Set(rows.map((row) => row.id));
+  const live = new Set(rows.filter((row) => row.status !== 'error').map((row) => row.id));
+  if (known.size < ids.length && (await cloningOwners()).has(owner)) {
+    for (const id of ids) if (!known.has(id)) live.add(id);
+  }
+  return live;
 }
 
 async function reapOrphanPartials(
   db: Database,
   root: string,
   shapes: RegExp[],
-  alsoKept?: (ids: string[]) => Promise<Set<string>>,
+  alsoKept?: (ids: string[], owner: string) => Promise<Set<string>>,
 ): Promise<number> {
   const owners = await readdirNoFollow(root, UPLOADS_DIR);
   if (owners === null) return 0;
@@ -363,7 +374,12 @@ async function reapOrphanPartials(
         batch.map((partial) => partial.session),
         cutoff,
       );
-      const kept = alsoKept ? await alsoKept(batch.map((file) => file.session)) : null;
+      const kept = alsoKept
+        ? await alsoKept(
+            batch.map((file) => file.session),
+            owner.name,
+          )
+        : null;
       for (const { rel, session } of batch) {
         if (recent.has(session) || kept?.has(session)) continue;
         try {
@@ -418,10 +434,19 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
     () => reapOrphanPartials(db, repoRoot(), [ARCHIVE_PARTIAL, DUMP_PARTIAL]),
     0,
   );
+  let cloning: Promise<Set<string>> | null = null;
+  const cloningOwners = () =>
+    (cloning ??= db
+      .select({ userId: schema.repositories.userId })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.status, 'cloning'))
+      .then((rows) => new Set(rows.map((row) => row.userId))));
   result.orphans += await guarded(
     'the finished archive pass',
     () =>
-      reapOrphanPartials(db, repoRoot(), [ARCHIVE_FINISHED], (ids) => liveRepositories(db, ids)),
+      reapOrphanPartials(db, repoRoot(), [ARCHIVE_FINISHED], (ids, owner) =>
+        liveRepositories(db, ids, owner, cloningOwners),
+      ),
     0,
   );
   result.orphans += await guarded(
