@@ -94,6 +94,24 @@ function findChildProcessSites(fileName: string, text: string): Site[] {
     }
   };
 
+  const promisified = (call: ts.CallExpression): string | null => {
+    const arg = call.arguments[0];
+    if (!arg || !PROMISIFY.test(call.expression.getText(sf))) return null;
+    if (ts.isIdentifier(arg)) {
+      const fn = bound.get(arg.text) ?? '';
+      return FUNCTIONS.has(fn) ? fn : null;
+    }
+    if (
+      ts.isPropertyAccessExpression(arg) &&
+      ts.isIdentifier(arg.expression) &&
+      bound.get(arg.expression.text) === '*' &&
+      FUNCTIONS.has(arg.name.text)
+    ) {
+      return arg.name.text;
+    }
+    return null;
+  };
+
   const collect = (node: ts.Node) => {
     if (
       ts.isImportDeclaration(node) &&
@@ -124,17 +142,10 @@ function findChildProcessSites(fileName: string, text: string): Site[] {
     if (ts.isVariableDeclaration(node) && node.initializer) {
       const init = unwrap(node.initializer);
       if (isModuleLoad(init)) bindNames(node.name);
-      if (
-        ts.isCallExpression(init) &&
-        PROMISIFY.test(init.expression.getText(sf)) &&
-        init.arguments[0] &&
-        ts.isIdentifier(init.arguments[0]) &&
-        bound.has(init.arguments[0].text) &&
-        ts.isIdentifier(node.name)
-      ) {
-        bound.set(node.name.text, bound.get(init.arguments[0].text) as string);
+      const alias = ts.isCallExpression(init) ? promisified(init) : null;
+      if (alias && ts.isIdentifier(node.name)) {
+        bound.set(node.name.text, alias);
         declared.add(node.name);
-        declared.add(init.arguments[0]);
       }
     }
     ts.forEachChild(node, collect);
@@ -161,6 +172,10 @@ function findChildProcessSites(fileName: string, text: string): Site[] {
       refuse(node, 'process.binding can load child_process unseen');
     }
     if (ts.isCallExpression(node)) {
+      const inline = promisified(node);
+      if (inline && !(ts.isVariableDeclaration(node.parent) && ts.isIdentifier(node.parent.name))) {
+        sites.push({ line: lineOf(node), fn: inline, why: 'promisified without a name' });
+      }
       const callee = node.expression;
       let fn: string | null = null;
       if (ts.isIdentifier(callee) && FUNCTIONS.has(bound.get(callee.text) ?? '')) {
@@ -189,12 +204,20 @@ function findChildProcessSites(fileName: string, text: string): Site[] {
     }
     if (ts.isIdentifier(node) && bound.has(node.text) && !declared.has(node)) {
       const parent = node.parent;
+      const memberUseAllowed = (access: ts.PropertyAccessExpression): boolean => {
+        if (bound.get(node.text) !== '*') return false;
+        if (!FUNCTIONS.has(access.name.text)) return true;
+        const outer = access.parent;
+        return (
+          ts.isCallExpression(outer) && (outer.expression === access || promisified(outer) !== null)
+        );
+      };
       const allowed =
         (ts.isCallExpression(parent) &&
           (parent.expression === node ||
-            (PROMISIFY.test(parent.expression.getText(sf)) && parent.arguments[0] === node))) ||
+            (promisified(parent) !== null && parent.arguments[0] === node))) ||
         (ts.isPropertyAccessExpression(parent) &&
-          (parent.expression === node || parent.name === node)) ||
+          (parent.name === node || (parent.expression === node && memberUseAllowed(parent)))) ||
         ts.isTypeReferenceNode(parent) ||
         ts.isQualifiedName(parent) ||
         ts.isTypeQueryNode(parent) ||
@@ -325,6 +348,14 @@ describe('child_process ratchet self-tests', () => {
       'a promisified alias',
       `import { execFile } from 'node:child_process'; const run = promisify(execFile); run(bin, a)`,
     ],
+    [
+      'an inline promisify',
+      `import { execFile } from 'node:child_process'; promisify(execFile)('git', a)`,
+    ],
+    [
+      'a promisified namespace member',
+      `import * as cp from 'node:child_process'; const run = promisify(cp.execFile); run(bin, a)`,
+    ],
     ['a namespace import', `import * as cp from 'node:child_process'; cp.spawn(x)`],
     [
       'a dynamic import',
@@ -355,6 +386,10 @@ describe('child_process ratchet self-tests', () => {
       'a local function named spawn',
       `import { exec } from 'node:child_process'; function spawn(x: string) { return x } spawn(cmd)`,
     ],
+    [
+      'a namespace used only as a type',
+      `import * as cp from 'node:child_process'; let c: cp.ChildProcess | undefined;`,
+    ],
   ])('does not flag %s', (_name, text) => {
     expect(count(text)).toBe(0);
   });
@@ -363,6 +398,14 @@ describe('child_process ratchet self-tests', () => {
     [
       'a bound function used as a value',
       `import { spawn } from 'node:child_process'; const s = spawn;`,
+    ],
+    [
+      'a bound function reached through .call',
+      `import { spawn } from 'node:child_process'; spawn.call(null, 'git', a)`,
+    ],
+    [
+      'a namespace member read without a call',
+      `import * as cp from 'node:child_process'; const f = cp.execSync; f('git status')`,
     ],
     ['createRequire', `createRequire(import.meta.url)('child_process')`],
   ])('refuses %s', (_name, text) => {
