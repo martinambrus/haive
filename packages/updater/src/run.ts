@@ -10,7 +10,14 @@ import {
 } from '@haive/shared';
 import type { ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
-import { enterPhase, finishRun, mergeMetadata, type RunMetadata } from './journal.js';
+import {
+  enterPhase,
+  finishRun,
+  mergeMetadata,
+  readFoundState,
+  recordFoundState,
+  type RunMetadata,
+} from './journal.js';
 import { decideResume, type UpgradePhase } from './phases.js';
 
 export interface UpgradeContext {
@@ -163,14 +170,19 @@ async function setMaintenanceState(sql: Sql, state: MaintenanceState): Promise<v
 }
 
 /** Writes draining over normal only: a draining or maintenance an administrator set is already a hold. */
-async function holdDraining(sql: Sql): Promise<MaintenanceState> {
-  return underFence(sql, async () => {
+async function holdDraining(ctx: UpgradeContext): Promise<MaintenanceState> {
+  return underFence(ctx.sql, async (fence) => {
     const found = parseMaintenanceState(
       await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
     );
+    await recordFoundState(fence, ctx.runId, found);
     if (found === 'normal') await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
     return found;
   });
+}
+
+async function restoreMaintenanceState(ctx: UpgradeContext): Promise<void> {
+  await setMaintenanceState(ctx.sql, await readFoundState(ctx.sql, ctx.runId));
 }
 
 /** Recounts under the fence: a draining or held install with nothing live enters maintenance. */
@@ -239,7 +251,7 @@ async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
 
 export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
   await enterPhase(ctx.sql, ctx.runId, 'draining');
-  const found = await holdDraining(ctx.sql);
+  const found = await holdDraining(ctx);
   ctx.log('draining', { deadlineMs: ctx.drainDeadlineMs, found });
   ctx.drainForced = await awaitDrain(ctx);
 }
@@ -319,7 +331,7 @@ export async function rollback(ctx: UpgradeContext, reason: string): Promise<voi
   ctx.log('rollback', { to: ctx.fromVersion, reason });
   await setEnvVar(ctx.envFile, 'HAIVE_VERSION', ctx.fromVersion);
   await dk.composeUp(ctx.compose, composeEnv(ctx.fromVersion));
-  await setMaintenanceState(ctx.sql, 'normal');
+  await restoreMaintenanceState(ctx);
   await finishRun(ctx.sql, ctx.runId, 'rolled_back', reason);
   ctx.log('rolled-back', { version: ctx.fromVersion });
 }
@@ -342,7 +354,7 @@ export async function phaseCommit(ctx: UpgradeContext): Promise<void> {
   );
   ctx.log('destructive-data-migrations', { tail: out.split('\n').slice(-1)[0] ?? '' });
 
-  await setMaintenanceState(ctx.sql, 'normal');
+  await restoreMaintenanceState(ctx);
   await finishRun(ctx.sql, ctx.runId, 'done');
   ctx.log('done', { version: ctx.target.version });
 }

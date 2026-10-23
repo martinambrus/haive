@@ -4,11 +4,12 @@ import { join } from 'node:path';
 import postgres, { type Sql, type TransactionSql } from 'postgres';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configService } from '@haive/shared';
-import { ensureJournal, finishRun, startRun } from '../src/journal.js';
+import { ensureJournal, enterPhase, finishRun, startRun } from '../src/journal.js';
 import {
   phaseCommit,
   phaseDraining,
   phaseMaintenance,
+  resume,
   rollback,
   type UpgradeContext,
 } from '../src/run.js';
@@ -608,6 +609,97 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
       expect(written).toEqual(['normal']);
       expect(logged.at(-1)?.event).toBe(finished);
       expect(await fenceIsFree()).toBe(true);
+    });
+
+    describe('the state an upgrade puts back', () => {
+      it.each(['draining', 'maintenance'])(
+        'ends with the %s it found, not with normal',
+        async (found) => {
+          stored = found;
+          const ctx = upgrade();
+          await phaseDraining(ctx);
+          await phaseMaintenance(ctx);
+
+          await run(ctx);
+
+          expect(stored).toBe(found);
+          expect(written).not.toContain('normal');
+          expect(logged.at(-1)?.event).toBe(finished);
+          expect(await fenceIsFree()).toBe(true);
+        },
+      );
+
+      it('ends with normal when it found normal', async () => {
+        stored = 'normal';
+        const ctx = upgrade();
+        await phaseDraining(ctx);
+        await phaseMaintenance(ctx);
+
+        await run(ctx);
+
+        expect(stored).toBe('normal');
+        expect(written).toEqual(['draining', 'maintenance', 'normal']);
+      });
+
+      it('puts back what the first draining phase found when that phase runs again', async () => {
+        stored = 'normal';
+        const ctx = upgrade();
+        await phaseDraining(ctx);
+        await phaseDraining(ctx);
+
+        await run(ctx);
+
+        expect(stored).toBe('normal');
+      });
+
+      it('puts back normal when the run never recorded what it found', async () => {
+        stored = 'maintenance';
+
+        await run(upgrade());
+
+        expect(stored).toBe('normal');
+      });
+
+      describe.each([
+        ['draining', 'reverse'],
+        ['maintenance', 'reverse'],
+        ['snapshot', 'reverse'],
+        ['migrate', 'reverse'],
+        ['verify', 'reverse'],
+        ['commit', 'forward'],
+      ] as const)('a restarted updater, the journal last saying %s (%s)', (phase, _direction) => {
+        it.each(['maintenance', 'draining', 'normal'])(
+          'puts back the %s the first updater found',
+          async (found) => {
+            stored = found;
+            await phaseDraining(upgrade());
+            await enterPhase(updater, runId, phase);
+            const restarted = postgres(url as string, { max: 1, max_lifetime: 0 });
+            try {
+              const ctx2 = {
+                sql: restarted,
+                runId,
+                drainDeadlineMs: 0,
+                drainPollMs: 25,
+                forceDrain: true,
+                log: (event: string, fields?: Record<string, unknown>) =>
+                  logged.push({ event, fields }),
+                envFile: join(envDir, '.env'),
+                fromVersion: '1.0.0',
+                target: { version: '1.1.0' },
+                registry: 'registry.test',
+                network: 'network.test',
+              } as unknown as UpgradeContext;
+
+              await resume(ctx2, phase);
+            } finally {
+              await restarted.end({ timeout: 5 });
+            }
+
+            expect(stored).toBe(found);
+          },
+        );
+      });
     });
   });
 });

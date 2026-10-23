@@ -34,8 +34,13 @@ database. `HAIVE_VERSION` has no default so the command fails rather than silent
 
 `haive upgrade` (the updater) reads `MAINTENANCE_STATE` under the fence described below and writes
 `draining` over `normal` only: a `draining` or `maintenance` an administrator already set stays as it
-is (the `draining` log line carries what it `found`). It then waits until no work is live, recounts
-under the fence and sets `maintenance` only from that recount: the fresh state must still be
+is (the `draining` log line carries what it `found`). It keeps that state in the run's journal row
+(`upgrade_runs.metadata.foundState`, written once, before the `draining` write) and puts it back when
+the run ends, on the commit and on the rollback alike: an upgrade over `maintenance` ends in
+`maintenance`, over `draining` in `draining`, over `normal` in `normal`. A restarted updater reads it
+from the journal, so a resumed run puts back the same state; a run with no record (it died before
+the drain, or an older updater started it) puts back `normal`. It then waits until no work is live,
+recounts under the fence and sets `maintenance` only from that recount: the fresh state must still be
 `draining` (or an administrator's `maintenance`, which it leaves as it is) with nothing live. A
 recount that finds work admitted after the count, or the state set back to `normal`, writes
 `draining` again (over `normal` only) and waits again, at least one poll interval.
@@ -62,8 +67,8 @@ database fence (`lockNewWorkFenceShared`, an advisory lock on `NEW_WORK_FENCE_KE
 also answer an early 503 from the same fresh read before they start (`assertNewWorkAllowed`). An
 upload complete makes that read once more right before it claims its session, since the claim is a
 write, so a drain that began after the early check refuses with the session untouched. Every
-updater state write (`draining`, the recount's `maintenance`, and the return to `normal` on commit
-or rollback), like an administrator's maintenance write, takes the same fence exclusively
+updater state write (`draining`, the recount's `maintenance`, and the return to the state it found
+on commit or rollback), like an administrator's maintenance write, takes the same fence exclusively
 (`setMaintenanceState`, `enterMaintenance`):
 it waits for every admission in flight, so the live-work count it reads next includes each task or
 job admitted before it, every admission after it reads the new state, and no write lands inside an

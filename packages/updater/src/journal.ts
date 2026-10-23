@@ -1,4 +1,5 @@
 import { UPGRADE_JOURNAL_DDL } from '@haive/database';
+import { parseMaintenanceState, type MaintenanceState } from '@haive/shared';
 import type { Sql } from 'postgres';
 import type { RunStatus, UpgradePhase } from './phases.js';
 
@@ -77,6 +78,24 @@ export async function mergeMetadata(sql: Sql, id: string, patch: RunMetadata): P
     UPDATE upgrade_runs
        SET metadata = metadata || ${sql.json(patch)}, updated_at = now()
      WHERE id = ${id}`;
+}
+
+/** The right operand of jsonb `||` wins, so a state already recorded is never replaced. */
+export async function recordFoundState(
+  sql: Sql,
+  id: string,
+  state: MaintenanceState,
+): Promise<void> {
+  await sql`
+    UPDATE upgrade_runs
+       SET metadata = ${sql.json({ foundState: state })} || metadata, updated_at = now()
+     WHERE id = ${id}`;
+}
+
+export async function readFoundState(sql: Sql, id: string): Promise<MaintenanceState> {
+  const rows = await sql<{ found: string | null }[]>`
+    SELECT metadata ->> 'foundState' AS found FROM upgrade_runs WHERE id = ${id}`;
+  return parseMaintenanceState(rows[0]?.found);
 }
 
 export async function finishRun(
