@@ -1446,3 +1446,72 @@ describe('R2: a cancel leaves the session reaping while a file will not go', () 
     },
   );
 });
+
+describe('I9: a complete on a session that is over', () => {
+  interface Case {
+    name: string;
+    family: Family;
+    at: 'partial' | 'finished';
+    replace?: boolean;
+  }
+  const [repos, dumps, bundles] = FAMILIES as [Family, Family, Family];
+  const cases: Case[] = [
+    { name: 'repos', family: repos, at: 'partial' },
+    { name: 'db-dumps (partial)', family: dumps, at: 'partial' },
+    { name: 'db-dumps (finished)', family: dumps, at: 'finished' },
+    { name: 'bundles create', family: bundles, at: 'partial' },
+    { name: 'bundle replace', family: bundles, at: 'partial', replace: true },
+  ];
+
+  async function stageCase(c: Case, status: string, bytesReceived: number): Promise<string> {
+    if (c.replace) await seedZipBundle();
+    await stage(c.family, { status, at: c.at });
+    fake.patch(c.family.table, SESSION, { bytesReceived });
+    if (c.replace) fake.patch(schema.customBundleUploads, SESSION, { bundleId: BUNDLE });
+    return c.replace ? `/${BUNDLE}/replace/${SESSION}/complete` : c.family.completeUrl(SESSION);
+  }
+
+  it.each(cases)(
+    '$name: a reaping session with short bytes answers 409 session cancelled',
+    async (c) => {
+      const url = await stageCase(c, 'reaping', 3);
+      const before = c.family.created();
+
+      const res = await request(c.family.app, 'POST', url);
+
+      expect(res.status).toBe(409);
+      expect(await errorOf(res)).toBe('session cancelled');
+      expect(rowOf(c.family).status).toBe('reaping');
+      expect(c.family.created()).toBe(before);
+      expect(queue.jobs).toHaveLength(0);
+    },
+  );
+
+  it.each(cases)(
+    '$name: a reaping session with all bytes answers 409 session cancelled',
+    async (c) => {
+      const url = await stageCase(c, 'reaping', CONTENT.length);
+      const before = c.family.created();
+
+      const res = await request(c.family.app, 'POST', url);
+
+      expect(res.status).toBe(409);
+      expect(await errorOf(res)).toBe('session cancelled');
+      expect(rowOf(c.family).status).toBe('reaping');
+      expect(c.family.created()).toBe(before);
+      expect(queue.jobs).toHaveLength(0);
+    },
+  );
+
+  it.each(cases)(
+    '$name: an uploading session with short bytes still answers incomplete',
+    async (c) => {
+      const url = await stageCase(c, 'uploading', 3);
+
+      const res = await request(c.family.app, 'POST', url);
+
+      expect(res.status).toBe(409);
+      expect(await errorOf(res)).toBe(`incomplete: 3/${CONTENT.length} bytes`);
+    },
+  );
+});

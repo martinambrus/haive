@@ -36,6 +36,7 @@ import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
 import {
   cancelUploadSession,
+  isSessionOver,
   isWholeFile,
   withCompleteClaim,
 } from '../lib/upload-complete-claim.js';
@@ -520,7 +521,7 @@ bundleRoutes.post('/uploads/:id/complete', requireNewWorkAllowed, async (c) => {
   if (row.status === 'complete') {
     return c.json(await completedUploadBody(userId, row.id));
   }
-  if (row.status === 'cancelled') {
+  if (isSessionOver(row.status)) {
     throw new HttpError(409, 'session cancelled');
   }
   if (Number(row.bytesReceived) !== Number(row.totalSize)) {
@@ -724,7 +725,7 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
   if (row.status === 'complete') {
     throw new HttpError(409, 'session already completed');
   }
-  if (row.status === 'cancelled') {
+  if (isSessionOver(row.status)) {
     throw new HttpError(409, 'session cancelled');
   }
   if (Number(row.bytesReceived) !== Number(row.totalSize)) {

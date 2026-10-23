@@ -13,6 +13,7 @@ import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
 import {
   cancelUploadSession,
+  isSessionOver,
   isWholeFile,
   withCompleteClaim,
 } from '../lib/upload-complete-claim.js';
@@ -235,7 +236,7 @@ dbDumpRoutes.post('/upload/:id/complete', async (c) => {
   if (row.status === 'complete') {
     throw new HttpError(409, 'session already completed');
   }
-  if (row.status === 'cancelled') {
+  if (isSessionOver(row.status)) {
     throw new HttpError(409, 'session cancelled');
   }
   if (Number(row.bytesReceived) !== Number(row.totalSize)) {
