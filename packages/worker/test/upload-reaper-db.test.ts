@@ -833,3 +833,33 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
     });
   });
 });
+
+describe.skipIf(!url)('the tasks.db_upload_id index', () => {
+  let db: Database;
+  beforeAll(() => {
+    db = createDatabase(url!);
+  });
+  afterAll(async () => {
+    await db.$client.end({ timeout: 5 });
+  });
+
+  it('exists on tasks (db_upload_id)', async () => {
+    const rows = await db.execute(
+      sql`SELECT indexdef FROM pg_indexes WHERE tablename = 'tasks' AND indexname = 'tasks_db_upload_id_idx'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(String(rows[0]!.indexdef)).toContain('(db_upload_id)');
+  });
+
+  it('serves the keyed lookup the reaper issues', async () => {
+    const plan = await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL enable_seqscan = off`);
+      return tx.execute(
+        sql.raw(
+          `EXPLAIN (FORMAT JSON) SELECT id FROM tasks WHERE db_upload_id IN ('${randomUUID()}', '${randomUUID()}')`,
+        ),
+      );
+    });
+    expect(JSON.stringify(plan)).toContain('tasks_db_upload_id_idx');
+  });
+});

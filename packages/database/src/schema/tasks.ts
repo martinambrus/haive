@@ -457,6 +457,7 @@ export const tasks = pgTable(
     index('tasks_repository_id_idx').on(table.repositoryId),
     index('tasks_env_template_id_idx').on(table.envTemplateId),
     index('tasks_parent_task_id_idx').on(table.parentTaskId),
+    index('tasks_db_upload_id_idx').on(table.dbUploadId),
     // Every statistics query is "this user's tasks that finished inside a window", and
     // every one of them was a full scan filtered by tasks_user_id_idx alone.
     index('tasks_user_completed_at_idx').on(table.userId, table.completedAt),

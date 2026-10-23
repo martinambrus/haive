@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { and, eq, gt, gte, inArray, isNotNull, lt, notExists, notInArray, or } from 'drizzle-orm';
+import { and, eq, gt, gte, inArray, lt, notExists, notInArray, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { lstatNoFollow, readdirNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
@@ -114,14 +114,24 @@ async function claimEndedDumps(db: Database, cutoff: Date): Promise<void> {
     .where(and(eq(schema.dbUploads.status, 'complete'), lt(schema.dbUploads.updatedAt, cutoff)));
   if (dumps.length === 0) return;
 
-  const tasks = await db
-    .select({
-      dumpId: schema.tasks.dbUploadId,
-      status: schema.tasks.status,
-      updatedAt: schema.tasks.updatedAt,
-    })
-    .from(schema.tasks)
-    .where(isNotNull(schema.tasks.dbUploadId));
+  const tasks: { dumpId: string | null; status: string; updatedAt: Date }[] = [];
+  for (let i = 0; i < dumps.length; i += BATCH) {
+    tasks.push(
+      ...(await db
+        .select({
+          dumpId: schema.tasks.dbUploadId,
+          status: schema.tasks.status,
+          updatedAt: schema.tasks.updatedAt,
+        })
+        .from(schema.tasks)
+        .where(
+          inArray(
+            schema.tasks.dbUploadId,
+            dumps.slice(i, i + BATCH).map((dump) => dump.id),
+          ),
+        )),
+    );
+  }
   const pinned = new Set<string>();
   for (const task of tasks) {
     if (task.dumpId === null) continue;
