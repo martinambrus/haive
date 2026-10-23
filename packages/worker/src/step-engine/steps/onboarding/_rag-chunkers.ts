@@ -248,7 +248,7 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
 
 type Span = [from: number, to: number];
 
-const PHP_OPEN_TAG = /<\?(?:php(?=\s|$)|=)/gi;
+const PHP_OPEN_TAG = /<\?(?:php(?=\s|$)|=|(?=\s))/gi;
 const PHP_HEREDOC = /<<<[ \t]*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|([A-Za-z_]\w*))\r?\n/y;
 const REGEX_AFTER_WORD =
   /^(?:return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/;
@@ -329,7 +329,7 @@ function heredocAt(text: string, open: number): { body: Span; end: number } | nu
 }
 
 /** The spans of a PHP file that are not code: inline HTML, comments, strings and heredocs. A file
- *  with no open tag is read as PHP from its first byte. */
+ *  with no open tag, such as a template, is inline HTML throughout. */
 function phpNonCode(text: string): Span[] {
   const spans: Span[] = [];
   const openAfter = (from: number): RegExpExecArray | null => {
@@ -337,8 +337,8 @@ function phpNonCode(text: string): Span[] {
     return PHP_OPEN_TAG.exec(text);
   };
   let tag = openAfter(0);
-  if (tag) spans.push([0, tag.index]);
-  let i = tag ? tag.index + tag[0].length : 0;
+  spans.push([0, tag ? tag.index : text.length]);
+  let i = tag ? tag.index + tag[0].length : text.length;
   while (i < text.length) {
     const c = text[i];
     const next = text[i + 1];
@@ -431,7 +431,7 @@ function jsNonCode(text: string): Span[] {
       if (frames.length === 0) spans.push([i + 2, bodyEnd]);
       i = next === '*' && close >= 0 ? close + 2 : bodyEnd;
     } else if (c === '/') {
-      const close = regexMayStart(prev) && next !== '>' ? regexClose(text, i) : -1;
+      const close = regexMayStart(prev) ? regexClose(text, i) : -1;
       if (close < 0) {
         prev = c;
         i += 1;

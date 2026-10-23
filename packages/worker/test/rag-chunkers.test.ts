@@ -1073,10 +1073,14 @@ describe('maskNonCode', () => {
     );
   });
 
-  it('reads a file with no open tag as PHP from its first byte', () => {
-    expect(maskNonCode("function f() { return '{'; }\n", 'php')).toBe(
-      `function f() { return '${blank('{')}'; }\n`,
+  it('reads a file with no open tag as inline HTML, and a short open tag as an open tag', () => {
+    expect(maskNonCode("<footer>{ 'x' }</footer>\n", 'php')).toBe(
+      `${blank("<footer>{ 'x' }</footer>")}\n`,
     );
+    expect(maskNonCode('<?xml version="1.0"?>\n<root>{</root>\n', 'php')).toBe(
+      `${blank('<?xml version="1.0"?>')}\n${blank('<root>{</root>')}\n`,
+    );
+    expect(maskNonCode("<? $a = '{'; ?>\n", 'php')).toBe(`<? $a = '${blank('{')}'; ?>\n`);
   });
 
   it('keeps delimiters, the docblock opener and an attribute', () => {
@@ -1099,6 +1103,7 @@ describe('maskNonCode', () => {
     ['an escaped slash in a regex', 'var a = /\\/{/;'],
     ['a regex after return', 'return /{/.test(s);'],
     ['a regex after a parenthesis', 'f(/{/);'],
+    ['a regex that starts with a bracket', 'f(/>{/);'],
     ['a regex after a comma', 'f(a, /}/);'],
     ['a regex after an arrow', 'var f = () => /}/;'],
   ])('blanks %s of a JS file', (_what, snippet) => {
