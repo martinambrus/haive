@@ -21,7 +21,7 @@ import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { getIdeEnsureQueue, getIdeEnsureQueueEvents } from '../queues.js';
 import { verifyAccessToken } from '../auth/jwt.js';
-import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { ACCESS_COOKIE, withoutSessionCookies } from '../auth/cookies.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
@@ -124,6 +124,12 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
 
   const headers = new Headers(c.req.raw.headers);
   headers.delete('host');
+  // code-server runs repo-controlled code, so the Haive session must not reach it.
+  headers.delete('authorization');
+  headers.delete('proxy-authorization');
+  const keptCookie = withoutSessionCookies(headers.get('cookie') ?? '');
+  if (keptCookie === null) headers.delete('cookie');
+  else headers.set('cookie', keptCookie);
   // Force identity so undici's auto-decompression can't desync content-encoding.
   headers.set('accept-encoding', 'identity');
 
@@ -268,6 +274,14 @@ function proxyWsUpgrade(
       // the container's; the upgrade handler already checked the browser's Origin.
       if (k.toLowerCase() === 'origin') {
         lines.push(`Origin: http://${host}:${IDE_INTERNAL_PORT}`);
+        continue;
+      }
+      if (k.toLowerCase() === 'authorization' || k.toLowerCase() === 'proxy-authorization') {
+        continue;
+      }
+      if (k.toLowerCase() === 'cookie') {
+        const kept = typeof v === 'string' ? withoutSessionCookies(v) : null;
+        if (kept !== null) lines.push(`${k}: ${kept}`);
         continue;
       }
       if (Array.isArray(v)) {
