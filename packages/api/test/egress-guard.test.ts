@@ -1411,6 +1411,7 @@ describe('the production entry point', () => {
 
   it('looks the name up through c-ares with the deadline of the call, and refuses a loopback answer', async () => {
     const { cares, Resolver } = mockCares({ a: ['127.0.0.1'] });
+    vi.spyOn(dns, 'getServers').mockReturnValue(['192.0.2.53']);
     const lookup = vi.spyOn(dns, 'lookup');
     const promisesLookup = vi.spyOn(dns.promises, 'lookup');
 
