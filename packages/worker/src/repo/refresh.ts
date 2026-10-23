@@ -165,7 +165,11 @@ export async function fastForward(
   // file it finds rewritten ends the transaction unmoved and goes back to the set-aside.
   let asided = false;
   const kept: KeptFiles = new Map();
-  const before = (await gitRun(dest, ['rev-parse', 'HEAD'])).stdout.trim();
+  const headRead = await gitRun(dest, ['rev-parse', 'HEAD']);
+  if (headRead.code !== 0) {
+    return `Not refreshed: the checkout's HEAD could not be read (${firstLine(headRead.stderr || headRead.stdout)}).`;
+  }
+  const before = headRead.stdout.trim();
   for (let attempt = 1; ; attempt++) {
     let aside;
     try {

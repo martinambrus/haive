@@ -18,6 +18,7 @@ import {
   worktreeDirName,
 } from '../../../repo/worktree-paths.js';
 import { gitRun } from '../../../repo/git-exec.js';
+import { isWorktreeRegistered } from '../../../repo/git-workspace.js';
 
 const FALLBACK_GIT_IDENTITY = {
   GIT_AUTHOR_NAME: 'Haive',
@@ -360,9 +361,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       `refs/heads/${branchName}`,
     ]);
 
-    const list = await gitRun(ctx.repoPath, ['worktree', 'list', '--porcelain']);
-    const isRegistered =
-      list.code === 0 && list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
+    const isRegistered = await isWorktreeRegistered(ctx.repoPath, worktreePath);
 
     if (isRegistered) {
       ctx.logger.info({ worktreePath, branchName }, 'reusing existing worktree');

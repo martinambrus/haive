@@ -8,6 +8,7 @@ import { schema, type Database } from '@haive/database';
 import { configService } from '@haive/shared';
 import { ensureGitExcludeEntry } from '../src/repo/git-init.js';
 import { WORKTREE_SUBDIR, worktreeDirName } from '../src/repo/worktree-paths.js';
+import { failGit } from './support/fake-git.js';
 import { worktreeSetupStep } from '../src/step-engine/steps/workflow/01-worktree-setup.js';
 import type { StepApplyArgs, StepContext } from '../src/step-engine/step-definition.js';
 
@@ -248,6 +249,31 @@ describe('01 worktree setup after the task applied once (a Retry)', () => {
     expect(await worktreePaths(root)).toEqual([root, first.worktreePath].sort());
     expect(await git(retry.worktreePath, ['rev-parse', 'HEAD'])).toBe(taskCommit);
     expect(await readFile(path.join(retry.worktreePath, 'work.txt'), 'utf8')).toBe('task work\n');
+  }, 30_000);
+
+  it('C3b: a failed worktree list on a Retry is not "unregistered": the worktree and its uncommitted work stay', async () => {
+    vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    const root = await setupRepo();
+    const ctx = mkCtx(root, freshTask());
+
+    const firstDetected = await worktreeSetupStep.detect!(ctx);
+    const first = await worktreeSetupStep.apply(ctx, submitDefault(ctx, firstDetected));
+    const dirty = path.join(first.worktreePath, 'uncommitted.txt');
+    await writeFile(dirty, 'not committed\n', 'utf8');
+
+    const retryDetected = await worktreeSetupStep.detect!(ctx);
+    const retryArgs = submitDefault(ctx, retryDetected);
+    const shim = await failGit(['worktree', 'list']);
+    try {
+      await expect(worktreeSetupStep.apply(ctx, retryArgs)).rejects.toThrow(
+        /^git worktree list failed in /,
+      );
+    } finally {
+      await shim.restore();
+    }
+
+    expect(await readFile(dirty, 'utf8')).toBe('not committed\n');
+    expect(await worktreePaths(root)).toEqual([root, first.worktreePath].sort());
   }, 30_000);
 
   it('C4: proposes the own branch when its worktree directory is gone but the branch stays', async () => {

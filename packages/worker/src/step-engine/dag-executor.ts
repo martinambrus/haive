@@ -120,6 +120,7 @@ import type {
   WorkerDeps,
 } from './step-runner.js';
 import { gitRun } from '../repo/git-exec.js';
+import { isWorktreeRegistered } from '../repo/git-workspace.js';
 
 // Drives the persisted DAG (Phase 3) one dependency level per ADVANCE_STEP
 // re-entry. All decisions are a pure function of the task_dag_* rows so a crash
@@ -205,10 +206,7 @@ async function createIssueWorktree(
 ): Promise<void> {
   // Reclaim worktree metadata orphaned by a prior crash before (re)adding.
   await gitRun(ctx.repoPath, ['worktree', 'prune']);
-  const list = await gitRun(ctx.repoPath, ['worktree', 'list', '--porcelain']);
-  const registered =
-    list.code === 0 && list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
-  if (!registered) {
+  if (!(await isWorktreeRegistered(ctx.repoPath, worktreePath))) {
     // Anchored on the repository root with the worktree walked below it — the same split the
     // `ensureSandboxWritableTree` call below already makes. A LINK planted at that path still
     // answers true and is still removed: a name taken is not free space.

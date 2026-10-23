@@ -12,6 +12,7 @@ import {
 import { buildMergeFixPrompt, handBackAfterMove } from '../../git-merge.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { seedPlanBaseFromCheckout } from '../../../plan/mirror.js';
+import { headCommit } from '../../../plan/merge.js';
 import { checkoutHoldingTasks } from '../../../repo/refresh.js';
 import {
   claimMergeDir,
@@ -488,6 +489,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       }
     }
     const moveBase = async (): Promise<SyncBaseApply> => {
+      const before = await headCommit(ctx.repoPath);
       const first = await setAside();
       if (first.outcome === 'held') {
         return {
@@ -564,7 +566,6 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         }
       };
 
-      const before = (await gitRun(ctx.repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
       let res: Awaited<ReturnType<typeof ffLocked>>;
       try {
         res = await ffLocked();
