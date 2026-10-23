@@ -16,6 +16,9 @@
  *   `gpg.program`.
  * - `core.pager=cat` — a pager is a command too.
  *
+ * The later overrides (askPass, ext and git protocols, alternate refs, signature switches, auto
+ * maintenance) were MEASURED the same way; docs/architecture/sandbox-masking.md has each one.
+ *
  * Three keys do NOT yield to `-c`, which is what the per-subcommand flags are for:
  *
  * - `remote.<name>.uploadpack` and `remote.<name>.receivepack` — MEASURED, the repository's command
@@ -45,6 +48,24 @@ export const GIT_CONFIG_SAFETY_ARGS: readonly string[] = [
   'tag.gpgsign=false',
   '-c',
   'core.pager=cat',
+  '-c',
+  'core.askPass=',
+  '-c',
+  'protocol.ext.allow=never',
+  '-c',
+  'protocol.git.allow=never',
+  '-c',
+  'core.alternateRefsCommand=',
+  '-c',
+  'log.showSignature=false',
+  '-c',
+  'merge.verifySignatures=false',
+  '-c',
+  'push.gpgSign=false',
+  '-c',
+  'tag.forceSignAnnotated=false',
+  '-c',
+  'maintenance.auto=false',
 ];
 
 /** git's own options, which sit before the subcommand. A value rides the next token for these. */
