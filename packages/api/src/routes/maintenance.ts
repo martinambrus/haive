@@ -546,28 +546,32 @@ maintenanceRoutes.post('/upgrade', async (c) => {
  *  Mirrors `lib/sandbox-kill.ts`'s shape — spawn, buffer, kill on a deadline — but does NOT
  *  swallow the failure, because unlike a best-effort sandbox sweep this one has a person waiting
  *  for an answer. */
-function runDockerClient(
+export function runDockerClient(
   args: string[],
 ): Promise<{ ok: boolean; containerId: string; stderr: string }> {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
     const child = spawn('docker', args);
+    // Generous: `docker run -d` returns as soon as the container starts, but it PULLS the updater
+    // image first if this host has never seen it.
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve({ ok: false, containerId: '', stderr: 'docker run timed out' });
+    }, 300_000).unref();
     child.stdout.on('data', (b: Buffer) => {
       stdout += b.toString('utf8');
     });
     child.stderr.on('data', (b: Buffer) => {
       stderr += b.toString('utf8');
     });
-    child.on('close', (code) =>
-      resolve({ ok: code === 0, containerId: stdout.trim().slice(0, 64), stderr: stderr.trim() }),
-    );
-    child.on('error', (err) => resolve({ ok: false, containerId: '', stderr: String(err) }));
-    // Generous: `docker run -d` returns as soon as the container starts, but it PULLS the updater
-    // image first if this host has never seen it.
-    setTimeout(() => {
-      child.kill('SIGKILL');
-      resolve({ ok: false, containerId: '', stderr: 'docker run timed out' });
-    }, 300_000).unref();
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, containerId: stdout.trim().slice(0, 64), stderr: stderr.trim() });
+    });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ ok: false, containerId: '', stderr: String(err) });
+    });
   });
 }

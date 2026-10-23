@@ -310,3 +310,24 @@ describe('killTaskSandboxes', () => {
     expect(children.at(-1)?.kill).toHaveBeenCalledWith('SIGKILL');
   });
 });
+
+describe('deadline timers', () => {
+  const settle = async (spawned: number) => {
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(children).toHaveLength(spawned);
+    for (const child of children) expect(child.kill).not.toHaveBeenCalled();
+  };
+
+  it.each(deadlines)('leaves no timer and no kill when the %s call exits', async (step) => {
+    runs.push(...(step === 'listing' ? [{ stdout: '' }] : [{ stdout: IDS }, { stdout: IDS }]));
+    await expect(killTaskSandboxes(TASK)).resolves.toBe(step === 'listing' ? 0 : 2);
+    await settle(step === 'listing' ? 1 : 2);
+  });
+
+  it.each(deadlines)('leaves no timer and no kill when the %s call cannot spawn', async (step) => {
+    runs.push(...failing(step, { error: new Error('spawn docker ENOENT') }));
+    await expect(killTaskSandboxes(TASK)).resolves.toBe(step === 'listing' ? 0 : 2);
+    await settle(step === 'listing' ? 1 : 2);
+  });
+});
