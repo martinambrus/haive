@@ -37,6 +37,9 @@ export interface CommitDiffFile {
   binary: boolean;
   /** Either side exceeded the size cap or the total budget; content omitted. */
   truncated: boolean;
+  /** A side could not be read: git exited non-zero or the working file could not be opened;
+   *  contents are omitted. Absent means both sides were read. */
+  unreadable?: boolean;
   oldContent: string;
   newContent: string;
   /** Absolute path the web viewer may WRITE this file's new side back to, via
@@ -124,19 +127,21 @@ export async function buildFileEntry(
   const needsOld = status === 'modified' || status === 'deleted' || status === 'renamed';
   const oldRef = status === 'renamed' && e.oldPath ? e.oldPath : e.path;
 
+  let unreadable = false;
   let newContent = '';
   let newBinary = false;
   let newTooBig = false;
   if (status !== 'deleted') {
     // One capped read from the verified descriptor, where it used to be `stat` by path and then
     // `readFile` by the same path — two resolutions of a name git reported, in a tree the agents
-    // write. A link, a FIFO or a vanished file all read as empty, which is what this artifact
-    // already means by an unreadable working file.
+    // write. A link, a FIFO or a vanished file is flagged unreadable.
     const wa = workspaceAnchor(workspacePath);
     const read = await readFileNoFollow(wa.anchor, `${wa.prefix}${e.path}`, {
       maxBytes: PER_FILE_CONTENT_CAP + 1,
     });
-    if (read !== null) {
+    if (read === null) {
+      unreadable = true;
+    } else {
       if (read.size > PER_FILE_CONTENT_CAP) {
         newTooBig = true;
       } else {
@@ -151,13 +156,17 @@ export async function buildFileEntry(
   let oldTooBig = false;
   if (needsOld) {
     const sizeRes = await gitRun(workspacePath, ['cat-file', '-s', `HEAD:${oldRef}`]);
-    if (sizeRes.code === 0) {
+    if (sizeRes.code !== 0) {
+      unreadable = true;
+    } else {
       const size = Number.parseInt(sizeRes.stdout.trim(), 10);
       if (Number.isFinite(size) && size > PER_FILE_CONTENT_CAP) {
         oldTooBig = true;
       } else {
         const show = await gitRun(workspacePath, ['show', `HEAD:${oldRef}`]);
-        if (show.code === 0) {
+        if (show.code !== 0) {
+          unreadable = true;
+        } else {
           oldBinary = show.stdout.includes('\u0000');
           if (!oldBinary) oldContent = show.stdout;
         }
@@ -168,7 +177,7 @@ export async function buildFileEntry(
   const binary = newBinary || oldBinary;
   const overBudget = oldContent.length + newContent.length > remainingBudget;
   const truncated = newTooBig || oldTooBig || overBudget;
-  if (binary || truncated) {
+  if (binary || truncated || unreadable) {
     oldContent = '';
     newContent = '';
   }
@@ -182,6 +191,7 @@ export async function buildFileEntry(
     newContent,
   };
   if (status === 'renamed' && e.oldPath) file.oldPath = e.oldPath;
+  if (unreadable) file.unreadable = true;
   return file;
 }
 

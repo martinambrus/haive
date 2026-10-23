@@ -28,6 +28,8 @@ interface CommitDiffFile {
    *  knowledge gates). Absent — every file of the gate-3 commit diff — renders
    *  read-only. */
   editPath?: string;
+  /** Git or the working tree could not be read for this file; both contents are empty then. */
+  unreadable?: boolean;
 }
 
 interface CommitDiffArtifact {
@@ -388,7 +390,8 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
     () => artifact?.files.find((f) => f.path === selected) ?? null,
     [artifact, selected],
   );
-  const renderable = selectedFile && !selectedFile.binary && !selectedFile.truncated;
+  const renderable =
+    selectedFile && !selectedFile.binary && !selectedFile.truncated && !selectedFile.unreadable;
   // What the file says NOW: the fetched disk content once we have it, else the
   // artifact's copy. Everything downstream (both diff views, the editor seed, the
   // unsaved marker) reads this one value.
@@ -631,6 +634,7 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
                       </span>
                     )}
                     {selectedFile.binary && <span className="text-yellow-400">binary</span>}
+                    {selectedFile.unreadable && <span className="text-yellow-400">unreadable</span>}
                     {selectedFile.truncated && !selectedFile.binary && (
                       <span className="text-yellow-400">too large</span>
                     )}
@@ -706,6 +710,10 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
                       // would otherwise collapse the box to two lines.
                       className="min-h-[320px] flex-1 resize-none bg-neutral-950 p-2 font-mono text-[11px] leading-tight text-neutral-200 outline-none"
                     />
+                  ) : selectedFile.unreadable ? (
+                    <div className="p-4 text-xs text-neutral-400">
+                      Could not read this file — diff not shown.
+                    </div>
                   ) : selectedFile.binary ? (
                     <div className="p-4 text-xs text-neutral-400">
                       Binary file — diff not shown.
