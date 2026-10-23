@@ -176,6 +176,7 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
       cacheReadTokens: 200,
       cacheCreationTokens: 100,
       costUsd: 0.12,
+      peakPromptTokens: 3,
     });
   });
 
@@ -205,6 +206,7 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
       outputTokens: 100,
       totalTokens: 16386,
       cacheCreationTokens: 16256,
+      peakPromptTokens: 16266,
     });
   });
 
@@ -250,6 +252,7 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
       totalTokens: 5264,
       cacheReadTokens: 4100,
       cacheCreationTokens: 800,
+      peakPromptTokens: 1802,
     });
   });
 
@@ -284,6 +287,7 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
       totalTokens: 847,
       cacheReadTokens: 700,
       cacheCreationTokens: 70,
+      peakPromptTokens: 444,
     });
   });
 
@@ -325,6 +329,7 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
       totalTokens: 5174,
       cacheReadTokens: 4300,
       cacheCreationTokens: 800,
+      peakPromptTokens: 1805,
     });
   });
 
@@ -337,7 +342,12 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
         message: { content: [] },
       },
     ]);
-    expect(c.getTokenUsage()).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 });
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+      peakPromptTokens: 10,
+    });
   });
 
   it('prefers message.usage when both placements exist on one event', () => {
@@ -349,7 +359,12 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
         message: { usage: { input_tokens: 1, output_tokens: 2 }, content: [] },
       },
     ]);
-    expect(c.getTokenUsage()).toEqual({ inputTokens: 1, outputTokens: 2, totalTokens: 3 });
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 1,
+      outputTokens: 2,
+      totalTokens: 3,
+      peakPromptTokens: 1,
+    });
   });
 
   it('captures usage from a non-success result event (tokens were still burned)', () => {
@@ -374,6 +389,66 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     const plain = createStreamJsonCollector();
     plain.onChunk('not json at all');
     expect(plain.getTokenUsage()).toBeNull();
+  });
+
+  const peakRunEvents = () => [
+    blockEvent('msg_1', { type: 'thinking', thinking: 'a' }, usageOf(10, 100, 50000, 30000)),
+    blockEvent('msg_1', { type: 'text', text: 'b' }, usageOf(10, 100, 50000, 30000)),
+    toolResult,
+    blockEvent('msg_2', { type: 'text', text: 'c' }, usageOf(8, 200, 85000, 15000)),
+    toolResult,
+    blockEvent('msg_3', { type: 'text', text: 'd' }, usageOf(6, 300, 110000, 10000)),
+  ];
+  const peakResult = {
+    type: 'result',
+    subtype: 'success',
+    result: 'done',
+    usage: usageOf(24, 600, 245000, 55000),
+  };
+
+  it('records the largest single-message prompt beside the cumulative result usage', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [...peakRunEvents(), peakResult]);
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 24,
+      outputTokens: 600,
+      totalTokens: 300624,
+      cacheReadTokens: 245000,
+      cacheCreationTokens: 55000,
+      peakPromptTokens: 120006,
+    });
+  });
+
+  it('records the same peak for a killed run that never produced a result', () => {
+    const c = createStreamJsonCollector();
+    feed(c, peakRunEvents());
+    expect(c.getTokenUsage()).toEqual({
+      inputTokens: 24,
+      outputTokens: 600,
+      totalTokens: 300624,
+      cacheReadTokens: 245000,
+      cacheCreationTokens: 55000,
+      peakPromptTokens: 120006,
+    });
+  });
+
+  it('counts a sub-agent message toward the peak', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      ...peakRunEvents(),
+      blockEvent('msg_sub', { type: 'text', text: 's' }, usageOf(4, 10, 200000, 5000), 'toolu_9'),
+      peakResult,
+    ]);
+    expect(c.getTokenUsage()?.peakPromptTokens).toBe(205004);
+  });
+
+  it('leaves peakPromptTokens absent when assistant events report zero usage', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      blockEvent('msg_z', { type: 'text', text: 'z' }, { input_tokens: 0, output_tokens: 0 }),
+      peakResult,
+    ]);
+    expect(c.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
   });
 });
 
