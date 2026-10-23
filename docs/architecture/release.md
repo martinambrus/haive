@@ -72,5 +72,13 @@ be written refuses the change. The state itself lives in Redis, so a commit that
 write still leaves the new state without its row. A task the administrator pauses or resumes from that
 page gets its `task.admin_pause` or `task.admin_resume` row in the same transaction as the change, so a
 row that cannot be written undoes it; Stop's row stays best-effort, since the runs it stopped cannot be
-restarted. In the worker, the allowance auto-resume and an answer to a parked form do not reopen a
-failed task while new work is refused (see [Worker restarts](worker-restarts.md)).
+restarted. A pause an administrator makes is theirs to lift. The newest `task.paused` event says who made
+the pause in force (`byAdmin`, `findAdminPausedTaskIds`); while it is an administrator's, the owner's
+Resume answers 409 `paused_by_admin` and keeps the pause, judged after the clear inside the resume's
+transaction so that a pause placed since the route read it is the one refused. An owner's Retry of a failed
+task revives it but leaves that pause standing, since a 409 there would strand a task that
+`GET /admin/maintenance/blocking` omits (it lists no failed task); Cancel still clears any pause, and an
+administrator may lift it from either route. `GET /tasks/:id` carries `pauseLocked` (the pause is an
+administrator's and the viewer is not one), which hides the task page's Resume and changes its banner.
+In the worker, the allowance auto-resume and an answer to a parked form do not reopen a failed task while
+new work is refused (see [Worker restarts](worker-restarts.md)).
