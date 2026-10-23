@@ -35,7 +35,8 @@ const {
 } = await import('../src/modules/loader.js');
 const { ModuleTeardownRefusedError, runModuleTeardown } =
   await import('../src/queues/module-control-queue.js');
-const { moduleDeactivationMessage } = await import('../src/modules/activation.js');
+const { moduleDeactivationMessage, moduleSchemaWaitMessage } =
+  await import('../src/modules/activation.js');
 
 type Loaded = Parameters<typeof startModuleJobs>[0][number];
 type Entry = Parameters<typeof startModuleJobs>[1][number];
@@ -1546,24 +1547,27 @@ describe('the steps of a module whose boot schema ensure outlived its wait', () 
     return m;
   };
 
-  it('fail with a message naming the module while that ensure runs, and run once it has succeeded', async () => {
+  it('wait with a message naming the module while that ensure runs, and run once it has succeeded', async () => {
     const m = await bootLate('gate-late');
-    expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-late.x')).toMatch(
-      /gate-late.*schema setup.*module\.gate-late\.x/,
+    expect(await moduleSchemaWaitMessage(activeRowDb, 'module.gate-late.x')).toMatch(
+      /gate-late.*schema is being set up.*module\.gate-late\.x/,
     );
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-late.x')).toBeNull();
 
     m.end().resolve();
     await vi.advanceTimersByTimeAsync(0);
+    expect(await moduleSchemaWaitMessage(activeRowDb, 'module.gate-late.x')).toBeNull();
     expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-late.x')).toBeNull();
   });
 
-  it('keep failing after that ensure failed, until a reconcile pass has ensured the schema', async () => {
+  it('keep waiting after that ensure failed, until a reconcile pass has ensured the schema', async () => {
     const m = await bootLate('gate-failed');
     m.end().reject(new Error('ddl refused'));
     await vi.advanceTimersByTimeAsync(0);
-    expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-failed.x')).toMatch(
-      /gate-failed.*schema setup/,
+    expect(await moduleSchemaWaitMessage(activeRowDb, 'module.gate-failed.x')).toMatch(
+      /gate-failed.*schema is being set up/,
     );
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-failed.x')).toBeNull();
 
     const { reconcile, stopAll } = await startModuleJobs(
       [m.loaded],
@@ -1572,12 +1576,14 @@ describe('the steps of a module whose boot schema ensure outlived its wait', () 
     );
     await reconcile(new Set());
     expect(m.ensure).toHaveBeenCalledTimes(2);
+    expect(await moduleSchemaWaitMessage(activeRowDb, 'module.gate-failed.x')).toBeNull();
     expect(await moduleDeactivationMessage(activeRowDb, 'module.gate-failed.x')).toBeNull();
     await stopAll();
   });
 
   it('name the deactivation, not the schema, when the module is also deactivated', async () => {
     await bootLate('gate-off');
+    expect(await moduleSchemaWaitMessage(deactivatedRowDb, 'module.gate-off.x')).toBeNull();
     expect(await moduleDeactivationMessage(deactivatedRowDb, 'module.gate-off.x')).toMatch(
       /gate-off is deactivated/,
     );
@@ -1614,55 +1620,62 @@ describe('the steps of a module whose schema a teardown or a restart may have le
     return { m, handle };
   };
 
-  it('fail with a message naming the module once it is active again, and run once a pass has ensured the schema', async () => {
+  it('wait with a message naming the module once it is active again, and run once a pass has ensured the schema', async () => {
     const { m, handle } = await tearDown('torn-gate');
-    expect(await moduleDeactivationMessage(activeRowDb, 'module.torn-gate.x')).toMatch(
-      /torn-gate.*schema setup.*module\.torn-gate\.x/,
+    expect(await moduleSchemaWaitMessage(activeRowDb, 'module.torn-gate.x')).toMatch(
+      /torn-gate.*schema is being set up.*module\.torn-gate\.x/,
     );
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.torn-gate.x')).toBeNull();
 
     await handle.reconcile(new Set());
     expect(m.ensure).toHaveBeenCalledTimes(2);
+    expect(await moduleSchemaWaitMessage(activeRowDb, 'module.torn-gate.x')).toBeNull();
     expect(await moduleDeactivationMessage(activeRowDb, 'module.torn-gate.x')).toBeNull();
     await handle.stopAll();
   });
 
-  it('keep failing while the ensure after the teardown fails, and run once one succeeds', async () => {
+  it('keep waiting while the ensure after the teardown fails, and run once one succeeds', async () => {
     const { m, handle } = await tearDown('torn-failed');
     vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
     m.ensure.mockRejectedValueOnce(new Error('ddl refused'));
 
     await handle.reconcile(new Set());
     expect(m.ensure).toHaveBeenCalledTimes(2);
-    expect(await moduleDeactivationMessage(activeRowDb, 'module.torn-failed.x')).toMatch(
-      /torn-failed.*schema setup/,
+    expect(await moduleSchemaWaitMessage(activeRowDb, 'module.torn-failed.x')).toMatch(
+      /torn-failed.*schema is being set up/,
     );
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.torn-failed.x')).toBeNull();
 
     await handle.reconcile(new Set());
     expect(m.ensure).toHaveBeenCalledTimes(3);
+    expect(await moduleSchemaWaitMessage(activeRowDb, 'module.torn-failed.x')).toBeNull();
     expect(await moduleDeactivationMessage(activeRowDb, 'module.torn-failed.x')).toBeNull();
     await handle.stopAll();
   });
 
   it('name the deactivation, not the schema, while the torn down module is still deactivated', async () => {
     const { handle } = await tearDown('torn-off');
+    expect(await moduleSchemaWaitMessage(deactivatedRowDb, 'module.torn-off.x')).toBeNull();
     expect(await moduleDeactivationMessage(deactivatedRowDb, 'module.torn-off.x')).toMatch(
       /torn-off is deactivated/,
     );
     await handle.stopAll();
   });
 
-  it('fail after a boot that skipped the ensure of the deactivated module, until a pass has ensured it', async () => {
+  it('wait after a boot that skipped the ensure of the deactivated module, until a pass has ensured it', async () => {
     const m = moduleWithSchemaOnly('boot-off');
     expect(
       await ensureModuleSchemas({} as Database, [m.loaded], [m.entry], new Set(['boot-off'])),
     ).toEqual({ 'boot-off': 'deactivated' });
     expect(m.ensure).not.toHaveBeenCalled();
+    expect(await moduleSchemaWaitMessage(deactivatedRowDb, 'module.boot-off.x')).toBeNull();
     expect(await moduleDeactivationMessage(deactivatedRowDb, 'module.boot-off.x')).toMatch(
       /boot-off is deactivated/,
     );
-    expect(await moduleDeactivationMessage(activeRowDb, 'module.boot-off.x')).toMatch(
-      /boot-off.*schema setup/,
+    expect(await moduleSchemaWaitMessage(activeRowDb, 'module.boot-off.x')).toMatch(
+      /boot-off.*schema is being set up/,
     );
+    expect(await moduleDeactivationMessage(activeRowDb, 'module.boot-off.x')).toBeNull();
 
     const { reconcile, stopAll } = await startModuleJobs(
       [m.loaded],
@@ -1671,6 +1684,7 @@ describe('the steps of a module whose schema a teardown or a restart may have le
     );
     await reconcile(new Set());
     expect(m.ensure).toHaveBeenCalledOnce();
+    expect(await moduleSchemaWaitMessage(activeRowDb, 'module.boot-off.x')).toBeNull();
     expect(await moduleDeactivationMessage(activeRowDb, 'module.boot-off.x')).toBeNull();
     await stopAll();
   });

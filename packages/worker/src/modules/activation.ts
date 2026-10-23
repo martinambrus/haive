@@ -1,7 +1,7 @@
 import { eq, isNotNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { parseStepId } from '@haive/shared/modularity';
-import { moduleSchemaUnready } from './schema-ready.js';
+import { moduleSchemaFailed, moduleSchemaUnready, moduleTeardownRunning } from './schema-ready.js';
 
 /** `lock` reads under KEY SHARE, which waits out a deactivation holding the row FOR UPDATE. */
 export async function moduleDeactivationMessage(
@@ -16,17 +16,37 @@ export async function moduleDeactivationMessage(
     .from(schema.modules)
     .where(eq(schema.modules.moduleId, parsed.moduleId));
   const [row] = opts.lock ? await read.for('key share') : await read.limit(1);
-  if (!row?.deactivatedAt) {
-    if (!moduleSchemaUnready(parsed.moduleId)) return null;
-    return (
-      `Module ${parsed.moduleId}'s schema setup has not finished on this worker, so step ${stepId} cannot run yet. ` +
-      `Retry the step shortly; if this repeats, the worker log has the setup error, and deactivating and ` +
-      `reactivating the module (Admin > Modules) runs the setup again.`
-    );
-  }
+  if (!row?.deactivatedAt) return null;
   return (
     `Module ${parsed.moduleId} is deactivated, so step ${stepId} cannot run. ` +
     `Reactivate the module (Admin > Modules), then Retry the step.`
+  );
+}
+
+export async function moduleSchemaWaitMessage(
+  db: Database,
+  stepId: string,
+): Promise<string | null> {
+  const parsed = parseStepId(stepId);
+  if (parsed?.kind !== 'module') return null;
+  const id = parsed.moduleId;
+  if (!moduleSchemaUnready(id)) return null;
+  if ((await moduleDeactivationMessage(db, stepId)) !== null) return null;
+  if (moduleTeardownRunning(id)) {
+    return (
+      `Module ${id}'s teardown hook is still running on this worker, so its schema setup waits for the hook to end and step ${stepId} starts after that. ` +
+      `Only a worker restart frees a hook that never ends.`
+    );
+  }
+  if (moduleSchemaFailed(id)) {
+    return (
+      `Module ${id}'s schema setup failed on this worker and is no longer being retried (the worker log has the error), so step ${stepId} is waiting. ` +
+      `Deactivating and reactivating the module (Admin > Modules) runs the setup again.`
+    );
+  }
+  return (
+    `Module ${id}'s schema is being set up on this worker, so step ${stepId} starts when it is done. ` +
+    `If this stays here, the worker log has the setup error; deactivating and reactivating the module (Admin > Modules) runs the setup again.`
   );
 }
 

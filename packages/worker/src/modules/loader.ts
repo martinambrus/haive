@@ -24,7 +24,14 @@ import type { StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { emitsLoop } from '../step-engine/steps/index.js';
 import { FIX_LOOP_TARGET_STEP_ID } from '../step-engine/steps/workflow/_fix-loop.js';
-import { markModuleSchemaReady, markModuleSchemaUnready } from './schema-ready.js';
+import {
+  markModuleSchemaFailed,
+  markModuleSchemaReady,
+  markModuleSchemaUnready,
+  markModuleTeardownRunning,
+  moduleSchemaFailed,
+  moduleTeardownRunning,
+} from './schema-ready.js';
 
 export type { ModuleSchemaContext, ModuleTeardownContext };
 
@@ -289,7 +296,6 @@ function settledWithinStartWait(moduleId: string, work: Promise<unknown>): Promi
 }
 
 const jobsStarted = new Set<string>();
-const teardownsRunning = new Set<string>();
 // A teardown can begin and end between two passes, so no pass need have seen the deactivation.
 const tornDown = new Set<string>();
 // Boot went on without these schema ensures; until each settles, no teardown may drop the schema under it.
@@ -298,14 +304,11 @@ const bootEnsuresRunning = new Set<string>();
 export const moduleJobsStarted = (moduleId: string): boolean =>
   jobsStarted.has(moduleId) || bootEnsuresRunning.has(moduleId);
 
-export const moduleTeardownRunning = (moduleId: string): boolean => teardownsRunning.has(moduleId);
+export { moduleTeardownRunning };
 
 export function beginModuleTeardown(moduleId: string): () => void {
-  teardownsRunning.add(moduleId);
   tornDown.add(moduleId);
-  return () => {
-    teardownsRunning.delete(moduleId);
-  };
+  return markModuleTeardownRunning(moduleId);
 }
 
 export type ModuleJobsHandle = {
@@ -474,6 +477,7 @@ export async function startModuleJobs(
       const attempt = (attemptsMade.get(moduleId) ?? 0) + 1;
       attemptsMade.delete(moduleId);
       starting.add(moduleId);
+      if (moduleSchemaFailed(moduleId)) markModuleSchemaUnready(moduleId);
       const timer = setTimeout(() => {
         warnStartOutlivedWait(moduleId);
         resolve();
@@ -501,6 +505,7 @@ export async function startModuleJobs(
               `module schema or jobs failed to start (attempt ${attempt} of ${MODULE_REACTIVATION_ATTEMPTS}); trying again on the next pass`,
             );
           } else {
+            markModuleSchemaFailed(moduleId);
             logger.error(
               { err, module: moduleId },
               'module schema or jobs failed to start; deactivate and reactivate the module to try again',

@@ -229,6 +229,7 @@ jobs:
           worker test/module-intent.test.ts MODULE_INTENT_TEST_URL module_intent_test pg
           worker test/module-deactivated-step.test.ts MODULE_DEACTIVATED_STEP_TEST_URL module_deactivated_step_test pg
           worker test/module-teardown.test.ts MODULE_TEARDOWN_TEST_URL module_teardown_test pg
+          worker test/module-schema-park.test.ts MODULE_SCHEMA_PARK_TEST_URL module_schema_park_test pg
           worker test/boot-module-window.test.ts BOOT_MODULE_WINDOW_TEST_URL boot_module_window_test pg
           worker test/cancel-sandbox-fence.test.ts CANCEL_FENCE_TEST_URL cancel_fence_test pg
           worker test/pending-fail-path.test.ts PENDING_FAIL_PATH_TEST_URL pending_fail_path_test pg
