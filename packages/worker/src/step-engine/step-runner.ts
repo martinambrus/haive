@@ -333,6 +333,8 @@ export interface AdvanceStepParams {
   epoch?: number | null;
   /** The caller's module decision: a message is off, null is on. Undefined reads it here. */
   moduleDeactivation?: string | null;
+  /** Admission skipped this step for a failed schema setup, so it must not run unless that failure stands. */
+  moduleSchemaFailedAtAdmission?: boolean;
 }
 
 export type AdvanceStepResult =
@@ -354,7 +356,9 @@ export type AdvanceStepResult =
   | { status: 'revise'; row: TaskStepRow; targetStepId: string; sourceStepId: string }
   | { status: 'failed'; row: TaskStepRow; error: string }
   /** A Retry or Skip took the row over while this pass ran; the pass wrote no outcome. */
-  | { status: 'superseded'; row: TaskStepRow };
+  | { status: 'superseded'; row: TaskStepRow }
+  /** A schema setup that failed at admission was reset since; the step re-enters admission and writes nothing. */
+  | { status: 'deferred'; row: TaskStepRow };
 
 type UpdatePatch = Partial<{
   status: StepStatus;
@@ -2739,6 +2743,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (!failed) return { status: 'superseded', row };
     return { status: 'failed', row: failed, error: failure };
   }
+  if (params.moduleSchemaFailedAtAdmission) return { status: 'deferred', row };
 
   const controller = new AbortController();
   let superseded = false;

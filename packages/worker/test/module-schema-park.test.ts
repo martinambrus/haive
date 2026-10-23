@@ -16,9 +16,23 @@ import { stepRegistry } from '../src/step-engine/registry.js';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   adds: [] as { name: string; data: Record<string, unknown>; opts: { delay?: number } }[],
+  afterLockedRead: undefined as undefined | (() => Promise<void>),
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/modules/activation.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/modules/activation.js')>();
+  return {
+    ...real,
+    moduleDeactivationMessage: async (
+      ...args: Parameters<typeof real.moduleDeactivationMessage>
+    ) => {
+      const message = await real.moduleDeactivationMessage(...args);
+      if (args[2]?.lock) await h.afterLockedRead?.();
+      return message;
+    },
+  };
+});
 vi.mock('../src/redis.js', () => ({
   getBullRedis: () => ({}),
   getRedis: () => ({ scan: async () => ['0', []], del: async () => 0 }),
@@ -160,6 +174,7 @@ describe.skipIf(!url)('a module step whose schema is unready, on Postgres', () =
     setContainerCleanupRunner(async () => 0);
     Object.values(phases).forEach((phase) => phase.mockClear());
     h.adds.length = 0;
+    h.afterLockedRead = undefined;
     ran = 0;
     await db.delete(schema.modules);
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
@@ -395,6 +410,55 @@ describe.skipIf(!url)('a module step whose schema is unready, on Postgres', () =
     await runNext();
     expect(phases.detect).toHaveBeenCalledTimes(1);
     expect((await rows())[0]!.status).not.toBe('failed');
+  });
+
+  it('G4: a setup that failed at admission and was reset before the runner read it parks the row and runs once ready', async () => {
+    markModuleSchemaFailed(MODULE);
+    await runningTask();
+    h.afterLockedRead = async () => markModuleSchemaUnready(MODULE);
+    const epoch = (await task()).orchestrationEpoch;
+    await tick();
+    const [row] = await rows();
+    expect(row!.status).not.toBe('failed');
+    expect(row!.errorMessage).toBeNull();
+    expect((await task()).status).toBe('running');
+    expect(advances()).toHaveLength(1);
+    expect(advances()[0]!.opts.delay).toBe(5000);
+    expect(advances()[0]!.data.epoch).toBe(epoch);
+    noPhaseRan();
+
+    h.afterLockedRead = undefined;
+    await runNext();
+    expect((await rows())[0]).toMatchObject({ status: 'pending' });
+    markModuleSchemaReady(MODULE);
+    await runNext();
+    expect(phases.detect).toHaveBeenCalledTimes(1);
+    expect((await rows())[0]!.status).not.toBe('failed');
+  });
+
+  it('G5: a setup still failed when the runner reads it fails the row with the setup-failed words', async () => {
+    markModuleSchemaFailed(MODULE);
+    await runningTask();
+    h.afterLockedRead = async () => undefined;
+    await tick();
+    const [row] = await rows();
+    expect(row).toMatchObject({ status: 'failed' });
+    expect(row!.errorMessage).toMatch(/no longer being retried/);
+    expect(advances()).toHaveLength(0);
+    noPhaseRan();
+  });
+
+  it('G6: a deactivation read at admission still fails the row though the module is back since', async () => {
+    await db.update(schema.modules).set({ deactivatedAt: OFF });
+    await runningTask();
+    h.afterLockedRead = async () => {
+      await db.update(schema.modules).set({ deactivatedAt: null });
+    };
+    await tick();
+    const [row] = await rows();
+    expect(row).toMatchObject({ status: 'failed' });
+    expect(row!.errorMessage).toMatch(/is deactivated/);
+    noPhaseRan();
   });
 
   it('F7: a paused task holds with the pause words and the 30 s poll, not the schema ones', async () => {
