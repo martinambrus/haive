@@ -213,8 +213,9 @@ text. `expires_in: 0` means already expired. Over HTTP: vendor error 400, unavai
 
 One switch per user per provider (`integration_user_settings`, default off), covering every account of
 that provider and never set per task or per step. `PUT /integrations/providers/:id/write` writes it and
-audits `integration.write_switch`. It is in Postgres, with no ConfigService cache, so a flip is
-visible to the next read. `integrationTools` lists a binding's read operations always and its write
+its `integration.write_switch` row in one transaction (see Audit rows). It is in Postgres, with no
+ConfigService cache, so a flip is visible to the next read. `integrationTools` lists a binding's
+read operations always and its write
 operations only when the binding asked for write access and the caller's `writeAllowed` says yes —
 the broker answers it from the task owner's switch; anything that is not `read` counts as write. Tool
 names are computed from what the bindings declare before the switch filters them, so a flip never
@@ -310,8 +311,8 @@ the restriction when the last allowed account goes. Restricted with no entries a
 **Routes.** User: `GET /integrations/preferences`, `PUT|DELETE /integrations/preferences/:categoryId`
 (no audit). Install defaults: `GET /integrations/defaults` for anyone signed in, `GET|PUT
 /admin/integrations/defaults[/:categoryId]` for an admin (`{providerId: null}` clears; audited
-`integration.category_default.update`). Repository: `GET|PUT /repositories/:id/integrations
-{restricted, connectionIds}` for its owner, diffed under
+`integration.category_default.update`, in the change's transaction). Repository: `GET|PUT
+/repositories/:id/integrations {restricted, connectionIds}` for its owner, diffed under
 `pg_advisory_xact_lock(integration-allow-list:<repo>)` so two saves never interleave. Task: `GET
 /tasks/:id/integrations` (kept off the polled `GET /tasks/:id`), `PUT /tasks/:id/integrations/:category
 {providerId, connectionId?, remember?}` and `DELETE …?remember=1`: one transaction writes the choice,
@@ -503,6 +504,23 @@ switch, budget row, deadline) and then:
 - answers the result as JSON text, scrubbed of the token and cut to 64 KiB (`[truncated]` marks a
   cut).
 
+## Audit rows
+
+An action that changes whose account a vendor call runs under writes its audit row inside the
+change's own transaction (`insertAuditEvent(tx)`) and logs it after the commit (`logAuditEvent`), so
+a row the database refuses answers 500 with nothing changed, and a commit that fails leaves neither.
+They are the admin's provider save (`integration.provider_config.update`, the OAuth client secret
+included) and category default (`integration.category_default.update`); the user's own GitHub client
+id (`integration.github_client.update`, whose user secret joins the transaction through the
+service's `executor`); "Use as connection" and every sign-in (`integration.connection.create`,
+`.reconnect`; a forge sign-in's Git credential, connection and row are one transaction); and the
+write switch (`integration.write_switch`).
+
+Disconnect (`integration.connection.disconnect`) is the one exception, on purpose: its row follows
+the vendor revoke, which cannot be undone and whose outcome (`revoked`) the row records, so it stays
+`recordAuditEvent` and a refused row is logged, not raised.
+`api/test/integrations-audit-db.test.ts` pins both sides.
+
 ## Migrations
 
 All guarded and idempotent. 0192 created the six tables and enums (its first line is the rollback).
@@ -549,3 +567,6 @@ uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
 17. Only a dispatch stamps, under the task's integrations lock, with its grants in the same
     transaction; the choice routes take that lock first; a provider-pinned requirement is refused at
     dispatch until pins land (J6e).
+18. An integration action's audit row is inserted in the change's own transaction and logged after
+    the commit, so a refused row undoes the change; only disconnect's stays best-effort, because the
+    revoke at the vendor before it cannot be undone.
