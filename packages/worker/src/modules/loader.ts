@@ -158,22 +158,54 @@ async function bootstrapModuleSchema(
   moduleId: string,
   ensureSchema: NonNullable<WorkerModuleEntry['ensureSchema']>,
 ): Promise<void> {
-  try {
-    const moduleDb = await openModuleDatabase(db, moduleId);
+  let expired = false;
+  let opened: Awaited<ReturnType<typeof openModuleDatabase>> | undefined;
+  let closing: Promise<void> | undefined;
+  const closeOnce = (): Promise<void> => {
+    if (!opened) return Promise.resolve();
+    closing ??= opened.close();
+    return closing;
+  };
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      expired = true;
+      void closeOnce()
+        .catch(() => undefined)
+        .then(() =>
+          reject(
+            new Error(
+              `the schema setup did not finish within ${Math.round(MODULE_SCHEMA_ENSURE_TIMEOUT_MS / 1000)} s`,
+            ),
+          ),
+        );
+    }, MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
+  });
+  const body = (async () => {
+    opened = await openModuleDatabase(db, moduleId);
+    if (expired) {
+      await closeOnce();
+      return;
+    }
     try {
       await ensureSchema({
         moduleId,
-        sql: moduleDb.sql,
-        withSchemaLock: moduleDb.withSchemaLock,
+        sql: opened.sql,
+        withSchemaLock: opened.withSchemaLock,
       });
     } finally {
-      await moduleDb.close();
+      await closeOnce();
     }
+  })();
+  try {
+    await Promise.race([body, deadline]);
   } catch (err) {
     throw new Error(
       `Module ${moduleId} schema bootstrap failed: ${err instanceof Error ? err.message : String(err)}`,
       { cause: err },
     );
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -223,6 +255,7 @@ export async function ensureModuleSchemas(
 }
 
 export const MODULE_JOBS_RECONCILE_MS = 15_000;
+export const MODULE_SCHEMA_ENSURE_TIMEOUT_MS = 10 * 60_000;
 export const MODULE_JOB_START_WAIT_MS = 10_000;
 export const MODULE_JOB_STOP_WAIT_MS = 10_000;
 export const MODULE_SHUTDOWN_WAIT_MS = 5_000;
