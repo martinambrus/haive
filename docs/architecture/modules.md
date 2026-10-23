@@ -99,9 +99,11 @@ the module loads again.
   is the pause park (`handleAdvanceStep`, see [Worker restarts](worker-restarts.md)), and a pause wins
   over it. A step already past its start (a form answer, a finished CLI run, a fan-out continuation)
   keeps its row as it is, and only its advance is put off by the same delayed job; a START hands its
-  first step to the advance path so the park is written there. The park has no bound of its own: a
-  setup that cannot succeed leaves the step parked until the module is deactivated and activated
-  again or the task is stopped, and the line says so. A boot that skips the ensure of a deactivated
+  first step to the advance path so the park is written there. The park has no time bound, but
+  it ends when the setup is spent (the flag reads `failed`, attempts used up): the next poll, or a
+  step reaching the gate, fails the row with the setup-failed words (`moduleSchemaFailedMessage`,
+  through the deactivation failure path of `advanceStep`), so the task fails and Retry works once
+  the module is reactivated; a reactivation resets the flag first, so it never fails a row. A boot that skips the ensure of a deactivated
   module marks it the same way, so after Activate its steps wait for a pass's ensure too. A schema
   ensure has a deadline, `MODULE_SCHEMA_ENSURE_TIMEOUT_MS` (10 minutes), over the whole
   setup, the open of the module database included, and a setup that runs out of it counts as

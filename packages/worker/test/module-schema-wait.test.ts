@@ -100,15 +100,17 @@ describe('moduleSchemaWaitMessage', () => {
     unready('gamma-wait');
     for (let pass = 0; pass < 4; pass++) await reconcile(new Set());
     expect(ensure).toHaveBeenCalledTimes(3);
-    expect(await waitMessage(activeRowDb, 'module.gamma-wait.x')).toContain(
+    expect(activation.moduleSchemaFailedMessage('module.gamma-wait.x')).toContain(
       'no longer being retried',
     );
+    expect(await waitMessage(activeRowDb, 'module.gamma-wait.x')).toBeNull();
 
     ensure.mockResolvedValue(undefined as never);
     await reconcile(new Set(['gamma-wait']));
     await reconcile(new Set());
     expect(ensure).toHaveBeenCalledTimes(4);
     expect(await waitMessage(activeRowDb, 'module.gamma-wait.x')).toBeNull();
+    expect(activation.moduleSchemaFailedMessage('module.gamma-wait.x')).toBeNull();
     await stopAll();
   });
 

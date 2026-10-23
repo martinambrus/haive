@@ -5,7 +5,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { computeTaskTiming } from '@haive/shared/timing';
-import { markModuleSchemaReady, markModuleSchemaUnready } from '../src/modules/schema-ready.js';
+import {
+  markModuleSchemaFailed,
+  markModuleSchemaReady,
+  markModuleSchemaUnready,
+} from '../src/modules/schema-ready.js';
 import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 
@@ -334,6 +338,63 @@ describe.skipIf(!url)('a module step whose schema is unready, on Postgres', () =
     ran = adds;
     await runNext();
     expect(phases.detect.mock.calls.length + phases.apply.mock.calls.length).toBeGreaterThan(0);
+  });
+
+  it('G1: when the setup is spent, a parked row fails on its next poll with the setup-failed words and the task fails', async () => {
+    await runningTask();
+    await tick();
+    await runNext();
+    expect((await rows())[0]).toMatchObject({ status: 'pending' });
+    markModuleSchemaFailed(MODULE);
+    const adds = advances().length;
+    await runNext();
+    const [row] = await rows();
+    expect(row).toMatchObject({ status: 'failed', waitingStartedAt: null });
+    expect(row!.errorMessage).toMatch(/no longer being retried/);
+    expect(row!.errorMessage).toContain(MODULE);
+    expect(row!.errorMessage).toMatch(/reactivating the module/);
+    expect(advances()).toHaveLength(adds);
+    expect((await task()).status).toBe('failed');
+    noPhaseRan();
+  });
+
+  it('G2: a fresh step on a module whose setup is spent fails at once and does not park', async () => {
+    markModuleSchemaFailed(MODULE);
+    await runningTask();
+    await tick();
+    const found = await rows();
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ status: 'failed', waitingStartedAt: null });
+    expect(found[0]!.errorMessage).toMatch(/no longer being retried/);
+    expect(advances()).toHaveLength(0);
+    expect((await task()).status).toBe('failed');
+    noPhaseRan();
+  });
+
+  it('G2b: a START on a module whose setup is spent fails the first step at once', async () => {
+    markModuleSchemaFailed(MODULE);
+    await start();
+    const found = await rows();
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ status: 'failed' });
+    expect(found[0]!.errorMessage).toMatch(/no longer being retried/);
+    expect(advances()).toHaveLength(0);
+    noPhaseRan();
+  });
+
+  it('G3: a reactivation that resets the attempts leaves a parked row parked, and a ready schema runs it', async () => {
+    await runningTask();
+    await tick();
+    markModuleSchemaFailed(MODULE);
+    markModuleSchemaUnready(MODULE);
+    await runNext();
+    expect((await rows())[0]).toMatchObject({ status: 'pending' });
+    expect((await rows())[0]!.errorMessage).toBeNull();
+    expect((await task()).status).toBe('running');
+    markModuleSchemaReady(MODULE);
+    await runNext();
+    expect(phases.detect).toHaveBeenCalledTimes(1);
+    expect((await rows())[0]!.status).not.toBe('failed');
   });
 
   it('F7: a paused task holds with the pause words and the 30 s poll, not the schema ones', async () => {

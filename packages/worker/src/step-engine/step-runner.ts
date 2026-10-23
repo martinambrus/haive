@@ -53,7 +53,7 @@ import {
   parseStepId,
   type IntegrationRequirement,
 } from '@haive/shared/modularity';
-import { moduleDeactivationMessage } from '../modules/activation.js';
+import { moduleDeactivationMessage, moduleSchemaFailedMessage } from '../modules/activation.js';
 import { invalidToolsFailure, pinnedToolsFailure } from './steps/custom/pinned-tools.js';
 import {
   promptStepAccountIds,
@@ -2714,15 +2714,20 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     params.moduleDeactivation === undefined
       ? await moduleDeactivationMessage(db, meta.id)
       : params.moduleDeactivation;
-  if (deactivated !== null) {
+  const blocked = deactivated ?? moduleSchemaFailedMessage(meta.id);
+  if (blocked !== null) {
+    // An open wait stops counting as idle once ended_at is set, so fold it first.
+    await foldCliParkOnResume(db, row.id);
+  }
+  // A reactivation can reset a spent setup while the fold ran; the flag is read again as late as it can be.
+  const failure = blocked === null ? null : (deactivated ?? moduleSchemaFailedMessage(meta.id));
+  if (failure !== null) {
     const patch = {
       status: 'failed',
       statusMessage: null,
-      errorMessage: deactivated,
+      errorMessage: failure,
       endedAt: new Date(),
     } as const;
-    // An open wait stops counting as idle once ended_at is set, so fold it first.
-    await foldCliParkOnResume(db, row.id);
     // updateRow refuses a pending row; openPendingStep opens it, under the job's epoch.
     const failed =
       row.status === 'pending'
@@ -2732,7 +2737,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
             throw err;
           });
     if (!failed) return { status: 'superseded', row };
-    return { status: 'failed', row: failed, error: deactivated };
+    return { status: 'failed', row: failed, error: failure };
   }
 
   const controller = new AbortController();

@@ -52,7 +52,11 @@ import { resolveGlobalKbSettings } from '@haive/shared/global-kb';
 import { fairPriority } from '@haive/shared/fair-priority';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { getDb } from '../db.js';
-import { moduleDeactivationMessage, moduleSchemaWaitMessage } from '../modules/activation.js';
+import {
+  moduleDeactivationMessage,
+  moduleSchemaFailedMessage,
+  moduleSchemaWaitMessage,
+} from '../modules/activation.js';
 import { completePlanNodesForTask } from '../plan/task-link.js';
 import { stampRepositoryOnboarded } from '../repo/onboarded.js';
 import { markPlanCodeLinksStale } from '../plan/code-link-staleness.js';
@@ -2904,7 +2908,9 @@ async function handleAdvanceStep(
   // reservation — see resolveAdmissionRuntimeKind.
   // A step of a deactivated module asks its shouldRun nothing and takes no slot here;
   // advanceStep fails its row.
-  const moduleDeactivation = await moduleDeactivationMessage(db, payload.stepId);
+  const moduleDeactivation =
+    (await moduleDeactivationMessage(db, payload.stepId)) ??
+    moduleSchemaFailedMessage(payload.stepId);
   const moduleOff = moduleDeactivation !== null;
   // A fresh step whose own shouldRun says skip takes no slot, ticket or preemption first.
   const skipsBeforeAdmission =

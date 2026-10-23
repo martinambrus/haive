@@ -23,6 +23,17 @@ export async function moduleDeactivationMessage(
   );
 }
 
+export function moduleSchemaFailedMessage(stepId: string): string | null {
+  const parsed = parseStepId(stepId);
+  if (parsed?.kind !== 'module') return null;
+  const id = parsed.moduleId;
+  if (!moduleSchemaFailed(id) || moduleTeardownRunning(id)) return null;
+  return (
+    `Module ${id}'s schema setup failed on this worker and is no longer being retried (the worker log has the error), so step ${stepId} cannot run. ` +
+    `Deactivating and reactivating the module (Admin > Modules) runs the setup again; then Retry the step.`
+  );
+}
+
 export async function moduleSchemaWaitMessage(
   db: Database,
   stepId: string,
@@ -31,17 +42,12 @@ export async function moduleSchemaWaitMessage(
   if (parsed?.kind !== 'module') return null;
   const id = parsed.moduleId;
   if (!moduleSchemaUnready(id)) return null;
+  if (moduleSchemaFailedMessage(stepId) !== null) return null;
   if ((await moduleDeactivationMessage(db, stepId)) !== null) return null;
   if (moduleTeardownRunning(id)) {
     return (
       `Module ${id}'s teardown hook is still running on this worker, so its schema setup waits for the hook to end and step ${stepId} starts after that. ` +
       `Only a worker restart frees a hook that never ends.`
-    );
-  }
-  if (moduleSchemaFailed(id)) {
-    return (
-      `Module ${id}'s schema setup failed on this worker and is no longer being retried (the worker log has the error), so step ${stepId} is waiting. ` +
-      `Deactivating and reactivating the module (Admin > Modules) runs the setup again.`
     );
   }
   return (
