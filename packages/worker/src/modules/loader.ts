@@ -24,7 +24,14 @@ import type { StepRegistry } from '../step-engine/registry.js';
 import type { StepDefinition } from '../step-engine/step-definition.js';
 import { emitsLoop } from '../step-engine/steps/index.js';
 import { FIX_LOOP_TARGET_STEP_ID } from '../step-engine/steps/workflow/_fix-loop.js';
-import { markModuleSchemaReady, markModuleSchemaUnready } from './schema-ready.js';
+import {
+  markModuleSchemaFailed,
+  markModuleSchemaReady,
+  markModuleSchemaUnready,
+  markModuleTeardownRunning,
+  moduleSchemaFailed,
+  moduleTeardownRunning,
+} from './schema-ready.js';
 
 export type { ModuleSchemaContext, ModuleTeardownContext };
 
@@ -158,22 +165,53 @@ async function bootstrapModuleSchema(
   moduleId: string,
   ensureSchema: NonNullable<WorkerModuleEntry['ensureSchema']>,
 ): Promise<void> {
-  try {
-    const moduleDb = await openModuleDatabase(db, moduleId);
+  let expired = false;
+  let opened: Awaited<ReturnType<typeof openModuleDatabase>> | undefined;
+  let closing: Promise<void> | undefined;
+  const closeOnce = (): Promise<void> => {
+    if (!opened) return Promise.resolve();
+    closing ??= opened.close();
+    return closing;
+  };
+  const expiredError = () =>
+    new Error(
+      `the schema setup did not finish within ${Math.round(MODULE_SCHEMA_ENSURE_TIMEOUT_MS / 1000)} s`,
+    );
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      expired = true;
+      void closeOnce()
+        .catch(() => undefined)
+        .then(() => reject(expiredError()));
+    }, MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
+  });
+  const body = (async () => {
+    opened = await openModuleDatabase(db, moduleId);
+    if (expired) {
+      await closeOnce();
+      throw expiredError();
+    }
     try {
       await ensureSchema({
         moduleId,
-        sql: moduleDb.sql,
-        withSchemaLock: moduleDb.withSchemaLock,
+        sql: opened.sql,
+        withSchemaLock: opened.withSchemaLock,
       });
     } finally {
-      await moduleDb.close();
+      await closeOnce();
     }
+  })();
+  try {
+    await Promise.race([body, deadline]);
+    if (expired) throw expiredError();
   } catch (err) {
     throw new Error(
       `Module ${moduleId} schema bootstrap failed: ${err instanceof Error ? err.message : String(err)}`,
       { cause: err },
     );
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -223,6 +261,7 @@ export async function ensureModuleSchemas(
 }
 
 export const MODULE_JOBS_RECONCILE_MS = 15_000;
+export const MODULE_SCHEMA_ENSURE_TIMEOUT_MS = 10 * 60_000;
 export const MODULE_JOB_START_WAIT_MS = 10_000;
 export const MODULE_JOB_STOP_WAIT_MS = 10_000;
 export const MODULE_SHUTDOWN_WAIT_MS = 5_000;
@@ -256,7 +295,6 @@ function settledWithinStartWait(moduleId: string, work: Promise<unknown>): Promi
 }
 
 const jobsStarted = new Set<string>();
-const teardownsRunning = new Set<string>();
 // A teardown can begin and end between two passes, so no pass need have seen the deactivation.
 const tornDown = new Set<string>();
 // Boot went on without these schema ensures; until each settles, no teardown may drop the schema under it.
@@ -265,14 +303,11 @@ const bootEnsuresRunning = new Set<string>();
 export const moduleJobsStarted = (moduleId: string): boolean =>
   jobsStarted.has(moduleId) || bootEnsuresRunning.has(moduleId);
 
-export const moduleTeardownRunning = (moduleId: string): boolean => teardownsRunning.has(moduleId);
+export { moduleTeardownRunning };
 
 export function beginModuleTeardown(moduleId: string): () => void {
-  teardownsRunning.add(moduleId);
   tornDown.add(moduleId);
-  return () => {
-    teardownsRunning.delete(moduleId);
-  };
+  return markModuleTeardownRunning(moduleId);
 }
 
 export type ModuleJobsHandle = {
@@ -441,6 +476,7 @@ export async function startModuleJobs(
       const attempt = (attemptsMade.get(moduleId) ?? 0) + 1;
       attemptsMade.delete(moduleId);
       starting.add(moduleId);
+      if (moduleSchemaFailed(moduleId)) markModuleSchemaUnready(moduleId);
       const timer = setTimeout(() => {
         warnStartOutlivedWait(moduleId);
         resolve();
@@ -468,6 +504,7 @@ export async function startModuleJobs(
               `module schema or jobs failed to start (attempt ${attempt} of ${MODULE_REACTIVATION_ATTEMPTS}); trying again on the next pass`,
             );
           } else {
+            markModuleSchemaFailed(moduleId);
             logger.error(
               { err, module: moduleId },
               'module schema or jobs failed to start; deactivate and reactivate the module to try again',

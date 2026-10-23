@@ -290,9 +290,9 @@ only while the row still reads `failed` and the task is still failed at that epo
 clears a hint written before it but not one written after; a finished fan-out's timeout hint lands
 only on a row still `done` under the pass's fence, and a login hint only while its run stands.
 Answering a fix-loop gate does the same, and closes the gate only while its row is still the pass's
-own. So does the advance that parks or starts a step. A pause or runtime park writes its row and
-points the task at it in one transaction (`writeFencedPark`), the row first as a Retry takes rows
-first, and is dropped whole when the fence no longer holds: a park a Retry overtook leaves the
+own. So does the advance that parks or starts a step. A pause, a runtime park or a module step's
+park for its module's schema setup ([Modules](modules.md)) writes its row and points the task at it
+in one transaction (`writeFencedPark`), the row first as a Retry takes rows first, and is dropped whole when the fence no longer holds: a park a Retry overtook leaves the
 signature the Retry's own advance reads as a live loop and drops itself behind. A step starts only
 while the fence holds. A job revives a failed task only when the task was already failed at pickup,
 which the pickup guard allows only for an answer to a form still parked, or to a fix-loop gate

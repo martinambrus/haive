@@ -13,6 +13,7 @@ import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
 import { advanceStep } from '../src/step-engine/index.js';
 import { runtimeAdmission } from '../src/sandbox/runtime-admission.js';
 import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.js';
+import { markModuleSchemaReady, markModuleSchemaUnready } from '../src/modules/schema-ready.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
 import { finishedStepResult } from '../src/step-engine/step-runner.js';
@@ -1525,6 +1526,167 @@ describe('a park or a step start that a Retry or a Stop overtakes', () => {
       await processTaskJob(job('epoch-chain-runtime'), 'tok');
       expect(h.state.taskHolds).toEqual([{ epochs: [5], landed: false }]);
       expect(h.state.add).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('on a module schema setup', () => {
+    const stepId = 'module.epoch-plain.step';
+    const on = [{ deactivatedAt: null }];
+    const off = [{ deactivatedAt: new Date() }];
+    const unready = () => {
+      markModuleSchemaUnready('epoch-plain');
+      h.state.moduleRows = on;
+    };
+    const waitingRow = (status: string) => ({ ...unparked, stepId, round: 0, status });
+    const parkPatches = () =>
+      h.state.stepPatches.filter((p) => /schema is being set up/.test(String(p.statusMessage)));
+    afterEach(() => {
+      markModuleSchemaReady('epoch-plain');
+    });
+
+    it('parks a fresh step, polling every 5 s, and runs nothing while the job holds the task', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      const shouldRun = vi.fn(async () => true);
+      h.state.shouldRun = shouldRun;
+      unready();
+      await processTaskJob(job(stepId), 'tok');
+      expect(parkPatches()).toHaveLength(1);
+      expect(parkPatches()[0]).toMatchObject({
+        status: 'pending',
+        waitingStartedAt: expect.any(Date),
+        statusMessage: expect.stringMatching(/epoch-plain.*schema is being set up/),
+      });
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: true });
+      expect(h.state.add).toHaveBeenCalledTimes(1);
+      expect(h.state.add.mock.lastCall?.[0]).toBe(TASK_JOB_NAMES.ADVANCE_STEP);
+      expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId, epoch: 5 });
+      expect(h.state.add.mock.lastCall?.[2]).toMatchObject({ delay: 5_000 });
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+      expect(vi.mocked(runtimeAdmission)).not.toHaveBeenCalled();
+      expect(shouldRun).not.toHaveBeenCalled();
+    });
+
+    it('re-parks a step already parked by refreshing only its message and heartbeat', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = { ...unparked, waitingStartedAt: new Date() };
+      unready();
+      await processTaskJob(job(stepId), 'tok');
+      expect(parkPatches()).toHaveLength(1);
+      expect(Object.keys(parkPatches()[0]!).sort()).toEqual(['statusMessage', 'updatedAt']);
+      expect(h.state.taskHolds).toEqual([{ epochs: [5], landed: true }]);
+      parkQueued(5_000);
+    });
+
+    it.each([
+      ['a Retry', retryLands],
+      ['a Stop', stopLands],
+    ])('parks nothing once %s overtook the advance', async (_l, overtake) => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      h.state.onSelect = overtake;
+      unready();
+      await processTaskJob(job(stepId), 'tok');
+      expect(parkPatches()).toHaveLength(1);
+      expect(h.state.taskWrites.at(-1)).toEqual({ epochs: [5], landed: false });
+      expect(h.state.add).not.toHaveBeenCalled();
+    });
+
+    it('lets a pause win: the park says Paused and polls at the pause rate', async () => {
+      h.state.readsAnswer = true;
+      h.state.pausedAt = new Date();
+      h.state.parkRow = unparked;
+      unready();
+      await processTaskJob(job(stepId), 'tok');
+      expect(
+        h.state.stepPatches.some((p) => String(p.statusMessage ?? '').startsWith('Paused')),
+      ).toBe(true);
+      expect(parkPatches()).toEqual([]);
+      parkQueued(30_000);
+    });
+
+    it('runs the step through advanceStep, with no module hold, once the flag is clear', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = on;
+      await processTaskJob(job(stepId), 'tok');
+      expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(advanceStep).mock.calls[0]?.[0]?.moduleDeactivation).toBeNull();
+      expect(parkPatches()).toEqual([]);
+    });
+
+    it.each([
+      ['no step row yet', null],
+      ['a pending step row', waitingRow('pending')],
+    ])(
+      'hands a deactivated module to advanceStep with the deactivation words (%s)',
+      async (_l, row) => {
+        h.state.readsAnswer = true;
+        h.state.parkRow = unparked;
+        h.state.existingRow = row;
+        h.state.moduleRows = off;
+        markModuleSchemaUnready('epoch-plain');
+        await processTaskJob(job(stepId), 'tok');
+        expect(parkPatches()).toEqual([]);
+        expect(h.state.add).not.toHaveBeenCalled();
+        expect(vi.mocked(advanceStep)).toHaveBeenCalledTimes(1);
+        const handed = vi.mocked(advanceStep).mock.calls[0]?.[0]?.moduleDeactivation;
+        expect(handed).toEqual(expect.stringContaining('is deactivated'));
+        expect(handed).not.toEqual(expect.stringMatching(/schema/));
+      },
+    );
+
+    it.each(['waiting_cli', 'waiting_form', 'running'])(
+      'defers a %s continuation: no row write, one delayed advance without the form values',
+      async (status) => {
+        h.state.readsAnswer = true;
+        h.state.parkRow = unparked;
+        h.state.existingRow = waitingRow(status);
+        unready();
+        await processTaskJob(job(stepId, { formValues: { answer: 'yes' } }), 'tok');
+        expect(h.state.stepPatches).toEqual([]);
+        expect(h.state.add).toHaveBeenCalledTimes(1);
+        expect(h.state.add.mock.lastCall?.[1]).toEqual(
+          expect.objectContaining({ stepId, round: 0, epoch: 5 }),
+        );
+        expect(h.state.add.mock.lastCall?.[1]).not.toHaveProperty('formValues');
+        expect(h.state.add.mock.lastCall?.[2]).toMatchObject({ delay: 5_000 });
+        expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+      },
+    );
+
+    it('hands a START of a first module step to the advance path, undelayed, with no step row', async () => {
+      h.state.readsAnswer = true;
+      h.state.taskType = 'module.epoch-plain';
+      h.state.taskStatus = 'queued';
+      unready();
+      await processTaskJob(
+        {
+          id: 'job-start',
+          name: TASK_JOB_NAMES.START,
+          data: { taskId: 'task-1', userId: 'user-1' },
+          timestamp: Date.now(),
+          moveToDelayed: vi.fn(async () => undefined),
+        } as unknown as Job,
+        'tok',
+      );
+      expect(vi.mocked(advanceStep)).not.toHaveBeenCalled();
+      expect(h.state.stepPatches).toEqual([]);
+      expect(h.state.add).toHaveBeenCalledTimes(1);
+      expect(h.state.add.mock.lastCall?.[0]).toBe(TASK_JOB_NAMES.ADVANCE_STEP);
+      expect(h.state.add.mock.lastCall?.[1]).toMatchObject({ stepId, round: 0, epoch: 5 });
+      expect(h.state.add.mock.lastCall?.[2]).not.toHaveProperty('delay');
+    });
+
+    it('adds no module read for a ready module step or a core step', async () => {
+      h.state.readsAnswer = true;
+      h.state.parkRow = unparked;
+      h.state.moduleRows = on;
+      await processTaskJob(job(stepId), 'tok');
+      expect(h.state.moduleReads).toBe(2);
+      h.state.moduleReads = 0;
+      await processTaskJob(job('epoch-chain-first'), 'tok');
+      expect(h.state.moduleReads).toBe(0);
     });
   });
 

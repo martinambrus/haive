@@ -12,6 +12,8 @@ const h = vi.hoisted(() => ({
   urgent: { kind: 'missing' } as unknown,
   urgents: [] as unknown[],
   audits: [] as unknown[],
+  publishes: [] as unknown[][],
+  publishImpl: null as null | ((...args: unknown[]) => unknown),
 }));
 
 vi.mock('../src/middleware/auth.js', async (importOriginal) => {
@@ -52,7 +54,15 @@ vi.mock('../src/db.js', () => ({
     },
   }),
 }));
-vi.mock('../src/redis.js', () => ({ getRedis: () => ({ get: async () => null }) }));
+vi.mock('../src/redis.js', () => ({
+  getRedis: () => ({
+    get: async () => null,
+    publish: (...args: unknown[]) => {
+      h.publishes.push(args);
+      return h.publishImpl ? h.publishImpl(...args) : Promise.resolve(1);
+    },
+  }),
+}));
 vi.mock('../src/lib/audit.js', () => ({
   recordAuditEvent: async (_db: unknown, event: unknown) => void h.audits.push(event),
   insertAuditEvent: async (_db: unknown, event: unknown) => void h.audits.push(event),
@@ -146,6 +156,8 @@ beforeEach(() => {
   h.urgent = { kind: 'missing' };
   h.urgents = [];
   h.audits = [];
+  h.publishes = [];
+  h.publishImpl = null;
 });
 
 describe('/m/<id> for a deactivated module', () => {
@@ -384,5 +396,58 @@ describe('PATCH /modules/:id', () => {
         metadata: { moduleId: 'alpha' },
       },
     ]);
+  });
+
+  describe('the activation signal', () => {
+    const activated = { kind: 'ok', deactivatedAt: null };
+    const audited = [expect.objectContaining({ action: 'module.activate' })];
+
+    it('publishes the module id once, before the response, when a module is activated', async () => {
+      h.toggle = activated;
+      const res = await patch('alpha', { active: true });
+      expect(res.status).toBe(200);
+      expect(h.publishes).toEqual([['haive:module-activated', 'alpha']]);
+    });
+
+    it('publishes nothing for a deactivation, an urgent deactivation, a missing module or the 409', async () => {
+      h.toggle = { kind: 'ok', deactivatedAt: new Date('2026-10-14T08:00:00.000Z') };
+      expect((await patch('alpha', { active: false })).status).toBe(200);
+      h.urgent = {
+        kind: 'ok',
+        deactivatedAt: new Date('2026-10-14T08:00:00.000Z'),
+        stopped: [],
+        left: [],
+        failed: [],
+        capped: false,
+      };
+      await patch('alpha', { active: false, mode: 'urgent' });
+      h.toggle = { kind: 'missing' };
+      expect((await patch('ghost', { active: true })).status).toBe(404);
+      h.toggle = { kind: 'open', tasks: [], capped: false };
+      expect((await patch('alpha', { active: true })).status).toBe(409);
+      expect(h.publishes).toEqual([]);
+    });
+
+    it.each<[string, () => unknown]>([
+      [
+        'throws synchronously',
+        () => {
+          throw new Error('redis is not initialised');
+        },
+      ],
+      ['rejects', () => Promise.reject(new Error('connection closed'))],
+      ['never settles', () => new Promise(() => {})],
+    ])('answers 200 and audits when the publish %s', async (_label, impl) => {
+      h.toggle = activated;
+      h.publishImpl = impl;
+      const timeout = new Promise<'timeout'>((resolve) =>
+        setTimeout(() => resolve('timeout'), 1000),
+      );
+      const res = await Promise.race([patch('alpha', { active: true }), timeout]);
+      expect(res).not.toBe('timeout');
+      expect((res as Response).status).toBe(200);
+      expect(h.publishes).toHaveLength(1);
+      expect(h.audits).toEqual(audited);
+    });
   });
 });

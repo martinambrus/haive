@@ -52,7 +52,11 @@ import { resolveGlobalKbSettings } from '@haive/shared/global-kb';
 import { fairPriority } from '@haive/shared/fair-priority';
 import type { CliProviderRecord } from '../cli-adapters/types.js';
 import { getDb } from '../db.js';
-import { moduleDeactivationMessage } from '../modules/activation.js';
+import {
+  moduleDeactivationMessage,
+  moduleSchemaFailedMessage,
+  moduleSchemaWaitMessage,
+} from '../modules/activation.js';
 import { completePlanNodesForTask } from '../plan/task-link.js';
 import { stampRepositoryOnboarded } from '../repo/onboarded.js';
 import { markPlanCodeLinksStale } from '../plan/code-link-staleness.js';
@@ -1285,6 +1289,9 @@ const RUNTIME_PARK_POLL_MS = 15_000;
  *  which is why it is not longer still. */
 const PAUSE_POLL_MS = 30_000;
 
+/** Poll interval for a module step waiting on its module's schema setup on this worker. */
+const MODULE_SCHEMA_POLL_MS = 5_000;
+
 export async function enqueueAdvance(
   taskId: string,
   userId: string,
@@ -1721,6 +1728,19 @@ export async function handleResult(
     return;
   }
   switch (result.status) {
+    case 'deferred': {
+      await enqueueAdvance(
+        ctx.taskId,
+        ctx.userId,
+        stepId,
+        result.row.round,
+        ctx.orchestrationEpoch,
+        {
+          delayMs: MODULE_SCHEMA_POLL_MS,
+        },
+      );
+      return;
+    }
     case 'superseded': {
       // A Retry or Skip took the row over; the pass that replaced this one carries the task. A Stop
       // took it by failing the task, which moves no epoch, and a pass it stopped mid-apply is the
@@ -2374,7 +2394,10 @@ async function handleStartTask(
   // entirely — without this a task created (or retried) while paused would run its whole first
   // step. Hand the first step to the normal advance path instead and let that gate park it,
   // which also gives the task the poll loop it needs to resume itself.
-  if (await resolvePause(db, ctx.taskId)) {
+  if (
+    (await resolvePause(db, ctx.taskId)) ||
+    (await moduleSchemaWaitMessage(db, first.metadata.id)) !== null
+  ) {
     await enqueueAdvance(ctx.taskId, ctx.userId, first.metadata.id, 0, ctx.orchestrationEpoch);
     return;
   }
@@ -2771,9 +2794,32 @@ async function handleAdvanceStep(
   // one returns, so a held task never reaches the admission gate. Deliberately AFTER the
   // terminal/epoch/other-active/duplicate guards — a stale or duplicate advance must still be
   // dropped rather than converted into a second park loop.
-  const pause =
-    existing == null || existing.status === 'pending' ? await resolvePause(db, ctx.taskId) : null;
-  if (pause) {
+  const fresh = existing == null || existing.status === 'pending';
+  const pause = fresh ? await resolvePause(db, ctx.taskId) : null;
+  const schemaWait = pause ? null : await moduleSchemaWaitMessage(db, payload.stepId);
+  if (schemaWait !== null && !fresh) {
+    // A started row keeps its status (a pending park would ask shouldRun again on resume),
+    // so only its advance waits.
+    await enqueueAdvance(ctx.taskId, ctx.userId, payload.stepId, round, ctx.orchestrationEpoch, {
+      delayMs: MODULE_SCHEMA_POLL_MS,
+    });
+    logger.debug(
+      { taskId: ctx.taskId, stepId: payload.stepId, round },
+      'module schema: deferred a continuation (schema setup has not finished)',
+    );
+    return;
+  }
+  const hold = pause
+    ? { message: pauseParkMessage(pause), pollMs: PAUSE_POLL_MS, label: 'pause', scope: pause }
+    : schemaWait !== null
+      ? {
+          message: schemaWait,
+          pollMs: MODULE_SCHEMA_POLL_MS,
+          label: 'module schema',
+          scope: undefined,
+        }
+      : null;
+  if (hold) {
     // Same duplicate-park-loop rule the runtime park uses, and for the same reason: a park
     // re-drives itself on a delayed job, so two advances for one task would each spawn a loop
     // and both tick a wait. Drop only on EVIDENCE that another loop owns the task (the
@@ -2786,13 +2832,13 @@ async function handleAdvanceStep(
     ) {
       await foldAbandonedPark(db, ctx.taskId, payload.stepId, round);
       logger.info(
-        { taskId: ctx.taskId, stepId: payload.stepId, round, scope: pause },
-        'pause: dropped a duplicate park loop (another live step owns this task)',
+        { taskId: ctx.taskId, stepId: payload.stepId, round, scope: hold.scope },
+        `${hold.label}: dropped a duplicate park loop (another live step owns this task)`,
       );
       return;
     }
     const row = await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined);
-    const message = pauseParkMessage(pause);
+    const message = hold.message;
     // `pending` + a live waiting_started_at is the park signature computeStepContribution bills
     // as IDLE, so a hold costs the task no phantom work. deriveSlotWait reads the same shape as
     // a runtime-slot wait, which is why it takes an explicit `paused` flag and returns null.
@@ -2842,7 +2888,7 @@ async function handleAdvanceStep(
     if (!holds) {
       logger.info(
         { taskId: ctx.taskId, stepId: payload.stepId, round },
-        'pause: park dropped (a Retry or a Stop overtook this advance)',
+        `${hold.label}: park dropped (a Retry or a Stop overtook this advance)`,
       );
       return;
     }
@@ -2851,12 +2897,16 @@ async function handleAdvanceStep(
     // off) needs no sweep and no re-drive, because the next tick simply falls through. Delayed
     // BullMQ jobs survive a worker restart, so a hold outlives a redeploy.
     await enqueueAdvance(ctx.taskId, ctx.userId, payload.stepId, round, ctx.orchestrationEpoch, {
-      delayMs: PAUSE_POLL_MS,
+      delayMs: hold.pollMs,
     });
-    logger.info(
-      { taskId: ctx.taskId, stepId: payload.stepId, round, scope: pause },
-      'pause: parked step (task is held)',
-    );
+    const parkedFields = { taskId: ctx.taskId, stepId: payload.stepId, round, scope: hold.scope };
+    if (pause) {
+      logger.info(parkedFields, 'pause: parked step (task is held)');
+    } else if (alreadyParked) {
+      logger.debug(parkedFields, 'module schema: still parked (schema setup has not finished)');
+    } else {
+      logger.info(parkedFields, 'module schema: parked step (schema setup has not finished)');
+    }
     return;
   }
 
@@ -2872,7 +2922,8 @@ async function handleAdvanceStep(
   // A step of a deactivated module asks its shouldRun nothing and takes no slot here;
   // advanceStep fails its row.
   const moduleDeactivation = await moduleDeactivationMessage(db, payload.stepId);
-  const moduleOff = moduleDeactivation !== null;
+  const moduleOff =
+    moduleDeactivation !== null || moduleSchemaFailedMessage(payload.stepId) !== null;
   // A fresh step whose own shouldRun says skip takes no slot, ticket or preemption first.
   const skipsBeforeAdmission =
     !moduleOff &&

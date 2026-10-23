@@ -3,6 +3,7 @@ import { formSchemaSchema } from '../schemas/form.js';
 import { stepLoopLimitsSchema } from '../schemas/tasks.js';
 
 export const MODULES_LOADED_WORKER_KEY = 'haive:modules:loaded:worker';
+export const MODULE_ACTIVATED_CHANNEL = 'haive:module-activated';
 
 export const CORE_STEP_ID_PATTERN = /^[0-9a-z_-]+$/;
 const MODULE_STEP_ID_PATTERN = /^module\.([a-z0-9][a-z0-9-]*)\.([a-z0-9][a-z0-9_-]*)$/;

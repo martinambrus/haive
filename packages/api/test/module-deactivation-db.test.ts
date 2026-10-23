@@ -775,10 +775,15 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       failed: { id: string; title: string; error: string }[];
       capped: boolean;
     };
-    const step = async (taskId: string, stepId: string, status: 'waiting_cli' | 'waiting_form') => {
+    const step = async (
+      taskId: string,
+      stepId: string,
+      status: 'waiting_cli' | 'waiting_form' | 'pending',
+      waitingStartedAt: Date | null = null,
+    ) => {
       const [row] = await db
         .insert(schema.taskSteps)
-        .values({ taskId, stepId, stepIndex: 1, round: 0, title: stepId, status })
+        .values({ taskId, stepId, stepIndex: 1, round: 0, title: stepId, status, waitingStartedAt })
         .returning();
       return row!;
     };
@@ -918,6 +923,25 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
         (await taskAudits()).map((r) => [r.action, r.targetId, r.actorUserId, r.metadata]),
       ).toEqual([['task.admin_stop', a.id, ACTOR, { ownerUserId: userId, moduleId: 'alpha' }]]);
       expect(sorted(h.kills)).toEqual(sorted([a.id, c.id]));
+    });
+
+    it('stops a task parked on a step of the module while its schema is set up, and folds the park as idle', async () => {
+      await db.delete(schema.tasks).where(eq(schema.tasks.id, a.id));
+      const parked = await task({ title: 'Parked', runListSnapshot: ['module.alpha.x'] });
+      await db
+        .update(schema.tasks)
+        .set({ currentStepId: 'module.alpha.x' })
+        .where(eq(schema.tasks.id, parked.id));
+      await step(parked.id, 'module.alpha.x', 'pending', new Date(Date.now() - 90_000));
+      const body = (await (await patchUrgent('alpha')).json()) as Body;
+      expect(body.stopped).toHaveLength(1);
+      expect(body.stopped[0]!.id).toBe(parked.id);
+      const [after] = await observe([parked.id]);
+      expect(after!.steps).toMatchObject([{ status: 'failed', waitingStartedAt: null }]);
+      expect(after!.steps[0]!.idleMs).toBeGreaterThanOrEqual(89_000);
+      expect(after!.events.map((ev) => [ev.eventType, ev.payload])).toMatchObject([
+        ['task.stopped', { reason: 'module_deactivated' }],
+      ]);
     });
 
     it('records on the entry and in the event of a stopped task the instant it failed the task: the stamp the task carries', async () => {

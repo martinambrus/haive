@@ -112,4 +112,16 @@ describe('the module schemas at worker boot', () => {
       /const \{ deactivated, stamps \} = await moduleActivationState\(getDb\(\)\);\s*await moduleJobs\.reconcile\(deactivated, stamps\);/,
     );
   });
+
+  it('runs the reconcile pass through the scheduler and wakes it on an activation', () => {
+    const boot = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+
+    expect(boot).toMatch(
+      /const \{ deactivated, stamps \} = await moduleActivationState\(getDb\(\)\);/,
+    );
+    expect(boot).toMatch(/new ModulePassScheduler\(\{\s*run: reconcileModuleJobs,/);
+    expect(boot).toContain('startModuleActivationWatch(');
+    expect(boot).not.toContain('moduleJobsTimer');
+    expect(boot).not.toContain('let moduleJobsPass');
+  });
 });

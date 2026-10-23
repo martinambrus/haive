@@ -13,6 +13,7 @@ import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
   MODULE_JOBS_RECONCILE_MS,
+  MODULE_SCHEMA_ENSURE_TIMEOUT_MS,
   beginModuleTeardown,
   moduleJobsStarted,
   moduleTeardownRunning,
@@ -132,7 +133,7 @@ export async function runModuleTeardown(
   }
   if (deps.jobsStarted(moduleId)) {
     throw new ModuleTeardownRefusedError(
-      `Module ${moduleId}'s jobs or schema setup are still running on this worker; try again once they have ended. Its jobs normally stop within about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds of the deactivation; a schema setup has no time limit`,
+      `Module ${moduleId}'s jobs or schema setup are still running on this worker; try again once they have ended. Its jobs normally stop within about ${MODULE_JOBS_RECONCILE_MS / 1000} seconds of the deactivation; a schema setup that does not finish is cut off after ${MODULE_SCHEMA_ENSURE_TIMEOUT_MS / 60_000} minutes`,
     );
   }
   if (deps.teardownRunning(moduleId)) {
