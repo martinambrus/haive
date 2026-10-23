@@ -26,7 +26,7 @@ import { setAuthCookies, clearAuthCookies, getRefreshCookie } from '../auth/cook
 import { checkInvite, hashInviteToken } from '../lib/invites.js';
 import { decideRegistration } from '../lib/registration.js';
 import { reserveAuthAttempt } from '../lib/auth-throttle.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuthAllowingPasswordChange } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
 const log = logger.child({ module: 'auth' });
@@ -339,7 +339,7 @@ authRoutes.post('/logout', async (c) => {
   return c.json({ ok: true });
 });
 
-authRoutes.get('/me', requireAuth, async (c) => {
+authRoutes.get('/me', requireAuthAllowingPasswordChange, async (c) => {
   const userId = c.get('userId');
   const db = getDb();
   const fieldKey = await configService.getEncryptionKey();

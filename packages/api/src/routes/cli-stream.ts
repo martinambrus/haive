@@ -320,9 +320,16 @@ async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: stri
     const db = getDb();
     const user = await db.query.users.findFirst({
       where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true },
+      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
     });
-    if (!user || user.status !== 'active' || user.tokenVersion !== payload.tv) return null;
+    if (
+      !user ||
+      user.status !== 'active' ||
+      user.tokenVersion !== payload.tv ||
+      user.mustChangePassword
+    ) {
+      return null;
+    }
     return { userId: user.id };
   } catch {
     return null;
