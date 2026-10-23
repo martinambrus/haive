@@ -366,8 +366,8 @@ Phase 1 (the record):
   a set member added beside a teammate's. A conflicted key keeps its old base, so the next sync
   meets the same conflict until B1.5 asks, and `last_error` names the keys. A refusal writes
   `last_error` only on an existing row: a new row needs a base, and any base record turns the next
-  first import into a conflict. A column the sync creates records `rtkChoiceRecorded: true`, since
-  B follows its live RTK switch, which B0.3 imported from A's tooling.
+  first import into a conflict. A column the sync creates records `rtkChoiceRecorded: true` only when the
+  imported record carries `settings/rtk-enabled.json` (D24, #835); otherwise it records none.
 
   **As built, B1.4c (01 and the banner read the column first).** One order in
   `@haive/shared/project-state` decides for both:
