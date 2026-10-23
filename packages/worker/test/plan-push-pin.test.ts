@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   otherSha: 'b'.repeat(40),
   fail: false,
   empty: false,
+  branch: { code: 0, stdout: 'main', stderr: '' },
   push: vi.fn(),
   advance: vi.fn(),
   recordError: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock('../src/repo/git-push.js', async (original) => ({
         };
       return { code: 0, stdout: h.sha, stderr: '' };
     }
+    if (args.join(' ') === 'branch --show-current') return h.branch;
     return {
       code: 0,
       stdout: args.includes('--is-inside-work-tree') ? 'true' : 'main',
@@ -91,6 +93,7 @@ beforeEach(() => {
   h.switched = false;
   h.fail = false;
   h.empty = false;
+  h.branch = { code: 0, stdout: 'main', stderr: '' };
   h.recordError.mockResolvedValue(undefined);
   h.push.mockResolvedValue({});
   const db = {
@@ -214,5 +217,29 @@ describe('#280 fix5 plan pushes pin the destination branch after a checkout swit
     expect(h.headReads).toBeGreaterThanOrEqual(2);
     expect(h.push).toHaveBeenCalledWith(expect.objectContaining({ sha: h.sha, branch: 'main' }));
     expect(h.advance).toHaveBeenCalledWith(h.db, 'r1', '/repo', h.sha, 'main');
+  });
+});
+
+describe('plan save reads the current branch', () => {
+  it('rejects a failed branch read when pushing', async () => {
+    h.branch = { code: 128, stdout: '', stderr: 'fatal: simulated branch failure' };
+    await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
+      'git branch failed in /repo: fatal: simulated branch failure',
+    );
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it('keeps a saved commit when the branch read fails without a push', async () => {
+    h.branch = { code: 128, stdout: '', stderr: 'fatal: simulated branch failure' };
+    const result = await save({ repositoryId: 'r1', userId: 'u1', push: false });
+    expect(result).toMatchObject({ pushed: false, branch: null });
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it('still calls an empty answer a detached HEAD', async () => {
+    h.branch = { code: 0, stdout: '', stderr: '' };
+    await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
+      'cannot push a plan snapshot from a detached HEAD',
+    );
   });
 });

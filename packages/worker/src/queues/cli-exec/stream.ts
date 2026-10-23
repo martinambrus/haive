@@ -38,7 +38,8 @@ interface StreamJsonCollector {
   getMalformedLineCount: () => number;
   /** Token usage: the result event's usage when present (claude/zai — wins,
    *  never summed with assistant usages), else the sum of the per-message
-   *  assistant usages (amp emits no result usage). Null when nothing reported. */
+   *  assistant usages (amp emits no result usage). Either way peakPromptTokens is the
+   *  largest single message's prompt. Null when nothing reported. */
   getTokenUsage: () => CliTokenUsage | null;
   /** Model time from the LAST `result` event's `duration_api_ms` (cumulative across a steered
    *  run's turns, like its usage). Null when no result event carried one. */
@@ -484,11 +485,21 @@ export function createStreamJsonCollector(
       // The result event's usage is authoritative and already cumulative — prefer
       // it outright. Before it arrives (live snapshots), use the per-message fallback.
       let assistantUsage: CliTokenUsage | null = null;
-      for (const u of assistantUsageByMessage.values())
+      let peakPrompt = 0;
+      for (const u of assistantUsageByMessage.values()) {
         assistantUsage = sumTokenUsage(assistantUsage, u);
+        peakPrompt = Math.max(
+          peakPrompt,
+          u.inputTokens + (u.cacheReadTokens ?? 0) + (u.cacheCreationTokens ?? 0),
+        );
+      }
       const base = resultUsage ?? assistantUsage;
       if (!base) return null;
-      return costUsd !== null ? { ...base, costUsd } : base;
+      return {
+        ...base,
+        ...(costUsd !== null ? { costUsd } : {}),
+        ...(peakPrompt > 0 ? { peakPromptTokens: peakPrompt } : {}),
+      };
     },
   };
 }

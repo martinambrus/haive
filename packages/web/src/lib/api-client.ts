@@ -1813,18 +1813,22 @@ export interface PlanSnapshotHealth {
   snapshotWritten: boolean;
   lastError: string | null;
   filesExist: boolean;
-  gitAvailable: boolean;
-  tracked: boolean;
+  /** null = the git read failed, so nothing is claimed. */
+  gitAvailable: boolean | null;
+  /** null = the git read failed, so nothing is claimed. */
+  tracked: boolean | null;
   /** null = git status failed, so nothing is claimed: committed is false and pushed null. */
   uncommitted: boolean | null;
   committed: boolean;
   /** null = no/freshly unknown upstream; false = local commits are ahead. */
   pushed: boolean | null;
+  /** null = detached HEAD or unread. */
   branch: string | null;
   /** Whether the checkout has an `origin` remote at all. Read from git, not from
    *  the repository row, because git is what push and pull obey. Push and pull
-   *  are HIDDEN without one rather than shown and failing. */
-  hasOrigin: boolean;
+   *  are HIDDEN only when git says there is none (false); null = the read failed,
+   *  nothing is claimed and nothing is hidden. */
+  hasOrigin: boolean | null;
   originUrl: string | null;
 }
 

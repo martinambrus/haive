@@ -8,10 +8,11 @@ const log = logger.child({ module: 'step-context-usage' });
  * Surface B: freeze the step's context-window usage at completion (display-only audit
  * trail pinned to the finished step's title row).
  *
- * Records the PEAK single-invocation prompt-side tokens (input + cacheRead +
- * cacheCreation) over the step's live CLI invocations — NOT the summed tokenUsage the
- * UI shows, which overcounts context across iterations/sub-agents — against the model's
- * context window. The provider/model come from the peak invocation's own cliProviderId.
+ * Records the PEAK prompt-side tokens of any ONE model request over the step's live CLI
+ * invocations (token_usage.peakPromptTokens; a row without it falls back to its stored
+ * input + cacheRead + cacheCreation, a run total that overcounts a multi-turn run) against
+ * the model's context window. The provider/model come from the peak invocation's own
+ * cliProviderId.
  *
  * Best-effort: skips deterministic steps (no CLI invocations -> peak 0 -> columns stay
  * null) and is called inside a .catch() at the finalize so it never fails a step.
@@ -40,7 +41,9 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
     const tu = r.tokenUsage;
     if (!tu) continue;
     const prompt =
-      (tu.inputTokens ?? 0) + (tu.cacheReadTokens ?? 0) + (tu.cacheCreationTokens ?? 0);
+      typeof tu.peakPromptTokens === 'number' && tu.peakPromptTokens > 0
+        ? tu.peakPromptTokens
+        : (tu.inputTokens ?? 0) + (tu.cacheReadTokens ?? 0) + (tu.cacheCreationTokens ?? 0);
     if (prompt > peak) {
       peak = prompt;
       peakProviderId = r.cliProviderId;

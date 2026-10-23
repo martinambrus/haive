@@ -13,6 +13,7 @@ interface Statement {
 const events: string[] = [];
 const statements: Statement[] = [];
 const logs: string[] = [];
+const logFields: Record<string, unknown>[] = [];
 
 function kindOf(text: string): string {
   if (/pg_advisory_unlock\(/.test(text)) return 'unlock';
@@ -56,7 +57,10 @@ const context = (sql: ReturnType<typeof fakeSql>, over: Partial<UpgradeContext> 
     drainDeadlineMs: 0,
     drainPollMs: 1,
     forceDrain: true,
-    log: (event: string) => logs.push(event),
+    log: (event: string, fields?: Record<string, unknown>) => {
+      logs.push(event);
+      logFields.push({ event, ...fields });
+    },
     ...over,
   }) as unknown as UpgradeContext;
 
@@ -74,6 +78,7 @@ beforeEach(() => {
   events.length = 0;
   statements.length = 0;
   logs.length = 0;
+  logFields.length = 0;
   writeFails = false;
   stored = 'draining';
   vi.spyOn(configService, 'set').mockImplementation(async (_key, value) => {
@@ -88,10 +93,79 @@ beforeEach(() => {
 });
 
 describe('phaseDraining', () => {
-  it('writes the draining state while it holds the new-work fence, and counts after it let go', async () => {
+  it('reads the state and writes draining over normal while it holds the new-work fence, and counts after it let go', async () => {
+    stored = 'normal';
+
     await phaseDraining(context(fakeSql()));
 
-    expect(fenceEvents()).toEqual(['lock', 'set:draining', 'unlock', 'count']);
+    expect(fenceEvents()).toEqual(['lock', 'get', 'set:draining', 'unlock', 'count']);
+  });
+
+  it.each(['draining', 'maintenance'])(
+    'reads %s under the fence and writes nothing, and counts after it let go',
+    async (found) => {
+      stored = found;
+
+      await phaseDraining(context(fakeSql()));
+
+      expect(fenceEvents()).toEqual(['lock', 'get', 'unlock', 'count']);
+      expect(stored).toBe(found);
+    },
+  );
+
+  it.each(['normal', 'draining', 'maintenance'])(
+    'logs the draining event with the deadline and the %s state it found',
+    async (found) => {
+      stored = found;
+
+      await phaseDraining(context(fakeSql(), { drainDeadlineMs: 0 }));
+
+      expect(logFields[0]).toEqual({ event: 'draining', deadlineMs: 0, found });
+    },
+  );
+
+  it('waits for live work, and writes nothing, when an administrator chose maintenance and force was chosen', async () => {
+    stored = 'maintenance';
+    const ctx = context(fakeSql(undefined, 1));
+
+    await phaseDraining(ctx);
+
+    expect(stateWrites()).toEqual([]);
+    expect(logFields).toContainEqual({ event: 'drain-forced', live: 1 });
+    expect(ctx.drainForced).toBe(true);
+  });
+
+  it('gives up, and writes nothing, when an administrator chose maintenance, work is live and force was not chosen', async () => {
+    stored = 'maintenance';
+    const ctx = context(fakeSql(undefined, 1), { forceDrain: false, drainDeadlineMs: 0 });
+
+    await expect(phaseDraining(ctx)).rejects.toThrow(
+      '1 task(s) or background job(s) are still live',
+    );
+
+    expect(stateWrites()).toEqual([]);
+    expect(stored).toBe('maintenance');
+  });
+
+  it('keeps maintenance through the draining and maintenance phases when nothing is live', async () => {
+    stored = 'maintenance';
+    const ctx = context(fakeSql(), { forceDrain: false });
+
+    await phaseDraining(ctx);
+    await phaseMaintenance(ctx);
+
+    expect(stateWrites()).toEqual([]);
+    expect(stored).toBe('maintenance');
+    expect(logs).toEqual(['draining', 'drained', 'maintenance']);
+  });
+
+  it('still writes draining once over normal', async () => {
+    stored = 'normal';
+    const ctx = context(fakeSql(), { forceDrain: false });
+
+    await phaseDraining(ctx);
+
+    expect(stateWrites()).toEqual(['set:draining']);
   });
 
   it('takes and releases the fence on one session, on the one key an admission shares', async () => {
@@ -105,14 +179,27 @@ describe('phaseDraining', () => {
   });
 
   it('lets the fence go when the write throws, and counts nothing', async () => {
+    stored = 'normal';
     writeFails = true;
 
     await expect(phaseDraining(context(fakeSql()))).rejects.toThrow('redis down');
 
-    expect(fenceEvents()).toEqual(['lock', 'set:draining', 'unlock']);
+    expect(fenceEvents()).toEqual(['lock', 'get', 'set:draining', 'unlock']);
   });
 
-  it('writes nothing when the fence cannot be taken', async () => {
+  it('lets the fence go when the read throws, and writes and counts nothing', async () => {
+    stored = 'normal';
+    vi.spyOn(configService, 'getFresh').mockImplementation(async () => {
+      events.push('get');
+      throw new Error('redis down');
+    });
+
+    await expect(phaseDraining(context(fakeSql()))).rejects.toThrow('redis down');
+
+    expect(fenceEvents()).toEqual(['lock', 'get', 'unlock']);
+  });
+
+  it('reads and writes nothing when the fence cannot be taken', async () => {
     await expect(phaseDraining(context(fakeSql('lock')))).rejects.toThrow('lock failed');
 
     expect(fenceEvents()).toEqual(['lock']);
@@ -286,9 +373,14 @@ describe('the drain wait, on a clock', () => {
     vi.useFakeTimers();
     taskEndsAt = 0;
     races = 0;
+    let drainRead = false;
     // Three times in a row an administrator chose normal and a task was admitted after the count.
     vi.spyOn(configService, 'getFresh').mockImplementation(async () => {
       events.push('get');
+      if (!drainRead) {
+        drainRead = true;
+        return 'normal';
+      }
       if (races >= 3) return stored;
       races += 1;
       taskEndsAt = Date.now() + 12_000;

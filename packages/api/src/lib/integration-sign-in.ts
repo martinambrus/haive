@@ -18,7 +18,7 @@ import {
 import type { IntegrationProviderSpec } from '@haive/shared/modularity';
 import { HttpError } from '../context.js';
 import type { Database } from '../db.js';
-import { recordAuditEvent } from './audit.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from './audit.js';
 import {
   endpointHost,
   isForgeProvider,
@@ -211,13 +211,31 @@ export async function finishSignIn(input: {
           }),
     };
 
+    const record = async (row: ConnectionRow, created: boolean) => {
+      const event: AuditEvent = {
+        actorUserId: userId,
+        action: created ? 'integration.connection.create' : 'integration.connection.reconnect',
+        targetType: 'integration_connection',
+        targetId: row.id,
+        metadata: {
+          providerId: spec.id,
+          authMethod: method.kind,
+          clientSource: client.source,
+          credentialBacked: credential !== null,
+          ...(credential ? { repoCredentialId: credential.id } : {}),
+        },
+      };
+      await insertAuditEvent(tx, event);
+      return { row, created, credential, event };
+    };
+
     if (existing) {
       const [row] = await tx
         .update(schema.integrationConnections)
         .set(columns)
         .where(eq(schema.integrationConnections.id, existing.id))
         .returning();
-      return { row: row!, created: false, credential };
+      return record(row!, false);
     }
     const [row] = await tx
       .insert(schema.integrationConnections)
@@ -229,21 +247,9 @@ export async function finishSignIn(input: {
         ...columns,
       })
       .returning();
-    return { row: row!, created: true, credential };
+    return record(row!, true);
   });
 
-  await recordAuditEvent(db, {
-    actorUserId: userId,
-    action: written.created ? 'integration.connection.create' : 'integration.connection.reconnect',
-    targetType: 'integration_connection',
-    targetId: written.row.id,
-    metadata: {
-      providerId: spec.id,
-      authMethod: method.kind,
-      clientSource: client.source,
-      credentialBacked: written.credential !== null,
-      ...(written.credential ? { repoCredentialId: written.credential.id } : {}),
-    },
-  });
+  logAuditEvent(written.event);
   return { connection: toConnectionSummary(written.row), credential: written.credential };
 }

@@ -4,6 +4,7 @@ const h = vi.hoisted(() => ({
   db: null as unknown,
   sha: 'a'.repeat(40),
   status: { code: 0, stdout: '', stderr: '' },
+  branch: { code: 0, stdout: 'main', stderr: '' },
   fetch: vi.fn(),
   recordError: vi.fn(),
   recover: vi.fn(),
@@ -21,7 +22,7 @@ vi.mock('../src/repo/git-push.js', async (original) => ({
       return { code: 0, stdout: 'true', stderr: '' };
     }
     if (args.join(' ') === 'branch --show-current') {
-      return { code: 0, stdout: 'main', stderr: '' };
+      return h.branch;
     }
     if (args.join(' ') === 'rev-parse HEAD') return { code: 0, stdout: h.sha, stderr: '' };
     return { code: 0, stdout: '', stderr: '' };
@@ -59,6 +60,7 @@ import { pull } from '../src/queues/plan-mirror-queue.js';
 beforeEach(() => {
   vi.clearAllMocks();
   h.status = { code: 0, stdout: '', stderr: '' };
+  h.branch = { code: 0, stdout: 'main', stderr: '' };
   h.fetch.mockResolvedValue(undefined);
   h.recordError.mockResolvedValue(undefined);
   h.recover.mockImplementation(async (...a: unknown[]) => {
@@ -117,5 +119,29 @@ describe('plan pull reads the whole-checkout git status', () => {
       /^this checkout has uncommitted changes; commit or discard them first$/,
     );
     expect(h.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('plan pull reads the current branch', () => {
+  it.each([
+    [
+      { code: 128, stderr: 'fatal: simulated branch failure', stdout: '' },
+      'fatal: simulated branch failure',
+    ],
+    [{ code: 1, stderr: '', stdout: 'detail on stdout' }, 'detail on stdout'],
+  ])('refuses to pull when branch fails: %j', async (branch, output) => {
+    h.branch = branch;
+    await expect(pull({ repositoryId: 'r1', userId: 'u1' })).rejects.toThrow(
+      `git branch failed in /repo: ${output}`,
+    );
+    expect(h.fetch).not.toHaveBeenCalled();
+    expect(h.recordError).toHaveBeenCalledTimes(1);
+  });
+
+  it('still calls an empty answer a detached HEAD', async () => {
+    h.branch = { code: 0, stdout: '', stderr: '' };
+    await expect(pull({ repositoryId: 'r1', userId: 'u1' })).rejects.toThrow(
+      'cannot pull onto a detached HEAD',
+    );
   });
 });

@@ -1,5 +1,18 @@
 import path from 'node:path';
-import { readFileNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import type {
+  CommitDiffArtifact,
+  CommitDiffFile,
+  CommitDiffLink,
+  CommitDiffStatus,
+} from '@haive/shared/commit-diff-artifact';
+import {
+  lstatNoFollow,
+  openDirNoFollow,
+  readFileNoFollow,
+  readLinkNoFollow,
+  removeNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
 /** Runs git in `cwd` and returns stdout/stderr/exit code. Matches the gitRun
@@ -24,42 +37,6 @@ export const MAX_FILES = 500;
 // keep their metadata but drop content (truncated) so a pathological diff can't
 // produce a multi-hundred-MB artifact.
 export const TOTAL_CONTENT_BUDGET = 16 * 1024 * 1024;
-
-export type CommitDiffStatus = 'added' | 'modified' | 'deleted' | 'renamed';
-
-export interface CommitDiffFile {
-  /** Repo-relative path (the new path for renames). */
-  path: string;
-  /** Source path, present only for renames. */
-  oldPath?: string;
-  status: CommitDiffStatus;
-  /** Either side is binary; content omitted. */
-  binary: boolean;
-  /** Either side exceeded the size cap or the total budget; content omitted. */
-  truncated: boolean;
-  /** A side could not be read: git exited non-zero or the working file could not be opened;
-   *  contents are omitted. Absent means both sides were read. */
-  unreadable?: boolean;
-  oldContent: string;
-  newContent: string;
-  /** Absolute path the web viewer may WRITE this file's new side back to, via
-   *  `PUT /tasks/:id/files/content`. Set only by builders whose gate offers
-   *  inline editing (the knowledge diff); absent means the file renders
-   *  read-only, which is every file of the gate-3 commit diff. Points at the
-   *  real worktree file for an on-disk change, and at a `.haive/` staging file
-   *  for a draft the step has not written yet — the viewer does not care which,
-   *  it just PUTs the path back. */
-  editPath?: string;
-}
-
-export interface CommitDiffArtifact {
-  headSha: string | null;
-  /** Total changed files detected (may exceed files.length when capped). */
-  fileCount: number;
-  /** File list was capped at MAX_FILES. */
-  truncated: boolean;
-  files: CommitDiffFile[];
-}
 
 export interface CommitDiffResult {
   /** In-memory snapshot for callers that also need to describe the pending commit. */
@@ -117,6 +94,78 @@ function classify(e: PorcelainEntry): CommitDiffStatus {
   return 'modified';
 }
 
+const GITLINK_MODE = '160000';
+const HEAD_ENTRY = /^(\d{6}) \w+ ([0-9a-f]{40,64}) +(\d+|-)\t/;
+const INDEX_GITLINK = /^160000 ([0-9a-f]{40,64}) 0\t/;
+
+const subprojectText = (commit: string): string => `Subproject commit ${commit}\n`;
+const literal = (rel: string): string => `:(literal)${rel}`;
+
+/** What HEAD holds at `rel`: mode, object id and a blob's size; null when git lists none. */
+async function headEntry(
+  gitRun: GitRun,
+  cwd: string,
+  rel: string,
+): Promise<{ mode: string; id: string; size: number | null } | null> {
+  const res = await gitRun(cwd, ['ls-tree', '-l', '-z', 'HEAD', '--', literal(rel)]);
+  const match = res.code === 0 ? HEAD_ENTRY.exec(res.stdout) : null;
+  if (match === null) return null;
+  return {
+    mode: match[1] ?? '',
+    id: match[2] ?? '',
+    size: match[3] === '-' ? null : Number(match[3]),
+  };
+}
+
+/** The commit the index pins for the submodule at `rel`; null when that is no gitlink. */
+async function stagedCommit(gitRun: GitRun, cwd: string, rel: string): Promise<string | null> {
+  const res = await gitRun(cwd, ['ls-files', '-s', '-z', '--', literal(rel)]);
+  if (res.code !== 0) return null;
+  for (const record of res.stdout.split('\0')) {
+    const match = INDEX_GITLINK.exec(record);
+    if (match !== null) return match[1] ?? null;
+  }
+  return null;
+}
+
+/** The commit the submodule at `rel` has checked out, asked of a held descriptor on its directory
+ *  so that a name swapped after the check cannot point git at another repository. */
+async function checkedOutCommit(
+  gitRun: GitRun,
+  workspacePath: string,
+  rel: string,
+): Promise<string | null> {
+  const wa = workspaceAnchor(workspacePath);
+  const dir = await openDirNoFollow(wa.anchor, `${wa.prefix}${rel}`).catch(() => null);
+  if (dir === null) return null;
+  try {
+    const res = await gitRun(`/proc/self/fd/${dir.fd}`, ['rev-parse', 'HEAD']);
+    return res.code === 0 ? res.stdout.trim() : null;
+  } finally {
+    await dir.close().catch(() => undefined);
+  }
+}
+
+/** A link's target, or the commit a submodule is at; null when the path is neither. */
+async function readLinkSide(
+  workspacePath: string,
+  gitRun: GitRun,
+  e: PorcelainEntry,
+): Promise<{ link: CommitDiffLink; text: string } | null> {
+  const wa = workspaceAnchor(workspacePath);
+  const rel = `${wa.prefix}${e.path}`;
+  const target = await readLinkNoFollow(wa.anchor, rel);
+  if (target !== null) return { link: 'symlink', text: target };
+  if ((await lstatNoFollow(wa.anchor, rel))?.kind !== 'directory') return null;
+  const staged = await stagedCommit(gitRun, workspacePath, e.path);
+  if (staged === null) return null;
+  // Y = M (checkout ahead of the index) or A (intent to add: the empty blob) means a repository is
+  // checked out; git run in an uninitialised submodule's empty directory reports the superproject.
+  const commit =
+    e.y === 'M' || e.y === 'A' ? await checkedOutCommit(gitRun, workspacePath, e.path) : staged;
+  return commit === null ? null : { link: 'gitlink', text: subprojectText(commit) };
+}
+
 export async function buildFileEntry(
   workspacePath: string,
   gitRun: GitRun,
@@ -128,19 +177,26 @@ export async function buildFileEntry(
   const oldRef = status === 'renamed' && e.oldPath ? e.oldPath : e.path;
 
   let unreadable = false;
+  let link: CommitDiffLink | undefined;
   let newContent = '';
   let newBinary = false;
   let newTooBig = false;
   if (status !== 'deleted') {
     // One capped read from the verified descriptor, where it used to be `stat` by path and then
     // `readFile` by the same path — two resolutions of a name git reported, in a tree the agents
-    // write. A link, a FIFO or a vanished file is flagged unreadable.
+    // write. A FIFO or a vanished file is flagged unreadable; a link is read for what it points at.
     const wa = workspaceAnchor(workspacePath);
     const read = await readFileNoFollow(wa.anchor, `${wa.prefix}${e.path}`, {
       maxBytes: PER_FILE_CONTENT_CAP + 1,
     });
     if (read === null) {
-      unreadable = true;
+      const side = await readLinkSide(workspacePath, gitRun, e);
+      if (side === null) {
+        unreadable = true;
+      } else {
+        link = side.link;
+        newContent = side.text;
+      }
     } else {
       if (read.size > PER_FILE_CONTENT_CAP) {
         newTooBig = true;
@@ -155,21 +211,20 @@ export async function buildFileEntry(
   let oldBinary = false;
   let oldTooBig = false;
   if (needsOld) {
-    const sizeRes = await gitRun(workspacePath, ['cat-file', '-s', `HEAD:${oldRef}`]);
-    if (sizeRes.code !== 0) {
+    const entry = await headEntry(gitRun, workspacePath, oldRef);
+    if (entry?.mode === GITLINK_MODE) {
+      oldContent = subprojectText(entry.id);
+    } else if (entry === null || entry.size === null) {
       unreadable = true;
+    } else if (entry.size > PER_FILE_CONTENT_CAP) {
+      oldTooBig = true;
     } else {
-      const size = Number.parseInt(sizeRes.stdout.trim(), 10);
-      if (Number.isFinite(size) && size > PER_FILE_CONTENT_CAP) {
-        oldTooBig = true;
+      const show = await gitRun(workspacePath, ['show', `HEAD:${oldRef}`]);
+      if (show.code !== 0) {
+        unreadable = true;
       } else {
-        const show = await gitRun(workspacePath, ['show', `HEAD:${oldRef}`]);
-        if (show.code !== 0) {
-          unreadable = true;
-        } else {
-          oldBinary = show.stdout.includes('\u0000');
-          if (!oldBinary) oldContent = show.stdout;
-        }
+        oldBinary = show.stdout.includes('\u0000');
+        if (!oldBinary) oldContent = show.stdout;
       }
     }
   }
@@ -192,6 +247,7 @@ export async function buildFileEntry(
   };
   if (status === 'renamed' && e.oldPath) file.oldPath = e.oldPath;
   if (unreadable) file.unreadable = true;
+  if (link) file.link = link;
   return file;
 }
 
@@ -199,7 +255,7 @@ export async function buildFileEntry(
  *  `<workspacePath>/.haive/gate3-diff.json`. The changed-file set comes from
  *  `git status --porcelain -z --untracked-files=all` (the exact set `git add -A` will commit,
  *  including untracked files that `git diff HEAD` omits). Old content is read
- *  from the HEAD blob, new content from the working tree. */
+ *  from the HEAD blob (a submodule's from its tree entry), new content from the working tree. */
 export async function buildCommitDiffArtifact(
   workspacePath: string,
   gitRun: GitRun,

@@ -164,12 +164,12 @@ export default function MaintenancePage() {
             <button
               key={s.value}
               type="button"
-              disabled={busy || state === s.value}
+              disabled={busy || liveRun !== null || state === s.value}
               onClick={() => void changeState(s.value)}
               className={`rounded-lg border p-3 text-left transition ${
                 state === s.value
                   ? 'border-indigo-500 bg-indigo-950/30'
-                  : 'border-neutral-800 hover:border-neutral-700'
+                  : 'border-neutral-800 enabled:hover:border-neutral-700 disabled:opacity-60'
               } disabled:cursor-default`}
             >
               <div className="text-sm font-medium text-neutral-100">{s.label}</div>
@@ -177,6 +177,14 @@ export default function MaintenancePage() {
             </button>
           ))}
         </div>
+        {liveRun ? (
+          <p className="text-xs text-amber-400">
+            An upgrade to {liveRun.to_version} is running (phase {liveRun.phase}), so the system
+            state is held by the updater and cannot be changed here. If the updater has stopped, run{' '}
+            <code className="text-amber-300">./haive upgrade --version {liveRun.to_version}</code>{' '}
+            in the install directory to finish or undo it.
+          </p>
+        ) : null}
       </Card>
 
       <Card className="space-y-4 p-5">
