@@ -16,7 +16,7 @@ import {
   PROJECT_STATE_DIR,
   ProjectStateError,
   RENDER_UNIT,
-  RTK_ENABLED_UNIT,
+  isRtkQuestion,
   claimFileName,
   claimSchema,
   conflictBody,
@@ -717,7 +717,7 @@ async function answerInTransaction(
       .limit(1);
     if (live.length > 0) return { kind: 'busy' };
 
-    if (row.unit === RTK_ENABLED_UNIT) {
+    if (isRtkQuestion(row)) {
       return answerRtkQuestion(tx, { repositoryId, userId, answer, row });
     }
 
