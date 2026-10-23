@@ -38,6 +38,8 @@ import { refreshProjectState } from './refresh.js';
 import {
   readProjectStateBase,
   rebaseProjectStateOnHeadLocked,
+  readHeadRecord,
+  type HeadRecord,
   syncProjectStateFromCheckout,
 } from './sync.js';
 import {
@@ -537,6 +539,7 @@ const stateGuard = (
   repositoryId: string,
   repoPath: string,
   state: readonly string[],
+  head: HeadRecord,
   fence?: CheckoutFence,
 ): RestoreGuard => ({
   owns: (path) => path.startsWith(STATE_PREFIX),
@@ -544,7 +547,7 @@ const stateGuard = (
   judgeLock: (tx) => lockProjectState(tx, repositoryId),
   offender: (tx) => stateOffender(tx, repositoryId, repoPath, state),
   mark: (tx) => markProjectStateDirty(tx, repositoryId),
-  base: (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath }),
+  base: (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath, head }),
   generation: (tx) => readProjectStateBase(tx, repositoryId),
   fence,
 });
@@ -756,14 +759,15 @@ async function setAsideOnce(
   if (early) return refuse(early, NOT_HAIVE);
 
   if (state.length > 0) {
+    const head = await readHeadRecord(repoPath);
     const stopped = await setAsideDomain(
       db,
       repoPath,
       state,
-      stateGuard(repositoryId, repoPath, state, fence),
+      stateGuard(repositoryId, repoPath, state, head, fence),
       kept,
       section,
-      (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath }),
+      (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath, head }),
     );
     if (stopped) return stopped;
     for (const path of state) restored.add(path);

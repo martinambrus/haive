@@ -1974,6 +1974,50 @@ async function main(): Promise<void> {
           isDeepEqual(after?.acceptedAgentIds, ['a', 'b']),
         { thrown: String(k3.thrown), col: k3.col, disk: k3.disk, moved, after },
       );
+
+      // K4: the record of HEAD is read whole once, before the first transaction; the transactions only
+      // check HEAD is unmoved, so no tree listing or blob read runs while they hold their locks.
+      {
+        const shimDir = await mkdtemp(path.join(tmpdir(), 'git-shim-'));
+        const gitLog = path.join(shimDir, 'git.log');
+        await writeFile(
+          path.join(shimDir, 'git'),
+          `#!/bin/sh\nprintf '%s\\n' "$*" >> "${gitLog}"\nexec /usr/bin/git "$@"\n`,
+        );
+        await chmod(path.join(shimDir, 'git'), 0o755);
+        const k4 = await withPendingRender();
+        const mark = (name: string) => writeFile(gitLog, `MARK ${name}\n`, { flag: 'a' });
+        const originalPath = process.env.PATH;
+        process.env.PATH = `${shimDir}:${originalPath}`;
+        restoreFaults.afterJudgeFence = () => mark('judge');
+        restoreFaults.afterBase = () => mark('base');
+        restoreFaults.afterRestore = () => mark('restore');
+        let k4Out: unknown;
+        try {
+          k4Out = await setAsideHaiveProjections(db, k4.payload.repositoryId, k4.dest);
+        } finally {
+          process.env.PATH = originalPath;
+          delete restoreFaults.afterJudgeFence;
+          delete restoreFaults.afterBase;
+          delete restoreFaults.afterRestore;
+        }
+        const lines = (await readFile(gitLog, 'utf8')).split('\n');
+        const at = (m: string) => lines.indexOf(`MARK ${m}`);
+        const recordReads = (from: number, to: number) =>
+          lines
+            .slice(from, to)
+            .filter((l) => /cat-file blob [0-9a-f]{40,}$/.test(l) || /ls-tree -r /.test(l)).length;
+        check(
+          "K4: a set-aside reads HEAD's record before its first transaction and none inside either one",
+          (k4Out as { outcome?: string }).outcome === 'set-aside' &&
+            at('judge') > 0 &&
+            at('restore') > at('judge') &&
+            recordReads(0, at('judge')) > 0 &&
+            recordReads(at('judge'), lines.length) === 0,
+          { k4Out, lines: lines.slice(0, 80) },
+        );
+        await rm(shimDir, { recursive: true, force: true });
+      }
     }
 
     // 11l. A foreign edit staged in the index is not Haive's to discard, even when the working tree has
