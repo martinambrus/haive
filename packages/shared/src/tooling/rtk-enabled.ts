@@ -1,4 +1,4 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import { RTK_ENABLED_UNIT } from '../project-state/conflicts.js';
 
@@ -24,6 +24,7 @@ export async function convergeRtkQuestion(
         eq(schema.projectStateConflicts.repositoryId, repositoryId),
         eq(schema.projectStateConflicts.unit, RTK_ENABLED_UNIT),
         isNull(schema.projectStateConflicts.resolvedAt),
+        sql`${schema.projectStateConflicts.base} IS NOT DISTINCT FROM ${schema.projectStateConflicts.local}`,
       ),
     );
 }
