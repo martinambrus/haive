@@ -249,6 +249,8 @@ export function withRulesState<T extends { rulesContent: string }>(
   return { ...row, rulesInherited: inheritsDefaultRules(row.rulesContent) };
 }
 
+cliProviderRoutes.use('*', requireAuth);
+
 cliProviderRoutes.get('/catalog', async (c) => {
   const db = getDb();
   const versionRows = await db.query.cliPackageVersions.findMany();
@@ -286,11 +288,7 @@ cliProviderRoutes.post('/catalog/:name/refresh-versions', async (c) => {
   return c.json({ jobId: job.id }, 202);
 });
 
-/** Poll target for a refresh queued by POST /catalog/:name/refresh-versions.
- *
- *  Registered alongside its POST — i.e. ahead of the `requireAuth` middleware below — so the
- *  pair keeps the posture the catalog routes already have. It exposes nothing that the public
- *  GET /catalog does not. */
+/** Poll target for a refresh queued by POST /catalog/:name/refresh-versions. */
 cliProviderRoutes.get('/catalog/:name/refresh-versions/:jobId', async (c) => {
   const name = cliProviderNameSchema.parse(c.req.param('name'));
   const jobId = c.req.param('jobId');
@@ -320,14 +318,11 @@ cliProviderRoutes.get('/catalog/:name/refresh-versions/:jobId', async (c) => {
   return c.json({ status: 'done', entry });
 });
 
-cliProviderRoutes.use('*', requireAuth);
-
 /** The cached OpenRouter model catalog, for the provider form's model picker.
  *
- *  Behind requireAuth and deliberately NOT folded into GET /catalog: that route is
- *  registered ahead of the auth middleware and is fetched on every settings page
- *  load, so adding 400+ models with pricing to it would be a large public payload
- *  on a request that does not need it.
+ *  Deliberately NOT folded into GET /catalog: that route is fetched on every settings
+ *  page load, so adding 400+ models with pricing to it would be a large payload on a
+ *  request that does not need it.
  *
  *  Degrades rather than fails. A missing row (never refreshed) answers with an empty
  *  list and a null fetchedAt, and the form falls back to a free-text model field —
