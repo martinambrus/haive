@@ -246,6 +246,76 @@ describe('the deadline on a module schema setup', () => {
     expect(moduleJobsStarted(id)).toBe(false);
   });
 
+  const slowClose = () => {
+    let release!: () => void;
+    moduleDb.closed.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+    return () => release();
+  };
+
+  it('rejects a boot schema setup that settles while the expired close is still pending', async () => {
+    const id = 'deadline-close-window-boot';
+    const m = fresh(id);
+    const release = slowClose();
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const ensuring = ensureModuleSchemas({} as Database, [m.loaded], [m.entry], new Set());
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+    expect(await ensuring).toEqual({ [id]: 'pending' });
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+
+    m.end().resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    release();
+    await vi.advanceTimersByTimeAsync(DRAIN_MS);
+
+    expect(moduleSchemaUnready(id)).toBe(true);
+    expect(moduleJobsStarted(id)).toBe(false);
+  });
+
+  it('rejects a pass schema setup that settles while the expired close is still pending', async () => {
+    const id = 'deadline-close-window-pass';
+    const m = fresh(id);
+    markModuleSchemaUnready(id);
+    const release = slowClose();
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+    const pass = track(reconcile(new Set()));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+    expect(pass.settled).toBe(true);
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+
+    m.end().resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    release();
+    await vi.advanceTimersByTimeAsync(DRAIN_MS);
+
+    expect(moduleSchemaUnready(id)).toBe(true);
+    expect(moduleJobsStarted(id)).toBe(false);
+  });
+
+  it('rejects a schema setup whose database opens after the deadline and closes later', async () => {
+    const id = 'deadline-late-open-reject';
+    const m = fresh(id, 'never');
+    const release = slowClose();
+    let openGate!: () => void;
+    moduleDb.gate = new Promise<void>((resolve) => (openGate = resolve));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const ensuring = ensureModuleSchemas({} as Database, [m.loaded], [m.entry], new Set());
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+    expect(await ensuring).toEqual({ [id]: 'pending' });
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+
+    openGate();
+    await vi.advanceTimersByTimeAsync(0);
+    release();
+    await vi.advanceTimersByTimeAsync(DRAIN_MS);
+
+    expect(m.ensure).not.toHaveBeenCalled();
+    expect(moduleSchemaUnready(id)).toBe(true);
+    expect(moduleJobsStarted(id)).toBe(false);
+  });
+
   it('leaves no timer and no warning behind a schema setup that ends in time', async () => {
     const id = 'deadline-in-time';
     const m = fresh(id, 'never');

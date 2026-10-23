@@ -173,26 +173,24 @@ async function bootstrapModuleSchema(
     closing ??= opened.close();
     return closing;
   };
+  const expiredError = () =>
+    new Error(
+      `the schema setup did not finish within ${Math.round(MODULE_SCHEMA_ENSURE_TIMEOUT_MS / 1000)} s`,
+    );
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       expired = true;
       void closeOnce()
         .catch(() => undefined)
-        .then(() =>
-          reject(
-            new Error(
-              `the schema setup did not finish within ${Math.round(MODULE_SCHEMA_ENSURE_TIMEOUT_MS / 1000)} s`,
-            ),
-          ),
-        );
+        .then(() => reject(expiredError()));
     }, MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
   });
   const body = (async () => {
     opened = await openModuleDatabase(db, moduleId);
     if (expired) {
       await closeOnce();
-      return;
+      throw expiredError();
     }
     try {
       await ensureSchema({
@@ -206,6 +204,7 @@ async function bootstrapModuleSchema(
   })();
   try {
     await Promise.race([body, deadline]);
+    if (expired) throw expiredError();
   } catch (err) {
     throw new Error(
       `Module ${moduleId} schema bootstrap failed: ${err instanceof Error ? err.message : String(err)}`,
