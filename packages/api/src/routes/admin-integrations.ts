@@ -11,7 +11,7 @@ import {
 } from '@haive/shared/integrations';
 import type { IntegrationProviderSpec } from '@haive/shared/modularity';
 import { getDb } from '../db.js';
-import { recordAuditEvent } from '../lib/audit.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import {
   listAdminDefaults,
   removePreference,
@@ -94,15 +94,7 @@ adminIntegrationRoutes.put('/providers/:id', async (c) => {
     Object.assign(changes, await secretColumns(body.oauthClientSecret));
   }
 
-  // A new row takes the provider's current default, not the column's FALSE, so a save that
-  // only sets a client id leaves a core provider enabled.
-  const [saved] = await db
-    .insert(schema.integrationProviderConfigs)
-    .values({ providerId: spec.id, enabled: defaultProviderEnabled(spec.id), ...changes })
-    .onConflictDoUpdate({ target: schema.integrationProviderConfigs.providerId, set: changes })
-    .returning();
-
-  await recordAuditEvent(db, {
+  const audit: AuditEvent = {
     actorUserId: userId,
     action: 'integration.provider_config.update',
     targetType: 'integration_provider_config',
@@ -112,7 +104,20 @@ adminIntegrationRoutes.put('/providers/:id', async (c) => {
       oauthClientIdChanged: body.oauthClientId !== undefined,
       oauthClientSecretChanged: body.oauthClientSecret !== undefined,
     },
+  };
+
+  // A new row takes the provider's current default, not the column's FALSE, so a save that
+  // only sets a client id leaves a core provider enabled.
+  const saved = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .insert(schema.integrationProviderConfigs)
+      .values({ providerId: spec.id, enabled: defaultProviderEnabled(spec.id), ...changes })
+      .onConflictDoUpdate({ target: schema.integrationProviderConfigs.providerId, set: changes })
+      .returning();
+    await insertAuditEvent(tx, audit);
+    return row;
   });
+  logAuditEvent(audit);
   return c.json({ provider: providerJson(spec, saved) });
 });
 
@@ -126,18 +131,21 @@ adminIntegrationRoutes.put('/defaults/:categoryId', async (c) => {
   const userId = c.get('userId');
   const db = getDb();
 
-  if (providerId === null) {
-    await removePreference(db, null, categoryId);
-  } else {
-    await requireValidChoice(db, userId, { categoryId, providerId, connectionId: null });
-    await upsertPreference(db, { userId: null, categoryId, providerId, connectionId: null });
-  }
-
-  await recordAuditEvent(db, {
+  const audit: AuditEvent = {
     actorUserId: userId,
     action: 'integration.category_default.update',
     targetType: 'integration_category_default',
     metadata: { categoryId, providerId },
+  };
+
+  if (providerId !== null) {
+    await requireValidChoice(db, userId, { categoryId, providerId, connectionId: null });
+  }
+  await db.transaction(async (tx) => {
+    if (providerId === null) await removePreference(tx, null, categoryId);
+    else await upsertPreference(tx, { userId: null, categoryId, providerId, connectionId: null });
+    await insertAuditEvent(tx, audit);
   });
+  logAuditEvent(audit);
   return c.json({ categoryId, providerId });
 });

@@ -16,7 +16,7 @@ import {
 import type { IntegrationProviderSpec } from '@haive/shared/modularity';
 import { HttpError } from '../context.js';
 import type { Database } from '../db.js';
-import { recordAuditEvent } from './audit.js';
+import { insertAuditEvent, logAuditEvent, recordAuditEvent, type AuditEvent } from './audit.js';
 import { isForgeProvider, requireEnabled, revokeUrlOf } from './integration-provider.js';
 import { toConnectionSummary, type ConnectionRow } from './integration-sign-in.js';
 
@@ -118,6 +118,8 @@ export async function disconnectConnection(
   if (removed.ownsToken) {
     revoked = removed.tokens ? await revokeAtVendor(db, removed.row, removed.tokens) : 'no';
   }
+  // Best effort on purpose: the vendor revoke above cannot be undone, so a failed row must not
+  // fail the disconnect.
   await recordAuditEvent(db, {
     actorUserId: userId,
     action: 'integration.connection.disconnect',
@@ -162,30 +164,35 @@ export async function linkCredential(
     throw new HttpError(400, `This is not a ${spec.displayName} credential (${credential.host})`);
   }
   try {
-    const [row] = await db
-      .insert(schema.integrationConnections)
-      .values({
-        providerId: spec.id,
-        scope: 'user',
-        ownerUserId: userId,
-        accountLabel: credential.label,
-        authMethod: 'token',
-        repoCredentialId: credential.id,
-      })
-      .returning();
-    await recordAuditEvent(db, {
-      actorUserId: userId,
-      action: 'integration.connection.create',
-      targetType: 'integration_connection',
-      targetId: row!.id,
-      metadata: {
-        providerId: spec.id,
-        authMethod: 'token',
-        credentialBacked: true,
-        repoCredentialId: credential.id,
-      },
+    const { row, audit } = await db.transaction(async (tx) => {
+      const [inserted] = await tx
+        .insert(schema.integrationConnections)
+        .values({
+          providerId: spec.id,
+          scope: 'user',
+          ownerUserId: userId,
+          accountLabel: credential.label,
+          authMethod: 'token',
+          repoCredentialId: credential.id,
+        })
+        .returning();
+      const event: AuditEvent = {
+        actorUserId: userId,
+        action: 'integration.connection.create',
+        targetType: 'integration_connection',
+        targetId: inserted!.id,
+        metadata: {
+          providerId: spec.id,
+          authMethod: 'token',
+          credentialBacked: true,
+          repoCredentialId: credential.id,
+        },
+      };
+      await insertAuditEvent(tx, event);
+      return { row: inserted!, audit: event };
     });
-    return toConnectionSummary(row!);
+    logAuditEvent(audit);
+    return toConnectionSummary(row);
   } catch (err) {
     if (isUniqueViolationOf(err, REPO_CREDENTIAL_KEY_INDEX)) {
       throw new HttpError(409, 'This Git credential is already a connection');
@@ -200,17 +207,21 @@ export async function setWriteSwitch(
   spec: IntegrationProviderSpec,
   writeEnabled: boolean,
 ): Promise<void> {
-  await db
-    .insert(schema.integrationUserSettings)
-    .values({ userId, providerId: spec.id, writeEnabled })
-    .onConflictDoUpdate({
-      target: [schema.integrationUserSettings.userId, schema.integrationUserSettings.providerId],
-      set: { writeEnabled, updatedAt: new Date() },
-    });
-  await recordAuditEvent(db, {
+  const audit: AuditEvent = {
     actorUserId: userId,
     action: 'integration.write_switch',
     targetType: 'integration_provider',
     metadata: { providerId: spec.id, writeEnabled },
+  };
+  await db.transaction(async (tx) => {
+    await tx
+      .insert(schema.integrationUserSettings)
+      .values({ userId, providerId: spec.id, writeEnabled })
+      .onConflictDoUpdate({
+        target: [schema.integrationUserSettings.userId, schema.integrationUserSettings.providerId],
+        set: { writeEnabled, updatedAt: new Date() },
+      });
+    await insertAuditEvent(tx, audit);
   });
+  logAuditEvent(audit);
 }

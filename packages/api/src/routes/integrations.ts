@@ -20,7 +20,7 @@ import {
 import { CORE_INTEGRATION_CATEGORY_SPECS } from '@haive/shared/modularity';
 import { requireAuth } from '../middleware/auth.js';
 import { getDb } from '../db.js';
-import { recordAuditEvent } from '../lib/audit.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import {
   listAdminDefaults,
   removePreference,
@@ -98,17 +98,27 @@ integrationsRoutes.get('/github', async (c) => {
 integrationsRoutes.put('/github', async (c) => {
   const userId = c.get('userId');
   const clientId = putGithubSchema.parse(await c.req.json()).clientId.trim();
-  if (clientId.length === 0) {
-    await userSecretsService.delete(userId, GITHUB_CLIENT_ID_KEY);
-  } else {
-    await userSecretsService.set(userId, GITHUB_CLIENT_ID_KEY, clientId, 'GitHub OAuth Client ID');
-  }
-  await recordAuditEvent(getDb(), {
+  const audit: AuditEvent = {
     actorUserId: userId,
     action: 'integration.github_client.update',
     targetType: 'integration_provider',
     metadata: { clientIdSet: clientId.length > 0 },
+  };
+  await getDb().transaction(async (tx) => {
+    if (clientId.length === 0) {
+      await userSecretsService.delete(userId, GITHUB_CLIENT_ID_KEY, tx);
+    } else {
+      await userSecretsService.set(
+        userId,
+        GITHUB_CLIENT_ID_KEY,
+        clientId,
+        'GitHub OAuth Client ID',
+        tx,
+      );
+    }
+    await insertAuditEvent(tx, audit);
   });
+  logAuditEvent(audit);
   return c.json({ ok: true });
 });
 
