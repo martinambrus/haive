@@ -14,6 +14,7 @@ import {
   getOllamaModelPlacement,
   hashEmbed,
   ollamaEmbed,
+  probeOllama,
   resolveEmbedBudget,
 } from './embed.js';
 
@@ -184,5 +185,31 @@ describe('getOllamaModelPlacement', () => {
       }) as unknown as typeof fetch,
     );
     expect(await getOllamaModelPlacement('http://x', 'm')).toBe('unreachable');
+  });
+});
+
+describe('fetchFn parameter', () => {
+  it('probeOllama uses the given fetch', async () => {
+    const seen: string[] = [];
+    const fetchFn = (async (url: string) => {
+      seen.push(url);
+      return new Response('{}');
+    }) as unknown as typeof fetch;
+    expect(await probeOllama('http://o.test', fetchFn)).toBe(true);
+    expect(seen).toEqual(['http://o.test/api/tags']);
+    const failing = (async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+    expect(await probeOllama('http://o.test', failing)).toBe(false);
+  });
+
+  it('ollamaEmbed uses the given fetch', async () => {
+    const fetchFn = (async (url: string) => {
+      expect(url).toBe('http://o.test/api/embed');
+      return new Response(JSON.stringify({ embeddings: [[1, 2]] }));
+    }) as unknown as typeof fetch;
+    expect(await ollamaEmbed('http://o.test', 'm', ['x'], { timeoutMs: 1000, fetchFn })).toEqual([
+      [1, 2],
+    ]);
   });
 });

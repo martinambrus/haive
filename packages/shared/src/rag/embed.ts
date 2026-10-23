@@ -77,9 +77,9 @@ export async function resolveEmbedBudget(): Promise<EmbedBudget> {
 /* Ollama connectivity                                                 */
 /* ------------------------------------------------------------------ */
 
-export async function probeOllama(url: string): Promise<boolean> {
+export async function probeOllama(url: string, fetchFn: typeof fetch = fetch): Promise<boolean> {
   try {
-    const resp = await fetch(`${url}/api/tags`, {
+    const resp = await fetchFn(`${url}/api/tags`, {
       signal: AbortSignal.timeout(5000),
     });
     return resp.ok;
@@ -95,10 +95,10 @@ export async function ollamaEmbed(
   url: string,
   model: string,
   inputs: string[],
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; fetchFn?: typeof fetch } = {},
 ): Promise<number[][]> {
   const timeoutMs = opts.timeoutMs ?? (await resolveEmbedBudget()).embedTimeoutMs;
-  const resp = await fetch(`${url}/api/embed`, {
+  const resp = await (opts.fetchFn ?? fetch)(`${url}/api/embed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, input: inputs, keep_alive: OLLAMA_KEEP_ALIVE }),
