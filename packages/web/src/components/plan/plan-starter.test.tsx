@@ -155,6 +155,44 @@ describe('PlanStarter when the start is refused', () => {
     expect(onNavigate).toHaveBeenCalledWith('/tasks/draft-1');
   });
 
+  it('C5: removing every row after a refused start still starts the same draft', async () => {
+    net.startTask
+      .mockReset()
+      .mockRejectedValueOnce(new Error('the queue is draining'))
+      .mockResolvedValue({ ok: true, started: true, status: 'queued' });
+    const view = await mount();
+    await press(view);
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    for (const name of ['a.md', 'b.md']) {
+      const remove = buttons(view.tree(), `remove ${name}`)[0]!;
+      if (!isDisabled(remove)) fire.click(remove);
+      view.draw();
+    }
+    await press(view);
+
+    expect(net.buildPlan).toHaveBeenCalledTimes(1);
+    expect(net.startTask.mock.calls.map((c) => c[0])).toEqual(['draft-1', 'draft-1']);
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(onNavigate).toHaveBeenCalledWith('/tasks/draft-1');
+  });
+
+  it('C6: a row already attached to the draft cannot be removed or re-described', async () => {
+    net.startTask.mockReset().mockRejectedValue(new Error('the queue is draining'));
+    const view = await mount();
+    await press(view);
+
+    for (const name of ['a.md', 'b.md']) {
+      expect(isDisabled(buttons(view.tree(), `remove ${name}`)[0]!)).toBe(true);
+    }
+    const inputs = findAll(
+      view.tree(),
+      (h) => h.tag === 'input' && h.props.placeholder === 'What is this? (optional)',
+    );
+    expect(inputs).toHaveLength(2);
+    expect(inputs.every((i) => isDisabled(i))).toBe(true);
+  });
+
   it('C4: a refused create leaves no draft, so the next press creates again', async () => {
     net.buildPlan.mockRejectedValueOnce(new Error('no capacity'));
     const view = await mount();
