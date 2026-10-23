@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -858,5 +858,24 @@ describe('10-gate-3-commit persisted changed paths', () => {
     const paths = stored[0]?.changedPaths ?? [];
     expect(paths).toEqual(expect.arrayContaining(['c d.txt', 'é.txt']));
     expect(paths.filter((p) => p.startsWith('"'))).toEqual([]);
+  });
+});
+
+describe('10-gate-3-commit unreadable file', () => {
+  it('withholds the content of a tracked file replaced by a link', async () => {
+    const repo = await seedRepo();
+    await writeFile(path.join(repo, 'a.txt'), 'distinctive-original-text\n');
+    await git(repo, ['add', '-A']);
+    await git(repo, ['commit', '-q', '-m', 'text']);
+    await unlink(path.join(repo, 'a.txt'));
+    await symlink('elsewhere', path.join(repo, 'a.txt'));
+    const detected = await gate3CommitStep.detect!(mkCtx(repo));
+    const context = detected.commitMessageContext!;
+    const entry = (JSON.parse(context).files as { path: string; note?: string }[]).find(
+      (f) => f.path === 'a.txt',
+    );
+
+    expect(entry?.note).toBe('content unavailable');
+    expect(context).not.toContain('distinctive-original-text');
   });
 });

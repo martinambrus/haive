@@ -114,7 +114,8 @@ function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPo
     if (protectedChanged && file.status !== 'deleted') {
       return { ...metadata, note: 'content withheld: a protected file was removed in this change' };
     }
-    if (file.binary || file.truncated) return { ...metadata, note: 'content unavailable' };
+    if (file.binary || file.truncated || file.unreadable)
+      return { ...metadata, note: 'content unavailable' };
     return { ...metadata, ...changedExcerpt(file.oldContent, file.newContent) };
   });
   const text = JSON.stringify({
