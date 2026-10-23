@@ -789,6 +789,7 @@ repoRoutes.post('/upload/:id/complete', requireNewWorkAllowed, async (c) => {
       const [created] = await tx
         .insert(schema.repositories)
         .values({
+          id: row.id,
           userId,
           name: repoName,
           source: 'upload',

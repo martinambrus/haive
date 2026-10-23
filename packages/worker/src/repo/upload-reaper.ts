@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { and, eq, gt, gte, inArray, lt, notExists, notInArray, or } from 'drizzle-orm';
+import { and, eq, gt, gte, inArray, lt, ne, notExists, notInArray, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { lstatNoFollow, readdirNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
@@ -16,6 +16,7 @@ const ENDED_TASK_STATUSES = ['completed', 'failed', 'cancelled'] as const;
 // Group 1 of every shape built from it is the session id.
 const UUID = '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})';
 const ARCHIVE_PARTIAL = new RegExp(`^${UUID}\\.(zip|tar|tar\\.gz)\\.partial$`);
+const ARCHIVE_FINISHED = new RegExp(`^${UUID}\\.(zip|tar|tar\\.gz)$`);
 // The extension rule is dumpDiskExtension in the api's db-dumps.ts.
 const DUMP_PARTIAL = new RegExp(`^db-${UUID}\\.[a-z0-9.]{1,16}\\.partial$`);
 const DUMP_FILE = new RegExp(`^db-${UUID}\\.[a-z0-9.]{1,16}$`);
@@ -254,7 +255,21 @@ async function recentSessions(db: Database, ids: string[], cutoff: Date): Promis
   return recent;
 }
 
-async function reapOrphanPartials(db: Database, root: string, shapes: RegExp[]): Promise<number> {
+// The ids of a finished archive's repositories that still need it: anything but a missing or failed one.
+async function liveRepositories(db: Database, ids: string[]): Promise<Set<string>> {
+  const rows = await db
+    .select({ id: schema.repositories.id })
+    .from(schema.repositories)
+    .where(and(inArray(schema.repositories.id, ids), ne(schema.repositories.status, 'error')));
+  return new Set(rows.map((row) => row.id));
+}
+
+async function reapOrphanPartials(
+  db: Database,
+  root: string,
+  shapes: RegExp[],
+  alsoKept?: (ids: string[]) => Promise<Set<string>>,
+): Promise<number> {
   const owners = await readdirNoFollow(root, UPLOADS_DIR);
   if (owners === null) return 0;
   const cutoff = new Date(Date.now() - IDLE_MS);
@@ -281,8 +296,9 @@ async function reapOrphanPartials(db: Database, root: string, shapes: RegExp[]):
         batch.map((partial) => partial.session),
         cutoff,
       );
+      const kept = alsoKept ? await alsoKept(batch.map((file) => file.session)) : null;
       for (const { rel, session } of batch) {
-        if (recent.has(session)) continue;
+        if (recent.has(session) || kept?.has(session)) continue;
         try {
           if (await removeFile(root, rel)) removed += 1;
         } catch (err) {
@@ -321,6 +337,12 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
   result.orphans += await guarded(
     'the repository file pass',
     () => reapOrphanPartials(db, repoRoot(), [ARCHIVE_PARTIAL, DUMP_PARTIAL]),
+    0,
+  );
+  result.orphans += await guarded(
+    'the finished archive pass',
+    () =>
+      reapOrphanPartials(db, repoRoot(), [ARCHIVE_FINISHED], (ids) => liveRepositories(db, ids)),
     0,
   );
   result.orphans += await guarded(

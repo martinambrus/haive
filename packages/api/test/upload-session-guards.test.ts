@@ -1516,6 +1516,47 @@ describe('I9: a complete on a session that is over', () => {
   );
 });
 
+describe('I1: a chunked upload repository takes the session id', () => {
+  const repos = FAMILIES[0]!;
+
+  it('names the repository, the response and the finished archive after the session', async () => {
+    const staged = await stage(repos);
+
+    const res = await request(repos.app, 'POST', repos.completeUrl(SESSION));
+
+    expect(res.status).toBe(201);
+    const [repository] = fake.rows(schema.repositories);
+    expect(repository!.id).toBe(SESSION);
+    expect(((await res.json()) as { repository: { id: string } }).repository.id).toBe(SESSION);
+    expect(await exists(absolute(repos, `_uploads/${USER}/${SESSION}.zip`))).toBe(true);
+    expect((queue.jobs[0]!.data as { archivePath: string }).archivePath).toMatch(
+      new RegExp(`/${repository!.id}\\.zip$`),
+    );
+    expect(staged.finished).toBe(absolute(repos, `_uploads/${USER}/${SESSION}.zip`));
+  });
+
+  it('leaves the finished archive recorded on the session, once', async () => {
+    const staged = await stage(repos);
+
+    await request(repos.app, 'POST', repos.completeUrl(SESSION));
+
+    expect(await exists(staged.partial)).toBe(false);
+    expect(rowOf(repos)).toMatchObject({ status: 'complete', archivePath: staged.finished });
+    expect(fake.rows(schema.repositories)).toHaveLength(1);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it('a repeat complete of a dead claim whose file already moved ends with the session id', async () => {
+    const staged = await stage(repos, { status: 'completing', at: 'finished', idleMs: 11 * MIN });
+    fake.patch(repos.table, SESSION, { archivePath: staged.partial });
+
+    const res = await request(repos.app, 'POST', repos.completeUrl(SESSION));
+
+    expect(res.status).toBe(201);
+    expect(fake.rows(schema.repositories).map((r) => r.id)).toEqual([SESSION]);
+  });
+});
+
 describe('I3a: a duplicate complete of a session another complete finished', () => {
   const [repos, dumps] = FAMILIES as [Family, Family, Family];
 
