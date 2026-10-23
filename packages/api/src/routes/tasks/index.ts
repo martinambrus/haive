@@ -1662,8 +1662,8 @@ taskRoutes.patch('/:id/summary-cli', async (c) => {
     if (!provider) throw new HttpError(404, 'CLI provider not found');
     // Rejected rather than stored: maybeEnqueueStepSummary honors the choice only while the
     // provider is still enabled, and resolveDispatch merely ORDERS a preferred provider first
-    // — so a disabled id does not fail, it silently hands the recap to whichever provider
-    // comes first. Refusing here is what keeps the stored value and the run in agreement.
+    // — so a disabled id does not fail, it silently hands the recap to the default provider.
+    // Refusing here is what keeps the stored value and the run in agreement.
     if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
   }
 

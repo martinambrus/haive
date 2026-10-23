@@ -122,6 +122,20 @@ interface AttachmentOutcome {
   failed: { name: string; message: string }[];
 }
 
+function DefaultCliNote({
+  providerId,
+  providers,
+}: {
+  providerId: string | null;
+  providers: CliProvider[];
+}) {
+  const p = providers.find((x) => x.id === providerId);
+  if (!p) return null;
+  return (
+    <p className="text-xs text-neutral-400">{`Steps with no saved CLI will use ${p.label} (${p.name}).`}</p>
+  );
+}
+
 function SavedStepClis({
   steps,
   providers,
@@ -262,9 +276,13 @@ export default function NewTaskPage() {
         : null;
   const fields = newTaskFields(selectedType, inferredType);
   const savedStepsSlug = selectedType.kind === 'custom' ? selectedType.value : inferredType;
-  const [savedSteps, setSavedSteps] = useState<{ slug: string; steps: UpcomingCliStep[] } | null>(
-    null,
-  );
+  const [savedSteps, setSavedSteps] = useState<{
+    slug: string;
+    steps: UpcomingCliStep[];
+    defaultProviderId: string | null;
+  } | null>(null);
+
+  const lockOn = ignoreSavedStepClis && cliProviderId !== '';
 
   const [resetting, setResetting] = useState(false);
   const [resetNote, setResetNote] = useState<string | null>(null);
@@ -497,7 +515,12 @@ export default function NewTaskPage() {
     let cancelled = false;
     getSavedStepClis(savedStepsSlug)
       .then((res) => {
-        if (!cancelled) setSavedSteps({ slug: savedStepsSlug, steps: res.steps });
+        if (!cancelled)
+          setSavedSteps({
+            slug: savedStepsSlug,
+            steps: res.steps,
+            defaultProviderId: res.defaultProviderId,
+          });
       })
       .catch(() => {
         /* non-fatal: no list */
@@ -706,7 +729,7 @@ export default function NewTaskPage() {
         description,
         estimatedTime,
         cliProviderId,
-        ignoreSavedStepClis,
+        ignoreSavedStepClis: lockOn,
         summaryCliProviderId,
         planNodeIds,
         planNodeRole,
@@ -1159,28 +1182,27 @@ export default function NewTaskPage() {
                   <button
                     type="button"
                     role="switch"
-                    aria-checked={ignoreSavedStepClis}
+                    aria-checked={lockOn}
+                    disabled={cliProviderId === ''}
                     aria-label="Use this CLI for every step (this task only)"
                     onClick={() => setIgnoreSavedStepClis((v) => !v)}
-                    className={`inline-flex h-10 w-10 items-center justify-center rounded-md border transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500 ${
-                      ignoreSavedStepClis
+                    className={`inline-flex h-10 w-10 items-center justify-center rounded-md border transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50 ${
+                      lockOn
                         ? 'border-amber-600 bg-amber-950/30 text-amber-300'
                         : 'border-indigo-500 bg-indigo-950/40 text-indigo-300 hover:border-indigo-400 hover:bg-indigo-950/60 hover:text-indigo-200'
                     }`}
                   >
-                    {ignoreSavedStepClis ? (
-                      <Lock className="h-4 w-4" />
-                    ) : (
-                      <Unlock className="h-4 w-4" />
-                    )}
+                    {lockOn ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4" />}
                   </button>
                   <span
                     role="tooltip"
                     className="pointer-events-none absolute right-0 top-full z-30 mt-2 w-64 whitespace-pre-line rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 text-xs font-normal leading-relaxed text-neutral-200 opacity-0 shadow-xl transition-opacity duration-150 group-hover/lock:opacity-100"
                   >
-                    {ignoreSavedStepClis
-                      ? 'Locked: using this CLI for every step (this task only). Click to unlock.'
-                      : 'Unlocked: use this CLI for every step (this task only). Click to lock.'}
+                    {cliProviderId === ''
+                      ? 'Pick a CLI first: the lock uses it for every step (this task only).'
+                      : lockOn
+                        ? 'Locked: using this CLI for every step (this task only). Click to unlock.'
+                        : 'Unlocked: use this CLI for every step (this task only). Click to lock.'}
                   </span>
                 </span>
               </div>
@@ -1190,10 +1212,15 @@ export default function NewTaskPage() {
                 untouched. A step you change during the task runs on its new CLI.
               </p>
               {cliProviderId === '' &&
-                !ignoreSavedStepClis &&
                 savedSteps !== null &&
                 savedSteps.slug === savedStepsSlug && (
-                  <SavedStepClis steps={savedSteps.steps} providers={providers ?? []} />
+                  <>
+                    <SavedStepClis steps={savedSteps.steps} providers={providers ?? []} />
+                    <DefaultCliNote
+                      providerId={savedSteps.defaultProviderId}
+                      providers={providers ?? []}
+                    />
+                  </>
                 )}
             </div>
 

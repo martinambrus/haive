@@ -22,6 +22,7 @@ import {
   planSequenceRequestSchema,
   planSnapshotSaveRequestSchema,
   logger,
+  resolveDefaultCliProvider,
   updatePlanNodeRequestSchema,
   resolvePlanNodeRequestSchema,
   type PlanPatch,
@@ -1124,16 +1125,16 @@ async function resolveProvider(
   const db = getDb();
   if (cliProviderId) {
     // A disabled provider is refused here rather than dispatched: the dispatcher drops it and
-    // runs whichever provider comes first, which is not the CLI the person picked.
+    // runs the default provider, which is not the CLI the person picked.
     await loadUsableProvider(db, userId, cliProviderId);
     return cliProviderId;
   }
   const enabled = await db.query.cliProviders.findMany({
     where: and(eq(schema.cliProviders.userId, userId), eq(schema.cliProviders.enabled, true)),
-    columns: { id: true },
-    orderBy: [asc(schema.cliProviders.createdAt)],
+    columns: { id: true, enabled: true, createdAt: true },
   });
-  if (enabled.length === 0) return null;
+  const fallback = resolveDefaultCliProvider(enabled);
+  if (!fallback) return null;
   const enabledIds = enabled.map((provider) => provider.id);
   for (const scope of [eq(schema.tasks.repositoryId, repositoryId), undefined]) {
     const lastUsed = await db.query.tasks.findFirst({
@@ -1147,7 +1148,7 @@ async function resolveProvider(
     });
     if (lastUsed?.cliProviderId) return lastUsed.cliProviderId;
   }
-  return enabled[0]!.id;
+  return fallback.id;
 }
 
 /** The CLIs the plan starter preselects: the one a build would plan on, and the questioner this

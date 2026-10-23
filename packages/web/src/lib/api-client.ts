@@ -2690,7 +2690,9 @@ export const postModulePurge = (moduleId: string, confirm: string) =>
 export const listTaskTypes = () => api.get<{ taskTypes: PublicTaskType[] }>('/task-types');
 
 export const getSavedStepClis = (slug: string) =>
-  api.get<{ steps: UpcomingCliStep[] }>(`/task-types/${encodeURIComponent(slug)}/saved-step-clis`);
+  api.get<{ steps: UpcomingCliStep[]; defaultProviderId: string | null }>(
+    `/task-types/${encodeURIComponent(slug)}/saved-step-clis`,
+  );
 
 export interface IntegrationPreference {
   categoryId: string;

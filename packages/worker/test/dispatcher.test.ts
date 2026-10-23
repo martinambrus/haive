@@ -925,11 +925,14 @@ describe('dispatchCandidates', () => {
       'b',
     ],
     [
-      'the first enabled provider when nothing is preferred',
-      [makeProvider({ id: 'a', name: 'gemini' }), makeProvider({ id: 'b', name: 'claude-code' })],
+      'the oldest enabled provider when nothing is preferred',
+      [
+        makeProvider({ id: 'a', name: 'gemini', createdAt: new Date('2026-02-01T00:00:00Z') }),
+        makeProvider({ id: 'b', name: 'claude-code', createdAt: new Date('2026-01-01T00:00:00Z') }),
+      ],
       null,
       false,
-      'a',
+      'b',
     ],
     [
       'a sighted provider when the preferred one is blind and the input needs vision',

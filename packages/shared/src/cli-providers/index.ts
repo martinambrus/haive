@@ -12,3 +12,4 @@ export * from './context-windows.js';
 export * from './usage-window.js';
 export * from './model-pricing.js';
 export * from './provider-secret.js';
+export * from './default-provider.js';

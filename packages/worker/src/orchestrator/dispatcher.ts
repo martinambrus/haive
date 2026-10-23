@@ -3,6 +3,7 @@ import {
   CONFIG_KEYS,
   configService,
   getCliProviderMetadata,
+  orderByDefaultPriority,
   promptNamesAgentPath,
   resolveEffectiveRules,
   type StepCapability,
@@ -571,8 +572,8 @@ async function resolveCodexAppServerVerdicts(
 }
 
 /** The providers a dispatch tries, in the order it tries them, after every check that needs no
- *  plan: enabled, the preferred one first, an adapter that runs under CLI auth, and never a model
- *  known to be blind for an input that needs vision. */
+ *  plan: enabled, the preferred one first then the rest oldest first, an adapter that runs under
+ *  CLI auth, and never a model known to be blind for an input that needs vision. */
 export function* dispatchCandidates(
   providers: CliProviderRecord[],
   preferredProviderId: string | null,
@@ -647,13 +648,11 @@ function orderProviders(
   preferredId: string | null,
   preferVision: boolean,
 ): CliProviderRecord[] {
+  const ranked = orderByDefaultPriority(providers);
   const preferredFirst =
-    preferredId && providers.some((p) => p.id === preferredId)
-      ? [
-          providers.find((p) => p.id === preferredId)!,
-          ...providers.filter((p) => p.id !== preferredId),
-        ]
-      : providers;
+    preferredId && ranked.some((p) => p.id === preferredId)
+      ? [ranked.find((p) => p.id === preferredId)!, ...ranked.filter((p) => p.id !== preferredId)]
+      : ranked;
   if (!preferVision) return preferredFirst;
   // A stable partition, so the explicit preference still wins WITHIN each half:
   // the user's chosen provider stays first unless it is the blind one, in which

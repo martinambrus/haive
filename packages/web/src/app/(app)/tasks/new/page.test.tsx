@@ -82,6 +82,7 @@ const savedStep = (stepId: string, title: string, over: Record<string, unknown> 
 const disabledClis = new Set<string>();
 const savedRows: Record<string, unknown[]> = {};
 let savedFailure = 0;
+let savedDefault: string | null = null;
 const GETS: Record<string, unknown> = {
   '/repos': { repositories: [repo('repo-a', 'Alpha'), repo('repo-b', 'Beta')] },
   get '/cli-providers'() {
@@ -173,7 +174,7 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
   if (call.startsWith('GET ') && savedSlug !== undefined && savedSlug in savedRows) {
     return savedFailure
       ? reply(savedFailure, { error: 'saved CLIs failed' })
-      : reply(200, { steps: savedRows[savedSlug] });
+      : reply(200, { steps: savedRows[savedSlug], defaultProviderId: savedDefault });
   }
   if (call.startsWith('GET ') && path in GETS) return reply(200, GETS[path]);
   return reply(404, { error: `not stubbed: ${call}` });
@@ -186,6 +187,7 @@ beforeEach(() => {
   disabledClis.clear();
   for (const key of Object.keys(savedRows)) delete savedRows[key];
   savedFailure = 0;
+  savedDefault = null;
   sent.length = 0;
   posted.length = 0;
   holdLastCli = false;
@@ -833,7 +835,7 @@ describe('the steps that keep a saved CLI under the none option', () => {
     return view;
   }
 
-  it('lists the step and its CLI only while none is picked and the lock is off', async () => {
+  it('lists the step and its CLI only while none is picked', async () => {
     const view = await onScoped();
     expect(page(view)).toContain(
       'With no default CLI, a step that has a saved CLI of its own still uses it:',
@@ -841,14 +843,128 @@ describe('the steps that keep a saved CLI under the none option', () => {
     expect(page(view)).toContain('Implementation');
     expect(page(view)).toContain('08-implement');
     expect(page(view)).toContain('cli-1 (cli-1)');
-    toggle(view);
-    expect(page(view)).not.toContain('08-implement');
-    toggle(view);
-    expect(page(view)).toContain('08-implement');
     choose(view, P2);
     expect(page(view)).not.toContain('08-implement');
     choose(view, '');
     expect(page(view)).toContain('08-implement');
+  });
+
+  it('lists it again when none is chosen over a ticked lock, which cannot apply to none', async () => {
+    const view = await onScoped();
+    choose(view, P2);
+    toggle(view);
+    expect(page(view)).not.toContain('08-implement');
+    choose(view, '');
+    expect(page(view)).toContain('08-implement');
+  });
+
+  describe('the default CLI named under the none option', () => {
+    const LINE = 'Steps with no saved CLI will use cli-2 (cli-2).';
+    const SENTENCE = 'With no default CLI, a step that has a saved CLI of its own still uses it:';
+
+    it('is shown under none with the exact text', async () => {
+      savedDefault = P2;
+      const view = await onScoped();
+      expect(page(view)).toContain(LINE);
+    });
+
+    it('is shown when the type has no saved steps', async () => {
+      savedDefault = P2;
+      const view = await onScoped([]);
+      expect(page(view)).not.toContain(SENTENCE);
+      expect(page(view)).toContain(LINE);
+    });
+
+    it('comes after the saved-steps box', async () => {
+      savedDefault = P2;
+      const view = await onScoped();
+      const text = page(view);
+      expect(text.indexOf(SENTENCE)).toBeGreaterThan(-1);
+      expect(text.indexOf(LINE)).toBeGreaterThan(text.indexOf(SENTENCE));
+    });
+
+    it('is hidden once a CLI is picked and back after choosing none', async () => {
+      savedDefault = P2;
+      const view = await onScoped();
+      choose(view, P1);
+      expect(page(view)).not.toContain('Steps with no saved CLI will use');
+      choose(view, '');
+      expect(page(view)).toContain(LINE);
+    });
+
+    it.each([
+      ['null', null],
+      ['a provider that is not known', 'cli-unknown'],
+    ])('is absent when the default is %s', async (_what, id) => {
+      savedDefault = id;
+      const view = await onScoped();
+      expect(page(view)).not.toContain('Steps with no saved CLI will use');
+    });
+  });
+
+  describe('the lock', () => {
+    async function onWorkflow() {
+      savedRows.workflow = [];
+      const view = await mount();
+      pick(view, 'repo-a');
+      await answer(view, 'repo-a', 200, status({ onboarded: true }));
+      return view;
+    }
+    const fill = (view: Renderer) => {
+      fire.type(controls(view.tree(), /^title$/)[0]!, 'A title');
+      fire.type(controls(view.tree(), /^description/)[0]!, 'A description');
+      view.draw();
+    };
+
+    it('is disabled while none is picked and enabled with a CLI picked', async () => {
+      const view = await onScoped();
+      expect(isDisabled(lock(view))).toBe(true);
+      choose(view, P1);
+      expect(isDisabled(lock(view))).toBe(false);
+      choose(view, '');
+      expect(isDisabled(lock(view))).toBe(true);
+    });
+
+    it('is not posted when it was ticked and then none was chosen', async () => {
+      const view = await onWorkflow();
+      choose(view, P1);
+      toggle(view);
+      choose(view, '');
+      fill(view);
+      await submitForm(view);
+      expect(posted).toHaveLength(1);
+      expect(posted[0]).toMatchObject({ cliProviderId: null });
+      expect(posted[0]).not.toHaveProperty('ignoreSavedStepClis');
+    });
+
+    it('is posted with a CLI picked', async () => {
+      const view = await onWorkflow();
+      choose(view, P1);
+      toggle(view);
+      fill(view);
+      await submitForm(view);
+      expect(posted[0]).toMatchObject({ cliProviderId: P1, ignoreSavedStepClis: true });
+    });
+
+    it('is not posted when a repository switch brings back a remembered none', async () => {
+      holdLastCli = true;
+      savedRows.workflow = [];
+      const view = await mount();
+      pick(view, 'repo-a');
+      await answer(view, 'repo-a', 200, status({ onboarded: true }));
+      await release(view, LAST_CLI('repo-a'), 200, remembered(P1));
+      expect(valueOf(cliPick(view))).toBe(P1);
+      toggle(view);
+      pick(view, 'repo-b');
+      await answer(view, 'repo-b', 200, status({ onboarded: true }));
+      await release(view, LAST_CLI('repo-b'), 200, { cliChoice: null, summaryChoice: null });
+      expect(valueOf(cliPick(view))).toBe('');
+      fill(view);
+      await submitForm(view);
+      expect(posted).toHaveLength(1);
+      expect(posted[0]).toMatchObject({ cliProviderId: null });
+      expect(posted[0]).not.toHaveProperty('ignoreSavedStepClis');
+    });
   });
 
   it("asks for the chosen type, and shows only that type's rows", async () => {
