@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -757,6 +757,29 @@ describe("plan merge: discarding a cancelled conversation's merge", () => {
     expect(await readFile(path.join(local, folder, 'files', 'notes.txt'), 'utf8')).toBe(
       'scratch\n',
     );
+  });
+
+  it('records a discard whose branch read failed, rather than throwing', async () => {
+    const local = await unrelatedPair();
+    const { db, events, flags } = fakeDb();
+    flags.repoPath = local;
+    await open(local, db);
+    const realGit = (await exec('sh', ['-c', 'command -v git'])).stdout.toString().trim();
+    const shimDir = await mkdtemp(path.join(tmpdir(), 'planmerge-discard-shim-'));
+    dirs.push(shimDir);
+    const shim = `#!/bin/sh\nfor a in "$@"; do if [ "$a" = '--show-current' ]; then echo "fatal: simulated failure" >&2; exit 128; fi; done\nexec ${realGit} "$@"\n`;
+    await writeFile(path.join(shimDir, 'git'), shim);
+    await chmod(path.join(shimDir, 'git'), 0o755);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    try {
+      await expect(discardPlanMerge(db as never, 't1')).resolves.toBeUndefined();
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    expect(events.find((e) => e.eventType === 'plan_merge.discard_failed')?.payload).toMatchObject({
+      error: expect.stringMatching(/git branch failed in/),
+    });
   });
 
   it('leaves the worktree to another live conversation, and says so', async () => {
