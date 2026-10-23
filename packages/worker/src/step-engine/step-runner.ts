@@ -53,7 +53,11 @@ import {
   parseStepId,
   type IntegrationRequirement,
 } from '@haive/shared/modularity';
-import { moduleDeactivationMessage, moduleSchemaFailedMessage } from '../modules/activation.js';
+import {
+  moduleDeactivationMessage,
+  moduleSchemaFailedMessage,
+  moduleSchemaNotReady,
+} from '../modules/activation.js';
 import { invalidToolsFailure, pinnedToolsFailure } from './steps/custom/pinned-tools.js';
 import {
   promptStepAccountIds,
@@ -333,8 +337,6 @@ export interface AdvanceStepParams {
   epoch?: number | null;
   /** The caller's module decision: a message is off, null is on. Undefined reads it here. */
   moduleDeactivation?: string | null;
-  /** Admission skipped this step for a failed schema setup, so it must not run unless that failure stands. */
-  moduleSchemaFailedAtAdmission?: boolean;
 }
 
 export type AdvanceStepResult =
@@ -2743,7 +2745,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     if (!failed) return { status: 'superseded', row };
     return { status: 'failed', row: failed, error: failure };
   }
-  if (params.moduleSchemaFailedAtAdmission) return { status: 'deferred', row };
+  if (moduleSchemaNotReady(meta.id)) return { status: 'deferred', row };
 
   const controller = new AbortController();
   let superseded = false;

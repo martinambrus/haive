@@ -104,9 +104,11 @@ the module loads again.
   step reaching the gate, fails the row with the setup-failed words (`moduleSchemaFailedMessage`,
   through the deactivation failure path of `advanceStep`), so the task fails and Retry works once
   the module is reactivated; a reactivation resets the flag first, so it never fails a row. The
-  runner reads the flag itself rather than taking admission's word: a step admission skipped for a
-  failed setup that reads it reset returns `deferred`, writes nothing and is advanced again after
-  `MODULE_SCHEMA_POLL_MS`, so it parks or is admitted, never runs unadmitted. A boot that skips the ensure of a deactivated
+  runner is the last gate and reads the flag itself, after every await of the admission block
+  (`moduleSchemaNotReady`), rather than taking admission's or START's word: a module step whose
+  schema is not ready returns `deferred`, writes nothing and is advanced again after
+  `MODULE_SCHEMA_POLL_MS` under the same epoch from both callers, so a reset that lands between
+  two reads never runs the step on an unready schema. A boot that skips the ensure of a deactivated
   module marks it the same way, so after Activate its steps wait for a pass's ensure too. A schema
   ensure has a deadline, `MODULE_SCHEMA_ENSURE_TIMEOUT_MS` (10 minutes), over the whole
   setup, the open of the module database included, and a setup that runs out of it counts as

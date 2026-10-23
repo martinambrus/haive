@@ -34,6 +34,11 @@ export function moduleSchemaFailedMessage(stepId: string): string | null {
   );
 }
 
+export function moduleSchemaNotReady(stepId: string): boolean {
+  const parsed = parseStepId(stepId);
+  return parsed?.kind === 'module' && moduleSchemaUnready(parsed.moduleId);
+}
+
 export async function moduleSchemaWaitMessage(
   db: Database,
   stepId: string,

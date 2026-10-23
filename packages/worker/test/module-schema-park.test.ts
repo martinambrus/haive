@@ -17,6 +17,7 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   adds: [] as { name: string; data: Record<string, unknown>; opts: { delay?: number } }[],
   afterLockedRead: undefined as undefined | (() => Promise<void>),
+  afterPlainRead: undefined as undefined | (() => Promise<void>),
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -29,6 +30,7 @@ vi.mock('../src/modules/activation.js', async (importOriginal) => {
     ) => {
       const message = await real.moduleDeactivationMessage(...args);
       if (args[2]?.lock) await h.afterLockedRead?.();
+      else await h.afterPlainRead?.();
       return message;
     },
   };
@@ -175,6 +177,7 @@ describe.skipIf(!url)('a module step whose schema is unready, on Postgres', () =
     Object.values(phases).forEach((phase) => phase.mockClear());
     h.adds.length = 0;
     h.afterLockedRead = undefined;
+    h.afterPlainRead = undefined;
     ran = 0;
     await db.delete(schema.modules);
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
@@ -459,6 +462,40 @@ describe.skipIf(!url)('a module step whose schema is unready, on Postgres', () =
     expect(row).toMatchObject({ status: 'failed' });
     expect(row!.errorMessage).toMatch(/is deactivated/);
     noPhaseRan();
+  });
+
+  it('H1: a setup failed at the wait read and reset during the deactivation read does not run the step, which defers and runs once ready', async () => {
+    markModuleSchemaFailed(MODULE);
+    await runningTask();
+    h.afterPlainRead = async () => markModuleSchemaUnready(MODULE);
+    const epoch = (await task()).orchestrationEpoch;
+    await tick();
+    noPhaseRan();
+    expect((await rows())[0]!.status).not.toBe('failed');
+    expect(advances()).toHaveLength(1);
+    expect(advances()[0]!.opts.delay).toBe(5000);
+    expect(advances()[0]!.data.epoch).toBe(epoch);
+
+    h.afterPlainRead = undefined;
+    markModuleSchemaReady(MODULE);
+    await runNext();
+    expect(phases.detect).toHaveBeenCalledTimes(1);
+    expect((await rows())[0]!.status).not.toBe('failed');
+  });
+
+  it('H2: a START whose setup is reset after its wait read does not run the first step, which defers and runs once ready', async () => {
+    markModuleSchemaFailed(MODULE);
+    h.afterLockedRead = async () => markModuleSchemaUnready(MODULE);
+    await start();
+    noPhaseRan();
+    expect((await rows())[0]?.status).not.toBe('failed');
+    expect(advances()).toHaveLength(1);
+    expect(advances()[0]!.opts.delay).toBe(5000);
+
+    h.afterLockedRead = undefined;
+    markModuleSchemaReady(MODULE);
+    await runNext();
+    expect(phases.detect).toHaveBeenCalledTimes(1);
   });
 
   it('F7: a paused task holds with the pause words and the 30 s poll, not the schema ones', async () => {
