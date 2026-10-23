@@ -11,7 +11,10 @@ const h = vi.hoisted(() => {
   };
   const fake = {
     calls: [] as Array<{ args: string[]; kill: ReturnType<typeof vi.fn> }>,
-    route: (_verb: string, _filter: string): { stdout: string; hang: boolean } => ({
+    route: (
+      _verb: string,
+      _filter: string,
+    ): { stdout: string; hang: boolean; error?: boolean } => ({
       stdout: '',
       hang: false,
     }),
@@ -35,7 +38,9 @@ vi.mock('node:child_process', async () => {
       const verb = args[0] ?? '';
       const filter = args[args.indexOf('--filter') + 1] ?? '';
       const plan = h.fake.route(verb, filter);
-      if (!plan.hang) {
+      if (plan.error) {
+        Promise.resolve().then(() => child.emit('error', new Error('spawn docker ENOENT')));
+      } else if (!plan.hang) {
         Promise.resolve().then(() => {
           if (plan.stdout) stdout.emit('data', Buffer.from(plan.stdout));
           child.emit('close', 0);
@@ -166,6 +171,54 @@ describe('reapAllCliSandboxes shutdown budget', () => {
     await flush();
     expect(cutLogs()).toHaveLength(0);
     for (const c of h.fake.calls) expect(c.kill).not.toHaveBeenCalled();
+  });
+});
+
+describe('kill timers', () => {
+  const owned = `abc123\t${installId()}\n`;
+  const labelListing = (verb: string, filter: string) =>
+    verb === 'ps' && filter === 'label=haive.task.id';
+
+  async function expectNoTimerLeft(): Promise<void> {
+    await flush();
+    expect(h.fake.calls.length).toBeGreaterThan(0);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(31_000);
+    for (const c of h.fake.calls) expect(c.kill).not.toHaveBeenCalled();
+  }
+
+  it('W1a clears the listing timer when the listing exits', async () => {
+    await reapAllCliSandboxes('x');
+    expect(verbs('ps')).toHaveLength(5);
+    await expectNoTimerLeft();
+  });
+
+  it('W1b clears the listing timer when the listing cannot spawn', async () => {
+    h.fake.route = (verb) => ({ stdout: '', hang: false, error: verb === 'ps' });
+    await reapAllCliSandboxes('x');
+    expect(verbs('ps')).toHaveLength(5);
+    await expectNoTimerLeft();
+  });
+
+  it('W2a clears the removal timer when the removal exits', async () => {
+    h.fake.route = (verb, filter) => ({
+      stdout: labelListing(verb, filter) ? owned : '',
+      hang: false,
+    });
+    await expect(reapAllCliSandboxes('x')).resolves.toBe(1);
+    expect(verbs('rm')).toHaveLength(1);
+    await expectNoTimerLeft();
+  });
+
+  it('W2b clears the removal timer when the removal cannot spawn', async () => {
+    h.fake.route = (verb, filter) => ({
+      stdout: labelListing(verb, filter) ? owned : '',
+      hang: false,
+      error: verb === 'rm',
+    });
+    await expect(reapAllCliSandboxes('x')).resolves.toBe(1);
+    expect(verbs('rm')).toHaveLength(1);
+    await expectNoTimerLeft();
   });
 });
 

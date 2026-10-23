@@ -76,6 +76,10 @@ async function runDocker(args: string[], timeoutMs: number): Promise<DockerRun> 
       let stdout = '';
       let stderr = '';
       const child = spawn('docker', args);
+      const timer = setTimeout(() => {
+        resolve({ stdout: '', failure: 'timed out' });
+        child.kill('SIGKILL');
+      }, timeoutMs);
       child.stdout.on('data', (b: Buffer) => {
         stdout += b.toString('utf8');
       });
@@ -83,17 +87,17 @@ async function runDocker(args: string[], timeoutMs: number): Promise<DockerRun> 
         stderr += b.toString('utf8');
       });
       child.on('close', (code, signal) => {
+        clearTimeout(timer);
         const line = stderr.trim().split('\n').pop()?.trim();
         resolve({
           stdout,
           failure: code === 0 ? null : `exit ${code ?? signal}${line ? `: ${line}` : ''}`,
         });
       });
-      child.on('error', (err) => resolve({ stdout: '', failure: err.message }));
-      setTimeout(() => {
-        resolve({ stdout: '', failure: 'timed out' });
-        child.kill('SIGKILL');
-      }, timeoutMs);
+      child.on('error', (err) => {
+        clearTimeout(timer);
+        resolve({ stdout: '', failure: err.message });
+      });
     });
   } catch (err) {
     return { stdout: '', failure: err instanceof Error ? err.message : String(err) };
