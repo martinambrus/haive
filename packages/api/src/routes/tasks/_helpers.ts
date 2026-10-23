@@ -1135,7 +1135,7 @@ export async function findAdminPausedTaskIds(
         eq(schema.taskEvents.eventType, 'task.paused'),
       ),
     )
-    .orderBy(desc(schema.taskEvents.createdAt));
+    .orderBy(desc(schema.taskEvents.createdAt), desc(schema.taskEvents.id));
   const newest = new Map<string, boolean>();
   for (const { taskId, payload } of events) {
     if (!newest.has(taskId)) newest.set(taskId, payload?.byAdmin === true);

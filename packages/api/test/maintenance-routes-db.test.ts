@@ -49,6 +49,7 @@ import { Hono } from 'hono';
 import { CONFIG_KEYS, encryptEmail } from '@haive/shared';
 import { EventEmitter } from 'node:events';
 import { BLOCKING_LIST_CAP, maintenanceRoutes } from '../src/routes/maintenance.js';
+import { findAdminPausedTaskIds } from '../src/routes/tasks/_helpers.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -941,6 +942,43 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       expect((await postUpgrade()).status).toBe(500);
       expect(h.spawn).not.toHaveBeenCalled();
       expect(await startAudits()).toEqual([]);
+    });
+  });
+
+  describe('findAdminPausedTaskIds on Postgres', () => {
+    it('reads two pauses with the same stamp by id, whichever of them was written first', async () => {
+      const at = new Date('2026-10-14T09:00:00.000Z');
+      const pause = (id: string, taskId: string, payload: Record<string, unknown>) => ({
+        id,
+        taskId,
+        eventType: 'task.paused',
+        payload,
+        createdAt: at,
+      });
+      const lowerFirst = await task({ pausedAt: at });
+      const higherFirst = await task({ pausedAt: at });
+      await db
+        .insert(schema.taskEvents)
+        .values([
+          pause('00000000-0000-4000-8000-000000000a01', lowerFirst.id, { by: OWNER }),
+          pause('00000000-0000-4000-8000-000000000a02', lowerFirst.id, {
+            by: ADMIN,
+            byAdmin: true,
+          }),
+        ]);
+      await db
+        .insert(schema.taskEvents)
+        .values([
+          pause('00000000-0000-4000-8000-000000000a04', higherFirst.id, {
+            by: ADMIN,
+            byAdmin: true,
+          }),
+          pause('00000000-0000-4000-8000-000000000a03', higherFirst.id, { by: OWNER }),
+        ]);
+
+      const named = await findAdminPausedTaskIds(db, [lowerFirst.id, higherFirst.id]);
+
+      expect([...named].sort()).toEqual([lowerFirst.id, higherFirst.id].sort());
     });
   });
 
