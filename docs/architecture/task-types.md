@@ -206,7 +206,8 @@ Beyond a step's own `allowSkip`, only `01-worktree-setup` is skippable from the 
 `GET|POST /admin/task-types`, `GET|PATCH|DELETE /admin/task-types/:slug`, `GET
 /admin/task-types/catalog` (admin); `GET /task-types` (anyone signed in: enabled and selectable rows,
 with availability and public traits); `GET /task-types/:slug/saved-step-clis` (anyone signed in: the
-steps of that type's run list, prompt steps included, on which the caller saved a per-step CLI; see
+steps of that type's run list, prompt steps included, on which the caller saved a per-step CLI, and
+`defaultProviderId`, the provider every other CLI step falls to; see
 [Step summaries](step-summaries.md)). Every write is audited (`task_type.create`, `update` with the
 field list, `delete`).
 
