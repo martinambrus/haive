@@ -98,6 +98,9 @@ export interface CliTokenUsage {
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
   costUsd?: number;
+  /** Largest prompt side of ONE model request in the run (the totals above count a re-read
+   *  cached prefix once per turn). Absent when the CLI reports no per-request usage. */
+  peakPromptTokens?: number;
 }
 
 /** Which model actually answered a CLI invocation, as reported by the CLI itself.

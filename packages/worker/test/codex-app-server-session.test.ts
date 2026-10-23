@@ -156,10 +156,49 @@ describe('createCodexAppServerSession run', () => {
       outputTokens: 50,
       totalTokens: 1050,
       cacheReadTokens: 800,
+      peakPromptTokens: 1000,
     });
     expect(onTurnCompleted).toHaveBeenCalledTimes(1);
     expect(session.getTurnStatus()).toBe('completed');
     expect(session.getTransportFailure()).toBeNull();
+  });
+
+  it('records the largest single request as peakPromptTokens beside the running totals', () => {
+    const { session } = acceptedSession();
+    const usageNote = (total: number, last: number) =>
+      note('thread/tokenUsage/updated', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        tokenUsage: {
+          total: {
+            inputTokens: total,
+            cachedInputTokens: 0,
+            outputTokens: 10,
+            totalTokens: total + 10,
+          },
+          last: { inputTokens: last, cachedInputTokens: 0, outputTokens: 5, totalTokens: last + 5 },
+        },
+      });
+    session.onChunk(usageNote(60000, 60000));
+    session.onChunk(usageNote(100000, 40000));
+    expect(session.getTokenUsage()).toEqual({
+      inputTokens: 100000,
+      outputTokens: 10,
+      totalTokens: 100010,
+      peakPromptTokens: 60000,
+    });
+  });
+
+  it('leaves peakPromptTokens absent when the note carries no last', () => {
+    const { session } = acceptedSession();
+    session.onChunk(
+      note('thread/tokenUsage/updated', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        tokenUsage: { total: { inputTokens: 1000, cachedInputTokens: 0, outputTokens: 50 } },
+      }),
+    );
+    expect(session.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
   });
 
   it('recognises a turn/completed parsed in the same chunk as the turn/start response', () => {

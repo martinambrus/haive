@@ -598,7 +598,8 @@ export const taskSteps = pgTable(
     carriedUserActiveMs: integer('carried_user_active_ms').notNull().default(0),
     /** Surface B audit trail: context-window usage frozen at step completion.
      *  context_tokens = peak single-invocation prompt-side tokens
-     *  (input + cacheRead + cacheCreation) over this step's non-superseded CLI
+     *  (the largest single request's prompt, token_usage.peakPromptTokens, else
+     *  input + cacheRead + cacheCreation) over this step's non-superseded CLI
      *  invocations; context_window_size = that model's max context;
      *  context_left_percent = 100 - round(tokens / window * 100). All null on
      *  deterministic (no-CLI) steps and on rows finalized before this feature. */
@@ -938,6 +939,7 @@ export const cliInvocations = pgTable(
       cacheReadTokens?: number;
       cacheCreationTokens?: number;
       costUsd?: number;
+      peakPromptTokens?: number;
     }>(),
     /** What this invocation COST, decided at completion and then immutable.
      *

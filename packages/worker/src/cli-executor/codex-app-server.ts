@@ -344,6 +344,7 @@ export function createCodexAppServerSession(
   const toolUsage = opts.toolUsage ?? createToolUsageTally({ workdir: null });
   let lastAgentMessage: string | null = null;
   let usage: CliTokenUsage | null = null;
+  let peakPrompt = 0;
   let promptSeen = false;
   let anonymousSteers = 0;
   const queued: SentSteer[] = [];
@@ -434,6 +435,10 @@ export function createCodexAppServerSession(
       }
       case 'thread/tokenUsage/updated': {
         if (typeof params.threadId === 'string' && params.threadId !== threadId) return;
+        // codex input already includes the cached prefix, so a request's prompt is its input alone.
+        const last = isRecord(params.tokenUsage) ? params.tokenUsage.last : null;
+        if (isRecord(last) && typeof last.inputTokens === 'number' && last.inputTokens > peakPrompt)
+          peakPrompt = last.inputTokens;
         const total = isRecord(params.tokenUsage) ? params.tokenUsage.total : null;
         if (!isRecord(total)) return;
         // Same field meanings as `codex exec --json`'s turn.completed usage (input INCLUDES the
@@ -563,7 +568,7 @@ export function createCodexAppServerSession(
       return lastAgentMessage;
     },
     getTokenUsage(): CliTokenUsage | null {
-      return usage;
+      return usage && peakPrompt > 0 ? { ...usage, peakPromptTokens: peakPrompt } : usage;
     },
     getModelReport() {
       if (requestedModel === null && servedModel === null) return null;
