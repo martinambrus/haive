@@ -443,6 +443,107 @@ describe.skipIf(!url)('the new-work fence, taken by the updater, on Postgres', (
       expect(written).toEqual(['draining', 'draining', 'draining', 'maintenance']);
     });
 
+    describe('the draining phase over a state it finds', () => {
+      const heldAt: string[] = [];
+      const watchFence = () => {
+        heldAt.length = 0;
+        const holdsFence = async (what: string) => {
+          if (!(await fenceIsFree())) heldAt.push(what);
+        };
+        vi.spyOn(configService, 'getFresh').mockImplementation(async () => {
+          await holdsFence('read');
+          return stored;
+        });
+        vi.spyOn(configService, 'set').mockImplementation(async (_key, value) => {
+          await holdsFence('write');
+          written.push(value);
+          stored = value;
+        });
+      };
+
+      it('reads and writes draining over normal while the updater holds the fence', async () => {
+        stored = 'normal';
+        watchFence();
+
+        await phaseDraining(upgrade({ forceDrain: true, drainDeadlineMs: 0 }));
+
+        expect(heldAt).toEqual(['read', 'write']);
+        expect(written).toEqual(['draining']);
+        expect(logged[0]).toEqual({
+          event: 'draining',
+          fields: { deadlineMs: 0, found: 'normal' },
+        });
+        expect(await fenceIsFree()).toBe(true);
+      });
+
+      it.each(['draining', 'maintenance'])(
+        'reads %s under the fence and writes nothing',
+        async (found) => {
+          stored = found;
+          watchFence();
+
+          await phaseDraining(upgrade({ forceDrain: true, drainDeadlineMs: 0 }));
+
+          expect(heldAt).toEqual(['read']);
+          expect(written).toEqual([]);
+          expect(stored).toBe(found);
+          expect(logged[0]).toEqual({ event: 'draining', fields: { deadlineMs: 0, found } });
+          expect(await fenceIsFree()).toBe(true);
+        },
+      );
+
+      it('counts a live task and forces past it, writing nothing, when an administrator chose maintenance', async () => {
+        stored = 'maintenance';
+        await liveTask();
+        const ctx = upgrade({ forceDrain: true, drainDeadlineMs: 0 });
+
+        await phaseDraining(ctx);
+
+        expect(written).toEqual([]);
+        expect(stored).toBe('maintenance');
+        expect(logged).toContainEqual({ event: 'drain-forced', fields: { live: 1 } });
+        expect(ctx.drainForced).toBe(true);
+        expect(await fenceIsFree()).toBe(true);
+      });
+
+      it('gives up on a live task, writing nothing, when an administrator chose maintenance and force was not chosen', async () => {
+        stored = 'maintenance';
+        await liveTask();
+
+        await expect(
+          phaseDraining(upgrade({ forceDrain: false, drainDeadlineMs: 0 })),
+        ).rejects.toThrow('1 task(s) or background job(s) are still live');
+
+        expect(written).toEqual([]);
+        expect(stored).toBe('maintenance');
+        expect(await fenceIsFree()).toBe(true);
+      });
+
+      it('keeps maintenance through the draining and maintenance phases when nothing is live', async () => {
+        stored = 'maintenance';
+        const ctx = upgrade();
+
+        await phaseDraining(ctx);
+        await enter(ctx);
+
+        expect(written).toEqual([]);
+        expect(stored).toBe('maintenance');
+        expect(logged.map((l) => l.event)).toEqual(['draining', 'drained', 'maintenance']);
+        expect(await fenceIsFree()).toBe(true);
+      });
+
+      it('writes draining once over normal on the way to maintenance', async () => {
+        stored = 'normal';
+        const ctx = upgrade();
+
+        await phaseDraining(ctx);
+        await enter(ctx);
+
+        expect(written).toEqual(['draining', 'maintenance']);
+        expect(logged.map((l) => l.event)).toEqual(['draining', 'drained', 'maintenance']);
+      });
+    });
+
     it('still enters maintenance past a live task, without a second wait, when the drain was forced', async () => {
       await liveTask();
       const ctx = upgrade({ drainDeadlineMs: 0, forceDrain: true });
