@@ -1,20 +1,48 @@
+import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { GIT_CONFIG_SAFETY_ARGS, hardenGitArgs } from '@haive/shared/git-args';
 
-const PACKAGES = fileURLToPath(new URL('../..', import.meta.url));
+const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 
 /** The one module allowed to start a git process without going through `hardenGitArgs` itself. */
-const WRAPPER = 'worker/src/repo/git-exec.ts';
+const WRAPPER = 'packages/worker/src/repo/git-exec.ts';
 
-async function sources(pkg: string): Promise<{ rel: string; text: string }[]> {
-  const root = path.join(PACKAGES, pkg, 'src');
+/** Where Haive's own code can start a host-side git: the three server packages, the worker's
+ *  operator scripts, and every module, whose routes the api loads. */
+async function scanRoots(): Promise<string[]> {
+  const modules = await readdir(path.join(REPO, 'modules'), { withFileTypes: true });
+  return [
+    'packages/worker/src',
+    'packages/worker/scripts',
+    'packages/api/src',
+    'packages/shared/src',
+    ...modules
+      .filter((m) => m.isDirectory() && existsSync(path.join(REPO, 'modules', m.name, 'src')))
+      .map((m) => `modules/${m.name}/src`),
+  ];
+}
+
+async function sources(dir: string): Promise<{ rel: string; text: string }[]> {
+  const root = path.join(REPO, dir);
   const out: { rel: string; text: string }[] = [];
   for (const rel of await readdir(root, { recursive: true })) {
     if (!rel.endsWith('.ts') || rel.endsWith('.test.ts')) continue;
-    out.push({ rel: `${pkg}/src/${rel}`, text: await readFile(path.join(root, rel), 'utf8') });
+    out.push({ rel: `${dir}/${rel}`, text: await readFile(path.join(root, rel), 'utf8') });
+  }
+  return out;
+}
+
+// Keyed on the `'git'` argument, not the callee's name, so an alias cannot hide a spawn.
+const GIT_SPAWN = /\b([A-Za-z_$][\w$]*)\(\s*(['"`])git\2\s*,\s*([^\n]*)/g;
+
+function unhardenedGitSpawns(text: string): { line: number; callee: string }[] {
+  const out: { line: number; callee: string }[] = [];
+  for (const m of text.matchAll(GIT_SPAWN)) {
+    if (m[3]!.startsWith('hardenGitArgs(')) continue;
+    out.push({ line: text.slice(0, m.index).split('\n').length, callee: m[1]! });
   }
   return out;
 }
@@ -22,19 +50,33 @@ async function sources(pkg: string): Promise<{ rel: string; text: string }[]> {
 describe('every host-side git process', () => {
   it('is started through the hardened argv', async () => {
     const offenders: string[] = [];
-    for (const pkg of ['worker', 'api', 'shared']) {
-      for (const { rel, text } of await sources(pkg)) {
+    for (const dir of await scanRoots()) {
+      for (const { rel, text } of await sources(dir)) {
         if (rel === WRAPPER) continue;
-        // A git spawn is `<fn>('git', <args>` — the args must be the hardened form.
-        for (const m of text.matchAll(
-          /\b(?:exec|execFile|execFileAsync|execGit|spawn)\(\s*'git',\s*([^\n]*)/g,
-        )) {
-          if (m[1]!.startsWith('hardenGitArgs(')) continue;
-          offenders.push(`${rel}:${text.slice(0, m.index).split('\n').length}`);
+        for (const { line, callee } of unhardenedGitSpawns(text)) {
+          offenders.push(`${rel}:${line} ${callee}`);
         }
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('flags a git spawn under any callee name and passes hardened or unrelated text', () => {
+    const flagged = [
+      "execFileP('git', args, { cwd })",
+      'run("git", [\'status\'])',
+      'cp.spawn(`git`, argv)',
+      "spawn(\n  'git',\n  args,\n)",
+    ];
+    for (const text of flagged) expect(unhardenedGitSpawns(text)).toHaveLength(1);
+    const clean = [
+      "spawn('git', hardenGitArgs(args))",
+      "spawn(\n  'git',\n  hardenGitArgs(args),\n)",
+      "names.add('git')",
+      "has('git')",
+      "x.sourceType === 'git'",
+    ];
+    for (const text of clean) expect(unhardenedGitSpawns(text)).toEqual([]);
   });
 });
 
