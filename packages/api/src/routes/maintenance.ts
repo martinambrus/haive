@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -29,7 +29,7 @@ import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js
 import { appendTaskEvent } from './tasks/_helpers.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { findLiveUpgradeRun } from '../lib/upgrade-run.js';
+import { findLiveUpgradeRun, listUpgradeRuns } from '../lib/upgrade-run.js';
 
 const log = logger.child({ module: 'maintenance' });
 
@@ -378,33 +378,9 @@ function manifestUrl(version: string): string {
   return template.replaceAll('{tag}', `v${version}`).replaceAll('{version}', version);
 }
 
-// A type alias, not an interface: `db.execute<T>` constrains T to `Record<string, unknown>`, and
-// only a type literal picks up the implicit index signature that satisfies it.
-type UpgradeRunRow = {
-  id: string;
-  from_version: string;
-  to_version: string;
-  phase: string;
-  status: string;
-  error: string | null;
-  started_at: Date;
-  ended_at: Date | null;
-};
-
 /** Upgrade history, and whether this install can start one at all. */
 maintenanceRoutes.get('/upgrade', async (c) => {
-  let runs: UpgradeRunRow[] = [];
-  try {
-    const rows = await getDb().execute<UpgradeRunRow>(
-      sql`SELECT id, from_version, to_version, phase, status, error, started_at, ended_at
-            FROM upgrade_runs ORDER BY started_at DESC LIMIT 20`,
-    );
-    runs = rows as unknown as UpgradeRunRow[];
-  } catch (err) {
-    // The journal is created by the updater itself, so an install that has never upgraded has no
-    // such table. That is a legitimate state — "no runs" — not an error worth failing on.
-    log.debug({ err }, 'upgrade journal not readable');
-  }
+  const runs = await listUpgradeRuns(getDb());
 
   const version = getHaiveVersion();
   return c.json({
@@ -468,17 +444,9 @@ maintenanceRoutes.post('/upgrade', async (c) => {
   }
 
   const db = getDb();
-  try {
-    const live = (await db.execute<{ id: string }>(
-      sql`SELECT id FROM upgrade_runs WHERE status = 'running' LIMIT 1`,
-    )) as unknown as { id: string }[];
-    // The updater's own advisory lock and its partial unique index are the real guards; this only
-    // spares the operator a container that would refuse and exit.
-    if (live.length > 0) throw new HttpError(409, 'an upgrade is already running');
-  } catch (err) {
-    if (err instanceof HttpError) throw err;
-    log.debug({ err }, 'no upgrade journal yet; nothing can be running');
-  }
+  // The updater's own advisory lock and its partial unique index are the real guards; this only
+  // spares the operator a container that would refuse and exit.
+  if (await findLiveUpgradeRun(db)) throw new HttpError(409, 'an upgrade is already running');
 
   const project = process.env.COMPOSE_PROJECT_NAME || 'haive';
   // The TARGET release's updater, not this one's: the new release is what knows how to reach

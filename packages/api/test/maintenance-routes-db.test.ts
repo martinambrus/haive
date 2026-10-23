@@ -1,6 +1,6 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createDatabase, schema, type Database } from '@haive/database';
+import { createDatabase, schema, UPGRADE_JOURNAL_DDL, type Database } from '@haive/database';
 
 const url = process.env.MAINTENANCE_API_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/maintenance_api_test'))
@@ -12,9 +12,15 @@ const KEY = '11'.repeat(32);
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  spawn: undefined as unknown as ReturnType<typeof vi.fn>,
   actor: { id: '00000000-0000-4000-8000-0000000000a1', role: 'admin' },
 }));
 
+vi.mock('node:child_process', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:child_process')>();
+  h.spawn = vi.fn();
+  return { ...real, spawn: h.spawn };
+});
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => undefined }) }));
 vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
@@ -33,6 +39,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 
 import { Hono } from 'hono';
 import { encryptEmail } from '@haive/shared';
+import { EventEmitter } from 'node:events';
 import { BLOCKING_LIST_CAP, maintenanceRoutes } from '../src/routes/maintenance.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -798,6 +805,103 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
         expect(res.status).toBe(200);
         expect(await stored(row.id)).toEqual(stamp);
       });
+    });
+  });
+
+  describe('GET and POST /admin/maintenance/upgrade on Postgres', () => {
+    const dropJournal = () => db.execute(sql.raw('DROP TABLE IF EXISTS upgrade_runs'));
+    const createJournal = () => db.$client.unsafe(UPGRADE_JOURNAL_DDL).simple();
+    const journalRow = (status: string, minute: number) =>
+      db.execute(
+        sql`INSERT INTO upgrade_runs (from_version, to_version, phase, status, started_at)
+            VALUES ('1.0.0', '1.1.0', ${status === 'running' ? 'drain' : status}, ${status},
+                    ${new Date(Date.UTC(2026, 9, 1, 10, minute)).toISOString()}::timestamp)`,
+      );
+    const getUpgrade = () => app.request('/admin/maintenance/upgrade');
+    const postUpgrade = () =>
+      app.request('/admin/maintenance/upgrade', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ version: '2.0.0' }),
+      });
+    const startAudits = () =>
+      db
+        .select()
+        .from(schema.auditEvents)
+        .where(eq(schema.auditEvents.action, 'maintenance.start_upgrade'));
+
+    beforeEach(async () => {
+      vi.stubEnv('HAIVE_VERSION', '1.0.0');
+      vi.stubEnv('HAIVE_INSTALL_DIR_HOST', '/srv/haive');
+      h.spawn.mockReset();
+      h.spawn.mockImplementation(() => {
+        const child = Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(),
+          stderr: new EventEmitter(),
+          kill: vi.fn(() => true),
+        });
+        setImmediate(() => {
+          child.stdout.emit('data', Buffer.from('container123\n'));
+          child.emit('close', 0);
+        });
+        return child;
+      });
+      await dropJournal();
+    });
+    afterEach(async () => {
+      vi.unstubAllEnvs();
+      await dropJournal();
+    });
+
+    it('lists no runs and starts the updater when the journal table does not exist', async () => {
+      const res = await getUpgrade();
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { runs: unknown }).runs).toEqual([]);
+      expect((await postUpgrade()).status).toBe(202);
+      expect(h.spawn).toHaveBeenCalledTimes(1);
+    });
+
+    it('lists no runs and starts the updater when the journal is empty', async () => {
+      await createJournal();
+      const res = await getUpgrade();
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { runs: unknown }).runs).toEqual([]);
+      expect((await postUpgrade()).status).toBe(202);
+      expect(h.spawn).toHaveBeenCalledTimes(1);
+    });
+
+    it('lists finished runs and starts the updater when none is running', async () => {
+      await createJournal();
+      await journalRow('done', 1);
+      await journalRow('failed', 2);
+      await journalRow('rolled_back', 3);
+      const res = await getUpgrade();
+      expect(res.status).toBe(200);
+      const runs = ((await res.json()) as { runs: { status: string }[] }).runs;
+      expect(runs.map((r) => r.status)).toEqual(['rolled_back', 'failed', 'done']);
+      expect((await postUpgrade()).status).toBe(202);
+      expect(h.spawn).toHaveBeenCalledTimes(1);
+    });
+
+    it('lists a running run and refuses to start a second one', async () => {
+      await createJournal();
+      await journalRow('running', 1);
+      const res = await getUpgrade();
+      expect(res.status).toBe(200);
+      const runs = ((await res.json()) as { runs: { status: string }[] }).runs;
+      expect(runs.map((r) => r.status)).toEqual(['running']);
+      const started = await postUpgrade();
+      expect(started.status).toBe(409);
+      expect(JSON.stringify(await started.json())).toContain('already running');
+      expect(h.spawn).not.toHaveBeenCalled();
+    });
+
+    it('answers 500 for GET and POST, starts nothing and audits nothing when the journal exists but cannot be read', async () => {
+      await db.execute(sql.raw('CREATE TABLE upgrade_runs (id uuid)'));
+      expect((await getUpgrade()).status).toBe(500);
+      expect((await postUpgrade()).status).toBe(500);
+      expect(h.spawn).not.toHaveBeenCalled();
+      expect(await startAudits()).toEqual([]);
     });
   });
 });

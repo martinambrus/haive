@@ -98,7 +98,10 @@ table, which reads as no run; any other failed read answers 500 with the state u
 writes no audit row. The row stays `running` until the commit or the rollback finishes it, so an
 updater that died keeps the refusal in place until the next `./haive upgrade --version <v>` resumes
 it. The admin page disables the three state buttons, and says which run holds them, while
-`GET /admin/maintenance/upgrade` lists one `running`.
+`GET /admin/maintenance/upgrade` lists one `running`. That list and the check in
+`POST /admin/maintenance/upgrade` read the journal through the same helpers (`listUpgradeRuns`,
+`findLiveUpgradeRun`) and fail the same way: a missing table reads as no run, and any other failed
+read answers 500, so a read that failed never enables the start buttons and never starts an updater.
 
 The updater creates the journal table itself, at every start: `ensureJournal` runs
 `UPGRADE_JOURNAL_DDL`, which `@haive/database` exports once and the api's tests build the table
