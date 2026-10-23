@@ -53,9 +53,14 @@ async function takeClaim(db: Database, table: UploadTable, id: string): Promise<
     .returning({ id: table.id });
   if (taken) return stamp;
   const [row] = await db.select({ status: table.status }).from(table).where(eq(table.id, id));
-  if (row?.status === 'complete') throw new HttpError(409, 'session already completed');
+  if (row?.status === 'complete' || row?.status === 'consumed') {
+    throw new HttpError(409, 'session already completed');
+  }
   if (row?.status === 'completing') {
     throw new HttpError(409, 'a complete of this session is already running');
+  }
+  if (row?.status === 'uploading') {
+    throw new HttpError(409, 'a complete of this session ended without finishing it; try again');
   }
   throw new HttpError(409, 'session cancelled');
 }

@@ -233,7 +233,7 @@ dbDumpRoutes.post('/upload/:id/complete', async (c) => {
   const db = getDb();
 
   const row = await loadUploadSession(userId, uploadId);
-  if (row.status === 'complete') {
+  if (row.status === 'complete' || row.status === 'consumed') {
     throw new HttpError(409, 'session already completed');
   }
   if (isSessionOver(row.status)) {

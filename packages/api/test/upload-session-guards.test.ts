@@ -1515,3 +1515,33 @@ describe('I9: a complete on a session that is over', () => {
     },
   );
 });
+
+describe('I3a: a duplicate complete of a session another complete finished', () => {
+  const [repos, dumps] = FAMILIES as [Family, Family, Family];
+
+  it.each([repos, dumps])(
+    '$name: a second complete after a successful first answers 409 session already completed, and creates nothing more',
+    async (family) => {
+      await stage(family);
+
+      const first = await request(family.app, 'POST', family.completeUrl(SESSION));
+      const second = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(409);
+      expect(await errorOf(second)).toBe('session already completed');
+      expect(family.created()).toBe(family.made);
+      expect(queue.jobs).toHaveLength(family.jobs);
+    },
+  );
+
+  it('db-dumps: a consumed session answers 409 session already completed', async () => {
+    await stage(dumps, { status: 'consumed' });
+
+    const res = await request(dumps.app, 'POST', dumps.completeUrl(SESSION));
+
+    expect(res.status).toBe(409);
+    expect(await errorOf(res)).toBe('session already completed');
+    expect(rowOf(dumps).status).toBe('consumed');
+  });
+});
