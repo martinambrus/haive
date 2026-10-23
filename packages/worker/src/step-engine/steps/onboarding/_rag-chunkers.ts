@@ -113,6 +113,9 @@ export function fileBudget(
  *  shorter span that is not blank joins a neighbouring section, see `assembleSections`. */
 const MIN_GAP_CHARS = 120;
 
+/** The lines a span starts with that hold nothing but closing brackets, semicolons or commas. */
+const CLOSING_LINES = /^(?:[ \t]*(?:[)\]};,]+[ \t]*)?\r?\n)*/;
+
 /* ------------------------------------------------------------------ */
 /* Hashing / slugify                                                   */
 /* ------------------------------------------------------------------ */
@@ -865,7 +868,8 @@ function rustRanges(content: string): SectionRange[] {
  *  so a class yields its methods rather than one duplicate copy of both.
  *
  *  A short span joins the section before it when it continues that section's last
- *  line, holds no word character or ends the file, else the section after it. */
+ *  line, holds no word character or ends the file, else the section after it, bar
+ *  the closing lines it starts with, which stay with the section they close. */
 export function assembleSections(content: string, ranges: SectionRange[]): RagSection[] {
   const kept = ranges.filter(
     (r) =>
@@ -895,7 +899,9 @@ export function assembleSections(content: string, ranges: SectionRange[]): RagSe
       previous.to = from + text.trimEnd().length;
       return to;
     }
-    return from + text.length - text.trimStart().length;
+    const closing = previous ? CLOSING_LINES.exec(text)![0] : '';
+    if (previous && closing.trim() !== '') previous.to = from + closing.trimEnd().length;
+    return from + text.length - text.slice(closing.length).trimStart().length;
   };
 
   for (const r of kept) {

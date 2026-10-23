@@ -1301,6 +1301,95 @@ describe('extractCodeSections — a keyword in a comment', () => {
   });
 });
 
+describe('extractCodeSections — closing lines in front of a head', () => {
+  const byId = (src: string, file: string) =>
+    new Map(extractCodeSections(src, file).map((s) => [s.sectionId, s.content]));
+  const withoutSpace = (text: string) => text.replace(/\s+/g, '');
+
+  const members = [
+    'var table = {',
+    '  inner: {',
+    '    last: function () {',
+    '      return 1;',
+    '    }',
+    '  },',
+    '  customize: function customize() {',
+    '    return 2;',
+    '  },',
+    '};',
+    '',
+  ].join('\n');
+  const classes = [
+    '<?php',
+    'class A {',
+    '  public function last() {',
+    '    return 1;',
+    '  }',
+    '}',
+    '',
+    'class B {',
+    '  public function first() {',
+    '    return 2;',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+  const noted = [
+    'var table = {',
+    '  inner: {',
+    '    last: function () {',
+    '      return 1;',
+    '    }',
+    '  }',
+    '};',
+    '/**',
+    ' * Notes the offset.',
+    ' */',
+    'var offset = 1;',
+    'function next() {',
+    '  return offset;',
+    '}',
+    '',
+  ].join('\n');
+
+  it('keeps the closing lines of a JS object with the member they close', () => {
+    const sections = byId(members, 'table.js');
+
+    expect(sections.get('function-last')!.endsWith('    }\n  },')).toBe(true);
+    expect(
+      sections.get('function-customize')!.startsWith('customize: function customize() {'),
+    ).toBe(true);
+  });
+
+  it('keeps the closing brace of a PHP class with its last method and the next class head with its first', () => {
+    const sections = byId(classes, 'AB.php');
+
+    expect(sections.get('method-A-last')!.endsWith('  }\n}')).toBe(true);
+    expect(
+      sections.get('method-B-first')!.startsWith('class B {\n  public function first() {'),
+    ).toBe(true);
+  });
+
+  it('does not part a comment from its body, whatever closes in front of it', () => {
+    const sections = byId(noted, 'noted.js');
+
+    expect(sections.get('function-last')!.endsWith('  }\n};')).toBe(true);
+    expect(
+      sections.get('function-next')!.startsWith('/**\n * Notes the offset.\n */\nvar offset = 1;'),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['closing lines and a head', members, 'table.js'],
+    ['two classes', classes, 'AB.php'],
+    ['a comment behind closing lines', noted, 'noted.js'],
+  ])('loses no text of %s', (_what, src, file) => {
+    const sections = extractCodeSections(src, file);
+
+    expect(withoutSpace(sections.map((s) => s.content).join(''))).toBe(withoutSpace(src));
+  });
+});
+
 describe('chunkSection', () => {
   it('splits a long section without losing any region', () => {
     const content = markedBody(10_000);
