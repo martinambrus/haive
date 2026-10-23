@@ -62,3 +62,17 @@ export function refusesNewWork(state: MaintenanceState): boolean {
 export function locksOutNonAdmins(state: MaintenanceState): boolean {
   return state === 'maintenance';
 }
+
+const RUNNING_TASK_STATUSES = ['queued', 'running'] as const;
+const PARKED_TASK_STATUSES = ['paused', 'waiting_user', 'waiting_pr'] as const;
+
+export type DrainTaskStatus =
+  (typeof RUNNING_TASK_STATUSES)[number] | (typeof PARKED_TASK_STATUSES)[number];
+
+/** Task statuses an upgrade's drain waits for. Owners locked out cannot finish a parked task,
+ *  so only work that runs by itself holds the drain then. */
+export function drainTaskStatuses(state: MaintenanceState): DrainTaskStatus[] {
+  return locksOutNonAdmins(state)
+    ? [...RUNNING_TASK_STATUSES]
+    : [...RUNNING_TASK_STATUSES, ...PARKED_TASK_STATUSES];
+}

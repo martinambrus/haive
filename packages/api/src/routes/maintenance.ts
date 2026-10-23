@@ -1,14 +1,15 @@
 import { spawn } from 'node:child_process';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { and, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
+import { LIVE_TASK_STATUSES, schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   CONTAINER_FAMILY,
   configService,
   containerName,
   decryptEmail,
+  drainTaskStatuses,
   getHaiveVersion,
   installId,
   isDevVersion,
@@ -29,7 +30,7 @@ import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js
 import { appendTaskEvent } from './tasks/_helpers.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
-import { findLiveUpgradeRun } from '../lib/upgrade-run.js';
+import { findLiveUpgradeRun, listUpgradeRuns } from '../lib/upgrade-run.js';
 
 const log = logger.child({ module: 'maintenance' });
 
@@ -44,12 +45,9 @@ export const maintenanceRoutes = new Hono<AppEnv>();
 maintenanceRoutes.use('*', requireAuth);
 maintenanceRoutes.use('*', requireAdmin);
 
-/** Task states that still hold a maintenance window open. `waiting_user` counts: a task parked on
- *  a form is live work whose owner will come back to it, and stopping it loses their place. */
-const BLOCKING_TASK_STATES = ['queued', 'running', 'paused', 'waiting_user', 'waiting_pr'] as const;
-
-/** Also `created`: a draft runs nothing but would find its module deactivated once started. */
-export const LIVE_TASK_STATES = ['created', ...BLOCKING_TASK_STATES] as const;
+/** Every unfinished status. `created` is in: a draft runs nothing but would find its module
+ *  deactivated once started. */
+export const LIVE_TASK_STATES = LIVE_TASK_STATUSES;
 
 /** The most rows either list of GET /blocking answers. */
 export const BLOCKING_LIST_CAP = 200;
@@ -178,6 +176,7 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
  */
 maintenanceRoutes.get('/blocking', async (c) => {
   const db = getDb();
+  const state = parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
   const fetched = await db
     .select({
       id: schema.tasks.id,
@@ -197,9 +196,7 @@ maintenanceRoutes.get('/blocking', async (c) => {
     .from(schema.tasks)
     .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
     // A dead task runs nothing, and none of this page's actions reach it; its owner cancels it.
-    .where(
-      and(inArray(schema.tasks.status, [...BLOCKING_TASK_STATES]), isNull(schema.tasks.deadAt)),
-    )
+    .where(and(inArray(schema.tasks.status, drainTaskStatuses(state)), isNull(schema.tasks.deadAt)))
     .orderBy(desc(schema.tasks.updatedAt))
     .limit(BLOCKING_LIST_CAP + 1);
   const rows = fetched.slice(0, BLOCKING_LIST_CAP);
@@ -378,33 +375,9 @@ function manifestUrl(version: string): string {
   return template.replaceAll('{tag}', `v${version}`).replaceAll('{version}', version);
 }
 
-// A type alias, not an interface: `db.execute<T>` constrains T to `Record<string, unknown>`, and
-// only a type literal picks up the implicit index signature that satisfies it.
-type UpgradeRunRow = {
-  id: string;
-  from_version: string;
-  to_version: string;
-  phase: string;
-  status: string;
-  error: string | null;
-  started_at: Date;
-  ended_at: Date | null;
-};
-
 /** Upgrade history, and whether this install can start one at all. */
 maintenanceRoutes.get('/upgrade', async (c) => {
-  let runs: UpgradeRunRow[] = [];
-  try {
-    const rows = await getDb().execute<UpgradeRunRow>(
-      sql`SELECT id, from_version, to_version, phase, status, error, started_at, ended_at
-            FROM upgrade_runs ORDER BY started_at DESC LIMIT 20`,
-    );
-    runs = rows as unknown as UpgradeRunRow[];
-  } catch (err) {
-    // The journal is created by the updater itself, so an install that has never upgraded has no
-    // such table. That is a legitimate state — "no runs" — not an error worth failing on.
-    log.debug({ err }, 'upgrade journal not readable');
-  }
+  const runs = await listUpgradeRuns(getDb());
 
   const version = getHaiveVersion();
   return c.json({
@@ -468,17 +441,9 @@ maintenanceRoutes.post('/upgrade', async (c) => {
   }
 
   const db = getDb();
-  try {
-    const live = (await db.execute<{ id: string }>(
-      sql`SELECT id FROM upgrade_runs WHERE status = 'running' LIMIT 1`,
-    )) as unknown as { id: string }[];
-    // The updater's own advisory lock and its partial unique index are the real guards; this only
-    // spares the operator a container that would refuse and exit.
-    if (live.length > 0) throw new HttpError(409, 'an upgrade is already running');
-  } catch (err) {
-    if (err instanceof HttpError) throw err;
-    log.debug({ err }, 'no upgrade journal yet; nothing can be running');
-  }
+  // The updater's own advisory lock and its partial unique index are the real guards; this only
+  // spares the operator a container that would refuse and exit.
+  if (await findLiveUpgradeRun(db)) throw new HttpError(409, 'an upgrade is already running');
 
   const project = process.env.COMPOSE_PROJECT_NAME || 'haive';
   // The TARGET release's updater, not this one's: the new release is what knows how to reach
