@@ -925,9 +925,18 @@ async function investigationDiffFile(
   const wa = workspaceAnchor(worktree);
   let oldContent = '';
   try {
-    oldContent = (await readTextNoFollow(wa.anchor, `${wa.prefix}${rel}`)) ?? '';
+    // Strict: only absence reads as null (a new file); a link, a pipe or a refused read throws.
+    oldContent = (await readTextNoFollow(wa.anchor, `${wa.prefix}${rel}`, { strict: true })) ?? '';
   } catch {
-    // not there yet -> a new file
+    return {
+      path: rel,
+      status: 'modified',
+      binary: false,
+      truncated: false,
+      unreadable: true,
+      oldContent: '',
+      newContent: '',
+    };
   }
   return {
     path: rel,

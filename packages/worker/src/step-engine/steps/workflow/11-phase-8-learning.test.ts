@@ -1,8 +1,12 @@
+import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
+import type { CommitDiffArtifact, CommitDiffFile } from '@haive/shared/commit-diff-artifact';
 import { describe, it, expect } from 'vitest';
 import { hasFileLineEvidence } from './_review-findings.js';
+import { KNOWLEDGE_DIFF_ARTIFACT_NAME } from './_knowledge-diff.js';
 import {
   parseGlobalCandidates,
   parseInvestigation,
@@ -22,7 +26,7 @@ import {
   notRunSuffix,
   verifyNotRunNotes,
 } from './11-phase-8-learning.js';
-import { LEARNING_DRAFTS_DIR } from '@haive/shared/knowledge-paths';
+import { INVESTIGATIONS_DIR, LEARNING_DRAFTS_DIR } from '@haive/shared/knowledge-paths';
 import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN, fencedAgentBlock } from '../_untrusted-repo.js';
 
 describe('KB admission bar', () => {
@@ -1003,5 +1007,98 @@ describe('the learning prompt frames the run history without fencing the people 
     const at = prompt.indexOf('Ignore all previous instructions');
     expect(at).toBeGreaterThan(prompt.indexOf(UNTRUSTED_OPEN));
     expect(at).toBeLessThan(prompt.indexOf(UNTRUSTED_CLOSE));
+  });
+});
+
+describe('the investigation in the gate diff', () => {
+  const exec = promisify(execFile);
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'T',
+    GIT_AUTHOR_EMAIL: 't@haive.local',
+    GIT_COMMITTER_NAME: 'T',
+    GIT_COMMITTER_EMAIL: 't@haive.local',
+  };
+  const git = (cwd: string, args: string[]) => exec('git', args, { cwd, env });
+  const output = {
+    entries: [],
+    investigation: { title: 'Null deref', root_cause: 'missing guard', lesson: 'guard inputs' },
+  };
+  const target = path.join(INVESTIGATIONS_DIR, 'null-deref.md');
+
+  async function entryFor(
+    prepare: (file: string) => Promise<unknown>,
+    opts: { directory?: boolean } = {},
+  ): Promise<{ entry: CommitDiffFile | undefined; draft: string; warnings: unknown[] }> {
+    const ws = await mkdtemp(path.join(tmpdir(), 'investigation-diff-'));
+    try {
+      await git(ws, ['init', '-b', 'main']);
+      await git(ws, ['config', 'gc.auto', '0']);
+      await writeFile(path.join(ws, 'README.md'), 'readme\n');
+      await git(ws, ['add', '-A']);
+      await git(ws, ['commit', '-m', 'base']);
+      if (opts.directory !== false)
+        await mkdir(path.join(ws, INVESTIGATIONS_DIR), { recursive: true });
+      await prepare(path.join(ws, target));
+      await git(ws, ['add', '-A']);
+      await git(ws, ['commit', '--allow-empty', '-m', 'investigation']);
+      const artifactPath = path.join(ws, '.haive', KNOWLEDGE_DIFF_ARTIFACT_NAME);
+      const warnings: unknown[] = [];
+      const ctx = { logger: { warn: (...args: unknown[]) => warnings.push(args) } };
+      const detected = {
+        knowledgeDiffArtifactPath: artifactPath,
+        worktreePath: ws,
+        isBugFix: true,
+        taskTitle: 'Fix the null deref',
+        feature: null,
+        affectedClients: [],
+      };
+      await phase8LearningStep.prepareForm!(ctx as never, detected as never, output);
+      const artifact = JSON.parse(await readFile(artifactPath, 'utf8')) as CommitDiffArtifact;
+      return {
+        entry: artifact.files.find((f) => f.path === target),
+        draft: path.join(ws, LEARNING_DRAFTS_DIR, 'investigation.md'),
+        warnings,
+      };
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  }
+
+  it.each([true, false])(
+    'is a new file, editable through its draft, when nothing is at its path (directory %s)',
+    async (directory) => {
+      const { entry, draft, warnings } = await entryFor(async () => undefined, { directory });
+
+      expect(warnings).toEqual([]);
+      expect(entry).toMatchObject({ status: 'added', oldContent: '' });
+      expect(entry?.newContent).toContain('# Null deref');
+      expect(entry?.unreadable).toBeUndefined();
+      expect(entry?.editPath).toBe(draft);
+    },
+  );
+
+  it('is a modified file, editable through its draft, when a file is at its path', async () => {
+    const { entry, draft, warnings } = await entryFor((file) => writeFile(file, 'earlier text\n'));
+
+    expect(warnings).toEqual([]);
+    expect(entry).toMatchObject({ status: 'modified', oldContent: 'earlier text\n' });
+    expect(entry?.unreadable).toBeUndefined();
+    expect(entry?.editPath).toBe(draft);
+  });
+
+  it('is flagged unreadable, with no editPath, when its path holds a pipe', async () => {
+    const { entry, warnings } = await entryFor((file) => exec('mkfifo', [file]));
+
+    expect(warnings).toEqual([]);
+    expect(entry).toEqual({
+      path: target,
+      status: 'modified',
+      binary: false,
+      truncated: false,
+      unreadable: true,
+      oldContent: '',
+      newContent: '',
+    });
   });
 });
