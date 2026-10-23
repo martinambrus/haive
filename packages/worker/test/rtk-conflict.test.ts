@@ -41,6 +41,16 @@ const asked: RtkQuestionInput = {
   local04Toolings: [],
   hasAnyRowForUnit: false,
   rtkChoiceMadeAt: null,
+  rtkChoiceRecorded: false,
+};
+
+const RECORDED = {
+  projectInfo: {},
+  framework: 'unknown',
+  acceptedAgentIds: [],
+  customAgentSpecs: [],
+  lspLanguages: [],
+  rtkChoiceRecorded: true,
 };
 
 describe('needsRtkQuestion', () => {
@@ -74,6 +84,14 @@ describe('needsRtkQuestion', () => {
     expect(needsRtkQuestion({ ...asked, rtkChoiceMadeAt: null })).toBe(true);
   });
 
+  it('does not ask once the render context recorded the choice, stamp or not', () => {
+    expect(needsRtkQuestion({ ...asked, rtkChoiceRecorded: true })).toBe(false);
+    expect(needsRtkQuestion({ ...asked, rtkChoiceMadeAt: new Date(1000) })).toBe(false);
+    expect(needsRtkQuestion({ ...asked, rtkChoiceRecorded: false, rtkChoiceMadeAt: null })).toBe(
+      true,
+    );
+  });
+
   it('does not ask when a row for the unit exists, answered or not', () => {
     expect(needsRtkQuestion({ ...asked, hasAnyRowForUnit: true })).toBe(false);
   });
@@ -85,6 +103,7 @@ function setup(
     tooling?: unknown;
     rtkEnabled?: boolean;
     rtkChoiceMadeAt?: Date;
+    renderContext?: unknown;
   }[] = [{ id: REPO, tooling: OFF }],
 ) {
   const fake = createFakeDb({
@@ -103,6 +122,7 @@ function setup(
       status: 'ready',
       rtkEnabled: r.rtkEnabled ?? true,
       rtkChoiceMadeAt: r.rtkChoiceMadeAt ?? null,
+      renderContext: r.renderContext ?? null,
       onboardingTooling:
         r.tooling === undefined || r.tooling === null
           ? null
@@ -250,6 +270,59 @@ describe('a repository where a person switched RTK', () => {
       [REPO, 'converged'],
       [REPO_2, null],
     ]);
+  });
+});
+
+describe('a repository whose render context recorded the RTK choice', () => {
+  const pendingFor = (s: ReturnType<typeof setup>, repositoryId: string) =>
+    s.fake.insert(schema.projectStateConflicts, {
+      repositoryId,
+      unit: RTK_ENABLED_UNIT,
+      base: conflictSide(true),
+      local: conflictSide(true),
+      incoming: conflictSide(false),
+    });
+
+  it('raiseRtkQuestion asks nothing of it, while an unrecorded sibling is asked', async () => {
+    const s = setup([
+      { id: REPO, tooling: OFF, renderContext: RECORDED },
+      { id: REPO_2, tooling: OFF },
+    ]);
+
+    expect(await raiseRtkQuestion(s.db, REPO)).toBe(false);
+    expect(await raiseRtkQuestion(s.db, REPO_2)).toBe(true);
+
+    expect(s.rows().map((r) => r.repositoryId)).toEqual([REPO_2]);
+  });
+
+  it('raiseRtkQuestion closes its pending question as converged', async () => {
+    const s = setup([{ id: REPO, tooling: OFF, renderContext: RECORDED }]);
+    pendingFor(s, REPO);
+
+    expect(await raiseRtkQuestion(s.db, REPO)).toBe(false);
+
+    expect(s.rows()[0]).toMatchObject({ resolution: 'converged', resolvedBy: null });
+  });
+
+  it('the boot entry closes its pending question and asks the unrecorded sibling', async () => {
+    const s = setup([
+      { id: REPO, tooling: OFF, renderContext: RECORDED },
+      { id: REPO_2, tooling: OFF },
+    ]);
+    pendingFor(s, REPO);
+
+    await raiseRtkQuestions(s.db);
+
+    expect(s.rows().map((r) => [r.repositoryId, r.resolution])).toEqual([
+      [REPO, 'converged'],
+      [REPO_2, null],
+    ]);
+  });
+
+  it('a column the schema refuses records nothing', async () => {
+    const s = setup([{ id: REPO, tooling: OFF, renderContext: { rtkChoiceRecorded: true } }]);
+
+    expect(await raiseRtkQuestion(s.db, REPO)).toBe(true);
   });
 });
 
