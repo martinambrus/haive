@@ -49,7 +49,7 @@ import {
   FolderGit2,
 } from 'lucide-react';
 import { useCliLogin } from '@/lib/use-cli-login';
-import { shouldClearSubmitting } from '@/lib/submit-state';
+import { shouldClearSubmitting, submitErrorFor } from '@/lib/submit-state';
 import { formatDuration, formatHoursMinutes } from '@/lib/format-duration';
 import { isAfterFrontier, isBeforeFrontier, type StepOrderKey } from '@/lib/step-order';
 import {
@@ -725,7 +725,7 @@ export default function TaskDetailPage() {
   const [summaryCliError, setSummaryCliError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('steps');
   const [submitting, setSubmitting] = useState<string | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<{ stepId: string; message: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [stepActionBusy, setStepActionBusy] = useState<string | null>(null);
   const [stepActionError, setStepActionError] = useState<{
@@ -1272,7 +1272,10 @@ export default function TaskDetailPage() {
       // (success) or is replaced by a retry button (failure). Clearing in a
       // `finally` re-enabled the button between reload and backend transition.
     } catch (err) {
-      setSubmitError((err as Error).message ?? 'Failed to submit step');
+      setSubmitError({
+        stepId: step.stepId,
+        message: (err as Error).message ?? 'Failed to submit step',
+      });
       setSubmitting(null);
     }
   }
@@ -2150,7 +2153,7 @@ export default function TaskDetailPage() {
                       : step.userActiveMs) + step.carriedUserActiveMs
                   }
                   submitting={submitting === step.stepId}
-                  submitError={submitting === step.stepId ? submitError : null}
+                  submitError={submitErrorFor(submitError, step.stepId)}
                   onSubmit={(values) => submitStep(step, values)}
                   actionBusy={stepActionBusy === step.stepId}
                   actionError={

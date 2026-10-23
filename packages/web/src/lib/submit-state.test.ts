@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isAwaitingFormInput } from './submit-state';
+import { isAwaitingFormInput, submitErrorFor } from './submit-state';
 
 const STAMP = '2026-09-13T11:08:31.100Z';
 
@@ -20,5 +20,18 @@ describe('isAwaitingFormInput', () => {
   it('is false with no step', () => {
     expect(isAwaitingFormInput(null)).toBe(false);
     expect(isAwaitingFormInput(undefined)).toBe(false);
+  });
+});
+
+describe('submitErrorFor', () => {
+  const error = { stepId: 'step-a', message: 'The repository is busy, try again' };
+
+  it('shows the message on the step that failed', () => {
+    expect(submitErrorFor(error, 'step-a')).toBe('The repository is busy, try again');
+  });
+
+  it('shows nothing on another step, or with no error', () => {
+    expect(submitErrorFor(error, 'step-b')).toBeNull();
+    expect(submitErrorFor(null, 'step-a')).toBeNull();
   });
 });

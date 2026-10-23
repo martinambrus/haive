@@ -166,6 +166,7 @@ export function PlanStarter({
             }),
           )
         ).taskId;
+      if (deferStart) setDraftTaskId(taskId);
 
       if (!deferStart) return onNavigate(`/tasks/${taskId}`);
 
@@ -199,7 +200,6 @@ export function PlanStarter({
           `${failed} of ${files.length} file(s) failed to upload, so the build was NOT started. Nothing was lost — the draft task is waiting. Fix the files listed above and press "Retry the failed uploads" (only those are re-sent), or open the draft and attach them there.`,
         );
         setProgress(null);
-        setDraftTaskId(taskId);
         setBusy(false);
         return;
       }
