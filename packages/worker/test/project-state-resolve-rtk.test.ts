@@ -118,7 +118,7 @@ describe('answering the RTK question: take theirs', () => {
 });
 
 describe('answering the RTK question: keep mine', () => {
-  it('leaves RTK on, stamps the row and writes nothing else', async () => {
+  it('leaves RTK on, records the choice, stamps the row and writes nothing else', async () => {
     const s = setup();
 
     const result = await s.answer('keep_mine');
@@ -129,7 +129,7 @@ describe('answering the RTK question: keep mine', () => {
       conflict: { id: s.id, resolution: 'keep_mine' },
     });
     expect(s.repo().rtkEnabled).toBe(true);
-    expect(s.repo().rtkChoiceMadeAt).toBeNull();
+    expect(s.repo().rtkChoiceMadeAt).toBeInstanceOf(Date);
     expect((s.repo().updatedAt as Date).getTime()).toBe(UPDATED.getTime());
     expect(s.row()).toMatchObject({ resolution: 'keep_mine', resolvedBy: OWNER });
   });
@@ -138,7 +138,10 @@ describe('answering the RTK question: keep mine', () => {
     const s = setup();
     const first = await s.answer('keep_mine');
 
+    const before = JSON.stringify([s.repo(), s.row()]);
+
     expect(await s.answer('keep_mine')).toEqual(first);
+    expect(JSON.stringify([s.repo(), s.row()])).toBe(before);
     expect(await s.answer('take_theirs')).toEqual({ kind: 'settled', resolution: 'keep_mine' });
     expect(s.repo().rtkEnabled).toBe(true);
   });
@@ -174,6 +177,7 @@ describe('answering the RTK question: who and when', () => {
 
     expect(await s.answer('take_theirs', STRANGER)).toEqual({ kind: 'not_found' });
     expect(s.repo().rtkEnabled).toBe(true);
+    expect(s.repo().rtkChoiceMadeAt).toBeNull();
     expect(s.row().resolvedAt).toBeNull();
   });
 
@@ -190,6 +194,7 @@ describe('answering the RTK question: who and when', () => {
 
     expect(await s.answer('take_theirs')).toEqual({ kind: 'busy' });
     expect(s.repo().rtkEnabled).toBe(true);
+    expect(s.repo().rtkChoiceMadeAt).toBeNull();
     expect(s.row().resolvedAt).toBeNull();
   });
 });

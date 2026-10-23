@@ -145,6 +145,10 @@ export function ProjectStateConflictsView({
   );
 }
 
+type AnsweredConflict = Pick<ProjectStateConflictBody, 'unit' | 'base' | 'local'> & {
+  answer: ProjectStateAnswer;
+};
+
 export interface ProjectStateConflictsBannerProps {
   repositoryId: string;
   scope?: ConflictScope;
@@ -178,7 +182,7 @@ export function ProjectStateConflictsBanner({
   const onAnsweredRef = useRef(onAnswered);
   onAnsweredRef.current = onAnswered;
   const pendingAnswers = useRef<Record<string, ProjectStateAnswer>>({});
-  const recordAnswers = useCallback((items: { answer: ProjectStateAnswer; unit: string }[]) => {
+  const recordAnswers = useCallback((items: AnsweredConflict[]) => {
     const plan = items.filter(isPlanConflict).map((i) => i.answer);
     const rtk = items.filter(isRtkConflict).map((i) => i.answer);
     const claims = items.filter(isClaimConflict).map((i) => i.answer);
@@ -243,20 +247,20 @@ export function ProjectStateConflictsBanner({
               id,
               ok: true,
               answer: landedAnswer(res.conflict.resolution),
-              unit: res.conflict.unit,
+              conflict: res.conflict,
             }))
-            .catch(() => ({ id, ok: false, answer: null, unit: '' })),
+            .catch(() => ({ id, ok: false, answer: null, conflict: null })),
         ),
       );
       if (!alive.current) return;
-      const answers: { answer: ProjectStateAnswer; unit: string }[] = [];
+      const answers: AnsweredConflict[] = [];
       for (const l of looked) {
         if (!l.ok) {
           unconfirmed.push(l.id);
           continue;
         }
         delete pendingAnswers.current[l.id];
-        if (l.answer) answers.push({ answer: l.answer, unit: l.unit });
+        if (l.answer && l.conflict) answers.push({ answer: l.answer, ...l.conflict });
       }
       recordAnswers(answers);
       if (answers.length > 0) onAnsweredRef.current?.();
@@ -315,9 +319,9 @@ export function ProjectStateConflictsBanner({
       if (out.kind === 'error') next[conflict.id] = { tone: 'error', text: out.message };
       return next;
     });
-    if (out.kind === 'resolved') recordAnswers([{ answer, unit: conflict.unit }]);
+    if (out.kind === 'resolved') recordAnswers([{ answer, ...conflict }]);
     if (out.kind === 'error' && out.landed) {
-      recordAnswers([{ answer: out.landed, unit: conflict.unit }]);
+      recordAnswers([{ answer: out.landed, ...conflict }]);
     }
     if (out.kind === 'pending') {
       pendingAnswers.current[conflict.id] = answer;
@@ -339,6 +343,7 @@ export function ProjectStateConflictsBanner({
         confirming.conflict.key,
         confirming.conflict.unit,
         conflictClaimPath(confirming.conflict),
+        isRtkConflict(confirming.conflict),
       )
     : null;
 

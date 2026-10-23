@@ -40,34 +40,33 @@ describe('the RTK question', () => {
   it('is labelled by its unit, since its key is null like the whole file', () => {
     expect(conflictKeyLabel(null, UNIT)).toBe('RTK command compression');
     expect(conflictKeyLabel(null)).toBe('The whole project record file');
-    expect(isRtkConflict({ unit: UNIT })).toBe(true);
-    expect(isRtkConflict({ unit: 'project/render.json' })).toBe(false);
   });
 
-  it('keep mine says RTK stays on here and no file is written', () => {
-    const c = answerConfirmation('keep_mine', null, UNIT);
+  it('keep mine says RTK stays on here and the choice is recorded in its record file', () => {
+    const c = answerConfirmation('keep_mine', null, UNIT, null, true);
     expect(c.confirmLabel).toBe('Keep mine');
     expect(c.body).toBe(
-      'RTK command compression stays on in this install. No repository file is written.',
+      "RTK command compression stays on in this install. This install's choice is recorded in the project's record file, .haive-data/state/settings/rtk-enabled.json. Commit and push that file if it changed, so your teammate gets it.",
     );
-    expect(c.body).not.toContain('Commit and push');
   });
 
   it('take theirs says RTK is switched off here as the other install has it', () => {
-    const c = answerConfirmation('take_theirs', null, UNIT);
+    const c = answerConfirmation('take_theirs', null, UNIT, null, true);
     expect(c.confirmLabel).toBe('Take theirs');
     expect(c.body).toContain('switched off in this install, as the other install has it');
-    expect(c.body).toContain('No repository file is written');
+    expect(c.body).toContain('.haive-data/state/settings/rtk-enabled.json');
+    expect(c.body).not.toContain('No repository file is written');
   });
 
-  it('reports each answer as what happened to RTK, never as a record file written', () => {
+  it('reports each answer as what happened to RTK and where the choice is recorded', () => {
+    const recorded =
+      "This install's choice is recorded in `.haive-data/state/settings/rtk-enabled.json`. Commit and push that file if it changed, so your teammate gets it.";
     expect(resolutionNotice([], ['keep_mine'])).toBe(
-      'RTK command compression stays on in this install.',
+      `RTK command compression stays on in this install. ${recorded}`,
     );
     expect(resolutionNotice([], ['take_theirs'])).toBe(
-      'RTK command compression is switched off in this install.',
+      `RTK command compression is switched off in this install. ${recorded}`,
     );
-    expect(resolutionNotice([], ['keep_mine'])).not.toContain('Commit and push');
   });
 
   it('adds the record file notice only for a render answer beside it', () => {
@@ -377,10 +376,9 @@ describe('a setting or environment question', () => {
   });
 
   it('is told apart from the RTK question and the render keys when an answer lands', () => {
-    expect(isSettingConflict({ unit: LSP })).toBe(true);
-    expect(isSettingConflict({ unit: 'project/environment.json' })).toBe(true);
-    expect(isSettingConflict({ unit: 'settings/rtk-enabled.json' })).toBe(false);
-    expect(isSettingConflict({ unit: 'project/render.json#framework' })).toBe(false);
+    expect(isSettingConflict(bare(LSP))).toBe(true);
+    expect(isSettingConflict(bare('project/environment.json'))).toBe(true);
+    expect(isSettingConflict(bare('project/render.json#framework'))).toBe(false);
     expect(resolutionNotice([], [], [], ['keep_mine'])).toContain(
       'Commit and push the changed file',
     );
@@ -427,5 +425,30 @@ describe('a plan question', () => {
     );
     expect(resolutionNotice([], [], [], [], ['keep_mine'])).toContain('.haive-data/plan.json');
     expect(resolutionNotice([], [], [], [], ['take_theirs'])).toContain('teammate');
+  });
+});
+
+const bare = (unit: string) => ({
+  unit,
+  base: { present: false as const },
+  local: { present: false as const },
+});
+
+describe('the RTK question versus an ordinary rtk-enabled conflict', () => {
+  const side = (value: unknown) => ({ present: true, value });
+  const unit = 'settings/rtk-enabled.json';
+
+  it('shows an ordinary conflict the setting copy, not the question copy', () => {
+    const c = answerConfirmation('keep_mine', null, unit, null, false);
+    expect(c.body).not.toContain('stays on in this install');
+  });
+
+  it('is the question only where base equals local', () => {
+    const question = { unit, base: side(true), local: side(true), incoming: side(false) };
+    const ordinary = { unit, base: side(true), local: side(false), incoming: side(true) };
+    expect(isRtkConflict(question)).toBe(true);
+    expect(isRtkConflict(ordinary)).toBe(false);
+    expect(isSettingConflict(question)).toBe(false);
+    expect(isSettingConflict(ordinary)).toBe(true);
   });
 });
