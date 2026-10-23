@@ -81,7 +81,7 @@ on commit or rollback), like an administrator's maintenance write, takes the sam
 it waits for every admission in flight, so the live-work count it reads next includes each task or
 job admitted before it, every admission after it reads the new state, and no write lands inside an
 administrator's write. Lifting the hold therefore needs Postgres: an updater that cannot reach it
-leaves its run `running`, and the next `haive upgrade` resumes into the commit or the rollback. The admin
+leaves its run `running`, and the next `haive upgrade` resumes into the commit or the rollback. A rollback that throws does the same: the updater records the error on the run, keeps it `running`, emits `rollback-failed` and exits 6, and the next `haive upgrade` finds the run and finishes the rollback. The admin
 page (`GET /admin/maintenance`) and the app banner (`GET /system/state`) read the state past the
 config cache, so a change shows at once; the gate that locks non-admins out during `maintenance`
 keeps its cached read, so that lockout can lag by up to 30 s. `PUT /admin/maintenance` writes its
