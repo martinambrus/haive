@@ -39,7 +39,7 @@ import { loadRepoStackAnchors, techAnchorFacets } from '../_repo-stack.js';
 import { buildTaskHistoryDigest, type TaskHistoryDigest } from './_task-history-digest.js';
 import { KNOWLEDGE_DIFF_ARTIFACT_NAME, buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
 import { revertKnowledgeBase } from './_kb-commit.js';
-import type { CommitDiffFile } from './_commit-diff.js';
+import type { CommitDiffFile } from '@haive/shared/commit-diff-artifact';
 import {
   loadOutstandingLearningInstruction,
   recordLearningAccepted,

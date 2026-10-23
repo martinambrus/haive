@@ -1,4 +1,9 @@
 import path from 'node:path';
+import type {
+  CommitDiffArtifact,
+  CommitDiffFile,
+  CommitDiffStatus,
+} from '@haive/shared/commit-diff-artifact';
 import { readFileNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
@@ -24,42 +29,6 @@ export const MAX_FILES = 500;
 // keep their metadata but drop content (truncated) so a pathological diff can't
 // produce a multi-hundred-MB artifact.
 export const TOTAL_CONTENT_BUDGET = 16 * 1024 * 1024;
-
-export type CommitDiffStatus = 'added' | 'modified' | 'deleted' | 'renamed';
-
-export interface CommitDiffFile {
-  /** Repo-relative path (the new path for renames). */
-  path: string;
-  /** Source path, present only for renames. */
-  oldPath?: string;
-  status: CommitDiffStatus;
-  /** Either side is binary; content omitted. */
-  binary: boolean;
-  /** Either side exceeded the size cap or the total budget; content omitted. */
-  truncated: boolean;
-  /** A side could not be read: git exited non-zero or the working file could not be opened;
-   *  contents are omitted. Absent means both sides were read. */
-  unreadable?: boolean;
-  oldContent: string;
-  newContent: string;
-  /** Absolute path the web viewer may WRITE this file's new side back to, via
-   *  `PUT /tasks/:id/files/content`. Set only by builders whose gate offers
-   *  inline editing (the knowledge diff); absent means the file renders
-   *  read-only, which is every file of the gate-3 commit diff. Points at the
-   *  real worktree file for an on-disk change, and at a `.haive/` staging file
-   *  for a draft the step has not written yet — the viewer does not care which,
-   *  it just PUTs the path back. */
-  editPath?: string;
-}
-
-export interface CommitDiffArtifact {
-  headSha: string | null;
-  /** Total changed files detected (may exceed files.length when capped). */
-  fileCount: number;
-  /** File list was capped at MAX_FILES. */
-  truncated: boolean;
-  files: CommitDiffFile[];
-}
 
 export interface CommitDiffResult {
   /** In-memory snapshot for callers that also need to describe the pending commit. */

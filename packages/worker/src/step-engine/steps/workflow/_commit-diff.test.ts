@@ -3,7 +3,11 @@ import { mkdir, mkdtemp, readFile, rename, rm, symlink, unlink, writeFile } from
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect } from 'vitest';
+import type {
+  CommitDiffArtifact as SharedCommitDiffArtifact,
+  CommitDiffFile as SharedCommitDiffFile,
+} from '@haive/shared/commit-diff-artifact';
+import { describe, it, expect, expectTypeOf } from 'vitest';
 import { gitRun } from '../../../repo/git-exec.js';
 import {
   buildCommitDiffArtifact,
@@ -296,5 +300,16 @@ describe('an unreadable side of a changed file', () => {
       expect(written.fileCount).toBe(1);
       expect(written.files[0].unreadable).toBe(true);
     });
+  });
+});
+
+describe('the artifact types', () => {
+  it('are the ones @haive/shared declares', () => {
+    expectTypeOf<
+      Awaited<ReturnType<typeof buildFileEntry>>
+    >().toEqualTypeOf<SharedCommitDiffFile>();
+    expectTypeOf<
+      Awaited<ReturnType<typeof buildCommitDiffArtifact>>['artifact']
+    >().toEqualTypeOf<SharedCommitDiffArtifact>();
   });
 });

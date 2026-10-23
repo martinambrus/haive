@@ -3,10 +3,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import type { CommitDiffArtifact, CommitDiffFile } from '@haive/shared/commit-diff-artifact';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { describe, it, expect } from 'vitest';
 import { gitRun } from '../../../repo/git-exec.js';
-import { type CommitDiffArtifact, type CommitDiffFile, MAX_FILES } from './_commit-diff.js';
+import { MAX_FILES } from './_commit-diff.js';
 import {
   buildKnowledgeDiffArtifact,
   EXTERNAL_KB_DIFF_ARTIFACT_NAME,

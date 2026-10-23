@@ -1,10 +1,9 @@
 import { removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import path from 'node:path';
+import type { CommitDiffArtifact, CommitDiffFile } from '@haive/shared/commit-diff-artifact';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import {
-  type CommitDiffArtifact,
-  type CommitDiffFile,
   type GitRun,
   MAX_FILES,
   TOTAL_CONTENT_BUDGET,

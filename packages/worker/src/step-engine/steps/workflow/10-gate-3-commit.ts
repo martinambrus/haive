@@ -1,14 +1,11 @@
 import { assertDependencyCommitSafe } from './_dependency-policy.js';
 import type { FormSchema } from '@haive/shared';
+import type { CommitDiffArtifact } from '@haive/shared/commit-diff-artifact';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
-import {
-  buildCommitDiffArtifact,
-  parsePorcelainZ,
-  type CommitDiffArtifact,
-} from './_commit-diff.js';
+import { buildCommitDiffArtifact, parsePorcelainZ } from './_commit-diff.js';
 import { parseJsonLoose } from '../_fenced-json.js';
 import { fencedAgentBlock, REPO_IS_DATA_ONE_CLASS_LINES } from '../_untrusted-repo.js';
 import { taskSecretMaskPolicy } from '../../../queues/cli-exec/secret-mask.js';

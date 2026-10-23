@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CommitDiffArtifact, CommitDiffStatus } from '@haive/shared/commit-diff-artifact';
 import { api, API_BASE_URL, type ApiError } from '@/lib/api-client';
 import { usePersistedToggle } from '@/lib/use-persisted-toggle';
 import {
@@ -12,32 +13,6 @@ import {
   type InlineRow,
   type SplitRow,
 } from '@/components/commit-diff';
-
-// Mirrors the worker artifact shape written by _commit-diff.ts.
-type CommitDiffStatus = 'added' | 'modified' | 'deleted' | 'renamed';
-
-interface CommitDiffFile {
-  path: string;
-  oldPath?: string;
-  status: CommitDiffStatus;
-  binary: boolean;
-  truncated: boolean;
-  oldContent: string;
-  newContent: string;
-  /** Set by the worker for files this gate lets the user correct in place (the
-   *  knowledge gates). Absent — every file of the gate-3 commit diff — renders
-   *  read-only. */
-  editPath?: string;
-  /** Git or the working tree could not be read for this file; both contents are empty then. */
-  unreadable?: boolean;
-}
-
-interface CommitDiffArtifact {
-  headSha: string | null;
-  fileCount: number;
-  truncated: boolean;
-  files: CommitDiffFile[];
-}
 
 interface CommitDiffViewerProps {
   taskId: string;

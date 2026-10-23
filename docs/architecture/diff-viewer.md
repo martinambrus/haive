@@ -28,8 +28,9 @@ shows "Could not read this file" instead of a diff, gate 3 gives the commit-mess
 path and status only ("content unavailable"), and the knowledge builders set no `editPath`, so
 the file cannot be edited. The field is absent when both sides were read, which covers every
 artifact an older worker wrote and every entry the learning step synthesizes. A changed submodule
-pointer reads this way too, since git has no blob to show for it. `CommitDiffFile` is declared
-twice, in `_commit-diff.ts` and in `commit-diff-viewer.tsx`; a new field goes into both.
+pointer reads this way too, since git has no blob to show for it. `CommitDiffFile` and
+`CommitDiffArtifact` are declared once, in `@haive/shared/commit-diff-artifact`, and the builders
+and the viewer both import them; a new field goes there.
 
 Whole lines retain their red/green background. A removed run followed by an added run also
 gets a `diffWordsWithSpace` comparison: only changed words, punctuation and whitespace receive

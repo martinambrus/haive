@@ -1,3 +1,4 @@
+import type { CommitDiffFile, CommitDiffStatus } from '@haive/shared/commit-diff-artifact';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { CommitDiffViewer } from './commit-diff-viewer';
 import { createRenderer, findAll, fire, textOf, type Renderer } from '../../test/render-tree';
@@ -7,7 +8,7 @@ vi.mock('react', async (importOriginal) => ({
   ...(await import('../../test/render-tree')).reactHooks,
 }));
 
-let files: Array<Record<string, unknown>> = [];
+let files: CommitDiffFile[] = [];
 
 async function fakeFetch() {
   return {
@@ -30,7 +31,11 @@ beforeAll(() => {
 });
 afterAll(() => vi.unstubAllGlobals());
 
-const file = (path: string, status: string, extra: Record<string, unknown> = {}) => ({
+const file = (
+  path: string,
+  status: CommitDiffStatus,
+  extra: Partial<CommitDiffFile> = {},
+): CommitDiffFile => ({
   path,
   status,
   binary: false,
@@ -40,7 +45,7 @@ const file = (path: string, status: string, extra: Record<string, unknown> = {})
   ...extra,
 });
 
-async function mount(list: Array<Record<string, unknown>>): Promise<Renderer> {
+async function mount(list: CommitDiffFile[]): Promise<Renderer> {
   files = list;
   const view = createRenderer(() => <CommitDiffViewer taskId="t1" artifactPath="diff.json" />);
   for (let i = 0; i < 3; i += 1) await view.flush();
