@@ -141,4 +141,12 @@ describe('#280 fix5 halt ownership with an advanced feature and no fix baseline'
     expect(claimFake.claims.has(state.mergeDir)).toBe(true);
     expect(claimFake.released).toEqual([]);
   });
+
+  it('keeps the claim when the merge directory is gone and git cannot run', async () => {
+    const state = await openMerge(false);
+    await rm(state.mergeDir, { recursive: true, force: true });
+    await halt(state);
+    expect(claimFake.claims.has(state.mergeDir)).toBe(true);
+    expect(claimFake.released).toEqual([]);
+  });
 });

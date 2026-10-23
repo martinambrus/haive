@@ -30,6 +30,7 @@ import {
   mergeOriginInto,
   planMergeWorktreePath,
   removePlanMergeWorktree,
+  unlandedResolvedMerge,
 } from './merge.js';
 
 // As the root worker, which the hand-back after a move is for: every path reads as the worker's own,
@@ -1046,6 +1047,59 @@ describe('landPlanMerge', () => {
 
     await expect(landPlanMerge(local, sha!)).rejects.toThrow(/uncommitted changes \(README\.md\)/);
     expect(await readFile(path.join(local, 'README.md'), 'utf8')).toBe('edited meanwhile\n');
+  });
+});
+
+describe('unlandedResolvedMerge', () => {
+  async function mergedInScratch(): Promise<{ local: string; wt: string; sha: string }> {
+    const local = await mkdtemp(path.join(tmpdir(), 'planmerge-unlanded-'));
+    dirs.push(local);
+    await git(local, ['init', '-b', 'main']);
+    await quietGit(local);
+    await write(local, 'a.txt', 'a\n');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'root']);
+    await git(local, ['branch', 'feature']);
+    await git(local, ['switch', 'feature']);
+    await write(local, 'b.txt', 'b\n');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'feature']);
+    await git(local, ['switch', 'main']);
+    const wt = await ensurePlanMergeWorktree(local);
+    await git(wt, ['merge', '--no-ff', '-m', 'merge feature', 'feature']);
+    const sha = (await git(wt, ['rev-parse', 'HEAD'])).trim();
+    return { local, wt, sha };
+  }
+
+  it('names the merge until it lands, then null', async () => {
+    const { local, wt, sha } = await mergedInScratch();
+    const head = (await git(local, ['rev-parse', 'main'])).trim();
+    expect(
+      await unlandedResolvedMerge({ repoPath: local, worktreePath: wt, branch: 'main' }),
+    ).toEqual({
+      sha,
+      head,
+    });
+    await git(local, ['merge', '--ff-only', sha]);
+    expect(
+      await unlandedResolvedMerge({ repoPath: local, worktreePath: wt, branch: 'main' }),
+    ).toBeNull();
+  });
+
+  it('throws when git cannot run in the repository', async () => {
+    const { local, wt } = await mergedInScratch();
+    const gone = path.join(local, 'never-created');
+    await expect(
+      unlandedResolvedMerge({ repoPath: gone, worktreePath: wt, branch: 'main' }),
+    ).rejects.toThrow(/git merge-base failed/);
+  });
+
+  it('throws when git cannot run in the worktree', async () => {
+    const { local } = await mergedInScratch();
+    const gone = path.join(local, 'never-created');
+    await expect(
+      unlandedResolvedMerge({ repoPath: local, worktreePath: gone, branch: 'main' }),
+    ).rejects.toThrow(/git rev-parse failed/);
   });
 });
 

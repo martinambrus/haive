@@ -787,6 +787,23 @@ describe('a put-back cut short is resumed, not lost', () => {
     expect(commitsOf(h)).toEqual([first!.commit]);
   });
 
+  it('a git that ended without an exit status in judging a record keeps it', async () => {
+    const { parent, wt } = await fixture();
+    await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+    const h = stubDb();
+    const first = await pass(parent, wt, h);
+    expect(commitsOf(h)).toEqual([first!.commit]);
+
+    await commit(wt, { 'late.txt': 'late\n' }, 'work after the put-back');
+    inject.hook = (args) =>
+      args.includes('merge-base') && args.includes('--is-ancestor')
+        ? { stdout: '', stderr: 'injected merge-base failure', code: -1 }
+        : undefined;
+    await expect(pass(parent, wt, h)).rejects.toThrow(/git merge-base failed: injected/);
+    expect(commitsOf(h)).toEqual([first!.commit]);
+    inject.hook = null;
+  });
+
   it('a hand-back cut short after its restore is run again by the next pass, and not once it finished', async () => {
     const { parent, wt } = await fixture();
     await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');

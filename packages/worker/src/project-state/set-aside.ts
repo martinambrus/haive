@@ -1104,7 +1104,7 @@ async function indexToHeadPatch(repoPath: string, path: string): Promise<Buffer>
   if (res.code !== 0) {
     const why = res.stderr.trim().slice(0, 300);
     throw new Error(
-      why === ''
+      res.noExit === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
         ? `the staged copy of ${path} is too large to set aside`
         : `git diff failed: ${why}`,
     );

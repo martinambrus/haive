@@ -580,6 +580,53 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(d.diverged).toBe(false);
       const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
       expect(out).toMatchObject({ synced: true, strategy: 'noop' });
+      expect(d.compareError).toBeNull();
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('a commit count that fails after a good fetch → skipped, never noop', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    try {
+      await git(local, [
+        'config',
+        'remote.origin.fetch',
+        '+refs/heads/other:refs/remotes/origin/other',
+      ]);
+      await git(local, ['update-ref', '-d', 'refs/remotes/origin/main']);
+      const ctx = mkCtx(local);
+      const d = await syncBaseStep.detect!(ctx);
+      expect(d.fetchOk).toBe(true);
+      expect(d.compareError).toContain('origin/main');
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }));
+      expect(out).toMatchObject({ synced: false, base: 'main', strategy: 'skipped' });
+      expect(out.reason).toContain('could not compare main with origin/main');
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('a failed commit count does not skip a base the user typed instead', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    try {
+      await git(local, ['branch', 'other']);
+      await git(local, [
+        'config',
+        'remote.origin.fetch',
+        '+refs/heads/other:refs/remotes/origin/other',
+      ]);
+      await git(local, ['update-ref', '-d', 'refs/remotes/origin/main']);
+      const ctx = mkCtx(local);
+      const d = await syncBaseStep.detect!(ctx);
+      const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'other' }));
+      expect(out.reason ?? '').not.toContain('could not compare');
     } finally {
       await rm(bare, { recursive: true, force: true });
       await rm(seed, { recursive: true, force: true });
@@ -1289,6 +1336,20 @@ describe('00a-sync-base form', () => {
     expect(formOf({ hasOrigin: false }).autoSubmit).toBe(true); // no origin, nothing to sync
     expect(formOf({ diverged: true, behindBy: 2, aheadBy: 1 }).autoSubmit).toBeUndefined();
     expect(formOf({ fetchOk: false, fetchError: 'x' }).autoSubmit).toBeUndefined();
+  });
+
+  it('warns, gates and keeps the base picker when the commit count failed', () => {
+    const s = formOf({ compareError: 'fatal: bad revision' });
+    const note = s.fields.find((f) => f.id === 'compareFailed') as
+      { variant?: string; body?: string } | undefined;
+    expect(note?.variant).toBe('warning');
+    expect(note?.body).toContain('fatal: bad revision');
+    expect(ids(s)).toContain('base');
+    expect(ids(s)).not.toContain('uptodate');
+    expect(s.autoSubmit).toBeUndefined();
+    const ok = formOf({ compareError: null });
+    expect(ids(ok)).not.toContain('compareFailed');
+    expect(ok.autoSubmit).toBe(true);
   });
 
   it('shows the merge/skip choice ONLY when diverged', () => {

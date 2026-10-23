@@ -264,7 +264,9 @@ export async function abortMerge(worktreePath: string): Promise<void> {
 
 async function commitOf(worktreePath: string, spec: string): Promise<string | null> {
   const res = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', `${spec}^{commit}`]);
-  return res.code === 0 ? res.stdout.trim() : null;
+  if (res.code === 0) return res.stdout.trim();
+  if (res.code === 1) return null;
+  throw new Error(`git rev-parse failed: ${(res.stderr || res.stdout).trim()}`);
 }
 
 /** The merge commit HEAD is, while it has not landed on the branch; null when HEAD is no such merge.
@@ -285,7 +287,9 @@ export async function unlandedResolvedMerge(args: {
     sha,
     `refs/heads/${branch}`,
   ]);
-  return landed.code === 1 ? { sha, head } : null;
+  if (landed.code === 0) return null;
+  if (landed.code === 1) return { sha, head };
+  throw new Error(`git merge-base failed: ${(landed.stderr || landed.stdout).trim()}`);
 }
 
 /** Reopen the unlanded resolved merge `prior` at its conflicts, as git opens them, for the agent to
