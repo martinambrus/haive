@@ -667,6 +667,54 @@ describe('00a-sync-base detect + apply (real git)', () => {
       await rm(local, { recursive: true, force: true });
     }
   });
+
+  describe('an origin git cannot read', () => {
+    // A bad fetch refspec makes `git remote get-url origin` exit 128 while rev-parse, status and branch still work.
+    async function unreadableOriginCheckout(): Promise<{ local: string; bare: string }> {
+      const bare = await mkdtemp(path.join(tmpdir(), 'sync-unreadable-bare-'));
+      await git(bare, ['init', '--bare', '-b', 'main']);
+      const local = await mkdtemp(path.join(tmpdir(), 'sync-unreadable-'));
+      await git(local, ['init', '-b', 'main']);
+      await git(local, ['config', 'gc.auto', '0']);
+      await writeFile(path.join(local, 'a.txt'), '1\n', 'utf8');
+      await git(local, ['add', '-A']);
+      await git(local, ['commit', '-m', 'c1']);
+      await git(local, ['remote', 'add', 'origin', `file://${bare}`]);
+      await git(local, ['config', '--add', 'remote.origin.fetch', ':::bad']);
+      return { local, bare };
+    }
+
+    it('detect rejects with the failure instead of reporting no origin', async () => {
+      const { local, bare } = await unreadableOriginCheckout();
+      try {
+        expect(await gitCode(local, ['remote', 'get-url', 'origin'])).toBe(128);
+        await expect(syncBaseStep.detect!(mkCtx(local))).rejects.toThrow(
+          /git remote get-url origin failed in /,
+        );
+      } finally {
+        await rm(bare, { recursive: true, force: true });
+        await rm(local, { recursive: true, force: true });
+      }
+    });
+
+    it('detect reports the origin once the refspec is repaired', async () => {
+      const { local, bare } = await unreadableOriginCheckout();
+      try {
+        await git(local, ['config', '--unset-all', 'remote.origin.fetch']);
+        await git(local, [
+          'config',
+          '--add',
+          'remote.origin.fetch',
+          '+refs/heads/*:refs/remotes/origin/*',
+        ]);
+        const d = await syncBaseStep.detect!(mkCtx(local));
+        expect(d.hasOrigin).toBe(true);
+      } finally {
+        await rm(bare, { recursive: true, force: true });
+        await rm(local, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 // In-memory db backing merge_resolve_state for the divergence merge (mirrors the

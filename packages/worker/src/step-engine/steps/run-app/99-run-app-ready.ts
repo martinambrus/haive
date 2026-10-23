@@ -49,6 +49,8 @@ interface RunAppReadyDetect {
   hasGit: boolean;
   branch: string | null;
   hasOrigin: boolean;
+  /** Why the origin could not be read, so the push is not offered. Optional: a parked step replays a payload without it. */
+  originError?: string | null;
   dirtyFiles: number;
   diffArtifactPath: string | null;
   changedFileCount: number;
@@ -163,13 +165,22 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
 
     let branch: string | null = null;
     let hasOrigin = false;
+    let originError: string | null = null;
     let dirtyFiles = 0;
     let diffArtifactPath: string | null = null;
     let changedFileCount = 0;
     if (hasGit) {
       const branchRes = await gitRun(workspacePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
-      hasOrigin = await detectOrigin(workspacePath);
+      try {
+        hasOrigin = await detectOrigin(workspacePath);
+      } catch (err) {
+        originError = err instanceof Error ? err.message : String(err);
+        ctx.logger.warn(
+          { err, workspacePath },
+          'run-app-ready: origin remote unreadable; push not offered',
+        );
+      }
       // Never fail the gate on a diff-build error — the viewer is simply hidden.
       try {
         const status = await gitRun(workspacePath, [
@@ -204,6 +215,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       hasGit,
       branch,
       hasOrigin,
+      originError,
       dirtyFiles,
       diffArtifactPath,
       changedFileCount,
@@ -253,6 +265,15 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         id: 'push',
         label: `Push ${detected.branch ?? 'this branch'} to origin after committing`,
         default: false,
+      });
+    }
+    if (detected.originError) {
+      fields.push({
+        type: 'note',
+        id: 'originUnreadable',
+        label: 'Origin remote not read',
+        body: `Pushing is not offered: ${detected.originError}. Fix the git configuration and Retry this step to see it.`,
+        variant: 'warning',
       });
     }
     return {

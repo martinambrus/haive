@@ -14,40 +14,46 @@ const h = vi.hoisted(() => ({
   advance: vi.fn(),
   recordError: vi.fn(),
   remove: vi.fn(),
+  detectOrigin: vi.fn(),
+  realDetectOrigin: null as unknown as (cwd: string) => Promise<boolean>,
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/secrets/user-git-identity.js', () => ({ resolveGitEnv: async () => ({}) }));
 vi.mock('../src/repo/refresh.js', () => ({ checkoutHoldingTasks: async () => 0 }));
-vi.mock('../src/repo/git-push.js', async (original) => ({
-  ...(await original<typeof import('../src/repo/git-push.js')>()),
-  detectOrigin: async () => true,
-  pushBranch: h.push,
-  gitRun: async (_cwd: string, args: string[]) => {
-    if (args.join(' ') === 'rev-parse --verify refs/heads/main^{commit}') {
-      return {
-        code: h.fail ? 128 : 0,
-        stdout: h.empty ? '' : h.sha,
-        stderr: '',
-      };
-    }
-    if (args.join(' ') === 'rev-parse HEAD') {
-      h.headReads += 1;
-      if (h.headReads === 3)
+vi.mock('../src/repo/git-push.js', async (original) => {
+  const real = await original<typeof import('../src/repo/git-push.js')>();
+  h.realDetectOrigin = real.detectOrigin;
+  return {
+    ...real,
+    detectOrigin: (cwd: string) => h.detectOrigin(cwd),
+    pushBranch: h.push,
+    gitRun: async (_cwd: string, args: string[]) => {
+      if (args.join(' ') === 'rev-parse --verify refs/heads/main^{commit}') {
         return {
           code: h.fail ? 128 : 0,
-          stdout: h.empty ? '' : h.switched ? h.otherSha : 'unreadable',
-          stderr: 'unreadable',
+          stdout: h.empty ? '' : h.sha,
+          stderr: '',
         };
-      return { code: 0, stdout: h.sha, stderr: '' };
-    }
-    if (args.join(' ') === 'branch --show-current') return h.branch;
-    return {
-      code: 0,
-      stdout: args.includes('--is-inside-work-tree') ? 'true' : 'main',
-      stderr: '',
-    };
-  },
-}));
+      }
+      if (args.join(' ') === 'rev-parse HEAD') {
+        h.headReads += 1;
+        if (h.headReads === 3)
+          return {
+            code: h.fail ? 128 : 0,
+            stdout: h.empty ? '' : h.switched ? h.otherSha : 'unreadable',
+            stderr: 'unreadable',
+          };
+        return { code: 0, stdout: h.sha, stderr: '' };
+      }
+      if (args.join(' ') === 'branch --show-current') return h.branch;
+      return {
+        code: 0,
+        stdout: args.includes('--is-inside-work-tree') ? 'true' : 'main',
+        stderr: '',
+      };
+    },
+  };
+});
 vi.mock('../src/plan/mirror.js', () => ({
   PlanMirrorHeldError: class extends Error {},
   flushPlanMirrorForRepository: async () => ({
@@ -94,6 +100,7 @@ beforeEach(() => {
   h.fail = false;
   h.empty = false;
   h.branch = { code: 0, stdout: 'main', stderr: '' };
+  h.detectOrigin.mockReset().mockResolvedValue(true);
   h.recordError.mockResolvedValue(undefined);
   h.push.mockResolvedValue({});
   const db = {
@@ -241,5 +248,46 @@ describe('plan save reads the current branch', () => {
     await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
       'cannot push a plan snapshot from a detached HEAD',
     );
+  });
+});
+
+describe('plan save reads the origin remote', () => {
+  const saveIt = (push: boolean) => save({ repositoryId: 'r1', userId: 'u1', push });
+
+  it('rejects with the origin read error and pushes nothing', async () => {
+    const message = 'git remote get-url origin failed in /repo: boom';
+    h.detectOrigin.mockRejectedValue(new Error(message));
+
+    await expect(saveIt(true)).rejects.toThrow(new RegExp(`^${message}$`));
+
+    expect(h.recordError).toHaveBeenCalledTimes(1);
+    expect(h.recordError).toHaveBeenCalledWith(h.db, 'r1', expect.objectContaining({ message }));
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it('names the failed read, not a missing remote, when git cannot run', async () => {
+    h.detectOrigin.mockImplementation((cwd) => h.realDetectOrigin(cwd));
+
+    const err = await saveIt(true).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+
+    expect(err?.message).toMatch(/git remote get-url origin failed in \/repo/);
+    expect(err?.message).not.toMatch(/has no origin remote/);
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it('keeps the old message when there is no origin', async () => {
+    h.detectOrigin.mockResolvedValue(false);
+
+    await expect(saveIt(true)).rejects.toThrow('this repository has no origin remote to push to');
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it('never reads the origin when not pushing', async () => {
+    await saveIt(false);
+
+    expect(h.detectOrigin).not.toHaveBeenCalled();
   });
 });
