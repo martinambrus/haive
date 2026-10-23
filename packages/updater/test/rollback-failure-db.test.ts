@@ -163,6 +163,21 @@ describe.skipIf(!url)(
       expect(logs.some((l) => l.event === 'resume')).toBe(true);
     });
 
+    it('keeps the run running and exits 6 when the resumed rollback throws again', async () => {
+      control.stored = 'maintenance';
+      failRollback();
+      await runUpdater();
+      logs = [];
+
+      expect(await runUpdater()).toBe(6);
+
+      const row = await run();
+      expect(row.status).toBe('running');
+      expect(row.error).toContain('compose down');
+      expect(control.stored).toBe('maintenance');
+      expect(logs.some((l) => l.event === 'rollback-failed')).toBe(true);
+    });
+
     it('restores a normal install to normal when the next run finishes the rollback', async () => {
       failRollback();
       await runUpdater();

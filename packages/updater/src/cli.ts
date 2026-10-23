@@ -19,6 +19,7 @@ import {
   rollback,
   type UpgradeContext,
 } from './run.js';
+import { decideResume } from './phases.js';
 
 /**
  * `haive upgrade`.
@@ -65,14 +66,18 @@ async function undo(ctx: UpgradeContext, reason: string): Promise<number> {
     await rollback(ctx, reason);
     return EXIT.rolledBack;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await recordRunError(ctx.sql, ctx.runId, `rollback failed: ${message}`).catch(() => {});
-    emit('rollback-failed', {
-      message,
-      next: 'run `haive upgrade` again to finish the rollback',
-    });
-    return EXIT.rollbackFailed;
+    return rollbackFailed(ctx, err);
   }
+}
+
+async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number> {
+  const message = err instanceof Error ? err.message : String(err);
+  await recordRunError(ctx.sql, ctx.runId, `rollback failed: ${message}`).catch(() => {});
+  emit('rollback-failed', {
+    message,
+    next: 'run `haive upgrade` again to finish the rollback',
+  });
+  return EXIT.rollbackFailed;
 }
 
 async function main(): Promise<number> {
@@ -147,7 +152,12 @@ async function main(): Promise<number> {
         forceDrain: true,
         log: emit,
       };
-      await resume(ctx, live.phase);
+      try {
+        await resume(ctx, live.phase);
+      } catch (err) {
+        if (decideResume(live.phase).action !== 'reverse') throw err;
+        return rollbackFailed(ctx, err);
+      }
       return EXIT.ok;
     }
 
