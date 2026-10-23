@@ -1,6 +1,6 @@
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
-import { RTK_ENABLED_UNIT } from '../project-state/conflicts.js';
+import { RTK_ENABLED_UNIT, isRtkQuestion } from '../project-state/conflicts.js';
 
 /** The columns that switch a repository's RTK on or off, which the tooling page's PATCH and the answer
  *  to an imported RTK-off question both write; each also stamps `rtkChoiceMadeAt` on a change. */
@@ -16,15 +16,30 @@ export async function convergeRtkQuestion(
   repositoryId: string,
   userId: string | null,
 ): Promise<void> {
-  await db
-    .update(schema.projectStateConflicts)
-    .set({ resolution: 'converged', resolvedAt: new Date(), resolvedBy: userId })
+  const open = await db
+    .select({
+      id: schema.projectStateConflicts.id,
+      unit: schema.projectStateConflicts.unit,
+      base: schema.projectStateConflicts.base,
+      local: schema.projectStateConflicts.local,
+    })
+    .from(schema.projectStateConflicts)
     .where(
       and(
         eq(schema.projectStateConflicts.repositoryId, repositoryId),
         eq(schema.projectStateConflicts.unit, RTK_ENABLED_UNIT),
         isNull(schema.projectStateConflicts.resolvedAt),
-        sql`${schema.projectStateConflicts.base} IS NOT DISTINCT FROM ${schema.projectStateConflicts.local}`,
+      ),
+    );
+  const ids = open.filter(isRtkQuestion).map((row) => row.id);
+  if (ids.length === 0) return;
+  await db
+    .update(schema.projectStateConflicts)
+    .set({ resolution: 'converged', resolvedAt: new Date(), resolvedBy: userId })
+    .where(
+      and(
+        inArray(schema.projectStateConflicts.id, ids),
+        isNull(schema.projectStateConflicts.resolvedAt),
       ),
     );
 }
