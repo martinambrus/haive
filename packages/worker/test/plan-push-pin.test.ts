@@ -221,11 +221,18 @@ describe('#280 fix5 plan pushes pin the destination branch after a checkout swit
 });
 
 describe('plan save reads the current branch', () => {
-  it.each([true, false])('rejects a failed branch read with push %s', async (push) => {
+  it('rejects a failed branch read when pushing', async () => {
     h.branch = { code: 128, stdout: '', stderr: 'fatal: simulated branch failure' };
-    await expect(save({ repositoryId: 'r1', userId: 'u1', push })).rejects.toThrow(
+    await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
       'git branch failed in /repo: fatal: simulated branch failure',
     );
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it('keeps a saved commit when the branch read fails without a push', async () => {
+    h.branch = { code: 128, stdout: '', stderr: 'fatal: simulated branch failure' };
+    const result = await save({ repositoryId: 'r1', userId: 'u1', push: false });
+    expect(result).toMatchObject({ pushed: false, branch: null });
     expect(h.push).not.toHaveBeenCalled();
   });
 

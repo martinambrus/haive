@@ -314,7 +314,10 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
       identity,
     });
 
-    const branch = await currentBranch(repoPath);
+    // The commit has landed: only a push needs the branch, so a failed read fails only a push.
+    const branch = payload.push
+      ? await currentBranch(repoPath)
+      : await currentBranch(repoPath).catch(() => null);
     let pushed = false;
     if (payload.push) {
       if (!branch) throw new Error('cannot push a plan snapshot from a detached HEAD');
