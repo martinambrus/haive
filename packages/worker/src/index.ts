@@ -70,6 +70,8 @@ import { MODULE_JOBS_RECONCILE_MS, startModuleJobs } from './modules/loader.js';
 import { guardShutdown } from './shutdown-guard.js';
 import { startModuleControlWorker } from './queues/module-control-queue.js';
 import { deactivatedModuleIds, moduleActivationState } from './modules/activation.js';
+import { ModulePassScheduler } from './modules/pass-scheduler.js';
+import { startModuleActivationWatch } from './modules/activation-watch.js';
 
 async function main(): Promise<void> {
   const buildStamp = initBuildStamp();
@@ -292,7 +294,6 @@ async function main(): Promise<void> {
     loaded: loadedModules,
     entries: moduleEntries,
   });
-  let moduleJobsPass: Promise<void> | null = null;
   const reconcileModuleJobs = async (): Promise<void> => {
     try {
       const { deactivated, stamps } = await moduleActivationState(getDb());
@@ -301,13 +302,12 @@ async function main(): Promise<void> {
       logger.warn({ err }, 'module jobs reconcile skipped');
     }
   };
-  const moduleJobsTimer = setInterval(() => {
-    if (moduleJobsPass) return;
-    moduleJobsPass = reconcileModuleJobs().finally(() => {
-      moduleJobsPass = null;
-    });
-  }, MODULE_JOBS_RECONCILE_MS);
-  moduleJobsTimer.unref();
+  const moduleJobsScheduler = new ModulePassScheduler({
+    run: reconcileModuleJobs,
+    intervalMs: MODULE_JOBS_RECONCILE_MS,
+  });
+  moduleJobsScheduler.start();
+  const stopModuleActivationWatch = startModuleActivationWatch(() => moduleJobsScheduler.request());
 
   logger.info('haive-worker ready');
 
@@ -328,9 +328,10 @@ async function main(): Promise<void> {
     stopDeadTaskRevival();
     cliStreamLogReaper.stop();
     stopRuntimeLimitsWatch();
-    clearInterval(moduleJobsTimer);
+    stopModuleActivationWatch();
+    moduleJobsScheduler.stop();
     await Promise.all([
-      moduleJobs.shutdown(moduleJobsPass),
+      moduleJobs.shutdown(moduleJobsScheduler.inFlight()),
       terminalManager.stop().catch((err) => {
         logger.warn({ err }, 'terminal manager stop failed');
       }),

@@ -310,6 +310,11 @@ jobs:
         env:
           USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/12
 
+      - name: Module activation watch on a real Redis
+        run: pnpm --filter @haive/worker exec vitest run test/module-activation-watch.test.ts
+        env:
+          MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/11
+
       # The migration runner's live-database coverage. Not part of smoke:ci, which is
       # worker-scoped; this package had no smoke of its own before.
       - name: Run migration smokes

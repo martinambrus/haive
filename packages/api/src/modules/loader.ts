@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { isLockNotAvailable, schema } from '@haive/database';
 import {
   configService,
+  logger,
   MODULE_CONTROL_JOB_NAMES,
   validateFormValues,
   type ModuleTeardownPayload,
@@ -13,6 +14,7 @@ import { registerModuleIntegrations } from '@haive/shared/integrations';
 import {
   collectFieldIds,
   diffModuleIntent,
+  MODULE_ACTIVATED_CHANNEL,
   MODULES_LOADED_WORKER_KEY,
   moduleManifestSchema,
   modulePackageId,
@@ -69,6 +71,18 @@ const purgeBodySchema = z.object({ confirm: z.string() });
 const TEARDOWN_WAIT_MS = 120_000;
 // A wait this long is a stuck holder, and every waiter holds a pooled connection meanwhile.
 const SETTINGS_LOCK_TIMEOUT_MS = 30_000;
+
+function publishModuleActivated(moduleId: string): void {
+  try {
+    void getRedis()
+      .publish(MODULE_ACTIVATED_CHANNEL, moduleId)
+      .catch((err: unknown) => {
+        logger.warn({ err, moduleId }, 'module activation publish failed');
+      });
+  } catch (err) {
+    logger.warn({ err, moduleId }, 'module activation publish failed');
+  }
+}
 
 function lockBusyError(err: unknown): never {
   if (isLockNotAvailable(err)) {
@@ -288,6 +302,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
         409,
       );
     }
+    if (active) publishModuleActivated(id);
     await recordAuditEvent(db, {
       actorUserId: c.get('userId'),
       action: active ? 'module.activate' : 'module.deactivate',
