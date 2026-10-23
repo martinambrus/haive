@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -1100,5 +1100,63 @@ describe('the investigation in the gate diff', () => {
       oldContent: '',
       newContent: '',
     });
+  });
+});
+
+describe("the learning gate's git runner", () => {
+  const exec = promisify(execFile);
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'T',
+    GIT_AUTHOR_EMAIL: 't@haive.local',
+    GIT_COMMITTER_NAME: 'T',
+    GIT_COMMITTER_EMAIL: 't@haive.local',
+  };
+  const git = (cwd: string, args: string[]) => exec('git', args, { cwd, env });
+
+  it("does not run a registered submodule's own core.fsmonitor", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'learning-fsmonitor-'));
+    try {
+      const sub = path.join(dir, 'sub');
+      const sup = path.join(dir, 'super');
+      const marker = path.join(dir, 'ran');
+      const script = path.join(dir, 'monitor.sh');
+      for (const repo of [sub, sup]) {
+        await mkdir(repo);
+        await git(repo, ['init', '-b', 'main']);
+        await git(repo, ['config', 'gc.auto', '0']);
+        await writeFile(path.join(repo, 'README.md'), 'readme\n');
+        await git(repo, ['add', '-A']);
+        await git(repo, ['commit', '-m', 'base']);
+      }
+      const vendor = '.haive-data/knowledge_base/vendor';
+      await git(sup, ['-c', 'protocol.file.allow=always', 'submodule', 'add', sub, vendor]);
+      await git(sup, ['commit', '-m', 'register submodule']);
+      await writeFile(script, `#!/bin/sh\necho ran >> '${marker}'\nexit 0\n`);
+      await chmod(script, 0o755);
+      await git(path.join(sup, vendor), ['config', 'core.fsmonitor', script]);
+
+      const artifactPath = path.join(sup, '.haive', KNOWLEDGE_DIFF_ARTIFACT_NAME);
+      const warnings: unknown[] = [];
+      const ctx = { logger: { warn: (...args: unknown[]) => warnings.push(args) } };
+      const detected = {
+        knowledgeDiffArtifactPath: artifactPath,
+        worktreePath: sup,
+        isBugFix: false,
+        taskTitle: 'Learning gate',
+        feature: null,
+        affectedClients: [],
+      };
+      await phase8LearningStep.prepareForm!(ctx as never, detected as never, {
+        entries: [],
+      });
+
+      expect(warnings).toEqual([]);
+      const artifact = JSON.parse(await readFile(artifactPath, 'utf8')) as CommitDiffArtifact;
+      expect(artifact.headSha).toMatch(/^[0-9a-f]{40,64}$/);
+      await expect(access(marker)).rejects.toThrow();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

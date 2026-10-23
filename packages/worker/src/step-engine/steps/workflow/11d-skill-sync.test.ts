@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -295,6 +295,35 @@ describe('skillSyncStep.apply', () => {
       '.claude/skills',
     ]);
     expect(status.stdout.trim()).toBe('');
+  });
+
+  it('commits without running the repository hooks', async () => {
+    await execFileP('git', ['-C', repo, 'init', '-q']);
+    const markerDir = await mkdtemp(path.join(os.tmpdir(), 'skill-sync-hook-'));
+    try {
+      const marker = path.join(markerDir, 'ran');
+      const hook = path.join(repo, '.git', 'hooks', 'pre-commit');
+      await writeFile(hook, `#!/bin/sh\necho ran >> '${marker}'\nexit 0\n`);
+      await chmod(hook, 0o755);
+      const ctx = ctxFor({
+        userId: 'u',
+        db: { query: { users: { findFirst: async () => null } } } as unknown as StepContext['db'],
+      });
+      const out = (await skillSyncStep.apply(ctx, {
+        detected: detectStub({
+          worktreePath: repo,
+          targets: [newTarget('boat-sync', 'Boat Catalogue Sync')],
+        }),
+        formValues: {},
+        agentMiningResults: [miningResult('boat-sync', skillJson('boat-sync'))],
+        iteration: 0,
+        previousIterations: [],
+      } as unknown as Parameters<typeof skillSyncStep.apply>[1])) as { committed: boolean };
+      expect(out.committed).toBe(true);
+      expect(await exists(marker)).toBe(false);
+    } finally {
+      await rm(markerDir, { recursive: true, force: true });
+    }
   });
 });
 
