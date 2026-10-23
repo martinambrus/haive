@@ -1056,10 +1056,10 @@ export interface TaskStep {
    *  have this as false. Used to hide the retry button on auto-skips. */
   manuallySkipped: boolean;
   /** True when the step opts into the user-facing Skip action (server-enforced
-   *  via SKIPPABLE_STEP_IDS). Drives whether the Skip button is shown. */
+   *  from step_catalog). Drives whether the Skip button is shown. */
   canSkip: boolean;
   /** True when this step ever dispatches a CLI (llm | agentMining | dagExecute),
-   *  from CLI_DISPATCH_STEP_IDS. Deterministic steps (false) never consume a
+   *  from step_catalog. Deterministic steps (false) never consume a
    *  per-step provider, so the step card hides the CLI picker for them and shows
    *  a "runs without an AI CLI" note instead. */
   usesCli: boolean;
