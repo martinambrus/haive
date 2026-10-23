@@ -69,6 +69,7 @@ import {
   upgradeRefusalMessage,
 } from '../lib/onboarding-state.js';
 import { reviveRefusal } from '@haive/shared/onboarding-admission';
+import { boundedLockWait } from '../lib/repository-busy.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
 
@@ -915,7 +916,7 @@ export async function withRepositoryTaskLock<T>(
 }
 
 async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
-  const repo = await lockRepositoryRow(tx, repositoryId);
+  const repo = await boundedLockWait(tx, () => lockRepositoryRow(tx, repositoryId));
   if (!repo) throw new HttpError(404, 'Repository not found');
   if (isRootClaimLive(repo.rootClaimedAt)) {
     throw new HttpError(409, rootClaimRefusal(repo.rootClaimKind as RootClaimKind | null));
@@ -930,7 +931,7 @@ async function lockRepositoryTasks(tx: DbTx, repositoryId: string) {
  *  beside a live onboarding, a live root claim. An upgrade or rollback is also admitted again, as
  *  at creation, so one a reset has since cut off cannot continue. */
 export async function refuseReviveBesideLive(tx: DbTx, taskId: string): Promise<void> {
-  const verdict = await reviveRefusal(tx, taskId);
+  const verdict = await boundedLockWait(tx, () => reviveRefusal(tx, taskId));
   if (!verdict) return;
   const rollback = (verdict.task.metadata as { mode?: unknown } | null)?.mode === 'rollback';
   const action = rollback ? 'rolled back' : 'upgraded';

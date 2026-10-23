@@ -3,12 +3,7 @@ import { buildCredentialHelper, gitRun, scrubSecret } from '../repo/git-push.js'
 import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
-import {
-  abortMerge as abortGitMerge,
-  handBackAfterMove,
-  openMerge,
-  utf8Name,
-} from '../step-engine/git-merge.js';
+import { abortMerge as abortGitMerge, openMerge, utf8Name } from '../step-engine/git-merge.js';
 import { resolveHaiveProjectionConflicts } from './projection-merge.js';
 import type { Database } from '@haive/database';
 
@@ -338,8 +333,11 @@ export async function commitMerge(
  * always non-destructive. If it ever is not — someone committed to the checkout while
  * the conversation was open — git refuses and the caller reports it, rather than this
  * quietly resetting over their work.
+ *
+ * Returns the HEAD it moved from; the caller hands the written files back (`handBackAfterMove`)
+ * once it has let go of the task-creation lock.
  */
-export async function landPlanMerge(repoPath: string, sha: string): Promise<void> {
+export async function landPlanMerge(repoPath: string, sha: string): Promise<string> {
   const before = (await gitRun(repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
   const res = await gitRun(repoPath, ['merge', '--ff-only', sha]);
   if (res.code !== 0) {
@@ -356,7 +354,7 @@ export async function landPlanMerge(repoPath: string, sha: string): Promise<void
         `so the result could not be fast-forwarded in: ${res.stderr || res.stdout}`,
     );
   }
-  await handBackAfterMove(repoPath, before);
+  return before;
 }
 
 /** Both mirror files, for a caller that wants to name them. */

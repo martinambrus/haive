@@ -15,9 +15,16 @@ const h = vi.hoisted(() => ({
   gdb: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
   beforeQueued: undefined as (() => Promise<void>) | undefined,
+  lockTimeoutMs: 30_000,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('@haive/database', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/database')>()),
+  get REPOSITORY_TASKS_LOCK_TIMEOUT_MS() {
+    return h.lockTimeoutMs;
+  },
+}));
 vi.mock('../src/queues.js', () => ({
   getTaskQueue: () => ({ add: h.add }),
   getRepoQueue: () => h.repoQueue,
@@ -81,6 +88,7 @@ import {
   type DbTx,
 } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { lockPlanMerge } from '@haive/shared/plan';
 import { TASK_JOB_NAMES } from '@haive/shared';
 import { globalKbEntries } from '@haive/shared/global-kb';
 import { taskRoutes } from '../src/routes/tasks/index.js';
@@ -1164,6 +1172,252 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
       }
       const statuses = await Promise.all(pending.map(async (p) => (await p).status));
       expect(statuses).toEqual([201, 201]);
+    });
+  });
+
+  describe('a request refused by a repository lock another transaction holds', () => {
+    const BOUND_MS = 400;
+    const BUSY = { error: 'The repository is busy, try again', code: null };
+    const CLI = '00000000-0000-4000-8000-0000000000e3';
+    const NODE = '00000000-0000-4000-8000-0000000000e4';
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const json = (path: string, body: unknown) =>
+      app.request(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    const userTasks = () => db.select().from(schema.tasks).where(eq(schema.tasks.userId, USER));
+    const startsQueued = () =>
+      h.add.mock.calls.filter(([name]) => name === TASK_JOB_NAMES.START).length;
+    let kb: ReturnType<typeof createFakeDb<{ globalKbEntries: typeof globalKbEntries }>>;
+
+    /** A transaction holding the lock `take` takes until it is released. */
+    const holding = async (take: (tx: DbTx) => Promise<unknown>) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let taken!: () => void;
+      const locked = new Promise<void>((resolve) => (taken = resolve));
+      const done = db.transaction(async (tx) => {
+        await take(tx);
+        taken();
+        await gate;
+      });
+      await Promise.race([locked, done]);
+      return { release, done };
+    };
+    /** A checkout move: a transaction holding REPO's task-creation lock until it is released. */
+    const move = () => holding((tx) => lockRepositoryTasksKey(tx, REPO));
+    /** A Save/Pull integration: a transaction holding REPO's plan-merge lock until it is released. */
+    const integration = () => holding((tx) => lockPlanMerge(tx, REPO));
+    const requestWaiting = async () => {
+      for (let i = 0; i < 100; i++) {
+        const [row] = await db.execute<{ n: number }>(
+          sql`select count(*)::int as n from pg_locks where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`,
+        );
+        if (row!.n > 0) return true;
+        await sleep(20);
+      }
+      return false;
+    };
+
+    /** Sends the request while the move holds the lock, and says whether it answered within 5 s. */
+    const sentWhileHeld = async (
+      send: () => Response | Promise<Response>,
+      hold: () => ReturnType<typeof move> = move,
+    ) => {
+      const moving = await hold();
+      let request: Promise<Response> | undefined;
+      try {
+        const started = Date.now();
+        request = Promise.resolve(send());
+        const waiting = await requestWaiting();
+        const outcome = await Promise.race([
+          request.then((res) => ({ res, ms: Date.now() - started })),
+          sleep(5_000).then(() => 'pending' as const),
+        ]);
+        return { waiting, outcome };
+      } finally {
+        moving.release();
+        await moving.done;
+        await request?.catch(() => undefined);
+      }
+    };
+    const refusedAsBusy = async (held: Awaited<ReturnType<typeof sentWhileHeld>>) => {
+      expect(held.waiting, 'the request waits behind the held lock').toBe(true);
+      expect(held.outcome, 'the request is still pending after 5 s').not.toBe('pending');
+      const { res, ms } = held.outcome as { res: Response; ms: number };
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual(BUSY);
+      expect(ms, 'the timeout answered, not an early refusal').toBeGreaterThanOrEqual(
+        BOUND_MS - 10,
+      );
+    };
+
+    beforeAll(() => {
+      h.lockTimeoutMs = BOUND_MS;
+    });
+    afterAll(() => {
+      h.lockTimeoutMs = 30_000;
+    });
+    beforeEach(async () => {
+      h.add.mockReset();
+      kb = createFakeDb({ globalKbEntries });
+      h.gdb = kb.db;
+      await db
+        .insert(schema.taskTypeDefinitions)
+        .values(typeRow('onboarding', ['cp-plain'], { source: 'builtin' }));
+      await db.insert(schema.cliProviders).values({
+        id: CLI,
+        userId: USER,
+        name: 'claude-code',
+        label: 'claude-code',
+        enabled: true,
+      });
+      await db.insert(schema.planNodes).values({
+        id: NODE,
+        repositoryId: REPO,
+        parentId: null,
+        path: `/${NODE}/`,
+        title: 'Root',
+        ordinal: 0,
+        kind: 'component',
+        status: 'todo',
+        version: 1,
+      });
+    });
+
+    const creations = [
+      {
+        name: 'POST /tasks of a type that takes the direct lock',
+        send: () => post({ type: 'cp-plain', repositoryId: REPO }),
+      },
+      {
+        name: 'POST /tasks of a type that takes the root lock',
+        send: () => post({ type: 'cp-lock', repositoryId: REPO }),
+      },
+      {
+        name: 'POST /tasks of an onboarding',
+        send: () => post({ type: 'onboarding', repositoryId: REPO }),
+      },
+      {
+        name: 'a plan build',
+        send: () =>
+          json(`/repositories/${REPO}/plan/build`, {
+            mode: 'greenfield',
+            description: 'Clubs',
+            cliProviderId: CLI,
+            clarify: false,
+          }),
+      },
+      {
+        name: 'a plan chat',
+        send: () =>
+          json(`/repositories/${REPO}/plan/nodes/${NODE}/chat`, {
+            message: 'Split payments out.',
+            cliProviderId: CLI,
+          }),
+      },
+      {
+        name: 'a plan advisory',
+        send: () =>
+          json(`/repositories/${REPO}/plan/nodes/${NODE}/advisory`, {
+            question: 'Which queue?',
+            cliProviderId: CLI,
+          }),
+      },
+      {
+        name: 'a global-kb enrich',
+        send: () =>
+          json('/global-kb/enrich', {
+            title: 'Never inline SVG',
+            seedText: 'bloats the cache',
+            cliProviderId: CLI,
+            repositoryId: REPO,
+          }),
+      },
+    ];
+
+    it.each(creations)(
+      '$name answers 409 busy, creates and queues nothing, and succeeds once the lock is free',
+      async ({ name, send }) => {
+        const held = await sentWhileHeld(send);
+
+        await refusedAsBusy(held);
+        expect(await userTasks()).toEqual([]);
+        expect(startsQueued()).toBe(0);
+        if (name === 'a global-kb enrich') expect(kb.rows(globalKbEntries)).toEqual([]);
+
+        const again = await send();
+        expect(again.status).toBe(201);
+        expect(await userTasks()).toHaveLength(1);
+        expect(startsQueued()).toBe(1);
+      },
+      30_000,
+    );
+
+    it('POST /tasks/:id action start answers 409 busy, leaves the task created, and starts it once the lock is free', async () => {
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({ userId: USER, repositoryId: REPO, type: 'plan_build', title: 't' })
+        .returning();
+      const start = () => json(`/tasks/${task!.id}/action`, { action: 'start' });
+      const before = await db.select().from(schema.tasks).where(eq(schema.tasks.id, task!.id));
+
+      const held = await sentWhileHeld(start);
+
+      await refusedAsBusy(held);
+      expect(await db.select().from(schema.tasks).where(eq(schema.tasks.id, task!.id))).toEqual(
+        before,
+      );
+      expect(before[0]!.status).toBe('created');
+      expect(startsQueued()).toBe(0);
+
+      const again = await start();
+      expect(again.status).toBe(200);
+      expect(await again.json()).toMatchObject({ ok: true, started: true });
+      expect(startsQueued()).toBe(1);
+    }, 30_000);
+
+    it('a plan merge conversation answers 409 busy while a Save/Pull holds the plan-merge lock, and opens once it is free', async () => {
+      const open = () => json(`/repositories/${REPO}/plan/merge`, { cliProviderId: CLI });
+
+      const held = await sentWhileHeld(open, integration);
+
+      await refusedAsBusy(held);
+      expect(await userTasks()).toEqual([]);
+      expect(startsQueued()).toBe(0);
+
+      const again = await open();
+      expect(again.status).toBe(201);
+      expect(await userTasks()).toHaveLength(1);
+      expect(startsQueued()).toBe(1);
+    }, 30_000);
+  });
+
+  describe('the lock wait bound', () => {
+    beforeAll(() => {
+      h.lockTimeoutMs = 400;
+    });
+    afterAll(() => {
+      h.lockTimeoutMs = 30_000;
+    });
+
+    it('is in force while the lock is taken, and does not stay in force after it', async () => {
+      const { boundedLockWait } = await import('../src/lib/repository-busy.js');
+      const timeoutIn = async (tx: DbTx) =>
+        (await tx.execute<{ lock_timeout: string }>(sql`show lock_timeout`))[0]!.lock_timeout;
+
+      const seen = await db.transaction(async (tx) => {
+        const before = await timeoutIn(tx);
+        const during = await boundedLockWait(tx, async () => {
+          await lockRepositoryTasksKey(tx, REPO);
+          return timeoutIn(tx);
+        });
+        return { before, during, after: await timeoutIn(tx) };
+      });
+
+      expect(seen).toEqual({ before: '0', during: '400ms', after: '0' });
     });
   });
 

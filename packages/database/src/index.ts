@@ -54,6 +54,7 @@ export {
 } from './repo-root-claim.js';
 export {
   LIVE_TASK_STATUSES,
+  REPOSITORY_TASKS_LOCK_TIMEOUT_MS,
   checkRevive,
   liveTaskIdOfType,
   lockRepositoryRow,

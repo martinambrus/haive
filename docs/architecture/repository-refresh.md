@@ -12,8 +12,9 @@ repository, while a task holds the checkout (`CHECKOUT_HOLDING_TASK_STATUSES`, s
 Pull; a task marked dead holds none), when the checkout has commits the source lacks or no history in common, and on a detached
 HEAD; git itself refuses a fast-forward that would overwrite a local change, but not Haive's own pending projection files: those are set aside before the fast-forward and re-rendered over the new head (`setAsideHaiveProjections`, see [Onboarding template versioning](onboarding-upgrades.md)), and one that is not what Haive last wrote refuses the refresh naming the file. What the fast-forward wrote, run as root over a tree the sandbox user owns, goes to that user as a merge's does (`handBackAfterMove`, see [Merge conflicts](merge-conflicts.md)). The task check is read
 twice: once under the claim, and again with the fast-forward itself under the project-state lock
-(`lockProjectState`), and the set-aside reads it a third time under each of its own locks, the task-creation lock (`lockRepositoryTasksKey`) first, before it
-touches a file, so a task that starts while the refresh fetches or waits for that lock, and an
+(`lockProjectState`), and the set-aside reads it a third time under each of its own locks before it touches a file (its
+restoring transaction takes the task-creation lock, `lockRepositoryTasksKey`, first; its first takes
+only the domain lock), so a task that starts while the refresh fetches or waits for that lock, and an
 upgrade still writing its record (which holds the same lock), keeps the checkout where it was. A same-branch merge reads the same check before it opens a merge in the checkout ([Merge conflicts](merge-conflicts.md)). A task
 that starts after the fast-forward is not fenced out, since nothing that starts a task reads the claim:
 the window writer 1 in [Onboarding reset](onboarding-reset.md) leaves open for the reset. It loses nothing

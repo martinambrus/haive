@@ -60,6 +60,7 @@ import { getGlobalKbSyncQueue } from '../queues.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
 import { isUuid } from '../lib/uuid.js';
+import { boundedLockWait } from '../lib/repository-busy.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -700,7 +701,10 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
     queued = await db.transaction(async (tx) => {
       await admitNewWork(tx);
       // Queuing takes this lock; taken before the insert, it inverts no lock the row's insert holds.
-      if (data.repositoryId) await lockRepositoryTasksKey(tx, data.repositoryId);
+      const lockedRepositoryId = data.repositoryId;
+      if (lockedRepositoryId) {
+        await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, lockedRepositoryId));
+      }
       const { runListSnapshot, customSteps } = await definitionForCreate(tx, 'kb_author', {
         generic: false,
       });

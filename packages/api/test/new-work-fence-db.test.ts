@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import {
   createDatabase,
   lockRepositoryRow,
+  lockRepositoryTasksKey,
   schema,
   UPGRADE_JOURNAL_DDL,
   type Database,
@@ -21,9 +22,16 @@ const h = vi.hoisted(() => ({
   state: 'normal',
   reads: [] as string[],
   queued: [] as string[],
+  lockTimeoutMs: 30_000,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('@haive/database', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@haive/database')>()),
+  get REPOSITORY_TASKS_LOCK_TIMEOUT_MS() {
+    return h.lockTimeoutMs;
+  },
+}));
 vi.mock('../src/queues.js', () => {
   const queue = () => ({
     add: async (name: string) => {
@@ -526,6 +534,181 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
       expect(await statusOf(task.id)).toBe('failed');
       expect(h.queued).toEqual([]);
     });
+  });
+
+  describe('a revival beside a repository lock another transaction holds', () => {
+    const BOUND_MS = 400;
+    const BUSY = { error: 'The repository is busy, try again', code: null };
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    beforeAll(() => {
+      h.lockTimeoutMs = BOUND_MS;
+    });
+    afterAll(() => {
+      h.lockTimeoutMs = 30_000;
+    });
+
+    const hold = async (
+      take: (tx: Parameters<Parameters<Database['transaction']>[0]>[0]) => Promise<unknown>,
+    ) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let taken!: () => void;
+      const held = new Promise<void>((resolve) => (taken = resolve));
+      const done = db.transaction(async (tx) => {
+        await take(tx);
+        taken();
+        await gate;
+      });
+      await Promise.race([held, done]);
+      return { release, done };
+    };
+    const taskRow = async (id: string) =>
+      (await db.select().from(schema.tasks).where(eq(schema.tasks.id, id)))[0];
+    const stepRows = (taskId: string) =>
+      db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, taskId));
+    const eventRows = (taskId: string) =>
+      db.select().from(schema.taskEvents).where(eq(schema.taskEvents.taskId, taskId));
+
+    const seeds = {
+      parked: () => parkedFailedTask({ repositoryId }),
+      unstarted: async () => {
+        const [task] = await db
+          .insert(schema.tasks)
+          .values({
+            userId: USER,
+            repositoryId,
+            type: 'workflow',
+            title: 'fence-unstarted',
+            status: 'failed',
+            errorMessage: 'boom',
+            completedAt: new Date(),
+          })
+          .returning();
+        return { task: task! };
+      },
+    };
+    const cases = [
+      {
+        name: 'task Retry that re-runs the stopped step',
+        seed: seeds.parked,
+        send: (id: string) => post(`/tasks/${id}/action`, { action: 'retry' }),
+        after: 'running',
+        bumps: true,
+      },
+      {
+        name: 'task Retry of a task that never reached a step',
+        seed: seeds.unstarted,
+        send: (id: string) => post(`/tasks/${id}/action`, { action: 'retry' }),
+        after: 'queued',
+        bumps: true,
+      },
+      {
+        name: 'step Retry',
+        seed: seeds.parked,
+        send: (id: string) => post(`/tasks/${id}/steps/${STEP}/action`, { action: 'retry' }),
+        after: 'running',
+        bumps: true,
+      },
+      ...ANSWERS.map(({ route, body }) => ({
+        name: `${route} of a failed task`,
+        seed: seeds.parked,
+        send: (id: string) => post(`/tasks/${id}/steps/${STEP}/${route}`, body),
+        after: 'running',
+        bumps: false,
+      })),
+    ];
+
+    it.each(cases)(
+      '$name answers 409 busy, changes nothing, and goes through once the lock is free',
+      async ({ seed, send, after, bumps }) => {
+        const { task } = await seed();
+        const before = {
+          task: await taskRow(task.id),
+          steps: await stepRows(task.id),
+          events: await eventRows(task.id),
+        };
+        const moving = await hold((tx) => lockRepositoryTasksKey(tx, repositoryId));
+        let request: Promise<Response> | undefined;
+        let outcome: { res: Response; ms: number } | 'pending';
+        try {
+          const started = Date.now();
+          request = send(task.id);
+          await untilBlocked('ExclusiveLock');
+          outcome = await Promise.race([
+            request.then((res) => ({ res, ms: Date.now() - started })),
+            sleep(5_000).then(() => 'pending' as const),
+          ]);
+        } finally {
+          moving.release();
+          await moving.done;
+          await request?.catch(() => undefined);
+        }
+
+        expect(outcome, 'the request is still pending after 5 s').not.toBe('pending');
+        const { res, ms } = outcome as { res: Response; ms: number };
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual(BUSY);
+        expect(ms, 'the timeout answered, not an early refusal').toBeGreaterThanOrEqual(
+          BOUND_MS - 10,
+        );
+        expect(before.task?.status).toBe('failed');
+        expect(await taskRow(task.id)).toEqual(before.task);
+        expect(await stepRows(task.id)).toEqual(before.steps);
+        expect(await eventRows(task.id)).toEqual(before.events);
+        expect(h.queued).toEqual([]);
+
+        expect((await send(task.id)).status).toBe(200);
+        expect(await statusOf(task.id)).toBe(after);
+        if (bumps) {
+          expect((await taskRow(task.id))!.orchestrationEpoch).toBeGreaterThan(
+            before.task!.orchestrationEpoch,
+          );
+        }
+      },
+      30_000,
+    );
+
+    it('keeps a Retry that waits on a step row longer than the bound from failing, once the row is free', async () => {
+      const { task, step } = await seeds.parked();
+      await db
+        .update(schema.taskSteps)
+        .set({ status: 'failed' })
+        .where(eq(schema.taskSteps.id, step.id));
+      const rowHolder = await hold((tx) =>
+        tx.execute(sql`select id from task_steps where id = ${step.id} for update`),
+      );
+      let request: Promise<Response> | undefined;
+      let answered: Response | undefined;
+      let waitedMs = 0;
+      try {
+        const started = Date.now();
+        request = post(`/tasks/${task.id}/action`, { action: 'retry' }).then(
+          (res) => (answered = res),
+        );
+        await vi.waitFor(
+          async () => {
+            const [row] = await db.execute<{ n: number }>(
+              sql`select count(*)::int as n from pg_locks where not granted and locktype in ('transactionid', 'tuple')`,
+            );
+            expect(row!.n).toBeGreaterThan(0);
+          },
+          { timeout: 3_000, interval: 20 },
+        );
+        await sleep(3 * BOUND_MS);
+        expect(answered, 'the Retry is still waiting on the step row').toBeUndefined();
+        expect(await statusOf(task.id)).toBe('failed');
+        waitedMs = Date.now() - started;
+      } finally {
+        rowHolder.release();
+        await rowHolder.done;
+        await request?.catch(() => undefined);
+      }
+
+      expect(waitedMs).toBeGreaterThan(BOUND_MS);
+      expect(answered?.status).toBe(200);
+      expect(await statusOf(task.id)).toBe('running');
+    }, 30_000);
   });
 
   describe('POST /tasks/:id/action start of a created task', () => {

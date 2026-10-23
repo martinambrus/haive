@@ -108,4 +108,18 @@ describe('markQueuedForStart beside a checkout move', () => {
     await moving;
     expect(status()).toBe('queued');
   });
+
+  it('L4: answers 409 busy when the task-creation lock times out', async () => {
+    const { fake, status } = world(REPO);
+    fake.hooks.beforeLock = () => {
+      throw Object.assign(new Error('Failed query'), {
+        cause: Object.assign(new Error('canceling statement due to lock timeout'), {
+          code: '55P03',
+        }),
+      });
+    };
+    const err = await markQueuedForStart(fake.db as never, TASK).catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 409, message: 'The repository is busy, try again' });
+    expect(status()).toBe('created');
+  });
 });

@@ -33,6 +33,7 @@ import { getBullRedis } from '../redis.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../repo/git-push.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
+import { handBackAfterMove } from '../step-engine/git-merge.js';
 import {
   PlanMirrorHeldError,
   advancePlanBaseFromCommit,
@@ -236,7 +237,8 @@ export async function integrateOrigin(args: {
       return mergeInScratch(tx, args, gap, previousCommit, fence);
     });
     if (moved.retry && attempt < MOVE_ATTEMPTS) continue;
-    const { retry, ...outcome } = moved;
+    const { retry, movedFrom, ...outcome } = moved;
+    if (movedFrom !== undefined) await handBackAfterMove(args.repoPath, movedFrom);
     if (!outcome.landed) await putBack();
     return retry
       ? { ...outcome, refused: "Haive's project files kept changing under the move" }
@@ -250,9 +252,10 @@ async function mergeInScratch(
   gap: Awaited<ReturnType<typeof divergence>>,
   previousCommit: string | null,
   fence: CheckoutFence,
-): Promise<IntegrateOutcome & { retry?: true }> {
+): Promise<IntegrateOutcome & { retry?: true; movedFrom?: string }> {
   const db = getDb();
   const worktree = await ensurePlanMergeWorktree(args.repoPath);
+  let removed = false;
   // An abandoned conversation's merge is discarded below, but not what its fixers left: a failure
   // to move that aside fails the save before anything removes the worktree.
   await moveAsideRecordedLeftovers(db, args.repositoryId, worktree, `origin/${args.branch}`);
@@ -272,6 +275,9 @@ async function mergeInScratch(
     }
     const sha = await commitMerge(worktree, `Merge origin/${args.branch}`, args.identity);
     if (!sha) throw new Error('the merge produced no commit to fast-forward onto');
+    // The fast-forward needs the commit, not the worktree: remove it before taking the creation lock.
+    removed = true;
+    await removePlanMergeWorktree(args.repoPath);
     // Every task's start and every revival take this lock, so none lands between the fence and the move.
     await lockRepositoryTasksKey(tx, args.repositoryId);
     const check = await restoreProjectionsInTx(tx, args.repositoryId, args.repoPath);
@@ -281,10 +287,10 @@ async function mergeInScratch(
     }
     const holding = await fence(tx);
     if (holding > 0) return { landed: false, previousCommit, held: holding };
-    await landPlanMerge(args.repoPath, sha);
-    return { landed: true, previousCommit };
+    const movedFrom = await landPlanMerge(args.repoPath, sha);
+    return { landed: true, previousCommit, movedFrom };
   } finally {
-    await removePlanMergeWorktree(args.repoPath);
+    if (!removed) await removePlanMergeWorktree(args.repoPath);
   }
 }
 

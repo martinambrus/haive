@@ -57,6 +57,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { enqueuePlanTask, spawnPlanTask } from '../lib/spawn-plan-task.js';
+import { boundedLockWait } from '../lib/repository-busy.js';
 import { enqueueStart } from '../lib/task-start.js';
 import { loadUsableProvider, writeStepCliChoice } from '../lib/step-cli-choice.js';
 import { loadOpenPlanAdvisories, OPEN_PLAN_TASK_STATES } from '../lib/plan-advisories.js';
@@ -1279,7 +1280,7 @@ planRoutes.post('/:id/plan/merge', requireNewWorkAllowed, async (c) => {
   // Under the lock a Save/Pull integration and a cancel's discard take around the scratch worktree.
   const taskId = await getDb().transaction(async (tx) => {
     await admitNewWork(tx);
-    await lockPlanMerge(tx, repositoryId);
+    await boundedLockWait(tx, () => lockPlanMerge(tx, repositoryId));
     // One live merge worktree per repository. A second conversation would build its
     // own on top of the first one's and neither could land.
     if (await findOpenPlanMerge(repositoryId, tx)) {

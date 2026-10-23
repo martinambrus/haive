@@ -32,6 +32,7 @@ import {
   removePlanMergeWorktree,
   unlandedResolvedMerge,
 } from './merge.js';
+import { handBackAfterMove } from '../step-engine/git-merge.js';
 
 // As the root worker, which the hand-back after a move is for: every path reads as the worker's own,
 // and a hand-back is recorded instead of made.
@@ -991,7 +992,7 @@ describe('landPlanMerge', () => {
     expect(await readFile(path.join(local, 'README.md'), 'utf8')).toContain('both sides');
   });
 
-  it('hands what the fast-forward wrote to the sandbox user, as the root worker', async () => {
+  it('returns the pre-move HEAD and leaves the hand-back to the caller, as the root worker', async () => {
     const { local } = await unrelatedPair();
     await git(local, ['checkout', '-b', 'side']);
     await write(local, 'README.md', '# edited\n');
@@ -1001,10 +1002,13 @@ describe('landPlanMerge', () => {
     await git(local, ['commit', '-m', 'the merge result']);
     const sha = (await git(local, ['rev-parse', 'HEAD'])).trim();
     await git(local, ['checkout', 'main']);
+    const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
     const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
     try {
       handBack.asRoot = true;
-      await landPlanMerge(local, sha);
+      expect(await landPlanMerge(local, sha)).toBe(before);
+      expect(handBack.chowned).toEqual([]);
+      await handBackAfterMove(local, before);
       expect([...handBack.chowned].sort()).toEqual([
         'README.md',
         'dir',

@@ -1974,6 +1974,50 @@ async function main(): Promise<void> {
           isDeepEqual(after?.acceptedAgentIds, ['a', 'b']),
         { thrown: String(k3.thrown), col: k3.col, disk: k3.disk, moved, after },
       );
+
+      // K4: the record of HEAD is read whole once, before the first transaction; the transactions only
+      // check HEAD is unmoved, so no tree listing or blob read runs while they hold their locks.
+      {
+        const shimDir = await mkdtemp(path.join(tmpdir(), 'git-shim-'));
+        const gitLog = path.join(shimDir, 'git.log');
+        await writeFile(
+          path.join(shimDir, 'git'),
+          `#!/bin/sh\nprintf '%s\\n' "$*" >> "${gitLog}"\nexec /usr/bin/git "$@"\n`,
+        );
+        await chmod(path.join(shimDir, 'git'), 0o755);
+        const k4 = await withPendingRender();
+        const mark = (name: string) => writeFile(gitLog, `MARK ${name}\n`, { flag: 'a' });
+        const originalPath = process.env.PATH;
+        process.env.PATH = `${shimDir}:${originalPath}`;
+        restoreFaults.afterJudgeFence = () => mark('judge');
+        restoreFaults.afterBase = () => mark('base');
+        restoreFaults.afterRestore = () => mark('restore');
+        let k4Out: unknown;
+        try {
+          k4Out = await setAsideHaiveProjections(db, k4.payload.repositoryId, k4.dest);
+        } finally {
+          process.env.PATH = originalPath;
+          delete restoreFaults.afterJudgeFence;
+          delete restoreFaults.afterBase;
+          delete restoreFaults.afterRestore;
+        }
+        const lines = (await readFile(gitLog, 'utf8')).split('\n');
+        const at = (m: string) => lines.indexOf(`MARK ${m}`);
+        const recordReads = (from: number, to: number) =>
+          lines
+            .slice(from, to)
+            .filter((l) => /cat-file blob [0-9a-f]{40,}$/.test(l) || /ls-tree -r /.test(l)).length;
+        check(
+          "K4: a set-aside reads HEAD's record before its first transaction and none inside either one",
+          (k4Out as { outcome?: string }).outcome === 'set-aside' &&
+            at('judge') > 0 &&
+            at('restore') > at('judge') &&
+            recordReads(0, at('judge')) > 0 &&
+            recordReads(at('judge'), lines.length) === 0,
+          { k4Out, lines: lines.slice(0, 80) },
+        );
+        await rm(shimDir, { recursive: true, force: true });
+      }
     }
 
     // 11l. A foreign edit staged in the index is not Haive's to discard, even when the working tree has
@@ -4198,8 +4242,9 @@ async function main(): Promise<void> {
       });
     }
 
-    // C14. A set-aside that carries a fence reads it, and moves the files, under the repository's task-creation lock,
-    // which comes before the domain's own lock: creating a task and reviving one take it, so none lands in between.
+    // C14. A set-aside that carries a fence moves the files under the repository's task-creation lock, which comes before
+    // the domain's own lock: creating a task and reviving one take it, so none lands in between. Its first transaction
+    // writes database rows only and takes the domain's lock alone, so a start is never held behind it.
     const taskLockFree = async (id: string): Promise<boolean> => {
       try {
         await db.transaction(async (tx) => {
@@ -4223,13 +4268,18 @@ async function main(): Promise<void> {
       return c;
     };
     /** One set-aside of `c`, asking from another connection whether the lock is free: at each fence read inside a
-     *  transaction, at `beforeCapture` (after the fence read, before any file moves) and once it is done. */
+     *  transaction, right after the first transaction's fence read, at `beforeCapture` (after the second's fence
+     *  read, before any file moves) and once it is done. */
     const probedSetAside = async (c: Awaited<ReturnType<typeof cloned>>, fenced: boolean) => {
       const id = c.payload.repositoryId;
       const free = {
         inFence: [] as boolean[],
+        judged: null as boolean | null,
         paused: null as boolean | null,
         done: null as boolean | null,
+      };
+      restoreFaults.afterJudgeFence = async () => {
+        free.judged = await taskLockFree(id);
       };
       restoreFaults.beforeCapture = async () => {
         free.paused = await taskLockFree(id);
@@ -4248,6 +4298,7 @@ async function main(): Promise<void> {
             : undefined,
         );
       } finally {
+        delete restoreFaults.afterJudgeFence;
         delete restoreFaults.beforeCapture;
       }
       free.done = await taskLockFree(id);
@@ -4260,12 +4311,20 @@ async function main(): Promise<void> {
         const { aside, free } = await probedSetAside(await fixture(), true);
         const moved = aside.outcome === 'set-aside' && aside.paths.includes(file);
         check(
-          `C14: ${domain}: a set-aside with a fence holds the task-creation lock at both of its fence reads`,
-          moved && free.inFence.length === 2 && free.inFence.every((isFree) => !isFree),
+          `C14: ${domain}: the first transaction leaves the task-creation lock free right after its fence read`,
+          moved && free.judged === true,
           { outcome: aside.outcome, free },
         );
         check(
-          `C14: ${domain}: and while it is paused after the fence read, before any file moves`,
+          `C14: ${domain}: the first fence read finds the lock free and the second holds it`,
+          moved &&
+            free.inFence.length === 2 &&
+            free.inFence[0] === true &&
+            free.inFence[1] === false,
+          { outcome: aside.outcome, free },
+        );
+        check(
+          `C14: ${domain}: and while it is paused after the second fence read, before any file moves`,
           moved && free.paused === false,
           { outcome: aside.outcome, free },
         );
@@ -4274,52 +4333,126 @@ async function main(): Promise<void> {
           free,
         });
       });
+      await attempt(`C14: ${domain}: a task starting during the first transaction`, async () => {
+        const c = await fixture();
+        const id = c.payload.repositoryId;
+        const before = await readFile(path.join(c.dest, file));
+        const started: string[] = [];
+        restoreFaults.afterJudgeFence = async () => {
+          await db.transaction(async (tx) => {
+            await tx.execute(sql`set local lock_timeout = '5s'`);
+            await lockRepositoryTasksKey(tx, id);
+            started.push(
+              (
+                await tx
+                  .insert(schema.tasks)
+                  .values({
+                    userId,
+                    repositoryId: id,
+                    type: 'workflow',
+                    title: 'repo-refresh-smoke start',
+                    status: 'queued',
+                  })
+                  .returning({ id: schema.tasks.id })
+              )[0]!.id,
+            );
+          });
+        };
+        let aside;
+        try {
+          aside = await setAsideHaiveProjections(db, id, c.dest, (conn) =>
+            checkoutHoldingTasks(conn, id),
+          );
+        } finally {
+          delete restoreFaults.afterJudgeFence;
+          await dropTasks(started);
+        }
+        check(
+          `C14: ${domain}: a task that starts during the first transaction makes the second answer held, the files untouched`,
+          started.length === 1 &&
+            aside.outcome === 'held' &&
+            (await readFile(path.join(c.dest, file))).equals(before) &&
+            git(c.dest, 'status', '--porcelain', '--', file).length > 0,
+          { started: started.length, outcome: aside.outcome },
+        );
+      });
       await attempt(`C14: ${domain}: a set-aside without a fence`, async () => {
         const { aside, free } = await probedSetAside(await fixture(), false);
         check(
-          `C14: ${domain}: a set-aside without a fence leaves the task-creation lock free while it is paused`,
-          aside.outcome === 'set-aside' && aside.paths.includes(file) && free.paused === true,
+          `C14: ${domain}: a set-aside without a fence leaves the task-creation lock free throughout`,
+          aside.outcome === 'set-aside' &&
+            aside.paths.includes(file) &&
+            free.judged === true &&
+            free.paused === true,
           { outcome: aside.outcome, free },
         );
       });
     }
 
-    // Every other mover takes the task-creation lock and then the domain's, so a set-aside waiting for the domain's lock holds it.
+    // Every other mover takes the task-creation lock and then the domain's: the second transaction, which moves the
+    // files, waits for the domain's lock holding it; the first, which does not move them, holds only the domain's.
     await attempt('C14: a set-aside with a fence waiting for the plan lock', async () => {
       const c = await planOnly();
       const id = c.payload.repositoryId;
-      let release!: () => void;
-      let held!: () => void;
-      const locked = new Promise<void>((r) => (held = r));
-      const writer = db.transaction(async (tx) => {
-        await lockPlanMirror(tx, id);
-        held();
-        await new Promise<void>((r) => (release = r));
-      });
-      await locked;
-      const asiding = setAsideHaiveProjections(db, id, c.dest, (conn) =>
-        checkoutHoldingTasks(conn, id),
-      );
-      let queued = false;
-      let free: boolean | null = null;
-      try {
-        for (let i = 0; i < 300 && !queued; i++) {
+      const queuedWaiter = async () => {
+        for (let i = 0; i < 300; i++) {
           const rows = (await db.execute(
             sql`select count(*)::int as n from pg_locks where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())`,
           )) as unknown as { n: number }[];
-          queued = Number(rows[0]?.n) > 0;
-          if (!queued) await new Promise((r) => setTimeout(r, 100));
+          if (Number(rows[0]?.n) > 0) return true;
+          await new Promise((r) => setTimeout(r, 100));
         }
-        free = await taskLockFree(id);
+        return false;
+      };
+      const writerHolding = () => {
+        let release!: () => void;
+        let held!: () => void;
+        const locked = new Promise<void>((r) => (held = r));
+        const done = db.transaction(async (tx) => {
+          await lockPlanMirror(tx, id);
+          held();
+          await new Promise<void>((r) => (release = r));
+        });
+        return { locked, done, release: () => release() };
+      };
+      const first = writerHolding();
+      await first.locked;
+      let second: ReturnType<typeof writerHolding> | undefined;
+      restoreFaults.afterBase = async () => {
+        second = writerHolding();
+        await second.locked;
+      };
+      const asiding = setAsideHaiveProjections(db, id, c.dest, (conn) =>
+        checkoutHoldingTasks(conn, id),
+      );
+      let firstQueued = false;
+      let firstFree: boolean | null = null;
+      let secondQueued = false;
+      let secondFree: boolean | null = null;
+      try {
+        firstQueued = await queuedWaiter();
+        firstFree = await taskLockFree(id);
+        first.release();
+        await first.done;
+        for (let i = 0; i < 300 && !second; i++) await new Promise((r) => setTimeout(r, 100));
+        secondQueued = await queuedWaiter();
+        secondFree = await taskLockFree(id);
       } finally {
-        release();
+        first.release();
+        second?.release();
+        delete restoreFaults.afterBase;
       }
-      await writer;
+      await second?.done;
       const aside = await asiding;
       check(
-        'C14: a set-aside with a fence waiting for the plan lock already holds the task-creation lock, and finishes once it is released',
-        queued && free === false && aside.outcome === 'set-aside',
-        { queued, free, outcome: aside.outcome },
+        'C14: a first transaction waiting for the plan lock leaves the task-creation lock free',
+        firstQueued && firstFree === true,
+        { firstQueued, firstFree },
+      );
+      check(
+        'C14: a second transaction waiting for the plan lock already holds the task-creation lock, and finishes once it is released',
+        secondQueued && secondFree === false && aside.outcome === 'set-aside',
+        { secondQueued, secondFree, outcome: aside.outcome },
       );
     });
 

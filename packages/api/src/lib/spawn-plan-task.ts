@@ -3,6 +3,7 @@ import { getDb } from '../db.js';
 import { HttpError } from '../context.js';
 import { admitNewWork } from '../middleware/maintenance.js';
 import { definitionForCreate } from './task-type-definition.js';
+import { boundedLockWait } from './repository-busy.js';
 import { enqueueStart, markQueuedForStart } from './task-start.js';
 
 /** Insert the task row, seed it and queue it in one transaction, then enqueue START after the
@@ -38,7 +39,7 @@ export async function spawnPlanTask(args: {
   const create = async (tx: DbTx): Promise<string> => {
     await admitNewWork(tx);
     // Queuing takes this lock; taken before the insert, it inverts no lock the row's insert holds.
-    await lockRepositoryTasksKey(tx, args.repositoryId);
+    await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, args.repositoryId));
     const { runListSnapshot, customSteps } = await definitionForCreate(tx, args.type, {
       generic: false,
     });

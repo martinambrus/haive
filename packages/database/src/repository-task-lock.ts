@@ -15,6 +15,9 @@ export const LIVE_TASK_STATUSES = [
   'waiting_pr',
 ] as const;
 
+/** How long an api task start waits for the creation lock behind a checkout move. */
+export const REPOSITORY_TASKS_LOCK_TIMEOUT_MS = 30_000;
+
 /** The repository's task-creation lock alone, without the row: a checkout move holds it so no task is
  *  created between its last check and the move, while plain inserts still go through. */
 export async function lockRepositoryTasksKey(tx: DbTx, repositoryId: string): Promise<void> {

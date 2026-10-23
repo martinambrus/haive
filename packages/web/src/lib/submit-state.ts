@@ -21,3 +21,12 @@ export function isAwaitingFormInput(
 ): boolean {
   return step?.status === 'waiting_form' && step.waitingStartedAt !== null;
 }
+
+/** The answer-form error belongs to the step that failed, and stays shown after `submitting`
+ *  clears so the form is not just silently clickable again. */
+export function submitErrorFor(
+  error: { stepId: string; message: string } | null,
+  stepId: string,
+): string | null {
+  return error?.stepId === stepId ? error.message : null;
+}

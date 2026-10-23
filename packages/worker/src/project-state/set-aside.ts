@@ -38,6 +38,8 @@ import { refreshProjectState } from './refresh.js';
 import {
   readProjectStateBase,
   rebaseProjectStateOnHeadLocked,
+  readHeadRecord,
+  type HeadRecord,
   syncProjectStateFromCheckout,
 } from './sync.js';
 import {
@@ -395,6 +397,7 @@ export const restoreFaults: {
   afterRestore?: () => void | Promise<void>;
   beforeResync?: (domain: 'state' | 'plan') => void;
   beforeRestore?: () => void | Promise<void>;
+  afterJudgeFence?: () => void | Promise<void>;
   beforeCapture?: () => void | Promise<void>;
   beforePutBack?: () => void | Promise<void>;
   beforeIndexSwap?: () => void | Promise<void>;
@@ -405,6 +408,7 @@ export const restoreFaults: {
 interface RestoreGuard {
   owns: (path: string) => boolean;
   lock: (tx: Tx) => Promise<unknown>;
+  judgeLock: (tx: Tx) => Promise<unknown>;
   offender: (tx: Tx) => Promise<string | null>;
   mark: (tx: Tx) => Promise<unknown>;
   base?: (tx: Tx) => Promise<unknown>;
@@ -414,22 +418,24 @@ interface RestoreGuard {
 
 type Changed = { changed: string };
 
-/** First transaction, with the domain's lock held: the files judged and the fence read, then the stale
- *  mark and the sync base at HEAD's record committed, so a crash before the files move finds the mark
- *  and a base the pending value still merges against. Nothing else is asked of the pool meanwhile. The
- *  generation read last is what the second transaction finds unchanged unless a sweep took the lock between. */
+/** First transaction, with the domain's lock held (not the task-creation lock: it writes no file): the files
+ *  judged and the fence read, then the stale mark and the sync base at HEAD's record committed, so a crash
+ *  before the files move finds the mark and a base the pending value still merges against. Nothing else is
+ *  asked of the pool meanwhile. The generation read last is what the second transaction finds unchanged
+ *  unless a sweep took the lock between. */
 async function judgeAndMark(
   tx: Tx,
   repoPath: string,
   paths: readonly string[],
   guard: RestoreGuard,
 ): Promise<{ stopped: SetAsideResult } | { prints: Map<string, string>; generation: string }> {
-  await guard.lock(tx);
+  await guard.judgeLock(tx);
   const prints = new Map<string, string>();
   for (const path of paths) prints.set(path, await fingerprint(repoPath, path));
   const offender = await guard.offender(tx);
   if (offender) return { stopped: refuse(offender, NOT_HAIVE) };
   const holding = guard.fence ? await guard.fence(tx) : 0;
+  await restoreFaults.afterJudgeFence?.();
   if (holding > 0) return { stopped: { outcome: 'held', holding } };
   await guard.mark(tx);
   await guard.base?.(tx);
@@ -533,13 +539,15 @@ const stateGuard = (
   repositoryId: string,
   repoPath: string,
   state: readonly string[],
+  head: HeadRecord,
   fence?: CheckoutFence,
 ): RestoreGuard => ({
   owns: (path) => path.startsWith(STATE_PREFIX),
   lock: guardLock(repositoryId, fence, (tx) => lockProjectState(tx, repositoryId)),
+  judgeLock: (tx) => lockProjectState(tx, repositoryId),
   offender: (tx) => stateOffender(tx, repositoryId, repoPath, state),
   mark: (tx) => markProjectStateDirty(tx, repositoryId),
-  base: (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath }),
+  base: (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath, head }),
   generation: (tx) => readProjectStateBase(tx, repositoryId),
   fence,
 });
@@ -552,6 +560,7 @@ const planGuard = (
 ): RestoreGuard => ({
   owns: (path) => !path.startsWith(STATE_PREFIX),
   lock: guardLock(repositoryId, fence, (tx) => lockPlanMirror(tx, repositoryId)),
+  judgeLock: (tx) => lockPlanMirror(tx, repositoryId),
   offender: (tx) => planOffender(tx, repositoryId, repoPath, plan),
   mark: (tx) => markPlanMirrorDirty(tx, repositoryId),
   generation: async (tx) =>
@@ -750,14 +759,15 @@ async function setAsideOnce(
   if (early) return refuse(early, NOT_HAIVE);
 
   if (state.length > 0) {
+    const head = await readHeadRecord(repoPath);
     const stopped = await setAsideDomain(
       db,
       repoPath,
       state,
-      stateGuard(repositoryId, repoPath, state, fence),
+      stateGuard(repositoryId, repoPath, state, head, fence),
       kept,
       section,
-      (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath }),
+      (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath, head }),
     );
     if (stopped) return stopped;
     for (const path of state) restored.add(path);

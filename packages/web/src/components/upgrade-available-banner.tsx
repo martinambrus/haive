@@ -20,6 +20,7 @@ export function UpgradeAvailableBanner({
   const router = useRouter();
   const [status, setStatus] = useState<UpgradeStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -47,6 +48,7 @@ export function UpgradeAvailableBanner({
       return;
     }
     setSubmitting(true);
+    setActionError(null);
     try {
       const res = await api.post<{ task: { id: string } }>('/tasks', {
         type: 'onboarding_upgrade',
@@ -56,7 +58,7 @@ export function UpgradeAvailableBanner({
       });
       router.push(`/tasks/${res.task.id}`);
     } catch (err) {
-      setError((err as Error).message ?? 'Failed to start upgrade');
+      setActionError((err as Error).message ?? 'Failed to start upgrade');
       setSubmitting(false);
     }
   }
@@ -71,13 +73,14 @@ export function UpgradeAvailableBanner({
       return;
     }
     setSubmitting(true);
+    setActionError(null);
     try {
       const res = await api.post<{ taskId: string }>(
         `/repositories/${repositoryId}/rollback-upgrade`,
       );
       router.push(`/tasks/${res.taskId}`);
     } catch (err) {
-      setError((err as Error).message ?? 'Failed to start rollback');
+      setActionError((err as Error).message ?? 'Failed to start rollback');
       setSubmitting(false);
     }
   }
@@ -100,6 +103,10 @@ export function UpgradeAvailableBanner({
       : status.installedHaiveVersion
         ? `On v${status.installedHaiveVersion}${runningDevBuild ? ' (dev build)' : ''}`
         : null;
+
+  const actionErrorLine = actionError ? (
+    <div className="text-xs text-red-400">{actionError}</div>
+  ) : null;
 
   // The api refuses a rollback while an upgrade or another rollback runs.
   const canRollBack = status.hasPriorUpgrade && !status.hasInProgressUpgradeSession;
@@ -210,36 +217,40 @@ export function UpgradeAvailableBanner({
             ))}
           </ul>
         )}
+        {actionErrorLine}
       </div>
     );
   }
 
   // A rollback, or an upgrade whose apply already cleared the drift, is live with nothing to review.
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-400">
-      {status.hasInProgressUpgradeSession ? (
-        <Badge variant="default">Upgrade in progress</Badge>
-      ) : (
-        <Badge variant="success">Up to date</Badge>
-      )}
-      <span>Template set {status.currentTemplateSetHash.slice(0, 8)}</span>
-      {versionLine && <span>{versionLine}</span>}
-      {linkedNote}
-      <div className="ml-auto flex flex-wrap items-center gap-3">
-        <Link href={`/repos/${repositoryId}/bundles`} className="text-indigo-300 hover:underline">
-          Manage bundles
-        </Link>
-        {status.inProgressUpgradeTaskId && (
-          <Button size="sm" onClick={handleUpgrade} disabled={submitting}>
-            Open task
-          </Button>
+    <div className="flex flex-col gap-1 rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-400">
+      <div className="flex flex-wrap items-center gap-2">
+        {status.hasInProgressUpgradeSession ? (
+          <Badge variant="default">Upgrade in progress</Badge>
+        ) : (
+          <Badge variant="success">Up to date</Badge>
         )}
-        {canRollBack && (
-          <Button size="sm" variant="secondary" onClick={handleRollback} disabled={submitting}>
-            Roll back last upgrade
-          </Button>
-        )}
+        <span>Template set {status.currentTemplateSetHash.slice(0, 8)}</span>
+        {versionLine && <span>{versionLine}</span>}
+        {linkedNote}
+        <div className="ml-auto flex flex-wrap items-center gap-3">
+          <Link href={`/repos/${repositoryId}/bundles`} className="text-indigo-300 hover:underline">
+            Manage bundles
+          </Link>
+          {status.inProgressUpgradeTaskId && (
+            <Button size="sm" onClick={handleUpgrade} disabled={submitting}>
+              Open task
+            </Button>
+          )}
+          {canRollBack && (
+            <Button size="sm" variant="secondary" onClick={handleRollback} disabled={submitting}>
+              Roll back last upgrade
+            </Button>
+          )}
+        </div>
       </div>
+      {actionErrorLine}
     </div>
   );
 }

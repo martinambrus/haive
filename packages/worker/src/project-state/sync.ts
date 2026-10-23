@@ -54,6 +54,7 @@ import {
   unionExpandedFor,
 } from '../step-engine/_upgrade-render.js';
 import { readStateTree } from '../plan/projection-merge.js';
+import { gitRun } from '../repo/git-exec.js';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
 import { claimDiskHash } from './claim-disk.js';
@@ -151,7 +152,7 @@ async function readStateFiles(repoPath: string): Promise<Map<string, string> | n
   return files;
 }
 
-type Checkout =
+export type Checkout =
   | { kind: 'absent' }
   | { kind: 'refused'; reason: string }
   | {
@@ -846,20 +847,43 @@ export async function rebaseProjectStateOnCheckout(
   await db.transaction((tx) => rebaseLocked(tx, args.repositoryId, checkout));
 }
 
-/** The rebase onto the record HEAD commits, read from the commit and written in the transaction the
- *  caller holds the project-state lock in. Run before the files move, so a crash leaves the base at
- *  HEAD with the files pending or at HEAD. */
+/** HEAD's commit and the record it holds, read outside any transaction: a commit is immutable, so
+ *  only applying the result needs the project-state lock. A sha of null (no HEAD) is never reused. */
+export interface HeadRecord {
+  sha: string | null;
+  checkout: Checkout;
+}
+
+async function headSha(repoPath: string): Promise<string | null> {
+  const head = await gitRun(repoPath, ['rev-parse', '--verify', '-q', 'HEAD']);
+  const sha = head.stdout.trim();
+  return head.code === 0 && sha !== '' ? sha : null;
+}
+
+async function readRecordAt(repoPath: string, rev: string): Promise<Checkout> {
+  try {
+    const files = await readStateTree(repoPath, rev);
+    return checkoutOf(files.size === 0 ? null : files);
+  } catch (err) {
+    return notRead((err as Error).message);
+  }
+}
+
+export async function readHeadRecord(repoPath: string): Promise<HeadRecord> {
+  const sha = await headSha(repoPath);
+  return { sha, checkout: await readRecordAt(repoPath, sha ?? 'HEAD') };
+}
+
+/** The rebase onto the record HEAD commits, written in the transaction the caller holds the
+ *  project-state lock in. A `head` read before the transaction is used while HEAD is still its
+ *  commit, else the record is read again here. Run before the files move, so a crash leaves the base
+ *  at HEAD with the files pending or at HEAD. */
 export async function rebaseProjectStateOnHeadLocked(
   tx: Tx,
-  { repositoryId, repoPath }: { repositoryId: string; repoPath: string },
+  { repositoryId, repoPath, head }: { repositoryId: string; repoPath: string; head?: HeadRecord },
 ): Promise<void> {
-  let checkout: Checkout;
-  try {
-    const files = await readStateTree(repoPath, 'HEAD');
-    checkout = checkoutOf(files.size === 0 ? null : files);
-  } catch (err) {
-    checkout = notRead((err as Error).message);
-  }
+  const reuse = head?.sha != null && (await headSha(repoPath)) === head.sha;
+  const checkout = reuse ? head.checkout : (await readHeadRecord(repoPath)).checkout;
   await applyRebase(tx, repositoryId, checkout);
 }
 
