@@ -29,9 +29,9 @@ interface UploadClaim {
   write(handle: Database | DbTx, values: SessionWrite): Promise<void>;
 }
 
-/** A session no complete can take: cancelled, or being removed. */
+/** A session no complete can take: cancelled, being removed, or parked after a removal that failed. */
 export const isSessionOver = (status: string): boolean =>
-  status === 'cancelled' || status === 'reaping';
+  status === 'cancelled' || status === 'reaping' || status === 'reap_failed';
 
 async function takeClaim(db: Database, table: UploadTable, id: string): Promise<Date> {
   const stamp = new Date();

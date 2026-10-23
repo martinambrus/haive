@@ -141,6 +141,7 @@ export const repoUploadStatusSchema = z.enum([
   'complete',
   'cancelled',
   'reaping',
+  'reap_failed',
 ]);
 
 export const repoUploadSessionSchema = z.object({

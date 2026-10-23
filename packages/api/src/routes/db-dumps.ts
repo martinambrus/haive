@@ -74,7 +74,13 @@ function sessionFromRow(row: typeof schema.dbUploads.$inferSelect) {
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
     status: row.status as
-      'uploading' | 'completing' | 'complete' | 'cancelled' | 'consumed' | 'reaping',
+      | 'uploading'
+      | 'completing'
+      | 'complete'
+      | 'cancelled'
+      | 'consumed'
+      | 'reaping'
+      | 'reap_failed',
   };
 }
 

@@ -1471,37 +1471,33 @@ describe('I9: a complete on a session that is over', () => {
     return c.replace ? `/${BUNDLE}/replace/${SESSION}/complete` : c.family.completeUrl(SESSION);
   }
 
-  it.each(cases)(
-    '$name: a reaping session with short bytes answers 409 session cancelled',
-    async (c) => {
-      const url = await stageCase(c, 'reaping', 3);
+  describe.each(['reaping', 'reap_failed'])('a %s session', (over) => {
+    it.each(cases)('$name: with short bytes answers 409 session cancelled', async (c) => {
+      const url = await stageCase(c, over, 3);
       const before = c.family.created();
 
       const res = await request(c.family.app, 'POST', url);
 
       expect(res.status).toBe(409);
       expect(await errorOf(res)).toBe('session cancelled');
-      expect(rowOf(c.family).status).toBe('reaping');
+      expect(rowOf(c.family).status).toBe(over);
       expect(c.family.created()).toBe(before);
       expect(queue.jobs).toHaveLength(0);
-    },
-  );
+    });
 
-  it.each(cases)(
-    '$name: a reaping session with all bytes answers 409 session cancelled',
-    async (c) => {
-      const url = await stageCase(c, 'reaping', CONTENT.length);
+    it.each(cases)('$name: with all bytes answers 409 session cancelled', async (c) => {
+      const url = await stageCase(c, over, CONTENT.length);
       const before = c.family.created();
 
       const res = await request(c.family.app, 'POST', url);
 
       expect(res.status).toBe(409);
       expect(await errorOf(res)).toBe('session cancelled');
-      expect(rowOf(c.family).status).toBe('reaping');
+      expect(rowOf(c.family).status).toBe(over);
       expect(c.family.created()).toBe(before);
       expect(queue.jobs).toHaveLength(0);
-    },
-  );
+    });
+  });
 
   it.each(cases)(
     '$name: an uploading session with short bytes still answers incomplete',

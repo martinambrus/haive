@@ -21,14 +21,33 @@ import { reapAbandonedUploads, startUploadReaper } from '../src/repo/upload-reap
 
 const guard = vi.hoisted(() => ({
   claims: 0,
+  removals: 0,
   removal: null as null | ((rel: string) => boolean),
+  errors: [] as unknown[][],
 }));
+vi.mock('@haive/shared', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared')>();
+  return {
+    ...real,
+    logger: {
+      ...real.logger,
+      child: () => ({
+        info: () => undefined,
+        warn: () => undefined,
+        error: (...args: unknown[]) => guard.errors.push(args),
+      }),
+    },
+  };
+});
 vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
   return {
     ...real,
     removeNoFollow: async (...args: Parameters<typeof real.removeNoFollow>) => {
-      if (guard.removal?.(args[1])) throw new Error('EACCES: the removal failed');
+      if (guard.removal?.(args[1])) {
+        guard.removals += 1;
+        throw new Error('EACCES: the removal failed');
+      }
       return real.removeNoFollow(...args);
     },
   };
@@ -132,6 +151,8 @@ beforeEach(async () => {
   await mkdir(uploadsDir('bundles'), { recursive: true });
   fake = makeFake();
   guard.claims = 0;
+  guard.removals = 0;
+  guard.errors = [];
   guard.removal = null;
 });
 
@@ -892,7 +913,7 @@ describe('U5: a completed dump whose task ended without importing it', () => {
     });
 
     it('is left alone by the session and file passes, which still take what is theirs', async () => {
-      const upload = await dump({ status: 'reaping' });
+      const upload = await dump({ status: 'reaping', idleMs: HOUR });
       dumpFilesFail();
       const idle = await session(dumps, { idleMs: TTL + MIN });
       const orphan = path.join(uploadsDir('repos'), `${randomUUID()}.zip.partial`);
@@ -1402,6 +1423,70 @@ describe('I3b: the file pass removes an owner directory left empty for a day', (
 
       expect(await exists(stale.file)).toBe(false);
       expect(await exists(dir())).toBe(true);
+    });
+  });
+});
+
+describe('a removal that fails for 24 h parks its row as reap_failed', () => {
+  describe.each(KINDS)('$name', (kind) => {
+    it('parks a row claimed 25 h ago whose file cannot be removed, logs one error, and leaves it alone on the next pass', async () => {
+      const stuck = await session(kind, { idleMs: TTL + HOUR, status: 'reaping' });
+      guard.removal = () => true;
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, stuck.id).status).toBe('reap_failed');
+      expect(await exists(stuck.file)).toBe(true);
+      expect(guard.errors).toHaveLength(1);
+      const removals = guard.removals;
+
+      await reapAbandonedUploads(db());
+
+      expect(guard.removals).toBe(removals);
+      expect(guard.errors).toHaveLength(1);
+      expect(rowOf(kind, stuck.id).status).toBe('reap_failed');
+    });
+
+    it('keeps a failing row claimed 23 h ago reaping without an error log', async () => {
+      const stuck = await session(kind, { idleMs: TTL - HOUR, status: 'reaping' });
+      guard.removal = () => true;
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, stuck.id).status).toBe('reaping');
+      expect(guard.errors).toHaveLength(0);
+    });
+
+    it('cancels, never parks, a row claimed 25 h ago whose removal succeeds', async () => {
+      const old = await session(kind, { idleMs: TTL + HOUR, status: 'reaping' });
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, old.id).status).toBe('cancelled');
+      expect(await exists(old.file)).toBe(false);
+      expect(guard.errors).toHaveLength(0);
+    });
+
+    it('leaves the old partial of a parked session to the orphan pass', async () => {
+      const parked = await session(kind, { idleMs: 3 * TTL, status: 'reap_failed' });
+
+      await reapAbandonedUploads(db());
+
+      expect(await exists(parked.file)).toBe(true);
+      expect(rowOf(kind, parked.id).status).toBe('reap_failed');
+    });
+
+    it('does not delete a parked row with the cancelled-row cleanup', async () => {
+      const parked = await session(kind, {
+        idleMs: 3 * TTL,
+        status: 'reap_failed',
+        name: kind.finished,
+      });
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, parked.id).status).toBe('reap_failed');
+      expect(await exists(parked.file)).toBe(true);
     });
   });
 });

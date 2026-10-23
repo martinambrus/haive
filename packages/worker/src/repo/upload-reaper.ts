@@ -1,5 +1,17 @@
 import path from 'node:path';
-import { and, eq, gt, gte, inArray, lt, ne, notExists, notInArray, or } from 'drizzle-orm';
+import {
+  and,
+  eq,
+  getTableName,
+  gt,
+  gte,
+  inArray,
+  lt,
+  ne,
+  notExists,
+  notInArray,
+  or,
+} from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { lstatNoFollow, readdirNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
@@ -8,6 +20,7 @@ import { splitUploadPath } from './worktree-paths.js';
 const log = logger.child({ module: 'upload-reaper' });
 
 const IDLE_MS = 24 * 60 * 60 * 1000;
+const REAP_RETRY_MS = IDLE_MS;
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 const UPLOADS_DIR = '_uploads';
 const BATCH = 100;
@@ -165,7 +178,12 @@ async function finishReaping(
 ): Promise<{ sessions: number; dumps: number }> {
   const table = kind.table;
   const rows = await db
-    .select({ id: table.id, userId: table.userId, stored: kind.pathColumn })
+    .select({
+      id: table.id,
+      userId: table.userId,
+      stored: kind.pathColumn,
+      updatedAt: table.updatedAt,
+    })
     .from(table)
     .where(eq(table.status, 'reaping'));
   const done = { sessions: 0, dumps: 0 };
@@ -180,15 +198,32 @@ async function finishReaping(
       const files = rel === null ? [] : [rel];
       if (partialRel !== null && kind.finalBesidePartial) files.push(finalRelOf(partialRel));
       let gone = true;
+      let lastErr: unknown;
       for (const file of files) {
         try {
           await removeFile(kind.root(), file);
         } catch (err) {
           gone = false;
+          lastErr = err;
           log.warn({ err, rel: file }, 'reaping upload file was not removed');
         }
       }
-      if (!gone) continue;
+      if (!gone) {
+        if (row.updatedAt.getTime() < Date.now() - REAP_RETRY_MS) {
+          const [parked] = await db
+            .update(table)
+            .set({ status: 'reap_failed', updatedAt: new Date() })
+            .where(and(eq(table.id, row.id), eq(table.status, 'reaping')))
+            .returning({ id: table.id });
+          if (parked !== undefined) {
+            log.error(
+              { err: lastErr, id: row.id, table: getTableName(table), stored: row.stored },
+              'upload removal kept failing for a day; the row is parked as reap_failed',
+            );
+          }
+        }
+        continue;
+      }
       const [cancelled] = await db
         .update(table)
         .set({ status: 'cancelled', updatedAt: new Date() })
@@ -276,7 +311,12 @@ async function recentSessions(db: Database, ids: string[], cutoff: Date): Promis
     const rows = await db
       .select({ id: kind.table.id })
       .from(kind.table)
-      .where(and(inArray(kind.table.id, ids), gt(kind.table.updatedAt, cutoff)));
+      .where(
+        and(
+          inArray(kind.table.id, ids),
+          or(gt(kind.table.updatedAt, cutoff), eq(kind.table.status, 'reap_failed')),
+        ),
+      );
     for (const row of rows) recent.add(row.id);
   }
   return recent;

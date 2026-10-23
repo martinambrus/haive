@@ -137,4 +137,12 @@ describe('shouldRun for a task that carries an uploaded dump', () => {
 
     expect(await restoreDatabaseStep.shouldRun!(ctx)).toBe(false);
   });
+
+  it('fails a Retry whose dump the reaper gave up removing, the same way', async () => {
+    const ctx = failedTask({ status: 'reap_failed' });
+
+    await expect(restoreDatabaseStep.shouldRun!(ctx)).rejects.toThrow(
+      'removed after the task ended',
+    );
+  });
 });

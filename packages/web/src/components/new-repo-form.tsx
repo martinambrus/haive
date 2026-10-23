@@ -39,7 +39,7 @@ interface UploadSession {
   totalSize: number;
   bytesReceived: number;
   chunkSize: number;
-  status: 'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping';
+  status: 'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping' | 'reap_failed';
 }
 
 async function chunkedUpload(opts: {

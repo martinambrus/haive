@@ -278,6 +278,20 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
       expect(finished.dumps).toBe(1);
     });
 
+    it('parks a dump claimed 25 h ago whose removal keeps failing, and the next pass leaves it', async () => {
+      const upload = await dump(25 * HOUR, 'reaping');
+      dumpFilesFail();
+
+      await reapAbandonedUploads(db);
+
+      expect(await statusOf(upload.id)).toBe('reap_failed');
+      expect(await exists(upload.file)).toBe(true);
+
+      await reapAbandonedUploads(db);
+
+      expect(await statusOf(upload.id)).toBe('reap_failed');
+    });
+
     it.each([
       ['just now, beside an ended task', 0, 'cancelled'],
       ['5 days ago, beside a live task', 5 * 24 * HOUR, 'running'],
@@ -317,7 +331,7 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
     });
 
     it('is left alone by the session and file passes, which still take what is theirs', async () => {
-      const upload = await dump(5 * 24 * HOUR, 'reaping');
+      const upload = await dump(HOUR, 'reaping');
       dumpFilesFail();
       const idleId = randomUUID();
       const idle = path.join(root, 'repos', '_uploads', userId, `db-${idleId}.sql.partial`);

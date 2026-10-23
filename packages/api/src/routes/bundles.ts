@@ -149,7 +149,8 @@ function uploadSessionFromRow(
     totalSize: Number(row.totalSize),
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
-    status: row.status as 'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping',
+    status: row.status as
+      'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping' | 'reap_failed',
   };
 }
 

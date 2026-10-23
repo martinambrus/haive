@@ -44,6 +44,7 @@ export const bundleUploadStatusSchema = z.enum([
   'complete',
   'cancelled',
   'reaping',
+  'reap_failed',
 ]);
 
 export const bundleUploadSessionSchema = z.object({
