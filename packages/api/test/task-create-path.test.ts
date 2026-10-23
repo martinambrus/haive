@@ -88,6 +88,7 @@ import {
   type DbTx,
 } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { lockPlanMerge } from '@haive/shared/plan';
 import { TASK_JOB_NAMES } from '@haive/shared';
 import { globalKbEntries } from '@haive/shared/global-kb';
 import { taskRoutes } from '../src/routes/tasks/index.js';
@@ -1191,20 +1192,24 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
       h.add.mock.calls.filter(([name]) => name === TASK_JOB_NAMES.START).length;
     let kb: ReturnType<typeof createFakeDb<{ globalKbEntries: typeof globalKbEntries }>>;
 
-    /** A checkout move: a transaction holding REPO's task-creation lock until it is released. */
-    const move = async () => {
+    /** A transaction holding the lock `take` takes until it is released. */
+    const holding = async (take: (tx: DbTx) => Promise<unknown>) => {
       let release!: () => void;
       const gate = new Promise<void>((resolve) => (release = resolve));
       let taken!: () => void;
       const locked = new Promise<void>((resolve) => (taken = resolve));
       const done = db.transaction(async (tx) => {
-        await lockRepositoryTasksKey(tx, REPO);
+        await take(tx);
         taken();
         await gate;
       });
       await Promise.race([locked, done]);
       return { release, done };
     };
+    /** A checkout move: a transaction holding REPO's task-creation lock until it is released. */
+    const move = () => holding((tx) => lockRepositoryTasksKey(tx, REPO));
+    /** A Save/Pull integration: a transaction holding REPO's plan-merge lock until it is released. */
+    const integration = () => holding((tx) => lockPlanMerge(tx, REPO));
     const requestWaiting = async () => {
       for (let i = 0; i < 100; i++) {
         const [row] = await db.execute<{ n: number }>(
@@ -1217,8 +1222,11 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
     };
 
     /** Sends the request while the move holds the lock, and says whether it answered within 5 s. */
-    const sentWhileHeld = async (send: () => Response | Promise<Response>) => {
-      const moving = await move();
+    const sentWhileHeld = async (
+      send: () => Response | Promise<Response>,
+      hold: () => ReturnType<typeof move> = move,
+    ) => {
+      const moving = await hold();
       let request: Promise<Response> | undefined;
       try {
         const started = Date.now();
@@ -1368,6 +1376,21 @@ describe.skipIf(!url)('POST /tasks create path on Postgres', () => {
       const again = await start();
       expect(again.status).toBe(200);
       expect(await again.json()).toMatchObject({ ok: true, started: true });
+      expect(startsQueued()).toBe(1);
+    }, 30_000);
+
+    it('a plan merge conversation answers 409 busy while a Save/Pull holds the plan-merge lock, and opens once it is free', async () => {
+      const open = () => json(`/repositories/${REPO}/plan/merge`, { cliProviderId: CLI });
+
+      const held = await sentWhileHeld(open, integration);
+
+      await refusedAsBusy(held);
+      expect(await userTasks()).toEqual([]);
+      expect(startsQueued()).toBe(0);
+
+      const again = await open();
+      expect(again.status).toBe(201);
+      expect(await userTasks()).toHaveLength(1);
       expect(startsQueued()).toBe(1);
     }, 30_000);
   });

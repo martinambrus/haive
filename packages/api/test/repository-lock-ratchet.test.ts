@@ -4,7 +4,12 @@ import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 const SRC = join(import.meta.dirname, '../src');
-const LOCKING = new Set(['lockRepositoryTasksKey', 'lockRepositoryRow', 'reviveRefusal']);
+const LOCKING = new Set([
+  'lockRepositoryTasksKey',
+  'lockRepositoryRow',
+  'lockPlanMerge',
+  'reviveRefusal',
+]);
 const WRAPPER = 'boundedLockWait';
 
 function sources(dir: string): string[] {
