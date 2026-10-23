@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, configService, logger } from '@haive/shared';
+import { CONFIG_KEYS, configService, logger, resolveDefaultCliProvider } from '@haive/shared';
 import { listIntegrationCategories } from '@haive/shared/integrations';
 import {
   COMPOSABLE_STEP_GROUPS,
@@ -511,5 +511,9 @@ taskTypeRoutes.get('/:slug/saved-step-clis', async (c) => {
       holdsSaved(step.cliRoleProviders) ||
       holdsSaved(step.miningSeatProviders),
   );
-  return c.json({ steps });
+  const providers = await db.query.cliProviders.findMany({
+    where: eq(schema.cliProviders.userId, c.get('userId')),
+    columns: { id: true, enabled: true, createdAt: true },
+  });
+  return c.json({ steps, defaultProviderId: resolveDefaultCliProvider(providers)?.id ?? null });
 });

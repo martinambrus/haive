@@ -19,6 +19,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { resolveDefaultCliProvider } from '@haive/shared';
 import { taskTypeRoutes } from '../src/routes/task-types.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { resetStepFlagsCache } from '../src/lib/step-flags.js';
@@ -50,6 +51,7 @@ function setup() {
     modules: schema.modules,
     userStepCliPreferences: schema.userStepCliPreferences,
     userStepCliRolePreferences: schema.userStepCliRolePreferences,
+    cliProviders: schema.cliProviders,
   });
   h.db = fake.db;
   const defineType = (stepIds: string[], promptSteps: Record<string, unknown> = {}) =>
@@ -84,7 +86,16 @@ function setup() {
       effortLevel: null,
       explicit,
     });
-  return { defineType, save, saveRole };
+  const addProvider = (id: string, createdAt: string, enabled = true, userId = USER) =>
+    fake.insert(schema.cliProviders, {
+      id: uidOf(id),
+      userId,
+      name: 'codex',
+      label: id,
+      enabled,
+      createdAt: new Date(createdAt),
+    });
+  return { defineType, save, saveRole, addProvider, fake };
 }
 
 const get = (slug: string) => app.request(`/task-types/${slug}/saved-step-clis`);
@@ -93,6 +104,21 @@ const stepIds = async (slug: string): Promise<string[]> => {
   expect(res.status).toBe(200);
   const body = (await res.json()) as { steps: { stepId: string }[] };
   return body.steps.map((s) => s.stepId);
+};
+
+const shortIds = new Map<string, string>();
+const uidOf = (name: string): string => {
+  const hex = [...name].map((ch) => ch.charCodeAt(0).toString(16)).join('');
+  const id = `00000000-0000-4000-8000-${hex.padEnd(12, '0')}`;
+  shortIds.set(id, name);
+  return id;
+};
+
+const defaultProviderId = async (): Promise<string | null | undefined> => {
+  const res = await get('workflow');
+  expect(res.status).toBe(200);
+  const { defaultProviderId: id } = (await res.json()) as { defaultProviderId: string | null };
+  return id === null || id === undefined ? id : (shortIds.get(id) ?? id);
 };
 
 const A = '07b-phase-4-validate';
@@ -207,7 +233,7 @@ describe('GET /task-types/:slug/saved-step-clis', () => {
     const { defineType } = setup();
     defineType([A, B]);
     const res = await get(TYPE);
-    expect(await res.json()).toEqual({ steps: [] });
+    expect(await res.json()).toMatchObject({ steps: [] });
   });
 
   it('answers an empty list for run_app', async () => {
@@ -229,4 +255,108 @@ describe('GET /task-types/:slug/saved-step-clis', () => {
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ error: 'Unknown task type nope' });
   });
+});
+
+describe('the default CLI the saved-step-clis answer names', () => {
+  it('is the oldest enabled provider of the caller, inserted newest first', async () => {
+    const { addProvider } = setup();
+    addProvider('b3', '2026-03-01T00:00:00Z');
+    addProvider('b2', '2026-02-01T00:00:00Z');
+    addProvider('b1', '2026-01-01T00:00:00Z');
+    expect(await defaultProviderId()).toBe('b1');
+  });
+
+  it('breaks a createdAt tie by the lowest id', async () => {
+    const { addProvider } = setup();
+    addProvider('bb', '2026-01-01T00:00:00Z');
+    addProvider('aa', '2026-01-01T00:00:00Z');
+    expect(await defaultProviderId()).toBe('aa');
+  });
+
+  it('skips a disabled older provider', async () => {
+    const { addProvider } = setup();
+    addProvider('off', '2025-01-01T00:00:00Z', false);
+    addProvider('on', '2026-01-01T00:00:00Z');
+    expect(await defaultProviderId()).toBe('on');
+  });
+
+  it("ignores another user's older enabled provider", async () => {
+    const { addProvider } = setup();
+    addProvider('theirs', '2025-01-01T00:00:00Z', true, OTHER);
+    addProvider('mine', '2026-01-01T00:00:00Z');
+    expect(await defaultProviderId()).toBe('mine');
+  });
+
+  it('is null with no providers and with only disabled ones', async () => {
+    const { addProvider } = setup();
+    expect(await defaultProviderId()).toBeNull();
+    addProvider('off', '2025-01-01T00:00:00Z', false);
+    addProvider('theirs', '2025-01-01T00:00:00Z', true, OTHER);
+    expect(await defaultProviderId()).toBeNull();
+  });
+
+  it('keeps listing the saved steps beside it', async () => {
+    const { defineType, save, addProvider } = setup();
+    defineType([A, B]);
+    save(A);
+    addProvider('b1', '2026-01-01T00:00:00Z');
+    const res = await get(TYPE);
+    expect(await res.json()).toMatchObject({
+      steps: [{ stepId: A, preferredCliProviderId: CLI }],
+      defaultProviderId: uidOf('b1'),
+    });
+  });
+
+  const rows = (...specs: [string, string, boolean?][]) =>
+    specs.map(([id, createdAt, enabled = true]) => ({
+      id,
+      createdAt: new Date(createdAt),
+      enabled,
+    }));
+  const table: [string, [string, string, boolean?][], string | null][] = [
+    [
+      'newest first',
+      [
+        ['n', '2026-03-01T00:00:00Z'],
+        ['o', '2026-01-01T00:00:00Z'],
+      ],
+      'o',
+    ],
+    [
+      'a tie',
+      [
+        ['bb', '2026-01-01T00:00:00Z'],
+        ['aa', '2026-01-01T00:00:00Z'],
+      ],
+      'aa',
+    ],
+    [
+      'a disabled oldest',
+      [
+        ['d', '2025-01-01T00:00:00Z', false],
+        ['e', '2026-01-01T00:00:00Z'],
+      ],
+      'e',
+    ],
+    ['a single provider', [['s', '2026-01-01T00:00:00Z']], 's'],
+    ['none enabled', [['x', '2026-01-01T00:00:00Z', false]], null],
+    ['no providers', [], null],
+    [
+      'three, mixed',
+      [
+        ['c', '2026-02-01T00:00:00Z'],
+        ['b', '2026-02-01T00:00:00Z'],
+        ['a', '2026-02-02T00:00:00Z'],
+      ],
+      'b',
+    ],
+  ];
+  for (const [what, specs, expected] of table) {
+    it(`agrees with the shared default on ${what}`, async () => {
+      const { addProvider } = setup();
+      for (const [id, createdAt, enabled] of specs) addProvider(id, createdAt, enabled);
+      expect(await defaultProviderId()).toBe(expected);
+      expect(resolveDefaultCliProvider(rows(...specs))?.id ?? null).toBe(expected);
+    });
+  }
 });

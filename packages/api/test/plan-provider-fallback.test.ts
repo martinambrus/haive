@@ -34,7 +34,13 @@ const app = new Hono<AppEnv>();
 app.route('/', planRoutes);
 app.onError(errorHandler);
 
-function setup() {
+const DEFAULT_PROVIDERS = [
+  [FIXTURE, true, new Date('2026-01-01T00:00:00Z')],
+  [USED, true, new Date('2026-02-01T00:00:00Z')],
+  [OFF, false, new Date('2026-03-01T00:00:00Z')],
+] as const;
+
+function setup(providers: readonly (readonly [string, boolean, Date])[] = DEFAULT_PROVIDERS) {
   const fake = createFakeDb({
     repositories: schema.repositories,
     tasks: schema.tasks,
@@ -44,11 +50,7 @@ function setup() {
   for (const id of [REPO, OTHER_REPO]) {
     fake.insert(schema.repositories, { id, userId: USER, name: id });
   }
-  for (const [id, enabled, createdAt] of [
-    [FIXTURE, true, new Date('2026-01-01T00:00:00Z')],
-    [USED, true, new Date('2026-02-01T00:00:00Z')],
-    [OFF, false, new Date('2026-03-01T00:00:00Z')],
-  ] as const) {
+  for (const [id, enabled, createdAt] of providers) {
     fake.insert(schema.cliProviders, {
       id,
       userId: USER,
@@ -114,6 +116,15 @@ describe('the plan CLI chosen when none is named', () => {
     addTask(fake, REPO, USED, '2026-04-01T00:00:00Z');
     addTask(fake, OTHER_REPO, FIXTURE, '2026-05-01T00:00:00Z');
     expect(await planner()).toBe(USED);
+  });
+
+  it('breaks a createdAt tie by the lowest id, whatever the insert order', async () => {
+    const tied = new Date('2026-01-01T00:00:00Z');
+    setup([
+      [USED, true, tied],
+      [FIXTURE, true, tied],
+    ]);
+    expect(await planner()).toBe(FIXTURE);
   });
 
   it('is null when the user has no enabled provider', async () => {
