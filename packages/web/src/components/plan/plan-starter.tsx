@@ -82,7 +82,7 @@ export function PlanStarter({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
-  /** The unstarted draft a partial upload left behind. Its presence is what makes
+  /** The unstarted draft a failed upload or a refused start left behind. Its presence is what makes
    *  a retry reuse the SAME task: creating a second one would leave the user with
    *  two half-built plans and no way to tell which is which. */
   const [draftTaskId, setDraftTaskId] = useState<string | null>(null);
@@ -205,7 +205,17 @@ export function PlanStarter({
       }
 
       setProgress('Starting the build…');
-      await startTask(taskId);
+      try {
+        await startTask(taskId);
+      } catch (e) {
+        setError(
+          `The task was created but could not be started (${e instanceof Error ? e.message : 'Failed to start the build'}). Nothing was lost — the draft task is waiting with every file attached. Press "Retry starting the build", or open the draft and press Start.`,
+        );
+        setProgress(null);
+        setDraftTaskId(taskId);
+        setBusy(false);
+        return;
+      }
       onNavigate(`/tasks/${taskId}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to start the build');
@@ -435,9 +445,13 @@ export function PlanStarter({
               disabled={busy || !canDescribe}
               onClick={() => void describeAndBuild()}
             >
-              {draftTaskId ? 'Retry the failed uploads' : 'Draft a plan from this'}
+              {draftTaskId
+                ? files.some((f) => f.state === 'failed' || f.state === 'uploading')
+                  ? 'Retry the failed uploads'
+                  : 'Retry starting the build'
+                : 'Draft a plan from this'}
             </Button>
-            {/* The draft a partial upload left behind. An escape hatch, not the
+            {/* The draft a failed upload or a refused start left behind. An escape hatch, not the
                 main route: pressing Retry above is the shorter path, and this is
                 for someone who would rather finish on the task page. A client-side
                 Link rather than a plain anchor: a full document load would drop the
