@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
-import type { FormSchema } from '@haive/shared';
+import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
@@ -582,6 +582,49 @@ describe('advanceStep auto-continue', () => {
     const values = state.taskStepRow.formValues as Record<string, unknown>;
     expect(values.action).toBe('update');
     expect(values.flag).toBe(true);
+  });
+
+  it('autoSubmitDefaults never auto-submits a form carrying the fix-loop gate field', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: true, preAnswers: null };
+    const gate: FormSchema = {
+      title: 'Gate',
+      fields: [
+        {
+          type: 'radio',
+          id: FIX_LOOP_ACTION_FIELD,
+          label: 'Proceed?',
+          options: [
+            { value: 'continue', label: 'Go' },
+            { value: 'abort', label: 'Stop' },
+          ],
+          default: 'continue',
+        },
+      ],
+    };
+    const result = await run(state, makeStep({ form: () => gate, autoSubmitDefaults: true }));
+    expect(result.status).toBe('waiting_form');
+    expect(state.taskStepRow.formValues).toBeNull();
+  });
+
+  it('a gate form that sets its own autoSubmit still waits for a person', async () => {
+    const state = freshState();
+    state.taskRow = { id: 'task-1', autoContinue: false, preAnswers: null };
+    const gate: FormSchema = {
+      title: 'Gate',
+      autoSubmit: true,
+      fields: [
+        {
+          type: 'radio',
+          id: FIX_LOOP_ACTION_FIELD,
+          label: 'Proceed?',
+          options: [{ value: 'continue', label: 'Go' }],
+          default: 'continue',
+        },
+      ],
+    };
+    const result = await run(state, makeStep({ form: () => gate }));
+    expect(result.status).toBe('waiting_form');
   });
 
   it('autoSubmitDefaults still stops when a required field has no default', async () => {

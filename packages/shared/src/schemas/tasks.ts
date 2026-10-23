@@ -239,6 +239,10 @@ export const MERGE_CLARIFICATION_ANSWERED_EVENT = 'merge_resolution.clarificatio
 /** task_events type the worker's markTaskDead writes with the unresolved step ids; the api reads it. */
 export const TASK_DEAD_EVENT = 'task.dead';
 
+/** The worker (builds and resolves the gates) and the api (re-offers rows) key on one id: an
+ *  answer carrying it as a string is a fix-loop gate decision. */
+export const FIX_LOOP_ACTION_FIELD = 'fixLoopAction';
+
 /** One turn of a plan-merge conversation. In `task_events` rather than a table of its
  *  own because the conversation belongs to ONE task and dies with it — unlike
  *  `plan_node_messages`, which exists because a node accumulates conversations across

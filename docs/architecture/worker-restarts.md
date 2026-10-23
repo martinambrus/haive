@@ -138,7 +138,13 @@ cannot disagree on precedence. An answered fix-loop gate is finished from its an
 step's own. An answer that reopens the task (continue, or accept with a next step) closes the gate,
 records the answer and points the task at its next step in one transaction, under the new-work fence
 and then the repository lock when the task had failed, so a refused or overtaken reopen leaves the
-gate parked with nothing recorded. Abort, an accept with no next step, a dead run list and a continue
+gate parked with nothing recorded. The refused answer stays saved on its row. A task Retry, a settle
+and a CLI switch that reset a row to `pending` drop it (`withoutGateAnswer`,
+`api/src/lib/task-control.ts`), because every write to a `pending` row is refused: a kept answer was
+a no-op that the stalled sweep re-drove for good. A Retry and a settle also set `pause_form_on_retry`
+on such a row, since a source step that auto-submits its defaults (`08-phase-5-verify`) would
+otherwise answer the gate itself with `continue` and run with the gate's values; the gate parks
+again and asks. Abort, an accept with no next step, a dead run list and a continue
 with no routable target close the row before they act. On a task that failed before the
 answer was sent, the pickup guard admits the answer onto the `done` row as it would onto the parked
 form (`gateAnswerSentAfterFailure`, the task's `completed_at` against the job's own timestamp); a
@@ -212,7 +218,10 @@ prints, when it is certainly running and so either the kill found it or this rea
 supersede, and every few seconds after (`run-superseded.ts`); a run that reads superseded gets no
 sandbox or loses the one it has. A Stop takes the Retry's steps in one transaction
 (`stopActiveCliInvocations`): runs, steps, a second sweep of runs, then the task, and the sandboxes
-are killed only once it commits. No reader sees a run cancelled beside a step still running, and a
+are killed only once it commits. The steps it fails are the `running` and `waiting_cli` ones, a
+`pending` one with a park marker (a pause or a runtime slot), and a `pending` one that still holds a
+fix-loop gate's saved answer, the shape a task was left in before a Retry dropped that answer; any
+other `pending` row is a step not yet run and stays. No reader sees a run cancelled beside a step still running, and a
 Stop that fails leaves every run as it was and kills nothing. When the Stop's own update fails the
 task it returns that update's `completedAt` as `failedAt`, and the `task.stopped` event an
 administrator's Stop writes carries it: the task page and the task list name a stop as the cause of
@@ -253,7 +262,8 @@ either, and a failed task stays fully recoverable.
 A task Retry re-runs the step the task stopped on, at its round (`retryTaskAtStep`), rather than
 replaying the task from START, which re-derives every stored loop_back and pays each fix round
 again. One transaction ends the task's live runs, re-offers a parked row as it was (a form keeps its
-schema and answers, a runtime park its detection), resets the failed or live row, its downstream
+schema and answers except a fix-loop gate's, which loses its saved answer and asks again; a runtime
+park its detection), resets the failed or live row, its downstream
 and any other live row, and moves the task back through `moveTaskToStep` under a bump fenced on
 `failed`, so a Cancel that landed first stands (409) and nothing is reset. A `done` or `skipped`
 row is left as it is: its advance re-drives the hand-off it finished with. A task that never

@@ -1,6 +1,6 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
-import type { FormSchema } from '@haive/shared';
+import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { fenceOpener, scanFences } from '@haive/shared/markdown-fences';
 import type { StepContext } from '../../step-definition.js';
 import {
@@ -31,9 +31,7 @@ export const FIX_LOOP_TARGET_STEP_ID = '07-phase-2-implement';
 export const DEFAULT_MAX_FIX_ROUNDS = 5;
 const FIX_LOOP_REQUESTED = 'fix_loop.requested';
 const FIX_LOOP_ACCEPTED = 'fix_loop.accepted';
-/** Radio field id on the escalation gate form — its presence in a submitted form
- *  marks the submission as a gate decision (not a normal step re-run). */
-export const FIX_LOOP_ACTION_FIELD = 'fixLoopAction';
+export { FIX_LOOP_ACTION_FIELD };
 
 /** Optional free-text on the escalation gate: what the next fix round should actually do.
  *  Without it the gate's only "keep going" option is a blind re-run against the same diagnosis
