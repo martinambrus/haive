@@ -305,6 +305,11 @@ describe('skillSyncStep.apply', () => {
       const hook = path.join(repo, '.git', 'hooks', 'pre-commit');
       await writeFile(hook, `#!/bin/sh\necho ran >> '${marker}'\nexit 0\n`);
       await chmod(hook, 0o755);
+      // The hook must be live here, or its absence after apply proves nothing.
+      const who = ['-c', 'user.name=T', '-c', 'user.email=t@haive.local'];
+      await execFileP('git', ['-C', repo, ...who, 'commit', '--allow-empty', '-m', 'probe']);
+      expect(await exists(marker)).toBe(true);
+      await rm(marker);
       const ctx = ctxFor({
         userId: 'u',
         db: { query: { users: { findFirst: async () => null } } } as unknown as StepContext['db'],

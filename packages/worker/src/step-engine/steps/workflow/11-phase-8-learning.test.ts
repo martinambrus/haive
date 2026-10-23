@@ -1135,6 +1135,10 @@ describe("the learning gate's git runner", () => {
       await writeFile(script, `#!/bin/sh\necho ran >> '${marker}'\nexit 0\n`);
       await chmod(script, 0o755);
       await git(path.join(sup, vendor), ['config', 'core.fsmonitor', script]);
+      // The monitor must be live here, or its absence after prepareForm proves nothing.
+      await git(sup, ['status', '--porcelain', '--', '.haive-data/knowledge_base']);
+      await access(marker);
+      await rm(marker);
 
       const artifactPath = path.join(sup, '.haive', KNOWLEDGE_DIFF_ARTIFACT_NAME);
       const warnings: unknown[] = [];
