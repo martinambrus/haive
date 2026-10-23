@@ -17,6 +17,7 @@ import { schema, hasPgCode, isUniqueViolation, type StepIterationEntry } from '@
 import {
   CONFIG_KEYS,
   DEFAULT_CLI_TIMEOUT_BASE_MINUTES,
+  FIX_LOOP_ACTION_FIELD,
   IN_STACK_OLLAMA_HOSTS,
   IN_STACK_OLLAMA_URL,
   STEP_CAPABILITIES,
@@ -3020,7 +3021,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           reuseCandidate ??
           (persistedSchema.fields.length === 0
             ? {}
-            : meta.autoSubmitDefaults || persistedSchema.autoSubmit
+            : (meta.autoSubmitDefaults || persistedSchema.autoSubmit) &&
+                !persistedSchema.fields.some((f) => f.id === FIX_LOOP_ACTION_FIELD)
               ? extractFormDefaults(persistedSchema)
               : undefined);
         if (candidate !== undefined) {

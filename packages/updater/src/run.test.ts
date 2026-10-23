@@ -41,10 +41,11 @@ function fakeSql(failOn?: string, live: number | (() => number) = 0) {
   return Object.assign(
     run(() => `pool-${(next += 1)}`),
     {
+      json: (value: unknown) => value,
       reserve: async () =>
         Object.assign(
           run(() => 'reserved'),
-          { release: () => undefined },
+          { release: () => undefined, json: (value: unknown) => value },
         ),
     },
   );

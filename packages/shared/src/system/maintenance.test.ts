@@ -2,9 +2,11 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import {
+  drainTaskStatuses,
   lockNewWorkFenceExclusive,
   lockNewWorkFenceShared,
   locksOutNonAdmins,
+  type MaintenanceState,
   NEW_WORK_FENCE_KEY,
   parseMaintenanceState,
   refusesNewWork,
@@ -86,5 +88,43 @@ describe('the fence statements', () => {
         params: [NEW_WORK_FENCE_KEY],
       },
     ]);
+  });
+});
+
+describe('drainTaskStatuses', () => {
+  const statuses = (state: MaintenanceState): readonly string[] => {
+    expect(typeof drainTaskStatuses).toBe('function');
+    return drainTaskStatuses(state);
+  };
+  const FIVE = ['queued', 'running', 'paused', 'waiting_user', 'waiting_pr'];
+
+  it('waits for the five live statuses while owners can still work (normal and draining)', () => {
+    expect([...statuses('normal')].sort()).toEqual([...FIVE].sort());
+    expect([...statuses('draining')].sort()).toEqual([...FIVE].sort());
+  });
+
+  it('waits only for queued and running once owners are locked out', () => {
+    expect([...statuses('maintenance')].sort()).toEqual(['queued', 'running']);
+  });
+
+  it('never waits for a task that is not started or is over', () => {
+    for (const state of ['normal', 'draining', 'maintenance'] as const) {
+      for (const status of ['created', 'completed', 'failed', 'cancelled']) {
+        expect(statuses(state)).not.toContain(status);
+      }
+    }
+  });
+
+  it('hands out a list a caller can change without changing the next answer', () => {
+    for (const state of ['normal', 'draining', 'maintenance'] as const) {
+      const before = [...statuses(state)];
+      try {
+        (statuses(state) as string[]).push('completed');
+        (statuses(state) as string[]).length = 0;
+      } catch {
+        // a frozen array refuses the write, which is as good
+      }
+      expect([...statuses(state)]).toEqual(before);
+    }
   });
 });

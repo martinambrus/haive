@@ -152,4 +152,45 @@ describe.skipIf(!url)('liveWorkCount on Postgres', () => {
       expect(await liveWorkCount(sql)).toBe(0);
     });
   });
+
+  describe('under the maintenance state', () => {
+    const seedLive = async () => {
+      for (const status of LIVE) await task(status);
+    };
+
+    it.each([undefined, 'normal', 'draining'] as const)(
+      'counts every live status when the state is %s',
+      async (state) => {
+        await seedLive();
+
+        expect(await liveWorkCount(sql, state)).toBe(LIVE.length);
+      },
+    );
+
+    it('counts only the queued and running tasks under maintenance', async () => {
+      await seedLive();
+
+      expect(await liveWorkCount(sql, 'maintenance')).toBe(2);
+    });
+
+    it('still counts the background jobs under maintenance', async () => {
+      await task('running');
+      await task('waiting_user');
+      const id = await repository('cloning');
+      await bundle(id, 'syncing');
+      await provider('building', 'idle');
+      await provider('idle', 'provisioning');
+
+      expect(await liveWorkCount(sql, 'maintenance')).toBe(5);
+      expect(await liveWorkCount(sql, 'normal')).toBe(6);
+    });
+
+    it('still leaves a dead task and a created one out under maintenance', async () => {
+      await task('running', { deadAt: new Date() });
+      await task('waiting_user', { deadAt: new Date() });
+      await task('created');
+
+      expect(await liveWorkCount(sql, 'maintenance')).toBe(0);
+    });
+  });
 });

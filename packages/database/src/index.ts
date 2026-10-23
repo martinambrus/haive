@@ -17,6 +17,7 @@ export {
   snapshotPromotionAllowed,
 } from './database-snapshots.js';
 export { ONE_LIVE_UPGRADE_INDEX } from './schema/tasks.js';
+export { UPGRADE_JOURNAL_DDL } from './upgrade-journal.js';
 export type { StepIterationEntry, MergeResolveState } from './schema/index.js';
 export type { StepGuidanceScope, StepGuidanceCause, StepGuidanceStatus } from './schema/index.js';
 export { waitForDatabaseReady, type WaitForDatabaseOptions } from './wait-for-ready.js';
