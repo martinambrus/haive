@@ -499,11 +499,20 @@ bundleRoutes.put('/uploads/:id/chunk', async (c) => {
       throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
     }
 
-    return tx
+    const advanced = await tx
       .update(schema.customBundleUploads)
       .set({ bytesReceived: end + 1, updatedAt: new Date() })
-      .where(eq(schema.customBundleUploads.id, row.id))
+      .where(
+        and(
+          eq(schema.customBundleUploads.id, row.id),
+          eq(schema.customBundleUploads.status, 'uploading'),
+        ),
+      )
       .returning();
+    if (advanced.length === 0) {
+      throw new HttpError(409, 'session is no longer uploading');
+    }
+    return advanced;
   });
 
   return c.json({ session: uploadSessionFromRow(updated[0]!) });

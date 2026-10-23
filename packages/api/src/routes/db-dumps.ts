@@ -217,11 +217,15 @@ dbDumpRoutes.put('/upload/:id/chunk', async (c) => {
       throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
     }
 
-    return tx
+    const advanced = await tx
       .update(schema.dbUploads)
       .set({ bytesReceived: end + 1, updatedAt: new Date() })
-      .where(eq(schema.dbUploads.id, row.id))
+      .where(and(eq(schema.dbUploads.id, row.id), eq(schema.dbUploads.status, 'uploading')))
       .returning();
+    if (advanced.length === 0) {
+      throw new HttpError(409, 'session is no longer uploading');
+    }
+    return advanced;
   });
 
   return c.json({ session: sessionFromRow(updated[0]!) });

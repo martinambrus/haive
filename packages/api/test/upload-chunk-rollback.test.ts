@@ -476,6 +476,56 @@ describe('a chunk of a chunked upload that is rolled back', () => {
       );
     });
 
+    const statusOf = (family: Family): unknown =>
+      fake.rows(family.table).find((r) => r.id === SESSION)!.status;
+    const cancel = (family: Family) =>
+      family.app.request(family.chunkUrl(SESSION).replace(/\/chunk$/, ''), { method: 'DELETE' });
+
+    it('E9 answers 409 and leaves the cursor when the session is cancelled while the chunk is written', async () => {
+      await seed(family);
+      let cancelled = 0;
+      const fault = interceptWriteOf(CHUNK, {
+        during: async () => {
+          cancelled = (await cancel(family)).status;
+        },
+      });
+
+      const res = await put(family, CHUNK);
+
+      expect(fault.fired, 'the chunk’s bytes reached FileHandle.prototype.write').toBe(1);
+      expect(cancelled, 'the cancel is accepted').toBe(200);
+      expect(res.status, 'the chunk of a cancelled session is refused').toBe(409);
+      expect(received(family), 'the cancel’s byte count is kept').toBe(PREVIOUS.length);
+      expect(statusOf(family), 'the session stays cancelled').toBe('cancelled');
+    });
+
+    it('E9 pin: a chunk nobody cancels is accepted and the session stays uploading', async () => {
+      await seed(family);
+
+      const res = await put(family, CHUNK);
+
+      expect(res.status, 'the chunk is accepted').toBe(200);
+      expect(received(family), 'the byte count is advanced').toBe(PREVIOUS.length + CHUNK.length);
+      expect(statusOf(family), 'the session is still uploading').toBe('uploading');
+    });
+
+    it('E9 pin: a chunk for a session cancelled before it arrived is refused as cancelled', async () => {
+      await seed(family);
+      expect((await cancel(family)).status, 'the cancel is accepted').toBe(200);
+
+      const res = await family.app.request(family.chunkUrl(SESSION), {
+        method: 'PUT',
+        headers: {
+          'content-range': `bytes ${PREVIOUS.length}-${PREVIOUS.length + CHUNK.length - 1}/${TOTAL}`,
+        },
+        body: new Uint8Array(CHUNK),
+        duplex: 'half',
+      } as RequestInit);
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('session is cancelled');
+    });
+
     it('E2 pin: a good chunk lands at the session’s offset and advances its byte count', async () => {
       const session = await seed(family);
 
