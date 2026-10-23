@@ -5,6 +5,7 @@ const h = vi.hoisted(() => ({
   tasks: [] as Record<string, unknown>[],
   events: [] as Record<string, unknown>[],
   eventReads: 0,
+  role: 'user' as string,
 }));
 const schemaRef = vi.hoisted(() => ({}) as { taskEvents: unknown });
 
@@ -47,6 +48,7 @@ vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => und
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
+    c.set('userRole', h.role);
     await next();
   },
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
@@ -188,6 +190,7 @@ describe('findAdminPausedTaskIds', () => {
 
 describe('who paused a task, as the owner reads it', () => {
   beforeEach(() => {
+    h.role = 'user';
     h.eventReads = 0;
     h.tasks = [
       taskRow(ADMIN_PAUSED, PAUSED_AT),
@@ -239,5 +242,36 @@ describe('who paused a task, as the owner reads it', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { task: { pausedByAdmin: boolean } };
     expect(body.task.pausedByAdmin).toBe(expected);
+  });
+});
+
+describe('whether the viewer may lift the pause, as the detail reads it', () => {
+  it.each([
+    ['the owner of an administrator pause', ADMIN_PAUSED, 'user', true],
+    ['an administrator viewing an administrator pause', ADMIN_PAUSED, 'admin', false],
+    ['the owner of their own pause', OWNER_PAUSED, 'user', false],
+    ['the owner of an unpaused task', RUNNING, 'user', false],
+  ])('carries pauseLocked for %s', async (_name, id, role, expected) => {
+    h.role = role;
+    h.eventReads = 0;
+    h.tasks = [taskRow(id, id === RUNNING ? null : PAUSED_AT)];
+    h.events = [
+      {
+        taskId: ADMIN_PAUSED,
+        eventType: 'task.paused',
+        payload: { by: 'admin-1', byAdmin: true, reason: 'maintenance' },
+        createdAt: new Date('2026-10-14T09:00:00.000Z'),
+      },
+      {
+        taskId: OWNER_PAUSED,
+        eventType: 'task.paused',
+        payload: { by: USER },
+        createdAt: new Date('2026-10-14T09:00:01.000Z'),
+      },
+    ];
+    const res = await app.request(`/tasks/${id}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { task: { pauseLocked: boolean } };
+    expect(body.task.pauseLocked).toBe(expected);
   });
 });

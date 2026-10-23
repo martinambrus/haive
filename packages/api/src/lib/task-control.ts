@@ -229,15 +229,21 @@ function failStuckSteps(
 /** Release a per-task pause. Clearing the column is the whole operation — the worker's
  *  park loop and the deferred cli-exec jobs re-check it on their own schedule, so there is
  *  no queue state to unwind here. True only when this call lifted the pause, false when it was
- *  already gone. */
+ *  already gone. With `only`, it lifts that pause alone: one placed since `only` was read stays. */
 export async function clearTaskPause(
   db: ReturnType<typeof getDb> | DbHandle,
   taskId: string,
+  only?: Date,
 ): Promise<boolean> {
   const rows = await db
     .update(schema.tasks)
     .set({ pausedAt: null, updatedAt: new Date() })
-    .where(and(eq(schema.tasks.id, taskId), isNotNull(schema.tasks.pausedAt)))
+    .where(
+      and(
+        eq(schema.tasks.id, taskId),
+        only ? eq(schema.tasks.pausedAt, only) : isNotNull(schema.tasks.pausedAt),
+      ),
+    )
     .returning({ id: schema.tasks.id });
   return rows.length > 0;
 }
