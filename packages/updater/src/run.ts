@@ -162,6 +162,17 @@ async function setMaintenanceState(sql: Sql, state: MaintenanceState): Promise<v
   await underFence(sql, () => configService.set(CONFIG_KEYS.MAINTENANCE_STATE, state));
 }
 
+/** Writes draining over normal only: a draining or maintenance an administrator set is already a hold. */
+async function holdDraining(sql: Sql): Promise<MaintenanceState> {
+  return underFence(sql, async () => {
+    const found = parseMaintenanceState(
+      await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
+    );
+    if (found === 'normal') await configService.set(CONFIG_KEYS.MAINTENANCE_STATE, 'draining');
+    return found;
+  });
+}
+
 /** Recounts under the fence: a draining or held install with nothing live enters maintenance. */
 async function enterMaintenance(ctx: UpgradeContext): Promise<boolean> {
   const { entered, state, live } = await underFence(ctx.sql, async (fence) => {
@@ -228,8 +239,8 @@ async function awaitDrain(ctx: UpgradeContext): Promise<boolean> {
 
 export async function phaseDraining(ctx: UpgradeContext): Promise<void> {
   await enterPhase(ctx.sql, ctx.runId, 'draining');
-  await setMaintenanceState(ctx.sql, 'draining');
-  ctx.log('draining', { deadlineMs: ctx.drainDeadlineMs });
+  const found = await holdDraining(ctx.sql);
+  ctx.log('draining', { deadlineMs: ctx.drainDeadlineMs, found });
   ctx.drainForced = await awaitDrain(ctx);
 }
 

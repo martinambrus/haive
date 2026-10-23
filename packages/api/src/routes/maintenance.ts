@@ -29,6 +29,7 @@ import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js
 import { appendTaskEvent } from './tasks/_helpers.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { findLiveUpgradeRun } from '../lib/upgrade-run.js';
 
 const log = logger.child({ module: 'maintenance' });
 
@@ -65,6 +66,14 @@ maintenanceRoutes.put('/', async (c) => {
   const actorUserId = c.get('userId');
   const { event, previous } = await getDb().transaction(async (tx) => {
     await lockNewWorkFenceExclusive(tx);
+    const live = await findLiveUpgradeRun(tx);
+    if (live) {
+      throw new HttpError(
+        409,
+        `An upgrade from ${live.fromVersion} to ${live.toVersion} is running (run ${live.id}, phase ${live.phase}), so the maintenance state cannot be changed by hand until it ends. If the updater has stopped, run ./haive upgrade --version ${live.toVersion} in the install directory to finish or undo it.`,
+        'upgrade_running',
+      );
+    }
     const replaced = parseMaintenanceState(
       await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE),
     );
