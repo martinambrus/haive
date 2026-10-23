@@ -18,6 +18,19 @@ viewer reports "Could not load changes" instead of a stale diff or "No changes t
 and the KB commit also run their own `git status` in detect, outside that catch, so a status that
 keeps failing fails those steps there before any diff is built.
 
+A file that could not be read is not an empty file. `buildFileEntry` sets `unreadable` on its
+entry when `git cat-file -s HEAD:<path>` or `git show HEAD:<path>` exits non-zero, or when the
+working file cannot be opened (a link, a FIFO, a file that vanished, a permission error), and it
+drops both contents, as it does for a binary or oversized file. It keys on git's exit code, never
+on its message. Left empty, the side that did read would diff against nothing: a modified file
+would render as all-added or all-removed and a deleted file as an empty deletion. The viewer
+shows "Could not read this file" instead of a diff, gate 3 gives the commit-message generator the
+path and status only ("content unavailable"), and the knowledge builders set no `editPath`, so
+the file cannot be edited. The field is absent when both sides were read, which covers every
+artifact an older worker wrote and every entry the learning step synthesizes. A changed submodule
+pointer reads this way too, since git has no blob to show for it. `CommitDiffFile` is declared
+twice, in `_commit-diff.ts` and in `commit-diff-viewer.tsx`; a new field goes into both.
+
 Whole lines retain their red/green background. A removed run followed by an added run also
 gets a `diffWordsWithSpace` comparison: only changed words, punctuation and whitespace receive
 the brighter background. Compare the entire replacement run before projecting spans onto
@@ -38,6 +51,7 @@ In split mode both panes move together. Selecting another file remounts the pane
 their scroll position.
 
 `commit-diff.test.ts` covers span reconstruction, uncommented settings, shifted comments,
-whitespace, Unicode and marker grouping. `tests/e2e/tasks/commit-diff.spec.ts` exercises the
-real task page with a completed fixture and a mocked artifact: both views, marker navigation,
-scroll synchronisation, fullscreen, file switching and narrow-screen containment.
+whitespace, Unicode and marker grouping. `commit-diff-viewer.test.tsx` draws the viewer through
+the DOM-less test renderer for the unreadable states. `tests/e2e/tasks/commit-diff.spec.ts`
+exercises the real task page with a completed fixture and a mocked artifact: both views, marker
+navigation, scroll synchronisation, fullscreen, file switching and narrow-screen containment.
