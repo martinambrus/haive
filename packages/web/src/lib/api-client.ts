@@ -1813,7 +1813,8 @@ export interface PlanSnapshotHealth {
   filesExist: boolean;
   gitAvailable: boolean;
   tracked: boolean;
-  uncommitted: boolean;
+  /** null = git status failed, so nothing is claimed: committed is false and pushed null. */
+  uncommitted: boolean | null;
   committed: boolean;
   /** null = no/freshly unknown upstream; false = local commits are ahead. */
   pushed: boolean | null;

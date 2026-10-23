@@ -338,7 +338,7 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
 
   let gitAvailable = false;
   let tracked = false;
-  let uncommitted = false;
+  let uncommitted: boolean | null = false;
   let branch: string | null = null;
   let pushed: boolean | null = null;
   // Whether there is anywhere to push TO. Read from git rather than from
@@ -360,9 +360,9 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
         gitRead(repoRoot, ['rev-parse', '--abbrev-ref', '@{upstream}']),
       ]);
       tracked = trackedResults.every((result) => result.ok);
-      uncommitted = status.ok && status.stdout.length > 0;
+      uncommitted = status.ok ? status.stdout.length > 0 : null;
       branch = branchResult.ok ? branchResult.stdout || null : null;
-      if (tracked && !uncommitted && upstream.ok) {
+      if (tracked && uncommitted === false && upstream.ok) {
         const ahead = await gitRead(repoRoot, ['rev-list', '--count', '@{upstream}..HEAD']);
         pushed = ahead.ok ? Number(ahead.stdout) === 0 : null;
       }
@@ -384,7 +384,7 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
     gitAvailable,
     tracked,
     uncommitted,
-    committed: filesExist && tracked && !uncommitted,
+    committed: filesExist && tracked && uncommitted === false,
     pushed,
     branch,
     hasOrigin: originUrl !== null,
