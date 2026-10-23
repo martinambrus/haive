@@ -5,6 +5,10 @@ const h = vi.hoisted(() => ({
   db: null as unknown,
   sha: 'a'.repeat(40),
   headReads: 0,
+  failRead: 0,
+  probe: null as { code: number; stdout: string; stderr: string } | null,
+  aside: vi.fn(),
+  land: vi.fn(),
   switched: false,
   otherSha: 'b'.repeat(40),
   fail: false,
@@ -37,6 +41,7 @@ vi.mock('../src/repo/git-push.js', async (original) => {
       }
       if (args.join(' ') === 'rev-parse HEAD') {
         h.headReads += 1;
+        if (h.headReads === h.failRead) return { code: 128, stdout: '', stderr: 'boom' };
         if (h.headReads === 3)
           return {
             code: h.fail ? 128 : 0,
@@ -46,6 +51,7 @@ vi.mock('../src/repo/git-push.js', async (original) => {
         return { code: 0, stdout: h.sha, stderr: '' };
       }
       if (args.join(' ') === 'branch --show-current') return h.branch;
+      if (h.probe && args.includes('--is-inside-work-tree')) return h.probe;
       return {
         code: 0,
         stdout: args.includes('--is-inside-work-tree') ? 'true' : 'main',
@@ -71,7 +77,7 @@ vi.mock('../src/plan/snapshot-git.js', () => ({
 }));
 vi.mock('../src/project-state/set-aside.js', () => ({
   MOVE_ATTEMPTS: 3,
-  setAsideHaiveProjections: async () => ({ outcome: 'set-aside', kept: new Map() }),
+  setAsideHaiveProjections: h.aside,
   restoreProjectionsInTx: async () => ({ outcome: 'clean' }),
   putBackProjections: async () => {},
   restoreKeptMetadata: async () => {},
@@ -84,7 +90,7 @@ vi.mock('../src/plan/merge.js', async (original) => ({
   ...(await original<typeof import('../src/plan/merge.js')>()),
   conflictedPaths: async () => ({ paths: [], undecodable: 0 }),
   commitMerge: async () => h.sha,
-  landPlanMerge: async () => h.sha,
+  landPlanMerge: h.land,
   removePlanMergeWorktree: h.remove,
   fetchOrigin: async () => {},
   divergence: async () => ({ behind: 0, ahead: 1 }),
@@ -96,6 +102,10 @@ import { save } from '../src/queues/plan-mirror-queue.js';
 beforeEach(() => {
   vi.clearAllMocks();
   h.headReads = 0;
+  h.failRead = 0;
+  h.probe = null;
+  h.aside.mockReset().mockResolvedValue({ outcome: 'set-aside', kept: new Map() });
+  h.land.mockReset().mockImplementation(async () => h.sha);
   h.switched = false;
   h.fail = false;
   h.empty = false;
@@ -289,5 +299,73 @@ describe('plan save reads the origin remote', () => {
     await saveIt(false);
 
     expect(h.detectOrigin).not.toHaveBeenCalled();
+  });
+});
+
+describe('plan save and confirm read git before they act', () => {
+  it.each([128, 124, -1])(
+    'save rejects a failed work-tree probe (%i), not a missing checkout',
+    async (code) => {
+      h.probe = { code, stdout: '', stderr: 'boom' };
+      const err = await save({ repositoryId: 'r1', userId: 'u1', push: true }).then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(err?.message).toMatch(/git rev-parse failed in \/repo/);
+      expect(err?.message).not.toMatch(/not a Git checkout/);
+      expect(h.push).not.toHaveBeenCalled();
+    },
+  );
+
+  it('save keeps the old message when git answers false', async () => {
+    h.probe = { code: 0, stdout: 'false', stderr: '' };
+    await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
+      'repository snapshot cannot be committed because this is not a Git checkout',
+    );
+  });
+
+  it('save rejects a failed before read and pushes nothing', async () => {
+    h.failRead = 1;
+    await expect(save({ repositoryId: 'r1', userId: 'u1', push: true })).rejects.toThrow(
+      /git rev-parse HEAD failed in \/repo/,
+    );
+    expect(h.push).not.toHaveBeenCalled();
+  });
+
+  it('plan-merge confirm rejects a failed before read and moves nothing', async () => {
+    h.headReads = 1;
+    h.failRead = 2;
+    const ctx = {
+      db: h.db,
+      repoPath: '/repo',
+      taskId: 't1',
+      taskStepId: 's1',
+      userId: 'u1',
+    } as StepContext;
+    const detected = {
+      repositoryId: 'r1',
+      branch: 'main',
+      worktreePath: '/repo/merge',
+      worktreeRelPath: 'merge',
+      unrelated: false,
+      conflicts: [],
+      undecodable: 0,
+      attempts: 0,
+      transcript: [],
+      pendingGuidance: null,
+      mergeOpen: false,
+    } as Parameters<typeof planMergeStep.apply>[1]['detected'];
+    await expect(
+      planMergeStep.apply(ctx, {
+        detected,
+        formValues: { decision: 'confirm' },
+        iteration: 0,
+        previousIterations: [],
+        llmOutput: undefined,
+      }),
+    ).rejects.toThrow(/git rev-parse HEAD failed in \/repo/);
+    expect(h.aside).not.toHaveBeenCalled();
+    expect(h.land).not.toHaveBeenCalled();
+    expect(h.push).not.toHaveBeenCalled();
   });
 });

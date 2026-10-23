@@ -5,6 +5,11 @@ const h = vi.hoisted(() => ({
   sha: 'a'.repeat(40),
   status: { code: 0, stdout: '', stderr: '' },
   branch: { code: 0, stdout: 'main', stderr: '' },
+  probe: { code: 0, stdout: 'true', stderr: '' },
+  headReads: 0,
+  failRead: 0,
+  divergence: { behind: 0, ahead: 0, unrelated: false },
+  aside: vi.fn(),
   fetch: vi.fn(),
   recordError: vi.fn(),
   recover: vi.fn(),
@@ -23,13 +28,15 @@ vi.mock('../src/repo/git-push.js', async (original) => {
     pushBranch: vi.fn(),
     gitRun: async (_cwd: string, args: string[]) => {
       if (args.includes('status')) return h.status;
-      if (args.join(' ') === 'rev-parse --is-inside-work-tree') {
-        return { code: 0, stdout: 'true', stderr: '' };
-      }
+      if (args.join(' ') === 'rev-parse --is-inside-work-tree') return h.probe;
       if (args.join(' ') === 'branch --show-current') {
         return h.branch;
       }
-      if (args.join(' ') === 'rev-parse HEAD') return { code: 0, stdout: h.sha, stderr: '' };
+      if (args.join(' ') === 'rev-parse HEAD') {
+        h.headReads += 1;
+        if (h.headReads === h.failRead) return { code: 128, stdout: '', stderr: 'boom' };
+        return { code: 0, stdout: h.sha, stderr: '' };
+      }
       return { code: 0, stdout: '', stderr: '' };
     },
   };
@@ -48,7 +55,7 @@ vi.mock('../src/plan/snapshot-git.js', () => ({
 }));
 vi.mock('../src/project-state/set-aside.js', () => ({
   MOVE_ATTEMPTS: 3,
-  setAsideHaiveProjections: async () => ({ outcome: 'clean' }),
+  setAsideHaiveProjections: h.aside,
   restoreProjectionsInTx: async () => ({ outcome: 'clean' }),
   putBackProjections: async () => {},
   restoreKeptMetadata: async () => {},
@@ -58,13 +65,18 @@ vi.mock('../src/project-state/set-aside.js', () => ({
 vi.mock('../src/plan/merge.js', async (original) => ({
   ...(await original<typeof import('../src/plan/merge.js')>()),
   fetchOrigin: h.fetch,
-  divergence: async () => ({ behind: 0, ahead: 0, unrelated: false }),
+  divergence: async () => h.divergence,
 }));
 
 import { pull } from '../src/queues/plan-mirror-queue.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  h.probe = { code: 0, stdout: 'true', stderr: '' };
+  h.headReads = 0;
+  h.failRead = 0;
+  h.divergence = { behind: 0, ahead: 0, unrelated: false };
+  h.aside.mockReset().mockResolvedValue({ outcome: 'clean' });
   h.status = { code: 0, stdout: '', stderr: '' };
   h.branch = { code: 0, stdout: 'main', stderr: '' };
   h.detectOrigin.mockReset().mockResolvedValue(true);
@@ -186,5 +198,60 @@ describe('plan pull reads the origin remote', () => {
 
     await expect(pullIt()).rejects.toThrow('this repository has no origin remote to pull from');
     expect(h.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('plan pull reads git before it acts', () => {
+  const pullIt = () => pull({ repositoryId: 'r1', userId: 'u1' });
+  const failure = (): Promise<Error | null> =>
+    pullIt().then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+
+  it.each([128, 124, -1])(
+    'rejects a failed work-tree probe (%i), not a missing checkout',
+    async (code) => {
+      h.probe = { code, stdout: '', stderr: 'boom' };
+      const err = await failure();
+      expect(err?.message).toMatch(/git rev-parse failed in \/repo/);
+      expect(err?.message).not.toMatch(/not a Git checkout/);
+      expect(h.fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the old message when git answers false', async () => {
+    h.probe = { code: 0, stdout: 'false', stderr: '' };
+    await expect(pullIt()).rejects.toThrow(
+      'this repository is not a Git checkout, so there is nothing to pull',
+    );
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects a failed before read and touches nothing', async () => {
+    h.failRead = 1;
+    await expect(pullIt()).rejects.toThrow(/git rev-parse HEAD failed in \/repo/);
+    expect(h.aside).not.toHaveBeenCalled();
+    expect(h.fetch).not.toHaveBeenCalled();
+    expect(h.recover).not.toHaveBeenCalled();
+  });
+
+  it('rejects a failed previousCommit read before fetching', async () => {
+    h.failRead = 2;
+    await expect(pullIt()).rejects.toThrow(/git rev-parse HEAD failed in \/repo/);
+    expect(h.fetch).not.toHaveBeenCalled();
+  });
+
+  it('reports no fast-forward when the read after integrate fails and nothing landed', async () => {
+    h.failRead = 3;
+    const result = await pullIt();
+    expect(h.headReads).toBe(3);
+    expect(result.pulled?.fastForwarded).toBe(false);
+  });
+
+  it('reports no fast-forward when every read is healthy and nothing landed', async () => {
+    const result = await pullIt();
+    expect(h.headReads).toBe(3);
+    expect(result.pulled?.fastForwarded).toBe(false);
   });
 });

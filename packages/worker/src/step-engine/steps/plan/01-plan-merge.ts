@@ -42,6 +42,7 @@ import {
   ensurePlanMergeWorktree,
   PLAN_MERGE_LIVE_STATUSES,
   fetchOrigin,
+  headCommit,
   landPlanMerge,
   mergeOriginInto,
   planMergeWorktreePath,
@@ -212,7 +213,11 @@ async function currentBranch(repoPath: string): Promise<string> {
 
 async function mergeIsOpen(worktreePath: string): Promise<boolean> {
   const res = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
-  return res.code === 0;
+  if (res.code === 0) return true;
+  if (res.code === 1) return false;
+  throw new Error(
+    `git rev-parse MERGE_HEAD failed in ${worktreePath}: ${(res.stderr || res.stdout).trim()}`,
+  );
 }
 
 const conflictTotal = (d: Pick<PlanMergeDetect, 'conflicts' | 'undecodable'>): number =>
@@ -638,7 +643,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     const fence = (conn: Parameters<typeof checkoutHoldingTasks>[0]) =>
       checkoutHoldingTasks(conn, repositoryId, { excludeTaskId: ctx.taskId, rootOnly: true });
     const kept: KeptFiles = new Map();
-    const before = (await gitRun(ctx.repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
+    const before = await headCommit(ctx.repoPath);
     let refusal: string | null = null;
     let movedFrom: string | null = null;
     try {

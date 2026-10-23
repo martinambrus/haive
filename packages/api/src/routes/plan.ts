@@ -325,13 +325,13 @@ planRoutes.get('/:id/plan', async (c) => {
 
 /** The four boundaries a portable plan crosses: DB -> files -> commit -> remote. */
 planRoutes.get('/:id/plan/snapshot', async (c) => {
-  const { userId, repositoryId } = await requireOwnedRepo(c);
+  const { repositoryId, repo } = await requireOwnedRepo(c);
   const db = getDb();
   const state = await db.query.planMirrorState.findFirst({
     where: eq(schema.planMirrorState.repositoryId, repositoryId),
     columns: { revision: true, writtenRevision: true, lastError: true },
   });
-  const repoRoot = await resolveRepoRoot(db, userId, repositoryId).catch(() => null);
+  const repoRoot = repo.storagePath ?? repo.localPath;
   const paths = [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown];
   const filesExist = repoRoot
     ? (

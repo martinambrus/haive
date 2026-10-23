@@ -238,3 +238,48 @@ describe('the plan snapshot git state', () => {
     });
   });
 });
+
+describe('the plan snapshot repository root', () => {
+  type Row = Record<string, unknown>;
+  async function request(row: Row, throwOnCall: number | null) {
+    const fake = createFakeDb({
+      repositories: schema.repositories,
+      planMirrorState: schema.planMirrorState,
+    });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', ...row });
+    fake.insert(schema.planMirrorState, { repositoryId: REPO, revision: 1, writtenRevision: 1 });
+    const repositories = fake.db.query.repositories;
+    const inner = repositories.findFirst.bind(repositories);
+    let calls = 0;
+    repositories.findFirst = ((...args: Parameters<typeof inner>) => {
+      calls += 1;
+      if (calls === throwOnCall) throw new Error('repositories read failed');
+      return inner(...args);
+    }) as typeof repositories.findFirst;
+    h.db = fake.db;
+    const res = await app.request(`/${REPO}/plan/snapshot`);
+    return { res, calls: () => calls };
+  }
+
+  it('answers from the row it already loaded when a second repositories read would fail', async () => {
+    const { res } = await request({ storagePath: root }, 2);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ gitAvailable: true, hasOrigin: true });
+  });
+
+  it('reads a row with no checkout path as no checkout, in one repositories read', async () => {
+    const { res, calls } = await request({ storagePath: null, localPath: null }, null);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      filesExist: false,
+      gitAvailable: false,
+      hasOrigin: false,
+    });
+    expect(calls()).toBe(1);
+  });
+
+  it('fails the request when the ownership read itself fails', async () => {
+    const { res } = await request({ storagePath: root }, 1);
+    expect(res.status).toBe(500);
+  });
+});

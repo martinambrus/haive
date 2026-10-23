@@ -1,6 +1,6 @@
 import { isPathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from './worktree-paths.js';
-import { gitExec } from './git-exec.js';
+import { gitExec, gitRun } from './git-exec.js';
 
 /** `absent` — no `.git` entry: a legitimate in-place / no-git workspace.
  *  `broken` — a `.git` entry exists but is not usable, either because git refuses it (a linked
@@ -68,4 +68,18 @@ export async function requireUsableGit(dir: string): Promise<boolean> {
     );
   }
   return status === 'ok';
+}
+
+/** Whether `worktreePath` is one of the worktrees git lists for `repoPath`. A list git could not give is no answer and throws: read as "not registered" it sends the caller to remove a worktree that is. */
+export async function isWorktreeRegistered(
+  repoPath: string,
+  worktreePath: string,
+): Promise<boolean> {
+  const list = await gitRun(repoPath, ['worktree', 'list', '--porcelain']);
+  if (list.code !== 0) {
+    throw new Error(
+      `git worktree list failed in ${repoPath}: ${(list.stderr || list.stdout).trim().slice(0, 500)}`,
+    );
+  }
+  return list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
 }

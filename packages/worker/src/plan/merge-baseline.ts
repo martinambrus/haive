@@ -27,7 +27,9 @@ export interface RecordedFixBaseline {
 
 async function revParse(dir: string, spec: string): Promise<string | null> {
   const res = await gitRun(dir, ['rev-parse', '-q', '--verify', spec]);
-  return res.code === 0 ? res.stdout.trim() : null;
+  if (res.code === 0) return res.stdout.trim();
+  if (res.code === 1) return null;
+  throw new Error(`git rev-parse ${spec} failed in ${dir}: ${(res.stderr || res.stdout).trim()}`);
 }
 
 async function openMergeIds(dir: string): Promise<{ head: string; mergeHead: string } | null> {
