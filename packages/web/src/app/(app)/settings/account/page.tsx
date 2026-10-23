@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, type ApiError } from '@/lib/api-client';
 import { usePageTitle } from '@/lib/use-page-title';
@@ -26,6 +26,7 @@ export default function AccountPage() {
   const router = useRouter();
   const [account, setAccount] = useState<AccountData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [passwordRequired, setPasswordRequired] = useState(false);
 
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -40,16 +41,28 @@ export default function AccountPage() {
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadAccount = useCallback(() => {
     api
       .get<AccountData>('/user-settings/account')
       .then((data) => {
         setAccount(data);
         setName(data.name ?? '');
         setPhone(data.phone ?? '');
+        setLoadError(null);
+        setPasswordRequired(false);
       })
-      .catch((err) => setLoadError((err as ApiError).message ?? 'Failed to load account'));
+      .catch((err) => {
+        if ((err as ApiError).code === 'must_change_password') {
+          setPasswordRequired(true);
+          return;
+        }
+        setLoadError((err as ApiError).message ?? 'Failed to load account');
+      });
   }, []);
+
+  useEffect(() => {
+    loadAccount();
+  }, [loadAccount]);
 
   async function handleProfileSave() {
     setProfileSaving(true);
@@ -93,6 +106,7 @@ export default function AccountPage() {
       // stale. Without this the forced-password guard keeps bouncing the user back here after
       // they have already complied — a lockout only a full page reload clears.
       router.refresh();
+      loadAccount();
     } catch (err) {
       setPasswordError((err as ApiError).message ?? 'Failed to change password');
     } finally {
@@ -100,7 +114,7 @@ export default function AccountPage() {
     }
   }
 
-  if (account === null && !loadError) {
+  if (account === null && !loadError && !passwordRequired) {
     return <p className="text-sm text-neutral-400">Loading account...</p>;
   }
 
@@ -113,52 +127,60 @@ export default function AccountPage() {
 
       <FormError message={loadError} />
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Profile</CardTitle>
-          <CardDescription>
-            Your display name and contact phone. Email is shown for reference and cannot be changed
-            here.
-          </CardDescription>
-        </CardHeader>
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="account-email">Email</Label>
-            <Input id="account-email" type="email" value={account?.email ?? ''} readOnly disabled />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="account-name">Name</Label>
-            <Input
-              id="account-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Your display name"
-              maxLength={80}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="account-phone">Phone</Label>
-            <Input
-              id="account-phone"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              placeholder="+1 555 555 5555"
-              maxLength={32}
-            />
-          </div>
-          <FormError message={profileError} />
-          {profileSuccess && (
-            <div className="rounded-md border border-emerald-900 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-200">
-              {profileSuccess}
+      {!passwordRequired && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Profile</CardTitle>
+            <CardDescription>
+              Your display name and contact phone. Email is shown for reference and cannot be
+              changed here.
+            </CardDescription>
+          </CardHeader>
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="account-email">Email</Label>
+              <Input
+                id="account-email"
+                type="email"
+                value={account?.email ?? ''}
+                readOnly
+                disabled
+              />
             </div>
-          )}
-          <div>
-            <Button size="sm" onClick={handleProfileSave} disabled={profileSaving}>
-              {profileSaving ? 'Saving...' : 'Save profile'}
-            </Button>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="account-name">Name</Label>
+              <Input
+                id="account-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Your display name"
+                maxLength={80}
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="account-phone">Phone</Label>
+              <Input
+                id="account-phone"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="+1 555 555 5555"
+                maxLength={32}
+              />
+            </div>
+            <FormError message={profileError} />
+            {profileSuccess && (
+              <div className="rounded-md border border-emerald-900 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-200">
+                {profileSuccess}
+              </div>
+            )}
+            <div>
+              <Button size="sm" onClick={handleProfileSave} disabled={profileSaving}>
+                {profileSaving ? 'Saving...' : 'Save profile'}
+              </Button>
+            </div>
           </div>
-        </div>
-      </Card>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

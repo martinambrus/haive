@@ -94,8 +94,7 @@ export interface AdminAccessRequest {
  * failed, and the result was an admin console showing "Admin access required" instead of a visitor
  * simply not being there. That is a worse answer than a redirect, not a safer one.
  *
- * The double-enforcement caveat on `decideForcedPasswordChange` does not apply here: that flag is
- * hygiene the api deliberately does not gate, whereas admin genuinely is a boundary, and the role
+ * Like `decideForcedPasswordChange`, this is the redirect over an api that also refuses: the role
  * this reads comes from the same `/auth/me` session the api authorises against — so the two cannot
  * disagree about who is an administrator.
  *
@@ -124,10 +123,9 @@ export interface ForcedPasswordRequest {
 /**
  * A user carrying a password an administrator minted for them is sent to change it.
  *
- * The flag is set wherever such a password is created and cleared only by the holder changing it,
- * so this is the whole enforcement — the api gates nothing on it. That is deliberate: it is
- * hygiene, not an authorisation boundary, and a redirect the api also enforced would take a
- * partially-broken deploy from "annoying" to "locked out".
+ * The flag is set wherever such a password is created and cleared only by the holder changing it.
+ * The redirect is the UX; the api is the boundary — `requireAuth` answers 403 `must_change_password`
+ * to every request but `/auth/me`, the password change, logout and refresh while the flag is set.
  *
  * Applied on the CLIENT, by `ForcedPasswordGuard`, because a Server Component cannot learn which
  * route it is rendering. Forwarding the path from middleware as a request header was tried and
