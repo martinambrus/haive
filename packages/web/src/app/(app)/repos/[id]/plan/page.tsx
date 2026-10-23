@@ -63,6 +63,7 @@ import { PlanMergePanel } from '@/components/plan/plan-merge-panel';
 import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
 import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
 import { pullReportLines } from '@/lib/plan-pull-report';
+import { showsPushAndPull, snapshotStatus, type SnapshotTone } from '@/lib/plan-snapshot';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 /**
@@ -77,6 +78,12 @@ import { InlineMarkdown } from '@/components/markdown/inline-markdown';
  *  mattering to nobody, and the query runs for every node of the repo. */
 const UNREAD_POLL_MS = 15_000;
 const SNAPSHOT_POLL_MS = 10_000;
+const SNAPSHOT_TONE_CLASS: Record<SnapshotTone, string> = {
+  error: 'text-red-400',
+  good: 'text-emerald-400',
+  warn: 'text-amber-400',
+  neutral: 'text-neutral-400',
+};
 
 export default function PlanPage() {
   usePageTitle('Plan');
@@ -728,21 +735,7 @@ export default function PlanPage() {
       'Nothing is startable: everything left is finished, already has a task open, or is ' +
       'waiting on work that is not done yet.';
 
-  const snapshotLabel = !snapshot
-    ? 'Checking snapshot…'
-    : snapshot.lastError
-      ? 'Snapshot error'
-      : snapshot.snapshotState === 'missing'
-        ? 'Snapshot missing'
-        : !snapshot.snapshotWritten
-          ? 'Snapshot updating…'
-          : !snapshot.committed
-            ? 'Not committed'
-            : snapshot.pushed === true
-              ? 'Committed and pushed'
-              : snapshot.pushed === false
-                ? 'Committed, not pushed'
-                : 'Committed';
+  const { label: snapshotLabel, tone: snapshotTone } = snapshotStatus(snapshot);
 
   return (
     <div className="flex flex-col gap-4 p-6">
@@ -782,13 +775,7 @@ export default function PlanPage() {
                   ? 'The snapshot files are not in the checkout, and nothing rewrites them on its own. Save plan rewrites and commits them.'
                   : 'Repository-backed plan snapshot status')
               }
-              className={`self-center text-xs ${
-                snapshot?.lastError
-                  ? 'text-red-400'
-                  : snapshot?.committed
-                    ? 'text-emerald-400'
-                    : 'text-amber-400'
-              }`}
+              className={`self-center text-xs ${SNAPSHOT_TONE_CLASS[snapshotTone]}`}
             >
               {snapshotLabel}
             </span>
@@ -924,7 +911,7 @@ export default function PlanPage() {
               {/* Both of these need somewhere to talk to. Offered without an
                   origin they are buttons whose only outcome is an error, so the
                   one affordance that fixes that takes their place instead. */}
-              {snapshot?.hasOrigin ? (
+              {showsPushAndPull(snapshot) ? (
                 <>
                   {/* Both are gated on an open merge conversation: it owns the
                       scratch worktree and is the thing that will land the remote,
@@ -938,7 +925,7 @@ export default function PlanPage() {
                     title={
                       merge
                         ? 'Finish or discard the open merge conversation first'
-                        : `Refresh, commit and push the portable plan snapshot to ${snapshot.originUrl ?? 'origin'}`
+                        : `Refresh, commit and push the portable plan snapshot to ${snapshot?.originUrl ?? 'origin'}`
                     }
                   >
                     <CloudUpload className="mr-1 h-3.5 w-3.5" />

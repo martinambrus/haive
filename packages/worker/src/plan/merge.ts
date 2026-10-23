@@ -121,22 +121,35 @@ export async function fetchOrigin(args: {
 
 /** How far apart the checkout and the fetched remote are.
  *
- *  Keyed on counts and on `merge-base`'s EXIT CODE, never on git's stderr. A push
+ *  Keyed on counts and on exit codes, never on git's stderr. A push
  *  rejection prints a multi-line hint that git is free to reword at any release
  *  (`pushBranch` throws it verbatim), so branching on it would break silently on a
  *  git upgrade — and silently is the worst way for this to break, because the
- *  symptom would be a push that stops integrating. */
+ *  symptom would be a push that stops integrating. A missing `origin/<branch>` is the
+ *  only failure read as "nothing to pull"; every other failed read throws. */
 export async function divergence(
   repoPath: string,
   branch: string,
 ): Promise<{ ahead: number; behind: number; unrelated: boolean }> {
+  const failed = (cmd: string, res: { stdout: string; stderr: string }): Error =>
+    new Error(`git ${cmd} failed in ${repoPath}: ${res.stderr.trim() || res.stdout.trim()}`);
   const count = async (range: string): Promise<number> => {
     const res = await gitRun(repoPath, ['rev-list', '--count', range]);
     const n = Number.parseInt(res.stdout.trim(), 10);
-    return res.code === 0 && Number.isFinite(n) ? n : 0;
+    if (res.code !== 0 || !Number.isFinite(n)) throw failed('rev-list', res);
+    return n;
   };
+  const ref = await gitRun(repoPath, [
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `origin/${branch}^{commit}`,
+  ]);
+  if (ref.code === 1) return { ahead: await count('HEAD'), behind: 0, unrelated: true };
+  if (ref.code !== 0) throw failed('rev-parse', ref);
   const base = await gitRun(repoPath, ['merge-base', 'HEAD', `origin/${branch}`]);
-  const unrelated = base.code !== 0;
+  if (base.code !== 0 && base.code !== 1) throw failed('merge-base', base);
+  const unrelated = base.code === 1;
   // With no common ancestor the two-dot ranges are meaningless (git errors), so the
   // whole of each side counts as unmerged. `behind > 0` is what callers branch on.
   if (unrelated) {

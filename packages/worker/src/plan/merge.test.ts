@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile, readFile, lstat } from 'node:fs/promises';
+import { execFile, execFileSync } from 'node:child_process';
+import { mkdtemp, mkdir, rm, writeFile, readFile, lstat, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -172,6 +172,73 @@ describe('divergence', () => {
     expect(d.unrelated).toBe(false);
     expect(d.behind).toBe(1);
     expect(d.ahead).toBe(0);
+  });
+});
+
+describe('divergence on a failed git read', () => {
+  const REAL_GIT = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+
+  async function withShim<T>(body: string, run: () => Promise<T>): Promise<T> {
+    const shimDir = await mkdtemp(path.join(tmpdir(), 'planmerge-shim-'));
+    dirs.push(shimDir);
+    await writeFile(
+      path.join(shimDir, 'git'),
+      ['#!/bin/sh', body, `exec ${REAL_GIT} "$@"`, ''].join('\n'),
+    );
+    await chmod(path.join(shimDir, 'git'), 0o755);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    try {
+      return await run();
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  }
+
+  const failing = (sub: string): string =>
+    `for a in "$@"; do if [ "$a" = '${sub}' ]; then echo "fatal: simulated failure" >&2; exit 128; fi; done`;
+
+  it.each([
+    ['rev-list', /git rev-list failed in/],
+    ['merge-base', /git merge-base failed in/],
+    ['rev-parse', /git rev-parse failed in/],
+  ])('rejects when %s fails', async (sub, message) => {
+    const { local } = await unrelatedPair();
+    await expect(withShim(failing(sub), () => divergence(local, 'main'))).rejects.toThrow(message);
+  });
+
+  it('rejects when rev-list prints a count that is not a number', async () => {
+    const { local } = await unrelatedPair();
+    const body = `for a in "$@"; do if [ "$a" = 'rev-list' ]; then echo garbage; exit 0; fi; done`;
+    await expect(withShim(body, () => divergence(local, 'main'))).rejects.toThrow(
+      /git rev-list failed in/,
+    );
+  });
+
+  it('rejects in a directory that is not a git repository', async () => {
+    const outer = await mkdtemp(path.join(tmpdir(), 'planmerge-notrepo-'));
+    dirs.push(outer);
+    const inner = path.join(outer, 'inner');
+    await mkdir(inner);
+    const saved = process.env.GIT_CEILING_DIRECTORIES;
+    process.env.GIT_CEILING_DIRECTORIES = outer;
+    try {
+      await expect(divergence(inner, 'main')).rejects.toThrow(/git \S+ failed in/);
+    } finally {
+      if (saved === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+      else process.env.GIT_CEILING_DIRECTORIES = saved;
+    }
+  });
+
+  it('reads a missing origin ref as unrelated with nothing to pull', async () => {
+    const { local } = await unrelatedPair();
+    await git(local, ['update-ref', '-d', 'refs/remotes/origin/main']);
+    const head = Number.parseInt((await git(local, ['rev-list', '--count', 'HEAD'])).trim(), 10);
+    await expect(divergence(local, 'main')).resolves.toEqual({
+      ahead: head,
+      behind: 0,
+      unrelated: true,
+    });
   });
 });
 

@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile, execFileSync } from 'node:child_process';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -115,6 +115,27 @@ function contextFor(repoPath: string, db: unknown): StepContext {
   } as unknown as StepContext;
 }
 
+async function failingBranchRead(): Promise<() => void> {
+  const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+  const shimDir = await mkdtemp(path.join(tmpdir(), 'planmerge-branch-shim-'));
+  dirs.push(shimDir);
+  await writeFile(
+    path.join(shimDir, 'git'),
+    [
+      '#!/bin/sh',
+      `for a in "$@"; do if [ "$a" = '--show-current' ]; then echo "fatal: simulated failure" >&2; exit 128; fi; done`,
+      `exec ${realGit} "$@"`,
+      '',
+    ].join('\n'),
+  );
+  await chmod(path.join(shimDir, 'git'), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${shimDir}:${savedPath}`;
+  return () => {
+    process.env.PATH = savedPath;
+  };
+}
+
 const integrate = (repoPath: string) =>
   integrateOrigin({
     repositoryId: 'r1',
@@ -170,5 +191,52 @@ describe('plan snapshot save and pull: a merge a conversation left open', () => 
 
     await expect(integrate(local)).rejects.toThrow('lookup failed');
     expect(await readFile(stray, 'utf8')).toBe('scratch\n');
+  });
+
+  it('rejects when the divergence read fails instead of reporting nothing to pull', async () => {
+    const local = await unrelatedPair();
+    const { db } = fakeDb();
+    h.db = db;
+    const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+    const shimDir = await mkdtemp(path.join(tmpdir(), 'planmerge-save-shim-'));
+    dirs.push(shimDir);
+    await writeFile(
+      path.join(shimDir, 'git'),
+      [
+        '#!/bin/sh',
+        `for a in "$@"; do if [ "$a" = 'rev-list' ]; then echo "fatal: simulated failure" >&2; exit 128; fi; done`,
+        `exec ${realGit} "$@"`,
+        '',
+      ].join('\n'),
+    );
+    await chmod(path.join(shimDir, 'git'), 0o755);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    try {
+      await expect(integrate(local)).rejects.toThrow(/git rev-list failed in/);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('stops the plan-merge detect when the branch read fails instead of finding nothing to merge', async () => {
+    const local = await unrelatedPair();
+    const { db } = fakeDb();
+    const restore = await failingBranchRead();
+    try {
+      await expect(planMergeStep.detect!(contextFor(local, db))).rejects.toThrow(
+        /git branch failed in/,
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it('still finds nothing to merge on a detached HEAD', async () => {
+    const local = await unrelatedPair();
+    await git(local, ['checkout', '--detach']);
+    const { db } = fakeDb();
+    const detected = await planMergeStep.detect!(contextFor(local, db));
+    expect(detected).toMatchObject({ branch: '', conflicts: [], mergeOpen: false });
   });
 });
