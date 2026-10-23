@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
     h.settings = { ...h.settings, connectionString: null };
   }),
   db: undefined as unknown,
+  auditFails: [] as string[],
   audits: [] as { table: unknown; row: unknown }[],
   auditLog: { info: vi.fn(), error: vi.fn() },
   vectorType: null as string | null,
@@ -163,6 +164,34 @@ const send = (method: string, url: string, body?: unknown) =>
   });
 const put = (body: unknown) => send('PUT', '/global-kb/config', body);
 const written = () => h.set.mock.calls.map(([key, value]) => [key, value]);
+const auditDb = () => {
+  const open = (rows: { table: unknown; row: unknown }[]): Record<string, unknown> => ({
+    insert: (table: unknown) => ({
+      values: async (row: unknown) => {
+        if (h.auditFails.includes((row as { action: string }).action)) {
+          throw new Error('audit insert refused');
+        }
+        h.events.push('audit');
+        rows.push({ table, row });
+      },
+    }),
+    transaction: async (inner: (child: unknown) => Promise<unknown>) => {
+      const child: typeof rows = [];
+      const result = await inner(open(child));
+      rows.push(...child);
+      return result;
+    },
+  });
+  return {
+    transaction: async (run: (tx: unknown) => Promise<unknown>) => {
+      const rows: { table: unknown; row: unknown }[] = [];
+      const result = await run(open(rows));
+      h.audits.push(...rows);
+      return result;
+    },
+  };
+};
+
 const actions = () => h.audits.map(({ row }) => (row as { action: string }).action);
 
 beforeEach(() => {
@@ -170,14 +199,9 @@ beforeEach(() => {
   h.setSecret.mockClear();
   h.deleteSecret.mockClear();
   h.connect.mockClear();
-  h.db = {
-    insert: (table: unknown) => ({
-      values: async (row: unknown) => {
-        h.audits.push({ table, row });
-      },
-    }),
-  };
+  h.db = auditDb();
   h.audits = [];
+  h.auditFails = [];
   h.auditLog.info.mockClear();
   h.auditLog.error.mockClear();
   h.vectorType = null;
@@ -191,7 +215,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  // recordAuditEvent swallows a failed insert into this logger, so a broken audit would pass unseen.
+  // A failed audit row fails the save; none may be swallowed into this logger.
   expect(h.auditLog.error).not.toHaveBeenCalled();
 });
 
@@ -413,13 +437,7 @@ describe('PUT /global-kb/config audit trail', () => {
     ]);
 
   beforeEach(() => {
-    h.db = {
-      insert: (table: unknown) => ({
-        values: async (row: unknown) => {
-          h.audits.push({ table, row });
-        },
-      }),
-    };
+    h.db = auditDb();
   });
 
   it('records one event for the string and one for the settings when an admin sets it, and no part of the string', async () => {
@@ -516,20 +534,14 @@ describe('PUT /global-kb/config storing the connection string before the setting
   const MODE = `set:${CONFIG_KEYS.GLOBAL_KB_MODE}`;
 
   beforeEach(() => {
-    h.db = {
-      insert: () => ({
-        values: async () => {
-          h.events.push('audit');
-        },
-      }),
-    };
+    h.db = auditDb();
   });
 
   it('stores the string and records its one audit row before it writes the mode that switches to it', async () => {
     const res = await put({ mode: 'external', connectionString: NEW_STRING });
 
     expect(res.status).toBe(200);
-    expect(h.events).toEqual(['set-secret', 'audit', MODE, 'audit']);
+    expect(h.events).toEqual(['audit', 'set-secret', 'audit', MODE]);
     expect(h.setSecret).toHaveBeenCalledTimes(1);
   });
 
@@ -546,10 +558,9 @@ describe('PUT /global-kb/config storing the connection string before the setting
     const res = await put({ ...PAGE, mode: 'external', connectionString: NEW_STRING });
 
     expect(res.status).toBe(200);
-    expect(h.events.slice(0, 2)).toEqual(['set-secret', 'audit']);
+    expect(h.events.slice(0, 3)).toEqual(['audit', 'set-secret', 'audit']);
     expect(h.events).toContain(MODE);
     expect(h.events.filter((event) => event === 'audit')).toHaveLength(2);
-    expect(h.events.at(-1)).toBe('audit');
   });
 
   it('keeps the single write of a save that sends only the mode', async () => {
@@ -557,7 +568,7 @@ describe('PUT /global-kb/config storing the connection string before the setting
     const res = await put({ mode: 'external' });
 
     expect(res.status).toBe(200);
-    expect(h.events).toEqual([MODE, 'audit']);
+    expect(h.events).toEqual(['audit', MODE]);
   });
 
   it('keeps the single write of a save that sends only the string', async () => {
@@ -565,7 +576,7 @@ describe('PUT /global-kb/config storing the connection string before the setting
     const res = await put({ connectionString: NEW_STRING });
 
     expect(res.status).toBe(200);
-    expect(h.events).toEqual(['set-secret', 'audit']);
+    expect(h.events).toEqual(['audit', 'set-secret']);
   });
 
   describe('when the same save changes the embedding width and re-sends the stored string', () => {
@@ -600,8 +611,8 @@ describe('PUT /global-kb/config storing the connection string before the setting
       expect(res.status).toBe(200);
       expect(h.setSecret).not.toHaveBeenCalled();
       expect(h.events.filter((event) => event === 'audit')).toHaveLength(1);
-      expect(h.events.slice(-3)).toEqual(['audit', 'commit', 'close']);
-      expect(h.events).toContain(MODE);
+      expect(h.events.slice(-2)).toEqual(['commit', 'close']);
+      expect(h.events.indexOf('audit')).toBeLessThan(h.events.indexOf(MODE));
     });
   });
 });
@@ -621,13 +632,7 @@ describe('PUT /global-kb/config removing the stored connection string', () => {
 
   beforeEach(() => {
     h.settings = { ...SAVED, connectionString: STORED_STRING };
-    h.db = {
-      insert: (table: unknown) => ({
-        values: async (row: unknown) => {
-          h.audits.push({ table, row });
-        },
-      }),
-    };
+    h.db = auditDb();
   });
 
   it('deletes the secret once and records one event with no part of it, while the store is the built-in one', async () => {
@@ -703,9 +708,14 @@ describe('PUT /global-kb/config removing the stored connection string', () => {
     const res = await put({ mode: 'internal', ...CLEAR });
 
     expect(res.status).toBe(200);
-    expect(h.events).toEqual([`set:${CONFIG_KEYS.GLOBAL_KB_MODE}`, 'delete-secret']);
+    expect(h.events).toEqual([
+      'audit',
+      `set:${CONFIG_KEYS.GLOBAL_KB_MODE}`,
+      'audit',
+      'delete-secret',
+    ]);
     expect(actions()).toEqual(['config.global_kb', 'global_kb.connection_string.update']);
-    expect(h.audits[0]?.row).toMatchObject({ metadata: { connectionStringChanged: true } });
+    expect(h.audits[0]?.row).toMatchObject({ metadata: { connectionStringChanged: false } });
   });
 
   it.each([
@@ -827,6 +837,7 @@ describe('PUT /global-kb/config with a different embedding width', () => {
       'begin',
       'lock',
       'read',
+      'audit',
       `set:${CONFIG_KEYS.GLOBAL_KB_ENABLED}`,
       `set:${CONFIG_KEYS.GLOBAL_KB_DIGEST_ENABLED}`,
       `set:${CONFIG_KEYS.GLOBAL_KB_MODE}`,
@@ -999,6 +1010,70 @@ describe('PUT /global-kb/config settings audit', () => {
       'digestEnabled',
       'mode',
     ]);
+  });
+});
+
+describe('PUT /global-kb/config audit rows are strict', () => {
+  const NEW_STRING = 'postgres://kb:pw@new.example:5432/kb';
+  const STRING_ACTION = 'global_kb.connection_string.update';
+  const nothingRecorded = () => {
+    expect(h.audits).toEqual([]);
+    expect(h.auditLog.info).not.toHaveBeenCalled();
+  };
+
+  it('fails the save and stores no string when its row is refused', async () => {
+    h.auditFails = [STRING_ACTION];
+    const res = await put({ mode: 'external', connectionString: NEW_STRING });
+
+    expect(res.status).toBe(500);
+    expect(h.setSecret).not.toHaveBeenCalled();
+    expect(h.set).not.toHaveBeenCalled();
+    nothingRecorded();
+  });
+
+  it('takes its row back when the string cannot be stored', async () => {
+    h.setSecret.mockRejectedValueOnce(new Error('secrets down'));
+    const res = await put({ mode: 'external', connectionString: NEW_STRING });
+
+    expect(res.status).toBe(500);
+    expect(h.set).not.toHaveBeenCalled();
+    nothingRecorded();
+  });
+
+  it('fails the save and writes no setting when the settings row is refused', async () => {
+    h.auditFails = ['config.global_kb'];
+    const res = await put({ ...PAGE, enabled: false });
+
+    expect(res.status).toBe(500);
+    expect(h.set).not.toHaveBeenCalled();
+    nothingRecorded();
+  });
+
+  it('takes the settings row back when the first write fails', async () => {
+    h.set.mockRejectedValueOnce(new Error('redis down'));
+    const res = await put({ ...PAGE, enabled: false });
+
+    expect(res.status).toBe(500);
+    nothingRecorded();
+  });
+
+  it('fails the save and keeps the string when the removal row is refused', async () => {
+    h.settings = { ...SAVED, connectionString: STORED_STRING };
+    h.auditFails = [STRING_ACTION];
+    const res = await put({ clearConnectionString: true });
+
+    expect(res.status).toBe(500);
+    expect(h.deleteSecret).not.toHaveBeenCalled();
+    nothingRecorded();
+  });
+
+  it('takes the removal row back when the string cannot be deleted', async () => {
+    h.settings = { ...SAVED, connectionString: STORED_STRING };
+    h.deleteSecret.mockRejectedValueOnce(new Error('secrets down'));
+    const res = await put({ clearConnectionString: true });
+
+    expect(res.status).toBe(500);
+    nothingRecorded();
   });
 });
 
