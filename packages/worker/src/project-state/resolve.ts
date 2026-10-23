@@ -184,8 +184,9 @@ async function putBackIfPending(db: Database, conflictId: string, putBack: PutBa
   });
 }
 
-/** Keep mine leaves the column; take theirs switches RTK off as the tooling page does. No file is
- *  written here: the question names a setting, and the sweep brings the record file to the column. */
+/** Either answer is this install's own choice and stamps `rtk_choice_made_at`; keep mine leaves the
+ *  column, take theirs switches RTK off as the tooling page does. No file is written here: the
+ *  question names a setting, and the sweep brings the record file to the column. */
 async function answerRtkQuestion(
   tx: Tx,
   {
@@ -206,6 +207,11 @@ async function answerRtkQuestion(
     await tx
       .update(schema.repositories)
       .set({ ...rtkEnabledUpdate(incoming), rtkChoiceMadeAt: new Date() })
+      .where(eq(schema.repositories.id, repositoryId));
+  } else {
+    await tx
+      .update(schema.repositories)
+      .set({ rtkChoiceMadeAt: new Date() })
       .where(eq(schema.repositories.id, repositoryId));
   }
   await markProjectStateDirty(tx, repositoryId);

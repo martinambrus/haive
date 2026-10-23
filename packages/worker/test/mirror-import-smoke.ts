@@ -3,7 +3,7 @@
  * choice they carry, against a database. One throwaway user and temp directory, deleted after.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -20,6 +20,8 @@ import {
 import { handleScan } from '../src/repo/clone.js';
 import { raiseRtkQuestions } from '../src/project-state/rtk-conflict.js';
 import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
+import { sweepDirtyProjectStates } from '../src/project-state/refresh.js';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 
 const log = logger.child({ module: 'mirror-import-smoke' });
 
@@ -240,6 +242,72 @@ async function main(): Promise<void> {
       closedRows.length === 1 && closedRows[0]!.resolution === 'converged',
       closedRows,
     );
+
+    // D2: keeping mine is this install's own choice, so a later record file adopts nothing.
+    const stateFolder = path.join(tmp, 'rtk-keep-record');
+    await mkdir(path.join(stateFolder, '.haive-data'), { recursive: true });
+    const keepFiles = renderProjectState({
+      ...emptyProjectState(),
+      render: {
+        projectInfo: {},
+        framework: 'unknown',
+        acceptedAgentIds: [],
+        customAgentSpecs: [],
+        lspLanguages: [],
+      } as never,
+      settings: { 'onboarding-tooling': { ragMode: 'none', rtkEnabled: false } },
+      environment: { envDetectData: { project: { name: 'keep' } }, confirmedValues: {} },
+    });
+    for (const [rel, text] of keepFiles) {
+      await mkdir(path.dirname(path.join(stateFolder, PROJECT_STATE_DIR, rel)), {
+        recursive: true,
+      });
+      await writeFile(path.join(stateFolder, PROJECT_STATE_DIR, rel), text);
+    }
+    const [keepRepo] = await db
+      .insert(schema.repositories)
+      .values({ userId, name: 'rtk-keep-record', source: 'local_path', localPath: stateFolder })
+      .returning({ id: schema.repositories.id });
+    const keepScan = () =>
+      handleScan(
+        { repositoryId: keepRepo!.id, userId, source: 'local_path', localPath: stateFolder },
+        db,
+      );
+    await keepScan();
+    await raiseRtkQuestions(db);
+    const recordRows = await askedAbout(keepRepo!.id);
+    check('a record naming RTK off asks once', recordRows.length === 1, recordRows.length);
+    await resolveProjectStateConflict(db, {
+      repositoryId: keepRepo!.id,
+      userId,
+      conflictId: recordRows[0]!.id,
+      answer: 'keep_mine',
+    });
+    const stamped = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, keepRepo!.id),
+      columns: { rtkChoiceMadeAt: true },
+    });
+    check('keeping mine records the choice', stamped?.rtkChoiceMadeAt instanceof Date, stamped);
+    const rtkFile = path.join(stateFolder, PROJECT_STATE_DIR, 'settings', 'rtk-enabled.json');
+    await mkdir(path.dirname(rtkFile), { recursive: true });
+    await writeFile(rtkFile, 'false\n');
+    await keepScan();
+    const afterRow = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, keepRepo!.id),
+      columns: { rtkEnabled: true, renderContext: true },
+    });
+    check(
+      'a later rtk-enabled file adopts nothing and asks nothing',
+      afterRow?.rtkEnabled === true &&
+        (afterRow.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded ===
+          false &&
+        (await askedAbout(keepRepo!.id)).length === 1,
+      { afterRow, asked: (await askedAbout(keepRepo!.id)).length },
+    );
+    await markProjectStateDirty(db, keepRepo!.id);
+    await sweepDirtyProjectStates(db);
+    const written = (await readFile(rtkFile, 'utf8')).trim();
+    check("and the next record write carries this install's choice", written === 'true', written);
 
     // E: a checkout holding a record carries its units; a stale legacy file does not outrank them.
     const withRecord = path.join(tmp, 'with-record');
