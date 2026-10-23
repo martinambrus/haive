@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const ADMIN = '00000000-0000-4000-8000-0000000000a1';
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  liveRun: null as null | { id: string; fromVersion: string; toVersion: string; phase: string },
+  events: [] as string[],
+}));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', () => ({
@@ -10,6 +14,13 @@ vi.mock('../src/middleware/auth.js', () => ({
     await next();
   },
   requireAdmin: async (_c: unknown, next: () => unknown) => next(),
+}));
+
+vi.mock('../src/lib/upgrade-run.js', () => ({
+  findLiveUpgradeRun: async () => {
+    h.events.push('checks run');
+    return h.liveRun;
+  },
 }));
 
 import { sql } from 'drizzle-orm';
@@ -42,6 +53,8 @@ function setup(
 ) {
   const fake = createFakeDb({ auditEvents: schema.auditEvents });
   const events: string[] = [];
+  h.events = events;
+  h.liveRun = null;
   fake.hooks.beforeLock = (key) => {
     events.push(`asks ${key}`);
   };
@@ -85,7 +98,7 @@ describe('PUT /admin/maintenance', () => {
 
     expect((await put('draining')).status).toBe(200);
 
-    expect(t.events).toEqual([asks, 'reads', 'writes draining', 'wrote']);
+    expect(t.events).toEqual([asks, 'checks run', 'reads', 'writes draining', 'wrote']);
   });
 
   it('records the stored state it replaces, not a cached copy another process has outdated', async () => {
@@ -112,7 +125,15 @@ describe('PUT /admin/maintenance', () => {
     expect((await put('draining')).status).toBe(200);
     await rival;
 
-    expect(t.events).toEqual([asks, 'reads', 'writes draining', asks, 'wrote', 'rival holds']);
+    expect(t.events).toEqual([
+      asks,
+      'checks run',
+      'reads',
+      'writes draining',
+      asks,
+      'wrote',
+      'rival holds',
+    ]);
   });
 
   it('answers an error, records nothing and lets go of the fence when the write fails', async () => {
@@ -121,7 +142,7 @@ describe('PUT /admin/maintenance', () => {
 
     expect((await put('maintenance')).status).toBe(500);
 
-    expect(t.events).toEqual([asks, 'reads']);
+    expect(t.events).toEqual([asks, 'checks run', 'reads']);
     expect(t.fake.rows(schema.auditEvents)).toEqual([]);
     const next = await Promise.race([
       t.fake.db.transaction((tx) => tx.execute(FENCE)).then(() => 'taken'),
@@ -138,7 +159,45 @@ describe('PUT /admin/maintenance', () => {
 
     expect((await put('draining')).status).toBe(200);
 
-    expect(t.events).toEqual([asks, 'reads', 'audits', 'writes draining', 'wrote']);
+    expect(t.events).toEqual([asks, 'checks run', 'reads', 'audits', 'writes draining', 'wrote']);
+  });
+
+  it('checks for a live upgrade run after the fence and before it reads the state or audits', async () => {
+    const t = setup();
+    t.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.auditEvents) t.events.push('audits');
+    };
+
+    expect((await put('normal')).status).toBe(200);
+
+    expect(t.events).toEqual([asks, 'checks run', 'reads', 'audits', 'writes normal', 'wrote']);
+  });
+
+  it('refuses with 409 while an upgrade run is live, naming the run, and changes nothing', async () => {
+    const t = setup(undefined, 'draining');
+    h.liveRun = {
+      id: '11111111-2222-4333-8444-555555555555',
+      fromVersion: '1.2.3',
+      toVersion: '1.3.0',
+      phase: 'migrating',
+    };
+
+    const res = await put('normal');
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.code).toBe('upgrade_running');
+    expect(body.error).toContain('11111111-2222-4333-8444-555555555555');
+    expect(body.error).toContain('1.2.3');
+    expect(body.error).toContain('1.3.0');
+    expect(body.error).toContain('migrating');
+    expect(t.set).not.toHaveBeenCalled();
+    expect(t.fake.rows(schema.auditEvents)).toEqual([]);
+    const next = await Promise.race([
+      t.fake.db.transaction((tx) => tx.execute(FENCE)).then(() => 'taken'),
+      new Promise((resolve) => setTimeout(() => resolve('still held'), 500)),
+    ]);
+    expect(next).toBe('taken');
   });
 
   it('answers an error, changes no state and lets go of the fence when the audit row cannot be written', async () => {
@@ -150,7 +209,7 @@ describe('PUT /admin/maintenance', () => {
     expect((await put('draining')).status).toBe(500);
 
     expect(t.set).not.toHaveBeenCalled();
-    expect(t.events).toEqual([asks, 'reads']);
+    expect(t.events).toEqual([asks, 'checks run', 'reads']);
     expect(t.fake.rows(schema.auditEvents)).toEqual([]);
     const next = await Promise.race([
       t.fake.db.transaction((tx) => tx.execute(FENCE)).then(() => 'taken'),

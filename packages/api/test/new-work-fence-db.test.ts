@@ -77,6 +77,25 @@ import { retryTaskAtStep } from '../src/routes/tasks/steps.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
+const JOURNAL_DDL = `
+CREATE TABLE IF NOT EXISTS "upgrade_runs" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "from_version" text NOT NULL,
+  "to_version" text NOT NULL,
+  "channel" text NOT NULL DEFAULT 'public',
+  "phase" text NOT NULL,
+  "status" text NOT NULL,
+  "error" text,
+  "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
+  "started_at" timestamp NOT NULL DEFAULT now(),
+  "updated_at" timestamp NOT NULL DEFAULT now(),
+  "ended_at" timestamp
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "upgrade_runs_one_live_idx"
+  ON "upgrade_runs" ((1)) WHERE "status" = 'running';
+CREATE INDEX IF NOT EXISTS "upgrade_runs_started_at_idx" ON "upgrade_runs" ("started_at");
+`;
+
 const REFUSAL =
   'Haive is preparing for maintenance, so new work is not being started. Work already running will finish.';
 
@@ -551,6 +570,99 @@ describe.skipIf(!url)('the new-work fence on Postgres', () => {
 
   describe('PUT /admin/maintenance', () => {
     const setState = (state: string) => put('/admin/maintenance', { state });
+    const RUN = { from: '1.2.3', to: '1.3.0', phase: 'migrating' };
+    const setStateAudits = () =>
+      db
+        .select()
+        .from(schema.auditEvents)
+        .where(
+          and(
+            eq(schema.auditEvents.actorUserId, USER),
+            eq(schema.auditEvents.action, 'maintenance.set_state'),
+          ),
+        );
+    const insertRun = async (status: string) => {
+      const [row] = await db.execute<{ id: string }>(
+        sql`insert into upgrade_runs (from_version, to_version, phase, status)
+             values (${RUN.from}, ${RUN.to}, ${RUN.phase}, ${status}) returning id`,
+      );
+      return row!.id;
+    };
+
+    beforeEach(async () => {
+      await db.$client.unsafe(JOURNAL_DDL).simple();
+      await db.execute(sql`delete from upgrade_runs`);
+      await db
+        .delete(schema.auditEvents)
+        .where(
+          and(
+            eq(schema.auditEvents.actorUserId, USER),
+            eq(schema.auditEvents.action, 'maintenance.set_state'),
+          ),
+        );
+    });
+
+    afterAll(async () => {
+      await db.execute(sql`drop table if exists upgrade_runs`);
+    });
+
+    it('refuses with 409 while an upgrade run is live, naming it, and changes nothing', async () => {
+      h.state = 'draining';
+      const id = await insertRun('running');
+
+      const res = await answered(setState('normal'));
+
+      expect(res).toMatchObject({ status: 409, body: { code: 'upgrade_running' } });
+      const error = String(res.body.error);
+      expect([id, RUN.from, RUN.to, RUN.phase].filter((part) => !error.includes(part))).toEqual([]);
+      expect(h.state).toBe('draining');
+      expect(await setStateAudits()).toEqual([]);
+    });
+
+    it('refuses a run that went live while the request waited for the fence', async () => {
+      h.state = 'draining';
+      await holdFenceShared();
+      const request = setState('normal');
+      await untilBlocked('ExclusiveLock');
+      await insertRun('running');
+
+      await releaseFence();
+
+      expect(await answered(request)).toMatchObject({
+        status: 409,
+        body: { code: 'upgrade_running' },
+      });
+      expect(h.state).toBe('draining');
+      expect(await setStateAudits()).toEqual([]);
+    });
+
+    it.each(['done', 'rolled_back', 'failed'])(
+      'writes the state when the only run is %s',
+      async (status) => {
+        await insertRun(status);
+
+        expect(await answered(setState('draining'))).toMatchObject({ status: 200 });
+        expect(h.state).toBe('draining');
+        expect(await setStateAudits()).toHaveLength(1);
+      },
+    );
+
+    it('writes the state when the journal table is empty', async () => {
+      expect(await answered(setState('draining'))).toMatchObject({ status: 200 });
+      expect(h.state).toBe('draining');
+      expect(await setStateAudits()).toHaveLength(1);
+    });
+
+    it('writes the state when the journal table does not exist', async () => {
+      await db.execute(sql`drop table if exists upgrade_runs`);
+
+      expect(await answered(setState('draining'))).toMatchObject({
+        status: 200,
+        body: { state: 'draining', previous: 'normal' },
+      });
+      expect(h.state).toBe('draining');
+      expect(await setStateAudits()).toHaveLength(1);
+    });
 
     it('writes the state at once while no admission holds the fence', async () => {
       expect(await answered(setState('draining'))).toMatchObject({ status: 200 });
