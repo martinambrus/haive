@@ -168,6 +168,36 @@ describe('the fake database', () => {
     expect(matches(null as unknown as Record<string, unknown>)).toBe(0);
   });
 
+  it('tells whether a jsonb key holds a string, as jsonb_typeof does, and never of a NULL document', () => {
+    const fake = createFakeDb({ tasks: schema.tasks, taskSteps: schema.taskSteps });
+    fake.insert(schema.tasks, { id: TASK, userId: USER, type: 'workflow', title: 'task' });
+    const steps = schema.taskSteps;
+    const documents: [string, unknown][] = [
+      ['string', { k: 'x' }],
+      ['empty string', { k: '' }],
+      ['number', { k: 3 }],
+      ['null member', { k: null }],
+      ['missing key', { other: 'x' }],
+      ['array', ['k']],
+      ['NULL document', null],
+    ];
+    for (const [stepId, formValues] of documents) {
+      fake.insert(steps, { taskId: TASK, stepId, formValues });
+    }
+    const holdsString = sql`jsonb_typeof(${steps.formValues} -> ${'k'}::text) = 'string'`;
+
+    const matched = fake
+      .rows(steps)
+      .filter(fake.compileWhere(steps, holdsString))
+      .map((r) => r.stepId);
+
+    expect(matched).toEqual(['string', 'empty string']);
+    const foreign = sql`jsonb_typeof(${schema.tasks.metadata} -> ${'k'}::text) = 'string'`;
+    for (const cond of [sql`${steps.formValues} ->> ${'k'} is not null`, foreign]) {
+      expect(() => fake.compileWhere(steps, cond)).toThrow(/unsupported condition/);
+    }
+  });
+
   it('projects a select onto the columns it names', async () => {
     const { fake, row } = setup();
     fake.insert(t, row('b.md'));
