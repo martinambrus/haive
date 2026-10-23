@@ -4,6 +4,7 @@ import {
   noStepsMessage,
   notStartedBanner,
   pausedByLabel,
+  pausedResumeHint,
   taskBadgeKind,
   taskClockEndMs,
   taskMenuKeys,
@@ -85,6 +86,27 @@ describe('taskMenuKeys', () => {
   it('keeps every action for a task whose dead_reason outlived its dead_at', () => {
     // NEGATIVE CONTROL: a version keyed on dead_reason strips the menu of a live task.
     expect(taskMenuKeys(COPY_ONLY, idle)).toEqual(['pause', 'cancel']);
+  });
+
+  it("offers neither Pause nor Resume while an administrator's pause is locked for the viewer", () => {
+    // NEGATIVE CONTROL: red on a menu that keys only on pausedAt.
+    const locked = { status: 'running', pausedAt: PAUSED_AT, pauseLocked: true };
+    expect(taskMenuKeys(locked, idle)).toEqual(['cancel']);
+    expect(taskMenuKeys(locked, { stepRunning: true })).toEqual(['stop', 'cancel']);
+    expect(taskMenuKeys({ ...locked, status: 'failed' }, idle)).toEqual(['retry', 'cancel']);
+  });
+
+  it('keeps Resume for an administrator viewer, an older api and an unlocked pause', () => {
+    const paused = { status: 'running', pausedAt: PAUSED_AT };
+    expect(taskMenuKeys({ ...paused, pauseLocked: false }, idle)).toEqual(['resume', 'cancel']);
+    expect(taskMenuKeys(paused, idle)).toEqual(['resume', 'cancel']);
+  });
+
+  it('ignores pauseLocked on a task that is not paused', () => {
+    expect(taskMenuKeys({ status: 'running', pauseLocked: true }, idle)).toEqual([
+      'pause',
+      'cancel',
+    ]);
   });
 
   it('offers Start only to a task that was created and never started', () => {
@@ -186,6 +208,19 @@ describe('pausedByLabel', () => {
     // NEGATIVE CONTROL: a version that always says an administrator fails these two.
     expect(pausedByLabel({ pausedByAdmin: false })).toBe('Paused by you');
     expect(pausedByLabel({})).toBe('Paused by you');
+  });
+});
+
+describe('pausedResumeHint', () => {
+  it('says only an administrator can resume a locked pause', () => {
+    expect(pausedResumeHint({ pauseLocked: true })).toBe('Only an administrator can resume it.');
+  });
+
+  it('tells everyone else to press Resume', () => {
+    expect(pausedResumeHint({ pauseLocked: false })).toBe(
+      'Press Resume to continue where it stopped.',
+    );
+    expect(pausedResumeHint({})).toBe('Press Resume to continue where it stopped.');
   });
 });
 

@@ -828,6 +828,8 @@ export interface Task {
   pausedAt?: string | null;
   /** The pause in force is an administrator's, not the owner's own; absent on an older api. */
   pausedByAdmin?: boolean;
+  /** The pause in force is an administrator's and the viewer is not one; absent on an older api. */
+  pauseLocked?: boolean;
   /** ISO time the worker marked the task dead; null otherwise. Read it through isTaskDead. */
   deadAt?: string | null;
   /** List endpoint only: the stop that failed this task, or null. Read it through moduleStopBanner. */

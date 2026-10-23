@@ -15,13 +15,19 @@ export function taskBadgeKind(task: TaskToneLike): TaskBadgeKind {
 export type TaskMenuKey = 'start' | 'retry' | 'resume' | 'pause' | 'stop' | 'cancel';
 
 /** The entries of the task page's actions menu. A dead task keeps Cancel and nothing else. */
-export function taskMenuKeys(task: TaskToneLike, opts: { stepRunning: boolean }): TaskMenuKey[] {
+export function taskMenuKeys(
+  task: TaskToneLike & { pauseLocked?: boolean },
+  opts: { stepRunning: boolean },
+): TaskMenuKey[] {
   if (isTaskDead(task)) return ['cancel'];
   const open = task.status !== 'completed' && task.status !== 'cancelled';
   const keys: TaskMenuKey[] = [];
   if (task.status === 'created') keys.push('start');
   if (task.status === 'failed') keys.push('retry');
-  if (open) keys.push(task.pausedAt != null ? 'resume' : 'pause');
+  if (open) {
+    if (task.pausedAt == null) keys.push('pause');
+    else if (!task.pauseLocked) keys.push('resume');
+  }
   if (opts.stepRunning) keys.push('stop');
   if (open) keys.push('cancel');
   return keys;
@@ -49,6 +55,13 @@ export function noStepsMessage(task: TaskToneLike): string {
 /** Who the owner is told holds a paused task: an administrator's maintenance pause is not their own. */
 export function pausedByLabel(task: { pausedByAdmin?: boolean }): string {
   return task.pausedByAdmin ? 'Paused by an administrator' : 'Paused by you';
+}
+
+/** The closing sentence of the paused banner: a locked pause has no Resume to press. */
+export function pausedResumeHint(task: { pauseLocked?: boolean }): string {
+  return task.pauseLocked
+    ? 'Only an administrator can resume it.'
+    : 'Press Resume to continue where it stopped.';
 }
 
 /** The state word a list shows for a task: `dead` ahead of the status it died in. */
