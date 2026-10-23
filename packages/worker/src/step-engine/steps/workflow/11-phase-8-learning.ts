@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import {
   ensureDirNoFollow,
   lstatNoFollow,
@@ -46,7 +44,7 @@ import {
   recordLearningInstruction,
 } from './_learning-feedback.js';
 import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
-import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
+import { gitRun } from '../../../repo/git-exec.js';
 
 interface LearningDetect {
   taskTitle: string;
@@ -202,27 +200,6 @@ const GLOBAL_CANDIDATE_CATEGORIES = new Set([
   'quick_reference',
   'general',
 ]);
-
-const execFileP = promisify(execFile);
-
-/** Runs git in `cwd`, returning stdout/stderr/exit code (never throws) — the
- *  GitRun contract the shared knowledge/commit diff builder expects. */
-async function gitRun(
-  cwd: string,
-  args: string[],
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const { stdout, stderr } = await execFileP('git', args, { cwd, maxBuffer: GIT_MAX_BUFFER });
-    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: (e.stdout ?? '').toString(),
-      stderr: (e.stderr ?? '').toString(),
-      code: typeof e.code === 'number' ? e.code : 1,
-    };
-  }
-}
 
 /** Valid op values for a reported KB sync change. */
 /** Per-article budget in the existing-global-articles prompt block. A cap, not

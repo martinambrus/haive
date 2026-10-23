@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import {
   lstatNoFollow,
   readTextNoFollow,
@@ -6,7 +5,6 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
-import { promisify } from 'node:util';
 import type { DetectResult, SkillEntry } from '@haive/shared';
 import { mapWithConcurrency } from '@haive/shared';
 import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
@@ -40,9 +38,8 @@ import { listSkillDirs, loadBundleSkillIds } from '../onboarding/09_6-skill-veri
 import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import type { SkillSyncOp } from './11-phase-8-learning.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
-import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
+import { gitRun } from '../../../repo/git-exec.js';
 
-const execFileP = promisify(execFile);
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
 const STEP_ID = '11d-skill-sync';
 // One skill's JSON is one bounded generation-worth of output (fits the model ceiling),
@@ -112,25 +109,6 @@ interface SkillSyncApply {
 /** The learning step's persisted skill-sync decisions (11-phase-8-learning output). */
 interface LearningSkillSyncOutput {
   skillSync?: { newUpdate?: SkillSyncOp[]; remove?: SkillSyncOp[] } | null;
-}
-
-async function gitRun(
-  cwd: string,
-  args: string[],
-  env?: Record<string, string>,
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  try {
-    const opts = env ? { cwd, env: { ...process.env, ...env } } : { cwd };
-    const { stdout, stderr } = await execFileP('git', args, { ...opts, maxBuffer: GIT_MAX_BUFFER });
-    return { stdout: stdout.toString(), stderr: stderr.toString(), code: 0 };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: (e.stdout ?? '').toString(),
-      stderr: (e.stderr ?? '').toString(),
-      code: typeof e.code === 'number' ? e.code : 1,
-    };
-  }
 }
 
 /** Resolve the worktree the learning phase wrote into (mirrors 11-phase-8-learning /
