@@ -28,6 +28,7 @@ import { and, eq, isNull, like } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { getHaiveVersion, logger } from '@haive/shared';
 import { parseBundle, persistBundleItems } from '../src/bundle-parser/index.js';
+import { hardenGitArgs } from '../src/repo/git-exec.js';
 import {
   expandCustomBundlesFor,
   type ExpandedRendering,
@@ -39,7 +40,7 @@ import { resolveSkillTargetDirs } from '../src/step-engine/steps/onboarding/_hel
 function runGit(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-    const proc = spawn('git', args, { cwd, env });
+    const proc = spawn('git', hardenGitArgs(args), { cwd, env });
     let stdout = '';
     let stderr = '';
     proc.stdout.on('data', (d: Buffer) => {

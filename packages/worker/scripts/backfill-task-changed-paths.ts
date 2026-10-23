@@ -44,6 +44,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { and, eq, isNull, isNotNull } from 'drizzle-orm';
 import { createDatabase, schema } from '@haive/database';
+import { hardenGitArgs } from '../src/repo/git-exec.js';
 
 const exec = promisify(execFile);
 
@@ -62,7 +63,7 @@ const db = createDatabase(DATABASE_URL);
 
 async function gitRun(cwd: string, args: string[]): Promise<{ stdout: string; code: number }> {
   try {
-    const { stdout } = await exec('git', args, { cwd, maxBuffer: 32 * 1024 * 1024 });
+    const { stdout } = await exec('git', hardenGitArgs(args), { cwd, maxBuffer: 32 * 1024 * 1024 });
     return { stdout: stdout.toString(), code: 0 };
   } catch (err) {
     const e = err as { stdout?: string; code?: number };
