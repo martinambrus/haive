@@ -68,6 +68,12 @@ equivalent to root on the host. That is how it runs AI CLIs in sandboxes. See
 > insert share a transaction under an advisory lock. On an instance you expose to a network before
 > registering yourself, set `SETUP_TOKEN` in the install's `.env` and that first registration must
 > present it, which closes the window where a stranger could claim the instance.
+>
+> Sign-in and registration are rate limited per account (10 a minute) and per address (30 a
+> minute), counting failures only. Behind a reverse proxy the api sees the proxy's address for
+> every client; set `HAIVE_TRUSTED_PROXIES` in `.env` to the proxy's IP or CIDR (comma separated)
+> so the client address is read from `X-Forwarded-For`, which is otherwise never believed. See
+> [API sign-in hardening](docs/architecture/api-auth.md).
 
 ### Upgrading
 
@@ -314,7 +320,8 @@ fallback when the editor is unavailable).
   shell — the same human-trust model as the existing Terminal tab. The AI
   secret-file masking does NOT apply to the human editor. code-server runs with
   auth disabled, bound only to the internal sandbox network (never host-published);
-  the API proxy (cookie-JWT + task ownership) is the sole auth boundary.
+  the API proxy (cookie-JWT + task ownership) is the sole auth boundary, and it does
+  not forward your Haive session cookies or any Authorization header to the editor.
 
 ## Resource limits and WSL2 tuning
 

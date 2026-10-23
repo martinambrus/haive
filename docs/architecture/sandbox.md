@@ -150,6 +150,17 @@ read-only git-data boundary as task editors (`repoGitDataBoundary`), since code-
 and workspace tasks execute repository code; the repository Terminal remains the surface for git
 commits and pushes.
 
+**The editor proxy never forwards the Haive session.** code-server runs `--auth none` and executes
+repository code, and its own `/proxy/<port>` relays every cookie it receives to whatever listens in the
+container, so `routes/ide.ts` removes `haive_access` and `haive_refresh` (every occurrence, matched by
+trimmed exact name, `withoutSessionCookies` in `auth/cookies.ts`), `Authorization` and
+`Proxy-Authorization` from the HTTP request and from the WebSocket replay before anything is forwarded; a
+Cookie header left with no pairs is dropped. Other cookies and headers pass unchanged: an app previewed
+through `/proxy/<port>` keeps its own session cookies. The response direction is not filtered: an upstream
+`Set-Cookie` still reaches the browser, and so do `forwarded` and `x-forwarded-*`. The editor is served from
+the api origin, which is on the state-change allow list on purpose, so this removes the credentials from
+the container's reach and nothing more.
+
 ## A step's project commands run in the sandbox
 
 `08-phase-5-verify` and `08b-test-management` do not start a project's tests, lint or typecheck in the
