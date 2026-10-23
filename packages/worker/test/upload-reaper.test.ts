@@ -241,23 +241,22 @@ describe('U1: the row pass reaps an upload idle for 24 hours', () => {
     });
 
     // A complete dump that no task links is the ended-dump pass's to take once it is old (U5).
-    it.each(
-      kind.table === schema.dbUploads
-        ? ['cancelled', 'consumed']
-        : ['complete', 'cancelled', 'consumed'],
-    )('leaves a stale %s session and its file alone', async (status) => {
-      const done = await session(kind, {
-        idleMs: 3 * TTL,
-        status,
-        name: kind.finished,
-      });
-      if (kind.table === schema.repoUploads) repository(done.id, 'cloning');
+    it.each(kind.table === schema.dbUploads ? ['consumed'] : ['complete', 'consumed'])(
+      'leaves a stale %s session and its file alone',
+      async (status) => {
+        const done = await session(kind, {
+          idleMs: 3 * TTL,
+          status,
+          name: kind.finished,
+        });
+        if (kind.table === schema.repoUploads) repository(done.id, 'cloning');
 
-      await reapAbandonedUploads(db());
+        await reapAbandonedUploads(db());
 
-      expect(rowOf(kind, done.id).status).toBe(status);
-      expect(await exists(done.file)).toBe(true);
-    });
+        expect(rowOf(kind, done.id).status).toBe(status);
+        expect(await exists(done.file)).toBe(true);
+      },
+    );
 
     it('leaves a directory standing at a reaped row’s partial name', async () => {
       const id = randomUUID();
@@ -1250,5 +1249,159 @@ describe('R1: a reaped session stays reaping until its files are gone', () => {
     expect(rowOf(dumps, stale.id).status).toBe('cancelled');
     expect(rowOf(dumps, linked.id).status).toBe('complete');
     expect(await exists(linked.file)).toBe(true);
+  });
+});
+
+describe('I3b: the row pass deletes a cancelled session a day after it was cancelled', () => {
+  const dumps = KINDS[1]!;
+
+  describe.each(KINDS)('$name', (kind) => {
+    const cancelled = (idleMs: number) =>
+      session(kind, { idleMs, status: 'cancelled', name: kind.finished });
+
+    it('deletes a cancelled row last updated 25 h ago', async () => {
+      const old = await cancelled(TTL + HOUR);
+
+      await reapAbandonedUploads(db());
+
+      expect(fake.rows(kind.table).some((r) => r.id === old.id)).toBe(false);
+    });
+
+    it('keeps a cancelled row last updated 23 h ago', async () => {
+      const recent = await cancelled(TTL - HOUR);
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, recent.id).status).toBe('cancelled');
+    });
+
+    it.each(['complete', 'uploading', 'completing', 'reaping', 'consumed'])(
+      'keeps a %s row 25 h old',
+      async (status) => {
+        const other = await session(kind, {
+          idleMs: TTL + HOUR,
+          status,
+          name: kind.finished,
+        });
+        if (kind.table === schema.repoUploads) repository(other.id, 'cloning');
+        if (kind.table === schema.dbUploads && status === 'complete') {
+          fake.insert(schema.tasks, {
+            id: randomUUID(),
+            userId: USER,
+            dbUploadId: other.id,
+            status: 'running',
+            updatedAt: new Date(),
+          });
+        }
+
+        await reapAbandonedUploads(db());
+
+        expect(fake.rows(kind.table).some((r) => r.id === other.id)).toBe(true);
+      },
+    );
+
+    it('keeps the row this very pass cancels', async () => {
+      const stale = await session(kind, { idleMs: TTL + MIN });
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(kind, stale.id).status).toBe('cancelled');
+    });
+  });
+
+  describe.each(['completed', 'failed', 'running'])('a dump a %s task names', (taskStatus) => {
+    it('stays, with the task link, while an unlinked cancelled dump is deleted', async () => {
+      const linked = await session(dumps, {
+        idleMs: TTL + HOUR,
+        status: 'cancelled',
+        name: dumps.finished,
+      });
+      const free = await session(dumps, {
+        idleMs: TTL + HOUR,
+        status: 'cancelled',
+        name: dumps.finished,
+      });
+      const taskId = randomUUID();
+      fake.insert(schema.tasks, {
+        id: taskId,
+        userId: USER,
+        dbUploadId: linked.id,
+        status: taskStatus,
+        updatedAt: new Date(Date.now() - 5 * TTL),
+      });
+
+      await reapAbandonedUploads(db());
+
+      expect(rowOf(dumps, linked.id).status).toBe('cancelled');
+      expect(fake.rows(dumps.table).some((r) => r.id === free.id)).toBe(false);
+    });
+  });
+});
+
+describe('I3b: the file pass removes an owner directory left empty for a day', () => {
+  describe.each(['repos', 'bundles'] as const)('in the %s root', (volume) => {
+    const dir = () => uploadsDir(volume);
+
+    it('removes an empty directory whose mtime is 25 h old', async () => {
+      await age(dir(), TTL + HOUR);
+
+      await reapAbandonedUploads(db());
+
+      expect(await exists(dir())).toBe(false);
+      expect(await exists(path.dirname(dir()))).toBe(true);
+    });
+
+    it('keeps an empty directory 23 h old', async () => {
+      await age(dir(), TTL - HOUR);
+
+      await reapAbandonedUploads(db());
+
+      expect(await exists(dir())).toBe(true);
+    });
+
+    it('keeps an old directory that holds a fresh file', async () => {
+      const file = path.join(dir(), 'something.txt');
+      await writeFile(file, 'x');
+      await age(dir(), TTL + HOUR);
+
+      await reapAbandonedUploads(db());
+
+      expect(await exists(file)).toBe(true);
+    });
+
+    it('keeps an old directory that holds notification-sound.mp3', async () => {
+      const file = path.join(dir(), 'notification-sound.mp3');
+      await writeFile(file, 'x');
+      await age(file, 5 * TTL);
+      await age(dir(), 5 * TTL);
+
+      await reapAbandonedUploads(db());
+
+      expect(await exists(file)).toBe(true);
+    });
+
+    it('leaves a link named like an owner directory and its target alone', async () => {
+      const target = path.join(storage, `target-${volume}`);
+      await mkdir(target);
+      await age(target, TTL + HOUR);
+      const link = path.join(roots[volume], '_uploads', OTHER_USER);
+      await symlink(target, link);
+
+      await reapAbandonedUploads(db());
+
+      expect(await exists(target)).toBe(true);
+      expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    });
+
+    it('keeps a directory this very pass emptied', async () => {
+      const kind = volume === 'repos' ? KINDS[0]! : KINDS[2]!;
+      const stale = await session(kind, { idleMs: TTL + HOUR });
+      await age(dir(), TTL + HOUR);
+
+      await reapAbandonedUploads(db());
+
+      expect(await exists(stale.file)).toBe(false);
+      expect(await exists(dir())).toBe(true);
+    });
   });
 });

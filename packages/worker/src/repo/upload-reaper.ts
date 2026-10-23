@@ -204,6 +204,33 @@ async function finishReaping(
   return done;
 }
 
+// A row turns cancelled only once every file of it is gone. A task that names a cancelled dump
+// keeps the row: deleting it would null the task's link and a Retry would skip the restore.
+async function deleteCancelledSessions(
+  db: Database,
+  kind: UploadKind,
+  cutoff: Date,
+): Promise<void> {
+  const table = kind.table;
+  const rows = await db
+    .select({ id: table.id })
+    .from(table)
+    .where(and(eq(table.status, 'cancelled'), lt(table.updatedAt, cutoff)));
+  for (let i = 0; i < rows.length; i += BATCH) {
+    let ids = rows.slice(i, i + BATCH).map((row) => row.id);
+    if (table === schema.dbUploads) {
+      const named = await db
+        .select({ dumpId: schema.tasks.dbUploadId })
+        .from(schema.tasks)
+        .where(inArray(schema.tasks.dbUploadId, ids));
+      const kept = new Set(named.map((task) => task.dumpId));
+      ids = ids.filter((id) => !kept.has(id));
+    }
+    if (ids.length === 0) continue;
+    await db.delete(table).where(and(inArray(table.id, ids), eq(table.status, 'cancelled')));
+  }
+}
+
 async function claimDump(db: Database, dumpId: string, cutoff: Date): Promise<boolean> {
   const keptByTask = db
     .select({ id: schema.tasks.id })
@@ -306,6 +333,11 @@ async function reapOrphanPartials(
         }
       }
     }
+    const left = await readdirNoFollow(root, dirRel);
+    const own = await lstatNoFollow(root, dirRel);
+    if (left?.length === 0 && own !== null && own.stats.mtimeMs < cutoff.getTime()) {
+      await removeNoFollow(root, dirRel).catch(() => undefined);
+    }
   }
   return removed;
 }
@@ -333,6 +365,13 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
     });
     result.sessions += done.sessions;
     result.dumps += done.dumps;
+  }
+  for (const kind of KINDS) {
+    await guarded(
+      'a cancelled-row pass',
+      () => deleteCancelledSessions(db, kind, cutoff),
+      undefined,
+    );
   }
   result.orphans += await guarded(
     'the repository file pass',

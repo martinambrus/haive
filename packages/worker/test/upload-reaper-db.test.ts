@@ -840,6 +840,48 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
       });
     });
   });
+
+  describe('a cancelled dump row a day after it was cancelled', () => {
+    async function cancelledDump() {
+      const id = randomUUID();
+      await db.insert(schema.dbUploads).values({
+        id,
+        userId,
+        filename: 'a.sql',
+        dumpFormat: 'sql',
+        totalSize: 10,
+        bytesReceived: 10,
+        chunkSize: 10,
+        dumpPath: path.join(root, 'repos', '_uploads', userId, `db-${id}.sql`),
+        status: 'cancelled',
+        updatedAt: new Date(Date.now() - 25 * HOUR),
+      });
+      return id;
+    }
+    const rowCount = async (id: string) =>
+      (
+        await db
+          .select({ id: schema.dbUploads.id })
+          .from(schema.dbUploads)
+          .where(eq(schema.dbUploads.id, id))
+      ).length;
+
+    it.each(['completed', 'failed', 'running'] as const)(
+      'stays with the link of a %s task while an unlinked one is deleted',
+      async (taskStatus) => {
+        const linked = await cancelledDump();
+        const free = await cancelledDump();
+        await link(linked, taskStatus, 5 * 24 * HOUR);
+
+        await reapAbandonedUploads(db);
+
+        expect(await rowCount(linked)).toBe(1);
+        expect(await rowCount(free)).toBe(0);
+        const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.userId, userId) });
+        expect(task!.dbUploadId).toBe(linked);
+      },
+    );
+  });
 });
 
 describe.skipIf(!url)('the finished repository archive pass against Postgres', () => {
