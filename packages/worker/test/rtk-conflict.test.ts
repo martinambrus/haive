@@ -12,6 +12,7 @@ import {
   type RtkQuestionInput,
 } from '../src/project-state/rtk-conflict.js';
 import { persistDetection } from '../src/repo/clone.js';
+import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 
 vi.mock('../src/project-state/sync.js', () => ({
   syncProjectStateFromCheckout: vi.fn(async () => ({ outcome: 'unchanged' })),
@@ -362,6 +363,59 @@ describe('persistDetection and the RTK question', () => {
     await persistDetection(s.db, REPO, root);
 
     expect(s.rows()).toHaveLength(0);
+  });
+
+  it('asks about tooling the project state sync imported, once', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rtk-question-'));
+    dirs.push(root);
+    const s = setup([{ id: REPO }]);
+    vi.mocked(syncProjectStateFromCheckout).mockImplementationOnce(async () => {
+      s.fake.patch(schema.repositories, REPO, {
+        onboardingTooling: { schemaVersion: 1, tooling: OFF },
+      });
+      return { outcome: 'synced' } as never;
+    });
+
+    await persistDetection(s.db, REPO, root);
+
+    expect(s.rows()).toHaveLength(1);
+    expect(s.rows()[0]).toMatchObject({ repositoryId: REPO, unit: RTK_ENABLED_UNIT });
+  });
+
+  it('asks nothing when the sync recorded the choice', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rtk-question-'));
+    dirs.push(root);
+    const s = setup();
+    vi.mocked(syncProjectStateFromCheckout).mockImplementationOnce(async () => {
+      s.fake.patch(schema.repositories, REPO, { renderContext: RECORDED });
+      return { outcome: 'synced' } as never;
+    });
+
+    await persistDetection(s.db, REPO, root);
+
+    expect(s.rows()).toHaveLength(0);
+  });
+
+  it('closes a pending question when the sync recorded the choice', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'rtk-question-'));
+    dirs.push(root);
+    const s = setup();
+    s.fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit: RTK_ENABLED_UNIT,
+      base: conflictSide(true),
+      local: conflictSide(true),
+      incoming: conflictSide(false),
+    });
+    vi.mocked(syncProjectStateFromCheckout).mockImplementationOnce(async () => {
+      s.fake.patch(schema.repositories, REPO, { renderContext: RECORDED });
+      return { outcome: 'synced' } as never;
+    });
+
+    await persistDetection(s.db, REPO, root);
+
+    expect(s.rows()).toHaveLength(1);
+    expect(s.rows()[0]).toMatchObject({ resolution: 'converged' });
   });
 });
 

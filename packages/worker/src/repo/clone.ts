@@ -301,12 +301,6 @@ export async function persistDetection(
   }
 
   try {
-    await raiseRtkQuestion(db, repositoryId);
-  } catch (err) {
-    logger.warn({ err, repositoryId }, 'RTK question not raised (non-fatal)');
-  }
-
-  try {
     const synced = await syncProjectStateFromCheckout(db, {
       repositoryId,
       repoPath: storagePath,
@@ -325,6 +319,13 @@ export async function persistDetection(
     } catch (err) {
       logger.warn({ err, repositoryId }, 'haive-data mirror fallback import failed (non-fatal)');
     }
+  }
+
+  // After the sync and the fallback import: they supply the tooling and the choice it weighs.
+  try {
+    await raiseRtkQuestion(db, repositoryId);
+  } catch (err) {
+    logger.warn({ err, repositoryId }, 'RTK question not raised (non-fatal)');
   }
 
   // The plan canvas restores from the same dir but is its own call, not another

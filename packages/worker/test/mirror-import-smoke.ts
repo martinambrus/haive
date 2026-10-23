@@ -309,6 +309,74 @@ async function main(): Promise<void> {
     const written = (await readFile(rtkFile, 'utf8')).trim();
     check("and the next record write carries this install's choice", written === 'true', written);
 
+    // G, H: the question is weighed after the record is synced.
+    const recordFolder = async (name: string, settings: Record<string, unknown>) => {
+      const folder = path.join(tmp, name);
+      await mkdir(path.join(folder, '.haive-data'), { recursive: true });
+      const recordFiles = renderProjectState({
+        ...emptyProjectState(),
+        render: {
+          projectInfo: {},
+          framework: 'unknown',
+          acceptedAgentIds: [],
+          customAgentSpecs: [],
+          lspLanguages: [],
+        } as never,
+        settings,
+        environment: { envDetectData: { project: { name } }, confirmedValues: {} },
+      });
+      for (const [rel, text] of recordFiles) {
+        await mkdir(path.dirname(path.join(folder, PROJECT_STATE_DIR, rel)), { recursive: true });
+        await writeFile(path.join(folder, PROJECT_STATE_DIR, rel), text);
+      }
+      return folder;
+    };
+    const gFolder = await recordFolder('rtk-record-clone', {
+      'onboarding-tooling': { ragMode: 'none', rtkEnabled: false },
+    });
+    const [gRepo] = await db
+      .insert(schema.repositories)
+      .values({ userId, name: 'rtk-record-clone', source: 'local_path', localPath: gFolder })
+      .returning({ id: schema.repositories.id });
+    await handleScan(
+      { repositoryId: gRepo!.id, userId, source: 'local_path', localPath: gFolder },
+      db,
+    );
+    const gRows = await askedAbout(gRepo!.id);
+    check(
+      'a record-based clone is asked about its RTK-off at scan time',
+      gRows.length === 1 && gRows[0]!.resolution === null && (await rtkOf(gRepo!.id)) === true,
+      gRows,
+    );
+
+    const hFolder = await recordFolder('rtk-stale-adopts', { 'rtk-enabled': true });
+    const [hRepo] = await db
+      .insert(schema.repositories)
+      .values({
+        userId,
+        name: 'rtk-stale-adopts',
+        source: 'local_path',
+        localPath: hFolder,
+        onboardingTooling: JSON.parse(tooling()),
+      })
+      .returning({ id: schema.repositories.id });
+    await handleScan(
+      { repositoryId: hRepo!.id, userId, source: 'local_path', localPath: hFolder },
+      db,
+    );
+    const hAfter = await db.query.repositories.findFirst({
+      where: eq(schema.repositories.id, hRepo!.id),
+      columns: { renderContext: true },
+    });
+    const hRows = await askedAbout(hRepo!.id);
+    check(
+      "a stale RTK-off blob that adopts the team's choice is not asked about",
+      hRows.length === 0 &&
+        (hAfter?.renderContext as { rtkChoiceRecorded?: unknown } | null)?.rtkChoiceRecorded ===
+          true,
+      { hRows, hAfter },
+    );
+
     // E: a checkout holding a record carries its units; a stale legacy file does not outrank them.
     const withRecord = path.join(tmp, 'with-record');
     await mkdir(path.join(withRecord, '.haive-data'), { recursive: true });
