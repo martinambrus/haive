@@ -2159,7 +2159,7 @@ export async function handleResult(
       return;
     }
     case 'failed': {
-      await finishFailedStep(db, ctx, stepId, result.row, result.error);
+      await finishFailedStep(db, ctx, stepId, result.row, result.error, ['running']);
       return;
     }
   }
@@ -3111,6 +3111,7 @@ async function handleAdvanceStep(
       { taskId: ctx.taskId, stepId: payload.stepId, round },
       'advance-step skipped: a Retry or a Stop overtook it before the step ran',
     );
+    if (runtimeKind) await releaseRuntimeReservation(ctx.taskId);
     return;
   }
   // Now that the task is live a deactivation must count it, and one already under way is waited

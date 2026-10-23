@@ -17,6 +17,8 @@ import type { StepDefinition } from '../src/step-engine/step-definition.js';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   adds: [] as { name: string; data: unknown }[],
+  releases: [] as string[],
+  admission: undefined as undefined | (() => Promise<void>),
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -24,6 +26,16 @@ vi.mock('../src/redis.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/redis.js')>()),
   getBullRedis: () => ({}),
   getRedis: () => ({ scan: async () => ['0', []], del: async () => 0 }),
+}));
+vi.mock('../src/sandbox/runtime-admission.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/sandbox/runtime-admission.js')>()),
+  runtimeAdmission: async () => {
+    await h.admission?.();
+    return { decision: 'proceed', busyMb: 0, budgetMb: 0, myWeightMb: 0, position: 1, waiting: 0 };
+  },
+  releaseRuntimeReservation: async (taskId: string) => {
+    h.releases.push(taskId);
+  },
 }));
 vi.mock('bullmq', async (importOriginal) => ({
   ...(await importOriginal<typeof import('bullmq')>()),
@@ -46,11 +58,14 @@ const ROUND = 1;
 const STOPPED = 'Stopped by user';
 const OLD = new Date('2026-10-20T10:00:00.000Z');
 
+const R = '02-runtime-step';
+const hook = { apply: undefined as undefined | (() => Promise<void>) };
 const calls = { detect: 0, form: 0, shouldRun: 0, apply: 0 };
 const total = () => calls.detect + calls.form + calls.shouldRun + calls.apply;
 
-function stub(id: string, index: number): StepDefinition {
+function stub(id: string, index: number, needsRuntime?: 'app'): StepDefinition {
   return {
+    ...(needsRuntime ? { needsRuntime } : {}),
     metadata: {
       id,
       workflowType: 'workflow' as WorkflowType,
@@ -73,6 +88,7 @@ function stub(id: string, index: number): StepDefinition {
     },
     async apply() {
       calls.apply++;
+      if (id === S) await hook.apply?.();
       return {};
     },
   } as StepDefinition;
@@ -218,10 +234,14 @@ describe.skipIf(!url)('the worker leaves a Stop-failed row alone, on Postgres', 
       .onConflictDoNothing();
     stepRegistry.override(stub(S, 1));
     stepRegistry.override(stub(NEXT, 2));
+    stepRegistry.override(stub(R, 3, 'app'));
   });
 
   beforeEach(async () => {
     h.adds.length = 0;
+    h.releases.length = 0;
+    h.admission = undefined;
+    hook.apply = undefined;
     calls.detect = calls.form = calls.shouldRun = calls.apply = 0;
     vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, userId));
@@ -318,6 +338,114 @@ describe.skipIf(!url)('the worker leaves a Stop-failed row alone, on Postgres', 
       const before = await state(taskId);
       await backfillMissingRunSeq(db);
       await expectUntouched(taskId, before);
+    });
+  });
+
+  describe('a pass in flight when a Stop commits', () => {
+    const stepFailedEvents = async (taskId: string) =>
+      (await state(taskId)).events.filter((e) => e.eventType === 'step.failed');
+    const runPass = (taskId: string) =>
+      processTaskJob(
+        job(TASK_JOB_NAMES.ADVANCE_STEP, { taskId, userId, stepId: S, round: ROUND, epoch: E }),
+      );
+    const running = async () => {
+      const taskId = await makeTask({ status: 'running', errorMessage: null, completedAt: null });
+      await makeRow(taskId, { status: 'pending', errorMessage: null, endedAt: null });
+      return taskId;
+    };
+
+    it('leaves the Stop error, completed_at and the single step.failed alone', async () => {
+      const taskId = await running();
+      hook.apply = async () => {
+        await db
+          .update(schema.tasks)
+          .set({ status: 'failed', errorMessage: STOPPED, completedAt: OLD })
+          .where(eq(schema.tasks.id, taskId));
+        await db
+          .insert(schema.taskEvents)
+          .values({ taskId, eventType: 'step.failed', payload: { error: STOPPED } });
+        throw new Error('the pass failed after the Stop');
+      };
+      await runPass(taskId);
+      expect(calls.apply).toBe(1);
+      const after = await state(taskId);
+      expect(after.task.status).toBe('failed');
+      expect(after.task.errorMessage).toBe(STOPPED);
+      expect(after.task.completedAt).toBe(OLD.toISOString());
+      expect(await stepFailedEvents(taskId)).toHaveLength(1);
+    });
+
+    it('still fails a task nobody stopped, once', async () => {
+      const taskId = await running();
+      hook.apply = async () => {
+        throw new Error('the pass failed on its own');
+      };
+      await runPass(taskId);
+      const after = await state(taskId);
+      expect(after.task.status).toBe('failed');
+      expect(after.task.errorMessage).toContain('the pass failed on its own');
+      expect(after.task.completedAt).not.toBe(OLD.toISOString());
+      expect(await stepFailedEvents(taskId)).toHaveLength(1);
+    });
+  });
+
+  describe('the runtime slot of an admitted step', () => {
+    const runR = (taskId: string) =>
+      processTaskJob(
+        job(TASK_JOB_NAMES.ADVANCE_STEP, { taskId, userId, stepId: R, round: 0, epoch: E }),
+      );
+    const taskOnR = async () => {
+      const taskId = await makeTask({
+        status: 'running',
+        errorMessage: null,
+        completedAt: null,
+        currentStepId: R,
+        currentRound: 0,
+        runListSnapshot: [S, NEXT, R],
+      });
+      await makeRow(taskId, {
+        stepId: R,
+        stepIndex: 3,
+        round: 0,
+        status: 'pending',
+        errorMessage: null,
+        endedAt: null,
+      });
+      return taskId;
+    };
+
+    it.each([
+      [
+        'a Retry',
+        (taskId: string) =>
+          db
+            .update(schema.tasks)
+            .set({ orchestrationEpoch: E + 1 })
+            .where(eq(schema.tasks.id, taskId)),
+      ],
+      [
+        'a Stop',
+        (taskId: string) =>
+          db
+            .update(schema.tasks)
+            .set({ status: 'failed', errorMessage: STOPPED, completedAt: OLD })
+            .where(eq(schema.tasks.id, taskId)),
+      ],
+    ])('is released once when %s overtakes the step at the fence', async (_name, overtake) => {
+      const taskId = await taskOnR();
+      h.admission = async () => {
+        await overtake(taskId);
+      };
+      await runR(taskId);
+      expect(calls.apply).toBe(0);
+      expect(h.releases).toEqual([taskId]);
+    });
+
+    it('is released once when the step runs normally', async () => {
+      const taskId = await taskOnR();
+      await runR(taskId);
+      expect(calls.apply).toBe(1);
+      expect(h.releases).toEqual([taskId]);
     });
   });
 
