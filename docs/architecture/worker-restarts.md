@@ -81,7 +81,8 @@ The same sweep covers the two other jobs that can be lost with nothing to notice
 duplicate; `created` is left alone, since a deferred-start draft waits there on purpose. Every
 route that starts a task moves it from `created` to `queued` before it queues START, after every
 write that can fail (`markQueuedForStart`, `api/src/lib/task-start.ts`), under the repository's
-task-creation lock, since a queued task holds the checkout and a checkout move holds that lock. So a
+task-creation lock, since a queued task holds the checkout and a checkout move holds that lock. The
+api waits at most 30 s for it and otherwise answers 409 with nothing created or queued. So a
 START that was lost or could not be queued is the sweep's to give, and the route answers as though
 it had been queued. POST /tasks, `spawnPlanTask` (its seed included) and the global-KB enrich each
 insert the task and claim its START in one transaction, taking that lock before the insert, so a

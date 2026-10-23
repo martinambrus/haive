@@ -28,7 +28,11 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   (`lockRepositoryTasksKey`) and counts them again before it moves anything. Every task's start takes
   the same lock to move it from `created` to `queued` (`markQueuedForStart`), so none becomes a holder
   between that count and the move; a create with a repository takes it before its insert, as every
-  other holder does, so no create inverts it with the repository row or the database-snapshot lock.
+  other holder does, so no create inverts it with the repository row or the database-snapshot lock. An api start waits
+  at most 30 s for that lock (`boundedLockWait`, `api/src/lib/repository-busy.ts`; the plan-merge
+  start's wait on its own lock too) and otherwise answers 409 "The repository is busy, try again",
+  having created and queued nothing; the bound is lifted once the lock is held. The worker's movers
+  wait without a bound, since none of them retries.
   A count above zero halts the step with "N other task(s) working in this checkout; nothing was
   merged. Retry this step once it/they finish(es)." and nothing is merged or aborted. A cross-branch
   merge runs in the shared `<base>--base` worktree and is not fenced.
@@ -172,8 +176,9 @@ left. Six rules keep it that way, each MEASURED on git 2.43 and 2.54:
   as it stands), one `diff --name-only -z` per call, and the index is refreshed since a chown moves ctime and
   `merge --abort` refuses stat data that moved; a name that is not UTF-8 stays the worker's and is
   logged. A fast-forward of the checkout is handed back the same way from the commit before it
-  (`handBackAfterMove`): 00a's on the checked-out branch, a repository refresh's, and `landPlanMerge`'s
-  for a plan Pull, Save or confirm. In the checkout, Haive's projection files and their directories
+  (`handBackAfterMove`): 00a's on the checked-out branch, a repository refresh's, and a plan Pull's,
+  Save's or confirm's, which their callers run after `landPlanMerge`'s transaction commits, so the
+  task-creation lock covers the move only. In the checkout, Haive's projection files and their directories
   (`.haive-data/state/**`, `plan.json`, `plan.md`) are left out of all three hand-backs: the worker
   writes them, and `restoreKeptMetadata` restores the owner and mode a set-aside captured only on a
   file the worker still owns. A worktree is never set aside, so there they are handed back like any
