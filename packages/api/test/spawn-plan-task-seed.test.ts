@@ -65,6 +65,7 @@ import { enqueuePlanTask, spawnPlanTask } from '../src/lib/spawn-plan-task.js';
 
 const FENCE = 'fence:haive-new-work-fence';
 const LOCK = 'lock:onboarding-upgrade:r1';
+const BOUNDED_LOCK = ['execute', LOCK, 'execute'];
 
 beforeEach(() => {
   vi.spyOn(configService, 'getFresh').mockResolvedValue('normal');
@@ -103,10 +104,10 @@ describe('spawnPlanTask seeding', () => {
     });
     expect(order).toEqual([
       FENCE,
-      LOCK,
+      ...BOUNDED_LOCK,
       'insert',
       'seed:task-1',
-      LOCK,
+      ...BOUNDED_LOCK,
       'queued',
       'commit',
       'enqueue',
@@ -121,7 +122,15 @@ describe('spawnPlanTask seeding', () => {
 
   it('still enqueues when there is nothing to seed', async () => {
     await spawnPlanTask(args);
-    expect(order).toEqual([FENCE, LOCK, 'insert', LOCK, 'queued', 'commit', 'enqueue']);
+    expect(order).toEqual([
+      FENCE,
+      ...BOUNDED_LOCK,
+      'insert',
+      ...BOUNDED_LOCK,
+      'queued',
+      'commit',
+      'enqueue',
+    ]);
   });
 
   it('creates without enqueueing when the start is deferred', async () => {
@@ -132,7 +141,7 @@ describe('spawnPlanTask seeding', () => {
     // exists to avoid.
     const id = await spawnPlanTask({ ...args, type: 'plan_build' as const, enqueue: false });
     expect(id).toBe('task-1');
-    expect(order).toEqual([FENCE, LOCK, 'insert', 'commit']);
+    expect(order).toEqual([FENCE, ...BOUNDED_LOCK, 'insert', 'commit']);
     expect(taskQueue.add).not.toHaveBeenCalled();
   });
 
@@ -145,7 +154,7 @@ describe('spawnPlanTask seeding', () => {
         order.push(`seed:${taskId}`);
       },
     });
-    expect(order).toEqual([FENCE, LOCK, 'insert', 'seed:task-1', 'commit']);
+    expect(order).toEqual([FENCE, ...BOUNDED_LOCK, 'insert', 'seed:task-1', 'commit']);
   });
 
   it('does not enqueue a task whose seed failed', async () => {
@@ -159,7 +168,7 @@ describe('spawnPlanTask seeding', () => {
         },
       }),
     ).rejects.toThrow('message insert failed');
-    expect(order).toEqual([FENCE, LOCK, 'insert']);
+    expect(order).toEqual([FENCE, ...BOUNDED_LOCK, 'insert']);
     expect(taskQueue.add).not.toHaveBeenCalled();
   });
 });
@@ -182,7 +191,7 @@ describe('spawnPlanTask while the system drains', () => {
   it('takes the fence in the transaction a caller owns, before it writes the task', async () => {
     await spawnPlanTask({ ...args, db: tx as never });
 
-    expect(order).toEqual([FENCE, LOCK, 'insert', LOCK, 'queued']);
+    expect(order).toEqual([FENCE, ...BOUNDED_LOCK, 'insert', ...BOUNDED_LOCK, 'queued']);
   });
 
   it.each(['draining', 'maintenance'])(
@@ -210,7 +219,7 @@ describe('enqueuePlanTask', () => {
   it('claims the started task under the fence and queues START after the commit', async () => {
     await enqueuePlanTask('task-1', 'u1');
 
-    expect(order).toEqual([FENCE, LOCK, 'queued', 'commit', 'enqueue']);
+    expect(order).toEqual([FENCE, ...BOUNDED_LOCK, 'queued', 'commit', 'enqueue']);
   });
 
   it('claims and queues nothing when the state is draining once the fence is held', async () => {

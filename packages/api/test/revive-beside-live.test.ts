@@ -245,6 +245,27 @@ describe.each([
   });
 });
 
+describe('reviving when the repository lock wait times out', () => {
+  it.each(revivals)('answers 409 busy by $name and changes nothing', async (revival) => {
+    const t = setup('onboarding_upgrade', revival);
+    const stepsBefore = t.fake.rows(schema.taskSteps);
+    t.fake.hooks.beforeLock = (key) => {
+      if (key !== `onboarding-upgrade:${REPO}`) return;
+      throw Object.assign(new Error('Failed query'), {
+        cause: Object.assign(new Error('canceling statement due to lock timeout'), {
+          code: '55P03',
+        }),
+      });
+    };
+    const res = await revival.request();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'The repository is busy, try again', code: null });
+    expect(t.task()).toMatchObject({ status: 'failed', orchestrationEpoch: 3 });
+    expect(t.fake.rows(schema.taskSteps)).toEqual(stepsBefore);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+});
+
 describe.each([
   ['an upgrade', undefined, 'upgraded'],
   ['a rollback', { mode: 'rollback' }, 'rolled back'],

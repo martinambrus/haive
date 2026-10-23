@@ -1,6 +1,7 @@
 import { and, eq, isNull } from 'drizzle-orm';
 import { lockRepositoryTasksKey, schema, type DbTx } from '@haive/database';
 import { TASK_JOB_NAMES, logger, type TaskJobPayload } from '@haive/shared';
+import { boundedLockWait } from './repository-busy.js';
 import type { getDb } from '../db.js';
 import { getTaskQueue } from '../queues.js';
 
@@ -14,7 +15,8 @@ export async function markQueuedForStart(db: ReturnType<typeof getDb> | DbTx, ta
       .from(schema.tasks)
       .where(eq(schema.tasks.id, taskId));
     // A queued task holds the checkout, so its start waits out a move that holds this lock.
-    if (task?.repositoryId) await lockRepositoryTasksKey(tx, task.repositoryId);
+    const repositoryId = task?.repositoryId;
+    if (repositoryId) await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, repositoryId));
     const [queued] = await tx
       .update(schema.tasks)
       .set({ status: 'queued', updatedAt: new Date() })

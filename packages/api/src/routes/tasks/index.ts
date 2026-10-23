@@ -20,6 +20,7 @@ import {
   initializeTaskDatabaseState,
   DatabaseSnapshotUnavailableError,
   lockRepositoryTasksKey,
+  isLockNotAvailable,
 } from '@haive/database';
 import { isTaskClass, knownTaskTypes, typesForClass } from '@haive/shared/stats';
 import {
@@ -87,6 +88,7 @@ import { isTaskDead, loadTaskDead, refuseDeadTask } from '../../lib/task-dead.js
 import { loadTaskStop, loadTaskStops } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
 import { isUuid } from '../../lib/uuid.js';
+import { REPOSITORY_BUSY, boundedLockWait } from '../../lib/repository-busy.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   appendTaskEvent,
@@ -751,6 +753,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         });
       } catch (err) {
         if (err instanceof DatabaseSnapshotUnavailableError) throw new HttpError(409, err.message);
+        if (isLockNotAvailable(err)) throw new HttpError(409, REPOSITORY_BUSY);
         throw err;
       }
     }
@@ -807,7 +810,10 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         : await db.transaction(async (tx) => {
             await admitNewWork(tx);
             // Queuing takes this lock, and taken before the insert, as every holder does, it inverts no other.
-            if (body.repositoryId) await lockRepositoryTasksKey(tx, body.repositoryId);
+            const lockedRepositoryId = body.repositoryId;
+            if (lockedRepositoryId) {
+              await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, lockedRepositoryId));
+            }
             return create(tx);
           }));
   }
