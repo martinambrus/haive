@@ -1390,6 +1390,64 @@ describe('extractCodeSections — closing lines in front of a head', () => {
   });
 });
 
+describe('extractCodeSections — Ruby definitions', () => {
+  const byId = (src: string, file: string) =>
+    new Map(extractCodeSections(src, file).map((s) => [s.sectionId, s.content]));
+  const ruby = [
+    'require "x"',
+    '',
+    'MAX = 5',
+    '',
+    'def a',
+    '  if MAX > 1',
+    '    1',
+    '  end',
+    'end # a',
+    '',
+    'FLAG = true',
+    '',
+    'def b',
+    '  2',
+    'end',
+    '',
+  ].join('\n');
+
+  it('ends a Ruby method after its own end and lets the constant lead the method after it', () => {
+    const sections = byId(ruby, 'jobs.rb');
+
+    expect(sections.get('function-a')!.trimEnd().endsWith('  end\nend # a')).toBe(true);
+    expect(sections.get('function-b')!.startsWith('FLAG = true\n\ndef b\n  2\nend')).toBe(true);
+  });
+
+  it('ends a Ruby class after its own end', () => {
+    const rb =
+      'class Box\n  def size\n    1\n  end\nend\n\nBOX = Box.new\n\ndef make\n  BOX\nend\n';
+    const sections = byId(rb, 'box.rb');
+
+    expect(sections.get('class-Box')!.trimEnd().endsWith('  end\nend')).toBe(true);
+    expect(sections.get('function-make')!.startsWith('BOX = Box.new\n\ndef make')).toBe(true);
+  });
+
+  it('does not read a Python line that starts with end as the end of a definition', () => {
+    const py = 'def a():\n    return 1\n\nend = 3\n\ndef b():\n    return 2\n';
+    const sections = byId(py, 'jobs.py');
+
+    expect(sections.get('function-a')).not.toContain('end = 3');
+    expect(sections.get('function-b')!.startsWith('end = 3\n\ndef b')).toBe(true);
+  });
+
+  it('loses no text of a Ruby file', () => {
+    const sections = extractCodeSections(ruby, 'jobs.rb');
+
+    expect(
+      sections
+        .map((s) => s.content)
+        .join('')
+        .replace(/\s+/g, ''),
+    ).toBe(ruby.replace(/\s+/g, ''));
+  });
+});
+
 describe('chunkSection', () => {
   it('splits a long section without losing any region', () => {
     const content = markedBody(10_000);

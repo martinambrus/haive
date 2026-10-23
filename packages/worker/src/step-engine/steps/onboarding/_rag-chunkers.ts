@@ -759,7 +759,7 @@ function jsRanges(content: string, members: boolean): SectionRange[] {
   return ranges;
 }
 
-function pythonRanges(content: string): SectionRange[] {
+function pythonRanges(content: string, closer?: RegExp): SectionRange[] {
   const ranges: SectionRange[] = [];
   const lines = content.split('\n');
 
@@ -791,6 +791,11 @@ function pythonRanges(content: string): SectionRange[] {
         const lineIndent = line.length - line.trimStart().length;
         if (lineIndent <= indent) break;
         i += 1;
+      }
+      // A definition that closes with a keyword (Ruby's `end`) owns that line, at its own indentation.
+      const next = lines[i];
+      if (closer && next !== undefined && closer.test(next.trim())) {
+        if (next.length - next.trimStart().length === indent) i += 1;
       }
       ranges.push({
         sectionId: `${kind}-${name}`,
@@ -947,8 +952,10 @@ export function extractCodeSections(content: string, filePath: string): RagSecti
       ranges = jsRanges(content, lang !== 'java');
       break;
     case 'python':
-    case 'ruby':
       ranges = pythonRanges(content);
+      break;
+    case 'ruby':
+      ranges = pythonRanges(content, /^end\b/);
       break;
     case 'go':
       ranges = goRanges(content);
