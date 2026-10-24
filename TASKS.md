@@ -91,7 +91,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
-status: parked · reason: user's retention rule for item 4 · last: 2026-10-24T19:52Z · items 1-3 shipped in PR #892 (42ee32d7c)
+status: parked · reason: user's retention rule for item 4 · last: 2026-10-24T19:31Z · items 1-3 shipped in PR #892 (42ee32d7c)
 All PRE-EXISTING.
 
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
@@ -277,7 +277,7 @@ All PRE-EXISTING.
 
 ### T304 · FNF[claims-2] · .git refusal misses NTFS aliases (+1)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:42Z · last: 2026-10-24T19:42Z
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:28Z · last: 2026-10-24T19:28Z
 
 1. Low: isClaimablePath (shared project-state/names.ts) and 02's safeDiskRel accept `.git.`, `.git `, `git~1`, `.git::$INDEX_ALLOCATION`; one shared predicate mirroring git's is_ntfs_dotgit / is_hfs_dotgit.
 2. Cosmetic: 02's refusal warning says "not a path inside the repository" for `.git/...` (02-upgrade-apply.ts ~1295, ~1371, ~1460); reword (check tests first).
