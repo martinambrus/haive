@@ -9,6 +9,7 @@ import { claimFileName } from '@haive/shared/project-state';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
+import { recordWritten } from './support/upgrade-apply-record.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 
 const generated = vi.hoisted(() => ({ detect: null as unknown }));
@@ -117,12 +118,14 @@ describe('12-post-onboarding: a claim file a person deleted by hand', () => {
       db: fake.db as unknown as Database,
     } as unknown as StepContext;
     const twelve = () =>
-      postOnboardingStep.apply(ctx, {
-        detected: { hasGit: true } as never,
-        formValues: { commit: true, commitMessage: 'chore: onboard' },
-        iteration: 0,
-        previousIterations: [],
-      });
+      recordWritten(
+        postOnboardingStep.apply(ctx, {
+          detected: { hasGit: true } as never,
+          formValues: { commit: true, commitMessage: 'chore: onboard' },
+          iteration: 0,
+          previousIterations: [],
+        }),
+      );
     const tracked = async (): Promise<string[]> =>
       (await git(repo, ['ls-tree', '-r', '--name-only', 'HEAD'])).split('\n').filter(Boolean);
     const oldFile = `.haive-data/state/${claimFileName(OLD)}`;

@@ -153,6 +153,7 @@ async function rollback(
   const out = await (older === null
     ? applied
     : recordWritten(applied, { recordWriteFails: refuseRecordWrite }));
+  if (older === null) expect(out.recordWrite).toBe('skipped');
   return {
     root,
     out,
