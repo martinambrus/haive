@@ -72,6 +72,8 @@ const PULL_BUSY = 'this repository has a task in flight; finish or cancel it bef
 const SAVE_BUSY =
   'this repository has a task in flight; the plan commit stays local and nothing was pushed; finish or cancel it before saving and pushing';
 
+/** A Save or Pull that did not run (a task in flight, a held or refused move, an open merge
+ *  conversation): the api answers it 409 and `last_error` never records it. */
 export class PlanMirrorRefusal extends Error {
   override readonly name = 'PlanMirrorRefusal';
 }

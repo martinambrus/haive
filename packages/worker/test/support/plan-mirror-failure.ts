@@ -1,3 +1,5 @@
+// This module calls vi.mock itself, so a test must import it BEFORE plan-mirror-queue.js; a
+// later import leaves the queue on the real modules.
 import { vi, type Mock } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
