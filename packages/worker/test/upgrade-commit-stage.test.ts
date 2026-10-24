@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   agentsRulesVerdict,
+  appliedDeletedPaths,
   appliedImportStubs,
   appliedWrittenPaths,
   headLacksImport,
@@ -17,6 +18,20 @@ import { killGit, type KilledGit } from './support/kill-git.js';
 const run = promisify(execFile);
 
 describe('appliedWrittenPaths', () => {
+  it('drops git data aliases from every persisted path list', () => {
+    const paths = ['.git./x', 'a/GIT~1:x/b', '.g\u200cit/x'];
+    expect(appliedWrittenPaths({ writtenPaths: paths })).toEqual([]);
+    expect(appliedDeletedPaths({ deletedPaths: paths })).toEqual([]);
+    expect(
+      appliedImportStubs({
+        rulesImportStubs: paths.map((file) => ({
+          file,
+          result: 'created',
+        })),
+      }),
+    ).toEqual([]);
+  });
+
   it('stages the repository paths 02 reports writing', () => {
     expect(
       appliedWrittenPaths({ writtenPaths: ['AGENTS.md', 'CLAUDE.md', '.claude/x.md'] }),

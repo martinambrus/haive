@@ -74,6 +74,41 @@ function classify(
 }
 
 describe('safeDiskRel', () => {
+  it.each(
+    [
+      '.git',
+      '.git.',
+      '.git ',
+      '.GIT. .',
+      'git~1',
+      'GIT~1:x',
+      '.git::$INDEX_ALLOCATION',
+      '.g\u200cit',
+      '\ufeff.git',
+      '.GiT\u200e',
+    ].flatMap((seg) => [seg, `a/${seg}/b`]),
+  )('refuses git data alias %s', (path) => {
+    expect(safeDiskRel(path)).toBeNull();
+  });
+
+  it.each(
+    [
+      '.git~1',
+      'git~2',
+      '.gitx',
+      '.git-foo',
+      '.github',
+      '.gitignore',
+      'x.git',
+      'git',
+      '.git\u00a0',
+      '.g\u0130t',
+      '.g\u0131t',
+    ].flatMap((seg) => [seg, `a/${seg}/b`]),
+  )('keeps ordinary path %s', (path) => {
+    expect(safeDiskRel(path)).toBe(path);
+  });
+
   // Every write and delete in the upgrade and rollback steps joins `diskPath` onto the repository
   // root, and it arrives from a plan row — i.e. from the database — with no validation anywhere
   // before this.

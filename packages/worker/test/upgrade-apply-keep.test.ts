@@ -265,19 +265,21 @@ describe('O3: a file picked both to be removed and to be kept', () => {
 });
 
 describe('a removal the plan holds for a path inside git data', () => {
-  const GIT = '.git/config';
+  it.each(['.git/config', '.git./x', 'a/git~1/x', '.g\u200cit/x'])(
+    'leaves %s in place, removes nothing, and reports the refusal',
+    async (GIT) => {
+      const u = await upgrade([GIT]);
 
-  it('leaves the file in place, removes nothing, and warns naming the path', async () => {
-    const u = await upgrade([GIT]);
+      const out = await u.apply({ selectedObsoleteRemovals: [u.entries[0]!.entryId] });
 
-    const out = await u.apply({ selectedObsoleteRemovals: [u.entries[0]!.entryId] });
-
-    expect(await readFile(join(u.root, GIT), 'utf8')).toBe(bodyOf(GIT));
-    expect(out.warnings.some((w) => w.includes(GIT))).toBe(true);
-    expect(out.deletedCount).toBe(0);
-    expect(out.deletedPaths ?? []).toEqual([]);
-    expect(u.live(GIT)).toBe(true);
-  });
+      expect(await readFile(join(u.root, GIT), 'utf8')).toBe(bodyOf(GIT));
+      expect(out.warnings.length).toBeGreaterThan(0);
+      expect(out.skippedCount).toBe(1);
+      expect(out.deletedCount).toBe(0);
+      expect(out.deletedPaths ?? []).toEqual([]);
+      expect(u.live(GIT)).toBe(true);
+    },
+  );
 });
 
 describe('a bundle item that is gone, which 02 untracks without being asked', () => {

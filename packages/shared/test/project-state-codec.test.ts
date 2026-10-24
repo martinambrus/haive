@@ -9,6 +9,7 @@ import {
   emptyProjectState,
   gitBlobId,
   isClaimablePath,
+  namesGitData,
   localTemplateId,
   normalizeProjectState,
   parseProjectState,
@@ -90,6 +91,71 @@ describe('claimFileName', () => {
   it('stays inside a file name the filesystem accepts', () => {
     const name = claimFileName(`${'d'.repeat(120)}/${'é'.repeat(150)}.md`).split('/')[1]!;
     expect(Buffer.byteLength(name)).toBeLessThanOrEqual(255);
+  });
+});
+
+const gitDataSegments = [
+  '.git',
+  '.GIT',
+  '.git.',
+  '.git ',
+  '.GIT. .',
+  'git~1',
+  'GIT~1:x',
+  '.git::$INDEX_ALLOCATION',
+  '.git. :stream',
+  'git~1. :stream',
+  '.g\u200cit',
+  '\ufeff.git',
+  '.GiT\u200e',
+  ...[
+    0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x206a, 0x206b, 0x206c,
+    0x206d, 0x206e, 0x206f, 0xfeff,
+  ].flatMap((code) => {
+    const ch = String.fromCodePoint(code);
+    return [`${ch}.git`, `.g${ch}it`, `.git${ch}`];
+  }),
+];
+const ordinarySegments = [
+  '.git~1',
+  'git~2',
+  '.gitx',
+  '.git-foo',
+  '.github',
+  '.gitignore',
+  'x.git',
+  'git',
+  '.git\u00a0',
+  '.g\u0130t',
+  '.g\u0131t',
+  '.git\u200b',
+  '.git\u2069',
+  '.git\u2070',
+  '.git.x',
+  'git~10',
+  'git~1x',
+  '.g\u200cit.',
+];
+
+describe('git data filesystem aliases', () => {
+  it.each(['.git\n', '.git.\n', 'git~1\n', '.git\r'])(
+    'keeps a non-alias control character in %s',
+    (path) => {
+      expect(namesGitData(path)).toBe(false);
+      expect(isClaimablePath(path)).toBe(false);
+    },
+  );
+  it.each(gitDataSegments.flatMap((seg) => [seg, `a/${seg}/b`]))('refuses %s', (path) => {
+    expect(namesGitData(path)).toBe(true);
+    expect(isClaimablePath(path)).toBe(false);
+    expect(() => renderProjectState({ ...emptyProjectState(), claims: [claim(path)] })).toThrow(
+      ProjectStateError,
+    );
+  });
+
+  it.each(ordinarySegments.flatMap((seg) => [seg, `a/${seg}/b`]))('keeps %s', (path) => {
+    expect(namesGitData(path)).toBe(false);
+    expect(isClaimablePath(path)).toBe(true);
   });
 });
 
@@ -233,7 +299,7 @@ describe('renderProjectState and parseProjectState', () => {
   });
 
   it('read a claim file at a git-data path an earlier release wrote apart from the claims', () => {
-    const legacy = [claim('.git/config'), claim('sub/.GIT/x')];
+    const legacy = [claim('.git/config'), claim('sub/.GIT/x'), claim('.git./x')];
     const files = legacy.reduce(
       (all, c) => withFile(all, claimFileName(c.path), canonicalJson(c)),
       renderProjectState(record()),
@@ -245,7 +311,11 @@ describe('renderProjectState and parseProjectState', () => {
       '.claude/agents/code-reviewer.md',
       'AGENTS.md',
     ]);
-    expect(parsed.gitDataClaims.map((c) => c.path).sort()).toEqual(['.git/config', 'sub/.GIT/x']);
+    expect(parsed.gitDataClaims.map((c) => c.path).sort()).toEqual([
+      '.git./x',
+      '.git/config',
+      'sub/.GIT/x',
+    ]);
     expect(parsed.ignored).toEqual([]);
     expect(renderProjectState(parsed.record)).toEqual(renderProjectState(record()));
   });

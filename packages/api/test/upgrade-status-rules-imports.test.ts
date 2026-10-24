@@ -80,6 +80,7 @@ function inSync(providers: { name: string; rulesContent: string; enabled: boolea
   const agent = { templateId: 'agent.x', schemaVersion: 1, contentHash: 'h1' };
   const artifact = (templateId: string, templateSchemaVersion: number, hash: string) => ({
     templateId,
+    diskPath: templateId === CLI_RULES_TEMPLATE_ID ? 'AGENTS.md' : '.claude/agents/x.md',
     templateSchemaVersion,
     templateContentHash: hash,
     bundleItemId: null,
@@ -146,32 +147,35 @@ describe('upgrade-status and the rules import', () => {
     expect(body.linkedRulesFiles).toBeUndefined();
   });
 
-  it('offers nothing for a live row at a git-data path an earlier release recorded', async () => {
-    await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
-    await mkdir(path.join(repo, '.git'));
-    const bytes = '[core]\n';
-    await writeFile(path.join(repo, '.git', 'config'), bytes, 'utf8');
-    const rows = state.rows.get(schema.onboardingArtifacts)!;
-    state.rows.set(schema.onboardingArtifacts, [
-      ...rows,
-      {
-        id: 'legacy-git',
-        diskPath: '.git/config',
-        templateId: 'plugin.unknown',
-        templateKind: 'plugin-file',
-        templateSchemaVersion: 1,
-        templateContentHash: 'h',
-        writtenHash: sha256Hex(bytes),
-        bundleItemId: null,
-        haiveVersion: null,
-        repositoryId: 'repo-1',
-        generatedAt: new Date(2),
-      },
-    ]);
-    const body = await status();
-    expect(body.hasUpgradeAvailable).toBe(false);
-    expect(body.obsoleteTemplateIds).toBeUndefined();
-  });
+  it.each(['.git/config', '.git./config', 'a/git~1/x', '.g\u200cit/config'])(
+    'offers nothing for an earlier release row at %s',
+    async (diskPath) => {
+      await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+      await mkdir(path.dirname(path.join(repo, diskPath)), { recursive: true });
+      const bytes = '[core]\n';
+      await writeFile(path.join(repo, diskPath), bytes, 'utf8');
+      const rows = state.rows.get(schema.onboardingArtifacts)!;
+      state.rows.set(schema.onboardingArtifacts, [
+        ...rows,
+        {
+          id: 'legacy-git',
+          diskPath,
+          templateId: 'plugin.unknown',
+          templateKind: 'plugin-file',
+          templateSchemaVersion: 1,
+          templateContentHash: 'h',
+          writtenHash: sha256Hex(bytes),
+          bundleItemId: null,
+          haiveVersion: null,
+          repositoryId: 'repo-1',
+          generatedAt: new Date(2),
+        },
+      ]);
+      const body = await status();
+      expect(body.hasUpgradeAvailable).toBe(false);
+      expect(body.obsoleteTemplateIds).toBeUndefined();
+    },
+  );
 
   it('offers no upgrade, and names the units, while a project state conflict is pending', async () => {
     expect((await status()).contestedUnits).toBeUndefined();
@@ -288,6 +292,7 @@ describe('upgrade-status and a repository that switched RTK off', () => {
     });
     state.rows.get(schema.onboardingArtifacts)!.push({
       templateId: rtk.templateId,
+      diskPath: '.claude/settings.json',
       templateSchemaVersion: rtk.schemaVersion,
       templateContentHash: rtk.contentHash,
       bundleItemId: null,
@@ -321,6 +326,12 @@ describe('upgrade-status and a repository that switched RTK off', () => {
   });
 
   it('offers an upgrade for an RTK block left in a rules file once RTK is off', async () => {
+    state.rows.set(
+      schema.onboardingArtifacts,
+      state.rows
+        .get(schema.onboardingArtifacts)!
+        .filter((a) => (a as { templateId: string }).templateId !== rtk.templateId),
+    );
     await writeFile(path.join(repo, 'AGENTS.md'), `# rules\n${block}`, 'utf8');
     state.rows.set(
       schema.onboardingArtifacts,
@@ -432,6 +443,7 @@ describe('upgrade-status and a repository that switched RTK back on', () => {
     snapshots(true, [{ name: 'claude-code' }]);
     state.rows.get(schema.onboardingArtifacts)!.push({
       templateId: claudeRtk.templateId,
+      diskPath: '.claude/settings.json',
       templateSchemaVersion: claudeRtk.schemaVersion,
       templateContentHash: claudeRtk.contentHash,
       bundleItemId: null,
@@ -494,6 +506,7 @@ describe('upgrade-status and an upgrade that only removed files', () => {
     state.rows.set(schema.onboardingArtifacts, [
       {
         templateId: 'agent.x',
+        diskPath: '.claude/agents/x.md',
         templateSchemaVersion: 1,
         templateContentHash: 'h1',
         bundleItemId: null,
