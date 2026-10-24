@@ -344,12 +344,15 @@ describe('maintenance Stop controls (#395)', () => {
     hasLiveCli: false,
   };
 
+  const stopButton = (view: Renderer) =>
+    findAll(view.tree(), (h) => h.tag === 'button' && h.props['data-action'] === 'stop')[0]!;
+
   it.each(['pending', 'running', 'waiting_cli'])(
     'enables Stop for a %s current row without a live CLI',
     async (status) => {
       blockingTasks = [{ ...row, currentStepStatus: status, stepRunning: status !== 'pending' }];
       const view = await mount();
-      expect(stateButton(view, 'Stop CLI').props.disabled).toBe(false);
+      expect(stopButton(view).props.disabled).toBe(false);
     },
   );
 
@@ -375,7 +378,7 @@ describe('maintenance Stop controls (#395)', () => {
     stopResult = result;
     blockingTasks = [{ ...row, hasLiveCli: true }];
     const view = await mount();
-    fire.click(stateButton(view, 'Stop CLI'));
+    fire.click(stopButton(view));
     for (let i = 0; i < 5; i += 1) await view.flush();
     expect(textOf(view.tree()).includes('Nothing was running to stop.')).toBe(notice);
   });
@@ -385,7 +388,7 @@ describe('maintenance Stop controls (#395)', () => {
     stopResult = { killed: 0, cancelled: 0, stopped: 0 };
     blockingTasks = [{ ...row, hasLiveCli: true }];
     const view = await mount();
-    fire.click(stateButton(view, 'Stop CLI'));
+    fire.click(stopButton(view));
     for (let i = 0; i < 5; i += 1) await view.flush();
     const notices = () =>
       findAll(

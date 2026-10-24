@@ -125,10 +125,11 @@ function TaskRow({
             busy ||
             !taskCanStop(t, { stepRunning: t.hasLiveCli, currentStepStatus: t.currentStepStatus })
           }
+          title="Stop the current step. Keeps the environment and allows a retry."
           data-action="stop"
           onClick={() => void act(t, 'stop')}
         >
-          Stop CLI
+          Stop step
         </Button>
       </div>
     </div>

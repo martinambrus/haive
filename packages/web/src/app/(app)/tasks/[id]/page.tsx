@@ -3944,7 +3944,7 @@ function StepCardImpl({
                     )
                       onStop();
                   }}
-                  title="Stop this step. Keeps the environment; the task stays open and restartable. Use Stop & retry to stop and immediately re-run."
+                  title="Stop this step. Keeps the environment; the task stays open and restartable."
                 >
                   Stop
                 </Button>
