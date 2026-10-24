@@ -550,7 +550,7 @@ function jsNonCode(text: string, java: boolean): Span[] {
       const word = text.slice(i, end);
       if (word === 'async' || word === 'import' || word === 'export') sawAsync = true;
       const operandBefore: boolean = prev !== null && !regexMayStart(prev);
-      if (prev === '.') prev = '';
+      if (prev === '.' || (prev === '#' && text[i - 1] === '#')) prev = '';
       else if (CONTEXTUAL_WORDS.has(word)) {
         const keyword: boolean =
           word === 'of'
