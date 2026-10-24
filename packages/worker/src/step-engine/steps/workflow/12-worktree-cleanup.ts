@@ -11,7 +11,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { gitRun } from '../../../repo/git-exec.js';
-import { detectOrigin, getOriginUrl, pushBranch } from '../../../repo/git-push.js';
+import { OriginUrlError, getOriginUrl, pushBranch } from '../../../repo/git-push.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import {
   listBranchProjectionEdits,
@@ -56,6 +56,7 @@ interface WorktreeCleanupDetect {
   /** Whether the repo has a pushable `origin` remote (gates the base-push fields). */
   hasOrigin: boolean;
   originUrl: string | null;
+  originError?: string | null;
   /** Credential bound to the repo (default selection for the push). */
   boundCredentialId: string | null;
   /** The user's stored git credentials, for the push credential picker. `provider`
@@ -241,6 +242,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     let projectionEdits: string[] = [];
     let hasOrigin = false;
     let originUrl: string | null = null;
+    let originError: string | null = null;
     let boundCredentialId: string | null = null;
     let credentials: WorktreeCleanupDetect['credentials'] = [];
     let prWorkflowAvailable = false;
@@ -263,8 +265,13 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
           return [];
         });
       }
-      hasOrigin = await detectOrigin(ctx.repoPath);
-      originUrl = hasOrigin ? await getOriginUrl(ctx.repoPath) : null;
+      try {
+        originUrl = await getOriginUrl(ctx.repoPath);
+        hasOrigin = originUrl !== null;
+      } catch (err) {
+        if (!(err instanceof OriginUrlError)) throw err;
+        originError = err.message;
+      }
       const repo = repositoryId
         ? await ctx.db.query.repositories.findFirst({
             where: eq(schema.repositories.id, repositoryId),
@@ -308,6 +315,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
       repositoryId,
       hasOrigin,
       originUrl,
+      originError,
       boundCredentialId,
       credentials,
       prWorkflowAvailable,
@@ -339,6 +347,14 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     const base = detected.baseBranch ?? detected.parentBranch ?? 'the base branch';
     const branch = detected.branchName ?? 'this branch';
     const fields: FormField[] = [];
+    if (detected.originError)
+      fields.push({
+        type: 'note',
+        id: 'originError',
+        label: 'Push unavailable',
+        body: detected.originError,
+        variant: 'warning',
+      });
 
     // Up-front guard for the cross-branch case (parent checkout moved off the base).
     // The merge now runs via a transient worktree on the base branch, so it is never

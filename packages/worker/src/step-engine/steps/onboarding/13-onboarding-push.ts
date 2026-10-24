@@ -5,7 +5,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   originGitRun,
   buildCredentialHelper,
-  detectOrigin,
+  OriginUrlError,
   getOriginUrl,
   gitRun,
   scrubSecret,
@@ -35,6 +35,7 @@ interface OnboardingPushDetect {
   currentBranch: string | null;
   hasOrigin: boolean;
   originUrl: string | null;
+  originError?: string | null;
   fetchOk: boolean;
   fetchError: string | null;
   /** Local base behind / ahead of origin/<base> (0 when the ref is absent / not fetched). */
@@ -155,13 +156,25 @@ export const onboardingPushStep: StepDefinition<OnboardingPushDetect, Onboarding
       );
     const currentBranch = cur.code === 0 ? cur.stdout.trim() : null;
     const base = currentBranch && currentBranch !== 'HEAD' ? currentBranch : null;
-    const hasOrigin = await detectOrigin(ctx.repoPath);
-    const originUrl = hasOrigin ? await getOriginUrl(ctx.repoPath) : null;
+    let originUrl: string | null;
+    try {
+      originUrl = await getOriginUrl(ctx.repoPath);
+    } catch (err) {
+      if (!(err instanceof OriginUrlError)) throw err;
+      return { ...empty, currentBranch, originError: err.message };
+    }
+    const hasOrigin = originUrl !== null;
     if (!base || !hasOrigin) {
       return { ...empty, currentBranch, hasOrigin, originUrl };
     }
 
-    const fetch = await fetchOrigin(ctx, base, credentialId || null);
+    let fetch;
+    try {
+      fetch = await fetchOrigin(ctx, base, credentialId || null);
+    } catch (err) {
+      if (!(err instanceof OriginUrlError)) throw err;
+      return { ...empty, currentBranch, originError: err.message };
+    }
     // origin/<base> may exist (from the clone / this fetch) or not (a branch never
     // pushed). When present we merge it in (the pull); when absent we self-merge <base>
     // (a no-op) so resolveMergePhase still proceeds to push and CREATE the branch.
@@ -239,6 +252,14 @@ export const onboardingPushStep: StepDefinition<OnboardingPushDetect, Onboarding
         default: detected.credentialId,
       },
     ];
+    if (detected.originError)
+      fields.unshift({
+        type: 'note',
+        id: 'originError',
+        label: 'Push unavailable',
+        body: detected.originError,
+        variant: 'warning',
+      });
     return {
       title: 'Push onboarding to origin',
       description: `Pushing the onboarding commit on ${base} to origin.`,
@@ -289,7 +310,7 @@ export const onboardingPushStep: StepDefinition<OnboardingPushDetect, Onboarding
         pushed: false,
         merged: false,
         branch: base,
-        message: 'nothing to push (no branch or origin remote)',
+        message: d.originError ?? 'nothing to push (no branch or origin remote)',
       };
     }
     const row = await ctx.db.query.taskSteps.findFirst({
