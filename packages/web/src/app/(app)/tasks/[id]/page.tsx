@@ -22,6 +22,7 @@ import {
   type RagQueryEntry,
   type StepAction,
   type StepActionResponse,
+  type StopActivityResult,
   type Task,
   type TaskAction,
   type TaskEvent,
@@ -70,10 +71,12 @@ import {
   pausedByLabel,
   pausedResumeHint,
   taskBadgeKind,
+  taskCanStop,
   taskClockEndMs,
   taskMenuKeys,
   taskNotStarted,
   taskStoppedAt,
+  stopResultNotice,
 } from '@/lib/task-state';
 import { useGlobalPause } from '@/lib/use-global-pause';
 import {
@@ -731,6 +734,7 @@ export default function TaskDetailPage() {
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<{ stepId: string; message: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [stepActionBusy, setStepActionBusy] = useState<string | null>(null);
   const [stepActionError, setStepActionError] = useState<{
     stepId: string;
@@ -1254,6 +1258,7 @@ export default function TaskDetailPage() {
     task?.status === 'completed' || task?.status === 'cancelled' ? 'ended' : 'preparing';
 
   async function submitStep(step: TaskStep, values: FormValues) {
+    setActionNotice(null);
     setSubmitting(step.stepId);
     setSubmitError(null);
     try {
@@ -1288,6 +1293,7 @@ export default function TaskDetailPage() {
   }, [steps, submitting]);
 
   async function runAction(action: TaskAction) {
+    setActionNotice(null);
     setActionError(null);
     try {
       await api.post(`/tasks/${id}/action`, { action });
@@ -1300,9 +1306,11 @@ export default function TaskDetailPage() {
   // Stop the running CLI step without ending the task (vs runAction('cancel'),
   // which tears everything down). Leaves the task open/restartable.
   async function stopActiveCli() {
+    setActionNotice(null);
     setActionError(null);
     try {
-      await api.post(`/tasks/${id}/cancel-active-cli`, {});
+      const result = await api.post<StopActivityResult>(`/tasks/${id}/cancel-active-cli`, {});
+      setActionNotice(stopResultNotice(result));
       await reload();
     } catch (err) {
       setActionError((err as Error).message ?? 'Stop failed');
@@ -1359,6 +1367,7 @@ export default function TaskDetailPage() {
     if (!confirm(label)) return;
     setStepActionBusy(step.stepId);
     setStepActionError(null);
+    setActionNotice(null);
     try {
       await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
         action,
@@ -1400,6 +1409,7 @@ export default function TaskDetailPage() {
     setPendingLoginRetry(null);
     setStepActionBusy(step.stepId);
     setStepActionError(null);
+    setActionNotice(null);
     try {
       await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
         action: 'retry',
@@ -1503,6 +1513,8 @@ export default function TaskDetailPage() {
 
   async function toggleAutoContinue() {
     if (!task || autoContinueBusy) return;
+    setActionError(null);
+    setActionNotice(null);
     const next = !task.autoContinue;
     setAutoContinueBusy(true);
     // Optimistic flip; the 2s poll reconciles with the server either way.
@@ -1588,11 +1600,13 @@ export default function TaskDetailPage() {
   const badgeKind = taskBadgeKind(task);
   const deadNote = deadBanner(task, deadSteps);
   const stopNote = moduleStopBanner(task, stop);
-  // A CLI step is actively executing. The Stop buttons (top-right + the running
-  // step row) target it: stop the CLI, keep the environment, task stays open.
-  // Cancel, by contrast, ends the whole task and tears the environment down.
+  // Stop also covers the current pending row before its runner claims it.
+  // The environment stays available and the failed task can be retried.
   const stepRunning = steps.some((s) => s.status === 'running' || s.status === 'waiting_cli');
-  const menu = taskMenuKeys(task, { stepRunning });
+  const pointedStep = steps.find(
+    (s) => s.stepId === task.currentStepId && s.round === (task.currentRound ?? 0),
+  );
+  const menu = taskMenuKeys(task, { stepRunning, currentStepStatus: pointedStep?.status });
   // A failed task failed AT a step. The top-level Retry must re-run that step
   // (reset it + downstream, re-execute), which is exactly the per-step Retry —
   // NOT the task-level `start` action, which re-walks from the first step and
@@ -1951,7 +1965,7 @@ export default function TaskDetailPage() {
                       void stopActiveCli();
                   },
                   title:
-                    'Stop the running CLI for the current step. Keeps the environment; the task stays open and restartable.',
+                    'Stop the current step. Keeps the environment; the task stays open and restartable.',
                 },
                 menu.includes('cancel') && {
                   key: 'cancel',
@@ -2038,6 +2052,12 @@ export default function TaskDetailPage() {
         <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
           {actionError}
         </div>
+      )}
+
+      {actionNotice && (
+        <Card role="status" className="px-3 py-2 text-sm text-neutral-400">
+          <InlineMarkdown body={actionNotice} />
+        </Card>
       )}
 
       {deadNote && <DeadTaskBanner text={deadNote.text} />}
@@ -2167,6 +2187,10 @@ export default function TaskDetailPage() {
                     const target = steps.find((s) => s.stepId === sid);
                     if (target) await runStepAction(target, 'retry');
                   }}
+                  canStop={taskCanStop(task, {
+                    stepRunning: step.status === 'running' || step.status === 'waiting_cli',
+                    currentStepStatus: step.id === pointedStep?.id ? step.status : null,
+                  })}
                   onStop={() => void stopActiveCli()}
                   onCliLogin={() => openCliLoginForStep(step)}
                   providers={providers}
@@ -2725,8 +2749,9 @@ interface StepCardProps {
   /** Retry an arbitrary step by id (not just this card's own step). Used by the
    *  03c review card to re-run the previous business-requirements step. */
   onRetryStep: (stepId: string) => Promise<void>;
-  /** Stop the running CLI for this step without re-running it (vs onAction('retry'),
-   *  which stops AND re-runs). Same effect as the top-right Stop. */
+  /** Shared Stop predicate evaluated for this row and the task pointer. */
+  canStop: boolean;
+  /** Stop this step without re-running it. Same effect as the header Stop. */
   onStop: () => void;
 }
 
@@ -3568,6 +3593,7 @@ function StepCardImpl({
   onAction,
   onRetryStep,
   onStop,
+  canStop,
   onCliLogin,
   providers,
   taskCliProviderId,
@@ -3853,6 +3879,7 @@ function StepCardImpl({
                   type="checkbox"
                   checked={autoContinue}
                   disabled={autoContinueBusy}
+                  data-action="auto-continue"
                   onChange={onToggleAutoContinue}
                   className="h-3.5 w-3.5 rounded border-neutral-700 bg-neutral-950"
                 />
@@ -3907,7 +3934,7 @@ function StepCardImpl({
                   Re-run business requirements
                 </Button>
               )}
-              {(step.status === 'running' || step.status === 'waiting_cli') && (
+              {canStop && (
                 <Button
                   size="sm"
                   variant="secondary"
@@ -3917,7 +3944,7 @@ function StepCardImpl({
                     )
                       onStop();
                   }}
-                  title="Stop the running CLI for this step. Keeps the environment; the task stays open and restartable. Use Stop & retry to stop and immediately re-run."
+                  title="Stop this step. Keeps the environment; the task stays open and restartable."
                 >
                   Stop
                 </Button>
@@ -3934,6 +3961,7 @@ function StepCardImpl({
                       size="sm"
                       variant="secondary"
                       disabled={actionBusy}
+                      data-action="retry"
                       onClick={() => onAction('retry')}
                       title={title}
                     >
