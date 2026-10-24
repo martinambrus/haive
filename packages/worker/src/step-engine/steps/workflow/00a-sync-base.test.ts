@@ -1618,3 +1618,120 @@ it.each(['detect', 'fetch'])(
     }
   },
 );
+
+it.each(['fast-forward', 'deepen', 'put-back-fails'])(
+  'an origin refused after detect is handled during apply (%s)',
+  async (mode) => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    let originSpy: ReturnType<typeof vi.spyOn> | undefined;
+    let runSpy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await advanceOrigin(seed, 'after-detect.txt');
+      // The direct fetch moves a branch not checked out; the deepen runs after a
+      // failed local fast-forward, once projections have been put back.
+      if (mode === 'fast-forward') {
+        await git(seed, ['push', 'origin', 'HEAD:refs/heads/other']);
+        await git(local, ['checkout', '-b', 'other']);
+      }
+      const ctx = mkCtx(local, mode === 'fast-forward' ? null : 'repo-1');
+      const detected = await syncBaseStep.detect!(ctx);
+      expect(detected).toMatchObject({ fetchOk: true, behindBy: 1 });
+      const before = (await git(local, ['rev-parse', 'main'])).trim();
+      await git(local, ['config', 'remote.origin.url', 'file:///refused-after-detect']);
+      const refusal = new gitPush.OriginUrlError('file:///refused-after-detect');
+      const realOrigin = gitPush.originGitRun;
+      originSpy = vi.spyOn(gitPush, 'originGitRun').mockImplementation(realOrigin);
+      if (mode !== 'fast-forward') {
+        projections.setAside.mockResolvedValue({
+          outcome: 'set-aside',
+          paths: [],
+          kept: new Map(),
+        });
+        const realRun = gitPush.gitRun;
+        runSpy = vi
+          .spyOn(gitPush, 'gitRun')
+          .mockImplementation(async (...args) =>
+            args[1][0] === 'merge'
+              ? { code: 1, stdout: '', stderr: 'fast-forward unavailable' }
+              : realRun(...args),
+          );
+      }
+      const putBackFailure = new Error('put-back unavailable');
+      if (mode === 'put-back-fails') projections.putBack.mockRejectedValue(putBackFailure);
+      const warn = vi.fn();
+      ctx.logger = { ...ctx.logger, warn } as unknown as StepContext['logger'];
+      const result = syncBaseStep.apply(ctx, applyArgs(detected, { base: 'main' }));
+      if (mode === 'put-back-fails') {
+        await expect(result).rejects.toBe(putBackFailure);
+        expect(projections.putBack).toHaveBeenCalledTimes(2);
+        expect(originSpy).not.toHaveBeenCalled();
+      } else {
+        await expect(result).resolves.toMatchObject({
+          synced: false,
+          strategy: 'skipped',
+          reason: refusal.message,
+        });
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ err: refusal.message }),
+          expect.any(String),
+        );
+        expect(originSpy).toHaveBeenCalledTimes(1);
+        expect(originSpy.mock.calls[0]![1]).toContain('fetch');
+        if (mode === 'deepen') expect(projections.putBack).toHaveBeenCalledTimes(1);
+      }
+      expect((await git(local, ['rev-parse', 'main'])).trim()).toBe(before);
+    } finally {
+      originSpy?.mockRestore();
+      runSpy?.mockRestore();
+      for (const dir of [bare, seed, local]) await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each([false, true])(
+  'a refusal with projections still set aside preserves recovery failures (%s)',
+  async (putBackFails) => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    let runSpy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await advanceOrigin(seed, 'recovery.txt');
+      const ctx = mkCtx(local, 'repo-1');
+      const detected = await syncBaseStep.detect!(ctx);
+      const refusal = new gitPush.OriginUrlError('file:///refused-during-move');
+      const putBackFailure = new Error('recovery put-back failed');
+      const failedRecovery = new AggregateError([refusal, putBackFailure], 'recovery failed');
+      projections.setAside.mockResolvedValue({ outcome: 'set-aside', paths: [], kept: new Map() });
+      if (putBackFails) projections.putBack.mockRejectedValue(failedRecovery);
+      // Inject the transport's typed failure at the move boundary to cover recovery
+      // while projections are still aside, before the deepen path puts them back.
+      const realRun = gitPush.gitRun;
+      runSpy = vi.spyOn(gitPush, 'gitRun').mockImplementation(async (...args) => {
+        if (args[1][0] === 'merge') throw refusal;
+        return realRun(...args);
+      });
+      const warn = vi.fn();
+      ctx.logger = { ...ctx.logger, warn } as unknown as StepContext['logger'];
+      const result = syncBaseStep.apply(ctx, applyArgs(detected, { base: 'main' }));
+      if (putBackFails) {
+        await expect(result).rejects.toBe(failedRecovery);
+        expect(warn).not.toHaveBeenCalled();
+      } else {
+        await expect(result).resolves.toMatchObject({
+          synced: false,
+          strategy: 'skipped',
+          reason: refusal.message,
+        });
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ err: refusal.message }),
+          expect.any(String),
+        );
+      }
+      expect(projections.putBack).toHaveBeenCalledTimes(1);
+    } finally {
+      runSpy?.mockRestore();
+      for (const dir of [bare, seed, local]) await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
