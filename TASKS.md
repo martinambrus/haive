@@ -126,6 +126,14 @@ From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it
 2. Low: 99-run-app-ready.ts:315 drops a ticked push silently when the commit box is unticked.
 3. Display: 11-phase-8-learning.ts:549,1170 says "No commit recorded"/"(none)" when gate 3's sha read gave no answer after a landed commit.
 
+### T414 · FNF[deps-alerts-2] · 9 open Dependabot alerts on main (3 critical: next, dompurify)
+status: open
+Seen 2026-10-24 by fnf-run on a push (alerts #108-#116, opened 2026-10-23). (Session fnf-run mirrors it as task #331.)
+1. next → 16.4.1 (2 critical, 1 high): Dependabot PR #857 open since before the alerts; needs CI + review, then `pnpm docker rebuild`.
+2. dompurify → 3.4.17 (1 critical, 1 high, 1 low) and markdown-it → 14.3.3 (1 high, 1 low): check whether group PRs #838/#839 carry them; else a lockfile-only bump (memory: adding a dependency).
+3. zod → 4.6.6 (1 high): Dependabot PR #859.
+Route: one lockfile PR, a web browser check of markdown rendering (MarkdownView) since dompurify + markdown-it sit under it.
+
 ### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+5)
 status: open
 From the #311 driver (2026-10-24). PRE-EXISTING unless noted. (Session fnf-run mirrors it as task #330.) Evidence/harness (ruler, lexer-diff, oracle-cross, mutants): .claude/tmp/fnf-run/p311/ on ACTIVIT21.
