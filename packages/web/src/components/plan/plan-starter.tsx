@@ -11,7 +11,9 @@ import {
   startTask,
   uploadTaskAttachment,
   type CliProvider,
+  type Repository,
 } from '@/lib/api-client';
+import { attachmentUnavailableNote } from '@/lib/attachment-availability';
 import { planBuildBody } from '@/lib/plan-build-request';
 import { planOrigin, rememberTaskOrigin } from '@/lib/task-origin';
 import {
@@ -99,6 +101,7 @@ export function PlanStarter({
   const [questionerId, setQuestionerId] = useState('');
   const [askBrief, setAskBrief] = useState(true);
   const [askRepo, setAskRepo] = useState(false);
+  const [attachNote, setAttachNote] = useState<string | null>(null);
 
   // Preselect what a build would run on: the server's planner fallback, and the questioner this
   // user picked last time. Without the list the pickers stay hidden and the server picks.
@@ -119,6 +122,21 @@ export function PlanStarter({
       })
       .catch(() => {
         /* the pickers are optional */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repositoryId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .get<{ repository: Repository }>(`/repos/${repositoryId}`)
+      .then(({ repository }) => {
+        if (!cancelled) setAttachNote(attachmentUnavailableNote(repository));
+      })
+      .catch(() => {
+        /* fail open: the api still refuses a deferred build for a read-only repository */
       });
     return () => {
       cancelled = true;
@@ -335,56 +353,60 @@ export function PlanStarter({
             className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100"
           />
 
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              ref={fileInput}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={(e) => {
-                addFiles(e.target.files);
-                e.target.value = '';
-              }}
-            />
-            {/* A SECOND input, not a mode on the first: a picker is either a file
-                picker or a folder picker, and the two questions are different
-                enough that a toggle would just hide one of them. */}
-            <input
-              ref={folderInput}
-              type="file"
-              multiple
-              webkitdirectory=""
-              directory=""
-              className="hidden"
-              onChange={(e) => {
-                addFiles(e.target.files);
-                e.target.value = '';
-              }}
-            />
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={busy}
-              onClick={() => fileInput.current?.click()}
-            >
-              <Paperclip className="mr-1 h-3.5 w-3.5" />
-              Attach files
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={busy}
-              onClick={() => folderInput.current?.click()}
-            >
-              <FolderUp className="mr-1 h-3.5 w-3.5" />
-              Attach folder
-            </Button>
-            <span className="text-xs text-neutral-500">
-              A written plan, requirements (.docx), a spreadsheet, a PDF, wireframes. Word, Excel
-              and PDF are converted to text the agent can read; images need a model that can see
-              them. A folder keeps its structure, and a .zip is expanded into its own.
-            </span>
-          </div>
+          {attachNote ? (
+            <p className="text-xs text-neutral-500">{attachNote}</p>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={fileInput}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  addFiles(e.target.files);
+                  e.target.value = '';
+                }}
+              />
+              {/* A SECOND input, not a mode on the first: a picker is either a file
+                  picker or a folder picker, and the two questions are different
+                  enough that a toggle would just hide one of them. */}
+              <input
+                ref={folderInput}
+                type="file"
+                multiple
+                webkitdirectory=""
+                directory=""
+                className="hidden"
+                onChange={(e) => {
+                  addFiles(e.target.files);
+                  e.target.value = '';
+                }}
+              />
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => fileInput.current?.click()}
+              >
+                <Paperclip className="mr-1 h-3.5 w-3.5" />
+                Attach files
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => folderInput.current?.click()}
+              >
+                <FolderUp className="mr-1 h-3.5 w-3.5" />
+                Attach folder
+              </Button>
+              <span className="text-xs text-neutral-500">
+                A written plan, requirements (.docx), a spreadsheet, a PDF, wireframes. Word, Excel
+                and PDF are converted to text the agent can read; images need a model that can see
+                them. A folder keeps its structure, and a .zip is expanded into its own.
+              </span>
+            </div>
+          )}
 
           {files.length > 0 && (
             <ul className="flex flex-col gap-1.5">
@@ -456,7 +478,9 @@ export function PlanStarter({
               {draftTaskId
                 ? files.some((f) => f.state === 'failed' || f.state === 'uploading')
                   ? 'Retry the failed uploads'
-                  : 'Retry starting the build'
+                  : files.some((f) => f.state === 'pending')
+                    ? 'Retry starting the build with the new files'
+                    : 'Retry starting the build'
                 : 'Draft a plan from this'}
             </Button>
             {/* The draft a failed upload or a refused start left behind. An escape hatch, not the

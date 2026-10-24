@@ -7,8 +7,14 @@ files through the ordinary attachment route and finalizes with the `start` task 
 claims `status = 'created'` in one atomic UPDATE (a second click matches no row and enqueues
 nothing). An upload that fails therefore cannot start anything — the draft is the repair
 surface, reachable from its Attachments tab. A read-only local repository takes no attachments
-(the attachment route refuses it), so `POST /plan/build` refuses a `deferStart` for one before it
-creates the row; otherwise the draft was made and every upload into it then answered 409. The plan starter
+(the attachment route refuses it), so `POST /plan/build` and `POST /tasks` refuse a `deferStart`
+for one before they create the row; otherwise the draft was made and every upload into it then
+answered 409. Both forms also hide their attach controls for such a repository behind one line
+(`attachmentUnavailableNote`, `web/src/lib/attachment-availability.ts`): the plan starter reads the
+repository itself and keeps the controls if that read fails, leaving the api's refusal to answer,
+and New Task drops files already picked when the person switches to such a repository. After a
+refused `start` with every file uploaded, a freshly picked file turns the plan starter's button into
+"Retry starting the build with the new files". The plan starter
 (`web/src/components/plan/plan-starter.tsx`) keeps that draft's id whenever a press leaves one,
 after a failed upload or a refused `start`, so its next press re-sends only the rows not yet
 uploaded and sends `start` to the SAME task; a form that forgot the id after a refused `start`

@@ -45,6 +45,7 @@ import {
   taskVoteRequestSchema,
   TASK_JOB_NAMES,
   WAITING_SLOT_FILTER_TOKEN,
+  isReadOnlyLocalRepo,
   type TaskJobPayload,
 } from '@haive/shared';
 import { clampVoteScore } from '@haive/shared/fair-priority';
@@ -475,9 +476,12 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         eq(schema.repositories.id, body.repositoryId),
         eq(schema.repositories.userId, userId),
       ),
-      columns: { id: true },
+      columns: { id: true, source: true, writable: true },
     });
     if (!repo) throw new HttpError(404, 'Repository not found');
+    if (body.deferStart && isReadOnlyLocalRepo(repo)) {
+      throw new HttpError(409, 'Attachments are not supported for read-only local repositories');
+    }
   }
 
   if (body.type === 'onboarding_upgrade') {

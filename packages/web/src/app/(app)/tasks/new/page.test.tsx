@@ -54,6 +54,11 @@ const status = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 const repo = (id: string, name: string) => ({ id, name, status: 'ready', detectedFramework: null });
+const localRepo = (id: string, name: string, writable: boolean) => ({
+  ...repo(id, name),
+  source: 'local_path',
+  writable,
+});
 const taskType = (slug: string, over: Record<string, unknown> = {}) => ({
   slug,
   displayName: slug,
@@ -84,7 +89,14 @@ const savedRows: Record<string, unknown[]> = {};
 let savedFailure = 0;
 let savedDefault: string | null = null;
 const GETS: Record<string, unknown> = {
-  '/repos': { repositories: [repo('repo-a', 'Alpha'), repo('repo-b', 'Beta')] },
+  '/repos': {
+    repositories: [
+      repo('repo-a', 'Alpha'),
+      repo('repo-b', 'Beta'),
+      localRepo('repo-ro', 'Read only', false),
+      localRepo('repo-rw', 'Writable', true),
+    ],
+  },
   get '/cli-providers'() {
     return {
       providers: [P1, P2, P3].map((id) => ({
@@ -830,6 +842,51 @@ describe('a new task with attachments', () => {
     expect(posted).toHaveLength(1);
     expect(posted[0]).not.toHaveProperty('deferStart');
     expect(writes()).toEqual(['POST /tasks']);
+  });
+
+  describe('for a read-only local repository', () => {
+    const NOTE = 'This repository is imported read-only, so files cannot be attached.';
+    const folderInputs = (view: Renderer) =>
+      findAll(view.tree(), (h) => h.tag === 'input' && 'webkitdirectory' in h.props);
+
+    it('N1: offers no attachment controls and says why', async () => {
+      const view = await mount();
+      pick(view, 'repo-ro');
+      expect(controls(view.tree(), /^attachments/)).toHaveLength(0);
+      expect(folderInputs(view)).toHaveLength(0);
+      expect(page(view)).toContain(NOTE);
+    });
+
+    it('N2: a writable local repository keeps the controls and shows no sentence', async () => {
+      const view = await mount();
+      pick(view, 'repo-rw');
+      expect(controls(view.tree(), /^attachments/)).toHaveLength(1);
+      expect(folderInputs(view)).toHaveLength(1);
+      expect(page(view)).not.toContain(NOTE);
+    });
+
+    it('N3: files picked for another repository do not ride a deferred start into it', async () => {
+      const view = await readyOnA(two());
+      expect(page(view)).toContain('2 file(s) selected');
+
+      pick(view, 'repo-ro');
+      await answer(view, 'repo-ro', 200, status({ onboarded: true }));
+      await submitForm(view);
+      expect(posted).toHaveLength(1);
+      expect(posted[0]).not.toHaveProperty('deferStart');
+      expect(writes()).toEqual(['POST /tasks']);
+      expect(nav.pushed).toEqual(['/tasks/task-new']);
+    });
+
+    it('N4: files picked before moving to it are gone when the person moves back', async () => {
+      const view = await readyOnA(two());
+      pick(view, 'repo-ro');
+      expect(page(view)).not.toContain('file(s) selected');
+
+      pick(view, 'repo-a');
+      expect(controls(view.tree(), /^attachments/)).toHaveLength(1);
+      expect(page(view)).not.toContain('file(s) selected');
+    });
   });
 });
 
