@@ -1,3 +1,4 @@
+import { fixtureBase, networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import {
   chmod,
@@ -10,7 +11,6 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
@@ -35,6 +35,7 @@ import {
   type ProjectRender,
 } from '@haive/shared/project-state';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
+import * as gitPush from '../../../repo/git-push.js';
 import {
   haltFailed,
   loadOutstandingMergeGuidance,
@@ -94,6 +95,15 @@ vi.mock('../../../repo/git-push.js', async (importOriginal) => {
       const fetching = args[1].includes('fetch');
       if (fetching) fetchProbe.sections.push(claimFake.activeSections);
       const result = await real.gitRun(...args);
+      if (fetching) await fetchProbe.afterFetch?.();
+      return result;
+    },
+    originGitRun: async (...args: Parameters<typeof real.gitRun>) => {
+      const intercepted = fetchProbe.intercept?.(args[1], args[0]);
+      if (intercepted) return intercepted;
+      const fetching = args[1].includes('fetch');
+      if (fetching) fetchProbe.sections.push(claimFake.activeSections);
+      const result = await real.originGitRun(...args);
       if (fetching) await fetchProbe.afterFetch?.();
       return result;
     },
@@ -164,6 +174,7 @@ const GIT_ENV = {
 };
 
 async function git(dir: string, args: string[]): Promise<string> {
+  args = networkGitArgs(args);
   const { stdout } = await exec('git', args, { cwd: dir, env: GIT_ENV });
   return stdout.toString();
 }
@@ -187,7 +198,7 @@ async function writeIn(dir: string, files: Record<string, string>): Promise<void
 async function setupWorktree(
   seed: Record<string, string> = {},
 ): Promise<{ parent: string; wt: string }> {
-  const parent = await mkdtemp(path.join(tmpdir(), 'wt-parent-'));
+  const parent = await mkdtemp(path.join(fixtureBase, 'wt-parent-'));
   await git(parent, ['init', '-b', 'main']);
   await git(parent, ['config', 'gc.auto', '0']);
   await writeFile(path.join(parent, 'base.txt'), 'base\n', 'utf8');
@@ -218,9 +229,9 @@ async function divergeBase(parent: string, wt: string): Promise<void> {
 
 /** Give `parent` an `origin` (a fresh bare) and push its current `main`. */
 async function pushParentMainToOrigin(parent: string): Promise<string> {
-  const bare = await mkdtemp(path.join(tmpdir(), 'wt-origin-'));
+  const bare = await mkdtemp(path.join(fixtureBase, 'wt-origin-'));
   await git(bare, ['init', '--bare', '-b', 'main']);
-  await git(parent, ['remote', 'add', 'origin', `file://${bare}`]);
+  await git(parent, ['remote', 'add', 'origin', httpOrigin(bare)]);
   await git(parent, ['push', '-u', 'origin', 'main']);
   return bare;
 }
@@ -228,9 +239,9 @@ async function pushParentMainToOrigin(parent: string): Promise<string> {
 /** Advance origin's `main` by one commit (via an ephemeral clone) so the parent's
  *  remote-tracking ref goes stale until it next fetches. */
 async function advanceOrigin(bare: string, file: string, content: string): Promise<void> {
-  const seed = await mkdtemp(path.join(tmpdir(), 'wt-seed-'));
+  const seed = await mkdtemp(path.join(fixtureBase, 'wt-seed-'));
   try {
-    await git(seed, ['clone', `file://${bare}`, '.']);
+    await git(seed, ['clone', httpOrigin(bare), '.']);
     await writeFile(path.join(seed, file), content, 'utf8');
     await git(seed, ['add', '-A']);
     await git(seed, ['commit', '-m', `origin: ${file}`]);
@@ -1093,10 +1104,10 @@ describe('12 merge phase + apply (real git)', () => {
 
   it('pushBase pushes the integrated base branch to origin', async () => {
     const { parent, wt } = await setupWorktree();
-    const bare = await mkdtemp(path.join(tmpdir(), 'wt-bare-'));
+    const bare = await mkdtemp(path.join(fixtureBase, 'wt-bare-'));
     try {
       await git(bare, ['init', '--bare', '-b', 'main']);
-      await git(parent, ['remote', 'add', 'origin', `file://${bare}`]);
+      await git(parent, ['remote', 'add', 'origin', httpOrigin(bare)]);
       const { merge, state } = await mergeThenApply(parent, det(wt, { hasOrigin: true }), {
         action: 'merge_remove',
         pushBase: true,
@@ -1116,7 +1127,7 @@ describe('12 merge phase + apply (real git)', () => {
   it('push failure halts but preserves the local merge', async () => {
     const { parent, wt } = await setupWorktree();
     try {
-      await git(parent, ['remote', 'add', 'origin', 'file:///nonexistent/repo.git']);
+      await git(parent, ['remote', 'add', 'origin', path.join(fixtureBase, 'nonexistent.git')]);
       const h = makeDb();
       const ctx = mkCtx(parent, h.db);
       const merge = await resolveMergePhase(
@@ -2118,7 +2129,7 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
       const h = makeDb();
       const detected = det(wt, {
         hasOrigin: true,
-        originUrl: `file://${bare}`,
+        originUrl: httpOrigin(bare),
         prWorkflowAvailable: true,
       });
       const out = await worktreeCleanupStep.apply(
@@ -2150,7 +2161,7 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
       const h = makeDb();
       const detected = det(wt, {
         hasOrigin: true,
-        originUrl: `file://${bare}`,
+        originUrl: httpOrigin(bare),
         prWorkflowAvailable: true,
       });
       await worktreeCleanupStep.apply(
@@ -3846,7 +3857,7 @@ it.each(['origin-keeps-advancing', 'origin-keeps-advancing without squash', 'pus
         },
       });
       expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
-      if (kind === 'push-failure') await git(parent, ['remote', 'add', 'origin', `file://${bare}`]);
+      if (kind === 'push-failure') await git(parent, ['remote', 'add', 'origin', httpOrigin(bare)]);
       else await git(parent, ['merge', '--no-ff', '--no-edit', 'origin/main']);
       await h.db.update().set({ status: 'running' }).where(null);
       const retried = await resolveMergePhase(
@@ -4706,6 +4717,128 @@ it('K4 a failed read of the base tip at the first open of a cross-branch merge r
     expect(h.stateWrites.filter((s) => s.phase !== 'pending')).toEqual([]);
     expect(String(thrown)).toContain('rev-parse');
     expect(claimFake.claims.get(dir)?.stepId).toBe('step1');
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+it('a refused pre-push origin warns, then the refused push halts with the merge preserved', async () => {
+  const { parent, wt } = await setupWorktree();
+  const bare = await pushParentMainToOrigin(parent);
+  try {
+    // Bypass only the fixture address mapping to install the refused repository config.
+    await git(parent, ['config', 'remote.origin.url', 'file:///refused-origin']);
+    const h = makeDb();
+    const ctx = mkCtx(parent, h.db);
+    const warn = vi.fn();
+    ctx.logger = { ...ctx.logger, warn } as unknown as StepContext['logger'];
+    const outcome = await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(det(wt, { hasOrigin: true }), { action: 'merge_remove', pushBase: true }),
+      ctx,
+      mkParams(h.db),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.stringContaining('origin URL is not allowed') }),
+      expect.stringContaining('pushing the local base as-is'),
+    );
+    expect(outcome).toMatchObject({
+      resolved: false,
+      result: {
+        status: 'failed',
+        error: expect.stringContaining('pushing'),
+      },
+    });
+    expect(h.getState()).toMatchObject({ phase: 'pushing', merged: true, pushed: false });
+    expect(await gitCode(parent, ['show', 'main:feature.txt'])).toBe(0);
+    expect(await gitCode(bare, ['show', 'main:feature.txt'])).not.toBe(0);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true });
+  }
+});
+
+it.each([new Error('origin read unavailable'), 'origin read unavailable'])(
+  'a thrown pre-push fetch warns and still pushes the pinned local merge (%s)',
+  async (failure) => {
+    const { parent, wt } = await setupWorktree();
+    const bare = await pushParentMainToOrigin(parent);
+    try {
+      fetchProbe.intercept = (argv) => {
+        if (argv.includes('fetch')) throw failure;
+        return null;
+      };
+      const h = makeDb();
+      const ctx = mkCtx(parent, h.db);
+      const warn = vi.fn();
+      ctx.logger = { ...ctx.logger, warn } as unknown as StepContext['logger'];
+      const outcome = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt, { hasOrigin: true }), { action: 'merge_remove', pushBase: true }),
+        ctx,
+        mkParams(h.db),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.stringContaining('origin read unavailable') }),
+        expect.any(String),
+      );
+      expect(outcome.resolved).toBe(true);
+      expect(h.getState()).toMatchObject({ phase: 'done', merged: true, pushed: true });
+      expect(fetchProbe.pushes).toContainEqual(
+        expect.objectContaining({ sha: await revOf(parent, 'main') }),
+      );
+      expect(await gitCode(bare, ['show', 'main:feature.txt'])).toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  },
+);
+
+it('merge_remove completes locally without any origin transport when detect refuses origin', async () => {
+  const { parent, wt } = await setupWorktree();
+  try {
+    await git(parent, ['config', 'remote.origin.url', 'file:///refused-origin']);
+    const originRun = vi.spyOn(gitPush, 'originGitRun');
+    const config = vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    try {
+      const detected = await worktreeCleanupStep.detect!(detectCtx(parent, wt));
+      expect(detected).toMatchObject({
+        hasOrigin: false,
+        originUrl: null,
+        originError: expect.any(String),
+      });
+      const form = await formOf(detectCtx(parent, wt), detected);
+      const validated = validateFormValues(form, {
+        ...extractFormDefaults(form),
+        action: 'merge_remove',
+        pushBase: true,
+      });
+      expect(validated.success).toBe(true);
+      if (!validated.success) throw new Error(validated.issues.join('; '));
+      expect(validated.data).not.toHaveProperty('pushBase');
+      const result = await mergeThenApply(parent, detected, validated.data);
+      expect(result.merge.resolved).toBe(true);
+      expect(result.state).toMatchObject({
+        phase: 'done',
+        merged: true,
+        pushed: false,
+        pushAfterMerge: false,
+      });
+      expect(result.applyOut).toMatchObject({
+        action: 'merge_remove',
+        merged: true,
+        removed: true,
+      });
+      expect(await gitCode(parent, ['show', 'main:feature.txt'])).toBe(0);
+      expect(originRun).not.toHaveBeenCalled();
+      expect(fetchProbe.pushes).toEqual([]);
+    } finally {
+      originRun.mockRestore();
+      config.mockRestore();
+    }
   } finally {
     await rm(parent, { recursive: true, force: true });
   }

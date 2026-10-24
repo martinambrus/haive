@@ -1,6 +1,6 @@
+import { fixtureBase, networkGitArgs } from './support/git-http.js';
 import { execFile, execFileSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -24,6 +24,7 @@ const IDENTITY = {
 };
 
 async function git(dir: string, args: string[]): Promise<void> {
+  args = networkGitArgs(args);
   await exec('git', args, { cwd: dir, env: { ...process.env, ...IDENTITY } });
 }
 
@@ -37,8 +38,8 @@ afterEach(async () => {
 
 /** A Haive repo and a remote made on its own, sharing no commit: both READMEs collide. */
 async function unrelatedPair(): Promise<string> {
-  const remote = await mkdtemp(path.join(tmpdir(), 'planmerge-save-remote-'));
-  const local = await mkdtemp(path.join(tmpdir(), 'planmerge-save-local-'));
+  const remote = await mkdtemp(path.join(fixtureBase, 'planmerge-save-remote-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'planmerge-save-local-'));
   dirs.push(remote, local);
   for (const [dir, readme] of [
     [remote, '# vareska\n\nfrom the forge\n'],
@@ -121,7 +122,7 @@ function contextFor(repoPath: string, db: unknown): StepContext {
 
 async function failingBranchRead(): Promise<() => void> {
   const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
-  const shimDir = await mkdtemp(path.join(tmpdir(), 'planmerge-branch-shim-'));
+  const shimDir = await mkdtemp(path.join(fixtureBase, 'planmerge-branch-shim-'));
   dirs.push(shimDir);
   await writeFile(
     path.join(shimDir, 'git'),
@@ -218,7 +219,7 @@ describe('plan snapshot save and pull: a merge a conversation left open', () => 
     const { db } = fakeDb();
     h.db = db;
     const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
-    const shimDir = await mkdtemp(path.join(tmpdir(), 'planmerge-save-shim-'));
+    const shimDir = await mkdtemp(path.join(fixtureBase, 'planmerge-save-shim-'));
     dirs.push(shimDir);
     await writeFile(
       path.join(shimDir, 'git'),

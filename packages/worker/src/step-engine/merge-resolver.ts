@@ -18,7 +18,13 @@ import {
 import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
-import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
+import {
+  originGitRun,
+  buildCredentialHelper,
+  gitRun,
+  pushBranch,
+  scrubSecret,
+} from '../repo/git-push.js';
 import { isWorktreeRegistered } from '../repo/git-workspace.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
 import {
@@ -640,7 +646,7 @@ async function squashFeatureMerge(
 }
 
 /** Best-effort authenticated `git fetch origin <base>` (same credential the push uses).
- *  Never throws — a failure is surfaced so the caller can warn-and-continue. */
+ *  Network failures and refused origins warn-and-continue. */
 async function fetchForSync(
   db: Database,
   ctx: StepContext,
@@ -671,7 +677,17 @@ async function fetchForSync(
     'origin',
     `refs/heads/${base}:${fetchRef}`,
   );
-  const res = await gitRun(cwd, argv, env);
+  let res;
+  try {
+    res = await originGitRun(cwd, argv, env);
+  } catch (err) {
+    return {
+      ok: false,
+      error: scrubSecret(err instanceof Error ? err.message : String(err), secret)
+        .trim()
+        .slice(0, 300),
+    };
+  }
   if (res.code !== 0) {
     return {
       ok: false,

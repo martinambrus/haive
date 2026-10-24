@@ -1,6 +1,6 @@
+import { fixtureBase, networkGitArgs } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -29,6 +29,7 @@ const GIT_ENV = {
 };
 
 async function git(dir: string, args: string[]): Promise<string> {
+  args = networkGitArgs(args);
   const { stdout } = await exec('git', args, { cwd: dir, env: GIT_ENV });
   return stdout.toString();
 }
@@ -58,8 +59,8 @@ async function write(dir: string, file: string, body: string): Promise<void> {
 
 /** A Haive repo and a remote made on its own, sharing no commit: both READMEs collide. */
 async function unrelatedPair(): Promise<string> {
-  const remote = await mkdtemp(path.join(tmpdir(), 'planmerge-apply-remote-'));
-  const local = await mkdtemp(path.join(tmpdir(), 'planmerge-apply-local-'));
+  const remote = await mkdtemp(path.join(fixtureBase, 'planmerge-apply-remote-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'planmerge-apply-local-'));
   dirs.push(remote, local);
   for (const [dir, readme] of [
     [remote, '# vareska\n\nfrom the forge\n'],
@@ -646,8 +647,8 @@ describe('plan merge: the previous answer, offered as reference when the merge r
 
 /** Local holds a FILE `docs`, the remote a DIRECTORY `docs/`: git moves the file to `docs~HEAD`. */
 async function fileAndDirectoryPair(): Promise<string> {
-  const remote = await mkdtemp(path.join(tmpdir(), 'planmerge-apply-remote-'));
-  const local = await mkdtemp(path.join(tmpdir(), 'planmerge-apply-local-'));
+  const remote = await mkdtemp(path.join(fixtureBase, 'planmerge-apply-remote-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'planmerge-apply-local-'));
   dirs.push(remote, local);
   for (const [dir, files] of [
     [remote, { 'README.md': '# vareska\n\nfrom the forge\n', 'docs/guide.md': 'guide\n' }],
@@ -769,7 +770,7 @@ describe("plan merge: discarding a cancelled conversation's merge", () => {
     flags.repoPath = local;
     await open(local, db);
     const realGit = (await exec('sh', ['-c', 'command -v git'])).stdout.toString().trim();
-    const shimDir = await mkdtemp(path.join(tmpdir(), 'planmerge-discard-shim-'));
+    const shimDir = await mkdtemp(path.join(fixtureBase, 'planmerge-discard-shim-'));
     dirs.push(shimDir);
     const shim = `#!/bin/sh\nfor a in "$@"; do if [ "$a" = '--show-current' ]; then echo "fatal: simulated failure" >&2; exit 128; fi; done\nexec ${realGit} "$@"\n`;
     await writeFile(path.join(shimDir, 'git'), shim);

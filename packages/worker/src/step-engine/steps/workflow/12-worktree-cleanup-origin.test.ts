@@ -1,6 +1,6 @@
+import { fixtureBase, networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,6 +13,7 @@ const tmpDirs: string[] = [];
 const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 
 async function git(cwd: string, args: string[]): Promise<void> {
+  args = networkGitArgs(args);
   await exec('git', ['-c', 'gc.auto=0', ...args], {
     cwd,
     env: {
@@ -26,7 +27,7 @@ async function git(cwd: string, args: string[]): Promise<void> {
 }
 
 async function mkTmp(prefix: string): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), prefix));
+  const dir = await mkdtemp(path.join(fixtureBase, prefix));
   tmpDirs.push(dir);
   return dir;
 }
@@ -47,7 +48,7 @@ async function setupWorktree(): Promise<{ parent: string; wt: string }> {
 async function addBareOrigin(parent: string): Promise<string> {
   const bare = await mkTmp('wt-origin-bare-');
   await git(bare, ['init', '--bare', '-b', 'main']);
-  const url = `file://${bare}`;
+  const url = httpOrigin(bare);
   await git(parent, ['remote', 'add', 'origin', url]);
   await git(parent, ['push', '-u', 'origin', 'main']);
   return url;

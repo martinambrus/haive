@@ -1,3 +1,4 @@
+import { originGitRun } from './git-push.js';
 import path from 'node:path';
 import { ensureDirNoFollow, lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
@@ -50,9 +51,9 @@ export async function gitRevParseHead(cwd: string): Promise<string> {
 }
 
 async function gitFetchAndCheckout(cwd: string, branch?: string): Promise<void> {
-  const args = ['pull', '--ff-only'];
-  if (branch) args.push('origin', branch);
-  const res = await gitRun(cwd, args, { GIT_ASKPASS: 'echo' });
+  const args = ['pull', '--ff-only', 'origin'];
+  if (branch) args.push(branch);
+  const res = await originGitRun(cwd, args, { GIT_ASKPASS: 'echo' });
   if (res.code !== 0) {
     const msg = res.stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
     throw new Error(`git pull failed (exit ${res.noExit ?? res.code}): ${msg}`);

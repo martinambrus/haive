@@ -1,3 +1,4 @@
+import { isAllowedGitRemoteUrl } from '@haive/shared/schemas';
 import type { Database } from '@haive/database';
 import { getDecryptedCredentials } from './credentials.js';
 import { GIT_MAX_BUFFER, type GitRunResult, gitRun } from './git-exec.js';
@@ -19,13 +20,80 @@ export async function detectOrigin(cwd: string): Promise<boolean> {
   return (await getOriginUrl(cwd)) !== null;
 }
 
-/** The origin remote URL, or null when git says there is none: `remote get-url` exits 2 for a remote that does not exist. Any other failure is no answer and throws. */
+/** An origin address refused by the same rule as a typed remote URL. */
+export class OriginUrlError extends Error {
+  constructor(url: string, direction: 'fetch' | 'push' = 'fetch') {
+    let safe = url;
+    if (safe.includes('://')) {
+      try {
+        let parsed = new URL(safe);
+        const start = safe.indexOf('://') + 3;
+        const end = safe.indexOf('/', start);
+        const authority = safe.slice(start, end < 0 ? undefined : end);
+        const at = authority.lastIndexOf('@');
+        // Remove userinfo before interpreting a ? or # inside malformed credentials.
+        if (at >= 0) parsed = new URL(safe.slice(0, start) + safe.slice(start + at + 1));
+        parsed.username = '';
+        parsed.password = '';
+        parsed.search = '';
+        parsed.hash = '';
+        if (!parsed.hostname && !parsed.pathname.startsWith('/')) {
+          // Opaque URLs have no authority for URL to separate from userinfo.
+          const start = safe.indexOf('://') + 3;
+          const at = safe.lastIndexOf('@');
+          if (at >= start) safe = safe.slice(0, start) + safe.slice(at + 1);
+          safe = safe.split(/[?#]/)[0]!;
+        } else {
+          safe = parsed.toString();
+        }
+      } catch {
+        // A malformed authority cannot be redacted reliably; keep only its scheme.
+        safe = safe.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/)?.[0] ?? '(unparseable URL)';
+      }
+    } else {
+      safe = safe.slice(safe.lastIndexOf('@') + 1).split(/[?#]/)[0]!;
+    }
+    const text = safe.replace(/[\r\n]+/g, ' ');
+    const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+    const fence = '`'.repeat(longest + 1);
+    const span = longest > 0 ? `${fence} ${text} ${fence}` : `${fence}${text}${fence}`;
+    super(
+      `origin URL is not allowed (${direction} URL; expected https, http, ssh or an scp-style address): ${span}. Fix the git configuration and Retry this step.`,
+    );
+    this.name = 'OriginUrlError';
+  }
+}
+
+/** Read every effective fetch and push URL (including git's insteadOf rewrites). Exit 2 alone
+ *  means no origin; a failed read is unknown, and an unsafe address fails the caller. */
 export async function getOriginUrl(cwd: string): Promise<string | null> {
-  const res = await gitRun(cwd, ['remote', 'get-url', 'origin']);
-  if (res.code === 0) return res.stdout.trim();
-  if (res.code === 2) return null;
-  const output = (res.stderr || res.stdout).trim().slice(0, 500);
-  throw new Error(`git remote get-url origin failed in ${cwd}: ${output}`);
+  let first: string | undefined;
+  for (const push of [false, true]) {
+    const res = await gitRun(cwd, [
+      'remote',
+      'get-url',
+      ...(push ? ['--push'] : []),
+      '--all',
+      'origin',
+    ]);
+    if (!push && res.code === 2) return null;
+    if (res.code !== 0) {
+      const output = (res.stderr || res.stdout).trim().slice(0, 500);
+      throw new Error(`git remote get-url origin failed in ${cwd}: ${output}`);
+    }
+    const urls = res.stdout.trim().split('\n');
+    for (const url of urls) {
+      if (!isAllowedGitRemoteUrl(url)) throw new OriginUrlError(url, push ? 'push' : 'fetch');
+    }
+    first ??= urls[0];
+  }
+  return first!;
+}
+
+/** Origin transports always re-read the checkout immediately before git talks to the remote. */
+export async function originGitRun(...args: Parameters<typeof gitRun>): Promise<GitRunResult> {
+  if ((await getOriginUrl(args[0])) === null) throw new Error('origin remote is not configured');
+  return gitRun(...args);
 }
 
 /** Add `origin` pointing at url, or set-url when it already exists. Idempotent.
@@ -36,8 +104,11 @@ export async function ensureOrigin(
 ): Promise<{ added: boolean; updated: boolean }> {
   const add = await gitRun(cwd, ['remote', 'add', 'origin', url]);
   if (add.code === 0) return { added: true, updated: false };
-  if (/remote origin already exists/i.test(add.stderr)) {
-    await gitRun(cwd, ['remote', 'set-url', 'origin', url]);
+  if (add.code === 3) {
+    const updated = await gitRun(cwd, ['remote', 'set-url', 'origin', url]);
+    if (updated.code !== 0) {
+      throw new Error(`git remote set-url origin failed: ${updated.stderr || updated.stdout}`);
+    }
     return { added: false, updated: true };
   }
   throw new Error(`git remote add origin failed: ${add.stderr || add.stdout}`);
@@ -96,7 +167,7 @@ export async function pushBranch(args: {
   if (setUpstream && !sha) pushArgs.push('-u');
   pushArgs.push('origin', sha ? `${sha}:refs/heads/${branch}` : branch);
 
-  const res = await gitRun(cwd, pushArgs, env);
+  const res = await originGitRun(cwd, pushArgs, env);
   if (res.code !== 0) {
     throw new Error(`git push failed: ${scrubSecret(res.stderr || res.stdout, secret)}`);
   }

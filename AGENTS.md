@@ -145,7 +145,8 @@ seeing a file once git had replaced it on the bind mount, so a pull could leave 
 running with no restart line. MEASURED in the worker container: the second `git checkout` of one
 file and every write after it went unseen, all of them seen when polling, at ~1.6% of one core
 for all 744 worker source and lib files polled once a second. A check with no repository wrapper runs inside the matching
-existing service container — `docker exec` is fine for diagnostics and tests, but never to
+existing service container — `docker exec` is fine for diagnostics and tests (not those using the git HTTP fixture: the worker
+image has no `git http-backend`), but never to
 install dependencies or rebuild runtime artifacts. Before restarting or rebuilding the
 worker, inspect active tasks: recreating it can interrupt live CLI terminals and
 in-progress task steps.

@@ -1,6 +1,6 @@
+import { fixtureBase, networkGitArgs } from '../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { SQL } from 'drizzle-orm';
@@ -65,6 +65,7 @@ afterEach(async () => {
 });
 
 async function git(dir: string, args: string[]): Promise<string> {
+  args = networkGitArgs(args);
   const { stdout } = await exec('git', args, { cwd: dir, env: { ...process.env, ...IDENTITY } });
   return stdout.toString();
 }
@@ -114,8 +115,8 @@ async function fixture(
   extra: Record<string, string> = {},
   { sha256 = false }: { sha256?: boolean } = {},
 ): Promise<{ parent: string; wt: string; bare: string; forked: string }> {
-  const parent = await mkdtemp(path.join(tmpdir(), 'branch-revert-'));
-  const bare = await mkdtemp(path.join(tmpdir(), 'branch-revert-origin-'));
+  const parent = await mkdtemp(path.join(fixtureBase, 'branch-revert-'));
+  const bare = await mkdtemp(path.join(fixtureBase, 'branch-revert-origin-'));
   dirs.push(parent, bare);
   const format = sha256 ? ['--object-format=sha256'] : [];
   await git(bare, ['init', '-q', '--bare', '-b', 'main', ...format]);
@@ -409,7 +410,7 @@ describe('revertHaiveProjectionsOnBranch', () => {
     const { parent, wt } = await fixture();
     await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
     const tip = await revOf(wt);
-    const elsewhere = await mkdtemp(path.join(tmpdir(), 'branch-revert-elsewhere-'));
+    const elsewhere = await mkdtemp(path.join(fixtureBase, 'branch-revert-elsewhere-'));
     dirs.push(elsewhere);
     await write(elsewhere, { 'state/settings/scope-exclude-globs.json': 'decoy\n' });
     await rm(path.join(wt, '.haive-data'), { recursive: true });
@@ -424,7 +425,7 @@ describe('revertHaiveProjectionsOnBranch', () => {
   it('leaves a link where the state directory was alone, and writes nothing through it', async () => {
     const { parent, wt, forked } = await fixture();
     await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
-    const elsewhere = await mkdtemp(path.join(tmpdir(), 'branch-revert-elsewhere-'));
+    const elsewhere = await mkdtemp(path.join(fixtureBase, 'branch-revert-elsewhere-'));
     dirs.push(elsewhere);
     await write(elsewhere, { 'settings/scope-exclude-globs.json': 'decoy\n' });
     await rm(path.join(wt, STATE), { recursive: true });
@@ -475,7 +476,7 @@ describe('revertHaiveProjectionsOnBranch', () => {
 
   it('does nothing for a branch with no fork point with the target, a missing one or a bad name', async () => {
     const { parent, wt } = await fixture();
-    const unrelated = await mkdtemp(path.join(tmpdir(), 'branch-revert-unrelated-'));
+    const unrelated = await mkdtemp(path.join(fixtureBase, 'branch-revert-unrelated-'));
     dirs.push(unrelated);
     await git(unrelated, ['init', '-q', '-b', 'main']);
     await git(unrelated, ['config', 'gc.auto', '0']);
@@ -904,7 +905,7 @@ describe('a put-back cut short is resumed, not lost', () => {
   });
 
   it('a .haive-data link halts the resumed put-back too, and nothing is written through it', async () => {
-    const elsewhere = await mkdtemp(path.join(tmpdir(), 'branch-revert-elsewhere-'));
+    const elsewhere = await mkdtemp(path.join(fixtureBase, 'branch-revert-elsewhere-'));
     dirs.push(elsewhere);
     const decoy = path.join(elsewhere, 'state/settings/scope-exclude-globs.json');
     await write(elsewhere, { 'state/settings/scope-exclude-globs.json': 'decoy\n' });

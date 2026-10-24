@@ -1,6 +1,6 @@
+import { fixtureBase, networkGitArgs, httpOrigin } from './support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -8,7 +8,7 @@ import { validateFormValues, type FormSchema } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 
 // Avoid the master-KEK / secretsService dependency: the credentialed push path
-// only needs a {username,secret,host}. A local bare remote ignores the creds,
+// only needs a {username,secret,host}. The HTTP fixture ignores the creds,
 // so the real `git push` still succeeds while we assert the call happened.
 vi.mock('../src/repo/credentials.js', () => ({
   getDecryptedCredentials: vi.fn(async () => ({ username: 'u', secret: 's', host: 'github.com' })),
@@ -22,11 +22,12 @@ const BRANCH = 'feature/test';
 const tmpDirs: string[] = [];
 
 async function git(cwd: string, args: string[]): Promise<void> {
+  args = networkGitArgs(args);
   await exec('git', args, { cwd });
 }
 
 async function mkTmp(prefix: string): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), prefix));
+  const dir = await mkdtemp(path.join(fixtureBase, prefix));
   tmpDirs.push(dir);
   return dir;
 }
@@ -129,7 +130,7 @@ describe('gate-4 push: detect', () => {
     const detected = await gate4PushStep.detect!(ctx);
     expect(detected.hasGit).toBe(true);
     expect(detected.hasOrigin).toBe(true);
-    expect(detected.originUrl).toBe(bare);
+    expect(detected.originUrl).toBe(httpOrigin(bare!));
     expect(detected.branch).toBe(BRANCH);
     expect(detected.recentCommits).toContain('init commit');
     expect(detected.credentials).toHaveLength(1);
@@ -270,13 +271,13 @@ describe('gate-4 push: apply', () => {
     const detected = await gate4PushStep.detect!(ctx);
     const out = await gate4PushStep.apply(
       ctx,
-      applyArgs(detected, { push: true, remoteUrl: bare, credentialId: '' }),
+      applyArgs(detected, { push: true, remoteUrl: httpOrigin(bare), credentialId: '' }),
     );
     expect(out.pushed).toBe(true);
     expect(out.branch).toBe(BRANCH);
     expect(await bareHasBranch(bare)).toBe(true);
     expect(sets).toHaveLength(1);
-    expect(sets[0]!.remoteUrl).toBe(bare);
+    expect(sets[0]!.remoteUrl).toBe(httpOrigin(bare));
   });
 
   it('pushes to an existing origin using the chosen credential', async () => {
