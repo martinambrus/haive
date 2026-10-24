@@ -3,6 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+    # A push that changes only the task board (TASKS.md, edited straight on main) starts no CI: it
+    # carries no code, and each run is the whole job set, which never cancels another push's run
+    # (the push concurrency group is per sha).
+    # Pull requests keep every check.
+    paths-ignore:
+      - 'TASKS.md'
   pull_request:
     branches: [main]
 
