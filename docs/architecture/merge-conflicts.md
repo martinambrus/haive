@@ -268,8 +268,9 @@ left. Seven rules keep it that way, each MEASURED on git 2.43 and 2.54:
   `refused`, git's own answer), and
   the resolver's `setAside` reads HEAD ahead of the set-aside, so a failed read throws before any file is
   set aside and, in a later round, puts the first round's files back through its own catch. A throw out of
-  the resolver ends the step as failed with git's text, moves nothing and keeps the claim (a failed task's
-  claim stays live until its Retry, above). Four readers report the unknown in their own type, because their
+  the resolver ends the step as failed with git's text and keeps the claim (a failed task's claim stays
+  live until its Retry, above); a section that runs after files were set aside, the abort of a merge the
+  pass just opened included, puts them back first (`mergeSection`). Four readers report the unknown in their own type, because their
   caller has a branch for it: `halt` (the recorder of last resort, which must not reject on a git read; an
   unreadable feature ref keeps the claim, as null did), `prePushSync` (warns and pushes the pinned local
   base), `captureFixBaseline` (`{unavailable}` carrying git's text) and the check after `merge --abort`

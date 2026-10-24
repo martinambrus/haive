@@ -1601,15 +1601,17 @@ export async function resolveMergePhase(
       return finishMerge(db, stepDef, current, ctx, params, state);
     }
     const dir = state.mergeDir;
+    const repositoryId =
+      state.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
     if (state.conflictRetries >= MAX_MERGE_CONFLICT_RETRIES) {
-      const aborted = await section(dir, () => abortMerge(dir));
+      const aborted = await mergeSection(repositoryId, dir, () => abortMerge(dir));
       const why = `Merge conflict merging ${state.featureBranch} into ${state.baseBranch}: auto-resolution exhausted after ${MAX_MERGE_CONFLICT_RETRIES} attempts. Resolve manually or use "Retry with AI".`;
       if (!aborted.ok) return haltUnaborted(db, current, params, state, aborted, why);
       await settleGivenUp(db, current, params, state);
       return haltFailed(db, current, params, state, why, 'merge conflict');
     }
     if (!params.providers || !params.deps) {
-      const aborted = await section(dir, () => abortMerge(dir));
+      const aborted = await mergeSection(repositoryId, dir, () => abortMerge(dir));
       const why = 'Merge conflict requires a CLI provider to resolve, but none were supplied.';
       if (!aborted.ok) return haltUnaborted(db, current, params, state, aborted, why);
       await settleGivenUp(db, current, params, state);
@@ -1619,8 +1621,6 @@ export async function resolveMergePhase(
     // ref is not this conflict, and a fixer must never be sent into it.
     const feature = state.featureBranch;
     const baselineSource = await maskSourceOnce(db, params.taskId);
-    const repositoryId =
-      state.mode === 'same-branch' ? await taskRepositoryId(db, params.taskId) : null;
     const putBackFirst = await putBackBeforeFeatureMerge(
       db,
       spec,
@@ -1776,7 +1776,7 @@ export async function resolveMergePhase(
       return { resolved: false, result: { status: 'waiting_cli', row } };
     }
     if (dispatched.kind === 'no_provider') {
-      const aborted = await section(dir, () => abortMerge(dir));
+      const aborted = await mergeSection(repositoryId, dir, () => abortMerge(dir));
       const why = 'No CLI provider available for merge conflict resolution.';
       if (!aborted.ok) return haltUnaborted(db, current, params, state, aborted, why);
       await settleGivenUp(db, current, params, state);
