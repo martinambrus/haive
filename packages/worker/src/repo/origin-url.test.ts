@@ -4,7 +4,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import { gitRun } from './git-exec.js';
-import { detectOrigin, getOriginUrl, originGitRun, pushBranch } from './git-push.js';
+import {
+  detectOrigin,
+  getOriginUrl,
+  originGitRun,
+  pushBranch,
+  OriginUrlError,
+} from './git-push.js';
 import { fetchOrigin } from '../plan/merge.js';
 
 const dirs: string[] = [];
@@ -132,9 +138,15 @@ describe('origin URL boundary', () => {
       expect(e.message).not.toContain('pa/ss');
       expect(e.message).not.toContain('ss@');
       expect(e.message).not.toContain('?');
-      expect(e.message.endsWith(`: ${safe}`)).toBe(true);
+      expect(e.message.endsWith(`: \`${safe}\``)).toBe(true);
       expect(e.message).toContain(safe);
     });
+  });
+  it.each([
+    ['git://host/[x](https://e.example)', '`git://host/[x](https://e.example)`'],
+    ['/tmp/a`[x](relative)', '`` /tmp/a`[x](relative) ``'],
+  ])('keeps refused address %s inside one Markdown code span', (url, span) => {
+    expect(new OriginUrlError(url).message.endsWith(`: ${span}`)).toBe(true);
   });
   it('accepts all allowed fetch/push addresses and returns the first fetch URL', async () => {
     const work = await repo();

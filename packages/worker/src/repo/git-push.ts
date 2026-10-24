@@ -53,7 +53,11 @@ export class OriginUrlError extends Error {
     } else {
       safe = safe.slice(safe.lastIndexOf('@') + 1).split(/[?#]/)[0]!;
     }
-    super(`origin URL is not allowed (expected https, http, ssh or an scp-style address): ${safe}`);
+    const text = safe.replace(/[\r\n]+/g, ' ');
+    const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+    const fence = '`'.repeat(longest + 1);
+    const span = longest > 0 ? `${fence} ${text} ${fence}` : `${fence}${text}${fence}`;
+    super(`origin URL is not allowed (expected https, http, ssh or an scp-style address): ${span}`);
     this.name = 'OriginUrlError';
   }
 }
