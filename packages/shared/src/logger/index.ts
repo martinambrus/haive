@@ -1,7 +1,13 @@
 import pino from 'pino';
 import { boundQueryError, serializeError } from './errors.js';
 
-export { boundQueryError, safeErrorDetails, serializeError } from './errors.js';
+export {
+  boundQueryError,
+  safeErrorDetails,
+  safeErrorMessage,
+  safeErrorForTransport,
+  serializeError,
+} from './errors.js';
 
 export const logger = pino({
   level: process.env.LOG_LEVEL ?? 'info',

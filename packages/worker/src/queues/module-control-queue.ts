@@ -9,6 +9,7 @@ import {
   type ModuleTeardownResult,
 } from '@haive/shared';
 import { openModuleDatabase, type ModuleDatabase } from '@haive/shared/module-db';
+import { safeErrorForTransport } from '@haive/shared/logger';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
@@ -183,7 +184,9 @@ export async function processModuleControlJob(
   if (job.name !== MODULE_CONTROL_JOB_NAMES.TEARDOWN) {
     throw new Error(`Unknown module-control job: ${job.name}`);
   }
-  return runModuleTeardown(deps, job.data.moduleId);
+  return runModuleTeardown(deps, job.data.moduleId).catch((err) => {
+    throw safeErrorForTransport(err);
+  });
 }
 
 export function startModuleControlWorker(

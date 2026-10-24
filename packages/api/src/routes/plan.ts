@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { execFile } from 'node:child_process';
 import { access } from 'node:fs/promises';
@@ -473,7 +474,7 @@ planRoutes.post('/:id/plan/snapshot/save', async (c) => {
   } catch (err) {
     throw new HttpError(
       409,
-      err instanceof Error ? err.message : 'Could not save the plan snapshot',
+      err instanceof Error ? safeErrorMessage(err) : 'Could not save the plan snapshot',
       'plan_snapshot_save_failed',
     );
   }
@@ -494,7 +495,7 @@ planRoutes.post('/:id/plan/snapshot/pull', async (c) => {
   } catch (err) {
     throw new HttpError(
       409,
-      err instanceof Error ? err.message : 'Could not pull the plan snapshot',
+      err instanceof Error ? safeErrorMessage(err) : 'Could not pull the plan snapshot',
       'plan_snapshot_pull_failed',
     );
   }

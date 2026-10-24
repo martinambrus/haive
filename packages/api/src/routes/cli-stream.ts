@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import type { Server } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { eq } from 'drizzle-orm';
@@ -354,6 +355,5 @@ function sendFrame(ws: WebSocket, frame: StreamFrameOut): void {
 }
 
 function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
+  return safeErrorMessage(err);
 }

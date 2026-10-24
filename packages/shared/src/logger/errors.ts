@@ -46,3 +46,14 @@ export function serializeError(err: unknown): unknown {
     ...(typeof queryError.query === 'string' ? { query: queryError.query } : {}),
   };
 }
+
+/** Response text must not expose query text, bound values or driver diagnostics. */
+export function safeErrorMessage(err: unknown): string {
+  if (boundQueryError(err)) return 'Database operation failed';
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** BullMQ keeps only message/stack on failure, so sanitize BEFORE it loses the class. */
+export function safeErrorForTransport(err: unknown): unknown {
+  return boundQueryError(err) ? new Error(safeErrorMessage(err)) : err;
+}

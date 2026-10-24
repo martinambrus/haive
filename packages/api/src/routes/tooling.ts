@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { ollamaEmbed } from '@haive/shared/rag';
@@ -39,13 +40,13 @@ tooling.post('/test-postgres', async (c) => {
       await sql.end({ timeout: 5 }).catch(() => {});
       return c.json({
         ok: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: safeErrorMessage(err),
       });
     }
   } catch (err) {
     return c.json({
       ok: false,
-      error: err instanceof Error ? err.message : String(err),
+      error: safeErrorMessage(err),
     });
   }
 });
@@ -104,7 +105,7 @@ tooling.post('/test-ollama', async (c) => {
         dims = vec?.length ?? 0;
         dimsMatch = dims === body.dimensions;
       } catch (err) {
-        dimsError = err instanceof Error ? err.message : String(err);
+        dimsError = safeErrorMessage(err);
       }
     }
 
@@ -123,7 +124,7 @@ tooling.post('/test-ollama', async (c) => {
     return c.json({
       ok: false,
       reachable: false,
-      error: err instanceof Error ? err.message : String(err),
+      error: safeErrorMessage(err),
     });
   }
 });
@@ -196,7 +197,7 @@ tooling.post('/ollama-model-capabilities', async (c) => {
       found: false,
       capabilities: [],
       supportsThinking: null,
-      error: err instanceof Error ? err.message : String(err),
+      error: safeErrorMessage(err),
     });
   }
 });
@@ -325,7 +326,7 @@ tooling.post('/pull-ollama-model', async (c) => {
         });
       } else {
         await stream.writeSSE({
-          data: JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          data: JSON.stringify({ error: safeErrorMessage(err) }),
           event: 'error',
         });
       }

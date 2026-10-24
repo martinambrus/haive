@@ -31,7 +31,7 @@ import { attachContainerStream } from './terminal.js';
 import { execInContainer } from './docker-exec.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isUuid } from '../lib/uuid.js';
-import { safeErrorDetails } from '@haive/shared/logger';
+import { safeErrorDetails, safeErrorMessage } from '@haive/shared/logger';
 
 // CLI output, authorization URLs and upstream errors can contain credentials.
 // Log only session identifiers, lengths, error classes/codes and fixed messages.
@@ -331,7 +331,8 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   if (!createResult.ok || !createResult.containerRowId || !createResult.dockerContainerId) {
     wsSend(ws, {
       type: 'error',
-      message: createResult.error ?? 'Failed to create login container',
+      // Worker results are strings: the DB error's class/params have been lost.
+      message: 'Failed to create login container',
     });
     try {
       ws.close(1011, 'create_failed');
@@ -471,7 +472,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   stream.on('error', (err: Error) => {
     log.warn({ error: safeErrorDetails(err), providerId }, 'stream error');
     if (session.probePending) return;
-    wsSend(ws, { type: 'error', message: err.message });
+    wsSend(ws, { type: 'error', message: safeErrorMessage(err) });
     void cleanupSession(session);
   });
 
@@ -1042,7 +1043,7 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
     );
     wsSend(session.ws, {
       type: 'error',
-      message: err instanceof Error ? err.message : 'post-login probe failed',
+      message: safeErrorMessage(err),
     });
   } finally {
     session.probePending = false;
@@ -1258,6 +1259,5 @@ function wsSend(ws: WebSocket, data: Record<string, unknown>): void {
 }
 
 function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
+  return safeErrorMessage(err);
 }

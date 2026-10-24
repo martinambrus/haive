@@ -11,6 +11,7 @@ import {
   type PlanMirrorJobResult,
 } from '@haive/shared';
 import { lockPlanMerge } from '@haive/shared/plan';
+import { safeErrorForTransport } from '@haive/shared/logger';
 import type {
   ProjectStateResolvePayload,
   ProjectStateResolveResult,
@@ -664,9 +665,13 @@ export function startPlanMirrorWorker(): Worker<
           if (!data.repositoryId) throw new Error('repositoryId required');
           return refresh(data.repositoryId, data.userId);
         case PLAN_MIRROR_JOB_NAMES.SAVE:
-          return save(data);
+          return save(data).catch((err) => {
+            throw safeErrorForTransport(err);
+          });
         case PLAN_MIRROR_JOB_NAMES.PULL:
-          return pull(data);
+          return pull(data).catch((err) => {
+            throw safeErrorForTransport(err);
+          });
         case PLAN_MIRROR_JOB_NAMES.SWEEP:
           return sweepAll();
         default:

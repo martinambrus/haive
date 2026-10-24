@@ -1,4 +1,6 @@
+import { randomBytes } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
@@ -1092,6 +1094,22 @@ describe('POST /global-kb/test-db', () => {
   const CONNECTION = 'postgres://probe:pw@169.254.169.254:5432/kb';
   const probe = () =>
     send('POST', '/global-kb/test-db', { mode: 'external', connectionString: CONNECTION });
+
+  it('does not return a bound query value from a failed connection setup', async () => {
+    const secret = randomBytes(24).toString('base64url');
+    h.connect.mockRejectedValueOnce(
+      new DrizzleQueryError('select $1', [secret], new Error(secret)),
+    );
+    const res = await probe();
+    const text = await res.text();
+    expect(res.status).toBe(200);
+    expect(
+      Array.from({ length: secret.length - 5 }, (_, i) => secret.slice(i, i + 6)).some((part) =>
+        text.includes(part),
+      ),
+    ).toBe(false);
+    expect(JSON.parse(text).ok).toBe(false);
+  });
 
   it('is refused to a regular user, and opens no connection', async () => {
     h.role = 'user';

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { Server } from 'node:http';
 import { Duplex } from 'node:stream';
 import type Docker from 'dockerode';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
@@ -11,6 +12,7 @@ const h = vi.hoisted(() => ({
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
   save: vi.fn(),
   queueError: undefined as Error | undefined,
+  createError: undefined as string | undefined,
   probeError: undefined as Error | undefined,
 }));
 vi.mock('@haive/shared', async (original) => ({
@@ -41,7 +43,9 @@ vi.mock('../src/queues.js', () => ({
         waitUntilFinished: async () => {
           if (name !== 'cli-login-create' && h.probeError) throw h.probeError;
           return name === 'cli-login-create'
-            ? { ok: true, containerRowId: 'row', dockerContainerId: 'container' }
+            ? h.createError
+              ? { ok: false, error: h.createError }
+              : { ok: true, containerRowId: 'row', dockerContainerId: 'container' }
             : { cli: { authStatus: 'ok' } };
         },
       };
@@ -69,6 +73,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.save.mockReset();
   h.queueError = undefined;
+  h.createError = undefined;
   h.probeError = undefined;
   providerName = 'claude-code';
   h.db = {
@@ -155,6 +160,46 @@ function paste() {
 }
 
 describe('CLI login banner credential logging', () => {
+  it.each(['queue', 'probe', 'stream'] as const)(
+    'sanitizes a structured DB failure from %s',
+    async (source) => {
+      const err = new DrizzleQueryError(
+        'insert into secrets (value) values ($1)',
+        [TOKEN],
+        new Error(TOKEN),
+      );
+      if (source === 'queue') h.queueError = err;
+      if (source === 'probe') {
+        providerName = 'grok';
+        h.probeError = err;
+      }
+      await start('', source !== 'queue');
+      if (source === 'stream') stream.emit('error', err);
+      if (source === 'probe')
+        stream.emit('data', Buffer.from('https://accounts.x.ai/oauth2/device\n\nSigned in\n'));
+      await settle();
+      const sent = JSON.stringify(ws.send.mock.calls);
+      expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'error')).toBe(true);
+      expect(
+        Array.from({ length: TOKEN.length - 5 }, (_, i) => TOKEN.slice(i, i + 6)).some((part) =>
+          sent.includes(part),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it('does not forward a failed worker insert message to the browser', async () => {
+    h.createError = `Failed query: insert into containers (env_vars) values ($1)\nparams: ${TOKEN}`;
+    await start('', false);
+    const sent = JSON.stringify(ws.send.mock.calls);
+    expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'error')).toBe(true);
+    expect(
+      Array.from({ length: TOKEN.length - 5 }, (_, i) => TOKEN.slice(i, i + 6)).some((part) =>
+        sent.includes(part),
+      ),
+    ).toBe(false);
+  });
+
   it('captures a wrapped Claude token without logging any six-character substring', async () => {
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));

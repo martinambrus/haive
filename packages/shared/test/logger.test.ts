@@ -2,7 +2,13 @@ import { randomBytes } from 'node:crypto';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import pino from 'pino';
 import { afterEach, expect, it, vi } from 'vitest';
-import { logger, serializeError, safeErrorDetails } from '../src/logger/index.js';
+import {
+  logger,
+  serializeError,
+  safeErrorDetails,
+  safeErrorMessage,
+  safeErrorForTransport,
+} from '../src/logger/index.js';
 
 const secret = randomBytes(24).toString('base64url');
 const query = 'insert into secrets (value) values ($1)';
@@ -36,6 +42,17 @@ function assertSafe(value: unknown) {
   ).toBe(false);
 }
 afterEach(() => vi.restoreAllMocks());
+
+it('sanitizes response and queue failure text before a transport loses error structure', () => {
+  const err = new Error(secret, { cause: failure() });
+  assertSafe(safeErrorMessage(err));
+  const transported = safeErrorForTransport(err) as Error;
+  assertSafe({ message: transported.message, stack: transported.stack });
+  expect(transported.cause === undefined).toBe(true);
+  const ordinary = new Error('ordinary');
+  expect(safeErrorMessage(ordinary)).toBe('ordinary');
+  expect(safeErrorForTransport(ordinary)).toBe(ordinary);
+});
 
 it.each(['err', 'error', 'bare', 'implicit', 'wrapped'] as const)(
   'sanitizes %s logging through child loggers',

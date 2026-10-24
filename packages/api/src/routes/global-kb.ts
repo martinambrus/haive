@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Hono, type Context } from 'hono';
@@ -570,7 +571,7 @@ globalKbRoutes.post('/test-ollama', async (c) => {
   } catch (err) {
     return c.json({
       ok: false,
-      message: `Reachable, but model "${model}" failed: ${(err as Error).message}`,
+      message: `Reachable, but model "${model}" failed: ${safeErrorMessage(err)}`,
     });
   }
 });
@@ -612,7 +613,7 @@ globalKbRoutes.post('/test-db', requireAdmin, async (c) => {
       message: mode === 'internal' ? 'Internal global KB DB reachable' : 'External DB reachable',
     });
   } catch (err) {
-    return c.json({ ok: false, message: (err as Error).message });
+    return c.json({ ok: false, message: safeErrorMessage(err) });
   } finally {
     if (conn) await conn.close().catch(() => {});
   }

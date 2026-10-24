@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { randomUUID } from 'node:crypto';
 import type { Server } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -604,8 +605,7 @@ function sendJson(ws: WebSocket, frame: Record<string, unknown>): void {
 }
 
 function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
+  return safeErrorMessage(err);
 }
 
 export async function resetStaleRefcounts(redis: Redis = getRedis()): Promise<void> {

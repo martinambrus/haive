@@ -1,4 +1,6 @@
+import { randomBytes } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 
 const ACTOR = '00000000-0000-4000-8000-0000000000a1';
 const OFF = new Date('2026-10-14T08:00:00.000Z');
@@ -98,6 +100,22 @@ function buildApp() {
   return app;
 }
 const teardown = (id: string) => buildApp().request(`/modules/${id}/teardown`, { method: 'POST' });
+
+it('does not return a structured DB error from a failed teardown', async () => {
+  const secret = randomBytes(24).toString('base64url');
+  h.state = 'failed';
+  h.settle = async () => {
+    throw new DrizzleQueryError('select $1', [secret], new Error(secret));
+  };
+  const res = await teardown('alpha');
+  const text = await res.text();
+  expect(res.status).toBe(502);
+  expect(
+    Array.from({ length: secret.length - 5 }, (_, i) => secret.slice(i, i + 6)).some((part) =>
+      text.includes(part),
+    ),
+  ).toBe(false);
+});
 const body = async (res: Response) => (await res.json()) as Record<string, unknown>;
 const refused = async (res: Response, status: number, code: string | null) => {
   expect([res.status, (await body(res)).code]).toEqual([status, code]);
