@@ -801,7 +801,7 @@ status: open · (T377 landed as PR #886) · was modular #252
 
 ### T378 · FNF[sign-in-failure-paths] · vendor token not revoked on a failed finishSignIn; device poll finally can 500; GitHub connect poll has no cancelled guard
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:40Z · last: 2026-10-24T20:40Z · was modular #254
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:40Z · last: 2026-10-24T23:50Z · merged PR #905 (134a27e13), waiting for main CI · was modular #254
 
 1. api lib/integration-sign-in.ts ~:150-153: revoke the token on failure, best-effort.
 2. lib/integration-device.ts ~:151-153: the finally must never change a committed answer.
