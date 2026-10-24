@@ -718,6 +718,7 @@ describe('the parent of a bug fix', () => {
 });
 
 describe('a new task with attachments', () => {
+  afterEach(() => Reflect.deleteProperty(globalThis, 'window'));
   const UPLOAD = (name: string) => `POST /tasks/task-new/attachments?filename=${name}`;
   const START = 'POST /tasks/task-new/action';
   const writes = () => sent.filter((call) => !call.startsWith('GET '));

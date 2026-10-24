@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PlanStarter } from './plan-starter';
 import {
   buttons,
@@ -86,6 +86,7 @@ beforeEach(() => {
 });
 
 describe('PlanStarter when the start is refused', () => {
+  afterEach(() => vi.unstubAllGlobals());
   it.each([true, false])(
     'confirms missing uploads and keeps the draft when declined: %s',
     async (yes) => {
