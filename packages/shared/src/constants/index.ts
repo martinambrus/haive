@@ -428,9 +428,11 @@ export const VERSION_REFRESH_JOB_ID = 'cli-refresh-versions-repeatable';
 
 /** Finished CLI jobs stay readable beyond the browser's 10-minute poll window
  *  (packages/web/src/lib/cli-jobs.ts), including refreshes started by the worker.
- *  BullMQ age/count pruning applies to the queue's entire finished set. Every
+ *  BullMQ age/count pruning applies only to the finishing job's own state set. Every
  *  cli-exec producer that retains results must use at least this age, without a
  *  count cap; `true` is safe for jobs that remove only their own result.
+ *  This also governs non-polled INVOKE records and the four build/provision/remove
+ *  failure sites: their finishes can prune polled results in that same state's set.
  *  Age cleanup is lazy: older records are pruned on the next retained job's
  *  completion/failure, so an idle queue can still hold its last window. */
 export const CLI_POLLABLE_JOB_OPTS = {

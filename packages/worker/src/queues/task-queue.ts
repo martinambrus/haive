@@ -1408,7 +1408,7 @@ const workerDeps: WorkerDeps = {
     const opts: JobsOptions = {
       attempts: 2,
       backoff: { type: 'exponential', delay: 5000 },
-      // Retention trims the whole cli-exec finished set, including polled jobs.
+      // Keep INVOKE's age aligned so its finishes cannot prune young polled results.
       ...CLI_POLLABLE_JOB_OPTS,
     };
     // Fair scheduling (kill-switch'd): composite priority round-robins across tasks
