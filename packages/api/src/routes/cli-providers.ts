@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
+  VERSION_REFRESH_JOB_ID,
   CLI_POLLABLE_JOB_OPTS,
   CLI_INSTALL_METADATA,
   CLI_PROVIDER_CATALOG,
@@ -63,8 +64,10 @@ async function loadOwnedProvider(db: Database, userId: string, providerId: strin
 const CLI_PROVIDER_LABEL_MAX_LENGTH = 255;
 const MAX_CLONE_ATTEMPTS = 1000;
 
-// Plain adds use BullMQ's counter; refresh reuse can also return this scheduler's tick id.
-const POLLABLE_JOB_ID = /^(?:[1-9][0-9]*|repeat:cli-refresh-versions-repeatable:[1-9][0-9]*)$/;
+// BullMQ ids: plain adds use its counter; scheduler ticks use repeat:<schedulerId>:<ms>.
+const POLLABLE_JOB_ID = new RegExp(
+  `^(?:[1-9][0-9]*|repeat:${VERSION_REFRESH_JOB_ID.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:[1-9][0-9]*)$`,
+);
 
 /** Load a job the UI is polling, or 404.
  *

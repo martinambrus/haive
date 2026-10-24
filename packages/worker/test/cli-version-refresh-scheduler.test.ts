@@ -12,7 +12,7 @@ vi.mock('../src/queues/cli-exec/_shared.js', async (importOriginal) => {
   return { ...actual, getCliExecQueue: () => queue };
 });
 
-import { CLI_EXEC_JOB_NAMES } from '@haive/shared';
+import { CLI_EXEC_JOB_NAMES, VERSION_REFRESH_JOB_ID } from '@haive/shared';
 import { scheduleCliVersionRefresh } from '../src/queues/cli-exec/handlers.js';
 
 beforeEach(() => {
@@ -24,6 +24,11 @@ describe('version refresh scheduler', () => {
   it('keeps scheduler and boot results readable beyond the browser poll window', async () => {
     await scheduleCliVersionRefresh();
 
+    expect(queue.upsertJobScheduler).toHaveBeenCalledWith(
+      VERSION_REFRESH_JOB_ID,
+      { every: 12 * 60 * 60 * 1000 },
+      expect.objectContaining({ name: CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS }),
+    );
     const scheduled = queue.upsertJobScheduler.mock.calls[0]![2];
     const boot = queue.add.mock.calls[0]!;
     for (const opts of [scheduled.opts, boot[2]]) {

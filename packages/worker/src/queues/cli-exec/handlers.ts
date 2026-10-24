@@ -8,6 +8,7 @@ import { schema, type Database } from '@haive/database';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import {
   CLI_EXEC_JOB_NAMES,
+  VERSION_REFRESH_JOB_ID,
   CLI_POLLABLE_JOB_OPTS,
   CONFIG_CONCURRENCY_CHANNEL,
   CONFIG_KEYS,
@@ -1171,7 +1172,6 @@ export async function handleSignOutJob(
 }
 
 const VERSION_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
-const VERSION_REFRESH_JOB_ID = 'cli-refresh-versions-repeatable';
 
 export async function scheduleCliVersionRefresh(): Promise<void> {
   const queue = getCliExecQueue();

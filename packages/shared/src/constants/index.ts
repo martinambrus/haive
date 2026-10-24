@@ -423,6 +423,9 @@ export const CLI_EXEC_JOB_NAMES = {
   PROVISION_OLLAMA_MODEL: 'cli-provision-ollama-model',
 } as const;
 
+/** Stable scheduler key; BullMQ derives each refresh tick's job id from it. */
+export const VERSION_REFRESH_JOB_ID = 'cli-refresh-versions-repeatable';
+
 /** Finished CLI jobs stay readable beyond the browser's 10-minute poll window
  *  (packages/web/src/lib/cli-jobs.ts), including refreshes started by the worker. */
 export const CLI_POLLABLE_JOB_OPTS = {

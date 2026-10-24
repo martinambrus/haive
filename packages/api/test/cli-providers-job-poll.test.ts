@@ -20,13 +20,13 @@ vi.mock('../src/queues.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { CLI_EXEC_JOB_NAMES } from '@haive/shared';
+import { CLI_EXEC_JOB_NAMES, VERSION_REFRESH_JOB_ID } from '@haive/shared';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 const PROVIDER = '00000000-0000-4000-8000-0000000000b1';
-const SCHEDULER_ID = 'repeat:cli-refresh-versions-repeatable:1792800000000';
+const SCHEDULER_ID = `repeat:${VERSION_REFRESH_JOB_ID}:1792800000000`;
 const routes = [
   { path: '/catalog/claude-code/refresh-versions', name: CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS },
   { path: `/${PROVIDER}/test`, name: CLI_EXEC_JOB_NAMES.PROBE },
@@ -57,8 +57,8 @@ describe.each(routes)('poll $path', ({ path, name }) => {
     '01',
     '1:logs',
     'repeat:other:1792800000000',
-    'repeat:cli-refresh-versions-repeatable:abc',
-    'repeat:cli-refresh-versions-repeatable:1:logs',
+    `repeat:${VERSION_REFRESH_JOB_ID}:abc`,
+    `repeat:${VERSION_REFRESH_JOB_ID}:1:logs`,
     '1\n',
   ])('rejects malformed id %j before looking it up', async (id) => {
     h.getJob.mockResolvedValue(job(name));

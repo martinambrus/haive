@@ -16,7 +16,7 @@ vi.mock('../src/queues.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { secretsService } from '@haive/shared';
+import { VERSION_REFRESH_JOB_ID, secretsService } from '@haive/shared';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -123,7 +123,7 @@ describe('the CLI catalog routes require a session', () => {
   });
 
   it('reuses a scheduler refresh id', async () => {
-    const id = 'repeat:cli-refresh-versions-repeatable:1792800000000';
+    const id = `repeat:${VERSION_REFRESH_JOB_ID}:1792800000000`;
     h.getJobs.mockResolvedValue([{ id, name: 'cli-refresh-versions' }]);
 
     const reply = await call('POST', '/catalog/claude-code/refresh-versions', true);
