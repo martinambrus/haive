@@ -9,6 +9,7 @@ import {
   gitRun,
   scrubSecret,
 } from '../../../repo/git-push.js';
+import { gitGaveNoAnswer } from '../../../repo/git-exec.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 
@@ -95,9 +96,12 @@ async function fetchOrigin(
 
 async function countCommits(repoPath: string, range: string): Promise<number> {
   const res = await gitRun(repoPath, ['rev-list', '--count', range]);
-  if (res.code !== 0) return 0;
-  const n = Number.parseInt(res.stdout.trim() || '0', 10);
-  return Number.isFinite(n) ? n : 0;
+  const n = Number.parseInt(res.stdout.trim(), 10);
+  if (res.code !== 0 || !Number.isFinite(n))
+    throw new Error(
+      `git rev-list --count ${range} failed in ${repoPath}: ${(res.stderr || res.stdout).trim()}`,
+    );
+  return n;
 }
 
 async function loadHandoff(ctx: StepContext): Promise<PostOnboardingPushHandoff> {
@@ -145,6 +149,10 @@ export const onboardingPushStep: StepDefinition<OnboardingPushDetect, Onboarding
     };
 
     const cur = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    if (gitGaveNoAnswer(cur))
+      throw new Error(
+        `could not read the checkout's current branch: ${(cur.stderr || cur.stdout).trim()}`,
+      );
     const currentBranch = cur.code === 0 ? cur.stdout.trim() : null;
     const base = currentBranch && currentBranch !== 'HEAD' ? currentBranch : null;
     const hasOrigin = await detectOrigin(ctx.repoPath);
