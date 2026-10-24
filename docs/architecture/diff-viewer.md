@@ -24,13 +24,16 @@ when `git show HEAD:<path>` exits non-zero, or when the working file cannot be o
 file that vanished, a permission error), and it drops both contents, as it does for a binary or
 oversized file. It keys on git's exit code and record layout, never on its message. Left empty,
 the side that did read would diff against nothing: a modified file would render as all-added or
-all-removed and a deleted file as an empty deletion. The viewer shows "Could not read this file"
-instead of a diff, gate 3 gives the commit-message generator the path and status only ("content
+all-removed and a deleted file as an empty deletion. The viewer shows the entry's
+`unreadableReason` when it has one, else "Could not read this file", instead of a diff; the reason
+is display copy, the flag decides. Gate 3 gives the commit-message generator the path and status only ("content
 unavailable"), and the knowledge builders set no `editPath`, so the file cannot be edited. The
 field is absent when both sides were read, which covers every artifact an older worker wrote and
 every learning entry the learning step synthesizes. Its investigation entry is read from the path
-it will be written to with a strict read: nothing there, or no directory yet, is a new file, and a
-link, a pipe or a refused read flags the entry the same way.
+it will be written to with a strict read, capped and NUL-checked by the same reader as
+`buildFileEntry` (a binary or oversized file keeps no contents and no `editPath`): nothing there,
+or no directory yet, is a new file, an existing empty file is a modified one with an empty old
+side, and a link, a pipe or a refused read flags the entry the same way.
 
 A link is not an unreadable file. A symlink reads as its target text: the old side is the blob git
 holds, the new side is `readLinkNoFollow` on the working path, which reads the link without
@@ -39,7 +42,9 @@ prints for one. The old sha comes from the tree entry `ls-tree -l` lists (mode 1
 before any blob is read, so a commit that also sits in the superproject's object store is not
 shown as a patch. The new sha is the index entry or, when git reports the checkout as moved on
 disk (`Y` is `M`) or as an intent to add (`Y` is `A`, whose index entry is the empty blob), the
-commit `git rev-parse HEAD` answers inside the checkout. That directory is opened without
+sha `git --git-dir=.git rev-parse --verify --quiet HEAD` resolves inside the checkout. That reads
+the ref and never the commit object, as `git add` does (`resolve_gitlink_ref`), and it is asked
+only when the held directory has a `.git` directory or file of its own. That directory is opened without
 following links and handed to git as a descriptor, so a name swapped after the check cannot
 redirect it, and an uninitialised submodule, an empty directory where git answers with the
 superproject's own HEAD, is never asked. Paths reach git as `:(literal)` pathspecs. Such an entry
@@ -47,8 +52,11 @@ sets `link` (`symlink` or `gitlink`) for its new side: the viewer names it with 
 passes it to the commit-message generator beside the target text, and the knowledge builders set
 no `editPath`, since the text is a target, not a file's bytes. A submodule whose own working tree
 is dirty but whose commit has not moved reads as no change, because the commit would not record
-the rest. A repository nobody added as a submodule (git lists it as `dir/`), a conflicted gitlink
-and a gitlink path that now holds a pipe stay unreadable. `CommitDiffFile` and
+the rest. A repository nobody added as a submodule (git lists it as `dir/`) is shown as
+`git add -A` records it: a gitlink at its checked-out commit or, while its HEAD is unborn (exit 1),
+an unreadable entry whose reason says git cannot stage it. A git run that gave no answer, a
+conflicted gitlink, a gitlink path that now holds a pipe and a symlinked `.git` stay unreadable
+with no reason. `CommitDiffFile` and
 `CommitDiffArtifact` are declared once, in `@haive/shared/commit-diff-artifact`, and the builders
 and the viewer both import them; a new field goes there.
 
