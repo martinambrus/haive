@@ -28,6 +28,9 @@ beforeAll(async () => {
     } else if (req.url === '/empty') {
       res.writeHead(204);
       res.end();
+    } else if (req.url === '/odd-status') {
+      res.writeHead(600);
+      res.end('x');
     } else if (req.url === '/hold') {
       res.writeHead(200);
       res.write('x');
@@ -143,6 +146,14 @@ describe('guarded fetch', () => {
     const res = await f(`http://127.0.0.1:${server.port}/empty`);
     expect(res.status).toBe(204);
     expect(res.body).toBeNull();
+  });
+
+  it('rejects a status a Response cannot hold as a fetch failure', async () => {
+    const f = createGuardedFetch({ isBlocked: () => false });
+    const err = await failure(f(`http://127.0.0.1:${server.port}/odd-status`));
+    expect(err).toBeInstanceOf(TypeError);
+    expect(err.message).toBe('fetch failed');
+    expect(err.cause).toBeInstanceOf(RangeError);
   });
 
   it('rejects with the signal reason when aborted mid-response, and when already aborted', async () => {

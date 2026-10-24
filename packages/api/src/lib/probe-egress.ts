@@ -109,25 +109,30 @@ export function createGuardedFetch(seams: ProbeSeams = {}) {
         },
         (res) => {
           done = true;
-          const responseHeaders = new Headers();
-          for (const [key, value] of Object.entries(res.headers)) {
-            if (Array.isArray(value)) for (const v of value) responseHeaders.append(key, v);
-            else if (value !== undefined) responseHeaders.append(key, value);
-          }
-          const status = res.statusCode ?? 0;
-          const noBody = NO_BODY_STATUS.has(status);
-          if (noBody) res.resume();
           res.on('close', () => {
             cleanup();
             agent.destroy();
           });
-          resolve(
-            new Response(noBody ? null : (Readable.toWeb(res) as ReadableStream), {
-              status,
-              statusText: res.statusMessage ?? '',
-              headers: responseHeaders,
-            }),
-          );
+          try {
+            const responseHeaders = new Headers();
+            for (const [key, value] of Object.entries(res.headers)) {
+              if (Array.isArray(value)) for (const v of value) responseHeaders.append(key, v);
+              else if (value !== undefined) responseHeaders.append(key, value);
+            }
+            const status = res.statusCode ?? 0;
+            const noBody = NO_BODY_STATUS.has(status);
+            if (noBody) res.resume();
+            resolve(
+              new Response(noBody ? null : (Readable.toWeb(res) as ReadableStream), {
+                status,
+                statusText: res.statusMessage ?? '',
+                headers: responseHeaders,
+              }),
+            );
+          } catch (err) {
+            res.destroy();
+            fail(err);
+          }
         },
       );
       request.on('error', (err) => {
