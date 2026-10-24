@@ -83,23 +83,6 @@ board. At session start, load the board's tasks you own or will work on into the
 
 # Open tasks
 
-### T311 · FNF[rag-chunker-2] · chunker false matches, wrong method owners, braces in strings (+5)
-status: taken · owner: fnf-run@ACTIVIT21 · since: 2026-10-24T12:56Z · last: 2026-10-24T13:23Z (user: fix r3 first)
-branch: fnf/311-rag-chunker-2 (pushed) · PR #889 (CI 11/11 green on 6d80205cd) · worktree on ACTIVIT21: .claude/worktrees/p311 · evidence/ledger/fix briefs: .claude/tmp/fnf-run/p311/ on ACTIVIT21
-All PRE-EXISTING, measured on the eval tree at 9c0c8ee77 (evidence .claude/tmp/rag-plan/p1/evidence/metrics-main.json). File: `_rag-chunkers.ts`.
-1. The PHP class pattern matches "class" inside comments: 563 methods get a wrong owner, 120 lose theirs.
-2. Function/arrow patterns match inside strings, comments, inline HTML, template literals (31 PHP + 7 JS false sections).
-3. `braceBlockEnd` counts braces inside strings: 5 PHP functions lose their section.
-4. FIXED in #815.
-5. A short span with a closer plus the next head goes whole to the next section; split at the first worded line.
-6. `.rb` sections stop before `end`; Ruby ranges should end after `end`.
-Fix: a lexer pass marking comment/string spans shared by PHP and JS. Needs one reindex.
-State 2026-10-24: 16 commits on the branch; full worker suite green at 19320b360 (session run after the crash); measured on the eval tree: wrong method owners 753→0, PHP unmatched 48→0, 0 constructs newly lost; ruler unchanged across fix rounds. 3 Codex rounds, each fixed one class:
-- r1 (fixed af669c010): unclosed template literal (stray backtick in JSX text) masked to EOF.
-- r2 (fixed ef082d0e1, 6d80205cd): `//` after a URL scheme in JSX text read as a comment; unclosed `/*` masked to EOF.
-- r3 (fixed 61f1f86b2, 7e278ba33): (a) postfix `++`/`--` before `/` lets a regex start, masking up to the next `/` on the line (`n++ / 2; function save(){} … n / 3` loses save) — fix: record `++`/`--` as an operand in `prev`; (b) Java `"""` text blocks are read with the single-line string reader, so a `/*` inside one masks following classes — fix: recognise text blocks for Java (or language-specific masking).
-- r4 OPEN: `n! / 2` (TS non-null) and `obj. return / 2` (property across whitespace) read `/` as regex. User decision 2026-10-24: keep looping with Codex until clean. Round 5 rewrites the slash rule on the previous significant token and checks it against the TypeScript parser as an oracle.
-
 ### T323 · FNF[uploads-3] · leftover upload files never cleaned; unlink failures warn forever (+3)
 status: open (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Previous brief, reusable: .claude/tmp/fnf-run/p323/drive.md on ACTIVIT21)
 All PRE-EXISTING.
@@ -847,6 +830,7 @@ Fix: pass `connection: { client_connection_check_interval: 500 }` in the postgre
 ## Done
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
+- T311 — RAG chunker reads constructs only outside comments, strings and inline HTML (16 Codex rounds; leftovers in T413) — PR #889 (74eba9317), 2026-10-24
 - T328 — bundle git bounded; 01 refuses an unknown base; gate 3 keeps an earlier sha — PR #888 (214b76b1f), 2026-10-24
 - T383 — fix-loop gate re-offer follow-ups (was modular #263) — PR #887 (e5c41e2ec), 2026-10-24
 - T384 — module lifecycle bounds (was modular #264) — PR #885 (a9e51e265), 2026-10-24
