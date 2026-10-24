@@ -137,3 +137,18 @@ describe('grok device-code login parsing', () => {
     expect(detectAuthResult('Signed in as someone@example.com\n')).toEqual({ kind: 'success' });
   });
 });
+
+describe('auth result signal', () => {
+  it('fix5 returns only the result kind without retaining credential-bearing stdout', () => {
+    const secret = 'SyntheticCredential_Q7v9Z2p4R8x6';
+    const signal = detectAuthResult(`authentication failed: ${secret}`);
+    expect(signal?.kind === 'error').toBe(true);
+    expect(Object.keys(signal ?? {}).every((key) => key === 'kind')).toBe(true);
+    const serialized = JSON.stringify(signal);
+    expect(
+      Array.from({ length: secret.length - 5 }, (_, i) => secret.slice(i, i + 6)).some((part) =>
+        serialized.includes(part),
+      ),
+    ).toBe(false);
+  });
+});

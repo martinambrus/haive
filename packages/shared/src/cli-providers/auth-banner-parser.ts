@@ -108,7 +108,6 @@ export function extractDeviceCode(raw: string): string | undefined {
 
 export interface AuthResultSignal {
   kind: 'success' | 'error';
-  message?: string;
 }
 
 export function detectAuthResult(clean: string): AuthResultSignal | null {
@@ -130,8 +129,7 @@ export function detectAuthResult(clean: string): AuthResultSignal | null {
     lower.includes('login failed') ||
     lower.includes('token expired')
   ) {
-    const errorLine = clean.split('\n').find((l) => /invalid|failed|expired/i.test(l));
-    return { kind: 'error', message: (errorLine?.trim() ?? 'Authentication failed').slice(0, 200) };
+    return { kind: 'error' };
   }
   return null;
 }
