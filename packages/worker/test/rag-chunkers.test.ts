@@ -1113,7 +1113,6 @@ describe('maskNonCode', () => {
     ['a single-quoted string', "var a = '{';"],
     ['a double-quoted string', 'var a = "}";'],
     ['an escaped quote', "var a = 'it\\'s {';"],
-    ['a string with no closing quote', "var a = '{"],
     ['a template', 'var a = `{`;'],
     ['a template holding expressions', "var a = `a ${ f({ x: '}' }) } ${ `n${'{'}` } {`;"],
     ['a regex class', 'var a = /[{}]/g;'],
@@ -1209,9 +1208,22 @@ describe('maskNonCode', () => {
     );
   });
 
-  it('ends an unterminated template at the end of the text and a string at the end of its line', () => {
+  it('ends an unterminated template at the end of the text', () => {
     expect(maskNonCode('var a = `x {\nok();', 'js')).toBe(`var a = \`${blank('x {\nok();')}`);
-    expect(maskNonCode("var a = 'x {\nok();", 'js')).toBe(`var a = '${blank('x {')}\nok();`);
+  });
+
+  it('reads a quote with no closing quote on its line as text, as an apostrophe in markup is', () => {
+    for (const src of [
+      "var a = 'x {\nok();",
+      "var h = <p>Don't {x}</p>;\n",
+      'String t = """\n  { it\'s "x" }\n  """;\n',
+      'a = "{',
+    ]) {
+      expect(maskNonCode(src, 'js')).toBe(src);
+    }
+    expect(maskNonCode("var s = 'a\\\r\n{ b';\r\nok();", 'js')).toBe(
+      `var s = '${blank('a\\\r\n{ b')}';\r\nok();`,
+    );
   });
 
   it('gives up on regex literals after a few slashes on a line that closed none', () => {
@@ -1293,6 +1305,29 @@ describe('extractCodeSections — braces that are not code', () => {
     const found = extractCodeSections(src, 'bundle.js').map((s) => s.sectionId);
 
     expect(found.filter((id) => !id.startsWith('chunk-'))).toEqual(expected);
+  });
+
+  it('ends a JSX component at its own closing brace past an apostrophe in its text', () => {
+    const tsx = [
+      'export function Banner({ items }) {',
+      '  return (',
+      '    <p>',
+      "      You don't have any items. {items.length > 0 && (",
+      '        <span>some</span>',
+      '      )}',
+      '    </p>',
+      '  );',
+      '}',
+      '',
+      'export function Other() {',
+      '  return 1;',
+      '}',
+      '',
+    ].join('\n');
+    const sections = sectionsOf(tsx, 'banner.tsx');
+
+    expect(sections.get('function-Banner')!.endsWith('    </p>\n  );\n}')).toBe(true);
+    expect(sections.get('function-Other')!.startsWith('export function Other() {')).toBe(true);
   });
 
   it('ends an object-literal member at its own closing brace', () => {

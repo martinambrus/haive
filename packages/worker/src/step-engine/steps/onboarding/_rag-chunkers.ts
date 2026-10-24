@@ -271,14 +271,15 @@ function quotedEnd(text: string, open: number): number {
   return text.length;
 }
 
-/** `quotedEnd` for a JS string, which ends where its line does when it has no closing quote. */
+/** `quotedEnd` for a JS string, which is -1 when its line ends first: such a quote is text, as an
+ *  apostrophe is in markup. */
 function lineStringEnd(text: string, open: number): number {
   for (let i = open + 1; i < text.length; i += 1) {
-    if (text[i] === '\\') i += 1;
+    if (text[i] === '\\') i += text[i + 1] === '\r' && text[i + 2] === '\n' ? 2 : 1;
     else if (text[i] === text[open]) return i + 1;
-    else if (text[i] === '\n') return i;
+    else if (text[i] === '\n') return -1;
   }
-  return text.length;
+  return -1;
 }
 
 /** Index just past the '}' that closes the '{' at `open`; a quoted string inside is skipped. */
@@ -450,10 +451,15 @@ function jsNonCode(text: string): Span[] {
       }
     } else if (c === "'" || c === '"') {
       const end = lineStringEnd(text, i);
-      const body = stringBody(text, i, end);
-      if (frames.length === 0 && !BARE_NAME.test(text.slice(body[0], body[1]))) spans.push(body);
-      prev = '';
-      i = end;
+      if (end < 0) {
+        prev = c;
+        i += 1;
+      } else {
+        const body = stringBody(text, i, end);
+        if (frames.length === 0 && !BARE_NAME.test(text.slice(body[0], body[1]))) spans.push(body);
+        prev = '';
+        i = end;
+      }
     } else if (c === '`') {
       if (frames.length === 0) templateOpen = i;
       frames.push(-1);
