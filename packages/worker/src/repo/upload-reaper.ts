@@ -1,16 +1,5 @@
 import path from 'node:path';
-import {
-  and,
-  eq,
-  getTableName,
-  gt,
-  gte,
-  inArray,
-  lt,
-  notExists,
-  notInArray,
-  or,
-} from 'drizzle-orm';
+import { and, eq, getTableName, gte, inArray, lt, notExists, notInArray, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { lstatNoFollow, readdirNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
@@ -23,6 +12,10 @@ const REAP_RETRY_MS = IDLE_MS;
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 const UPLOADS_DIR = '_uploads';
 const BATCH = 100;
+const MAX_ORPHAN_FAILURES = 1000;
+const orphanFailures = new Map<string, { root: string; rel: string; code: string | undefined }>();
+const MAX_INVALID_DUMP_PATHS = 1000;
+const invalidDumpPaths = new Set<string>();
 const ENDED_TASK_STATUSES = ['completed', 'failed', 'cancelled'] as const;
 
 // Group 1 of every shape built from it is the session id.
@@ -100,7 +93,7 @@ function finalRelOf(partialRel: string): string {
 }
 
 async function removeFile(root: string, rel: string): Promise<boolean> {
-  const info = await lstatNoFollow(root, rel);
+  const info = await lstatNoFollow(root, rel, { strict: true });
   if (info === null || (info.kind !== 'file' && info.kind !== 'symlink')) return false;
   return removeNoFollow(root, rel);
 }
@@ -160,7 +153,14 @@ async function claimEndedDumps(db: Database, cutoff: Date): Promise<void> {
     if (pinned.has(dump.id)) continue;
     try {
       if (ownedRel(repoRoot(), dump.userId, dump.stored, DUMP_FILE) === null) {
-        log.warn({ stored: dump.stored }, 'completed dump names a path that is not its own file');
+        const details = { dumpId: dump.id, stored: dump.stored };
+        const message = 'completed dump names a path that is not its own file';
+        if (invalidDumpPaths.has(dump.id)) {
+          log.debug(details, message);
+        } else {
+          log.warn(details, message);
+          if (invalidDumpPaths.size < MAX_INVALID_DUMP_PATHS) invalidDumpPaths.add(dump.id);
+        }
         continue;
       }
       await claimDump(db, dump.id, cutoff);
@@ -313,7 +313,7 @@ async function recentSessions(db: Database, ids: string[], cutoff: Date): Promis
       .where(
         and(
           inArray(kind.table.id, ids),
-          or(gt(kind.table.updatedAt, cutoff), eq(kind.table.status, 'reap_failed')),
+          or(gte(kind.table.updatedAt, cutoff), eq(kind.table.status, 'reap_failed')),
         ),
       );
     for (const row of rows) recent.add(row.id);
@@ -321,7 +321,7 @@ async function recentSessions(db: Database, ids: string[], cutoff: Date): Promis
   return recent;
 }
 
-// The ids of a finished archive's repositories that still need it: anything but a failed one. An
+// The ids of a finished archive's repositories that still need it: only a cloning one. An
 // id no repository carries may be a legacy archive named by its upload session, so it stays while
 // its owner has a repository still cloning.
 async function liveRepositories(
@@ -335,22 +335,47 @@ async function liveRepositories(
     .from(schema.repositories)
     .where(inArray(schema.repositories.id, ids));
   const known = new Set(rows.map((row) => row.id));
-  const live = new Set(rows.filter((row) => row.status !== 'error').map((row) => row.id));
+  const live = new Set(rows.filter((row) => row.status === 'cloning').map((row) => row.id));
   if (known.size < ids.length && (await cloningOwners()).has(owner)) {
     for (const id of ids) if (!known.has(id)) live.add(id);
   }
   return live;
 }
 
+async function forgetGoneOrphanFailures(): Promise<void> {
+  for (const [key, { root, rel }] of orphanFailures) {
+    try {
+      if ((await lstatNoFollow(root, rel, { strict: true })) === null) orphanFailures.delete(key);
+    } catch {
+      // An unreadable path may still hold the file whose removal failed.
+    }
+  }
+}
+
+function logOrphanFailure(root: string, rel: string, err: unknown): void {
+  const key = path.join(root, rel);
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  const previous = orphanFailures.get(key);
+  if (previous === undefined || previous.code !== code) {
+    log.warn({ err, root, rel }, 'orphan upload file was not removed');
+  } else {
+    log.debug({ err, root, rel }, 'orphan upload file was not removed');
+  }
+  if (previous !== undefined || orphanFailures.size < MAX_ORPHAN_FAILURES) {
+    orphanFailures.set(key, { root, rel, code });
+  }
+}
+
 async function reapOrphanPartials(
   db: Database,
   root: string,
   shapes: RegExp[],
+  pass: string,
+  cutoff: Date,
   alsoKept?: (ids: string[], owner: string) => Promise<Set<string>>,
 ): Promise<number> {
   const owners = await readdirNoFollow(root, UPLOADS_DIR);
   if (owners === null) return 0;
-  const cutoff = new Date(Date.now() - IDLE_MS);
   let removed = 0;
   for (const owner of owners) {
     if (!owner.isDirectory()) continue;
@@ -383,9 +408,13 @@ async function reapOrphanPartials(
       for (const { rel, session } of batch) {
         if (recent.has(session) || kept?.has(session)) continue;
         try {
-          if (await removeFile(root, rel)) removed += 1;
+          if (await removeFile(root, rel)) {
+            removed += 1;
+            log.debug({ rel, pass }, 'orphan upload file removed');
+          }
+          orphanFailures.delete(path.join(root, rel));
         } catch (err) {
-          log.warn({ err, rel }, 'orphan upload partial was not removed');
+          logOrphanFailure(root, rel, err);
         }
       }
     }
@@ -401,6 +430,7 @@ async function reapOrphanPartials(
 /** One reaper pass: claim the idle and the ended, finish what is reaping, sweep orphan partials. */
 export async function reapAbandonedUploads(db: Database): Promise<UploadReapResult> {
   const cutoff = new Date(Date.now() - IDLE_MS);
+  await forgetGoneOrphanFailures();
   const result: UploadReapResult = { sessions: 0, dumps: 0, orphans: 0 };
   const guarded = async <T>(what: string, run: () => Promise<T>, skipped: T): Promise<T> => {
     try {
@@ -431,7 +461,7 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
   }
   result.orphans += await guarded(
     'the repository file pass',
-    () => reapOrphanPartials(db, repoRoot(), [ARCHIVE_PARTIAL, DUMP_PARTIAL]),
+    () => reapOrphanPartials(db, repoRoot(), [ARCHIVE_PARTIAL, DUMP_PARTIAL], 'repository', cutoff),
     0,
   );
   let cloning: Promise<Set<string>> | null = null;
@@ -444,14 +474,31 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
   result.orphans += await guarded(
     'the finished archive pass',
     () =>
-      reapOrphanPartials(db, repoRoot(), [ARCHIVE_FINISHED], (ids, owner) =>
-        liveRepositories(db, ids, owner, cloningOwners),
+      reapOrphanPartials(
+        db,
+        repoRoot(),
+        [ARCHIVE_FINISHED],
+        'finished archive',
+        cutoff,
+        (ids, owner) => liveRepositories(db, ids, owner, cloningOwners),
       ),
     0,
   );
   result.orphans += await guarded(
+    'the finished dump pass',
+    () =>
+      reapOrphanPartials(db, repoRoot(), [DUMP_FILE], 'finished dump', cutoff, async (ids) => {
+        const rows = await db
+          .select({ id: schema.dbUploads.id })
+          .from(schema.dbUploads)
+          .where(inArray(schema.dbUploads.id, ids));
+        return new Set(rows.map((row) => row.id));
+      }),
+    0,
+  );
+  result.orphans += await guarded(
     'the bundle file pass',
-    () => reapOrphanPartials(db, bundleRoot(), [ARCHIVE_PARTIAL]),
+    () => reapOrphanPartials(db, bundleRoot(), [ARCHIVE_PARTIAL], 'bundle', cutoff),
     0,
   );
   if (result.sessions + result.dumps + result.orphans > 0) {
