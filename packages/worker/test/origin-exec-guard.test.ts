@@ -70,10 +70,14 @@ function unvalidatedOriginCalls(
         owner = scope(owner);
       }
     }
+    if (ts.isFunctionLike(node) || ts.isPropertyAccessExpression(node)) return [];
     if (
-      ts.isFunctionLike(node) ||
-      ts.isBinaryExpression(node) ||
-      ts.isPropertyAccessExpression(node)
+      ts.isBinaryExpression(node) &&
+      ![
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+        ts.SyntaxKind.AmpersandAmpersandToken,
+      ].includes(node.operatorToken.kind)
     )
       return [];
     if (ts.isCallExpression(node) && node.expression.getText(file) !== 'hardenGitArgs') return [];
@@ -86,7 +90,25 @@ function unvalidatedOriginCalls(
   const offenders: number[] = [];
   function insideClone(node: ts.Node): boolean {
     for (let at: ts.Node | undefined = node; at; at = at.parent) {
-      if (ts.isFunctionDeclaration(at) && at.name?.text === 'gitClone') return definesClone;
+      if (ts.isFunctionDeclaration(at) && at.name?.text === 'gitClone') {
+        const first = at.body?.statements[0];
+        const url = at.parameters[0]?.name;
+        if (
+          !definesClone ||
+          !first ||
+          !url ||
+          !ts.isIdentifier(url) ||
+          !ts.isExpressionStatement(first)
+        )
+          return false;
+        const call = first.expression;
+        return (
+          ts.isCallExpression(call) &&
+          ts.isIdentifier(call.expression) &&
+          call.expression.text === 'assertCloneUrl' &&
+          call.arguments[0]?.getText(file) === url.text
+        );
+      }
     }
     return false;
   }
@@ -99,6 +121,16 @@ function unvalidatedOriginCalls(
       const args = node.arguments.flatMap((arg) => strings(arg));
       const localFetch =
         definesLocalFetch &&
+        ts.isIdentifier(callee) &&
+        callee.text === 'gitRun' &&
+        node.arguments[3] !== undefined &&
+        ts.isObjectLiteralExpression(node.arguments[3]) &&
+        node.arguments[3].properties.some(
+          (property) =>
+            ts.isPropertyAssignment(property) &&
+            property.name.getText(file) === 'allowFileTransport' &&
+            property.initializer.kind === ts.SyntaxKind.TrueKeyword,
+        ) &&
         args.includes('fetch') &&
         args.includes('--') &&
         !args.includes('origin');
@@ -128,7 +160,12 @@ describe('origin network operations', () => {
       ).toBeGreaterThan(0);
     }
     expect(
-      unvalidatedOriginCalls("run(cwd, ['fetch', '--', localPath, 'main']);", false, false, true),
+      unvalidatedOriginCalls(
+        "gitRun(cwd, ['fetch', '--', localPath, 'main'], undefined, { allowFileTransport: true });",
+        false,
+        false,
+        true,
+      ),
     ).toEqual([]);
     expect(
       unvalidatedOriginCalls(
@@ -152,6 +189,61 @@ describe('origin network operations', () => {
         argv,
       ).toBeGreaterThan(0);
     }
+  });
+
+  it('requires the local fetch exemption to opt in on that gitRun call', () => {
+    for (const options of ['', ', undefined, { allowFileTransport: false }']) {
+      expect(
+        unvalidatedOriginCalls(
+          `gitRun(cwd, ['fetch', '--', folder, 'main']${options});`,
+          false,
+          false,
+          true,
+        ),
+      ).toHaveLength(1);
+    }
+    expect(
+      unvalidatedOriginCalls(
+        "gitRun(cwd, ['fetch', '--', folder, 'main'], undefined, { allowFileTransport: true });",
+        false,
+        false,
+        true,
+      ),
+    ).toEqual([]);
+    expect(
+      unvalidatedOriginCalls(
+        "gitRun(cwd, ['fetch', '--', folder], undefined, { allowFileTransport: true }); gitRun(cwd, ['fetch', '--', other]);",
+        false,
+        false,
+        true,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('requires gitClone to validate its URL before transport', () => {
+    const clone = (body: string) =>
+      unvalidatedOriginCalls(`function gitClone(url, dest) { ${body} }`, false, true);
+    expect(clone("spawn('git', hardenGitArgs(['clone', url, dest]));").length).toBeGreaterThan(0);
+    expect(
+      clone("assertCloneUrl(url); spawn('git', hardenGitArgs(['clone', url, dest]));"),
+    ).toEqual([]);
+    expect(
+      clone("assertCloneUrl(other); spawn('git', hardenGitArgs(['clone', url, dest]));").length,
+    ).toBeGreaterThan(0);
+    expect(
+      clone("spawn('git', hardenGitArgs(['clone', url, dest])); assertCloneUrl(url);").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('finds transports behind logical fallback expressions without following arithmetic', () => {
+    for (const expression of ["x || 'fetch'", "x ?? 'pull'", "c && 'push'"]) {
+      expect(unvalidatedOriginCalls(`run(cwd, [${expression}]);`), expression).toHaveLength(1);
+    }
+    expect(
+      unvalidatedOriginCalls(
+        "const argv = ['push']; const insertAt = argv.length + 1; argv.splice(insertAt, 0, '--x');",
+      ),
+    ).toEqual([]);
   });
 
   it('uses originGitRun throughout server sources and operator scripts, and catches a bypass in each guarded file', async () => {

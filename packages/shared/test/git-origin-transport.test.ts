@@ -13,7 +13,7 @@ it.each(['fetch', 'push'])('refuses a local origin %s at the protocol layer', (c
   const base = mkdtempSync(path.join(tmpdir(), 't388-protocol-'));
   dirs.push(base);
   const git = (args: string[], cwd = base) =>
-    execFileSync('git', hardenGitArgs(args, { allowFileTransport: true }), {
+    execFileSync('git', hardenGitArgs(args), {
       cwd,
       encoding: 'utf8',
     });
@@ -33,13 +33,21 @@ it.each(['fetch', 'push'])('refuses a local origin %s at the protocol layer', (c
     ],
     work,
   );
-  git(['push', `${base}/bare`, 'main'], work);
+  git(['-c', 'protocol.file.allow=always', 'push', `${base}/bare`, 'main'], work);
   git(['remote', 'add', 'origin', `${base}/bare`], work);
   const result = spawnSync('git', hardenGitArgs([command, 'origin', 'main']), {
     cwd: work,
     encoding: 'utf8',
   });
   expect(result.status, result.stderr).not.toBe(0);
-  // Refresh's host-folder fetch remains supported.
-  expect(() => git(['fetch', '--', `${base}/bare`, 'main'], work)).not.toThrow();
+  // The default production hardening refuses the host path too.
+  expect(() => git(['fetch', '--', `${base}/bare`, 'main'], work)).toThrow();
+  // Refresh opts in at its call site; exercise that hardening path explicitly.
+  expect(() =>
+    execFileSync(
+      'git',
+      hardenGitArgs(['fetch', '--', `${base}/bare`, 'main'], { allowFileTransport: true }),
+      { cwd: work },
+    ),
+  ).not.toThrow();
 });
