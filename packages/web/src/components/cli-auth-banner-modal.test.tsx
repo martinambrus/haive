@@ -87,6 +87,18 @@ function assertClosedError() {
   expect(textOf(view.tree())).not.toContain('Waiting for a free CLI slot');
 }
 
+async function exhaustUrlAttempts() {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    socket = FakeWebSocket.instances.at(-1)!;
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onopen?.();
+    socket.frame({ type: 'phase', phase: 'awaiting-token' });
+    view.draw();
+    await vi.advanceTimersByTimeAsync(30_000);
+    view.draw();
+  }
+}
+
 describe('CLI auth banner socket close', () => {
   it.each(['connecting', 'starting', 'awaiting-token', 'awaiting-approval', 'submitting'])(
     'offers retry after a server close during %s',
@@ -161,6 +173,15 @@ describe('CLI auth banner socket close', () => {
     view.draw();
     socket.onclose?.();
     expect(textOf(view.draw())).toBe('');
+  });
+
+  it('fix3 preserves the URL-wait give-up error after a later server close', async () => {
+    await exhaustUrlAttempts();
+    expect(buttons(view.tree(), 'retry')).toHaveLength(1);
+    const before = textOf(view.tree());
+    socket.close();
+    view.draw();
+    expect(textOf(view.tree()) === before).toBe(true);
   });
 
   it('preserves the explicit connection timeout error', async () => {

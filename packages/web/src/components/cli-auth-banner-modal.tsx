@@ -91,7 +91,13 @@ export function CliAuthBannerModal({
   } = usePendingCliCopy();
   const termRef = useRef<XTerm | null>(null);
   const termMountRef = useRef<HTMLDivElement | null>(null);
-  const [phase, setPhase] = useState<Phase>('connecting');
+  const [phase, setRenderedPhase] = useState<Phase>('connecting');
+  const phaseRef = useRef<Phase>('connecting');
+  // Every transition updates the socket's view immediately, before React renders.
+  const changePhase = useCallback((next: Phase) => {
+    phaseRef.current = next;
+    setRenderedPhase(next);
+  }, []);
   /** Non-null while a cli-exec job this dialog started is waiting for a free slot. */
   const [queueWait, setQueueWait] = useState<{
     running: number;
@@ -117,13 +123,7 @@ export function CliAuthBannerModal({
 
   useEffect(() => {
     if (!open) return;
-    // Track frames immediately, including when a close arrives before React renders.
-    let sessionPhase: Phase = 'connecting';
     let disposed = false;
-    const changePhase = (next: Phase) => {
-      sessionPhase = next;
-      setPhase(next);
-    };
     changePhase('connecting');
     setAuthUrl(null);
     setDeviceCode(null);
@@ -219,7 +219,11 @@ export function CliAuthBannerModal({
           setError(typeof msg.message === 'string' ? msg.message : 'Login failed');
           break;
         case 'exit':
-          if (sessionPhase !== 'saved' && sessionPhase !== 'success' && sessionPhase !== 'error') {
+          if (
+            phaseRef.current !== 'saved' &&
+            phaseRef.current !== 'success' &&
+            phaseRef.current !== 'error'
+          ) {
             changePhase('error');
           }
           break;
@@ -236,9 +240,9 @@ export function CliAuthBannerModal({
       clearTimeout(connectTimeout);
       if (
         disposed ||
-        sessionPhase === 'saved' ||
-        sessionPhase === 'success' ||
-        sessionPhase === 'error'
+        phaseRef.current === 'saved' ||
+        phaseRef.current === 'success' ||
+        phaseRef.current === 'error'
       )
         return;
       setQueueWait(null);
@@ -256,7 +260,7 @@ export function CliAuthBannerModal({
       }
       wsRef.current = null;
     };
-  }, [open, providerId, providerName, onLoginComplete, retryNonce]);
+  }, [open, providerId, providerName, onLoginComplete, retryNonce, changePhase]);
 
   useEffect(() => {
     if (open) setUrlAttempt(1);
@@ -272,7 +276,7 @@ export function CliAuthBannerModal({
     if (phase !== 'awaiting-token' && phase !== 'awaiting-approval') return;
     const timer = setTimeout(() => {
       if (urlAttempt >= MAX_URL_WAIT_ATTEMPTS) {
-        setPhase('error');
+        changePhase('error');
         setError(
           `Sign-in URL never arrived after ${MAX_URL_WAIT_ATTEMPTS} attempts. ` +
             `The CLI may be stuck waiting on stdin or printing the URL in an unrecognized format.`,
@@ -283,7 +287,7 @@ export function CliAuthBannerModal({
       setRetryNonce((n) => n + 1);
     }, URL_WAIT_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [open, phase, authUrl, urlAttempt, providerName]);
+  }, [open, phase, authUrl, urlAttempt, providerName, changePhase]);
 
   // Safety net: phase 'success' ("testing and saving credentials...") waits on the server's
   // post-login probe + 'saved' frame. If that frame never arrives (e.g. the WS
@@ -299,7 +303,7 @@ export function CliAuthBannerModal({
   useEffect(() => {
     if (phase !== 'success' || queueWait !== null) return;
     const timer = setTimeout(() => {
-      setPhase('error');
+      changePhase('error');
       setVerifyOnly(true);
       setError(
         'Sign-in finished and your credentials were saved, but the connection test did not ' +
@@ -307,7 +311,7 @@ export function CliAuthBannerModal({
       );
     }, SUCCESS_SAVE_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [phase, queueWait]);
+  }, [phase, queueWait, changePhase]);
 
   // antigravity debug terminal: render agy's TUI in an xterm bound to the same
   // banner WS the modal owns. 'output' frames are written to the term (see
@@ -403,9 +407,9 @@ export function CliAuthBannerModal({
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const trimmed = token.trim();
     if (!trimmed) return;
-    setPhase('submitting');
+    changePhase('submitting');
     ws.send(JSON.stringify({ type: 'token-input', token: trimmed }));
-  }, [token]);
+  }, [token, changePhase]);
 
   const handleClose = useCallback(() => {
     onClose();
@@ -437,17 +441,17 @@ export function CliAuthBannerModal({
       const probeResult = await runCliProbe(providerId);
       setSavedResult(probeResult);
       setVerifyOnly(false);
-      setPhase('saved');
+      changePhase('saved');
       if (onLoginComplete) onLoginComplete(probeResult);
     } catch (err) {
       // Stay in the verify-only branch: the credentials are still saved, so the way out is
       // another test, never another login.
-      setPhase('error');
+      changePhase('error');
       setError(err instanceof Error ? err.message : 'Connection test failed');
     } finally {
       setVerifying(false);
     }
-  }, [providerId, onLoginComplete]);
+  }, [providerId, onLoginComplete, changePhase]);
 
   if (!open) return null;
 
