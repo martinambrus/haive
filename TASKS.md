@@ -147,7 +147,7 @@ From the T414 review (2026-10-24). All PRE-EXISTING, consequential for dependenc
 
 ### T417 · FNF[origin-url-2] · origin follow-ups after T388: clone URLs, relink push URLs, remote-helper syntax, nested probe (+5)
 
-status: blocked · blocked-by: T388 (same files)
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:55Z · last: 2026-10-25T00:55Z
 From the T388 review (2026-10-24). All PRE-EXISTING.
 
 1. gitClone of DB-stored URLs is not re-checked by isAllowedGitRemoteUrl and gets no file guard (repo/clone.ts ~:798, repo/refresh.ts ~:293, repo/bundle-ingest.ts ~:196); needs a legacy row. Minor.
@@ -164,7 +164,7 @@ From the T388 review (2026-10-24). PRE-EXISTING, minor. Same class as T388 item 
 
 ### T420 · FNF[cli-job-polling-2] · the pricing page ignores its refresh job; other jobs can trim a polled result early (+1)
 
-status: open
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:45Z · last: 2026-10-25T00:45Z
 From the T380 review (2026-10-24). PRE-EXISTING, minor.
 
 1. packages/web/src/app/(app)/admin/pricing/page.tsx ~:137-140 ignores the `jobId` "Refresh now" returns and re-reads once after a fixed 4 s, while the refresh can queue behind agents for minutes, so the page can show stale numbers. Poll the job (web lib/cli-jobs.ts) instead.
@@ -775,7 +775,7 @@ Sites:
 
 ### T375 · FNF[diff-artifact-edges] · an untracked nested repo shows as unreadable although gate 3 commits it as a gitlink (+1)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:07Z · last: 2026-10-24T21:07Z · was modular #250
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:07Z · last: 2026-10-25T00:40Z · merged PR #909 (d35333489), waiting for main CI · was modular #250
 
 1. worker steps/workflow/_commit-diff.ts ~:161 returns null when the index has no gitlink. Proposed: show the repo as a new gitlink with its HEAD sha. Show an unborn repo as unreadable with a reason.
 2. An empty investigation file reads as `added` (11-phase-8-learning.ts ~:943). Fix: tell absent from empty by the read result.
@@ -848,7 +848,7 @@ Decide: sanitise .git/config at import (allow-list keys), or refuse archives tha
 
 ### T388 · FNF[origin-url-revalidate] · a stored remote.origin.url is never re-validated, so network git can fetch/push file:// paths of other tenants (+3)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-24T17:47Z · was modular #269
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-25T00:50Z · merged PR #906 (da043a2aa), waiting for main CI · was modular #269
 
 1. isAllowedGitRemoteUrl (shared schemas/git-url.ts ~:94) guards only typed URLs. Since #255, getOriginUrl is the one read. Validate the URL there and switch the detectOrigin-only callers.
 2. `-c` does not reach a local-path transport child. Item 1 closes this.
@@ -982,7 +982,7 @@ From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` r
 
 ### T422 · FNF[cli-login-banner] · the Claude OAuth capture logs the token's first 22 and last 6 characters (+1)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:14Z · last: 2026-10-24T21:14Z
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:14Z · last: 2026-10-25T01:00Z · merged PR #910 (dc444c013), waiting for main CI
 From the T400 Codex run (2026-10-24), confirmed by the session.
 
 1. PRE-EXISTING, security hygiene: api routes/cli-login-banner.ts ~:674-680 logs `tokenHead: oauthToken.slice(0, 22)` and `tokenTail: oauthToken.slice(-6)` when it captures a Claude OAuth token from stdout, so 15 secret characters of every captured token reach the api log. The only such site (grep of packages and modules). Fix: log the length and, if one is needed, a short hash, never characters of the token.

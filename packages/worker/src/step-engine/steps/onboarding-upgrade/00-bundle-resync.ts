@@ -1,3 +1,4 @@
+import { originGitRun } from '../../../repo/git-push.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { BundleJobPayload, FormSchema, FormValues } from '@haive/shared';
@@ -33,7 +34,7 @@ const FIELD_ID = 'bundlesToPull';
 async function fetchRemoteHead(cwd: string, branch: string | null): Promise<string> {
   const fetchArgs = ['fetch', '--quiet', 'origin'];
   if (branch) fetchArgs.push(branch);
-  const fetched = await gitRun(cwd, fetchArgs, { GIT_ASKPASS: 'echo' });
+  const fetched = await originGitRun(cwd, fetchArgs, { GIT_ASKPASS: 'echo' });
   if (fetched.code !== 0) {
     const msg = fetched.stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
     throw new Error(`git fetch failed (exit ${fetched.noExit ?? fetched.code}): ${msg}`);

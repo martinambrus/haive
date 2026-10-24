@@ -1,3 +1,4 @@
+import { originGitRun } from './git-push.js';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -11,7 +12,7 @@ import { gitRun } from './git-exec.js';
 async function gitFetch(cwd: string, branch: string | null): Promise<void> {
   const args = ['fetch', '--quiet', 'origin'];
   if (branch) args.push(branch);
-  const res = await gitRun(cwd, args, { GIT_ASKPASS: 'echo' });
+  const res = await originGitRun(cwd, args, { GIT_ASKPASS: 'echo' });
   if (res.code !== 0) {
     const msg = res.stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
     throw new Error(`git fetch failed (exit ${res.noExit ?? res.code}): ${msg}`);

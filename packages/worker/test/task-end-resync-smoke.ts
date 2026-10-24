@@ -1,3 +1,4 @@
+import { fixtureBase, httpOrigin, networkGitArgs } from './support/smoke-git-http.js';
 /**
  * An onboarding or upgrade that ends re-syncs Haive's project files at once, and a dead task holds
  * no checkout, against a database and real git repositories. Throwaway user and temp directory,
@@ -7,7 +8,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -85,7 +85,11 @@ const gitEnv = {
   GIT_COMMITTER_EMAIL: 't@example.com',
 };
 const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', ['-c', 'gc.auto=0', ...args], { cwd, env: gitEnv, encoding: 'utf8' }).trim();
+  execFileSync('git', ['-c', 'gc.auto=0', ...networkGitArgs(args)], {
+    cwd,
+    env: gitEnv,
+    encoding: 'utf8',
+  }).trim();
 
 const GONE = 'module.gone.x';
 const SCOPE_REL = '.haive-data/state/settings/scope-exclude-globs.json';
@@ -138,7 +142,7 @@ async function main(): Promise<void> {
   stub('tend-a', 90);
   stub('tend-b', 91);
 
-  const tmp = await mkdtemp(path.join(tmpdir(), 'task-end-resync-smoke-'));
+  const tmp = await mkdtemp(path.join(fixtureBase, 'task-end-resync-smoke-'));
   const userId = randomUUID();
   const now = new Date();
 
@@ -504,13 +508,13 @@ async function main(): Promise<void> {
       const origin = path.join(tmp, 'origin.git');
       git(tmp, 'init', '-q', '--bare', '-b', 'main', origin);
       const seed = path.join(tmp, 'seed');
-      git(tmp, 'clone', '-q', `file://${origin}`, seed);
+      git(tmp, 'clone', '-q', httpOrigin(origin), seed);
       await writeFile(path.join(seed, 'README.md'), 'seed\n');
       git(seed, 'add', 'README.md');
       git(seed, 'commit', '-q', '-m', 'seed');
       git(seed, 'push', '-q', 'origin', 'HEAD:main');
 
-      const remoteUrl = `file://${origin}`;
+      const remoteUrl = httpOrigin(origin);
       const [repo] = await db
         .insert(schema.repositories)
         .values({

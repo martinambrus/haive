@@ -1,6 +1,6 @@
+import { fixtureBase, networkGitArgs } from '../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -18,6 +18,7 @@ const IDENTITY = {
 };
 
 async function git(dir: string, args: string[]): Promise<string> {
+  args = networkGitArgs(args);
   const { stdout } = await exec('git', args, { cwd: dir, env: { ...process.env, ...IDENTITY } });
   return stdout.toString();
 }
@@ -31,8 +32,8 @@ afterEach(async () => {
 });
 
 async function scratchWorktree(): Promise<{ local: string; wt: string }> {
-  const remote = await mkdtemp(path.join(tmpdir(), 'planbaseline-remote-'));
-  const local = await mkdtemp(path.join(tmpdir(), 'planbaseline-local-'));
+  const remote = await mkdtemp(path.join(fixtureBase, 'planbaseline-remote-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'planbaseline-local-'));
   dirs.push(remote, local);
   for (const [dir, readme] of [
     [remote, '# from the forge\n'],

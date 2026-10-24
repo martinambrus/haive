@@ -1,3 +1,4 @@
+import { fixtureBase, httpOrigin, networkGitArgs } from './support/smoke-git-http.js';
 /**
  * A refresh fast-forwards a checkout to its source and never deletes one, against a database and
  * real git repositories. One throwaway user and temp directory, deleted after.
@@ -18,7 +19,6 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -95,7 +95,11 @@ const gitEnv = {
   GIT_COMMITTER_EMAIL: 't@example.com',
 };
 const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', ['-c', 'gc.auto=0', ...args], { cwd, env: gitEnv, encoding: 'utf8' }).trim();
+  execFileSync('git', ['-c', 'gc.auto=0', ...networkGitArgs(args)], {
+    cwd,
+    env: gitEnv,
+    encoding: 'utf8',
+  }).trim();
 const hasCommit = (cwd: string, sha: string): boolean => {
   try {
     git(cwd, 'cat-file', '-e', `${sha}^{commit}`);
@@ -114,7 +118,7 @@ async function commitFile(repo: string, file: string, body: string, message: str
 async function main(): Promise<void> {
   initDatabase(process.env.DATABASE_URL!);
   const db = getDb();
-  const tmp = await mkdtemp(path.join(tmpdir(), 'repo-refresh-smoke-'));
+  const tmp = await mkdtemp(path.join(fixtureBase, 'repo-refresh-smoke-'));
   const storage = path.join(tmp, 'storage');
   await mkdir(storage);
   const userId = randomUUID();
@@ -139,7 +143,7 @@ async function main(): Promise<void> {
     const origin = path.join(tmp, 'origin.git');
     git(tmp, 'init', '-q', '--bare', '-b', 'main', origin);
     const seed = path.join(tmp, 'seed');
-    git(tmp, 'clone', '-q', `file://${origin}`, seed);
+    git(tmp, 'clone', '-q', httpOrigin(origin), seed);
     await commitFile(seed, 'README.md', 'seed\n', 'seed');
     git(seed, 'push', '-q', 'origin', 'HEAD:main');
     const push = async (file: string, body: string) => {
@@ -149,7 +153,7 @@ async function main(): Promise<void> {
     };
 
     const cloned = async (from = origin) => {
-      const remoteUrl = `file://${from}`;
+      const remoteUrl = httpOrigin(from);
       const [row] = await db
         .insert(schema.repositories)
         .values({
@@ -690,7 +694,7 @@ async function main(): Promise<void> {
       const origin2 = path.join(tmp, `origin-no-record-${via}.git`);
       git(tmp, 'init', '-q', '--bare', '-b', 'main', origin2);
       const seed2 = path.join(tmp, `seed-no-record-${via}`);
-      git(tmp, 'clone', '-q', `file://${origin2}`, seed2);
+      git(tmp, 'clone', '-q', httpOrigin(origin2), seed2);
       await commitFile(seed2, 'README.md', 'seed\n', 'seed');
       git(seed2, 'push', '-q', 'origin', 'HEAD:main');
       const c = await cloned(origin2);
@@ -741,7 +745,7 @@ async function main(): Promise<void> {
         const origin3 = path.join(tmp, `origin-ignored-${via}-${handEdited}.git`);
         git(tmp, 'init', '-q', '--bare', '-b', 'main', origin3);
         const seed3 = path.join(tmp, `seed-ignored-${via}-${handEdited}`);
-        git(tmp, 'clone', '-q', `file://${origin3}`, seed3);
+        git(tmp, 'clone', '-q', httpOrigin(origin3), seed3);
         await commitFile(seed3, 'README.md', 'seed\n', 'seed');
         await commitFile(seed3, '.gitignore', '.haive-data/\n', 'ignore the data directory');
         git(seed3, 'push', '-q', 'origin', 'HEAD:main');
@@ -1979,7 +1983,7 @@ async function main(): Promise<void> {
       // K4: the record of HEAD is read whole once, before the first transaction; the transactions only
       // check HEAD is unmoved, so no tree listing or blob read runs while they hold their locks.
       {
-        const shimDir = await mkdtemp(path.join(tmpdir(), 'git-shim-'));
+        const shimDir = await mkdtemp(path.join(fixtureBase, 'git-shim-'));
         const gitLog = path.join(shimDir, 'git.log');
         await writeFile(
           path.join(shimDir, 'git'),
@@ -2094,7 +2098,7 @@ async function main(): Promise<void> {
       const bareR1 = path.join(tmp, 'origin-r1.git');
       git(tmp, 'init', '-q', '--bare', '-b', 'main', bareR1);
       const seedR1 = path.join(tmp, 'seed-r1');
-      git(tmp, 'clone', '-q', `file://${bareR1}`, seedR1);
+      git(tmp, 'clone', '-q', httpOrigin(bareR1), seedR1);
       await commitFile(seedR1, 'README.md', 'seed\n', 'seed');
       git(seedR1, 'push', '-q', 'origin', 'HEAD:main');
       const r1 = await cloned(bareR1);
@@ -2595,7 +2599,7 @@ async function main(): Promise<void> {
         const origin = path.join(tmp, `origin-${name}.git`);
         git(tmp, 'init', '-q', '--bare', '-b', 'main', origin);
         const seedDir = path.join(tmp, `seed-${name}`);
-        git(tmp, 'clone', '-q', `file://${origin}`, seedDir);
+        git(tmp, 'clone', '-q', httpOrigin(origin), seedDir);
         await commitFile(seedDir, 'README.md', 'seed\n', 'seed');
         git(seedDir, 'push', '-q', 'origin', 'HEAD:main');
         const c = await cloned(origin);
@@ -3650,7 +3654,7 @@ async function main(): Promise<void> {
         const remote = path.join(tmp, `origin-c12-${ending}.git`);
         git(tmp, 'init', '-q', '--bare', '-b', 'main', remote);
         const there = path.join(tmp, `seed-c12-${ending}`);
-        git(tmp, 'clone', '-q', `file://${remote}`, there);
+        git(tmp, 'clone', '-q', httpOrigin(remote), there);
         await commitFile(there, 'README.md', 'seed\n', 'seed');
         await commitFile(there, 'conflict.txt', 'base\n', 'base');
         git(there, 'push', '-q', 'origin', 'HEAD:main');
@@ -4725,7 +4729,7 @@ async function main(): Promise<void> {
       const o = path.join(tmp, `origin-m14-${name}.git`);
       git(tmp, 'init', '-q', '--bare', '-b', 'main', o);
       const s = path.join(tmp, `seed-m14-${name}`);
-      git(tmp, 'clone', '-q', `file://${o}`, s);
+      git(tmp, 'clone', '-q', httpOrigin(o), s);
       await commitFile(s, 'README.md', 'seed\n', 'seed');
       git(s, 'push', '-q', 'origin', 'HEAD:main');
       const c = await cloned(o);
