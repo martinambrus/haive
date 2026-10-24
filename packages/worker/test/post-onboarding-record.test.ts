@@ -111,7 +111,7 @@ describe('12 writes the project state record whatever the artifact recording did
   it('writes it, and the artifact rows, when nothing fails', async () => {
     const s = await setup('none');
 
-    const out = await s.apply();
+    const out = await recordWritten(s.apply());
 
     expect(out.warnings.filter((w) => w.includes('onboarding-artifacts'))).toEqual([]);
     expect(out.artifactRowsWritten).toBeGreaterThan(0);
@@ -128,7 +128,7 @@ describe('12 writes the project state record whatever the artifact recording did
   it('writes it when the database refuses the artifact rows', async () => {
     const s = await setup('artifact-rows');
 
-    const out = await s.apply();
+    const out = await recordWritten(s.apply());
 
     // The recording failed, after the context it derives from 07's output existed.
     expect(out.warnings).toContain('onboarding-artifacts recording failed: database refused');
@@ -150,7 +150,7 @@ describe('12 writes the project state record whatever the artifact recording did
     delete preRtk.rtkEnabled;
     const s = await setup('none', preRtk);
 
-    await s.apply();
+    await recordWritten(s.apply());
 
     expect(s.column()).toMatchObject({ rtkEnabled: false, rtkChoiceRecorded: false });
   });
@@ -160,7 +160,7 @@ describe('12 reports what its record write did', () => {
   it('written, when the record is written', async () => {
     const s = await setup('none');
 
-    const out = await s.apply();
+    const out = await recordWritten(s.apply());
 
     expect(out.recordWrite).toBe('written');
   });
@@ -202,7 +202,7 @@ describe('12 commits the artifact claims it wrote into the record', () => {
     await git('git', ['-C', s.root, 'add', 'README.md']);
     await git('git', ['-C', s.root, 'commit', '-qm', 'seed']);
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit());
 
     expect(out.commitPerformed).toBe(true);
     const tree = (await git('git', ['-C', s.root, 'ls-tree', '-r', '--name-only', 'HEAD'])).stdout
@@ -251,12 +251,12 @@ describe('12 retires .haive/install.json', () => {
   it('leaves the checkout clean after two identical runs', async () => {
     const s = await seededSetup();
 
-    const first = await s.applyCommit();
+    const first = await recordWritten(s.applyCommit());
     expect(first.commitPerformed).toBe(true);
     expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
     const head = await gitOut(s.root, 'rev-parse', 'HEAD');
 
-    const second = await s.applyCommit();
+    const second = await recordWritten(s.applyCommit());
 
     expect(second.commitPerformed).toBe(false);
     expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
@@ -268,7 +268,7 @@ describe('12 retires .haive/install.json', () => {
     const s = await seededSetup(HAIVE_SHAPED);
     expect(await trackedFiles(s.root)).toContain('.haive/install.json');
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit());
 
     expect(out.commitPerformed).toBe(true);
     expect(await trackedFiles(s.root)).not.toContain('.haive/install.json');
@@ -280,7 +280,7 @@ describe('12 retires .haive/install.json', () => {
     const s = await seededSetup(HAIVE_SHAPED);
     await rm(join(s.root, '.haive', 'install.json'));
 
-    await s.applyCommit();
+    await recordWritten(s.applyCommit());
 
     expect(await trackedFiles(s.root)).not.toContain('.haive/install.json');
   });
@@ -288,7 +288,7 @@ describe('12 retires .haive/install.json', () => {
   it("keeps a file that is not Haive's, and says so", async () => {
     const s = await seededSetup('{"keep":true}');
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit());
 
     expect(existsSync(join(s.root, '.haive', 'install.json'))).toBe(true);
     expect(await trackedFiles(s.root)).toContain('.haive/install.json');
@@ -305,7 +305,7 @@ describe('12 retires .haive/install.json', () => {
     await mkdir(join(s.root, '.haive'), { recursive: true });
     await symlink(join(outside, 'elsewhere.json'), join(s.root, '.haive', 'install.json'));
 
-    const out = await s.apply();
+    const out = await recordWritten(s.apply());
 
     expect(out.warnings.some((w) => w.startsWith('.haive/install.json was left in place'))).toBe(
       true,
@@ -453,7 +453,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
     const s = await seeded({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS });
     expect(await trackedFiles(s.root)).toEqual(expect.arrayContaining([ENV_LEGACY, GLOBS_LEGACY]));
 
-    const first = await s.applyCommit();
+    const first = await recordWritten(s.applyCommit());
 
     expect(first.commitPerformed).toBe(true);
     const files = await trackedFiles(s.root);
@@ -465,7 +465,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
     expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
     const head = await gitOut(s.root, 'rev-parse', 'HEAD');
 
-    const second = await s.applyCommit();
+    const second = await recordWritten(s.applyCommit());
 
     expect(second.commitPerformed).toBe(false);
     expect(await gitOut(s.root, 'rev-parse', 'HEAD')).toBe(head);
@@ -474,7 +474,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
   it('writes neither legacy file where none existed', async () => {
     const s = await seeded({});
 
-    await s.applyCommit();
+    await recordWritten(s.applyCommit());
 
     expect(existsSync(join(s.root, ENV_LEGACY))).toBe(false);
     expect(existsSync(join(s.root, GLOBS_LEGACY))).toBe(false);
@@ -484,7 +484,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
   it("keeps a file at either name that is not Haive's, and says so", async () => {
     const s = await seeded({ [ENV_LEGACY]: '{"keep":true}', [GLOBS_LEGACY]: '{"keep":true}' });
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit());
 
     for (const rel of [ENV_LEGACY, GLOBS_LEGACY]) {
       expect(existsSync(join(s.root, rel)), rel).toBe(true);
@@ -502,7 +502,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
       { onboardingEnvironment: null, scopeExcludeGlobs: null },
     );
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit());
 
     expect(existsSync(join(s.root, ENV_UNIT))).toBe(false);
     expect(existsSync(join(s.root, GLOBS_UNIT))).toBe(false);
@@ -518,6 +518,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
 
     const out = await s.applyCommit();
 
+    expect(out.recordWrite).toBe('skipped');
     expect(out.commitPerformed).toBe(true);
     expect(existsSync(join(s.root, RECORD_FORMAT))).toBe(false);
     expect(await trackedFiles(s.root)).toEqual(expect.arrayContaining([ENV_LEGACY, GLOBS_LEGACY]));
@@ -575,7 +576,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
     );
     expect(await trackedFiles(s.root)).toContain(TOOLING_LEGACY);
 
-    const first = await s.applyCommit();
+    const first = await recordWritten(s.applyCommit());
 
     expect(first.commitPerformed).toBe(true);
     const files = await trackedFiles(s.root);
@@ -589,7 +590,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
     expect(await gitOut(s.root, 'status', '--porcelain')).toBe('');
     const head = await gitOut(s.root, 'rev-parse', 'HEAD');
 
-    const second = await s.applyCommit();
+    const second = await recordWritten(s.applyCommit());
 
     expect(second.commitPerformed).toBe(false);
     expect(await gitOut(s.root, 'rev-parse', 'HEAD')).toBe(head);
@@ -598,7 +599,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
   it('writes no tooling.json where none existed', async () => {
     const s = await seeded({}, { onboardingTooling: TOOLING_COLUMN });
 
-    await s.applyCommit();
+    await recordWritten(s.applyCommit());
 
     expect(existsSync(join(s.root, TOOLING_LEGACY))).toBe(false);
     expect(await trackedFiles(s.root)).toContain(TOOLING_UNIT);
@@ -610,7 +611,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
       { onboardingTooling: TOOLING_COLUMN },
     );
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit());
 
     expect(existsSync(join(s.root, TOOLING_LEGACY))).toBe(true);
     expect(await trackedFiles(s.root)).toContain(TOOLING_LEGACY);
@@ -622,7 +623,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
   it('keeps tooling.json when the record does not carry the tooling', async () => {
     const s = await seeded({ [TOOLING_LEGACY]: HAIVE_TOOLING }, { onboardingTooling: null });
 
-    const out = await s.applyCommit();
+    const out = await recordWritten(s.applyCommit());
 
     expect(existsSync(join(s.root, TOOLING_UNIT))).toBe(false);
     expect(existsSync(join(s.root, TOOLING_LEGACY))).toBe(true);
@@ -634,6 +635,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
 
     const out = await s.applyCommit();
 
+    expect(out.recordWrite).toBe('skipped');
     expect(out.commitPerformed).toBe(true);
     expect(existsSync(join(s.root, TOOLING_UNIT))).toBe(false);
     expect(await trackedFiles(s.root)).toContain(TOOLING_LEGACY);
@@ -681,7 +683,7 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
       const stale = JSON.stringify({ schemaVersion: 1, tooling: { ragMode: 'stale' } });
       const s = await seeded({ [TOOLING_LEGACY]: stale }, { onboardingTooling: column });
 
-      const out = await s.applyCommit();
+      const out = await recordWritten(s.applyCommit());
 
       expect(out.commitPerformed).toBe(true);
       expect(existsSync(join(s.root, TOOLING_UNIT))).toBe(false);
