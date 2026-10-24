@@ -687,7 +687,7 @@ Fix direction: after a failed reset, re-ask for the status without clearing the 
 status: open · was modular #208
 DECIDED 2026-10-23: record the expected attachment count on the task, and Start confirms "N of M missing". The start claim is in api lib/task-start.ts:10-23.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+7)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+10)
 
 status: open · was modular #211
 
@@ -700,6 +700,8 @@ status: open · was modular #211
 7. Two flush and sweep test files use fake-DB Proxy workarounds, and K5/M11c count git reads. Replace both with behaviour assertions.
 8. worker repo/worktree-changes.test.ts:191 failed once in a full run under load (expected 1, got 0); 65 replays could not reproduce. Flake, cause unknown.
 9. PRE-EXISTING: a gate row healed by 0210 with no saved schema (the old per-step switch nulls formSchema, steps.ts:1855) has no real-worker check, only the SQL test. Also 0210.sql:14 sets pause_form_on_retry on no-schema rows too, which costs one extra stop at that step's form; narrow it to `pause_form_on_retry OR form_schema IS NOT NULL` if wanted. From #263 (PR #887).
+10. From the T407 review (2026-10-24), PRE-EXISTING, minor: no runner-level test pins that `applyArgs.llmInvocationId` is the run that produced `llmOutput` for a post-form LLM step (worker step-runner.ts ~:3148, ~:3231; only the preForm path is pinned, step-runner-auto-continue.test.ts ~:296-339). Plan chat attribution, 07b, 08c2, 07_7 and prompt steps rest on it.
+11. Same source, minor: the "no agents directory" branch (provider amp) has no test: the `_active-agents-target.ts` null return, 07_5-verify-files.ts ~:57-64, 11-final-review.ts ~:86-93, `collectReviewFindings(repo, null)`.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -774,7 +776,7 @@ Sites:
 status: open · was modular #245
 
 1. api test/new-work-fence-order.test.ts:87 runs under the 5 s default timeout. Fix: 30 s.
-2. cli-picker-grid.tsx shows "(step default)" and the none option for one state.
+2. MOVED to T391 (the same defect as its item 3; ships with it): cli-picker-grid.tsx shows "(step default)" and the none option for one state.
 3. PublicTaskType.stepIds carries only the missing steps. Fix: rename it to missingStepIds.
 
 ### T373 · FNF[audit-strict-admin-actions] · module/task-type/upgrade-start actions still audit best-effort (+1)
@@ -806,7 +808,7 @@ status: open · was modular #250 (a Codex attempt was discarded, nothing kept)
 1. worker steps/workflow/_commit-diff.ts ~:161 returns null when the index has no gitlink. Proposed: show the repo as a new gitlink with its HEAD sha. Show an unborn repo as unreadable with a reason.
 2. An empty investigation file reads as `added` (11-phase-8-learning.ts ~:943). Fix: tell absent from empty by the read result.
 
-### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+4)
+### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+5)
 
 status: open · (T377 landed as PR #886) · was modular #252
 
@@ -816,6 +818,7 @@ status: open · (T377 landed as PR #886) · was modular #252
 4. DECIDED: audit successful and failed sign-ins; nothing for token refresh or logout.
 5. Throttled (429) attempts and the forced password change.
    Fix: the #218 shape, with gated tests.
+6. From the T374 review (2026-10-24), PRE-EXISTING, minor: a house rule's approval also lapses with no audit row and no admin: a content PATCH clears `enforcedHash` (api global-kb.ts ~:1124-1127), the store trigger clears it when an active entry leaves `active` (shared global-kb/ensure-schema.ts ~:168-186), and DELETE /entries/:id removes an enforced entry (~:1243-1270); PATCH and DELETE are requireAuth only. global-kb.md:79-85 calls the lapse deliberate, so the open question is only the trail: a `global_kb.house_rule.lapse` row in the same transaction.
 
 ### T378 · FNF[sign-in-failure-paths] · vendor token not revoked on a failed finishSignIn; device poll finally can 500; GitHub connect poll has no cancelled guard
 
@@ -1041,6 +1044,11 @@ PRE-EXISTING. #264 (PR #885) sets client_connection_check_interval only inside w
 Fix: pass `connection: { client_connection_check_interval: 500 }` in the postgres() options (needs PG >= 14; the stack pins 18).
 
 ---
+
+### T421 · FNF[git-data-ledger-rows] · ledger rows recorded at git-data paths stay live forever
+
+status: open
+From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` rows an earlier release recorded at a git-data path (a literal `.git` segment or, since T304, an NTFS or HFS+ alias of it) are skipped by every reader (01 plan, 02 and 04 writes, 03 staging, the sync), but nothing retires them and they still count in `liveArtifacts` (api upgrades.ts ~:456, ~:723, ~:787). Fix: retire them in a numbered, idempotent data migration (SQL cannot call `namesGitData`, so the migration needs the same rule in SQL, or ship a deploy script), or leave them out of the counts.
 
 ## Done
 
