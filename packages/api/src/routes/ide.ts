@@ -61,6 +61,39 @@ const HOP_BY_HOP = [
   'content-length',
 ];
 
+// Both transports cross the same boundary. Connection can nominate arbitrary
+// headers, so collect its tokens before removing it. No client forwarding metadata
+// is trusted; fetch derives the HTTP Host, and the upgrade path sets Host/Origin.
+function upstreamRequestHeaders(source: Headers): Headers {
+  const headers = new Headers(source);
+  const connectionHeaders = (headers.get('connection') ?? '')
+    .split(',')
+    .map((name) => name.trim().toLowerCase())
+    .filter(Boolean);
+  for (const name of [
+    'host',
+    'authorization',
+    'connection',
+    'keep-alive',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade',
+    'forwarded',
+    ...connectionHeaders,
+  ]) {
+    headers.delete(name);
+  }
+  for (const name of [...headers.keys()]) {
+    if (name.startsWith('proxy-') || name.startsWith('x-forwarded-')) headers.delete(name);
+  }
+  // code-server runs repository-controlled code, so the Haive session must not reach it.
+  const keptCookie = withoutSessionCookies(headers.get('cookie') ?? '');
+  if (keptCookie === null) headers.delete('cookie');
+  else headers.set('cookie', keptCookie);
+  return headers;
+}
+
 // ---- HTTP reverse proxy ---------------------------------------------------
 
 export const ideRoutes = new Hono<AppEnv>();
@@ -128,14 +161,7 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
   const rest = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : '/';
   const upstreamUrl = `http://${ideRunnerName(target.sessionId)}:${IDE_INTERNAL_PORT}${rest || '/'}${url.search}`;
 
-  const headers = new Headers(c.req.raw.headers);
-  headers.delete('host');
-  // code-server runs repo-controlled code, so the Haive session must not reach it.
-  headers.delete('authorization');
-  headers.delete('proxy-authorization');
-  const keptCookie = withoutSessionCookies(headers.get('cookie') ?? '');
-  if (keptCookie === null) headers.delete('cookie');
-  else headers.set('cookie', keptCookie);
+  const headers = upstreamRequestHeaders(c.req.raw.headers);
   // Force identity so undici's auto-decompression can't desync content-encoding.
   headers.set('accept-encoding', 'identity');
 
@@ -318,31 +344,22 @@ function proxyWsUpgrade(
   upstream.on('connect', () => {
     if (session.revoked) return;
     const lines = [`${req.method ?? 'GET'} ${strippedPath} HTTP/1.1`];
-    for (const [k, v] of Object.entries(req.headers)) {
-      if (k.toLowerCase() === 'host') {
-        lines.push(`Host: ${host}:${IDE_INTERNAL_PORT}`);
-        continue;
-      }
-      // code-server refuses an Origin whose host is not the Host header, and here the Host is
-      // the container's; the upgrade handler already checked the browser's Origin.
-      if (k.toLowerCase() === 'origin') {
-        lines.push(`Origin: http://${host}:${IDE_INTERNAL_PORT}`);
-        continue;
-      }
-      if (k.toLowerCase() === 'authorization' || k.toLowerCase() === 'proxy-authorization') {
-        continue;
-      }
-      if (k.toLowerCase() === 'cookie') {
-        const kept = typeof v === 'string' ? withoutSessionCookies(v) : null;
-        if (kept !== null) lines.push(`${k}: ${kept}`);
-        continue;
-      }
-      if (Array.isArray(v)) {
-        for (const vv of v) lines.push(`${k}: ${vv}`);
-      } else if (v !== undefined) {
-        lines.push(`${k}: ${v}`);
+    const incoming = new Headers();
+    for (const [name, value] of Object.entries(req.headers)) {
+      if (Array.isArray(value)) {
+        for (const item of value) incoming.append(name, item);
+      } else if (value !== undefined) {
+        incoming.set(name, value);
       }
     }
+    const headers = upstreamRequestHeaders(incoming);
+    lines.push(`Host: ${host}:${IDE_INTERNAL_PORT}`);
+    // The handler already checked the browser's Origin. code-server requires
+    // the upstream Origin to match its Host, which is the container here.
+    headers.set('origin', `http://${host}:${IDE_INTERNAL_PORT}`);
+    headers.set('connection', 'Upgrade');
+    headers.set('upgrade', 'websocket');
+    for (const [name, value] of headers) lines.push(`${name}: ${value}`);
     upstream.write(`${lines.join('\r\n')}\r\n\r\n`);
     if (head && head.length) upstream.write(head);
     relayUpgradeResponse(upstream, socket, teardown, session);

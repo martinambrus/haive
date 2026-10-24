@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http';
 import net, { type AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
+import { createAdaptorServer } from '@hono/node-server';
 import { parse } from 'hono/utils/cookie';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -60,6 +61,7 @@ function seedDb(owned = true): void {
 }
 
 const realConnect = net.connect.bind(net);
+const realFetch = globalThis.fetch;
 let fetchStub: ReturnType<typeof vi.fn>;
 let servers: Array<{ close: (cb: () => void) => unknown }> = [];
 
@@ -208,7 +210,7 @@ describe('IDE-1 http proxy strips Haive credentials', () => {
     expect(forwarded.get('cookie')).toBe('other=1; theme=dark');
     expect(forwarded.has('authorization')).toBe(false);
     expect(forwarded.has('proxy-authorization')).toBe(false);
-    expect(forwarded.get('x-forwarded-for')).toBe('1.2.3.4');
+    expect(forwarded.has('x-forwarded-for')).toBe(false);
     expect(forwarded.get('user-agent')).toBe('ua');
     expect(forwarded.has('host')).toBe(false);
   });
@@ -230,9 +232,9 @@ describe('IDE-2 websocket proxy strips Haive credentials', () => {
     expect(lower).not.toContain('proxy-authorization:');
     expect(lower).toContain('cookie: other=1; theme=dark');
     expect(head).toContain(`Host: ${ideRunnerName(TASK)}:8080`);
-    expect(head).toContain(`Origin: http://${ideRunnerName(TASK)}:8080`);
+    expect(head).toContain(`origin: http://${ideRunnerName(TASK)}:8080`);
     expect(head).toContain('sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==');
-    expect(head).toContain('x-forwarded-for: 1.2.3.4');
+    expect(head.toLowerCase()).not.toContain('x-forwarded-for:');
   });
 });
 
@@ -488,5 +490,100 @@ describe('IDE-8 upstream cannot set or clear the Haive session cookies', () => {
     );
     expect(got).toContain('Sec-WebSocket-Accept: abc');
     expect(got.endsWith('\r\n\r\nFRAME-BYTES')).toBe(true);
+  });
+});
+
+describe('IDE request header controls', () => {
+  it('streams a real chunked POST through HTTP to a stub upstream', async () => {
+    let received: { body: string; headers: Record<string, unknown> } | undefined;
+    const upstream = createServer(async (req, res) => {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      received = { body, headers: req.headers };
+      res.end('saved');
+    });
+    await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r));
+    servers.push(upstream);
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    fetchStub.mockImplementation((url: string, init: RequestInit) => {
+      const path = new URL(url);
+      return realFetch(`http://127.0.0.1:${upstreamPort}${path.pathname}${path.search}`, init);
+    });
+    const proxy = createAdaptorServer({ fetch: app.fetch });
+    await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r));
+    servers.push(proxy);
+    const port = (proxy.address() as AddressInfo).port;
+    const reply = await new Promise<string>((resolve, reject) => {
+      let reply = '';
+      const socket = realConnect(port, '127.0.0.1', () => {
+        socket.write(
+          [
+            `POST /ide/${TASK}/save HTTP/1.1`,
+            `Host: 127.0.0.1:${port}`,
+            'Transfer-Encoding: chunked',
+            'Connection: close',
+            'Cookie: haive_access=A; app=ok',
+            '',
+            '4',
+            'test',
+            '3',
+            '=ok',
+            '0',
+            '',
+            '',
+          ].join('\r\n'),
+        );
+      });
+      socket.on('data', (chunk) => (reply += chunk.toString()));
+      socket.on('end', () => resolve(reply));
+      socket.on('error', reject);
+    });
+    expect(reply.split('\r\n')[0]).toBe('HTTP/1.1 200 OK');
+    expect(received?.body).toBe('test=ok');
+    expect(received?.headers.cookie).toBe('app=ok');
+  });
+
+  const tainted: HeaderPairs = [
+    ['connection', 'keep-alive, x-private, X-Other'],
+    ['keep-alive', 'timeout=10'],
+    ['proxy-connection', 'keep-alive'],
+    ['proxy-authenticate', 'Basic'],
+    ['proxy-custom', 'secret'],
+    ['te', 'trailers'],
+    ['trailer', 'x-trailer'],
+    ['x-private', 'secret'],
+    ['x-other', 'secret2'],
+    ['forwarded', 'host=evil;proto=https'],
+    ['x-forwarded-for', '1.2.3.4'],
+    ['x-forwarded-host', 'evil'],
+    ['x-forwarded-proto', 'https'],
+    ['x-forwarded-prefix', '/evil'],
+  ];
+
+  it('drops connection-scoped and client forwarding headers on HTTP', async () => {
+    const forwarded = await httpForwarded([...tainted, ['upgrade', 'websocket']]);
+    for (const [name] of tainted) expect(forwarded.has(name), name).toBe(false);
+    expect(forwarded.has('upgrade')).toBe(false);
+  });
+
+  it('rebuilds only the WebSocket transport headers on a real upgrade', async () => {
+    const rig = await wsRig();
+    const { head } = await rig.upgrade([
+      AUTH_LINE,
+      ...tainted.map(([name, value]) => `${name}: ${value}`),
+      'Transfer-Encoding: chunked',
+    ]);
+    const lines = headLines(head).map((line) => line.toLowerCase());
+    expect(head.split('\r\n')[0]).toBe('GET / HTTP/1.1');
+    for (const [name] of tainted.filter(([name]) => name !== 'connection')) {
+      expect(
+        lines.some((line) => line.startsWith(`${name}:`)),
+        name,
+      ).toBe(false);
+    }
+    expect(lines.filter((line) => line.startsWith('connection:'))).toEqual(['connection: upgrade']);
+    expect(lines).toContain('upgrade: websocket');
+    expect(lines.some((line) => line.startsWith('transfer-encoding:'))).toBe(false);
+    expect(head).toContain('sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==');
   });
 });
