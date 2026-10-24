@@ -7,16 +7,7 @@ import {
   type ModelIdentity,
   type StepErrorHint,
 } from '@haive/shared';
-import type {
-  CliExecJobPayload,
-  CliProbeJobPayload,
-  SandboxImageBuildJobPayload,
-  SandboxImageRemoveJobPayload,
-  RefreshCliVersionsJobPayload,
-  CliLoginCreateJobPayload,
-  CliSignOutJobPayload,
-  OllamaProvisionJobPayload,
-} from '@haive/shared';
+import type { CliExecQueuePayload } from '@haive/shared';
 import { QUEUE_NAMES, type InvocationToolUsage } from '@haive/shared';
 import { defaultCliSpawner, type CliSpawner } from '../../cli-executor/index.js';
 import type { CodexAppServerFailure } from '../../cli-executor/codex-app-server.js';
@@ -24,15 +15,7 @@ import { getBullRedis } from '../../redis.js';
 
 export const log: ReturnType<typeof logger.child> = logger.child({ module: 'cli-exec-queue' });
 
-export type CliExecQueuePayload =
-  | CliExecJobPayload
-  | CliProbeJobPayload
-  | SandboxImageBuildJobPayload
-  | SandboxImageRemoveJobPayload
-  | RefreshCliVersionsJobPayload
-  | CliLoginCreateJobPayload
-  | CliSignOutJobPayload
-  | OllamaProvisionJobPayload;
+export type { CliExecQueuePayload } from '@haive/shared';
 
 let cliExecQueueInstance: Queue<CliExecQueuePayload> | null = null;
 

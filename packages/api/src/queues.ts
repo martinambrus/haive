@@ -1,12 +1,12 @@
 import { Queue, QueueEvents } from 'bullmq';
-import { QUEUE_NAMES } from '@haive/shared';
+import { QUEUE_NAMES, type CliExecQueuePayload } from '@haive/shared';
 import { getBullRedis } from './redis.js';
 
 export type { RepoJobPayload, TaskJobPayload, BundleJobPayload } from '@haive/shared';
 
 let repoQueue: Queue | null = null;
 let taskQueue: Queue | null = null;
-let cliExecQueue: Queue | null = null;
+let cliExecQueue: Queue<CliExecQueuePayload> | null = null;
 let cliExecQueueEvents: QueueEvents | null = null;
 let bundleQueue: Queue | null = null;
 let globalKbSyncQueue: Queue | null = null;
@@ -36,9 +36,11 @@ export function getTaskQueue(): Queue {
   return taskQueue;
 }
 
-export function getCliExecQueue(): Queue {
+export function getCliExecQueue(): Queue<CliExecQueuePayload> {
   if (!cliExecQueue) {
-    cliExecQueue = new Queue(QUEUE_NAMES.CLI_EXEC, { connection: getBullRedis() });
+    cliExecQueue = new Queue<CliExecQueuePayload>(QUEUE_NAMES.CLI_EXEC, {
+      connection: getBullRedis(),
+    });
   }
   return cliExecQueue;
 }

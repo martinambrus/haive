@@ -446,6 +446,16 @@ export interface CliSignOutJobResult {
 
 export type RefreshCliVersionsJobPayload = Record<string, never>;
 
+export type CliExecQueuePayload =
+  | CliExecJobPayload
+  | CliProbeJobPayload
+  | SandboxImageBuildJobPayload
+  | SandboxImageRemoveJobPayload
+  | RefreshCliVersionsJobPayload
+  | CliLoginCreateJobPayload
+  | CliSignOutJobPayload
+  | OllamaProvisionJobPayload;
+
 export interface RefreshCliVersionsJobResult {
   ok: boolean;
   refreshed: { name: string; count: number; latest: string | null }[];
