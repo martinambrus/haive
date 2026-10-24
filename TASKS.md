@@ -466,7 +466,7 @@ Recommendation: delete the route.
 status: open · was modular #127
 Plan I4, part d. Browser check at 1280, 768 and 390.
 
-### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+1)
+### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+2)
 
 status: open · was modular #138
 Items 2-5 merged (#781, #808).
@@ -477,6 +477,7 @@ Items 2-5 merged (#781, #808).
    - refuse a bind whose credential does not fit the remote;
    - make the helper answer only for the credential's own host;
    - run the fit check before 12's push.
+3. (T388 review) PRE-EXISTING, minor: an accepted origin URL is returned raw, userinfo included, into step output (worker repo/git-push.ts getOriginUrl; 11a-gate-4-push.ts ~:111, 12-worktree-cleanup.ts ~:267), so a token embedded in a remote URL reaches the step's detect output. Fix: redact userinfo wherever a URL is shown or stored.
 
 ### T341 · FNF[credential-connection-coupling] · deleting a Git credential silently deletes its connection; re-sign-in duplicates the credential (+11)
 
