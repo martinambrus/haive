@@ -215,7 +215,11 @@ export default function MaintenancePage() {
                   <Badge>{t.status}</Badge>
                   {/* The distinction that decides whether to wait or to act. */}
                   {t.hasLiveCli ? <Badge variant="info">CLI running</Badge> : null}
-                  {t.pausedAt ? <Badge variant="warning">paused</Badge> : null}
+                  {t.pausedAt ? (
+                    <Badge variant="warning">
+                      {t.pausedByAdmin ? 'paused by admin' : 'paused by owner'}
+                    </Badge>
+                  ) : null}
                 </div>
                 <div className="mt-1 text-xs text-neutral-500">
                   {t.ownerName ?? t.ownerEmail ?? 'unknown owner'}
@@ -224,14 +228,27 @@ export default function MaintenancePage() {
               </div>
               <div className="flex gap-2">
                 {t.pausedAt ? (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={busy}
-                    onClick={() => void act(t, 'resume')}
-                  >
-                    Resume
-                  </Button>
+                  <>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() => void act(t, 'resume')}
+                    >
+                      Resume
+                    </Button>
+                    {t.pausedByAdmin ? null : (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={busy}
+                        title="Keep it paused and make the pause an administrator's, so only an administrator can resume it."
+                        onClick={() => void act(t, 'pause')}
+                      >
+                        Take over pause
+                      </Button>
+                    )}
+                  </>
                 ) : (
                   <Button
                     size="sm"

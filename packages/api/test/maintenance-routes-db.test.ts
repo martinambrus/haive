@@ -63,7 +63,14 @@ app.route('/admin/maintenance', maintenanceRoutes);
 app.route('/tasks', taskRoutes);
 
 interface Blocking {
-  tasks: { id: string; hasLiveCli: boolean; ownerId: string | null; ownerEmail: string | null }[];
+  tasks: {
+    id: string;
+    hasLiveCli: boolean;
+    pausedAt: string | null;
+    pausedByAdmin: boolean;
+    ownerId: string | null;
+    ownerEmail: string | null;
+  }[];
   jobs: {
     kind: string;
     id: string;
@@ -846,6 +853,164 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
         expect(await stored(row.id)).toEqual(stamp);
       });
     });
+
+    describe("an administrator's pause of a task its owner paused", () => {
+      const ownerPaused = async () => {
+        const row = await task();
+        as(OWNER, 'user');
+        expect((await ownerAct(row.id, 'pause')).status).toBe(200);
+        as(ADMIN, 'admin');
+        return row;
+      };
+      const holdLock = async (taskId: string, write: (tx: Database) => Promise<void>) => {
+        let release = () => {};
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let locked = () => {};
+        const held = new Promise<void>((resolve) => {
+          locked = resolve;
+        });
+        const done = db.transaction(async (tx) => {
+          await tx
+            .select({ id: schema.tasks.id })
+            .from(schema.tasks)
+            .where(eq(schema.tasks.id, taskId))
+            .for('update');
+          locked();
+          await gate;
+          await write(tx as unknown as Database);
+        });
+        await held;
+        return { release, done };
+      };
+      const waitUntilBlocked = async () => {
+        for (let tries = 0; tries < 100; tries += 1) {
+          const waiting = await db.execute(
+            sql`select 1 from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()`,
+          );
+          if (waiting.length > 0) return;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        throw new Error('the administrator request never blocked on the task row lock');
+      };
+
+      it('takes the pause over through both routes, keeping the stamp', async () => {
+        const row = await ownerPaused();
+        const stamp = await stored(row.id);
+
+        const res = await act(row.id, 'pause');
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true, pausedAt: stamp!.toISOString() });
+        expect(await stored(row.id)).toEqual(stamp);
+        expect(await events(row.id, 'task.paused')).toHaveLength(2);
+        const [audit, ...rest] = await audits(row.id, 'task.admin_pause');
+        expect(rest).toEqual([]);
+        expect(audit?.metadata).toMatchObject({
+          ownerUserId: OWNER,
+          pausedAt: stamp!.toISOString(),
+          tookOver: true,
+        });
+        const listed = (await blocking()).tasks.find((t) => t.id === row.id);
+        expect(listed?.pausedByAdmin).toBe(true);
+
+        as(OWNER, 'user');
+        expect((await ownerAct(row.id, 'resume')).status).toBe(409);
+        as(ADMIN, 'admin');
+        expect((await act(row.id, 'resume')).status).toBe(200);
+        expect(await stored(row.id)).toBeNull();
+      });
+
+      it('lists who holds each pause on GET /blocking', async () => {
+        const byOwner = await ownerPaused();
+        const byAdmin = await task();
+        expect((await act(byAdmin.id, 'pause')).status).toBe(200);
+        const free = await task();
+
+        const byId = new Map((await blocking()).tasks.map((t) => [t.id, t]));
+
+        expect(byId.get(byOwner.id)?.pausedByAdmin).toBe(false);
+        expect(byId.get(byAdmin.id)?.pausedByAdmin).toBe(true);
+        expect(byId.get(free.id)?.pausedByAdmin).toBe(false);
+      });
+
+      it('writes nothing for a second administrator pause', async () => {
+        const row = await ownerPaused();
+        expect((await act(row.id, 'pause')).status).toBe(200);
+
+        expect((await act(row.id, 'pause')).status).toBe(200);
+
+        expect(await events(row.id, 'task.paused')).toHaveLength(2);
+        expect(await audits(row.id, 'task.admin_pause')).toHaveLength(1);
+      });
+
+      it('leaves the events, the audit rows and the stamp untouched when the audit row is refused', async () => {
+        const row = await ownerPaused();
+        const stamp = await stored(row.id);
+        await refuseAuditInserts();
+
+        const res = await act(row.id, 'pause');
+
+        expect(res.status).toBe(500);
+        expect(await stored(row.id)).toEqual(stamp);
+        expect(await events(row.id, 'task.paused')).toHaveLength(1);
+        await allowAuditInserts();
+        expect(await audits(row.id, 'task.admin_pause')).toEqual([]);
+      });
+
+      it('pauses outright when a concurrent owner Resume clears the pause first', async () => {
+        const row = await ownerPaused();
+        const lock = await holdLock(row.id, async (tx) => {
+          await tx.update(schema.tasks).set({ pausedAt: null }).where(eq(schema.tasks.id, row.id));
+          await tx
+            .insert(schema.taskEvents)
+            .values({ taskId: row.id, eventType: 'task.resumed', payload: { by: OWNER } });
+        });
+
+        const pending = act(row.id, 'pause');
+        await waitUntilBlocked();
+        lock.release();
+        await lock.done;
+        const res = await pending;
+
+        expect(res.status).toBe(200);
+        const stamp = await stored(row.id);
+        expect(stamp).toBeInstanceOf(Date);
+        expect(await res.json()).toEqual({ ok: true, pausedAt: stamp!.toISOString() });
+        const [audit, ...rest] = await audits(row.id, 'task.admin_pause');
+        expect(rest).toEqual([]);
+        expect(audit?.metadata).not.toHaveProperty('tookOver');
+        expect((await findAdminPausedTaskIds(db, [row.id])).has(row.id)).toBe(true);
+      });
+
+      it('takes over the stamp of a concurrent owner Pause that lands first', async () => {
+        const row = await task();
+        const ownerStamp = new Date(Date.now() - 60_000);
+        const lock = await holdLock(row.id, async (tx) => {
+          await tx
+            .update(schema.tasks)
+            .set({ pausedAt: ownerStamp })
+            .where(eq(schema.tasks.id, row.id));
+          await tx
+            .insert(schema.taskEvents)
+            .values({ taskId: row.id, eventType: 'task.paused', payload: { by: OWNER } });
+        });
+
+        const pending = act(row.id, 'pause');
+        await waitUntilBlocked();
+        lock.release();
+        await lock.done;
+        const res = await pending;
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true, pausedAt: ownerStamp.toISOString() });
+        expect(await stored(row.id)).toEqual(ownerStamp);
+        const [audit] = await audits(row.id, 'task.admin_pause');
+        expect(audit?.metadata).toMatchObject({ tookOver: true });
+        expect((await findAdminPausedTaskIds(db, [row.id])).has(row.id)).toBe(true);
+      });
+    });
   });
 
   describe('GET and POST /admin/maintenance/upgrade on Postgres', () => {
@@ -957,24 +1122,20 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       });
       const lowerFirst = await task({ pausedAt: at });
       const higherFirst = await task({ pausedAt: at });
-      await db
-        .insert(schema.taskEvents)
-        .values([
-          pause('00000000-0000-4000-8000-000000000a01', lowerFirst.id, { by: OWNER }),
-          pause('00000000-0000-4000-8000-000000000a02', lowerFirst.id, {
-            by: ADMIN,
-            byAdmin: true,
-          }),
-        ]);
-      await db
-        .insert(schema.taskEvents)
-        .values([
-          pause('00000000-0000-4000-8000-000000000a04', higherFirst.id, {
-            by: ADMIN,
-            byAdmin: true,
-          }),
-          pause('00000000-0000-4000-8000-000000000a03', higherFirst.id, { by: OWNER }),
-        ]);
+      await db.insert(schema.taskEvents).values([
+        pause('00000000-0000-4000-8000-000000000a01', lowerFirst.id, { by: OWNER }),
+        pause('00000000-0000-4000-8000-000000000a02', lowerFirst.id, {
+          by: ADMIN,
+          byAdmin: true,
+        }),
+      ]);
+      await db.insert(schema.taskEvents).values([
+        pause('00000000-0000-4000-8000-000000000a04', higherFirst.id, {
+          by: ADMIN,
+          byAdmin: true,
+        }),
+        pause('00000000-0000-4000-8000-000000000a03', higherFirst.id, { by: OWNER }),
+      ]);
 
       const named = await findAdminPausedTaskIds(db, [lowerFirst.id, higherFirst.id]);
 

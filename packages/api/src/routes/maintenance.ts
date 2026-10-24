@@ -27,7 +27,7 @@ import {
   type AuditEvent,
 } from '../lib/audit.js';
 import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js';
-import { appendTaskEvent } from './tasks/_helpers.js';
+import { appendTaskEvent, findAdminPausedTaskIds } from './tasks/_helpers.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { findLiveUpgradeRun, listUpgradeRuns } from '../lib/upgrade-run.js';
@@ -218,9 +218,15 @@ maintenanceRoutes.get('/blocking', async (c) => {
     );
   const withLiveCli = new Set(live.map((r) => r.taskId));
 
+  const adminPaused = await findAdminPausedTaskIds(
+    db,
+    rows.filter((r) => r.pausedAt).map((r) => r.id),
+  );
+
   return c.json({
     tasks: rows.map(({ ownerEmailEncrypted, ...r }) => ({
       ...r,
+      pausedByAdmin: adminPaused.has(r.id),
       ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
       hasLiveCli: withLiveCli.has(r.id),
     })),
@@ -280,36 +286,40 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
       if (task.status === 'completed' || task.status === 'cancelled') {
         throw new HttpError(409, `Cannot pause a ${task.status} task`);
       }
-      // Idempotent, and it keeps the ORIGINAL timestamp for the same reason the owner path does:
-      // that stamp anchors the runtime reaper's paused-grace.
-      if (task.pausedAt) return c.json({ ok: true, pausedAt: task.pausedAt.toISOString() });
-      const pausedAt = new Date();
-      const ev = auditEvent({ pausedAt: pausedAt.toISOString() });
-      const paused = await db.transaction(async (tx) => {
-        // Only the pause that changes the row is recorded.
-        const rows = await tx
-          .update(schema.tasks)
-          .set({ pausedAt, updatedAt: pausedAt })
-          .where(and(eq(schema.tasks.id, taskId), isNull(schema.tasks.pausedAt)))
-          .returning({ id: schema.tasks.id });
-        if (rows.length === 0) return false;
+      // Decided under the task row lock, so a concurrent owner Pause or Resume is judged as it is.
+      // A standing stamp stays (it anchors the reaper's paused-grace); the event alone takes over.
+      const now = new Date();
+      const result = await db.transaction(async (tx) => {
+        const [locked] = await tx
+          .select({ pausedAt: schema.tasks.pausedAt })
+          .from(schema.tasks)
+          .where(eq(schema.tasks.id, taskId))
+          .for('update');
+        if (!locked) return { stamp: null, ev: null };
+        let stamp = locked.pausedAt;
+        let ev: AuditEvent;
+        if (!stamp) {
+          stamp = now;
+          await tx
+            .update(schema.tasks)
+            .set({ pausedAt: now, updatedAt: now })
+            .where(and(eq(schema.tasks.id, taskId), isNull(schema.tasks.pausedAt)));
+          ev = auditEvent({ pausedAt: now.toISOString() });
+        } else if ((await findAdminPausedTaskIds(tx, [taskId])).has(taskId)) {
+          return { stamp, ev: null };
+        } else {
+          ev = auditEvent({ pausedAt: stamp.toISOString(), tookOver: true });
+        }
         await appendTaskEvent(tx, taskId, null, 'task.paused', {
           by: actorUserId,
           byAdmin: true,
           reason: 'maintenance',
         });
         await insertAuditEvent(tx, ev);
-        return true;
+        return { stamp, ev };
       });
-      if (!paused) {
-        const standing = await db.query.tasks.findFirst({
-          where: eq(schema.tasks.id, taskId),
-          columns: { pausedAt: true },
-        });
-        return c.json({ ok: true, pausedAt: standing?.pausedAt?.toISOString() ?? null });
-      }
-      logAuditEvent(ev);
-      return c.json({ ok: true, pausedAt: pausedAt.toISOString() });
+      if (result.ev) logAuditEvent(result.ev);
+      return c.json({ ok: true, pausedAt: result.stamp?.toISOString() ?? null });
     }
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });

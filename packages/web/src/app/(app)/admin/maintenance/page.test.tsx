@@ -30,6 +30,8 @@ const reply = (code: number, body: unknown) => ({
 let state = 'normal';
 let holdState: { settle?: () => void } | null = null;
 let runs: Array<Record<string, unknown>> = [];
+let blockingTasks: Array<Record<string, unknown>> = [];
+let actions: string[] = [];
 
 const upgradeRun = (status: string) => ({
   id: '11111111-2222-4333-8444-555555555555',
@@ -66,7 +68,17 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
     return reply(200, { state, previous });
   }
   if (call === 'GET /admin/maintenance/blocking') {
-    return reply(200, { tasks: [], jobs: [], total: 0, capped: false, viewerId: 'u1' });
+    return reply(200, {
+      tasks: structuredClone(blockingTasks),
+      jobs: [],
+      total: blockingTasks.length,
+      capped: false,
+      viewerId: 'u1',
+    });
+  }
+  if (call.startsWith('POST /admin/maintenance/tasks/') && call.endsWith('/action')) {
+    actions.push(`${call} ${init?.body}`);
+    return reply(200, { ok: true });
   }
   if (call === 'GET /admin/maintenance/upgrade') {
     return reply(200, {
@@ -86,6 +98,8 @@ beforeEach(() => {
   state = 'normal';
   holdState = null;
   runs = [];
+  blockingTasks = [];
+  actions = [];
 });
 afterEach(() => vi.useRealTimers());
 
@@ -165,5 +179,65 @@ describe('maintenance page while an upgrade run is live', () => {
     expect(stateButton(view, 'Maintenance').props.disabled).toBe(false);
     expect(occurrences(textOf(view.tree()), '9.9.9')).toBe(1);
     expect(reasonNote(view)).toHaveLength(0);
+  });
+});
+
+describe('maintenance page task pause controls', () => {
+  const blockingTask = (over: Record<string, unknown>) => ({
+    id: 'task-1',
+    title: 'A task',
+    type: 'workflow',
+    status: 'running',
+    pausedAt: null,
+    pausedByAdmin: false,
+    currentStepId: null,
+    updatedAt: '2026-10-01T10:00:00.000Z',
+    ownerId: 'u2',
+    ownerName: 'Owner',
+    ownerEmail: null,
+    hasLiveCli: false,
+    ...over,
+  });
+  const buttons = (view: Renderer) =>
+    findAll(view.tree(), (h) => h.tag === 'button')
+      .map((b) => textOf(b))
+      .filter((t) => ['Pause', 'Resume', 'Take over pause'].includes(t));
+
+  it('offers only Pause for a task nobody paused', async () => {
+    blockingTasks = [blockingTask({})];
+    const view = await mount();
+
+    expect(buttons(view)).toEqual(['Pause']);
+    expect(textOf(view.tree())).not.toContain('paused by');
+  });
+
+  it('marks an owner pause and offers Resume beside Take over pause', async () => {
+    blockingTasks = [blockingTask({ pausedAt: '2026-10-01T09:00:00.000Z' })];
+    const view = await mount();
+
+    expect(textOf(view.tree())).toContain('paused by owner');
+    expect(buttons(view)).toEqual(['Resume', 'Take over pause']);
+  });
+
+  it('marks an administrator pause and offers Resume only', async () => {
+    blockingTasks = [blockingTask({ pausedAt: '2026-10-01T09:00:00.000Z', pausedByAdmin: true })];
+    const view = await mount();
+
+    expect(textOf(view.tree())).toContain('paused by admin');
+    expect(buttons(view)).toEqual(['Resume']);
+  });
+
+  it('posts the pause action when Take over pause is clicked', async () => {
+    blockingTasks = [blockingTask({ pausedAt: '2026-10-01T09:00:00.000Z' })];
+    const view = await mount();
+    const takeOver = findAll(
+      view.tree(),
+      (h) => h.tag === 'button' && textOf(h) === 'Take over pause',
+    )[0]!;
+
+    fire.click(takeOver);
+    for (let i = 0; i < 3; i += 1) await view.flush();
+
+    expect(actions).toEqual(['POST /admin/maintenance/tasks/task-1/action {"action":"pause"}']);
   });
 });

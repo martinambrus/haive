@@ -93,17 +93,41 @@ describe.each(PAUSES)('$name', ({ admin, owner, path, recorded, resumed }) => {
   it('answers the stamp that stands and writes nothing for a task already paused', async () => {
     const pausedAt = new Date('2026-10-15T08:00:00.000Z');
     const fake = setup({ pausedAt });
+    if (admin) {
+      fake.insert(schema.taskEvents, { taskId: TASK, eventType: 'task.paused', payload: recorded });
+    }
+    const events = fake.rows(schema.taskEvents).length;
 
     const res = await pause();
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, pausedAt: pausedAt.toISOString() });
     expect(fake.rows(schema.tasks)[0]?.pausedAt).toEqual(pausedAt);
-    expect(fake.rows(schema.taskEvents)).toEqual([]);
+    expect(fake.rows(schema.taskEvents)).toHaveLength(events);
     expect(fake.rows(schema.auditEvents)).toEqual([]);
   });
 
-  describe('when the other writer pauses between the check and the update', () => {
+  if (admin) {
+    it("takes over the owner's pause without changing its stamp", async () => {
+      const pausedAt = new Date('2026-10-15T08:00:00.000Z');
+      const fake = setup({ pausedAt });
+      fake.insert(schema.taskEvents, {
+        taskId: TASK,
+        eventType: 'task.paused',
+        payload: { by: OWNER },
+      });
+
+      const res = await pause();
+
+      expect(await res.json()).toEqual({ ok: true, pausedAt: pausedAt.toISOString() });
+      expect(fake.rows(schema.tasks)[0]?.pausedAt).toEqual(pausedAt);
+      expect(fake.rows(schema.taskEvents)).toHaveLength(2);
+      expect((await findAdminPausedTaskIds(fake.db as never, [TASK])).has(TASK)).toBe(true);
+      expect(fake.rows(schema.auditEvents)).toHaveLength(1);
+    });
+  }
+
+  describe.skipIf(admin)('when the other writer pauses between the check and the update', () => {
     const rival = PAUSES.find((p) => p.path !== path)!;
     const STANDING = '2026-10-15T08:00:05.000Z';
     const race = async () => {

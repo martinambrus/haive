@@ -2431,6 +2431,7 @@ export interface BlockingTask {
   type: string;
   status: string;
   pausedAt: string | null;
+  pausedByAdmin: boolean;
   currentStepId: string | null;
   updatedAt: string;
   ownerId: string | null;
