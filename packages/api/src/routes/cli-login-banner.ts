@@ -31,26 +31,11 @@ import { attachContainerStream } from './terminal.js';
 import { execInContainer } from './docker-exec.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isUuid } from '../lib/uuid.js';
+import { safeErrorDetails } from '@haive/shared/logger';
 
 // CLI output, authorization URLs and upstream errors can contain credentials.
 // Log only session identifiers, lengths, error classes/codes and fixed messages.
 const log = logger.child({ module: 'cli-login-banner-ws' });
-
-/** Keep diagnostics without serializing query messages, bound params or stacks. */
-function safeErrorDetails(err: unknown): { name: string; code?: string | number } {
-  const name = err instanceof Error ? err.constructor.name : 'UnknownError';
-  // Drizzle wraps the driver's code in cause. Bound traversal also handles cycles.
-  for (
-    let current = err, depth = 0;
-    depth < 5 && current !== null && typeof current === 'object';
-    depth++
-  ) {
-    const { code, cause } = current as { code?: unknown; cause?: unknown };
-    if (typeof code === 'string' || typeof code === 'number') return { name, code };
-    current = cause;
-  }
-  return { name };
-}
 
 const WS_PATH_PREFIX = '/cli-login-banner/';
 const RAW_BUFFER_MAX = 64 * 1024;
