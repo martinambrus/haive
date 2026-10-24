@@ -41,7 +41,7 @@ describe('stepCliProviderIds', () => {
   });
 
   it('falls an unset seat through to the step default, not the task provider', () => {
-    // Matches the picker's own "(step default)" option and resolvePreferredCli's order.
+    // Matches the picker's seat fallback to the step's CLI and resolvePreferredCli's order.
     expect(
       stepCliProviderIds({
         step: step({ preferredCliProviderId: 'codex', miningSeats: seats }),

@@ -447,12 +447,10 @@ export default function GlobalKbPage() {
     prefilledEnrich.current = true;
     const params = new URLSearchParams(window.location.search);
     const repo = params.get('repo');
-    const cli = params.get('cli');
-    if (repo || cli) {
+    if (repo) {
       setEnrich((p) => ({
         ...p,
         repoId: repo ?? p.repoId,
-        cliProviderId: cli ?? p.cliProviderId,
       }));
     }
     // Arriving via the onboarding "review drafts" link (?status=draft) → pre-filter
@@ -753,7 +751,14 @@ export default function GlobalKbPage() {
       .catch(() => {});
     void api
       .get<{ providers: CliProvider[] }>('/cli-providers')
-      .then((r) => setProviders(r.providers))
+      .then((r) => {
+        const enabled = r.providers.filter((p) => p.enabled);
+        setProviders(enabled);
+        const cli = new URLSearchParams(window.location.search).get('cli');
+        if (cli && enabled.some((p) => p.id === cli)) {
+          setEnrich((p) => ({ ...p, cliProviderId: cli }));
+        }
+      })
       .catch(() => {});
   }, []);
 

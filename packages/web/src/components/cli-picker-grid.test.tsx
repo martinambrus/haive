@@ -32,7 +32,6 @@ describe('the none option of a step CLI dropdown', () => {
   it.each([
     ['the single dropdown', {}],
     ['a role dropdown', { roles: slots }],
-    ['a seat dropdown', { seats: slots }],
   ])('reads (none — use the default) in %s', (_name, props) => {
     const texts = noneOptions(props);
     expect(texts.length).toBeGreaterThan(0);
@@ -56,7 +55,7 @@ describe('the none option names the fallback provider', () => {
     for (const text of texts) expect(text).toBe(NAMED);
   });
 
-  it('keeps a seat dropdown on the generic text', () => {
+  it('names the step CLI as the seat fallback', () => {
     const view = createRenderer(() => (
       <CliPickerGrid
         providers={providers}
@@ -72,7 +71,7 @@ describe('the none option names the fallback provider', () => {
     const texts = findAll(seat as never, (h) => h.tag === 'option' && h.props.value === '').map(
       (h) => textOf(h),
     );
-    expect(texts).toContain(PLAIN);
+    expect(texts).toEqual(['(none — use the step’s CLI)']);
     expect(texts).not.toContain(NAMED);
   });
 
@@ -81,7 +80,7 @@ describe('the none option names the fallback provider', () => {
     ['an unknown id', { fallbackProviderId: 'nope' }],
     ['null', { fallbackProviderId: null }],
   ])('keeps the generic text when the prop is %s', (_n, extra) => {
-    for (const props of [{}, { roles: slots }, { seats: slots }]) {
+    for (const props of [{}, { roles: slots }]) {
       const texts = noneOptions({ ...props, ...extra });
       expect(texts.length).toBeGreaterThan(0);
       for (const text of texts) expect(text).toBe(PLAIN);
@@ -104,5 +103,24 @@ describe('the none option names the fallback provider', () => {
     expect(select?.props.value).toBe('');
     fire.type(select!, '');
     expect(calls[0]?.[0]).toBeNull();
+  });
+});
+
+describe('seat inheritance', () => {
+  it('has one empty option naming the step CLI fallback', () => {
+    const view = createRenderer(() => (
+      <CliPickerGrid
+        providers={providers}
+        idPrefix="s"
+        defaultProviderId="p1"
+        taskCliProviderId={null}
+        seats={slots}
+        onChange={() => {}}
+      />
+    ));
+    const seat = findAll(view.tree(), (h) => h.tag === 'select' && h.props.id === 's-seat-a')[0]!;
+    const empty = findAll(seat, (h) => h.tag === 'option' && h.props.value === '');
+    expect(empty).toHaveLength(1);
+    expect(textOf(empty[0]!)).toBe('(none — use the step’s CLI)');
   });
 });
