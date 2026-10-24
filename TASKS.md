@@ -1019,6 +1019,14 @@ status: open · area: modular-haive-plan owns merge-resolver.ts landing sections
 status: open
 From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` rows an earlier release recorded at a git-data path (a literal `.git` segment or, since T304, an NTFS or HFS+ alias of it) are skipped by every reader (01 plan, 02 and 04 writes, 03 staging, the sync), but nothing retires them and they still count in `liveArtifacts` (api upgrades.ts ~:456, ~:723, ~:787). Fix: retire them in a numbered, idempotent data migration (SQL cannot call `namesGitData`, so the migration needs the same rule in SQL, or ship a deploy script), or leave them out of the counts.
 
+### T422 · FNF[cli-login-banner] · the Claude OAuth capture logs the token's first 22 and last 6 characters (+1)
+
+status: open
+From the T400 Codex run (2026-10-24), confirmed by the session.
+
+1. PRE-EXISTING, security hygiene: api routes/cli-login-banner.ts ~:674-680 logs `tokenHead: oauthToken.slice(0, 22)` and `tokenTail: oauthToken.slice(-6)` when it captures a Claude OAuth token from stdout, so 15 secret characters of every captured token reach the api log. The only such site (grep of packages and modules). Fix: log the length and, if one is needed, a short hash, never characters of the token.
+2. PRE-EXISTING, minor: web components/cli-auth-banner-modal.tsx ~:226, the socket close handler leaves the displayed phase unchanged.
+
 ## Done
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
