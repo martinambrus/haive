@@ -259,7 +259,7 @@ const WORD_CHAR = /[\p{L}\p{N}_$]/u;
 /** A '/' that opens no regex literal would otherwise scan to the end of its line from every call: a
  *  literal longer than MAX_REGEX_CHARS is not read as one, and a line gives up on regex literals after
  *  MAX_REGEX_MISSES slashes that closed none. */
-const MAX_REGEX_CHARS = 1000;
+const MAX_REGEX_CHARS = 20_000;
 const MAX_REGEX_MISSES = 8;
 
 /** Index just past the quote that closes the string opening at `open`, else the end of the text. */
@@ -393,7 +393,7 @@ function regexClose(text: string, open: number): number {
 function regexMayStart(prev: string | null): boolean {
   if (prev === null) return true;
   if (WORD_START.test(prev[0] ?? '')) return REGEX_AFTER_WORD.test(prev);
-  return prev !== '' && ![')', ']', '}', '>', '<'].includes(prev);
+  return prev !== '' && ![')', ']', '}', '>', '<', '.'].includes(prev);
 }
 
 /** The spans of a JS, TS or Java file that are not code: comments, strings, template literals (their
@@ -468,7 +468,10 @@ function jsNonCode(text: string): Span[] {
     } else if (WORD_START.test(c)) {
       let end = i + 1;
       while (end < text.length && WORD_CHAR.test(text[end]!)) end += 1;
-      prev = text.slice(i, end);
+      const word = text.slice(i, end);
+      if (text[i - 1] === '.') prev = '';
+      else if (word === 'default' && prev === 'export') prev = ';';
+      else prev = word;
       i = end;
     } else if (c >= '0' && c <= '9') {
       let end = i + 1;
@@ -478,6 +481,9 @@ function jsNonCode(text: string): Span[] {
     } else if (c === '=' && next === '>') {
       prev = '=>';
       i += 2;
+    } else if (c === '.' && next === '.' && text[i + 2] === '.') {
+      prev = '...';
+      i += 3;
     } else {
       prev = c;
       i += 1;

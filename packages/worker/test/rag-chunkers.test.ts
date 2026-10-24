@@ -1148,6 +1148,55 @@ describe('maskNonCode', () => {
     }
   });
 
+  it('reads a slash after a keyword used as a property name, a dot, or a literal as division', () => {
+    for (const src of [
+      'var a = o.in / 2 / b;\n',
+      'var a = o.else / 2 / b;\n',
+      'var h = <p>run ./haive upgrade</p>;\n',
+      'x = 1.5 / 2 / 3;\n',
+      '\u540d\u524d / 2 / 3;\n',
+    ]) {
+      expect(maskNonCode(src, 'js')).toBe(src);
+    }
+    expect(maskNonCode('x = /a/ / 2 / 3;\n', 'js')).toBe(`x = /${blank('a')}/ / 2 / 3;\n`);
+    expect(maskNonCode('x = `t` / 2 / 3;\n', 'js')).toBe(`x = \`${blank('t')}\` / 2 / 3;\n`);
+  });
+
+  it('reads a regex after export default and after every keyword that takes an operand', () => {
+    expect(maskNonCode('export default /{/;\n', 'js')).toBe(`export default /${blank('{')}/;\n`);
+    for (const word of [
+      'return',
+      'typeof',
+      'instanceof',
+      'in',
+      'of',
+      'new',
+      'delete',
+      'void',
+      'throw',
+      'case',
+      'do',
+      'else',
+      'yield',
+      'await',
+    ]) {
+      expect(maskNonCode(`${word} /{/.test(s);\n`, 'js')).not.toMatch(/[{}]/);
+    }
+    expect(maskNonCode('/{/.test(s);\n', 'js')).toBe(`/${blank('{')}/.test(s);\n`);
+    expect(maskNonCode('x = [.../a/.exec(s)];\n', 'js')).toBe(
+      `x = [.../${blank('a')}/.exec(s)];\n`,
+    );
+  });
+
+  it('reads a regex of up to 20000 characters whole, and a division no further than that', () => {
+    const body = `[${'a'.repeat(1500)}\`]`;
+    expect(maskNonCode(`var r = /${body}/;\nvar t = \`x\`;\n`, 'js')).toBe(
+      `var r = /${blank(body)}/;\nvar t = \`${blank('x')}\`;\n`,
+    );
+    const far = `x = a++ / 2;${'var v = 1;'.repeat(3000)}y = b / 3;\n`;
+    expect(maskNonCode(far, 'js')).toBe(far);
+  });
+
   it('blanks a template whose expression holds braces and another template', () => {
     expect(maskNonCode('var a = `${ {x:1}.x + `inner` } tail`;', 'js')).toBe(
       `var a = \`${blank('${ {x:1}.x + `inner` } tail')}\`;`,
@@ -1222,6 +1271,28 @@ describe('extractCodeSections — braces that are not code', () => {
     ['JS', "function g(a /* ' ) */, b) {\n  return b;\n}\n", 'g.js', 'function-g'],
   ])('reads a %s signature past a parenthesis in a comment', (_lang, src, file, id) => {
     expect(extractCodeSections(src, file).map((s) => s.sectionId)).toEqual([id]);
+  });
+
+  it.each([
+    [
+      'eight regexes of 1200 characters on one line, then a quote in a regex',
+      `${`var r = /[${'a'.repeat(1200)}]/;`.repeat(8)}var s = /'/;function f() {return 1;}function g() {return 2;}\n`,
+      ['function-f', 'function-g'],
+    ],
+    [
+      'a backtick in a regex of over 1000 characters',
+      `const re = /[${'a'.repeat(1001)}\`]/;\nfunction one() {\n  return 1;\n}\nconst t = \`x\`;\nfunction two() {\n  return 2;\n}\n`,
+      ['function-one', 'function-two'],
+    ],
+    [
+      'export default of a regex holding a backtick',
+      'export default /`/;\nfunction one() {\n  return 1;\n}\nconst t = `x`;\nfunction two() {\n  return 2;\n}\n',
+      ['function-one', 'function-two'],
+    ],
+  ])('keeps the functions that follow %s', (_what, src, expected) => {
+    const found = extractCodeSections(src, 'bundle.js').map((s) => s.sectionId);
+
+    expect(found.filter((id) => !id.startsWith('chunk-'))).toEqual(expected);
   });
 
   it('ends an object-literal member at its own closing brace', () => {
