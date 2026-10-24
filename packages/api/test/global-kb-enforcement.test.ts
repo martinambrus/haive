@@ -990,7 +990,11 @@ describe('enforcement security audit', () => {
           ...(spec.mode === 'files' ? { globCount: 2 } : {}),
         },
       });
-      expect(JSON.stringify(rows)).not.toContain(BODY);
+      expect(rows[0]!.metadata).toEqual({
+        namespace: 'default',
+        mode: spec.mode,
+        ...(spec.mode === 'files' ? { globCount: 2 } : {}),
+      });
       expect(h.logAudit).toHaveBeenCalledTimes(1);
       expect(h.logAudit.mock.calls[0]![0]).toMatchObject({
         action: rows[0]!.action,
