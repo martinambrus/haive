@@ -158,19 +158,6 @@ From the T388 review (2026-10-24). All PRE-EXISTING.
 5. (T388 fix-round reviews) The two operator scripts run `git fetch --all` (scripts/advance-bundle-items.ts ~:66, reset-bundle-to-commit.ts ~:88), which reaches every remote with neither the origin rule nor `protocol.file.allow=never`. PRE-EXISTING, minor (operator-run). Fix: fetch `origin` through the same validation, or refuse a remote the rule refuses.
 6. (T388 third review) Design limit, minor: `protocol.file.allow=never` is added only when the literal token `origin` is in the argv (shared git-args.ts ~:125-128), and the origin exec guard keys on the same token (worker origin-exec-guard.test.ts ~:84), so a future transport written without it (a bare `pull`, `fetch` with no remote, `remote update`) gets neither. Every current call passes `origin`. Fix: harden by verb (fetch, pull, push, ls-remote, remote update) rather than by the remote's name.
 
-### T418 · FNF[git-wording] · "nothing to commit" is still matched by git's English wording
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T01:20Z · last: 2026-10-25T02:45Z · merged PR #915, waiting for main CI
-From the T388 review (2026-10-24). PRE-EXISTING, minor. Same class as T388 item 4 (exit code, not wording), another command: steps/workflow/_kb-commit.ts ~:69, 10-gate-3-commit.ts ~:416, 11d-skill-sync.ts ~:527, run-app/99-run-app-ready.ts ~:335. A localized or reworded git turns "nothing to commit" into a failure. Fix: decide by `git diff --cached --quiet` (exit 1 = staged changes) before committing, or by the commit's exit code plus a staged-paths read.
-
-### T420 · FNF[cli-job-polling-2] · the pricing page ignores its refresh job; other jobs can trim a polled result early (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:45Z · last: 2026-10-25T02:30Z · merged PR #914 (d6b37bac3), browser-checked, waiting for main CI
-From the T380 review (2026-10-24). PRE-EXISTING, minor.
-
-1. packages/web/src/app/(app)/admin/pricing/page.tsx ~:137-140 ignores the `jobId` "Refresh now" returns and re-reads once after a fixed 4 s, while the refresh can queue behind agents for minutes, so the page can show stale numbers. Poll the job (web lib/cli-jobs.ts) instead.
-2. The cli-exec `completed`/`failed` sets are shared by every job and INVOKE jobs trim them by count (worker queues/task-queue.ts ~:1409-1410, also ~:1312, ~:1327), so under load a retained probe, sign-out or refresh result can be reaped before CLI_POLLABLE_JOB_OPTS' 900 s, against its "outlast the poll window" intent.
-
 ### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+7)
 
 status: open
@@ -1006,6 +993,8 @@ From the T382 review (2026-10-25). PRE-EXISTING, consequential if it reproduces 
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T418 — an empty commit is decided by the staged diff's exit code (submodule ignore and open merge handled), never by git's wording (leftovers in T397, T430) — PR #915 (ab398f836), 2026-10-25
+- T420 — the pricing page waits for its refresh job; cli-exec retention is by age so no job trims a pollable result early (browser-checked; leftovers in T428) — PR #914 (d6b37bac3), 2026-10-25
 - T363 — the expected attachment count is recorded at create and Start confirms "N of M attachments are missing" (migration 0211; live flow owed, T300) — PR #913 (f5bbce839), 2026-10-25
 - T400 — one WebSocket upgrade authenticator and refusal; a deactivation, reset or password change closes the user's open and pending sockets (1008); upgrade sockets cannot crash the api (live probe passed) — PR #912 (eb54d0f3a), 2026-10-25
 - T306 — step 12's written runs guarded, 04's rollback runs seeded with the snapshot they need, the revive fake given its table (test-only; fake-db class hazard in T364) — PR #911 (adad1b8d8), 2026-10-25
