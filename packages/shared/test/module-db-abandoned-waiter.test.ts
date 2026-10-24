@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabase, type Database } from '@haive/database';
+import { logger } from '../src/logger/index.js';
 import {
   moduleDatabaseName,
   openModuleDatabase,
@@ -99,6 +100,24 @@ describe.skipIf(!URL_)('an abandoned module database session', () => {
     await db?.$client.end({ timeout: 5 });
   });
 
+  it('inherits the startup check interval inside the schema lock', async () => {
+    const handle = await open(freshId(), 'mdw-lock-setting');
+    const readSetting = (sql: postgres.Sql | postgres.TransactionSql) =>
+      sql`SELECT setting::int, source FROM pg_settings
+           WHERE name = 'client_connection_check_interval'`;
+    const connections = await Promise.all([handle.sql.reserve(), handle.sql.reserve()]);
+    try {
+      for (const connection of connections) {
+        expect(await readSetting(connection)).toMatchObject([{ setting: 500, source: 'client' }]);
+      }
+    } finally {
+      for (const connection of connections) connection.release();
+    }
+    const locked = await handle.withSchemaLock(readSetting);
+    logger.info({ locked }, 'schema lock check interval');
+    expect(locked).toMatchObject([{ setting: 500, source: 'client' }]);
+  });
+
   it('ends statements on both sql connections soon after the pool closes', async () => {
     const id = freshId();
     const app = 'mdw-sql-runners';
@@ -123,8 +142,13 @@ describe.skipIf(!URL_)('an abandoned module database session', () => {
       GONE_WITHIN_MS,
     );
     const checked = performance.now();
-    process.stdout.write(
-      `sql pool: close=${Math.round(closed - started)}ms, backend check after close=${Math.round(checked - closed)}ms, remaining=${left.length}\n`,
+    logger.info(
+      {
+        closeMs: Math.round(closed - started),
+        backendCheckAfterCloseMs: Math.round(checked - closed),
+        remaining: left.length,
+      },
+      'sql pool close measurement',
     );
     expect(left, 'sql backends still on the server after close').toHaveLength(0);
     expect(checked - started, 'backends ended well before pg_sleep(10) could finish').toBeLessThan(

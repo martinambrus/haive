@@ -63,7 +63,6 @@ export async function openModuleDatabase(
     sql: pg,
     withSchemaLock: <T>(run: (tx: postgres.TransactionSql) => Promise<T>) =>
       pg.begin(async (tx) => {
-        await tx.unsafe(`SET LOCAL client_connection_check_interval = ${CONNECTION_CHECK_MS}`);
         await tx`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
         return run(tx) as Promise<T>;
       }) as Promise<T>,
