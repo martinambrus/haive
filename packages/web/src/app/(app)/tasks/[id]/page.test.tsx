@@ -48,6 +48,7 @@ vi.mock('@/components/terminal/InteractiveShell', () => ({
 const net = vi.hoisted(() => ({
   detail: {} as Record<string, unknown>,
   unstubbed: [] as string[],
+  stopResult: { killed: 0, cancelled: 0, stopped: 0 },
 }));
 
 const PAUSED_AT = '2026-10-15T09:00:00.000Z';
@@ -83,6 +84,9 @@ const taskRow = (over: Record<string, unknown> = {}) => ({
 
 async function fakeFetch(input: unknown) {
   const path = new URL(String(input), 'http://localhost').pathname;
+  if (path === '/tasks/t1/cancel-active-cli') {
+    return { ok: true, status: 200, json: async () => net.stopResult };
+  }
   if (path === '/tasks/t1') {
     return { ok: true, status: 200, json: async () => structuredClone(net.detail) };
   }
@@ -292,5 +296,47 @@ describe('task page Stop controls (#395)', () => {
     expect(await menuLabels(view)).toContain('Stop');
     const rows = findAll(view.tree(), (h) => !!h.props['data-step-id']);
     expect(rows.map((row) => buttons(row, 'stop').length)).toEqual([0, 1, 0]);
+  });
+
+  it.each([
+    { killed: 0, cancelled: 0, stopped: 0, notice: true },
+    { killed: 1, cancelled: 0, stopped: 0, notice: false },
+    { killed: 0, cancelled: 1, stopped: 0, notice: false },
+    { killed: 0, cancelled: 0, stopped: 1, notice: false },
+  ])('shows a notice only for an empty Stop result: %j', async ({ notice, ...result }) => {
+    vi.stubGlobal('confirm', () => true);
+    net.stopResult = result;
+    const view = await mount({ pausedAt: null }, [{ ...stepRow(), status: 'running' }]);
+    const stop = buttons(view.tree(), 'stop')[0]!;
+    fire.click(stop);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(textOf(view.tree()).includes('Nothing was running to stop.')).toBe(notice);
+  });
+
+  it('shows the header Stop notice through polling and clears it on the next successful Stop', async () => {
+    vi.stubGlobal('confirm', () => true);
+    net.stopResult = { killed: 0, cancelled: 0, stopped: 0 };
+    const view = await mount({ pausedAt: null }, [{ ...stepRow(), status: 'running' }]);
+    await menuLabels(view);
+    const stop = findAll(
+      view.tree(),
+      (h) => h.props.role === 'menuitem' && textOf(h).trim() === 'Stop',
+    )[0]!;
+    fire.click(stop);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    const notices = () =>
+      findAll(
+        view.tree(),
+        (h) => h.props.role === 'status' && textOf(h).includes('Nothing was running to stop.'),
+      );
+    expect(notices()).toHaveLength(1);
+    expect(notices()[0]!.props.className).toContain('text-neutral-400');
+    vi.advanceTimersByTime(2000);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(notices()).toHaveLength(1);
+    net.stopResult = { killed: 0, cancelled: 0, stopped: 1 };
+    fire.click(buttons(view.tree(), 'stop')[0]!);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(notices()).toHaveLength(0);
   });
 });

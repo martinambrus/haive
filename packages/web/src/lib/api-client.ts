@@ -2425,6 +2425,12 @@ export interface AdminInviteCreated {
 
 export type MaintenanceState = 'normal' | 'draining' | 'maintenance';
 
+export interface StopActivityResult {
+  killed: number;
+  cancelled: number;
+  stopped: number;
+}
+
 /** A task still holding a maintenance window open. `hasLiveCli` is the distinction that decides
  *  whether an operator waits or acts: a task with a running CLI is doing work, a parked one is
  *  only holding its place. */
@@ -2500,7 +2506,10 @@ export const maintenanceApi = {
     }),
   blocking: () => api.get<BlockingResponse>('/admin/maintenance/blocking'),
   taskAction: (taskId: string, action: 'pause' | 'resume' | 'stop') =>
-    api.post<{ ok: boolean }>(`/admin/maintenance/tasks/${taskId}/action`, { action }),
+    api.post<{ ok: boolean } & Partial<StopActivityResult>>(
+      `/admin/maintenance/tasks/${taskId}/action`,
+      { action },
+    ),
   upgradeStatus: () => api.get<UpgradeStatusResponse>('/admin/maintenance/upgrade'),
   startUpgrade: (body: { version: string; force?: boolean; drainTimeoutSeconds?: number }) =>
     api.post<{ started: boolean; from: string; to: string; container: string }>(

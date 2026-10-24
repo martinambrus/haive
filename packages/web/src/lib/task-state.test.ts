@@ -11,6 +11,7 @@ import {
   taskNotStarted,
   taskStatusWord,
   taskStoppedAt,
+  stopResultNotice,
 } from './task-state';
 
 const DEAD_AT = '2026-10-14T10:00:00.000Z';
@@ -339,5 +340,17 @@ describe('Stop eligibility controls (#395)', () => {
 
   it.each(['running', 'waiting_cli'])('keeps Stop for a %s row', () => {
     expect(taskMenuKeys({ status: 'running' }, { stepRunning: true })).toContain('stop');
+  });
+});
+
+describe('empty Stop result notice', () => {
+  it('requires explicit zero counts, including when an older API omits counts', () => {
+    expect(stopResultNotice({ stopped: 0, cancelled: 0, killed: 0 })).toBe(
+      'Nothing was running to stop.',
+    );
+    expect(stopResultNotice({})).toBeNull();
+    expect(stopResultNotice({ stopped: 0 })).toBeNull();
+    expect(stopResultNotice({ stopped: 0, killed: 0 })).toBeNull();
+    expect(stopResultNotice({ stopped: 0, cancelled: 0 })).toBeNull();
   });
 });

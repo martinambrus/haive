@@ -1,3 +1,4 @@
+import type { StopActivityResult } from './api-client';
 import { isTaskDead } from './step-banners';
 import type { TaskToneLike } from './task-tone';
 
@@ -99,4 +100,11 @@ export function taskStoppedAt(task: TaskClockRow): string | null {
 export function taskClockEndMs(task: TaskClockRow, nowMs: number): number {
   const stoppedAt = taskStoppedAt(task);
   return stoppedAt === null ? nowMs : new Date(stoppedAt).getTime();
+}
+
+/** An empty Stop can race a completion; only explicit zero counts prove nothing was stopped. */
+export function stopResultNotice(result: Partial<StopActivityResult>): string | null {
+  return result.stopped === 0 && result.killed === 0 && result.cancelled === 0
+    ? 'Nothing was running to stop.'
+    : null;
 }

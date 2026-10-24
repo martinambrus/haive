@@ -21,6 +21,7 @@ import {
   type RagQueryEntry,
   type StepAction,
   type StepActionResponse,
+  type StopActivityResult,
   type Task,
   type TaskAction,
   type TaskEvent,
@@ -73,6 +74,7 @@ import {
   taskMenuKeys,
   taskNotStarted,
   taskStoppedAt,
+  stopResultNotice,
 } from '@/lib/task-state';
 import { useGlobalPause } from '@/lib/use-global-pause';
 import {
@@ -730,6 +732,7 @@ export default function TaskDetailPage() {
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<{ stepId: string; message: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [stepActionBusy, setStepActionBusy] = useState<string | null>(null);
   const [stepActionError, setStepActionError] = useState<{
     stepId: string;
@@ -1290,6 +1293,7 @@ export default function TaskDetailPage() {
   }, [steps, submitting]);
 
   async function runAction(action: TaskAction) {
+    setActionNotice(null);
     setActionError(null);
     try {
       await api.post(`/tasks/${id}/action`, { action });
@@ -1302,9 +1306,11 @@ export default function TaskDetailPage() {
   // Stop the running CLI step without ending the task (vs runAction('cancel'),
   // which tears everything down). Leaves the task open/restartable.
   async function stopActiveCli() {
+    setActionNotice(null);
     setActionError(null);
     try {
-      await api.post(`/tasks/${id}/cancel-active-cli`, {});
+      const result = await api.post<StopActivityResult>(`/tasks/${id}/cancel-active-cli`, {});
+      setActionNotice(stopResultNotice(result));
       await reload();
     } catch (err) {
       setActionError((err as Error).message ?? 'Stop failed');
@@ -2042,6 +2048,12 @@ export default function TaskDetailPage() {
         <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
           {actionError}
         </div>
+      )}
+
+      {actionNotice && (
+        <Card role="status" className="px-3 py-2 text-sm text-neutral-400">
+          <InlineMarkdown body={actionNotice} />
+        </Card>
       )}
 
       {deadNote && <DeadTaskBanner text={deadNote.text} />}

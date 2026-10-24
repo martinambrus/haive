@@ -35,6 +35,7 @@ let parkedTasks: Array<Record<string, unknown>> = [];
 let parkedCapped = false;
 let predatesParked = false;
 let actions: string[] = [];
+let stopResult = { killed: 0, cancelled: 0, stopped: 0 };
 
 const upgradeRun = (status: string) => ({
   id: '11111111-2222-4333-8444-555555555555',
@@ -82,7 +83,7 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
   }
   if (call.startsWith('POST /admin/maintenance/tasks/') && call.endsWith('/action')) {
     actions.push(`${call} ${init?.body}`);
-    return reply(200, { ok: true });
+    return reply(200, { ok: true, ...stopResult });
   }
   if (call === 'GET /admin/maintenance/upgrade') {
     return reply(200, {
@@ -351,4 +352,40 @@ describe('maintenance Stop controls (#395)', () => {
       expect(stateButton(view, 'Stop CLI').props.disabled).toBe(false);
     },
   );
+
+  it.each([
+    { killed: 0, cancelled: 0, stopped: 0, notice: true },
+    { killed: 1, cancelled: 0, stopped: 0, notice: false },
+    { killed: 0, cancelled: 1, stopped: 0, notice: false },
+    { killed: 0, cancelled: 0, stopped: 1, notice: false },
+  ])('shows a notice only for an empty Stop result: %j', async ({ notice, ...result }) => {
+    stopResult = result;
+    blockingTasks = [{ ...row, hasLiveCli: true }];
+    const view = await mount();
+    fire.click(stateButton(view, 'Stop CLI'));
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(textOf(view.tree()).includes('Nothing was running to stop.')).toBe(notice);
+  });
+
+  it('keeps the Stop notice through polling and clears it on the next action', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    stopResult = { killed: 0, cancelled: 0, stopped: 0 };
+    blockingTasks = [{ ...row, hasLiveCli: true }];
+    const view = await mount();
+    fire.click(stateButton(view, 'Stop CLI'));
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    const notices = () =>
+      findAll(
+        view.tree(),
+        (h) => h.props.role === 'status' && textOf(h).includes('Nothing was running to stop.'),
+      );
+    expect(notices()).toHaveLength(1);
+    expect(notices()[0]!.props.className).toContain('text-neutral-400');
+    vi.advanceTimersByTime(5000);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(notices()).toHaveLength(1);
+    fire.click(stateButton(view, 'Pause'));
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(notices()).toHaveLength(0);
+  });
 });

@@ -14,7 +14,8 @@ import { BlockingTaskTitle } from '@/components/blocking-task-title';
 import { Badge, Button, Card, FormError, Input, Label } from '@/components/ui';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { usePageTitle } from '@/lib/use-page-title';
-import { taskCanStop } from '@/lib/task-state';
+import { taskCanStop, stopResultNotice } from '@/lib/task-state';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 /** The three states, in the order an operator walks them, each with what it actually does. Copy
  *  lives here rather than in the API because the API's job is to enforce them, not describe them. */
@@ -140,6 +141,7 @@ export default function MaintenancePage() {
   const [blocking, setBlocking] = useState<BlockingResponse | null>(null);
   const [upgrade, setUpgrade] = useState<UpgradeStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const [targetVersion, setTargetVersion] = useState('');
@@ -179,6 +181,7 @@ export default function MaintenancePage() {
   }, [load]);
 
   async function changeState(next: MaintenanceState) {
+    setNotice(null);
     setBusy(true);
     try {
       await maintenanceApi.set(next);
@@ -191,9 +194,11 @@ export default function MaintenancePage() {
   }
 
   async function act(task: BlockingTask, action: 'pause' | 'resume' | 'stop') {
+    setNotice(null);
     setBusy(true);
     try {
-      await maintenanceApi.taskAction(task.id, action);
+      const result = await maintenanceApi.taskAction(task.id, action);
+      if (action === 'stop') setNotice(stopResultNotice(result));
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : `could not ${action} that task`);
@@ -203,6 +208,7 @@ export default function MaintenancePage() {
   }
 
   async function startUpgrade() {
+    setNotice(null);
     setConfirming(false);
     setBusy(true);
     try {
@@ -233,6 +239,11 @@ export default function MaintenancePage() {
       </div>
 
       <FormError message={error} />
+      {notice && (
+        <Card role="status" className="px-3 py-2 text-sm text-neutral-400">
+          <InlineMarkdown body={notice} />
+        </Card>
+      )}
 
       <Card className="space-y-4 p-5">
         <div className="flex items-center gap-3">
