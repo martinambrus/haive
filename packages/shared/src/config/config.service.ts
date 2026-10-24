@@ -36,9 +36,6 @@ export const CONFIG_KEYS = {
   DATABASE_URL: 'config:database:url',
   API_PORT: 'config:server:apiPort',
 
-  RATE_LIMIT_API_RPM: 'config:rateLimit:api:requestsPerMinute',
-  RATE_LIMIT_AUTH_RPM: 'config:rateLimit:auth:requestsPerMinute',
-
   SMTP_HOST: 'config:email:smtpHost',
   SMTP_PORT: 'config:email:smtpPort',
   SMTP_USER: 'config:email:smtpUser',
@@ -658,8 +655,6 @@ export function parseRegistrationMode(raw: string | null | undefined): Registrat
 
 const DEFAULT_CONFIG: Record<string, string> = {
   [CONFIG_KEYS.API_PORT]: '3001',
-  [CONFIG_KEYS.RATE_LIMIT_API_RPM]: '60',
-  [CONFIG_KEYS.RATE_LIMIT_AUTH_RPM]: '10',
   [CONFIG_KEYS.SMTP_HOST]: 'mailpit',
   [CONFIG_KEYS.SMTP_PORT]: '1025',
   [CONFIG_KEYS.SMTP_FROM]: 'no-reply@haive.local',

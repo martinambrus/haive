@@ -21,7 +21,12 @@ import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { getIdeEnsureQueue, getIdeEnsureQueueEvents } from '../queues.js';
 import { verifyAccessToken } from '../auth/jwt.js';
-import { ACCESS_COOKIE } from '../auth/cookies.js';
+import {
+  ACCESS_COOKIE,
+  isSessionSetCookie,
+  withoutSessionCookies,
+  withoutSessionSetCookies,
+} from '../auth/cookies.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
@@ -124,6 +129,12 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
 
   const headers = new Headers(c.req.raw.headers);
   headers.delete('host');
+  // code-server runs repo-controlled code, so the Haive session must not reach it.
+  headers.delete('authorization');
+  headers.delete('proxy-authorization');
+  const keptCookie = withoutSessionCookies(headers.get('cookie') ?? '');
+  if (keptCookie === null) headers.delete('cookie');
+  else headers.set('cookie', keptCookie);
   // Force identity so undici's auto-decompression can't desync content-encoding.
   headers.set('accept-encoding', 'identity');
 
@@ -146,6 +157,7 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
 
   const outHeaders = new Headers(resp.headers);
   for (const h of HOP_BY_HOP) outHeaders.delete(h);
+  withoutSessionSetCookies(outHeaders);
   // Re-prefix a root-absolute redirect so it stays inside the proxy namespace.
   const loc = outHeaders.get('location');
   if (loc && loc.startsWith('/') && !loc.startsWith('//')) {
@@ -221,6 +233,40 @@ export function installIdeWebSocket(server: Server): void {
   log.info({ pathPrefix: WS_PATH_PREFIX }, 'ide websocket installed');
 }
 
+const MAX_UPGRADE_RESPONSE_HEAD = 64 * 1024;
+
+function relayUpgradeResponse(
+  upstream: net.Socket,
+  socket: Duplex,
+  teardown: (reason: string) => void,
+): void {
+  let buffered = Buffer.alloc(0);
+  const onData = (chunk: Buffer): void => {
+    buffered = Buffer.concat([buffered, chunk]);
+    const end = buffered.indexOf('\r\n\r\n');
+    if (end === -1) {
+      if (buffered.length > MAX_UPGRADE_RESPONSE_HEAD) teardown('upgrade response head too large');
+      return;
+    }
+    upstream.off('data', onData);
+    const head = buffered
+      .subarray(0, end)
+      .toString('latin1')
+      .split('\r\n')
+      .filter((line) => {
+        const colon = line.indexOf(':');
+        const isSetCookie =
+          colon !== -1 && line.slice(0, colon).trim().toLowerCase() === 'set-cookie';
+        return !(isSetCookie && isSessionSetCookie(line.slice(colon + 1)));
+      })
+      .join('\r\n');
+    socket.write(Buffer.concat([Buffer.from(head, 'latin1'), buffered.subarray(end)]));
+    buffered = Buffer.alloc(0);
+    upstream.pipe(socket);
+  };
+  upstream.on('data', onData);
+}
+
 /** Replay the client's upgrade request to the code-server container with the
  *  /ide/<taskId> prefix stripped, then pipe bytes both ways. Holds a refcount on
  *  the task's IDE session for the life of the connection so the idle reaper never
@@ -270,6 +316,14 @@ function proxyWsUpgrade(
         lines.push(`Origin: http://${host}:${IDE_INTERNAL_PORT}`);
         continue;
       }
+      if (k.toLowerCase() === 'authorization' || k.toLowerCase() === 'proxy-authorization') {
+        continue;
+      }
+      if (k.toLowerCase() === 'cookie') {
+        const kept = typeof v === 'string' ? withoutSessionCookies(v) : null;
+        if (kept !== null) lines.push(`${k}: ${kept}`);
+        continue;
+      }
       if (Array.isArray(v)) {
         for (const vv of v) lines.push(`${k}: ${vv}`);
       } else if (v !== undefined) {
@@ -278,7 +332,7 @@ function proxyWsUpgrade(
     }
     upstream.write(`${lines.join('\r\n')}\r\n\r\n`);
     if (head && head.length) upstream.write(head);
-    upstream.pipe(socket);
+    relayUpgradeResponse(upstream, socket, teardown);
     socket.pipe(upstream);
     counted = true;
     void acquireIdeSession(taskId);
@@ -362,11 +416,12 @@ async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: stri
     const db = getDb();
     const user = await db.query.users.findFirst({
       where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true },
+      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
     });
     if (!user) return null;
     if (user.status !== 'active') return null;
     if (user.tokenVersion !== payload.tv) return null;
+    if (user.mustChangePassword) return null;
     return { userId: user.id };
   } catch {
     return null;

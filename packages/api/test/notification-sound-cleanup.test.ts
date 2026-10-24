@@ -26,6 +26,13 @@ vi.mock('../src/middleware/auth.js', () => ({
     c.set('userId', USER);
     await next();
   },
+  requireAuthAllowingPasswordChange: async (
+    c: { set: (key: string, value: string) => void },
+    next: () => unknown,
+  ) => {
+    c.set('userId', USER);
+    await next();
+  },
 }));
 
 import { Hono } from 'hono';

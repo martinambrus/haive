@@ -221,7 +221,9 @@ in 40 seconds and rendered a blank page, where the same visit without it is one 
 clean throughout, so it is invisible outside a browser. `ForcedPasswordGuard` uses `usePathname()`
 and withholds `children` rather than flashing them, and `router.refresh()` after a successful
 change is load-bearing: the layout read the flag when it rendered, so without it the guard keeps
-bouncing a user who has already complied.
+bouncing a user who has already complied. The redirect is only the UX: `requireAuth` also answers 403
+`must_change_password` to every request but the current-user read, the password change, logout and
+refresh while the flag is set (see [API sign-in hardening](../architecture/api-auth.md)).
 
 **A new column goes LAST in the Drizzle table.** `ALTER TABLE ADD COLUMN` appends while
 `drizzle-kit push` builds the table in declaration order, so a column declared anywhere else makes

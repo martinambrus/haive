@@ -22,7 +22,7 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireAuthAllowingPasswordChange } from '../middleware/auth.js';
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
@@ -84,6 +84,65 @@ export function resolveSoundType(
 
 export const userSettingsRoutes = new Hono<AppEnv>();
 
+// Registered above the router-level requireAuth on purpose: a user who must change their password reaches only this.
+userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c) => {
+  const userId = c.get('userId');
+  const body = passwordChangeSchema.parse(await c.req.json());
+  const db = getDb();
+
+  const user = await db.query.users.findFirst({
+    where: eq(schema.users.id, userId),
+    columns: {
+      id: true,
+      role: true,
+      passwordHash: true,
+      tokenVersion: true,
+      mustChangePassword: true,
+    },
+  });
+  if (!user) throw new HttpError(404, 'User not found');
+
+  const ok = await verifyPassword(body.currentPassword, user.passwordHash);
+  if (!ok) throw new HttpError(401, 'Current password is incorrect');
+
+  if (user.mustChangePassword && body.newPassword === body.currentPassword) {
+    throw new HttpError(
+      400,
+      'Choose a password different from the one you were given',
+      'password_unchanged',
+    );
+  }
+
+  const newHash = await hashPassword(body.newPassword);
+  const newTokenVersion = user.tokenVersion + 1;
+  await db
+    .update(schema.users)
+    .set({
+      passwordHash: newHash,
+      tokenVersion: newTokenVersion,
+      // The one writer that clears it: this route is the only place the account HOLDER chooses the
+      // password, which is the whole condition the flag records.
+      mustChangePassword: false,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.users.id, userId));
+
+  const accessToken = await signAccessToken({
+    sub: user.id,
+    role: user.role,
+    tv: newTokenVersion,
+  });
+  const { token: refreshToken, expiresAt } = await signRefreshToken(user.id, newTokenVersion);
+  await db.insert(schema.refreshTokens).values({
+    userId: user.id,
+    tokenHash: hashRefreshToken(refreshToken),
+    expiresAt,
+  });
+  setAuthCookies(c, accessToken, refreshToken);
+
+  return c.json({ ok: true });
+});
+
 userSettingsRoutes.use('*', requireAuth);
 
 userSettingsRoutes.get('/account', async (c) => {
@@ -121,50 +180,6 @@ userSettingsRoutes.put('/account', async (c) => {
     }
   }
   await db.update(schema.users).set(update).where(eq(schema.users.id, userId));
-  return c.json({ ok: true });
-});
-
-userSettingsRoutes.put('/password', async (c) => {
-  const userId = c.get('userId');
-  const body = passwordChangeSchema.parse(await c.req.json());
-  const db = getDb();
-
-  const user = await db.query.users.findFirst({
-    where: eq(schema.users.id, userId),
-    columns: { id: true, role: true, passwordHash: true, tokenVersion: true },
-  });
-  if (!user) throw new HttpError(404, 'User not found');
-
-  const ok = await verifyPassword(body.currentPassword, user.passwordHash);
-  if (!ok) throw new HttpError(401, 'Current password is incorrect');
-
-  const newHash = await hashPassword(body.newPassword);
-  const newTokenVersion = user.tokenVersion + 1;
-  await db
-    .update(schema.users)
-    .set({
-      passwordHash: newHash,
-      tokenVersion: newTokenVersion,
-      // The one writer that clears it: this route is the only place the account HOLDER chooses the
-      // password, which is the whole condition the flag records.
-      mustChangePassword: false,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.users.id, userId));
-
-  const accessToken = await signAccessToken({
-    sub: user.id,
-    role: user.role,
-    tv: newTokenVersion,
-  });
-  const { token: refreshToken, expiresAt } = await signRefreshToken(user.id, newTokenVersion);
-  await db.insert(schema.refreshTokens).values({
-    userId: user.id,
-    tokenHash: hashRefreshToken(refreshToken),
-    expiresAt,
-  });
-  setAuthCookies(c, accessToken, refreshToken);
-
   return c.json({ ok: true });
 });
 

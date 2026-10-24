@@ -118,7 +118,7 @@ describe('a password an administrator minted', () => {
   });
 
   // Fails OPEN. An unknown path would otherwise redirect the destination too, which is a lockout
-  // over a UX nudge — the api enforces nothing on this flag.
+  // over a UX nudge, and the password page itself must stay reachable.
   it('continues when the path is unknown', () => {
     expect(decideForcedPasswordChange(forced({ path: null }))).toEqual({ action: 'continue' });
   });

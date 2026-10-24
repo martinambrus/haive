@@ -60,6 +60,7 @@ import { getGlobalKbSyncQueue } from '../queues.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
 import { isUuid } from '../lib/uuid.js';
+import { probeEgressFor } from '../lib/probe-hosts.js';
 import { boundedLockWait } from '../lib/repository-busy.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
@@ -547,11 +548,12 @@ globalKbRoutes.post('/test-ollama', async (c) => {
   const parsed = testOllamaSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid test request', 'invalid_body');
   const { ollamaUrl, model, dimensions } = parsed.data;
-  if (!(await probeOllama(ollamaUrl))) {
+  const { fetchFn } = await probeEgressFor(c);
+  if (!(await probeOllama(ollamaUrl, fetchFn))) {
     return c.json({ ok: false, message: `Ollama unreachable at ${ollamaUrl}` });
   }
   try {
-    const [vec] = await ollamaEmbed(ollamaUrl, model, ['healthcheck']);
+    const [vec] = await ollamaEmbed(ollamaUrl, model, ['healthcheck'], { fetchFn });
     const dims = vec?.length ?? 0;
     const dimsMatch = dims === dimensions;
     return c.json({
