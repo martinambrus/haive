@@ -1272,6 +1272,22 @@ describe('extractCodeSections — line terminators other than LF', () => {
     expect(ids).toContain('function-save');
   });
 
+  it.each([
+    ['a.js', '<!-- a ` b'],
+    ['a.cjs', 'x = 1; <!-- a ` b'],
+    ['a.js', '  --> a ` b'],
+  ])('reads an HTML-like comment in the script %s', (file, line) => {
+    const src = `${line}\nfunction save() { persist(); }\nconst t = \`\`;\n`;
+    const ids = extractCodeSections(src, file).map((s) => s.sectionId);
+    expect(ids).toContain('function-save');
+  });
+
+  it.each(['a.ts', 'a.mjs', 'a.tsx'])('keeps `<!--` as operators in %s', (file) => {
+    const src = 'let b = 1; const x = a <!--b; function save() { persist(); }\n';
+    const ids = extractCodeSections(src, file).map((s) => s.sectionId);
+    expect(ids).toContain('function-save');
+  });
+
   it('keeps every line terminator in the masked text', () => {
     const src = 'a; // c\u2028b; // d\ru = 1;';
     expect(maskNonCode(src, 'js')).toBe('a; //  \u2028b; //  \ru = 1;');

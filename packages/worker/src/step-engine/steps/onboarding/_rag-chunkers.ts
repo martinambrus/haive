@@ -294,6 +294,13 @@ function isLineTerminator(c: string, lfCrOnly: boolean): boolean {
   return c === '\n' || c === '\r' || (!lfCrOnly && (c === '\u2028' || c === '\u2029'));
 }
 
+/** Whether only spaces and tabs stand between the start of `at`'s line and `at`. */
+function atLineStart(text: string, at: number): boolean {
+  let j = at - 1;
+  while (j >= 0 && (text[j] === ' ' || text[j] === '\t')) j -= 1;
+  return j < 0 || isLineTerminator(text[j]!, false);
+}
+
 /** Index of the first line terminator at or after `from`, else -1. */
 function lineEnd(text: string, from: number, lfCrOnly: boolean): number {
   for (let i = from; i < text.length; i += 1) if (isLineTerminator(text[i]!, lfCrOnly)) return i;
@@ -450,7 +457,7 @@ function regexMayStart(prev: string | null): boolean {
 
 /** The spans of a JS, TS or Java file that are not code: comments, strings, template literals (their
  *  `${}` expressions too) and regex literals. A string that is a bare name stays: it may be a key. */
-function jsNonCode(text: string, java: boolean): Span[] {
+function jsNonCode(text: string, java: boolean, htmlComments = false): Span[] {
   const spans: Span[] = [];
   // The open template literals and `${` expressions, innermost last: -1 is template text, n >= 1
   // the braces open in an expression. Spans are recorded for the outermost template only.
@@ -494,6 +501,16 @@ function jsNonCode(text: string, java: boolean): Span[] {
     } else if (/\s/.test(c)) {
       i += 1;
       if (isLineTerminator(c, java)) regexMisses = 0;
+    } else if (
+      htmlComments &&
+      ((c === '<' && text.startsWith('<!--', i)) ||
+        (c === '-' && text.startsWith('-->', i) && atLineStart(text, i)))
+    ) {
+      const from = i + (c === '<' ? 4 : 3);
+      const close = lineEnd(text, from, false);
+      const bodyEnd = close < 0 ? text.length : close;
+      if (frames.length === 0) spans.push([from, bodyEnd]);
+      i = bodyEnd;
     } else if (c === '/' && next === '/' && isUrlScheme(text, i)) {
       prev = '';
       i += 2;
@@ -601,12 +618,12 @@ function jsNonCode(text: string, java: boolean): Span[] {
 /** `content` with the body of every comment and string blanked, so that a pattern or a brace count
  *  cannot match inside one: PHP loses its inline HTML and heredocs too, JS its template and regex
  *  literals. Same length and line ends; the delimiters stay. */
-export function maskNonCode(content: string, syntax: 'php' | 'js' | 'java'): string {
+export function maskNonCode(content: string, syntax: 'php' | 'js' | 'script' | 'java'): string {
   let masked = '';
   let cursor = 0;
   for (const [from, to] of syntax === 'php'
     ? phpNonCode(content)
-    : jsNonCode(content, syntax === 'java')) {
+    : jsNonCode(content, syntax === 'java', syntax === 'script')) {
     masked +=
       content.slice(cursor, from) + content.slice(from, to).replace(/[^\r\n\u2028\u2029]/g, ' ');
     cursor = to;
@@ -823,9 +840,9 @@ function commentRunStart(content: string, start: number, headerAt: number): numb
   return runStart < 0 || runStart === headerAt ? start : runStart;
 }
 
-function jsRanges(content: string, members: boolean): SectionRange[] {
+function jsRanges(content: string, members: boolean, script = false): SectionRange[] {
   const ranges: SectionRange[] = [];
-  const code = maskNonCode(content, members ? 'js' : 'java');
+  const code = maskNonCode(content, !members ? 'java' : script ? 'script' : 'js');
   let match: RegExpExecArray | null;
   const headerAt = content.search(/\S/);
   // Java shares this reader but is read as before: no members, no comment join.
@@ -1075,7 +1092,8 @@ export function extractCodeSections(content: string, filePath: string): RagSecti
     case 'tsx':
     case 'java':
       // Java shares this reader, but its constructors and synchronized blocks are not object members.
-      ranges = jsRanges(content, lang !== 'java');
+      // A .js or .cjs file is a script, where Annex B reads `<!--` and a leading `-->` as comments.
+      ranges = jsRanges(content, lang !== 'java', ext === '.js' || ext === '.cjs');
       break;
     case 'python':
       ranges = pythonRanges(content);
