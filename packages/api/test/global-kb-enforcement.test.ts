@@ -182,7 +182,12 @@ beforeEach(() => {
     tasks: schema.tasks,
     cliProviders: schema.cliProviders,
   });
-  auditFake.insert(schema.cliProviders, { id: PROVIDER, userId: ADMIN });
+  auditFake.insert(schema.cliProviders, {
+    id: PROVIDER,
+    userId: ADMIN,
+    enabled: true,
+    name: 'codex',
+  });
   enforcementSuccesses = 0;
   h.db = auditFake.db;
   h.logAudit.mockReset();
