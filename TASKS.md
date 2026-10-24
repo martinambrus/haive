@@ -121,6 +121,16 @@ From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it
 2. Low: 99-run-app-ready.ts:315 drops a ticked push silently when the commit box is unticked.
 3. Display: 11-phase-8-learning.ts:549,1170 says "No commit recorded"/"(none)" when gate 3's sha read gave no answer after a landed commit.
 
+### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+5)
+status: open
+From the #311 driver (2026-10-24). PRE-EXISTING unless noted. (Session fnf-run mirrors it as task #330.) Evidence/harness (ruler, lexer-diff, oracle-cross, mutants): .claude/tmp/fnf-run/p311/ on ACTIVIT21.
+1. Go/Rust readers count braces in strings/comments (goRanges/rustRanges read raw content); verify with a ruler first.
+2. Python defRe matches def/class inside triple-quoted strings (verify).
+3. PHP trait/interface/enum owners absent; `new class extends X {` names methods method-extends-*.
+4. LIMIT introduced by #311: JSX text lexed as JS blanks the rest of a line after an apostrophe, `//` or `/` (30 runs in 3 of 2417 TS files, 0 constructs lost).
+5. Ruby reader: `def self.x` named `self`, `module`, endless def.
+6. Doc: docs/plans/rag-retrieval-improvements.md:22-23 chunkSection split order is stale.
+
 ### T117 · B3.2 · catch checkout moves Haive did not make (+5)
 status: open · kind: feature (designed; decisions D13-D16 taken)
 Full design: .claude/tmp/track-b/b3/b32/analysis/{detect,backstops}.md and the B3 ledger (2026-10-15).
