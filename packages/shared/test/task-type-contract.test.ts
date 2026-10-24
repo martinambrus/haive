@@ -151,7 +151,7 @@ describe('resolveTaskTypeAvailability', () => {
         generic: true,
         modules: noRows,
       }),
-    ).toEqual({ available: false, reason: 'missing-step', stepIds: ['gone', 'gone2'] });
+    ).toEqual({ available: false, reason: 'missing-step', missingStepIds: ['gone', 'gone2'] });
   });
 
   it('disabled beats missing-step', () => {
@@ -310,7 +310,7 @@ describe('resolveTaskTypeAvailability', () => {
       expect(resolve(['b', 'a', 'gone'])).toEqual({
         available: false,
         reason: 'missing-step',
-        stepIds: ['gone'],
+        missingStepIds: ['gone'],
       });
     });
   });
@@ -524,10 +524,10 @@ describe('resolveTaskTypeAvailability and module states', () => {
     it('stays missing-step for a step the catalog lacks of a module that is present', () => {
       expect(
         resolve({ source: 'admin', stepIds: ['a', 'module.beta.gone'] }, { modules: rowsOf() }),
-      ).toEqual({ available: false, reason: 'missing-step', stepIds: ['module.beta.gone'] });
+      ).toEqual({ available: false, reason: 'missing-step', missingStepIds: ['module.beta.gone'] });
       expect(
         resolve({ source: 'module:beta', stepIds: ['a', 'gone'] }, { modules: rowsOf() }),
-      ).toEqual({ available: false, reason: 'missing-step', stepIds: ['gone'] });
+      ).toEqual({ available: false, reason: 'missing-step', missingStepIds: ['gone'] });
     });
 
     it('lists each missing module once, sorted, naming the ones that have a row', () => {
@@ -604,7 +604,7 @@ describe('resolveTaskTypeAvailability and module states', () => {
           { source: 'admin', stepIds: ['a', 'module.alpha.x'] },
           { modules: null, catalog: gone },
         ),
-      ).toEqual({ available: false, reason: 'missing-step', stepIds: ['module.alpha.x'] });
+      ).toEqual({ available: false, reason: 'missing-step', missingStepIds: ['module.alpha.x'] });
       expect(resolve({ source: 'module:alpha', stepIds: ['a'] }, { modules: null })).toEqual({
         available: true,
       });
@@ -635,7 +635,7 @@ describe('resolveTaskTypeAvailability and module states', () => {
     expect(resolve(uses, { modules: alphaOff })).toEqual(deactivated('alpha'));
     expect(resolve(uses, { modules: rowsOf() })).toMatchObject({
       reason: 'missing-step',
-      stepIds: ['not-in-catalog'],
+      missingStepIds: ['not-in-catalog'],
     });
     expect(resolve({ source: 'admin', stepIds: ['b', 'a'] }, { modules: rowsOf() })).toMatchObject({
       reason: 'invalid-composition',
@@ -677,11 +677,12 @@ describe('publicTaskTypeSchema', () => {
     const parsed = publicTaskTypeSchema.safeParse({
       ...dto,
       reason: 'missing-step',
-      stepIds: ['gone', 'gone2'],
+      missingStepIds: ['gone', 'gone2'],
     });
-    expect(parsed.success && parsed.data.stepIds).toEqual(['gone', 'gone2']);
+    expect(parsed.success && parsed.data.missingStepIds).toEqual(['gone', 'gone2']);
     expect(
-      publicTaskTypeSchema.safeParse({ ...dto, reason: 'missing-step', stepIds: [1] }).success,
+      publicTaskTypeSchema.safeParse({ ...dto, reason: 'missing-step', missingStepIds: [1] })
+        .success,
     ).toBe(false);
   });
 

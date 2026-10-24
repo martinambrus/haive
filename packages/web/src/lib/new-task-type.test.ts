@@ -126,9 +126,9 @@ describe('buildNewTaskTypeOptions', () => {
   });
 
   it('names the steps a type needs that are not installed', () => {
-    const reasonOf = (stepIds?: string[]) =>
+    const reasonOf = (missingStepIds?: string[]) =>
       buildNewTaskTypeOptions([
-        row({ slug: 'x', available: false, reason: 'missing-step', stepIds }),
+        row({ slug: 'x', available: false, reason: 'missing-step', missingStepIds }),
       ])[2]!.reason;
     expect(reasonOf(['module.ix.gone'])).toBe('a step it needs is not installed: module.ix.gone');
     expect(reasonOf(['a', 'b'])).toBe('steps it needs are not installed: a, b');
