@@ -516,7 +516,8 @@ function braceBlockEnd(content: string, start: number): number | null {
 /** End offset of the brace block a match opens. Every pattern below ends AT its
  *  opening '{', so that brace is the last character of the match. */
 function blockEndFromMatch(content: string, m: RegExpExecArray): number | null {
-  return braceBlockEnd(content, m.index + m[0].length - 1);
+  const braceStart = content.indexOf('{', m.index + m[0].length - 1);
+  return braceBlockEnd(content, braceStart);
 }
 
 /** A longer parameter list is not read as a signature: a '(' inside a string would otherwise
@@ -526,7 +527,6 @@ const MAX_PARAMS_CHARS = 4000;
 /** Index just past the ')' that closes the '(' at `open`, or null. A quoted string is skipped, so
  *  `advance("(")` does not leave a parenthesis open. */
 function parenEnd(content: string, open: number): number | null {
-  if (content[open] !== '(') return null;
   const limit = Math.min(content.length, open + MAX_PARAMS_CHARS);
   let depth = 0;
   for (let i = open; i < limit; i += 1) {
