@@ -117,7 +117,14 @@ export function CliAuthBannerModal({
 
   useEffect(() => {
     if (!open) return;
-    setPhase('connecting');
+    // Track frames immediately, including when a close arrives before React renders.
+    let sessionPhase: Phase = 'connecting';
+    let disposed = false;
+    const changePhase = (next: Phase) => {
+      sessionPhase = next;
+      setPhase(next);
+    };
+    changePhase('connecting');
     setAuthUrl(null);
     setDeviceCode(null);
     setToken('');
@@ -133,7 +140,7 @@ export function CliAuthBannerModal({
 
     const connectTimeout = setTimeout(() => {
       if (ws.readyState !== WebSocket.OPEN) {
-        setPhase('error');
+        changePhase('error');
         setError('Connection timed out. Close and try again.');
         try {
           ws.close();
@@ -148,6 +155,7 @@ export function CliAuthBannerModal({
     };
 
     ws.onmessage = (ev) => {
+      if (disposed) return;
       let msg: { type?: string; [k: string]: unknown } | null = null;
       try {
         msg = JSON.parse(typeof ev.data === 'string' ? ev.data : ev.data.toString());
@@ -157,10 +165,10 @@ export function CliAuthBannerModal({
       if (!msg) return;
       switch (msg.type) {
         case 'phase':
-          if (msg.phase === 'starting') setPhase('starting');
-          else if (msg.phase === 'awaiting-token') setPhase('awaiting-token');
-          else if (msg.phase === 'awaiting-approval') setPhase('awaiting-approval');
-          else if (msg.phase === 'submitting') setPhase('submitting');
+          if (msg.phase === 'starting') changePhase('starting');
+          else if (msg.phase === 'awaiting-token') changePhase('awaiting-token');
+          else if (msg.phase === 'awaiting-approval') changePhase('awaiting-approval');
+          else if (msg.phase === 'submitting') changePhase('submitting');
           break;
         case 'auth-url': {
           if (typeof msg.url === 'string') setAuthUrl(safeAuthUrl(msg.url));
@@ -170,7 +178,7 @@ export function CliAuthBannerModal({
               ? msg.tokenPaste
               : TOKEN_PASTE_PROVIDERS.has(providerName);
           setTokenPasteFlow(paste);
-          setPhase(paste ? 'awaiting-token' : 'awaiting-approval');
+          changePhase(paste ? 'awaiting-token' : 'awaiting-approval');
           break;
         }
         case 'output':
@@ -195,39 +203,51 @@ export function CliAuthBannerModal({
           setQueueWait(null);
           break;
         case 'auth-success':
-          setPhase('success');
+          changePhase('success');
           break;
         case 'saved': {
           const probeResult = (msg.result as CliProbeResult | undefined) ?? null;
           setSavedResult(probeResult);
-          setPhase('saved');
+          changePhase('saved');
           if (probeResult && onLoginComplete) {
             onLoginComplete(probeResult);
           }
           break;
         }
         case 'error':
-          setPhase('error');
+          changePhase('error');
           setError(typeof msg.message === 'string' ? msg.message : 'Login failed');
           break;
         case 'exit':
-          setPhase((prev) =>
-            prev === 'saved' || prev === 'success' || prev === 'error' ? prev : 'error',
-          );
+          if (sessionPhase !== 'saved' && sessionPhase !== 'success' && sessionPhase !== 'error') {
+            changePhase('error');
+          }
           break;
       }
     };
 
     ws.onerror = () => {
-      setPhase('error');
+      if (disposed) return;
+      changePhase('error');
       setError('WebSocket error');
     };
 
     ws.onclose = () => {
       clearTimeout(connectTimeout);
+      if (
+        disposed ||
+        sessionPhase === 'saved' ||
+        sessionPhase === 'success' ||
+        sessionPhase === 'error'
+      )
+        return;
+      setQueueWait(null);
+      setError('Connection closed. Retry the login.');
+      changePhase('error');
     };
 
     return () => {
+      disposed = true;
       clearTimeout(connectTimeout);
       try {
         ws.close(1000, 'unmount');
