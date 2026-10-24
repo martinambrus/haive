@@ -1,0 +1,91 @@
+import { eq, isNull, and } from 'drizzle-orm';
+import { Hono } from 'hono';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const url = process.env.AUTH_HARDENING_TEST_URL;
+if (url && !new URL(url).pathname.startsWith('/auth_hardening_test'))
+  throw new Error('Use a dedicated auth_hardening_test database');
+
+const h = vi.hoisted(() => {
+  process.env.LOG_LEVEL = 'silent';
+  return { db: undefined as unknown };
+});
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+
+import { secretsService } from '@haive/shared';
+import type { AppEnv } from '../src/context.js';
+import { REFRESH_COOKIE } from '../src/auth/cookies.js';
+import { hashRefreshToken, signRefreshToken } from '../src/auth/jwt.js';
+import { errorHandler } from '../src/middleware/error-handler.js';
+import { authRoutes } from '../src/routes/auth.js';
+import {
+  concurrentReads,
+  createDatabase,
+  instrumentDb,
+  makeUser,
+  schema,
+} from './auth-hardening-db.js';
+
+describe.skipIf(!url)('refresh rotation on Postgres', () => {
+  let db: ReturnType<typeof createDatabase>;
+  let userId: string;
+  let cookie: string;
+  let tokenHash: string;
+  let release = () => {};
+  const app = new Hono<AppEnv>().onError(errorHandler).route('/auth', authRoutes);
+  const refresh = () => app.request('/auth/refresh', { method: 'POST', headers: { cookie } });
+
+  beforeAll(() => {
+    db = createDatabase(url!);
+  });
+  beforeEach(async () => {
+    vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('cd'.repeat(32));
+    h.db = db;
+    const { user } = await makeUser(db);
+    userId = user.id;
+    const { token, expiresAt } = await signRefreshToken(userId, 0);
+    tokenHash = hashRefreshToken(token);
+    await db.insert(schema.refreshTokens).values({ userId, tokenHash, expiresAt });
+    cookie = `${REFRESH_COOKIE}=${token}`;
+  });
+  afterEach(async () => {
+    release();
+    await db.delete(schema.users).where(eq(schema.users.id, userId));
+    vi.restoreAllMocks();
+  });
+  afterAll(async () => {
+    await db.$client.end({ timeout: 5 });
+  });
+
+  it('only one concurrent redemption issues cookies and a live successor', async () => {
+    const gate = concurrentReads('refreshTokens');
+    release = gate.release;
+    h.db = instrumentDb(db, gate.afterRead);
+    const replies = await Promise.all([refresh(), refresh()]);
+    expect(replies.map((r) => r.status).sort()).toEqual([200, 401]);
+    const loser = replies.find((r) => r.status === 401)!;
+    expect(loser.headers.getSetCookie()).toEqual([]);
+    expect(await loser.json()).toEqual({ error: 'Refresh token invalid or expired', code: null });
+    const live = await db
+      .select()
+      .from(schema.refreshTokens)
+      .where(and(eq(schema.refreshTokens.userId, userId), isNull(schema.refreshTokens.revokedAt)));
+    expect(live).toHaveLength(1);
+    expect(live[0]!.tokenHash).not.toBe(tokenHash);
+    h.db = db;
+    expect((await refresh()).status).toBe(401);
+  });
+
+  it('a failed successor insert rolls the revocation back and sends no cookies', async () => {
+    h.db = instrumentDb(db, async () => {}, true);
+    const res = await refresh();
+    expect(res.status).toBe(500);
+    expect(res.headers.getSetCookie()).toEqual([]);
+    const original = await db.query.refreshTokens.findFirst({
+      where: eq(schema.refreshTokens.tokenHash, tokenHash),
+    });
+    expect(original!.revokedAt).toBeNull();
+    h.db = db;
+    expect((await refresh()).status).toBe(200);
+  });
+});

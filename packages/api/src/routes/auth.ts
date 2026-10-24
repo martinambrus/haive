@@ -294,20 +294,23 @@ authRoutes.post('/refresh', async (c) => {
     throw new HttpError(401, 'User not found or token revoked');
   }
 
-  await db
-    .update(schema.refreshTokens)
-    .set({ revokedAt: new Date() })
-    .where(eq(schema.refreshTokens.id, row.id));
+  const { accessToken, refreshToken: newRefresh } = await db.transaction(async (tx) => {
+    // The read above validates the token; only this guarded write claims it. A concurrent
+    // redemption waits for the winner's commit and then matches no row.
+    const claimed = await tx
+      .update(schema.refreshTokens)
+      .set({ revokedAt: sql`now()` })
+      .where(and(eq(schema.refreshTokens.id, row.id), isNull(schema.refreshTokens.revokedAt)))
+      .returning({ id: schema.refreshTokens.id });
+    if (claimed.length === 0) throw new HttpError(401, 'Refresh token invalid or expired');
 
-  const {
-    accessToken,
-    refreshToken: newRefresh,
-    expiresAt,
-  } = await issueTokens(user.id, user.role, user.tokenVersion);
-  await db.insert(schema.refreshTokens).values({
-    userId: user.id,
-    tokenHash: hashRefreshToken(newRefresh),
-    expiresAt,
+    const tokens = await issueTokens(user.id, user.role, user.tokenVersion);
+    await tx.insert(schema.refreshTokens).values({
+      userId: user.id,
+      tokenHash: hashRefreshToken(tokens.refreshToken),
+      expiresAt: tokens.expiresAt,
+    });
+    return tokens;
   });
   setAuthCookies(c, accessToken, newRefresh);
 

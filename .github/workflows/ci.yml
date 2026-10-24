@@ -262,6 +262,7 @@ jobs:
           shared test/rtk-converge-db.test.ts RTK_CONVERGE_TEST_URL rtk_converge_test pg
           database test/integration-connection-keys.test.ts INTEGRATION_KEYS_TEST_URL integration_keys_test pg
           api test/admin-integrations-db.test.ts ADMIN_INTEGRATIONS_TEST_URL admin_integrations_test pg
+          api test/refresh-rotation-db.test.ts AUTH_HARDENING_TEST_URL auth_hardening_test pg
           api test/maintenance-routes-db.test.ts MAINTENANCE_API_TEST_URL maintenance_api_test pg
           updater test/live-task-count-db.test.ts UPDATER_LIVE_COUNT_TEST_URL updater_live_count_test pg
           api test/new-work-fence-db.test.ts NEW_WORK_FENCE_TEST_URL new_work_fence_test pg
