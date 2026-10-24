@@ -792,14 +792,6 @@ status: open · (T377 landed as PR #886) · was modular #252
    Fix: the #218 shape, with gated tests.
 6. From the T374 review (2026-10-24), PRE-EXISTING, minor: a house rule's approval also lapses with no audit row and no admin: a content PATCH clears `enforcedHash` (api global-kb.ts ~:1124-1127), the store trigger clears it when an active entry leaves `active` (shared global-kb/ensure-schema.ts ~:168-186), and DELETE /entries/:id removes an enforced entry (~:1243-1270); PATCH and DELETE are requireAuth only. global-kb.md:79-85 calls the lapse deliberate, so the open question is only the trail: a `global_kb.house_rule.lapse` row in the same transaction.
 
-### T378 · FNF[sign-in-failure-paths] · vendor token not revoked on a failed finishSignIn; device poll finally can 500; GitHub connect poll has no cancelled guard
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:40Z · last: 2026-10-24T23:50Z · merged PR #905 (134a27e13), waiting for main CI · was modular #254
-
-1. api lib/integration-sign-in.ts ~:150-153: revoke the token on failure, best-effort.
-2. lib/integration-device.ts ~:151-153: the finally must never change a committed answer.
-3. web github-oauth-connect.tsx ~:101-105, ~:139-142: add an attempt id or a cancelled ref.
-
 ### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+4)
 
 status: open · was modular #257
@@ -1027,6 +1019,7 @@ From the T422 review (2026-10-24). PRE-EXISTING, minor, latent. api routes/cli-l
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T378 — a failed finishSignIn revokes the vendor token; the device poll's cleanup cannot 500; the GitHub connect poll stops once cancelled — PR #905 (134a27e13; main green at 7eb1938af), 2026-10-24
 - T372 — fence-order test budget; stepIds named for what they hold (picker label shipped with T391) — PR #904 (7fe56b9e0), 2026-10-24
 - T404 — a re-opened step clears its context and allowance stamp; the page shows stamps on done rows only (browser-checked; ratchet budget follow-up #907) — PR #903 (6e9daa2e6), 2026-10-24
 - T391 — pickers preselect the oldest enabled provider; create refuses a disabled one (+2, with T372's picker label) — PR #902 (a4bb484eb), 2026-10-24
