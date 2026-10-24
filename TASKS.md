@@ -90,7 +90,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 ### T323 · FNF[uploads-3] · leftover upload files never cleaned; unlink failures warn forever (+3)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-24T17:47Z (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Its brief stays on ACTIVIT21; this run writes a new one)
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-24T19:01Z (PR #892 open: items 1-3 + review fixes; item 4 stays parked)
 All PRE-EXISTING.
 
 1. repo/clone.ts:678 swallows a failed archive unlink after extract; reaper's liveRepositories keeps every non-error repo, so a ready repo's archive stays.
