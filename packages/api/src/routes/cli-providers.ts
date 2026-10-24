@@ -27,7 +27,6 @@ import {
   type CliSignOutJobPayload,
   type CliSignOutJobResult,
   type OllamaProvisionJobPayload,
-  type RefreshCliVersionsJobPayload,
   type SandboxImageBuildJobPayload,
   type SandboxImageRemoveJobPayload,
 } from '@haive/shared';
@@ -50,6 +49,7 @@ import {
   requireNewWorkAllowed,
 } from '../middleware/maintenance.js';
 import { getCliExecQueue, getUsagePollQueue } from '../queues.js';
+import { enqueueCliVersionRefresh } from '../lib/cli-version-refresh.js';
 
 async function loadOwnedProvider(db: Database, userId: string, providerId: string) {
   const provider = await db.query.cliProviders.findFirst({
@@ -276,14 +276,7 @@ cliProviderRoutes.get('/catalog', async (c) => {
 cliProviderRoutes.post('/catalog/:name/refresh-versions', async (c) => {
   // Parsed for the 400 on an unknown CLI name; the job itself refreshes every catalog entry.
   cliProviderNameSchema.parse(c.req.param('name'));
-  const payload: RefreshCliVersionsJobPayload = {};
-  const queue = getCliExecQueue();
-  // Match the worker's boot check: a delayed scheduler tick is future work. This scan/add
-  // is best effort; simultaneous requests can both see an empty queue and enqueue a refresh.
-  const inFlight = await queue.getJobs(['active', 'wait', 'prioritized']);
-  const job =
-    inFlight.find((candidate) => candidate?.name === CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS) ??
-    (await queue.add(CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS, payload, CLI_POLLABLE_JOB_OPTS));
+  const job = await enqueueCliVersionRefresh();
   if (!job.id) throw new HttpError(500, 'refresh was not queued', 'refresh_enqueue_failed');
 
   return c.json({ jobId: job.id }, 202);
