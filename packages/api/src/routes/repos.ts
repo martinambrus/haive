@@ -862,6 +862,8 @@ repoRoutes.get('/:id', async (c) => {
   const db = getDb();
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    // Large; the list leaves both out too.
+    columns: { fileTree: false, renderContext: false },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
   return c.json({ repository: repo });
