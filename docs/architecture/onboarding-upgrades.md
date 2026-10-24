@@ -643,7 +643,7 @@ checkout itself (00a's merge, 12 when the parent checkout is on the base branch,
 it seeds the plan base and checks again under the projection locks right before `openMerge`, where a
 file Haive rewrote since the set-aside sends it round again, up to `MOVE_ATTEMPTS`. Every outcome that
 did not merge puts the files back and, once no merge or rebase is open, re-syncs them, a throw from
-the merge section recovers them before it reaches the caller, and reaching done re-syncs. The owner
+the merge section recovers them before it reaches the caller (put back while HEAD is still where the section started, re-synced once it moved or cannot be read), and reaching done re-syncs. The owner
 and mode a set-aside captured ride in the merge state (`keptMetadata`, never the bytes), so the
 call that ends a merge restores them even when an earlier call set the files aside; a merge left
 open keeps them for its end. They are restored, and cleared, only after a re-sync that completed:

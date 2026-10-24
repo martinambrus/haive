@@ -1066,7 +1066,8 @@ export async function putBackAfterFailure(
 }
 
 /** A throw around the move: while HEAD is still `before` the files go back as the set-aside found them;
- *  once the move landed, the old bytes would hide the incoming change, so the re-sync brings them over. */
+ *  once the move landed, the old bytes would hide the incoming change, so the re-sync brings them over.
+ *  A HEAD that cannot be read counts as moved: the put-back could overwrite incoming bytes, the re-sync cannot lose any. */
 export async function recoverAfterMoveFailure(
   db: Database,
   repositoryId: string,
@@ -1077,7 +1078,13 @@ export async function recoverAfterMoveFailure(
   section?: RestoreSection,
 ): Promise<never> {
   const head = await gitRun(repoPath, ['rev-parse', 'HEAD']);
-  if (head.code === 0 && head.stdout.trim() !== before) {
+  if (head.code !== 0 || head.stdout.trim() !== before) {
+    if (head.code !== 0) {
+      logger.warn(
+        { repositoryId, head: (head.stderr || head.stdout).trim().split('\n')[0] },
+        'HEAD not readable after a failed move; re-syncing instead of putting files back',
+      );
+    }
     await resyncHaiveProjections(db, repositoryId, repoPath).catch((resyncErr: unknown) =>
       logger.error(
         { err: resyncErr, repositoryId },

@@ -4457,9 +4457,9 @@ async function main(): Promise<void> {
       );
     });
 
-    // M11-M13. A git read that failed is unknown, never an answer (docs/architecture/plan-canvas.md, #255): the
+    // M11-M14. A git read that failed is unknown, never an answer (docs/architecture/plan-canvas.md, #255): the
     // resolver reads HEAD before it sets anything aside, the set-aside gates refuse on an unreadable
-    // `--git-path`, and a refresh stays ready.
+    // `--git-path`, a refresh stays ready, and a failed HEAD read never puts stale bytes over a landed move.
     const gitTask = async (c: Awaited<ReturnType<typeof cloned>>) => {
       const [task] = await db
         .insert(schema.tasks)
@@ -4715,6 +4715,149 @@ async function main(): Promise<void> {
         git(c.dest, 'rev-parse', 'HEAD') === head &&
           (await readFile(path.join(c.dest, RENDER_REL)).catch(() => null))?.equals(bytes) === true,
         { head: git(c.dest, 'rev-parse', 'HEAD') },
+      );
+    });
+
+    // M14. After a set-aside and a real fast-forward, a failed HEAD read must not put the pending bytes over the incoming file.
+    const m14Titles = (text: string) =>
+      (JSON.parse(text) as { nodes: { title: string }[] }).nodes.map((n) => n.title).sort();
+    const m14Fixture = async (name: string) => {
+      const o = path.join(tmp, `origin-m14-${name}.git`);
+      git(tmp, 'init', '-q', '--bare', '-b', 'main', o);
+      const s = path.join(tmp, `seed-m14-${name}`);
+      git(tmp, 'clone', '-q', `file://${o}`, s);
+      await commitFile(s, 'README.md', 'seed\n', 'seed');
+      git(s, 'push', '-q', 'origin', 'HEAD:main');
+      const c = await cloned(o);
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        {
+          ops: [
+            { op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Plan' },
+            { op: 'upsert', nodeRef: 'one', parentRef: 'root', title: 'One' },
+            { op: 'upsert', nodeRef: 'two', parentRef: 'root', title: 'Two' },
+          ],
+        },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      git(c.dest, 'add', '.haive-data');
+      git(c.dest, 'commit', '-q', '-m', 'plan');
+      git(c.dest, 'push', '-q', 'origin', 'HEAD:main');
+      git(s, 'pull', '-q', '--ff-only', 'origin', 'main');
+      const nodes = await db.query.planNodes.findMany({
+        where: eq(schema.planNodes.repositoryId, id),
+      });
+      await applyPlanPatch(
+        db,
+        {
+          ops: [
+            {
+              op: 'upsert',
+              nodeRef: nodes.find((n) => n.title === 'One')!.id,
+              title: 'One, edited here',
+            },
+          ],
+        },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      const theirs = JSON.parse(await readFile(path.join(s, PLAN_REL), 'utf8')) as {
+        nodes: { title: string }[];
+      };
+      theirs.nodes.find((n) => n.title === 'Two')!.title = 'Two, edited there';
+      await writeFile(path.join(s, PLAN_REL), `${JSON.stringify(theirs, null, 2)}\n`);
+      git(s, 'add', PLAN_REL);
+      git(s, 'commit', '-q', '-m', 'a teammate edits the plan');
+      git(s, 'push', '-q', 'origin', 'HEAD:main');
+      const pending = await readFile(path.join(c.dest, PLAN_REL));
+      const head = git(c.dest, 'rev-parse', 'HEAD');
+      const aside = await setAsideHaiveProjections(db, id, c.dest);
+      return { c, id, pending, head, aside };
+    };
+    const m14Recover = async (
+      f: Awaited<ReturnType<typeof m14Fixture>>,
+      land: boolean,
+      shimmed: boolean,
+    ) => {
+      if (land) {
+        git(f.c.dest, 'fetch', '-q', 'origin', 'main');
+        git(f.c.dest, 'merge', '-q', '--ff-only', 'origin/main');
+      }
+      const incoming = await readFile(path.join(f.c.dest, PLAN_REL));
+      const err = new Error('the move threw');
+      let thrown: unknown = null;
+      const shims = shimmed
+        ? [
+            await failGit(['rev-parse', 'HEAD']),
+            await failGit(['rev-parse', '-q', '--verify', 'HEAD']),
+          ]
+        : [];
+      try {
+        if (f.aside.outcome === 'set-aside') {
+          await recoverAfterMoveFailure(db, f.id, f.c.dest, f.aside.kept, f.head, err);
+        }
+      } catch (e) {
+        thrown = e;
+      } finally {
+        for (const s of shims.reverse()) await s.restore();
+      }
+      return { err, thrown, incoming };
+    };
+
+    await attempt('M14: a failed HEAD read after a landed move', async () => {
+      const f = await m14Fixture('failed');
+      const { err, thrown, incoming } = await m14Recover(f, true, true);
+      const now = await readFile(path.join(f.c.dest, PLAN_REL));
+      const titles = m14Titles(now.toString());
+      check(
+        'M14: the same error comes back and plan.json keeps the incoming node beside the local edit, not the pending bytes alone',
+        f.aside.outcome === 'set-aside' &&
+          !incoming.equals(f.pending) &&
+          thrown === err &&
+          !now.equals(f.pending) &&
+          titles.includes('Two, edited there') &&
+          titles.includes('One, edited here'),
+        { outcome: f.aside.outcome, thrown: String(thrown), titles },
+      );
+      await writePlanMirror(db, f.id, f.c.dest);
+      const inDb = (
+        await db.query.planNodes.findMany({ where: eq(schema.planNodes.repositoryId, f.id) })
+      )
+        .map((n) => n.title)
+        .sort();
+      check(
+        'M14: and after one flush the incoming node is in the database beside the local edit',
+        isDeepEqual(inDb, ['One, edited here', 'Plan', 'Two, edited there']),
+        { inDb },
+      );
+    });
+
+    await attempt('M14: controls with a healthy HEAD read', async () => {
+      const unmoved = await m14Fixture('unmoved');
+      const a = await m14Recover(unmoved, false, false);
+      check(
+        'M14: control: HEAD unmoved and readable puts the pending bytes back',
+        unmoved.aside.outcome === 'set-aside' &&
+          a.thrown === a.err &&
+          (await readFile(path.join(unmoved.c.dest, PLAN_REL))).equals(unmoved.pending),
+        { outcome: unmoved.aside.outcome, thrown: String(a.thrown) },
+      );
+      const moved = await m14Fixture('moved');
+      const b = await m14Recover(moved, true, false);
+      const now = await readFile(path.join(moved.c.dest, PLAN_REL));
+      check(
+        'M14: control: HEAD moved and readable re-syncs over the incoming file',
+        moved.aside.outcome === 'set-aside' &&
+          b.thrown === b.err &&
+          !now.equals(moved.pending) &&
+          m14Titles(now.toString()).includes('Two, edited there'),
+        {
+          outcome: moved.aside.outcome,
+          thrown: String(b.thrown),
+          titles: m14Titles(now.toString()),
+        },
       );
     });
 
