@@ -269,7 +269,11 @@ describe('describeAvailability', () => {
       'Unavailable: custom task types are switched off',
     );
     expect(
-      describeAvailability({ available: false, reason: 'missing-step', stepIds: ['a', 'b'] }),
+      describeAvailability({
+        available: false,
+        reason: 'missing-step',
+        missingStepIds: ['a', 'b'],
+      }),
     ).toBe('Unavailable: missing steps a, b');
     expect(
       describeAvailability({

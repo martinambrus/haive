@@ -21,11 +21,11 @@ const FORM_INFERS_THESE = new Set(['onboarding', 'onboarding_upgrade', 'workflow
 
 const TURNED_OFF = 'this task type is turned off';
 
-function missingStepText(stepIds: readonly string[]): string {
-  if (stepIds.length === 0) return 'a step it needs is not installed';
-  return stepIds.length === 1
-    ? `a step it needs is not installed: ${stepIds[0]}`
-    : `steps it needs are not installed: ${stepIds.join(', ')}`;
+function missingStepText(missingStepIds: readonly string[]): string {
+  if (missingStepIds.length === 0) return 'a step it needs is not installed';
+  return missingStepIds.length === 1
+    ? `a step it needs is not installed: ${missingStepIds[0]}`
+    : `steps it needs are not installed: ${missingStepIds.join(', ')}`;
 }
 
 function unavailableText(row: PublicTaskType): string {
@@ -40,7 +40,7 @@ function unavailableText(row: PublicTaskType): string {
     case 'module-deactivated':
       return moduleNeedText(row.modules ?? [], row.reason);
     case 'missing-step':
-      return missingStepText(row.stepIds ?? []);
+      return missingStepText(row.missingStepIds ?? []);
     case 'invalid-composition':
       return 'its steps no longer fit together';
   }

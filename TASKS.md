@@ -272,16 +272,9 @@ All PRE-EXISTING.
 4. POST /bundles/:id/sync has no already-syncing check (bundles.ts ~792-816); 409 or key the job.
 5. Web never shows lastSyncError; show it under a failed bundle (bundle-composer.tsx), browser check 375/768/1280.
 
-### T304 · FNF[claims-2] · .git refusal misses NTFS aliases (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:28Z · last: 2026-10-24T19:28Z
-
-1. Low: isClaimablePath (shared project-state/names.ts) and 02's safeDiskRel accept `.git.`, `.git `, `git~1`, `.git::$INDEX_ALLOCATION`; one shared predicate mirroring git's is_ntfs_dotgit / is_hfs_dotgit.
-2. Cosmetic: 02's refusal warning says "not a path inside the repository" for `.git/...` (02-upgrade-apply.ts ~1295, ~1371, ~1460); reword (check tests first).
-
 ### T306 · FNF[test-fakes-12] · 12's apply runs unguarded; 04's skipped runs (+2)
 
-status: open · kind: test-only
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:32Z · last: 2026-10-24T21:32Z · kind: test-only
 
 1. 12's 24 'written' runs are not wrapped in recordWritten (worker test/support/upgrade-apply-record.ts).
 2. 27 of 04's 61 runs report 'skipped' (no render snapshot in their fakes); seed or assert 'skipped'.
@@ -684,7 +677,7 @@ Fix direction: after a failed reset, re-ask for the status without clearing the 
 
 ### T363 · FNF[created-task-start-partial] · Start on a created task starts with whatever attachments landed
 
-status: open · was modular #208
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:05Z · last: 2026-10-25T00:05Z · was modular #208
 DECIDED 2026-10-23: record the expected attachment count on the task, and Start confirms "N of M missing". The start claim is in api lib/task-start.ts:10-23.
 
 ### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+11)
@@ -765,14 +758,6 @@ Sites:
   On a timeout they return different things: partial stdout, [], null, or "timed out".
   Fix: one shared runDockerCommand(args, {timeoutMs}) returning {stdout, stderr, exit, timedOut}, plus a test that kills a hung child.
 
-### T372 · FNF[api-test-hygiene] · fence-order test timeout; picker double label; stepIds misnamed (+2)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:38Z · last: 2026-10-24T20:38Z · item 2 ships with T391 · was modular #245
-
-1. api test/new-work-fence-order.test.ts:87 runs under the 5 s default timeout. Fix: 30 s.
-2. MOVED to T391 (the same defect as its item 3; ships with it): cli-picker-grid.tsx shows "(step default)" and the none option for one state.
-3. PublicTaskType.stepIds carries only the missing steps. Fix: rename it to missingStepIds.
-
 ### T373 · FNF[audit-strict-admin-actions] · module/task-type/upgrade-start actions still audit best-effort (+1)
 
 status: open · was modular #246
@@ -786,14 +771,6 @@ Sites:
   Fix: the #212/#224 shape (audit row in the change's transaction; for external side effects, row first, rolled back on failure).
 
 1. A role-admin owner's Retry under an administrator's pause lifts it with no byAdmin event or audit row (api tasks/_helpers.ts ~:1181).
-
-### T374 · FNF[audit-gkb-enforcement] · house-rule enforce/un-enforce writes no audit row (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:35Z · last: 2026-10-24T19:35Z · was modular #247
-DECIDED 2026-10-23: write the main-DB audit row first, and roll it back if the store write fails.
-Sites: api global-kb.ts PUT ~:1275, DELETE ~:1356.
-
-1. SecretsService.set and delete take no executor (shared config/secrets.service.ts:59, :74).
 
 ### T375 · FNF[diff-artifact-edges] · an untracked nested repo shows as unreadable although gate 3 commits it as a gitlink (+1)
 
@@ -816,13 +793,13 @@ status: open · (T377 landed as PR #886) · was modular #252
 
 ### T378 · FNF[sign-in-failure-paths] · vendor token not revoked on a failed finishSignIn; device poll finally can 500; GitHub connect poll has no cancelled guard
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:40Z · last: 2026-10-24T20:40Z · was modular #254
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:40Z · last: 2026-10-24T23:50Z · merged PR #905 (134a27e13), waiting for main CI · was modular #254
 
 1. api lib/integration-sign-in.ts ~:150-153: revoke the token on failure, best-effort.
 2. lib/integration-device.ts ~:151-153: the finally must never change a committed answer.
 3. web github-oauth-connect.tsx ~:101-105, ~:139-142: add an attempt id or a cancelled ref.
 
-### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+3)
+### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+4)
 
 status: open · was modular #257
 
@@ -830,6 +807,7 @@ status: open · was modular #257
 2. A duplicate runGit exists in advance-bundle-items.ts and reset-bundle-to-commit.ts.
 3. set-aside.ts ~:250 headOid, ~:1113 headEntry and projection-merge.ts ~:32 readBlob count a failed read as absent.
 4. git-merge.ts ~:632, :636, :1356, :1373, :1419: resolvingPaths and `rev-list --parents` failures.
+5. (T375 review) _commit-diff.ts checkedOutCommit ~:133-161 is one more gitlink reader with its own failure contract.
    Fix: one shared reader module with an explicit failure contract. Do this after T396.
 
 ### T382 · FNF[auth-endpoint-hardening] · refresh rotation not CAS; login timing; no admin-authz sweep (+4)
@@ -881,14 +859,6 @@ status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z ·
 status: open · kind: design · was modular #270
 `maintenance.auto=false` closes gc.recentObjectsHook. An explicit gc still runs that hook.
 Measure growth, then find a safe repack/prune under hardened args.
-
-### T391 · FNF[cli-picker-preselect] · pickers preselect the newest provider; create accepts a disabled provider (+2)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:52Z · last: 2026-10-24T19:52Z · with T372 item 2 · was modular #272
-
-1. GET /cli-providers sorts desc(createdAt) with no tie-break. Pickers at tasks/[id]/page.tsx ~:1192, terminal/page.tsx ~:43-50, plan-chat.tsx ~:172, plan-starter.tsx ~:115 and repos/[id]/plan/page.tsx ~:356 should preselect via resolveDefaultCliProvider.
-2. api tasks/index.ts ~:518 accepts a disabled provider. Fix: answer 400 with the reason, and hide it in the dropdown.
-3. The seat dropdown shows two empty options (cli-picker-grid.tsx ~:219-221). 09_6's provider query has no ORDER BY.
 
 ### T392 · FNF[dispatch-adapter-build-error] · an adapter build error aborts the whole dispatch instead of trying the next provider
 
@@ -969,12 +939,6 @@ The data is recoverable from cli_invocations.stream_log: windows for about 97% o
 status: open · kind: design · was modular #285
 The LiteLLM max_input_tokens value is fetched and dropped (shared model-pricing.ts ~:137-145). OpenRouter's context_length still outranks the CLI figure. Decide the precedence per adapter family.
 
-### T404 · FNF[stale-step-stamps] · a re-opened step keeps its old context and allowance stamp
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:07Z · last: 2026-10-24T20:07Z · was modular #286
-Nothing clears task_steps.context_* or the allowance columns on Retry, loop-back or re-offer; e.g. step cd6fc797 on the old dev DB.
-Fix: clear the stamps on the reopening writes, or gate the badge structurally.
-
 ### T405 · FNF[sandbox-image-failure-routing] · an image-build failure while 08/08b resolve the sandbox image may loop the implementer back to "fix" it
 
 status: open · was modular #287
@@ -989,14 +953,6 @@ Recommendation: fall back to the default at run time, plus T391's create refusal
 
 1. (T391 review) PRE-EXISTING, minor: the effort dropdown stays enabled for a step whose effective CLI is the task's own disabled provider and sends that id (web cli-picker-grid.tsx ~:100-139, ~:193; tasks/[id]/page.tsx ~:1452), so an effort change is refused (409 before T391, 400 after) until the CLI is switched.
 2. (T391 review) PRE-EXISTING, informational: the shell sockets check ownership only, never `enabled` (api terminal-shell.ts ~:513-531, ~:553-586; worker terminal-container.ts ~:181-186), so "disabled providers are not offered in terminals" is enforced by the web alone.
-
-### T407 · FNF[plan-message-attribution] · plan chat records the task-level CLI as the answering provider (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:45Z · last: 2026-10-24T19:45Z · was modular #289
-
-1. worker plan-chat.ts ~:343.
-2. plan-merge.ts ~:585 stores a value nothing reads.
-3. resolveActiveAgentsTarget is duplicated in 07_5-verify-files.ts and 11-final-review.ts.
 
 ### T408 · FNF[default-change-provider-sensitive] · disabling/deleting the oldest provider moves the default CLI but parked provider-sensitive steps keep old detect output
 
@@ -1031,10 +987,51 @@ From the T400 Codex run (2026-10-24), confirmed by the session.
 1. PRE-EXISTING, security hygiene: api routes/cli-login-banner.ts ~:674-680 logs `tokenHead: oauthToken.slice(0, 22)` and `tokenTail: oauthToken.slice(-6)` when it captures a Claude OAuth token from stdout, so 15 secret characters of every captured token reach the api log. The only such site (grep of packages and modules). Fix: log the length and, if one is needed, a short hash, never characters of the token.
 2. PRE-EXISTING, minor: web components/cli-auth-banner-modal.tsx ~:226, the socket close handler leaves the displayed phase unchanged.
 
+### T423 · FNF[terminal-attach] · a failed attach-count write leaves the docker attach stream open; the count is read-then-write (+1)
+
+status: open
+From the T400 review (2026-10-24). PRE-EXISTING, minor.
+
+1. api routes/terminal.ts ~:106-112: `await incrementAttached(...)` throwing (database down) leaves the docker attach stream opened at ~:106 open; the `.catch` at ~:80 closes only the ws.
+2. terminal.ts ~:317-343 moves `containers.attached_ws_count` by read-then-write, so concurrent closes lose updates (a revoke now closes several sockets of one container at once). Nothing reads the column for a decision (only these writes and a web type). Fix: one atomic `SET attached_ws_count = greatest(attached_ws_count + $d, 0)`.
+
+### T424 · FNF[nested-repo-worktree] · gate 3 offers a commit that git add will refuse for an unborn nested repo; the review collector calls a nested repo a new file (+1)
+
+status: open
+From the T375 review (2026-10-24). PRE-EXISTING, minor.
+
+1. worker 10-gate-3-commit.ts ~:375, ~:407-410: with an unborn nested repo (`git init`, no commit) in the worktree the whole `git add -A` fails, but the form still defaults the commit on and the failure shows only at Finalise. Since T375 the preview says why. Fix: say so in the form, or stage around it.
+2. worker `_impl-changes.ts` ~:147-156, ~:447, ~:453: an untracked nested repo enters the review scope as one changed "file" `nested/`, marked 'new file' (`-uall` cannot expand an embedded repo). Downstream effect on reviewers not traced.
+
+### T425 · FNF[orphan-gitlink] · gate 3 commits an agent-left nested repository as a gitlink with no .gitmodules entry
+
+status: open · kind: design
+From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. worker 10-gate-3-commit.ts ~:407-410: `git add -A` records an untracked nested repo that has a HEAD as a 160000 entry with no `.gitmodules` URL; the viewer labels it "submodule" and gate 3 reads only the exit code. Later `git submodule` commands and recursive clones meet a gitlink with no URL. Decide: refuse, warn, stage its files, or ask the user.
+
+### T426 · FNF[db-error-params] · a failed query's error message carries its bound params (secret fingerprints, ciphertext, container env) into logs and the browser (+1)
+
+status: open
+From the T422 review (2026-10-24). PRE-EXISTING, consequential in kind, rare (mechanism read from source, not triggered).
+
+1. drizzle-orm 0.45.2 builds `DrizzleQueryError.message` from every bound param (drizzle-orm errors.js ~:12). Three writers bind a secret's fingerprint (first 8 and last 4 characters, shared crypto/index.ts ~:87-90) and ciphertext: shared cli-providers/provider-secret.ts ~:26-35, shared config/user-secrets.service.ts ~:92-112, worker usage-window/token-source.ts ~:39-56. api middleware/error-handler.ts ~:59 logs `err` for any unhandled failure, so a failed secret write logs up to 12 characters of the secret.
+2. api routes/cli-login-banner.ts ~:328 forwards the worker's Error.message to the browser (worker queues/cli-exec/handlers.ts ~:1040, ~:1088); a failed containers insert binds env_vars (worker sandbox/login-container.ts ~:94-107).
+   Fix: one sanitizer for logged and returned database errors (class name and `code` walked through `cause`, never message or params), used by the error handler and every forwarder.
+
+### T427 · FNF[claude-token-extract] · the Claude OAuth capture depends on an exact 95-character token body
+
+status: open
+From the T422 review (2026-10-24). PRE-EXISTING, minor, latent. api routes/cli-login-banner.ts ~:199-211 `extractClaudeOauthToken`: run inline, a 100-character body is accepted and cut to 108 characters, and a 90-character body followed by "Store this token securely" is accepted with 5 characters of the prose appended. Today's tokens match; a format change would save a wrong token, which the probe should then reject visibly. Fix: end the token at the first character outside its alphabet, and test the boundary.
+
 ## Done
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T372 — fence-order test budget; stepIds named for what they hold (picker label shipped with T391) — PR #904 (7fe56b9e0), 2026-10-24
+- T404 — a re-opened step clears its context and allowance stamp; the page shows stamps on done rows only (browser-checked; ratchet budget follow-up #907) — PR #903 (6e9daa2e6), 2026-10-24
+- T391 — pickers preselect the oldest enabled provider; create refuses a disabled one (+2, with T372's picker label) — PR #902 (a4bb484eb), 2026-10-24
+- T407 — plan chat records the provider that answered (+1) — PR #899 (525098023), 2026-10-24
+- T374 — house-rule enforce/un-enforce write audit rows (+1) — PR #900 (42c518d8c), 2026-10-24
+- T304 — .git refusal catches NTFS aliases (+1) — PR #901 (0fce71181), 2026-10-24
 - T381 — AGENTS.md size test; requireAuth exceptions and the PUBLIC register named — PR #898 (4f91759b1), 2026-10-24
 - T380 — version refresh coalesces, poll routes check job ids, dead force flag gone (leftovers in T420) — PR #895 (892f3ea30), 2026-10-24
 - T411 — module, RAG and global-KB pools open every connection with client_connection_check_interval, so statements end with the pool — PR #893 (bce6d8a7b), 2026-10-24
