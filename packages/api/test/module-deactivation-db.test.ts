@@ -944,6 +944,38 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       ]);
     });
 
+    it('stops a task whose current step in the module has not started, and does not leave it', async () => {
+      const wedged = await task({
+        title: 'H',
+        currentStepId: 'module.alpha.x',
+        currentRound: 0,
+        runListSnapshot: ['module.alpha.x'],
+      });
+      await db.insert(schema.taskSteps).values({
+        taskId: wedged.id,
+        stepId: 'module.alpha.x',
+        stepIndex: 1,
+        round: 0,
+        title: 'x',
+        status: 'pending',
+      });
+
+      const body = (await (await patchUrgent('alpha')).json()) as Body;
+
+      expect(body.stopped.filter((s) => s.id === wedged.id)).toMatchObject([
+        { title: 'H', cancelled: 0, stopped: 1 },
+      ]);
+      expect(idsOf(body.left)).not.toContain(wedged.id);
+      const [after] = await observe([wedged.id]);
+      expect(after!.task).toMatchObject({
+        status: 'failed',
+        errorMessage: 'Stopped by an administrator',
+      });
+      expect(after!.steps).toMatchObject([
+        { status: 'failed', errorMessage: 'Stopped by an administrator' },
+      ]);
+    });
+
     it('records on the entry and in the event of a stopped task the instant it failed the task: the stamp the task carries', async () => {
       const body = (await (await patchUrgent('alpha')).json()) as Body;
       const [after] = await observe([a.id]);

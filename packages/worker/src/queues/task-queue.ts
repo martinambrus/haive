@@ -2159,7 +2159,7 @@ export async function handleResult(
       return;
     }
     case 'failed': {
-      await finishFailedStep(db, ctx, stepId, result.row, result.error);
+      await finishFailedStep(db, ctx, stepId, result.row, result.error, ['running']);
       return;
     }
   }
@@ -3111,15 +3111,15 @@ async function handleAdvanceStep(
       { taskId: ctx.taskId, stepId: payload.stepId, round },
       'advance-step skipped: a Retry or a Stop overtook it before the step ran',
     );
+    if (runtimeKind) await releaseRuntimeReservation(ctx.taskId);
     return;
   }
   // Now that the task is live a deactivation must count it, and one already under way is waited
   // out; on can still turn off here, never the reverse, which would run a step admission skipped.
-  const moduleDecision =
-    moduleDeactivation ?? (await moduleDeactivationMessage(db, payload.stepId, { lock: true }));
-
-  const providers = await loadProviders(db, ctx.userId);
   try {
+    const moduleDecision =
+      moduleDeactivation ?? (await moduleDeactivationMessage(db, payload.stepId, { lock: true }));
+    const providers = await loadProviders(db, ctx.userId);
     const result = await advanceStep({
       db,
       taskId: ctx.taskId,
