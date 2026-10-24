@@ -44,7 +44,12 @@ describe('resolveRagConnection pool options', () => {
     'keeps postgres.js its own limits for a call that asks for none (%s)',
     async (_mode, over) => {
       await resolveRagConnection(prefs(over), existingDatabase, 'project');
-      expect(Object.keys(h.calls[0]![1]).sort()).toEqual(['max', 'onnotice']);
+      expect(Object.keys(h.calls[0]![1]).sort()).toEqual(
+        _mode === 'internal' ? ['connection', 'max', 'onnotice'] : ['max', 'onnotice'],
+      );
+      expect(h.calls[0]![1].connection).toEqual(
+        _mode === 'internal' ? { client_connection_check_interval: 500 } : undefined,
+      );
       expect(h.calls[0]![1].max).toBe(5);
     },
   );
