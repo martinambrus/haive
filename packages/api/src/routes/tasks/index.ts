@@ -38,6 +38,7 @@ import {
   logger,
   PAUSED_FILTER_TOKEN,
   renameTaskRequestSchema,
+  resolveTaskCliProviderId,
   setCliProviderRequestSchema,
   setSummaryCliRequestSchema,
   STEER_IN_CHANNEL_PREFIX,
@@ -1089,8 +1090,20 @@ taskRoutes.get('/:id', async (c) => {
   const adminPausedIds = await findAdminPausedTaskIds(db, task.pausedAt ? [id] : []);
   // The pinned prompt steps fed the step flags above; the page never reads them, so they stay off the poll.
   const { customSteps: _pinned, ...taskFields } = task;
+  const providerRows =
+    task.cliProviderId === null
+      ? await db
+          .select({
+            id: schema.cliProviders.id,
+            enabled: schema.cliProviders.enabled,
+            createdAt: schema.cliProviders.createdAt,
+          })
+          .from(schema.cliProviders)
+          .where(eq(schema.cliProviders.userId, userId))
+      : [];
   const taskWithActive = {
     ...taskFields,
+    effectiveCliProviderId: resolveTaskCliProviderId(task.cliProviderId, providerRows),
     typeLabel: typeLabels.get(task.type) ?? null,
     pausedByAdmin: adminPausedIds.has(id),
     pauseLocked: adminPauseLocks(adminPausedIds.has(id), c.get('userRole')),

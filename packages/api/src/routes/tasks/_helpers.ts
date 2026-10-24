@@ -8,6 +8,7 @@ import {
   worktreeDirName,
   MODEL_HEALTH_STEP_IDS,
   STEP_MINING_SEATS,
+  resolveTaskCliProviderId,
   taskMayRunWithoutRepository,
   taskScratchSubpath,
   type CliRoleDescriptor,
@@ -339,7 +340,7 @@ export async function enrichStepsWithCliPreferences<T extends { stepId: string }
  *
  *  A task with no current step (or whose step has no pref) yields just its own provider, i.e.
  *  what the listing already showed. The result is never empty-by-accident: an empty array
- *  means the task names no usable provider at all. */
+ *  means the user has no enabled provider to default to (and no saved pref names one). */
 export async function resolveCurrentStepCliProviderIds(
   db: ReturnType<typeof getDb>,
   flags: StepFlagMap,
@@ -357,7 +358,11 @@ export async function resolveCurrentStepCliProviderIds(
   // A pref pointing at a deleted or disabled provider is ignored, exactly as the worker
   // ignores it — the step runs on the fallback, so the fallback is what the strip must meter.
   const enabledRows = await db
-    .select({ id: schema.cliProviders.id })
+    .select({
+      id: schema.cliProviders.id,
+      enabled: schema.cliProviders.enabled,
+      createdAt: schema.cliProviders.createdAt,
+    })
     .from(schema.cliProviders)
     .where(and(eq(schema.cliProviders.userId, userId), eq(schema.cliProviders.enabled, true)));
   const enabled = new Set(enabledRows.map((p) => p.id));
@@ -386,8 +391,7 @@ export async function resolveCurrentStepCliProviderIds(
       (stepId ? prefs.roleByStep.get(stepId) : undefined) ?? new Map<string, string>();
     const stepDefault =
       usable(stepId ? slot('default', prefs.byStep.get(stepId) ?? null) : null) ??
-      task.cliProviderId ??
-      null;
+      resolveTaskCliProviderId(task.cliProviderId, enabledRows);
 
     const ids: string[] = [];
     const push = (id: string | null) => {

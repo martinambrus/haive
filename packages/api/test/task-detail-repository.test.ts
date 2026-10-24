@@ -108,6 +108,7 @@ function setup(repo: Rows) {
     stepCatalog: schema.stepCatalog,
     taskTypeDefinitions: schema.taskTypeDefinitions,
     repositories: schema.repositories,
+    cliProviders: schema.cliProviders,
   });
   fake.insert(schema.repositories, {
     id: REPO,

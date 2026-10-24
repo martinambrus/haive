@@ -772,6 +772,7 @@ export interface Task {
    *  points at another linked bug fix. */
   parentTaskId?: string | null;
   cliProviderId: string | null;
+  effectiveCliProviderId?: string | null;
   /** Which CLI writes the per-step recap. NULL means INHERIT the step's own chain, which is
    *  a real choice and not "unset" — see `summaryCliChoiceRecorded` server-side. Optional so
    *  an older api renders as inherit. */

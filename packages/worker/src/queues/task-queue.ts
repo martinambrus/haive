@@ -2933,7 +2933,7 @@ async function handleAdvanceStep(
     stepDef.shouldRun &&
     (existing == null || isFreshStepEntry(existing.status))
       ? await willSkipBeforeAdmission(
-          { ...ctx, db, stepDef, round },
+          { ...ctx, db, stepDef, round, providers: await loadProviders(db, ctx.userId) },
           await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined),
         )
       : false;

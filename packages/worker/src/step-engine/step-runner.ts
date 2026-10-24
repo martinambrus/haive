@@ -28,6 +28,7 @@ import {
   isOllamaCloudModel,
   logger,
   parseTimeoutLadder,
+  resolveTaskCliProviderId,
   validateFormValues,
 } from '@haive/shared';
 import type {
@@ -2637,6 +2638,7 @@ function buildStepContext(
     | 'repoPath'
     | 'workspacePath'
     | 'cliProviderId'
+    | 'providers'
     | 'stepDef'
     | 'round'
     | 'epoch'
@@ -2654,7 +2656,7 @@ function buildStepContext(
     repoPath: params.repoPath,
     workspacePath: params.workspacePath,
     sandboxWorkdir: SANDBOX_WORKDIR,
-    cliProviderId: params.cliProviderId,
+    cliProviderId: resolveTaskCliProviderId(params.cliProviderId, params.providers ?? []),
     round,
     epoch: params.epoch,
     db,
@@ -2678,7 +2680,7 @@ function buildStepContext(
 /** Whether the step's own `shouldRun` already says skip, asked before runtime admission so a step
  *  that will only skip takes no slot. A throw answers false: the gate stays, as it was. */
 export async function willSkipBeforeAdmission(
-  params: Parameters<typeof buildStepContext>[0],
+  params: Parameters<typeof buildStepContext>[0] & { providers: CliProviderRecord[] },
   row: TaskStepRow,
 ): Promise<boolean> {
   const { stepDef } = params;
