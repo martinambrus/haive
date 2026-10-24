@@ -698,6 +698,61 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       expect(await events(row.id, 'task.resumed')).toHaveLength(1);
     });
 
+    it('records an administrator owner lifting an administrator pause like the admin route', async () => {
+      const row = await task({ userId: ADMIN });
+      expect((await act(row.id, 'pause')).status).toBe(200);
+
+      expect((await ownerAct(row.id, 'resume')).status).toBe(200);
+
+      expect((await events(row.id, 'task.resumed')).map((e) => e.payload)).toEqual([
+        { by: ADMIN, byAdmin: true },
+      ]);
+      const rows = await audits(row.id, 'task.admin_resume');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        actorUserId: ADMIN,
+        targetType: 'task',
+        metadata: { ownerUserId: ADMIN },
+      });
+    });
+
+    it('writes no audit row when an administrator owner lifts an owner-style hold', async () => {
+      const row = await task({ userId: ADMIN });
+      expect((await ownerAct(row.id, 'pause')).status).toBe(200);
+
+      expect((await ownerAct(row.id, 'resume')).status).toBe(200);
+
+      expect((await events(row.id, 'task.resumed')).map((e) => e.payload)).toEqual([{ by: ADMIN }]);
+      expect(await audits(row.id, 'task.admin_resume')).toEqual([]);
+    });
+
+    it('refuses the owner-route resume whose audit row cannot be written, and changes nothing', async () => {
+      const row = await task({ userId: ADMIN });
+      expect((await act(row.id, 'pause')).status).toBe(200);
+      const stamp = await stored(row.id);
+      await refuseAuditInserts();
+
+      const res = await ownerAct(row.id, 'resume');
+
+      await allowAuditInserts();
+      expect(res.status).toBe(500);
+      expect(await stored(row.id)).toEqual(stamp);
+      expect(await events(row.id, 'task.resumed')).toEqual([]);
+      expect(await audits(row.id, 'task.admin_resume')).toEqual([]);
+    });
+
+    it('the admin route resume writes the same event payload and one audit row', async () => {
+      const row = await task();
+      expect((await act(row.id, 'pause')).status).toBe(200);
+
+      expect((await act(row.id, 'resume')).status).toBe(200);
+
+      expect((await events(row.id, 'task.resumed')).map((e) => e.payload)).toEqual([
+        { by: ADMIN, byAdmin: true },
+      ]);
+      expect(await audits(row.id, 'task.admin_resume')).toHaveLength(1);
+    });
+
     it("lets the owner pause and resume the owner's own hold", async () => {
       const row = await task();
       as(OWNER, 'user');

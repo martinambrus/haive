@@ -90,6 +90,7 @@ import { loadTaskStop, loadTaskStops } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
 import { isUuid } from '../../lib/uuid.js';
 import { REPOSITORY_BUSY, boundedLockWait } from '../../lib/repository-busy.js';
+import { logAuditEvent } from '../../lib/audit.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   adminPauseLocks,
@@ -107,6 +108,7 @@ import {
   findQueuedInvocationStepIds,
   loadFinishedRunsRevision,
   loadTaskTypeLabels,
+  recordAdminResume,
   resolveCurrentStepCliProviderIds,
   sumTaskTokens,
   sumTaskProviderBreakdown,
@@ -1387,15 +1389,18 @@ taskRoutes.post('/:id/action', async (c) => {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
       const resumed = await db.transaction(async (tx) => {
         // Only the resume that changes the row is recorded.
-        if (!(await clearTaskPause(tx, id))) return false;
+        if (!(await clearTaskPause(tx, id))) return null;
         // Judged after the clear so a pause placed since the route's read is the one refused.
-        if (adminPauseLocks((await findAdminPausedTaskIds(tx, [id])).has(id), c.get('userRole'))) {
+        const pausedByAdmin = (await findAdminPausedTaskIds(tx, [id])).has(id);
+        if (adminPauseLocks(pausedByAdmin, c.get('userRole'))) {
           throw new HttpError(409, 'Paused by an administrator', 'paused_by_admin');
         }
+        if (pausedByAdmin) return { audit: await recordAdminResume(tx, id, userId, userId) };
         await appendTaskEvent(tx, id, null, 'task.resumed', { by: userId });
-        return true;
+        return { audit: null };
       });
       if (!resumed) return c.json({ ok: true, pausedAt: null });
+      if (resumed.audit) logAuditEvent(resumed.audit);
       // No re-drive needed: the pause park re-enqueues its own delayed advance every
       // PAUSE_POLL_MS and the deferred cli-exec jobs re-deliver on their own, so both pick
       // the task back up within ~30s. Enqueuing an extra advance here would race the park

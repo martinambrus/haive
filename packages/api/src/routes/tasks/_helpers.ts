@@ -21,6 +21,7 @@ import {
   type TaskProviderUsage,
 } from '@haive/shared/stats-server';
 import { getDb } from '../../db.js';
+import { insertAuditEvent, type AuditEvent } from '../../lib/audit.js';
 import { HttpError } from '../../context.js';
 import { compositionSurvivesWithout, type StepFlagMap } from '../../lib/step-flags.js';
 import { uploadsStorageRoot } from '../../lib/uploads.js';
@@ -1118,6 +1119,25 @@ export async function appendTaskEvent(
     eventType,
     payload,
   });
+}
+
+/** Takes the caller's tx so the audit row commits or rolls back with the resume it records. */
+export async function recordAdminResume(
+  tx: DbTx,
+  taskId: string,
+  actorUserId: string,
+  ownerUserId: string,
+): Promise<AuditEvent> {
+  await appendTaskEvent(tx, taskId, null, 'task.resumed', { by: actorUserId, byAdmin: true });
+  const event: AuditEvent = {
+    actorUserId,
+    action: 'task.admin_resume',
+    targetType: 'task',
+    targetId: taskId,
+    metadata: { ownerUserId },
+  };
+  await insertAuditEvent(tx, event);
+  return event;
 }
 
 /** Ids among `taskIds` whose newest `task.paused` event is an administrator's (`byAdmin`). */

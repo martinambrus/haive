@@ -27,7 +27,7 @@ import {
   type AuditEvent,
 } from '../lib/audit.js';
 import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js';
-import { appendTaskEvent, findAdminPausedTaskIds } from './tasks/_helpers.js';
+import { appendTaskEvent, findAdminPausedTaskIds, recordAdminResume } from './tasks/_helpers.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { findLiveUpgradeRun, listUpgradeRuns } from '../lib/upgrade-run.js';
@@ -323,15 +323,12 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
     }
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
-      const ev = auditEvent({});
-      const resumed = await db.transaction(async (tx) => {
+      const ev = await db.transaction(async (tx) => {
         // Only the resume that changes the row is recorded.
-        if (!(await clearTaskPause(tx, taskId))) return false;
-        await appendTaskEvent(tx, taskId, null, 'task.resumed', { by: actorUserId, byAdmin: true });
-        await insertAuditEvent(tx, ev);
-        return true;
+        if (!(await clearTaskPause(tx, taskId))) return null;
+        return recordAdminResume(tx, taskId, actorUserId, task.userId);
       });
-      if (resumed) logAuditEvent(ev);
+      if (ev) logAuditEvent(ev);
       return c.json({ ok: true, pausedAt: null });
     }
     case 'stop': {
