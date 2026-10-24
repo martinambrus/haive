@@ -63,3 +63,20 @@ it('excludes the developer global and system git configs from the backend', asyn
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it('answers 400 for a malformed path escape and serves the next request', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'git-http-malformed-'));
+  const fixture = await startGitHttpServer(root);
+  try {
+    const bare = path.join(root, 'repo.git');
+    expect((await gitRun(root, ['init', '--bare', bare])).code).toBe(0);
+    const url = fixture.httpOrigin(bare);
+    const response = await fetch(new URL('/%zz', url));
+    expect(response.status).toBe(400);
+    await response.text();
+    expect((await gitRun(root, ['ls-remote', url])).code).toBe(0);
+  } finally {
+    await fixture.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

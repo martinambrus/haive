@@ -10,6 +10,14 @@ if (!base || !path.isAbsolute(base)) throw new Error('fixture base directory req
 // A separate process lets fixtures that use execFileSync still speak real smart HTTP.
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    res.writeHead(400);
+    res.end();
+    return;
+  }
   const child = spawn('git', ['-c', 'http.receivepack=true', 'http-backend'], {
     env: {
       ...process.env,
@@ -19,7 +27,7 @@ const server = createServer((req, res) => {
       GIT_CONFIG_COUNT: '0',
       GIT_PROJECT_ROOT: base,
       GIT_HTTP_EXPORT_ALL: '1',
-      PATH_INFO: decodeURIComponent(url.pathname),
+      PATH_INFO: pathname,
       QUERY_STRING: url.search.slice(1),
       REQUEST_METHOD: req.method,
       CONTENT_TYPE: req.headers['content-type'] ?? '',
