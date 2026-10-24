@@ -515,7 +515,7 @@ function jsNonCode(text: string, java: boolean): Span[] {
       let end = i + 1;
       while (end < text.length && WORD_CHAR.test(text[end]!)) end += 1;
       const word = text.slice(i, end);
-      if (text[i - 1] === '.') prev = '';
+      if (prev === '.') prev = '';
       else if (word === 'default' && prev === 'export') prev = ';';
       else prev = word;
       i = end;
@@ -533,6 +533,8 @@ function jsNonCode(text: string, java: boolean): Span[] {
     } else if ((c === '+' || c === '-') && next === c && prev !== null && !regexMayStart(prev)) {
       prev = '';
       i += 2;
+    } else if (c === '!' && next !== '=' && prev !== null && !regexMayStart(prev)) {
+      i += 1;
     } else {
       prev = c;
       i += 1;
