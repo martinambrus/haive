@@ -20,6 +20,9 @@ const h = vi.hoisted(() => {
     invalidJwt: false,
     redisConnectWait: null as Promise<void> | null,
     loginReady: false,
+    runtimeEnsureWait: null as Promise<{ ok: boolean }> | null,
+    runtimeEnsureEntered: null as (() => void) | null,
+    runtimeEnsureTimeout: 0,
     redisClients: [] as Array<{
       quit: ReturnType<typeof vi.fn>;
       subscriptions: Set<string>;
@@ -56,6 +59,16 @@ vi.mock('../src/queues.js', () => ({
     add: async () => ({ waitUntilFinished: async () => ({ ok: true }) }),
   }),
   getIdeEnsureQueueEvents: () => ({}),
+  getRuntimeEnsureQueue: () => ({
+    add: async () => ({
+      waitUntilFinished: async (_events: unknown, timeout: number) => {
+        h.runtimeEnsureTimeout = timeout;
+        h.runtimeEnsureEntered?.();
+        return (await h.runtimeEnsureWait) ?? { ok: true };
+      },
+    }),
+  }),
+  getRuntimeEnsureQueueEvents: () => ({}),
   getCliExecQueue: () => ({
     add: async () => {
       let delivered = false;
@@ -207,6 +220,9 @@ beforeEach(() => {
   h.invalidJwt = false;
   h.redisConnectWait = null;
   h.loginReady = false;
+  h.runtimeEnsureWait = null;
+  h.runtimeEnsureEntered = null;
+  h.runtimeEnsureTimeout = 0;
   h.redisClients.length = 0;
   h.refcounts.clear();
   h.shellSessionIds.clear();
@@ -731,5 +747,82 @@ describe('revocation resource teardown', () => {
     expect(tcp.destroyed).toBe(false);
     await revoke(sockets);
     await vi.waitFor(() => expect(tcp.destroyed).toBe(true));
+  });
+});
+
+describe('pending runtime upgrade fences', () => {
+  it('revokes VNC during the ensure wait with 401 and starts no bridge', async () => {
+    const arrived = deferred<void>();
+    const resume = deferred<{ ok: boolean }>();
+    const resolvedDesktop = deferred<void>();
+    h.runtimeEnsureEntered = arrived.resolve;
+    h.runtimeEnsureWait = resume.promise;
+    let probes = 0;
+    vi.spyOn(net, 'connect').mockImplementation(((opts: net.TcpNetConnectOpts) => {
+      if (opts.port !== 5900) return realConnect(opts);
+      probes += 1;
+      const number = probes;
+      // Both cold-runtime probes fail; after ensure completes the desktop is reachable.
+      const tcp = new EventEmitter() as Socket;
+      Object.assign(tcp, {
+        setTimeout: () => tcp,
+        destroy: () => {
+          if (number === 3) resolvedDesktop.resolve();
+          return tcp;
+        },
+      });
+      queueMicrotask(() => tcp.emit(number <= 2 ? 'error' : 'connect', new Error('unavailable')));
+      return tcp;
+    }) as typeof net.connect);
+    const upgrade = vi.spyOn(WebSocketServer.prototype, 'handleUpgrade');
+    const port = await start(installBrowserVncWebSocket);
+    const pending = handshake(port, `/browser-vnc/${ID}`, 'haive_access=user-session');
+    await arrived.promise;
+    expect(probes).toBe(2);
+    expect(h.runtimeEnsureTimeout).toBe(180_000);
+    expect((await deactivate()).status).toBe(200);
+    expect(await pending).toBe(401);
+    resume.resolve({ ok: true });
+    await resolvedDesktop.promise;
+    await new Promise<void>((r) => setImmediate(r));
+    expect(upgrade.mock.calls.length).toBe(0);
+    expect(probes).toBe(3);
+    expect(closeUserSockets(USER)).toBe(0);
+  });
+
+  it('revokes terminal during the container wait with 401 and starts no session', async () => {
+    const arrived = deferred<void>();
+    const resume = deferred<void>();
+    const select = fake.db.select.bind(fake.db);
+    vi.spyOn(fake.db, 'select').mockImplementationOnce((fields) => ({
+      from: (table) => {
+        expect(table).toBe(schema.containers);
+        const query = select(fields).from(table);
+        const then = query.then.bind(query);
+        query.then = (onFulfilled, onRejected) =>
+          then(async (snapshot) => {
+            arrived.resolve();
+            await resume.promise;
+            return snapshot;
+          }).then(onFulfilled, onRejected);
+        return query;
+      },
+    }));
+    const upgrade = vi.spyOn(WebSocketServer.prototype, 'handleUpgrade');
+    const getContainer = vi.fn();
+    const port = await start((s) =>
+      installTerminalWebSocket(s, { docker: { getContainer } as never }),
+    );
+    const pending = handshake(port, `/terminal/${ID}`, 'haive_access=user-session');
+    await arrived.promise;
+    expect((await deactivate()).status).toBe(200);
+    expect(await pending).toBe(401);
+    resume.resolve();
+    await new Promise<void>((r) => setImmediate(r));
+    expect(upgrade.mock.calls.length).toBe(0);
+    expect(getContainer).not.toHaveBeenCalled();
+    expect(fake.rows(schema.terminalSessions)).toHaveLength(0);
+    expect(fake.rows(schema.containers)[0]?.attachedWsCount ?? 0).toBe(0);
+    expect(closeUserSockets(USER)).toBe(0);
   });
 });
