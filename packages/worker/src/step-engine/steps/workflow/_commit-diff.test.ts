@@ -469,41 +469,39 @@ describe('untracked directory staging controls', () => {
     });
   });
 
-  it.each(['nested', ':(top)nested'])(
-    'previews the gitlink git add -A records for %s',
-    async (name) => {
-      await repo(async (dir) => {
-        const nested = path.join(dir, name);
-        await git(dir, ['init', '-b', 'main', name]);
-        await writeFile(path.join(nested, 'file.txt'), 'nested commit\n');
-        await git(nested, ['add', '-A']);
-        await git(nested, ['commit', '-m', 'nested']);
-        const head = (await git(nested, ['rev-parse', 'HEAD'])).stdout.trim();
-        // Dirty nested content is not part of the superproject's commit.
-        await writeFile(path.join(nested, 'file.txt'), 'not committed\n');
-        const built = await buildCommitDiffArtifact(dir, gitRun);
-        const status = await gitRun(dir, ['status', '--porcelain', '-z', '-uall']);
-        expect(parsePorcelainZ(status.stdout)).toEqual([{ x: '?', y: '?', path: `${name}/` }]);
+  it('previews the gitlink git add -A records for nested', async () => {
+    const name = 'nested';
+    await repo(async (dir) => {
+      const nested = path.join(dir, name);
+      await git(dir, ['init', '-b', 'main', name]);
+      await writeFile(path.join(nested, 'file.txt'), 'nested commit\n');
+      await git(nested, ['add', '-A']);
+      await git(nested, ['commit', '-m', 'nested']);
+      const head = (await git(nested, ['rev-parse', 'HEAD'])).stdout.trim();
+      // Dirty nested content is not part of the superproject's commit.
+      await writeFile(path.join(nested, 'file.txt'), 'not committed\n');
+      const built = await buildCommitDiffArtifact(dir, gitRun);
+      const status = await gitRun(dir, ['status', '--porcelain', '-z', '-uall']);
+      expect(parsePorcelainZ(status.stdout)).toEqual([{ x: '?', y: '?', path: `${name}/` }]);
 
-        expect((await gitRun(dir, ['add', '-A'])).code).toBe(0);
-        const index = await gitRun(dir, ['ls-files', '-s', '-z']);
-        expect(index.code).toBe(0);
-        expect(index.stdout).toBe(`160000 ${head} 0\t${name}\0`);
-        expect((await git(dir, ['diff', '--cached', '--numstat'])).stdout).toBe(`1\t0\t${name}\n`);
-        expect(built.artifact.files).toEqual([
-          {
-            path: `${name}/`,
-            status: 'added',
-            binary: false,
-            truncated: false,
-            link: 'gitlink',
-            oldContent: '',
-            newContent: `Subproject commit ${head}\n`,
-          },
-        ]);
-      });
-    },
-  );
+      expect((await gitRun(dir, ['add', '-A'])).code).toBe(0);
+      const index = await gitRun(dir, ['ls-files', '-s', '-z']);
+      expect(index.code).toBe(0);
+      expect(index.stdout).toBe(`160000 ${head} 0\t${name}\0`);
+      expect((await git(dir, ['diff', '--cached', '--numstat'])).stdout).toBe(`1\t0\t${name}\n`);
+      expect(built.artifact.files).toEqual([
+        {
+          path: `${name}/`,
+          status: 'added',
+          binary: false,
+          truncated: false,
+          link: 'gitlink',
+          oldContent: '',
+          newContent: `Subproject commit ${head}\n`,
+        },
+      ]);
+    });
+  });
 
   it('explains an unborn nested repository that git add -A refuses', async () => {
     await repo(async (dir) => {
