@@ -38,21 +38,26 @@ throttle runs after the body is validated and before any bcrypt or database work
 rejects, or does not answer within 400 ms the attempt is admitted and one warning is logged: the shared
 client queues commands forever while Redis is down, and a login that waits on that is worse than an
 unthrottled one. A reservation that still lands after the bound is released when it does, so a stall does
-not leave slots that no refund frees, and the wait in `Retry-After` is capped at the window. The address is the TCP peer (`getConnInfo`), an IPv4-mapped peer read as IPv4 and an IPv6
+not leave slots that no refund frees, and the wait in `Retry-After` is capped at the window. The address is the TCP peer (`getConnInfo`), an IPv4-mapped peer (dotted or hex, any spelling) read as IPv4 and an IPv6
 peer bucketed by its /64; with no address (a unit test, a dead socket) only the account bucket applies.
 `X-Forwarded-For` is never read unless the peer is inside `HAIVE_TRUSTED_PROXIES` (comma separated IPs or
 CIDRs, empty by default, passed through `docker-compose.yml`); then the right-most hop that is not itself
 trusted is the client, and an unparsable chain falls back to the peer. The api port is published on all
 interfaces, so a header from anyone else must not be believed.
 
-Accepted limits. Under Docker NAT, the supported dev setup, every client reaches the api as the bridge
-gateway (MEASURED: `::ffff:172.20.0.1` for a WSL client), so the address bucket is one shared failure
-budget there and `HAIVE_TRUSTED_PROXIES` cannot recover the real address; thirty bad attempts a minute by
-anyone who can reach the port make every sign-in answer 429 until the window slides, sessions already
-open are unaffected. Someone who knows an email can keep its bucket full for as long as they keep
-sending, and the owner then gets 429 even with the right password. The window is measured by the api's
-clock, one api instance per install. `CONFIG_KEYS.RATE_LIMIT_API_RPM` and `RATE_LIMIT_AUTH_RPM` are
-declared and read by nothing; the limits are the constants above.
+**A private peer has no address bucket.** Under Docker's default network every browser reaches the api as the
+bridge gateway (MEASURED: `::ffff:172.20.0.1` for a WSL client), so one address bucket there was one shared
+budget and thirty bad attempts a minute made every sign-in answer 429, a correct admin login included. When the
+address is the peer itself and the egress guard's classifier (`isBlockedAddress`, the same one the probe routes
+use: RFC 1918, loopback, link-local, unique-local and the other special ranges) calls it private, the address
+bucket is neither counted nor enforced and only the account bucket applies. An address a trusted proxy supplied
+through `X-Forwarded-For` is counted even when it is private, because the operator configured that proxy and
+the address is then a real client. A public peer keeps the bucket.
+
+Accepted limits. Someone who knows an email can keep its bucket full for as long as they keep sending, and the
+owner then gets 429 even with the right password; behind the default bridge there is no address to tell the
+senders apart, so the account bucket is the only brake there. The window is measured by the api's clock, one api
+instance per install. The limits are the constants above; the unused `RATE_LIMIT_*` config keys were removed.
 
 **A caller who is not an administrator cannot aim the probe routes at a blocked address.**
 `POST /tooling/test-postgres`, `/tooling/test-ollama`, `/tooling/ollama-model-capabilities`, the

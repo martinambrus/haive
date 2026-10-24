@@ -5,6 +5,7 @@ import { HTTPException } from 'hono/http-exception';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { logger } from '@haive/shared';
 import { getRedis } from '../redis.js';
+import { isBlockedAddress } from './egress-guard.js';
 
 const log = logger.child({ module: 'auth-throttle' });
 
@@ -48,8 +49,13 @@ const NOOP_ATTEMPT: AuthAttempt = { refund: async () => undefined };
 
 export function normalizeAddress(raw: string): string {
   const unzoned = raw.split('%')[0] ?? '';
-  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(unzoned);
-  return mapped?.[1] ?? unzoned;
+  if (isIP(unzoned) !== 6) return unzoned;
+  const canonical = new URL(`http://[${unzoned}]`).hostname;
+  const mapped = /^\[::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})\]$/.exec(canonical);
+  if (mapped === null) return unzoned;
+  const high = parseInt(mapped[1] as string, 16);
+  const low = parseInt(mapped[2] as string, 16);
+  return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
 }
 
 export function addressBucket(address: string): string {
@@ -130,14 +136,17 @@ export function resolveClientAddress(
   return peerAddress;
 }
 
-function clientAddress(c: Context): string | undefined {
+function countedAddress(c: Context): string | undefined {
   let peer: string | undefined;
   try {
     peer = getConnInfo(c).remote.address;
   } catch {
     return undefined;
   }
-  return resolveClientAddress(peer, c.req.header('x-forwarded-for'), trustedProxies());
+  const address = resolveClientAddress(peer, c.req.header('x-forwarded-for'), trustedProxies());
+  if (address === undefined) return undefined;
+  const suppliedByProxy = address !== normalizeAddress(peer as string);
+  return !suppliedByProxy && isBlockedAddress(address) ? undefined : address;
 }
 
 async function bounded<T>(work: Promise<T>): Promise<T> {
@@ -180,7 +189,7 @@ export async function reserveAuthAttempt(
   try {
     redis = getRedis();
     if (redis.status !== 'ready') throw new Error(`redis is ${redis.status}`);
-    const address = clientAddress(c);
+    const address = countedAddress(c);
     keys = [`${KEY_PREFIX}${scope}:acct:${account}`];
     const limits = [AUTH_ACCOUNT_LIMIT];
     if (address !== undefined) {

@@ -70,7 +70,7 @@ type Scope = 'login' | 'register';
 const acctKey = (scope: Scope, email: string) =>
   `${PREFIX}${scope}:acct:${computeEmailBlindIndex(email, PEPPER)}`;
 const ipKey = (scope: Scope, ip: string) => `${PREFIX}${scope}:ip:${ip}`;
-const peer = (i: number) => `198.18.${Math.floor(i / 250)}.${(i % 250) + 1}`;
+const peer = (i: number) => `8.8.${Math.floor(i / 250)}.${(i % 250) + 1}`;
 const mail = (tag: string | number) => `user-${tag}@throttle.test`;
 
 let app: ReturnType<typeof createApiApp>;
@@ -409,36 +409,36 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       for (let i = 0; i < 30; i++) {
         const res = await login(mail(`xff-${i}`), WRONG, {
           peer: peer(8),
-          headers: { 'x-forwarded-for': `203.0.113.${i + 1}` },
+          headers: { 'x-forwarded-for': `93.184.216.${i + 1}` },
         });
         expect(res.status).toBe(401);
       }
       await expectRefused(() =>
         login(mail('xff-31'), WRONG, {
           peer: peer(8),
-          headers: { 'x-forwarded-for': '203.0.113.99' },
+          headers: { 'x-forwarded-for': '93.184.216.99' },
         }),
       );
       expect(await client.zcard(ipKey('login', peer(8)))).toBe(30);
-      expect(await client.exists(ipKey('login', '203.0.113.1'))).toBe(0);
+      expect(await client.exists(ipKey('login', '93.184.216.1'))).toBe(0);
     });
 
     it('reads the right-most untrusted hop when the peer is a trusted proxy', async () => {
       vi.stubEnv('HAIVE_TRUSTED_PROXIES', '10.0.0.0/8,192.0.2.1');
       await login(mail('t1'), WRONG, {
         peer: '10.1.2.3',
-        headers: { 'x-forwarded-for': '203.0.113.9, 10.9.9.9' },
+        headers: { 'x-forwarded-for': '93.184.216.9, 10.9.9.9' },
       });
       await login(mail('t2'), WRONG, {
         peer: '10.1.2.3',
-        headers: { 'x-forwarded-for': '1.1.1.1, 203.0.113.9, 10.9.9.9' },
+        headers: { 'x-forwarded-for': '1.1.1.1, 93.184.216.9, 10.9.9.9' },
       });
       await login(mail('t3'), WRONG, {
         peer: '192.0.2.1',
-        headers: { 'x-forwarded-for': '203.0.113.7' },
+        headers: { 'x-forwarded-for': '93.184.216.7' },
       });
-      expect(await client.zcard(ipKey('login', '203.0.113.9'))).toBe(2);
-      expect(await client.zcard(ipKey('login', '203.0.113.7'))).toBe(1);
+      expect(await client.zcard(ipKey('login', '93.184.216.9'))).toBe(2);
+      expect(await client.zcard(ipKey('login', '93.184.216.7'))).toBe(1);
       expect(await client.exists(ipKey('login', '1.1.1.1'))).toBe(0);
       expect(await client.exists(ipKey('login', '10.1.2.3'))).toBe(0);
     });
@@ -447,40 +447,41 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       vi.stubEnv('HAIVE_TRUSTED_PROXIES', '10.0.0.0/8,192.0.2.1');
       await login(mail('u1'), WRONG, { peer: '10.1.2.3', headers: { 'x-forwarded-for': 'bogus' } });
       await login(mail('u2'), WRONG, {
-        peer: '198.51.100.4',
-        headers: { 'x-forwarded-for': '203.0.113.50' },
+        peer: '93.184.217.4',
+        headers: { 'x-forwarded-for': '93.184.216.50' },
       });
-      expect(await client.zcard(ipKey('login', '10.1.2.3'))).toBe(1);
-      expect(await client.zcard(ipKey('login', '198.51.100.4'))).toBe(1);
-      expect(await client.exists(ipKey('login', '203.0.113.50'))).toBe(0);
+      expect(await client.exists(ipKey('login', '10.1.2.3'))).toBe(0);
+      expect(await client.zcard(ipKey('login', '93.184.217.4'))).toBe(1);
+      expect(await client.exists(ipKey('login', '93.184.216.50'))).toBe(0);
     });
 
     it('reads the trusted list on every request', async () => {
       await login(mail('r1'), WRONG, {
         peer: '10.1.2.3',
-        headers: { 'x-forwarded-for': '203.0.113.9' },
+        headers: { 'x-forwarded-for': '93.184.216.9' },
       });
       vi.stubEnv('HAIVE_TRUSTED_PROXIES', '10.0.0.0/8');
       await login(mail('r2'), WRONG, {
         peer: '10.1.2.3',
-        headers: { 'x-forwarded-for': '203.0.113.9' },
+        headers: { 'x-forwarded-for': '93.184.216.9' },
       });
-      expect(await client.zcard(ipKey('login', '10.1.2.3'))).toBe(1);
-      expect(await client.zcard(ipKey('login', '203.0.113.9'))).toBe(1);
+      expect(await client.exists(ipKey('login', '10.1.2.3'))).toBe(0);
+      expect(await client.zcard(ipKey('login', '93.184.216.9'))).toBe(1);
     });
 
     it('shares one bucket between an IPv4-mapped peer and the plain address', async () => {
-      await login(mail('m1'), WRONG, { peer: '::ffff:127.0.0.1' });
-      await login(mail('m2'), WRONG, { peer: '127.0.0.1' });
-      expect(await client.zcard(ipKey('login', '127.0.0.1'))).toBe(2);
+      await login(mail('m1'), WRONG, { peer: '::ffff:8.8.4.4' });
+      await login(mail('m2'), WRONG, { peer: '8.8.4.4' });
+      await login(mail('m3'), WRONG, { peer: '::ffff:808:404' });
+      expect(await client.zcard(ipKey('login', '8.8.4.4'))).toBe(3);
     });
 
     it('buckets IPv6 peers by their /64', async () => {
-      await login(mail('v1'), WRONG, { peer: '2001:db8:1:2:aaaa::1' });
-      await login(mail('v2'), WRONG, { peer: '2001:db8:1:2:bbbb::2' });
-      await login(mail('v3'), WRONG, { peer: '2001:db8:1:3::1' });
-      expect(await client.zcard(ipKey('login', '2001:db8:1:2'))).toBe(2);
-      expect(await client.zcard(ipKey('login', '2001:db8:1:3'))).toBe(1);
+      await login(mail('v1'), WRONG, { peer: '2606:4700:1:2:aaaa::1' });
+      await login(mail('v2'), WRONG, { peer: '2606:4700:1:2:bbbb::2' });
+      await login(mail('v3'), WRONG, { peer: '2606:4700:1:3::1' });
+      expect(await client.zcard(ipKey('login', '2606:4700:1:2'))).toBe(2);
+      expect(await client.zcard(ipKey('login', '2606:4700:1:3'))).toBe(1);
     });
 
     it('applies only the account bucket when no address can be determined', async () => {
@@ -499,6 +500,60 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
         ),
       );
       expect(await keys()).toEqual([acctKey('login', email)]);
+    });
+  });
+
+  describe('TH-13 a private peer shares no address bucket', () => {
+    const BRIDGE = '172.20.0.1';
+    const PUBLIC_PEER = '8.8.4.4';
+
+    it('A1 admits 31 failures for different accounts from one private peer, and still limits one account', async () => {
+      for (let i = 0; i < 31; i++) {
+        expect((await login(mail(`br-${i}`), WRONG, { peer: BRIDGE })).status).toBe(401);
+      }
+      expect(await client.exists(ipKey('login', BRIDGE))).toBe(0);
+      const email = mail('br-one');
+      for (let i = 0; i < 10; i++) {
+        expect((await login(email, WRONG, { peer: BRIDGE })).status).toBe(401);
+      }
+      await expectRefused(() => login(email, WRONG, { peer: BRIDGE }));
+    });
+
+    it('A1 treats the IPv4-mapped hex form of a private peer the same way', async () => {
+      for (let i = 0; i < 31; i++) {
+        expect((await login(mail(`bh-${i}`), WRONG, { peer: '::ffff:ac14:1' })).status).toBe(401);
+      }
+      expect(await keys()).not.toContain(ipKey('login', BRIDGE));
+    });
+
+    it('A1 skips the bucket for loopback, link-local and a unique-local peer', async () => {
+      for (const [n, p] of ['127.0.0.1', '169.254.1.1', 'fd00::1', 'fe80::1'].entries()) {
+        for (let i = 0; i < 31; i++) {
+          expect((await login(mail(`pp${n}-${i}`), WRONG, { peer: p })).status).toBe(401);
+        }
+      }
+    });
+
+    it('A2 keeps the 30 per minute bucket for a public peer', async () => {
+      for (let i = 0; i < 30; i++) {
+        expect((await login(mail(`pub-${i}`), WRONG, { peer: PUBLIC_PEER })).status).toBe(401);
+      }
+      await expectRefused(() => login(mail('pub-31'), WRONG, { peer: PUBLIC_PEER }));
+      expect(await client.zcard(ipKey('login', PUBLIC_PEER))).toBe(30);
+    });
+
+    it('A3 counts a private address a trusted proxy supplied, per address', async () => {
+      vi.stubEnv('HAIVE_TRUSTED_PROXIES', '172.20.0.0/16');
+      const headers = { 'x-forwarded-for': '10.5.5.5' };
+      for (let i = 0; i < 30; i++) {
+        expect((await login(mail(`px-${i}`), WRONG, { peer: BRIDGE, headers })).status).toBe(401);
+      }
+      await expectRefused(() => login(mail('px-31'), WRONG, { peer: BRIDGE, headers }));
+      expect(await client.zcard(ipKey('login', '10.5.5.5'))).toBe(30);
+      const other = { 'x-forwarded-for': '10.5.5.6' };
+      expect((await login(mail('px-other'), WRONG, { peer: BRIDGE, headers: other })).status).toBe(
+        401,
+      );
     });
   });
 

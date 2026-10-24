@@ -12,6 +12,12 @@ describe('normalizeAddress', () => {
     expect(normalizeAddress('fe80::1%eth0')).toBe('fe80::1');
     expect(normalizeAddress('2001:db8::1')).toBe('2001:db8::1');
   });
+  it('A4 reads the hex IPv4-mapped form in any spelling', () => {
+    expect(normalizeAddress('::ffff:7f00:1')).toBe('127.0.0.1');
+    expect(normalizeAddress('::FFFF:7F00:0001')).toBe('127.0.0.1');
+    expect(normalizeAddress('0:0:0:0:0:ffff:ac14:1')).toBe('172.20.0.1');
+    expect(normalizeAddress('::ffff:a00:1%eth0')).toBe('10.0.0.1');
+  });
 });
 
 describe('addressBucket', () => {
