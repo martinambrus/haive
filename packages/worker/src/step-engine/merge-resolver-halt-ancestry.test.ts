@@ -9,7 +9,11 @@ import { claimFake, mergeDirClaimOverrides } from '../../test/merge-dir-claim-fa
 import { haltFailed } from './merge-resolver.js';
 import type { AdvanceStepParams, TaskStepRow } from './step-runner.js';
 
-const h = vi.hoisted(() => ({ ancestryCode: null as number | null, ancestryThrows: false }));
+const h = vi.hoisted(() => ({
+  ancestryCode: null as number | null,
+  ancestryThrows: false,
+  featureUnreadable: false,
+}));
 vi.mock('./merge-dir-claim.js', async (original) => ({
   ...(await original<typeof import('./merge-dir-claim.js')>()),
   ...mergeDirClaimOverrides(),
@@ -33,6 +37,9 @@ vi.mock('../repo/git-push.js', async (original) => {
         if (h.ancestryCode !== null) {
           return { code: h.ancestryCode, stdout: '', stderr: '' };
         }
+      }
+      if (h.featureUnreadable && args[1].includes('feature^{commit}')) {
+        return { code: 128, stdout: '', stderr: 'fatal: unreadable' };
       }
       return actual.gitRun(...args);
     },
@@ -58,6 +65,7 @@ beforeEach(() => {
   claimFake.reset();
   h.ancestryCode = null;
   h.ancestryThrows = false;
+  h.featureUnreadable = false;
 });
 afterEach(async () => {
   for (const dir of dirs.splice(0)) {
@@ -137,6 +145,14 @@ describe('#280 fix5 halt ownership with an advanced feature and no fix baseline'
   it('keeps the claim and records the halt when the ancestry runner throws', async () => {
     const state = await openMerge(false);
     h.ancestryThrows = true;
+    await halt(state);
+    expect(claimFake.claims.has(state.mergeDir)).toBe(true);
+    expect(claimFake.released).toEqual([]);
+  });
+
+  it('keeps the claim and records the halt when the feature ref cannot be read', async () => {
+    const state = await openMerge(false);
+    h.featureUnreadable = true;
     await halt(state);
     expect(claimFake.claims.has(state.mergeDir)).toBe(true);
     expect(claimFake.released).toEqual([]);

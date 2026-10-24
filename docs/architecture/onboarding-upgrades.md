@@ -628,7 +628,7 @@ step: its base (`synced_snapshot`) is only ever the plan.json last read in. A va
 not refused: the sync that runs first imports it, so the database holds it and the set-aside loses
 nothing. After the move, `resyncHaiveProjections` runs the sync, writes the record if the outbox is
 dirty, reconciles the plan and flushes it, each in its own try; it reads nothing in while a merge or
-rebase is open, and looks again under the lock as the sweep does. The revision is bumped again after
+rebase is open or while git cannot say whether one is, and looks again under the lock as the sweep does. The revision is bumped again after
 the restore, since a sweep that ran between the two would have stamped it written. 00a calls it
 only when the base is the checked-out branch (a ref-only update moves no file), and again after a
 merge it drove; `persistDetection` keeps its two importers, because the legacy mirror files
@@ -643,7 +643,7 @@ checkout itself (00a's merge, 12 when the parent checkout is on the base branch,
 it seeds the plan base and checks again under the projection locks right before `openMerge`, where a
 file Haive rewrote since the set-aside sends it round again, up to `MOVE_ATTEMPTS`. Every outcome that
 did not merge puts the files back and, once no merge or rebase is open, re-syncs them, a throw from
-the merge section recovers them before it reaches the caller, and reaching done re-syncs. The owner
+the merge section recovers them before it reaches the caller (put back while HEAD is still where the section started, re-synced once it moved or cannot be read), and reaching done re-syncs. The owner
 and mode a set-aside captured ride in the merge state (`keptMetadata`, never the bytes), so the
 call that ends a merge restores them even when an earlier call set the files aside; a merge left
 open keeps them for its end. They are restored, and cleared, only after a re-sync that completed:

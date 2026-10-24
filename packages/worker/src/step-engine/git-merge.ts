@@ -24,6 +24,7 @@ import {
 } from '../queues/cli-exec/secret-mask-policy.js';
 import { ensureGitExcludeEntry } from '../repo/git-init.js';
 import { gitRun, type GitRunResult } from '../repo/git-push.js';
+import { GIT_NO_EXIT } from '../repo/git-exec.js';
 import { HOST_REPO_ROOT } from '../repo/worktree-git-boundary.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { SANDBOX_GID, SANDBOX_UID } from '../sandbox/sandbox-identity.js';
@@ -67,7 +68,13 @@ export async function unmergedPaths(dir: string): Promise<string[] | null> {
 
 export async function revParse(dir: string, spec: string): Promise<string | null> {
   const res = await gitRun(dir, ['rev-parse', '-q', '--verify', spec]);
-  return res.code === 0 ? res.stdout.trim() : null;
+  if (res.code === 0) return res.stdout.trim();
+  if (res.code === 1) return null;
+  if (res.code === GIT_NO_EXIT && res.noExit === 'ENOENT') {
+    const { anchor, prefix } = workspaceAnchor(dir);
+    if ((await lstatNoFollow(anchor, prefix.replace(/\/$/, ''))) === null) return null;
+  }
+  throw new Error(`git rev-parse ${spec} failed in ${dir}: ${(res.stderr || res.stdout).trim()}`);
 }
 
 export async function isCommitAncestor(
@@ -112,6 +119,21 @@ export async function openMerge(
 ): Promise<MergeOpen> {
   const handBack = await handBackPlan(dir);
   const before = handBack ? await revParse(dir, 'HEAD') : null;
+  // A worker that died after an earlier attempt's merge commit, before its hand-back, left HEAD
+  // on a merge of this ref (or of an earlier position of it): what that merge brought in goes too.
+  const priorTheirs = before ? await revParse(dir, `${before}^2`) : null;
+  // A ref that does not resolve is left to `git merge`, which refuses it with its own reason.
+  const target = priorTheirs !== null ? await revParse(dir, `${ref}^{commit}`) : null;
+  let priorMerge = false;
+  if (priorTheirs !== null && target !== null) {
+    const ancestor = await gitRun(dir, ['merge-base', '--is-ancestor', priorTheirs, target]);
+    if (ancestor.code !== 0 && ancestor.code !== 1) {
+      throw new Error(
+        `git merge-base failed in ${dir}: ${(ancestor.stderr || ancestor.stdout).trim()}`,
+      );
+    }
+    priorMerge = ancestor.code === 0;
+  }
   const res = await gitRun(dir, ['merge', '--no-ff', ...flags, ref], env);
   const opened: MergeOpen =
     res.code === 0
@@ -120,12 +142,6 @@ export async function openMerge(
         ? { kind: 'conflict' }
         : { kind: 'refused', detail: gitDetail(res) };
   if (handBack && before && opened.kind !== 'refused') {
-    // A worker that died after an earlier attempt's merge commit, before its hand-back, left HEAD
-    // on a merge of this ref (or of an earlier position of it): what that merge brought in goes too.
-    const priorTheirs = await revParse(dir, `${before}^2`);
-    const priorMerge =
-      priorTheirs !== null &&
-      (await gitRun(dir, ['merge-base', '--is-ancestor', priorTheirs, ref])).code === 0;
     await handBackWritten(
       handBack,
       dir,
@@ -310,9 +326,20 @@ export async function abortMerge(dir: string): Promise<MergeAbort> {
   return aborted;
 }
 
+/** True while MERGE_HEAD exists; git's reason when it could not be read. */
+async function stillOpen(dir: string): Promise<boolean | string> {
+  try {
+    return (await revParse(dir, 'MERGE_HEAD')) !== null;
+  } catch (err) {
+    return `git could not read MERGE_HEAD after the abort: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 async function abortOpenMerge(dir: string): Promise<MergeAbort> {
   const first = await gitRun(dir, ['merge', '--abort']);
-  if ((await revParse(dir, 'MERGE_HEAD')) === null) return { ok: true };
+  const afterFirst = await stillOpen(dir);
+  if (afterFirst === false) return { ok: true };
+  if (typeof afterFirst === 'string') return { ok: false, blocking: [], detail: afterFirst };
   const blocking = (await stagedThenEdited(dir)) ?? [];
   if (blocking.length === 0 || isHostCheckout(dir)) {
     return { ok: false, blocking: blocking.map(shown), detail: gitDetail(first) };
@@ -322,7 +349,9 @@ async function abortOpenMerge(dir: string): Promise<MergeAbort> {
     return { ok: false, blocking: blocking.map(shown), detail: gitDetail(restore) };
   }
   const second = await gitRun(dir, ['merge', '--abort']);
-  if ((await revParse(dir, 'MERGE_HEAD')) === null) return { ok: true };
+  const afterSecond = await stillOpen(dir);
+  if (afterSecond === false) return { ok: true };
+  if (typeof afterSecond === 'string') return { ok: false, blocking: [], detail: afterSecond };
   return {
     ok: false,
     blocking: ((await stagedThenEdited(dir)) ?? blocking).map(shown),
@@ -626,11 +655,17 @@ export async function captureFixBaseline(
   if (isHostCheckout(dir)) return null;
   // `.haive/` holds other tasks' worktrees and earlier leftovers; excluded, no snapshot reads them.
   await ensureGitExcludeEntry(workspaceAnchor(dir).anchor).catch(() => undefined);
-  const [head, mergeHead, unmerged] = await Promise.all([
-    revParse(dir, 'HEAD'),
-    revParse(dir, 'MERGE_HEAD'),
-    unmergedPaths(dir),
-  ]);
+  let read;
+  try {
+    read = await Promise.all([
+      revParse(dir, 'HEAD'),
+      revParse(dir, 'MERGE_HEAD'),
+      unmergedPaths(dir),
+    ]);
+  } catch (err) {
+    return { unavailable: err instanceof Error ? err.message : String(err) };
+  }
+  const [head, mergeHead, unmerged] = read;
   const resolving = unmerged === null ? null : await resolvingPaths(dir, unmerged);
   if (head === null || mergeHead === null || resolving === null) {
     return { unavailable: 'git could not read the merge' };
@@ -1256,8 +1291,7 @@ export async function completeMergeHostSide(
 ): Promise<boolean> {
   // Fast path: already committed (e.g. an environment where git did work).
   if (await mergeCommitted(worktreePath, branch)) return true;
-  const head = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
-  if (head.code !== 0) return false; // merge no longer open and not committed
+  if ((await revParse(worktreePath, 'MERGE_HEAD')) === null) return false; // merge no longer open and not committed
   const listed = await gitRun(
     worktreePath,
     ['diff', '--name-only', '--diff-filter=U', '-z'],
@@ -1358,8 +1392,7 @@ export async function squashMergeCommit(
     if (contained.code === 0) return null;
     if (contained.code !== 1) throw new Error('Could not check feature ancestry before squash');
   }
-  const open = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
-  if (open.code === 0) return null;
+  if ((await revParse(worktreePath, 'MERGE_HEAD')) !== null) return null;
   const head = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
   if (head.code !== 0) {
     throw new Error(
@@ -1434,5 +1467,10 @@ export async function squashMergeCommit(
     throw new Error(`git commit (squash) failed: ${commit.stderr || commit.stdout}`.trim());
   }
   const sha = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
-  return sha.code === 0 ? sha.stdout.trim() : null;
+  if (sha.code !== 0) {
+    throw new Error(
+      `git rev-parse HEAD failed in ${worktreePath}: ${(sha.stderr || sha.stdout).trim()}`,
+    );
+  }
+  return sha.stdout.trim();
 }

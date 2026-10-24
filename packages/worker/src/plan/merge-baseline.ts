@@ -7,11 +7,11 @@ import {
   fixerIndexHeldNote,
   recordFixerLeftovers,
   relocateFixerChanges,
+  revParse,
   type FixBaseline,
   type FixBaselineUnavailable,
 } from '../step-engine/git-merge.js';
 import { taskSecretMaskPolicy } from '../queues/cli-exec/secret-mask.js';
-import { gitRun } from '../repo/git-push.js';
 
 /** Kept beside the transcript, and for its reason: a Retry and the revise loop reset the step row,
  *  and a merge a cancelled conversation left open is resumed by the next one. */
@@ -23,13 +23,6 @@ export interface RecordedFixBaseline {
   taskStepId: string | null;
   /** The task that recorded the baseline, when another has taken its merge over. */
   ownerTaskId?: string;
-}
-
-async function revParse(dir: string, spec: string): Promise<string | null> {
-  const res = await gitRun(dir, ['rev-parse', '-q', '--verify', spec]);
-  if (res.code === 0) return res.stdout.trim();
-  if (res.code === 1) return null;
-  throw new Error(`git rev-parse ${spec} failed in ${dir}: ${(res.stderr || res.stdout).trim()}`);
 }
 
 async function openMergeIds(dir: string): Promise<{ head: string; mergeHead: string } | null> {

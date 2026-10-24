@@ -66,6 +66,7 @@ import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.j
 import { claimMergeDir, releaseTaskMergeClaims } from '../src/step-engine/merge-dir-claim.js';
 import { abortLeftMerge, recordLeftOpenMerges } from '../src/step-engine/left-open-merge.js';
 import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
+import { failGit } from './support/fake-git.js';
 
 const log = logger.child({ module: 'repo-refresh-smoke' });
 
@@ -4453,6 +4454,410 @@ async function main(): Promise<void> {
         'C14: a second transaction waiting for the plan lock already holds the task-creation lock, and finishes once it is released',
         secondQueued && secondFree === false && aside.outcome === 'set-aside',
         { secondQueued, secondFree, outcome: aside.outcome },
+      );
+    });
+
+    // M11-M14. A git read that failed is unknown, never an answer (docs/architecture/plan-canvas.md, #255): the
+    // resolver reads HEAD before it sets anything aside, the set-aside gates refuse on an unreadable
+    // `--git-path`, a refresh stays ready, and a failed HEAD read never puts stale bytes over a landed move.
+    const gitTask = async (c: Awaited<ReturnType<typeof cloned>>) => {
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: c.payload.repositoryId,
+          type: 'workflow',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        })
+        .returning({ id: schema.tasks.id, epoch: schema.tasks.orchestrationEpoch });
+      const ctx0 = await taskCtx(c.dest, task!.id);
+      const bump = () =>
+        db
+          .update(schema.tasks)
+          .set({ orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1` })
+          .where(eq(schema.tasks.id, task!.id));
+      // One pass of the step at the task's current epoch, as a Retry runs it.
+      const pass = async () => {
+        const now = (await db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, task!.id),
+          columns: { orchestrationEpoch: true },
+        }))!;
+        const ctx = { ...ctx0, epoch: now.orchestrationEpoch };
+        const detected = await syncBaseStep.detect!(ctx);
+        const row = (await db.query.taskSteps.findFirst({
+          where: eq(schema.taskSteps.id, ctx0.taskStepId),
+        }))!;
+        const current = {
+          ...row,
+          detectOutput: detected,
+          formValues: { base: 'main', syncAction: 'merge' },
+        };
+        const params = {
+          db,
+          taskId: task!.id,
+          userId,
+          repoPath: c.dest,
+          workspacePath: c.dest,
+          cliProviderId: null,
+          stepDef: step,
+          epoch: now.orchestrationEpoch,
+        };
+        return resolveMergePhase(db, step, current as never, ctx, params as never);
+      };
+      const claim = () =>
+        db.query.mergeDirClaims.findFirst({
+          where: eq(schema.mergeDirClaims.mergeDir, c.dest),
+        });
+      return { taskId: task!.id, stepId: ctx0.taskStepId, pass, bump, claim };
+    };
+
+    await attempt('M11: a failed HEAD read ahead of the set-aside', async () => {
+      const c = await withPendingRender();
+      await commitFile(c.dest, 'local.txt', 'local\n', 'local work');
+      git(c.dest, 'add', '--', RENDER_REL);
+      const upstream = await push('m11-theirs.txt', 'theirs\n');
+      const bytes = await readFile(path.join(c.dest, RENDER_REL));
+      const staged = git(c.dest, 'ls-files', '-s', '--', RENDER_REL);
+      const t = await gitTask(c);
+      try {
+        let fired = 0;
+        restoreFaults.afterRestore = async () => {
+          delete restoreFaults.afterRestore;
+          fired += 1;
+          await t.bump();
+        };
+        const shim = await failGit(['rev-parse', '-q', '--verify', 'HEAD'], {
+          from: 1,
+          until: 1,
+        });
+        let thrown: unknown = null;
+        try {
+          await t.pass();
+        } catch (err) {
+          thrown = err;
+        } finally {
+          await shim.restore();
+          delete restoreFaults.afterRestore;
+        }
+        const message = thrown instanceof Error ? thrown.message : String(thrown);
+        const held = await t.claim();
+        check(
+          'M11: a pass whose first HEAD read fails rejects with that read, not with a superseded step',
+          /git rev-parse HEAD failed in /.test(message) && !(thrown instanceof StepSupersededError),
+          { thrown: message },
+        );
+        check('M11: and nothing was set aside before the read', fired === 0, { fired });
+        check(
+          'M11: and the staged render is as it was, in bytes and in the index',
+          (await readFile(path.join(c.dest, RENDER_REL)).catch(() => null))?.equals(bytes) ===
+            true && git(c.dest, 'ls-files', '-s', '--', RENDER_REL) === staged,
+          { staged, now: git(c.dest, 'ls-files', '-s', '--', RENDER_REL) },
+        );
+        check(
+          "M11: and the claim row is still the step's, with no merge open",
+          held?.taskStepId === t.stepId && !mergeOpen(c.dest),
+          { held },
+        );
+        const again = await t.pass();
+        check(
+          'M11: and a Retry with the shim gone lands the merge and releases the claim',
+          again.resolved &&
+            isAncestor(c.dest, upstream, 'HEAD') &&
+            (await t.claim()) === undefined &&
+            !mergeOpen(c.dest),
+          { again },
+        );
+      } finally {
+        delete restoreFaults.afterRestore;
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, t.taskId));
+      }
+    });
+
+    // Round 1 sets the files aside and a rewrite under the merge sends it round again; round 2's HEAD read fails.
+    await attempt('M11c: a failed HEAD read in a later round', async () => {
+      const { c, id } = await divergedOverPendingRender();
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      git(c.dest, 'add', '--', RENDER_REL);
+      const planPath = path.join(c.dest, PLAN_REL);
+      const planBytes = await readFile(planPath);
+      const renderBytes = await readFile(path.join(c.dest, RENDER_REL));
+      const staged = git(c.dest, 'ls-files', '-s', '--', RENDER_REL);
+      const headPlan = (() => {
+        try {
+          return execFileSync('git', ['show', `HEAD:${PLAN_REL}`], { cwd: c.dest, env: gitEnv });
+        } catch {
+          return null;
+        }
+      })();
+      const t = await gitTask(c);
+      try {
+        let rewrites = 0;
+        restoreFaults.afterRestore = async () => {
+          if (rewrites > 0) return;
+          const now = await readFile(planPath).catch(() => null);
+          if (now === null ? headPlan !== null : headPlan === null || !now.equals(headPlan)) return;
+          rewrites += 1;
+          await writeFile(planPath, planBytes);
+        };
+        const shim = await failGit(['rev-parse', '-q', '--verify', 'HEAD'], {
+          from: 2,
+          until: 2,
+        });
+        let thrown: unknown = null;
+        try {
+          await t.pass();
+        } catch (err) {
+          thrown = err;
+        } finally {
+          await shim.restore();
+          delete restoreFaults.afterRestore;
+        }
+        const message = thrown instanceof Error ? thrown.message : String(thrown);
+        const held = await t.claim();
+        check(
+          'M11c: a pass whose second-round HEAD read fails rejects with that read after one rewrite',
+          /git rev-parse HEAD failed in /.test(message) && rewrites === 1,
+          { thrown: message, rewrites },
+        );
+        check(
+          "M11c: and round 1's files are back, in bytes and in the index, with the claim kept",
+          (await readFile(path.join(c.dest, RENDER_REL)).catch(() => null))?.equals(renderBytes) ===
+            true &&
+            (await readFile(planPath).catch(() => null))?.equals(planBytes) === true &&
+            git(c.dest, 'ls-files', '-s', '--', RENDER_REL) === staged &&
+            held?.taskStepId === t.stepId &&
+            !mergeOpen(c.dest),
+          { staged, now: git(c.dest, 'ls-files', '-s', '--', RENDER_REL), held },
+        );
+      } finally {
+        delete restoreFaults.afterRestore;
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, t.taskId));
+      }
+    });
+
+    await attempt('M12: a set-aside whose open-merge check failed', async () => {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      git(c.dest, 'add', '--', RENDER_REL);
+      const bytes = await readFile(path.join(c.dest, RENDER_REL));
+      const staged = git(c.dest, 'ls-files', '-s', '--', RENDER_REL);
+      let restored = false;
+      restoreFaults.beforeRestore = () => {
+        restored = true;
+      };
+      const shim = await failGit(['rev-parse', '--git-path']);
+      let aside;
+      try {
+        aside = await setAsideHaiveProjections(db, id, c.dest);
+      } finally {
+        await shim.restore();
+        delete restoreFaults.beforeRestore;
+      }
+      check(
+        'M12: an unreadable `--git-path` refuses the set-aside as "could not be checked"',
+        aside.outcome === 'refused' && /could not be checked/.test(aside.reason),
+        aside,
+      );
+      check(
+        'M12: and nothing moved: the file and its staged entry are as they were',
+        !restored &&
+          (await readFile(path.join(c.dest, RENDER_REL)).catch(() => null))?.equals(bytes) ===
+            true &&
+          git(c.dest, 'ls-files', '-s', '--', RENDER_REL) === staged,
+        { restored, staged, now: git(c.dest, 'ls-files', '-s', '--', RENDER_REL) },
+      );
+
+      // CONTROL, on a checkout of its own: an open rebase is the known refusal, healthy git.
+      const k = await withPendingRender();
+      const rebaseDir = path.join(k.dest, '.git', 'rebase-merge');
+      await mkdir(rebaseDir);
+      let control;
+      try {
+        control = await setAsideHaiveProjections(db, k.payload.repositoryId, k.dest);
+      } finally {
+        await rm(rebaseDir, { recursive: true, force: true });
+      }
+      check(
+        'M12: control: an open rebase is refused as "still open", not as unchecked',
+        control.outcome === 'refused' &&
+          /still open/.test(control.reason) &&
+          !/could not be checked/.test(control.reason),
+        control,
+      );
+    });
+
+    await attempt('M13: a refresh whose open-merge check failed stays ready', async () => {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      const head = git(c.dest, 'rev-parse', 'HEAD');
+      const bytes = await readFile(path.join(c.dest, RENDER_REL));
+      await push('m13-theirs.txt', 'theirs\n');
+      const shim = await failGit(['rev-parse', '--git-path']);
+      try {
+        await handleRefresh(c.payload, db, storage);
+      } finally {
+        await shim.restore();
+      }
+      const row = await statusOf(id);
+      check(
+        'M13: the repository stays ready and says it was not refreshed',
+        row.status === 'ready' && (row.statusMessage ?? '').startsWith('Not refreshed:'),
+        row,
+      );
+      check(
+        'M13: and the checkout did not move, its pending render untouched',
+        git(c.dest, 'rev-parse', 'HEAD') === head &&
+          (await readFile(path.join(c.dest, RENDER_REL)).catch(() => null))?.equals(bytes) === true,
+        { head: git(c.dest, 'rev-parse', 'HEAD') },
+      );
+    });
+
+    // M14. After a set-aside and a real fast-forward, a failed HEAD read must not put the pending bytes over the incoming file.
+    const m14Titles = (text: string) =>
+      (JSON.parse(text) as { nodes: { title: string }[] }).nodes.map((n) => n.title).sort();
+    const m14Fixture = async (name: string) => {
+      const o = path.join(tmp, `origin-m14-${name}.git`);
+      git(tmp, 'init', '-q', '--bare', '-b', 'main', o);
+      const s = path.join(tmp, `seed-m14-${name}`);
+      git(tmp, 'clone', '-q', `file://${o}`, s);
+      await commitFile(s, 'README.md', 'seed\n', 'seed');
+      git(s, 'push', '-q', 'origin', 'HEAD:main');
+      const c = await cloned(o);
+      const id = c.payload.repositoryId;
+      await applyPlanPatch(
+        db,
+        {
+          ops: [
+            { op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Plan' },
+            { op: 'upsert', nodeRef: 'one', parentRef: 'root', title: 'One' },
+            { op: 'upsert', nodeRef: 'two', parentRef: 'root', title: 'Two' },
+          ],
+        },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      git(c.dest, 'add', '.haive-data');
+      git(c.dest, 'commit', '-q', '-m', 'plan');
+      git(c.dest, 'push', '-q', 'origin', 'HEAD:main');
+      git(s, 'pull', '-q', '--ff-only', 'origin', 'main');
+      const nodes = await db.query.planNodes.findMany({
+        where: eq(schema.planNodes.repositoryId, id),
+      });
+      await applyPlanPatch(
+        db,
+        {
+          ops: [
+            {
+              op: 'upsert',
+              nodeRef: nodes.find((n) => n.title === 'One')!.id,
+              title: 'One, edited here',
+            },
+          ],
+        },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      const theirs = JSON.parse(await readFile(path.join(s, PLAN_REL), 'utf8')) as {
+        nodes: { title: string }[];
+      };
+      theirs.nodes.find((n) => n.title === 'Two')!.title = 'Two, edited there';
+      await writeFile(path.join(s, PLAN_REL), `${JSON.stringify(theirs, null, 2)}\n`);
+      git(s, 'add', PLAN_REL);
+      git(s, 'commit', '-q', '-m', 'a teammate edits the plan');
+      git(s, 'push', '-q', 'origin', 'HEAD:main');
+      const pending = await readFile(path.join(c.dest, PLAN_REL));
+      const head = git(c.dest, 'rev-parse', 'HEAD');
+      const aside = await setAsideHaiveProjections(db, id, c.dest);
+      return { c, id, pending, head, aside };
+    };
+    const m14Recover = async (
+      f: Awaited<ReturnType<typeof m14Fixture>>,
+      land: boolean,
+      shimmed: boolean,
+    ) => {
+      if (land) {
+        git(f.c.dest, 'fetch', '-q', 'origin', 'main');
+        git(f.c.dest, 'merge', '-q', '--ff-only', 'origin/main');
+      }
+      const incoming = await readFile(path.join(f.c.dest, PLAN_REL));
+      const err = new Error('the move threw');
+      let thrown: unknown = null;
+      const shims = shimmed
+        ? [
+            await failGit(['rev-parse', 'HEAD']),
+            await failGit(['rev-parse', '-q', '--verify', 'HEAD']),
+          ]
+        : [];
+      try {
+        if (f.aside.outcome === 'set-aside') {
+          await recoverAfterMoveFailure(db, f.id, f.c.dest, f.aside.kept, f.head, err);
+        }
+      } catch (e) {
+        thrown = e;
+      } finally {
+        for (const s of shims.reverse()) await s.restore();
+      }
+      return { err, thrown, incoming };
+    };
+
+    await attempt('M14: a failed HEAD read after a landed move', async () => {
+      const f = await m14Fixture('failed');
+      const { err, thrown, incoming } = await m14Recover(f, true, true);
+      const now = await readFile(path.join(f.c.dest, PLAN_REL));
+      const titles = m14Titles(now.toString());
+      check(
+        'M14: the same error comes back and plan.json keeps the incoming node beside the local edit, not the pending bytes alone',
+        f.aside.outcome === 'set-aside' &&
+          !incoming.equals(f.pending) &&
+          thrown === err &&
+          !now.equals(f.pending) &&
+          titles.includes('Two, edited there') &&
+          titles.includes('One, edited here'),
+        { outcome: f.aside.outcome, thrown: String(thrown), titles },
+      );
+      await writePlanMirror(db, f.id, f.c.dest);
+      const inDb = (
+        await db.query.planNodes.findMany({ where: eq(schema.planNodes.repositoryId, f.id) })
+      )
+        .map((n) => n.title)
+        .sort();
+      check(
+        'M14: and after one flush the incoming node is in the database beside the local edit',
+        isDeepEqual(inDb, ['One, edited here', 'Plan', 'Two, edited there']),
+        { inDb },
+      );
+    });
+
+    await attempt('M14: controls with a healthy HEAD read', async () => {
+      const unmoved = await m14Fixture('unmoved');
+      const a = await m14Recover(unmoved, false, false);
+      check(
+        'M14: control: HEAD unmoved and readable puts the pending bytes back',
+        unmoved.aside.outcome === 'set-aside' &&
+          a.thrown === a.err &&
+          (await readFile(path.join(unmoved.c.dest, PLAN_REL))).equals(unmoved.pending),
+        { outcome: unmoved.aside.outcome, thrown: String(a.thrown) },
+      );
+      const moved = await m14Fixture('moved');
+      const b = await m14Recover(moved, true, false);
+      const now = await readFile(path.join(moved.c.dest, PLAN_REL));
+      check(
+        'M14: control: HEAD moved and readable re-syncs over the incoming file',
+        moved.aside.outcome === 'set-aside' &&
+          b.thrown === b.err &&
+          !now.equals(moved.pending) &&
+          m14Titles(now.toString()).includes('Two, edited there'),
+        {
+          outcome: moved.aside.outcome,
+          thrown: String(b.thrown),
+          titles: m14Titles(now.toString()),
+        },
       );
     });
 

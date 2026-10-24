@@ -5,7 +5,6 @@ import {
   type KeptFile,
   type KeptFiles,
 } from '../project-state/set-aside.js';
-import { gitOperationInProgress } from '../repo/git-operation.js';
 
 export type KeptMetadata = NonNullable<MergeResolveState['keptMetadata']>;
 
@@ -53,7 +52,6 @@ export async function settleProjections(
   given: MergeResolveState,
   save: (cleared: MergeResolveState) => Promise<unknown>,
 ): Promise<boolean> {
-  if (await gitOperationInProgress(given.mergeDir)) return false;
   if (!(await resyncHaiveProjections(db, repositoryId, given.mergeDir))) return false;
   if (given.keptMetadata) await save(await restoreKeptMetadataOf(given));
   return true;
