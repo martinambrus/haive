@@ -3,13 +3,25 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import type { StepContext } from '../../step-definition.js';
+import { killGit } from '../../../../test/support/kill-git.js';
 import {
   externalCommitBlock,
+  resolveExternalDrift,
   parseCommitLog,
   resolveBranchPoint,
   type ExternalCommit,
 } from './_external-drift.js';
+
+vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../onboarding/_helpers.js')>()),
+  loadPreviousStepOutput: async () => null,
+}));
+vi.mock('../../../repo/task-worktree.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../repo/task-worktree.js')>()),
+  loadTaskWorktreeDecision: async () => ({ kind: 'root' }),
+}));
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -171,5 +183,49 @@ describe('externalCommitBlock', () => {
       drift({ commits: [{ sha: 'abcdef1234', subject: 'add thing' }] }),
     );
     expect(block).toBe('- abcdef12 add thing');
+  });
+});
+
+describe('resolveExternalDrift watermark check', () => {
+  let restore: (() => Promise<void>) | null = null;
+  afterEach(async () => {
+    await restore?.();
+    restore = null;
+  });
+  const ctxFor = (dir: string, kbSyncedCommit: string): StepContext =>
+    ({
+      taskId: 't',
+      repoPath: dir,
+      workspacePath: dir,
+      db: {
+        query: {
+          tasks: {
+            findFirst: async () => ({ repositoryId: 'r', worktreeBranch: null, worktreePath: dir }),
+          },
+          repositories: {
+            findFirst: async () => ({ branch: 'main', kbSyncedCommit, planSyncedCommit: null }),
+          },
+        },
+      },
+    }) as unknown as StepContext;
+
+  it('a watermark that is not in the history is a first run', async () => {
+    const dir = await repo();
+    const drift = await resolveExternalDrift(ctxFor(dir, 'f'.repeat(40)), 'kb');
+    expect(drift.firstRun).toBe(true);
+    expect(drift.measured).toBe(true);
+  });
+
+  it('a watermark check that gave no answer is unmeasured, not a first run', async () => {
+    const dir = await repo();
+    const old = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+    const head = await commit(dir, 'a.txt', 'a\n', 'add a');
+    restore = (await killGit(['cat-file', '-e'])).restore;
+    const drift = await resolveExternalDrift(ctxFor(dir, old), 'kb');
+    expect(drift.measured).toBe(false);
+    expect(drift.firstRun).toBe(false);
+    expect(drift.reason).toBeTruthy();
+    expect(drift.branchPoint).toBe(head);
+    expect(drift.since).toBe(old);
   });
 });

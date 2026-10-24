@@ -2,7 +2,7 @@ import { and, eq, isNotNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
-import { gitExec } from '../../../repo/git-exec.js';
+import { gitExec, gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
 import { decidedWorktreePath, loadTaskWorktreeDecision } from '../../../repo/task-worktree.js';
 
 /**
@@ -91,6 +91,12 @@ async function git(cwd: string, args: string[]): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+async function hasCommit(cwd: string, sha: string): Promise<boolean | null> {
+  const res = await gitRun(cwd, ['cat-file', '-e', `${sha}^{commit}`]);
+  if (res.code === 0) return true;
+  return gitGaveNoAnswer(res) ? null : false;
 }
 
 /**
@@ -248,8 +254,11 @@ export async function resolveExternalDrift(
   // branch, a repository re-imported under the same row — cannot bound a range. Treated as
   // a first run rather than an error: stamping the branch point restarts tracking, where
   // failing would leave the repository permanently unable to catch up.
-  const known = since ? await git(worktreePath, ['cat-file', '-e', `${since}^{commit}`]) : null;
-  if (!since || known === null) {
+  const known = since ? await hasCommit(worktreePath, since) : false;
+  if (known === null) {
+    return { ...empty('git could not check the recorded watermark'), branchPoint, since };
+  }
+  if (!since || !known) {
     return {
       ...NOTHING,
       repositoryId,

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
+import { killGit } from '../../../../test/support/kill-git.js';
 import type { StepContext } from '../../step-definition.js';
 import { phase4ValidateStep } from './07b-phase-4-validate.js';
 import { codeReviewStep, collectRefutable } from './08c-code-review.js';
@@ -16,6 +17,7 @@ import {
   OWNERSHIP_POLICY_PATH,
 } from './_dependency-policy.js';
 
+let restoreGit: (() => Promise<void>) | null = null;
 const exec = promisify(execFile);
 const directories: string[] = [];
 const env = {
@@ -69,6 +71,8 @@ async function repository(ownedPaths?: string[]) {
   return root;
 }
 afterEach(async () => {
+  await restoreGit?.();
+  restoreGit = null;
   await Promise.all(
     directories.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -439,6 +443,40 @@ describe('dependency ownership', () => {
     await file(root, 'composer.json', '{}');
     await file(root, 'core/lib/Framework.php', 'rewritten\n');
     await expect(assertDependencyCommitSafe(context(), root)).rejects.toThrow('Refusing to commit');
+  });
+
+  it('cannot lift core protection when the baseline composer.json read gave no answer', async () => {
+    const root = await repository();
+    await file(root, 'composer.json', '{}');
+    await file(root, 'core/lib/Framework.php', 'rewritten\n');
+    restoreGit = (await killGit(['show'], { contains: 'composer.json' })).restore;
+    await expect(assertDependencyCommitSafe(context(), root)).rejects.toThrow('composer.json');
+    await expect(loadDependencyPolicy(context(), root)).rejects.toThrow('composer.json');
+  });
+
+  it('throws when the baseline ownership read gave no answer', async () => {
+    const root = await repository(['web/modules/custom/company']);
+    restoreGit = (await killGit(['show'], { contains: 'dependency-ownership.json' })).restore;
+    await expect(loadDependencyPolicy(context(), root)).rejects.toThrow('ownership');
+  });
+
+  it('throws when the baseline Drupal 7 marker read gave no answer', async () => {
+    const root = await repository();
+    restoreGit = (await killGit(['cat-file', '-e'])).restore;
+    await expect(loadDependencyPolicy(context(), root)).rejects.toThrow('Drupal 7');
+  });
+
+  it('still loads when the baseline has no ownership file and no composer.json', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'haive-ownership-'));
+    directories.push(root);
+    await git(root, ['init', '-q']);
+    await file(root, 'README.md');
+    await git(root, ['add', '-A']);
+    await git(root, ['commit', '-qm', 'baseline']);
+    await expect(loadDependencyPolicy(context(), root)).resolves.toMatchObject({
+      ownedPaths: [],
+      drupal: false,
+    });
   });
 
   it('rejects a scoped npm namespace as a blanket ownership claim', () => {

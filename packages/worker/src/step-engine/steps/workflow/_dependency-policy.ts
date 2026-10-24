@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { readTextNoFollow, lstatNoFollow } from '@haive/shared/fs-safe';
-import { gitRun } from '../../../repo/git-exec.js';
+import { gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -142,7 +142,15 @@ export async function loadDependencyPolicy(
     'show',
     `${base.stdout.trim()}:${OWNERSHIP_POLICY_PATH}`,
   ]);
+  if (gitGaveNoAnswer(ownership)) {
+    throw new Error(
+      'Cannot read the dependency ownership file at the repository baseline: git gave no answer.',
+    );
+  }
   const baselineComposer = await gitRun(workspace, ['show', `${base.stdout.trim()}:composer.json`]);
+  if (gitGaveNoAnswer(baselineComposer)) {
+    throw new Error('Cannot read composer.json at the repository baseline: git gave no answer.');
+  }
   const { anchor, prefix } = workspaceAnchor(workspace);
   const composer = await readTextNoFollow(anchor, `${prefix}composer.json`);
   let drupal = false;
@@ -180,6 +188,11 @@ export async function loadDependencyPolicy(
       '-e',
       `${base.stdout.trim()}:${marker}`,
     ]);
+    if (gitGaveNoAnswer(baselineDrupal7)) {
+      throw new Error(
+        'Cannot read the Drupal 7 marker at the repository baseline: git gave no answer.',
+      );
+    }
     if (
       baselineDrupal7.code === 0 ||
       (await lstatNoFollow(anchor, `${prefix}${marker}`)) !== null
