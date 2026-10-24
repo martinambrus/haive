@@ -1258,6 +1258,7 @@ export default function TaskDetailPage() {
     task?.status === 'completed' || task?.status === 'cancelled' ? 'ended' : 'preparing';
 
   async function submitStep(step: TaskStep, values: FormValues) {
+    setActionNotice(null);
     setSubmitting(step.stepId);
     setSubmitError(null);
     try {
@@ -1366,6 +1367,7 @@ export default function TaskDetailPage() {
     if (!confirm(label)) return;
     setStepActionBusy(step.stepId);
     setStepActionError(null);
+    setActionNotice(null);
     try {
       await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
         action,
@@ -1407,6 +1409,7 @@ export default function TaskDetailPage() {
     setPendingLoginRetry(null);
     setStepActionBusy(step.stepId);
     setStepActionError(null);
+    setActionNotice(null);
     try {
       await api.post<StepActionResponse>(`/tasks/${id}/steps/${step.stepId}/action`, {
         action: 'retry',
