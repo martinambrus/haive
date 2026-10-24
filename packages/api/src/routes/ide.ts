@@ -20,7 +20,7 @@ import {
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { getIdeEnsureQueue, getIdeEnsureQueueEvents } from '../queues.js';
-import { authenticateUpgrade } from '../lib/upgrade-auth.js';
+import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import type { UpgradeSession } from '../lib/user-sockets.js';
 import {
@@ -417,14 +417,4 @@ function extractIdeTarget(rawUrl: string): { id: string; repository: boolean } |
   const repository = parts[0] === 'repos';
   const id = parts[repository ? 1 : 0] ?? '';
   return isCanonicalUuid(id) ? { id, repository } : null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  if (socket.destroyed || socket.writableEnded) return;
-  try {
-    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
-  } catch {
-    /* ignore */
-  }
-  socket.destroy();
 }

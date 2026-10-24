@@ -24,7 +24,7 @@ import {
   type CliProviderName,
 } from '@haive/shared';
 import { getDb } from '../db.js';
-import { authenticateUpgrade } from '../lib/upgrade-auth.js';
+import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { getCliExecQueue, getCliExecQueueEvents, getUsagePollQueue } from '../queues.js';
 import { attachContainerStream } from './terminal.js';
@@ -1222,16 +1222,6 @@ function extractProviderId(rawUrl: string, pathPrefix: string): string | null {
   if (!pathOnly.startsWith(pathPrefix)) return null;
   const remainder = pathOnly.slice(pathPrefix.length);
   return isUuid(remainder) ? remainder : null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  if (socket.destroyed || socket.writableEnded) return;
-  try {
-    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
-  } catch {
-    // ignore
-  }
-  socket.destroy();
 }
 
 function appendCapped(prior: string, chunk: string, max: number): string {

@@ -265,6 +265,10 @@ describe('upgrade authentication on every surface', () => {
       const source = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8');
       expect(source.includes("from '../lib/upgrade-auth.js'")).toBe(true);
       expect(source.includes('function authenticateUpgrade(')).toBe(false);
+      expect(source).toMatch(
+        /import\s*\{[^}]*\brejectUpgrade\b[^}]*\}\s*from ['"]\.\.\/lib\/upgrade-auth\.js['"]/,
+      );
+      expect(source).not.toMatch(/(?:function\s+|(?:const|let|var)\s+)rejectUpgrade\b/);
     }
   });
 });

@@ -9,7 +9,7 @@ import { logger } from '@haive/shared';
 import { terminalClientFrameSchema } from '@haive/shared';
 import type { TerminalServerFrame } from '@haive/shared';
 import { getDb } from '../db.js';
-import { authenticateUpgrade } from '../lib/upgrade-auth.js';
+import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { TerminalLogBuffer } from '../terminal/log-buffer.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
@@ -350,16 +350,6 @@ function extractContainerId(rawUrl: string, pathPrefix: string): string | null {
   if (!pathOnly.startsWith(pathPrefix)) return null;
   const remainder = pathOnly.slice(pathPrefix.length);
   return isUuid(remainder) ? remainder : null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  if (socket.destroyed || socket.writableEnded) return;
-  try {
-    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
-  } catch {
-    // ignore
-  }
-  socket.destroy();
 }
 
 function sendFrame(ws: WebSocket, frame: TerminalServerFrame): void {

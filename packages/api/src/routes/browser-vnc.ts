@@ -1,6 +1,5 @@
 import net from 'node:net';
 import type { Server } from 'node:http';
-import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -15,7 +14,7 @@ import {
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getRuntimeEnsureQueue, getRuntimeEnsureQueueEvents } from '../queues.js';
-import { authenticateUpgrade } from '../lib/upgrade-auth.js';
+import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isCanonicalUuid } from '../lib/uuid.js';
@@ -246,14 +245,4 @@ async function taskBelongsToUser(taskId: string, userId: string): Promise<boolea
     columns: { id: true },
   });
   return row !== undefined && row !== null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  if (socket.destroyed || socket.writableEnded) return;
-  try {
-    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
-  } catch {
-    // ignore
-  }
-  socket.destroy();
 }

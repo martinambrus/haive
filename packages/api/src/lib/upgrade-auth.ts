@@ -1,4 +1,5 @@
 import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { getDb } from '../db.js';
@@ -47,4 +48,15 @@ function accessCookie(header: string | undefined): string | null {
     }
   }
   return null;
+}
+
+/** Refuse once: a revocation may already have ended the pending handshake. */
+export function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
+  if (socket.destroyed || socket.writableEnded) return;
+  try {
+    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
+  } catch {
+    // ignore
+  }
+  socket.destroy();
 }

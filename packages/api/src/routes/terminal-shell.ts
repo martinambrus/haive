@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import type { Server } from 'node:http';
-import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Redis } from 'ioredis';
 import { eq } from 'drizzle-orm';
@@ -23,7 +22,7 @@ import {
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
-import { authenticateUpgrade } from '../lib/upgrade-auth.js';
+import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isCanonicalUuid } from '../lib/uuid.js';
@@ -593,16 +592,6 @@ export function extractRepoIds(
 ): { repositoryId: string; cliProviderId: string } | null {
   const parsed = parseTwoSegmentPath(rawUrl, pathPrefix);
   return parsed ? { repositoryId: parsed[0], cliProviderId: parsed[1] } : null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  if (socket.destroyed || socket.writableEnded) return;
-  try {
-    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
-  } catch {
-    // ignore
-  }
-  socket.destroy();
 }
 
 function sendJson(ws: WebSocket, frame: Record<string, unknown>): void {
