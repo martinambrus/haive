@@ -3,7 +3,12 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { api, type CliProvider, type Repository } from '@/lib/api-client';
+import {
+  api,
+  type CliProvider,
+  type CliProvidersResponse,
+  type Repository,
+} from '@/lib/api-client';
 import { Button, Card } from '@/components/ui';
 import { InteractiveShell } from '@/components/terminal/InteractiveShell';
 import { usePageTitle } from '@/lib/use-page-title';
@@ -14,6 +19,7 @@ export default function RepoTerminalPage() {
   const repositoryId = params.id;
   const [repo, setRepo] = useState<Repository | null>(null);
   const [providers, setProviders] = useState<CliProvider[]>([]);
+  const [defaultProviderId, setDefaultProviderId] = useState<string | null>(null);
   const [selectedCliProviderId, setSelectedCliProviderId] = useState<string | null>(null);
   const [maximized, setMaximized] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -30,9 +36,12 @@ export default function RepoTerminalPage() {
         if (!cancelled) setError((err as Error).message ?? 'Failed to load repository');
       });
     void api
-      .get<{ providers: CliProvider[] }>('/cli-providers')
+      .get<CliProvidersResponse>('/cli-providers')
       .then((d) => {
-        if (!cancelled) setProviders(d.providers);
+        if (!cancelled) {
+          setProviders(d.providers);
+          setDefaultProviderId(d.defaultProviderId ?? null);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -40,17 +49,13 @@ export default function RepoTerminalPage() {
     };
   }, [repositoryId]);
 
-  const usableProviders = useMemo(() => {
-    const enabled = providers.filter((p) => p.enabled);
-    return enabled.length > 0 ? enabled : providers;
-  }, [providers]);
+  const usableProviders = useMemo(() => providers.filter((p) => p.enabled), [providers]);
 
-  // Default the CLI to the first usable provider once the list arrives.
   useEffect(() => {
     if (selectedCliProviderId && usableProviders.some((p) => p.id === selectedCliProviderId))
       return;
-    setSelectedCliProviderId(usableProviders[0]?.id ?? null);
-  }, [usableProviders, selectedCliProviderId]);
+    setSelectedCliProviderId(defaultProviderId);
+  }, [usableProviders, selectedCliProviderId, defaultProviderId]);
 
   // Close the maximized overlay on Escape.
   useEffect(() => {

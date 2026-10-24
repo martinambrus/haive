@@ -15,6 +15,7 @@ import {
   getPlanOverview,
   postUserActive,
   type CliProvider,
+  type CliProvidersResponse,
   type CliProviderName,
   type EnvDepPreset,
   type ExecutionPath,
@@ -736,6 +737,7 @@ export default function TaskDetailPage() {
   } | null>(null);
   const [providers, setProviders] = useState<CliProvider[]>([]);
   const [terminalCliProviderId, setTerminalCliProviderId] = useState<string | null>(null);
+  const [defaultCliProviderId, setDefaultCliProviderId] = useState<string | null>(null);
   const [stepProviderBusy, setStepProviderBusy] = useState<string | null>(null);
   const [stepProviderError, setStepProviderError] = useState<{
     stepId: string;
@@ -1166,21 +1168,19 @@ export default function TaskDetailPage() {
 
   useEffect(() => {
     api
-      .get<{ providers: CliProvider[] }>('/cli-providers')
-      .then((data) => setProviders(data.providers))
+      .get<CliProvidersResponse>('/cli-providers')
+      .then((data) => {
+        setProviders(data.providers);
+        setDefaultCliProviderId(data.defaultProviderId ?? null);
+      })
       .catch(() => setProviders([]));
   }, []);
 
-  // Default terminal CLI to the task's bound provider when known, else the first
-  // enabled provider. User can switch via the dropdown above the shell.
+  // Default terminal CLI to the task's bound provider when known, else the server
+  // default. User can switch via the dropdown above the shell.
   //
-  // `/cli-providers` and `/tasks/:id` are independent fetches and the small one lands
-  // first, so on arrival `task` is still null and the fallback is chosen — and because
-  // the guard was "already set, leave it alone", that fallback then stood for the life
-  // of the page. `/cli-providers` orders by `desc(createdAt)`, so the fallback is the
-  // NEWEST provider: a task running claude-code opened its shell on whichever CLI was
-  // configured most recently. Only a user PICK is sticky now; a default gets corrected
-  // the moment the task says what it is actually running on.
+  // The list and task arrive independently. Only a user pick is sticky; an automatic
+  // selection follows the task's provider once it arrives, else the server default.
   const terminalCliPickedRef = useRef(false);
   useEffect(() => {
     if (terminalCliPickedRef.current) return;
@@ -1189,10 +1189,8 @@ export default function TaskDetailPage() {
       setTerminalCliProviderId(taskProvider);
       return;
     }
-    if (terminalCliProviderId) return;
-    const fallback = providers.find((p) => p.enabled)?.id ?? providers[0]?.id ?? null;
-    if (fallback) setTerminalCliProviderId(fallback);
-  }, [providers, task?.cliProviderId, terminalCliProviderId]);
+    setTerminalCliProviderId(defaultCliProviderId);
+  }, [providers, task?.cliProviderId, defaultCliProviderId]);
 
   const selectTerminalCliProvider = useCallback((nextId: string) => {
     terminalCliPickedRef.current = true;
@@ -2621,8 +2619,7 @@ function TerminalTab({
   selectedCliProviderId,
   onSelectCliProvider,
 }: TerminalTabProps) {
-  const enabledProviders = providers.filter((p) => p.enabled);
-  const usableProviders = enabledProviders.length > 0 ? enabledProviders : providers;
+  const usableProviders = providers.filter((p) => p.enabled || p.id === selectedCliProviderId);
 
   if (disabled) {
     return (

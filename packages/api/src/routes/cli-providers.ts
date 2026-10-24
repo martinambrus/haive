@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { schema, type Database } from '@haive/database';
 import {
@@ -16,6 +16,7 @@ import {
   isRunnableCliVersion,
   logger,
   normalizeCliArgsArray,
+  resolveDefaultCliProvider,
   secretsService,
   setCliProviderSecretRequestSchema,
   splitSecretLikeEnv,
@@ -342,7 +343,7 @@ cliProviderRoutes.get('/', async (c) => {
   const db = getDb();
   const rows = await db.query.cliProviders.findMany({
     where: eq(schema.cliProviders.userId, userId),
-    orderBy: [desc(schema.cliProviders.createdAt)],
+    orderBy: [desc(schema.cliProviders.createdAt), asc(schema.cliProviders.id)],
   });
   // Attach each provider's adapter effortScale (the per-CLI reasoning levels, or
   // null for knob-less CLIs) so the task UI can populate the per-step effort
@@ -351,7 +352,7 @@ cliProviderRoutes.get('/', async (c) => {
     ...withRulesState(p),
     effortScale: CLI_PROVIDER_CATALOG[p.name].effortScale,
   }));
-  return c.json({ providers });
+  return c.json({ providers, defaultProviderId: resolveDefaultCliProvider(rows)?.id ?? null });
 });
 
 cliProviderRoutes.get('/:id', async (c) => {
