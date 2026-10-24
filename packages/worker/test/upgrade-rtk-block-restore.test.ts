@@ -12,7 +12,8 @@ import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { buildRtkAwarenessBlock } from '../src/step-engine/steps/onboarding/_rtk-templates.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
-import { recordWritten } from './support/upgrade-apply-record.js';
+import { recordWritten, ROLLBACK_RECORD_WRITE_TABLES } from './support/upgrade-apply-record.js';
+import { seedRollbackSnapshot } from './support/upgrade-rollback-snapshot.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -40,10 +41,8 @@ async function setup(agents: string = AGENTS_LEFT, offered: string[] = ['AGENTS.
     customBundles: schema.customBundles,
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
-    projectStateSync: schema.projectStateSync,
-    projectStateOutbox: schema.projectStateOutbox,
-    projectStateConflicts: schema.projectStateConflicts,
     taskEvents: schema.taskEvents,
+    ...ROLLBACK_RECORD_WRITE_TABLES,
   });
   fake.insert(schema.repositories, {
     id: REPO,
@@ -52,6 +51,11 @@ async function setup(agents: string = AGENTS_LEFT, offered: string[] = ['AGENTS.
     source: 'blank',
     rtkEnabled: true,
     renderContext: null,
+  });
+  seedRollbackSnapshot(fake, {
+    userId: USER,
+    repositoryId: REPO,
+    taskId: '00000000-0000-4000-8000-0000000000c3',
   });
   const noop = () => undefined;
   const ctxFor = (taskId: string) =>
@@ -97,20 +101,22 @@ async function setup(agents: string = AGENTS_LEFT, offered: string[] = ['AGENTS.
       }),
     );
   const rollBack = (rtkBlockRestores: unknown) =>
-    upgradeRollbackStep.apply(ctxFor(ROLLBACK), {
-      detected: {
-        repositoryId: REPO,
-        rolledBackFromTaskId: TASK,
-        targets: [],
-        newArtifactsToUndo: [],
-        unrecordedRewrites: [],
-        warnings: [],
-        rtkBlockRestores,
-      },
-      formValues: {},
-      iteration: 0,
-      previousIterations: [],
-    } as never);
+    recordWritten(
+      upgradeRollbackStep.apply(ctxFor(ROLLBACK), {
+        detected: {
+          repositoryId: REPO,
+          rolledBackFromTaskId: TASK,
+          targets: [],
+          newArtifactsToUndo: [],
+          unrecordedRewrites: [],
+          warnings: [],
+          rtkBlockRestores,
+        },
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      } as never),
+    );
   const read = (rel: string) => readFile(join(root, rel), 'utf8');
   const records = () =>
     fake.rows(schema.onboardingArtifacts).filter((r) => r.templateKind === 'rtk-block-restore');
