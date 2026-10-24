@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api-client';
+import { runPricingRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { Button, Badge, Input, FormError } from '@/components/ui';
 import { usePageTitle } from '@/lib/use-page-title';
 
@@ -84,6 +85,9 @@ export default function PricingPage() {
   const [data, setData] = useState<PricingResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refreshPhase, setRefreshPhase] = useState<QueuedJobPhase | null>(null);
+  const refreshAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => refreshAbort.current?.abort(), []);
   const [filter, setFilter] = useState('');
   const [providerFilter, setProviderFilter] = useState('');
 
@@ -131,17 +135,21 @@ export default function PricingPage() {
   }
 
   async function refreshNow() {
-    setBusy(true);
+    if (refreshAbort.current) return;
+    const controller = new AbortController();
+    refreshAbort.current = controller;
+    setRefreshPhase('queued');
     setError(null);
     try {
-      await api.post('/cli-pricing/refresh', {});
-      // The job runs on the worker; give it a moment before re-reading rather than
-      // showing stale counts that look like the refresh did nothing.
-      setTimeout(() => void load(), 4000);
+      await runPricingRefresh(setRefreshPhase, controller.signal);
+      if (!controller.signal.aborted) await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to enqueue refresh');
+      if (!controller.signal.aborted) {
+        setError(err instanceof Error ? err.message : 'Failed to refresh pricing');
+      }
     } finally {
-      setBusy(false);
+      refreshAbort.current = null;
+      if (!controller.signal.aborted) setRefreshPhase(null);
     }
   }
 
@@ -212,8 +220,17 @@ export default function PricingPage() {
             actually cost.
           </p>
         </div>
-        <Button variant="secondary" size="sm" disabled={busy} onClick={() => void refreshNow()}>
-          Refresh now
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={refreshPhase !== null}
+          onClick={() => void refreshNow()}
+        >
+          {refreshPhase === null
+            ? 'Refresh now'
+            : refreshPhase === 'queued'
+              ? 'Queued...'
+              : 'Refreshing...'}
         </Button>
       </div>
 

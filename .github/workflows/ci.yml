@@ -318,6 +318,11 @@ jobs:
         env:
           HAIVE_LEASE_TEST_REDIS_URL: redis://localhost:6379/15
 
+      - name: CLI job retention on a real Redis
+        run: pnpm --filter @haive/worker exec vitest run test/cli-job-retention.test.ts
+        env:
+          CLI_JOB_RETENTION_TEST_REDIS_URL: redis://localhost:6379/9
+
       - name: RAG sync lock on a real Redis
         run: pnpm --filter @haive/shared exec vitest run test/rag-sync-lock.test.ts
         env:

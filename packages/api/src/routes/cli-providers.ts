@@ -3,7 +3,6 @@ import { Hono } from 'hono';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
-  VERSION_REFRESH_JOB_ID,
   CLI_POLLABLE_JOB_OPTS,
   CLI_INSTALL_METADATA,
   CLI_PROVIDER_CATALOG,
@@ -52,6 +51,7 @@ import {
 } from '../middleware/maintenance.js';
 import { getCliExecQueue, getUsagePollQueue } from '../queues.js';
 import { enqueueCliVersionRefresh } from '../lib/cli-version-refresh.js';
+import { loadPollableJob } from '../lib/cli-job-poll.js';
 
 async function loadOwnedProvider(db: Database, userId: string, providerId: string) {
   const provider = await db.query.cliProviders.findFirst({
@@ -64,39 +64,6 @@ async function loadOwnedProvider(db: Database, userId: string, providerId: strin
 
 const CLI_PROVIDER_LABEL_MAX_LENGTH = 255;
 const MAX_CLONE_ATTEMPTS = 1000;
-
-// BullMQ ids: plain adds use its counter; scheduler ticks use repeat:<schedulerId>:<ms>.
-const POLLABLE_JOB_ID = new RegExp(
-  `^(?:[1-9][0-9]*|repeat:${VERSION_REFRESH_JOB_ID.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:[1-9][0-9]*)$`,
-);
-
-/** Load a job the UI is polling, or 404.
- *
- *  `name` pins the job kind so one poll route can never read another kind's return value —
- *  the routes differ in what they expose (a probe result, a sign-out summary), and the job id
- *  alone does not say which. `owner` additionally pins the payload to the caller for the
- *  per-provider jobs. Everything that fails a check is reported as missing rather than
- *  forbidden: the id is the only handle, so a distinct "exists but not yours" would confirm
- *  live ids to whoever guesses one. */
-async function loadPollableJob(
-  jobId: string,
-  name: string,
-  owner?: { providerId: string; userId: string },
-) {
-  if (!POLLABLE_JOB_ID.test(jobId)) {
-    throw new HttpError(404, 'job not found — it may have expired', 'job_expired');
-  }
-  const job = await getCliExecQueue().getJob(jobId);
-  const data = job?.data as { providerId?: string; userId?: string } | undefined;
-  if (
-    !job ||
-    job.name !== name ||
-    (owner && (data?.providerId !== owner.providerId || data?.userId !== owner.userId))
-  ) {
-    throw new HttpError(404, 'job not found — it may have expired', 'job_expired');
-  }
-  return job;
-}
 
 export function makeCopyLabel(base: string, n: number): string {
   const suffix = n === 1 ? ' Copy' : ` Copy ${n}`;
@@ -210,7 +177,7 @@ async function enqueueBuildForProvider(providerId: string, userId: string): Prom
   const queue = getCliExecQueue();
   await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
     removeOnComplete: true,
-    removeOnFail: 50,
+    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
   });
 }
 
@@ -233,7 +200,7 @@ async function enqueueOllamaProvisionForProvider(
   const queue = getCliExecQueue();
   await queue.add(CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL, payload, {
     removeOnComplete: true,
-    removeOnFail: 50,
+    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
   });
 }
 
@@ -595,7 +562,7 @@ cliProviderRoutes.delete('/:id', async (c) => {
     void getCliExecQueue()
       .add(CLI_EXEC_JOB_NAMES.REMOVE_SANDBOX_IMAGE, payload, {
         removeOnComplete: true,
-        removeOnFail: 50,
+        removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
       })
       .catch((err: unknown) =>
         log.warn({ err, providerId: id, imageTag }, 'could not queue the sandbox image removal'),
@@ -635,7 +602,7 @@ cliProviderRoutes.post('/:id/sandbox-image/build', requireNewWorkAllowed, async 
   const queue = getCliExecQueue();
   await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
     removeOnComplete: true,
-    removeOnFail: 50,
+    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
   });
 
   return c.json({ ok: true, status: 'building' }, 202);
