@@ -989,10 +989,14 @@ describe('the finished-archive pass', () => {
     expect(await exists(archive.file)).toBe(true);
   });
 
-  it.each(['cloning', 'ready'] as const)('keeps the archive of a %s repository', async (repo) => {
+  it.each([
+    ['cloning', false],
+    ['ready', true],
+    ['error', true],
+  ] as const)('T323: with repository %s its old archive is removed: %s', async (repo, removed) => {
     const a = await archive({ repo });
     await reapAbandonedUploads(db());
-    expect(await exists(a.file)).toBe(true);
+    expect(await exists(a.file)).toBe(!removed);
   });
 
   it('keeps a legacy archive named by its session id while its owner has a cloning repository', async () => {

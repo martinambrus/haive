@@ -962,7 +962,7 @@ describe.skipIf(!url)('the finished repository archive pass against Postgres', (
     ['error', true],
     [null, true],
     ['cloning', false],
-    ['ready', false],
+    ['ready', true],
   ] as const)('with repository %s the archive is removed: %s', async (status, removed) => {
     const file = await archive(status);
 

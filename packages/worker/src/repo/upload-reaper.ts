@@ -321,7 +321,7 @@ async function recentSessions(db: Database, ids: string[], cutoff: Date): Promis
   return recent;
 }
 
-// The ids of a finished archive's repositories that still need it: anything but a failed one. An
+// The ids of a finished archive's repositories that still need it: only a cloning one. An
 // id no repository carries may be a legacy archive named by its upload session, so it stays while
 // its owner has a repository still cloning.
 async function liveRepositories(
@@ -335,7 +335,7 @@ async function liveRepositories(
     .from(schema.repositories)
     .where(inArray(schema.repositories.id, ids));
   const known = new Set(rows.map((row) => row.id));
-  const live = new Set(rows.filter((row) => row.status !== 'error').map((row) => row.id));
+  const live = new Set(rows.filter((row) => row.status === 'cloning').map((row) => row.id));
   if (known.size < ids.length && (await cloningOwners()).has(owner)) {
     for (const id of ids) if (!known.has(id)) live.add(id);
   }
