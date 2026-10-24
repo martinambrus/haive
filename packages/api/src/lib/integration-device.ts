@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { logger } from '@haive/shared';
 import {
   OauthVendorError,
   pollDeviceToken,
@@ -99,6 +100,14 @@ export async function pollDeviceSignIn(
 ): Promise<DevicePollOutcome> {
   const { db, userId, spec, handle } = scope;
   const redis = getRedis();
+  const dropRecord = async () => {
+    try {
+      await dropDeviceRecord(redis, userId, spec.id, handle);
+    } catch {
+      // Cleanup must preserve the committed result or the original refusal. The record has a TTL.
+      logger.warn({ userId, providerId: spec.id }, 'device sign-in cleanup failed');
+    }
+  };
   const method = requireDeviceMethod(spec);
   if (scope.checkEnabled) await requireEnabled(db, spec);
   const current = await resolveOauthClient(db, spec.id, userId, 'device');
@@ -114,7 +123,7 @@ export async function pollDeviceSignIn(
       ? current
       : await resolveOauthClientById(db, spec.id, userId, 'device', record.clientId);
   if (!client) {
-    await dropDeviceRecord(redis, userId, spec.id, handle);
+    await dropRecord();
     throw new HttpError(400, CLIENT_CHANGED_MESSAGE);
   }
 
@@ -127,7 +136,7 @@ export async function pollDeviceSignIn(
       interval: record.interval,
     });
   } catch (err) {
-    if (err instanceof OauthVendorError) await dropDeviceRecord(redis, userId, spec.id, handle);
+    if (err instanceof OauthVendorError) await dropRecord();
     return vendorFailure(err);
   }
   if (polled.status === 'pending') {
@@ -149,6 +158,6 @@ export async function pollDeviceSignIn(
     });
     return { status: 'ok', result };
   } finally {
-    await dropDeviceRecord(redis, userId, spec.id, handle);
+    await dropRecord();
   }
 }
