@@ -1208,8 +1208,8 @@ describe('maskNonCode', () => {
     );
   });
 
-  it('ends an unterminated template at the end of the text', () => {
-    expect(maskNonCode('var a = `x {\nok();', 'js')).toBe(`var a = \`${blank('x {\nok();')}`);
+  it('reads an unterminated template as text and lexes on', () => {
+    expect(maskNonCode('var a = `x {\nok();', 'js')).toBe('var a = `x {\nok();');
   });
 
   it('reads a quote with no closing quote on its line as text, as an apostrophe in markup is', () => {
@@ -1328,6 +1328,15 @@ describe('extractCodeSections — braces that are not code', () => {
 
     expect(sections.get('function-Banner')!.endsWith('    </p>\n  );\n}')).toBe(true);
     expect(sections.get('function-Other')!.startsWith('export function Other() {')).toBe(true);
+  });
+
+  it('keeps the sections after a backtick in JSX text that never closes', () => {
+    const tsx =
+      'function Example() { return <p>Press the ` key</p>; }\nexport function save() { persist(); }\n';
+    const sections = sectionsOf(tsx, 'example.tsx');
+
+    expect(sections.has('function-Example')).toBe(true);
+    expect(sections.get('function-save')).toBe('export function save() { persist(); }');
   });
 
   it('ends an object-literal member at its own closing brace', () => {

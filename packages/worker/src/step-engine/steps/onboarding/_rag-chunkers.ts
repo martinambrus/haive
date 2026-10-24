@@ -262,6 +262,9 @@ const WORD_CHAR = /[\p{L}\p{N}_$]/u;
 const MAX_REGEX_CHARS = 20_000;
 const MAX_REGEX_MISSES = 8;
 
+/** How many unclosed template literals one file may give back as plain text before the rest masks to EOF. */
+const MAX_STRAY_TICKS = 8;
+
 /** Index just past the quote that closes the string opening at `open`, else the end of the text. */
 function quotedEnd(text: string, open: number): number {
   for (let i = open + 1; i < text.length; i += 1) {
@@ -407,8 +410,18 @@ function jsNonCode(text: string): Span[] {
   let templateOpen = 0;
   let prev: string | null = null;
   let regexMisses = 0;
+  let strayTicks = 0;
   let i = 0;
-  while (i < text.length) {
+  while (true) {
+    if (i >= text.length) {
+      if (frames.length === 0 || strayTicks >= MAX_STRAY_TICKS) break;
+      // A template that never closes is a stray backtick (JSX text, a comment's prose): lex on as text.
+      strayTicks += 1;
+      frames.length = 0;
+      i = templateOpen + 1;
+      prev = '';
+      continue;
+    }
     const c = text[i]!;
     const next = text[i + 1];
     const top = frames[frames.length - 1];
