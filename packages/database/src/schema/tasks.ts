@@ -601,7 +601,9 @@ export const taskSteps = pgTable(
      *  context_tokens = peak single-invocation prompt-side tokens
      *  (the largest single request's prompt, token_usage.peakPromptTokens, else
      *  input + cacheRead + cacheCreation) over this step's non-superseded CLI
-     *  invocations; context_window_size = that model's max context;
+     *  invocations; context_window_size = the OpenRouter catalog's context_length,
+     *  else the window the CLI reported for that invocation
+     *  (token_usage.contextWindow), else a static-table fallback;
      *  context_left_percent = 100 - round(tokens / window * 100). All null on
      *  deterministic (no-CLI) steps and on rows finalized before this feature. */
     contextLeftPercent: integer('context_left_percent'),
@@ -941,6 +943,7 @@ export const cliInvocations = pgTable(
       cacheCreationTokens?: number;
       costUsd?: number;
       peakPromptTokens?: number;
+      contextWindow?: number;
     }>(),
     /** What this invocation COST, decided at completion and then immutable.
      *

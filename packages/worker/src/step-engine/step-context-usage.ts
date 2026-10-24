@@ -11,8 +11,9 @@ const log = logger.child({ module: 'step-context-usage' });
  * Records the PEAK prompt-side tokens of any ONE model request over the step's live CLI
  * invocations (token_usage.peakPromptTokens; a row without it falls back to its stored
  * input + cacheRead + cacheCreation, a run total that overcounts a multi-turn run) against
- * the model's context window. The provider/model come from the peak invocation's own
- * cliProviderId.
+ * the model's context window: the OpenRouter catalog's figure, else the window the peak
+ * invocation's CLI reported (token_usage.contextWindow), else the static table. The
+ * provider/model come from the peak invocation's own cliProviderId.
  *
  * Best-effort: skips deterministic steps (no CLI invocations -> peak 0 -> columns stay
  * null) and is called inside a .catch() at the finalize so it never fails a step.
@@ -37,6 +38,7 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
 
   let peak = 0;
   let peakProviderId: string | null = null;
+  let peakWindow: number | null = null;
   for (const r of invs) {
     const tu = r.tokenUsage;
     if (!tu) continue;
@@ -47,6 +49,12 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
     if (prompt > peak) {
       peak = prompt;
       peakProviderId = r.cliProviderId;
+      peakWindow =
+        typeof tu.contextWindow === 'number' &&
+        Number.isFinite(tu.contextWindow) &&
+        tu.contextWindow > 0
+          ? tu.contextWindow
+          : null;
     }
   }
   if (peak <= 0) return null; // deterministic step / no usable token data -> leave columns null
@@ -77,11 +85,9 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
     }
   }
 
-  // OpenRouter reports a real per-model context_length, so prefer it over the
-  // substring table — one gateway provider row can point at anything from a 32k
-  // model to a 1M one, which no provider-level fallback can describe. Only the
-  // openrouter rows pay for the extra read, and a miss (never refreshed, model not
-  // in the catalog) simply leaves the override undefined.
+  // The catalog is the provider's own figure for the exact routed model, so it outranks the
+  // window the CLI recorded (the claude binary reports 200000 for ids it does not know).
+  // Only the openrouter rows pay for the extra read; a miss falls through to the recorded window.
   let knownContextLength: number | null = null;
   if (providerName === 'openrouter' && model) {
     const cache = await db.query.openrouterModelCache.findFirst({
@@ -90,7 +96,11 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
     });
     knownContextLength = cache?.models.find((m) => m.id === model)?.contextLength ?? null;
   }
-  const windowSize = resolveContextWindow(providerName, model, knownContextLength);
+  const windowSize = resolveContextWindow(
+    providerName,
+    model,
+    knownContextLength !== null && knownContextLength > 0 ? knownContextLength : peakWindow,
+  );
   const leftPct = Math.max(0, Math.min(100, 100 - Math.round((peak / windowSize) * 100)));
 
   await db

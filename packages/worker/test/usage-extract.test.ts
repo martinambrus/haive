@@ -27,3 +27,30 @@ describe('sumTokenUsage peakPromptTokens', () => {
     expect(sumTokenUsage(usage(), usage())).not.toHaveProperty('peakPromptTokens');
   });
 });
+
+describe('sumTokenUsage contextWindow', () => {
+  const withWindow = (w?: number) => ({
+    ...usage(),
+    ...(w === undefined ? {} : { contextWindow: w }),
+  });
+
+  it('takes the smaller positive window of the two operands', () => {
+    expect(sumTokenUsage(withWindow(1000000), withWindow(200000))).toHaveProperty(
+      'contextWindow',
+      200000,
+    );
+    expect(sumTokenUsage(withWindow(200000), withWindow(1000000))).toHaveProperty(
+      'contextWindow',
+      200000,
+    );
+  });
+
+  it('keeps the one window when only one side has it', () => {
+    expect(sumTokenUsage(withWindow(200000), withWindow())).toHaveProperty('contextWindow', 200000);
+    expect(sumTokenUsage(withWindow(), withWindow(300000))).toHaveProperty('contextWindow', 300000);
+  });
+
+  it('leaves the key absent when neither side has it', () => {
+    expect(sumTokenUsage(withWindow(), withWindow())).not.toHaveProperty('contextWindow');
+  });
+});

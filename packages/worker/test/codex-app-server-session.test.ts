@@ -590,3 +590,53 @@ describe('createCodexAppServerSession.getToolUsage', () => {
     expect(session.getToolUsage().coverage).toBe('none');
   });
 });
+
+describe('createCodexAppServerSession contextWindow', () => {
+  const total = { inputTokens: 1000, cachedInputTokens: 800, outputTokens: 50, totalTokens: 1050 };
+  const usageNote = (tokenUsage: Record<string, unknown>, threadId = 'thread-1') =>
+    note('thread/tokenUsage/updated', { threadId, turnId: 'turn-1', tokenUsage });
+
+  it('records modelContextWindow beside the existing fields', () => {
+    const { session } = acceptedSession();
+    session.onChunk(usageNote({ total, last: total, modelContextWindow: 258400 }));
+    expect(session.getTokenUsage()).toEqual({
+      inputTokens: 1000,
+      outputTokens: 50,
+      totalTokens: 1050,
+      cacheReadTokens: 800,
+      peakPromptTokens: 1000,
+      contextWindow: 258400,
+    });
+  });
+
+  it('keeps a window from a note that had no total when a later note has a total and no window', () => {
+    const { session } = acceptedSession();
+    session.onChunk(usageNote({ modelContextWindow: 258400 }));
+    session.onChunk(usageNote({ total, last: total }));
+    expect(session.getTokenUsage()).toHaveProperty('contextWindow', 258400);
+  });
+
+  it('ignores null, zero and non-numeric windows, and a later positive one replaces', () => {
+    const { session } = acceptedSession();
+    for (const bad of [null, 0, 'x']) {
+      session.onChunk(usageNote({ total, last: total, modelContextWindow: bad }));
+      expect(session.getTokenUsage(), JSON.stringify(bad)).not.toHaveProperty('contextWindow');
+    }
+    session.onChunk(usageNote({ total, last: total, modelContextWindow: 258400 }));
+    expect(session.getTokenUsage()).toHaveProperty('contextWindow', 258400);
+    session.onChunk(usageNote({ total, last: total, modelContextWindow: 400000 }));
+    expect(session.getTokenUsage()).toHaveProperty('contextWindow', 400000);
+  });
+
+  it('leaves the property absent when no note carries a window', () => {
+    const { session } = acceptedSession();
+    session.onChunk(usageNote({ total, last: total }));
+    expect(session.getTokenUsage()).not.toHaveProperty('contextWindow');
+  });
+
+  it('ignores a window from another thread', () => {
+    const { session } = acceptedSession();
+    session.onChunk(usageNote({ total, last: total, modelContextWindow: 258400 }, 'thread-2'));
+    expect(session.getTokenUsage()).toBeNull();
+  });
+});

@@ -10,7 +10,8 @@
     "outputTokens": 141,
     "totalTokens": 1498,
     "costUsd": 0.023059999999999997,
-    "peakPromptTokens": 1490
+    "peakPromptTokens": 1490,
+    "contextWindow": 200000
   },
   "streamModelIdentity": {
     "requested": "qwen3:1.7b",

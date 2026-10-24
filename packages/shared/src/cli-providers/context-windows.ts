@@ -3,6 +3,8 @@ import type { CliProviderName } from '../types/index.js';
 /**
  * Per-model context-window sizes (max input tokens). Used only to compute the
  * display-only "context left %" frozen on a finished step (Surface B).
+ * FALLBACK ONLY: used when neither the OpenRouter catalog nor the window recorded with the
+ * invocation exists.
  *
  * VOLATILE: vendors bump these silently, so this is a best-effort lookup with a
  * conservative fallback, NOT a contract. A wrong value only skews a cosmetic
@@ -11,8 +13,8 @@ import type { CliProviderName } from '../types/index.js';
  * wins over a broad 'gemini').
  */
 const MODEL_CONTEXT_WINDOWS: ReadonlyArray<{ match: string; tokens: number }> = [
-  // Anthropic Claude — standard 200k window (the 1M window is an opt-in beta,
-  // not the default for a Haive provider's configured model).
+  // The claude binary reports 1,000,000 for opus-5/opus-5-5/sonnet-5 and a claude-code provider
+  // row carries no model, so this entry only covers runs that recorded no window.
   { match: 'claude', tokens: 200_000 },
   // OpenAI Codex / GPT family.
   { match: 'gpt-5', tokens: 400_000 },
@@ -27,11 +29,7 @@ const MODEL_CONTEXT_WINDOWS: ReadonlyArray<{ match: string; tokens: number }> = 
   { match: 'glm', tokens: 128_000 },
   // Meta Muse Spark — 1M.
   { match: 'muse-spark', tokens: 1_048_576 },
-  // xAI Grok. MEASURED from the CLI, not from xAI's model docs: a live
-  // `grok -p` run reports modelUsage["grok-4.6"].contextWindow = 256000, and the
-  // same for grok-build-0.1, while docs.x.ai lists 500k (4.6) and 1M (4.20/4.3).
-  // The CLI's number is the one that governs auto-compaction, so it is the one
-  // that describes the context a step actually gets.
+  // xAI Grok. The 256000 is a single measurement on grok 1.0.3; stored runs report none.
   { match: 'grok', tokens: 256_000 },
 ];
 
@@ -62,8 +60,8 @@ export const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000;
  * Best-effort + volatile (see MODEL_CONTEXT_WINDOWS). Never throws; always
  * returns a positive number so callers can compute a percentage safely.
  *
- * `knownContextLength` is a value the PROVIDER itself reported for this exact
- * model — today the OpenRouter catalog's `context_length`. It wins outright,
+ * `knownContextLength` is a value reported for this exact model: the OpenRouter
+ * catalog's `context_length` or the window the CLI recorded. It wins outright,
  * because it is the vendor's own number for the specific model rather than the
  * substring guess the table below makes. Ignored unless it is a positive finite
  * number, so a null/0/NaN from a stale cache falls through to the old behaviour
