@@ -6,12 +6,17 @@ import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
-const TRANSPORTS = new Set(['fetch', 'pull', 'push', 'ls-remote']);
+const TRANSPORTS = new Set(['fetch', 'pull', 'push', 'ls-remote', 'clone']);
 
 /** Follow argv initializers and .push additions within their lexical function.
  * This catches both inline arrays and the credential-prefixed argv our helpers build.
  * An argv returned by a helper call is invisible to this scan. */
-function unvalidatedOriginCalls(text: string, definesOrigin = false): number[] {
+function unvalidatedOriginCalls(
+  text: string,
+  definesOrigin = false,
+  definesClone = false,
+  definesLocalFetch = false,
+): number[] {
   const file = ts.createSourceFile('source.ts', text, ts.ScriptTarget.Latest, true);
   const bindings = new Map<ts.Node, Map<string, ts.Node[]>>();
   const validated = new Set<string>(definesOrigin ? ['originGitRun'] : []);
@@ -65,7 +70,12 @@ function unvalidatedOriginCalls(text: string, definesOrigin = false): number[] {
         owner = scope(owner);
       }
     }
-    if (ts.isFunctionLike(node)) return [];
+    if (
+      ts.isFunctionLike(node) ||
+      ts.isBinaryExpression(node) ||
+      ts.isPropertyAccessExpression(node)
+    )
+      return [];
     if (ts.isCallExpression(node) && node.expression.getText(file) !== 'hardenGitArgs') return [];
     const out: string[] = [];
     ts.forEachChild(node, (child) => {
@@ -74,6 +84,12 @@ function unvalidatedOriginCalls(text: string, definesOrigin = false): number[] {
     return out;
   }
   const offenders: number[] = [];
+  function insideClone(node: ts.Node): boolean {
+    for (let at: ts.Node | undefined = node; at; at = at.parent) {
+      if (ts.isFunctionDeclaration(at) && at.name?.text === 'gitClone') return definesClone;
+    }
+    return false;
+  }
   function check(node: ts.Node) {
     if (ts.isCallExpression(node)) {
       const callee = node.expression;
@@ -81,7 +97,15 @@ function unvalidatedOriginCalls(text: string, definesOrigin = false): number[] {
       const safe =
         ts.isIdentifier(callee) && (validated.has(callee.text) || callee.text === 'hardenGitArgs');
       const args = node.arguments.flatMap((arg) => strings(arg));
-      if (!assembly && !safe && args.includes('origin') && args.some((arg) => TRANSPORTS.has(arg)))
+      const localFetch =
+        definesLocalFetch &&
+        args.includes('fetch') &&
+        args.includes('--') &&
+        !args.includes('origin');
+      const transport =
+        args.some((arg) => TRANSPORTS.has(arg)) ||
+        (args.includes('remote') && args.includes('update'));
+      if (!assembly && !safe && !insideClone(node) && !localFetch && transport)
         offenders.push(file.getLineAndCharacterOfPosition(node.getStart()).line + 1);
     }
     ts.forEachChild(node, check);
@@ -103,12 +127,31 @@ describe('origin network operations', () => {
         unvalidatedOriginCalls(`spawn('git', hardenGitArgs(['${command}', 'origin']));`).length,
       ).toBeGreaterThan(0);
     }
-    expect(unvalidatedOriginCalls("run(cwd, ['fetch', '--', localPath, 'main']);")).toEqual([]);
+    expect(
+      unvalidatedOriginCalls("run(cwd, ['fetch', '--', localPath, 'main']);", false, false, true),
+    ).toEqual([]);
     expect(
       unvalidatedOriginCalls(
         "import { originGitRun } from './git-push.js'; originGitRun(cwd, ['fetch', 'origin']);",
       ),
     ).toEqual([]);
+  });
+
+  it('flags implicit transports and clone calls without an origin token', () => {
+    for (const argv of [
+      "['fetch']",
+      "['pull', '--ff-only']",
+      "['push']",
+      "['ls-remote']",
+      "['remote', 'update']",
+      "['clone', url, dest]",
+    ]) {
+      expect(unvalidatedOriginCalls(`run(cwd, ${argv});`), argv).toHaveLength(1);
+      expect(
+        unvalidatedOriginCalls(`spawn('git', hardenGitArgs(${argv}));`).length,
+        argv,
+      ).toBeGreaterThan(0);
+    }
   });
 
   it('uses originGitRun throughout server sources and operator scripts, and catches a bypass in each guarded file', async () => {
@@ -132,6 +175,8 @@ describe('origin network operations', () => {
         for (const line of unvalidatedOriginCalls(
           text,
           name === 'packages/worker/src/repo/git-push.ts',
+          name === 'packages/worker/src/repo/clone.ts',
+          name === 'packages/worker/src/repo/refresh.ts',
         ))
           offenders.push(`${name}:${line}`);
         if (/\boriginGitRun\(/.test(text)) {

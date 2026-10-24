@@ -13,7 +13,10 @@ it.each(['fetch', 'push'])('refuses a local origin %s at the protocol layer', (c
   const base = mkdtempSync(path.join(tmpdir(), 't388-protocol-'));
   dirs.push(base);
   const git = (args: string[], cwd = base) =>
-    execFileSync('git', hardenGitArgs(args), { cwd, encoding: 'utf8' });
+    execFileSync('git', hardenGitArgs(args, { allowFileTransport: true }), {
+      cwd,
+      encoding: 'utf8',
+    });
   git(['init', '--bare', `${base}/bare`]);
   git(['init', '-b', 'main', `${base}/work`]);
   const work = `${base}/work`;

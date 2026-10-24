@@ -94,7 +94,12 @@ async function sourceFor(
     return {
       label: 'the folder it was imported from',
       fetch: async (branch, extra) => {
-        const res = await gitRun(dest, ['fetch', ...extra, '--', folder, `refs/heads/${branch}`]);
+        const res = await gitRun(
+          dest,
+          ['fetch', ...extra, '--', folder, `refs/heads/${branch}`],
+          undefined,
+          { allowFileTransport: true },
+        );
         return res.code === 0 ? null : firstLine(res.stderr || res.stdout);
       },
     };

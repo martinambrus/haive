@@ -119,18 +119,24 @@ const DIFF_SUBCOMMANDS: ReadonlySet<string> = new Set([
  * with the per-subcommand flags `-c` cannot express inserted right after the subcommand.
  *
  * A flag already present is left alone, so a caller that names its own `--upload-pack` keeps it.
- * A pack command that names `origin` also refuses the file transport (`protocol.file.allow=never`).
+ * Transport verbs refuse the file protocol regardless of the remote's spelling or omission.
+ * The explicit host-folder refresh opts in to file transport through the second argument.
  */
-export function hardenGitArgs(args: readonly string[]): string[] {
+export function hardenGitArgs(
+  args: readonly string[],
+  options: { allowFileTransport?: boolean } = {},
+): string[] {
   const at = gitSubcommandIndex(args);
-  // Origin is a network remote. Refresh's explicit host-folder fetch keeps the file transport.
-  const originSafety =
+  const transportSafety =
     at !== -1 &&
+    !options.allowFileTransport &&
     (args[at] === 'clone' ||
-      (PACK_COMMAND_FLAG[args[at]!] && args.slice(at + 1).includes('origin')))
+      PACK_COMMAND_FLAG[args[at]!] ||
+      (args[at] === 'remote' &&
+        args.slice(at + 1).find((arg) => !arg.startsWith('-')) === 'update'))
       ? ['-c', 'protocol.file.allow=never']
       : [];
-  const out = [...GIT_CONFIG_SAFETY_ARGS, ...originSafety, ...args];
+  const out = [...GIT_CONFIG_SAFETY_ARGS, ...transportSafety, ...args];
   if (at === -1) return out;
   const name = args[at]!;
   const extra: string[] = [];
@@ -141,7 +147,7 @@ export function hardenGitArgs(args: readonly string[]): string[] {
     if (!args.includes('--no-textconv')) extra.push('--no-textconv');
   }
   if (extra.length === 0) return out;
-  const insertAt = GIT_CONFIG_SAFETY_ARGS.length + originSafety.length + at + 1;
+  const insertAt = GIT_CONFIG_SAFETY_ARGS.length + transportSafety.length + at + 1;
   return [...out.slice(0, insertAt), ...extra, ...out.slice(insertAt)];
 }
 
