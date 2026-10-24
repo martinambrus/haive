@@ -13,8 +13,8 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  * `gt` / `lt` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL never matching the last five,
  * and a jsonb column's key that holds a string (`jsonb_typeof(column -> 'key') = 'string'`) —
  * and throws on anything else, so a drizzle upgrade or a new query shape fails loudly instead of
- * matching every row. Of an update's SQL values it evaluates `<column> + <integer>` and stores any
- * other as it is. The foreign-key cascade is read off the schema.
+ * matching every row. Of an update's SQL values it evaluates `<column> + <integer>` and
+ * `greatest(<column> + <integer>, 0)` and stores any other as it is. The foreign-key cascade is read off the schema.
  *
  * A transaction keeps an undo log, so a throw takes back exactly what IT wrote and a nested one is
  * a savepoint. There is no isolation: a write is visible to every reader the moment it is made,
@@ -300,14 +300,27 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     return compile(cond);
   }
 
-  /** An update's values as a function of the row it writes: `<column> + <integer>` read off that
-   *  row, and anything else, another SQL expression included, as it is. */
+  /** An update's values as a function of the row it writes: integer addition, optionally clamped
+   *  at zero with greatest(), and anything else, another SQL expression included, as it is. */
   function compileSet(table: PgTable, values: FakeRow): (row: FakeRow) => FakeRow {
     const cols = getTableColumns(table);
     const keyOf = columnKeys(table);
     const parts = Object.entries(values).map(([k, v]): [string, (row: FakeRow) => unknown] => {
       if (!(k in cols)) throw new Error(`fake db: ${getTableName(table)} has no column "${k}"`);
       const ch = is(v, SQL) ? v.queryChunks.filter((c) => text(c) !== '') : [];
+      if (
+        ch.length === 5 &&
+        text(ch[0]) === 'greatest(' &&
+        is(ch[1], Column) &&
+        text(ch[2]) === ' + ' &&
+        typeof ch[3] === 'number' &&
+        Number.isInteger(ch[3]) &&
+        text(ch[4]) === ', 0)'
+      ) {
+        const key = keyOf.get(ch[1]);
+        const delta = ch[3];
+        if (key !== undefined) return [k, (row) => Math.max(0, Number(row[key]) + delta)];
+      }
       const key = is(ch[0], Column) ? keyOf.get(ch[0]) : undefined;
       const step = /^ \+ (\d+)$/.exec(text(ch[1]) ?? '');
       if (ch.length !== 2 || key === undefined || !step) return [k, () => v];

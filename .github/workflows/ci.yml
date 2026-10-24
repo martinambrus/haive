@@ -227,6 +227,7 @@ jobs:
             ' || failed=1
             echo "::endgroup::"
           done <<'GATED'
+          api test/terminal-attach-db.test.ts TERMINAL_ATTACH_TEST_URL terminal_attach_test pg
           worker test/database-snapshots.test.ts DATABASE_SNAPSHOT_TEST_URL snapshot_test pg
           worker test/task-type-seed.test.ts TASK_TYPE_SEED_TEST_URL task_type_seed_test pg
           worker test/task-type-seed-guard.test.ts TASK_TYPE_SEED_GUARD_TEST_URL task_type_seed_guard_test pg

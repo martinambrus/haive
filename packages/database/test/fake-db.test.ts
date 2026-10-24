@@ -671,3 +671,21 @@ describe('the attachments lock on the fake', () => {
     await expect(withTaskAttachmentsLock(db, TASK, async () => 'next')).resolves.toBe('next');
   });
 });
+
+describe('clamped integer SQL updates', () => {
+  it('reads the current row on each update, clamps at zero and leaves other rows alone', async () => {
+    const fake = createFakeDb({ containers: schema.containers });
+    const table = schema.containers;
+    fake.insert(table, { id: TASK, attachedWsCount: 2 });
+    fake.insert(table, { id: TASK2, attachedWsCount: 7 });
+    const update = (delta: number) =>
+      fake.db
+        .update(table)
+        .set({ attachedWsCount: sql`greatest(${table.attachedWsCount} + ${delta}, 0)` })
+        .where(eq(table.id, TASK));
+    await Promise.all([update(-1), update(-1), update(-1)]);
+    expect(fake.rows(table).map((row) => row.attachedWsCount)).toEqual([0, 7]);
+    await Promise.all([update(1), update(1)]);
+    expect(fake.rows(table).map((row) => row.attachedWsCount)).toEqual([2, 7]);
+  });
+});

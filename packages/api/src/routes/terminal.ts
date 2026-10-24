@@ -3,7 +3,7 @@ import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import Docker from 'dockerode';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { terminalClientFrameSchema } from '@haive/shared';
@@ -329,29 +329,17 @@ async function markTerminalSessionEnded(dbSessionId: string): Promise<void> {
 
 async function incrementAttached(containerId: string): Promise<void> {
   const db = getDb();
-  const rows = await db
-    .select({ count: schema.containers.attachedWsCount })
-    .from(schema.containers)
-    .where(eq(schema.containers.id, containerId))
-    .limit(1);
-  const current = rows[0]?.count ?? 0;
   await db
     .update(schema.containers)
-    .set({ attachedWsCount: current + 1 })
+    .set({ attachedWsCount: sql`greatest(${schema.containers.attachedWsCount} + ${1}, 0)` })
     .where(eq(schema.containers.id, containerId));
 }
 
 async function decrementAttached(containerId: string): Promise<void> {
   const db = getDb();
-  const rows = await db
-    .select({ count: schema.containers.attachedWsCount })
-    .from(schema.containers)
-    .where(eq(schema.containers.id, containerId))
-    .limit(1);
-  const current = rows[0]?.count ?? 0;
   await db
     .update(schema.containers)
-    .set({ attachedWsCount: Math.max(0, current - 1) })
+    .set({ attachedWsCount: sql`greatest(${schema.containers.attachedWsCount} + ${-1}, 0)` })
     .where(eq(schema.containers.id, containerId));
 }
 
