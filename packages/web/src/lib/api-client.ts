@@ -1016,7 +1016,8 @@ export interface TaskStep {
   degradedNote: string | null;
   /** Surface B: context-window usage frozen at step completion (display-only audit
    *  trail). contextLeftPercent = 100 - round(peak prompt tokens / window * 100). Null
-   *  on deterministic steps and rows finished before this feature shipped. */
+   *  on deterministic steps, on steps whose CLI reported no per-request figure, and on
+   *  rows finished before this feature shipped. */
   contextLeftPercent: number | null;
   contextTokens: number | null;
   contextWindowSize: number | null;
