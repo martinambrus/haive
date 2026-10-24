@@ -15,18 +15,34 @@ function regexRanges(text: string): Array<[number, number]> {
   return out;
 }
 
-/** The text with the body of every regex literal the TypeScript parser finds, and of every comment, blanked. */
+function commentRanges(text: string): Array<[number, number]> {
+  const file = ts.createSourceFile('a.ts', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const seen = new Set<number>();
+  const out: Array<[number, number]> = [];
+  const take = (pos: number): void => {
+    if (seen.has(pos)) return;
+    seen.add(pos);
+    for (const r of [
+      ...(ts.getLeadingCommentRanges(text, pos) ?? []),
+      ...(ts.getTrailingCommentRanges(text, pos) ?? []),
+    ]) {
+      const block = r.kind === ts.SyntaxKind.MultiLineCommentTrivia;
+      out.push([r.pos + 2, block ? r.end - 2 : r.end]);
+    }
+  };
+  const walk = (node: ts.Node): void => {
+    take(node.pos);
+    for (const child of node.getChildren(file)) walk(child);
+  };
+  walk(file);
+  return out;
+}
+
+/** The text with the body of every regex literal and every comment the TypeScript parser finds blanked. */
 function oracleMask(text: string): string {
-  const regexes = regexRanges(text);
-  const chars = [...text];
-  for (const [from, to] of regexes) for (let k = from; k < to; k += 1) chars[k] = 'R';
-  const comments = /\/\*[\s\S]*?\*\/|\/\/[^\n]*/g;
-  const filled = chars.join('');
   const blank = new Set<number>();
-  for (const [from, to] of regexes) for (let k = from; k < to; k += 1) blank.add(k);
-  for (const m of filled.matchAll(comments)) {
-    const to = m[0].startsWith('/*') ? m.index + m[0].length - 2 : m.index + m[0].length;
-    for (let k = m.index + 2; k < to; k += 1) blank.add(k);
+  for (const [from, to] of [...regexRanges(text), ...commentRanges(text)]) {
+    for (let k = from; k < to; k += 1) blank.add(k);
   }
   return [...text].map((c, k) => (blank.has(k) && !/[\r\n]/.test(c) ? ' ' : c)).join('');
 }
@@ -111,6 +127,9 @@ const CASES: string[] = [
   'async function f() { await /a/.test(s) } function f1() { x(); }',
   'let as = 4; as / 2; function f1() { x(); } const c = d / 3;',
   'let from = 4; from / 2; function f1() { x(); } const c = d / 3;',
+  // a label before a comment is no URL scheme
+  'function first(){ retry:// a ` in the comment\nwork(); }\nfunction second(){ return 1; }\nconst t = ``;',
+  'switch (k) { case 1:// c `\n break; }\nfunction second(){ return 1; }\nconst t = ``;',
 ];
 
 const KNOWN_LIMITS = new Map<string, string>([
@@ -126,6 +145,17 @@ describe('maskNonCode regex literals against the TypeScript parser', () => {
     const run = limit ? it.fails : it;
     run(`${limit ? `[limit: ${limit}] ` : ''}${JSON.stringify(text)}`, () => {
       expect(maskNonCode(text, 'js')).toBe(oracleMask(text));
+    });
+  }
+});
+
+describe('maskNonCode URLs in markup text', () => {
+  for (const text of [
+    '<p>see https://x</p>\nfunction a(){ return 1; }\nconst t = ``;',
+    '<p>https://x</p>\nfunction a(){ return 1; }\nconst t = ``;',
+  ]) {
+    it(JSON.stringify(text), () => {
+      expect(maskNonCode(text, 'js')).toBe(text);
     });
   }
 });
