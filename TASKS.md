@@ -278,7 +278,7 @@ All PRE-EXISTING.
 
 ### T304 · FNF[claims-2] · .git refusal misses NTFS aliases (+1)
 
-status: open
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:42Z · last: 2026-10-24T19:42Z
 
 1. Low: isClaimablePath (shared project-state/names.ts) and 02's safeDiskRel accept `.git.`, `.git `, `git~1`, `.git::$INDEX_ALLOCATION`; one shared predicate mirroring git's is_ntfs_dotgit / is_hfs_dotgit.
 2. Cosmetic: 02's refusal warning says "not a path inside the repository" for `.git/...` (02-upgrade-apply.ts ~1295, ~1371, ~1460); reword (check tests first).
