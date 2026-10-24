@@ -947,12 +947,6 @@ The data is recoverable from cli_invocations.stream_log: windows for about 97% o
 status: open · kind: design · was modular #285
 The LiteLLM max_input_tokens value is fetched and dropped (shared model-pricing.ts ~:137-145). OpenRouter's context_length still outranks the CLI figure. Decide the precedence per adapter family.
 
-### T404 · FNF[stale-step-stamps] · a re-opened step keeps its old context and allowance stamp
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:07Z · last: 2026-10-24T20:07Z · was modular #286
-Nothing clears task_steps.context_* or the allowance columns on Retry, loop-back or re-offer; e.g. step cd6fc797 on the old dev DB.
-Fix: clear the stamps on the reopening writes, or gate the badge structurally.
-
 ### T405 · FNF[sandbox-image-failure-routing] · an image-build failure while 08/08b resolve the sandbox image may loop the implementer back to "fix" it
 
 status: open · was modular #287
@@ -1026,6 +1020,7 @@ From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. w
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T404 — a re-opened step clears its context and allowance stamp; the page shows stamps on done rows only (browser-checked; ratchet budget follow-up #907) — PR #903 (6e9daa2e6), 2026-10-24
 - T391 — pickers preselect the oldest enabled provider; create refuses a disabled one (+2, with T372's picker label) — PR #902 (a4bb484eb), 2026-10-24
 - T407 — plan chat records the provider that answered (+1) — PR #899 (525098023), 2026-10-24
 - T374 — house-rule enforce/un-enforce write audit rows (+1) — PR #900 (42c518d8c), 2026-10-24
