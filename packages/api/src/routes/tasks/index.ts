@@ -87,7 +87,11 @@ import {
   withoutGateAnswer,
 } from '../../lib/task-control.js';
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
-import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
+import {
+  enqueueStart,
+  markQueuedForStart,
+  MissingTaskAttachmentsError,
+} from '../../lib/task-start.js';
 import { isTaskDead, loadTaskDead, refuseDeadTask } from '../../lib/task-dead.js';
 import { loadTaskStop, loadTaskStops } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
@@ -726,6 +730,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         runListSnapshot,
         customSteps,
         status: 'created',
+        expectedAttachmentCount: body.deferStart ? (body.expectedAttachmentCount ?? null) : null,
       })
       .returning();
   };
@@ -1225,10 +1230,26 @@ taskRoutes.post('/:id/action', async (c) => {
       // atomically, so a second click matches no row and enqueues nothing —
       // guarding with a read-then-write instead would let two clicks both pass
       // the read and put the same task on the queue twice.
-      const started = await db.transaction(async (tx) => {
-        await admitNewWork(tx);
-        return markQueuedForStart(tx, id);
-      });
+      const started = await db
+        .transaction(async (tx) => {
+          await admitNewWork(tx);
+          return markQueuedForStart(tx, id, body.confirmMissingAttachments);
+        })
+        .catch((err: unknown) => {
+          if (err instanceof MissingTaskAttachmentsError) return err;
+          throw err;
+        });
+      if (started instanceof MissingTaskAttachmentsError) {
+        return c.json(
+          {
+            error: started.message,
+            code: 'task_attachments_missing',
+            landed: started.landed,
+            expected: started.expected,
+          },
+          409,
+        );
+      }
       if (!started) {
         return c.json({ ok: true, started: false, status: task.status });
       }

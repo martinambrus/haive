@@ -62,6 +62,22 @@ beforeEach(() => {
 });
 
 describe('a plan build that defers its start for uploads', () => {
+  it.each([true, false])('passes the picked count only for deferStart=%s', async (deferStart) => {
+    setup(writableLocal);
+    const res = await build({ ...brief, deferStart, expectedAttachmentCount: 3 });
+    expect(res.status).toBe(201);
+    expect(vi.mocked(spawnPlanTask).mock.calls[0]![0]).toMatchObject({
+      expectedAttachmentCount: deferStart ? 3 : null,
+    });
+  });
+  it.each([-1, 1.5, 10001, '2'])('rejects invalid picked count %s', async (count) => {
+    setup(writableLocal);
+    expect(
+      (await build({ ...brief, deferStart: true, expectedAttachmentCount: count })).status,
+    ).toBe(400);
+    expect(spawnPlanTask).not.toHaveBeenCalled();
+  });
+
   it('is refused up front for a read-only local repository, which takes no attachments', async () => {
     setup(readOnlyLocal);
     const res = await build({ ...brief, deferStart: true });
