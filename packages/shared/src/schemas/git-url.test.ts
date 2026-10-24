@@ -101,3 +101,17 @@ describe('gitRemoteUrlSchema', () => {
     expect(accepts(`https://host/${'a'.repeat(3000)}`)).toBe(false);
   });
 });
+
+it.each(['a.b::x', 'git@host::x', 'a.b::https://example.test/r'])(
+  'refuses remote-helper syntax %s',
+  (url) => {
+    expect(accepts(url)).toBe(false);
+    expect(parseScpLikeGitUrl(url)).toBeNull();
+  },
+);
+it.each(['git@host:path::part', 'host.example:path::part', 'https://host/path::part'])(
+  'keeps colons inside a remote path: %s',
+  (url) => {
+    expect(accepts(url)).toBe(true);
+  },
+);

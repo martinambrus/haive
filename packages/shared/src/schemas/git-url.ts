@@ -38,6 +38,10 @@ import { z } from 'zod';
  */
 const ALLOWED_GIT_URL_SCHEMES = new Set(['https:', 'http:', 'ssh:']);
 
+// Git treats a leading <transport>:: as a remote helper, even when it resembles scp.
+// Colons later in an ordinary URL/scp path retain their existing meaning.
+const REMOTE_HELPER_SYNTAX = /^[^/:]+::/;
+
 /** A user in an scp-style address. Must START alphanumeric, which is what keeps
  *  a leading `-` out — an argument that begins with a dash can be read as an
  *  option by whatever it is handed to. */
@@ -70,6 +74,7 @@ export interface ScpLikeGitUrl {
  * which of the two a string is.
  */
 export function parseScpLikeGitUrl(value: string): ScpLikeGitUrl | null {
+  if (REMOTE_HELPER_SYNTAX.test(value)) return null;
   const m = SCP_LIKE.exec(value);
   if (!m) return null;
   const user = m[1] ?? null;
@@ -92,6 +97,7 @@ function looksLikeUrl(value: string): boolean {
 }
 
 export function isAllowedGitRemoteUrl(value: string): boolean {
+  if (REMOTE_HELPER_SYNTAX.test(value)) return false;
   if (looksLikeUrl(value)) {
     let parsed: URL;
     try {
