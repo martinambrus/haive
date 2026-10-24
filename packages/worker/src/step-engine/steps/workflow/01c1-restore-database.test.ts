@@ -7,6 +7,24 @@ import type { StepContext } from '../../step-definition.js';
 import { ddevEnvStep } from './01c-ddev-env.js';
 import { databaseRestoreForm, restoreDatabaseStep } from './01c1-restore-database.js';
 
+const cleanup = vi.hoisted(() => ({ remove: vi.fn() }));
+vi.mock('@haive/shared/fs-safe', async (original) => ({
+  ...(await original<typeof import('@haive/shared/fs-safe')>()),
+  removeNoFollow: cleanup.remove,
+}));
+vi.mock('./_app-runtime.js', () => ({
+  ensureDdevWithProgress: async () => ({ container: 'test', projectDir: '/repos/test' }),
+  withDdevProgress: async (_ctx: unknown, _label: string, fn: (onLine: () => void) => unknown) =>
+    fn(() => {}),
+}));
+vi.mock('../../../sandbox/ddev-runner.js', async (original) => ({
+  ...(await original<typeof import('../../../sandbox/ddev-runner.js')>()),
+  ddevImportDb: async () => ({ exitCode: 0, output: 'imported' }),
+  ddevCountTables: async () => 1,
+  ddevSnapshot: async () => ({ exitCode: 0, output: '' }),
+  sniffDumpFormat: async () => ({ pgRestore: false, gzipped: false }),
+}));
+
 const detected = {
   repoSubpath: 'test',
   workspace: null,
@@ -144,5 +162,64 @@ describe('shouldRun for a task that carries an uploaded dump', () => {
     await expect(restoreDatabaseStep.shouldRun!(ctx)).rejects.toThrow(
       'removed after the task ended',
     );
+  });
+});
+
+describe('uploaded dump cleanup after import', () => {
+  it.each([false, true])('consumes the upload when cleanup fails: %s', async (fails) => {
+    const fake = createFakeDb({ dbUploads: schema.dbUploads });
+    const userId = randomUUID();
+    const dumpId = randomUUID();
+    const root = process.env.REPO_STORAGE_ROOT ?? '/var/lib/haive/repos';
+    const rel = `_uploads/${userId}/db-${dumpId}.sql`;
+    const err = Object.assign(new Error('the removal failed'), { code: 'EACCES' });
+    cleanup.remove.mockReset();
+    if (fails) cleanup.remove.mockRejectedValue(err);
+    else cleanup.remove.mockResolvedValue(true);
+    fake.insert(schema.dbUploads, {
+      id: dumpId,
+      userId,
+      filename: 'project.sql',
+      dumpFormat: 'sql',
+      totalSize: 1,
+      chunkSize: 1,
+      dumpPath: `${root}/${rel}`,
+      status: 'complete',
+    });
+    const warn = vi.fn();
+    const ctx = {
+      db: fake.db,
+      taskId: randomUUID(),
+      logger: { warn },
+      emitProgress: async () => {},
+    } as unknown as StepContext;
+
+    const result = await restoreDatabaseStep.apply(ctx, {
+      detected: {
+        ...detected,
+        dbUploadId: dumpId,
+        databaseSnapshotId: null,
+        snapshotEngine: null,
+        dumpWorkerPath: `${root}/${rel}`,
+        dumpRunnerPath: `/repos/${rel}`,
+      },
+      formValues: {},
+      iteration: 0,
+      llmOutput: null,
+      previousIterations: [],
+    });
+
+    expect(result).toEqual({ imported: true });
+    expect(cleanup.remove).toHaveBeenCalledExactlyOnceWith(root, rel);
+    expect(fake.rows(schema.dbUploads)).toHaveLength(1);
+    expect(fake.rows(schema.dbUploads)[0]?.status).toBe('consumed');
+    if (fails) {
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        { err, taskId: ctx.taskId, dbUploadId: dumpId, rel },
+        'imported database dump was not removed',
+      );
+    } else {
+      expect(warn).not.toHaveBeenCalled();
+    }
   });
 });
