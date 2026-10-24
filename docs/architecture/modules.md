@@ -57,7 +57,7 @@ the module loads again.
   a failed removal, and `eventError` when the event or audit write failed), `left` and `failed` (only
   a stop transaction that threw); the page shows the counts and names each
   task it could not stop or whose kill or record failed. The code stays loaded: its api routes and
-  settings answer 404, `GET /modules` leaves it out (nav, pages, dashboard widget; compiled module
+  settings answer 404 (a non-administrator asking for admin settings gets 403 first, whatever the module), `GET /modules` leaves it out (nav, pages, dashboard widget; compiled module
   pages and widgets render only for modules that list names) and the composer palette drops its steps.
   The worker neither ensures the schema of nor starts any job of a module that is deactivated when it
   boots (so a restart after Tear down leaves the dropped schema dropped; it reads the deactivated set
