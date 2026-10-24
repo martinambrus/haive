@@ -478,7 +478,9 @@ export function PlanStarter({
               {draftTaskId
                 ? files.some((f) => f.state === 'failed' || f.state === 'uploading')
                   ? 'Retry the failed uploads'
-                  : 'Retry starting the build'
+                  : files.some((f) => f.state === 'pending')
+                    ? 'Retry starting the build with the new files'
+                    : 'Retry starting the build'
                 : 'Draft a plan from this'}
             </Button>
             {/* The draft a failed upload or a refused start left behind. An escape hatch, not the

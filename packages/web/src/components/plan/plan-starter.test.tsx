@@ -70,6 +70,11 @@ const press = async (view: Renderer) => {
   await view.flush();
 };
 const page = (view: Renderer) => textOf(view.tree());
+const addFile = (view: Renderer, name: string) => {
+  const input = findAll(view.tree(), (h) => h.tag === 'input' && h.props.type === 'file')[0]!;
+  (input.props.onChange as (e: unknown) => void)({ target: { files: [new File(['z'], name)] } });
+  view.draw();
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -208,6 +213,40 @@ describe('PlanStarter when the start is refused', () => {
 
     await press(view);
     expect(net.buildPlan).toHaveBeenCalledTimes(2);
+  });
+
+  it('C7: a file picked after a refused start is named by the button and uploaded alone', async () => {
+    net.startTask
+      .mockReset()
+      .mockRejectedValueOnce(new Error('the queue is draining'))
+      .mockResolvedValue({ ok: true, started: true, status: 'queued' });
+    const view = await mount();
+    await press(view);
+    expect(textOf(build(view))).toBe('Retry starting the build');
+
+    addFile(view, 'c.md');
+    expect(textOf(build(view))).toBe('Retry starting the build with the new files');
+
+    await press(view);
+    expect(net.uploadTaskAttachment.mock.calls.map((c) => (c[1] as File).name)).toEqual([
+      'a.md',
+      'b.md',
+      'c.md',
+    ]);
+    expect(net.buildPlan).toHaveBeenCalledTimes(1);
+    expect(net.startTask.mock.calls.map((c) => c[0])).toEqual(['draft-1', 'draft-1']);
+    expect(onNavigate).toHaveBeenCalledWith('/tasks/draft-1');
+  });
+
+  it('C8: a failed row still names the button when a new file is picked beside it', async () => {
+    net.uploadTaskAttachment.mockImplementation(async (_task: string, file: File) => {
+      if (file.name === 'b.md') throw new Error('too large');
+      return {};
+    });
+    const view = await mount();
+    await press(view);
+    addFile(view, 'c.md');
+    expect(textOf(build(view))).toBe('Retry the failed uploads');
   });
 });
 
