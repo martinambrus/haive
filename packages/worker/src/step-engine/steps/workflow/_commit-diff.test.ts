@@ -287,7 +287,7 @@ describe('an unreadable side of a changed file', () => {
     });
   });
 
-  it('flags a repository nobody added as a submodule, which has no pinned commit to show', async () => {
+  it('flags an unborn nested repository as unreadable', async () => {
     await repo(async (dir) => {
       await git(dir, ['init', '-q', 'nested']);
       const built = await buildCommitDiffArtifact(dir, gitRun);
