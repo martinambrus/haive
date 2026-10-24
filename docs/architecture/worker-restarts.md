@@ -312,7 +312,8 @@ which the pickup guard allows only for an answer to a form still parked, or to a
 that answer closed before a worker died (above), so a Stop landing after pickup stands; the answer
 to a fix-loop gate hands off under the same rule. That holds
 for the job's own catch too, which fails the task only at the epoch the job holds it at: the one it
-read, or the one a reset the job made itself moved it to. Such a reset (a fix-loop re-entry, a
+read, or the one a reset the job made itself moved it to, and only from an open status, so a Stop that
+failed the task (which moves no epoch) keeps its error and `completed_at`. Such a reset (a fix-loop re-entry, a
 revise, boot recovery's) compare-and-swaps that epoch in the write that bumps it, kept last as the
 api Retry keeps its own, and a lost swap rolls the whole reset back and hands nothing off. The
 hand-off after it points the task at the target only while the task is still at that epoch, and a

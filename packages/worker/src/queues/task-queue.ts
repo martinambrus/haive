@@ -31,6 +31,7 @@ import {
   ideSessionKey,
   repoIdeSessionId,
   logger,
+  OPEN_TASK_STATUSES,
   parseAllowanceWatchMode,
   refusesNewWork,
   type CliExecJobPayload,
@@ -4089,7 +4090,7 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
           );
           if (dead) return;
         }
-        const statuses = unclaimed ? STARTABLE_TASK_STATUSES : undefined;
+        const statuses = unclaimed ? STARTABLE_TASK_STATUSES : OPEN_TASK_STATUSES;
         await markTaskFailed(db, taskId, message, epoch, statuses).catch((cleanupErr) => {
           logger.warn({ err: cleanupErr, taskId }, 'markTaskFailed during catch failed');
         });
