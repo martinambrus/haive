@@ -555,7 +555,7 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
         },
       });
     } catch (err) {
-      return recoverAfterMoveFailure(db, repo.id, repoPath, kept, before, err);
+      return await recoverAfterMoveFailure(db, repo.id, repoPath, kept, before, err);
     }
   } catch (err) {
     await recordPlanMirrorError(db, repo.id, err).catch(() => undefined);
