@@ -95,18 +95,6 @@ All PRE-EXISTING, measured on the eval tree at 9c0c8ee77 (evidence .claude/tmp/r
 6. `.rb` sections stop before `end`; Ruby ranges should end after `end`.
 Fix: a lexer pass marking comment/string spans shared by PHP and JS. Needs one reindex.
 
-### T328 · FNF[git-noexit-low-2] · bundle git spawns unbounded; 01's 'main' guess under autoContinue; gate 3 NULL sha (+4)
-status: taken · owner: fnf-run@ACTIVIT21 · since: 2026-10-24 · last: 2026-10-24T06:40Z
-branch: fnf/328-git-noexit-low-2 · worktree: .claude/worktrees/p328 · brief: .claude/tmp/fnf-run/p328/drive.md
-All PRE-EXISTING.
-1. 00-bundle-resync.ts:37-78 and repo/bundle-ingest.ts:47,77 spawn git with no time bound; move to gitRun.
-2. 01-worktree-setup.ts:363 `?? 'main'` still reachable when the branch is unknown; under autoContinue the #879 note is unseen.
-3. 10-gate-3-commit.ts:184 writes commit_sha NULL over an earlier round's sha.
-4. 99-run-app-ready.ts:338 a plain exit-128 branch read (or old payload) still offers the push, then drops it silently.
-5. (display) _kb-commit.ts:75, 11d-skill-sync.ts:525, plan/snapshot-git.ts:31, 99:350 fold a no-answer `rev-parse HEAD` into null.
-6. (low) 00-bundle-resync.ts:116-121 swallows a failed local-head read; `hasAny` unread.
-7. (low) 12-post-onboarding.ts:466 currentBranch dead; 13-onboarding-push.ts:29 unread `branch?`.
-
 ### T323 · FNF[uploads-3] · leftover upload files never cleaned; unlink failures warn forever (+3)
 status: open (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Previous brief, reusable: .claude/tmp/fnf-run/p323/drive.md on ACTIVIT21)
 All PRE-EXISTING.
@@ -833,6 +821,7 @@ Fix: pass `connection: { client_connection_check_interval: 500 }` in the postgre
 ## Done
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
+- T328 — bundle git bounded; 01 refuses an unknown base; gate 3 keeps an earlier sha — PR #888 (214b76b1f), 2026-10-24
 - T383 — fix-loop gate re-offer follow-ups (was modular #263) — PR #887 (e5c41e2ec), 2026-10-24
 - T384 — module lifecycle bounds (was modular #264) — PR #885 (a9e51e265), 2026-10-24
 - T390 — a task with no CLI picked runs its steps as the default provider (was modular #271) — PR #882 (c59fb005e), 2026-10-24
