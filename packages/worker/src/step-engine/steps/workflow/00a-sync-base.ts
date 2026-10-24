@@ -261,7 +261,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         type: 'note',
         id: 'fetchFailed',
         label: 'Could not reach origin',
-        body: `Couldn't fetch origin: ${detected.fetchError ?? 'unknown error'}. Continuing with the local **${base}** (possibly stale). Fix connectivity or credentials and Retry this step to re-sync.`,
+        body: `Couldn't fetch origin: ${detected.fetchError ?? 'unknown error'}. Continuing with the local **${base}** (possibly stale). Fix the checkout's origin configuration, connectivity or credentials and Retry this step to re-sync.`,
         variant: 'warning',
       });
     } else if (detected.compareError) {

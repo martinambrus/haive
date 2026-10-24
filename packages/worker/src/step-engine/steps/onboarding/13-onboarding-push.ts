@@ -63,7 +63,7 @@ interface OnboardingPushApply {
 }
 
 /** Best-effort `git fetch origin <base>` with the step-12 credential. Network
- *  failures warn-and-continue; an unsafe origin throws (mirrors 00a-sync-base). */
+ *  failures warn-and-continue; detect records a refused origin and withholds the push. */
 async function fetchOrigin(
   ctx: StepContext,
   base: string,
