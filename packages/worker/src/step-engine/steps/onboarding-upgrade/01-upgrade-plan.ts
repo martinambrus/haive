@@ -311,7 +311,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     const cliRulesRenderHashes = await loadCliRulesRenderHashes(ctx.db, repositoryId);
 
     for (const diskPath of allPaths) {
-      // A row imported before claims under `.git` were refused: never list it or read its bytes.
+      // A row imported before claims naming git data (aliases included) were refused: never list it or read its bytes.
       if (!isClaimablePath(diskPath)) continue;
       const current = byPath.get(diskPath) ?? null;
       const live = liveByPath.get(diskPath) ?? null;
