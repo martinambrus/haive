@@ -537,7 +537,7 @@ describe('untracked directory staging controls', () => {
         await git(nested, ['commit', '--allow-empty', '-m', 'nested']);
         const head = (await git(nested, ['rev-parse', 'HEAD'])).stdout.trim();
         const swapping: typeof gitRun = async (cwd, args) => {
-          if (args.includes('rev-parse') && cwd.startsWith('/proc/self/fd/')) {
+          if (args.includes('rev-parse') && cwd !== dir) {
             if (swap === 'directory') {
               await rename(nested, path.join(dir, 'moved'));
               await symlink(dir, nested);
@@ -833,8 +833,10 @@ describe('a changed link or submodule', () => {
   it('asks a submodule through the directory it opened, not through its name', async () => {
     await repo(async (dir, { second }) => {
       await git(path.join(dir, 'sub'), ['checkout', '-q', second]);
+      let swapped = false;
       const swapping: typeof gitRun = async (cwd, args) => {
-        if (args[0] === 'rev-parse' && cwd !== dir) {
+        if (args.includes('rev-parse') && cwd !== dir) {
+          swapped = true;
           await rename(path.join(dir, 'sub'), path.join(dir, 'sub-moved'));
           await symlink(dir, path.join(dir, 'sub'));
         }
@@ -842,6 +844,7 @@ describe('a changed link or submodule', () => {
       };
       const built = await buildCommitDiffArtifact(dir, swapping);
 
+      expect(swapped).toBe(true);
       expect(built.artifact.files.find((f) => f.path === 'sub')?.newContent).toBe(
         subproject(second),
       );
