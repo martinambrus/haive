@@ -265,6 +265,9 @@ const MAX_REGEX_MISSES = 8;
 /** How many unclosed template literals one file may give back as plain text before the rest masks to EOF. */
 const MAX_STRAY_TICKS = 8;
 
+/** `//` right after `scheme:` is a URL in markup text, not a line comment. */
+const URL_SCHEME = /[A-Za-z][A-Za-z0-9+.-]*:$/;
+
 /** Index just past the quote that closes the string opening at `open`, else the end of the text. */
 function quotedEnd(text: string, open: number): number {
   for (let i = open + 1; i < text.length; i += 1) {
@@ -444,6 +447,9 @@ function jsNonCode(text: string): Span[] {
     } else if (/\s/.test(c)) {
       i += 1;
       if (c === '\n') regexMisses = 0;
+    } else if (c === '/' && next === '/' && URL_SCHEME.test(text.slice(Math.max(0, i - 40), i))) {
+      prev = '';
+      i += 2;
     } else if (c === '/' && (next === '/' || next === '*')) {
       const close = text.indexOf(next === '/' ? '\n' : '*/', i + 2);
       const bodyEnd = close < 0 ? text.length : close;

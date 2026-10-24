@@ -1339,6 +1339,15 @@ describe('extractCodeSections — braces that are not code', () => {
     expect(sections.get('function-save')).toBe('export function save() { persist(); }');
   });
 
+  it('keeps the sections around a URL in JSX text', () => {
+    const tsx =
+      'function First(){ return <p>https://example.com</p>; }\nfunction second(){ return 1; }\n';
+    const sections = sectionsOf(tsx, 'url.tsx');
+
+    expect(sections.has('function-First')).toBe(true);
+    expect(sections.has('function-second')).toBe(true);
+  });
+
   it('ends an object-literal member at its own closing brace', () => {
     const src = [
       'var api = {',
