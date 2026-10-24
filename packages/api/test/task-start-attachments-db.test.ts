@@ -133,9 +133,19 @@ describe.skipIf(!url)('deferred attachments through real Postgres routes', () =>
         confirmMissingAttachments: true,
       });
       expect(await confirmed.json()).toMatchObject({ started: true });
-      const again = await post(`/tasks/${id}/action`, { action: 'start' });
-      expect(await again.json()).toMatchObject({ started: false });
-      expect(h.add).toHaveBeenCalledTimes(1);
+      const startedRow = await row(id);
+      const startedEvents = await db.select().from(schema.taskEvents);
+      for (const confirmMissingAttachments of [false, true]) {
+        const again = await post(`/tasks/${id}/action`, {
+          action: 'start',
+          confirmMissingAttachments,
+        });
+        expect(again.status).toBe(200);
+        expect(await again.json()).toMatchObject({ started: false });
+        expect(await row(id)).toEqual(startedRow);
+        expect(await db.select().from(schema.taskEvents)).toEqual(startedEvents);
+        expect(h.add).toHaveBeenCalledTimes(1);
+      }
     },
   );
 

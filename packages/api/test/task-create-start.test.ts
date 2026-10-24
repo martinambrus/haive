@@ -356,10 +356,19 @@ describe('the start action', () => {
     } else {
       expect(await res.json()).toMatchObject({ started: true, status: 'queued' });
       // The short count cannot make a repeated, already-started action conflict.
-      const again = await post(`/${DRAFT}/action`, { action: 'start' });
-      expect(again.status).toBe(200);
-      expect(await again.json()).toMatchObject({ started: false });
-      expect(starts()).toHaveLength(1);
+      const startedRow = structuredClone(t.row());
+      const events = structuredClone(t.fake.rows(schema.taskEvents));
+      for (const confirmMissingAttachments of [false, true]) {
+        const again = await post(`/${DRAFT}/action`, {
+          action: 'start',
+          confirmMissingAttachments,
+        });
+        expect(again.status).toBe(200);
+        expect(await again.json()).toMatchObject({ started: false });
+        expect(t.row()).toEqual(startedRow);
+        expect(t.fake.rows(schema.taskEvents)).toEqual(events);
+        expect(starts()).toHaveLength(1);
+      }
     }
   });
 
