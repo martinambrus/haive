@@ -186,6 +186,7 @@ maintenanceRoutes.get('/blocking', async (c) => {
     status: schema.tasks.status,
     pausedAt: schema.tasks.pausedAt,
     currentStepId: schema.tasks.currentStepId,
+    currentStepStatus: schema.taskSteps.status,
     updatedAt: schema.tasks.updatedAt,
     ownerId: schema.users.id,
     ownerName: schema.users.name,
@@ -194,9 +195,15 @@ maintenanceRoutes.get('/blocking', async (c) => {
     // same way `/admin/users` does it, since this list has the same admin-only audience.
     ownerEmailEncrypted: schema.users.emailEncrypted,
   };
+  const currentStepJoin = and(
+    eq(schema.taskSteps.taskId, schema.tasks.id),
+    eq(schema.taskSteps.stepId, schema.tasks.currentStepId),
+    eq(schema.taskSteps.round, schema.tasks.currentRound),
+  );
   const fetched = await db
     .select(blockingTask)
     .from(schema.tasks)
+    .leftJoin(schema.taskSteps, currentStepJoin)
     .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
     // A dead task runs nothing, and none of this page's actions reach it; its owner cancels it.
     .where(and(inArray(schema.tasks.status, drainTaskStatuses(state)), isNull(schema.tasks.deadAt)))
@@ -234,6 +241,7 @@ maintenanceRoutes.get('/blocking', async (c) => {
       : await db
           .select(blockingTask)
           .from(schema.tasks)
+          .leftJoin(schema.taskSteps, currentStepJoin)
           .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
           .where(and(isNull(schema.tasks.deadAt), or(...arms)))
           .orderBy(desc(schema.tasks.updatedAt))

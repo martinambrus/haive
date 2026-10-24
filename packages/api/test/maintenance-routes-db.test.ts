@@ -68,6 +68,7 @@ interface Blocking {
   tasks: {
     id: string;
     hasLiveCli: boolean;
+    currentStepStatus: string | null;
     pausedAt: string | null;
     pausedByAdmin: boolean;
     ownerId: string | null;
@@ -251,6 +252,66 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, index));
     }
     await db.$client.end({ timeout: 5 });
+  });
+
+  describe('GET /blocking, the current step for Stop', () => {
+    it.each([
+      { state: 'normal', taskStatus: 'running', list: 'tasks' },
+      { state: 'maintenance', taskStatus: 'waiting_user', list: 'parked' },
+    ] as const)(
+      'returns the current round status in $list, retaining tasks without a current row',
+      async ({ state, taskStatus, list }) => {
+        h.state = state;
+        const current = await task({
+          status: taskStatus,
+          currentStepId: 'implement',
+          currentRound: 1,
+        });
+        const missing = await task({
+          status: taskStatus,
+          currentStepId: 'missing',
+          currentRound: 1,
+        });
+        await db.insert(schema.taskSteps).values([
+          {
+            taskId: current.id,
+            stepId: 'implement',
+            stepIndex: 0,
+            title: 'Old round',
+            round: 0,
+            status: 'done',
+          },
+          {
+            taskId: current.id,
+            stepId: 'implement',
+            stepIndex: 0,
+            title: 'Current',
+            round: 1,
+            status: 'pending',
+          },
+          {
+            taskId: current.id,
+            stepId: 'later',
+            stepIndex: 1,
+            title: 'Future',
+            round: 1,
+            status: 'pending',
+          },
+          {
+            taskId: missing.id,
+            stepId: 'missing',
+            stepIndex: 0,
+            title: 'Old round only',
+            round: 0,
+            status: 'running',
+          },
+        ]);
+        const rows = (await blocking())[list];
+        expect(rows.filter((r) => r.id === current.id)).toHaveLength(1);
+        expect(rows.find((r) => r.id === current.id)?.currentStepStatus).toBe('pending');
+        expect(rows.find((r) => r.id === missing.id)?.currentStepStatus).toBeNull();
+      },
+    );
   });
 
   describe('GET /blocking, the live CLI', () => {

@@ -91,7 +91,13 @@ export function CliAuthBannerModal({
   } = usePendingCliCopy();
   const termRef = useRef<XTerm | null>(null);
   const termMountRef = useRef<HTMLDivElement | null>(null);
-  const [phase, setPhase] = useState<Phase>('connecting');
+  const [phase, setRenderedPhase] = useState<Phase>('connecting');
+  const phaseRef = useRef<Phase>('connecting');
+  // Every transition updates the socket's view immediately, before React renders.
+  const changePhase = useCallback((next: Phase) => {
+    phaseRef.current = next;
+    setRenderedPhase(next);
+  }, []);
   /** Non-null while a cli-exec job this dialog started is waiting for a free slot. */
   const [queueWait, setQueueWait] = useState<{
     running: number;
@@ -117,7 +123,8 @@ export function CliAuthBannerModal({
 
   useEffect(() => {
     if (!open) return;
-    setPhase('connecting');
+    let disposed = false;
+    changePhase('connecting');
     setAuthUrl(null);
     setDeviceCode(null);
     setToken('');
@@ -133,7 +140,7 @@ export function CliAuthBannerModal({
 
     const connectTimeout = setTimeout(() => {
       if (ws.readyState !== WebSocket.OPEN) {
-        setPhase('error');
+        changePhase('error');
         setError('Connection timed out. Close and try again.');
         try {
           ws.close();
@@ -148,6 +155,7 @@ export function CliAuthBannerModal({
     };
 
     ws.onmessage = (ev) => {
+      if (disposed) return;
       let msg: { type?: string; [k: string]: unknown } | null = null;
       try {
         msg = JSON.parse(typeof ev.data === 'string' ? ev.data : ev.data.toString());
@@ -157,10 +165,10 @@ export function CliAuthBannerModal({
       if (!msg) return;
       switch (msg.type) {
         case 'phase':
-          if (msg.phase === 'starting') setPhase('starting');
-          else if (msg.phase === 'awaiting-token') setPhase('awaiting-token');
-          else if (msg.phase === 'awaiting-approval') setPhase('awaiting-approval');
-          else if (msg.phase === 'submitting') setPhase('submitting');
+          if (msg.phase === 'starting') changePhase('starting');
+          else if (msg.phase === 'awaiting-token') changePhase('awaiting-token');
+          else if (msg.phase === 'awaiting-approval') changePhase('awaiting-approval');
+          else if (msg.phase === 'submitting') changePhase('submitting');
           break;
         case 'auth-url': {
           if (typeof msg.url === 'string') setAuthUrl(safeAuthUrl(msg.url));
@@ -170,7 +178,7 @@ export function CliAuthBannerModal({
               ? msg.tokenPaste
               : TOKEN_PASTE_PROVIDERS.has(providerName);
           setTokenPasteFlow(paste);
-          setPhase(paste ? 'awaiting-token' : 'awaiting-approval');
+          changePhase(paste ? 'awaiting-token' : 'awaiting-approval');
           break;
         }
         case 'output':
@@ -195,39 +203,56 @@ export function CliAuthBannerModal({
           setQueueWait(null);
           break;
         case 'auth-success':
-          setPhase('success');
+          changePhase('success');
           break;
         case 'saved': {
           const probeResult = (msg.result as CliProbeResult | undefined) ?? null;
           setSavedResult(probeResult);
-          setPhase('saved');
+          changePhase('saved');
           if (probeResult && onLoginComplete) {
             onLoginComplete(probeResult);
           }
           break;
         }
         case 'error':
-          setPhase('error');
+          changePhase('error');
           setError(typeof msg.message === 'string' ? msg.message : 'Login failed');
           break;
         case 'exit':
-          setPhase((prev) =>
-            prev === 'saved' || prev === 'success' || prev === 'error' ? prev : 'error',
-          );
+          if (
+            phaseRef.current !== 'saved' &&
+            phaseRef.current !== 'success' &&
+            phaseRef.current !== 'error'
+          ) {
+            changePhase('error');
+            setError('Login process exited before sign-in completed. Retry the login.');
+          }
           break;
       }
     };
 
     ws.onerror = () => {
-      setPhase('error');
+      if (disposed) return;
+      changePhase('error');
       setError('WebSocket error');
     };
 
     ws.onclose = () => {
       clearTimeout(connectTimeout);
+      if (disposed) return;
+      if (phaseRef.current === 'success') {
+        // A closed socket cannot clear the queued probe; let the safety timer resume.
+        setQueueWait(null);
+        return;
+      }
+      if (phaseRef.current === 'saved' || phaseRef.current === 'error') return;
+      setQueueWait(null);
+      setError('Connection closed. Retry the login.');
+      changePhase('error');
     };
 
     return () => {
+      disposed = true;
       clearTimeout(connectTimeout);
       try {
         ws.close(1000, 'unmount');
@@ -236,7 +261,7 @@ export function CliAuthBannerModal({
       }
       wsRef.current = null;
     };
-  }, [open, providerId, providerName, onLoginComplete, retryNonce]);
+  }, [open, providerId, providerName, onLoginComplete, retryNonce, changePhase]);
 
   useEffect(() => {
     if (open) setUrlAttempt(1);
@@ -252,7 +277,7 @@ export function CliAuthBannerModal({
     if (phase !== 'awaiting-token' && phase !== 'awaiting-approval') return;
     const timer = setTimeout(() => {
       if (urlAttempt >= MAX_URL_WAIT_ATTEMPTS) {
-        setPhase('error');
+        changePhase('error');
         setError(
           `Sign-in URL never arrived after ${MAX_URL_WAIT_ATTEMPTS} attempts. ` +
             `The CLI may be stuck waiting on stdin or printing the URL in an unrecognized format.`,
@@ -263,7 +288,7 @@ export function CliAuthBannerModal({
       setRetryNonce((n) => n + 1);
     }, URL_WAIT_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [open, phase, authUrl, urlAttempt, providerName]);
+  }, [open, phase, authUrl, urlAttempt, providerName, changePhase]);
 
   // Safety net: phase 'success' ("testing and saving credentials...") waits on the server's
   // post-login probe + 'saved' frame. If that frame never arrives (e.g. the WS
@@ -279,7 +304,7 @@ export function CliAuthBannerModal({
   useEffect(() => {
     if (phase !== 'success' || queueWait !== null) return;
     const timer = setTimeout(() => {
-      setPhase('error');
+      changePhase('error');
       setVerifyOnly(true);
       setError(
         'Sign-in finished and your credentials were saved, but the connection test did not ' +
@@ -287,7 +312,7 @@ export function CliAuthBannerModal({
       );
     }, SUCCESS_SAVE_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [phase, queueWait]);
+  }, [phase, queueWait, changePhase]);
 
   // antigravity debug terminal: render agy's TUI in an xterm bound to the same
   // banner WS the modal owns. 'output' frames are written to the term (see
@@ -383,9 +408,9 @@ export function CliAuthBannerModal({
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const trimmed = token.trim();
     if (!trimmed) return;
-    setPhase('submitting');
+    changePhase('submitting');
     ws.send(JSON.stringify({ type: 'token-input', token: trimmed }));
-  }, [token]);
+  }, [token, changePhase]);
 
   const handleClose = useCallback(() => {
     onClose();
@@ -417,17 +442,17 @@ export function CliAuthBannerModal({
       const probeResult = await runCliProbe(providerId);
       setSavedResult(probeResult);
       setVerifyOnly(false);
-      setPhase('saved');
+      changePhase('saved');
       if (onLoginComplete) onLoginComplete(probeResult);
     } catch (err) {
       // Stay in the verify-only branch: the credentials are still saved, so the way out is
       // another test, never another login.
-      setPhase('error');
+      changePhase('error');
       setError(err instanceof Error ? err.message : 'Connection test failed');
     } finally {
       setVerifying(false);
     }
-  }, [providerId, onLoginComplete]);
+  }, [providerId, onLoginComplete, changePhase]);
 
   if (!open) return null;
 
@@ -711,7 +736,14 @@ export function CliAuthBannerModal({
                 {verifying ? 'Testing...' : 'Test connection'}
               </Button>
             ) : (
-              <Button onClick={() => setRetryNonce((n) => n + 1)}>Retry</Button>
+              <Button
+                onClick={() => {
+                  setUrlAttempt(1);
+                  setRetryNonce((n) => n + 1);
+                }}
+              >
+                Retry
+              </Button>
             )}
           </div>
         )}

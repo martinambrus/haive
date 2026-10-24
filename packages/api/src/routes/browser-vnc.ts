@@ -1,6 +1,5 @@
 import net from 'node:net';
-import type { Server, IncomingMessage } from 'node:http';
-import type { Duplex } from 'node:stream';
+import type { Server } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -15,8 +14,8 @@ import {
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getRuntimeEnsureQueue, getRuntimeEnsureQueueEvents } from '../queues.js';
-import { verifyAccessToken } from '../auth/jwt.js';
-import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isCanonicalUuid } from '../lib/uuid.js';
 
@@ -51,6 +50,7 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
+    guardUpgradeSocket(socket);
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(pathPrefix)) return;
     if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {
@@ -75,11 +75,13 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
+        if (auth.session.revoked) return;
         // Fast path: if the desktop VNC is ALREADY reachable, bridge straight to it. Do NOT run
         // the ensure job on a reconnect — it re-navigates Chrome to the app root (page.goto),
         // which resets an in-progress session (e.g. an install wizard) each time the bridge
         // re-establishes. The VNC bridge only needs the desktop reachable, not re-navigated.
         let desktopHost = await reachableDesktopHost(taskId, vncPort);
+        if (auth.session.revoked) return;
         if (!desktopHost) {
           // Desktop is down (a worker-boot reap / restart / first open). The api can't start it
           // (spawning task containers is worker-only), so enqueue a worker ensure job and await
@@ -93,7 +95,9 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
           desktopHost = await resolveDesktopContainer(taskId, vncPort);
         }
         const host = desktopHost;
+        if (auth.session.revoked) return;
         wss.handleUpgrade(req, socket, head, (ws) => {
+          if (!auth.session.accept(ws)) return;
           runVncBridge(ws, host, vncPort, taskId);
         });
       } catch (err) {
@@ -241,43 +245,4 @@ async function taskBelongsToUser(taskId: string, userId: string): Promise<boolea
     columns: { id: true },
   });
   return row !== undefined && row !== null;
-}
-
-async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {
-  const cookieHeader = req.headers.cookie;
-  if (!cookieHeader) return null;
-  const token = parseCookieValue(cookieHeader, ACCESS_COOKIE);
-  if (!token) return null;
-  try {
-    const payload = await verifyAccessToken(token);
-    const db = getDb();
-    const user = await db.query.users.findFirst({
-      where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
-    });
-    if (!user) return null;
-    if (user.status !== 'active') return null;
-    if (user.tokenVersion !== payload.tv) return null;
-    if (user.mustChangePassword) return null;
-    return { userId: user.id };
-  } catch {
-    return null;
-  }
-}
-
-function parseCookieValue(cookieHeader: string, name: string): string | null {
-  for (const part of cookieHeader.split(';')) {
-    const [k, ...rest] = part.trim().split('=');
-    if (k === name) return decodeURIComponent(rest.join('='));
-  }
-  return null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  try {
-    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
-  } catch {
-    // ignore
-  }
-  socket.destroy();
 }

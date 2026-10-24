@@ -3,7 +3,7 @@
 // `/core/rfb` subpath at bundle time, so BrowserVncPanel imports the bare package.
 declare module '@novnc/novnc' {
   export default class RFB {
-    constructor(target: HTMLElement, url: string, options?: Record<string, unknown>);
+    constructor(target: HTMLElement, url: string | WebSocket, options?: Record<string, unknown>);
     scaleViewport: boolean;
     resizeSession: boolean;
     focus(options?: FocusOptions): void;

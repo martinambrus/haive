@@ -819,6 +819,7 @@ export interface Task {
   autoContinue: boolean;
   currentStepId: string | null;
   currentStepIndex: number;
+  currentRound?: number;
   /** ISO time the current gate began waiting (the waiting_form step's
    *  waitingStartedAt), or null when the task is not parked at a gate. Tags the
    *  wait occurrence so the notifier re-fires when a task re-enters the same gate
@@ -2218,6 +2219,7 @@ export function buildPlan(
      *  picks a job up immediately, so uploading afterwards would race the first
      *  step's detect. */
     deferStart?: boolean;
+    expectedAttachmentCount?: number;
     /** Ask clarifying questions about an outline before expanding it. Unset: on for a brief,
      *  off for a knowledge-base build. */
     clarify?: boolean;
@@ -2236,10 +2238,15 @@ export function getPlanBuildClis(repositoryId: string): Promise<{
 }
 
 /** Enqueue a task that was created but never started. Idempotent server-side, so
- *  a double-click cannot start it twice. */
-export function startTask(taskId: string): Promise<{ ok: true; started: boolean; status: string }> {
+ *  a double-click cannot start it twice. A short recorded upload count returns
+ *  409 task_attachments_missing with landed/expected; confirmMissingAttachments bypasses it. */
+export function startTask(
+  taskId: string,
+  confirmMissingAttachments = false,
+): Promise<{ ok: true; started: boolean; status: string }> {
   return api.post<{ ok: true; started: boolean; status: string }>(`/tasks/${taskId}/action`, {
     action: 'start',
+    ...(confirmMissingAttachments ? { confirmMissingAttachments: true } : {}),
   });
 }
 
@@ -2430,6 +2437,12 @@ export interface AdminInviteCreated {
 
 export type MaintenanceState = 'normal' | 'draining' | 'maintenance';
 
+export interface StopActivityResult {
+  killed: number;
+  cancelled: number;
+  stopped: number;
+}
+
 /** A task still holding a maintenance window open. `hasLiveCli` is the distinction that decides
  *  whether an operator waits or acts: a task with a running CLI is doing work, a parked one is
  *  only holding its place. */
@@ -2442,6 +2455,8 @@ export interface BlockingTask {
   /** Absent from an api that predates it. */
   pausedByAdmin?: boolean;
   currentStepId: string | null;
+  /** Current step at the task's round; absent from older APIs. */
+  currentStepStatus?: string | null;
   updatedAt: string;
   ownerId: string | null;
   ownerName: string | null;
@@ -2503,7 +2518,10 @@ export const maintenanceApi = {
     }),
   blocking: () => api.get<BlockingResponse>('/admin/maintenance/blocking'),
   taskAction: (taskId: string, action: 'pause' | 'resume' | 'stop') =>
-    api.post<{ ok: boolean }>(`/admin/maintenance/tasks/${taskId}/action`, { action }),
+    api.post<{ ok: boolean } & Partial<StopActivityResult>>(
+      `/admin/maintenance/tasks/${taskId}/action`,
+      { action },
+    ),
   upgradeStatus: () => api.get<UpgradeStatusResponse>('/admin/maintenance/upgrade'),
   startUpgrade: (body: { version: string; force?: boolean; drainTimeoutSeconds?: number }) =>
     api.post<{ started: boolean; from: string; to: string; container: string }>(

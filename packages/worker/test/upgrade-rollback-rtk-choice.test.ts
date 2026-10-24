@@ -348,7 +348,7 @@ describe('a rollback whose prior rows hold no snapshot that decodes', () => {
     ['an empty one', {}],
     ['none', null],
   ])(
-    'writes %s as none, never as {}, and renders from the repository context',
+    'writes %s as none, never as {}, and skips the record without a surviving snapshot',
     async (_n, held) => {
       const repoPath = await root();
       const fake = database({ rtkFollowsLive: true });
@@ -373,7 +373,11 @@ describe('a rollback whose prior rows hold no snapshot that decodes', () => {
         newArtifactsToUndo: [],
         warnings: [],
       };
-      await upgradeRollbackStep.apply(stepContext(fake, repoPath), { detected } as never);
+      const out = await upgradeRollbackStep.apply(stepContext(fake, repoPath), {
+        detected,
+      } as never);
+      expect(out.recordWrite).toBe('skipped');
+      expect(fake.rows(schema.projectStateSync)).toEqual([]);
 
       const rows = fake.rows(schema.onboardingArtifacts);
       expect(rows).toHaveLength(1);

@@ -165,6 +165,9 @@ export const createTaskRequestSchema = z
     stepLoopLimits: stepLoopLimitsSchema,
     /** Created unstarted: the caller uploads its attachments, then sends the `start` action. */
     deferStart: z.boolean().optional(),
+    /** Picked original uploads (0–10,000); recorded only with deferStart, otherwise ignored.
+     *  Omitted leaves the count unrecorded, preserving the ordinary start behavior. */
+    expectedAttachmentCount: z.number().int().min(0).max(10_000).optional(),
   })
   .refine(
     (d) =>
@@ -264,6 +267,7 @@ export const taskActionSchema = z.enum(['cancel', 'retry', 'pause', 'resume', 's
 
 export const taskActionRequestSchema = z.object({
   action: taskActionSchema,
+  confirmMissingAttachments: z.boolean().optional(),
 });
 
 export type TaskAction = z.infer<typeof taskActionSchema>;

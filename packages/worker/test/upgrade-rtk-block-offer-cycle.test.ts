@@ -20,6 +20,7 @@ import {
   seedRepository,
 } from './support/upgrade-plan-fixtures.js';
 import { recordWritten } from './support/upgrade-apply-record.js';
+import { seedRollbackSnapshot } from './support/upgrade-rollback-snapshot.js';
 
 const COLUMN = {
   projectInfo: { name: 'acme', framework: 'drupal', docroot: 'web' },
@@ -67,6 +68,21 @@ async function cycle(agents: string, rtkOnAtApply: boolean) {
     rtkEnabled: rtkOnAtApply,
     renderContext: COLUMN,
   });
+  const { rtkChoiceRecorded: _recorded, ...snapshot } = COLUMN;
+  seedRollbackSnapshot(fake, {
+    userId: '00000000-0000-4000-8000-0000000000a1',
+    repositoryId: REPO,
+    taskId: '00000000-0000-4000-8000-0000000000c3',
+    snapshot,
+  });
+  fake.insert(schema.taskSteps, {
+    taskId: '00000000-0000-4000-8000-0000000000c1',
+    stepId: '01-upgrade-plan',
+    stepIndex: 1,
+    round: 0,
+    status: 'done',
+    output: { rtkFollowsLive: true },
+  });
   let clock = 1000;
   const stamp = async () => {
     clock += 1000;
@@ -100,20 +116,22 @@ async function cycle(agents: string, rtkOnAtApply: boolean) {
     return out;
   };
   const rollBack = async (over: Record<string, unknown>) => {
-    const out = await upgradeRollbackStep.apply({ ...ctxFor(loose, root), taskId: ROLLBACK }, {
-      detected: {
-        repositoryId: REPO,
-        rolledBackFromTaskId: '00000000-0000-4000-8000-0000000000c1',
-        targets: [],
-        newArtifactsToUndo: [],
-        unrecordedRewrites: [],
-        warnings: [],
-        ...over,
-      },
-      formValues: {},
-      iteration: 0,
-      previousIterations: [],
-    } as never);
+    const out = await recordWritten(
+      upgradeRollbackStep.apply({ ...ctxFor(loose, root), taskId: ROLLBACK }, {
+        detected: {
+          repositoryId: REPO,
+          rolledBackFromTaskId: '00000000-0000-4000-8000-0000000000c1',
+          targets: [],
+          newArtifactsToUndo: [],
+          unrecordedRewrites: [],
+          warnings: [],
+          ...over,
+        },
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      } as never),
+    );
     await stamp();
     return out;
   };
