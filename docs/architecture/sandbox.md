@@ -156,8 +156,10 @@ container, so `routes/ide.ts` removes `haive_access` and `haive_refresh` (every 
 trimmed exact name, `withoutSessionCookies` in `auth/cookies.ts`), `Authorization` and
 `Proxy-Authorization` from the HTTP request and from the WebSocket replay before anything is forwarded; a
 Cookie header left with no pairs is dropped. Other cookies and headers pass unchanged: an app previewed
-through `/proxy/<port>` keeps its own session cookies. The response direction is not filtered: an upstream
-`Set-Cookie` still reaches the browser, and so do `forwarded` and `x-forwarded-*`. The editor is served from
+through `/proxy/<port>` keeps its own session cookies. The response direction drops an upstream `Set-Cookie` for `haive_access` or
+`haive_refresh` (exact name, `isSessionSetCookie`), on HTTP responses and on the WebSocket upgrade
+response head, so the container cannot plant or clear the session; its other cookies, `forwarded` and
+`x-forwarded-*` still reach the browser. The editor is served from
 the api origin, which is on the state-change allow list on purpose, so this removes the credentials from
 the container's reach and nothing more.
 

@@ -95,7 +95,7 @@ interface WsRig {
   upgrade: (lines: string[], path?: string) => Promise<{ head: string; reply: string }>;
 }
 
-async function wsRig(): Promise<WsRig> {
+async function wsRig(upstreamReply?: string): Promise<WsRig> {
   let captured: ((head: string) => void) | null = null;
   const fake = net.createServer((sock) => {
     let buf = '';
@@ -106,6 +106,7 @@ async function wsRig(): Promise<WsRig> {
         const done = captured;
         captured = null;
         done(buf.slice(0, end));
+        if (upstreamReply !== undefined) sock.write(upstreamReply);
         sock.end();
       }
     });
@@ -140,6 +141,7 @@ async function wsRig(): Promise<WsRig> {
       const timer = setTimeout(() => reject(new Error('ws upgrade timed out')), 5000);
       captured = (value) => {
         head = value;
+        if (upstreamReply !== undefined) return;
         clearTimeout(timer);
         finish();
       };
@@ -160,7 +162,7 @@ async function wsRig(): Promise<WsRig> {
       client.on('data', (chunk) => (reply += chunk.toString()));
       client.on('close', () => {
         clearTimeout(timer);
-        if (!captured) return;
+        if (upstreamReply === undefined && !captured) return;
         captured = null;
         finish();
       });
@@ -446,5 +448,45 @@ describe('IDE-7 negative control', () => {
     expect(ws).toBe('other=1');
     expect(() => expect(http).toBe('other=2')).toThrow();
     expect(() => expect(ws).toBe('other=2')).toThrow();
+  });
+});
+
+describe('IDE-8 upstream cannot set or clear the Haive session cookies', () => {
+  const upstreamCookies = [
+    'haive_access=x; Path=/; HttpOnly',
+    'haive_refresh=; Max-Age=0; Path=/',
+    'ide_pref=dark; Path=/',
+    'Haive_Access=kept; Path=/',
+  ];
+  const expectedKept = ['ide_pref=dark; Path=/', 'Haive_Access=kept; Path=/'];
+
+  it('http: drops haive_access and haive_refresh, keeps other Set-Cookie lines', async () => {
+    fetchStub.mockImplementation(async () => {
+      const headers = new Headers({ 'x-up': '1' });
+      for (const line of upstreamCookies) headers.append('set-cookie', line);
+      return new Response('up', { headers });
+    });
+    const res = await app.request(`/ide/${TASK}/x`);
+    expect(res.headers.getSetCookie()).toEqual(expectedKept);
+    expect(res.headers.get('x-up')).toBe('1');
+  });
+
+  it('ws: drops them from the upgrade response and relays the rest and the frames', async () => {
+    const reply =
+      [
+        'HTTP/1.1 101 Switching Protocols',
+        'Upgrade: websocket',
+        ...upstreamCookies.map((l) => `Set-Cookie: ${l}`),
+        'Sec-WebSocket-Accept: abc',
+      ].join('\r\n') + '\r\n\r\nFRAME-BYTES';
+    const rig = await wsRig(reply);
+    const { reply: got } = await rig.upgrade([AUTH_LINE]);
+    const gotLines = got.split('\r\n');
+    expect(gotLines[0]).toBe('HTTP/1.1 101 Switching Protocols');
+    expect(gotLines.filter((l) => /^set-cookie:/i.test(l))).toEqual(
+      expectedKept.map((l) => `Set-Cookie: ${l}`),
+    );
+    expect(got).toContain('Sec-WebSocket-Accept: abc');
+    expect(got.endsWith('\r\n\r\nFRAME-BYTES')).toBe(true);
   });
 });

@@ -19,6 +19,17 @@ export function withoutSessionCookies(header: string): string | null {
   return kept.length > 0 ? kept.join('; ') : null;
 }
 
+export function isSessionSetCookie(setCookieValue: string): boolean {
+  const eq = setCookieValue.indexOf('=');
+  return SESSION_COOKIES.has((eq === -1 ? setCookieValue : setCookieValue.slice(0, eq)).trim());
+}
+
+export function withoutSessionSetCookies(upstream: Headers): void {
+  const kept = upstream.getSetCookie().filter((line) => !isSessionSetCookie(line));
+  upstream.delete('set-cookie');
+  for (const line of kept) upstream.append('set-cookie', line);
+}
+
 const isProd = process.env.NODE_ENV === 'production';
 
 const baseOptions = {
