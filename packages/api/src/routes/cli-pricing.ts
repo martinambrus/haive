@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
+  CLI_EXEC_JOB_NAMES,
   CLI_PROVIDER_LIST,
   DISPLAY_CURRENCIES,
   PRICE_FEEDS,
@@ -10,9 +11,11 @@ import {
   logger,
   normalizeModelKey,
   type CliProviderName,
+  type RefreshCliVersionsJobResult,
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { enqueueCliVersionRefresh } from '../lib/cli-version-refresh.js';
+import { loadPollableJob } from '../lib/cli-job-poll.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -239,4 +242,17 @@ cliPricingRoutes.post('/refresh', async (c) => {
   const job = await enqueueCliVersionRefresh();
   log.info({ jobId: job.id }, 'manual price refresh enqueued');
   return c.json({ jobId: job.id });
+});
+
+/** Poll the same refresh job that updates catalog, model prices and FX together. */
+cliPricingRoutes.get('/refresh/:jobId', async (c) => {
+  const job = await loadPollableJob(c.req.param('jobId'), CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS);
+  const state = await job.getState();
+  if (state === 'completed') {
+    return c.json({ status: 'done', result: job.returnvalue as RefreshCliVersionsJobResult });
+  }
+  if (state === 'failed') {
+    return c.json({ status: 'failed', error: job.failedReason || 'refresh failed' });
+  }
+  return c.json({ status: 'pending', state });
 });

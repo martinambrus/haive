@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api-client';
+import { runPricingRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { Button, Badge, Input, FormError } from '@/components/ui';
 import { usePageTitle } from '@/lib/use-page-title';
 
@@ -84,6 +85,7 @@ export default function PricingPage() {
   const [data, setData] = useState<PricingResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refreshPhase, setRefreshPhase] = useState<QueuedJobPhase | null>(null);
   const [filter, setFilter] = useState('');
   const [providerFilter, setProviderFilter] = useState('');
 
@@ -131,16 +133,16 @@ export default function PricingPage() {
   }
 
   async function refreshNow() {
+    setRefreshPhase('queued');
     setBusy(true);
     setError(null);
     try {
-      await api.post('/cli-pricing/refresh', {});
-      // The job runs on the worker; give it a moment before re-reading rather than
-      // showing stale counts that look like the refresh did nothing.
-      setTimeout(() => void load(), 4000);
+      await runPricingRefresh(setRefreshPhase);
+      await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to enqueue refresh');
+      setError(err instanceof Error ? err.message : 'Failed to refresh pricing');
     } finally {
+      setRefreshPhase(null);
       setBusy(false);
     }
   }
@@ -213,7 +215,11 @@ export default function PricingPage() {
           </p>
         </div>
         <Button variant="secondary" size="sm" disabled={busy} onClick={() => void refreshNow()}>
-          Refresh now
+          {refreshPhase === null
+            ? 'Refresh now'
+            : refreshPhase === 'queued'
+              ? 'Queued...'
+              : 'Refreshing...'}
         </Button>
       </div>
 

@@ -98,3 +98,7 @@ export async function runCatalogVersionRefresh(
   );
   return entry;
 }
+
+export async function runPricingRefresh(onPhase?: (phase: QueuedJobPhase) => void): Promise<void> {
+  await runQueuedJob('/cli-pricing/refresh', (jobId) => `/cli-pricing/refresh/${jobId}`, onPhase);
+}
