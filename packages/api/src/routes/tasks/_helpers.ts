@@ -1122,6 +1122,21 @@ export async function appendTaskEvent(
   });
 }
 
+/** Stamped at write time, which follows the task row lock: findAdminPausedTaskIds orders by it. */
+export async function appendPauseEvent(
+  tx: DbTx,
+  taskId: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await tx.insert(schema.taskEvents).values({
+    taskId,
+    taskStepId: null,
+    eventType: 'task.paused',
+    payload,
+    createdAt: sql`clock_timestamp()`,
+  });
+}
+
 /** Takes the caller's tx so the audit row commits or rolls back with the resume it records. */
 export async function recordAdminResume(
   tx: DbTx,

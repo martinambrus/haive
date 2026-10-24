@@ -94,6 +94,7 @@ import { logAuditEvent } from '../../lib/audit.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   adminPauseLocks,
+  appendPauseEvent,
   appendTaskEvent,
   buildUpcomingCliSteps,
   currentStepParkedSql,
@@ -1369,7 +1370,7 @@ taskRoutes.post('/:id/action', async (c) => {
           .where(and(eq(schema.tasks.id, id), isNull(schema.tasks.pausedAt)))
           .returning({ id: schema.tasks.id });
         if (rows.length === 0) return false;
-        await appendTaskEvent(tx, id, null, 'task.paused', { by: userId });
+        await appendPauseEvent(tx, id, { by: userId });
         return true;
       });
       if (!paused) {

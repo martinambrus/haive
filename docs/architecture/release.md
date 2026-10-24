@@ -99,20 +99,22 @@ restarted. A pause an administrator makes is theirs to lift, and an administrato
 already paused makes it theirs: under the task row lock (`FOR UPDATE`) it writes a newer `byAdmin`
 `task.paused` event and a `task.admin_pause` row marked `tookOver`, in one transaction, and leaves
 `paused_at` alone (the stamp anchors the runtime reaper's paused-grace); a pause that is already an
-administrator's writes nothing. The newest `task.paused` event (ordered by `created_at`, then `id`; the id
-is a random uuid, so a tie is made stable, not chronological) says who made the pause in force (`byAdmin`,
-`findAdminPausedTaskIds`), and the page's rows carry it as `pausedByAdmin`: an owner's pause offers Resume
-and Take over pause, an administrator's only Resume. While it is an administrator's, the owner's
-Resume answers 409 `paused_by_admin` and keeps the pause, judged after the clear inside the resume's
-transaction so that a pause placed since the route read it is the one refused. An owner's Retry of a failed
-task revives it but leaves that pause standing (a refusal would leave its owner nothing to do until an
-administrator acts); it lifts the hold it read only after judging whose it is again under the task row
-lock (`liftReadPause`), since a takeover keeps the stamp the Retry read. Cancel still clears any pause,
-and an administrator may lift it from either route. One who owns the task and lifts an
-administrator's pause through the owner route gets the same `byAdmin` `task.resumed` event and
-`task.admin_resume` row as from the page (`recordAdminResume`, in the resume's transaction, so a row that
-cannot be written undoes it); lifting their own owner pause stays an owner action with neither, and a
-Retry that clears an administrator's pause for an administrator records only `task.retried`.
+administrator's writes nothing. The newest `task.paused` event says who made the pause in force
+(`byAdmin`, `findAdminPausedTaskIds`). Events are ordered by `created_at`, then `id`, and both writers
+(`appendPauseEvent`) stamp `created_at` with `clock_timestamp()` once they hold the row lock, so it
+follows the order the lock was held in, which the default (the transaction's start) does not; the id is
+a random uuid, so it only makes a tie stable. The page's rows carry the answer as `pausedByAdmin`: an
+owner's pause offers Resume and Take over pause, an administrator's only Resume. While it is an
+administrator's, the owner's Resume answers 409 `paused_by_admin` and keeps the pause, judged after the
+clear inside the resume's transaction so that a pause placed since the route read it is the one refused.
+An owner's Retry of a failed task revives it but leaves that pause standing (a refusal would leave its
+owner nothing to do until an administrator acts); it lifts the hold it read only after judging whose it
+is again under the task row lock (`liftReadPause`), since a takeover keeps the stamp the Retry read.
+Cancel still clears any pause, and an administrator may lift it from either route. One who owns the task
+and lifts an administrator's pause through the owner route gets the same `byAdmin` `task.resumed` event
+and `task.admin_resume` row as from the page (`recordAdminResume`, in the resume's transaction, so a row
+that cannot be written undoes it); lifting their own owner pause stays an owner action with neither, and
+a Retry that clears an administrator's pause for an administrator records only `task.retried`.
 `GET /tasks/:id` carries `pauseLocked` (the pause is an administrator's and the viewer is not one), which
 hides the task page's Resume and changes its banner.
 In the worker, the allowance auto-resume and an answer to a parked form do not reopen a failed task while

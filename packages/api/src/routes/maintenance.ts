@@ -28,7 +28,12 @@ import {
   type AuditEvent,
 } from '../lib/audit.js';
 import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js';
-import { appendTaskEvent, findAdminPausedTaskIds, recordAdminResume } from './tasks/_helpers.js';
+import {
+  appendPauseEvent,
+  appendTaskEvent,
+  findAdminPausedTaskIds,
+  recordAdminResume,
+} from './tasks/_helpers.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { findLiveUpgradeRun, listUpgradeRuns } from '../lib/upgrade-run.js';
@@ -337,7 +342,7 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
         } else {
           ev = auditEvent({ pausedAt: stamp.toISOString(), tookOver: true });
         }
-        await appendTaskEvent(tx, taskId, null, 'task.paused', {
+        await appendPauseEvent(tx, taskId, {
           by: actorUserId,
           byAdmin: true,
           reason: 'maintenance',
