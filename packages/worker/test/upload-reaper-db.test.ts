@@ -278,6 +278,20 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
       expect(finished.dumps).toBe(1);
     });
 
+    it('parks a dump claimed 25 h ago whose removal keeps failing, and the next pass leaves it', async () => {
+      const upload = await dump(25 * HOUR, 'reaping');
+      dumpFilesFail();
+
+      await reapAbandonedUploads(db);
+
+      expect(await statusOf(upload.id)).toBe('reap_failed');
+      expect(await exists(upload.file)).toBe(true);
+
+      await reapAbandonedUploads(db);
+
+      expect(await statusOf(upload.id)).toBe('reap_failed');
+    });
+
     it.each([
       ['just now, beside an ended task', 0, 'cancelled'],
       ['5 days ago, beside a live task', 5 * 24 * HOUR, 'running'],
@@ -317,7 +331,7 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
     });
 
     it('is left alone by the session and file passes, which still take what is theirs', async () => {
-      const upload = await dump(5 * 24 * HOUR, 'reaping');
+      const upload = await dump(HOUR, 'reaping');
       dumpFilesFail();
       const idleId = randomUUID();
       const idle = path.join(root, 'repos', '_uploads', userId, `db-${idleId}.sql.partial`);
@@ -614,6 +628,14 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
       const old = new Date(Date.now() - 72 * HOUR);
       await utimes(done, old, old);
       await repos.insert(doneId, done, 'complete', old);
+      await db.insert(schema.repositories).values({
+        id: doneId,
+        userId,
+        name: 'archive-test',
+        source: 'upload',
+        storagePath: path.join(root, userId, doneId),
+        status: 'cloning',
+      });
 
       await reapAbandonedUploads(db);
 
@@ -831,5 +853,174 @@ describe.skipIf(!url)('the upload reaper against Postgres', () => {
         expect(await exists(file)).toBe(false);
       });
     });
+  });
+
+  describe('a cancelled dump row a day after it was cancelled', () => {
+    async function cancelledDump() {
+      const id = randomUUID();
+      await db.insert(schema.dbUploads).values({
+        id,
+        userId,
+        filename: 'a.sql',
+        dumpFormat: 'sql',
+        totalSize: 10,
+        bytesReceived: 10,
+        chunkSize: 10,
+        dumpPath: path.join(root, 'repos', '_uploads', userId, `db-${id}.sql`),
+        status: 'cancelled',
+        updatedAt: new Date(Date.now() - 25 * HOUR),
+      });
+      return id;
+    }
+    const rowCount = async (id: string) =>
+      (
+        await db
+          .select({ id: schema.dbUploads.id })
+          .from(schema.dbUploads)
+          .where(eq(schema.dbUploads.id, id))
+      ).length;
+
+    it.each(['completed', 'failed', 'running'] as const)(
+      'stays with the link of a %s task while an unlinked one is deleted',
+      async (taskStatus) => {
+        const linked = await cancelledDump();
+        const free = await cancelledDump();
+        await link(linked, taskStatus, 5 * 24 * HOUR);
+
+        await reapAbandonedUploads(db);
+
+        expect(await rowCount(linked)).toBe(1);
+        expect(await rowCount(free)).toBe(0);
+        const task = await db.query.tasks.findFirst({ where: eq(schema.tasks.userId, userId) });
+        expect(task!.dbUploadId).toBe(linked);
+      },
+    );
+  });
+});
+
+describe.skipIf(!url)('the finished repository archive pass against Postgres', () => {
+  let db: Database;
+  let root: string;
+  let userId: string;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeAll(async () => {
+    db = createDatabase(url!);
+    root = await mkdtemp(path.join(tmpdir(), 'upload-reaper-archive-'));
+    for (const [env, dir] of [
+      ['REPO_STORAGE_ROOT', 'repos'],
+      ['BUNDLE_STORAGE_ROOT', 'bundles'],
+    ] as const) {
+      saved[env] = process.env[env];
+      process.env[env] = path.join(root, dir);
+    }
+  });
+  beforeEach(async () => {
+    userId = randomUUID();
+    await db.insert(schema.users).values({
+      id: userId,
+      emailEncrypted: 'test',
+      emailBlindIndex: userId,
+      passwordHash: 'test',
+    });
+    await mkdir(path.join(root, 'repos', '_uploads', userId), { recursive: true });
+  });
+  afterEach(async () => {
+    await db.delete(schema.users).where(eq(schema.users.id, userId));
+  });
+  afterAll(async () => {
+    for (const [env, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[env];
+      else process.env[env] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+    await db.$client.end({ timeout: 5 });
+  });
+
+  const exists = async (file: string) => (await lstat(file).catch(() => null)) !== null;
+
+  async function archive(status: 'error' | 'cloning' | 'ready' | null) {
+    const id = randomUUID();
+    if (status !== null) {
+      await db.insert(schema.repositories).values({
+        id,
+        userId,
+        name: 'archive-test',
+        source: 'upload',
+        storagePath: path.join(root, userId, id),
+        status,
+      });
+    }
+    const file = path.join(root, 'repos', '_uploads', userId, `${id}.zip`);
+    await writeFile(file, 'finished bytes');
+    const old = new Date(Date.now() - 25 * HOUR);
+    await utimes(file, old, old);
+    return file;
+  }
+
+  it.each([
+    ['error', true],
+    [null, true],
+    ['cloning', false],
+    ['ready', false],
+  ] as const)('with repository %s the archive is removed: %s', async (status, removed) => {
+    const file = await archive(status);
+
+    await reapAbandonedUploads(db);
+
+    expect(await exists(file)).toBe(!removed);
+  });
+
+  it('keeps a legacy archive whose owner has a cloning repository and removes it once none is', async () => {
+    const file = await archive(null);
+    const cloningId = randomUUID();
+    await db.insert(schema.repositories).values({
+      id: cloningId,
+      userId,
+      name: 'archive-test',
+      source: 'upload',
+      storagePath: path.join(root, userId, cloningId),
+      status: 'cloning',
+    });
+
+    await reapAbandonedUploads(db);
+    expect(await exists(file)).toBe(true);
+
+    await db
+      .update(schema.repositories)
+      .set({ status: 'ready' })
+      .where(eq(schema.repositories.id, cloningId));
+    await reapAbandonedUploads(db);
+    expect(await exists(file)).toBe(false);
+  });
+});
+
+describe.skipIf(!url)('the tasks.db_upload_id index', () => {
+  let db: Database;
+  beforeAll(() => {
+    db = createDatabase(url!);
+  });
+  afterAll(async () => {
+    await db.$client.end({ timeout: 5 });
+  });
+
+  it('exists on tasks (db_upload_id)', async () => {
+    const rows = await db.execute(
+      sql`SELECT indexdef FROM pg_indexes WHERE tablename = 'tasks' AND indexname = 'tasks_db_upload_id_idx'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(String(rows[0]!.indexdef)).toContain('(db_upload_id)');
+  });
+
+  it('serves the keyed lookup the reaper issues', async () => {
+    const plan = await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL enable_seqscan = off`);
+      return tx.execute(
+        sql.raw(
+          `EXPLAIN (FORMAT JSON) SELECT id FROM tasks WHERE db_upload_id IN ('${randomUUID()}', '${randomUUID()}')`,
+        ),
+      );
+    });
+    expect(JSON.stringify(plan)).toContain('tasks_db_upload_id_idx');
   });
 });

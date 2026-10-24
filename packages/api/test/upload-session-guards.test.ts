@@ -1446,3 +1446,139 @@ describe('R2: a cancel leaves the session reaping while a file will not go', () 
     },
   );
 });
+
+describe('I9: a complete on a session that is over', () => {
+  interface Case {
+    name: string;
+    family: Family;
+    at: 'partial' | 'finished';
+    replace?: boolean;
+  }
+  const [repos, dumps, bundles] = FAMILIES as [Family, Family, Family];
+  const cases: Case[] = [
+    { name: 'repos', family: repos, at: 'partial' },
+    { name: 'db-dumps (partial)', family: dumps, at: 'partial' },
+    { name: 'db-dumps (finished)', family: dumps, at: 'finished' },
+    { name: 'bundles create', family: bundles, at: 'partial' },
+    { name: 'bundle replace', family: bundles, at: 'partial', replace: true },
+  ];
+
+  async function stageCase(c: Case, status: string, bytesReceived: number): Promise<string> {
+    if (c.replace) await seedZipBundle();
+    await stage(c.family, { status, at: c.at });
+    fake.patch(c.family.table, SESSION, { bytesReceived });
+    if (c.replace) fake.patch(schema.customBundleUploads, SESSION, { bundleId: BUNDLE });
+    return c.replace ? `/${BUNDLE}/replace/${SESSION}/complete` : c.family.completeUrl(SESSION);
+  }
+
+  describe.each(['reaping', 'reap_failed'])('a %s session', (over) => {
+    it.each(cases)('$name: with short bytes answers 409 session cancelled', async (c) => {
+      const url = await stageCase(c, over, 3);
+      const before = c.family.created();
+
+      const res = await request(c.family.app, 'POST', url);
+
+      expect(res.status).toBe(409);
+      expect(await errorOf(res)).toBe('session cancelled');
+      expect(rowOf(c.family).status).toBe(over);
+      expect(c.family.created()).toBe(before);
+      expect(queue.jobs).toHaveLength(0);
+    });
+
+    it.each(cases)('$name: with all bytes answers 409 session cancelled', async (c) => {
+      const url = await stageCase(c, over, CONTENT.length);
+      const before = c.family.created();
+
+      const res = await request(c.family.app, 'POST', url);
+
+      expect(res.status).toBe(409);
+      expect(await errorOf(res)).toBe('session cancelled');
+      expect(rowOf(c.family).status).toBe(over);
+      expect(c.family.created()).toBe(before);
+      expect(queue.jobs).toHaveLength(0);
+    });
+  });
+
+  it.each(cases)(
+    '$name: an uploading session with short bytes still answers incomplete',
+    async (c) => {
+      const url = await stageCase(c, 'uploading', 3);
+
+      const res = await request(c.family.app, 'POST', url);
+
+      expect(res.status).toBe(409);
+      expect(await errorOf(res)).toBe(`incomplete: 3/${CONTENT.length} bytes`);
+    },
+  );
+});
+
+describe('I1: a chunked upload repository takes the session id', () => {
+  const repos = FAMILIES[0]!;
+
+  it('names the repository, the response and the finished archive after the session', async () => {
+    const staged = await stage(repos);
+
+    const res = await request(repos.app, 'POST', repos.completeUrl(SESSION));
+
+    expect(res.status).toBe(201);
+    const [repository] = fake.rows(schema.repositories);
+    expect(repository!.id).toBe(SESSION);
+    expect(((await res.json()) as { repository: { id: string } }).repository.id).toBe(SESSION);
+    expect(await exists(absolute(repos, `_uploads/${USER}/${SESSION}.zip`))).toBe(true);
+    expect((queue.jobs[0]!.data as { archivePath: string }).archivePath).toMatch(
+      new RegExp(`/${repository!.id}\\.zip$`),
+    );
+    expect(staged.finished).toBe(absolute(repos, `_uploads/${USER}/${SESSION}.zip`));
+  });
+
+  it('leaves the finished archive recorded on the session, once', async () => {
+    const staged = await stage(repos);
+
+    await request(repos.app, 'POST', repos.completeUrl(SESSION));
+
+    expect(await exists(staged.partial)).toBe(false);
+    expect(rowOf(repos)).toMatchObject({ status: 'complete', archivePath: staged.finished });
+    expect(fake.rows(schema.repositories)).toHaveLength(1);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it('a repeat complete of a dead claim whose file already moved ends with the session id', async () => {
+    const staged = await stage(repos, { status: 'completing', at: 'finished', idleMs: 11 * MIN });
+    fake.patch(repos.table, SESSION, { archivePath: staged.partial });
+
+    const res = await request(repos.app, 'POST', repos.completeUrl(SESSION));
+
+    expect(res.status).toBe(201);
+    expect(fake.rows(schema.repositories).map((r) => r.id)).toEqual([SESSION]);
+  });
+});
+
+describe('I3a: a duplicate complete of a session another complete finished', () => {
+  const [repos, dumps] = FAMILIES as [Family, Family, Family];
+
+  it.each([repos, dumps])(
+    '$name: a second complete after a successful first answers 409 session already completed, and creates nothing more',
+    async (family) => {
+      await stage(family);
+
+      const first = await request(family.app, 'POST', family.completeUrl(SESSION));
+      const second = await request(family.app, 'POST', family.completeUrl(SESSION));
+
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(409);
+      expect(await errorOf(second)).toBe('session already completed');
+      expect(family.created()).toBe(family.made);
+      expect(queue.jobs).toHaveLength(family.jobs);
+    },
+  );
+
+  it('db-dumps: a consumed session answers 409 session already completed', async () => {
+    await stage(dumps, { status: 'consumed' });
+
+    const res = await request(dumps.app, 'POST', dumps.completeUrl(SESSION));
+
+    expect(res.status).toBe(409);
+    expect(await errorOf(res)).toBe('session already completed');
+    expect(rowOf(dumps).status).toBe('consumed');
+  });
+});

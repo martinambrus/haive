@@ -22,6 +22,7 @@ import {
   type Database,
 } from '@haive/database';
 import {
+  archiveFormatSchema,
   CLI_EXEC_JOB_NAMES,
   CONFIG_KEYS,
   configService,
@@ -3929,6 +3930,13 @@ async function handleCleanupRepoResources(
       repairPermissions: true,
     }).catch((err: unknown) =>
       logger.warn({ err, path: payload.storagePath }, 'repo-cleanup: workspace rm failed'),
+    );
+  }
+
+  for (const ext of archiveFormatSchema.options) {
+    const rel = `_uploads/${payload.userId}/${payload.repositoryId}.${ext}`;
+    await removeNoFollow(WORKER_REPO_STORAGE_ROOT, rel).catch((err: unknown) =>
+      logger.warn({ err, rel }, 'repo-cleanup: upload archive rm failed'),
     );
   }
 

@@ -38,6 +38,7 @@ import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
 import {
   cancelUploadSession,
+  isSessionOver,
   isWholeFile,
   withCompleteClaim,
 } from '../lib/upload-complete-claim.js';
@@ -584,7 +585,8 @@ function sessionFromRow(row: typeof schema.repoUploads.$inferSelect) {
     totalSize: Number(row.totalSize),
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
-    status: row.status as 'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping',
+    status: row.status as
+      'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping' | 'reap_failed',
   };
 }
 
@@ -733,11 +735,15 @@ repoRoutes.put('/upload/:id/chunk', async (c) => {
       throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
     }
 
-    return tx
+    const advanced = await tx
       .update(schema.repoUploads)
       .set({ bytesReceived: end + 1, updatedAt: new Date() })
-      .where(eq(schema.repoUploads.id, row.id))
+      .where(and(eq(schema.repoUploads.id, row.id), eq(schema.repoUploads.status, 'uploading')))
       .returning();
+    if (advanced.length === 0) {
+      throw new HttpError(409, 'session is no longer uploading');
+    }
+    return advanced;
   });
 
   return c.json({ session: sessionFromRow(updated[0]!) });
@@ -752,7 +758,7 @@ repoRoutes.post('/upload/:id/complete', requireNewWorkAllowed, async (c) => {
   if (row.status === 'complete') {
     throw new HttpError(409, 'session already completed');
   }
-  if (row.status === 'cancelled') {
+  if (isSessionOver(row.status)) {
     throw new HttpError(409, 'session cancelled');
   }
   if (Number(row.bytesReceived) !== Number(row.totalSize)) {
@@ -788,6 +794,7 @@ repoRoutes.post('/upload/:id/complete', requireNewWorkAllowed, async (c) => {
       const [created] = await tx
         .insert(schema.repositories)
         .values({
+          id: row.id,
           userId,
           name: repoName,
           source: 'upload',

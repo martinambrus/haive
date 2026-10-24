@@ -36,6 +36,7 @@ import { writeBodyToHeld } from '../lib/held-write.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
 import {
   cancelUploadSession,
+  isSessionOver,
   isWholeFile,
   withCompleteClaim,
 } from '../lib/upload-complete-claim.js';
@@ -148,7 +149,8 @@ function uploadSessionFromRow(
     totalSize: Number(row.totalSize),
     bytesReceived: Number(row.bytesReceived),
     chunkSize: row.chunkSize,
-    status: row.status as 'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping',
+    status: row.status as
+      'uploading' | 'completing' | 'complete' | 'cancelled' | 'reaping' | 'reap_failed',
   };
 }
 
@@ -498,11 +500,20 @@ bundleRoutes.put('/uploads/:id/chunk', async (c) => {
       throw new HttpError(500, `chunk write failed: ${(err as Error).message}`);
     }
 
-    return tx
+    const advanced = await tx
       .update(schema.customBundleUploads)
       .set({ bytesReceived: end + 1, updatedAt: new Date() })
-      .where(eq(schema.customBundleUploads.id, row.id))
+      .where(
+        and(
+          eq(schema.customBundleUploads.id, row.id),
+          eq(schema.customBundleUploads.status, 'uploading'),
+        ),
+      )
       .returning();
+    if (advanced.length === 0) {
+      throw new HttpError(409, 'session is no longer uploading');
+    }
+    return advanced;
   });
 
   return c.json({ session: uploadSessionFromRow(updated[0]!) });
@@ -520,7 +531,7 @@ bundleRoutes.post('/uploads/:id/complete', requireNewWorkAllowed, async (c) => {
   if (row.status === 'complete') {
     return c.json(await completedUploadBody(userId, row.id));
   }
-  if (row.status === 'cancelled') {
+  if (isSessionOver(row.status)) {
     throw new HttpError(409, 'session cancelled');
   }
   if (Number(row.bytesReceived) !== Number(row.totalSize)) {
@@ -724,7 +735,7 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
   if (row.status === 'complete') {
     throw new HttpError(409, 'session already completed');
   }
-  if (row.status === 'cancelled') {
+  if (isSessionOver(row.status)) {
     throw new HttpError(409, 'session cancelled');
   }
   if (Number(row.bytesReceived) !== Number(row.totalSize)) {

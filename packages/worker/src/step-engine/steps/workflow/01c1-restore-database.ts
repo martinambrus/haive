@@ -123,7 +123,12 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
       const upload = await ctx.db.query.dbUploads.findFirst({
         where: eq(schema.dbUploads.id, task.dbUploadId),
       });
-      if ((upload?.status === 'cancelled' || upload?.status === 'reaping') && !state?.importedAt)
+      if (
+        (upload?.status === 'cancelled' ||
+          upload?.status === 'reaping' ||
+          upload?.status === 'reap_failed') &&
+        !state?.importedAt
+      )
         throw new Error(
           'The uploaded database dump was removed after the task ended. Upload it again and start a new task with it.',
         );

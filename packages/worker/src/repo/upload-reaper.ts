@@ -1,5 +1,16 @@
 import path from 'node:path';
-import { and, eq, gt, gte, inArray, isNotNull, lt, notExists, notInArray, or } from 'drizzle-orm';
+import {
+  and,
+  eq,
+  getTableName,
+  gt,
+  gte,
+  inArray,
+  lt,
+  notExists,
+  notInArray,
+  or,
+} from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { lstatNoFollow, readdirNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
@@ -8,6 +19,7 @@ import { splitUploadPath } from './worktree-paths.js';
 const log = logger.child({ module: 'upload-reaper' });
 
 const IDLE_MS = 24 * 60 * 60 * 1000;
+const REAP_RETRY_MS = IDLE_MS;
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 const UPLOADS_DIR = '_uploads';
 const BATCH = 100;
@@ -16,6 +28,7 @@ const ENDED_TASK_STATUSES = ['completed', 'failed', 'cancelled'] as const;
 // Group 1 of every shape built from it is the session id.
 const UUID = '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})';
 const ARCHIVE_PARTIAL = new RegExp(`^${UUID}\\.(zip|tar|tar\\.gz)\\.partial$`);
+const ARCHIVE_FINISHED = new RegExp(`^${UUID}\\.(zip|tar|tar\\.gz)$`);
 // The extension rule is dumpDiskExtension in the api's db-dumps.ts.
 const DUMP_PARTIAL = new RegExp(`^db-${UUID}\\.[a-z0-9.]{1,16}\\.partial$`);
 const DUMP_FILE = new RegExp(`^db-${UUID}\\.[a-z0-9.]{1,16}$`);
@@ -114,14 +127,24 @@ async function claimEndedDumps(db: Database, cutoff: Date): Promise<void> {
     .where(and(eq(schema.dbUploads.status, 'complete'), lt(schema.dbUploads.updatedAt, cutoff)));
   if (dumps.length === 0) return;
 
-  const tasks = await db
-    .select({
-      dumpId: schema.tasks.dbUploadId,
-      status: schema.tasks.status,
-      updatedAt: schema.tasks.updatedAt,
-    })
-    .from(schema.tasks)
-    .where(isNotNull(schema.tasks.dbUploadId));
+  const tasks: { dumpId: string | null; status: string; updatedAt: Date }[] = [];
+  for (let i = 0; i < dumps.length; i += BATCH) {
+    tasks.push(
+      ...(await db
+        .select({
+          dumpId: schema.tasks.dbUploadId,
+          status: schema.tasks.status,
+          updatedAt: schema.tasks.updatedAt,
+        })
+        .from(schema.tasks)
+        .where(
+          inArray(
+            schema.tasks.dbUploadId,
+            dumps.slice(i, i + BATCH).map((dump) => dump.id),
+          ),
+        )),
+    );
+  }
   const pinned = new Set<string>();
   for (const task of tasks) {
     if (task.dumpId === null) continue;
@@ -154,7 +177,12 @@ async function finishReaping(
 ): Promise<{ sessions: number; dumps: number }> {
   const table = kind.table;
   const rows = await db
-    .select({ id: table.id, userId: table.userId, stored: kind.pathColumn })
+    .select({
+      id: table.id,
+      userId: table.userId,
+      stored: kind.pathColumn,
+      updatedAt: table.updatedAt,
+    })
     .from(table)
     .where(eq(table.status, 'reaping'));
   const done = { sessions: 0, dumps: 0 };
@@ -169,15 +197,32 @@ async function finishReaping(
       const files = rel === null ? [] : [rel];
       if (partialRel !== null && kind.finalBesidePartial) files.push(finalRelOf(partialRel));
       let gone = true;
+      let lastErr: unknown;
       for (const file of files) {
         try {
           await removeFile(kind.root(), file);
         } catch (err) {
           gone = false;
+          lastErr = err;
           log.warn({ err, rel: file }, 'reaping upload file was not removed');
         }
       }
-      if (!gone) continue;
+      if (!gone) {
+        if (row.updatedAt.getTime() < Date.now() - REAP_RETRY_MS) {
+          const [parked] = await db
+            .update(table)
+            .set({ status: 'reap_failed', updatedAt: new Date() })
+            .where(and(eq(table.id, row.id), eq(table.status, 'reaping')))
+            .returning({ id: table.id });
+          if (parked !== undefined) {
+            log.error(
+              { err: lastErr, id: row.id, table: getTableName(table), stored: row.stored },
+              'upload removal kept failing for a day; the row is parked as reap_failed',
+            );
+          }
+        }
+        continue;
+      }
       const [cancelled] = await db
         .update(table)
         .set({ status: 'cancelled', updatedAt: new Date() })
@@ -191,6 +236,33 @@ async function finishReaping(
     }
   }
   return done;
+}
+
+// A row turns cancelled only once every file of it is gone. A task that names a cancelled dump
+// keeps the row: deleting it would null the task's link and a Retry would skip the restore.
+async function deleteCancelledSessions(
+  db: Database,
+  kind: UploadKind,
+  cutoff: Date,
+): Promise<void> {
+  const table = kind.table;
+  const rows = await db
+    .select({ id: table.id })
+    .from(table)
+    .where(and(eq(table.status, 'cancelled'), lt(table.updatedAt, cutoff)));
+  for (let i = 0; i < rows.length; i += BATCH) {
+    let ids = rows.slice(i, i + BATCH).map((row) => row.id);
+    if (table === schema.dbUploads) {
+      const named = await db
+        .select({ dumpId: schema.tasks.dbUploadId })
+        .from(schema.tasks)
+        .where(inArray(schema.tasks.dbUploadId, ids));
+      const kept = new Set(named.map((task) => task.dumpId));
+      ids = ids.filter((id) => !kept.has(id));
+    }
+    if (ids.length === 0) continue;
+    await db.delete(table).where(and(inArray(table.id, ids), eq(table.status, 'cancelled')));
+  }
 }
 
 async function claimDump(db: Database, dumpId: string, cutoff: Date): Promise<boolean> {
@@ -238,13 +310,44 @@ async function recentSessions(db: Database, ids: string[], cutoff: Date): Promis
     const rows = await db
       .select({ id: kind.table.id })
       .from(kind.table)
-      .where(and(inArray(kind.table.id, ids), gt(kind.table.updatedAt, cutoff)));
+      .where(
+        and(
+          inArray(kind.table.id, ids),
+          or(gt(kind.table.updatedAt, cutoff), eq(kind.table.status, 'reap_failed')),
+        ),
+      );
     for (const row of rows) recent.add(row.id);
   }
   return recent;
 }
 
-async function reapOrphanPartials(db: Database, root: string, shapes: RegExp[]): Promise<number> {
+// The ids of a finished archive's repositories that still need it: anything but a failed one. An
+// id no repository carries may be a legacy archive named by its upload session, so it stays while
+// its owner has a repository still cloning.
+async function liveRepositories(
+  db: Database,
+  ids: string[],
+  owner: string,
+  cloningOwners: () => Promise<Set<string>>,
+): Promise<Set<string>> {
+  const rows = await db
+    .select({ id: schema.repositories.id, status: schema.repositories.status })
+    .from(schema.repositories)
+    .where(inArray(schema.repositories.id, ids));
+  const known = new Set(rows.map((row) => row.id));
+  const live = new Set(rows.filter((row) => row.status !== 'error').map((row) => row.id));
+  if (known.size < ids.length && (await cloningOwners()).has(owner)) {
+    for (const id of ids) if (!known.has(id)) live.add(id);
+  }
+  return live;
+}
+
+async function reapOrphanPartials(
+  db: Database,
+  root: string,
+  shapes: RegExp[],
+  alsoKept?: (ids: string[], owner: string) => Promise<Set<string>>,
+): Promise<number> {
   const owners = await readdirNoFollow(root, UPLOADS_DIR);
   if (owners === null) return 0;
   const cutoff = new Date(Date.now() - IDLE_MS);
@@ -271,14 +374,25 @@ async function reapOrphanPartials(db: Database, root: string, shapes: RegExp[]):
         batch.map((partial) => partial.session),
         cutoff,
       );
+      const kept = alsoKept
+        ? await alsoKept(
+            batch.map((file) => file.session),
+            owner.name,
+          )
+        : null;
       for (const { rel, session } of batch) {
-        if (recent.has(session)) continue;
+        if (recent.has(session) || kept?.has(session)) continue;
         try {
           if (await removeFile(root, rel)) removed += 1;
         } catch (err) {
           log.warn({ err, rel }, 'orphan upload partial was not removed');
         }
       }
+    }
+    const left = await readdirNoFollow(root, dirRel);
+    const own = await lstatNoFollow(root, dirRel);
+    if (left?.length === 0 && own !== null && own.stats.mtimeMs < cutoff.getTime()) {
+      await removeNoFollow(root, dirRel).catch(() => undefined);
     }
   }
   return removed;
@@ -308,9 +422,31 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
     result.sessions += done.sessions;
     result.dumps += done.dumps;
   }
+  for (const kind of KINDS) {
+    await guarded(
+      'a cancelled-row pass',
+      () => deleteCancelledSessions(db, kind, cutoff),
+      undefined,
+    );
+  }
   result.orphans += await guarded(
     'the repository file pass',
     () => reapOrphanPartials(db, repoRoot(), [ARCHIVE_PARTIAL, DUMP_PARTIAL]),
+    0,
+  );
+  let cloning: Promise<Set<string>> | null = null;
+  const cloningOwners = () =>
+    (cloning ??= db
+      .select({ userId: schema.repositories.userId })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.status, 'cloning'))
+      .then((rows) => new Set(rows.map((row) => row.userId))));
+  result.orphans += await guarded(
+    'the finished archive pass',
+    () =>
+      reapOrphanPartials(db, repoRoot(), [ARCHIVE_FINISHED], (ids, owner) =>
+        liveRepositories(db, ids, owner, cloningOwners),
+      ),
     0,
   );
   result.orphans += await guarded(

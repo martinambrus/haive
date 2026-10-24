@@ -16,7 +16,7 @@ import { users } from './auth.js';
  *  of extracted into a repository. status: uploading | completing | complete | reaping |
  *  cancelled | consumed (set once the import step has loaded it and removed the
  *  file); reaping is a session or completed dump whose files a cancel or the upload reaper
- *  is still removing. */
+ *  is still removing; reap_failed is a reaping row whose removal kept failing for a day. */
 export const dbUploads = pgTable(
   'db_uploads',
   {
