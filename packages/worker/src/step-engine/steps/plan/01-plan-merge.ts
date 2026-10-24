@@ -73,6 +73,7 @@ import {
 import { commitPlanSnapshotFiles } from '../../../plan/snapshot-git.js';
 import { taskSecretMaskPolicy } from '../../../queues/cli-exec/secret-mask.js';
 import { pushBranch, gitRun } from '../../../repo/git-push.js';
+import { gitGaveNoAnswer } from '../../../repo/git-exec.js';
 import { checkoutHoldingTasks } from '../../../repo/refresh.js';
 import { WORKTREE_SUBDIR } from '../../../repo/worktree-paths.js';
 
@@ -738,7 +739,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       sha: pushedHead,
       cwd: ctx.repoPath,
       branch: d.branch,
-      setUpstream: upstream.code !== 0,
+      setUpstream: upstream.code !== 0 && !gitGaveNoAnswer(upstream),
       ...(repo?.credentialsSecretId ? { credentialId: repo.credentialsSecretId } : {}),
       db: ctx.db,
       userId: ctx.userId,

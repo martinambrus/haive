@@ -32,6 +32,7 @@ import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../repo/git-push.js';
+import { gitGaveNoAnswer } from '../repo/git-exec.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
 import {
@@ -402,7 +403,7 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
         sha: pushedHead,
         cwd: repoPath,
         branch,
-        setUpstream: upstream.code !== 0,
+        setUpstream: upstream.code !== 0 && !gitGaveNoAnswer(upstream),
         ...(repo.credentialsSecretId ? { credentialId: repo.credentialsSecretId } : {}),
         db: getDb(),
         userId: payload.userId,
