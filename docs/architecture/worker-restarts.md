@@ -140,7 +140,7 @@ step's own. An answer that reopens the task (continue, or accept with a next ste
 records the answer and points the task at its next step in one transaction, under the new-work fence
 and then the repository lock when the task had failed, so a refused or overtaken reopen leaves the
 gate parked with nothing recorded. The refused answer stays saved on its row. A task Retry, a settle
-and a CLI switch that reset a row to `pending` drop it (`withoutGateAnswer`,
+and a CLI switch (of one step or of the whole task) that reset a row to `pending` drop it (`withoutGateAnswer`,
 `api/src/lib/task-control.ts`), because every write to a `pending` row is refused: a kept answer was
 a no-op that the stalled sweep re-drove for good. Migration `0210_heal_wedged_fix_loop_gate_rows`
 heals the rows an older build left that way (`pending`, unparked, holding a saved answer): the answer
