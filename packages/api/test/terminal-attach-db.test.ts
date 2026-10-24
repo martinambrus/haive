@@ -134,14 +134,24 @@ describe.skipIf(!url)('terminal attach counts on Postgres', () => {
   async function whileCountLocked(action: () => Promise<void>) {
     const connection = await db.$client.reserve();
     try {
+      const [holder] = await connection`SELECT pg_backend_pid() AS pid`;
       await connection`BEGIN`;
       await connection`SELECT id FROM containers WHERE id = ${containerId} FOR UPDATE`;
       await action();
+      // Writers can wait behind another writer instead of directly on the holder.
+      // Follow the lock chain so all N count writes must be parked before release.
       await vi.waitFor(async () => {
         const [row] = await db.execute<{ waiting: number }>(sql`
-          SELECT count(*)::int AS waiting FROM pg_stat_activity
-          WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE 'update "containers"%'
+          WITH RECURSIVE waiters(pid) AS (
+            SELECT pid FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND ${holder!.pid}::int = ANY(pg_blocking_pids(pid))
+            UNION
+            SELECT activity.pid FROM pg_stat_activity AS activity
+            JOIN waiters ON waiters.pid = ANY(pg_blocking_pids(activity.pid))
+            WHERE activity.datname = current_database()
+          )
+          SELECT count(*)::int AS waiting FROM waiters
         `);
         expect(row!.waiting).toBe(N);
       }, WAIT);
