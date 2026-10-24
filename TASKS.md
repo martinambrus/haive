@@ -800,7 +800,7 @@ status: open · was modular #257
 
 ### T382 · FNF[auth-endpoint-hardening] · refresh rotation not CAS; login timing; no admin-authz sweep (+4)
 
-status: open · (T377 landed as PR #886) · was modular #261
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:00Z · last: 2026-10-25T02:00Z · (T377 landed as PR #886) · was modular #261
 
 1. api auth.ts ~:280-295: rotate with `UPDATE … WHERE revoked_at IS NULL RETURNING`, in a transaction.
 2. Login answers 401 before bcrypt for unknown accounts. Compare against a dummy hash; register's 409 too.
