@@ -1309,6 +1309,41 @@ describe('T323: repeated orphan removal failures', () => {
   });
 });
 
+describe('T323: one cutoff throughout an upload reaper pass', () => {
+  it.each([
+    ['repos', (id: string) => `${id}.zip.partial`],
+    ['repos', (id: string) => `db-${id}.sql.partial`],
+    ['repos', (id: string) => `${id}.zip`],
+    ['repos', (id: string) => `db-${id}.sql`],
+    ['bundles', (id: string) => `${id}.zip.partial`],
+  ] as const)(
+    'keeps a session crossing the cutoff during the %s pass (%#)',
+    async (volume, name) => {
+      const now = Date.now();
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(now);
+      const keeper = await session(KINDS[2]!, {
+        idleMs: TTL - MIN,
+        fileAgeMs: HOUR,
+        status: 'complete',
+      });
+      const file = path.join(uploadsDir(volume), name(keeper.id));
+      await writeFile(file, 'orphan');
+      await age(file, 5 * TTL);
+      fake.hooks.beforeUpdate = (table) => {
+        if (table === schema.customBundleUploads) vi.setSystemTime(now + 2 * MIN);
+      };
+
+      expect((await reapAbandonedUploads(db())).orphans).toBe(0);
+      expect(await exists(file)).toBe(true);
+      expect(rowOf(KINDS[2]!, keeper.id).updatedAt).toEqual(new Date(now - TTL + MIN));
+
+      expect((await reapAbandonedUploads(db())).orphans).toBe(1);
+      expect(await exists(file)).toBe(false);
+    },
+  );
+});
+
 describe('startUploadReaper', () => {
   it('runs a pass at start and every 15 minutes, and stops when asked', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });

@@ -382,11 +382,11 @@ async function reapOrphanPartials(
   root: string,
   shapes: RegExp[],
   pass: string,
+  cutoff: Date,
   alsoKept?: (ids: string[], owner: string) => Promise<Set<string>>,
 ): Promise<number> {
   const owners = await readdirNoFollow(root, UPLOADS_DIR);
   if (owners === null) return 0;
-  const cutoff = new Date(Date.now() - IDLE_MS);
   let removed = 0;
   for (const owner of owners) {
     if (!owner.isDirectory()) continue;
@@ -440,8 +440,8 @@ async function reapOrphanPartials(
 
 /** One reaper pass: claim the idle and the ended, finish what is reaping, sweep orphan partials. */
 export async function reapAbandonedUploads(db: Database): Promise<UploadReapResult> {
-  await forgetGoneOrphanFailures();
   const cutoff = new Date(Date.now() - IDLE_MS);
+  await forgetGoneOrphanFailures();
   const result: UploadReapResult = { sessions: 0, dumps: 0, orphans: 0 };
   const guarded = async <T>(what: string, run: () => Promise<T>, skipped: T): Promise<T> => {
     try {
@@ -472,7 +472,7 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
   }
   result.orphans += await guarded(
     'the repository file pass',
-    () => reapOrphanPartials(db, repoRoot(), [ARCHIVE_PARTIAL, DUMP_PARTIAL], 'repository'),
+    () => reapOrphanPartials(db, repoRoot(), [ARCHIVE_PARTIAL, DUMP_PARTIAL], 'repository', cutoff),
     0,
   );
   let cloning: Promise<Set<string>> | null = null;
@@ -485,15 +485,20 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
   result.orphans += await guarded(
     'the finished archive pass',
     () =>
-      reapOrphanPartials(db, repoRoot(), [ARCHIVE_FINISHED], 'finished archive', (ids, owner) =>
-        liveRepositories(db, ids, owner, cloningOwners),
+      reapOrphanPartials(
+        db,
+        repoRoot(),
+        [ARCHIVE_FINISHED],
+        'finished archive',
+        cutoff,
+        (ids, owner) => liveRepositories(db, ids, owner, cloningOwners),
       ),
     0,
   );
   result.orphans += await guarded(
     'the finished dump pass',
     () =>
-      reapOrphanPartials(db, repoRoot(), [DUMP_FILE], 'finished dump', async (ids) => {
+      reapOrphanPartials(db, repoRoot(), [DUMP_FILE], 'finished dump', cutoff, async (ids) => {
         const rows = await db
           .select({ id: schema.dbUploads.id })
           .from(schema.dbUploads)
@@ -504,7 +509,7 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
   );
   result.orphans += await guarded(
     'the bundle file pass',
-    () => reapOrphanPartials(db, bundleRoot(), [ARCHIVE_PARTIAL], 'bundle'),
+    () => reapOrphanPartials(db, bundleRoot(), [ARCHIVE_PARTIAL], 'bundle', cutoff),
     0,
   );
   if (result.sessions + result.dumps + result.orphans > 0) {
