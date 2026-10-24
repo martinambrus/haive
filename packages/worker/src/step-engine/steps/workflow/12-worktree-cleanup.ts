@@ -377,7 +377,9 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
               type: 'note',
               id: 'branchMismatchNote',
               label: 'Merge will stay local',
-              body: `The parent checkout is on **${detected.parentBranch}**, not the base **${detected.baseBranch}**. Haive will merge **${branch}** into **${detected.baseBranch}** via a temporary worktree and commit it — so the merge IS saved in this repository. But there is **no origin remote**, so it cannot be pushed anywhere. Add an origin (the Push gate or the repo terminal) and push **${detected.baseBranch}** yourself to put it on a remote.`,
+              body: detected.originError
+                ? `The parent checkout is on **${detected.parentBranch}**, not the base **${detected.baseBranch}**. Haive will merge **${branch}** into **${detected.baseBranch}** via a temporary worktree and commit it locally. The origin exists but its URL is refused: ${detected.originError}. Fix the checkout's remote configuration and Retry this step to enable pushing.`
+                : `The parent checkout is on **${detected.parentBranch}**, not the base **${detected.baseBranch}**. Haive will merge **${branch}** into **${detected.baseBranch}** via a temporary worktree and commit it — so the merge IS saved in this repository. But there is **no origin remote**, so it cannot be pushed anywhere. Add an origin (the Push gate or the repo terminal) and push **${detected.baseBranch}** yourself to put it on a remote.`,
               variant: 'warning',
             },
       );

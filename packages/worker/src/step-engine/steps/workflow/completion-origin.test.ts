@@ -129,3 +129,17 @@ for (const step of steps) {
     );
   });
 }
+
+it('explains that a cross-branch merge stays local when an existing origin is refused', async () => {
+  const { ctx, reason } = await setup('git');
+  const detected = await worktreeCleanupStep.detect!(ctx);
+  const form = await worktreeCleanupStep.form!(ctx, { ...detected, parentBranch: 'other' });
+  const note = form!.fields.find((f) => f.id === 'branchMismatchNote');
+  expect(note).toMatchObject({
+    type: 'note',
+    variant: 'warning',
+    body: expect.stringContaining('origin exists but its URL is refused'),
+  });
+  expect(note).toHaveProperty('body', expect.stringContaining('Retry this step'));
+  expect(note).toHaveProperty('body', expect.stringContaining(reason));
+});
