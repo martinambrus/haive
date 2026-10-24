@@ -1145,7 +1145,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         }
         if (now === null || !entry.liveArtifactId || now.hash !== entry.newContentHash) {
           warnings.push(
-            `did not record ${entry.diskPath} as up to date: it changed after the upgrade was planned`,
+            `did not record ${entry.diskPath} as up to date: ${namesGitData(entry.diskPath) ? 'it names git data' : 'it changed after the upgrade was planned'}`,
           );
           skippedCount += 1;
           continue;
