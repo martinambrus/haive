@@ -281,3 +281,16 @@ describe('task page: the Attachments tab', () => {
     expect(fileInputs(view)).toHaveLength(0);
   });
 });
+
+describe('task page Stop controls (#395)', () => {
+  it('offers Stop in the header and only the pending current row, at its round', async () => {
+    const view = await mount({ pausedAt: null, currentStepId: '07-implement', currentRound: 1 }, [
+      { ...stepRow(), id: 'old', round: 0, waitingStartedAt: null },
+      { ...stepRow(), round: 1, waitingStartedAt: null },
+      { ...stepRow(), id: 'future', stepId: '08-verify', round: 1, waitingStartedAt: null },
+    ]);
+    expect(await menuLabels(view)).toContain('Stop');
+    const rows = findAll(view.tree(), (h) => !!h.props['data-step-id']);
+    expect(rows.map((row) => buttons(row, 'stop').length)).toEqual([0, 1, 0]);
+  });
+});

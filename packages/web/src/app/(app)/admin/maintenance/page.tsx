@@ -14,6 +14,7 @@ import { BlockingTaskTitle } from '@/components/blocking-task-title';
 import { Badge, Button, Card, FormError, Input, Label } from '@/components/ui';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { usePageTitle } from '@/lib/use-page-title';
+import { taskCanStop } from '@/lib/task-state';
 
 /** The three states, in the order an operator walks them, each with what it actually does. Copy
  *  lives here rather than in the API because the API's job is to enforce them, not describe them. */
@@ -119,7 +120,10 @@ function TaskRow({
         <Button
           size="sm"
           variant="secondary"
-          disabled={busy || !t.hasLiveCli}
+          disabled={
+            busy ||
+            !taskCanStop(t, { stepRunning: t.hasLiveCli, currentStepStatus: t.currentStepStatus })
+          }
           onClick={() => void act(t, 'stop')}
         >
           Stop CLI

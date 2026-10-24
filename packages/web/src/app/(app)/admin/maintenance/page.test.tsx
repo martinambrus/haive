@@ -325,3 +325,30 @@ describe('maintenance page parked list', () => {
     expect(textOf(view.tree())).toContain('Showing the first 1 parked tasks. There are more.');
   });
 });
+
+describe('maintenance Stop controls (#395)', () => {
+  const row = {
+    id: 'stop-task',
+    title: 'Stop task',
+    type: 'workflow',
+    status: 'running',
+    pausedAt: null,
+    currentStepId: '07-implement',
+    currentStepStatus: 'pending',
+    stepRunning: false,
+    updatedAt: '2026-10-01T10:00:00.000Z',
+    ownerId: 'u2',
+    ownerName: 'Owner',
+    ownerEmail: null,
+    hasLiveCli: false,
+  };
+
+  it.each(['pending', 'running', 'waiting_cli'])(
+    'enables Stop for a %s current row without a live CLI',
+    async (status) => {
+      blockingTasks = [{ ...row, currentStepStatus: status, stepRunning: status !== 'pending' }];
+      const view = await mount();
+      expect(stateButton(view, 'Stop CLI').props.disabled).toBe(false);
+    },
+  );
+});

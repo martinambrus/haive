@@ -314,3 +314,30 @@ describe('task page copy', () => {
     expect(noStepsMessage({ status: 'created', deadAt: DEAD_AT })).toBe(GENERIC);
   });
 });
+
+describe('Stop eligibility controls (#395)', () => {
+  it('offers Stop for a running task with a pending current row', () => {
+    const opts = { stepRunning: false, currentStepStatus: 'pending' };
+    expect(taskMenuKeys({ status: 'running' }, opts)).toContain('stop');
+  });
+
+  it.each(['completed', 'cancelled', 'created', 'failed', 'queued', 'waiting_user'])(
+    'does not offer Stop for a pending row on a %s task',
+    (status) => {
+      const opts = { stepRunning: false, currentStepStatus: 'pending' };
+      expect(taskMenuKeys({ status }, opts)).not.toContain('stop');
+    },
+  );
+
+  it('does not offer Stop for a pause alone, a missing row, or a dead task', () => {
+    expect(
+      taskMenuKeys({ status: 'running', pausedAt: PAUSED_AT }, { stepRunning: false }),
+    ).not.toContain('stop');
+    const opts = { stepRunning: false, currentStepStatus: 'pending' };
+    expect(taskMenuKeys({ status: 'running', deadAt: DEAD_AT }, opts)).not.toContain('stop');
+  });
+
+  it.each(['running', 'waiting_cli'])('keeps Stop for a %s row', () => {
+    expect(taskMenuKeys({ status: 'running' }, { stepRunning: true })).toContain('stop');
+  });
+});

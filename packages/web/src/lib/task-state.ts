@@ -14,10 +14,26 @@ export function taskBadgeKind(task: TaskToneLike): TaskBadgeKind {
 
 export type TaskMenuKey = 'start' | 'retry' | 'resume' | 'pause' | 'stop' | 'cancel';
 
+export interface TaskStopState {
+  stepRunning: boolean;
+  currentStepStatus?: string | null;
+}
+
+/** Stop covers live work and the current row waiting to be claimed after a hand-off or Retry. */
+export function taskCanStop(task: TaskToneLike, opts: TaskStopState): boolean {
+  if (isTaskDead(task) || task.status === 'completed' || task.status === 'cancelled') return false;
+  return (
+    opts.stepRunning ||
+    opts.currentStepStatus === 'running' ||
+    opts.currentStepStatus === 'waiting_cli' ||
+    (task.status === 'running' && opts.currentStepStatus === 'pending')
+  );
+}
+
 /** The entries of the task page's actions menu. A dead task keeps Cancel and nothing else. */
 export function taskMenuKeys(
   task: TaskToneLike & { pauseLocked?: boolean },
-  opts: { stepRunning: boolean },
+  opts: TaskStopState,
 ): TaskMenuKey[] {
   if (isTaskDead(task)) return ['cancel'];
   const open = task.status !== 'completed' && task.status !== 'cancelled';
@@ -28,7 +44,7 @@ export function taskMenuKeys(
     if (task.pausedAt == null) keys.push('pause');
     else if (!task.pauseLocked) keys.push('resume');
   }
-  if (opts.stepRunning) keys.push('stop');
+  if (taskCanStop(task, opts)) keys.push('stop');
   if (open) keys.push('cancel');
   return keys;
 }

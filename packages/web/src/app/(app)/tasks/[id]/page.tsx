@@ -68,6 +68,7 @@ import {
   pausedByLabel,
   pausedResumeHint,
   taskBadgeKind,
+  taskCanStop,
   taskClockEndMs,
   taskMenuKeys,
   taskNotStarted,
@@ -1589,11 +1590,13 @@ export default function TaskDetailPage() {
   const badgeKind = taskBadgeKind(task);
   const deadNote = deadBanner(task, deadSteps);
   const stopNote = moduleStopBanner(task, stop);
-  // A CLI step is actively executing. The Stop buttons (top-right + the running
-  // step row) target it: stop the CLI, keep the environment, task stays open.
-  // Cancel, by contrast, ends the whole task and tears the environment down.
+  // Stop also covers the current pending row before its runner claims it.
+  // The environment stays available and the failed task can be retried.
   const stepRunning = steps.some((s) => s.status === 'running' || s.status === 'waiting_cli');
-  const menu = taskMenuKeys(task, { stepRunning });
+  const pointedStep = steps.find(
+    (s) => s.stepId === task.currentStepId && s.round === (task.currentRound ?? 0),
+  );
+  const menu = taskMenuKeys(task, { stepRunning, currentStepStatus: pointedStep?.status });
   // A failed task failed AT a step. The top-level Retry must re-run that step
   // (reset it + downstream, re-execute), which is exactly the per-step Retry —
   // NOT the task-level `start` action, which re-walks from the first step and
@@ -1952,7 +1955,7 @@ export default function TaskDetailPage() {
                       void stopActiveCli();
                   },
                   title:
-                    'Stop the running CLI for the current step. Keeps the environment; the task stays open and restartable.',
+                    'Stop the current step. Keeps the environment; the task stays open and restartable.',
                 },
                 menu.includes('cancel') && {
                   key: 'cancel',
@@ -2168,6 +2171,10 @@ export default function TaskDetailPage() {
                     const target = steps.find((s) => s.stepId === sid);
                     if (target) await runStepAction(target, 'retry');
                   }}
+                  canStop={taskCanStop(task, {
+                    stepRunning: step.status === 'running' || step.status === 'waiting_cli',
+                    currentStepStatus: step.id === pointedStep?.id ? step.status : null,
+                  })}
                   onStop={() => void stopActiveCli()}
                   onCliLogin={() => openCliLoginForStep(step)}
                   providers={providers}
@@ -2725,8 +2732,9 @@ interface StepCardProps {
   /** Retry an arbitrary step by id (not just this card's own step). Used by the
    *  03c review card to re-run the previous business-requirements step. */
   onRetryStep: (stepId: string) => Promise<void>;
-  /** Stop the running CLI for this step without re-running it (vs onAction('retry'),
-   *  which stops AND re-runs). Same effect as the top-right Stop. */
+  /** Shared Stop predicate evaluated for this row and the task pointer. */
+  canStop: boolean;
+  /** Stop this step without re-running it. Same effect as the header Stop. */
   onStop: () => void;
 }
 
@@ -3567,6 +3575,7 @@ function StepCardImpl({
   onAction,
   onRetryStep,
   onStop,
+  canStop,
   onCliLogin,
   providers,
   taskCliProviderId,
@@ -3906,7 +3915,7 @@ function StepCardImpl({
                   Re-run business requirements
                 </Button>
               )}
-              {(step.status === 'running' || step.status === 'waiting_cli') && (
+              {canStop && (
                 <Button
                   size="sm"
                   variant="secondary"
@@ -3916,7 +3925,7 @@ function StepCardImpl({
                     )
                       onStop();
                   }}
-                  title="Stop the running CLI for this step. Keeps the environment; the task stays open and restartable. Use Stop & retry to stop and immediately re-run."
+                  title="Stop this step. Keeps the environment; the task stays open and restartable. Use Stop & retry to stop and immediately re-run."
                 >
                   Stop
                 </Button>

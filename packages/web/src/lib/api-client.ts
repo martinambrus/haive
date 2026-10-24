@@ -813,6 +813,7 @@ export interface Task {
   autoContinue: boolean;
   currentStepId: string | null;
   currentStepIndex: number;
+  currentRound?: number;
   /** ISO time the current gate began waiting (the waiting_form step's
    *  waitingStartedAt), or null when the task is not parked at a gate. Tags the
    *  wait occurrence so the notifier re-fires when a task re-enters the same gate
@@ -2436,6 +2437,8 @@ export interface BlockingTask {
   /** Absent from an api that predates it. */
   pausedByAdmin?: boolean;
   currentStepId: string | null;
+  /** Current step at the task's round; absent from older APIs. */
+  currentStepStatus?: string | null;
   updatedAt: string;
   ownerId: string | null;
   ownerName: string | null;
