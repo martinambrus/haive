@@ -249,7 +249,13 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
 type Span = [from: number, to: number];
 
 const PHP_OPEN_TAG = /<\?(?:php(?=\s|$)|=|(?=\s))/gi;
-const PHP_HEREDOC = /<<<[ \t]*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|([A-Za-z_]\w*))(?:\r\n?|\n)/y;
+/** PHP reads any byte from 0x80 up as a label character, so every non-ASCII code unit is one. */
+const PHP_LABEL = String.raw`[A-Za-z_\u0080-\uFFFF][\w\u0080-\uFFFF]*`;
+const PHP_LABEL_CHAR = /[\w\u0080-\uFFFF]/;
+const PHP_HEREDOC = new RegExp(
+  String.raw`<<<[ \t]*(?:'(${PHP_LABEL})'|"(${PHP_LABEL})"|(${PHP_LABEL}))(?:\r\n?|\n)`,
+  'y',
+);
 const REGEX_AFTER_WORD = /^(?:return|typeof|instanceof|in|new|delete|void|throw|case|do|else)$/;
 /** Keywords only in their own syntax: an identifier anywhere else, so a slash after one divides. */
 const CONTEXTUAL_WORDS = new Set(['of', 'yield', 'await']);
@@ -357,7 +363,7 @@ function heredocAt(text: string, open: number): { body: Span; end: number } | nu
   for (let line = bodyStart; line < text.length;) {
     let at = line;
     while (text[at] === ' ' || text[at] === '\t') at += 1;
-    if (text.startsWith(label, at) && !WORD_CHAR.test(text[at + label.length] ?? ' ')) {
+    if (text.startsWith(label, at) && !PHP_LABEL_CHAR.test(text[at + label.length] ?? ' ')) {
       return { body: [bodyStart, line], end: at + label.length };
     }
     const newline = lineEnd(text, line, true);

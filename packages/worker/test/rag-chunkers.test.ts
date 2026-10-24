@@ -1262,6 +1262,16 @@ describe('extractCodeSections — line terminators other than LF', () => {
     expect(ids).toContain('function-next');
   });
 
+  it.each([
+    ['heredoc', "$x = <<<ÉOT\n'\nÉOT;"],
+    ['nowdoc', "$x = <<<'ÉOT'\n'\nÉOT;"],
+    ['heredoc whose body line extends the label', "$x = <<<EOT\nEOTé '\nEOT;"],
+  ])('reads a PHP %s with a non-ASCII label', (_name, doc) => {
+    const src = `<?php\n${doc}\nfunction save() { persist(); }\n$x = 'ok';`;
+    const ids = extractCodeSections(src, 'a.php').map((s) => s.sectionId);
+    expect(ids).toContain('function-save');
+  });
+
   it('keeps every line terminator in the masked text', () => {
     const src = 'a; // c\u2028b; // d\ru = 1;';
     expect(maskNonCode(src, 'js')).toBe('a; //  \u2028b; //  \ru = 1;');
