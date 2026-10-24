@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CliAuthBannerModal } from './cli-auth-banner-modal';
 import { buttons, createRenderer, fire, textOf, type Renderer } from '../../test/render-tree';
 
-const h = vi.hoisted(() => ({ stateUpdate: vi.fn() }));
+const h = vi.hoisted(() => ({ stateUpdate: vi.fn(), errorRender: vi.fn() }));
 vi.mock('react', async (original) => {
   const { reactHooks } = await import('../../test/render-tree');
   return {
@@ -35,7 +35,10 @@ vi.mock('@/components/ui', async () => {
   return {
     Button: ({ children, ...props }: Record<string, unknown>) =>
       createElement('button', props, children as never),
-    FormError: ({ message }: { message: string | null }) => message,
+    FormError: ({ message }: { message: string | null }) => {
+      h.errorRender(message);
+      return message;
+    },
   };
 });
 
@@ -211,6 +214,35 @@ describe('CLI auth banner socket close', () => {
     socket.onclose?.();
     socket.onerror?.();
     expect(h.stateUpdate).not.toHaveBeenCalled();
+    expect(textOf(view.draw()) === before).toBe(true);
+  });
+
+  it.each(['connecting', 'awaiting-token', 'submitting'])(
+    'fix8 shows an error for an exit during %s',
+    (phase) => {
+      if (phase !== 'connecting') socket.frame({ type: 'phase', phase });
+      socket.frame({ type: 'exit' });
+      view.draw();
+      const message: unknown = h.errorRender.mock.calls.at(-1)?.[0];
+      expect(typeof message === 'string' && message.length > 0).toBe(true);
+      expect(buttons(view.tree(), 'retry')).toHaveLength(1);
+      const before = textOf(view.tree());
+      socket.close();
+      expect(textOf(view.draw()) === before).toBe(true);
+    },
+  );
+
+  it.each(['success', 'saved', 'error'])('fix8 preserves the final %s phase on exit', (phase) => {
+    socket.frame(
+      phase === 'success'
+        ? { type: 'auth-success' }
+        : phase === 'saved'
+          ? { type: 'saved', result: { cli: { authStatus: 'ok' } } }
+          : { type: 'error', message: 'Existing failure' },
+    );
+    view.draw();
+    const before = textOf(view.tree());
+    socket.frame({ type: 'exit' });
     expect(textOf(view.draw()) === before).toBe(true);
   });
 

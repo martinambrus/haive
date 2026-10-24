@@ -225,6 +225,7 @@ export function CliAuthBannerModal({
             phaseRef.current !== 'error'
           ) {
             changePhase('error');
+            setError('Login process exited before sign-in completed. Retry the login.');
           }
           break;
       }
