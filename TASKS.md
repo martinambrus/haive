@@ -793,7 +793,7 @@ status: open · was modular #257
 
 ### T380 · FNF[cli-job-poll-routes] · version refresh does not coalesce; poll routes pass raw job ids to BullMQ; force is dead (+2)
 
-status: open · was modular #259 (a Codex attempt was discarded, nothing kept)
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T18:14Z · last: 2026-10-24T18:14Z · was modular #259 (a Codex attempt was discarded, nothing kept)
 
 1. POST /cli-providers/catalog/:name/refresh-versions (api cli-providers.ts ~:280-289) enqueues a job on every call. Fix: reuse the in-flight job.
 2. The poll routes (~:90) pass the raw path id. Fix: validate the id shape, answer 404 otherwise.
