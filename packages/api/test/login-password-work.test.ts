@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   user: undefined as unknown,
+  mode: 'open',
   compare: vi.fn(),
   hash: vi.fn(),
 }));
@@ -17,6 +18,7 @@ vi.mock('../src/lib/auth-throttle.js', () => ({
 }));
 vi.mock('../src/db.js', () => {
   const tx = {
+    select: () => ({ from: async () => [{ n: 1 }] }),
     insert: () => ({ values: async () => {} }),
     execute: async () => {},
     query: { users: { findFirst: async () => h.user } },
@@ -26,7 +28,7 @@ vi.mock('../src/db.js', () => {
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
   decryptEmail: () => 'synthetic@login.test.local',
-  configService: { getEncryptionKey: async () => 'ab'.repeat(32), get: async () => null },
+  configService: { getEncryptionKey: async () => 'ab'.repeat(32), get: async () => h.mode },
   secretsService: {
     getJwtSecret: async () => 'cd'.repeat(32),
     getEmailBlindIndexPepper: async () => 'ef'.repeat(32),
@@ -47,6 +49,7 @@ const send = (route: string) =>
 
 beforeEach(() => {
   h.user = undefined;
+  h.mode = 'open';
   h.compare.mockReset().mockResolvedValue(false);
   h.hash.mockReset().mockResolvedValue('synthetic-hash');
 });
@@ -105,6 +108,21 @@ describe('login password work without timing assertions', () => {
     );
     expect(res.headers.getSetCookie()).toEqual([]);
   });
+
+  it.each(['closed', 'invite'])(
+    'registration mode %s refuses known and unknown emails identically',
+    async (mode) => {
+      h.mode = mode;
+      const unknown = await send('register');
+      h.user = { id: 'synthetic-existing-user' };
+      const known = await send('register');
+      expect(unknown.status).toBe(403);
+      expect(known.status).toBe(unknown.status);
+      expect(await known.text()).toBe(await unknown.text());
+      expect([...known.headers]).toEqual([...unknown.headers]);
+      expect(known.headers.getSetCookie()).toEqual([]);
+    },
+  );
 
   it('duplicate registration already pays for one bcrypt hash before its unchanged 409', async () => {
     h.user = { id: 'synthetic-existing-user' };

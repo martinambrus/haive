@@ -91,12 +91,6 @@ authRoutes.post('/register', async (c) => {
       sql`SELECT pg_advisory_xact_lock(hashtext('haive_bootstrap'), hashtext('first_admin'))`,
     );
 
-    const existing = await tx.query.users.findFirst({
-      where: eq(schema.users.emailBlindIndex, blindIndex),
-      columns: { id: true },
-    });
-    if (existing) throw new HttpError(409, 'Email already registered');
-
     const counted = await tx.select({ n: count() }).from(schema.users);
     const userCount = Number(counted[0]?.n ?? 0);
 
@@ -133,6 +127,12 @@ authRoutes.post('/register', async (c) => {
         setupToken.length > 0 && timingSafeEqualString(setupToken, body.setupToken),
     });
     if (!decision.allow) throw new HttpError(403, decision.message);
+
+    const existing = await tx.query.users.findFirst({
+      where: eq(schema.users.emailBlindIndex, blindIndex),
+      columns: { id: true },
+    });
+    if (existing) throw new HttpError(409, 'Email already registered');
 
     // An invite's role wins over the mode's default: that is the whole point of inviting someone
     // as an administrator. The first-run branch still outranks both — it is already `admin`.
