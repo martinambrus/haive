@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import PricingPage from './page';
-import { buttons, createRenderer, fire, isDisabled, textOf } from '../../../../../test/render-tree';
+import {
+  buttons,
+  controls,
+  createRenderer,
+  fire,
+  isDisabled,
+  textOf,
+} from '../../../../../test/render-tree';
 import { POLL_TIMEOUT_MS } from '@/lib/cli-jobs';
 
 vi.mock('react', async (importOriginal) => ({
@@ -50,6 +57,17 @@ async function start() {
 }
 
 describe('pricing refresh job', () => {
+  it('keeps Save rate enabled while the refresh is queued and running', async () => {
+    const view = await start();
+    fire.type(controls(view.tree(), 'model')[0]!, 'test-model');
+    view.draw();
+    expect(isDisabled(buttons(view.tree(), /^save rate$/i)[0]!)).toBe(false);
+    status = { status: 'pending', state: 'active' };
+    await vi.advanceTimersByTimeAsync(2000);
+    view.draw();
+    expect(isDisabled(buttons(view.tree(), /^save rate$/i)[0]!)).toBe(false);
+  });
+
   it('waits through a long queue and running job, then reloads exactly on completion', async () => {
     const view = await start();
     expect(buttons(view.tree(), /queued/i)).toHaveLength(1);

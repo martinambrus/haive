@@ -134,7 +134,6 @@ export default function PricingPage() {
 
   async function refreshNow() {
     setRefreshPhase('queued');
-    setBusy(true);
     setError(null);
     try {
       await runPricingRefresh(setRefreshPhase);
@@ -143,7 +142,6 @@ export default function PricingPage() {
       setError(err instanceof Error ? err.message : 'Failed to refresh pricing');
     } finally {
       setRefreshPhase(null);
-      setBusy(false);
     }
   }
 
@@ -214,7 +212,12 @@ export default function PricingPage() {
             actually cost.
           </p>
         </div>
-        <Button variant="secondary" size="sm" disabled={busy} onClick={() => void refreshNow()}>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={refreshPhase !== null}
+          onClick={() => void refreshNow()}
+        >
           {refreshPhase === null
             ? 'Refresh now'
             : refreshPhase === 'queued'
