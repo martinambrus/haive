@@ -16,7 +16,12 @@ vi.mock('../src/queues.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { VERSION_REFRESH_JOB_ID, secretsService } from '@haive/shared';
+import {
+  CLI_EXEC_JOB_NAMES,
+  CLI_POLLABLE_JOB_OPTS,
+  VERSION_REFRESH_JOB_ID,
+  secretsService,
+} from '@haive/shared';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -87,8 +92,12 @@ describe('the CLI catalog routes require a session', () => {
     expect(reply.status).toBe(202);
     expect(reply.body).toEqual({ jobId: '1' });
     expect(h.add).toHaveBeenCalledTimes(1);
-    expect(h.add.mock.calls[0]?.[0]).toBe('cli-refresh-versions');
-    expect(h.add.mock.calls[0]?.[1]).toEqual({});
+    expect(h.add).toHaveBeenCalledWith(
+      CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
+      {},
+      CLI_POLLABLE_JOB_OPTS,
+    );
+    expect(h.add.mock.calls[0]?.[2]).not.toHaveProperty('jobId');
   });
 
   it('reuses the refresh on a second POST while it is in flight', async () => {

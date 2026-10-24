@@ -14,7 +14,7 @@ vi.mock('../src/queues.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { CLI_EXEC_JOB_NAMES, secretsService } from '@haive/shared';
+import { CLI_EXEC_JOB_NAMES, CLI_POLLABLE_JOB_OPTS, secretsService } from '@haive/shared';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -53,7 +53,12 @@ describe('pricing refresh', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ jobId: '1' });
     expect(h.add).toHaveBeenCalledTimes(1);
-    expect(h.add.mock.calls[0]?.slice(0, 2)).toEqual([CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS, {}]);
+    expect(h.add).toHaveBeenCalledWith(
+      CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
+      {},
+      CLI_POLLABLE_JOB_OPTS,
+    );
+    expect(h.add.mock.calls[0]?.[2]).not.toHaveProperty('jobId');
   });
 
   it.each(['active', 'wait', 'prioritized'])('reuses a refresh from %s', async (state) => {
