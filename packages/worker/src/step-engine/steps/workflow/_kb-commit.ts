@@ -2,7 +2,7 @@ import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { Database } from '@haive/database';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
-import { gitRun } from '../../../repo/git-exec.js';
+import { gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
 
 export const FALLBACK_GIT_IDENTITY = {
   GIT_AUTHOR_NAME: 'Haive',
@@ -83,12 +83,16 @@ export async function commitKnowledgeTrees(opts: {
  * runs this, and learnings live elsewhere, so neither is affected.
  *
  * Best-effort on purpose — a brand-new repository with no tracked KB makes `checkout` a
- * no-op, and a decline must not fail the step it is declining.
+ * no-op, and a decline must not fail the step it is declining. A no-answer from git throws; an
+ * exit status is still ignored.
  *
  * Shared by the learning gate (11) and the external catch-up (01e) so there is one
  * destructive git path rather than two copies that can drift apart.
  */
 export async function revertKnowledgeBase(worktree: string): Promise<void> {
-  await gitRun(worktree, ['checkout', 'HEAD', '--', KB_DIR]);
-  await gitRun(worktree, ['clean', '-fdq', '--', KB_DIR]);
+  const noAnswer = 'the declined knowledge-base edits could not be reverted: git gave no answer';
+  const checkout = await gitRun(worktree, ['checkout', 'HEAD', '--', KB_DIR]);
+  if (gitGaveNoAnswer(checkout)) throw new Error(noAnswer);
+  const clean = await gitRun(worktree, ['clean', '-fdq', '--', KB_DIR]);
+  if (gitGaveNoAnswer(clean)) throw new Error(noAnswer);
 }
