@@ -161,6 +161,11 @@ From the T388 review (2026-10-24). All PRE-EXISTING.
 status: open
 From the T388 review (2026-10-24). PRE-EXISTING, minor. Same class as T388 item 4 (exit code, not wording), another command: steps/workflow/_kb-commit.ts ~:69, 10-gate-3-commit.ts ~:416, 11d-skill-sync.ts ~:527, run-app/99-run-app-ready.ts ~:335. A localized or reworded git turns "nothing to commit" into a failure. Fix: decide by `git diff --cached --quiet` (exit 1 = staged changes) before committing, or by the commit's exit code plus a staged-paths read.
 
+### T419 · CI skips TASKS.md-only pushes to main
+
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:08Z · last: 2026-10-24T19:08Z
+User decision 2026-10-24: board-only pushes start no CI. Every board push to main ran the full CI (9 jobs; the push concurrency group is per sha, so none cancel), and with several PRs open the runner pool saturated. Fix: `paths-ignore: ['TASKS.md']` on ci.yml's push trigger only (a PR must keep its required checks). CodeQL is GitHub's default setup (no workflow file, no path filter) and stays. Board edits run prettier on TASKS.md before pushing, since format:check no longer sees a board-only push.
+
 ### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+7)
 
 status: open
