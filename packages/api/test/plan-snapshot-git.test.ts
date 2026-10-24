@@ -77,6 +77,7 @@ beforeEach(async () => {
   execFileSync(REAL_GIT, ['init', '-q', '--bare', '-b', 'main', origin], { stdio: 'ignore' });
   git('remote', 'add', 'origin', origin);
   git('push', '-q', '-u', 'origin', 'main');
+  git('remote', 'set-url', 'origin', 'https://example.test/repo.git');
 });
 
 afterEach(async () => {
@@ -133,6 +134,22 @@ async function ran(sub: string): Promise<boolean> {
 }
 
 describe('the plan snapshot git state', () => {
+  it.each(['url', 'pushurl', 'second-url', 'pushInsteadOf'])(
+    'reads a refused effective %s as no usable origin',
+    async (kind) => {
+      const refused = path.join(base, 'other-user.git');
+      if (kind === 'pushInsteadOf')
+        git('config', `url.${refused}.pushInsteadOf`, 'https://example.test/');
+      else
+        git(
+          'config',
+          ...(kind === 'second-url' ? ['--add'] : []),
+          `remote.origin.${kind === 'pushurl' ? 'pushurl' : 'url'}`,
+          refused,
+        );
+      expect(await snapshot()).toMatchObject({ hasOrigin: false, originUrl: null });
+    },
+  );
   it('reads clean and pushed', async () => {
     expect(await snapshot()).toMatchObject({
       gitAvailable: true,
