@@ -177,7 +177,7 @@ async function enqueueBuildForProvider(providerId: string, userId: string): Prom
   const queue = getCliExecQueue();
   await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
     removeOnComplete: true,
-    removeOnFail: 50,
+    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
   });
 }
 
@@ -200,7 +200,7 @@ async function enqueueOllamaProvisionForProvider(
   const queue = getCliExecQueue();
   await queue.add(CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL, payload, {
     removeOnComplete: true,
-    removeOnFail: 50,
+    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
   });
 }
 
@@ -562,7 +562,7 @@ cliProviderRoutes.delete('/:id', async (c) => {
     void getCliExecQueue()
       .add(CLI_EXEC_JOB_NAMES.REMOVE_SANDBOX_IMAGE, payload, {
         removeOnComplete: true,
-        removeOnFail: 50,
+        removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
       })
       .catch((err: unknown) =>
         log.warn({ err, providerId: id, imageTag }, 'could not queue the sandbox image removal'),
@@ -602,7 +602,7 @@ cliProviderRoutes.post('/:id/sandbox-image/build', requireNewWorkAllowed, async 
   const queue = getCliExecQueue();
   await queue.add(CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE, payload, {
     removeOnComplete: true,
-    removeOnFail: 50,
+    removeOnFail: CLI_POLLABLE_JOB_OPTS.removeOnFail,
   });
 
   return c.json({ ok: true, status: 'building' }, 202);
