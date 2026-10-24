@@ -1226,10 +1226,11 @@ taskRoutes.post('/:id/action', async (c) => {
       // `deferStart`): the row was made unstarted so the caller could upload
       // attachments, and this enqueues it once they landed.
       //
-      // Idempotent by construction. The UPDATE claims the `created` status
-      // atomically, so a second click matches no row and enqueues nothing —
-      // guarding with a read-then-write instead would let two clicks both pass
-      // the read and put the same task on the queue twice.
+      // Idempotent by construction. With a recorded count, the repository key
+      // and task row FOR UPDATE serialize the status re-read, original-upload
+      // count and claim in one transaction. A repeat returns before counting,
+      // with or without confirmation. The UPDATE claims `created` atomically
+      // for unrecorded counts too, so only one click enqueues START.
       const started = await db
         .transaction(async (tx) => {
           await admitNewWork(tx);

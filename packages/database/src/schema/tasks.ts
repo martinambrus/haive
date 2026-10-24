@@ -450,7 +450,8 @@ export const tasks = pgTable(
     /** Step id to the prompt step entry this task was created with: a copy, so a later edit of
      *  the type never reaches a task already created. Null when the type has none. Migration 0200. */
     customSteps: jsonb('custom_steps').$type<Record<string, unknown>>(),
-    /** Original uploads picked for a deferred start; NULL means the count was not recorded. */
+    /** Original uploads picked for a deferred start; NULL means the count was not recorded.
+     *  Migration 0211. */
     expectedAttachmentCount: integer('expected_attachment_count'),
   },
   (table) => [

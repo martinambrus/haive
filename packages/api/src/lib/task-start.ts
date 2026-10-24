@@ -16,7 +16,9 @@ export class MissingTaskAttachmentsError extends Error {
 
 /** Moves a `created` task to `queued`, which the stalled re-driver starts when its START is lost.
  *  Called after every write that can fail, since a task left `created` is one nothing starts.
- *  Returns the row, or undefined when the task was no longer `created` or is dead. */
+ *  Returns the row, or undefined when the task was no longer `created` or is dead.
+ *  A recorded count locks the task row and counts original uploads in this transaction;
+ *  throws MissingTaskAttachmentsError when short unless confirmMissingAttachments is true. */
 export async function markQueuedForStart(
   db: ReturnType<typeof getDb> | DbTx,
   taskId: string,

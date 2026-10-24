@@ -35,6 +35,8 @@ export async function spawnPlanTask(args: {
    *  `start` task action once they all land. The row sits at `created`, which is
    *  what that action claims. */
   enqueue?: boolean;
+  /** Original uploads to require at Start; stored only with enqueue: false, otherwise ignored.
+   *  Null or omitted leaves the count unrecorded. */
   expectedAttachmentCount?: number | null;
 }): Promise<string> {
   const create = async (tx: DbTx): Promise<string> => {

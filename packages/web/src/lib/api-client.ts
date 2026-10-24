@@ -2237,7 +2237,8 @@ export function getPlanBuildClis(repositoryId: string): Promise<{
 }
 
 /** Enqueue a task that was created but never started. Idempotent server-side, so
- *  a double-click cannot start it twice. */
+ *  a double-click cannot start it twice. A short recorded upload count returns
+ *  409 task_attachments_missing with landed/expected; confirmMissingAttachments bypasses it. */
 export function startTask(
   taskId: string,
   confirmMissingAttachments = false,

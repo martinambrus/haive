@@ -465,6 +465,8 @@ export const planBuildRequestSchema = z
      *  enqueue races the first step's detect — which is the whole reason this
      *  flag exists rather than a create-then-upload sequence. */
     deferStart: z.boolean().optional(),
+    /** Picked original uploads (0–10,000); recorded only with deferStart, otherwise ignored.
+     *  Omitted leaves the count unrecorded, preserving the ordinary start behavior. */
     expectedAttachmentCount: z.number().int().min(0).max(10_000).optional(),
     /** Ask the owner clarifying questions about an outline before it is expanded
      *  (`00b-plan-clarify`). Unset means on for `greenfield` and off for `from_repo`,
