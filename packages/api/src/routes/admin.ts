@@ -41,6 +41,7 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { isUuid } from '../lib/uuid.js';
+import { closeUserSockets } from '../lib/user-sockets.js';
 import { generateInviteToken, hashInviteToken } from '../lib/invites.js';
 
 const log = logger.child({ module: 'admin' });
@@ -309,6 +310,7 @@ adminRoutes.post('/users/:id/action', async (c) => {
         .where(eq(schema.users.id, targetUserId));
       await insertAuditEvent(tx, audit);
     });
+    closeUserSockets(target.id);
     logAuditEvent(audit);
     return c.json({ ok: true, action: 'deactivate' });
   }
@@ -355,6 +357,7 @@ adminRoutes.post('/users/:id/action', async (c) => {
         .where(eq(schema.users.id, targetUserId));
       await insertAuditEvent(tx, audit);
     });
+    closeUserSockets(target.id);
     logAuditEvent(audit);
     return c.json({ ok: true, action: 'reset_password', temporaryPassword });
   }

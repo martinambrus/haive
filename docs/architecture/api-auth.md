@@ -6,9 +6,10 @@
 While it is set `requireAuth` (`middleware/auth.ts`) answers 403 `must_change_password` on every route
 it guards, an administrator included. `requireAuthAllowingPasswordChange` guards exactly two routes,
 `GET /auth/me` (the app layout reads the flag there) and `PUT /user-settings/password`; login, register,
-logout and refresh never had a session check. The six WebSocket handshakes (`authenticateUpgrade` in
-terminal, terminal-shell, cli-stream, cli-login-banner, browser-vnc and ide) verify the token
-themselves, so each selects the flag too and answers 401 for a flagged user. Two tests keep this
+logout and refresh never had a session check. The six WebSocket handshakes (terminal, terminal-shell,
+cli-stream, cli-login-banner, browser-vnc and ide) share one authenticator, `authenticateUpgrade`
+(`lib/upgrade-auth.ts`), which selects the flag too and answers 401 for a flagged user, and one
+refusal, `rejectUpgrade`; a test fails a handler that keeps a copy of either. Two tests keep this
 structural rather than remembered: `session-flag-drift.test.ts` fails when a file calls
 `verifyAccessToken(` without reading the flag (`maintenance.ts` is the one listed exception: it reads
 the role only to let administrators through a maintenance 503), and `flagged-session-routes.test.ts`
@@ -22,6 +23,22 @@ the web (`ForcedPasswordGuard`) is now the UX and the api is the boundary, so th
 the 403 as the expected state and shows only its Password card. Nothing in the app clears the flag for
 someone else; an administrator who set it by mistake runs
 `UPDATE users SET must_change_password = false WHERE id = ...`.
+
+**A revoked session closes its open sockets.** A handshake registers its socket under the user as soon
+as the token verifies, before the user row is read (`trackUserUpgrade`, `lib/user-sockets.ts`), so a
+revocation that lands during the auth, ownership or runtime waits fences that upgrade too. A write that
+deactivates a user or moves `token_version` calls `closeUserSockets(userId)` after its commit: today
+`deactivate` and `reset_password` (`routes/admin.ts`, with the selected row's id, since the URL may
+spell the uuid in upper case) and `PUT /user-settings/password`. Any new writer of `users.status` or
+`token_version` must do the same. Activation and role changes end no session and close nothing. An open
+WebSocket closes with 1008, a pending upgrade is answered 401, the IDE relay gets a raw close frame, and
+a peer that never acknowledges is destroyed after one second; the browser panel stops reconnecting
+on that code. The registry is a Map in the api process, which assumes the single api process compose
+pins, as the terminal and IDE refcounts already do. Every upgrade socket gets an error listener first thing
+(`guardUpgradeSocket`, `lib/upgrade-errors.ts`) and every accepted WebSocket gets one: a client reset
+during the handshake, or a malformed frame, was an uncaught error that exited the api. Sockets are still
+authorized at the handshake only: logout, token expiry and an out-of-band database edit leave open
+sockets open.
 
 **Sign-in and registration are rate limited.** `lib/auth-throttle.ts` admits an attempt on
 `POST /auth/login` and `POST /auth/register` only while an account bucket (the email's blind index) holds

@@ -134,6 +134,7 @@ let holdParents = false;
 let holdUploads = false;
 let failUploads: Record<string, string> = {};
 let failStart = false;
+let missingAttachments = false;
 let startAnswer: { started: boolean; status: string } | null = null;
 const actions: Record<string, unknown>[] = [];
 
@@ -173,6 +174,16 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
       : reply(201, { attachment: { id: name } });
   }
   if (call === 'POST /tasks/task-new/action') {
+    const body = JSON.parse(init?.body ?? '{}') as Record<string, unknown>;
+    if (missingAttachments && !body.confirmMissingAttachments) {
+      actions.push(body);
+      return reply(409, {
+        error: 'arbitrary copy',
+        code: 'task_attachments_missing',
+        landed: 1,
+        expected: 2,
+      });
+    }
     if (failStart) return reply(409, { error: 'the queue is draining' });
     if (startAnswer) return reply(200, { ok: true, ...startAnswer });
     actions.push(JSON.parse(init?.body ?? '{}') as Record<string, unknown>);
@@ -207,6 +218,7 @@ beforeEach(() => {
   holdUploads = false;
   failUploads = {};
   failStart = false;
+  missingAttachments = false;
   startAnswer = null;
   nav.pushed.length = 0;
   actions.length = 0;
@@ -706,6 +718,7 @@ describe('the parent of a bug fix', () => {
 });
 
 describe('a new task with attachments', () => {
+  afterEach(() => Reflect.deleteProperty(globalThis, 'window'));
   const UPLOAD = (name: string) => `POST /tasks/task-new/attachments?filename=${name}`;
   const START = 'POST /tasks/task-new/action';
   const writes = () => sent.filter((call) => !call.startsWith('GET '));
@@ -732,6 +745,29 @@ describe('a new task with attachments', () => {
     findAll(failedList(view)!, (h) => h.tag === 'li').map((li) => textOf(li));
   const submitButton = (view: Renderer) =>
     findAll(view.tree(), (h) => h.tag === 'button' && h.props.type === 'submit')[0]!;
+
+  it.each([true, false])('confirms a missing upload before starting: %s', async (yes) => {
+    missingAttachments = true;
+    const confirm = vi.fn(() => yes);
+    vi.stubGlobal('window', { confirm });
+    const view = await readyOnA(two());
+    await submitForm(view);
+    expect(posted[0]).toMatchObject({ deferStart: true, expectedAttachmentCount: 2 });
+    expect(confirm).toHaveBeenCalledWith('1 of 2 attachments are missing. Start anyway?');
+    expect(actions).toEqual(
+      yes
+        ? [{ action: 'start' }, { action: 'start', confirmMissingAttachments: true }]
+        : [{ action: 'start' }],
+    );
+    const outcomes = findAll(view.tree(), (h) => h.props.role === 'alert');
+    expect(outcomes).toHaveLength(yes ? 0 : 1);
+    if (!yes) {
+      expect(
+        findAll(outcomes[0]!, (h) => h.tag === 'a' && h.props.href === '/tasks/task-new'),
+      ).toHaveLength(1);
+    }
+    expect(nav.pushed).toEqual(yes ? ['/tasks/task-new'] : []);
+  });
 
   it('creates the task unstarted, uploads every file, then starts it', async () => {
     const view = await readyOnA(two());

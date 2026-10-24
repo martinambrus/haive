@@ -47,6 +47,9 @@ vi.mock('@/components/terminal/InteractiveShell', () => ({
 
 const net = vi.hoisted(() => ({
   detail: {} as Record<string, unknown>,
+  missing: false,
+  actions: [] as Record<string, unknown>[],
+  attachmentFetches: [] as string[],
   unstubbed: [] as string[],
   patchError: null as string | null,
   stopResult: { killed: 0, cancelled: 0, stopped: 0 },
@@ -83,8 +86,29 @@ const taskRow = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-async function fakeFetch(input: unknown, init?: { method?: string }) {
+async function fakeFetch(input: unknown, init?: { body?: string; method?: string }) {
   const path = new URL(String(input), 'http://localhost').pathname;
+  if (path === '/tasks/t1/action') {
+    const body = JSON.parse(init?.body ?? '{}') as Record<string, unknown>;
+    net.actions.push(body);
+    if (net.missing && !body.confirmMissingAttachments)
+      return {
+        ok: false,
+        status: 409,
+        json: async () => ({
+          error: 'arbitrary copy',
+          code: 'task_attachments_missing',
+          landed: 1,
+          expected: 3,
+        }),
+      };
+    (net.detail.task as Record<string, unknown>).status = 'queued';
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, started: true, status: 'queued' }),
+    };
+  }
   if (path === '/tasks/t1/cancel-active-cli') {
     return { ok: true, status: 200, json: async () => net.stopResult };
   }
@@ -99,6 +123,7 @@ async function fakeFetch(input: unknown, init?: { method?: string }) {
     return { ok: true, status: 200, json: async () => structuredClone(net.detail) };
   }
   if (path === '/tasks/t1/attachments') {
+    net.attachmentFetches.push(path);
     return { ok: true, status: 200, json: async () => ({ attachments: [] }) };
   }
   net.unstubbed.push(path);
@@ -374,6 +399,28 @@ describe('task page: step usage stamp', () => {
       step.endedAt = null;
       expect(stamps(await mount({ pausedAt: null }, [step])), status).toHaveLength(0);
     }
+  });
+});
+
+describe('task page missing attachment confirmation', () => {
+  it.each([true, false])('starts only with explicit confirmation: %s', async (yes) => {
+    const confirm = vi.fn(() => yes);
+    vi.stubGlobal('window', { ...eventTarget(), confirm });
+    net.actions = [];
+    net.attachmentFetches = [];
+    net.missing = true;
+    const view = await mount({ status: 'created', pausedAt: null });
+    fire.click(buttons(view.tree(), /^start$/)[0]!);
+    await view.flush();
+    expect(confirm).toHaveBeenCalledWith('2 of 3 attachments are missing. Start anyway?');
+    expect(net.actions).toEqual(
+      yes
+        ? [{ action: 'start' }, { action: 'start', confirmMissingAttachments: true }]
+        : [{ action: 'start' }],
+    );
+    expect((net.detail.task as Record<string, unknown>).status).toBe(yes ? 'queued' : 'created');
+    expect(net.attachmentFetches).toEqual(yes ? [] : ['/tasks/t1/attachments']);
+    net.missing = false;
   });
 });
 

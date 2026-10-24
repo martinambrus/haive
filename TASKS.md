@@ -110,7 +110,7 @@ All PRE-EXISTING.
 6. Import markers record a synthesized rtkEnabled:false (import-marker.ts ~44). [D, may be harmless]
 7. A sync outside persistDetection that adopts a teammate's rtk-enabled.json leaves the RTK question pending until boot; call raiseRtkQuestion after it. [E]
 
-### T412 · FNF[git-noexit-low-3] · gitClone and a few scripts still spawn git unbounded (+3)
+### T412 · FNF[git-noexit-low-3] · gitClone and a few scripts still spawn git unbounded (+4)
 
 status: open
 From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it as its task #329.)
@@ -119,6 +119,7 @@ From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it
 2. Low: 99-run-app-ready.ts:315 drops a ticked push silently when the commit box is unticked.
 3. Display: 11-phase-8-learning.ts:549,1170 says "No commit recorded"/"(none)" when gate 3's sha read gave no answer after a landed commit.
 4. (T388 review) The operator scripts run `fetch --all` with no origin validation (scripts/advance-bundle-items.ts ~:66, reset-bundle-to-commit.ts ~:88); route them through the T388 origin read when they are bounded. Minor.
+5. (T417 review) PRE-EXISTING, minor: scripts/reset-bundle-to-commit.ts ~:156-157 writes repository files by pathname (`mkdir`, `writeFile`) under `repo.storagePath`, outside fs-safe and outside the fs-ratchet's scan (src only). Operator script.
 
 ### T414 · FNF[deps-alerts-2] · 9 open Dependabot alerts on main (3 critical: next, dompurify)
 
@@ -159,7 +160,7 @@ From the T388 review (2026-10-24). All PRE-EXISTING.
 
 ### T418 · FNF[git-wording] · "nothing to commit" is still matched by git's English wording
 
-status: open
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T01:20Z · last: 2026-10-25T01:20Z
 From the T388 review (2026-10-24). PRE-EXISTING, minor. Same class as T388 item 4 (exit code, not wording), another command: steps/workflow/_kb-commit.ts ~:69, 10-gate-3-commit.ts ~:416, 11d-skill-sync.ts ~:527, run-app/99-run-app-ready.ts ~:335. A localized or reworded git turns "nothing to commit" into a failure. Fix: decide by `git diff --cached --quiet` (exit 1 = staged changes) before committing, or by the commit's exit code plus a staged-paths read.
 
 ### T420 · FNF[cli-job-polling-2] · the pricing page ignores its refresh job; other jobs can trim a polled result early (+1)
@@ -274,7 +275,7 @@ All PRE-EXISTING.
 
 ### T306 · FNF[test-fakes-12] · 12's apply runs unguarded; 04's skipped runs (+2)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:32Z · last: 2026-10-24T21:32Z · kind: test-only
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:32Z · last: 2026-10-25T01:30Z · merged PR #911 (adad1b8d8), waiting for main CI · kind: test-only
 
 1. 12's 24 'written' runs are not wrapped in recordWritten (worker test/support/upgrade-apply-record.ts).
 2. 27 of 04's 61 runs report 'skipped' (no render snapshot in their fakes); seed or assert 'skipped'.
@@ -344,7 +345,7 @@ A full-repository review in the style of the Codex PR reviews once Track B is me
 ### T300 · live re-checks owed at the next real onboarding + workflow run
 
 status: parked · reason: needs a real onboarding + workflow run (LLM tokens; check running tasks first)
-Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check. Full list: task #300 text in the fnf-run ledger / memory.
+Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908). Full list: task #300 text in the fnf-run ledger / memory.
 
 ### T298 · house rules PR8 · switch similarity on with per-rule floors
 
@@ -468,7 +469,7 @@ Recommendation: delete the route.
 status: open · was modular #127
 Plan I4, part d. Browser check at 1280, 768 and 390.
 
-### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+2)
+### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+4)
 
 status: open · was modular #138
 Items 2-5 merged (#781, #808).
@@ -480,6 +481,8 @@ Items 2-5 merged (#781, #808).
    - make the helper answer only for the credential's own host;
    - run the fit check before 12's push.
 3. (T388 review) PRE-EXISTING, minor: an accepted origin URL is returned raw, userinfo included, into step output (worker repo/git-push.ts getOriginUrl; 11a-gate-4-push.ts ~:111, 12-worktree-cleanup.ts ~:267), so a token embedded in a remote URL reaches the step's detect output. Fix: redact userinfo wherever a URL is shown or stored.
+4. (T417 review) PRE-EXISTING, consequential: bundle clones keep the credential in `remote.origin.url` (worker repo/bundle-ingest.ts ~:194-197 `buildAuthenticatedUrl`), a plaintext secret at rest beside the envelope-encrypted copy, and stale after a rotation; the resyncs (bundle-ingest.ts ~:53-61, bundle-sync.ts ~:13-18, 00-bundle-resync.ts ~:35-40) depend on it. Fix: move all four to `buildCredentialHelper`.
+5. (T417 review) PRE-EXISTING, consequential: a relink clears `remote.origin.url` and `pushurl` only; `url.<base>.insteadOf`/`pushInsteadOf`, `include.path` and `remote.origin.vcs` in an uploaded repository's `.git/config` survive, and `getOriginUrl` checks only the rewritten URL's shape, never its host, so the bound credential can go to a host the UI does not show. Same fix as item 2 (a host-bound helper).
 
 ### T341 · FNF[credential-connection-coupling] · deleting a Git credential silently deletes its connection; re-sign-in duplicates the credential (+13)
 
@@ -677,10 +680,10 @@ Fix direction: after a failed reset, re-ask for the status without clearing the 
 
 ### T363 · FNF[created-task-start-partial] · Start on a created task starts with whatever attachments landed
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:05Z · last: 2026-10-25T00:05Z · was modular #208
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:05Z · last: 2026-10-25T02:10Z · merged PR #913 (f5bbce839), migration 0211 applied on the dev install, waiting for main CI · was modular #208
 DECIDED 2026-10-23: record the expected attachment count on the task, and Start confirms "N of M missing". The start claim is in api lib/task-start.ts:10-23.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+12)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+14)
 
 status: open · was modular #211
 
@@ -697,6 +700,8 @@ status: open · was modular #211
 11. Same source, minor: the "no agents directory" branch (provider amp) has no test: the `_active-agents-target.ts` null return, 07_5-verify-files.ts ~:57-64, 11-final-review.ts ~:86-93, `collectReviewFindings(repo, null)`.
 12. (T378 review) PRE-EXISTING, minor: `useDeviceSignIn` has no test of its own; the attempt counter, the unmount bump (web lib/use-device-sign-in.ts ~:25-30) and its `live()` guards are exercised only through `runDeviceSignIn` with an injected `live`.
 13. (T306 review) PRE-EXISTING, minor to moderate (class hazard): database testing/fake-db.ts ~:169 throws a plain Error for a table the fake was not given, which a route turns into a 500 or a caught failure, so a test that expects a throw or a 500 can pass on the miss (proven for revive-beside-live, fixed in T306; not scanned for others). Fix: a sentinel error class and an afterEach check of misses.
+14. (T363 review) PRE-EXISTING, consequential: scripts/test/ci-gated-list.test.mjs ~:12 recognises a Postgres-gated test only by `pathname.startsWith(` or `CREATE|DROP DATABASE`, so a gated file with another guard idiom is invisible to the "every gated file has a GATED row" check and skips green in CI for ever (T363's DB file was the live case, fixed there). Fix: detect by `skipIf` plus a `*_URL` env var.
+15. (T363 review) PRE-EXISTING, minor: no e2e spec creates a task with attachments or presses Start on a created task (the only Start click is Run app, tests/e2e/tasks/new-task-type.spec.ts ~:232), so the attachments confirm flow is checked by hand only.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -773,13 +778,6 @@ Sites:
 
 1. A role-admin owner's Retry under an administrator's pause lifts it with no byAdmin event or audit row (api tasks/_helpers.ts ~:1181).
 
-### T375 · FNF[diff-artifact-edges] · an untracked nested repo shows as unreadable although gate 3 commits it as a gitlink (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:07Z · last: 2026-10-25T00:40Z · merged PR #909 (d35333489), waiting for main CI · was modular #250
-
-1. worker steps/workflow/_commit-diff.ts ~:161 returns null when the index has no gitlink. Proposed: show the repo as a new gitlink with its HEAD sha. Show an unborn repo as unreadable with a reason.
-2. An empty investigation file reads as `added` (11-phase-8-learning.ts ~:943). Fix: tell absent from empty by the read result.
-
 ### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+5)
 
 status: open · (T377 landed as PR #886) · was modular #252
@@ -805,7 +803,7 @@ status: open · was modular #257
 
 ### T382 · FNF[auth-endpoint-hardening] · refresh rotation not CAS; login timing; no admin-authz sweep (+4)
 
-status: open · (T377 landed as PR #886) · was modular #261
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:00Z · last: 2026-10-25T02:00Z · (T377 landed as PR #886) · was modular #261
 
 1. api auth.ts ~:280-295: rotate with `UPDATE … WHERE revoked_at IS NULL RETURNING`, in a transaction.
 2. Login answers 401 before bcrypt for unknown accounts. Compare against a dummy hash; register's 409 too.
@@ -838,15 +836,6 @@ Decide: sanitise .git/config at import (allow-list keys), or refuse archives tha
 
 1. Env-only levers (GIT_ALLOW_PROTOCOL, GIT_NO_LAZY_FETCH) reach only gitRun and gitExec.
 
-### T388 · FNF[origin-url-revalidate] · a stored remote.origin.url is never re-validated, so network git can fetch/push file:// paths of other tenants (+3)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-25T00:50Z · merged PR #906 (da043a2aa), waiting for main CI · was modular #269
-
-1. isAllowedGitRemoteUrl (shared schemas/git-url.ts ~:94) guards only typed URLs. Since #255, getOriginUrl is the one read. Validate the URL there and switch the detectOrigin-only callers.
-2. `-c` does not reach a local-path transport child. Item 1 closes this.
-3. git-push.ts ensureOrigin tests stderr wording, not exit code 3. 11a trusts a cached hasOrigin. The twin is api repos.ts ~:2539.
-4. The api repos.ts ~:2530 link-origin route answers 409 with the wrong reason.
-
 ### T389 · FNF[repo-loose-objects] · Haive's git no longer triggers auto-maintenance (#256), so busy repos accumulate loose objects
 
 status: open · kind: design · was modular #270
@@ -870,12 +859,7 @@ Decide: Stop enqueues a settle, or the backstop sweep settles promptly.
 status: open · kind: design · was modular #276
 See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or answer a named 409.
 
-### T395 · FNF[web-stop-pending-current] · offer Stop for a running task whose current row is pending; notice on stopped:0
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:49Z · last: 2026-10-25T01:15Z · merged PR #908 (2f39fa5fd), browser-checked, waiting for main CI · was modular #277
-DECIDED 2026-10-24: yes. Sites: web lib/task-state.ts ~:31, tasks/[id]/page.tsx ~:1591, ~:3884, admin maintenance/page.tsx ~:248; the response is dropped at ~:1299-1307. Key the gate on structural columns, in a separate small web commit. Browser check at 1280, 768 and 390.
-
-### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+14)
+### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+16)
 
 status: open · was modular #279 (T396 landed as PR #884; re-check every item against T322/T325, PRs #877/#879, first)
 FIRST re-check each item on main: the #322 and #325 series fixed some of them.
@@ -892,10 +876,12 @@ FIRST re-check each item on main: the #322 and #325 series fixed some of them.
 10. git-operation.ts ~:31: a git dir outside the checkout.
 11. PRE-EXISTING, minor (found by the T388 driver, 2026-10-24): repo/refresh.ts ~:149-158 reads any non-zero `merge-base HEAD <target>` as "no history in common" (exit 1 is the only "none"; 128 is no answer), and ~:151 reads a failed `--is-shallow-repository` as not shallow. Fix: exit-1-only, else "could not be compared".
 12. PRE-EXISTING classification, minor (T370 review, 2026-10-24): set-aside `openOperationRefusal` (project-state/set-aside.ts ~:104-120, used by restoreJudged, setAsideOnce, restoreProjectionsInTx) turns a GitOperationUnreadableError into `refused` ("could not be checked for an open merge or rebase"), so callers read a git that gave no answer as a refusal; since T370 (PlanMirrorRefusal) the early Pull set-aside no longer records it in last_error. Fix: a separate unreadable outcome the callers treat as a failure.
+13. (T418 review) PRE-EXISTING, minor: worker repo/clone.ts ~:773-774 blank-repository init ignores the `git add` and `git commit` exit statuses and logs "Blank repo init complete".
+14. (T418 review) PRE-EXISTING, minor: step-engine/dag-executor.ts ~:477-490 `commitIssueWork` ignores the `add -A` status and only warns when the issue commit fails; the level then fails as "produced no branch changes" without the git error.
 
 ### T398 · FNF[ide-proxy-hardening] · the IDE proxy replays forwarded headers and transfer-encoding; serves /proxy/<port> on the api origin (+2)
 
-status: open · was modular #280
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:00Z · last: 2026-10-25T02:00Z · was modular #280
 
 1. Drop hop-by-hop and forwarded headers (transfer-encoding gives a 502 on chunked bodies, measured).
 2. The editor is on the api origin with code-server's /proxy/<port> enabled (worker ide-runner.ts ~:229-232). Measure, then disable it or move the IDE to its own origin.
@@ -911,7 +897,7 @@ Decide which stored targets a non-admin may point at private addresses.
 
 ### T400 · FNF[ws-auth-one-copy] · WebSocket handshakes authenticate once; six copies of authenticateUpgrade can drift
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:53Z · last: 2026-10-24T20:53Z · was modular #282
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:53Z · last: 2026-10-25T01:55Z · merged PR #912 (eb54d0f3a), live handshake probe passed, waiting for main CI · was modular #282
 Copies: terminal.ts ~:360, terminal-shell.ts ~:614, cli-stream.ts ~:365, cli-login-banner.ts ~:1233, browser-vnc.ts ~:268, ide.ts ~:391.
 Fix: one shared authenticator, and close a user's sockets on deactivation or a token_version bump.
 
@@ -972,14 +958,6 @@ status: open · area: modular-haive-plan owns merge-resolver.ts landing sections
 status: open
 From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` rows an earlier release recorded at a git-data path (a literal `.git` segment or, since T304, an NTFS or HFS+ alias of it) are skipped by every reader (01 plan, 02 and 04 writes, 03 staging, the sync), but nothing retires them and they still count in `liveArtifacts` (api upgrades.ts ~:456, ~:723, ~:787). Fix: retire them in a numbered, idempotent data migration (SQL cannot call `namesGitData`, so the migration needs the same rule in SQL, or ship a deploy script), or leave them out of the counts.
 
-### T422 · FNF[cli-login-banner] · the Claude OAuth capture logs the token's first 22 and last 6 characters (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:14Z · last: 2026-10-25T01:00Z · merged PR #910 (dc444c013), waiting for main CI
-From the T400 Codex run (2026-10-24), confirmed by the session.
-
-1. PRE-EXISTING, security hygiene: api routes/cli-login-banner.ts ~:674-680 logs `tokenHead: oauthToken.slice(0, 22)` and `tokenTail: oauthToken.slice(-6)` when it captures a Claude OAuth token from stdout, so 15 secret characters of every captured token reach the api log. The only such site (grep of packages and modules). Fix: log the length and, if one is needed, a short hash, never characters of the token.
-2. PRE-EXISTING, minor: web components/cli-auth-banner-modal.tsx ~:226, the socket close handler leaves the displayed phase unchanged.
-
 ### T423 · FNF[terminal-attach] · a failed attach-count write leaves the docker attach stream open; the count is read-then-write (+1)
 
 status: open
@@ -1015,10 +993,29 @@ From the T422 review (2026-10-24). PRE-EXISTING, consequential in kind, rare (me
 status: open
 From the T422 review (2026-10-24). PRE-EXISTING, minor, latent. api routes/cli-login-banner.ts ~:199-211 `extractClaudeOauthToken`: run inline, a 100-character body is accepted and cut to 108 characters, and a 90-character body followed by "Store this token securely" is accepted with 5 characters of the prose appended. Today's tokens match; a format change would save a wrong token, which the probe should then reject visibly. Fix: end the token at the first character outside its alphabet, and test the boundary.
 
+### T428 · FNF[refresh-result-hidden] · a version or price refresh that fails reports ok:false that no page reads
+
+status: open
+From the T420 review (2026-10-25). PRE-EXISTING design, minor. worker queues/cli-exec/handlers.ts ~:967-1010 records a refresh's source failures and completes the job with `ok: false` ("cannot fail the job"); web lib/cli-jobs.ts `runPricingRefresh` (since T420) and the catalog refresh discard the result, so a price-feed failure shows only as a per-CLI fetchError badge after the reload, and FX and catalog failures show nowhere. Fix: return the result and show the failed sources on the page.
+
+### T429 · FNF[file-transport-default] · refuse the file transport on every git call by default, not by verb
+
+status: open
+From the T417 review (2026-10-25), follow-up to T417 item 6. Minor, hardening. Verb-based hardening (shared git-args.ts) still misses `remote show|prune|set-head`, `remote add -f`, `submodule update|add`, `archive --remote` and a promisor lazy fetch; none is called today. Production needs the file transport only for the host-folder refresh (worker repo/refresh.ts ~:96-102, which opts in), so `protocol.file.allow=never` in `GIT_CONFIG_SAFETY_ARGS` with `allowFileTransport` as the one opt-in would cover every verb, future ones included. Check every test that seeds with hardened git. Also: `gitSetOriginUrl` (worker repo/clone.ts ~:121-138) is exported, called only by a test, and uses the single-URL `remote set-url` form T417 replaced (dead code; remove or route through `ensureOrigin`).
+
+### T430 · FNF[unscoped-commits] · the knowledge-base and skill-sync commits take whatever else is staged
+
+status: open
+From the T418 review (2026-10-25). PRE-EXISTING, minor. steps/workflow/_kb-commit.ts ~:67 and 11d-skill-sync.ts ~:519 commit the whole index (no pathspec), so anything a person staged in the task worktree (for example from the Terminal tab) lands in the "update knowledge base" or skill-sync commit. Fix: commit with the step's own pathspec (`--only`), as plan/snapshot-git.ts does.
+
 ## Done
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T395 — Stop offered for a running task whose current row is pending; "Nothing was running to stop." on an empty Stop (browser-checked; running-task case owed, T300) — PR #908 (2f39fa5fd), 2026-10-25
+- T422 — no credential text in the login banner's logs or errors (sanitized error class and code); the modal handles an unexpected close (+1; leftovers in T426, T427) — PR #910 (dc444c013), 2026-10-25
+- T388 — host git re-validates a stored origin URL and refuses the file transport for pack commands (follow-ups in T417) — PR #906 (da043a2aa), 2026-10-25
+- T375 — an untracked nested repo previews as git add records it (gitlink, or unborn with a reason); an empty investigation file is not new (gate 3 live view owed, T300) — PR #909 (d35333489), 2026-10-25
 - T378 — a failed finishSignIn revokes the vendor token; the device poll's cleanup cannot 500; the GitHub connect poll stops once cancelled — PR #905 (134a27e13; main green at 7eb1938af), 2026-10-24
 - T372 — fence-order test budget; stepIds named for what they hold (picker label shipped with T391) — PR #904 (7fe56b9e0), 2026-10-24
 - T404 — a re-opened step clears its context and allowance stamp; the page shows stamps on done rows only (browser-checked; ratchet budget follow-up #907) — PR #903 (6e9daa2e6), 2026-10-24

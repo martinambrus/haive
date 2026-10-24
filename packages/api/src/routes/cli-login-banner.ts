@@ -1,4 +1,4 @@
-import type { Server, IncomingMessage } from 'node:http';
+import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Job } from 'bullmq';
@@ -24,8 +24,8 @@ import {
   type CliProviderName,
 } from '@haive/shared';
 import { getDb } from '../db.js';
-import { verifyAccessToken } from '../auth/jwt.js';
-import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { getCliExecQueue, getCliExecQueueEvents, getUsagePollQueue } from '../queues.js';
 import { attachContainerStream } from './terminal.js';
 import { execInContainer } from './docker-exec.js';
@@ -240,6 +240,7 @@ export function installCliLoginBannerWebSocket(
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
+    guardUpgradeSocket(socket);
     const rawUrl = req.url ?? '';
     const requestPath = rawUrl.split('?', 1)[0] ?? '';
     if (!rawUrl.startsWith(pathPrefix)) return;
@@ -281,7 +282,10 @@ export function installCliLoginBannerWebSocket(
           return;
         }
 
+        if (auth.session.revoked) return;
+
         wss.handleUpgrade(req, socket, head, (ws) => {
+          if (!auth.session.accept(ws)) return;
           runBannerSession({
             ws,
             userId: auth.userId,
@@ -368,6 +372,12 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     return;
   }
 
+  if (abort.aborted) {
+    stream.end();
+    await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
+    throw new LoginCancelled();
+  }
+
   try {
     await dockerContainer.start();
   } catch (err) {
@@ -380,6 +390,12 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       // ignore
     }
     return;
+  }
+
+  if (abort.aborted) {
+    stream.end();
+    await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
+    throw new LoginCancelled();
   }
 
   const session: BannerSession = {
@@ -475,7 +491,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   });
 
   ws.on('message', async (raw) => {
-    if (session.cleanedUp) return;
+    if (session.cleanedUp || ws.readyState !== WebSocket.OPEN) return;
     const text = raw.toString();
     let parsed: unknown;
     try {
@@ -1234,52 +1250,12 @@ async function teardownContainer(
     });
 }
 
-async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {
-  const cookieHeader = req.headers.cookie;
-  if (!cookieHeader) return null;
-  const token = parseCookieValue(cookieHeader, ACCESS_COOKIE);
-  if (!token) return null;
-  try {
-    const payload = await verifyAccessToken(token);
-    const db = getDb();
-    const user = await db.query.users.findFirst({
-      where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
-    });
-    if (!user) return null;
-    if (user.status !== 'active') return null;
-    if (user.tokenVersion !== payload.tv) return null;
-    if (user.mustChangePassword) return null;
-    return { userId: user.id };
-  } catch {
-    return null;
-  }
-}
-
 function extractProviderId(rawUrl: string, pathPrefix: string): string | null {
   const qIndex = rawUrl.indexOf('?');
   const pathOnly = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
   if (!pathOnly.startsWith(pathPrefix)) return null;
   const remainder = pathOnly.slice(pathPrefix.length);
   return isUuid(remainder) ? remainder : null;
-}
-
-function parseCookieValue(header: string, name: string): string | null {
-  for (const part of header.split(/;\s*/)) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    if (part.slice(0, eq) === name) return decodeURIComponent(part.slice(eq + 1));
-  }
-  return null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  try {
-    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
-  } catch {
-    // ignore
-  }
-  socket.destroy();
 }
 
 function appendCapped(prior: string, chunk: string, max: number): string {

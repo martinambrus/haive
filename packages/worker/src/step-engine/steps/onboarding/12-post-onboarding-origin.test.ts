@@ -3,13 +3,17 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import type { StepContext } from '../../step-definition.js';
 import { killGit, type KilledGit } from '../../../../test/support/kill-git.js';
+import { recordWritten } from '../../../../test/support/upgrade-apply-record.js';
+import { REFERENCE_CONTEXT } from '../../template-manifest.js';
 import { postOnboardingStep } from './12-post-onboarding.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
+const REPO = '00000000-0000-4000-8000-0000000000b1';
 const TASK = '00000000-0000-4000-8000-0000000000c1';
 
 const dirs: string[] = [];
@@ -58,6 +62,27 @@ function ctxFor(root: string) {
     userId: USER,
     logger: { info: noop, warn: noop, error: noop, debug: noop },
   } as unknown as StepContext;
+  return ctx;
+}
+
+async function ctxForRecording(root: string) {
+  const ctx = ctxFor(root);
+  await ctx.db.insert(schema.repositories).values({
+    id: REPO,
+    userId: USER,
+    name: 'acme',
+    source: 'upload',
+  });
+  await ctx.db.update(schema.tasks).set({ repositoryId: REPO }).where(eq(schema.tasks.id, TASK));
+  await ctx.db.insert(schema.taskSteps).values({
+    taskId: TASK,
+    stepId: '07-generate-files',
+    stepIndex: 7,
+    round: 0,
+    title: 'Generate files',
+    status: 'done',
+    detectOutput: { ...REFERENCE_CONTEXT, cliProviders: [] },
+  });
   return ctx;
 }
 
@@ -123,14 +148,17 @@ describe('12-post-onboarding origin read', () => {
   });
 
   it('still records artifacts and requests no push when applied after an unreadable origin', async () => {
-    const ctx = ctxFor(await repo('unreadable'));
+    const ctx = await ctxForRecording(await repo('unreadable'));
     const detected = await postOnboardingStep.detect!(ctx);
 
-    const out = await postOnboardingStep.apply(ctx, {
-      detected,
-      formValues: { commit: false },
-    } as never);
+    const out = await recordWritten(
+      postOnboardingStep.apply(ctx, {
+        detected,
+        formValues: { commit: false },
+      } as never),
+    );
 
+    expect(out.artifactRowsWritten).toBeGreaterThan(0);
     expect(out).toMatchObject({ commitPerformed: false, pushRequested: false });
   });
 

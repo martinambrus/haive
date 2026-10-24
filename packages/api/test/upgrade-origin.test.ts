@@ -1,7 +1,5 @@
 import { createServer, type Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { installTerminalWebSocket } from '../src/routes/terminal.js';
 import { installTerminalShellWebSocket } from '../src/routes/terminal-shell.js';
@@ -9,6 +7,7 @@ import { installCliStreamWebSocket } from '../src/routes/cli-stream.js';
 import { installCliLoginBannerWebSocket } from '../src/routes/cli-login-banner.js';
 import { installBrowserVncWebSocket } from '../src/routes/browser-vnc.js';
 import { installIdeWebSocket } from '../src/routes/ide.js';
+import { upgradeListenerFiles } from './helpers/upgrade-listeners.js';
 
 const ID = '11111111-2222-3333-4444-555555555555';
 
@@ -103,15 +102,7 @@ describe('a WebSocket handshake', () => {
   }
 
   it('is listened for only by the handlers above', () => {
-    const src = join(__dirname, '../src');
-    const walk = (dir: string): string[] =>
-      readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-        e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)],
-      );
-    const listening = walk(src)
-      .filter((f) => f.endsWith('.ts') && readFileSync(f, 'utf8').includes("on('upgrade'"))
-      .map((f) => relative(src, f))
-      .sort();
+    const listening = upgradeListenerFiles();
     expect(listening).toEqual(HANDLERS.map((h) => h.file).sort());
   });
 });
