@@ -272,4 +272,12 @@ describe('task page: the Attachments tab', () => {
     expect(fileInputs(view)).toHaveLength(2);
     expect(textOf(view.tree())).not.toContain(NOTE);
   });
+
+  it('W3 names a task with no repository and offers no picker', async () => {
+    const view = await openTab({ repositoryId: null, repository: null });
+    expect(textOf(view.tree())).toContain(
+      'This task has no repository, so files cannot be attached.',
+    );
+    expect(fileInputs(view)).toHaveLength(0);
+  });
 });

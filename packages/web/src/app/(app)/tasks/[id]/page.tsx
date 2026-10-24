@@ -2317,7 +2317,13 @@ export default function TaskDetailPage() {
         <AttachmentsPanel
           taskId={id}
           taskEnded={taskEnded}
-          unavailableNote={attachmentUnavailableNote(task.repository)}
+          unavailableNote={
+            task.repository
+              ? attachmentUnavailableNote(task.repository)
+              : task.repositoryId
+                ? null
+                : 'This task has no repository, so files cannot be attached.'
+          }
         />
       )}
 
