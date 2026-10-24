@@ -1,9 +1,9 @@
 import { lstatNoFollow, readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
-import { mapWithConcurrency } from '@haive/shared';
+import { mapWithConcurrency, orderByDefaultPriority } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { readFrontmatterFields } from '../_yaml-scalar.js';
@@ -355,9 +355,14 @@ export const skillVerificationStep: StepDefinition<
     // forked repair/regenerate round runs on it. Mirrors 12-post-onboarding's enumeration.
     const providerRows = await ctx.db.query.cliProviders.findMany({
       where: and(eq(schema.cliProviders.userId, ctx.userId), eq(schema.cliProviders.enabled, true)),
-      columns: { id: true, label: true },
+      columns: { id: true, label: true, enabled: true, createdAt: true },
+      orderBy: [asc(schema.cliProviders.createdAt), asc(schema.cliProviders.id)],
     });
-    const cliOptions = providerRows.map((p) => ({ id: p.id, label: p.label }));
+    // Shared priority compares Date milliseconds, including SQL timestamps finer than that.
+    const cliOptions = orderByDefaultPriority(providerRows).map((p) => ({
+      id: p.id,
+      label: p.label,
+    }));
 
     return {
       checks,
