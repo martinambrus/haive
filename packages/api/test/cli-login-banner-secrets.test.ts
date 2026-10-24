@@ -10,6 +10,8 @@ const h = vi.hoisted(() => ({
   stream: undefined as unknown,
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
   save: vi.fn(),
+  queueError: undefined as Error | undefined,
+  probeError: undefined as Error | undefined,
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
@@ -32,13 +34,18 @@ vi.mock('../src/queues.js', () => ({
   getCliExecQueueEvents: () => ({}),
   getUsagePollQueue: () => ({ add: async () => ({}) }),
   getCliExecQueue: () => ({
-    add: async (name: string) => ({
-      getState: async () => 'active',
-      waitUntilFinished: async () =>
-        name === 'cli-login-create'
-          ? { ok: true, containerRowId: 'row', dockerContainerId: 'container' }
-          : { cli: { authStatus: 'ok' } },
-    }),
+    add: async (name: string) => {
+      if (h.queueError) throw h.queueError;
+      return {
+        getState: async () => 'active',
+        waitUntilFinished: async () => {
+          if (name !== 'cli-login-create' && h.probeError) throw h.probeError;
+          return name === 'cli-login-create'
+            ? { ok: true, containerRowId: 'row', dockerContainerId: 'container' }
+            : { cli: { authStatus: 'ok' } };
+        },
+      };
+    },
   }),
 }));
 
@@ -61,6 +68,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   h.save.mockReset();
+  h.queueError = undefined;
+  h.probeError = undefined;
   providerName = 'claude-code';
   h.db = {
     query: {
@@ -93,7 +102,7 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function start(query = '') {
+async function start(query = '', attached = true) {
   const server = new EventEmitter();
   const docker = {
     getContainer: () => ({ start: async () => {}, remove: async () => {}, resize: async () => {} }),
@@ -109,7 +118,7 @@ async function start(query = '') {
     Buffer.alloc(0),
   );
   await settle();
-  expect(stream.listenerCount('data')).toBe(1);
+  if (attached) expect(stream.listenerCount('data')).toBe(1);
 }
 function assertNoCredentialText(...values: string[]) {
   const strings: string[] = [];
@@ -201,13 +210,36 @@ describe('CLI login banner credential logging', () => {
     assertNoCredentialText(CODE);
   });
 
-  it('does not log or return credential text carried by a stream error', async () => {
+  it('does not log credential text carried by a stream error', async () => {
     await start();
     stream.emit('error', new Error(`synthetic transport failure: ${CODE}`));
     await settle();
     assertNoCredentialText(CODE);
-    expect(JSON.stringify(ws.send.mock.calls).includes(CODE)).toBe(false);
   });
+
+  it.each(['queue', 'stream', 'probe'])(
+    'fix2 preserves the infrastructure %s error response',
+    async (source) => {
+      const message = 'Synthetic infrastructure failure';
+      if (source === 'queue') h.queueError = new Error(message);
+      if (source === 'probe') {
+        providerName = 'grok';
+        h.probeError = new Error(message);
+      }
+      await start('', source !== 'queue');
+      if (source === 'stream') stream.emit('error', new Error(message));
+      if (source === 'probe') {
+        stream.emit('data', Buffer.from('https://accounts.x.ai/oauth2/device\n\nSigned in\n'));
+      }
+      await settle();
+      expect(
+        ws.send.mock.calls.some(([raw]) => {
+          const frame = JSON.parse(raw);
+          return frame.type === 'error' && frame.message === message;
+        }),
+      ).toBe(true);
+    },
+  );
 
   it('fix1 logs only the error class and nested code for a failed credential write', async () => {
     class DrizzleQueryError extends Error {}

@@ -295,7 +295,7 @@ export function installCliLoginBannerWebSocket(
               return;
             }
             log.error({ error: safeErrorDetails(err), providerId }, 'banner session crashed');
-            wsSend(ws, { type: 'error', message: 'Login session failed. Retry the login.' });
+            wsSend(ws, { type: 'error', message: errorMessage(err) });
             try {
               ws.close(1011, 'internal_error');
             } catch {
@@ -469,7 +469,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   stream.on('error', (err: Error) => {
     log.warn({ error: safeErrorDetails(err), providerId }, 'stream error');
     if (session.probePending) return;
-    wsSend(ws, { type: 'error', message: 'Login stream failed. Retry the login.' });
+    wsSend(ws, { type: 'error', message: err.message });
     void cleanupSession(session);
   });
 
@@ -1040,7 +1040,7 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
     );
     wsSend(session.ws, {
       type: 'error',
-      message: 'Failed to verify the login.',
+      message: err instanceof Error ? err.message : 'post-login probe failed',
     });
   } finally {
     session.probePending = false;
@@ -1293,4 +1293,9 @@ function wsSend(ws: WebSocket, data: Record<string, unknown>): void {
   } catch {
     // ignore
   }
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
 }
