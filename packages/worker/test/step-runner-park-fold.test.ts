@@ -22,6 +22,12 @@ vi.mock('../src/queues/cli-park-timing.js', () => ({
   foldOrphanedCliParkOnBoot: vi.fn(async () => {}),
 }));
 
+vi.mock('../src/step-engine/step-context-usage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/step-engine/step-context-usage.js')>();
+  return { ...actual, writeStepContextUsage: vi.fn(actual.writeStepContextUsage) };
+});
+
+const { writeStepContextUsage } = await import('../src/step-engine/step-context-usage.js');
 const { foldCliParkOnResume } = await import('../src/queues/cli-park-timing.js');
 const { advanceStep } = await import('../src/step-engine/step-runner.js');
 
@@ -245,4 +251,20 @@ describe('advanceStep usage stamp across attempts', () => {
       );
     },
   );
+});
+
+describe('advanceStep usage completion wiring', () => {
+  it('stamps the id and endedAt returned by the done write', async () => {
+    vi.mocked(writeStepContextUsage).mockClear();
+    const state: MockState = { taskStepRow: stepRow('waiting_cli', false), updates: [] };
+    const params = runParams(state);
+    const result = await advanceStep(params);
+    expect(result.status).toBe('done');
+    expect(result.row.endedAt).toBeInstanceOf(Date);
+    expect(writeStepContextUsage).toHaveBeenCalledExactlyOnceWith(
+      params.db,
+      result.row.id,
+      result.row.endedAt,
+    );
+  });
 });
