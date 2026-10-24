@@ -110,6 +110,7 @@ import {
   resolveCurrentStepCliProviderIds,
   sumTaskTokens,
   sumTaskProviderBreakdown,
+  TASK_REPOSITORY_COLUMNS,
 } from './_helpers.js';
 import { resolveCostDisplay } from '@haive/shared/stats-server';
 import { fileRoutes } from './files.js';
@@ -294,7 +295,7 @@ taskRoutes.get('/', async (c) => {
     orderBy: sortByUpdated
       ? [desc(schema.tasks.updatedAt), desc(schema.tasks.createdAt)]
       : [desc(effectiveVoteScore), desc(schema.tasks.createdAt)],
-    with: { repository: { columns: { id: true, name: true } } },
+    with: { repository: { columns: TASK_REPOSITORY_COLUMNS } },
     limit: pageSize,
     offset: (page - 1) * pageSize,
   });
@@ -1021,7 +1022,7 @@ taskRoutes.get('/:id', async (c) => {
   const db = getDb();
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    with: { repository: { columns: { id: true, name: true } } },
+    with: { repository: { columns: TASK_REPOSITORY_COLUMNS } },
   });
   if (!task) throw new HttpError(404, 'Task not found');
   const stepRows = await db

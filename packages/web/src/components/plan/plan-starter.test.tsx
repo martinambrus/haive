@@ -77,7 +77,7 @@ const addFile = (view: Renderer, name: string) => {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   net.repoRow.mockResolvedValue({ repository: { source: 'git_https', writable: false } });
   let created = 0;
   net.buildPlan.mockImplementation(async () => ({ taskId: `draft-${++created}` }));

@@ -71,10 +71,12 @@ function groupByFolder(items: TaskAttachment[]): {
 export function AttachmentsPanel({
   taskId,
   taskEnded = false,
+  unavailableNote = null,
 }: {
   taskId: string;
   /** The task completed, failed or was cancelled, so no step will run to expand an archive. */
   taskEnded?: boolean;
+  unavailableNote?: string | null;
 }) {
   const [items, setItems] = useState<TaskAttachment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -218,36 +220,40 @@ export function AttachmentsPanel({
             .zip, .tar or .tar.gz is expanded into its structure before the agent reads it.
           </p>
         </div>
-        <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
-          <div className="min-w-0 flex-1">
-            <p className="mb-1 text-xs text-neutral-400">Files</p>
-            <input
-              type="file"
-              multiple
-              disabled={uploading !== null}
-              onChange={(e) => {
-                void onPick(e.target.files);
-                e.target.value = '';
-              }}
-              className={inputClass}
-            />
+        {unavailableNote ? (
+          <p className="text-xs text-neutral-500">{unavailableNote}</p>
+        ) : (
+          <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
+            <div className="min-w-0 flex-1">
+              <p className="mb-1 text-xs text-neutral-400">Files</p>
+              <input
+                type="file"
+                multiple
+                disabled={uploading !== null}
+                onChange={(e) => {
+                  void onPick(e.target.files);
+                  e.target.value = '';
+                }}
+                className={inputClass}
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="mb-1 text-xs text-neutral-400">Folder</p>
+              <input
+                type="file"
+                multiple
+                webkitdirectory=""
+                directory=""
+                disabled={uploading !== null}
+                onChange={(e) => {
+                  void onPick(e.target.files);
+                  e.target.value = '';
+                }}
+                className={inputClass}
+              />
+            </div>
           </div>
-          <div className="min-w-0 flex-1">
-            <p className="mb-1 text-xs text-neutral-400">Folder</p>
-            <input
-              type="file"
-              multiple
-              webkitdirectory=""
-              directory=""
-              disabled={uploading !== null}
-              onChange={(e) => {
-                void onPick(e.target.files);
-                e.target.value = '';
-              }}
-              className={inputClass}
-            />
-          </div>
-        </div>
+        )}
         {uploading && <p className="text-xs text-indigo-300">Uploading {uploading}…</p>}
         {error && <p className="text-xs text-rose-400">{error}</p>}
         {deleteError && <p className="text-xs text-rose-400">{deleteError}</p>}

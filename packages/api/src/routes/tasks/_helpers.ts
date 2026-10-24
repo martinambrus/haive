@@ -25,6 +25,13 @@ import { HttpError } from '../../context.js';
 import { compositionSurvivesWithout, type StepFlagMap } from '../../lib/step-flags.js';
 import { uploadsStorageRoot } from '../../lib/uploads.js';
 
+export const TASK_REPOSITORY_COLUMNS = {
+  id: true,
+  name: true,
+  source: true,
+  writable: true,
+} as const;
+
 export const MAX_FILE_CONTENT_BYTES = 512 * 1024;
 export const TEXT_EXTENSIONS = new Set([
   '.md',
