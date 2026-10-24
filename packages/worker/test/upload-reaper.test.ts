@@ -28,6 +28,7 @@ const guard = vi.hoisted(() => ({
   debugs: [] as unknown[][],
   removalCode: 'EACCES' as string | undefined,
   statFailure: null as string | null,
+  ignoreParkedProtection: false,
 }));
 vi.mock('@haive/shared', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared')>();
@@ -70,13 +71,22 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
 });
 // The fake db evaluates no subquery, so the live-task check of the ended-dump claim is dropped here
 // and the pass's own read decides; upload-reaper-db.test.ts runs the statement as written on Postgres.
-vi.mock('drizzle-orm', async (original) => ({
-  ...(await original<typeof import('drizzle-orm')>()),
-  notExists: () => {
-    guard.claims += 1;
-    return undefined;
-  },
-}));
+vi.mock('drizzle-orm', async (original) => {
+  const real = await original<typeof import('drizzle-orm')>();
+  return {
+    ...real,
+    eq: (...args: Parameters<typeof real.eq>) =>
+      guard.ignoreParkedProtection &&
+      args[0] === schema.dbUploads.status &&
+      args[1] === 'reap_failed'
+        ? real.eq(schema.dbUploads.updatedAt, new Date(0))
+        : real.eq(...args),
+    notExists: () => {
+      guard.claims += 1;
+      return undefined;
+    },
+  };
+});
 
 const USER = 'aaaaaaaa-1111-4111-8111-111111111111';
 const OTHER_USER = 'bbbbbbbb-2222-4222-8222-222222222222';
@@ -174,6 +184,7 @@ beforeEach(async () => {
   guard.removalCode = 'EACCES';
   guard.removal = null;
   guard.statFailure = null;
+  guard.ignoreParkedProtection = false;
 });
 
 afterEach(async () => {
@@ -1687,11 +1698,17 @@ describe('T323: the orphan finished-dump pass', () => {
     'reap_failed',
   ])('keeps an old file whose %s row is still owned by the row passes', async (status) => {
     const upload = await session(dumps, {
-      idleMs: status === 'consumed' || status === 'reap_failed' ? 5 * TTL : HOUR,
+      idleMs: 5 * TTL,
       fileAgeMs: 5 * TTL,
       status,
       name: dumps.finished,
     });
+    // Hold the row passes back without renewing the row's timestamp. The keep-set must own
+    // every status, even without recentSessions' separate protection for reap_failed.
+    fake.hooks.beforeUpdate = fake.hooks.beforeDelete = (table) => {
+      if (table === schema.dbUploads) throw new Error('the row pass is unavailable');
+    };
+    guard.ignoreParkedProtection = true;
     if (status === 'reaping') guard.removal = () => true;
 
     await reapAbandonedUploads(db());
@@ -1699,6 +1716,11 @@ describe('T323: the orphan finished-dump pass', () => {
     expect(await exists(upload.file)).toBe(true);
     expect(rowOf(dumps, upload.id).status).toBe(status);
     expect(guard.removals).toBe(status === 'reaping' ? 1 : 0);
+    expect(
+      guard.warnings.filter(
+        ([, message]) => message === 'upload reaper skipped the finished dump pass',
+      ),
+    ).toHaveLength(0);
   });
 
   it('keeps an old complete dump with an old row while a running task needs it', async () => {
