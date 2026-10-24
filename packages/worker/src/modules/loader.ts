@@ -294,6 +294,66 @@ function settledWithinStartWait(moduleId: string, work: Promise<unknown>): Promi
   });
 }
 
+// How many stops of jobs that started after their deadline still run, per module; a teardown waits for them too.
+const lateStops = new Map<string, number>();
+
+// `jobs` that has not returned within a schema ensure's deadline counts as failed; what it starts later is stopped at once.
+function startJobsWithinDeadline(
+  moduleId: string,
+  jobs: NonNullable<WorkerModuleEntry['jobs']>,
+): Promise<() => Promise<void>> {
+  return new Promise((resolve, reject) => {
+    let expired = false;
+    const timer = setTimeout(() => {
+      expired = true;
+      reject(
+        new Error(
+          `the jobs did not start within ${Math.round(MODULE_SCHEMA_ENSURE_TIMEOUT_MS / 1000)} s`,
+        ),
+      );
+    }, MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
+    void (async () =>
+      jobs({
+        moduleId,
+        connection: getBullRedis(),
+        logger: logger.child({ module: moduleId }),
+      }))().then(
+      (stop) => {
+        clearTimeout(timer);
+        if (!expired) {
+          resolve(stop);
+          return;
+        }
+        logger.warn(
+          { module: moduleId },
+          'module jobs started after their deadline; stopping them',
+        );
+        lateStops.set(moduleId, (lateStops.get(moduleId) ?? 0) + 1);
+        void (async () => stop())()
+          .catch((err: unknown) => {
+            logger.warn(
+              { err, module: moduleId },
+              'module jobs that started after their deadline failed to stop',
+            );
+          })
+          .finally(() => {
+            const left = (lateStops.get(moduleId) ?? 1) - 1;
+            if (left > 0) lateStops.set(moduleId, left);
+            else lateStops.delete(moduleId);
+          });
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        if (!expired) {
+          reject(err);
+          return;
+        }
+        logger.warn({ err, module: moduleId }, 'module jobs failed to start after their deadline');
+      },
+    );
+  });
+}
+
 const jobsStarted = new Set<string>();
 // A teardown can begin and end between two passes, so no pass need have seen the deactivation.
 const tornDown = new Set<string>();
@@ -301,7 +361,7 @@ const tornDown = new Set<string>();
 const bootEnsuresRunning = new Set<string>();
 
 export const moduleJobsStarted = (moduleId: string): boolean =>
-  jobsStarted.has(moduleId) || bootEnsuresRunning.has(moduleId);
+  jobsStarted.has(moduleId) || bootEnsuresRunning.has(moduleId) || lateStops.has(moduleId);
 
 export { moduleTeardownRunning };
 
@@ -338,11 +398,7 @@ export async function startModuleJobs(
     moduleId: string,
     jobs: NonNullable<WorkerModuleEntry['jobs']>,
   ): Promise<boolean> => {
-    const stop = await jobs({
-      moduleId,
-      connection: getBullRedis(),
-      logger: logger.child({ module: moduleId }),
-    });
+    const stop = await startJobsWithinDeadline(moduleId, jobs);
     stops.set(moduleId, stop);
     jobsStarted.add(moduleId);
     if (!closing) return true;

@@ -27,6 +27,7 @@ const {
   MODULE_JOBS_RECONCILE_MS,
   MODULE_JOB_START_WAIT_MS,
   MODULE_JOB_STOP_WAIT_MS,
+  MODULE_SCHEMA_ENSURE_TIMEOUT_MS,
   beginModuleTeardown,
   ensureModuleSchemas,
   moduleJobsStarted,
@@ -1450,6 +1451,32 @@ describe('the jobs reconcile with a start that does not end', () => {
       expect(teardown).toHaveBeenCalledOnce();
     },
   );
+
+  it('refuses a teardown while a job start that does not return runs, naming its deadline, and goes ahead once the deadline has released it', async () => {
+    const id = 'pinned-deadline';
+    const m = moduleWithHungStart(id, 'jobs');
+    const teardown = vi.fn<Hook>(async () => {});
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+    const pass = track(reconcile(new Set()));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+    expect(pass.settled).toBe(true);
+
+    const refusal = (await runModuleTeardown(teardownDeps(m, teardown), id).catch(
+      (err: unknown) => err,
+    )) as Error;
+    expect(refusal).toBeInstanceOf(ModuleTeardownRefusedError);
+    expect(refusal.message).toMatch(
+      /schema setup that does not finish is cut off after 10 minutes, and so is a job start that does not return/,
+    );
+    expect(teardown).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(MODULE_SCHEMA_ENSURE_TIMEOUT_MS - MODULE_JOB_START_WAIT_MS);
+    expect(moduleJobsStarted(id)).toBe(false);
+    await runModuleTeardown(teardownDeps(m, teardown), id);
+    expect(teardown).toHaveBeenCalledOnce();
+  });
 
   it('goes on after the wait without the schema setup of a module that has no jobs, and ensures it once', async () => {
     const m = moduleWithSchemaOnly('schema-only-hung');
