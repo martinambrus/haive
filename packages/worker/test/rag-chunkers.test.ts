@@ -1165,10 +1165,12 @@ describe('maskNonCode', () => {
     expect(maskNonCode("var a = 'x {\nok();", 'js')).toBe(`var a = '${blank('x {')}\nok();`);
   });
 
-  it('scans a long run of slashes that open no regex in linear time', () => {
-    const src = `x=${'/['.repeat(60_000)}\n`;
+  it('gives up on regex literals after a few slashes on a line that closed none', () => {
+    const src = `x=${'/['.repeat(1_000_000)}\n`;
+    const started = performance.now();
 
     expect(maskNonCode(src, 'js').length).toBe(src.length);
+    expect(performance.now() - started).toBeLessThan(1_500);
   });
 });
 

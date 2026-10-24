@@ -256,9 +256,11 @@ const BARE_NAME = /^[A-Za-z_$][\w$]*$/;
 const WORD_START = /[\p{L}_$]/u;
 const WORD_CHAR = /[\p{L}\p{N}_$]/u;
 
-/** A regex literal longer than this is not read as one: a '/' that opens none would otherwise scan
- *  to the end of its line from every call. */
+/** A '/' that opens no regex literal would otherwise scan to the end of its line from every call: a
+ *  literal longer than MAX_REGEX_CHARS is not read as one, and a line gives up on regex literals after
+ *  MAX_REGEX_MISSES slashes that closed none. */
 const MAX_REGEX_CHARS = 1000;
+const MAX_REGEX_MISSES = 8;
 
 /** Index just past the quote that closes the string opening at `open`, else the end of the text. */
 function quotedEnd(text: string, open: number): number {
@@ -403,6 +405,7 @@ function jsNonCode(text: string): Span[] {
   const frames: number[] = [];
   let templateOpen = 0;
   let prev: string | null = null;
+  let regexMisses = 0;
   let i = 0;
   while (i < text.length) {
     const c = text[i]!;
@@ -424,15 +427,19 @@ function jsNonCode(text: string): Span[] {
           }
         }
       }
-    } else if (/\s/.test(c)) i += 1;
-    else if (c === '/' && (next === '/' || next === '*')) {
+    } else if (/\s/.test(c)) {
+      i += 1;
+      if (c === '\n') regexMisses = 0;
+    } else if (c === '/' && (next === '/' || next === '*')) {
       const close = text.indexOf(next === '/' ? '\n' : '*/', i + 2);
       const bodyEnd = close < 0 ? text.length : close;
       if (frames.length === 0) spans.push([i + 2, bodyEnd]);
       i = next === '*' && close >= 0 ? close + 2 : bodyEnd;
     } else if (c === '/') {
-      const close = regexMayStart(prev) ? regexClose(text, i) : -1;
+      const mayStart = regexMayStart(prev);
+      const close = mayStart && regexMisses < MAX_REGEX_MISSES ? regexClose(text, i) : -1;
       if (close < 0) {
+        if (mayStart) regexMisses += 1;
         prev = c;
         i += 1;
       } else {
