@@ -15,6 +15,7 @@ import {
   configService,
   createPlanEdgeRequestSchema,
   createPlanNodeRequestSchema,
+  isReadOnlyLocalRepo,
   planAdvisoryRequestSchema,
   planBuildRequestSchema,
   planChatRequestSchema,
@@ -106,7 +107,14 @@ async function requireOwnedRepo(c: {
   const repositoryId = c.req.param('id');
   const repo = await getDb().query.repositories.findFirst({
     where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
-    columns: { id: true, name: true, storagePath: true, localPath: true },
+    columns: {
+      id: true,
+      name: true,
+      storagePath: true,
+      localPath: true,
+      source: true,
+      writable: true,
+    },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
   return { userId, repositoryId, repo };
@@ -1188,6 +1196,9 @@ planRoutes.post('/:id/plan/build', requireNewWorkAllowed, async (c) => {
   // repo's uploads dir — the same requirement the attachments route enforces,
   // checked here so the user is told before a task is created rather than after
   // the first upload 409s.
+  if (body.deferStart && isReadOnlyLocalRepo(repo)) {
+    throw new HttpError(409, 'Attachments are not supported for read-only local repositories');
+  }
   if (body.deferStart && !repo.storagePath) {
     throw new HttpError(409, 'This repository is not ready for uploads yet');
   }

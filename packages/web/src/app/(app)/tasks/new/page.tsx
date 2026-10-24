@@ -118,6 +118,8 @@ interface AttachmentOutcome {
   taskId: string;
   /** The start action's answer, or null when the call itself failed. */
   start: { started: boolean; status: string } | null;
+  /** The api's words for that failure. */
+  startError: string | null;
   total: number;
   failed: { name: string; message: string }[];
 }
@@ -762,6 +764,7 @@ export default function NewTaskPage() {
       const data = await api.post<{ task: Task }>('/tasks', body);
       const failed: AttachmentOutcome['failed'] = [];
       let start: AttachmentOutcome['start'] = null;
+      let startError: AttachmentOutcome['startError'] = null;
       if (deferStart) {
         setAttachmentUploading(true);
         for (const f of attachmentFiles) {
@@ -777,16 +780,19 @@ export default function NewTaskPage() {
         setAttachmentUploading(false);
         // Started whatever the uploads did, so it is never left `created`; if this call fails,
         // the task page's Start is the retry.
-        start = await startTask(data.task.id).then(
-          ({ started, status }) => ({ started, status }),
-          () => null,
-        );
+        try {
+          const { started, status } = await startTask(data.task.id);
+          start = { started, status };
+        } catch (e) {
+          startError = e instanceof Error ? e.message : 'Failed to start the task';
+        }
       }
       if (origin) rememberTaskOrigin(`/tasks/${data.task.id}`, origin);
-      if (failed.length > 0) {
+      if (failed.length > 0 || startError !== null) {
         setAttachmentOutcome({
           taskId: data.task.id,
           start,
+          startError,
           total: attachmentFiles.length,
           failed,
         });
@@ -1449,17 +1455,23 @@ export default function NewTaskPage() {
                 ? 'The task was created and started.'
                 : attachmentOutcome.start
                   ? `The task was created but not started: it is ${attachmentOutcome.start.status} now.`
-                  : 'The task was created but could not be started. Open it and press Start.'}
+                  : `The task was created but could not be started${attachmentOutcome.startError ? ` (${attachmentOutcome.startError})` : ''}. Open it and press Start.`}
             </p>
-            <UploadFailureList total={attachmentOutcome.total} failed={attachmentOutcome.failed} />
+            {attachmentOutcome.failed.length > 0 && (
+              <UploadFailureList
+                total={attachmentOutcome.total}
+                failed={attachmentOutcome.failed}
+              />
+            )}
             <p>
               <Link
                 href={`/tasks/${attachmentOutcome.taskId}`}
                 className="text-indigo-300 underline"
               >
                 Open the task
-              </Link>{' '}
-              and add them again from its Attachments tab.
+              </Link>
+              {attachmentOutcome.failed.length > 0 &&
+                ' and add them again from its Attachments tab.'}
             </p>
           </div>
         )}

@@ -6,7 +6,9 @@ builder's first step reads the uploads dir and the worker picks a job up immedia
 files through the ordinary attachment route and finalizes with the `start` task action, which
 claims `status = 'created'` in one atomic UPDATE (a second click matches no row and enqueues
 nothing). An upload that fails therefore cannot start anything — the draft is the repair
-surface, reachable from its Attachments tab. The plan starter
+surface, reachable from its Attachments tab. A read-only local repository takes no attachments
+(the attachment route refuses it), so `POST /plan/build` refuses a `deferStart` for one before it
+creates the row; otherwise the draft was made and every upload into it then answered 409. The plan starter
 (`web/src/components/plan/plan-starter.tsx`) keeps that draft's id whenever a press leaves one,
 after a failed upload or a refused `start`, so its next press re-sends only the rows not yet
 uploaded and sends `start` to the SAME task; a form that forgot the id after a refused `start`
@@ -14,8 +16,9 @@ made a second build with no attachments while the first stayed `created` holding
 `POST /tasks` takes the same `deferStart`, and the
 New Task page sends it only when files are picked; there the rule differs: the page tries every
 file, then sends `start` whatever the uploads did (the task page's Attachments panel is the retry
-surface). When any upload failed it stays put and names each failed file with its error, says
-whether the task started, and links the task; the form stays locked, so the submit cannot create a
+surface). When any upload failed, or the `start` itself was refused (a 409 "busy" among them), it
+stays put, names each failed file with its error, says whether the task started and, when the start
+was refused, the api's reason, and links the task; the form stays locked, so the submit cannot create a
 second task. The task page's Attachments tab does the same with a pick: it tries every file, reloads
 once, and lists each failure by its path inside a picked folder until the next pick (a reload does not
 clear it). A `start` that never arrives (the tab closed mid-upload, a drain refusing it) leaves
