@@ -18,6 +18,7 @@ import { shellQuote } from '../../../sandbox/shell-quote.js';
 import { buildCommitDiffArtifact } from '../workflow/_commit-diff.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../../../repo/git-push.js';
+import { gitGaveNoAnswer } from '../../../repo/git-exec.js';
 import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
 import { putBackProjections, warnStep } from '../../../project-state/branch-revert.js';
 
@@ -51,6 +52,8 @@ interface RunAppReadyDetect {
   hasOrigin: boolean;
   /** Why the origin could not be read, so the push is not offered. Optional: a parked step replays a payload without it. */
   originError?: string | null;
+  /** Why the branch could not be read, so the push is not offered. Optional: a parked step replays a payload without it. */
+  branchError?: string | null;
   dirtyFiles: number;
   diffArtifactPath: string | null;
   changedFileCount: number;
@@ -166,12 +169,20 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     let branch: string | null = null;
     let hasOrigin = false;
     let originError: string | null = null;
+    let branchError: string | null = null;
     let dirtyFiles = 0;
     let diffArtifactPath: string | null = null;
     let changedFileCount = 0;
     if (hasGit) {
       const branchRes = await gitRun(workspacePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
+      if (gitGaveNoAnswer(branchRes)) {
+        branchError = `could not read the checkout's current branch: ${(branchRes.stderr || branchRes.stdout).trim()}`;
+        ctx.logger.warn(
+          { workspacePath, branchError },
+          'run-app-ready: branch unreadable; push not offered',
+        );
+      }
       try {
         hasOrigin = await detectOrigin(workspacePath);
       } catch (err) {
@@ -216,6 +227,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       branch,
       hasOrigin,
       originError,
+      branchError,
       dirtyFiles,
       diffArtifactPath,
       changedFileCount,
@@ -259,12 +271,21 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         default: 'chore: run-app session edits',
       },
     ];
-    if (detected.hasOrigin) {
+    if (detected.hasOrigin && !detected.branchError) {
       fields.push({
         type: 'checkbox',
         id: 'push',
         label: `Push ${detected.branch ?? 'this branch'} to origin after committing`,
         default: false,
+      });
+    }
+    if (detected.hasOrigin && detected.branchError) {
+      fields.push({
+        type: 'note',
+        id: 'branchUnreadable',
+        label: 'Branch not read',
+        body: `Pushing is not offered: ${detected.branchError}. Retry this step to read it again.`,
+        variant: 'warning',
       });
     }
     if (detected.originError) {
