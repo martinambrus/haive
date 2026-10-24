@@ -793,7 +793,7 @@ Sites: api global-kb.ts PUT ~:1275, DELETE ~:1356.
 
 ### T375 · FNF[diff-artifact-edges] · an untracked nested repo shows as unreadable although gate 3 commits it as a gitlink (+1)
 
-status: open · was modular #250 (a Codex attempt was discarded, nothing kept)
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:07Z · last: 2026-10-24T21:07Z · was modular #250
 
 1. worker steps/workflow/_commit-diff.ts ~:161 returns null when the index has no gitlink. Proposed: show the repo as a new gitlink with its HEAD sha. Show an unborn repo as unreadable with a reason.
 2. An empty investigation file reads as `added` (11-phase-8-learning.ts ~:943). Fix: tell absent from empty by the read result.
