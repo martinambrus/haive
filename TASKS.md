@@ -84,7 +84,7 @@ board. At session start, load the board's tasks you own or will work on into the
 # Open tasks
 
 ### T311 · FNF[rag-chunker-2] · chunker false matches, wrong method owners, braces in strings (+5)
-status: taken · owner: fnf-run@ACTIVIT21 · since: 2026-10-23 · last: 2026-10-24T06:40Z
+status: taken · owner: fnf-run@ACTIVIT21 · since: 2026-10-23 · last: 2026-10-24T11:00Z
 branch: fnf/311-rag-chunker-2 · worktree: /home/activit/haive/.claude/worktrees/p311 · evidence: .claude/tmp/fnf-run/p311/
 All PRE-EXISTING, measured on the eval tree at 9c0c8ee77 (evidence .claude/tmp/rag-plan/p1/evidence/metrics-main.json). File: `_rag-chunkers.ts`.
 1. The PHP class pattern matches "class" inside comments: 563 methods get a wrong owner, 120 lose theirs.
@@ -108,8 +108,7 @@ All PRE-EXISTING.
 7. (low) 12-post-onboarding.ts:466 currentBranch dead; 13-onboarding-push.ts:29 unread `branch?`.
 
 ### T323 · FNF[uploads-3] · leftover upload files never cleaned; unlink failures warn forever (+3)
-status: taken · owner: fnf-run@ACTIVIT21 · since: 2026-10-24 · last: 2026-10-24T06:40Z
-branch: fnf/323-uploads-3 · worktree: .claude/worktrees/p323 · brief: .claude/tmp/fnf-run/p323/drive.md (Codex)
+status: open (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Previous brief, reusable: .claude/tmp/fnf-run/p323/drive.md on ACTIVIT21)
 All PRE-EXISTING.
 1. repo/clone.ts:678 swallows a failed archive unlink after extract; reaper's liveRepositories keeps every non-error repo, so a ready repo's archive stays.
 2. upload-reaper.ts:372 an orphan file that cannot be removed warns every 15 min forever.
@@ -117,8 +116,7 @@ All PRE-EXISTING.
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 
 ### T288 · FNF[sync-reader] · project-state sync reader defects (+6)
-status: taken · owner: fnf-run@ACTIVIT21 · since: 2026-10-24 · last: 2026-10-24T06:40Z
-branch: fnf/288-sync-reader · worktree: .claude/worktrees/p288 · brief: .claude/tmp/fnf-run/p288/drive.md (Codex; items A,B,C,D,E)
+status: open (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Previous brief, reusable: .claude/tmp/fnf-run/p288/drive.md on ACTIVIT21 — it scoped items 2,3,5,6,7 and deferred 1/4 for the fnf/278 overlap)
 All PRE-EXISTING.
 1. DEFERRED (overlaps fnf/278): gitOperationInProgress (repo/git-operation.ts) reads an out-of-tree git dir as "merge open"; every caller holds forever for such repos.
 2. persistDetection's sync (clone.ts ~299) and resolve.ts ~140 re-sync import without the under-lock re-read compare (#751). [in brief as B]
