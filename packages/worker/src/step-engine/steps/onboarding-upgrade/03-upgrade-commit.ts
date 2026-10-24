@@ -24,7 +24,7 @@ import {
 } from '../onboarding/_rules-files.js';
 import { safeDiskRel } from './02-upgrade-apply.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
-import { gitExec } from '../../../repo/git-exec.js';
+import { gitExec, gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
 
 const DEFAULT_COMMIT_MESSAGE = [
   'chore: apply Haive onboarding upgrade',
@@ -85,11 +85,9 @@ export function appliedImportStubs(applyOutput: unknown): { file: string; link: 
  *  HEAD the line is missing; a grep failing any other way proves nothing, so it answers false,
  *  which leaves the file and any unrelated edits in it unstaged. */
 export async function headLacksImport(repoPath: string, rel: string): Promise<boolean> {
-  try {
-    await gitExec(['rev-parse', '--verify', '-q', 'HEAD'], { cwd: repoPath });
-  } catch {
-    return true;
-  }
+  const head = await gitRun(repoPath, ['rev-parse', '--verify', '-q', 'HEAD']);
+  if (gitGaveNoAnswer(head)) return false;
+  if (head.code !== 0) return true;
   try {
     await gitExec(['grep', '-q', '-F', '-e', RULES_IMPORT_LINE, 'HEAD', '--', rel], {
       cwd: repoPath,
@@ -110,11 +108,9 @@ export async function agentsRulesVerdict(repoPath: string): Promise<AgentsRulesV
   const disk = await readAgentsRulesRegion(repoPath);
   if ('unreadable' in disk) return { verdict: 'unknown', reason: disk.unreadable };
   if (disk.region === null) return { verdict: 'current' };
-  try {
-    await gitExec(['rev-parse', '--verify', '-q', 'HEAD'], { cwd: repoPath });
-  } catch {
-    return { verdict: 'stage' };
-  }
+  const probe = await gitRun(repoPath, ['rev-parse', '--verify', '-q', 'HEAD']);
+  if (gitGaveNoAnswer(probe)) return { verdict: 'unknown', reason: probe.noExit ?? 'timed out' };
+  if (probe.code !== 0) return { verdict: 'stage' };
   try {
     const { stdout: entry } = await gitExec(['ls-tree', '-z', 'HEAD', '--', CLI_RULES_DISK_PATH], {
       cwd: repoPath,

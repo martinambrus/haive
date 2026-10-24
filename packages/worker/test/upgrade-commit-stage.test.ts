@@ -12,6 +12,7 @@ import {
   upgradeCommitStep,
 } from '../src/step-engine/steps/onboarding-upgrade/03-upgrade-commit.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
+import { killGit, type KilledGit } from './support/kill-git.js';
 
 const run = promisify(execFile);
 
@@ -80,6 +81,7 @@ describe('appliedImportStubs', () => {
 
 describe('headLacksImport', () => {
   let repo: string;
+  let shim: KilledGit | null = null;
 
   beforeEach(async () => {
     repo = await mkdtemp(join(tmpdir(), 'haive-upgrade-commit-'));
@@ -90,6 +92,8 @@ describe('headLacksImport', () => {
   });
 
   afterEach(async () => {
+    await shim?.restore();
+    shim = null;
     await rm(repo, { recursive: true, force: true });
   });
 
@@ -122,6 +126,22 @@ describe('headLacksImport', () => {
     expect(await headLacksImport(repo, 'CLAUDE.md')).toBe(false);
   });
 
+  it('is true in a directory that is not a repository yet', async () => {
+    const bare = await mkdtemp(join(tmpdir(), 'haive-upgrade-norepo-'));
+    try {
+      expect(await headLacksImport(bare, 'CLAUDE.md')).toBe(true);
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('is false when the HEAD check gave no answer, so nothing is staged', async () => {
+    await commit('README.md', 'hi\n');
+    await writeFile(join(repo, 'CLAUDE.md'), '@AGENTS.md\n');
+    shim = await killGit(['rev-parse', '--verify', '-q', 'HEAD']);
+    expect(await headLacksImport(repo, 'CLAUDE.md')).toBe(false);
+  });
+
   it('reads a committed file larger than a child-process output buffer', async () => {
     await commit('CLAUDE.md', `${'x'.repeat(2 * 1024 * 1024)}\n@AGENTS.md\n`);
     expect(await headLacksImport(repo, 'CLAUDE.md')).toBe(false);
@@ -133,6 +153,7 @@ const RULES = (body: string) =>
 
 describe('agentsRulesVerdict', () => {
   let repo: string;
+  let shim: KilledGit | null = null;
 
   beforeEach(async () => {
     repo = await mkdtemp(join(tmpdir(), 'haive-agents-verdict-'));
@@ -143,6 +164,8 @@ describe('agentsRulesVerdict', () => {
   });
 
   afterEach(async () => {
+    await shim?.restore();
+    shim = null;
     await rm(repo, { recursive: true, force: true });
   });
 
@@ -157,6 +180,26 @@ describe('agentsRulesVerdict', () => {
     expect(await agentsRulesVerdict(repo)).toEqual({ verdict: 'stage' });
     await commit('README.md', 'hi\n');
     expect(await agentsRulesVerdict(repo)).toEqual({ verdict: 'stage' });
+  });
+
+  it('stages a rules block in a directory that is not a repository yet', async () => {
+    const bare = await mkdtemp(join(tmpdir(), 'haive-agents-norepo-'));
+    try {
+      await writeFile(join(bare, 'AGENTS.md'), RULES('- rule one'));
+      expect(await agentsRulesVerdict(bare)).toEqual({ verdict: 'stage' });
+    } finally {
+      await rm(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('cannot tell when the HEAD check gave no answer', async () => {
+    await commit('AGENTS.md', RULES('- rule one'));
+    await writeFile(join(repo, 'AGENTS.md'), RULES('- rule two'));
+    shim = await killGit(['rev-parse', '--verify', '-q', 'HEAD']);
+    expect(await agentsRulesVerdict(repo)).toEqual({
+      verdict: 'unknown',
+      reason: expect.any(String),
+    });
   });
 
   it('stages a block that differs from HEAD, or that HEAD lacks', async () => {
