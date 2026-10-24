@@ -179,7 +179,7 @@ export async function definitionForCreate(
       case 'missing-step':
         throw new HttpError(
           409,
-          `Task type ${slug} uses steps that no longer exist: ${availability.stepIds?.join(', ')}`,
+          `Task type ${slug} uses steps that no longer exist: ${availability.missingStepIds?.join(', ')}`,
           availability.reason,
         );
       case 'invalid-composition':
