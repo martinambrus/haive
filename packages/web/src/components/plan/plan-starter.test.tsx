@@ -25,13 +25,16 @@ vi.mock('next/link', async () => {
 vi.mock('lucide-react', () => ({ FolderUp: () => null, Paperclip: () => null, X: () => null }));
 
 const net = vi.hoisted(() => ({
+  repoRow: vi.fn(),
   buildPlan: vi.fn(),
   startTask: vi.fn(),
   uploadTaskAttachment: vi.fn(),
 }));
 vi.mock('@/lib/api-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api-client')>()),
-  api: { get: async () => ({ providers: [] }) },
+  api: {
+    get: async (path: string) => (path === '/repos/repo-1' ? net.repoRow() : { providers: [] }),
+  },
   getPlanBuildClis: async () => ({ plannerCliProviderId: null, questionerCliProviderId: null }),
   buildPlan: net.buildPlan,
   startTask: net.startTask,
@@ -70,6 +73,7 @@ const page = (view: Renderer) => textOf(view.tree());
 
 beforeEach(() => {
   vi.clearAllMocks();
+  net.repoRow.mockResolvedValue({ repository: { source: 'git_https', writable: false } });
   let created = 0;
   net.buildPlan.mockImplementation(async () => ({ taskId: `draft-${++created}` }));
   net.uploadTaskAttachment.mockResolvedValue({});
@@ -204,5 +208,60 @@ describe('PlanStarter when the start is refused', () => {
 
     await press(view);
     expect(net.buildPlan).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('PlanStarter for a read-only local repository', () => {
+  const NOTE = 'This repository is imported read-only, so files cannot be attached.';
+  const fileInputs = (view: Renderer) =>
+    findAll(view.tree(), (h) => h.tag === 'input' && h.props.type === 'file');
+
+  async function mountPlain(): Promise<Renderer> {
+    const view = createRenderer(() => (
+      <PlanStarter
+        repositoryId="repo-1"
+        onboarded={true}
+        onNavigate={onNavigate}
+        onCreateRoot={async () => {}}
+      />
+    ));
+    await view.flush();
+    return view;
+  }
+
+  it('R1: offers no attach controls and says why', async () => {
+    net.repoRow.mockResolvedValue({ repository: { source: 'local_path', writable: false } });
+    const view = await mountPlain();
+    expect(buttons(view.tree(), /^attach (files|folder)/)).toHaveLength(0);
+    expect(fileInputs(view)).toHaveLength(0);
+    expect(page(view)).toContain(NOTE);
+  });
+
+  it('R2: a writable local repository keeps both buttons and shows no sentence', async () => {
+    net.repoRow.mockResolvedValue({ repository: { source: 'local_path', writable: true } });
+    const view = await mountPlain();
+    expect(buttons(view.tree(), 'attach files')).toHaveLength(1);
+    expect(buttons(view.tree(), 'attach folder')).toHaveLength(1);
+    expect(page(view)).not.toContain(NOTE);
+  });
+
+  it('R3: keeps the controls when the repository cannot be fetched', async () => {
+    net.repoRow.mockRejectedValue(new Error('offline'));
+    const view = await mountPlain();
+    expect(buttons(view.tree(), 'attach files')).toHaveLength(1);
+    expect(buttons(view.tree(), 'attach folder')).toHaveLength(1);
+    expect(page(view)).not.toContain(NOTE);
+  });
+
+  it('R4: drafts the plan with no deferred start and opens the task', async () => {
+    net.repoRow.mockResolvedValue({ repository: { source: 'local_path', writable: false } });
+    const view = await mountPlain();
+    const textarea = findAll(view.tree(), (h) => h.tag === 'textarea')[0]!;
+    fire.type(textarea, 'A club site');
+    view.draw();
+    await press(view);
+    expect(net.buildPlan).toHaveBeenCalledTimes(1);
+    expect(net.buildPlan.mock.calls[0]![1]).not.toHaveProperty('deferStart');
+    expect(onNavigate).toHaveBeenCalledWith('/tasks/draft-1');
   });
 });

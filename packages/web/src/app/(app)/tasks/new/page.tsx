@@ -17,6 +17,7 @@ import type { PlanNodeTaskRole, PlanTaskProposal } from '@haive/shared';
 import type { PublicTaskType } from '@haive/shared/modularity';
 import { describePlanNodesForTask } from '@haive/shared/plan-describe';
 import { taskProposal } from '@/components/plan/plan-chat-turn';
+import { attachmentUnavailableNote } from '@/lib/attachment-availability';
 import { stepCliProviderIds } from '@/lib/step-cli-providers';
 import { HoursMinutesInput } from '@/components/hours-minutes-input';
 import { UploadFailureList } from '@/components/attachments/upload-failure-list';
@@ -382,6 +383,7 @@ export default function NewTaskPage() {
     setResetNote(null);
     setParentTaskId('');
     setParentOptions(null);
+    if (attachmentUnavailableNote(repos?.find((r) => r.id === id)) !== null) setAttachmentFiles([]);
   }
 
   useEffect(() => {
@@ -806,6 +808,7 @@ export default function NewTaskPage() {
   }
 
   const readyRepos = repos?.filter((r) => r.status === 'ready') ?? [];
+  const attachNote = attachmentUnavailableNote(repos?.find((r) => r.id === repositoryId));
 
   return (
     <div className="flex max-w-2xl flex-col gap-6">
@@ -1288,7 +1291,9 @@ export default function NewTaskPage() {
           </div>
         )}
 
-        {repositoryId && (
+        {attachNote !== null && <p className="text-xs text-neutral-500">{attachNote}</p>}
+
+        {repositoryId && attachNote === null && (
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="attachments">Attachments (optional)</Label>
             <input
