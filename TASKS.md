@@ -767,7 +767,7 @@ Sites:
 
 ### T372 · FNF[api-test-hygiene] · fence-order test timeout; picker double label; stepIds misnamed (+2)
 
-status: open · was modular #245
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:38Z · last: 2026-10-24T20:38Z · item 2 ships with T391 · was modular #245
 
 1. api test/new-work-fence-order.test.ts:87 runs under the 5 s default timeout. Fix: 30 s.
 2. MOVED to T391 (the same defect as its item 3; ships with it): cli-picker-grid.tsx shows "(step default)" and the none option for one state.
