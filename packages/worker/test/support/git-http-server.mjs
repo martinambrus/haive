@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import path from 'node:path';
-import { hardenGitArgs } from '@haive/shared/git-args';
 
 const base = process.argv[2];
 if (!base || !path.isAbsolute(base)) throw new Error('fixture base directory required');
@@ -11,9 +10,13 @@ if (!base || !path.isAbsolute(base)) throw new Error('fixture base directory req
 // A separate process lets fixtures that use execFileSync still speak real smart HTTP.
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const child = spawn('git', hardenGitArgs(['-c', 'http.receivepack=true', 'http-backend']), {
+  const child = spawn('git', ['-c', 'http.receivepack=true', 'http-backend'], {
     env: {
       ...process.env,
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_PARAMETERS: '',
+      GIT_CONFIG_COUNT: '0',
       GIT_PROJECT_ROOT: base,
       GIT_HTTP_EXPORT_ALL: '1',
       PATH_INFO: decodeURIComponent(url.pathname),
