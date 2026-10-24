@@ -23,7 +23,24 @@ export async function detectOrigin(cwd: string): Promise<boolean> {
 /** An origin address refused by the same rule as a typed remote URL. */
 export class OriginUrlError extends Error {
   constructor(url: string) {
-    const safe = url.replace(/(\/\/)[^/]*@/g, '$1').replace(/^[^/@]+@(?=[^/]*:)/, '');
+    let safe = url;
+    if (url.includes('://')) {
+      try {
+        const parsed = new URL(url);
+        if (!parsed.hostname) throw new Error('URL has no authority');
+        parsed.username = '';
+        parsed.password = '';
+        safe = parsed.toString();
+      } catch {
+        // Malformed userinfo or an opaque URL can have no parsed host. Strip that
+        // whole prefix through the last @ rather than expose part of a password.
+        const start = url.indexOf('://') + 3;
+        const at = url.lastIndexOf('@');
+        if (at >= start) safe = url.slice(0, start) + url.slice(at + 1);
+      }
+    } else {
+      safe = url.replace(/^[^@]+@(?=[^/]*:)/, '');
+    }
     super(`origin URL is not allowed (expected https, http, ssh or an scp-style address): ${safe}`);
     this.name = 'OriginUrlError';
   }

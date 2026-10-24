@@ -83,19 +83,23 @@ describe('origin URL boundary', () => {
     await gitRun(work, ['config', 'url./tmp/other-user.insteadOf', 'https://example.test/']);
     await expect(getOriginUrl(work)).rejects.toMatchObject({ name: 'OriginUrlError' });
   });
-  it.each(['file://user:secret@host/repo', 'ext://user:secret@host/repo'])(
-    'removes userinfo from refused URL %s',
-    async (url) => {
-      const work = await repo();
-      await gitRun(work, ['remote', 'add', 'origin', url]);
-      await expect(getOriginUrl(work)).rejects.toThrow(/origin.*URL.*not allowed/i);
-      await getOriginUrl(work).catch((e: Error) => {
-        expect(e.message).not.toContain('user');
-        expect(e.message).not.toContain('secret');
-        expect(e.message).toContain('host/repo');
-      });
-    },
-  );
+  it.each([
+    ['file://user:secret@host/repo', 'file://host/repo'],
+    ['ext://user:secret@host/repo', 'ext://host/repo'],
+    ['ext:://user:secret@host/repo', 'ext:://host/repo'],
+    ['https://user:pa/ss@host/x', 'https://host/x'],
+    ['user:secret@host:repo', 'host:repo'],
+  ])('removes userinfo from refused URL %s', async (url, safe) => {
+    const work = await repo();
+    await gitRun(work, ['remote', 'add', 'origin', url]);
+    await expect(getOriginUrl(work)).rejects.toThrow(/origin.*URL.*not allowed/i);
+    await getOriginUrl(work).catch((e: Error) => {
+      expect(e.message).not.toContain('user');
+      expect(e.message).not.toContain('secret');
+      expect(e.message).not.toContain('pa/ss');
+      expect(e.message).toContain(safe);
+    });
+  });
   it('accepts all allowed fetch/push addresses and returns the first fetch URL', async () => {
     const work = await repo();
     await gitRun(work, ['remote', 'add', 'origin', 'https://example.test/r']);
