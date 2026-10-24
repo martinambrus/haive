@@ -807,7 +807,7 @@ status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:40Z ·
 2. lib/integration-device.ts ~:151-153: the finally must never change a committed answer.
 3. web github-oauth-connect.tsx ~:101-105, ~:139-142: add an attempt id or a cancelled ref.
 
-### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+3)
+### T379 · FNF[git-tree-readers] · gitlink readers and literal-pathspec helpers duplicated with different failure contracts (+4)
 
 status: open · was modular #257
 
@@ -815,6 +815,7 @@ status: open · was modular #257
 2. A duplicate runGit exists in advance-bundle-items.ts and reset-bundle-to-commit.ts.
 3. set-aside.ts ~:250 headOid, ~:1113 headEntry and projection-merge.ts ~:32 readBlob count a failed read as absent.
 4. git-merge.ts ~:632, :636, :1356, :1373, :1419: resolvingPaths and `rev-list --parents` failures.
+5. (T375 review) _commit-diff.ts checkedOutCommit ~:133-161 is one more gitlink reader with its own failure contract.
    Fix: one shared reader module with an explicit failure contract. Do this after T396.
 
 ### T382 · FNF[auth-endpoint-hardening] · refresh rotation not CAS; login timing; no admin-authz sweep (+4)
@@ -999,6 +1000,27 @@ From the T400 Codex run (2026-10-24), confirmed by the session.
 
 1. PRE-EXISTING, security hygiene: api routes/cli-login-banner.ts ~:674-680 logs `tokenHead: oauthToken.slice(0, 22)` and `tokenTail: oauthToken.slice(-6)` when it captures a Claude OAuth token from stdout, so 15 secret characters of every captured token reach the api log. The only such site (grep of packages and modules). Fix: log the length and, if one is needed, a short hash, never characters of the token.
 2. PRE-EXISTING, minor: web components/cli-auth-banner-modal.tsx ~:226, the socket close handler leaves the displayed phase unchanged.
+
+### T423 · FNF[terminal-attach] · a failed attach-count write leaves the docker attach stream open; the count is read-then-write (+1)
+
+status: open
+From the T400 review (2026-10-24). PRE-EXISTING, minor.
+
+1. api routes/terminal.ts ~:106-112: `await incrementAttached(...)` throwing (database down) leaves the docker attach stream opened at ~:106 open; the `.catch` at ~:80 closes only the ws.
+2. terminal.ts ~:317-343 moves `containers.attached_ws_count` by read-then-write, so concurrent closes lose updates (a revoke now closes several sockets of one container at once). Nothing reads the column for a decision (only these writes and a web type). Fix: one atomic `SET attached_ws_count = greatest(attached_ws_count + $d, 0)`.
+
+### T424 · FNF[nested-repo-worktree] · gate 3 offers a commit that git add will refuse for an unborn nested repo; the review collector calls a nested repo a new file (+1)
+
+status: open
+From the T375 review (2026-10-24). PRE-EXISTING, minor.
+
+1. worker 10-gate-3-commit.ts ~:375, ~:407-410: with an unborn nested repo (`git init`, no commit) in the worktree the whole `git add -A` fails, but the form still defaults the commit on and the failure shows only at Finalise. Since T375 the preview says why. Fix: say so in the form, or stage around it.
+2. worker `_impl-changes.ts` ~:147-156, ~:447, ~:453: an untracked nested repo enters the review scope as one changed "file" `nested/`, marked 'new file' (`-uall` cannot expand an embedded repo). Downstream effect on reviewers not traced.
+
+### T425 · FNF[orphan-gitlink] · gate 3 commits an agent-left nested repository as a gitlink with no .gitmodules entry
+
+status: open · kind: design
+From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. worker 10-gate-3-commit.ts ~:407-410: `git add -A` records an untracked nested repo that has a HEAD as a 160000 entry with no `.gitmodules` URL; the viewer labels it "submodule" and gate 3 reads only the exit code. Later `git submodule` commands and recursive clones meet a gitlink with no URL. Decide: refuse, warn, stage its files, or ask the user.
 
 ## Done
 
