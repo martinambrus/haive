@@ -775,13 +775,6 @@ Sites:
 
 1. A role-admin owner's Retry under an administrator's pause lifts it with no byAdmin event or audit row (api tasks/_helpers.ts ~:1181).
 
-### T375 · FNF[diff-artifact-edges] · an untracked nested repo shows as unreadable although gate 3 commits it as a gitlink (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:07Z · last: 2026-10-25T00:40Z · merged PR #909 (d35333489), waiting for main CI · was modular #250
-
-1. worker steps/workflow/_commit-diff.ts ~:161 returns null when the index has no gitlink. Proposed: show the repo as a new gitlink with its HEAD sha. Show an unborn repo as unreadable with a reason.
-2. An empty investigation file reads as `added` (11-phase-8-learning.ts ~:943). Fix: tell absent from empty by the read result.
-
 ### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+5)
 
 status: open · (T377 landed as PR #886) · was modular #252
@@ -840,15 +833,6 @@ Decide: sanitise .git/config at import (allow-list keys), or refuse archives tha
 
 1. Env-only levers (GIT_ALLOW_PROTOCOL, GIT_NO_LAZY_FETCH) reach only gitRun and gitExec.
 
-### T388 · FNF[origin-url-revalidate] · a stored remote.origin.url is never re-validated, so network git can fetch/push file:// paths of other tenants (+3)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-25T00:50Z · merged PR #906 (da043a2aa), waiting for main CI · was modular #269
-
-1. isAllowedGitRemoteUrl (shared schemas/git-url.ts ~:94) guards only typed URLs. Since #255, getOriginUrl is the one read. Validate the URL there and switch the detectOrigin-only callers.
-2. `-c` does not reach a local-path transport child. Item 1 closes this.
-3. git-push.ts ensureOrigin tests stderr wording, not exit code 3. 11a trusts a cached hasOrigin. The twin is api repos.ts ~:2539.
-4. The api repos.ts ~:2530 link-origin route answers 409 with the wrong reason.
-
 ### T389 · FNF[repo-loose-objects] · Haive's git no longer triggers auto-maintenance (#256), so busy repos accumulate loose objects
 
 status: open · kind: design · was modular #270
@@ -871,11 +855,6 @@ Decide: Stop enqueues a settle, or the backstop sweep settles promptly.
 
 status: open · kind: design · was modular #276
 See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or answer a named 409.
-
-### T395 · FNF[web-stop-pending-current] · offer Stop for a running task whose current row is pending; notice on stopped:0
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:49Z · last: 2026-10-25T01:15Z · merged PR #908 (2f39fa5fd), browser-checked, waiting for main CI · was modular #277
-DECIDED 2026-10-24: yes. Sites: web lib/task-state.ts ~:31, tasks/[id]/page.tsx ~:1591, ~:3884, admin maintenance/page.tsx ~:248; the response is dropped at ~:1299-1307. Key the gate on structural columns, in a separate small web commit. Browser check at 1280, 768 and 390.
 
 ### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+14)
 
@@ -974,14 +953,6 @@ status: open · area: modular-haive-plan owns merge-resolver.ts landing sections
 status: open
 From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` rows an earlier release recorded at a git-data path (a literal `.git` segment or, since T304, an NTFS or HFS+ alias of it) are skipped by every reader (01 plan, 02 and 04 writes, 03 staging, the sync), but nothing retires them and they still count in `liveArtifacts` (api upgrades.ts ~:456, ~:723, ~:787). Fix: retire them in a numbered, idempotent data migration (SQL cannot call `namesGitData`, so the migration needs the same rule in SQL, or ship a deploy script), or leave them out of the counts.
 
-### T422 · FNF[cli-login-banner] · the Claude OAuth capture logs the token's first 22 and last 6 characters (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:14Z · last: 2026-10-25T01:00Z · merged PR #910 (dc444c013), waiting for main CI
-From the T400 Codex run (2026-10-24), confirmed by the session.
-
-1. PRE-EXISTING, security hygiene: api routes/cli-login-banner.ts ~:674-680 logs `tokenHead: oauthToken.slice(0, 22)` and `tokenTail: oauthToken.slice(-6)` when it captures a Claude OAuth token from stdout, so 15 secret characters of every captured token reach the api log. The only such site (grep of packages and modules). Fix: log the length and, if one is needed, a short hash, never characters of the token.
-2. PRE-EXISTING, minor: web components/cli-auth-banner-modal.tsx ~:226, the socket close handler leaves the displayed phase unchanged.
-
 ### T423 · FNF[terminal-attach] · a failed attach-count write leaves the docker attach stream open; the count is read-then-write (+1)
 
 status: open
@@ -1026,6 +997,10 @@ From the T420 review (2026-10-25). PRE-EXISTING design, minor. worker queues/cli
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T395 — Stop offered for a running task whose current row is pending; "Nothing was running to stop." on an empty Stop (browser-checked; running-task case owed, T300) — PR #908 (2f39fa5fd), 2026-10-25
+- T422 — no credential text in the login banner's logs or errors (sanitized error class and code); the modal handles an unexpected close (+1; leftovers in T426, T427) — PR #910 (dc444c013), 2026-10-25
+- T388 — host git re-validates a stored origin URL and refuses the file transport for pack commands (follow-ups in T417) — PR #906 (da043a2aa), 2026-10-25
+- T375 — an untracked nested repo previews as git add records it (gitlink, or unborn with a reason); an empty investigation file is not new (gate 3 live view owed, T300) — PR #909 (d35333489), 2026-10-25
 - T378 — a failed finishSignIn revokes the vendor token; the device poll's cleanup cannot 500; the GitHub connect poll stops once cancelled — PR #905 (134a27e13; main green at 7eb1938af), 2026-10-24
 - T372 — fence-order test budget; stepIds named for what they hold (picker label shipped with T391) — PR #904 (7fe56b9e0), 2026-10-24
 - T404 — a re-opened step clears its context and allowance stamp; the page shows stamps on done rows only (browser-checked; ratchet budget follow-up #907) — PR #903 (6e9daa2e6), 2026-10-24
