@@ -39,6 +39,7 @@ import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import type { SkillSyncOp } from './11-phase-8-learning.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { gitRun } from '../../../repo/git-exec.js';
+import { gitCommitStaged } from '../../../repo/git-commit.js';
 
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
 const STEP_ID = '11d-skill-sync';
@@ -515,17 +516,10 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
         if (add.code !== 0) throw new Error(`git add failed: ${add.stderr || add.stdout}`);
         const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
         const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-        const commit = await gitRun(
-          worktree,
-          ['commit', '-m', DEFAULT_SKILL_SYNC_COMMIT_MESSAGE],
-          commitEnv,
-        );
-        if (commit.code === 0) {
+        committed = await gitCommitStaged(worktree, DEFAULT_SKILL_SYNC_COMMIT_MESSAGE, commitEnv);
+        if (committed) {
           const sha = await gitRun(worktree, ['rev-parse', 'HEAD']);
           commitSha = sha.code === 0 ? sha.stdout.trim() : null;
-          committed = true;
-        } else if (!/nothing to commit/i.test(commit.stderr || commit.stdout)) {
-          throw new Error(`git commit failed: ${commit.stderr || commit.stdout}`);
         }
       }
     }
