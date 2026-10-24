@@ -159,7 +159,7 @@ From the T388 review (2026-10-24). All PRE-EXISTING.
 
 ### T418 · FNF[git-wording] · "nothing to commit" is still matched by git's English wording
 
-status: open
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T01:20Z · last: 2026-10-25T01:20Z
 From the T388 review (2026-10-24). PRE-EXISTING, minor. Same class as T388 item 4 (exit code, not wording), another command: steps/workflow/_kb-commit.ts ~:69, 10-gate-3-commit.ts ~:416, 11d-skill-sync.ts ~:527, run-app/99-run-app-ready.ts ~:335. A localized or reworded git turns "nothing to commit" into a failure. Fix: decide by `git diff --cached --quiet` (exit 1 = staged changes) before committing, or by the commit's exit code plus a staged-paths read.
 
 ### T420 · FNF[cli-job-polling-2] · the pricing page ignores its refresh job; other jobs can trim a polled result early (+1)
