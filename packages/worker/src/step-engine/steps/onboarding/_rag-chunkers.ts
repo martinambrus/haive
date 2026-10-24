@@ -516,6 +516,9 @@ function jsNonCode(text: string): Span[] {
     } else if (c === '.' && next === '.' && text[i + 2] === '.') {
       prev = '...';
       i += 3;
+    } else if ((c === '+' || c === '-') && next === c && prev !== null && !regexMayStart(prev)) {
+      prev = '';
+      i += 2;
     } else {
       prev = c;
       i += 1;

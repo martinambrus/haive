@@ -1356,6 +1356,12 @@ describe('extractCodeSections — braces that are not code', () => {
     expect(sections.has('function-second')).toBe(true);
   });
 
+  it('reads a slash after a postfix increment as division', () => {
+    const js = 'let n = 1; n++ / 2; function save() { persist(); } const ratio = n / 3;\n';
+
+    expect(sectionsOf(js, 'post.js').has('function-save')).toBe(true);
+  });
+
   it('ends an object-literal member at its own closing brace', () => {
     const src = [
       'var api = {',
