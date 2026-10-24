@@ -2697,6 +2697,28 @@ export async function willSkipBeforeAdmission(
   }
 }
 
+async function recordFinishedUsage(
+  db: Database,
+  finished: TaskStepRow,
+  stepId: string,
+): Promise<void> {
+  // Surface B: freeze context-window usage on the finished step (best-effort; never
+  // blocks completion). No-op for deterministic steps (no CLI invocations). Returns
+  // the provider whose allowance this step consumed, or null.
+  const usageProviderId = await writeStepContextUsage(db, finished.id, finished.endedAt).catch(
+    (err) => {
+      log.warn({ err, stepId }, 'failed to record step context usage');
+      return null;
+    },
+  );
+  // A CLI step just consumed subscription allowance — kick a gentle usage poll so the
+  // header meters and this step's stamp reflect it promptly (throttled per provider).
+  if (usageProviderId)
+    await enqueueUsagePollTick().catch((err) => {
+      log.warn({ err, stepId }, 'failed to enqueue usage poll after step');
+    });
+}
+
 export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceStepResult> {
   const { db, stepDef, taskId } = params;
   const meta = stepDef.metadata;
@@ -3596,6 +3618,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
         endedAt: new Date(),
       });
       await recordRecap();
+      await recordFinishedUsage(db, finished, meta.id);
       if (verdict.kind === 'revise') {
         ctx.logger.info(
           { stepId: meta.id, targetStepId: verdict.targetStepId },
@@ -3647,19 +3670,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     });
     await recordRecap();
 
-    // Surface B: freeze context-window usage on the finished step (best-effort; never
-    // blocks completion). No-op for deterministic steps (no CLI invocations). Returns
-    // the provider whose allowance this step consumed, or null.
-    const usageProviderId = await writeStepContextUsage(db, done.id, done.endedAt).catch((err) => {
-      log.warn({ err, stepId: meta.id }, 'failed to record step context usage');
-      return null;
-    });
-    // A CLI step just consumed subscription allowance — kick a gentle usage poll so the
-    // header meters and this step's stamp reflect it promptly (throttled per provider).
-    if (usageProviderId)
-      await enqueueUsagePollTick().catch((err) => {
-        log.warn({ err, stepId: meta.id }, 'failed to enqueue usage poll after step');
-      });
+    await recordFinishedUsage(db, done, meta.id);
 
     return { status: 'done', row: done, output };
   } catch (err) {
@@ -3701,6 +3712,8 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       if (stepDef.agentMining && finished !== row)
         await releaseStepAgents(db, row.id, errorMessage);
       if (!finished) return supersededPass(row);
+      // writeEnd returns the original row on a failed write; it owns no new completion.
+      if (finished !== row) await recordFinishedUsage(db, finished, meta.id);
       log.info(
         { stepId: meta.id, taskId, round },
         'fix-loop: step error routed back to implementation',

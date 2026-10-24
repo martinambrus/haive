@@ -34,6 +34,7 @@ const { advanceStep } = await import('../src/step-engine/step-runner.js');
 interface MockState {
   taskStepRow: Record<string, unknown>;
   updates: { table: string; patch: Record<string, unknown> }[];
+  rejectDoneWrite?: boolean;
 }
 
 function tableNameOf(table: unknown): string {
@@ -71,6 +72,7 @@ function makeMockDb(state: MockState): Database {
       set: (v: Record<string, unknown>) => ({
         where: () => ({
           returning: async () => {
+            if (state.rejectDoneWrite && v.status === 'done') throw new Error('write refused');
             state.updates.push({ table: tableNameOf(table), patch: v });
             state.taskStepRow = { ...state.taskStepRow, ...v };
             return [state.taskStepRow];
@@ -267,4 +269,51 @@ describe('advanceStep usage completion wiring', () => {
       result.row.endedAt,
     );
   });
+});
+
+describe('advanceStep routing usage completion wiring', () => {
+  it.each(['loop_back', 'revise', 'fixLoopOnError'] as const)(
+    'stamps the completion returned by the %s branch',
+    async (branch) => {
+      vi.mocked(writeStepContextUsage).mockClear();
+      const state: MockState = { taskStepRow: stepRow('waiting_cli', false), updates: [] };
+      const params = runParams(state);
+      if (branch === 'loop_back') {
+        params.stepDef.restartLoop = { evaluate: () => ({ diagnosis: 'repair required' }) };
+      } else if (branch === 'revise') {
+        params.stepDef.reviseLoop = { evaluate: () => ({ targetStepId: 'earlier-step' }) };
+      } else {
+        params.stepDef.fixLoopOnError = true;
+        params.stepDef.apply = async () => {
+          throw new Error('repair required');
+        };
+      }
+      const result = await advanceStep(params);
+      expect(result.status).toBe(branch === 'revise' ? 'revise' : 'loop_back');
+      expect(result.row.status).toBe('done');
+      expect(result.row.endedAt).toBeInstanceOf(Date);
+      expect(writeStepContextUsage).toHaveBeenCalledExactlyOnceWith(
+        params.db,
+        result.row.id,
+        result.row.endedAt,
+      );
+    },
+  );
+});
+
+it('does not stamp a fixLoopOnError completion whose done write failed', async () => {
+  vi.mocked(writeStepContextUsage).mockClear();
+  const state: MockState = {
+    taskStepRow: stepRow('waiting_cli', false),
+    updates: [],
+    rejectDoneWrite: true,
+  };
+  const params = runParams(state);
+  params.stepDef.fixLoopOnError = true;
+  params.stepDef.apply = async () => {
+    throw new Error('repair required');
+  };
+  await advanceStep(params);
+  expect(state.taskStepRow.status).toBe('waiting_cli');
+  expect(writeStepContextUsage).not.toHaveBeenCalled();
 });
