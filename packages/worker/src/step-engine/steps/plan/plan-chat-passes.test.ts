@@ -255,7 +255,7 @@ describe('plan chat provider attribution', () => {
     return db.select().from(schema.planNodeMessages);
   }
 
-  it('records the run provider when the task CLI column is null', async () => {
+  it('records the run provider when the step context names none', async () => {
     const turns = await reply(null, invocationId, { ops: [], reply: 'The mail queue.' });
     expect(turns).toHaveLength(1);
     expect(turns[0]?.cliProviderId).toBe(ran);
@@ -266,7 +266,7 @@ describe('plan chat provider attribution', () => {
     expect(turns[0]?.cliProviderId).toBe(ran);
   });
 
-  it('records no provider for an error before dispatch', async () => {
+  it('records no provider when no run produced the reply', async () => {
     const turns = await reply(other, null, null);
     expect(turns[0]?.cliProviderId).toBeNull();
   });
