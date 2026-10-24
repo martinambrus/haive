@@ -75,6 +75,8 @@ vi.mock('drizzle-orm', async (original) => {
   const real = await original<typeof import('drizzle-orm')>();
   return {
     ...real,
+    // The fake db supports gt and eq but not gte.
+    gte: (...args: Parameters<typeof real.gte>) => real.or(real.gt(...args), real.eq(...args)),
     eq: (...args: Parameters<typeof real.eq>) =>
       guard.ignoreParkedProtection &&
       args[0] === schema.dbUploads.status &&
@@ -1353,6 +1355,28 @@ describe('T323: repeated orphan removal failures', () => {
 });
 
 describe('T323: one cutoff throughout an upload reaper pass', () => {
+  describe.each(KINDS)('$name', (kind) => {
+    it.each(['uploading', 'completing'])(
+      'protects a %s session stamped exactly at the cutoff',
+      async (status) => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(Date.now());
+        const boundary = await session(kind, { idleMs: TTL, fileAgeMs: TTL + HOUR, status });
+
+        const protectedPass = await reapAbandonedUploads(db());
+
+        expect(rowOf(kind, boundary.id).status).toBe(status);
+        expect(await exists(boundary.file)).toBe(true);
+        expect(protectedPass).toEqual({ sessions: 0, dumps: 0, orphans: 0 });
+
+        vi.setSystemTime(Date.now() + 1);
+        expect((await reapAbandonedUploads(db())).sessions).toBe(1);
+        expect(rowOf(kind, boundary.id).status).toBe('cancelled');
+        expect(await exists(boundary.file)).toBe(false);
+      },
+    );
+  });
+
   it.each([
     ['repos', (id: string) => `${id}.zip.partial`],
     ['repos', (id: string) => `db-${id}.sql.partial`],

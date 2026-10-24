@@ -1,16 +1,5 @@
 import path from 'node:path';
-import {
-  and,
-  eq,
-  getTableName,
-  gt,
-  gte,
-  inArray,
-  lt,
-  notExists,
-  notInArray,
-  or,
-} from 'drizzle-orm';
+import { and, eq, getTableName, gte, inArray, lt, notExists, notInArray, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { lstatNoFollow, readdirNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
@@ -324,7 +313,7 @@ async function recentSessions(db: Database, ids: string[], cutoff: Date): Promis
       .where(
         and(
           inArray(kind.table.id, ids),
-          or(gt(kind.table.updatedAt, cutoff), eq(kind.table.status, 'reap_failed')),
+          or(gte(kind.table.updatedAt, cutoff), eq(kind.table.status, 'reap_failed')),
         ),
       );
     for (const row of rows) recent.add(row.id);
