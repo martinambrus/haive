@@ -28,7 +28,7 @@ import {
   RULES_IMPORT_LINE,
   rulesImportState,
 } from '@haive/shared/rules-files';
-import { gitExec } from '../../../repo/git-exec.js';
+import { gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
 
 export { isLinkToAgentsMd, RULES_IMPORT_LINE };
 
@@ -442,14 +442,13 @@ export async function enabledImportRulesFiles(db: Database, userId: string): Pro
 }
 
 /** A rules file the repository keeps out of git, such as a personal CLAUDE.md, stays out of a
- *  forced stage too. A tracked file is never reported ignored, and a failed check answers false. */
+ *  forced stage too. A tracked file is never reported ignored; a check that gave no answer throws. */
 export async function isGitIgnored(repoPath: string, rel: string): Promise<boolean> {
-  try {
-    await gitExec(['check-ignore', '-q', '--', rel], { cwd: repoPath });
-    return true;
-  } catch {
-    return false;
+  const res = await gitRun(repoPath, ['check-ignore', '-q', '--', rel]);
+  if (gitGaveNoAnswer(res)) {
+    throw new Error(`could not check whether ${rel} is ignored: git gave no answer`);
   }
+  return res.code === 0;
 }
 
 /** `paths` without the rules and settings files git ignores, each dropped one reported: the

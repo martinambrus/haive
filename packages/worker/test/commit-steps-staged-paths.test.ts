@@ -14,6 +14,8 @@ import {
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 import { upgradeCommitStep } from '../src/step-engine/steps/onboarding-upgrade/03-upgrade-commit.js';
 import { recordWritten } from './support/upgrade-apply-record.js';
+import { killGit, type KilledGit } from './support/kill-git.js';
+import { dropIgnoredRulesFiles } from '../src/step-engine/steps/onboarding/_rules-files.js';
 
 const stepOutputs = vi.hoisted(() => ({
   current: null as Record<string, { detect?: unknown; output?: unknown }> | null,
@@ -59,7 +61,10 @@ async function git(dir: string, args: string[]): Promise<string> {
 
 const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 const dirs: string[] = [];
+let shim: KilledGit | null = null;
 afterEach(async () => {
+  await shim?.restore();
+  shim = null;
   stepOutputs.current = null;
   await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
@@ -1060,5 +1065,130 @@ describe('commitRecorded commits what it staged in a private index', () => {
     await expect(
       commitRecorded(repo, { add: ['a.md'], remove: [] }, 'chore: x', GIT_ENV),
     ).rejects.toThrow(/merge/);
+  });
+});
+
+describe('a git read that gave no answer stops the commit instead of reading as a negative', () => {
+  async function repoWith(files: Record<string, string>, commit = true): Promise<string> {
+    const repo = await mkdtemp(path.join(tmpdir(), 'commit-noanswer-'));
+    dirs.push(repo);
+    await git(repo, ['init', '-q', '-b', 'main']);
+    await git(repo, ['config', 'gc.auto', '0']);
+    for (const [rel, body] of Object.entries(files)) {
+      await mkdir(path.dirname(path.join(repo, rel)), { recursive: true });
+      await writeFile(path.join(repo, rel), body);
+    }
+    if (commit) {
+      await git(repo, ['add', '-A']);
+      await git(repo, ['commit', '-q', '-m', 'seed']);
+    }
+    return repo;
+  }
+  const collect = (repo: string) => collectOnboardingStagePaths(repo, {} as never, 't1');
+
+  it('commitRecorded refuses when the MERGE_HEAD probe gave no answer, and HEAD stays', async () => {
+    const repo = await repoWith({ 'a.md': 'base\n' });
+    await git(repo, ['checkout', '-q', '-b', 'side']);
+    await writeFile(path.join(repo, 'a.md'), 'side\n');
+    await git(repo, ['commit', '-q', '-am', 'side']);
+    await git(repo, ['checkout', '-q', 'main']);
+    await writeFile(path.join(repo, 'a.md'), 'main\n');
+    await git(repo, ['commit', '-q', '-am', 'main']);
+    await git(repo, ['merge', 'side']).catch(() => undefined);
+    await git(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+    await writeFile(path.join(repo, 'b.md'), 'b\n');
+    const before = await git(repo, ['rev-parse', 'HEAD']);
+    shim = await killGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+    await expect(
+      commitRecorded(repo, { add: ['b.md'], remove: [] }, 'chore: x', GIT_ENV),
+    ).rejects.toThrow(/could not check for a merge/);
+    expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(before);
+  });
+
+  it('commitRecorded refuses when the CHERRY_PICK_HEAD probe gave no answer, and commits without the shim', async () => {
+    const repo = await repoWith({ 'a.md': 'a\n' });
+    await writeFile(path.join(repo, 'b.md'), 'b\n');
+    shim = await killGit(['rev-parse', '-q', '--verify', 'CHERRY_PICK_HEAD']);
+    await expect(
+      commitRecorded(repo, { add: ['b.md'], remove: [] }, 'chore: x', GIT_ENV),
+    ).rejects.toThrow(/could not check for a cherry/);
+    await shim.restore();
+    shim = null;
+    expect(await commitRecorded(repo, { add: ['b.md'], remove: [] }, 'chore: x', GIT_ENV)).toEqual([
+      'b.md',
+    ]);
+  });
+
+  const quarantine = {
+    '07-generate-files': {
+      output: {
+        quarantinedAgentFiles: [
+          { from: '.claude/agents/mine.md', to: '.claude/agents-legacy/mine.md' },
+        ],
+      },
+    },
+  };
+
+  it('a quarantine move is not dropped when the cat-file read gave no answer', async () => {
+    const repo = await repoWith({ '.claude/agents/mine.md': 'm\n' });
+    await mkdir(path.join(repo, '.claude', 'agents-legacy'), { recursive: true });
+    await rename(
+      path.join(repo, '.claude/agents/mine.md'),
+      path.join(repo, '.claude/agents-legacy/mine.md'),
+    );
+    stepOutputs.current = quarantine;
+    expect((await collect(repo)).remove).toContain('.claude/agents/mine.md');
+    shim = await killGit(['cat-file', '-e']);
+    await expect(collect(repo)).rejects.toThrow(/could not tell whether .* is in HEAD/);
+  });
+
+  it('an untracked quarantined agent is still not tracked (exit 128)', async () => {
+    const repo = await repoWith({ 'README.md': 'r\n' });
+    stepOutputs.current = quarantine;
+    shim = await killGit(['ls-tree']);
+    expect((await collect(repo)).remove).toEqual([]);
+  });
+
+  it('a legacy knowledge move is not dropped when the ls-tree read gave no answer', async () => {
+    const repo = await repoWith({ '.claude/knowledge_base/A.md': 'a\n' });
+    await rm(path.join(repo, '.claude/knowledge_base'), { recursive: true });
+    stepOutputs.current = { '08-knowledge-acquisition': { output: { written: [] } } };
+    expect((await collect(repo)).remove).toContain('.claude/knowledge_base/A.md');
+    shim = await killGit(['ls-tree']);
+    await expect(collect(repo)).rejects.toThrow(/could not list .* in HEAD/);
+  });
+
+  it('a legacy knowledge read on an unborn HEAD does not throw', async () => {
+    const repo = await repoWith({ 'README.md': 'r\n' }, false);
+    stepOutputs.current = { '08-knowledge-acquisition': { output: { written: [] } } };
+    await expect(collect(repo)).resolves.toBeDefined();
+  });
+
+  it('a repaired skill removal is not dropped when the ls-tree read gave no answer', async () => {
+    const repo = await repoWith({ '.claude/skills/a/sub-skills/stale.md': 's\n' });
+    await rm(path.join(repo, '.claude/skills/a'), { recursive: true });
+    stepOutputs.current = {
+      '09_5b-skill-repair': {
+        detect: { skillTargetDirs: ['.claude/skills'] },
+        output: { repaired: ['a'] },
+      },
+    };
+    expect((await collect(repo)).remove).toContain('.claude/skills/a/sub-skills/stale.md');
+    shim = await killGit(['ls-tree']);
+    await expect(collect(repo)).rejects.toThrow(/could not list .* in HEAD/);
+  });
+
+  it('dropIgnoredRulesFiles drops an ignored file, keeps a free one, and throws on no answer', async () => {
+    const repo = await repoWith({ '.gitignore': 'CLAUDE.md\n' });
+    await writeFile(path.join(repo, 'CLAUDE.md'), 'mine\n');
+    await writeFile(path.join(repo, 'AGENTS.md'), 'free\n');
+    const checked = new Set(['CLAUDE.md', 'AGENTS.md']);
+    const done = await dropIgnoredRulesFiles(repo, ['CLAUDE.md', 'AGENTS.md'], checked);
+    expect(done.keep).toEqual(['AGENTS.md']);
+    expect(done.warnings).toHaveLength(1);
+    shim = await killGit(['check-ignore']);
+    await expect(dropIgnoredRulesFiles(repo, ['CLAUDE.md'], checked)).rejects.toThrow(
+      /could not check whether CLAUDE.md is ignored/,
+    );
   });
 });
