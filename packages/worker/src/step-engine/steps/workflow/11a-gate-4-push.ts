@@ -268,7 +268,8 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       if (!remoteUrl) {
         throw new Error('origin remote URL is required to push');
       }
-      gitRemoteUrlSchema.parse(remoteUrl);
+      const parsed = gitRemoteUrlSchema.safeParse(remoteUrl);
+      if (!parsed.success) throw new Error(parsed.error.issues[0]!.message);
       await ensureOrigin(workspace, remoteUrl);
       // Persist the remote (and the chosen credential) onto the repo row so
       // future pushes/clones are pre-wired. Plain runtime write; idempotent.

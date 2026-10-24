@@ -4,6 +4,7 @@ vi.mock('../../../repo/git-push.js', async (original) => ({
   ...(await original<typeof import('../../../repo/git-push.js')>()),
   ...h,
 }));
+import { gitRemoteUrlSchema } from '@haive/shared/schemas';
 import { gate4PushStep } from './11a-gate-4-push.js';
 import type { StepContext } from '../../step-definition.js';
 const detected = {
@@ -34,7 +35,13 @@ describe('11a apply reads the current origin and validates a typed URL', () => {
   it.each(['/tmp/other', 'file:///tmp/other', 'ext::sh'])(
     'rejects %s before writing the remote',
     async (remoteUrl) => {
-      await expect(apply(detected, { push: true, remoteUrl })).rejects.toThrow();
+      const parsed = gitRemoteUrlSchema.safeParse(remoteUrl);
+      expect(parsed.success).toBe(false);
+      if (parsed.success) throw new Error('expected a refused URL');
+      await expect(apply(detected, { push: true, remoteUrl })).rejects.toMatchObject({
+        name: 'Error',
+        message: parsed.error.issues[0]!.message,
+      });
       expect(h.ensureOrigin).not.toHaveBeenCalled();
       expect(h.pushBranch).not.toHaveBeenCalled();
     },
