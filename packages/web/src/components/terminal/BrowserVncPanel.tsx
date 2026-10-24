@@ -21,6 +21,7 @@ type VncState = 'idle' | 'connecting' | 'connected' | 'error';
 // shot without exhausting these). A genuinely stuck runtime still surfaces the Retry button.
 const MAX_CONNECT_RETRIES = 60;
 const RETRY_DELAY_MS = 3000;
+const POLICY_CLOSE_CODE = 1008;
 
 interface BrowserVncPanelProps {
   taskId: string;
@@ -142,11 +143,23 @@ export function BrowserVncPanel({
     suppressNovncCloseLog();
     setState('connecting');
     setMessage(null);
+    let socket: WebSocket | undefined;
     try {
       // novnc 1.7.0 ships `exports: "./core/rfb.js"`, which blocks the `/core/rfb`
       // subpath import — the bare package specifier maps to that same module.
       const { default: RFB } = await import('@novnc/novnc');
-      const rfb = new RFB(containerRef.current, apiWebSocketUrl(`/browser-vnc/${taskId}`));
+      // noVNC's disconnect event carries only `clean`. Observe the raw close first,
+      // then hand the channel to noVNC through its public constructor.
+      socket = new WebSocket(apiWebSocketUrl(`/browser-vnc/${taskId}`));
+      let closeCode: number | undefined;
+      socket.addEventListener(
+        'close',
+        (event) => {
+          closeCode = event.code;
+        },
+        { once: true },
+      );
+      const rfb = new RFB(containerRef.current, socket);
       rfb.scaleViewport = true;
       rfb.addEventListener('connect', () => {
         connectedRef.current = true;
@@ -156,6 +169,15 @@ export function BrowserVncPanel({
       });
       rfb.addEventListener('disconnect', () => {
         rfbRef.current = null;
+        if (closeCode === POLICY_CLOSE_CODE) {
+          connectedRef.current = false;
+          liveDropRef.current = true;
+          if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = null;
+          setMessage('Browser session ended.');
+          setState('error');
+          return;
+        }
         // A live session that dropped → don't auto-reconnect. The runtime is
         // usually gone (the task completed and tore it down), so a reconnect just
         // races a torn-down bridge whose rejected upgrade closes 1006 mid-handshake
@@ -200,6 +222,7 @@ export function BrowserVncPanel({
       });
       rfbRef.current = rfb;
     } catch (err) {
+      socket?.close();
       setMessage((err as Error).message ?? 'Failed to load the VNC client');
       setState('error');
     }

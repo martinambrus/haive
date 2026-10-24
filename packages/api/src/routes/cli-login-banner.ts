@@ -1,4 +1,4 @@
-import type { Server, IncomingMessage } from 'node:http';
+import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Job } from 'bullmq';
@@ -24,15 +24,33 @@ import {
   type CliProviderName,
 } from '@haive/shared';
 import { getDb } from '../db.js';
-import { verifyAccessToken } from '../auth/jwt.js';
-import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { getCliExecQueue, getCliExecQueueEvents, getUsagePollQueue } from '../queues.js';
 import { attachContainerStream } from './terminal.js';
 import { execInContainer } from './docker-exec.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isUuid } from '../lib/uuid.js';
 
+// CLI output, authorization URLs and upstream errors can contain credentials.
+// Log only session identifiers, lengths, error classes/codes and fixed messages.
 const log = logger.child({ module: 'cli-login-banner-ws' });
+
+/** Keep diagnostics without serializing query messages, bound params or stacks. */
+function safeErrorDetails(err: unknown): { name: string; code?: string | number } {
+  const name = err instanceof Error ? err.constructor.name : 'UnknownError';
+  // Drizzle wraps the driver's code in cause. Bound traversal also handles cycles.
+  for (
+    let current = err, depth = 0;
+    depth < 5 && current !== null && typeof current === 'object';
+    depth++
+  ) {
+    const { code, cause } = current as { code?: unknown; cause?: unknown };
+    if (typeof code === 'string' || typeof code === 'number') return { name, code };
+    current = cause;
+  }
+  return { name };
+}
 
 const WS_PATH_PREFIX = '/cli-login-banner/';
 const RAW_BUFFER_MAX = 64 * 1024;
@@ -222,7 +240,9 @@ export function installCliLoginBannerWebSocket(
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
+    guardUpgradeSocket(socket);
     const rawUrl = req.url ?? '';
+    const requestPath = rawUrl.split('?', 1)[0] ?? '';
     if (!rawUrl.startsWith(pathPrefix)) return;
     if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {
       rejectUpgrade(socket, 403, 'Forbidden');
@@ -231,10 +251,10 @@ export function installCliLoginBannerWebSocket(
 
     void (async () => {
       try {
-        log.info({ url: rawUrl }, 'banner ws upgrade received');
+        log.info({ path: requestPath }, 'banner ws upgrade received');
         const providerId = extractProviderId(rawUrl, pathPrefix);
         if (!providerId) {
-          log.warn({ url: rawUrl }, 'banner ws reject: invalid providerId');
+          log.warn({ path: requestPath }, 'banner ws reject: invalid providerId');
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
@@ -262,7 +282,10 @@ export function installCliLoginBannerWebSocket(
           return;
         }
 
+        if (auth.session.revoked) return;
+
         wss.handleUpgrade(req, socket, head, (ws) => {
+          if (!auth.session.accept(ws)) return;
           runBannerSession({
             ws,
             userId: auth.userId,
@@ -276,7 +299,7 @@ export function installCliLoginBannerWebSocket(
               log.info({ providerId }, 'login dialog closed by the user');
               return;
             }
-            log.error({ err, providerId }, 'banner session crashed');
+            log.error({ error: safeErrorDetails(err), providerId }, 'banner session crashed');
             wsSend(ws, { type: 'error', message: errorMessage(err) });
             try {
               ws.close(1011, 'internal_error');
@@ -286,7 +309,7 @@ export function installCliLoginBannerWebSocket(
           });
         });
       } catch (err) {
-        log.error({ err, url: rawUrl }, 'upgrade failed');
+        log.error({ error: safeErrorDetails(err) }, 'upgrade failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
       }
     })();
@@ -338,7 +361,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   try {
     stream = await attachContainerStream(docker, createResult.dockerContainerId);
   } catch (err) {
-    log.error({ err, providerId }, 'attach failed');
+    log.error({ error: safeErrorDetails(err), providerId }, 'attach failed');
     await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
     wsSend(ws, { type: 'error', message: 'Failed to attach to login container' });
     try {
@@ -349,10 +372,16 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     return;
   }
 
+  if (abort.aborted) {
+    stream.end();
+    await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
+    throw new LoginCancelled();
+  }
+
   try {
     await dockerContainer.start();
   } catch (err) {
-    log.error({ err, providerId }, 'start failed');
+    log.error({ error: safeErrorDetails(err), providerId }, 'start failed');
     await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
     wsSend(ws, { type: 'error', message: 'Failed to start login container' });
     try {
@@ -361,6 +390,12 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       // ignore
     }
     return;
+  }
+
+  if (abort.aborted) {
+    stream.end();
+    await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
+    throw new LoginCancelled();
   }
 
   const session: BannerSession = {
@@ -428,8 +463,11 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       session.docker
         .getContainer(session.dockerContainerId)
         .resize({ h: 40, w: 120 })
-        .catch((err: unknown) => {
-          log.warn({ err, providerId: session.providerId }, 'initial pty resize failed');
+        .catch((err) => {
+          log.warn(
+            { error: safeErrorDetails(err), providerId: session.providerId },
+            'initial pty resize failed',
+          );
         });
     };
     setTimeout(sizeTerminalPty, 250);
@@ -446,14 +484,14 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     void cleanupSession(session);
   });
   stream.on('error', (err: Error) => {
-    log.warn({ err, providerId }, 'stream error');
+    log.warn({ error: safeErrorDetails(err), providerId }, 'stream error');
     if (session.probePending) return;
     wsSend(ws, { type: 'error', message: err.message });
     void cleanupSession(session);
   });
 
   ws.on('message', async (raw) => {
-    if (session.cleanedUp) return;
+    if (session.cleanedUp || ws.readyState !== WebSocket.OPEN) return;
     const text = raw.toString();
     let parsed: unknown;
     try {
@@ -473,7 +511,10 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       try {
         session.stream.write(msg.data);
       } catch (err) {
-        log.warn({ err, providerId: session.providerId }, 'terminal input write failed');
+        log.warn(
+          { error: safeErrorDetails(err), providerId: session.providerId },
+          'terminal input write failed',
+        );
       }
       return;
     }
@@ -484,7 +525,10 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
           w: msg.cols,
         });
       } catch (err) {
-        log.warn({ err, providerId: session.providerId }, 'terminal resize failed');
+        log.warn(
+          { error: safeErrorDetails(err), providerId: session.providerId },
+          'terminal resize failed',
+        );
       }
       return;
     }
@@ -515,7 +559,10 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
         }, 150);
         log.info({ providerId: session.providerId, wrote }, 'token written');
       } catch (err) {
-        log.warn({ err }, 'stream write failed');
+        log.warn(
+          { error: safeErrorDetails(err), providerId: session.providerId },
+          'stream write failed',
+        );
       }
       if (session.providerName === 'claude-code') {
         startCaptureWatchdog(session);
@@ -569,23 +616,18 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
       if (url && url.length > (prefixes[0]?.length ?? 0) + 8) {
         session.authUrlSent = true;
         log.info(
-          { providerId: session.providerId, urlLen: url.length, urlHead: url.slice(0, 80) },
+          { providerId: session.providerId, urlLen: url.length },
           'antigravity auth url extracted',
         );
         wsSend(session.ws, { type: 'auth-url', url });
       } else {
         if (!session.urlDebugged && session.rawBuffer.includes('oauth2')) {
-          // Could not extract despite the URL being on screen — log how it renders
-          // so the extractor can be refined (one-shot per session).
+          // Record the failed extraction without copying OAuth output, which can
+          // contain authorization codes and other credentials.
           session.urlDebugged = true;
-          const clean = stripAnsi(session.rawBuffer).replace(/\s+/g, ' ');
-          const idx = clean.indexOf('oauth2');
           log.info(
-            {
-              providerId: session.providerId,
-              sample: clean.slice(Math.max(0, idx - 30), idx + 220),
-            },
-            'antigravity oauth2 present but URL not extracted (debug sample)',
+            { providerId: session.providerId },
+            'antigravity oauth2 present but URL not extracted',
           );
         }
         // agy's first-run TUI shows an auth-method menu (Google Account
@@ -620,12 +662,8 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
   const clean = stripAnsi(text);
   session.cleanBuffer = appendCapped(session.cleanBuffer, clean, CLEAN_BUFFER_MAX);
 
-  if (session.tokenSubmitted) {
-    const snippet = clean.replace(/\s+/g, ' ').trim().slice(0, 300);
-    if (snippet) {
-      log.info({ providerId: session.providerId, snippet }, 'post-submit chunk');
-    }
-  }
+  // Login stdout can echo pasted codes and print complete or partial tokens.
+  // Keep it in the session for parsing, never in diagnostic logs or errors.
 
   if (!session.authUrlSent) {
     const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
@@ -646,7 +684,7 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
           ? extractDeviceCode(session.rawBuffer)
           : undefined;
       log.info(
-        { providerId: session.providerId, url: url.slice(0, 120), tokenPaste },
+        { providerId: session.providerId, urlLen: url.length, tokenPaste },
         'auth url extracted',
       );
       // tokenPaste travels with the URL because the client's own provider set is
@@ -674,8 +712,6 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
         {
           providerId: session.providerId,
           tokenLen: oauthToken.length,
-          tokenHead: oauthToken.slice(0, 22),
-          tokenTail: oauthToken.slice(-6),
         },
         'claude oauth token captured from stdout',
       );
@@ -687,9 +723,9 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
     // the token pattern above (other 'success' phrasings are misleading here).
     const signal = detectAuthResult(session.cleanBuffer);
     if (signal?.kind === 'error') {
-      log.warn({ providerId: session.providerId, msg: signal.message }, 'auth error detected');
+      log.warn({ providerId: session.providerId }, 'auth error detected');
       stopCaptureWatchdog(session);
-      wsSend(session.ws, { type: 'error', message: signal.message });
+      wsSend(session.ws, { type: 'error', message: 'Authentication failed. Retry the login.' });
     }
     return;
   }
@@ -714,8 +750,8 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
     wsSend(session.ws, { type: 'auth-success' });
     void runProbeAndSave(session);
   } else if (signal?.kind === 'error') {
-    log.warn({ providerId: session.providerId, msg: signal.message }, 'auth error detected');
-    wsSend(session.ws, { type: 'error', message: signal.message });
+    log.warn({ providerId: session.providerId }, 'auth error detected');
+    wsSend(session.ws, { type: 'error', message: 'Authentication failed. Retry the login.' });
   }
 }
 
@@ -824,7 +860,10 @@ function startAmpCredsPoller(session: BannerSession): void {
         }
       })
       .catch((err) => {
-        log.warn({ err, providerId: session.providerId }, 'amp creds poll exec failed');
+        log.warn(
+          { error: safeErrorDetails(err), providerId: session.providerId },
+          'amp creds poll exec failed',
+        );
       });
   }, AMP_POLL_INTERVAL_MS);
   session.credsPoller = poller;
@@ -893,7 +932,10 @@ function startAntigravityCredsPoller(session: BannerSession): void {
         }
       })
       .catch((err) => {
-        log.warn({ err, providerId: session.providerId }, 'antigravity creds poll exec failed');
+        log.warn(
+          { error: safeErrorDetails(err), providerId: session.providerId },
+          'antigravity creds poll exec failed',
+        );
       });
   }, ANTIGRAVITY_POLL_INTERVAL_MS);
   session.credsPoller = poller;
@@ -905,11 +947,10 @@ function startCaptureWatchdog(session: BannerSession): void {
   if (session.captureWatchdog) return;
   session.captureWatchdog = setTimeout(() => {
     if (session.cleanedUp || session.authSuccessSent) return;
-    const tail = session.cleanBuffer.replace(/\s+/g, ' ').trim().slice(-400);
-    log.warn({ providerId: session.providerId, tail }, 'oauth token not captured before timeout');
+    log.warn({ providerId: session.providerId }, 'oauth token not captured before timeout');
     wsSend(session.ws, {
       type: 'error',
-      message: `No OAuth token detected after ${Math.round(CAPTURE_TIMEOUT_MS / 1000)}s. Last output: ${tail || '(empty)'}`,
+      message: `No OAuth token detected after ${Math.round(CAPTURE_TIMEOUT_MS / 1000)}s. Retry the login.`,
     });
     void cleanupSession(session);
   }, CAPTURE_TIMEOUT_MS);
@@ -971,10 +1012,13 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
       log.info({ providerId: session.providerId }, 'login dialog closed while verifying');
       return; // the finally below still clears probePending and tears the session down
     }
-    log.error({ err, providerId: session.providerId }, 'save-token/probe failed');
+    log.error(
+      { error: safeErrorDetails(err), providerId: session.providerId },
+      'save-token/probe failed',
+    );
     wsSend(session.ws, {
       type: 'error',
-      message: err instanceof Error ? err.message : 'save-token/probe failed',
+      message: 'Failed to save credentials or verify the login. Retry the login.',
     });
   } finally {
     session.probePending = false;
@@ -1007,7 +1051,10 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
       log.info({ providerId: session.providerId }, 'login dialog closed while verifying');
       return; // the finally below still clears probePending and tears the session down
     }
-    log.error({ err, providerId: session.providerId }, 'post-login probe failed');
+    log.error(
+      { error: safeErrorDetails(err), providerId: session.providerId },
+      'post-login probe failed',
+    );
     wsSend(session.ws, {
       type: 'error',
       message: err instanceof Error ? err.message : 'post-login probe failed',
@@ -1055,7 +1102,7 @@ async function awaitQueuedJob<T>(job: Job, abort: AbortHandle, ws: WebSocket): P
       announced = true;
       wsSend(ws, { type: 'queue', running: active.length, agents, service, ahead });
     } catch (err) {
-      log.debug({ err, jobId: job.id }, 'queue position read failed');
+      log.debug({ error: safeErrorDetails(err), jobId: job.id }, 'queue position read failed');
     }
   };
   void report();
@@ -1091,7 +1138,7 @@ async function discardPendingLogin(pending: { job: Job | null }, docker: Docker)
       return;
     }
   } catch (err) {
-    log.debug({ err, jobId: job.id }, 'queued-job removal skipped');
+    log.debug({ error: safeErrorDetails(err), jobId: job.id }, 'queued-job removal skipped');
   }
   try {
     const result = (await job.waitUntilFinished(
@@ -1103,7 +1150,10 @@ async function discardPendingLogin(pending: { job: Job | null }, docker: Docker)
       log.info({ jobId: job.id }, 'login cancelled after start; container destroyed');
     }
   } catch (err) {
-    log.debug({ err, jobId: job.id }, 'cancelled login produced no container to destroy');
+    log.debug(
+      { error: safeErrorDetails(err), jobId: job.id },
+      'cancelled login produced no container to destroy',
+    );
   }
 }
 
@@ -1188,7 +1238,7 @@ async function teardownContainer(
   try {
     await docker.getContainer(dockerContainerId).remove({ force: true });
   } catch (err) {
-    log.warn({ err, dockerContainerId }, 'docker remove failed');
+    log.warn({ error: safeErrorDetails(err), dockerContainerId }, 'docker remove failed');
   }
   const db = getDb();
   await db
@@ -1196,30 +1246,8 @@ async function teardownContainer(
     .set({ status: 'destroyed', destroyedAt: new Date() })
     .where(eq(schema.containers.id, containerRowId))
     .catch((err) => {
-      log.warn({ err, containerRowId }, 'container row update failed');
+      log.warn({ error: safeErrorDetails(err), containerRowId }, 'container row update failed');
     });
-}
-
-async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {
-  const cookieHeader = req.headers.cookie;
-  if (!cookieHeader) return null;
-  const token = parseCookieValue(cookieHeader, ACCESS_COOKIE);
-  if (!token) return null;
-  try {
-    const payload = await verifyAccessToken(token);
-    const db = getDb();
-    const user = await db.query.users.findFirst({
-      where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
-    });
-    if (!user) return null;
-    if (user.status !== 'active') return null;
-    if (user.tokenVersion !== payload.tv) return null;
-    if (user.mustChangePassword) return null;
-    return { userId: user.id };
-  } catch {
-    return null;
-  }
 }
 
 function extractProviderId(rawUrl: string, pathPrefix: string): string | null {
@@ -1228,24 +1256,6 @@ function extractProviderId(rawUrl: string, pathPrefix: string): string | null {
   if (!pathOnly.startsWith(pathPrefix)) return null;
   const remainder = pathOnly.slice(pathPrefix.length);
   return isUuid(remainder) ? remainder : null;
-}
-
-function parseCookieValue(header: string, name: string): string | null {
-  for (const part of header.split(/;\s*/)) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    if (part.slice(0, eq) === name) return decodeURIComponent(part.slice(eq + 1));
-  }
-  return null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  try {
-    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
-  } catch {
-    // ignore
-  }
-  socket.destroy();
 }
 
 function appendCapped(prior: string, chunk: string, max: number): string {

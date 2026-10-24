@@ -87,8 +87,9 @@ describe('hardenGitArgs', () => {
     expect(out.slice(0, GIT_CONFIG_SAFETY_ARGS.length)).toEqual([...GIT_CONFIG_SAFETY_ARGS]);
     // The caller's own `-c credential.helper=` and its helper stay adjacent, so the helper still
     // appends after the safety reset rather than being erased by something spliced between them.
-    const at = out.indexOf('-c', GIT_CONFIG_SAFETY_ARGS.length);
-    expect(out[at + 1]).toBe('credential.helper=!f() { :; }; f');
+    const at = out.indexOf('credential.helper=!f() { :; }; f');
+    expect(at).toBeGreaterThan(GIT_CONFIG_SAFETY_ARGS.length);
+    expect(out[at - 1]).toBe('-c');
     expect(out).toContain('--receive-pack=git-receive-pack');
   });
 

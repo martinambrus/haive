@@ -820,6 +820,7 @@ export interface Task {
   autoContinue: boolean;
   currentStepId: string | null;
   currentStepIndex: number;
+  currentRound?: number;
   /** ISO time the current gate began waiting (the waiting_form step's
    *  waitingStartedAt), or null when the task is not parked at a gate. Tags the
    *  wait occurrence so the notifier re-fires when a task re-enters the same gate
@@ -2431,6 +2432,12 @@ export interface AdminInviteCreated {
 
 export type MaintenanceState = 'normal' | 'draining' | 'maintenance';
 
+export interface StopActivityResult {
+  killed: number;
+  cancelled: number;
+  stopped: number;
+}
+
 /** A task still holding a maintenance window open. `hasLiveCli` is the distinction that decides
  *  whether an operator waits or acts: a task with a running CLI is doing work, a parked one is
  *  only holding its place. */
@@ -2443,6 +2450,8 @@ export interface BlockingTask {
   /** Absent from an api that predates it. */
   pausedByAdmin?: boolean;
   currentStepId: string | null;
+  /** Current step at the task's round; absent from older APIs. */
+  currentStepStatus?: string | null;
   updatedAt: string;
   ownerId: string | null;
   ownerName: string | null;
@@ -2504,7 +2513,10 @@ export const maintenanceApi = {
     }),
   blocking: () => api.get<BlockingResponse>('/admin/maintenance/blocking'),
   taskAction: (taskId: string, action: 'pause' | 'resume' | 'stop') =>
-    api.post<{ ok: boolean }>(`/admin/maintenance/tasks/${taskId}/action`, { action }),
+    api.post<{ ok: boolean } & Partial<StopActivityResult>>(
+      `/admin/maintenance/tasks/${taskId}/action`,
+      { action },
+    ),
   upgradeStatus: () => api.get<UpgradeStatusResponse>('/admin/maintenance/upgrade'),
   startUpgrade: (body: { version: string; force?: boolean; drainTimeoutSeconds?: number }) =>
     api.post<{ started: boolean; from: string; to: string; container: string }>(

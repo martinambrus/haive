@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import TaskDetailPage from './page';
 import {
   buttons,
@@ -48,6 +48,8 @@ vi.mock('@/components/terminal/InteractiveShell', () => ({
 const net = vi.hoisted(() => ({
   detail: {} as Record<string, unknown>,
   unstubbed: [] as string[],
+  patchError: null as string | null,
+  stopResult: { killed: 0, cancelled: 0, stopped: 0 },
 }));
 
 const PAUSED_AT = '2026-10-15T09:00:00.000Z';
@@ -81,8 +83,18 @@ const taskRow = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-async function fakeFetch(input: unknown) {
+async function fakeFetch(input: unknown, init?: { method?: string }) {
   const path = new URL(String(input), 'http://localhost').pathname;
+  if (path === '/tasks/t1/cancel-active-cli') {
+    return { ok: true, status: 200, json: async () => net.stopResult };
+  }
+  if (path === '/tasks/t1' && init?.method === 'PATCH') {
+    return {
+      ok: !net.patchError,
+      status: net.patchError ? 500 : 200,
+      json: async () => (net.patchError ? { error: net.patchError } : {}),
+    };
+  }
   if (path === '/tasks/t1') {
     return { ok: true, status: 200, json: async () => structuredClone(net.detail) };
   }
@@ -108,6 +120,9 @@ beforeAll(() => {
   vi.stubGlobal('document', eventTarget());
   vi.stubGlobal('requestAnimationFrame', () => 0);
   vi.stubGlobal('cancelAnimationFrame', () => {});
+});
+beforeEach(() => {
+  net.patchError = null;
 });
 afterAll(() => {
   vi.useRealTimers();
@@ -282,6 +297,62 @@ describe('task page: the Attachments tab', () => {
   });
 });
 
+describe('task page Stop controls (#395)', () => {
+  it('offers Stop in the header and only the pending current row, at its round', async () => {
+    const view = await mount({ pausedAt: null, currentStepId: '07-implement', currentRound: 1 }, [
+      { ...stepRow(), id: 'old', round: 0, waitingStartedAt: null },
+      { ...stepRow(), round: 1, waitingStartedAt: null },
+      { ...stepRow(), id: 'future', stepId: '08-verify', round: 1, waitingStartedAt: null },
+    ]);
+    expect(await menuLabels(view)).toContain('Stop');
+    const rows = findAll(view.tree(), (h) => !!h.props['data-step-id']);
+    expect(rows.map((row) => buttons(row, 'stop').length)).toEqual([0, 1, 0]);
+  });
+
+  it.each([
+    { killed: 0, cancelled: 0, stopped: 0, notice: true },
+    { killed: 1, cancelled: 0, stopped: 0, notice: false },
+    { killed: 0, cancelled: 1, stopped: 0, notice: false },
+    { killed: 0, cancelled: 0, stopped: 1, notice: false },
+  ])('shows a notice only for an empty Stop result: %j', async ({ notice, ...result }) => {
+    vi.stubGlobal('confirm', () => true);
+    net.stopResult = result;
+    const view = await mount({ pausedAt: null }, [{ ...stepRow(), status: 'running' }]);
+    const stop = buttons(view.tree(), 'stop')[0]!;
+    fire.click(stop);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(textOf(view.tree()).includes('Nothing was running to stop.')).toBe(notice);
+  });
+
+  it('shows the header Stop notice through polling and clears it on the next step Retry', async () => {
+    vi.stubGlobal('confirm', () => true);
+    net.stopResult = { killed: 0, cancelled: 0, stopped: 0 };
+    const view = await mount({ pausedAt: null }, [{ ...stepRow(), status: 'running' }]);
+    await menuLabels(view);
+    const stop = findAll(
+      view.tree(),
+      (h) => h.props.role === 'menuitem' && textOf(h).trim() === 'Stop',
+    )[0]!;
+    fire.click(stop);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    const notices = () =>
+      findAll(
+        view.tree(),
+        (h) => h.props.role === 'status' && textOf(h).includes('Nothing was running to stop.'),
+      );
+    expect(notices()).toHaveLength(1);
+    expect(notices()[0]!.props.className).toContain('text-neutral-400');
+    vi.advanceTimersByTime(2000);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(notices()).toHaveLength(1);
+    const row = findAll(view.tree(), (h) => h.props['data-step-id'] === 's1')[0]!;
+    const retry = findAll(row, (h) => h.tag === 'button' && h.props['data-action'] === 'retry')[0]!;
+    fire.click(retry);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(notices()).toHaveLength(0);
+  });
+});
+
 describe('task page: step usage stamp', () => {
   it('hides the finished attempt stamp when that row is reopened', async () => {
     const step = {
@@ -303,5 +374,41 @@ describe('task page: step usage stamp', () => {
       step.endedAt = null;
       expect(stamps(await mount({ pausedAt: null }, [step])), status).toHaveLength(0);
     }
+  });
+});
+
+describe('task page auto-continue action lifecycle (#395)', () => {
+  const toggle = (view: Renderer) =>
+    findAll(view.tree(), (h) => h.props['data-action'] === 'auto-continue')[0]!;
+
+  it('clears an empty Stop notice when toggling auto-continue', async () => {
+    vi.stubGlobal('confirm', () => true);
+    net.stopResult = { killed: 0, cancelled: 0, stopped: 0 };
+    const view = await mount({ pausedAt: null, currentStepId: '07-implement' }, [
+      { ...stepRow(), status: 'running' },
+    ]);
+    await menuLabels(view);
+    fire.click(
+      findAll(view.tree(), (h) => h.props.role === 'menuitem' && textOf(h).trim() === 'Stop')[0]!,
+    );
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(findAll(view.tree(), (h) => h.props.role === 'status')).toHaveLength(1);
+    fire.check(toggle(view), true);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(findAll(view.tree(), (h) => h.props.role === 'status')).toHaveLength(0);
+  });
+
+  it('clears an earlier toggle error on the next toggle', async () => {
+    const view = await mount({ pausedAt: null, currentStepId: '07-implement' }, [
+      { ...stepRow(), status: 'running' },
+    ]);
+    net.patchError = 'toggle failed probe';
+    fire.check(toggle(view), true);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(textOf(view.tree())).toContain('toggle failed probe');
+    net.patchError = null;
+    fire.check(toggle(view), true);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(textOf(view.tree())).not.toContain('toggle failed probe');
   });
 });

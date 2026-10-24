@@ -128,6 +128,7 @@ function setup(
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateConflicts: schema.projectStateConflicts,
     stepCatalog: schema.stepCatalog,
+    taskTypeDefinitions: schema.taskTypeDefinitions,
   });
   seedStepCatalog(fake);
   fake.insert(schema.repositories, {
@@ -366,14 +367,19 @@ describe('creating an onboarding', () => {
     'leaves no task row when %s fails',
     async (failing) => {
       const t = setup('onboarding', revivals[0]!);
+      const refuseWrite = vi.fn(() => {
+        throw new Error(`refused ${failing}`);
+      });
       t.fake.hooks.beforeUpdate = async (table) => {
-        if (failing === 'the queued mark' && table === schema.tasks) throw new Error('boom');
+        if (failing === 'the queued mark' && table === schema.tasks) refuseWrite();
       };
       t.fake.hooks.beforeInsert = async (table) => {
-        if (failing === 'the created event' && table === schema.taskEvents) throw new Error('boom');
+        if (failing === 'the created event' && table === schema.taskEvents) refuseWrite();
       };
       const res = await json('/', { type: 'onboarding', title: 'Onboarding', repositoryId: REPO });
       expect(res.status).toBe(500);
+      expect(refuseWrite).toHaveBeenCalledExactlyOnceWith();
+      expect(h.add).not.toHaveBeenCalled();
       expect(t.fake.rows(schema.tasks).map((r) => r.id)).toEqual([TASK]);
     },
   );

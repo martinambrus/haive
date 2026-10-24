@@ -1,6 +1,6 @@
+import { fixtureBase, networkGitArgs, httpOrigin } from '../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, it, expect } from 'vitest';
@@ -18,23 +18,24 @@ const GIT_ENV = {
   GIT_COMMITTER_EMAIL: 't@haive.local',
 };
 async function git(dir: string, args: string[]): Promise<string> {
+  args = networkGitArgs(args);
   const { stdout } = await exec('git', args, { cwd: dir, env: GIT_ENV });
   return stdout.toString();
 }
 
 /** A working repo on `main` with one commit, plus a bare repo to serve as origin. */
 async function setupRepoWithBareOrigin(): Promise<{ work: string; bare: string }> {
-  const work = await mkdtemp(path.join(tmpdir(), 'gp-work-'));
+  const work = await mkdtemp(path.join(fixtureBase, 'gp-work-'));
   await git(work, ['init', '-b', 'main']);
   await writeFile(path.join(work, 'f.txt'), 'one\n', 'utf8');
   await git(work, ['add', '-A']);
   await git(work, ['commit', '-m', 'one']);
-  const bare = await mkdtemp(path.join(tmpdir(), 'gp-bare-'));
+  const bare = await mkdtemp(path.join(fixtureBase, 'gp-bare-'));
   await git(bare, ['init', '--bare', '-b', 'main']);
   return { work, bare };
 }
 
-// db/userId are only touched on the credential path; the file:// tests use no
+// db/userId are only touched on the credential path; the HTTP tests use no
 // credential, so a bare stub is never dereferenced.
 const stubDb = {} as unknown as Database;
 
@@ -51,7 +52,7 @@ describe('detectOrigin / getOriginUrl read a failed git as an error', () => {
   });
 
   async function repo(setup: (dir: string) => Promise<void> = async () => {}): Promise<string> {
-    const dir = await mkdtemp(path.join(tmpdir(), 'gp-'));
+    const dir = await mkdtemp(path.join(fixtureBase, 'gp-'));
     dirs.push(dir);
     await git(dir, ['init', '-b', 'main']);
     await git(dir, ['config', 'gc.auto', '0']);
@@ -121,17 +122,17 @@ describe('detectOrigin / getOriginUrl read a failed git as an error', () => {
     expect(await getOriginUrl(dir)).toBe('https://example.com/x.git');
   });
 
-  it('origin with only a fetch refspec is true (exit 0 means yes)', async () => {
+  it('origin with only a fetch refspec refuses the non-URL fallback', async () => {
     const dir = await repo(async (d) => {
       await git(d, ['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
     });
-    expect(await detectOrigin(dir)).toBe(true);
+    await expect(detectOrigin(dir)).rejects.toThrow(/origin URL is not allowed/);
   });
 });
 
 describe('git-push helpers', () => {
   it('detectOrigin / getOriginUrl reflect remote state', async () => {
-    const work = await mkdtemp(path.join(tmpdir(), 'gp-'));
+    const work = await mkdtemp(path.join(fixtureBase, 'gp-'));
     try {
       await git(work, ['init', '-b', 'main']);
       expect(await detectOrigin(work)).toBe(false);
@@ -145,7 +146,7 @@ describe('git-push helpers', () => {
   });
 
   it('ensureOrigin adds, then set-urls idempotently', async () => {
-    const work = await mkdtemp(path.join(tmpdir(), 'gp-'));
+    const work = await mkdtemp(path.join(fixtureBase, 'gp-'));
     try {
       await git(work, ['init', '-b', 'main']);
       expect(await ensureOrigin(work, 'https://a.test/x.git')).toEqual({
@@ -168,10 +169,10 @@ describe('git-push helpers', () => {
     expect(scrubSecret('nothing', null)).toBe('nothing');
   });
 
-  it('pushBranch pushes to a bare file:// origin and sets upstream', async () => {
+  it('pushBranch pushes to a bare HTTP origin and sets upstream', async () => {
     const { work, bare } = await setupRepoWithBareOrigin();
     try {
-      await git(work, ['remote', 'add', 'origin', `file://${bare}`]);
+      await git(work, ['remote', 'add', 'origin', httpOrigin(bare)]);
       const res = await pushBranch({
         cwd: work,
         branch: 'main',
@@ -193,7 +194,7 @@ describe('git-push helpers', () => {
   it('pushBranch with a sha pushes that commit, not where the branch has moved to, and sets upstream', async () => {
     const { work, bare } = await setupRepoWithBareOrigin();
     try {
-      await git(work, ['remote', 'add', 'origin', `file://${bare}`]);
+      await git(work, ['remote', 'add', 'origin', httpOrigin(bare)]);
       const sha = (await git(work, ['rev-parse', 'main'])).trim();
       await writeFile(path.join(work, 'f.txt'), 'two\n', 'utf8');
       await git(work, ['commit', '-am', 'two']);
@@ -219,7 +220,7 @@ describe('git-push helpers', () => {
   it('pushBranch with a sha reports a failed upstream setup, and still resolves as pushed', async () => {
     const { work, bare } = await setupRepoWithBareOrigin();
     try {
-      await git(work, ['remote', 'add', 'origin', `file://${bare}`]);
+      await git(work, ['remote', 'add', 'origin', httpOrigin(bare)]);
       await git(work, ['config', '--unset-all', 'remote.origin.fetch']);
       const sha = (await git(work, ['rev-parse', 'main'])).trim();
       const res = await pushBranch({
@@ -241,12 +242,12 @@ describe('git-push helpers', () => {
 
   it('pushBranch throws on a rejected (non-fast-forward) push', async () => {
     const { work, bare } = await setupRepoWithBareOrigin();
-    const other = await mkdtemp(path.join(tmpdir(), 'gp-other-'));
+    const other = await mkdtemp(path.join(fixtureBase, 'gp-other-'));
     try {
-      await git(work, ['remote', 'add', 'origin', `file://${bare}`]);
+      await git(work, ['remote', 'add', 'origin', httpOrigin(bare)]);
       await pushBranch({ cwd: work, branch: 'main', setUpstream: false, db: stubDb, userId: 'u1' });
       // Advance the bare origin from a second clone so `work` is now behind.
-      await git(other, ['clone', `file://${bare}`, '.']);
+      await git(other, ['clone', httpOrigin(bare), '.']);
       await writeFile(path.join(other, 'g.txt'), 'two\n', 'utf8');
       await git(other, ['add', '-A']);
       await git(other, ['commit', '-m', 'two']);

@@ -1,6 +1,6 @@
+import { fixtureBase, httpOrigin } from './support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -34,7 +34,7 @@ describe('a branch name a person types reaches git as a branch, never as an opti
   let work: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), 'haive-branch-fence-'));
+    root = await mkdtemp(join(fixtureBase, 'haive-branch-fence-'));
     upstream = join(root, 'upstream');
     work = join(root, 'work');
     await run('git', ['init', '-q', '-b', 'main', upstream]);
@@ -49,7 +49,7 @@ describe('a branch name a person types reaches git as a branch, never as an opti
     await git(upstream, 'branch', 'feature');
     await git(upstream, 'branch', '+topic');
     await git(upstream, 'branch', 'topic');
-    await run('git', ['clone', '-q', upstream, work]);
+    await run('git', ['clone', '-q', httpOrigin(upstream), work]);
     await git(work, 'config', 'gc.auto', '0');
     await git(work, 'branch', 'feature', 'origin/feature');
     await git(work, 'branch', '+topic', 'origin/+topic');

@@ -4,10 +4,12 @@ import type { FormField, FormSchema } from '@haive/shared';
 import { isBranchName } from '@haive/shared/git-args';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
+  originGitRun,
   buildCredentialHelper,
   detectOrigin,
   gitRun,
   scrubSecret,
+  OriginUrlError,
 } from '../../../repo/git-push.js';
 import { gitGaveNoAnswer } from '../../../repo/git-exec.js';
 import { buildMergeFixPrompt, handBackAfterMove } from '../../git-merge.js';
@@ -77,8 +79,8 @@ interface SyncBaseApply {
   reason: string | null;
 }
 
-/** Best-effort `git fetch origin <base>` with the repo's bound credential. Never
- *  throws — a failure is surfaced (warn & continue), not fatal. */
+/** Best-effort `git fetch origin <base>` with the repo's bound credential. Network
+ *  failures and refused origins warn-and-continue. */
 async function fetchOrigin(
   ctx: StepContext,
   base: string,
@@ -98,7 +100,14 @@ async function fetchOrigin(
     }
   }
   argv.push('fetch', '--end-of-options', 'origin', `refs/heads/${base}`);
-  const res = await gitRun(ctx.repoPath, argv, env);
+  let res;
+  try {
+    res = await originGitRun(ctx.repoPath, argv, env);
+  } catch (err) {
+    if (!(err instanceof OriginUrlError)) throw err;
+    ctx.logger.warn({ err: err.message }, 'base sync skipped: origin refused');
+    return { ok: false, error: err.message };
+  }
   if (res.code !== 0) {
     return {
       ok: false,
@@ -179,7 +188,14 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       parentBranch: currentBranch,
     };
 
-    const hasOrigin = await detectOrigin(ctx.repoPath);
+    let hasOrigin: boolean;
+    try {
+      hasOrigin = await detectOrigin(ctx.repoPath);
+    } catch (err) {
+      if (!(err instanceof OriginUrlError)) throw err;
+      ctx.logger.warn({ err: err.message }, 'base sync skipped: origin refused');
+      return { ...empty, ...baseFields, hasOrigin: true, fetchError: err.message };
+    }
     if (!hasOrigin || !base) {
       return { ...empty, ...baseFields, hasOrigin };
     }
@@ -245,7 +261,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         type: 'note',
         id: 'fetchFailed',
         label: 'Could not reach origin',
-        body: `Couldn't fetch origin: ${detected.fetchError ?? 'unknown error'}. Continuing with the local **${base}** (possibly stale). Fix connectivity or credentials and Retry this step to re-sync.`,
+        body: `Couldn't fetch origin: ${detected.fetchError ?? 'unknown error'}. Continuing with the local **${base}** (possibly stale). Fix the checkout's origin configuration, connectivity or credentials and Retry this step to re-sync.`,
         variant: 'warning',
       });
     } else if (detected.compareError) {
@@ -438,7 +454,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     const ff = (): Promise<{ code: number; stderr: string; stdout: string }> =>
       onCurrent
         ? gitRun(ctx.repoPath, ['merge', '--ff-only', `origin/${base}`])
-        : gitRun(ctx.repoPath, [
+        : originGitRun(ctx.repoPath, [
             'fetch',
             '--end-of-options',
             'origin',
@@ -581,7 +597,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
             kept.clear();
             asided = false;
           }
-          await gitRun(ctx.repoPath, [
+          await originGitRun(ctx.repoPath, [
             'fetch',
             '--deepen=50',
             '--end-of-options',
@@ -592,15 +608,23 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         }
       } catch (err) {
         if (repositoryId && asided) {
-          await recoverAfterMoveFailure(
-            ctx.db,
-            repositoryId,
-            ctx.repoPath,
-            kept,
-            before,
-            err,
-            putBackSection,
-          );
+          try {
+            await recoverAfterMoveFailure(
+              ctx.db,
+              repositoryId,
+              ctx.repoPath,
+              kept,
+              before,
+              err,
+              putBackSection,
+            );
+          } catch (recovered) {
+            if (recovered !== err || !(err instanceof OriginUrlError)) throw recovered;
+          }
+        }
+        if (err instanceof OriginUrlError) {
+          ctx.logger.warn({ err: err.message }, 'base sync skipped: origin refused');
+          return { synced: false, base, strategy: 'skipped', behindBy: 0, reason: err.message };
         }
         throw err;
       }

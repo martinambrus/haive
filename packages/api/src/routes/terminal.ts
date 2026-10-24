@@ -1,5 +1,5 @@
 import http from 'node:http';
-import type { Server, IncomingMessage } from 'node:http';
+import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import Docker from 'dockerode';
@@ -9,8 +9,8 @@ import { logger } from '@haive/shared';
 import { terminalClientFrameSchema } from '@haive/shared';
 import type { TerminalServerFrame } from '@haive/shared';
 import { getDb } from '../db.js';
-import { verifyAccessToken } from '../auth/jwt.js';
-import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { TerminalLogBuffer } from '../terminal/log-buffer.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isUuid } from '../lib/uuid.js';
@@ -39,6 +39,7 @@ export function installTerminalWebSocket(server: Server, opts: TerminalWsOptions
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
+    guardUpgradeSocket(socket);
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(pathPrefix)) return;
     if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {
@@ -74,7 +75,10 @@ export function installTerminalWebSocket(server: Server, opts: TerminalWsOptions
           return;
         }
 
+        if (auth.session.revoked) return;
+
         wss.handleUpgrade(req, socket, head, (ws) => {
+          if (!auth.session.accept(ws)) return;
           runTerminalSession(ws, container, docker, auth.userId).catch((err) => {
             log.error({ err, containerId: container.id }, 'terminal session crashed');
             sendFrame(ws, { type: 'error', message: errorMessage(err) });
@@ -102,6 +106,10 @@ async function runTerminalSession(
 
   const dockerContainer = docker.getContainer(container.dockerContainerId!);
   const stream = await attachContainerStream(docker, container.dockerContainerId!);
+  if (ws.readyState !== WebSocket.OPEN) {
+    stream.end();
+    return;
+  }
 
   await incrementAttached(container.id);
 
@@ -168,6 +176,7 @@ async function runTerminalSession(
   }, LOG_FLUSH_INTERVAL_MS);
 
   ws.on('message', async (raw) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
     const text = raw.toString();
     if (text.length > MAX_INPUT_BYTES) {
       sendFrame(ws, { type: 'error', message: 'frame too large' });
@@ -208,7 +217,10 @@ async function runTerminalSession(
     }
   });
 
-  ws.on('close', async () => {
+  let cleanedUp = false;
+  const cleanup = async () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
     clearInterval(keepalive);
     clearInterval(flushInterval);
     stream.off('data', onStreamData);
@@ -229,32 +241,15 @@ async function runTerminalSession(
       log.warn({ err, containerId: container.id }, 'decrementAttached failed');
     });
     log.info({ sessionId, containerId: container.id }, 'terminal session closed');
-  });
+  };
+  ws.on('close', () => void cleanup());
+  if (ws.readyState !== WebSocket.OPEN) {
+    await cleanup();
+    return;
+  }
 
   // Only now: a client may send input the moment it reads this, and the handlers above take it.
   sendFrame(ws, { type: 'connected', sessionId });
-}
-
-async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {
-  const cookieHeader = req.headers.cookie;
-  if (!cookieHeader) return null;
-  const token = parseCookieValue(cookieHeader, ACCESS_COOKIE);
-  if (!token) return null;
-  try {
-    const payload = await verifyAccessToken(token);
-    const db = getDb();
-    const user = await db.query.users.findFirst({
-      where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
-    });
-    if (!user) return null;
-    if (user.status !== 'active') return null;
-    if (user.tokenVersion !== payload.tv) return null;
-    if (user.mustChangePassword) return null;
-    return { userId: user.id };
-  } catch {
-    return null;
-  }
 }
 
 async function loadContainerForUser(
@@ -355,28 +350,6 @@ function extractContainerId(rawUrl: string, pathPrefix: string): string | null {
   if (!pathOnly.startsWith(pathPrefix)) return null;
   const remainder = pathOnly.slice(pathPrefix.length);
   return isUuid(remainder) ? remainder : null;
-}
-
-function parseCookieValue(header: string, name: string): string | null {
-  const parts = header.split(/;\s*/);
-  for (const part of parts) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    const key = part.slice(0, eq);
-    if (key === name) {
-      return decodeURIComponent(part.slice(eq + 1));
-    }
-  }
-  return null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  try {
-    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
-  } catch {
-    // ignore
-  }
-  socket.destroy();
 }
 
 function sendFrame(ws: WebSocket, frame: TerminalServerFrame): void {

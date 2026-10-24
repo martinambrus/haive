@@ -7,10 +7,12 @@ import {
   pausedResumeHint,
   taskBadgeKind,
   taskClockEndMs,
+  taskCanStop,
   taskMenuKeys,
   taskNotStarted,
   taskStatusWord,
   taskStoppedAt,
+  stopResultNotice,
 } from './task-state';
 
 const DEAD_AT = '2026-10-14T10:00:00.000Z';
@@ -312,5 +314,96 @@ describe('task page copy', () => {
     );
     expect(noStepsMessage({ status: 'running' })).toBe(GENERIC);
     expect(noStepsMessage({ status: 'created', deadAt: DEAD_AT })).toBe(GENERIC);
+  });
+});
+
+describe('Stop eligibility controls (#395)', () => {
+  it('offers Stop for a running task with a pending current row', () => {
+    const opts = { stepRunning: false, currentStepStatus: 'pending' };
+    expect(taskMenuKeys({ status: 'running' }, opts)).toContain('stop');
+  });
+
+  it.each(['completed', 'cancelled', 'created', 'failed', 'queued', 'waiting_user'])(
+    'does not offer Stop for a pending row on a %s task',
+    (status) => {
+      const opts = { stepRunning: false, currentStepStatus: 'pending' };
+      expect(taskMenuKeys({ status }, opts)).not.toContain('stop');
+    },
+  );
+
+  it('does not offer Stop for a pause alone, a missing row, or a dead task', () => {
+    expect(
+      taskMenuKeys({ status: 'running', pausedAt: PAUSED_AT }, { stepRunning: false }),
+    ).not.toContain('stop');
+    const opts = { stepRunning: false, currentStepStatus: 'pending' };
+    expect(taskMenuKeys({ status: 'running', deadAt: DEAD_AT }, opts)).not.toContain('stop');
+  });
+
+  it.each([
+    ...['done', 'skipped', 'failed', 'waiting_form'].map((status) => ({
+      name: `current row ${status}`,
+      status,
+      round: 1,
+      stepId: 'current',
+      stop: false,
+    })),
+    { name: 'missing row', status: null, round: 1, stepId: 'current', stop: false },
+    { name: 'earlier round', status: 'pending', round: 0, stepId: 'current', stop: false },
+    { name: 'another pending row', status: 'pending', round: 1, stepId: 'other', stop: false },
+    {
+      name: 'dead task with pending row',
+      status: 'pending',
+      round: 1,
+      stepId: 'current',
+      deadAt: DEAD_AT,
+      stop: false,
+    },
+    {
+      name: 'dead task with live work',
+      status: 'running',
+      round: 1,
+      stepId: 'current',
+      deadAt: DEAD_AT,
+      stepRunning: true,
+      stop: false,
+    },
+    {
+      name: 'paused pending current row',
+      status: 'pending',
+      round: 1,
+      stepId: 'current',
+      pausedAt: PAUSED_AT,
+      stop: true,
+    },
+  ])('matches the API Stop eligibility: $name', ({ status, round, stepId, stop, ...over }) => {
+    const task = { status: 'running', currentStepId: 'current', currentRound: 1, ...over };
+    const rows = status === null ? [] : [{ status, round, stepId }];
+    const current = rows.find(
+      (row) => row.stepId === task.currentStepId && row.round === task.currentRound,
+    );
+    expect(
+      taskCanStop(task, {
+        stepRunning: 'stepRunning' in over && over.stepRunning === true,
+        currentStepStatus: current?.status,
+      }),
+    ).toBe(stop);
+  });
+
+  it.each(['running', 'waiting_cli'])('keeps Stop for a %s row', (currentStepStatus) => {
+    expect(taskCanStop({ status: 'running' }, { stepRunning: false, currentStepStatus })).toBe(
+      true,
+    );
+  });
+});
+
+describe('empty Stop result notice', () => {
+  it('requires explicit zero counts, including when an older API omits counts', () => {
+    expect(stopResultNotice({ stopped: 0, cancelled: 0, killed: 0 })).toBe(
+      'Nothing was running to stop.',
+    );
+    expect(stopResultNotice({})).toBeNull();
+    expect(stopResultNotice({ stopped: 0 })).toBeNull();
+    expect(stopResultNotice({ stopped: 0, killed: 0 })).toBeNull();
+    expect(stopResultNotice({ stopped: 0, cancelled: 0 })).toBeNull();
   });
 });

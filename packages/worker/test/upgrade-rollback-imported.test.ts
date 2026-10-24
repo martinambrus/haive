@@ -21,6 +21,8 @@ import {
   UpgradeRollbackImportedError,
   upgradeRollbackStep,
 } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
+import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { recordWritten, ROLLBACK_RECORD_WRITE_TABLES } from './support/upgrade-apply-record.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -83,7 +85,12 @@ describe('04 apply restoring a retired import marker', () => {
     const fake = createFakeDb({
       onboardingArtifacts: schema.onboardingArtifacts,
       repositories: schema.repositories,
+      customBundles: schema.customBundles,
+      customBundleItems: schema.customBundleItems,
+      cliProviders: schema.cliProviders,
+      ...ROLLBACK_RECORD_WRITE_TABLES,
     });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
     const importedAt = new Date('2026-09-20T00:00:00Z');
     const upgradeRow = fake.insert(schema.onboardingArtifacts, {
       userId: USER,
@@ -111,6 +118,7 @@ describe('04 apply restoring a retired import marker', () => {
       source: 'backfill',
       haiveVersion: '0.0.1-other',
       importedAt,
+      formValuesSnapshot: REFERENCE_CONTEXT,
       supersededAt: new Date(),
     });
     const detected = {
@@ -130,7 +138,7 @@ describe('04 apply restoring a retired import marker', () => {
     };
     const root = await mkdtemp(join(tmpdir(), 'upgrade-rollback-imported-'));
     dirs.push(root);
-    await upgradeRollbackStep.apply(ctxOf(fake.db, root), { detected } as never);
+    await recordWritten(upgradeRollbackStep.apply(ctxOf(fake.db, root), { detected } as never));
     expect(fake.rows(schema.onboardingArtifacts).filter((r) => r.supersededAt == null)).toEqual([
       expect.objectContaining({
         diskPath: REL,
