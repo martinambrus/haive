@@ -48,6 +48,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 
 import { Hono } from 'hono';
 import { CONFIG_KEYS, encryptEmail } from '@haive/shared';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { BLOCKING_LIST_CAP, maintenanceRoutes } from '../src/routes/maintenance.js';
 import { findAdminPausedTaskIds } from '../src/routes/tasks/_helpers.js';
@@ -1366,6 +1367,18 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
 
       expect([...named].sort()).toEqual([lowerFirst.id, higherFirst.id].sort());
     });
+
+    it('answers for more ids than one statement can bind', async () => {
+      const held = await task({ pausedAt: new Date() });
+      await db.insert(schema.taskEvents).values({
+        taskId: held.id,
+        eventType: 'task.paused',
+        payload: { by: ADMIN, byAdmin: true },
+      });
+      const ids = [held.id, ...Array.from({ length: 70_000 }, () => randomUUID())];
+
+      expect([...(await findAdminPausedTaskIds(db, ids))]).toEqual([held.id]);
+    });
   });
 
   describe('GET /blocking, the parked list', () => {
@@ -1527,6 +1540,39 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
         );
         const body = await blocking();
         expect(body.parked).toHaveLength(BLOCKING_LIST_CAP);
+        expect(body.parkedCapped).toBe(true);
+      });
+
+      it('keeps the newest rows of the union when administrator-held failed tasks outnumber the cap', async () => {
+        h.state = 'maintenance';
+        const waiting = await task({
+          status: 'waiting_user',
+          updatedAt: new Date('2026-06-01T00:00:00Z'),
+        });
+        const rows = await db
+          .insert(schema.tasks)
+          .values(
+            Array.from({ length: BLOCKING_LIST_CAP + 5 }, (_, i) => ({
+              userId: OWNER,
+              type: TYPE,
+              title: `Held ${i}`,
+              status: 'failed' as const,
+              pausedAt: new Date(),
+              updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)),
+            })),
+          )
+          .returning({ id: schema.tasks.id });
+        await db.insert(schema.taskEvents).values(
+          rows.map((r) => ({
+            taskId: r.id,
+            eventType: 'task.paused',
+            payload: { by: ADMIN, byAdmin: true },
+          })),
+        );
+        const body = await blocking();
+        expect(body.parked).toHaveLength(BLOCKING_LIST_CAP);
+        expect(body.parked[0]?.id).toBe(waiting.id);
+        expect(body.parked.map((t) => t.id)).not.toContain(rows[0]!.id);
         expect(body.parkedCapped).toBe(true);
       });
     });

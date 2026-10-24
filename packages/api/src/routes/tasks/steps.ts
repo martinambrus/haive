@@ -281,7 +281,7 @@ async function moveTaskToStep(
   if (!bumped) {
     throw new HttpError(409, opts.fromFailed ? RETRY_RACED_MESSAGE : ENDED_TASK_MESSAGE);
   }
-  // A task Retry means "run it", so the hold it read goes with it.
+  // A task Retry means "run it", so the hold it read goes with it, unless it is an administrator's.
   if (opts.liftPause) {
     await liftReadPause(tx, taskId, opts.liftPause.read, opts.liftPause.role);
   }

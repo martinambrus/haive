@@ -1341,7 +1341,7 @@ taskRoutes.post('/:id/action', async (c) => {
         const [moved] = await requeue(tx);
         if (!moved) throw new HttpError(409, 'The task is no longer failed; reload it');
         // Retrying a paused task means "run it". Leaving the hold set would restart the task
-        // straight into the pause park, with Retry apparently doing nothing.
+        // straight into the pause park, with Retry apparently doing nothing; an administrator's stays.
         if (liftPause) await liftReadPause(tx, id, liftPause.read, liftPause.role);
       });
       // Answering a parked form revives the task, so its pass can open a row between the settle

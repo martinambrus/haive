@@ -221,8 +221,13 @@ maintenanceRoutes.get('/blocking', async (c) => {
           isNotNull(schema.tasks.pausedAt),
         ),
       )
+      .orderBy(desc(schema.tasks.updatedAt))
   ).map((r) => r.id);
-  const adminHeldFailed = [...(await findAdminPausedTaskIds(db, failedPausedIds))];
+  // Only the newest cap + 1 can reach the list, so no more ids than that go into the query below.
+  const heldIds = await findAdminPausedTaskIds(db, failedPausedIds);
+  const adminHeldFailed = failedPausedIds
+    .filter((id) => heldIds.has(id))
+    .slice(0, BLOCKING_LIST_CAP + 1);
   const arms = [
     notWaitedFor.length > 0 ? inArray(schema.tasks.status, notWaitedFor) : undefined,
     adminHeldFailed.length > 0 ? inArray(schema.tasks.id, adminHeldFailed) : undefined,
