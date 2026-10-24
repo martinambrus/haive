@@ -8,6 +8,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
+import { terminalSessionKey } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 import { eq } from 'drizzle-orm';
 import type { AppEnv } from '../src/context.js';
@@ -18,11 +19,20 @@ const h = vi.hoisted(() => {
     db: undefined as unknown,
     invalidJwt: false,
     redisConnectWait: null as Promise<void> | null,
+    loginReady: false,
+    redisClients: [] as Array<{
+      quit: ReturnType<typeof vi.fn>;
+      subscriptions: Set<string>;
+      streamKeys: Set<string>;
+    }>,
+    refcounts: new Map<string, number>(),
+    shellSessionIds: new Map<string, string>(),
   };
 });
 const USER = 'abcdefab-0000-4000-8000-000000000001';
 const ADMIN = '00000000-0000-4000-8000-000000000002';
 const ID = '00000000-0000-4000-8000-000000000003';
+const BANNER = '00000000-0000-4000-8000-000000000004';
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/auth/jwt.js', async (original) => ({
   ...(await original<typeof import('../src/auth/jwt.js')>()),
@@ -47,10 +57,24 @@ vi.mock('../src/queues.js', () => ({
   }),
   getIdeEnsureQueueEvents: () => ({}),
   getCliExecQueue: () => ({
-    add: async () => ({
-      getState: async () => 'active',
-      waitUntilFinished: () => new Promise(() => {}),
-    }),
+    add: async () => {
+      let delivered = false;
+      return {
+        getState: async () => (delivered ? 'unknown' : 'active'),
+        waitUntilFinished: () => {
+          if (!h.loginReady) return new Promise(() => {});
+          // Model removeOnComplete: the completed login result is delivered once.
+          // Its removed job cannot supply a second result to the pending-job drain.
+          if (delivered) return Promise.reject(new Error('job removed'));
+          delivered = true;
+          return Promise.resolve({
+            ok: true,
+            containerRowId: BANNER,
+            dockerContainerId: 'banner-container',
+          });
+        },
+      };
+    },
   }),
   getCliExecQueueEvents: () => ({}),
 }));
@@ -59,26 +83,52 @@ vi.mock('../src/redis.js', () => {
   const redis = () => {
     const emitter = new EventEmitter();
     subscribers.add(emitter);
+    const observation = {
+      quit: vi.fn(async () => {
+        subscribers.delete(emitter);
+        emitter.emit('stop');
+      }),
+      subscriptions: new Set<string>(),
+      streamKeys: new Set<string>(),
+    };
+    h.redisClients.push(observation);
     return Object.assign(emitter, {
       connect: async () => {
         await h.redisConnectWait;
       },
-      quit: async () => {
-        subscribers.delete(emitter);
-        emitter.emit('stop');
+      quit: observation.quit,
+      subscribe: async (...channels: string[]) => {
+        for (const channel of channels) observation.subscriptions.add(channel);
       },
-      subscribe: async () => {},
       unsubscribe: async () => {},
       scan: async () => ['0', []],
-      hincrby: async () => 1,
+      hincrby: async (key: string, field: string, increment: number) => {
+        const counter = `${key}:${field}`;
+        const value = (h.refcounts.get(counter) ?? 0) + increment;
+        h.refcounts.set(counter, value);
+        return value;
+      },
       hset: async () => 1,
       get: async () => null,
       xrevrange: async () => [],
-      xread: () => new Promise((resolve) => emitter.once('stop', () => resolve(null))),
+      xread: (...args: unknown[]) => {
+        observation.streamKeys.add(String(args[3]));
+        return new Promise((resolve) => emitter.once('stop', () => resolve(null)));
+      },
       duplicate: redis,
       publish: async (channel: string, raw: string) => {
         if (channel === 'terminal:request') {
-          const { correlationId } = JSON.parse(raw);
+          const { correlationId, userId, scope, taskId, repositoryId, cliProviderId } =
+            JSON.parse(raw);
+          h.shellSessionIds.set(
+            terminalSessionKey(
+              userId,
+              scope,
+              scope === 'repo' ? repositoryId : taskId,
+              cliProviderId,
+            ),
+            correlationId,
+          );
           queueMicrotask(() => {
             for (const sub of subscribers)
               sub.emit(
@@ -156,6 +206,10 @@ const realRequest = http.request.bind(http);
 beforeEach(() => {
   h.invalidJwt = false;
   h.redisConnectWait = null;
+  h.loginReady = false;
+  h.redisClients.length = 0;
+  h.refcounts.clear();
+  h.shellSessionIds.clear();
   fake = createFakeDb(tables);
   h.db = fake.db;
   fake.insert(schema.users, {
@@ -273,7 +327,26 @@ describe('upgrade authentication on every surface', () => {
   });
 });
 
-async function openAll() {
+async function openAll({ bannerReady = false } = {}) {
+  h.loginReady = bannerReady;
+  if (bannerReady)
+    fake.insert(schema.containers, {
+      id: BANNER,
+      cliProviderId: ID,
+      purpose: 'cli_login',
+      status: 'running',
+      dockerContainerId: 'banner-container',
+    });
+  const attachStreams = new Map<string, PassThrough>();
+  const desktopConnections: Socket[] = [];
+  const bannerContainer = {
+    start: vi.fn(async () => {}),
+    remove: vi.fn(async () => {}),
+  };
+  const docker = {
+    modem: { getSocketPath: () => undefined },
+    getContainer: (id: string) => (id === 'banner-container' ? bannerContainer : {}),
+  } as never;
   const upstream = createServer();
   const upstreamWss = new WebSocketServer({ server: upstream });
   upstream.on('connection', (s) => {
@@ -290,15 +363,23 @@ async function openAll() {
     const o = opts as net.TcpNetConnectOpts;
     if (o.host?.startsWith('haive-ide-'))
       return realConnect({ host: '127.0.0.1', port: upstreamPort });
-    if (o.port === 5900) return realConnect({ host: '127.0.0.1', port: desktopPort });
+    if (o.port === 5900) {
+      const tcp = realConnect({ host: '127.0.0.1', port: desktopPort });
+      desktopConnections.push(tcp);
+      return tcp;
+    }
     return realConnect(opts as never);
   }) as typeof net.connect);
   vi.spyOn(http, 'request').mockImplementation(((opts: http.RequestOptions, ...args: unknown[]) => {
-    if (opts.path?.startsWith('/containers/test-container/attach')) {
+    const containerId = opts.path?.match(
+      /^\/containers\/(test-container|banner-container)\/attach/,
+    )?.[1];
+    if (containerId) {
+      const stream = new PassThrough();
+      attachStreams.set(containerId, stream);
       const req = new EventEmitter();
       Object.assign(req, {
-        end: () =>
-          queueMicrotask(() => req.emit('upgrade', {}, new PassThrough(), Buffer.alloc(0))),
+        end: () => queueMicrotask(() => req.emit('upgrade', {}, stream, Buffer.alloc(0))),
       });
       return req;
     }
@@ -306,11 +387,13 @@ async function openAll() {
   }) as typeof http.request);
   const port = await start((s) => {
     // A Docker modem stub keeps terminal attach local and never touches a daemon.
-    installTerminalWebSocket(s, {
-      docker: { modem: { getSocketPath: () => undefined }, getContainer: () => ({}) } as never,
-    });
+    installTerminalWebSocket(s, { docker });
+    installCliLoginBannerWebSocket(s, { docker });
     for (const handler of HANDLERS.filter(
-      (h, i, a) => h.file !== 'terminal' && a.findIndex((x) => x.file === h.file) === i,
+      (h, i, a) =>
+        h.file !== 'terminal' &&
+        h.file !== 'cli-login-banner' &&
+        a.findIndex((x) => x.file === h.file) === i,
     ))
       handler.install(s);
   });
@@ -338,7 +421,15 @@ async function openAll() {
     unaffected.once('open', resolve);
     unaffected.once('error', reject);
   });
-  return { sockets: result, unaffected, port, upstreamWss };
+  return {
+    sockets: result,
+    unaffected,
+    port,
+    upstreamWss,
+    attachStreams,
+    desktopConnections,
+    bannerContainer,
+  };
 }
 const app = new Hono<AppEnv>();
 app.onError(errorHandler);
@@ -565,5 +656,80 @@ describe('real transport registry cleanup controls', () => {
     const port = await start(installCliStreamWebSocket);
     expect(await handshake(port, `/cli-stream/${ID}`, 'haive_access=user-session')).toBe(401);
     expect(closeUserSockets(USER)).toBe(0);
+  });
+});
+
+describe('revocation resource teardown', () => {
+  async function revoke(sockets: Awaited<ReturnType<typeof openAll>>['sockets']) {
+    expect((await deactivate()).status).toBe(200);
+    await vi.waitFor(() => expect(sockets.map((s) => s.codes)).toEqual(HANDLERS.map(() => [1008])));
+  }
+
+  it('ends the terminal Docker attach stream', async () => {
+    const { sockets, attachStreams } = await openAll();
+    const stream = attachStreams.get('test-container')!;
+    expect(stream.writableEnded).toBe(false);
+    await revoke(sockets);
+    await vi.waitFor(() => expect(stream.writableEnded).toBe(true));
+  });
+
+  it('releases the terminal attach count', async () => {
+    const { sockets } = await openAll();
+    const count = () => fake.rows(schema.containers).find((c) => c.id === ID)?.attachedWsCount;
+    await vi.waitFor(() => expect(count()).toBe(1));
+    await revoke(sockets);
+    await vi.waitFor(() => expect(count()).toBe(0));
+  });
+
+  for (const scope of ['task', 'repo'] as const) {
+    it(`quits the ${scope} shell subscriber and releases its refcount`, async () => {
+      const { sockets } = await openAll();
+      const counter = `${terminalSessionKey(USER, scope, ID, ID)}:refcount`;
+      await vi.waitFor(() => expect(h.refcounts.get(counter)).toBe(1));
+      const sessionId = h.shellSessionIds.get(terminalSessionKey(USER, scope, ID, ID));
+      expect(sessionId).toBeDefined();
+      const subscribers = h.redisClients.filter((c) =>
+        c.subscriptions.has(`terminal:out:${sessionId}`),
+      );
+      expect(subscribers).toHaveLength(1);
+      const subscriber = subscribers[0]!;
+      expect(subscriber.quit).not.toHaveBeenCalled();
+      await revoke(sockets);
+      await vi.waitFor(() => {
+        expect(subscriber.quit).toHaveBeenCalledOnce();
+        expect(h.refcounts.get(counter)).toBe(0);
+      });
+    });
+  }
+
+  it('quits the dedicated cli-stream Redis client', async () => {
+    const { sockets } = await openAll();
+    const readers = h.redisClients.filter((c) => c.streamKeys.has(`cli-stream:${ID}`));
+    expect(readers).toHaveLength(1);
+    const reader = readers[0]!;
+    expect(reader.quit).not.toHaveBeenCalled();
+    await revoke(sockets);
+    await vi.waitFor(() => expect(reader.quit).toHaveBeenCalledOnce());
+    const other = h.redisClients.find((c) => c.streamKeys.has(`cli-stream:${ADMIN}`))!;
+    expect(other.quit).not.toHaveBeenCalled();
+  });
+
+  it('destroys the completed banner login container', async () => {
+    const { sockets, attachStreams, bannerContainer } = await openAll({ bannerReady: true });
+    await vi.waitFor(() => expect(bannerContainer.start).toHaveBeenCalledOnce());
+    expect(attachStreams.get('banner-container')!.writableEnded).toBe(false);
+    expect(bannerContainer.remove).not.toHaveBeenCalled();
+    await revoke(sockets);
+    await vi.waitFor(() => expect(bannerContainer.remove).toHaveBeenCalledWith({ force: true }));
+  });
+
+  it('destroys the VNC bridge TCP socket', async () => {
+    const { sockets, desktopConnections } = await openAll();
+    // The fast-path probe is destroyed before upgrading; the bridge is a separate socket.
+    expect(desktopConnections).toHaveLength(2);
+    const tcp = desktopConnections[1]!;
+    expect(tcp.destroyed).toBe(false);
+    await revoke(sockets);
+    await vi.waitFor(() => expect(tcp.destroyed).toBe(true));
   });
 });
