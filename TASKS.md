@@ -148,7 +148,7 @@ From the T414 review (2026-10-24). All PRE-EXISTING, consequential for dependenc
 
 ### T417 · FNF[origin-url-2] · origin follow-ups after T388: clone URLs, relink push URLs, remote-helper syntax, nested probe (+5)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:55Z · last: 2026-10-25T00:55Z
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:55Z · last: 2026-10-25T03:20Z · merged PR #916, waiting for main CI
 From the T388 review (2026-10-24). All PRE-EXISTING.
 
 1. gitClone of DB-stored URLs is not re-checked by isAllowedGitRemoteUrl and gets no file guard (repo/clone.ts ~:798, repo/refresh.ts ~:293, repo/bundle-ingest.ts ~:196); needs a legacy row. Minor.
