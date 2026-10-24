@@ -903,7 +903,7 @@ Measure growth, then find a safe repack/prune under hardened args.
 
 ### T391 · FNF[cli-picker-preselect] · pickers preselect the newest provider; create accepts a disabled provider (+2)
 
-status: open · was modular #272
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:52Z · last: 2026-10-24T19:52Z · with T372 item 2 · was modular #272
 
 1. GET /cli-providers sorts desc(createdAt) with no tie-break. Pickers at tasks/[id]/page.tsx ~:1192, terminal/page.tsx ~:43-50, plan-chat.tsx ~:172, plan-starter.tsx ~:115 and repos/[id]/plan/page.tsx ~:356 should preselect via resolveDefaultCliProvider.
 2. api tasks/index.ts ~:518 accepts a disabled provider. Fix: answer 400 with the reason, and hide it in the dropdown.
