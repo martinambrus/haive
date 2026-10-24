@@ -14,7 +14,11 @@ import type { AppEnv } from '../src/context.js';
 
 const h = vi.hoisted(() => {
   process.env.LOG_LEVEL = 'silent';
-  return { db: undefined as unknown, invalidJwt: false };
+  return {
+    db: undefined as unknown,
+    invalidJwt: false,
+    redisConnectWait: null as Promise<void> | null,
+  };
 });
 const USER = 'abcdefab-0000-4000-8000-000000000001';
 const ADMIN = '00000000-0000-4000-8000-000000000002';
@@ -56,7 +60,9 @@ vi.mock('../src/redis.js', () => {
     const emitter = new EventEmitter();
     subscribers.add(emitter);
     return Object.assign(emitter, {
-      connect: async () => {},
+      connect: async () => {
+        await h.redisConnectWait;
+      },
       quit: async () => {
         subscribers.delete(emitter);
         emitter.emit('stop');
@@ -147,6 +153,7 @@ const realRequest = http.request.bind(http);
 
 beforeEach(() => {
   h.invalidJwt = false;
+  h.redisConnectWait = null;
   fake = createFakeDb(tables);
   h.db = fake.db;
   fake.insert(schema.users, {
@@ -513,6 +520,26 @@ describe('upgrade transport controls', () => {
       resume.resolve();
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(peer.destroyed).toBe(true);
+    });
+  }
+});
+
+describe('accepted websocket transport controls', () => {
+  for (const [index, handler] of HANDLERS.entries()) {
+    if (handler.file === 'ide') continue; // IDE relays bytes to code-server; it owns no ws parser.
+    it(`invalid UTF-8 closes only ${handler.path}`, async () => {
+      const setup = deferred<void>();
+      h.redisConnectWait = setup.promise;
+      const { sockets, unaffected } = await openAll();
+      const target = sockets[index]!;
+      target.client.send(Buffer.from([0xc0, 0xaf]), { binary: false });
+      await vi.waitFor(() => expect(target.codes).toEqual([1007]));
+      expect(unaffected.readyState).toBe(WebSocket.OPEN);
+      expect(
+        sockets.filter((_, i) => i !== index).every((s) => s.client.readyState === WebSocket.OPEN),
+      ).toBe(true);
+      setup.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
     });
   }
 });

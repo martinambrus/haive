@@ -1,5 +1,6 @@
 import type { Duplex } from 'node:stream';
 import type { WebSocket } from 'ws';
+import { logTransportError } from './upgrade-errors.js';
 
 // Compose pins the api to one process, as the terminal/IDE refcount resets also require.
 const users = new Map<string, Set<UpgradeSession>>();
@@ -51,6 +52,7 @@ export class UpgradeSession {
   /** Call synchronously in handleUpgrade, before starting any session work. */
   accept(ws: WebSocket): boolean {
     if (this.revoked || this.socket.destroyed) return false;
+    ws.on('error', logTransportError);
     this.ws = ws;
     return true;
   }
