@@ -58,4 +58,22 @@ describe('killGit', () => {
     expect((await gitRun(dir, ['rev-parse', '--is-inside-work-tree'])).code).toBe(0);
     expect((await gitRun(dir, ['rev-parse', '--is-inside-work-tree'])).code).toBe(GIT_NO_EXIT);
   });
+
+  it('kills only `times` matching calls and answers the rest', async () => {
+    const dir = await repo();
+    shim = await killGit(['rev-parse', '--is-inside-work-tree'], { times: 1 });
+    expect((await gitRun(dir, ['rev-parse', '--is-inside-work-tree'])).code).toBe(GIT_NO_EXIT);
+    expect((await gitRun(dir, ['rev-parse', '--is-inside-work-tree'])).code).toBe(0);
+    expect((await gitRun(dir, ['rev-parse', '--is-inside-work-tree'])).code).toBe(0);
+  });
+
+  it('counts `times` from the calls `after` let through', async () => {
+    const dir = await repo();
+    shim = await killGit(['rev-parse', '--is-inside-work-tree'], { after: 1, times: 1 });
+    const codes: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      codes.push((await gitRun(dir, ['rev-parse', '--is-inside-work-tree'])).code);
+    }
+    expect(codes).toEqual([0, GIT_NO_EXIT, 0]);
+  });
 });

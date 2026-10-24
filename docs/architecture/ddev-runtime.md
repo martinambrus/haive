@@ -145,7 +145,7 @@ starting with `-` (an option to the runner), and notes how many written tests di
 accepts a target only as `mysql|mariadb:<digits and dots>`, read the way YAML reads the value. 07c
 compares and guards on those YAML values on BOTH sides, so a quote- or comment-only restatement of
 the same version plans no migration and `'postgres'` keeps its PostgreSQL guard; a `.ddev/` tree
-whose hash is unchanged is no drift at all, whatever an older parser stored for the baseline. Every
+whose hash is unchanged is no drift at all, whatever an older parser stored for the baseline. A `.ddev/` listing git gave no answer for (`gitGaveNoAnswer`) is not a changed input either: `hashDdevInputs` throws, 01c records no baseline (so 07c skips), and 07c keeps the project as booted rather than planning a restart. Every
 reader of `.ddev/config.yaml` (07c, 01c, 01c1, 11g, onboarding's env detection and env-replicate)
 goes through `_ddev-config.ts`, which parses with `yaml` on the failsafe schema, so a value is its
 source text (`8.10` stays `8.10`) and quotes, comments, a comment after `database:`, the flow form,

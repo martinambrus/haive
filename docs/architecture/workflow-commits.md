@@ -62,3 +62,5 @@ The gate tests cover real git changes, message overrides, output validation, con
 secret omissions. `step-runner-llm.test.ts` exercises the actual gate definition through
 `waiting_cli` to `waiting_form` and submission. `workflow-commit-smoke.ts` fabricates its change
 before gate 3 detection and verifies that the bypass LLM message prefills the form.
+
+After its commit lands, gate 3 reads the new HEAD sha and the changed files. A read git gave no answer for (`gitGaveNoAnswer`) is retried once; if it still has none, `tasks.commit_sha` stays NULL and a step warning names the read. A NULL sha means `haiveOwnShas` cannot recognise that commit as Haive's own later.

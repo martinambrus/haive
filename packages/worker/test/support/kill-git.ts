@@ -15,12 +15,14 @@ const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
  * (`GIT_NO_EXIT`), for every call whose argv starts with `startsWith`, and runs the real git for the
  * rest. `hardenGitArgs` prepends `-c key=value` pairs, so the match skips those: `['rev-parse',
  * '--abbrev-ref', 'HEAD']` kills that read and no other `rev-parse`. `after` lets that many matching
- * calls through first, for a read that must fail the second time it is made; `contains` narrows the
- * match to calls with an argument holding that text (`show <sha>:composer.json`, not every `show`).
+ * calls through first, for a read that must fail the second time it is made; `times` ends only that
+ * many of the matching calls after those and runs the rest, for a read that fails once and then
+ * answers; `contains` narrows the match to calls with an argument holding that text
+ * (`show <sha>:composer.json`, not every `show`).
  */
 export async function killGit(
   startsWith: string[],
-  opts: { after?: number; contains?: string } = {},
+  opts: { after?: number; contains?: string; times?: number } = {},
 ): Promise<KilledGit> {
   const real = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
   const dir = await mkdtemp(path.join(tmpdir(), 'kill-git-'));
@@ -41,7 +43,8 @@ export async function killGit(
       ...(opts.contains ? [`case "$*" in *${quote(opts.contains)}*) ;; *) match=0 ;; esac`] : []),
       'if [ "$match" = 1 ]; then',
       `  echo x >> ${quote(counter)}`,
-      `  if [ "$(wc -l < ${quote(counter)})" -gt ${opts.after ?? 0} ]; then kill -9 $$; fi`,
+      `  seen=$(wc -l < ${quote(counter)})`,
+      `  if [ "$seen" -gt ${opts.after ?? 0} ]${opts.times === undefined ? '' : ` && [ "$seen" -le ${(opts.after ?? 0) + opts.times} ]`}; then kill -9 $$; fi`,
       'fi',
       `exec ${quote(real)} "$@"`,
       '',

@@ -49,10 +49,10 @@ function fetchRemoteHead(cwd: string, branch: string | null): Promise<string> {
       stderr += d.toString();
     });
     fetchProc.on('error', reject);
-    fetchProc.on('exit', (code) => {
+    fetchProc.on('exit', (code, signal) => {
       if (code !== 0) {
         const msg = stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
-        reject(new Error(`git fetch failed (exit ${code}): ${msg}`));
+        reject(new Error(`git fetch failed (exit ${code ?? signal}): ${msg}`));
         return;
       }
       const ref = branch ? `origin/${branch}` : 'origin/HEAD';
@@ -66,12 +66,16 @@ function fetchRemoteHead(cwd: string, branch: string | null): Promise<string> {
         revStderr += d.toString();
       });
       revProc.on('error', reject);
-      revProc.on('exit', (revCode) => {
+      revProc.on('exit', (revCode, revSignal) => {
         if (revCode === 0) {
           resolve(stdout.trim());
           return;
         }
-        reject(new Error(`git rev-parse ${ref} failed (exit ${revCode}): ${revStderr.trim()}`));
+        reject(
+          new Error(
+            `git rev-parse ${ref} failed (exit ${revCode ?? revSignal}): ${revStderr.trim()}`,
+          ),
+        );
       });
     });
   });
@@ -165,25 +169,43 @@ export const bundleResyncStep: StepDefinition<BundleResyncDetect, BundleResyncAp
 
   form(_ctx, detected): FormSchema | null {
     const drifted = detected.candidates.filter((c) => c.hasUpstreamChange);
-    if (drifted.length === 0) {
+    const unchecked = detected.candidates.filter((c) => c.fetchError);
+    if (drifted.length === 0 && unchecked.length === 0) {
       return null;
+    }
+    const fields: FormSchema['fields'] = [];
+    if (drifted.length > 0) {
+      fields.push({
+        type: 'multi-select',
+        id: FIELD_ID,
+        label: 'Pull these bundles',
+        options: drifted.map((c) => ({
+          value: c.bundleId,
+          label: `${c.name}${c.branch ? ` @ ${c.branch}` : ''} — ${c.lastSyncCommit?.slice(0, 7) ?? '(unknown)'} → ${c.remoteCommit?.slice(0, 7) ?? '(unknown)'}`,
+        })),
+        defaults: drifted.map((c) => c.bundleId),
+      });
+    }
+    if (unchecked.length > 0) {
+      fields.push({
+        type: 'note',
+        id: 'fetchFailed',
+        label: 'Could not check some bundles',
+        body: [
+          ...unchecked.map((c) => `- **${c.name}**: ${c.fetchError}`),
+          '',
+          'These bundles are left as they are. Retry this step to check them again.',
+        ].join('\n'),
+        variant: 'warning',
+      });
     }
     return {
       title: 'Refresh custom bundles',
       description:
-        'These git-sourced bundles have new commits upstream. Pulling them re-parses the bundle and offers any changed agents/skills as part of this upgrade.',
-      fields: [
-        {
-          type: 'multi-select',
-          id: FIELD_ID,
-          label: 'Pull these bundles',
-          options: drifted.map((c) => ({
-            value: c.bundleId,
-            label: `${c.name}${c.branch ? ` @ ${c.branch}` : ''} — ${c.lastSyncCommit?.slice(0, 7) ?? '(unknown)'} → ${c.remoteCommit?.slice(0, 7) ?? '(unknown)'}`,
-          })),
-          defaults: drifted.map((c) => c.bundleId),
-        },
-      ],
+        drifted.length > 0
+          ? 'These git-sourced bundles have new commits upstream. Pulling them re-parses the bundle and offers any changed agents/skills as part of this upgrade.'
+          : 'Some git-sourced bundles could not be checked for upstream changes.',
+      fields,
       submitLabel: 'Continue',
     };
   },
