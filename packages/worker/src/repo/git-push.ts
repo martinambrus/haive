@@ -69,8 +69,11 @@ export async function ensureOrigin(
 ): Promise<{ added: boolean; updated: boolean }> {
   const add = await gitRun(cwd, ['remote', 'add', 'origin', url]);
   if (add.code === 0) return { added: true, updated: false };
-  if (/remote origin already exists/i.test(add.stderr)) {
-    await gitRun(cwd, ['remote', 'set-url', 'origin', url]);
+  if (add.code === 3) {
+    const updated = await gitRun(cwd, ['remote', 'set-url', 'origin', url]);
+    if (updated.code !== 0) {
+      throw new Error(`git remote set-url origin failed: ${updated.stderr || updated.stdout}`);
+    }
     return { added: false, updated: true };
   }
   throw new Error(`git remote add origin failed: ${add.stderr || add.stdout}`);

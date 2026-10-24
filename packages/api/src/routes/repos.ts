@@ -2519,17 +2519,25 @@ repoRoutes.post('/:id/remote', async (c) => {
     if (!cred) throw new HttpError(404, 'Credentials not found');
   }
 
-  const git = async (args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> => {
+  const git = async (
+    args: string[],
+  ): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> => {
     try {
       const { stdout, stderr } = await execGit('git', hardenGitArgs(args), {
         cwd: root,
         timeout: 10_000,
       });
-      return { ok: true, stdout: stdout.toString().trim(), stderr: stderr.toString().trim() };
+      return {
+        ok: true,
+        code: 0,
+        stdout: stdout.toString().trim(),
+        stderr: stderr.toString().trim(),
+      };
     } catch (err) {
-      const e = err as { stdout?: string; stderr?: string };
+      const e = err as { code?: unknown; stdout?: string; stderr?: string };
       return {
         ok: false,
+        code: typeof e.code === 'number' ? e.code : -1,
         stdout: (e.stdout ?? '').toString().trim(),
         stderr: (e.stderr ?? '').toString().trim(),
       };
@@ -2545,7 +2553,7 @@ repoRoutes.post('/:id/remote', async (c) => {
   // round trip, and re-pointing an existing origin is a legitimate use of this.
   const added = await git(['remote', 'add', 'origin', body.remoteUrl]);
   if (!added.ok) {
-    if (!/already exists/i.test(added.stderr)) {
+    if (added.code !== 3) {
       throw new HttpError(409, `Could not add the remote: ${added.stderr || added.stdout}`);
     }
     const updated = await git(['remote', 'set-url', 'origin', body.remoteUrl]);
