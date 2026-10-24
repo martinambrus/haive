@@ -142,7 +142,10 @@ and then the repository lock when the task had failed, so a refused or overtaken
 gate parked with nothing recorded. The refused answer stays saved on its row. A task Retry, a settle
 and a CLI switch that reset a row to `pending` drop it (`withoutGateAnswer`,
 `api/src/lib/task-control.ts`), because every write to a `pending` row is refused: a kept answer was
-a no-op that the stalled sweep re-drove for good. A Retry and a settle also set `pause_form_on_retry`
+a no-op that the stalled sweep re-drove for good. Migration `0210_heal_wedged_fix_loop_gate_rows`
+heals the rows an older build left that way (`pending`, unparked, holding a saved answer): the answer
+is dropped and the flag set, so the gate asks again, and the dropped answer is not restored
+(`gate-wedge-heal.test.ts` runs the file's SQL on Postgres). A Retry and a settle also set `pause_form_on_retry`
 on such a row, since a source step that auto-submits its defaults (`08-phase-5-verify`) would
 otherwise answer the gate itself with `continue` and run with the gate's values; the gate parks
 again and asks. Abort, an accept with no next step, a dead run list and a continue
