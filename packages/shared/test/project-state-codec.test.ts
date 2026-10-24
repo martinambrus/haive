@@ -163,7 +163,7 @@ describe('git data filesystem aliases', () => {
       expect(isClaimablePath(path)).toBe(false);
     },
   );
-  it.each(gitDataSegments.flatMap((seg) => [seg, `a/${seg}/b`]))('refuses %s', (path) => {
+  it.each(gitDataSegments.flatMap((seg) => [seg, `a/${seg}/b`]))('refuses %j', (path) => {
     expect(namesGitData(path)).toBe(true);
     expect(isClaimablePath(path)).toBe(false);
     expect(() => renderProjectState({ ...emptyProjectState(), claims: [claim(path)] })).toThrow(
@@ -171,7 +171,7 @@ describe('git data filesystem aliases', () => {
     );
   });
 
-  it.each(ordinarySegments.flatMap((seg) => [seg, `a/${seg}/b`]))('keeps %s', (path) => {
+  it.each(ordinarySegments.flatMap((seg) => [seg, `a/${seg}/b`]))('keeps %j', (path) => {
     expect(namesGitData(path)).toBe(false);
     expect(isClaimablePath(path)).toBe(true);
   });

@@ -266,7 +266,7 @@ describe('O3: a file picked both to be removed and to be kept', () => {
 
 describe('a removal the plan holds for a path inside git data', () => {
   it.each(['.git/config', '.git./x', 'a/git~1/x', '.g\u200cit/x'])(
-    'leaves %s in place, removes nothing, and reports the refusal',
+    'leaves %j in place, removes nothing, and reports the refusal',
     async (GIT) => {
       const u = await upgrade([GIT]);
 

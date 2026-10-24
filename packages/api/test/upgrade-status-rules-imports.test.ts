@@ -148,7 +148,7 @@ describe('upgrade-status and the rules import', () => {
   });
 
   it.each(['.git/config', '.git./config', 'a/git~1/x', '.g\u200cit/config'])(
-    'offers nothing for an earlier release row at %s',
+    'offers nothing for an earlier release row at %j',
     async (diskPath) => {
       await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
       await mkdir(path.dirname(path.join(repo, diskPath)), { recursive: true });

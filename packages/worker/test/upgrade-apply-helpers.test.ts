@@ -94,7 +94,7 @@ describe('safeDiskRel', () => {
       '\ufeff.git',
       '.GiT\u200e',
     ].flatMap((seg) => [seg, `a/${seg}/b`]),
-  )('refuses git data alias %s', (path) => {
+  )('refuses git data alias %j', (path) => {
     expect(safeDiskRel(path)).toBeNull();
   });
 
