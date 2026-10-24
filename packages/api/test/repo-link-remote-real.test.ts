@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -135,4 +135,31 @@ it.each(['worktree', 'submodule'])('links its own %s gitfile', async (kind) => {
   expect(response.status, await response.text()).toBe(200);
   expect(await git(`${root}/nested`, ['remote', 'get-url', 'origin'])).toBe('https://new.test/r');
   expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://old.test/r');
+});
+
+it('keeps the old fetch URL and row when push URL cleanup fails', async () => {
+  const { root, link, fake } = await setup();
+  await git(root, ['config', 'remote.origin.pushurl', 'https://planted.test/r']);
+  const shim = await mkdtemp(path.join(tmpdir(), 't417-relink-fail-'));
+  dirs.push(shim);
+  const real = (await exec('sh', ['-c', 'command -v git'])).stdout.trim();
+  const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
+  await writeFile(
+    path.join(shim, 'git'),
+    `#!/bin/sh
+for arg in "$@"; do if [ "$arg" = --unset-all ]; then exit 128; fi; done
+exec ${quote(real)} "$@"
+`,
+  );
+  await chmod(path.join(shim, 'git'), 0o755);
+  const saved = process.env.PATH;
+  process.env.PATH = `${shim}:${saved}`;
+  try {
+    expect((await link()).status).toBe(409);
+  } finally {
+    process.env.PATH = saved;
+  }
+  expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://old.test/r');
+  expect(await git(root, ['remote', 'get-url', '--push', 'origin'])).toBe('https://planted.test/r');
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
 });

@@ -184,7 +184,7 @@ export async function handleIngestGit(
 
   try {
     if (!bundle.gitUrl) throw new Error('git-source bundle missing gitUrl');
-    assertCloneUrl(bundle.gitUrl);
+    assertCloneUrl(bundle.gitUrl, 'bundle');
     await ensureDirNoFollow(bundleStorageRoot, dirRel, { mode: 0o755 });
     await removeNoFollow(bundleStorageRoot, `${dirRel}/extracted`, { recursive: true });
 

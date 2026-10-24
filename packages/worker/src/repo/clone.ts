@@ -112,8 +112,11 @@ export async function gitClone(
 }
 
 /** Legacy database rows cross the same URL boundary as newly submitted remotes. */
-export function assertCloneUrl(url: string): void {
-  if (!isAllowedGitRemoteUrl(url)) throw new OriginUrlError(url);
+export function assertCloneUrl(
+  url: string,
+  context: 'clone' | 'refresh' | 'bundle' = 'clone',
+): void {
+  if (!isAllowedGitRemoteUrl(url)) throw new OriginUrlError(url, 'fetch', context);
 }
 
 /** Point origin at a (tokenless) URL. Used after a credentialed clone so the

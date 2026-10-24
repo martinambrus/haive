@@ -2577,6 +2577,13 @@ repoRoutes.post('/:id/remote', async (c) => {
     if (added.code !== 3) {
       throw new HttpError(409, `Could not add the remote: ${added.stderr || added.stdout}`);
     }
+    const cleared = await git(['config', '--local', '--unset-all', 'remote.origin.pushurl']);
+    if (!cleared.ok && cleared.code !== 5) {
+      throw new HttpError(
+        409,
+        `Could not clear the remote's push URLs: ${cleared.stderr || cleared.stdout}`,
+      );
+    }
     const updated = await git([
       'config',
       '--local',
@@ -2586,13 +2593,6 @@ repoRoutes.post('/:id/remote', async (c) => {
     ]);
     if (!updated.ok) {
       throw new HttpError(409, `Could not update the remote: ${updated.stderr || updated.stdout}`);
-    }
-    const cleared = await git(['config', '--local', '--unset-all', 'remote.origin.pushurl']);
-    if (!cleared.ok && cleared.code !== 5) {
-      throw new HttpError(
-        409,
-        `Could not clear the remote's push URLs: ${cleared.stderr || cleared.stdout}`,
-      );
     }
   }
 

@@ -286,7 +286,7 @@ async function rebuild(
   if (!fromFolder && !fromRemote) {
     throw new Error('Nothing to refresh from: this repository has no remote.');
   }
-  if (fromRemote) assertCloneUrl(fromRemote);
+  if (fromRemote) assertCloneUrl(fromRemote, 'refresh');
   const aside = await moveAside(repoStorageRoot, rel);
   if (fromFolder) {
     await ensureDirNoFollow(repoStorageRoot, rel);

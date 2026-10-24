@@ -99,6 +99,8 @@ it('a refused bundle URL records failure without wiping its existing extracted t
     root,
   ).catch((e: unknown) => e);
   expect(error).toMatchObject({ name: 'OriginUrlError' });
+  expect((error as Error).message).toContain('retry syncing');
+  expect((error as Error).message).not.toContain('this step');
   expect(fake.rows(schema.customBundles)[0]).toMatchObject({
     status: 'failed',
     lastSyncError: (error as Error).message,

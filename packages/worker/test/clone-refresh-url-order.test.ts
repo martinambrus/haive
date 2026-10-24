@@ -34,13 +34,16 @@ it.each([
   const config = await readFile(path.join(dest, '.git/config'), 'utf8');
   const fake = createFakeDb({ repositories: schema.repositories, tasks: schema.tasks });
   fake.insert(schema.repositories, { id: REPO, userId: USER, storagePath: dest });
-  await expect(
-    run(
-      { repositoryId: REPO, userId: USER, source: 'github', remoteUrl: 'file:///x' },
-      fake.db as unknown as Database,
-      base,
-    ),
-  ).rejects.toMatchObject({ name: 'OriginUrlError' });
+  const error = await run(
+    { repositoryId: REPO, userId: USER, source: 'git_https', remoteUrl: 'file:///x' },
+    fake.db as unknown as Database,
+    base,
+  ).catch((e: unknown) => e);
+  expect(error).toMatchObject({ name: 'OriginUrlError' });
+  expect((error as Error).message).toContain(
+    _name === 'clone' ? 'retry cloning' : 'retry refreshing',
+  );
+  expect((error as Error).message).not.toContain('this step');
   expect(await readFile(path.join(dest, 'keep'), 'utf8')).toBe('existing tree');
   expect(await readFile(path.join(dest, '.git/config'), 'utf8')).toBe(config);
   expect(await readdir(path.join(base, USER))).toEqual([REPO]);
