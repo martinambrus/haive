@@ -385,7 +385,7 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
           await restoreKeptMetadata(repoPath, kept);
         }
       } catch (err) {
-        return recoverAfterMoveFailure(getDb(), repo.id, repoPath, kept, before, err);
+        return await recoverAfterMoveFailure(getDb(), repo.id, repoPath, kept, before, err);
       }
       const upstream = await gitRun(repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
       const head = await gitRun(repoPath, [
