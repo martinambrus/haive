@@ -183,8 +183,6 @@ async function runTerminalSession(
       await cleanup();
       return;
     }
-    stream.on('data', onStreamData);
-    stream.on('end', onStreamEnd);
     stream.on('error', onStreamError);
 
     await incrementAttached(container.id);
@@ -193,6 +191,9 @@ async function runTerminalSession(
       log.warn({ err, sessionId }, 'createTerminalSession failed');
       return null;
     });
+
+    stream.on('data', onStreamData);
+    stream.on('end', onStreamEnd);
 
     keepalive = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {

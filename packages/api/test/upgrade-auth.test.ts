@@ -675,6 +675,49 @@ describe('real transport registry cleanup controls', () => {
   });
 });
 
+describe('terminal replay ordering', () => {
+  it('sends connected before output buffered by the attach stream', async () => {
+    const stream = new PassThrough();
+    stream.write('replayed output\n');
+    vi.spyOn(http, 'request').mockImplementation(((
+      opts: http.RequestOptions,
+      ...args: unknown[]
+    ) => {
+      if (!opts.path?.startsWith('/containers/test-container/attach'))
+        return Reflect.apply(realRequest, http, [opts, ...args]);
+      const req = new EventEmitter();
+      Object.assign(req, {
+        end: () => queueMicrotask(() => req.emit('upgrade', {}, stream, Buffer.alloc(0))),
+      });
+      return req;
+    }) as typeof http.request);
+    // Model a database round trip so buffered data can flow across the await.
+    fake.hooks.beforeUpdate = async (table) => {
+      if (table === schema.containers) await new Promise<void>((resolve) => setImmediate(resolve));
+    };
+    const docker = {
+      modem: { getSocketPath: () => undefined },
+      getContainer: () => ({}),
+    } as never;
+    const port = await start((s) => installTerminalWebSocket(s, { docker }));
+    const client = new WebSocket(`ws://127.0.0.1:${port}/terminal/${ID}`, {
+      headers: { cookie: 'haive_access=user-session' },
+    });
+    clients.add(client);
+    const frames: Array<{ type: string; data?: string }> = [];
+    client.on('message', (raw) => frames.push(JSON.parse(raw.toString())));
+    try {
+      await vi.waitFor(() => expect(frames).toHaveLength(2));
+      expect(frames[0]?.type).toBe('connected');
+      expect(frames[1]).toEqual({ type: 'output', data: 'replayed output\n' });
+    } finally {
+      client.close();
+      await vi.waitFor(() => expect(stream.writableEnded).toBe(true));
+      stream.destroy();
+    }
+  });
+});
+
 describe('terminal startup failure cleanup', () => {
   for (const stage of ['increment', 'timers'] as const) {
     it(`ends the attach stream and closes the websocket when ${stage} fails`, async () => {
