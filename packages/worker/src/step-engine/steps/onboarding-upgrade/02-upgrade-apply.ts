@@ -1305,7 +1305,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       if (action === 'delete') {
         const rel = safeDiskRel(entry.diskPath);
         if (rel === null) {
-          warnings.push(`refusing to delete ${entry.diskPath}: not a path inside the repository`);
+          warnings.push(
+            `refusing to delete ${entry.diskPath}: ${namesGitData(entry.diskPath) ? 'it names git data' : 'not a path inside the repository'}`,
+          );
           skippedCount += 1;
           continue;
         }
@@ -1381,7 +1383,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       if (action === 'strip') {
         const rel = safeDiskRel(entry.diskPath);
         if (rel === null) {
-          warnings.push(`refusing to edit ${entry.diskPath}: not a path inside the repository`);
+          warnings.push(
+            `refusing to edit ${entry.diskPath}: ${namesGitData(entry.diskPath) ? 'it names git data' : 'not a path inside the repository'}`,
+          );
           skippedCount += 1;
           continue;
         }
@@ -1470,7 +1474,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       // this branch is NOT inside a `try`, so a throw here would abort every remaining entry.
       const rel = safeDiskRel(entry.diskPath);
       if (rel === null) {
-        warnings.push(`refusing to write ${entry.diskPath}: not a path inside the repository`);
+        warnings.push(
+          `refusing to write ${entry.diskPath}: ${namesGitData(entry.diskPath) ? 'it names git data' : 'not a path inside the repository'}`,
+        );
         skippedCount += 1;
         continue;
       }
