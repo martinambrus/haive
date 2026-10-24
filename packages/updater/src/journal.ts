@@ -110,6 +110,11 @@ export async function finishRun(
      WHERE id = ${id}`;
 }
 
+/** Records why a run could not be undone while leaving it `running`, so the next updater finds it. */
+export async function recordRunError(sql: Sql, id: string, error: string): Promise<void> {
+  await sql`UPDATE upgrade_runs SET error = ${error}, updated_at = now() WHERE id = ${id}`;
+}
+
 const LOCK_KEY = 'haive:upgrade';
 
 /** Session-scoped, like the migration runner's and for the same reason: the upgrade spans many

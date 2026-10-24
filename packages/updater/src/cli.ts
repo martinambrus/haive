@@ -4,7 +4,7 @@ import postgres from 'postgres';
 import { configService, networkName } from '@haive/shared';
 import { parseReleaseManifest, type ReleaseManifest } from '@haive/shared/release';
 import * as dk from './docker.js';
-import { ensureJournal, findLiveRun, finishRun, startRun, tryLock } from './journal.js';
+import { ensureJournal, findLiveRun, recordRunError, startRun, tryLock } from './journal.js';
 import { preflight } from './preflight.js';
 import {
   phaseCommit,
@@ -19,6 +19,7 @@ import {
   rollback,
   type UpgradeContext,
 } from './run.js';
+import { decideResume } from './phases.js';
 
 /**
  * `haive upgrade`.
@@ -29,7 +30,15 @@ import {
  * the one that still works when the stack is down.
  */
 
-const EXIT = { ok: 0, failed: 1, usage: 2, refused: 3, busy: 4, rolledBack: 5 } as const;
+const EXIT = {
+  ok: 0,
+  failed: 1,
+  usage: 2,
+  refused: 3,
+  busy: 4,
+  rolledBack: 5,
+  rollbackFailed: 6,
+} as const;
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -48,6 +57,27 @@ async function loadManifest(source: string): Promise<ReleaseManifest> {
     ? await (await fetch(source)).text()
     : await readFile(source, 'utf8');
   return parseReleaseManifest(JSON.parse(text));
+}
+
+/** A rollback that throws has not undone the upgrade, so the run stays `running` for the next
+ *  updater to find and finish. */
+async function undo(ctx: UpgradeContext, reason: string): Promise<number> {
+  try {
+    await rollback(ctx, reason);
+    return EXIT.rolledBack;
+  } catch (err) {
+    return rollbackFailed(ctx, err);
+  }
+}
+
+async function rollbackFailed(ctx: UpgradeContext, err: unknown): Promise<number> {
+  const message = err instanceof Error ? err.message : String(err);
+  await recordRunError(ctx.sql, ctx.runId, `rollback failed: ${message}`).catch(() => {});
+  emit('rollback-failed', {
+    message,
+    next: 'run `haive upgrade` again to finish the rollback',
+  });
+  return EXIT.rollbackFailed;
 }
 
 async function main(): Promise<number> {
@@ -122,7 +152,12 @@ async function main(): Promise<number> {
         forceDrain: true,
         log: emit,
       };
-      await resume(ctx, live.phase);
+      try {
+        await resume(ctx, live.phase);
+      } catch (err) {
+        if (decideResume(live.phase).action !== 'reverse') throw err;
+        return rollbackFailed(ctx, err);
+      }
       return EXIT.ok;
     }
 
@@ -182,6 +217,7 @@ async function main(): Promise<number> {
       log: emit,
     };
 
+    let verifyFailed = false;
     try {
       await phaseDraining(ctx);
       await phaseMaintenance(ctx);
@@ -193,20 +229,16 @@ async function main(): Promise<number> {
       }
       await phaseMigrate(ctx);
 
-      if (!(await phaseVerify(ctx))) {
-        await rollback(ctx, 'the new containers never reported the target version');
-        return EXIT.rolledBack;
-      }
+      verifyFailed = !(await phaseVerify(ctx));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       emit('error', { message });
       // Anything that throws before commit is reversible by construction; say so and undo it
       // rather than leaving the install held.
-      await rollback(ctx, message).catch((e) =>
-        emit('error', { message: `rollback failed: ${e}` }),
-      );
-      await finishRun(sql, runId, 'rolled_back', message).catch(() => {});
-      return EXIT.rolledBack;
+      return await undo(ctx, message);
+    }
+    if (verifyFailed) {
+      return await undo(ctx, 'the new containers never reported the target version');
     }
     // Past the point of no return (`decideResume`): the run stays at `commit`, and the next run
     // resumes it forward rather than restoring old images onto data already changed.
