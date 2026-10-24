@@ -1,13 +1,19 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const ADMIN = '00000000-0000-4000-8000-0000000000a1';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   gdb: undefined as unknown,
   add: vi.fn(),
+  logAudit: vi.fn(),
   role: 'admin',
   houseRules: true,
   successors: [] as unknown[],
+}));
+
+vi.mock('../src/lib/audit.js', async (original) => ({
+  ...(await original<typeof import('../src/lib/audit.js')>()),
+  logAuditEvent: h.logAudit,
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -86,6 +92,8 @@ app.onError(errorHandler);
 const makeFake = () =>
   createFakeDb({ tasks: schema.tasks, cliProviders: schema.cliProviders, globalKbEntries });
 let fake: ReturnType<typeof makeFake>;
+let auditFake: ReturnType<typeof createFakeDb>;
+let enforcementSuccesses: number;
 let vectorStatements: string[];
 let rawStatements: string[];
 
@@ -114,12 +122,15 @@ function lenient<T extends { execute: (query: unknown) => Promise<unknown> }>(ha
 }
 
 type Json = Record<string, any>;
-const send = (method: string, url: string, body?: unknown) =>
-  app.request(url, {
+const send = async (method: string, url: string, body?: unknown) => {
+  const res = await app.request(url, {
     method,
     headers: { 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  if (url.endsWith('/enforcement') && res.status === 200) enforcementSuccesses += 1;
+  return res;
+};
 const asJson = async (res: Response): Promise<Json> => (await res.json()) as Json;
 
 const stored = (id = ENTRY) => fake.rows(globalKbEntries).find((r) => r.id === id)!;
@@ -166,7 +177,15 @@ beforeEach(() => {
   vectorStatements = [];
   rawStatements = [];
   fake = makeFake();
-  h.db = fake.db;
+  auditFake = createFakeDb({
+    auditEvents: schema.auditEvents,
+    tasks: schema.tasks,
+    cliProviders: schema.cliProviders,
+  });
+  auditFake.insert(schema.cliProviders, { id: PROVIDER, userId: ADMIN });
+  enforcementSuccesses = 0;
+  h.db = auditFake.db;
+  h.logAudit.mockReset();
   h.gdb = {
     ...lenient(fake.db),
     transaction: (fn: (tx: never) => Promise<unknown>) =>
@@ -174,6 +193,11 @@ beforeEach(() => {
   };
   fake.insert(schema.cliProviders, { id: PROVIDER, userId: ADMIN });
   addEntry(ENTRY, { title: TITLE, category: 'anti_pattern' });
+});
+
+afterEach(() => {
+  expect(auditFake.rows(schema.auditEvents)).toHaveLength(enforcementSuccesses);
+  expect(h.logAudit).toHaveBeenCalledTimes(enforcementSuccesses);
 });
 
 describe('the enforcement routes are for admins', () => {
@@ -933,4 +957,109 @@ describe('an id that is not a uuid names no entry', () => {
     expect(res.status).toBe(404);
     expect((await asJson(res)).error).toBe('global KB entry not found');
   });
+});
+
+describe('enforcement security audit', () => {
+  it.each([ALWAYS, FILES])(
+    'writes exactly one non-secret row before the store transaction for %j',
+    async (spec) => {
+      const original = h.gdb as typeof fake.db;
+      h.gdb = {
+        ...original,
+        transaction: async (fn: never) => {
+          expect(auditFake.rows(schema.auditEvents)).toHaveLength(1);
+          expect(h.logAudit).not.toHaveBeenCalled();
+          return original.transaction(fn);
+        },
+      };
+      auditFake.hooks.beforeCommit = () => {
+        expect(stored().enforcedHash).not.toBeNull();
+        expect(h.logAudit).not.toHaveBeenCalled();
+      };
+      expect((await enforce(spec)).status).toBe(200);
+      const rows = auditFake.rows(schema.auditEvents);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        actorUserId: ADMIN,
+        action: 'global_kb.house_rule.enforce',
+        targetType: 'global_kb_entry',
+        targetId: ENTRY,
+        metadata: {
+          namespace: 'default',
+          mode: spec.mode,
+          ...(spec.mode === 'files' ? { globCount: 2 } : {}),
+        },
+      });
+      expect(JSON.stringify(rows)).not.toContain(BODY);
+      expect(h.logAudit).toHaveBeenCalledTimes(1);
+      expect(h.logAudit.mock.calls[0]![0]).toMatchObject({
+        action: rows[0]!.action,
+        metadata: rows[0]!.metadata,
+      });
+    },
+  );
+
+  it('audits un-enforcement with the stored namespace and mode', async () => {
+    approve(ENTRY, FILES);
+    fake.patch(globalKbEntries, ENTRY, { namespace: 'elsewhere' });
+    expect((await unenforce()).status).toBe(200);
+    expect(auditFake.rows(schema.auditEvents)).toMatchObject([
+      {
+        actorUserId: ADMIN,
+        action: 'global_kb.house_rule.unenforce',
+        targetType: 'global_kb_entry',
+        targetId: ENTRY,
+        metadata: { namespace: 'elsewhere', mode: 'files', globCount: 2 },
+      },
+    ]);
+    expect(h.logAudit).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['PUT', 'DELETE'])('rolls the row back when the %s store write fails', async (method) => {
+    approve(ENTRY, FILES);
+    const before = stored();
+    fake.hooks.beforeUpdate = () => {
+      expect(auditFake.rows(schema.auditEvents)).toHaveLength(1);
+      throw new Error('store write refused');
+    };
+    expect((await (method === 'PUT' ? enforce(ALWAYS) : unenforce())).status).toBe(500);
+    expect(stored()).toEqual(before);
+    expect(auditFake.rows(schema.auditEvents)).toEqual([]);
+    expect(h.logAudit).not.toHaveBeenCalled();
+  });
+
+  it.each(['PUT', 'DELETE'])(
+    'refuses %s before touching the store if the audit insert fails',
+    async (method) => {
+      approve(ENTRY, FILES);
+      const before = stored();
+      auditFake.hooks.beforeInsert = () => {
+        throw new Error('audit refused');
+      };
+      expect((await (method === 'PUT' ? enforce(ALWAYS) : unenforce())).status).toBe(500);
+      expect(stored()).toEqual(before);
+      expect(h.logAudit).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not log when the main database commit fails after the store commit', async () => {
+    auditFake.hooks.beforeCommit = () => {
+      throw new Error('commit refused');
+    };
+    expect((await enforce(ALWAYS)).status).toBe(500);
+    expect(stored().enforcedHash).not.toBeNull();
+    expect(auditFake.rows(schema.auditEvents)).toEqual([]);
+    expect(h.logAudit).not.toHaveBeenCalled();
+  });
+});
+
+it('refuses a removal if its audit context changed while waiting for the lock', async () => {
+  approve(ENTRY, FILES);
+  fake.hooks.beforeLock = () => {
+    approve(ENTRY, ALWAYS);
+  };
+  const res = await unenforce();
+  expect(res.status).toBe(409);
+  expect((await asJson(res)).code).toBe('enforcement_changed');
+  expect(stored().enforcedHash).not.toBeNull();
 });

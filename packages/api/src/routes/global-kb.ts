@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { Hono, type Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { and, desc, eq, inArray, isNotNull, ne, sql, type SQL } from 'drizzle-orm';
 import {
   isLockNotAvailable,
@@ -360,13 +361,14 @@ function serializeConfigSave<T>(run: () => Promise<T>): Promise<T> {
 
 globalKbRoutes.put('/config', (c) => serializeConfigSave(() => putConfig(c)));
 
-// The secrets service writes on its own connection, beyond any rollback: the row goes first.
-async function auditedChange(event: AuditEvent, change: () => Promise<void>) {
-  await getDb().transaction(async (tx) => {
+// Write the main-DB row before a change on another connection; log only after its commit.
+async function auditedChange<T>(event: AuditEvent, change: () => Promise<T>): Promise<T> {
+  const result = await getDb().transaction(async (tx) => {
     await insertAuditEvent(tx, event);
-    await change();
+    return change();
   });
   logAuditEvent(event);
+  return result;
 }
 
 async function putConfig(c: Context<AppEnv>) {
@@ -1276,6 +1278,14 @@ const enforcementSchema = z.discriminatedUnion('mode', [
     .strict(),
 ]);
 
+function enforcementAuditMetadata(namespace: string, spec: EnforceSpec): Record<string, unknown> {
+  return {
+    namespace,
+    mode: spec.mode,
+    ...(spec.mode === 'files' ? { globCount: spec.globs.length } : {}),
+  };
+}
+
 // Enforcing puts the entry's full text into agent prompts as an instruction, so it is an admin's
 // call on exactly the text they saw: `expectedHash` is the content token of the entry they read.
 globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
@@ -1294,87 +1304,123 @@ globalKbRoutes.put('/entries/:id/enforcement', requireAdmin, async (c) => {
   const userId = c.get('userId');
 
   const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) =>
-    conn.transaction(async (db) => {
-      const row = await lockEntry(db, id);
-      if (!row) throw new HttpError(404, 'global KB entry not found');
-      if (row.status !== 'active') {
-        throw new HttpError(409, 'only an active entry can be enforced', 'not_active');
-      }
-      if (row.namespace !== settings.namespace) {
-        throw new HttpError(
-          409,
-          `this entry belongs to the namespace "${row.namespace}", not to the one this instance uses`,
-          'other_namespace',
-        );
-      }
-      if (houseRuleContentToken(row) !== expectedHash) {
-        throw new HttpError(
-          409,
-          'the entry changed after it was read; read it again before enforcing it',
-          'token_mismatch',
-        );
-      }
-      if (!collapseToLine(row.description ?? '')) {
-        throw new HttpError(
-          400,
-          'an enforced rule is listed by its description, so the entry needs one',
-          'description_required',
-        );
-      }
-      for (const field of ['title', 'description', 'body'] as const) {
-        const reason = refusedHouseRuleText(row[field] ?? '');
-        if (reason !== null) throw new HttpError(400, `${field} ${reason}`, 'refused_text');
-      }
-      if (spec.mode === 'always') {
-        const { usedBytes, entryBytes } = await alwaysBytes(db, settings.namespace, row);
-        if (usedBytes + entryBytes > HOUSE_RULES_ALWAYS_CAP_BYTES) {
-          return { capExceeded: { usedBytes, capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES, entryBytes } };
-        }
-      }
-      const [updated] = await db
-        .update(globalKbEntries)
-        .set({
-          enforce: spec,
-          enforcedHash: houseRuleApprovalHash(row, spec),
-          enforcedAt: new Date(),
-          enforcedBy: userId,
-        })
-        .where(eq(globalKbEntries.id, id))
-        .returning();
-      return { row: updated!, namespace: settings.namespace };
-    }),
+    auditedChange(
+      {
+        actorUserId: userId,
+        action: 'global_kb.house_rule.enforce',
+        targetType: 'global_kb_entry',
+        targetId: id,
+        metadata: enforcementAuditMetadata(settings.namespace, spec),
+      },
+      () =>
+        conn.transaction(async (db) => {
+          const row = await lockEntry(db, id);
+          if (!row) throw new HttpError(404, 'global KB entry not found');
+          if (row.status !== 'active') {
+            throw new HttpError(409, 'only an active entry can be enforced', 'not_active');
+          }
+          if (row.namespace !== settings.namespace) {
+            throw new HttpError(
+              409,
+              `this entry belongs to the namespace "${row.namespace}", not to the one this instance uses`,
+              'other_namespace',
+            );
+          }
+          if (houseRuleContentToken(row) !== expectedHash) {
+            throw new HttpError(
+              409,
+              'the entry changed after it was read; read it again before enforcing it',
+              'token_mismatch',
+            );
+          }
+          if (!collapseToLine(row.description ?? '')) {
+            throw new HttpError(
+              400,
+              'an enforced rule is listed by its description, so the entry needs one',
+              'description_required',
+            );
+          }
+          for (const field of ['title', 'description', 'body'] as const) {
+            const reason = refusedHouseRuleText(row[field] ?? '');
+            if (reason !== null) throw new HttpError(400, `${field} ${reason}`, 'refused_text');
+          }
+          if (spec.mode === 'always') {
+            const { usedBytes, entryBytes } = await alwaysBytes(db, settings.namespace, row);
+            if (usedBytes + entryBytes > HOUSE_RULES_ALWAYS_CAP_BYTES) {
+              // A refusal must throw through both transactions, including the audit row's.
+              throw new HTTPException(409, {
+                res: c.json(
+                  {
+                    error: 'the always-on rules would pass their size cap',
+                    code: 'always_cap',
+                    usedBytes,
+                    capBytes: HOUSE_RULES_ALWAYS_CAP_BYTES,
+                    entryBytes,
+                  },
+                  409,
+                ),
+              });
+            }
+          }
+          const [updated] = await db
+            .update(globalKbEntries)
+            .set({
+              enforce: spec,
+              enforcedHash: houseRuleApprovalHash(row, spec),
+              enforcedAt: new Date(),
+              enforcedBy: userId,
+            })
+            .where(eq(globalKbEntries.id, id))
+            .returning();
+          return { row: updated!, namespace: settings.namespace };
+        }),
+    ),
   ).catch(lockBusyError);
 
-  if ('capExceeded' in result) {
-    return c.json(
-      {
-        error: 'the always-on rules would pass their size cap',
-        code: 'always_cap',
-        ...result.capExceeded,
-      },
-      409,
-    );
-  }
   return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace)) });
 });
 
 // Removes the approval and keeps the settings, as the last ones given.
 globalKbRoutes.delete('/entries/:id/enforcement', requireAdmin, async (c) => {
   const id = entryIdParam(c.req.param('id'));
-  const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) =>
-    conn.transaction(async (db) => {
-      const row = await lockEntry(db, id);
-      if (!row) throw new HttpError(404, 'global KB entry not found');
-      if (row.enforce === null) {
-        throw new HttpError(404, 'this entry was never enforced', 'not_enforced');
-      }
-      const [updated] = await db
-        .update(globalKbEntries)
-        .set({ enforcedHash: null })
-        .where(eq(globalKbEntries.id, id))
-        .returning();
-      return { row: updated!, namespace: settings.namespace };
-    }),
-  ).catch(lockBusyError);
+  const result = await withGlobalKb(getDb(), async ({ db: conn, settings }) => {
+    // Read the audit context before opening the store transaction, then verify it under its lock.
+    const [seen] = await conn.select().from(globalKbEntries).where(eq(globalKbEntries.id, id));
+    if (!seen) throw new HttpError(404, 'global KB entry not found');
+    const metadata = enforcementAuditMetadata(seen.namespace, seen.enforce ?? ALWAYS);
+    return auditedChange(
+      {
+        actorUserId: c.get('userId'),
+        action: 'global_kb.house_rule.unenforce',
+        targetType: 'global_kb_entry',
+        targetId: id,
+        metadata,
+      },
+      () =>
+        conn.transaction(async (db) => {
+          const row = await lockEntry(db, id);
+          if (!row) throw new HttpError(404, 'global KB entry not found');
+          if (row.enforce === null) {
+            throw new HttpError(404, 'this entry was never enforced', 'not_enforced');
+          }
+          if (
+            JSON.stringify(enforcementAuditMetadata(row.namespace, row.enforce)) !==
+            JSON.stringify(metadata)
+          ) {
+            throw new HttpError(
+              409,
+              'the enforcement changed; retry the removal',
+              'enforcement_changed',
+            );
+          }
+          const [updated] = await db
+            .update(globalKbEntries)
+            .set({ enforcedHash: null })
+            .where(eq(globalKbEntries.id, id))
+            .returning();
+          return { row: updated!, namespace: settings.namespace };
+        }),
+    );
+  }).catch(lockBusyError);
   return c.json({ entry: presentEntry(result.row, await houseRuleContext(result.namespace)) });
 });
