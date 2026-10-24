@@ -44,6 +44,7 @@ beforeEach(() => {
 
 function setup() {
   const fake = createFakeDb({
+    cliProviders: schema.cliProviders,
     tasks: schema.tasks,
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
@@ -305,5 +306,96 @@ describe('the start action', () => {
     const again = await post(`/${DRAFT}/action`, { action: 'start' });
     expect(await again.json()).toMatchObject({ started: false, status: 'queued' });
     expect(starts()).toEqual([{ taskId: DRAFT, userId: USER }]);
+  });
+});
+
+describe('disabled providers on task writes', () => {
+  const CLI = '00000000-0000-4000-8000-0000000000e1';
+  it.each(['cliProviderId', 'summaryCliProviderId'])(
+    'rejects a disabled %s on create before writing a task',
+    async (field) => {
+      const t = setup();
+      t.fake.insert(schema.cliProviders, { id: CLI, userId: USER, enabled: false });
+      const res = await post('/', {
+        type: 'workflow',
+        title: 'task',
+        description: 'do it',
+        repositoryId: REPO,
+        [field]: CLI,
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({
+        error: expect.stringContaining(field),
+        code: 'cli_provider_disabled',
+      });
+      expect(t.fake.rows(schema.tasks)).toHaveLength(0);
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    ['cli-provider', { cliProviderId: CLI }],
+    ['summary-cli', { summaryCliProviderId: CLI }],
+  ])('rejects a disabled provider on %s updates', async (route, body) => {
+    const t = setup();
+    t.fake.insert(schema.cliProviders, { id: CLI, userId: USER, enabled: false });
+    t.fake.insert(schema.tasks, { id: DRAFT, userId: USER, status: 'running' });
+    const res = await app.request(`/${DRAFT}/${route}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'cli_provider_disabled' });
+    expect(t.fake.rows(schema.tasks)[0]?.cliProviderId).not.toBe(CLI);
+    expect(t.fake.rows(schema.tasks)[0]?.summaryCliProviderId).not.toBe(CLI);
+  });
+});
+
+describe('provider admission guards', () => {
+  const CLI = '00000000-0000-4000-8000-0000000000e1';
+  it('accepts enabled providers for the task and summary', async () => {
+    const t = setup();
+    t.fake.insert(schema.cliProviders, { id: CLI, userId: USER, enabled: true });
+    const res = await post('/', {
+      type: 'workflow',
+      title: 'task',
+      description: 'do it',
+      repositoryId: REPO,
+      cliProviderId: CLI,
+      summaryCliProviderId: CLI,
+    });
+    expect(res.status).toBe(201);
+    expect(t.task()).toMatchObject({ cliProviderId: CLI, summaryCliProviderId: CLI });
+  });
+  it('keeps a disabled provider already bound to an existing task when it starts', async () => {
+    const t = setup();
+    t.fake.insert(schema.cliProviders, { id: CLI, userId: USER, enabled: false });
+    t.fake.insert(schema.tasks, {
+      id: DRAFT,
+      userId: USER,
+      type: 'plan_build',
+      status: 'created',
+      cliProviderId: CLI,
+    });
+    const res = await post(`/${DRAFT}/action`, { action: 'start' });
+    expect(res.status).toBe(200);
+    expect(t.fake.rows(schema.tasks)[0]?.cliProviderId).toBe(CLI);
+  });
+  it.each(['cliProviderId', 'summaryCliProviderId'])('hides a foreign %s', async (field) => {
+    const t = setup();
+    t.fake.insert(schema.cliProviders, {
+      id: CLI,
+      userId: '00000000-0000-4000-8000-0000000000f1',
+      enabled: false,
+    });
+    const res = await post('/', {
+      type: 'workflow',
+      title: 'task',
+      description: 'do it',
+      repositoryId: REPO,
+      [field]: CLI,
+    });
+    expect(res.status).toBe(404);
+    expect(t.fake.rows(schema.tasks)).toHaveLength(0);
   });
 });

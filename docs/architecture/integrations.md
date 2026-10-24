@@ -156,7 +156,10 @@ provider be called `oauth` or `connections`.
   5 s, and the next poll is due one new interval from now. While
   the token endpoint is polled, a vendor refusal drops the record (400) and an unavailable vendor keeps
   it (502); once the token poll succeeds the record is consumed whatever the account lookup and the
-  sign-in then answer. The legacy
+  sign-in then answer. A failed delete of the record (Redis) is logged at warn with its error class and
+  never replaces the poll's answer, so a sign-in that committed still answers ok; the record then lives
+  until its TTL (at most 1800 s), and a replay reaches the vendor with a spent device code and is refused.
+  The legacy
   `/github-oauth/device-code|poll` routes run the same path and hand out the handle as `deviceCode`,
   which binds the device code to the user who started it.
 - Sign-in asks for write scopes only while the user's write switch is on. The settings page offers

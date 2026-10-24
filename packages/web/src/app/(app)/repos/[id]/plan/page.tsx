@@ -42,6 +42,7 @@ import {
   type PlanMergeConflict,
   type PlanMergeState,
   type CliProvider,
+  type CliProvidersResponse,
   getPlanBuildClis,
   getPlanMerge,
   startPlanMerge,
@@ -342,7 +343,7 @@ export default function PlanPage() {
     if (!conflict) return;
     let cancelled = false;
     void Promise.all([
-      api.get<{ providers: CliProvider[] }>('/cli-providers'),
+      api.get<CliProvidersResponse>('/cli-providers'),
       getPlanBuildClis(repositoryId).catch(() => ({ plannerCliProviderId: null })),
     ])
       .then(([res, clis]) => {
@@ -353,7 +354,7 @@ export default function PlanPage() {
           if (current) return current;
           const plannerId = clis.plannerCliProviderId;
           if (plannerId && enabled.some((p) => p.id === plannerId)) return plannerId;
-          return enabled[0]?.id ?? '';
+          return res.defaultProviderId ?? '';
         });
       })
       .catch(() => {

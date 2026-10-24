@@ -15,8 +15,8 @@ async function fakeProviders(page: Page): Promise<void> {
         response,
         json: {
           providers: [
-            { id: REMEMBERED, name: 'claude-code', label: 'Remembered' },
-            { id: PICKED, name: 'codex', label: 'Picked' },
+            { id: REMEMBERED, name: 'claude-code', label: 'Remembered', enabled: true },
+            { id: PICKED, name: 'codex', label: 'Picked', enabled: true },
           ],
         },
       });

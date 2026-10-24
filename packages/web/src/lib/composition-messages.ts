@@ -293,7 +293,7 @@ export function describeAvailability(availability: TaskTypeAvailability): string
     case 'module-deactivated':
       return `Unavailable: ${moduleNeedText(availability.modules ?? [], availability.reason)}`;
     case 'missing-step':
-      return `Unavailable: missing steps ${(availability.stepIds ?? []).join(', ')}`;
+      return `Unavailable: missing steps ${(availability.missingStepIds ?? []).join(', ')}`;
     case 'invalid-composition': {
       const n = availability.issues?.length ?? 0;
       return `Unavailable: the step list has ${n} problem${n === 1 ? '' : 's'}`;

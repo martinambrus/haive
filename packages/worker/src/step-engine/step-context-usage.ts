@@ -15,13 +15,19 @@ const log = logger.child({ module: 'step-context-usage' });
  * peak invocation's own cliProviderId. When that invocation reported no per-request
  * figure the context columns stay null; the allowance stamps are still written.
  *
- * Best-effort: skips deterministic steps (no CLI usage -> nothing is written) and is called
- * inside a .catch() at the finalize so it never fails a step.
+ * Best-effort: skips deterministic steps (the terminal transition already cleared the stamp)
+ * and is called inside a .catch() at the finalize so it never fails a step. The write matches
+ * the completion's endedAt as well as its status so a Retry or a later attempt wins.
  *
  * Returns the provider id whose allowance this step consumed (the peak invocation's),
  * or null for a deterministic step — the caller uses it to refresh the usage meters.
  */
-export async function writeStepContextUsage(db: Database, stepId: string): Promise<string | null> {
+export async function writeStepContextUsage(
+  db: Database,
+  stepId: string,
+  endedAt: Date | null,
+): Promise<string | null> {
+  if (!endedAt) return null;
   const invs = await db
     .select({
       tokenUsage: schema.cliInvocations.tokenUsage,
@@ -126,7 +132,13 @@ export async function writeStepContextUsage(db: Database, stepId: string): Promi
       usageDailyPct,
       updatedAt: new Date(),
     })
-    .where(eq(schema.taskSteps.id, stepId));
+    .where(
+      and(
+        eq(schema.taskSteps.id, stepId),
+        eq(schema.taskSteps.status, 'done'),
+        eq(schema.taskSteps.endedAt, endedAt),
+      ),
+    );
 
   log.debug(
     { stepId, peak, windowSize, leftPct, usageFiveHourPct, usageSevenDayPct, usageDailyPct },

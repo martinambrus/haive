@@ -42,7 +42,11 @@ vi.mock('@/components/terminal/InteractiveShell', () => ({
   ShellUnavailable: () => null,
 }));
 
-const net = vi.hoisted(() => ({ detail: {} as Record<string, unknown> }));
+const net = vi.hoisted(() => ({
+  detail: {} as Record<string, unknown>,
+  providers: null as unknown[] | null,
+  defaultProviderId: null as string | null,
+}));
 
 const NOW = '2026-10-15T09:00:00.000Z';
 const NONE_PLAIN = '(none — use the default)';
@@ -130,7 +134,8 @@ async function fakeFetch(input: unknown) {
   if (path === '/tasks/t1') return json(structuredClone(net.detail));
   if (path === '/cli-providers') {
     return json({
-      providers: [
+      defaultProviderId: net.defaultProviderId,
+      providers: net.providers ?? [
         providerRow('p-claude', 'claude-code', 'Claude'),
         providerRow('p-codex', 'codex', 'Codex'),
       ],
@@ -262,4 +267,81 @@ describe('task page: a task with no CLI of its own runs on the default provider'
     );
     expect(texts).toContain(NONE_PLAIN);
   });
+});
+
+describe('terminal provider preselect', () => {
+  it.each([
+    [
+      'newest inserted last',
+      [
+        { id: 'new', enabled: true, createdAt: '2026-10-20T00:00:00.000Z' },
+        { id: 'old', enabled: true, createdAt: '2026-10-01T00:00:00.000Z' },
+      ],
+      'old',
+    ],
+    [
+      'createdAt tie',
+      [
+        { id: 'z', enabled: true, createdAt: NOW },
+        { id: 'a', enabled: true, createdAt: NOW },
+      ],
+      'a',
+    ],
+    [
+      'disabled oldest',
+      [
+        { id: 'disabled', enabled: false, createdAt: '2026-09-01T00:00:00.000Z' },
+        { id: 'new', enabled: true, createdAt: '2026-10-20T00:00:00.000Z' },
+        { id: 'old', enabled: true, createdAt: '2026-10-01T00:00:00.000Z' },
+      ],
+      'old',
+    ],
+    ['no enabled provider', [{ id: 'disabled', enabled: false, createdAt: NOW }], null],
+    ['no configured provider', [], null],
+  ])('uses the server default: %s', async (_name, providers, expected) => {
+    net.providers = providers.map((p) => ({ ...providerRow(p.id, 'codex', p.id), ...p }));
+    net.defaultProviderId = expected;
+    try {
+      const view = await mount({ cliProviderId: null, type: 'onboarding' });
+      fire.click(buttons(view.tree(), 'terminal')[0]!);
+      await view.flush();
+      const select = findAll(view.tree(), (h) => h.tag === 'select' && h.props.value === expected);
+      if (expected) expect(select).toHaveLength(1);
+      else {
+        expect(
+          findAll(view.tree(), (h) => h.tag === 'select' && h.props.value === 'disabled'),
+        ).toHaveLength(0);
+        expect(textOf(view.tree())).toContain(
+          providers.length > 0 ? 'Every CLI provider is disabled.' : 'No CLI providers configured.',
+        );
+      }
+    } finally {
+      net.providers = null;
+      net.defaultProviderId = null;
+    }
+  });
+});
+
+it('keeps a disabled CLI already bound to the task in its terminal', async () => {
+  net.providers = [
+    { ...providerRow('disabled', 'codex', 'Disabled'), enabled: false },
+    providerRow('enabled', 'codex', 'Enabled'),
+  ];
+  net.defaultProviderId = 'enabled';
+  try {
+    const view = await mount({ type: 'onboarding', cliProviderId: 'disabled' });
+    fire.click(buttons(view.tree(), 'terminal')[0]!);
+    await view.flush();
+    const select = findAll(
+      view.tree(),
+      (h) => h.tag === 'select' && h.props.value === 'disabled',
+    )[0];
+    expect(select).toBeDefined();
+    expect(
+      findAll(select!, (h) => h.tag === 'option' && h.props.value === 'disabled'),
+    ).toHaveLength(1);
+  } finally {
+    net.providers = null;
+    net.defaultProviderId = null;
+  }
 });

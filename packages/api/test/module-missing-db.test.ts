@@ -99,7 +99,7 @@ const json = async <T>(path: string) => (await (await send('GET', path)).json())
 interface Availability {
   available: boolean;
   reason?: string;
-  stepIds?: string[];
+  missingStepIds?: string[];
   modules?: { id: string; name: string | null }[];
 }
 
@@ -300,7 +300,7 @@ describe.skipIf(!url)('module reasons on Postgres', () => {
       expect(entry).toMatchObject({
         available: false,
         reason: 'missing-step',
-        stepIds: ['mm-ghost', 'module.ix.gone'],
+        missingStepIds: ['mm-ghost', 'module.ix.gone'],
       });
       expect(entry?.modules).toBeUndefined();
     });
@@ -310,7 +310,8 @@ describe.skipIf(!url)('module reasons on Postgres', () => {
       const entry = await published('mm-fine');
       expect(entry?.available).toBe(true);
       const keys = Object.keys(entry ?? {});
-      for (const absent of ['reason', 'modules', 'stepIds']) expect(keys).not.toContain(absent);
+      for (const absent of ['reason', 'modules', 'missingStepIds', 'stepIds'])
+        expect(keys).not.toContain(absent);
     });
 
     it('keeps a disabled or not-selectable type out of the list', async () => {
@@ -382,7 +383,7 @@ describe.skipIf(!url)('module reasons on Postgres', () => {
       const unavailable = {
         available: false,
         reason: 'missing-step',
-        stepIds: ['module.ix.gone'],
+        missingStepIds: ['module.ix.gone'],
       };
       expect(await detail('mm-gone')).toEqual(unavailable);
       expect(await listed('mm-gone')).toEqual(unavailable);
