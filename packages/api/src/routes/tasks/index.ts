@@ -519,9 +519,11 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
     }
   }
 
-  if (body.cliProviderId) await loadUsableProvider(db, userId, body.cliProviderId);
+  if (body.cliProviderId) {
+    await loadUsableProvider(db, userId, body.cliProviderId, 'cliProviderId');
+  }
   if (body.summaryCliProviderId) {
-    await loadUsableProvider(db, userId, body.summaryCliProviderId);
+    await loadUsableProvider(db, userId, body.summaryCliProviderId, 'summaryCliProviderId');
   }
 
   const definition = await definitionForCreate(db, body.type, { generic: true });

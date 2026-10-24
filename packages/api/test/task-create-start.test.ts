@@ -325,6 +325,7 @@ describe('disabled providers on task writes', () => {
       });
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({
+        error: expect.stringContaining(field),
         code: 'cli_provider_disabled',
       });
       expect(t.fake.rows(schema.tasks)).toHaveLength(0);

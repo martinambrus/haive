@@ -1,6 +1,6 @@
 import { lstatNoFollow, readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema, InfoSection } from '@haive/shared';
 import { mapWithConcurrency, orderByDefaultPriority } from '@haive/shared';
@@ -356,7 +356,6 @@ export const skillVerificationStep: StepDefinition<
     const providerRows = await ctx.db.query.cliProviders.findMany({
       where: and(eq(schema.cliProviders.userId, ctx.userId), eq(schema.cliProviders.enabled, true)),
       columns: { id: true, label: true, enabled: true, createdAt: true },
-      orderBy: [asc(schema.cliProviders.createdAt), asc(schema.cliProviders.id)],
     });
     // Shared priority compares Date milliseconds, including SQL timestamps finer than that.
     const cliOptions = orderByDefaultPriority(providerRows).map((p) => ({

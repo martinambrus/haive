@@ -13,18 +13,21 @@ function clampEffort(name: CliProviderName, level: string | null | undefined): s
   return scale && scale.values.includes(level) ? level : null;
 }
 
-/** The user's provider, refused with 404 when it is not theirs and 400 when it is disabled. */
+/** The user's provider, refused with 404 when it is not theirs and 400 when it is disabled.
+ * A disabled id would silently hand the work to the default provider. */
 export async function loadUsableProvider(
   db: Pick<Database, 'query'>,
   userId: string,
   cliProviderId: string,
+  field?: 'cliProviderId' | 'summaryCliProviderId',
 ): Promise<{ name: CliProviderName }> {
   const provider = await db.query.cliProviders.findFirst({
     where: and(eq(schema.cliProviders.id, cliProviderId), eq(schema.cliProviders.userId, userId)),
   });
-  if (!provider) throw new HttpError(404, 'CLI provider not found');
+  const prefix = field ? `${field}: ` : '';
+  if (!provider) throw new HttpError(404, `${prefix}CLI provider not found`);
   if (!provider.enabled) {
-    throw new HttpError(400, 'CLI provider is disabled', 'cli_provider_disabled');
+    throw new HttpError(400, `${prefix}CLI provider is disabled`, 'cli_provider_disabled');
   }
   return provider;
 }
