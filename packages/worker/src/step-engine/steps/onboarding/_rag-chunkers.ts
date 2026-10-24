@@ -113,6 +113,9 @@ export function fileBudget(
  *  shorter span that is not blank joins a neighbouring section, see `assembleSections`. */
 const MIN_GAP_CHARS = 120;
 
+/** The lines a span starts with that hold nothing but closing brackets, semicolons or commas. */
+const CLOSING_LINES = /^(?:[ \t]*(?:[)\]};,]+[ \t]*)?\r?\n)*/;
+
 /* ------------------------------------------------------------------ */
 /* Hashing / slugify                                                   */
 /* ------------------------------------------------------------------ */
@@ -240,6 +243,416 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
 }
 
 /* ------------------------------------------------------------------ */
+/* Comment and string masking                                          */
+/* ------------------------------------------------------------------ */
+
+type Span = [from: number, to: number];
+
+/** A short `<?` needs no space after it; `<?xml` stays markup, as most installs turn short tags off. */
+const PHP_OPEN_TAG = /<\?(?:php(?=\s|$)|=|(?!xml\b))/gi;
+/** PHP reads any byte from 0x80 up as a label character, so every non-ASCII code unit is one. */
+const PHP_LABEL = String.raw`[A-Za-z_\u0080-\uFFFF][\w\u0080-\uFFFF]*`;
+const PHP_LABEL_CHAR = /[\w\u0080-\uFFFF]/;
+const PHP_HEREDOC = new RegExp(
+  String.raw`<<<[ \t]*(?:'(${PHP_LABEL})'|"(${PHP_LABEL})"|(${PHP_LABEL}))(?:\r\n?|\n)`,
+  'y',
+);
+const REGEX_AFTER_WORD = /^(?:return|typeof|instanceof|in|new|delete|void|throw|case|do|else)$/;
+/** Keywords only in their own syntax: an identifier anywhere else, so a slash after one divides. */
+const CONTEXTUAL_WORDS = new Set(['of', 'yield', 'await']);
+const BARE_NAME = /^[A-Za-z_$][\w$]*$/;
+const WORD_START = /^[\p{ID_Start}_$]/u;
+const WORD_CHAR = /^[\p{ID_Continue}$\u200C\u200D]/u;
+
+/** The whole code point at `at`, so an identifier character outside the BMP is read as one. */
+function codePointAt(text: string, at: number): string {
+  return String.fromCodePoint(text.codePointAt(at) ?? 0);
+}
+
+/** A '/' that opens no regex literal would otherwise scan to the end of its line from every call: a
+ *  literal longer than MAX_REGEX_CHARS is not read as one, and a line gives up on regex literals after
+ *  MAX_REGEX_MISSES slashes that closed none. */
+const MAX_REGEX_CHARS = 20_000;
+const MAX_REGEX_MISSES = 8;
+
+/** How many unclosed template literals or block comments one file may give back as plain text before the rest masks to EOF. */
+const MAX_STRAY_TICKS = 8;
+
+/** `//` right after `scheme:` is a URL in markup text, not a line comment. */
+const URL_SCHEME = /[A-Za-z][A-Za-z0-9+.-]*:$/;
+
+/** `scheme://` where a statement may start is a label before a comment, not a URL. */
+function isUrlScheme(text: string, slash: number): boolean {
+  const head = text.slice(Math.max(0, slash - 40), slash);
+  const m = URL_SCHEME.exec(head);
+  if (!m) return false;
+  const before = head.slice(0, m.index).trimEnd();
+  return !(before === '' && slash <= 40) && !/[{};)]$/.test(before);
+}
+
+/** Java and PHP end a line at LF or CR; ECMAScript also at U+2028 and U+2029. */
+function isLineTerminator(c: string, lfCrOnly: boolean): boolean {
+  return c === '\n' || c === '\r' || (!lfCrOnly && (c === '\u2028' || c === '\u2029'));
+}
+
+/** Whether only spaces and tabs stand between the start of `at`'s line and `at`. */
+function atLineStart(text: string, at: number): boolean {
+  let j = at - 1;
+  while (j >= 0 && (text[j] === ' ' || text[j] === '\t')) j -= 1;
+  return j < 0 || isLineTerminator(text[j]!, false);
+}
+
+/** Index of the first line terminator at or after `from`, else -1. */
+function lineEnd(text: string, from: number, lfCrOnly: boolean): number {
+  for (let i = from; i < text.length; i += 1) if (isLineTerminator(text[i]!, lfCrOnly)) return i;
+  return -1;
+}
+
+/** Index just past the quote that closes the string opening at `open`, else the end of the text. */
+function quotedEnd(text: string, open: number): number {
+  for (let i = open + 1; i < text.length; i += 1) {
+    if (text[i] === '\\') i += 1;
+    else if (text[i] === text[open]) return i + 1;
+  }
+  return text.length;
+}
+
+/** `quotedEnd` for a JS string, which is -1 when its line ends first: such a quote is text, as an
+ *  apostrophe is in markup. */
+function lineStringEnd(text: string, open: number, java: boolean): number {
+  for (let i = open + 1; i < text.length; i += 1) {
+    if (text[i] === '\\') i += text[i + 1] === '\r' && text[i + 2] === '\n' ? 2 : 1;
+    else if (text[i] === text[open]) return i + 1;
+    else if (isLineTerminator(text[i]!, java)) return -1;
+  }
+  return -1;
+}
+
+/** Index just past the `"""` that closes the Java text block opening at `open`, else -1. */
+function textBlockEnd(text: string, open: number): number {
+  for (let i = open + 3; i < text.length; i += 1) {
+    if (text[i] === '\\') i += 1;
+    else if (text.startsWith('"""', i)) return i + 3;
+  }
+  return -1;
+}
+
+/** Index just past the '}' that closes the '{' at `open`; a quoted string inside is skipped. */
+function interpolationEnd(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i += 1) {
+    if (text[i] === '"' || text[i] === "'") i = quotedEnd(text, i) - 1;
+    else if (text[i] === '{') depth += 1;
+    else if (text[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return text.length;
+}
+
+function phpDoubleQuotedEnd(text: string, open: number): number {
+  for (let i = open + 1; i < text.length; i += 1) {
+    if (text[i] === '\\') i += 1;
+    else if (text[i] === '"') return i + 1;
+    else if (text[i] === '{' && text[i + 1] === '$') i = interpolationEnd(text, i) - 1;
+    else if (text[i] === '$' && text[i + 1] === '{') i = interpolationEnd(text, i + 1) - 1;
+  }
+  return text.length;
+}
+
+/** The body of the string that opens at `open` and ends at `end`, quotes out. */
+function stringBody(text: string, open: number, end: number): Span {
+  return [open + 1, end - 1 > open && text[end - 1] === text[open] ? end - 1 : end];
+}
+
+/** The body and the end (just past the closing label) of the heredoc or nowdoc opening at `open`. */
+function heredocAt(text: string, open: number): { body: Span; end: number } | null {
+  PHP_HEREDOC.lastIndex = open;
+  const m = PHP_HEREDOC.exec(text);
+  if (!m) return null;
+  const label = (m[1] ?? m[2] ?? m[3])!;
+  const bodyStart = open + m[0].length;
+  for (let line = bodyStart; line < text.length;) {
+    let at = line;
+    while (text[at] === ' ' || text[at] === '\t') at += 1;
+    if (text.startsWith(label, at) && !PHP_LABEL_CHAR.test(text[at + label.length] ?? ' ')) {
+      return { body: [bodyStart, line], end: at + label.length };
+    }
+    const newline = lineEnd(text, line, true);
+    if (newline < 0) break;
+    line = newline + (text[newline] === '\r' && text[newline + 1] === '\n' ? 2 : 1);
+  }
+  return { body: [bodyStart, text.length], end: text.length };
+}
+
+/** The spans of a PHP file that are not code: inline HTML, comments, strings and heredocs. A file
+ *  with no open tag, such as a template, is inline HTML throughout. */
+function phpNonCode(text: string): Span[] {
+  const spans: Span[] = [];
+  const openAfter = (from: number): RegExpExecArray | null => {
+    PHP_OPEN_TAG.lastIndex = from;
+    return PHP_OPEN_TAG.exec(text);
+  };
+  let tag = openAfter(0);
+  spans.push([0, tag ? tag.index : text.length]);
+  let i = tag ? tag.index + tag[0].length : text.length;
+  while (i < text.length) {
+    const c = text[i];
+    const next = text[i + 1];
+    const heredoc = c === '<' ? heredocAt(text, i) : null;
+    if (c === '?' && next === '>') {
+      tag = openAfter(i + 2);
+      spans.push([i + 2, tag ? tag.index : text.length]);
+      i = tag ? tag.index + tag[0].length : text.length;
+    } else if ((c === '/' && next === '/') || (c === '#' && next !== '[')) {
+      const from = i + (c === '#' ? 1 : 2);
+      i = from;
+      while (
+        i < text.length &&
+        !isLineTerminator(text[i]!, true) &&
+        !(text[i] === '?' && text[i + 1] === '>')
+      )
+        i += 1;
+      spans.push([from, i]);
+    } else if (c === '/' && next === '*') {
+      const close = text.indexOf('*/', i + 2);
+      spans.push([
+        i + (text.startsWith('/**', i) && text[i + 3] !== '/' ? 3 : 2),
+        close < 0 ? text.length : close,
+      ]);
+      i = close < 0 ? text.length : close + 2;
+    } else if (c === "'" || c === '"' || c === '`') {
+      const end = c === '"' ? phpDoubleQuotedEnd(text, i) : quotedEnd(text, i);
+      spans.push(stringBody(text, i, end));
+      i = end;
+    } else if (heredoc) {
+      spans.push(heredoc.body);
+      i = heredoc.end;
+    } else i += 1;
+  }
+  return spans;
+}
+
+/** Index of the '/' that closes the regex literal opening at `open`, or -1 when its line ends first. */
+function regexClose(text: string, open: number, java: boolean): number {
+  let inClass = false;
+  const limit = Math.min(text.length, open + MAX_REGEX_CHARS);
+  for (let i = open + 1; i < limit; i += 1) {
+    if (isLineTerminator(text[i]!, java)) return -1;
+    if (text[i] === '\\') i += 1;
+    else if (text[i] === '[') inClass = true;
+    else if (text[i] === ']') inClass = false;
+    else if (text[i] === '/' && !inClass) return i;
+  }
+  return -1;
+}
+
+/** Whether a '/' after the token `prev` opens a regex literal rather than divides: `prev` is a word,
+ *  '' after a literal or a number, its punctuation otherwise, and null at the start of the text. */
+function regexMayStart(prev: string | null): boolean {
+  if (prev === null) return true;
+  if (WORD_START.test(prev)) return REGEX_AFTER_WORD.test(prev);
+  return prev !== '' && ![')', ']', '}', '>', '<', '.'].includes(prev);
+}
+
+/** Whether the `<` or `>` run before the slash at `slash` is a spaced operator (`a > /re/`), not the
+ *  end of a JSX tag (`<p>/x`) or the start of a closing one (`</p>`): spaces on both sides of it. */
+function spacedOperatorBefore(text: string, slash: number): boolean {
+  let j = slash - 1;
+  while (j >= 0 && (text[j] === ' ' || text[j] === '\t')) j -= 1;
+  if (j === slash - 1 || j < 0 || (text[j] !== '<' && text[j] !== '>')) return false;
+  let k = j;
+  while (k > 0 && (text[k - 1] === '<' || text[k - 1] === '>')) k -= 1;
+  return k > 0 && (text[k - 1] === ' ' || text[k - 1] === '\t');
+}
+
+/** The spans of a JS, TS or Java file that are not code: comments, strings, template literals (their
+ *  `${}` expressions too) and regex literals. A string that is a bare name stays: it may be a key. */
+function jsNonCode(text: string, java: boolean, htmlComments = false, module = false): Span[] {
+  const spans: Span[] = [];
+  // The open template literals and `${` expressions, innermost last: -1 is template text, n >= 1
+  // the braces open in an expression. Spans are recorded for the outermost template only.
+  const frames: number[] = [];
+  let templateOpen = 0;
+  let prev: string | null = null;
+  let regexMisses = 0;
+  let strayTicks = 0;
+  let sawGenerator = false;
+  let sawAsync = module;
+  let i = 0;
+  if (!java && text.startsWith('#!')) {
+    const close = lineEnd(text, 2, false);
+    i = close < 0 ? text.length : close;
+    spans.push([2, i]);
+  }
+  while (true) {
+    if (i >= text.length) {
+      if (frames.length === 0 || strayTicks >= MAX_STRAY_TICKS) break;
+      // A template that never closes is a stray backtick (JSX text, a comment's prose): lex on as text.
+      strayTicks += 1;
+      frames.length = 0;
+      i = templateOpen + 1;
+      prev = '';
+      continue;
+    }
+    const c = text[i]!;
+    const next = text[i + 1];
+    const top = frames[frames.length - 1];
+    if (top === -1) {
+      if (c === '\\') i += 2;
+      else if (c === '$' && next === '{') {
+        frames.push(1);
+        prev = '{';
+        i += 2;
+      } else {
+        i += 1;
+        if (c === '`') {
+          frames.pop();
+          if (frames.length === 0) {
+            spans.push([templateOpen + 1, i - 1]);
+            prev = '';
+          }
+        }
+      }
+    } else if (/\s/.test(c)) {
+      i += 1;
+      if (isLineTerminator(c, java)) regexMisses = 0;
+    } else if (
+      htmlComments &&
+      ((c === '<' && text.startsWith('<!--', i)) ||
+        (c === '-' && text.startsWith('-->', i) && atLineStart(text, i)))
+    ) {
+      const from = i + (c === '<' ? 4 : 3);
+      const close = lineEnd(text, from, false);
+      const bodyEnd = close < 0 ? text.length : close;
+      if (frames.length === 0) spans.push([from, bodyEnd]);
+      i = bodyEnd;
+    } else if (c === '/' && next === '/' && isUrlScheme(text, i)) {
+      prev = '';
+      i += 2;
+    } else if (c === '/' && (next === '/' || next === '*')) {
+      const close = next === '/' ? lineEnd(text, i + 2, java) : text.indexOf('*/', i + 2);
+      if (close < 0 && next === '*' && frames.length === 0 && strayTicks < MAX_STRAY_TICKS) {
+        // An unclosed block comment is a regex like /[/*]/ read as one: lex on as code.
+        strayTicks += 1;
+        prev = '';
+        i += 2;
+        continue;
+      }
+      const bodyEnd = close < 0 ? text.length : close;
+      if (frames.length === 0) spans.push([i + 2, bodyEnd]);
+      i = next === '*' && close >= 0 ? close + 2 : bodyEnd;
+    } else if (c === '/') {
+      const mayStart =
+        regexMayStart(prev) || ((prev === '<' || prev === '>') && spacedOperatorBefore(text, i));
+      const close = mayStart && regexMisses < MAX_REGEX_MISSES ? regexClose(text, i, java) : -1;
+      if (close < 0) {
+        if (mayStart) regexMisses += 1;
+        prev = c;
+        i += 1;
+      } else {
+        if (frames.length === 0) spans.push([i + 1, close]);
+        i = close + 1;
+        while (/[a-z]/.test(text[i] ?? '')) i += 1;
+        prev = '';
+      }
+    } else if (java && text.startsWith('"""', i) && textBlockEnd(text, i) >= 0) {
+      const end = textBlockEnd(text, i);
+      if (frames.length === 0) spans.push([i + 3, end - 3]);
+      prev = '';
+      i = end;
+    } else if (c === "'" || c === '"') {
+      const end = lineStringEnd(text, i, java);
+      if (end < 0) {
+        prev = c;
+        i += 1;
+      } else {
+        const body = stringBody(text, i, end);
+        if (frames.length === 0 && !BARE_NAME.test(text.slice(body[0], body[1]))) spans.push(body);
+        prev = '';
+        i = end;
+      }
+    } else if (c === '`') {
+      if (frames.length === 0) templateOpen = i;
+      frames.push(-1);
+      i += 1;
+    } else if (c === '{' || c === '}') {
+      if (top !== undefined) {
+        frames[frames.length - 1] = top + (c === '{' ? 1 : -1);
+        if (frames[frames.length - 1] === 0) frames.pop();
+      }
+      prev = c;
+      i += 1;
+    } else if (WORD_START.test(codePointAt(text, i))) {
+      let end = i + codePointAt(text, i).length;
+      while (end < text.length && WORD_CHAR.test(codePointAt(text, end))) {
+        end += codePointAt(text, end).length;
+      }
+      const word = text.slice(i, end);
+      if (word === 'async' || word === 'import' || word === 'export') sawAsync = true;
+      const operandBefore: boolean = prev !== null && !regexMayStart(prev);
+      if (prev === '.' || (prev === '#' && text[i - 1] === '#')) prev = '';
+      else if (CONTEXTUAL_WORDS.has(word)) {
+        const keyword: boolean =
+          word === 'of'
+            ? operandBefore
+            : !operandBefore && (word === 'yield' ? sawGenerator : sawAsync);
+        prev = keyword ? '/' : '';
+      } else if (word === 'default' && prev === 'export') prev = ';';
+      else prev = word;
+      i = end;
+    } else if (c >= '0' && c <= '9') {
+      let end = i + 1;
+      while (end < text.length && /[\w.]/.test(text[end]!)) end += 1;
+      prev = '';
+      i = end;
+    } else if (c === '=' && next === '>') {
+      prev = '=>';
+      i += 2;
+    } else if (c === '.' && next === '.' && text[i + 2] === '.') {
+      prev = '...';
+      i += 3;
+    } else if ((c === '+' || c === '-') && next === c && prev !== null && !regexMayStart(prev)) {
+      prev = '';
+      i += 2;
+    } else if (c === '!' && next !== '=' && prev !== null && !regexMayStart(prev)) {
+      i += 1;
+    } else {
+      if (
+        c === '*' &&
+        (prev === 'function' || prev === null || ['{', '}', ',', ';'].includes(prev))
+      ) {
+        sawGenerator = true;
+      }
+      prev = c;
+      i += 1;
+    }
+  }
+  if (frames.length > 0) spans.push([templateOpen + 1, text.length]);
+  return spans;
+}
+
+/** `content` with the body of every comment and string blanked, so that a pattern or a brace count
+ *  cannot match inside one: PHP loses its inline HTML and heredocs too, JS its template and regex
+ *  literals. Same length and line ends; the delimiters stay. */
+export function maskNonCode(
+  content: string,
+  syntax: 'php' | 'js' | 'script' | 'module' | 'java',
+): string {
+  let masked = '';
+  let cursor = 0;
+  for (const [from, to] of syntax === 'php'
+    ? phpNonCode(content)
+    : jsNonCode(content, syntax === 'java', syntax === 'script', syntax === 'module')) {
+    masked +=
+      content.slice(cursor, from) + content.slice(from, to).replace(/[^\r\n\u2028\u2029]/g, ' ');
+    cursor = to;
+  }
+  return masked + content.slice(cursor);
+}
+
+/* ------------------------------------------------------------------ */
 /* Code section extraction (regex fallback)                            */
 /* ------------------------------------------------------------------ */
 
@@ -310,6 +723,7 @@ const PHP_FUNCTION_HEAD = String.raw`(\/\*\*(?!\/)(?:(?!\*\/)[\s\S])*\*\/\s*)?(?
 
 function phpRanges(content: string): SectionRange[] {
   const ranges: SectionRange[] = [];
+  const code = maskNonCode(content, 'php');
 
   // File docblock
   const docMatch = /^<\?php\s*(\/\*\*[\s\S]*?\*\/)/.exec(content);
@@ -327,19 +741,19 @@ function phpRanges(content: string): SectionRange[] {
   // duplicate every method inside them. They exist only to name the method that
   // sits within, so a chunk can say which class it belongs to.
   const classes: Array<{ name: string; start: number; end: number }> = [];
-  const classRe = /class\s+(\w+)[^{;]*\{/g;
+  const classRe = /class\s+(\w+)[^{;]*\{/gi;
   let match: RegExpExecArray | null;
-  while ((match = classRe.exec(content)) !== null) {
-    const end = blockEndFromMatch(content, match);
+  while ((match = classRe.exec(code)) !== null) {
+    const end = blockEndFromMatch(code, match);
     if (end !== null) classes.push({ name: match[1]!, start: match.index, end });
   }
 
   // Functions (standalone and methods)
   const fileDoc = ranges.find((r) => r.sectionId === 'file-docblock');
   const funcRe = new RegExp(PHP_FUNCTION_HEAD, 'gi');
-  while ((match = funcRe.exec(content)) !== null) {
-    const brace = bodyAfterParams(content, match.index + match[0].length - 1, BLOCK_TAIL);
-    const end = brace === null ? null : braceBlockEnd(content, brace);
+  while ((match = funcRe.exec(code)) !== null) {
+    const brace = bodyAfterParams(code, match.index + match[0].length - 1, BLOCK_TAIL);
+    const end = brace === null ? null : braceBlockEnd(code, brace);
     if (end === null) continue;
     const name = match[2]!;
     // The file docblock stays its own section even when the function follows it directly.
@@ -447,8 +861,13 @@ function commentRunStart(content: string, start: number, headerAt: number): numb
   return runStart < 0 || runStart === headerAt ? start : runStart;
 }
 
-function jsRanges(content: string, members: boolean): SectionRange[] {
+function jsRanges(
+  content: string,
+  members: boolean,
+  flavour: 'js' | 'script' | 'module' = 'js',
+): SectionRange[] {
   const ranges: SectionRange[] = [];
+  const code = maskNonCode(content, members ? flavour : 'java');
   let match: RegExpExecArray | null;
   const headerAt = content.search(/\S/);
   // Java shares this reader but is read as before: no members, no comment join.
@@ -458,8 +877,8 @@ function jsRanges(content: string, members: boolean): SectionRange[] {
   // Classes. Their extents also name the class a member sits in.
   const classes: Array<{ name: string; start: number; end: number }> = [];
   const classRe = /class\s+(\w+)(?:\s+extends\s+\w+)?\s*\{/g;
-  while ((match = classRe.exec(content)) !== null) {
-    const end = blockEndFromMatch(content, match);
+  while ((match = classRe.exec(code)) !== null) {
+    const end = blockEndFromMatch(code, match);
     if (end !== null) {
       classes.push({ name: match[1]!, start: match.index, end });
       ranges.push({
@@ -475,20 +894,18 @@ function jsRanges(content: string, members: boolean): SectionRange[] {
   for (const { source, arrow, member } of JS_FORMS) {
     if (member && !members) continue;
     const formRe = new RegExp(source, 'gm');
-    while ((match = formRe.exec(content)) !== null) {
+    while ((match = formRe.exec(code)) !== null) {
       const name = match[1]!;
       if (JS_CONTROL_NAMES.has(name)) continue;
       const last = match.index + match[0].length - 1;
       const brace =
-        content[last] === '{'
-          ? last
-          : bodyAfterParams(content, last, arrow ? ARROW_TAIL : BLOCK_TAIL);
+        code[last] === '{' ? last : bodyAfterParams(code, last, arrow ? ARROW_TAIL : BLOCK_TAIL);
       if (brace === null) continue;
       if (arrow) {
         TYPE_MEMBER.lastIndex = brace + 1;
-        if (TYPE_MEMBER.test(content)) continue;
+        if (TYPE_MEMBER.test(code)) continue;
       }
-      const end = braceBlockEnd(content, brace);
+      const end = braceBlockEnd(code, brace);
       if (end === null) continue;
       const start = match.index + match[0].search(/\S/);
       const owner = member ? classes.find((c) => start > c.start && end <= c.end) : undefined;
@@ -505,7 +922,10 @@ function jsRanges(content: string, members: boolean): SectionRange[] {
   return ranges;
 }
 
-function pythonRanges(content: string): SectionRange[] {
+const RUBY_END = /^end\b/;
+const RUBY_CLAUSE = /^(?:rescue|ensure|else)\b/;
+
+function pythonRanges(content: string, ruby = false): SectionRange[] {
   const ranges: SectionRange[] = [];
   const lines = content.split('\n');
 
@@ -535,8 +955,15 @@ function pythonRanges(content: string): SectionRange[] {
           continue;
         }
         const lineIndent = line.length - line.trimStart().length;
-        if (lineIndent <= indent) break;
+        // A Ruby method's own rescue, else and ensure stand at the indentation of its `def`.
+        const clause = ruby && lineIndent === indent && RUBY_CLAUSE.test(line.trim());
+        if (lineIndent <= indent && !clause) break;
         i += 1;
+      }
+      // A Ruby definition owns its `end` line.
+      const next = lines[i];
+      if (ruby && next !== undefined && RUBY_END.test(next.trim())) {
+        if (next.length - next.trimStart().length === indent) i += 1;
       }
       ranges.push({
         sectionId: `${kind}-${name}`,
@@ -614,7 +1041,8 @@ function rustRanges(content: string): SectionRange[] {
  *  so a class yields its methods rather than one duplicate copy of both.
  *
  *  A short span joins the section before it when it continues that section's last
- *  line, holds no word character or ends the file, else the section after it. */
+ *  line, holds no word character or ends the file, else the section after it, bar
+ *  the closing lines it starts with, which stay with the section they close. */
 export function assembleSections(content: string, ranges: SectionRange[]): RagSection[] {
   const kept = ranges.filter(
     (r) =>
@@ -644,7 +1072,9 @@ export function assembleSections(content: string, ranges: SectionRange[]): RagSe
       previous.to = from + text.trimEnd().length;
       return to;
     }
-    return from + text.length - text.trimStart().length;
+    const closing = previous ? CLOSING_LINES.exec(text)![0] : '';
+    if (previous && closing.trim() !== '') previous.to = from + closing.trimEnd().length;
+    return from + text.length - text.slice(closing.length).trimStart().length;
   };
 
   for (const r of kept) {
@@ -687,11 +1117,18 @@ export function extractCodeSections(content: string, filePath: string): RagSecti
     case 'tsx':
     case 'java':
       // Java shares this reader, but its constructors and synchronized blocks are not object members.
-      ranges = jsRanges(content, lang !== 'java');
+      // .js/.cjs are scripts (Annex B `<!--` comments); .mjs is a module (top-level await).
+      ranges = jsRanges(
+        content,
+        lang !== 'java',
+        ext === '.js' || ext === '.cjs' ? 'script' : ext === '.mjs' ? 'module' : 'js',
+      );
       break;
     case 'python':
-    case 'ruby':
       ranges = pythonRanges(content);
+      break;
+    case 'ruby':
+      ranges = pythonRanges(content, true);
       break;
     case 'go':
       ranges = goRanges(content);
