@@ -2,7 +2,8 @@
 
 One shared list of open work for every agent and every machine. It lives in `TASKS.md` at the root
 of `main` (moved there from the old `tasks` branch on 2026-10-24). Board edits are direct commits to
-`main` that touch this file only: no PR, and nothing gates on the CI run they start.
+`main` that touch this file only: no PR, and they start no CI run (`ci.yml` ignores a push that
+changes only `TASKS.md`; T419).
 A task's number (`T323`) is the number its commits and PRs already cite (`#323`).
 
 ## Protocol (read before touching anything)
@@ -88,15 +89,13 @@ board. At session start, load the board's tasks you own or will work on into the
 
 # Open tasks
 
-### T323 · FNF[uploads-3] · leftover upload files never cleaned; unlink failures warn forever (+3)
+### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-24T19:01Z (PR #892 open: items 1-3 + review fixes; item 4 stays parked)
+status: parked · reason: user's retention rule for item 4 · last: 2026-10-24T19:52Z · items 1-3 shipped in PR #892 (42ee32d7c)
 All PRE-EXISTING.
 
-1. repo/clone.ts:678 swallows a failed archive unlink after extract; reaper's liveRepositories keeps every non-error repo, so a ready repo's archive stays.
-2. upload-reaper.ts:372 an orphan file that cannot be removed warns every 15 min forever.
-3. upload-reaper.ts:418 finished dump files with no db_uploads row are never removed.
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
+5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
 ### T288 · FNF[sync-reader] · project-state sync reader defects (+6)
 
