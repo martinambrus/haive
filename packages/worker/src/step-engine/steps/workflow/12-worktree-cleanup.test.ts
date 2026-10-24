@@ -35,6 +35,7 @@ import {
   type ProjectRender,
 } from '@haive/shared/project-state';
 import { worktreeCleanupStep } from './12-worktree-cleanup.js';
+import * as gitPush from '../../../repo/git-push.js';
 import {
   haltFailed,
   loadOutstandingMergeGuidance,
@@ -4795,3 +4796,50 @@ it.each([new Error('origin read unavailable'), 'origin read unavailable'])(
     }
   },
 );
+
+it('merge_remove completes locally without any origin transport when detect refuses origin', async () => {
+  const { parent, wt } = await setupWorktree();
+  try {
+    await git(parent, ['config', 'remote.origin.url', 'file:///refused-origin']);
+    const originRun = vi.spyOn(gitPush, 'originGitRun');
+    const config = vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
+    try {
+      const detected = await worktreeCleanupStep.detect!(detectCtx(parent, wt));
+      expect(detected).toMatchObject({
+        hasOrigin: false,
+        originUrl: null,
+        originError: expect.any(String),
+      });
+      const form = await formOf(detectCtx(parent, wt), detected);
+      const validated = validateFormValues(form, {
+        ...extractFormDefaults(form),
+        action: 'merge_remove',
+        pushBase: true,
+      });
+      expect(validated.success).toBe(true);
+      if (!validated.success) throw new Error(validated.issues.join('; '));
+      expect(validated.data).not.toHaveProperty('pushBase');
+      const result = await mergeThenApply(parent, detected, validated.data);
+      expect(result.merge.resolved).toBe(true);
+      expect(result.state).toMatchObject({
+        phase: 'done',
+        merged: true,
+        pushed: false,
+        pushAfterMerge: false,
+      });
+      expect(result.applyOut).toMatchObject({
+        action: 'merge_remove',
+        merged: true,
+        removed: true,
+      });
+      expect(await gitCode(parent, ['show', 'main:feature.txt'])).toBe(0);
+      expect(originRun).not.toHaveBeenCalled();
+      expect(fetchProbe.pushes).toEqual([]);
+    } finally {
+      originRun.mockRestore();
+      config.mockRestore();
+    }
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
