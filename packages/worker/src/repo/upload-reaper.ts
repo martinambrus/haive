@@ -363,10 +363,8 @@ function logOrphanFailure(root: string, rel: string, err: unknown): void {
   } else {
     log.debug({ err, root, rel }, 'orphan upload file was not removed');
   }
-  orphanFailures.delete(key);
-  orphanFailures.set(key, { root, rel, code });
-  if (orphanFailures.size > MAX_ORPHAN_FAILURES) {
-    orphanFailures.delete(orphanFailures.keys().next().value!);
+  if (previous !== undefined || orphanFailures.size < MAX_ORPHAN_FAILURES) {
+    orphanFailures.set(key, { root, rel, code });
   }
 }
 

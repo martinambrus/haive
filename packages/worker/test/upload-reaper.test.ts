@@ -1200,21 +1200,26 @@ describe('T323: repeated orphan removal failures', () => {
     expect(guard.debugs).toHaveLength(0);
   });
 
-  it('bounds the remembered paths and warns again for an evicted failure', async () => {
+  it('keeps remembered failures at capacity across repeated passes', async () => {
     for (let i = 0; i < 1001; i += 1) await orphan();
-    const attempted: string[] = [];
-    guard.removal = (rel) => {
-      attempted.push(rel);
-      return true;
-    };
+    guard.removal = () => true;
     await reapAbandonedUploads(db());
     expect(guard.warnings).toHaveLength(1001);
 
-    guard.removal = (rel) => rel === attempted[0];
     await reapAbandonedUploads(db());
-
     expect(guard.warnings).toHaveLength(1002);
-    expect(guard.debugs).toHaveLength(0);
+    expect(guard.debugs).toHaveLength(1000);
+
+    await reapAbandonedUploads(db());
+    expect(guard.warnings).toHaveLength(1003);
+    expect(guard.debugs).toHaveLength(2000);
+
+    guard.removalCode = 'EPERM';
+    await reapAbandonedUploads(db());
+    expect(guard.warnings).toHaveLength(2004);
+    await reapAbandonedUploads(db());
+    expect(guard.warnings).toHaveLength(2005);
+    expect(guard.debugs).toHaveLength(3000);
   });
 
   it('warns separately for the same relative path in different storage roots', async () => {
