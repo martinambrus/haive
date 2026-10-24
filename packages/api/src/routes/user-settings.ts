@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   accountUpdateSchema,
@@ -116,31 +116,41 @@ userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c)
 
   const newHash = await hashPassword(body.newPassword);
   const newTokenVersion = user.tokenVersion + 1;
-  await db
-    .update(schema.users)
-    .set({
-      passwordHash: newHash,
-      tokenVersion: newTokenVersion,
-      // The one writer that clears it: this route is the only place the account HOLDER chooses the
-      // password, which is the whole condition the flag records.
-      mustChangePassword: false,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.users.id, userId));
+  const { accessToken, refreshToken } = await db.transaction(async (tx) => {
+    const changed = await tx
+      .update(schema.users)
+      .set({
+        passwordHash: newHash,
+        tokenVersion: newTokenVersion,
+        // The one writer that clears it: the account holder has chosen a new password.
+        mustChangePassword: false,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(schema.users.id, userId), eq(schema.users.tokenVersion, user.tokenVersion)))
+      .returning({ id: schema.users.id });
+    if (changed.length === 0) {
+      throw new HttpError(
+        409,
+        'Your password or session changed. Sign in again before changing your password.',
+        'password_change_conflict',
+      );
+    }
+
+    const accessToken = await signAccessToken({
+      sub: user.id,
+      role: user.role,
+      tv: newTokenVersion,
+    });
+    const { token: refreshToken, expiresAt } = await signRefreshToken(user.id, newTokenVersion);
+    await tx.insert(schema.refreshTokens).values({
+      userId: user.id,
+      tokenHash: hashRefreshToken(refreshToken),
+      expiresAt,
+    });
+    return { accessToken, refreshToken };
+  });
 
   closeUserSockets(userId);
-
-  const accessToken = await signAccessToken({
-    sub: user.id,
-    role: user.role,
-    tv: newTokenVersion,
-  });
-  const { token: refreshToken, expiresAt } = await signRefreshToken(user.id, newTokenVersion);
-  await db.insert(schema.refreshTokens).values({
-    userId: user.id,
-    tokenHash: hashRefreshToken(refreshToken),
-    expiresAt,
-  });
   setAuthCookies(c, accessToken, refreshToken);
 
   return c.json({ ok: true });
