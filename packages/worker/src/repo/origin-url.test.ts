@@ -108,11 +108,15 @@ describe('origin URL boundary', () => {
     await expect(getOriginUrl(work)).rejects.toMatchObject({ name: 'OriginUrlError' });
   });
   it.each([
-    ['file://user:secret@host/repo', 'file://host/repo'],
+    ['file://user:secret@host/repo', 'file:'],
     ['ext://user:secret@host/repo', 'ext://host/repo'],
     ['ext:://user:secret@host/repo', 'ext:://host/repo'],
-    ['https://user:pa/ss@host/x', 'https://host/x'],
+    ['https://user:pa/ss@host/x', 'https:'],
     ['user:secret@host:repo', 'host:repo'],
+    ['user:pa@ss@host:path', 'host:path'],
+    ['git://host/x?token=secret', 'git://host/x'],
+    ['file:///home/me@corp/x.git', 'file:///home/me@corp/x.git'],
+    ['ext://user:secret@host/x?token=secret', 'ext://host/x'],
   ])('removes userinfo from refused URL %s', async (url, safe) => {
     const work = await repo();
     await gitRun(work, ['remote', 'add', 'origin', url]);
@@ -121,6 +125,9 @@ describe('origin URL boundary', () => {
       expect(e.message).not.toContain('user');
       expect(e.message).not.toContain('secret');
       expect(e.message).not.toContain('pa/ss');
+      expect(e.message).not.toContain('ss@');
+      expect(e.message).not.toContain('?');
+      expect(e.message.endsWith(`: ${safe}`)).toBe(true);
       expect(e.message).toContain(safe);
     });
   });

@@ -23,23 +23,26 @@ export async function detectOrigin(cwd: string): Promise<boolean> {
 /** An origin address refused by the same rule as a typed remote URL. */
 export class OriginUrlError extends Error {
   constructor(url: string) {
-    let safe = url;
-    if (url.includes('://')) {
+    let safe = url.split('?')[0]!;
+    if (safe.includes('://')) {
       try {
-        const parsed = new URL(url);
-        if (!parsed.hostname) throw new Error('URL has no authority');
+        const parsed = new URL(safe);
         parsed.username = '';
         parsed.password = '';
-        safe = parsed.toString();
+        if (!parsed.hostname && !parsed.pathname.startsWith('/')) {
+          // Opaque URLs have no authority for URL to separate from userinfo.
+          const start = safe.indexOf('://') + 3;
+          const at = safe.lastIndexOf('@');
+          if (at >= start) safe = safe.slice(0, start) + safe.slice(at + 1);
+        } else {
+          safe = parsed.toString();
+        }
       } catch {
-        // Malformed userinfo or an opaque URL can have no parsed host. Strip that
-        // whole prefix through the last @ rather than expose part of a password.
-        const start = url.indexOf('://') + 3;
-        const at = url.lastIndexOf('@');
-        if (at >= start) safe = url.slice(0, start) + url.slice(at + 1);
+        // A malformed authority cannot be redacted reliably; keep only its scheme.
+        safe = safe.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/)?.[0] ?? '(unparseable URL)';
       }
     } else {
-      safe = url.replace(/^[^@]+@(?=[^/]*:)/, '');
+      safe = safe.replace(/^.*@(?=[^/]*:)/, '');
     }
     super(`origin URL is not allowed (expected https, http, ssh or an scp-style address): ${safe}`);
     this.name = 'OriginUrlError';
