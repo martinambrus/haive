@@ -735,7 +735,7 @@ status: open · was modular #237
 
 ### T370 · FNF[plan-mirror-last-error] · refused/failed plan Pull or Save never records last_error
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-24T18:36Z (PR #890 open, Codex review round 1) · was modular #239
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-24T18:58Z (PR #890 merged b948852af, main CI running) · was modular #239
 DECIDED 2026-10-23: await the recovery; failures record last_error; refusals stay 409-only.
 worker plan-mirror-queue.ts pull() (~:532) and save() (~:361) return recoverAfterMoveFailure(...) without await, so throws never reach the outer catches.
 Verify the line numbers against T396 (merge-dir-reads) once it merges.
