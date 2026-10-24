@@ -294,6 +294,88 @@ function settledWithinStartWait(moduleId: string, work: Promise<unknown>): Promi
   });
 }
 
+// Stops of jobs that started after their deadline and have not succeeded yet, per module; a teardown waits for them too.
+const lateStops = new Map<string, Set<() => Promise<void>>>();
+const lateStopsRunning = new Map<() => Promise<void>, Promise<void>>();
+
+function runLateStop(moduleId: string, stop: () => Promise<void>): Promise<void> {
+  const running = lateStopsRunning.get(stop);
+  if (running) return running;
+  const run = (async () => stop())()
+    .then(() => {
+      const stops = lateStops.get(moduleId);
+      stops?.delete(stop);
+      if (stops?.size === 0) lateStops.delete(moduleId);
+    })
+    .catch((err: unknown) => {
+      logger.warn(
+        { err, module: moduleId },
+        'module jobs that started after their deadline failed to stop',
+      );
+    })
+    .finally(() => {
+      lateStopsRunning.delete(stop);
+    });
+  lateStopsRunning.set(stop, run);
+  return run;
+}
+
+function retryLateStops(): Promise<void> {
+  const runs: Promise<void>[] = [];
+  for (const [moduleId, stops] of lateStops) {
+    for (const stop of [...stops]) runs.push(runLateStop(moduleId, stop));
+  }
+  return Promise.all(runs).then(() => undefined);
+}
+
+// `jobs` that has not returned within a schema ensure's deadline counts as failed; what it starts later is stopped at once.
+function startJobsWithinDeadline(
+  moduleId: string,
+  jobs: NonNullable<WorkerModuleEntry['jobs']>,
+): Promise<() => Promise<void>> {
+  return new Promise((resolve, reject) => {
+    let expired = false;
+    const timer = setTimeout(() => {
+      expired = true;
+      reject(
+        new Error(
+          `the jobs did not start within ${Math.round(MODULE_SCHEMA_ENSURE_TIMEOUT_MS / 1000)} s`,
+        ),
+      );
+    }, MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
+    void (async () =>
+      jobs({
+        moduleId,
+        connection: getBullRedis(),
+        logger: logger.child({ module: moduleId }),
+      }))().then(
+      (stop) => {
+        clearTimeout(timer);
+        if (!expired) {
+          resolve(stop);
+          return;
+        }
+        logger.warn(
+          { module: moduleId },
+          'module jobs started after their deadline; stopping them',
+        );
+        const stops = lateStops.get(moduleId) ?? new Set();
+        stops.add(stop);
+        lateStops.set(moduleId, stops);
+        void runLateStop(moduleId, stop);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        if (!expired) {
+          reject(err);
+          return;
+        }
+        logger.warn({ err, module: moduleId }, 'module jobs failed to start after their deadline');
+      },
+    );
+  });
+}
+
 const jobsStarted = new Set<string>();
 // A teardown can begin and end between two passes, so no pass need have seen the deactivation.
 const tornDown = new Set<string>();
@@ -301,7 +383,7 @@ const tornDown = new Set<string>();
 const bootEnsuresRunning = new Set<string>();
 
 export const moduleJobsStarted = (moduleId: string): boolean =>
-  jobsStarted.has(moduleId) || bootEnsuresRunning.has(moduleId);
+  jobsStarted.has(moduleId) || bootEnsuresRunning.has(moduleId) || lateStops.has(moduleId);
 
 export { moduleTeardownRunning };
 
@@ -338,11 +420,7 @@ export async function startModuleJobs(
     moduleId: string,
     jobs: NonNullable<WorkerModuleEntry['jobs']>,
   ): Promise<boolean> => {
-    const stop = await jobs({
-      moduleId,
-      connection: getBullRedis(),
-      logger: logger.child({ module: moduleId }),
-    });
+    const stop = await startJobsWithinDeadline(moduleId, jobs);
     stops.set(moduleId, stop);
     jobsStarted.add(moduleId);
     if (!closing) return true;
@@ -388,7 +466,7 @@ export async function startModuleJobs(
   };
   const stopAll = (): Promise<void> => {
     closing = true;
-    return stopModules([...stops.keys()]);
+    return Promise.all([retryLateStops(), stopModules([...stops.keys()])]).then(() => undefined);
   };
   const shutdown = (inFlightPass: Promise<void> | null): Promise<void> =>
     new Promise<void>((resolve) => {
@@ -523,6 +601,7 @@ export async function startModuleJobs(
     nowDeactivated: ReadonlySet<string>,
     stamps?: ReadonlyMap<string, number>,
   ): Promise<void> => {
+    void retryLateStops();
     await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
     for (const [index, module] of loaded.entries()) {
       if (closing) return;

@@ -1086,6 +1086,25 @@ async function divergedCheckout() {
   };
 }
 
+/** A checkout whose main and origin's both rewrote a.txt: merging origin in stops on a conflict. */
+async function conflictingCheckout() {
+  const { bare, seed } = await seedOrigin();
+  const local = await cloneLocal(bare);
+  await writeFile(path.join(local, 'a.txt'), 'local\n', 'utf8');
+  await git(local, ['add', '-A']);
+  await git(local, ['commit', '-m', 'local edit']);
+  await writeFile(path.join(seed, 'a.txt'), 'origin\n', 'utf8');
+  await git(seed, ['add', '-A']);
+  await git(seed, ['commit', '-m', 'origin edit']);
+  await git(seed, ['push', 'origin', 'main']);
+  return {
+    local,
+    cleanup: async () => {
+      for (const dir of [bare, seed, local]) await rm(dir, { recursive: true, force: true });
+    },
+  };
+}
+
 const resolvingIn = (dir: string) => ({
   mode: 'same-branch',
   phase: 'resolving',
@@ -1110,6 +1129,7 @@ async function mergePhaseBeside(
   local: string,
   others: { id: string }[],
   phase: 'pending' | 'resolving' = 'pending',
+  withProviders = true,
 ) {
   const d = await syncBaseStep.detect!(mkCtx(local));
   const state = phase === 'resolving' ? resolvingIn(local) : null;
@@ -1132,8 +1152,8 @@ async function mergePhaseBeside(
     cliProviderId: null,
     ignoreSavedStepClis: false,
     stepDef: step,
-    providers: [{}],
-    deps: {},
+    providers: withProviders ? [{}] : undefined,
+    deps: withProviders ? {} : undefined,
   } as never;
   const out = await resolveMergePhase(h.db as never, step, current, mkCtx(local), params);
   const why = out.resolved
@@ -1480,4 +1500,73 @@ it('a failed plan-base read releases the claim without opening a merge', async (
   } finally {
     await cleanup();
   }
+});
+
+it.each(['pending', 'resolving'] as const)(
+  'K2 a failed read of MERGE_HEAD rejects before anything is seeded or set aside, and keeps the claim (%s)',
+  async (phase) => {
+    const { local, cleanup } = await divergedCheckout();
+    let shim: Awaited<ReturnType<typeof failGit>> | null = null;
+    try {
+      const head = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      projections.setAside.mockResolvedValue({ outcome: 'clean' });
+      shim = await failGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+      let thrown: unknown;
+      try {
+        await mergePhaseBeside(local, [], phase);
+      } catch (err) {
+        thrown = err;
+      }
+      await shim.restore();
+      shim = null;
+      expect(projections.seed).not.toHaveBeenCalled();
+      expect(projections.setAside).not.toHaveBeenCalled();
+      expect(String(thrown)).toMatch(/rev-parse .*MERGE_HEAD/);
+      expect(claimFake.claims.get(local)?.stepId).toBe('step1');
+      await expectUntouched(local, head);
+    } finally {
+      await shim?.restore();
+      await cleanup();
+    }
+  },
+);
+
+describe('K5 the abort of a merge this pass opened, with its files set aside', () => {
+  it('K5-guard a conflict with no providers aborts and halts the step as it does today', async () => {
+    const { local, cleanup } = await conflictingCheckout();
+    try {
+      asideReadingFence();
+      const { out, why } = await mergePhaseBeside(local, [], 'pending', false);
+      expect(out.resolved).toBe(false);
+      expect(why).toContain('requires a CLI provider');
+      expect(await gitCode(local, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).not.toBe(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('K5 a throw from that abort puts the set-aside files back and keeps the claim', async () => {
+    const { local, cleanup } = await conflictingCheckout();
+    let shim: Awaited<ReturnType<typeof failGit>> | null = null;
+    try {
+      asideReadingFence();
+      // The 7th MERGE_HEAD read of the pass is abortMerge's first, at the no-providers abort; the count is tied to the pass's read order.
+      shim = await failGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { from: 7, until: 7 });
+      let thrown: unknown;
+      try {
+        await mergePhaseBeside(local, [], 'pending', false);
+      } catch (err) {
+        thrown = err;
+      }
+      await shim.restore();
+      shim = null;
+      expect(String(thrown)).toMatch(/rev-parse MERGE_HEAD/);
+      expect(projections.putBack).toHaveBeenCalledTimes(1);
+      expect(keptPaths(projections.putBack.mock.calls[0])).toEqual([KEPT_FILE]);
+      expect(claimFake.claims.get(local)?.stepId).toBe('step1');
+    } finally {
+      await shim?.restore();
+      await cleanup();
+    }
+  });
 });

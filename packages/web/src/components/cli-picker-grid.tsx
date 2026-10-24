@@ -26,6 +26,7 @@ export function CliPickerGrid({
   seatProviders,
   seatEfforts,
   taskCliProviderId,
+  fallbackProviderId = null,
   locked = false,
   busy = false,
   onChange,
@@ -43,6 +44,7 @@ export function CliPickerGrid({
   seatProviders?: Record<string, string | null>;
   seatEfforts?: Record<string, string | null>;
   taskCliProviderId: string | null;
+  fallbackProviderId?: string | null;
   locked?: boolean;
   busy?: boolean;
   onChange: (
@@ -68,14 +70,28 @@ export function CliPickerGrid({
   // dropdown starts at its column's left edge with nothing between it and its label, no
   // label is ever truncated, and the cell narrows to 22rem so more fit per row.
   const cliLabelClass = 'truncate text-xs font-medium text-neutral-400';
+  const providerOptions = providers.map((p) => (
+    <option key={p.id} value={p.id} disabled={!p.enabled}>
+      {p.label} ({p.name}){!p.enabled ? ' — disabled' : ''}
+    </option>
+  ));
+  const fallbackProvider = fallbackProviderId
+    ? providers.find((p) => p.id === fallbackProviderId)
+    : undefined;
   const cliOptions = (
     <>
+      <option value="">
+        {fallbackProvider
+          ? `(none — use the default: ${fallbackProvider.label})`
+          : '(none — use the default)'}
+      </option>
+      {providerOptions}
+    </>
+  );
+  const seatOptions = (
+    <>
       <option value="">(none — use the default)</option>
-      {providers.map((p) => (
-        <option key={p.id} value={p.id} disabled={!p.enabled}>
-          {p.label} ({p.name}){!p.enabled ? ' — disabled' : ''}
-        </option>
-      ))}
+      {providerOptions}
     </>
   );
 
@@ -204,7 +220,7 @@ export function CliPickerGrid({
               className={cliSelectClass}
             >
               <option value="">(step default)</option>
-              {cliOptions}
+              {seatOptions}
             </select>
             {effortSelectFor(seatProviders?.[seat.id] ?? '', seatEfforts?.[seat.id], seat.id)}
           </div>

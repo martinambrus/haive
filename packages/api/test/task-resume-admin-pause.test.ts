@@ -182,6 +182,92 @@ describe('resume of a paused task', () => {
   });
 });
 
+describe('resume records an administrator lifting an administrator pause', () => {
+  const resumedEvents = (fake: ReturnType<typeof setup>) =>
+    fake.rows(schema.taskEvents).filter((e) => e.eventType === 'task.resumed');
+  const resumeAudits = (fake: ReturnType<typeof setup>) =>
+    fake.rows(schema.auditEvents).filter((e) => e.action === 'task.admin_resume');
+
+  it('R9 owner route: an administrator owner lifting an administrator pause writes the event and one audit row', async () => {
+    const fake = setup({}, ADMIN);
+    expect((await adminPause()).status).toBe(200);
+
+    expect((await resumeBy(ADMIN)).status).toBe(200);
+
+    expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeNull();
+    expect(resumedEvents(fake).map((e) => e.payload)).toEqual([{ by: ADMIN.id, byAdmin: true }]);
+    expect(resumeAudits(fake)).toHaveLength(1);
+    expect(resumeAudits(fake)[0]).toMatchObject({
+      actorUserId: ADMIN.id,
+      targetType: 'task',
+      targetId: TASK,
+      metadata: { ownerUserId: ADMIN.id },
+    });
+  });
+
+  it('R10 owner route: an administrator owner lifting an owner-style hold writes the plain event and no audit row', async () => {
+    const fake = setup({}, ADMIN);
+    expect((await pauseBy(ADMIN)).status).toBe(200);
+
+    expect((await resumeBy(ADMIN)).status).toBe(200);
+
+    expect(resumedEvents(fake).map((e) => e.payload)).toEqual([{ by: ADMIN.id }]);
+    expect(resumeAudits(fake)).toEqual([]);
+  });
+
+  it("R11 owner route: the owner lifting the owner's own hold writes no audit row", async () => {
+    const fake = setup();
+    expect((await pauseBy(OWNER)).status).toBe(200);
+
+    expect((await resumeBy(OWNER)).status).toBe(200);
+
+    expect(resumedEvents(fake).map((e) => e.payload)).toEqual([{ by: OWNER.id }]);
+    expect(resumeAudits(fake)).toEqual([]);
+  });
+
+  it("R12 owner route: the owner refused on an administrator's pause writes no event and no audit row", async () => {
+    const fake = setup();
+    expect((await adminPause()).status).toBe(200);
+    const stamp = fake.rows(schema.tasks)[0]?.pausedAt;
+
+    expect((await resumeBy(OWNER)).status).toBe(409);
+
+    expect(fake.rows(schema.tasks)[0]?.pausedAt).toEqual(stamp);
+    expect(resumedEvents(fake)).toEqual([]);
+    expect(resumeAudits(fake)).toEqual([]);
+  });
+
+  it('R13 owner route: a refused audit insert undoes the resume', async () => {
+    const fake = setup({}, ADMIN);
+    expect((await adminPause()).status).toBe(200);
+    const stamp = fake.rows(schema.tasks)[0]?.pausedAt;
+    fake.hooks.beforeInsert = async (table) => {
+      if (table === schema.auditEvents) throw new Error('audit insert refused');
+    };
+
+    expect((await resumeBy(ADMIN)).status).toBe(500);
+
+    expect(fake.rows(schema.tasks)[0]?.pausedAt).toEqual(stamp);
+    expect(resumedEvents(fake)).toEqual([]);
+  });
+
+  it('R14 admin route: the resume still writes the same event payload and one audit row', async () => {
+    const fake = setup();
+    expect((await adminPause()).status).toBe(200);
+
+    expect((await adminResume()).status).toBe(200);
+
+    expect(resumedEvents(fake).map((e) => e.payload)).toEqual([{ by: ADMIN.id, byAdmin: true }]);
+    expect(resumeAudits(fake)).toHaveLength(1);
+    expect(resumeAudits(fake)[0]).toMatchObject({
+      actorUserId: ADMIN.id,
+      targetType: 'task',
+      targetId: TASK,
+      metadata: { ownerUserId: OWNER.id },
+    });
+  });
+});
+
 type Holder = 'admin hold' | 'owner hold' | 'no hold';
 const MATRIX: [string, typeof OWNER, Holder, boolean][] = [
   ['owner on an administrator hold', OWNER, 'admin hold', true],
@@ -285,6 +371,27 @@ describe('Retry of a failed paused task', () => {
 
       expect(res.status).toBe(200);
       expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeInstanceOf(Date);
+    });
+
+    it('leaves an administrator pause that took over and kept the owner stamp', async () => {
+      const fake = make();
+      await pauseBy(OWNER);
+      const read = fake.rows(schema.tasks)[0]?.pausedAt;
+      fake.hooks.beforeUpdate = async (table) => {
+        if (table !== schema.tasks) return;
+        fake.hooks.beforeUpdate = null;
+        await (h.db as typeof fake.db).insert(schema.taskEvents).values({
+          taskId: TASK,
+          eventType: 'task.paused',
+          payload: { by: ADMIN.id, byAdmin: true, reason: 'maintenance' },
+          createdAt: new Date(Date.now() + 500),
+        });
+      };
+
+      const res = await retryBy(OWNER);
+
+      expect(res.status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]?.pausedAt).toEqual(read);
     });
 
     it('leaves the administrator pause that replaced the owner hold the Retry read', async () => {

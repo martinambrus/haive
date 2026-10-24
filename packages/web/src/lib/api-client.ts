@@ -772,6 +772,7 @@ export interface Task {
    *  points at another linked bug fix. */
   parentTaskId?: string | null;
   cliProviderId: string | null;
+  effectiveCliProviderId?: string | null;
   /** Which CLI writes the per-step recap. NULL means INHERIT the step's own chain, which is
    *  a real choice and not "unset" — see `summaryCliChoiceRecorded` server-side. Optional so
    *  an older api renders as inherit. */
@@ -893,7 +894,7 @@ export interface Task {
   /** Joined on the list and detail endpoints so the UI can show which repo a
    *  task belongs to. Null when the task has no repository (or it was deleted).
    *  Absent on the create response, which returns only the raw inserted row. */
-  repository?: { id: string; name: string } | null;
+  repository?: { id: string; name: string; source: string; writable: boolean } | null;
   /** Set on GET /tasks/:id when a CLI invocation is currently in flight
    *  (started, not ended, not superseded). Drives the Terminal tab and the
    *  live cli-stream WebSocket. Always null on the list endpoint. */
@@ -1016,7 +1017,8 @@ export interface TaskStep {
   degradedNote: string | null;
   /** Surface B: context-window usage frozen at step completion (display-only audit
    *  trail). contextLeftPercent = 100 - round(peak prompt tokens / window * 100). Null
-   *  on deterministic steps and rows finished before this feature shipped. */
+   *  on deterministic steps, on steps whose CLI reported no per-request figure, and on
+   *  rows finished before this feature shipped. */
   contextLeftPercent: number | null;
   contextTokens: number | null;
   contextWindowSize: number | null;
@@ -2431,6 +2433,8 @@ export interface BlockingTask {
   type: string;
   status: string;
   pausedAt: string | null;
+  /** Absent from an api that predates it. */
+  pausedByAdmin?: boolean;
   currentStepId: string | null;
   updatedAt: string;
   ownerId: string | null;
@@ -2453,6 +2457,10 @@ export interface BlockingJob {
 
 export interface BlockingResponse {
   tasks: BlockingTask[];
+  /** Tasks the drain does not wait for but only an administrator can act on; never counted in
+   *  `total`. Absent, with `parkedCapped`, from an api that predates them. */
+  parked?: BlockingTask[];
+  parkedCapped?: boolean;
   jobs: BlockingJob[];
   total: number;
   /** The listing is capped server-side. Rendered, because reading a truncated list as the whole

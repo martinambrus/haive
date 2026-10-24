@@ -1,11 +1,10 @@
 import { and, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { LIVE_TASK_STATUSES, schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { MODULE_DEPENDENTS_CAP, isStepOfModule } from '@haive/shared/modularity';
 import { recordAuditEvent } from '../lib/audit.js';
 import { killTaskSandboxesOrThrow } from '../lib/sandbox-kill.js';
 import { supersedeLiveRuns } from '../lib/task-control.js';
-import { LIVE_TASK_STATES } from '../routes/maintenance.js';
 import { appendTaskEvent } from '../routes/tasks/_helpers.js';
 
 type Reader = Pick<Database, 'select'>;
@@ -75,7 +74,8 @@ const dependentRows = (db: Reader, moduleId: string, includeDead: boolean, also?
     .from(schema.tasks)
     .where(
       and(
-        inArray(schema.tasks.status, [...LIVE_TASK_STATES]),
+        // `created` counts: a draft runs nothing but would find its module deactivated once started.
+        inArray(schema.tasks.status, [...LIVE_TASK_STATUSES]),
         includeDead ? undefined : isNull(schema.tasks.deadAt),
         also,
         sql`(EXISTS (

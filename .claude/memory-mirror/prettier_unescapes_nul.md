@@ -1,0 +1,19 @@
+---
+name: prettier-unescapes-nul
+description: Writing a `\0` escape in a TS string and then running prettier leaves a LITERAL NUL byte in the file, which makes it binary to file/grep
+metadata:
+  type: feedback
+---
+
+MEASURED 2026-09-15: `packages/worker/src/cli-executor/tool-usage.ts` was written with a
+`` `${server}�${tool}` `` map key; after the lint-staged `prettier --write` the file held
+a real 0x00 byte, `file` reported "data", and it was MERGED that way (#116). The tool-usage
+shared module got the same treatment. Fixed in #119 by keying on `JSON.stringify([a, b])`.
+
+**Why:** the user's rule [[literal-nul-makes-source-binary]] exists because grep and ripgrep
+skip such files silently; the repo's commit hook makes the escape form unsafe too, so "write
+the escape" is not enough here.
+**How to apply:** never build compound keys with a control-character separator in this repo;
+use a JSON pair or a separator that cannot appear in the parts. After any prettier run on a
+file that mentions `\u00`, check it with `file`. To repair one, build the byte at runtime in a
+Node one-liner (`String.fromCharCode(0)`) — the Bash tool rejects the escape in command text.

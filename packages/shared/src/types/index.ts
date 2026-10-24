@@ -101,6 +101,9 @@ export interface CliTokenUsage {
   /** Largest prompt side of ONE model request in the run (the totals above count a re-read
    *  cached prefix once per turn). Absent when the CLI reports no per-request usage. */
   peakPromptTokens?: number;
+  /** The window in tokens the CLI itself reported for the model that ran the invocation;
+   *  absent when the stream states none. */
+  contextWindow?: number;
 }
 
 /** Which model actually answered a CLI invocation, as reported by the CLI itself.

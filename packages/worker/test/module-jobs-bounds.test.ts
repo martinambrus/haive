@@ -16,6 +16,8 @@ vi.mock('@haive/shared/module-db', async (importOriginal) => ({
 const {
   MODULE_JOB_START_WAIT_MS,
   MODULE_JOB_STOP_WAIT_MS,
+  MODULE_REACTIVATION_ATTEMPTS,
+  MODULE_SCHEMA_ENSURE_TIMEOUT_MS,
   MODULE_SHUTDOWN_WAIT_MS,
   ensureModuleSchemas,
   moduleJobsStarted,
@@ -439,6 +441,295 @@ describe('the bounds on module work', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(hung.stop).toHaveBeenCalledOnce();
       expect(moduleJobsStarted('late-at-boot')).toBe(false);
+    });
+  });
+
+  describe('a jobs start that does not return', () => {
+    const beforeDeadline = MODULE_SCHEMA_ENSURE_TIMEOUT_MS - 1;
+
+    it('releases the claim of a start boot went on without at the deadline, and lets the first pass start the module again', async () => {
+      const m = moduleWithHungStart('boot-deadline', 'jobs');
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const booting = startModuleJobs([m.loaded], [m.entry]);
+      await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+      const handle = await booting;
+      expect(moduleJobsStarted('boot-deadline')).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(beforeDeadline - MODULE_JOB_START_WAIT_MS);
+      expect(moduleJobsStarted('boot-deadline')).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(moduleJobsStarted('boot-deadline')).toBe(false);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ module: 'boot-deadline', err: expect.any(Error) }),
+        expect.stringMatching(/first reconcile pass tries again/),
+      );
+
+      await handle.reconcile(new Set());
+      expect(m.jobs).toHaveBeenCalledTimes(2);
+      expect(moduleJobsStarted('boot-deadline')).toBe(true);
+
+      await handle.stopAll();
+    });
+
+    it('releases the claim of a start a pass went on without at the deadline, counts it as an attempt, and starts the module again on the next pass', async () => {
+      const m = moduleWithHungStart('pass-deadline', 'jobs');
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const handle = await startModuleJobs([m.loaded], [m.entry], new Set(['pass-deadline']));
+
+      const pass = track(handle.reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+      expect(pass.settled).toBe(true);
+      expect(moduleJobsStarted('pass-deadline')).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(beforeDeadline - MODULE_JOB_START_WAIT_MS);
+      expect(moduleJobsStarted('pass-deadline')).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(moduleJobsStarted('pass-deadline')).toBe(false);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ module: 'pass-deadline', attempt: 1, err: expect.any(Error) }),
+        expect.any(String),
+      );
+
+      await handle.reconcile(new Set());
+      expect(m.jobs).toHaveBeenCalledTimes(2);
+      expect(moduleJobsStarted('pass-deadline')).toBe(true);
+
+      await handle.stopAll();
+    });
+
+    it('stops starting a module whose start never returns after its last attempt, and says so in the error log', async () => {
+      const m = moduleWithJobs('attempts-deadline');
+      m.jobs.mockImplementation(() => new Promise<typeof m.stop>(() => {}));
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+      const handle = await startModuleJobs([m.loaded], [m.entry], new Set(['attempts-deadline']));
+
+      for (let attempt = 1; attempt <= MODULE_REACTIVATION_ATTEMPTS; attempt++) {
+        const pass = track(handle.reconcile(new Set()));
+        await vi.advanceTimersByTimeAsync(MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
+        expect(pass.settled).toBe(true);
+        expect(moduleJobsStarted('attempts-deadline')).toBe(false);
+        expect(m.jobs).toHaveBeenCalledTimes(attempt);
+      }
+      expect(error).toHaveBeenCalledWith(
+        expect.objectContaining({ module: 'attempts-deadline', err: expect.any(Error) }),
+        expect.any(String),
+      );
+
+      await handle.reconcile(new Set());
+      expect(m.jobs).toHaveBeenCalledTimes(MODULE_REACTIVATION_ATTEMPTS);
+    });
+
+    it('stops a start that returns after the deadline at once, and never counts it as started', async () => {
+      const m = moduleWithHungStart('late-deadline', 'jobs');
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+      const handle = await startModuleJobs([m.loaded], [m.entry], new Set(['late-deadline']));
+
+      const pass = track(handle.reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
+      expect(pass.settled).toBe(true);
+      expect(moduleJobsStarted('late-deadline')).toBe(false);
+
+      m.end().resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(m.stop).toHaveBeenCalledOnce();
+      expect(moduleJobsStarted('late-deadline')).toBe(false);
+      expect(warn).toHaveBeenCalledWith(
+        { module: 'late-deadline' },
+        expect.stringMatching(/started after their deadline/),
+      );
+      expect(info).not.toHaveBeenCalledWith(
+        { module: 'late-deadline' },
+        'module jobs started: the module is active again',
+      );
+
+      await handle.stopAll();
+      expect(m.stop).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the module marked as running while the stop of a start that returned after the deadline runs, until that stop ends', async () => {
+      const id = 'late-stopping-ends';
+      const m = moduleWithHungStart(id, 'jobs');
+      let endStop!: () => void;
+      m.stop.mockImplementationOnce(() => new Promise<void>((resolve) => (endStop = resolve)));
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const handle = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+      const pass = track(handle.reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
+      expect(pass.settled).toBe(true);
+      expect(moduleJobsStarted(id)).toBe(false);
+
+      m.end().resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(m.stop).toHaveBeenCalledOnce();
+      expect(moduleJobsStarted(id)).toBe(true);
+
+      endStop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(moduleJobsStarted(id)).toBe(false);
+    });
+
+    describe('a stop of a start that returned after the deadline fails', () => {
+      async function lateStartWithRefusedStop(id: string) {
+        const m = moduleWithHungStart(id, 'jobs');
+        m.stop.mockRejectedValueOnce(new Error('stop refused'));
+        const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+        const handle = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+        const pass = track(handle.reconcile(new Set()));
+        await vi.advanceTimersByTimeAsync(MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
+        expect(pass.settled).toBe(true);
+        m.end().resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(m.stop).toHaveBeenCalledOnce();
+        return { m, warn, handle };
+      }
+
+      it('keeps the module marked as running, so a teardown of it stays refused', async () => {
+        const { warn } = await lateStartWithRefusedStop('late-stop-refused');
+
+        expect(moduleJobsStarted('late-stop-refused')).toBe(true);
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ module: 'late-stop-refused', err: expect.any(Error) }),
+          expect.stringMatching(/failed to stop/),
+        );
+      });
+
+      it('calls the stop again on the next pass, and lets go of the module once it succeeds', async () => {
+        const id = 'late-stop-retried';
+        const { m, handle } = await lateStartWithRefusedStop(id);
+
+        await handle.reconcile(new Set([id]));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(m.stop).toHaveBeenCalledTimes(2);
+        expect(moduleJobsStarted(id)).toBe(false);
+
+        await handle.reconcile(new Set([id]));
+        await handle.stopAll();
+        expect(m.stop).toHaveBeenCalledTimes(2);
+      });
+
+      it('keeps the module marked as running after a retry that fails too, and calls the stop at shutdown', async () => {
+        const id = 'late-stop-shutdown';
+        const { m, handle } = await lateStartWithRefusedStop(id);
+        m.stop.mockRejectedValueOnce(new Error('still refused'));
+
+        await handle.reconcile(new Set([id]));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(m.stop).toHaveBeenCalledTimes(2);
+        expect(moduleJobsStarted(id)).toBe(true);
+
+        await handle.shutdown(null);
+        expect(m.stop).toHaveBeenCalledTimes(3);
+        expect(moduleJobsStarted(id)).toBe(false);
+      });
+
+      it('calls a stop that has not ended only once, whatever the passes do meanwhile', async () => {
+        const id = 'late-stop-hung';
+        const { m, handle } = await lateStartWithRefusedStop(id);
+        let endStop!: () => void;
+        m.stop.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              endStop = resolve;
+            }),
+        );
+
+        await handle.reconcile(new Set([id]));
+        await handle.reconcile(new Set([id]));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(m.stop).toHaveBeenCalledTimes(2);
+        expect(moduleJobsStarted(id)).toBe(true);
+
+        endStop();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(moduleJobsStarted(id)).toBe(false);
+      });
+
+      it('makes a shutdown wait for a retried stop that is still running', async () => {
+        const id = 'late-stop-shutdown-waits';
+        const { m, handle } = await lateStartWithRefusedStop(id);
+        let endStop!: () => void;
+        m.stop.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              endStop = resolve;
+            }),
+        );
+
+        await handle.reconcile(new Set([id]));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(m.stop).toHaveBeenCalledTimes(2);
+
+        const shutdown = track(handle.shutdown(null));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(shutdown.settled).toBe(false);
+        expect(m.stop).toHaveBeenCalledTimes(2);
+
+        endStop();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(shutdown.settled).toBe(true);
+        expect(moduleJobsStarted(id)).toBe(false);
+      });
+    });
+
+    it('logs a start that fails after the deadline without counting it again', async () => {
+      const m = moduleWithHungStart('failing-deadline', 'jobs');
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+      const handle = await startModuleJobs([m.loaded], [m.entry], new Set(['failing-deadline']));
+
+      const pass = track(handle.reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
+      expect(pass.settled).toBe(true);
+      expect(moduleJobsStarted('failing-deadline')).toBe(false);
+
+      m.end().reject(new Error('no queue'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ module: 'failing-deadline', err: expect.any(Error) }),
+        expect.stringMatching(/failed to start after their deadline/),
+      );
+      expect(error).not.toHaveBeenCalled();
+      expect(moduleJobsStarted('failing-deadline')).toBe(false);
+
+      await handle.reconcile(new Set());
+      expect(m.jobs).toHaveBeenCalledTimes(2);
+      expect(moduleJobsStarted('failing-deadline')).toBe(true);
+
+      await handle.stopAll();
+    });
+
+    it('counts a start that returns just before the deadline as started, and leaves no timer behind', async () => {
+      const m = moduleWithJobs('edge-deadline');
+      m.jobs.mockImplementationOnce(
+        () =>
+          new Promise<typeof m.stop>((resolve) =>
+            setTimeout(() => resolve(m.stop), MODULE_SCHEMA_ENSURE_TIMEOUT_MS - 1),
+          ),
+      );
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const handle = await startModuleJobs([m.loaded], [m.entry], new Set(['edge-deadline']));
+
+      const pass = track(handle.reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(beforeDeadline);
+      expect(pass.settled).toBe(true);
+      expect(moduleJobsStarted('edge-deadline')).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
+      expect(moduleJobsStarted('edge-deadline')).toBe(true);
+      expect(m.stop).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        expect.any(String),
+      );
+
+      await handle.stopAll();
+      expect(m.stop).toHaveBeenCalledOnce();
     });
   });
 });

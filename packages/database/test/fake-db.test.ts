@@ -49,6 +49,38 @@ function setup() {
 }
 
 describe('the fake database', () => {
+  it('stamps clock_timestamp() from the logical clock and stores any other SQL value as given', async () => {
+    const e = schema.taskEvents;
+    const fake = createFakeDb({ tasks: schema.tasks, taskEvents: e });
+    fake.insert(schema.tasks, { id: TASK, userId: USER, type: 'workflow', title: 'task' });
+    const event = (eventType: string, createdAt?: unknown) => ({
+      taskId: TASK,
+      eventType,
+      payload: {},
+      ...(createdAt === undefined ? {} : { createdAt }),
+    });
+    fake.insert(e, event('before'));
+    fake.insert(e, event('stamped', sql`clock_timestamp()`));
+    fake.insert(e, event('after'));
+    const other = sql`now()`;
+    fake.insert(e, event('other', other));
+
+    const rows = fake.rows(e);
+    const stamped = rows.find((r) => r.eventType === 'stamped')!.createdAt as Date;
+    expect(stamped).toBeInstanceOf(Date);
+    const at = (name: string) =>
+      (rows.find((r) => r.eventType === name)!.createdAt as Date).getTime();
+    expect(at('before')).toBeLessThan(stamped.getTime());
+    expect(stamped.getTime()).toBeLessThan(at('after'));
+    expect(rows.find((r) => r.eventType === 'other')!.createdAt).toBe(other);
+    const ordered = await fake.db
+      .select({ eventType: e.eventType })
+      .from(e)
+      .where(ne(e.eventType, 'other'))
+      .orderBy(asc(e.createdAt), asc(e.id));
+    expect(ordered.map((r) => r.eventType)).toEqual(['before', 'stamped', 'after']);
+  });
+
   it('applies pagination after filtering and ordering, regardless of builder order', async () => {
     const { fake, row } = setup();
     for (const name of ['c.md', 'a.md', 'b.md']) fake.insert(t, row(name));

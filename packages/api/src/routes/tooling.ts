@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { ollamaEmbed } from '@haive/shared/rag';
+import { probeEgressFor } from '../lib/probe-hosts.js';
 import { requireAuth } from '../middleware/auth.js';
 import type { AppEnv } from '../context.js';
 
@@ -20,9 +21,11 @@ tooling.post('/test-postgres', async (c) => {
     return c.json({ ok: false, error: 'connectionString is required' }, 400);
   }
 
+  const { pgSocket } = await probeEgressFor(c);
   try {
     const postgres = (await import('postgres')).default;
     const sql = postgres(connStr, {
+      ...(pgSocket ? { socket: pgSocket } : {}),
       max: 1,
       connect_timeout: CONNECT_TIMEOUT_MS / 1000,
       idle_timeout: 5,
@@ -62,9 +65,10 @@ tooling.post('/test-ollama', async (c) => {
     return c.json({ ok: false, error: 'ollamaUrl is required' }, 400);
   }
 
+  const { fetchFn } = await probeEgressFor(c);
   // Test connectivity
   try {
-    const resp = await fetch(`${url}/api/tags`, {
+    const resp = await fetchFn(`${url}/api/tags`, {
       signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
     });
     if (!resp.ok) {
@@ -96,7 +100,7 @@ tooling.post('/test-ollama', async (c) => {
     let dimsError: string | undefined;
     if (modelFound && body.model && typeof body.dimensions === 'number') {
       try {
-        const [vec] = await ollamaEmbed(url, body.model, ['healthcheck']);
+        const [vec] = await ollamaEmbed(url, body.model, ['healthcheck'], { fetchFn });
         dims = vec?.length ?? 0;
         dimsMatch = dims === body.dimensions;
       } catch (err) {
@@ -149,8 +153,9 @@ tooling.post('/ollama-model-capabilities', async (c) => {
     return c.json({ ok: false, error: 'ollamaUrl and model are required' }, 400);
   }
 
+  const { fetchFn } = await probeEgressFor(c);
   try {
-    const resp = await fetch(`${url}/api/show`, {
+    const resp = await fetchFn(`${url}/api/show`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model }),
@@ -202,7 +207,8 @@ tooling.post('/ollama-model-capabilities', async (c) => {
 
 const activePulls = new Map<string, AbortController>();
 
-tooling.post('/pull-ollama-model', (c) => {
+tooling.post('/pull-ollama-model', async (c) => {
+  const { fetchFn } = await probeEgressFor(c);
   const pullId = crypto.randomUUID();
 
   return streamSSE(c, async (stream) => {
@@ -236,7 +242,7 @@ tooling.post('/pull-ollama-model', (c) => {
     });
 
     try {
-      const resp = await fetch(`${url}/api/pull`, {
+      const resp = await fetchFn(`${url}/api/pull`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model, stream: true }),

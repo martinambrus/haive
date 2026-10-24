@@ -38,6 +38,7 @@ import {
   logger,
   PAUSED_FILTER_TOKEN,
   renameTaskRequestSchema,
+  resolveTaskCliProviderId,
   setCliProviderRequestSchema,
   setSummaryCliRequestSchema,
   STEER_IN_CHANNEL_PREFIX,
@@ -82,6 +83,7 @@ import {
   settleActiveStepsIn,
   stopActiveCliInvocations,
   supersedeLiveRuns,
+  withoutGateAnswer,
 } from '../../lib/task-control.js';
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
@@ -90,9 +92,11 @@ import { loadTaskStop, loadTaskStops } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
 import { isUuid } from '../../lib/uuid.js';
 import { REPOSITORY_BUSY, boundedLockWait } from '../../lib/repository-busy.js';
+import { logAuditEvent } from '../../lib/audit.js';
 import { getTaskQueue } from '../../queues.js';
 import {
   adminPauseLocks,
+  appendPauseEvent,
   appendTaskEvent,
   buildUpcomingCliSteps,
   currentStepParkedSql,
@@ -106,10 +110,13 @@ import {
   findAdminPausedTaskIds,
   findQueuedInvocationStepIds,
   loadFinishedRunsRevision,
+  liftReadPause,
   loadTaskTypeLabels,
+  recordAdminResume,
   resolveCurrentStepCliProviderIds,
   sumTaskTokens,
   sumTaskProviderBreakdown,
+  TASK_REPOSITORY_COLUMNS,
 } from './_helpers.js';
 import { resolveCostDisplay } from '@haive/shared/stats-server';
 import { fileRoutes } from './files.js';
@@ -294,7 +301,7 @@ taskRoutes.get('/', async (c) => {
     orderBy: sortByUpdated
       ? [desc(schema.tasks.updatedAt), desc(schema.tasks.createdAt)]
       : [desc(effectiveVoteScore), desc(schema.tasks.createdAt)],
-    with: { repository: { columns: { id: true, name: true } } },
+    with: { repository: { columns: TASK_REPOSITORY_COLUMNS } },
     limit: pageSize,
     offset: (page - 1) * pageSize,
   });
@@ -1021,7 +1028,7 @@ taskRoutes.get('/:id', async (c) => {
   const db = getDb();
   const task = await db.query.tasks.findFirst({
     where: and(eq(schema.tasks.id, id), eq(schema.tasks.userId, userId)),
-    with: { repository: { columns: { id: true, name: true } } },
+    with: { repository: { columns: TASK_REPOSITORY_COLUMNS } },
   });
   if (!task) throw new HttpError(404, 'Task not found');
   const stepRows = await db
@@ -1084,8 +1091,20 @@ taskRoutes.get('/:id', async (c) => {
   const adminPausedIds = await findAdminPausedTaskIds(db, task.pausedAt ? [id] : []);
   // The pinned prompt steps fed the step flags above; the page never reads them, so they stay off the poll.
   const { customSteps: _pinned, ...taskFields } = task;
+  const providerRows =
+    task.cliProviderId === null
+      ? await db
+          .select({
+            id: schema.cliProviders.id,
+            enabled: schema.cliProviders.enabled,
+            createdAt: schema.cliProviders.createdAt,
+          })
+          .from(schema.cliProviders)
+          .where(eq(schema.cliProviders.userId, userId))
+      : [];
   const taskWithActive = {
     ...taskFields,
+    effectiveCliProviderId: resolveTaskCliProviderId(task.cliProviderId, providerRows),
     typeLabel: typeLabels.get(task.type) ?? null,
     pausedByAdmin: adminPausedIds.has(id),
     pauseLocked: adminPauseLocks(adminPausedIds.has(id), c.get('userRole')),
@@ -1256,13 +1275,11 @@ taskRoutes.post('/:id/action', async (c) => {
       if (task.status !== 'failed') {
         throw new HttpError(409, `Cannot retry task in status ${task.status}`);
       }
-      // Retry lifts only the hold it read, and never an administrator's: a 409 would strand a
-      // failed task, which the maintenance list omits.
-      const liftPause =
-        task.pausedAt &&
-        !adminPauseLocks((await findAdminPausedTaskIds(db, [id])).has(id), c.get('userRole'))
-          ? task.pausedAt
-          : undefined;
+      // Retry lifts only the hold it read, and never an administrator's; it still revives the task,
+      // since a refusal would leave its owner nothing to do until an administrator acts.
+      const liftPause = task.pausedAt
+        ? { read: task.pausedAt, role: c.get('userRole') }
+        : undefined;
       // A task that stopped on a step re-runs that step. START replays the task from its first
       // step, which only a task that never reached one still needs.
       const [target] = task.currentStepId
@@ -1338,8 +1355,8 @@ taskRoutes.post('/:id/action', async (c) => {
         const [moved] = await requeue(tx);
         if (!moved) throw new HttpError(409, 'The task is no longer failed; reload it');
         // Retrying a paused task means "run it". Leaving the hold set would restart the task
-        // straight into the pause park, with Retry apparently doing nothing.
-        if (liftPause) await clearTaskPause(tx, id, liftPause);
+        // straight into the pause park, with Retry apparently doing nothing; an administrator's stays.
+        if (liftPause) await liftReadPause(tx, id, liftPause.read, liftPause.role);
       });
       // Answering a parked form revives the task, so its pass can open a row between the settle
       // above and the bump. None can at the old epoch after it, so settle once more.
@@ -1367,7 +1384,7 @@ taskRoutes.post('/:id/action', async (c) => {
           .where(and(eq(schema.tasks.id, id), isNull(schema.tasks.pausedAt)))
           .returning({ id: schema.tasks.id });
         if (rows.length === 0) return false;
-        await appendTaskEvent(tx, id, null, 'task.paused', { by: userId });
+        await appendPauseEvent(tx, id, { by: userId });
         return true;
       });
       if (!paused) {
@@ -1386,15 +1403,18 @@ taskRoutes.post('/:id/action', async (c) => {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
       const resumed = await db.transaction(async (tx) => {
         // Only the resume that changes the row is recorded.
-        if (!(await clearTaskPause(tx, id))) return false;
+        if (!(await clearTaskPause(tx, id))) return null;
         // Judged after the clear so a pause placed since the route's read is the one refused.
-        if (adminPauseLocks((await findAdminPausedTaskIds(tx, [id])).has(id), c.get('userRole'))) {
+        const pausedByAdmin = (await findAdminPausedTaskIds(tx, [id])).has(id);
+        if (adminPauseLocks(pausedByAdmin, c.get('userRole'))) {
           throw new HttpError(409, 'Paused by an administrator', 'paused_by_admin');
         }
+        if (pausedByAdmin) return { audit: await recordAdminResume(tx, id, userId, userId) };
         await appendTaskEvent(tx, id, null, 'task.resumed', { by: userId });
-        return true;
+        return { audit: null };
       });
       if (!resumed) return c.json({ ok: true, pausedAt: null });
+      if (resumed.audit) logAuditEvent(resumed.audit);
       // No re-drive needed: the pause park re-enqueues its own delayed advance every
       // PAUSE_POLL_MS and the deferred cli-exec jobs re-deliver on their own, so both pick
       // the task back up within ~30s. Enqueuing an extra advance here would race the park
@@ -1740,8 +1760,8 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
   // Invalidate cached detect output on provider-sensitive steps so the next
   // advance re-detects against the new CLI's metadata (skills dir, agents
   // dir, etc.). Terminal (done/failed/skipped/cancelled) steps are left
-  // alone — rewriting history would be confusing. form_values is preserved
-  // so the user's prior submission flows into the regenerated schema.
+  // alone — rewriting history would be confusing. A saved fix-loop gate answer
+  // is dropped (a pending row refuses every write); any other answer is kept.
   // Select the steps to invalidate first, so each finishing run's timing can be folded
   // into carried_* before zeroing (mirrors the retry / worker reset — a plain reset
   // discards the prior run and undercounts effort). foldSit counts a failed step's
@@ -1776,6 +1796,7 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
         status: 'pending',
         detectOutput: null,
         formSchema: null,
+        formValues: withoutGateAnswer,
         statusMessage: null,
         startedAt: null,
         endedAt: null,

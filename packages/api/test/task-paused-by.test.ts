@@ -137,7 +137,13 @@ describe('findAdminPausedTaskIds', () => {
   const C = '00000000-0000-4000-8000-0000000000a3';
 
   function eventsOf(
-    rows: { taskId: string; eventType: string; payload: Record<string, unknown> }[],
+    rows: {
+      id?: string;
+      taskId: string;
+      eventType: string;
+      payload: Record<string, unknown>;
+      createdAt?: Date;
+    }[],
   ) {
     const fake = createFakeDb({ taskEvents: schema.taskEvents });
     for (const row of rows) fake.insert(schema.taskEvents, row);
@@ -168,6 +174,23 @@ describe('findAdminPausedTaskIds', () => {
     ]);
 
     expect([...(await findAdminPausedTaskIds(db, [A, B]))]).toEqual([B]);
+  });
+
+  it('reads two pauses with the same stamp by id, whichever of them was written first', async () => {
+    const at = new Date('2026-10-14T09:00:00.000Z');
+    const lower = {
+      id: '00000000-0000-4000-8000-000000000a01',
+      ...paused(A, { by: 'owner-1' }),
+      createdAt: at,
+    };
+    const higher = {
+      id: '00000000-0000-4000-8000-000000000a02',
+      ...paused(A, { by: 'admin-1', byAdmin: true }),
+      createdAt: at,
+    };
+
+    expect([...(await findAdminPausedTaskIds(eventsOf([lower, higher]), [A]))]).toEqual([A]);
+    expect([...(await findAdminPausedTaskIds(eventsOf([higher, lower]), [A]))]).toEqual([A]);
   });
 
   it('keys on the pause event alone, not on any other event an administrator wrote', async () => {

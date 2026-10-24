@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   stateKeys: [] as string[],
   spawn: undefined as unknown as ReturnType<typeof vi.fn>,
   actor: { id: '00000000-0000-4000-8000-0000000000a1', role: 'admin' },
+  stall: null as ((real: unknown) => unknown) | null,
 }));
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -23,7 +24,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   h.spawn = vi.fn();
   return { ...real, spawn: h.spawn };
 });
-vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/db.js', () => ({ getDb: () => (h.stall ? h.stall(h.db) : h.db) }));
 vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({ add: async () => undefined }) }));
 vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
 vi.mock('../src/middleware/auth.js', () => ({
@@ -47,8 +48,10 @@ vi.mock('@haive/shared', async (importOriginal) => ({
 
 import { Hono } from 'hono';
 import { CONFIG_KEYS, encryptEmail } from '@haive/shared';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { BLOCKING_LIST_CAP, maintenanceRoutes } from '../src/routes/maintenance.js';
+import { findAdminPausedTaskIds } from '../src/routes/tasks/_helpers.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -62,7 +65,14 @@ app.route('/admin/maintenance', maintenanceRoutes);
 app.route('/tasks', taskRoutes);
 
 interface Blocking {
-  tasks: { id: string; hasLiveCli: boolean; ownerId: string | null; ownerEmail: string | null }[];
+  tasks: {
+    id: string;
+    hasLiveCli: boolean;
+    pausedAt: string | null;
+    pausedByAdmin: boolean;
+    ownerId: string | null;
+    ownerEmail: string | null;
+  }[];
   jobs: {
     kind: string;
     id: string;
@@ -73,6 +83,8 @@ interface Blocking {
     ownerName: string | null;
     ownerEmail: string | null;
   }[];
+  parked: Blocking['tasks'];
+  parkedCapped: boolean;
   viewerId: string;
   total: number;
   capped: boolean;
@@ -690,6 +702,61 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       expect(await events(row.id, 'task.resumed')).toHaveLength(1);
     });
 
+    it('records an administrator owner lifting an administrator pause like the admin route', async () => {
+      const row = await task({ userId: ADMIN });
+      expect((await act(row.id, 'pause')).status).toBe(200);
+
+      expect((await ownerAct(row.id, 'resume')).status).toBe(200);
+
+      expect((await events(row.id, 'task.resumed')).map((e) => e.payload)).toEqual([
+        { by: ADMIN, byAdmin: true },
+      ]);
+      const rows = await audits(row.id, 'task.admin_resume');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        actorUserId: ADMIN,
+        targetType: 'task',
+        metadata: { ownerUserId: ADMIN },
+      });
+    });
+
+    it('writes no audit row when an administrator owner lifts an owner-style hold', async () => {
+      const row = await task({ userId: ADMIN });
+      expect((await ownerAct(row.id, 'pause')).status).toBe(200);
+
+      expect((await ownerAct(row.id, 'resume')).status).toBe(200);
+
+      expect((await events(row.id, 'task.resumed')).map((e) => e.payload)).toEqual([{ by: ADMIN }]);
+      expect(await audits(row.id, 'task.admin_resume')).toEqual([]);
+    });
+
+    it('refuses the owner-route resume whose audit row cannot be written, and changes nothing', async () => {
+      const row = await task({ userId: ADMIN });
+      expect((await act(row.id, 'pause')).status).toBe(200);
+      const stamp = await stored(row.id);
+      await refuseAuditInserts();
+
+      const res = await ownerAct(row.id, 'resume');
+
+      await allowAuditInserts();
+      expect(res.status).toBe(500);
+      expect(await stored(row.id)).toEqual(stamp);
+      expect(await events(row.id, 'task.resumed')).toEqual([]);
+      expect(await audits(row.id, 'task.admin_resume')).toEqual([]);
+    });
+
+    it('the admin route resume writes the same event payload and one audit row', async () => {
+      const row = await task();
+      expect((await act(row.id, 'pause')).status).toBe(200);
+
+      expect((await act(row.id, 'resume')).status).toBe(200);
+
+      expect((await events(row.id, 'task.resumed')).map((e) => e.payload)).toEqual([
+        { by: ADMIN, byAdmin: true },
+      ]);
+      expect(await audits(row.id, 'task.admin_resume')).toHaveLength(1);
+    });
+
     it("lets the owner pause and resume the owner's own hold", async () => {
       const row = await task();
       as(OWNER, 'user');
@@ -772,7 +839,7 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
 
     describe('when an administrator pause lands while the owner request waits on the task row lock', () => {
       const adminStamp = () => new Date(Date.now() + 60_000);
-      const holdRowLock = async (taskId: string, stamp: Date) => {
+      const holdRowLock = async (taskId: string, stamp: Date | null) => {
         let release = () => {};
         const gate = new Promise<void>((resolve) => {
           release = resolve;
@@ -789,7 +856,12 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
             .for('update');
           locked();
           await gate;
-          await tx.update(schema.tasks).set({ pausedAt: stamp }).where(eq(schema.tasks.id, taskId));
+          if (stamp) {
+            await tx
+              .update(schema.tasks)
+              .set({ pausedAt: stamp })
+              .where(eq(schema.tasks.id, taskId));
+          }
           await tx.insert(schema.taskEvents).values({
             taskId,
             eventType: 'task.paused',
@@ -843,6 +915,326 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
 
         expect(res.status).toBe(200);
         expect(await stored(row.id)).toEqual(stamp);
+      });
+
+      describe.each([
+        ['START replay', false],
+        ['step target', true],
+      ])('a takeover that keeps the stamp, %s', (_shape, onStep) => {
+        it("leaves the administrator's pause in place on a Retry that read the owner hold", async () => {
+          const STEP = '07-phase-2-implement';
+          const row = await task(
+            onStep
+              ? { status: 'failed', currentStepId: STEP, currentRound: 0 }
+              : { status: 'failed' },
+          );
+          if (onStep) {
+            await db.insert(schema.taskSteps).values({
+              taskId: row.id,
+              stepId: STEP,
+              stepIndex: 7,
+              round: 0,
+              title: 'Implement',
+              status: 'failed',
+            });
+          }
+          as(OWNER, 'user');
+          expect((await ownerAct(row.id, 'pause')).status).toBe(200);
+          const stamp = await stored(row.id);
+          const lock = await holdRowLock(row.id, null);
+
+          const pending = ownerAct(row.id, 'retry');
+          await waitUntilBlocked();
+          lock.release();
+          await lock.done;
+          const res = await pending;
+
+          expect(res.status).toBe(200);
+          expect(
+            (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, row.id) }))?.status,
+          ).not.toBe('failed');
+          expect(await stored(row.id)).toEqual(stamp);
+          expect((await findAdminPausedTaskIds(db, [row.id])).has(row.id)).toBe(true);
+        });
+      });
+    });
+
+    describe("an administrator's pause of a task its owner paused", () => {
+      const ownerPaused = async () => {
+        const row = await task();
+        as(OWNER, 'user');
+        expect((await ownerAct(row.id, 'pause')).status).toBe(200);
+        as(ADMIN, 'admin');
+        return row;
+      };
+      const holdLock = async (taskId: string, write: (tx: Database) => Promise<void>) => {
+        let release = () => {};
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let locked = () => {};
+        const held = new Promise<void>((resolve) => {
+          locked = resolve;
+        });
+        const done = db.transaction(async (tx) => {
+          await tx
+            .select({ id: schema.tasks.id })
+            .from(schema.tasks)
+            .where(eq(schema.tasks.id, taskId))
+            .for('update');
+          locked();
+          await gate;
+          await write(tx as unknown as Database);
+        });
+        await held;
+        return { release, done };
+      };
+      const waitUntilBlocked = async () => {
+        for (let tries = 0; tries < 100; tries += 1) {
+          const waiting = await db.execute(
+            sql`select 1 from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()`,
+          );
+          if (waiting.length > 0) return;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        throw new Error('the administrator request never blocked on the task row lock');
+      };
+
+      it('takes the pause over through both routes, keeping the stamp', async () => {
+        const row = await ownerPaused();
+        const stamp = await stored(row.id);
+
+        const res = await act(row.id, 'pause');
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true, pausedAt: stamp!.toISOString() });
+        expect(await stored(row.id)).toEqual(stamp);
+        expect(await events(row.id, 'task.paused')).toHaveLength(2);
+        const [audit, ...rest] = await audits(row.id, 'task.admin_pause');
+        expect(rest).toEqual([]);
+        expect(audit?.metadata).toMatchObject({
+          ownerUserId: OWNER,
+          pausedAt: stamp!.toISOString(),
+          tookOver: true,
+        });
+        const listed = (await blocking()).tasks.find((t) => t.id === row.id);
+        expect(listed?.pausedByAdmin).toBe(true);
+
+        as(OWNER, 'user');
+        expect((await ownerAct(row.id, 'resume')).status).toBe(409);
+        as(ADMIN, 'admin');
+        expect((await act(row.id, 'resume')).status).toBe(200);
+        expect(await stored(row.id)).toBeNull();
+      });
+
+      it('lists who holds each pause on GET /blocking', async () => {
+        const byOwner = await ownerPaused();
+        const byAdmin = await task();
+        expect((await act(byAdmin.id, 'pause')).status).toBe(200);
+        const free = await task();
+
+        const byId = new Map((await blocking()).tasks.map((t) => [t.id, t]));
+
+        expect(byId.get(byOwner.id)?.pausedByAdmin).toBe(false);
+        expect(byId.get(byAdmin.id)?.pausedByAdmin).toBe(true);
+        expect(byId.get(free.id)?.pausedByAdmin).toBe(false);
+      });
+
+      it('writes nothing for a second administrator pause', async () => {
+        const row = await ownerPaused();
+        expect((await act(row.id, 'pause')).status).toBe(200);
+
+        expect((await act(row.id, 'pause')).status).toBe(200);
+
+        expect(await events(row.id, 'task.paused')).toHaveLength(2);
+        expect(await audits(row.id, 'task.admin_pause')).toHaveLength(1);
+      });
+
+      it('leaves the events, the audit rows and the stamp untouched when the audit row is refused', async () => {
+        const row = await ownerPaused();
+        const stamp = await stored(row.id);
+        await refuseAuditInserts();
+
+        const res = await act(row.id, 'pause');
+
+        expect(res.status).toBe(500);
+        expect(await stored(row.id)).toEqual(stamp);
+        expect(await events(row.id, 'task.paused')).toHaveLength(1);
+        await allowAuditInserts();
+        expect(await audits(row.id, 'task.admin_pause')).toEqual([]);
+      });
+
+      it('pauses outright when a concurrent owner Resume clears the pause first', async () => {
+        const row = await ownerPaused();
+        const lock = await holdLock(row.id, async (tx) => {
+          await tx.update(schema.tasks).set({ pausedAt: null }).where(eq(schema.tasks.id, row.id));
+          await tx
+            .insert(schema.taskEvents)
+            .values({ taskId: row.id, eventType: 'task.resumed', payload: { by: OWNER } });
+        });
+
+        const pending = act(row.id, 'pause');
+        await waitUntilBlocked();
+        lock.release();
+        await lock.done;
+        const res = await pending;
+
+        expect(res.status).toBe(200);
+        const stamp = await stored(row.id);
+        expect(stamp).toBeInstanceOf(Date);
+        expect(await res.json()).toEqual({ ok: true, pausedAt: stamp!.toISOString() });
+        const [audit, ...rest] = await audits(row.id, 'task.admin_pause');
+        expect(rest).toEqual([]);
+        expect(audit?.metadata).not.toHaveProperty('tookOver');
+        expect((await findAdminPausedTaskIds(db, [row.id])).has(row.id)).toBe(true);
+      });
+
+      it('takes over the stamp of a concurrent owner Pause that lands first', async () => {
+        const row = await task();
+        const ownerStamp = new Date(Date.now() - 60_000);
+        const lock = await holdLock(row.id, async (tx) => {
+          await tx
+            .update(schema.tasks)
+            .set({ pausedAt: ownerStamp })
+            .where(eq(schema.tasks.id, row.id));
+          await tx
+            .insert(schema.taskEvents)
+            .values({ taskId: row.id, eventType: 'task.paused', payload: { by: OWNER } });
+        });
+
+        const pending = act(row.id, 'pause');
+        await waitUntilBlocked();
+        lock.release();
+        await lock.done;
+        const res = await pending;
+
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true, pausedAt: ownerStamp.toISOString() });
+        expect(await stored(row.id)).toEqual(ownerStamp);
+        const [audit] = await audits(row.id, 'task.admin_pause');
+        expect(audit?.metadata).toMatchObject({ tookOver: true });
+        expect((await findAdminPausedTaskIds(db, [row.id])).has(row.id)).toBe(true);
+      });
+    });
+
+    describe('the order of two pauses is the order of their writes, not of their transactions', () => {
+      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const stallNextTransaction = () => {
+        const state = { stalled: false };
+        h.stall = (real) => {
+          return new Proxy(real as object, {
+            get(target, prop) {
+              if (prop === 'transaction') {
+                return (cb: (tx: Database) => Promise<unknown>) => {
+                  h.stall = null;
+                  return (target as Database).transaction(async (tx) => {
+                    await tx.execute(sql`select 1`);
+                    state.stalled = true;
+                    await sleep(400);
+                    return cb(tx as unknown as Database);
+                  });
+                };
+              }
+              const value = Reflect.get(target, prop);
+              return typeof value === 'function' ? value.bind(target) : value;
+            },
+          });
+        };
+        return state;
+      };
+      const untilStalled = async (state: { stalled: boolean }) => {
+        for (let tries = 0; tries < 100 && !state.stalled; tries += 1) await sleep(20);
+        if (!state.stalled) throw new Error('the request never reached its transaction');
+      };
+      const pauseEvents = async (taskId: string) =>
+        (await events(taskId, 'task.paused')).sort(
+          (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+        );
+      const holdRowLock = async (taskId: string) => {
+        let release = () => {};
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let locked = () => {};
+        const held = new Promise<void>((resolve) => {
+          locked = resolve;
+        });
+        const done = db.transaction(async (tx) => {
+          await tx
+            .select({ id: schema.tasks.id })
+            .from(schema.tasks)
+            .where(eq(schema.tasks.id, taskId))
+            .for('update');
+          locked();
+          await gate;
+        });
+        await held;
+        return { release, done };
+      };
+
+      afterEach(() => {
+        h.stall = null;
+      });
+
+      it("reads an administrator's takeover, begun first and written last, as the pause in force", async () => {
+        const row = await task();
+        const state = stallNextTransaction();
+        as(ADMIN, 'admin');
+        const admin = act(row.id, 'pause');
+        await untilStalled(state);
+        as(OWNER, 'user');
+        expect((await ownerAct(row.id, 'pause')).status).toBe(200);
+        as(ADMIN, 'admin');
+        expect((await admin).status).toBe(200);
+
+        const written = await pauseEvents(row.id);
+        expect(written.map((e) => e.payload)).toMatchObject([
+          { by: OWNER },
+          { by: ADMIN, byAdmin: true },
+        ]);
+        expect((await findAdminPausedTaskIds(db, [row.id])).has(row.id)).toBe(true);
+        as(OWNER, 'user');
+        expect((await ownerAct(row.id, 'resume')).status).toBe(409);
+      });
+
+      it("keeps an owner's pause, begun first and written last, the owner's after an administrator paused and resumed", async () => {
+        const row = await task();
+        const state = stallNextTransaction();
+        as(OWNER, 'user');
+        const owner = ownerAct(row.id, 'pause');
+        await untilStalled(state);
+        as(ADMIN, 'admin');
+        expect((await act(row.id, 'pause')).status).toBe(200);
+        expect((await act(row.id, 'resume')).status).toBe(200);
+        as(OWNER, 'user');
+        expect((await owner).status).toBe(200);
+
+        const written = await pauseEvents(row.id);
+        expect(written.map((e) => e.payload)).toMatchObject([
+          { by: ADMIN, byAdmin: true },
+          { by: OWNER },
+        ]);
+        expect((await findAdminPausedTaskIds(db, [row.id])).has(row.id)).toBe(false);
+        expect((await ownerAct(row.id, 'resume')).status).toBe(200);
+      });
+
+      it.each([
+        ['the owner pause', OWNER, 'user'],
+        ['the administrator pause', ADMIN, 'admin'],
+      ])('stamps %s with the time it was written, after a lock wait', async (_name, id, role) => {
+        const row = await task();
+        const lock = await holdRowLock(row.id);
+        as(id, role);
+        const started = Date.now();
+
+        const pending = role === 'admin' ? act(row.id, 'pause') : ownerAct(row.id, 'pause');
+        await sleep(300);
+        lock.release();
+        await lock.done;
+        expect((await pending).status).toBe(200);
+
+        const [event] = await pauseEvents(row.id);
+        expect(event!.createdAt.getTime()).toBeGreaterThanOrEqual(started + 250);
       });
     });
   });
@@ -941,6 +1333,248 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
       expect((await postUpgrade()).status).toBe(500);
       expect(h.spawn).not.toHaveBeenCalled();
       expect(await startAudits()).toEqual([]);
+    });
+  });
+
+  describe('findAdminPausedTaskIds on Postgres', () => {
+    it('reads two pauses with the same stamp by id, whichever of them was written first', async () => {
+      const at = new Date('2026-10-14T09:00:00.000Z');
+      const pause = (id: string, taskId: string, payload: Record<string, unknown>) => ({
+        id,
+        taskId,
+        eventType: 'task.paused',
+        payload,
+        createdAt: at,
+      });
+      const lowerFirst = await task({ pausedAt: at });
+      const higherFirst = await task({ pausedAt: at });
+      await db.insert(schema.taskEvents).values([
+        pause('00000000-0000-4000-8000-000000000a01', lowerFirst.id, { by: OWNER }),
+        pause('00000000-0000-4000-8000-000000000a02', lowerFirst.id, {
+          by: ADMIN,
+          byAdmin: true,
+        }),
+      ]);
+      await db.insert(schema.taskEvents).values([
+        pause('00000000-0000-4000-8000-000000000a04', higherFirst.id, {
+          by: ADMIN,
+          byAdmin: true,
+        }),
+        pause('00000000-0000-4000-8000-000000000a03', higherFirst.id, { by: OWNER }),
+      ]);
+
+      const named = await findAdminPausedTaskIds(db, [lowerFirst.id, higherFirst.id]);
+
+      expect([...named].sort()).toEqual([lowerFirst.id, higherFirst.id].sort());
+    });
+
+    it('answers for more ids than one statement can bind', async () => {
+      const held = await task({ pausedAt: new Date() });
+      await db.insert(schema.taskEvents).values({
+        taskId: held.id,
+        eventType: 'task.paused',
+        payload: { by: ADMIN, byAdmin: true },
+      });
+      const ids = [held.id, ...Array.from({ length: 70_000 }, () => randomUUID())];
+
+      expect([...(await findAdminPausedTaskIds(db, ids))]).toEqual([held.id]);
+    });
+  });
+
+  describe('GET /blocking, the parked list', () => {
+    const pausedBy = async (taskId: string, by: string, byAdmin: boolean) => {
+      await db.insert(schema.taskEvents).values({
+        taskId,
+        eventType: 'task.paused',
+        payload: byAdmin ? { by, byAdmin: true } : { by },
+      });
+    };
+    const seedParked = async () => {
+      const ids: Record<string, string> = {};
+      const add = async (key: string, over: Partial<typeof schema.tasks.$inferInsert>) => {
+        ids[key] = (await task({ title: key, ...over })).id;
+      };
+      await add('queued', { status: 'queued' });
+      await add('running', { status: 'running' });
+      await add('waiting_user', { status: 'waiting_user' });
+      await add('waiting_pr', { status: 'waiting_pr' });
+      await add('paused', { status: 'paused' });
+      await add('admin_waiting', { status: 'waiting_user', userId: ADMIN });
+      await add('failed_plain', { status: 'failed' });
+      await add('failed_admin_paused', { status: 'failed', pausedAt: new Date() });
+      await pausedBy(ids.failed_admin_paused!, ADMIN, true);
+      await add('failed_owner_paused', { status: 'failed', pausedAt: new Date() });
+      await pausedBy(ids.failed_owner_paused!, OWNER, false);
+      await add('failed_admin_dead', {
+        status: 'failed',
+        pausedAt: new Date(),
+        deadAt: new Date(),
+      });
+      await pausedBy(ids.failed_admin_dead!, ADMIN, true);
+      await add('created', { status: 'created' });
+      return ids;
+    };
+    const keysOf = (ids: Record<string, string>, rows: { id: string }[]) => {
+      const byId = new Map(Object.entries(ids).map(([key, id]) => [id, key]));
+      return rows.map((t) => byId.get(t.id)).sort();
+    };
+
+    it('in maintenance parks the tasks the drain does not wait for, and leaves tasks as it was', async () => {
+      h.state = 'maintenance';
+      const ids = await seedParked();
+      const body = await blocking();
+      expect(keysOf(ids, body.tasks)).toEqual(['queued', 'running']);
+      expect(keysOf(ids, body.parked)).toEqual([
+        'admin_waiting',
+        'failed_admin_paused',
+        'paused',
+        'waiting_pr',
+        'waiting_user',
+      ]);
+      expect(body.total).toBe(2 + body.jobs.length);
+      expect(body.capped).toBe(false);
+    });
+
+    it.each(['draining', 'normal'])(
+      'in %s parks only the failed task under an administrator pause',
+      async (state) => {
+        h.state = state;
+        const ids = await seedParked();
+        const body = await blocking();
+        expect(keysOf(ids, body.parked)).toEqual(['failed_admin_paused']);
+        expect(keysOf(ids, body.tasks)).toEqual([
+          'admin_waiting',
+          'paused',
+          'queued',
+          'running',
+          'waiting_pr',
+          'waiting_user',
+        ]);
+      },
+    );
+
+    it('carries pausedByAdmin, the owner and the live CLI on a parked row', async () => {
+      h.state = 'maintenance';
+      const ids = await seedParked();
+      await run(ids.waiting_user!, { startedAt: new Date() });
+      const body = await blocking();
+      const failed = body.parked.find((t) => t.id === ids.failed_admin_paused);
+      expect(failed?.pausedByAdmin).toBe(true);
+      expect(failed?.ownerEmail).toBe('owner@maintenance.test');
+      const waiting = body.parked.find((t) => t.id === ids.waiting_user);
+      expect(waiting?.pausedByAdmin).toBe(false);
+      expect(waiting?.hasLiveCli).toBe(true);
+    });
+
+    it.each([
+      { seeded: BLOCKING_LIST_CAP, capped: false },
+      { seeded: BLOCKING_LIST_CAP + 1, capped: true },
+    ])(
+      'with $seeded parked tasks, lists the cap and says parkedCapped is $capped',
+      async ({ seeded, capped }) => {
+        h.state = 'maintenance';
+        await db.insert(schema.tasks).values(
+          Array.from({ length: seeded }, (_, i) => ({
+            userId: OWNER,
+            type: TYPE,
+            title: `Parked ${i}`,
+            status: 'waiting_user' as const,
+          })),
+        );
+        const body = await blocking();
+        expect(body.parked).toHaveLength(BLOCKING_LIST_CAP);
+        expect(body.parkedCapped).toBe(capped);
+        expect(body.total).toBe(0);
+        expect(body.capped).toBe(false);
+      },
+    );
+
+    describe('with many failed tasks under a pause', () => {
+      const failedPaused = (n: number) =>
+        Array.from({ length: n }, (_, i) => ({
+          userId: OWNER,
+          type: TYPE,
+          title: `Failed ${i}`,
+          status: 'failed' as const,
+          pausedAt: new Date(),
+        }));
+
+      it('lists a waiting task that 201 newer failed tasks under no administrator pause would crowd out', async () => {
+        h.state = 'maintenance';
+        const waiting = await task({
+          status: 'waiting_user',
+          updatedAt: new Date('2020-01-01T00:00:00Z'),
+        });
+        await db.insert(schema.tasks).values(failedPaused(BLOCKING_LIST_CAP + 1));
+        const body = await blocking();
+        expect(body.parked.map((t) => t.id)).toEqual([waiting.id]);
+        expect(body.parkedCapped).toBe(false);
+      });
+
+      it('lists the one failed task under an administrator pause among 250 that are not', async () => {
+        h.state = 'maintenance';
+        const held = await task({
+          status: 'failed',
+          pausedAt: new Date(),
+          updatedAt: new Date('2020-01-01T00:00:00Z'),
+        });
+        await pausedBy(held.id, ADMIN, true);
+        await db.insert(schema.tasks).values(failedPaused(250));
+        const body = await blocking();
+        expect(body.parked.map((t) => t.id)).toEqual([held.id]);
+        expect(body.parkedCapped).toBe(false);
+      });
+
+      it('lists the cap and says parkedCapped when 201 failed tasks each hold an administrator pause', async () => {
+        h.state = 'maintenance';
+        const rows = await db
+          .insert(schema.tasks)
+          .values(failedPaused(BLOCKING_LIST_CAP + 1))
+          .returning({ id: schema.tasks.id });
+        await db.insert(schema.taskEvents).values(
+          rows.map((r) => ({
+            taskId: r.id,
+            eventType: 'task.paused',
+            payload: { by: ADMIN, byAdmin: true },
+          })),
+        );
+        const body = await blocking();
+        expect(body.parked).toHaveLength(BLOCKING_LIST_CAP);
+        expect(body.parkedCapped).toBe(true);
+      });
+
+      it('keeps the newest rows of the union when administrator-held failed tasks outnumber the cap', async () => {
+        h.state = 'maintenance';
+        const waiting = await task({
+          status: 'waiting_user',
+          updatedAt: new Date('2026-06-01T00:00:00Z'),
+        });
+        const rows = await db
+          .insert(schema.tasks)
+          .values(
+            Array.from({ length: BLOCKING_LIST_CAP + 5 }, (_, i) => ({
+              userId: OWNER,
+              type: TYPE,
+              title: `Held ${i}`,
+              status: 'failed' as const,
+              pausedAt: new Date(),
+              updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)),
+            })),
+          )
+          .returning({ id: schema.tasks.id });
+        await db.insert(schema.taskEvents).values(
+          rows.map((r) => ({
+            taskId: r.id,
+            eventType: 'task.paused',
+            payload: { by: ADMIN, byAdmin: true },
+          })),
+        );
+        const body = await blocking();
+        expect(body.parked).toHaveLength(BLOCKING_LIST_CAP);
+        expect(body.parked[0]?.id).toBe(waiting.id);
+        expect(body.parked.map((t) => t.id)).not.toContain(rows[0]!.id);
+        expect(body.parkedCapped).toBe(true);
+      });
     });
   });
 

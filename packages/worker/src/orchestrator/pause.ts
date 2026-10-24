@@ -43,11 +43,12 @@ export async function resolvePause(db: Database, taskId: string): Promise<PauseS
 }
 
 /** Copy for the pause park banner. Display only — every consumer keys on `tasks.paused_at` or
- *  the config switch, never on this text. */
+ *  the config switch, never on this text. Printed to every viewer, including one an
+ *  administrator's pause has locked out of Resume, so it does not tell the reader to resume. */
 export function pauseParkMessage(scope: PauseScope): string {
   return scope === 'global'
     ? 'Paused — all execution is paused by an administrator'
-    : 'Paused — resume this task to continue';
+    : 'Paused — this task continues when it is resumed';
 }
 
 /** Does this task have a CLI invocation actually RUNNING (started, not ended, not superseded)?

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { orderByDefaultPriority, resolveDefaultCliProvider } from './default-provider.js';
+import {
+  orderByDefaultPriority,
+  resolveDefaultCliProvider,
+  resolveTaskCliProviderId,
+} from './default-provider.js';
 
 interface P {
   id: string;
@@ -65,5 +69,40 @@ describe('default provider priority', () => {
     expect(ordered[1]).toBe(middle);
     expect(ordered[2]).toBe(newest);
     expect(resolveDefaultCliProvider(input)).toBe(oldest);
+  });
+});
+
+describe('the CLI a task runs on', () => {
+  const oldest = p('m', '2026-01-01T00:00:00Z');
+  const newest = p('a', '2026-03-01T00:00:00Z');
+
+  it('is the task own CLI whenever the task names one', () => {
+    expect(resolveTaskCliProviderId('a', [oldest, newest])).toBe('a');
+    expect(resolveTaskCliProviderId('a', [newest, oldest])).toBe('a');
+  });
+
+  it('keeps a disabled own CLI and an own CLI the list does not hold', () => {
+    const off = p('off', '2025-01-01T00:00:00Z', false);
+    expect(resolveTaskCliProviderId('off', [off, oldest])).toBe('off');
+    expect(resolveTaskCliProviderId('gone', [oldest])).toBe('gone');
+    expect(resolveTaskCliProviderId('gone', [])).toBe('gone');
+  });
+
+  it('is the default provider for a task that names none, whatever the input order', () => {
+    const off = p('off', '2025-01-01T00:00:00Z', false);
+    for (const order of permutations([off, oldest, newest])) {
+      expect(resolveTaskCliProviderId(null, order)).toBe('m');
+    }
+  });
+
+  it('breaks a createdAt tie by the lowest id for a task that names none', () => {
+    const low = p('aaa', '2026-01-01T00:00:00Z');
+    const high = p('bbb', '2026-01-01T00:00:00Z');
+    expect(resolveTaskCliProviderId(null, [high, low])).toBe('aaa');
+  });
+
+  it('is null for a task that names none when no provider is enabled', () => {
+    expect(resolveTaskCliProviderId(null, [])).toBeNull();
+    expect(resolveTaskCliProviderId(null, [p('x', '2026-01-01T00:00:00Z', false)])).toBeNull();
   });
 });

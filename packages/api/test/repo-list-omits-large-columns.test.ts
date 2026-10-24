@@ -35,10 +35,11 @@ function noRows(): unknown {
   return query;
 }
 
-/** One repository holding both large columns. The route's query runs through the fake's own
- *  `findMany`, which returns the columns that query names, as Postgres sends them; `fetched` keeps
- *  those rows, since the route drops from the response what it does not ship. The list's other
- *  queries are the ones the fake has no builder for. */
+/** One repository holding both large columns. A route's query runs through the fake's own
+ *  `findMany` (the list) or `findFirst` (one repository), which return the columns that query
+ *  names, as Postgres sends them; `fetched` keeps those rows, since the route drops from the
+ *  response what it does not ship. The list's other queries are the ones the fake has no builder
+ *  for. */
 function setup() {
   const fake = createFakeDb({ repositories: schema.repositories });
   fake.insert(schema.repositories, {
@@ -46,6 +47,8 @@ function setup() {
     userId: USER,
     name: 'repo',
     status: 'ready',
+    source: 'local_path',
+    writable: false,
     fileTree: ['src/a.ts', 'src/b.ts', 'docs/readme.md'],
     renderContext: {
       projectInfo: { name: MARKER },
@@ -65,6 +68,11 @@ function setup() {
           const rows = await fake.db.query.repositories.findMany(opts);
           fetched.push(...rows);
           return rows;
+        },
+        findFirst: async (opts?: Record<string, unknown>) => {
+          const row = await fake.db.query.repositories.findFirst(opts);
+          if (row) fetched.push(row);
+          return row;
         },
       },
     },
@@ -112,5 +120,49 @@ describe('listing repositories', () => {
 
     const { repositories } = (await res.json()) as { repositories: { topLevelPaths: string[] }[] };
     expect(repositories[0]!.topLevelPaths).toEqual(['docs', 'src']);
+  });
+});
+
+describe('reading one repository', () => {
+  it('leaves out the render context and the file tree, which no caller of it reads', async () => {
+    const { fake } = setup();
+    const stored = fake.rows(schema.repositories)[0]!;
+    expect(stored.renderContext).not.toBeNull();
+    expect(stored.fileTree).not.toBeNull();
+
+    const res = await app.request(`/${REPO}`);
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const { repository } = JSON.parse(text) as { repository: Record<string, unknown> };
+    expect(repository).not.toHaveProperty('renderContext');
+    expect(repository).not.toHaveProperty('fileTree');
+    expect(text).not.toContain(MARKER);
+    expect(text).not.toContain('src/a.ts');
+  });
+
+  it('does not fetch either of them', async () => {
+    const { fetched } = setup();
+
+    expect((await app.request(`/${REPO}`)).status).toBe(200);
+
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]).not.toHaveProperty('renderContext');
+    expect(fetched[0]).not.toHaveProperty('fileTree');
+  });
+
+  it('still ships the fields its callers read', async () => {
+    setup();
+
+    const res = await app.request(`/${REPO}`);
+
+    const { repository } = (await res.json()) as { repository: Record<string, unknown> };
+    expect(repository).toMatchObject({
+      id: REPO,
+      name: 'repo',
+      status: 'ready',
+      source: 'local_path',
+      writable: false,
+    });
   });
 });

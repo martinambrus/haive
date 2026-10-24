@@ -76,3 +76,9 @@ export function drainTaskStatuses(state: MaintenanceState): DrainTaskStatus[] {
     ? [...RUNNING_TASK_STATUSES]
     : [...RUNNING_TASK_STATUSES, ...PARKED_TASK_STATUSES];
 }
+
+/** The live statuses the drain does NOT wait for in this state: the complement of
+ *  `drainTaskStatuses`, which an administrator can still act on. */
+export function nonBlockingTaskStatuses(state: MaintenanceState): DrainTaskStatus[] {
+  return locksOutNonAdmins(state) ? [...PARKED_TASK_STATUSES] : [];
+}

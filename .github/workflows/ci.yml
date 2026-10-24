@@ -249,6 +249,7 @@ jobs:
           api test/integrations-broker.test.ts INTEGRATIONS_BROKER_TEST_URL integrations_broker_test pg
           api test/custom-mcp-db.test.ts CUSTOM_MCP_TEST_URL custom_mcp_test pg
           shared test/create-database-race.test.ts RACE_PG_URL create_database_race_test pg
+          shared test/module-db-abandoned-waiter.test.ts MODULE_DB_WAITER_TEST_URL module_db_waiter_test pg
           shared test/integrations-refresh-db.test.ts INTEGRATIONS_REFRESH_TEST_URL integrations_refresh_test pg
           shared test/integrations-clients-db.test.ts INTEGRATIONS_CLIENTS_TEST_URL integrations_clients_test pg
           shared test/integrations-resolution-db.test.ts INTEGRATIONS_RESOLUTION_TEST_URL integrations_resolution_test pg
@@ -260,6 +261,7 @@ jobs:
           api test/new-work-fence-db.test.ts NEW_WORK_FENCE_TEST_URL new_work_fence_test pg
           api test/gate-retry-reask-db.test.ts GATE_RETRY_REASK_TEST_URL gate_retry_reask_test pg
           api test/gate-stop-wedge-db.test.ts GATE_STOP_WEDGE_TEST_URL gate_stop_wedge_test pg
+          database test/gate-wedge-heal.test.ts GATE_WEDGE_HEAL_TEST_URL gate_wedge_heal_test pg
           updater test/new-work-fence-db.test.ts UPDATER_FENCE_TEST_URL updater_fence_test pg
           updater test/rollback-failure-db.test.ts UPDATER_ROLLBACK_TEST_URL updater_rollback_test pg
           api test/integration-choice-routes-db.test.ts INTEGRATION_CHOICE_ROUTES_TEST_URL integration_choice_routes_test pg
@@ -287,6 +289,7 @@ jobs:
           api test/module-integrations-routes-db.test.ts MODULE_INTEGRATIONS_ROUTES_TEST_URL module_integrations_routes_test pg
           api test/integrations-audit-db.test.ts INTEGRATIONS_AUDIT_TEST_URL integrations_audit_test pg
           api test/malformed-id-routes-db.test.ts MALFORMED_ID_ROUTES_TEST_URL malformed_id_routes_test pg
+          api test/must-change-password-gate-db.test.ts MUST_CHANGE_PASSWORD_TEST_URL must_change_password_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
@@ -322,6 +325,11 @@ jobs:
         run: pnpm --filter @haive/worker exec vitest run test/module-activation-watch.test.ts
         env:
           MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/11
+
+      - name: Auth throttle script on a real Redis
+        run: pnpm --filter @haive/api exec vitest run test/auth-throttle.test.ts
+        env:
+          AUTH_THROTTLE_TEST_REDIS_URL: redis://localhost:6379/10
 
       # The migration runner's live-database coverage. Not part of smoke:ci, which is
       # worker-scoped; this package had no smoke of its own before.

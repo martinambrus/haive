@@ -2167,7 +2167,14 @@ export async function handleResult(
   }
 }
 
-class GateAnswerOvertaken extends Error {}
+class GateAnswerOvertaken extends Error {
+  constructor(
+    readonly code: 'revive_refused' | 'task_moved',
+    readonly refusal?: string,
+  ) {
+    super(code);
+  }
+}
 
 /** Resolve a fix-loop escalation gate decision parked on the source step (the step that
  *  found the defect at the round cap): continue (one more round), accept (stand down the
@@ -2184,9 +2191,17 @@ export async function resolveFixLoopGate(
 ): Promise<void> {
   // A Retry that reset the gate took it over, and its own pass decides what runs next.
   const closeGate = () => writeOwnedRow(db, gateRow.id, { status: 'done', endedAt: new Date() });
+  const notApplied = (reason: string, detail: Record<string, unknown> = {}) =>
+    logger.warn(
+      { taskId: ctx.taskId, stepId: gateRow.stepId, round, action, reason, ...detail },
+      'fix-loop gate answer not applied',
+    );
 
   if (action === 'abort') {
-    if (!(await closeGate())) return;
+    if (!(await closeGate())) {
+      notApplied('row_not_owned');
+      return;
+    }
     await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.aborted', { round });
     await markTaskFailed(
       db,
@@ -2211,7 +2226,8 @@ export async function resolveFixLoopGate(
       await db.transaction(async (tx) => {
         if (fence.reviveFailed) {
           await admitReopen(tx, ctx.taskId);
-          if (await refuseRevive(tx, ctx.taskId)) throw new GateAnswerOvertaken();
+          const refusal = await refuseRevive(tx, ctx.taskId);
+          if (refusal) throw new GateAnswerOvertaken('revive_refused', refusal.reason);
         }
         await updateOwnedStep(tx, gateRow.id, { status: 'done', endedAt: new Date() });
         await record(tx);
@@ -2223,11 +2239,18 @@ export async function resolveFixLoopGate(
           targetRound,
           fence,
         );
-        if (!pointed) throw new GateAnswerOvertaken();
+        if (!pointed) throw new GateAnswerOvertaken('task_moved');
       });
       return true;
     } catch (err) {
-      if (err instanceof GateAnswerOvertaken || err instanceof StepSupersededError) return false;
+      if (err instanceof GateAnswerOvertaken) {
+        notApplied(err.code, err.refusal ? { refusal: err.refusal } : {});
+        return false;
+      }
+      if (err instanceof StepSupersededError) {
+        notApplied('row_not_owned');
+        return false;
+      }
       throw err;
     }
   };
@@ -2250,7 +2273,10 @@ export async function resolveFixLoopGate(
       await enqueueAdvance(ctx.taskId, ctx.userId, next.metadata.id, round, ctx.orchestrationEpoch);
       return;
     }
-    if (!(await closeGate())) return;
+    if (!(await closeGate())) {
+      notApplied('row_not_owned');
+      return;
+    }
     await recordFixLoopAccepted(db, ctx.taskId, gateRow.id);
     await acceptRemainingReviewFindings(db, ctx.taskId, round, 'fix-loop-gate');
     await appendEvent(db, ctx.taskId, gateRow.id, 'fix_loop.accepted', { round });
@@ -2267,6 +2293,7 @@ export async function resolveFixLoopGate(
   const target = await routableFixLoopTarget(db, ctx, gateRow.id);
   if (!target) {
     await closeGate();
+    notApplied('no_routable_target');
     return;
   }
   const nextRound = round + 1;
@@ -2933,7 +2960,7 @@ async function handleAdvanceStep(
     stepDef.shouldRun &&
     (existing == null || isFreshStepEntry(existing.status))
       ? await willSkipBeforeAdmission(
-          { ...ctx, db, stepDef, round },
+          { ...ctx, db, stepDef, round, providers: await loadProviders(db, ctx.userId) },
           await upsertRow(db, ctx.taskId, stepDef, round, runIdx >= 0 ? runIdx : undefined),
         )
       : false;

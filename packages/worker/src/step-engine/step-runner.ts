@@ -28,6 +28,7 @@ import {
   isOllamaCloudModel,
   logger,
   parseTimeoutLadder,
+  resolveTaskCliProviderId,
   validateFormValues,
 } from '@haive/shared';
 import type {
@@ -2637,6 +2638,7 @@ function buildStepContext(
     | 'repoPath'
     | 'workspacePath'
     | 'cliProviderId'
+    | 'providers'
     | 'stepDef'
     | 'round'
     | 'epoch'
@@ -2654,7 +2656,7 @@ function buildStepContext(
     repoPath: params.repoPath,
     workspacePath: params.workspacePath,
     sandboxWorkdir: SANDBOX_WORKDIR,
-    cliProviderId: params.cliProviderId,
+    cliProviderId: resolveTaskCliProviderId(params.cliProviderId, params.providers ?? []),
     round,
     epoch: params.epoch,
     db,
@@ -2678,7 +2680,7 @@ function buildStepContext(
 /** Whether the step's own `shouldRun` already says skip, asked before runtime admission so a step
  *  that will only skip takes no slot. A throw answers false: the gate stays, as it was. */
 export async function willSkipBeforeAdmission(
-  params: Parameters<typeof buildStepContext>[0],
+  params: Parameters<typeof buildStepContext>[0] & { providers: CliProviderRecord[] },
   row: TaskStepRow,
 ): Promise<boolean> {
   const { stepDef } = params;
@@ -2987,11 +2989,14 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       // A form may opt to auto-submit even in manual mode (autoContinue off) via
       // its own `autoSubmit` flag — for an info-only form with nothing to decide
       // (e.g. 06b's single-agent decision).
+      // A gate decision is always the person's.
+      const isGateForm = persistedSchema.fields.some((f) => f.id === FIX_LOOP_ACTION_FIELD);
       if (
         // A plain manual Retry set pauseFormOnRetry to force this step to STOP at
         // its form even under auto-continue — suppress every auto-submit variant
         // (pre-answer / reuse / zero-field / step defaults / form autoSubmit) so the
         // user can inspect and edit. Cleared on park below (one-shot).
+        !isGateForm &&
         !current.pauseFormOnRetry &&
         !meta.alwaysWaitForUser &&
         (autoContinue || persistedSchema.autoSubmit === true) &&
@@ -3033,8 +3038,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           reuseCandidate ??
           (persistedSchema.fields.length === 0
             ? {}
-            : (meta.autoSubmitDefaults || persistedSchema.autoSubmit) &&
-                !persistedSchema.fields.some((f) => f.id === FIX_LOOP_ACTION_FIELD)
+            : meta.autoSubmitDefaults || persistedSchema.autoSubmit
               ? extractFormDefaults(persistedSchema)
               : undefined);
         if (candidate !== undefined) {

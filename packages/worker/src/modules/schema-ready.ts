@@ -1,5 +1,6 @@
 // Boot skipped or outran these modules' schema ensures, or a teardown hook began on them, and no
-// ensure of theirs has succeeded since. 'failed' is an unready module whose attempts ran out.
+// ensure of theirs has succeeded since; a module with no ensure stays here until its hook ends.
+// 'failed' is an unready module whose attempts ran out.
 const unready = new Map<string, 'pending' | 'failed'>();
 const teardownsRunning = new Set<string>();
 

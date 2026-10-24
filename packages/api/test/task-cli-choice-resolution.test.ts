@@ -176,3 +176,109 @@ describe("the listing's usage strip", () => {
     expect(out.get(TASK)?.[0]).toBe(TASK_CLI);
   });
 });
+
+describe("the listing's usage strip for a task with no CLI of its own", () => {
+  const OTHER_USER = '00000000-0000-4000-8000-0000000000a2';
+  const P1 = '00000000-0000-4000-8000-0000000000c1';
+  const P2 = '00000000-0000-4000-8000-0000000000c2';
+  const P3 = '00000000-0000-4000-8000-0000000000c3';
+  const day = (n: number) => new Date(Date.UTC(2026, 0, n));
+  const none = (currentStepId = '08c-code-review') => ({
+    id: TASK,
+    currentStepId,
+    cliProviderId: null,
+    ignoreSavedStepClis: false,
+  });
+
+  function providers(rows: { id: string; createdAt: Date; enabled?: boolean; userId?: string }[]) {
+    const fake = createFakeDb({
+      cliProviders: schema.cliProviders,
+      taskStepCliChoices: schema.taskStepCliChoices,
+      taskStepCliTouched: schema.taskStepCliTouched,
+      userStepCliPreferences: schema.userStepCliPreferences,
+      userStepCliRolePreferences: schema.userStepCliRolePreferences,
+    });
+    for (const r of rows) {
+      fake.insert(schema.cliProviders, {
+        name: 'codex',
+        userId: USER,
+        enabled: true,
+        ...r,
+      });
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return { fake, db: fake.db as any };
+  }
+
+  it('meters the oldest enabled provider whatever the insert order', async () => {
+    const { db } = providers([
+      { id: P3, createdAt: day(3) },
+      { id: P1, createdAt: day(1) },
+      { id: P2, createdAt: day(2) },
+    ]);
+    const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [none()]);
+    expect(out.get(TASK)).toEqual([P1]);
+  });
+
+  it('breaks a createdAt tie on the lowest id', async () => {
+    const { db } = providers([
+      { id: P2, createdAt: day(1) },
+      { id: P1, createdAt: day(1) },
+      { id: P3, createdAt: day(2) },
+    ]);
+    const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [none()]);
+    expect(out.get(TASK)).toEqual([P1]);
+  });
+
+  it('skips a disabled oldest provider', async () => {
+    const { db } = providers([
+      { id: P1, createdAt: day(1), enabled: false },
+      { id: P2, createdAt: day(2) },
+      { id: P3, createdAt: day(3) },
+    ]);
+    const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [none()]);
+    expect(out.get(TASK)).toEqual([P2]);
+  });
+
+  it("ignores another user's older provider", async () => {
+    const { db } = providers([
+      { id: P1, createdAt: day(1), userId: OTHER_USER },
+      { id: P2, createdAt: day(2) },
+    ]);
+    const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [none()]);
+    expect(out.get(TASK)).toEqual([P2]);
+  });
+
+  it('keeps a saved step pick over the default', async () => {
+    const { fake, db } = providers([
+      { id: P1, createdAt: day(1) },
+      { id: P2, createdAt: day(2) },
+    ]);
+    fake.insert(schema.userStepCliPreferences, {
+      userId: USER,
+      stepId: '08c-code-review',
+      cliProviderId: P2,
+      effortLevel: 'low',
+      explicit: true,
+    });
+    const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [none()]);
+    expect(out.get(TASK)).toEqual([P2]);
+  });
+
+  it("keeps the task's own CLI over the default", async () => {
+    const { db } = providers([
+      { id: P1, createdAt: day(1) },
+      { id: P2, createdAt: day(2) },
+    ]);
+    const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [
+      { ...none(), cliProviderId: P2 },
+    ]);
+    expect(out.get(TASK)).toEqual([P2]);
+  });
+
+  it('names nothing when the user has no enabled provider', async () => {
+    const { db } = providers([{ id: P1, createdAt: day(1), enabled: false }]);
+    const out = await resolveCurrentStepCliProviderIds(db, flags, USER, [none()]);
+    expect(out.get(TASK)).toEqual([]);
+  });
+});

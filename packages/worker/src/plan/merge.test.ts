@@ -358,6 +358,35 @@ describe('landPlanMerge on a failed HEAD read', () => {
   });
 });
 
+describe('a conflicting merge whose unmerged listing fails', () => {
+  const LISTING = ['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--diff-filter=U'];
+
+  it('rejects instead of reporting the merge clean, and leaves the merge open', async () => {
+    const { local } = await unrelatedPair();
+    const wt = await ensurePlanMergeWorktree(local);
+    const { unrelated } = await divergence(local, 'main');
+    shim = await failGit(LISTING);
+    await expect(mergeOriginInto(wt, 'main', unrelated, COMMIT_ENV)).rejects.toThrow(
+      /git diff .* failed in /,
+    );
+    await shim.restore();
+    shim = null;
+    await expect(git(wt, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).resolves.toBeTruthy();
+    expect((await conflictedPaths(wt)).paths).toEqual(['README.md']);
+  });
+
+  it('rejects from conflictedPaths with the command, the worktree and git text', async () => {
+    const { local } = await unrelatedPair();
+    const wt = await ensurePlanMergeWorktree(local);
+    await mergeOriginInto(wt, 'main', (await divergence(local, 'main')).unrelated, COMMIT_ENV);
+    shim = await failGit(LISTING);
+    const listing = conflictedPaths(wt);
+    await expect(listing).rejects.toThrow(
+      `git diff --diff-filter=U failed in ${wt}: fatal: simulated failure`,
+    );
+  });
+});
+
 describe('mergeOriginInto', () => {
   it('needs the unrelated-histories flag, and reports the add/add conflict', async () => {
     const { local } = await unrelatedPair();

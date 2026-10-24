@@ -61,8 +61,16 @@ until the deadline. The wait counts by the state the draining phase left in forc
 the state it reads under the fence, so the two agree (a recount that counted more would reopen a
 drain the wait had ended). `GET /admin/maintenance/blocking` reads the state past the cache and
 lists the same statuses through the same function, so the page shows exactly what the updater waits
-for, and under `maintenance` a parked task is not listed. An administrator's own parked task is not
-told apart from the others, though its owner could still answer it.
+for, and under `maintenance` a parked task is not in `tasks` and holds nothing. The same response lists
+those tasks apart, in `parked` (`nonBlockingTaskStatuses`, in `@haive/shared`: the complement of
+`drainTaskStatuses`), together with every live (not dead) failed task an administrator's pause holds, so
+an administrator can still Pause or Resume them from the page, where they show as "Parked". Whose pause
+stands is decided first, by `findAdminPausedTaskIds` over the ids of the failed tasks that carry one,
+and the list is cut after that, so failed tasks under an owner's pause cannot crowd the others out.
+`parked` counts toward neither `total` nor `capped` (`parkedCapped` says its own cut-off), and the
+updater never waits for it. It does not filter by owner role: an administrator's own parked task (who
+passes the gate and could still answer it) is listed there too, though it is not waited for. A page
+newer than its api reads a response without `parked` as an empty list.
 Every api route that starts such work refuses with 503 while the state is `draining` or
 `maintenance`: the task routes, and every route that writes a job's in-progress status (repository
 create, upload and refresh, bundle create, upload, replace and sync, provider create, clone and image
@@ -90,14 +98,28 @@ be written refuses the change. The state itself lives in Redis, so a commit that
 write still leaves the new state without its row. A task the administrator pauses or resumes from that
 page gets its `task.admin_pause` or `task.admin_resume` row in the same transaction as the change, so a
 row that cannot be written undoes it; Stop's row stays best-effort, since the runs it stopped cannot be
-restarted. A pause an administrator makes is theirs to lift. The newest `task.paused` event says who made
-the pause in force (`byAdmin`, `findAdminPausedTaskIds`); while it is an administrator's, the owner's
-Resume answers 409 `paused_by_admin` and keeps the pause, judged after the clear inside the resume's
-transaction so that a pause placed since the route read it is the one refused. An owner's Retry of a failed
-task revives it but leaves that pause standing, since a 409 there would strand a task that
-`GET /admin/maintenance/blocking` omits (it lists no failed task); Cancel still clears any pause, and an
-administrator may lift it from either route. `GET /tasks/:id` carries `pauseLocked` (the pause is an
-administrator's and the viewer is not one), which hides the task page's Resume and changes its banner.
+restarted. A pause an administrator makes is theirs to lift, and an administrator's Pause on a task its owner
+already paused makes it theirs: under the task row lock (`FOR UPDATE`) it writes a newer `byAdmin`
+`task.paused` event and a `task.admin_pause` row marked `tookOver`, in one transaction, and leaves
+`paused_at` alone (the stamp anchors the runtime reaper's paused-grace); a pause that is already an
+administrator's writes nothing. The newest `task.paused` event says who made the pause in force
+(`byAdmin`, `findAdminPausedTaskIds`). Events are ordered by `created_at`, then `id`, and both writers
+(`appendPauseEvent`) stamp `created_at` with `clock_timestamp()` once they hold the row lock, so it
+follows the order the lock was held in, which the default (the transaction's start) does not; the id is
+a random uuid, so it only makes a tie stable. The page's rows carry the answer as `pausedByAdmin`: an
+owner's pause offers Resume and Take over pause, an administrator's only Resume. While it is an
+administrator's, the owner's Resume answers 409 `paused_by_admin` and keeps the pause, judged after the
+clear inside the resume's transaction so that a pause placed since the route read it is the one refused.
+An owner's Retry of a failed task revives it but leaves that pause standing (a refusal would leave its
+owner nothing to do until an administrator acts); it lifts the hold it read only after judging whose it
+is again under the task row lock (`liftReadPause`), since a takeover keeps the stamp the Retry read.
+Cancel still clears any pause, and an administrator may lift it from either route. One who owns the task
+and lifts an administrator's pause through the owner route gets the same `byAdmin` `task.resumed` event
+and `task.admin_resume` row as from the page (`recordAdminResume`, in the resume's transaction, so a row
+that cannot be written undoes it); lifting their own owner pause stays an owner action with neither, and
+a Retry that clears an administrator's pause for an administrator records only `task.retried`.
+`GET /tasks/:id` carries `pauseLocked` (the pause is an administrator's and the viewer is not one), which
+hides the task page's Resume and changes its banner.
 In the worker, the allowance auto-resume and an answer to a parked form do not reopen a failed task while
 new work is refused (see [Worker restarts](worker-restarts.md)).
 

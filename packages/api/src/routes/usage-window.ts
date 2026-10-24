@@ -1,7 +1,13 @@
 import { Hono } from 'hono';
 import { and, eq, isNull, notInArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { CONFIG_KEYS, configService, type AuthMode, type UsageWindowSnapshot } from '@haive/shared';
+import {
+  CONFIG_KEYS,
+  configService,
+  resolveTaskCliProviderId,
+  type AuthMode,
+  type UsageWindowSnapshot,
+} from '@haive/shared';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -124,8 +130,11 @@ async function credentialRepairedAt(
  *  spending codex, and pure noise when every codex task is already parked on the exhausted
  *  allowance (the state that produced the report — 8 failed codex tasks, zero running). The
  *  numbers themselves are never gated; the header chip keeps showing them. */
-async function activeProviderIds(db: ReturnType<typeof getDb>, userId: string): Promise<string[]> {
-  const [running, live] = await Promise.all([
+export async function activeProviderIds(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+): Promise<string[]> {
+  const [running, live, providers] = await Promise.all([
     db
       .select({ providerId: schema.tasks.cliProviderId })
       .from(schema.tasks)
@@ -142,10 +151,21 @@ async function activeProviderIds(db: ReturnType<typeof getDb>, userId: string): 
           notInArray(schema.tasks.status, ['completed', 'failed', 'cancelled']),
         ),
       ),
+    db
+      .select({
+        id: schema.cliProviders.id,
+        enabled: schema.cliProviders.enabled,
+        createdAt: schema.cliProviders.createdAt,
+      })
+      .from(schema.cliProviders)
+      .where(eq(schema.cliProviders.userId, userId)),
   ]);
   return [
     ...new Set(
-      [...running, ...live].map((r) => r.providerId).filter((id): id is string => id !== null),
+      [
+        ...running.map((r) => resolveTaskCliProviderId(r.providerId, providers)),
+        ...live.map((r) => r.providerId),
+      ].filter((id): id is string => id !== null),
     ),
   ];
 }

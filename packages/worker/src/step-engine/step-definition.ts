@@ -17,6 +17,7 @@ export interface StepContext {
   repoPath: string;
   workspacePath: string;
   sandboxWorkdir: string;
+  /** The task's own CLI, else the default provider; null only when the user has neither. */
   cliProviderId: string | null;
   /** Round this step row belongs to (0 = original pass). Bumped by BOTH loops — the fix
    *  loop (loop_back) and the revise loop's forward fork (a human gate-1 spec reject) — so

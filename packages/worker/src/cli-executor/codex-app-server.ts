@@ -345,6 +345,7 @@ export function createCodexAppServerSession(
   let lastAgentMessage: string | null = null;
   let usage: CliTokenUsage | null = null;
   let peakPrompt = 0;
+  let contextWindow: number | null = null;
   let promptSeen = false;
   let anonymousSteers = 0;
   const queued: SentSteer[] = [];
@@ -439,6 +440,9 @@ export function createCodexAppServerSession(
         const last = isRecord(params.tokenUsage) ? params.tokenUsage.last : null;
         if (isRecord(last) && typeof last.inputTokens === 'number' && last.inputTokens > peakPrompt)
           peakPrompt = last.inputTokens;
+        const window = isRecord(params.tokenUsage) ? params.tokenUsage.modelContextWindow : null;
+        if (typeof window === 'number' && Number.isFinite(window) && window > 0)
+          contextWindow = window;
         const total = isRecord(params.tokenUsage) ? params.tokenUsage.total : null;
         if (!isRecord(total)) return;
         // Same field meanings as `codex exec --json`'s turn.completed usage (input INCLUDES the
@@ -568,7 +572,12 @@ export function createCodexAppServerSession(
       return lastAgentMessage;
     },
     getTokenUsage(): CliTokenUsage | null {
-      return usage && peakPrompt > 0 ? { ...usage, peakPromptTokens: peakPrompt } : usage;
+      if (!usage) return usage;
+      return {
+        ...usage,
+        ...(peakPrompt > 0 ? { peakPromptTokens: peakPrompt } : {}),
+        ...(contextWindow !== null ? { contextWindow } : {}),
+      };
     },
     getModelReport() {
       if (requestedModel === null && servedModel === null) return null;

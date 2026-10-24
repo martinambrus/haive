@@ -39,7 +39,8 @@ interface StreamJsonCollector {
   /** Token usage: the result event's usage when present (claude/zai — wins,
    *  never summed with assistant usages), else the sum of the per-message
    *  assistant usages (amp emits no result usage). Either way peakPromptTokens is the
-   *  largest single message's prompt. Null when nothing reported. */
+   *  largest single message's prompt, and contextWindow is the window the result's modelUsage
+   *  entry for the init/served model reports. Null when nothing reported. */
   getTokenUsage: () => CliTokenUsage | null;
   /** Model time from the LAST `result` event's `duration_api_ms` (cumulative across a steered
    *  run's turns, like its usage). Null when no result event carried one. */
@@ -109,6 +110,7 @@ export function createStreamJsonCollector(
   let resultErrorText: string | null = null;
   let resultTerminalReason: string | null = null;
   let resultUsage: CliTokenUsage | null = null;
+  let reportedWindow: number | null = null;
   let resultApiDurationMs: number | null = null;
   // Live fallback before the `result` event: one usage per assistant message.id, summed like the
   // CLI's own result (a message arrives as one event per content block, each repeating its usage).
@@ -245,12 +247,25 @@ export function createStreamJsonCollector(
       }
       // modelUsage is keyed by model and lists EVERY model billed for the run,
       // including side calls the CLI makes on its own (claude-code bills a haiku
-      // call for session titling). Recorded for visibility only — it is not an
-      // identity source: grok bills under `grok-4.6-build` while serving `grok-4.6`.
+      // call for session titling). The keys are not an identity source (grok bills under
+      // `grok-4.6-build` while serving `grok-4.6`); only the init or served model's entry
+      // gives the window.
       const modelUsage = event.modelUsage as Record<string, unknown> | undefined;
       if (modelUsage && typeof modelUsage === 'object') {
         for (const key of Object.keys(modelUsage)) {
           if (key.trim() && !isPlaceholderModel(key)) billedModels.add(key.trim());
+        }
+        for (const key of [requestedModel, servedModel]) {
+          if (key === null) continue;
+          const entry = modelUsage[key];
+          const w =
+            typeof entry === 'object' && entry !== null
+              ? (entry as Record<string, unknown>).contextWindow
+              : null;
+          if (typeof w === 'number' && Number.isFinite(w) && w > 0) {
+            reportedWindow = w;
+            break;
+          }
         }
       }
       // Some CLIs (e.g. amp) put a human-readable failure reason on the result
@@ -493,12 +508,21 @@ export function createStreamJsonCollector(
           u.inputTokens + (u.cacheReadTokens ?? 0) + (u.cacheCreationTokens ?? 0),
         );
       }
+      // One message is one request, so the result's usage is that request's prompt even
+      // when the CLI (zai, muse) puts zero usage on the assistant event.
+      if (peakPrompt === 0 && assistantUsageByMessage.size === 1 && resultUsage) {
+        peakPrompt =
+          resultUsage.inputTokens +
+          (resultUsage.cacheReadTokens ?? 0) +
+          (resultUsage.cacheCreationTokens ?? 0);
+      }
       const base = resultUsage ?? assistantUsage;
       if (!base) return null;
       return {
         ...base,
         ...(costUsd !== null ? { costUsd } : {}),
         ...(peakPrompt > 0 ? { peakPromptTokens: peakPrompt } : {}),
+        ...(reportedWindow !== null ? { contextWindow: reportedWindow } : {}),
       };
     },
   };

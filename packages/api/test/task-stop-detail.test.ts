@@ -114,6 +114,7 @@ function setup(task: Rows, events: Rows[] = []) {
     modules: schema.modules,
     stepCatalog: schema.stepCatalog,
     taskTypeDefinitions: schema.taskTypeDefinitions,
+    cliProviders: schema.cliProviders,
   });
   fake.insert(schema.tasks, {
     id: TASK,

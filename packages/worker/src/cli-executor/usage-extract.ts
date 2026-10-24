@@ -27,6 +27,8 @@ export function sumTokenUsage(
   if (cost > 0) out.costUsd = cost;
   const peak = Math.max(a.peakPromptTokens ?? 0, b.peakPromptTokens ?? 0);
   if (peak > 0) out.peakPromptTokens = peak;
+  const windows = [a.contextWindow, b.contextWindow].filter((w): w is number => (w ?? 0) > 0);
+  if (windows.length > 0) out.contextWindow = Math.min(...windows);
   return out;
 }
 

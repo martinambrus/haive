@@ -5,6 +5,31 @@ import { ACCESS_TTL, REFRESH_TTL } from './jwt.js';
 export const ACCESS_COOKIE = 'haive_access';
 export const REFRESH_COOKIE = 'haive_refresh';
 
+const SESSION_COOKIES = new Set([ACCESS_COOKIE, REFRESH_COOKIE]);
+
+export function withoutSessionCookies(header: string): string | null {
+  const kept = header
+    .split(';')
+    .filter((pair) => {
+      const eq = pair.indexOf('=');
+      return !SESSION_COOKIES.has((eq === -1 ? pair : pair.slice(0, eq)).trim());
+    })
+    .map((pair) => pair.trim())
+    .filter((pair) => pair !== '');
+  return kept.length > 0 ? kept.join('; ') : null;
+}
+
+export function isSessionSetCookie(setCookieValue: string): boolean {
+  const eq = setCookieValue.indexOf('=');
+  return SESSION_COOKIES.has((eq === -1 ? setCookieValue : setCookieValue.slice(0, eq)).trim());
+}
+
+export function withoutSessionSetCookies(upstream: Headers): void {
+  const kept = upstream.getSetCookie().filter((line) => !isSessionSetCookie(line));
+  upstream.delete('set-cookie');
+  for (const line of kept) upstream.append('set-cookie', line);
+}
+
 const isProd = process.env.NODE_ENV === 'production';
 
 const baseOptions = {

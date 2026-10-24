@@ -51,7 +51,7 @@ export async function moduleSchemaWaitMessage(
   if ((await moduleDeactivationMessage(db, stepId)) !== null) return null;
   if (moduleTeardownRunning(id)) {
     return (
-      `Module ${id}'s teardown hook is still running on this worker, so its schema setup waits for the hook to end and step ${stepId} starts after that. ` +
+      `Module ${id}'s teardown hook is still running on this worker, so step ${stepId} starts after it has ended and the module's schema setup, if it has one, has run again. ` +
       `Only a worker restart frees a hook that never ends.`
     );
   }

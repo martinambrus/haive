@@ -442,12 +442,59 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     expect(c.getTokenUsage()?.peakPromptTokens).toBe(205004);
   });
 
-  it('leaves peakPromptTokens absent when assistant events report zero usage', () => {
+  const zeroUsage = { input_tokens: 0, output_tokens: 0 };
+  const zeroMsg = (id: string) => blockEvent(id, { type: 'text', text: 'z' }, zeroUsage);
+  const zaiResult = (extra: Record<string, unknown> = {}) => ({
+    type: 'result',
+    subtype: 'success',
+    result: 'done',
+    usage: { input_tokens: 31333, cache_read_input_tokens: 768, output_tokens: 69 },
+    ...extra,
+  });
+
+  it('leaves peakPromptTokens absent when several zero-usage messages share one result', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [zeroMsg('msg_z1'), zeroMsg('msg_z2'), peakResult]);
+    expect(c.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
+  });
+
+  it('takes the result prompt as the peak when one zero-usage message made the whole run', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [zeroMsg('msg_z'), zaiResult()]);
+    expect(c.getTokenUsage()?.peakPromptTokens).toBe(32101);
+  });
+
+  it('leaves the peak absent for a steered run of four zero-usage messages', () => {
     const c = createStreamJsonCollector();
     feed(c, [
-      blockEvent('msg_z', { type: 'text', text: 'z' }, { input_tokens: 0, output_tokens: 0 }),
-      peakResult,
+      zeroMsg('msg_1'),
+      zeroMsg('msg_2'),
+      zaiResult({ num_turns: 2 }),
+      zeroMsg('msg_3'),
+      zeroMsg('msg_4'),
+      zaiResult({ num_turns: 1 }),
     ]);
+    expect(c.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
+  });
+
+  it('keeps the message prompt as the peak when the one message carries usage', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      blockEvent('msg_u', { type: 'text', text: 'u' }, usageOf(10, 5, 5000, 0)),
+      zaiResult({ usage: usageOf(900, 50, 90000, 0) }),
+    ]);
+    expect(c.getTokenUsage()?.peakPromptTokens).toBe(5010);
+  });
+
+  it('leaves the peak absent for one zero-usage message and no result', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [zeroMsg('msg_z')]);
+    expect(c.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
+  });
+
+  it('leaves the peak absent when the result prompt is 0', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [zeroMsg('msg_z'), zaiResult({ usage: { input_tokens: 0, output_tokens: 7 } })]);
     expect(c.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
   });
 });
@@ -815,5 +862,131 @@ describe('createStreamJsonCollector.getToolUsage', () => {
     const c = createStreamJsonCollector();
     c.onChunk('just plain text output, no newline-delimited JSON');
     expect(c.getToolUsage().coverage).toBe('none');
+  });
+});
+
+describe('createStreamJsonCollector contextWindow', () => {
+  const asst = (
+    id: string,
+    model: string,
+    usage: Record<string, number> = { input_tokens: 100 },
+  ) => ({
+    type: 'assistant',
+    message: {
+      id,
+      model,
+      content: [{ type: 'text', text: 'x' }],
+      usage: { output_tokens: 1, ...usage },
+    },
+  });
+  const res = (modelUsage?: unknown) => ({
+    type: 'result',
+    subtype: 'success',
+    result: 'done',
+    usage: { input_tokens: 100, output_tokens: 1 },
+    ...(modelUsage === undefined ? {} : { modelUsage }),
+  });
+  const win = (contextWindow: unknown) => ({ contextWindow, inputTokens: 1, outputTokens: 1 });
+  const windowOf = (events: unknown[]) => {
+    const c = createStreamJsonCollector();
+    feed(c, events);
+    return c.getTokenUsage();
+  };
+
+  it('takes the window of the model the init event named, not the first listed entry', () => {
+    const usage = windowOf([
+      { type: 'system', subtype: 'init', model: 'claude-opus-5[1m]' },
+      asst('m1', 'claude-opus-5[1m]'),
+      res({
+        'claude-haiku-4-5': win(200000),
+        'claude-opus-5[1m]': win(1000000),
+      }),
+    ]);
+    expect(usage).toHaveProperty('contextWindow', 1000000);
+  });
+
+  it('reads the zai shape: init glm-5.3[1m], served glm-5.3, two keys', () => {
+    const usage = windowOf([
+      { type: 'system', subtype: 'init', model: 'glm-5.3[1m]' },
+      asst('m1', 'glm-5.3'),
+      res({ 'glm-4.5-air': win(200000), 'glm-5.3[1m]': win(1000000) }),
+    ]);
+    expect(usage).toHaveProperty('contextWindow', 1000000);
+  });
+
+  it('falls back to the served model when init names none or names a model no key matches', () => {
+    const entries = { 'claude-haiku-4-5': win(200000), 'served-model': win(777000) };
+    expect(
+      windowOf([{ type: 'system', subtype: 'init' }, asst('m1', 'served-model'), res(entries)]),
+    ).toHaveProperty('contextWindow', 777000);
+    expect(
+      windowOf([
+        { type: 'system', subtype: 'init', model: 'unlisted-model' },
+        asst('m1', 'served-model'),
+        res(entries),
+      ]),
+    ).toHaveProperty('contextWindow', 777000);
+  });
+
+  it('leaves the property absent when no entry can be attributed to the run', () => {
+    const init = { type: 'system', subtype: 'init', model: 'main-model' };
+    expect(windowOf([init, asst('m1', 'main-model'), res({})])).not.toHaveProperty('contextWindow');
+    expect(windowOf([init, asst('m1', 'main-model'), res()])).not.toHaveProperty('contextWindow');
+    expect(
+      windowOf([
+        init,
+        asst('m1', 'main-model'),
+        res({ 'main-model': { inputTokens: 1, outputTokens: 1 } }),
+      ]),
+    ).not.toHaveProperty('contextWindow');
+    expect(
+      windowOf([init, asst('m1', 'main-model'), res({ 'claude-haiku-4-5': win(200000) })]),
+    ).not.toHaveProperty('contextWindow');
+  });
+
+  it('ignores a window that is not a finite number above zero', () => {
+    for (const bad of [0, -5, '1000000', null]) {
+      const usage = windowOf([
+        { type: 'system', subtype: 'init', model: 'main-model' },
+        asst('m1', 'main-model'),
+        res({ 'main-model': win(bad) }),
+      ]);
+      expect(usage, JSON.stringify(bad)).not.toHaveProperty('contextWindow');
+    }
+  });
+
+  it('keeps the window across a later result that carries none, and takes a later one', () => {
+    const init = { type: 'system', subtype: 'init', model: 'main-model' };
+    const windowed = res({ 'main-model': win(1000000) });
+    expect(windowOf([init, asst('m1', 'main-model'), windowed, res({})])).toHaveProperty(
+      'contextWindow',
+      1000000,
+    );
+    expect(windowOf([init, asst('m1', 'main-model'), res({}), windowed])).toHaveProperty(
+      'contextWindow',
+      1000000,
+    );
+  });
+
+  it('reports the peak but no window for a killed run with no result event', () => {
+    const usage = windowOf([
+      { type: 'system', subtype: 'init', model: 'main-model' },
+      asst('m1', 'main-model', { input_tokens: 10, cache_read_input_tokens: 5000 }),
+      asst('m2', 'main-model', { input_tokens: 20, cache_read_input_tokens: 9000 }),
+    ]);
+    expect(usage).toHaveProperty('peakPromptTokens', 9020);
+    expect(usage).not.toHaveProperty('contextWindow');
+  });
+
+  it('reports the window even when no assistant message carried usage', () => {
+    const zero = { input_tokens: 0, output_tokens: 0 };
+    const usage = windowOf([
+      { type: 'system', subtype: 'init', model: 'main-model' },
+      asst('m1', 'main-model', zero),
+      asst('m2', 'main-model', zero),
+      res({ 'main-model': win(1000000) }),
+    ]);
+    expect(usage).toHaveProperty('contextWindow', 1000000);
+    expect(usage).not.toHaveProperty('peakPromptTokens');
   });
 });

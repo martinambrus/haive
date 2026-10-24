@@ -27,6 +27,7 @@ const {
   MODULE_JOBS_RECONCILE_MS,
   MODULE_JOB_START_WAIT_MS,
   MODULE_JOB_STOP_WAIT_MS,
+  MODULE_SCHEMA_ENSURE_TIMEOUT_MS,
   beginModuleTeardown,
   ensureModuleSchemas,
   moduleJobsStarted,
@@ -35,7 +36,7 @@ const {
 } = await import('../src/modules/loader.js');
 const { ModuleTeardownRefusedError, runModuleTeardown } =
   await import('../src/queues/module-control-queue.js');
-const { moduleDeactivationMessage, moduleSchemaWaitMessage } =
+const { moduleDeactivationMessage, moduleSchemaNotReady, moduleSchemaWaitMessage } =
   await import('../src/modules/activation.js');
 
 type Loaded = Parameters<typeof startModuleJobs>[0][number];
@@ -927,6 +928,7 @@ describe('the jobs reconcile', () => {
     await expect(runModuleTeardown(teardownDeps(m, hook), 'throws-early')).rejects.toThrow(
       'hook refused',
     );
+    expect(moduleSchemaNotReady('module.throws-early.x')).toBe(false);
     await reconcile(new Set());
     expect(m.jobs).toHaveBeenCalledOnce();
 
@@ -1451,6 +1453,32 @@ describe('the jobs reconcile with a start that does not end', () => {
     },
   );
 
+  it('refuses a teardown while a job start that does not return runs, naming its deadline, and goes ahead once the deadline has released it', async () => {
+    const id = 'pinned-deadline';
+    const m = moduleWithHungStart(id, 'jobs');
+    const teardown = vi.fn<Hook>(async () => {});
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const { reconcile } = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+    const pass = track(reconcile(new Set()));
+    await vi.advanceTimersByTimeAsync(MODULE_JOB_START_WAIT_MS);
+    expect(pass.settled).toBe(true);
+
+    const refusal = (await runModuleTeardown(teardownDeps(m, teardown), id).catch(
+      (err: unknown) => err,
+    )) as Error;
+    expect(refusal).toBeInstanceOf(ModuleTeardownRefusedError);
+    expect(refusal.message).toMatch(
+      /schema setup that does not finish is cut off after 10 minutes, and so is a job start that does not return/,
+    );
+    expect(teardown).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(MODULE_SCHEMA_ENSURE_TIMEOUT_MS - MODULE_JOB_START_WAIT_MS);
+    expect(moduleJobsStarted(id)).toBe(false);
+    await runModuleTeardown(teardownDeps(m, teardown), id);
+    expect(teardown).toHaveBeenCalledOnce();
+  });
+
   it('goes on after the wait without the schema setup of a module that has no jobs, and ensures it once', async () => {
     const m = moduleWithSchemaOnly('schema-only-hung');
     let endEnsure!: () => void;
@@ -1723,6 +1751,64 @@ describe('the steps of a module whose schema a teardown or a restart may have le
         ).toEqual({ [id]: 'none' });
       }
       expect(await moduleDeactivationMessage(activeRowDb, `module.${id}.x`)).toBeNull();
+      expect(moduleSchemaNotReady(`module.${id}.x`)).toBe(false);
+      expect(await moduleSchemaWaitMessage(activeRowDb, `module.${id}.x`)).toBeNull();
     },
   );
+
+  describe('while the teardown hook of a module with no schema ensure runs', () => {
+    const hookGate = () => {
+      let end!: (how: 'resolves' | 'rejects') => void;
+      let called!: () => void;
+      const hookCalled = new Promise<void>((resolve) => (called = resolve));
+      const hook: Hook = () =>
+        new Promise<void>((resolve, reject) => {
+          end = (how) => (how === 'resolves' ? resolve() : reject(new Error('hook failed')));
+          called();
+        });
+      return { hook, hookCalled, end: (how: 'resolves' | 'rejects') => end(how) };
+    };
+    const waitLine = (id: string) =>
+      new RegExp(`teardown hook is still running.*module\\.${id}\\.x`);
+
+    it.each(['resolves', 'rejects'] as const)(
+      'its steps wait, and run as soon as the hook %s',
+      async (how) => {
+        const id = `no-schema-held-${how}`;
+        const m = moduleWithJobs(id);
+        const gate = hookGate();
+
+        const tearingDown = runModuleTeardown(teardownDeps(m, gate.hook), id).catch(
+          (err: unknown) => err,
+        );
+        await gate.hookCalled;
+        expect(moduleSchemaNotReady(`module.${id}.x`)).toBe(true);
+        expect(await moduleSchemaWaitMessage(activeRowDb, `module.${id}.x`)).toMatch(waitLine(id));
+
+        gate.end(how);
+        const outcome = await tearingDown;
+        expect(outcome instanceof Error).toBe(how === 'rejects');
+        expect(moduleSchemaNotReady(`module.${id}.x`)).toBe(false);
+        expect(await moduleSchemaWaitMessage(activeRowDb, `module.${id}.x`)).toBeNull();
+      },
+    );
+
+    it('its steps keep waiting past a timed out hook, until the hook itself ends', async () => {
+      const id = 'no-schema-held-timeout';
+      const m = moduleWithJobs(id);
+      const gate = hookGate();
+
+      const failure = await runModuleTeardown(teardownDeps(m, gate.hook, 20), id).catch(
+        (err: unknown) => err,
+      );
+      expect(failure).toBeInstanceOf(Error);
+      expect(moduleSchemaNotReady(`module.${id}.x`)).toBe(true);
+      expect(await moduleSchemaWaitMessage(activeRowDb, `module.${id}.x`)).toMatch(waitLine(id));
+
+      gate.end('resolves');
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(moduleSchemaNotReady(`module.${id}.x`)).toBe(false);
+      expect(await moduleSchemaWaitMessage(activeRowDb, `module.${id}.x`)).toBeNull();
+    });
+  });
 });
