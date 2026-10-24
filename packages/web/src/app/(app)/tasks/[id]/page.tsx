@@ -1629,9 +1629,10 @@ export default function TaskDetailPage() {
   // spending three subscriptions at once. Reading only `preferredCliProviderId` (the
   // 'default' row) named a CLI that none of its agents were running on, and its reconnect
   // prompt covered only that one, so a dead token on a seat CLI failed the step in silence.
+  const taskEffectiveCliProviderId = task.effectiveCliProviderId ?? task.cliProviderId ?? null;
   const usageProviderIds = stepCliProviderIds({
     step: currentStep ?? null,
-    taskCliProviderId: task.cliProviderId ?? null,
+    taskCliProviderId: taskEffectiveCliProviderId,
     enabledProviderIds: new Set(providers.filter((p) => p.enabled).map((p) => p.id)),
   });
 
@@ -2171,6 +2172,7 @@ export default function TaskDetailPage() {
                   onCliLogin={() => openCliLoginForStep(step)}
                   providers={providers}
                   taskCliProviderId={task.cliProviderId ?? null}
+                  fallbackProviderId={taskEffectiveCliProviderId}
                   cliBusy={stepProviderBusy === step.stepId}
                   cliError={
                     stepProviderError?.stepId === step.stepId ? stepProviderError.message : null
@@ -2301,6 +2303,7 @@ export default function TaskDetailPage() {
             steps={upcomingCliSteps}
             providers={providers}
             taskCliProviderId={task.cliProviderId ?? null}
+            fallbackProviderId={taskEffectiveCliProviderId}
             busyStepId={stepProviderBusy}
             error={stepProviderError}
             disabled={task.status === 'cancelled' || task.status === 'completed' || taskDead}
@@ -2499,6 +2502,7 @@ function UpcomingCliPanel({
   steps,
   providers,
   taskCliProviderId,
+  fallbackProviderId,
   busyStepId,
   error,
   disabled,
@@ -2507,6 +2511,7 @@ function UpcomingCliPanel({
   steps: UpcomingCliStep[];
   providers: CliProvider[];
   taskCliProviderId: string | null;
+  fallbackProviderId: string | null;
   busyStepId: string | null;
   error: { stepId: string; message: string } | null;
   disabled: boolean;
@@ -2552,6 +2557,7 @@ function UpcomingCliPanel({
             seatProviders={s.miningSeatProviders}
             seatEfforts={s.miningSeatEfforts}
             taskCliProviderId={taskCliProviderId}
+            fallbackProviderId={fallbackProviderId}
             locked={disabled}
             busy={busyStepId === s.stepId}
             onChange={(cliProviderId, role, effortLevel, remember) =>
@@ -2701,6 +2707,7 @@ interface StepCardProps {
   providers: CliProvider[];
   /** Task-level fallback when this step has no per-step preference set. */
   taskCliProviderId: string | null;
+  fallbackProviderId: string | null;
   cliBusy: boolean;
   cliError: string | null;
   onChangeCli: (
@@ -3563,6 +3570,7 @@ function StepCardImpl({
   onCliLogin,
   providers,
   taskCliProviderId,
+  fallbackProviderId,
   cliBusy,
   cliError,
   onChangeCli,
@@ -3812,6 +3820,7 @@ function StepCardImpl({
               seatProviders={step.miningSeatProviders}
               seatEfforts={step.miningSeatEfforts}
               taskCliProviderId={taskCliProviderId}
+              fallbackProviderId={fallbackProviderId}
               locked={cliLocked}
               busy={cliBusy}
               onChange={onChangeCli}
