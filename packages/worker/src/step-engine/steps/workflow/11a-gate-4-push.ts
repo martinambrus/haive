@@ -6,6 +6,8 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
   OriginUrlError,
+  buildCredentialHelper,
+  taskRemoteUrl,
   ensureOrigin,
   getOriginUrl,
   gitRun,
@@ -310,6 +312,8 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       }
       const parsed = gitRemoteUrlSchema.safeParse(remoteUrl);
       if (!parsed.success) throw new Error(parsed.error.issues[0]!.message);
+      if (values.credentialId)
+        await buildCredentialHelper(ctx.db, values.credentialId, ctx.userId, remoteUrl);
       await ensureOrigin(workspace, remoteUrl);
       // Persist the remote (and the chosen credential) onto the repo row so
       // future pushes/clones are pre-wired. Plain runtime write; idempotent.
@@ -338,6 +342,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
         branch,
         setUpstream,
         credentialId: values.credentialId || undefined,
+        remoteUrl: values.credentialId ? await taskRemoteUrl(ctx) : null,
         db: ctx.db,
         userId: ctx.userId,
       });

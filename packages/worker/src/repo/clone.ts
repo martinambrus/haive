@@ -808,7 +808,7 @@ export async function handleClone(
     // survives the redirect. It also keeps the token out of .git/config, so the
     // cloned origin is already the plain URL — no post-clone reset needed.
     const auth = payload.credentialsId
-      ? await buildCredentialHelper(db, payload.credentialsId, payload.userId)
+      ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, remoteUrl)
       : undefined;
 
     await gitClone(remoteUrl, dest, payload.branch, auth);

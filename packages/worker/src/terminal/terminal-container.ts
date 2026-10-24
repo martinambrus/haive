@@ -47,15 +47,23 @@ let token = '';
 try { token = fs.readFileSync(${JSON.stringify(GIT_CRED_TOKEN_PATH)}, 'utf8').trim(); } catch (e) {}
 if (!endpoint || !token) process.exit(0);
 
-// Drain git's stdin request (protocol/host/path) so the pipe doesn't block.
-process.stdin.resume();
-process.stdin.on('data', () => {});
+// Forward the credential challenge, never an origin inferred by the container.
+let input = '';
+for await (const chunk of process.stdin) {
+  input += chunk;
+  if (input.length > 8192) process.exit(0);
+}
+const target = {};
+for (const line of input.split('\n')) {
+  const at = line.indexOf('=');
+  if (at > 0 && ['protocol', 'host'].includes(line.slice(0, at))) target[line.slice(0, at)] = line.slice(at + 1);
+}
 
 function done() { process.exit(0); }
 
 try {
   const u = new URL(endpoint);
-  const data = Buffer.from('{}');
+  const data = Buffer.from(JSON.stringify(target));
   const req = http.request(
     {
       method: 'POST',

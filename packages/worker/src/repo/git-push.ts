@@ -1,5 +1,10 @@
-import { isAllowedGitRemoteUrl } from '@haive/shared/schemas';
-import type { Database } from '@haive/database';
+import {
+  credentialFitsGitRemote,
+  gitCredentialTarget,
+  isAllowedGitRemoteUrl,
+} from '@haive/shared/schemas';
+import { schema, type Database } from '@haive/database';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { getDecryptedCredentials } from './credentials.js';
 import { GIT_MAX_BUFFER, type GitRunResult, gitRun } from './git-exec.js';
 
@@ -152,19 +157,85 @@ export async function buildCredentialHelper(
   db: Database,
   credentialId: string,
   userId: string,
+  remoteUrl: string | null | undefined,
 ): Promise<{ argv: string[]; env: Record<string, string>; secret: string }> {
   const creds = await getDecryptedCredentials(db, credentialId, userId);
+  if (!credentialFitsGitRemote(creds, remoteUrl)) {
+    throw new Error(
+      'The Git credential does not fit the bound remote. Link a matching credential and retry.',
+    );
+  }
+  const target = gitCredentialTarget(remoteUrl);
+  if (!target) {
+    // SSH authenticates with a key outside Haive. Its child process needs no token environment.
+    return { argv: [], env: { GIT_ALLOW_PROTOCOL: 'http:https:ssh' }, secret: creds.secret };
+  }
   const env: Record<string, string> = {
     GIT_HAIVE_USER: creds.username,
     GIT_HAIVE_PASS: creds.secret,
+    GIT_HAIVE_HOST: target?.host ?? '',
+    GIT_HAIVE_PROTOCOL: target?.protocol ?? '',
+    // A repository's remote.origin.vcs can name an executable that would inherit this env.
+    GIT_ALLOW_PROTOCOL: 'http:https:ssh',
   };
   const argv = [
     '-c',
     'credential.helper=',
     '-c',
-    `credential.helper=!f() { test "$1" = get && printf 'username=%s\\npassword=%s\\n' "$GIT_HAIVE_USER" "$GIT_HAIVE_PASS"; }; f`,
+    `credential.helper=!f() { test "$1" = get || return 0; protocol=; host=; while IFS= read -r line && test -n "$line"; do case "$line" in protocol=*) protocol=\${line#protocol=} ;; host=*) host=\${line#host=} ;; esac; done; host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]'); if test -n "$GIT_HAIVE_HOST" && test "$host" = "$GIT_HAIVE_HOST" && test "$protocol" = "$GIT_HAIVE_PROTOCOL"; then printf 'username=%s\\npassword=%s\\n' "$GIT_HAIVE_USER" "$GIT_HAIVE_PASS"; fi; }; f`,
   ];
   return { argv, env, secret: creds.secret };
+}
+
+/** The stored repo binding wins. For local_path repos without one, an explicit push approval
+ *  binds to the URL Haive persisted on the form the user saw, never a fresh config read. */
+export async function taskRemoteUrl(ctx: {
+  db: Database;
+  taskId: string;
+  userId: string;
+}): Promise<string | null> {
+  const task = await ctx.db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, ctx.taskId), eq(schema.tasks.userId, ctx.userId)),
+    columns: { repositoryId: true },
+  });
+  if (!task?.repositoryId) return null;
+  const repo = await ctx.db.query.repositories.findFirst({
+    where: and(
+      eq(schema.repositories.id, task.repositoryId),
+      eq(schema.repositories.userId, ctx.userId),
+    ),
+    columns: { remoteUrl: true },
+  });
+  if (repo?.remoteUrl) return repo.remoteUrl;
+  const steps = await ctx.db.query.taskSteps.findMany({
+    where: and(
+      eq(schema.taskSteps.taskId, ctx.taskId),
+      inArray(schema.taskSteps.stepId, [
+        '11a-gate-4-push',
+        '12-worktree-cleanup',
+        '12-post-onboarding',
+      ]),
+    ),
+    orderBy: [desc(schema.taskSteps.createdAt)],
+    columns: { stepId: true, formValues: true, detectOutput: true },
+  });
+  for (const step of steps) {
+    const values = step.formValues;
+    const approved =
+      step.stepId === '11a-gate-4-push'
+        ? values?.push === true
+        : step.stepId === '12-post-onboarding'
+          ? values?.pushToOrigin === true
+          : values?.pushBase === true || values?.action === 'create_pr';
+    const detected = step.detectOutput as { originUrl?: unknown } | null;
+    if (
+      approved &&
+      typeof detected?.originUrl === 'string' &&
+      isAllowedGitRemoteUrl(detected.originUrl)
+    )
+      return detected.originUrl;
+  }
+  return null;
 }
 
 /** Push `branch` to origin, optionally with a stored credential and upstream.
@@ -178,6 +249,7 @@ export async function pushBranch(args: {
   sha?: string;
   setUpstream: boolean;
   credentialId?: string;
+  remoteUrl?: string | null;
   db: Database;
   userId: string;
 }): Promise<{ pushed: true; remote: 'origin'; branch: string; upstreamError?: string }> {
@@ -187,7 +259,7 @@ export async function pushBranch(args: {
   let secret: string | null = null;
 
   if (credentialId) {
-    const helper = await buildCredentialHelper(db, credentialId, userId);
+    const helper = await buildCredentialHelper(db, credentialId, userId, args.remoteUrl);
     secret = helper.secret;
     Object.assign(env, helper.env);
     pushArgs.push(...helper.argv);

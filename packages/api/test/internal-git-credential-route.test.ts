@@ -3,9 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const SECRET = 'git-credential-route-test-secret';
 
 const h = vi.hoisted(() => ({
-  repo: null as { userId: string; credentialsSecretId: string | null } | null,
+  repo: null as {
+    userId: string;
+    credentialsSecretId: string | null;
+    remoteUrl: string | null;
+  } | null,
   cred: null as {
     userId: string;
+    host: string;
     usernameEncrypted: string;
     secretEncrypted: string;
     encryptedDek: string;
@@ -57,7 +62,11 @@ const PASSWORD = 'ghp_route_test_password';
 const REPO_ID = 'repo-1';
 const USER_ID = 'user-1';
 
-async function post(token: string | null, headers: Record<string, string> = {}): Promise<Response> {
+async function post(
+  token: string | null,
+  headers: Record<string, string> = {},
+  target: unknown = { protocol: 'https', host: 'github.com' },
+): Promise<Response> {
   return app.request('/internal/git-credential', {
     method: 'POST',
     headers: {
@@ -65,7 +74,7 @@ async function post(token: string | null, headers: Record<string, string> = {}):
       ...(token ? { authorization: `Bearer ${token}` } : {}),
       ...headers,
     },
-    body: '{}',
+    body: JSON.stringify(target),
   });
 }
 
@@ -102,9 +111,14 @@ beforeEach(() => {
   vi.stubEnv('CONFIG_ENCRYPTION_KEY', SECRET);
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
   const dek = generateDek();
-  h.repo = { userId: USER_ID, credentialsSecretId: 'cred-1' };
+  h.repo = {
+    userId: USER_ID,
+    credentialsSecretId: 'cred-1',
+    remoteUrl: 'https://github.com/acme/app.git',
+  };
   h.cred = {
     userId: USER_ID,
+    host: 'github.com',
     usernameEncrypted: encrypt(USERNAME, dek),
     secretEncrypted: encrypt(PASSWORD, dek),
     encryptedDek: encryptDek(dek, KEK),
@@ -118,6 +132,25 @@ afterEach(() => {
 });
 
 describe('POST /internal/git-credential', () => {
+  it('accepts host case and the explicit default port Git sends', async () => {
+    h.repo!.remoteUrl = 'https://github.com:443/acme/app.git';
+    const res = await post(v1Token(), {}, { protocol: 'https', host: 'GITHUB.COM:443' });
+    expect(res.status).toBe(200);
+  });
+  it.each([
+    {},
+    { protocol: 'https', host: 'other.example.test' },
+    { protocol: 'http', host: 'github.com' },
+    { protocol: 'https', host: 'github.com:8443' },
+  ])('emits nothing for an unbound target %j', async (target) => {
+    const res = await post(v1Token(), {}, target);
+    expect(res.status).toBe(204);
+    expect(await res.text()).toBe('');
+  });
+  it('emits nothing after the credential host drifts', async () => {
+    h.cred!.host = 'other.example.test';
+    expect((await post(v1Token())).status).toBe(204);
+  });
   it('serves a v1 token the credential bound to the repository', async () => {
     const token = v1Token();
 

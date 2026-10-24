@@ -7,11 +7,12 @@ import { promisify } from 'node:util';
 import zlib from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+const credentialHost = vi.hoisted(() => ({ value: '' }));
 vi.mock('../src/repo/credentials.js', () => ({
   getDecryptedCredentials: async () => ({
     username: 'haive-user',
     secret: 'haive-pass',
-    host: 'x',
+    host: credentialHost.value,
   }),
 }));
 
@@ -655,7 +656,9 @@ describe('hardened host git runs no program a repository config names', () => {
     await c.cfg('core.askPass', await c.script('askpass', 'echo wrong'));
     await c.cfg('credential.helper', `!${await c.script('repo-helper', 'exit 0')}`);
     await c.g('remote', 'add', 'origin', `http://127.0.0.1:${srv.port}/bare.git`);
-    const helper = await buildCredentialHelper({} as never, 'c', 'u');
+    const bound = `http://127.0.0.1:${srv.port}/bare.git`;
+    credentialHost.value = new URL(bound).host;
+    const helper = await buildCredentialHelper({} as never, 'c', 'u', bound);
     const r = await gitRun(c.repo, [...helper.argv, 'ls-remote', 'origin'], {
       ...hermetic,
       ...helper.env,

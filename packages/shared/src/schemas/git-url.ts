@@ -114,6 +114,38 @@ export function isAllowedGitRemoteUrl(value: string): boolean {
   return parseScpLikeGitUrl(value) !== null;
 }
 
+/** A Git credential is bound to a host, independently of its optional forge provider. */
+export function credentialFitsGitRemote(
+  credential: { host: string },
+  remote: string | null | undefined,
+): boolean {
+  if (!remote || !isAllowedGitRemoteUrl(remote)) return false;
+  const host = credential.host?.trim().toLowerCase();
+  if (!host) return false;
+  if (!remote.includes('://'))
+    return parseScpLikeGitUrl(remote)?.host.toLowerCase() === host.replace(/:\d+$/, '');
+  try {
+    const url = new URL(remote);
+    return url.protocol === 'ssh:'
+      ? url.hostname.toLowerCase() === host.replace(/:\d+$/, '')
+      : url.host.toLowerCase() === host.replace(url.protocol === 'https:' ? /:443$/ : /:80$/, '');
+  } catch {
+    return false;
+  }
+}
+
+/** Only HTTP transports use username/password helpers. Pin protocol and port as well as hostname. */
+export function gitCredentialTarget(
+  remote: string | null | undefined,
+): { protocol: string; host: string } | null {
+  if (!remote || !isAllowedGitRemoteUrl(remote) || !/^https?:\/\//i.test(remote)) return null;
+  const url = new URL(remote);
+  // Unlike URL.host, Git's credential protocol keeps an explicitly written default port.
+  const authority = remote.slice(remote.indexOf('://') + 3).split(/[/?#]/)[0]!;
+  const host = authority.slice(authority.lastIndexOf('@') + 1).toLowerCase();
+  return { protocol: url.protocol.slice(0, -1), host };
+}
+
 export const gitRemoteUrlSchema = z
   .string()
   .trim()

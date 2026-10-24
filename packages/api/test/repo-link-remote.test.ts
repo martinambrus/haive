@@ -18,6 +18,7 @@ vi.mock('node:child_process', async (original) => {
   return { ...actual, execFile: Object.assign(vi.fn(), { [promisify.custom]: h.git }) };
 });
 import { Hono } from 'hono';
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { repoRoutes } from '../src/routes/repos.js';
@@ -29,7 +30,10 @@ app.route('/', repoRoutes);
 app.onError(errorHandler);
 let fake: ReturnType<typeof createFakeDb>;
 beforeEach(() => {
-  fake = createFakeDb({ repositories: schema.repositories });
+  fake = createFakeDb({
+    repositories: schema.repositories,
+    repoCredentials: schema.repoCredentials,
+  });
   fake.insert(schema.repositories, {
     id: REPO,
     userId: USER,
@@ -95,3 +99,32 @@ it('does not persist a relink whose push URL cleanup failed', async () => {
   expect((await link()).status).toBe(409);
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
 });
+
+it.each([false, true])(
+  'refuses a remote with a mismatched credential (retained=%s) before touching git',
+  async (retained) => {
+    const credentialId = '00000000-0000-4000-8000-0000000000c1';
+    fake.insert(schema.repoCredentials, {
+      id: credentialId,
+      userId: USER,
+      host: 'other.example.test',
+    });
+    if (retained)
+      await fake.db
+        .update(schema.repositories)
+        .set({ credentialsSecretId: credentialId })
+        .where(eq(schema.repositories.id, REPO));
+    h.git.mockResolvedValueOnce({ stdout: 'true\n', stderr: '' });
+    const res = await app.request(`/${REPO}/remote`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        remoteUrl: 'https://example.test/r',
+        ...(retained ? {} : { credentialsId: credentialId }),
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(h.git).not.toHaveBeenCalled();
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+  },
+);

@@ -55,7 +55,11 @@ import { createFakeDb } from '@haive/database/testing';
 
 // create_pr pushes with a stored credential and opens the PR on the forge; neither is the subject here.
 vi.mock('../../../repo/credentials.js', () => ({
-  getDecryptedCredentials: vi.fn(async () => ({ username: 'u', secret: 's', host: 'github.com' })),
+  getDecryptedCredentials: vi.fn(async () => ({
+    username: 'u',
+    secret: 's',
+    host: new URL(httpOrigin(fixtureBase)).host,
+  })),
 }));
 vi.mock('../../../forge/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../forge/index.js')>()),

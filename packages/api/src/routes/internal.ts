@@ -4,6 +4,7 @@ import { schema } from '@haive/database';
 import { decrypt, decryptDek, secretsService, verifyRepoGitCredToken, logger } from '@haive/shared';
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
+import { credentialFitsGitRemote, gitCredentialTarget } from '@haive/shared/schemas';
 
 const log = logger.child({ module: 'internal-git-credential' });
 
@@ -28,7 +29,7 @@ internalRoutes.post('/git-credential', async (c) => {
   const db = getDb();
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, repositoryId),
-    columns: { userId: true, credentialsSecretId: true },
+    columns: { userId: true, credentialsSecretId: true, remoteUrl: true },
   });
   if (!repo || repo.userId !== userId) throw new HttpError(404, 'repository not found');
   // No stored credential -> 204 so the helper emits nothing and git falls
@@ -37,9 +38,29 @@ internalRoutes.post('/git-credential', async (c) => {
 
   const credRow = await db.query.repoCredentials.findFirst({
     where: eq(schema.repoCredentials.id, repo.credentialsSecretId),
-    columns: { userId: true, usernameEncrypted: true, secretEncrypted: true, encryptedDek: true },
+    columns: {
+      userId: true,
+      host: true,
+      usernameEncrypted: true,
+      secretEncrypted: true,
+      encryptedDek: true,
+    },
   });
   if (!credRow || credRow.userId !== userId) return c.body(null, 204);
+  const request: unknown = await c.req.json().catch(() => null);
+  const target = gitCredentialTarget(repo.remoteUrl);
+  if (
+    !target ||
+    !credentialFitsGitRemote(credRow, repo.remoteUrl) ||
+    !request ||
+    typeof request !== 'object' ||
+    !('protocol' in request) ||
+    request.protocol !== target.protocol ||
+    !('host' in request) ||
+    typeof request.host !== 'string' ||
+    request.host.toLowerCase() !== target.host
+  )
+    return c.body(null, 204);
 
   try {
     const masterKek = await secretsService.getMasterKek();

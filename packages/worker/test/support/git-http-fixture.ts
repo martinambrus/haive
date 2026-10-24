@@ -3,11 +3,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** A smart HTTP server restricted to one fixture directory, with no Vitest dependency. */
-export async function startGitHttpServer(base: string) {
+export async function startGitHttpServer(
+  base: string,
+  auth?: { username: string; password: string },
+) {
   const server = spawn(
     process.execPath,
     [fileURLToPath(new URL('./git-http-server.mjs', import.meta.url)), base],
-    { stdio: ['ignore', 'pipe', 'inherit'] },
+    {
+      stdio: ['ignore', 'pipe', 'inherit'],
+      env: { ...process.env, HAIVE_FIXTURE_AUTH: auth ? JSON.stringify(auth) : '' },
+    },
   );
   const exited = new Promise<void>((resolve) => server.once('exit', () => resolve()));
   const address = await new Promise<string>((resolve, reject) => {
@@ -47,6 +53,11 @@ export async function startGitHttpServer(base: string) {
   return {
     httpOrigin,
     networkGitArgs,
+    async authCount(): Promise<number> {
+      return (
+        (await (await fetch(`${address}/__fixture_stats`)).json()) as { authenticated: number }
+      ).authenticated;
+    },
     async close() {
       server.kill();
       await exited;

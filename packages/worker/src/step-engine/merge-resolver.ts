@@ -21,6 +21,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import {
   originGitRun,
   buildCredentialHelper,
+  taskRemoteUrl,
   gitRun,
   pushBranch,
   scrubSecret,
@@ -449,6 +450,7 @@ async function reachDone(
         sha,
         setUpstream: fv.setUpstream !== false,
         credentialId: fv.credentialId || undefined,
+        remoteUrl: fv.credentialId ? await taskRemoteUrl(ctx) : null,
         db,
         userId: ctx.userId,
       }));
@@ -660,7 +662,12 @@ async function fetchForSync(
   let secret: string | null = null;
   if (credentialId) {
     try {
-      const helper = await buildCredentialHelper(db, credentialId, ctx.userId);
+      const helper = await buildCredentialHelper(
+        db,
+        credentialId,
+        ctx.userId,
+        await taskRemoteUrl(ctx),
+      );
       secret = helper.secret;
       Object.assign(env, helper.env);
       argv.push(...helper.argv);

@@ -372,7 +372,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         const repo = task?.repositoryId
           ? await ctx.db.query.repositories.findFirst({
               where: eq(schema.repositories.id, task.repositoryId),
-              columns: { credentialsSecretId: true },
+              columns: { credentialsSecretId: true, remoteUrl: true },
             })
           : null;
         await pushBranch({
@@ -380,6 +380,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
           branch: pushTo,
           setUpstream: true,
           credentialId: repo?.credentialsSecretId ?? undefined,
+          remoteUrl: repo?.remoteUrl,
           db: ctx.db,
           userId: ctx.userId,
         });

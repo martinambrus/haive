@@ -4,12 +4,27 @@ import path from 'node:path';
 
 const base = process.argv[2];
 if (!base || !path.isAbsolute(base)) throw new Error('fixture base directory required');
+const auth = process.env.HAIVE_FIXTURE_AUTH ? JSON.parse(process.env.HAIVE_FIXTURE_AUTH) : null;
+const expected = auth
+  ? `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`
+  : null;
+let authenticated = 0;
 
 // The alpine worker image has no git http-backend in git --exec-path.
 // These fixtures run on the host and in CI only.
 // A separate process lets fixtures that use execFileSync still speak real smart HTTP.
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/__fixture_stats') {
+    res.end(JSON.stringify({ authenticated }));
+    return;
+  }
+  if (req.headers.authorization) authenticated++;
+  if (expected && req.headers.authorization !== expected) {
+    res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="fixture"' });
+    res.end();
+    return;
+  }
   let pathname;
   try {
     pathname = decodeURIComponent(url.pathname);

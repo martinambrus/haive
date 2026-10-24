@@ -11,7 +11,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { gitRun } from '../../../repo/git-exec.js';
-import { OriginUrlError, getOriginUrl, pushBranch } from '../../../repo/git-push.js';
+import { OriginUrlError, getOriginUrl, pushBranch, taskRemoteUrl } from '../../../repo/git-push.js';
 import { removeWorktreeDir } from '../../../repo/worktree-remove.js';
 import {
   listBranchProjectionEdits,
@@ -873,18 +873,6 @@ async function openPullRequestForCleanup(
     await putBackProjections({ ctx, worktree: d.worktreePath, branch: d.branchName, target }),
   );
 
-  // Make sure the feature branch is on origin. It was pushed at 11a-gate-4-push, but
-  // fix loops after that push can add commits. Host-side; git works here (the sandbox
-  // git ban is cli-exec only).
-  await pushBranch({
-    cwd: ctx.repoPath,
-    branch: d.branchName,
-    setUpstream: true,
-    credentialId,
-    db: ctx.db,
-    userId: ctx.userId,
-  });
-
   let provider: string;
   let result: OpenPrResult;
   try {
@@ -894,6 +882,19 @@ async function openPullRequestForCleanup(
       credentialId,
       remoteUrl: d.originUrl,
     });
+    // Make sure the feature branch is on origin. It was pushed at 11a-gate-4-push, but
+    // fix loops after that push can add commits. Host-side; git works here (the sandbox
+    // git ban is cli-exec only).
+    await pushBranch({
+      cwd: ctx.repoPath,
+      branch: d.branchName,
+      setUpstream: true,
+      credentialId,
+      remoteUrl: (await taskRemoteUrl(ctx)) ?? d.originUrl,
+      db: ctx.db,
+      userId: ctx.userId,
+    });
+
     provider = forgeCtx.provider;
     result = await resolveForgeProvider(forgeCtx.provider).openPullRequest(forgeCtx, {
       head: d.branchName,

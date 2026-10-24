@@ -88,6 +88,7 @@ async function requireOwnedRepository(repositoryId: string, userId?: string) {
       id: true,
       userId: true,
       credentialsSecretId: true,
+      remoteUrl: true,
     },
   });
   if (!repo) throw new Error('repository not found');
@@ -207,6 +208,14 @@ export async function integrateOrigin(args: {
     branch: args.branch,
     db,
     userId: args.userId,
+    remoteUrl: args.credentialId
+      ? (
+          await db.query.repositories.findFirst({
+            where: eq(schema.repositories.id, args.repositoryId),
+            columns: { remoteUrl: true },
+          })
+        )?.remoteUrl
+      : null,
     ...(args.credentialId ? { credentialId: args.credentialId } : {}),
   });
   const gap = await divergence(args.repoPath, args.branch);
@@ -407,6 +416,7 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
         setUpstream: upstream.code !== 0 && !gitGaveNoAnswer(upstream),
         ...(repo.credentialsSecretId ? { credentialId: repo.credentialsSecretId } : {}),
         db: getDb(),
+        remoteUrl: repo.remoteUrl,
         userId: payload.userId,
       });
       pushed = true;

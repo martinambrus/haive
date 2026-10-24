@@ -86,7 +86,7 @@ import {
   settingFileName,
 } from '@haive/shared/project-state';
 import { buildScopeTree } from '@haive/shared/scope-tree';
-import { parseScpLikeGitUrl } from '@haive/shared/schemas';
+import { credentialFitsGitRemote, parseScpLikeGitUrl } from '@haive/shared/schemas';
 import {
   KB_DIR,
   LEARNINGS_DIR,
@@ -394,9 +394,11 @@ repoRoutes.post('/', requireNewWorkAllowed, async (c) => {
         eq(schema.repoCredentials.id, body.credentialsId),
         eq(schema.repoCredentials.userId, userId),
       ),
-      columns: { id: true },
+      columns: { id: true, host: true },
     });
     if (!cred) throw new HttpError(404, 'Credentials not found');
+    if (!credentialFitsGitRemote(cred, body.remoteUrl))
+      throw new HttpError(400, 'The Git credential does not fit the remote');
   }
 
   let localPath: string | null = null;
@@ -2502,21 +2504,30 @@ repoRoutes.post('/:id/remote', async (c) => {
 
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
-    columns: { id: true, storagePath: true, localPath: true, remoteUrl: true },
+    columns: {
+      id: true,
+      storagePath: true,
+      localPath: true,
+      remoteUrl: true,
+      credentialsSecretId: true,
+    },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
   const root = repo.storagePath ?? repo.localPath;
   if (!root) throw new HttpError(409, 'This repository has no resolvable path');
 
-  if (body.credentialsId) {
+  const bindingId = body.credentialsId ?? repo.credentialsSecretId;
+  if (bindingId) {
     const cred = await db.query.repoCredentials.findFirst({
       where: and(
-        eq(schema.repoCredentials.id, body.credentialsId),
+        eq(schema.repoCredentials.id, bindingId),
         eq(schema.repoCredentials.userId, userId),
       ),
-      columns: { id: true },
+      columns: { id: true, host: true },
     });
     if (!cred) throw new HttpError(404, 'Credentials not found');
+    if (!credentialFitsGitRemote(cred, body.remoteUrl))
+      throw new HttpError(400, 'The Git credential does not fit the remote');
   }
 
   const git = async (
