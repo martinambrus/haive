@@ -1,33 +1,10 @@
 import path from 'node:path';
 import { lstatNoFollow, readdirNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
-import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
-import type { CliProviderName, FormSchema } from '@haive/shared';
-import { getCliProviderMetadata } from '@haive/shared';
+import type { FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { closesFence, fenceOpener } from '@haive/shared/markdown-fences';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
-
-interface ActiveAgentsTarget {
-  dir: string;
-  ext: '.md' | '.toml';
-}
-
-async function resolveActiveAgentsTarget(ctx: StepContext): Promise<ActiveAgentsTarget | null> {
-  const defaultTarget: ActiveAgentsTarget = { dir: '.claude/agents', ext: '.md' };
-  if (!ctx.cliProviderId) return defaultTarget;
-  const row = await ctx.db.query.cliProviders.findFirst({
-    where: eq(schema.cliProviders.id, ctx.cliProviderId),
-    columns: { name: true },
-  });
-  if (!row) return defaultTarget;
-  const meta = getCliProviderMetadata(row.name as CliProviderName);
-  if (!meta.projectAgentsDir || !meta.agentFileFormat) return null;
-  return {
-    dir: meta.projectAgentsDir,
-    ext: meta.agentFileFormat === 'toml' ? '.toml' : '.md',
-  };
-}
+import { resolveActiveAgentsTarget, type ActiveAgentsTarget } from './_active-agents-target.js';
 
 interface ReviewFinding {
   id: string;

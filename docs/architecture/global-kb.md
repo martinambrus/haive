@@ -102,6 +102,18 @@ apply only to an approval that is otherwise valid. The enforce panel shows the w
 receive it, `renderHouseRuleEntry` for the mode and globs being drafted, as plain text (highlighted
 as markdown, a glob's `**` turned the rest bold), since that is what is approved; Enforce is offered
 only in the namespace in use, Un-enforce on any live approval.
+Enforce and Un-enforce are audited as `global_kb.house_rule.enforce` and
+`global_kb.house_rule.unenforce` (target the entry; metadata the namespace, the mode and, for
+`files`, the glob count, never the rule's text). The row goes first, in a main-database transaction
+that wraps the store's (`auditedChange`): every refusal under the lock (404, 409, the `always` cap,
+503 on a busy lock) and a failed store write roll it back, and the pino line is logged after the
+commit. A main commit that fails after the store committed leaves the change without its row and
+answers 500, the settings' one-round-trip window below; a retry repairs the trail, since Un-enforce
+of an approval that has already lapsed answers 200 and writes its row too. Un-enforce of an entry
+that was never enforced answers 404 before any row, and one whose approval changed between its read
+and the lock answers 409 `enforcement_changed`, so a row never names settings it did not remove.
+Each request holds one main-database connection while it waits for the namespace lock (up to 30 s).
+A lapse (an edit, a status change or a deletion of the entry) writes no row.
 
 An enforced entry needs a description and may not carry invisible or control characters or Haive
 prompt delimiters. `always` rules share an 8,000-byte cap per namespace, counted in UTF-8 bytes of
@@ -127,15 +139,18 @@ comes after the mode. A save that writes any of the eight other settings also re
 this row and has its own), with `partial: true` when a later write failed. It takes no advisory
 lock: the one api process runs the saves one after another (`serializeConfigSave`) and is the only
 writer of those keys. Each of the three changes (the string, the settings, the removal) runs in its
-own transaction that inserts its row first and then makes the change. The secrets service writes
-`system_secrets` on its own connection and the settings go to Redis, so no rollback reaches either:
+own transaction that inserts its row first and then makes the change. The string and its removal
+are written in that transaction (`secretsService.set` and `delete` take its executor), so they
+commit or roll back with their row; such a write drops the key from the secrets cache instead of
+caching a value its transaction may still undo. The settings go to Redis, which no rollback reaches:
 a row that cannot be inserted fails the save with 500 before its change, and a change that fails
 rolls its row back, so no row claims a change that did not happen. The settings row goes in a
 savepoint before the first key; a write that fails after some keys rolls the full row back, commits
 the `partial: true` row for the keys written, and then fails the save. The pino line is logged after
-the commit. A commit that fails after the change was written leaves that change without its row,
+the commit. A commit that fails after the settings were written leaves them without their row,
 and the save answers 500: an omission in a window of one round trip, never a false claim
-(`global-kb-config-audit-db.test.ts` pins it with a trigger that fails at commit). Writing the
+(`global-kb-config-audit-db.test.ts` pins it with a trigger that fails at commit, and that the same
+failing commit takes a string write back with its row). Writing the
 change first and its row second has the same window plus one at the row insert, and a refused row
 could not leave the change untouched, so the row goes first. The transactions are separate, so a
 later failure never takes an earlier change's row with it: a save that stored the string and then

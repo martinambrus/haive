@@ -137,15 +137,17 @@ describe('the reset takes back the claim files of the rows it supersedes', () =>
     }
   });
 
-  it('removes the claim file of a live row at a git-data path an earlier release recorded', async () => {
-    const legacy = '.git/config';
-    const root = await repoRoot({ [claimFile(AGENT)]: '{}\n', [claimFile(legacy)]: '{}\n' });
+  it.each(['.git/config', '.git./config'])(
+    'removes the claim file of a live row at git-data path %j an earlier release recorded',
+    async (legacy) => {
+      const root = await repoRoot({ [claimFile(AGENT)]: '{}\n', [claimFile(legacy)]: '{}\n' });
 
-    const { removed } = await resetOnboardingArtifacts(root, provenance(AGENT, legacy));
+      const { removed } = await resetOnboardingArtifacts(root, provenance(AGENT, legacy));
 
-    expect(await exists(root, claimFile(legacy))).toBe(false);
-    expect(removed).toContain(claimFile(legacy));
-  });
+      expect(await exists(root, claimFile(legacy))).toBe(false);
+      expect(removed).toContain(claimFile(legacy));
+    },
+  );
 
   it('leaves a claim file no live row names, and the directory around it', async () => {
     const teammate = '.claude/agents/teammate.md';

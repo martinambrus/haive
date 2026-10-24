@@ -145,7 +145,7 @@ From the T414 review (2026-10-24). All PRE-EXISTING, consequential for dependenc
 2. No test sanitizes through DOMPurify or parses through markdown-it: packages/web/vitest.config.mts sets no DOM environment; mermaid-loader.test.ts is import-level; markdown-extensions.test.ts never passes a string to tiptap-markdown (`html: true` path).
 3. PR CI builds the production web stage but never starts it (.github/workflows/ci.yml ~:407-430); the first boot is release.yml ~:235-252, after publish, although next.config.mjs ~:8-13 records a standalone MODULE_NOT_FOUND crash loop that shipped once. Fix: boot the built image and curl /login (200 + CSP) and an unauthenticated /dashboard (307 to /login), as the T414 session check did.
 
-### T417 · FNF[origin-url-2] · origin follow-ups after T388: clone URLs, relink push URLs, remote-helper syntax, nested probe (+3)
+### T417 · FNF[origin-url-2] · origin follow-ups after T388: clone URLs, relink push URLs, remote-helper syntax, nested probe (+4)
 
 status: blocked · blocked-by: T388 (same files)
 From the T388 review (2026-10-24). All PRE-EXISTING.
@@ -154,6 +154,7 @@ From the T388 review (2026-10-24). All PRE-EXISTING.
 2. A relink (`remote set-url origin <url>`, git-push.ts ensureOrigin and api repos.ts link-remote) replaces only the first fetch URL and leaves `remote.origin.pushurl`, so a leftover push URL keeps receiving pushes (with the bound credential, see T340 item 2) while the UI shows the new remote. Consequential, narrow. Fix: clear push URLs on relink.
 3. The rule admits `a.b::x` (shared schemas/git-url.ts ~:44-52, :85), which git reads as remote helper `git-remote-a.b`; inert unless such an executable is on PATH. Minor. Fix: refuse `::` transport syntax.
 4. The link-remote probe uses upward `.git` discovery (api repos.ts ~:2547), so a localPath nested inside another repository would set that repository's origin; repo/git-workspace.ts ~:15-48 checks `.git` first. Minor.
+5. (T388 fix-round reviews) The two operator scripts run `git fetch --all` (scripts/advance-bundle-items.ts ~:66, reset-bundle-to-commit.ts ~:88), which reaches every remote with neither the origin rule nor `protocol.file.allow=never`. PRE-EXISTING, minor (operator-run). Fix: fetch `origin` through the same validation, or refuse a remote the rule refuses.
 
 ### T418 · FNF[git-wording] · "nothing to commit" is still matched by git's English wording
 
@@ -687,7 +688,7 @@ Fix direction: after a failed reset, re-ask for the status without clearing the 
 status: open · was modular #208
 DECIDED 2026-10-23: record the expected attachment count on the task, and Start confirms "N of M missing". The start claim is in api lib/task-start.ts:10-23.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+7)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+10)
 
 status: open · was modular #211
 
@@ -700,6 +701,8 @@ status: open · was modular #211
 7. Two flush and sweep test files use fake-DB Proxy workarounds, and K5/M11c count git reads. Replace both with behaviour assertions.
 8. worker repo/worktree-changes.test.ts:191 failed once in a full run under load (expected 1, got 0); 65 replays could not reproduce. Flake, cause unknown.
 9. PRE-EXISTING: a gate row healed by 0210 with no saved schema (the old per-step switch nulls formSchema, steps.ts:1855) has no real-worker check, only the SQL test. Also 0210.sql:14 sets pause_form_on_retry on no-schema rows too, which costs one extra stop at that step's form; narrow it to `pause_form_on_retry OR form_schema IS NOT NULL` if wanted. From #263 (PR #887).
+10. From the T407 review (2026-10-24), PRE-EXISTING, minor: no runner-level test pins that `applyArgs.llmInvocationId` is the run that produced `llmOutput` for a post-form LLM step (worker step-runner.ts ~:3148, ~:3231; only the preForm path is pinned, step-runner-auto-continue.test.ts ~:296-339). Plan chat attribution, 07b, 08c2, 07_7 and prompt steps rest on it.
+11. Same source, minor: the "no agents directory" branch (provider amp) has no test: the `_active-agents-target.ts` null return, 07_5-verify-files.ts ~:57-64, 11-final-review.ts ~:86-93, `collectReviewFindings(repo, null)`.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -745,13 +748,6 @@ status: open · was modular #237
 7. amp's `usage.max_tokens` (272k) may be its context window. Measure.
 8. ollama's per-message prompt and result prompt disagree (display only).
 
-### T370 · FNF[plan-mirror-last-error] · refused/failed plan Pull or Save never records last_error
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-24T18:58Z (PR #890 merged b948852af, main CI running) · was modular #239
-DECIDED 2026-10-23: await the recovery; failures record last_error; refusals stay 409-only.
-worker plan-mirror-queue.ts pull() (~:532) and save() (~:361) return recoverAfterMoveFailure(...) without await, so throws never reach the outer catches.
-Verify the line numbers against T396 (merge-dir-reads) once it merges.
-
 ### T371 · FNF[docker-spawn-dedup] · twelve hand-rolled docker spawn helpers re-implement collect, deadline and kill (+1)
 
 status: open · kind: design · was modular #240
@@ -771,10 +767,10 @@ Sites:
 
 ### T372 · FNF[api-test-hygiene] · fence-order test timeout; picker double label; stepIds misnamed (+2)
 
-status: open · was modular #245
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:38Z · last: 2026-10-24T20:38Z · item 2 ships with T391 · was modular #245
 
 1. api test/new-work-fence-order.test.ts:87 runs under the 5 s default timeout. Fix: 30 s.
-2. cli-picker-grid.tsx shows "(step default)" and the none option for one state.
+2. MOVED to T391 (the same defect as its item 3; ships with it): cli-picker-grid.tsx shows "(step default)" and the none option for one state.
 3. PublicTaskType.stepIds carries only the missing steps. Fix: rename it to missingStepIds.
 
 ### T373 · FNF[audit-strict-admin-actions] · module/task-type/upgrade-start actions still audit best-effort (+1)
@@ -806,7 +802,7 @@ status: open · was modular #250 (a Codex attempt was discarded, nothing kept)
 1. worker steps/workflow/_commit-diff.ts ~:161 returns null when the index has no gitlink. Proposed: show the repo as a new gitlink with its HEAD sha. Show an unborn repo as unreadable with a reason.
 2. An empty investigation file reads as `added` (11-phase-8-learning.ts ~:943). Fix: tell absent from empty by the read result.
 
-### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+4)
+### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+5)
 
 status: open · (T377 landed as PR #886) · was modular #252
 
@@ -816,10 +812,11 @@ status: open · (T377 landed as PR #886) · was modular #252
 4. DECIDED: audit successful and failed sign-ins; nothing for token refresh or logout.
 5. Throttled (429) attempts and the forced password change.
    Fix: the #218 shape, with gated tests.
+6. From the T374 review (2026-10-24), PRE-EXISTING, minor: a house rule's approval also lapses with no audit row and no admin: a content PATCH clears `enforcedHash` (api global-kb.ts ~:1124-1127), the store trigger clears it when an active entry leaves `active` (shared global-kb/ensure-schema.ts ~:168-186), and DELETE /entries/:id removes an enforced entry (~:1243-1270); PATCH and DELETE are requireAuth only. global-kb.md:79-85 calls the lapse deliberate, so the open question is only the trail: a `global_kb.house_rule.lapse` row in the same transaction.
 
 ### T378 · FNF[sign-in-failure-paths] · vendor token not revoked on a failed finishSignIn; device poll finally can 500; GitHub connect poll has no cancelled guard
 
-status: open · was modular #254
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:40Z · last: 2026-10-24T20:40Z · was modular #254
 
 1. api lib/integration-sign-in.ts ~:150-153: revoke the token on failure, best-effort.
 2. lib/integration-device.ts ~:151-153: the finally must never change a committed answer.
@@ -903,7 +900,7 @@ Measure growth, then find a safe repack/prune under hardened args.
 
 ### T391 · FNF[cli-picker-preselect] · pickers preselect the newest provider; create accepts a disabled provider (+2)
 
-status: open · was modular #272
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:52Z · last: 2026-10-24T19:52Z · with T372 item 2 · was modular #272
 
 1. GET /cli-providers sorts desc(createdAt) with no tie-break. Pickers at tasks/[id]/page.tsx ~:1192, terminal/page.tsx ~:43-50, plan-chat.tsx ~:172, plan-starter.tsx ~:115 and repos/[id]/plan/page.tsx ~:356 should preselect via resolveDefaultCliProvider.
 2. api tasks/index.ts ~:518 accepts a disabled provider. Fix: answer 400 with the reason, and hide it in the dropdown.
@@ -990,7 +987,7 @@ The LiteLLM max_input_tokens value is fetched and dropped (shared model-pricing.
 
 ### T404 · FNF[stale-step-stamps] · a re-opened step keeps its old context and allowance stamp
 
-status: open · was modular #286
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:07Z · last: 2026-10-24T20:07Z · was modular #286
 Nothing clears task_steps.context_* or the allowance columns on Retry, loop-back or re-offer; e.g. step cd6fc797 on the old dev DB.
 Fix: clear the stamps on the reopening writes, or gate the badge structurally.
 
@@ -1000,11 +997,14 @@ status: open · was modular #287
 isDdevAgentFixableFailure (ddev-build-guard.ts ~:467) matches "failed to solve". 08 (~:954) and 08b (~:755) are fixLoopOnError; build errors are thrown at images.ts ~:122, :140 and composed-image-cache.ts ~:130.
 Fix: classify by error type. Measure a real failure first.
 
-### T406 · FNF[disabled-task-cli] · a disabled own CLI is handled three ways
+### T406 · FNF[disabled-task-cli] · a disabled own CLI is handled three ways (+2)
 
 status: open · kind: design · was modular #288
 step-command.ts ~:62-64 and 01b read it; dispatch drops it (dispatcher.ts ~:583, ~:646-655); the strip shows it (api tasks/_helpers.ts ~:385).
 Recommendation: fall back to the default at run time, plus T391's create refusal.
+
+1. (T391 review) PRE-EXISTING, minor: the effort dropdown stays enabled for a step whose effective CLI is the task's own disabled provider and sends that id (web cli-picker-grid.tsx ~:100-139, ~:193; tasks/[id]/page.tsx ~:1452), so an effort change is refused (409 before T391, 400 after) until the CLI is switched.
+2. (T391 review) PRE-EXISTING, informational: the shell sockets check ownership only, never `enabled` (api terminal-shell.ts ~:513-531, ~:553-586; worker terminal-container.ts ~:181-186), so "disabled providers are not offered in terminals" is enforced by the web alone.
 
 ### T407 · FNF[plan-message-attribution] · plan chat records the task-level CLI as the answering provider (+1)
 
@@ -1042,10 +1042,16 @@ Fix: pass `connection: { client_connection_check_interval: 500 }` in the postgre
 
 ---
 
+### T421 · FNF[git-data-ledger-rows] · ledger rows recorded at git-data paths stay live forever
+
+status: open
+From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` rows an earlier release recorded at a git-data path (a literal `.git` segment or, since T304, an NTFS or HFS+ alias of it) are skipped by every reader (01 plan, 02 and 04 writes, 03 staging, the sync), but nothing retires them and they still count in `liveArtifacts` (api upgrades.ts ~:456, ~:723, ~:787). Fix: retire them in a numbered, idempotent data migration (SQL cannot call `namesGitData`, so the migration needs the same rule in SQL, or ship a deploy script), or leave them out of the counts.
+
 ## Done
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T370 — a refused or failed plan Pull or Save records last_error (recovery awaited) — PR #890 (b948852af), 2026-10-24
 - T311 — RAG chunker reads constructs only outside comments, strings and inline HTML (16 Codex rounds; leftovers in T413) — PR #889 (74eba9317), 2026-10-24
 - T328 — bundle git bounded; 01 refuses an unknown base; gate 3 keeps an earlier sha — PR #888 (214b76b1f), 2026-10-24
 - T383 — fix-loop gate re-offer follow-ups (was modular #263) — PR #887 (e5c41e2ec), 2026-10-24
