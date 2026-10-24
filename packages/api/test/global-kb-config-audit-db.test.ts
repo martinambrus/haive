@@ -119,7 +119,7 @@ const dropTriggers = async (db: Database) => {
   await db.execute(sql.raw('DROP FUNCTION IF EXISTS refuse_gkb_secret();'));
 };
 
-describe.skipIf(!url)('PUT /global-kb/config writes its audit row first, on Postgres', () => {
+describe.skipIf(!url)('global KB config and enforcement write audit rows first on Postgres', () => {
   let db: Database;
   let app: Hono<AppEnv>;
   let store: ReturnType<typeof postgres>;
