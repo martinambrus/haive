@@ -449,6 +449,98 @@ describe.skipIf(!url)('the worker leaves a Stop-failed row alone, on Postgres', 
     });
   });
 
+  describe('a job that throws out of the queue handler', () => {
+    const boom = 'the job threw';
+    const runR = (taskId: string) =>
+      processTaskJob(
+        job(TASK_JOB_NAMES.ADVANCE_STEP, { taskId, userId, stepId: R, round: 0, epoch: E }),
+      );
+    const taskOnR = async () => {
+      const taskId = await makeTask({
+        status: 'running',
+        errorMessage: null,
+        completedAt: null,
+        currentStepId: R,
+        currentRound: 0,
+        runListSnapshot: [S, NEXT, R],
+      });
+      await makeRow(taskId, {
+        stepId: R,
+        stepIndex: 3,
+        round: 0,
+        status: 'pending',
+        errorMessage: null,
+        endedAt: null,
+      });
+      return taskId;
+    };
+
+    it('leaves the Stop error and completed_at alone', async () => {
+      const taskId = await taskOnR();
+      h.admission = async () => {
+        await db
+          .update(schema.tasks)
+          .set({ status: 'failed', errorMessage: STOPPED, completedAt: OLD })
+          .where(eq(schema.tasks.id, taskId));
+        throw new Error(boom);
+      };
+      await expect(runR(taskId)).rejects.toThrow(boom);
+      const after = (await state(taskId)).task;
+      expect(after.status).toBe('failed');
+      expect(after.errorMessage).toBe(STOPPED);
+      expect(after.completedAt).toBe(OLD.toISOString());
+    });
+
+    it('still fails a running task with the thrown message', async () => {
+      const taskId = await taskOnR();
+      h.admission = async () => {
+        throw new Error(boom);
+      };
+      await expect(runR(taskId)).rejects.toThrow(boom);
+      const after = (await state(taskId)).task;
+      expect(after.status).toBe('failed');
+      expect(after.errorMessage).toContain(boom);
+      expect(after.completedAt).not.toBe(OLD.toISOString());
+    });
+  });
+
+  describe('a START that throws before it claims the task', () => {
+    const boom = 'the run list threw';
+    const failStart = () =>
+      vi.spyOn(stepRegistry, 'get').mockImplementation(() => {
+        throw new Error(boom);
+      });
+    const queued = () =>
+      makeTask({
+        status: 'queued',
+        errorMessage: null,
+        completedAt: null,
+        currentStepId: null,
+        currentRound: 0,
+      });
+
+    it('fails a queued task with the thrown message', async () => {
+      const taskId = await queued();
+      const spy = failStart();
+      await expect(processTaskJob(job(TASK_JOB_NAMES.START, { taskId, userId }))).rejects.toThrow(
+        boom,
+      );
+      spy.mockRestore();
+      const after = (await state(taskId)).task;
+      expect(after.status).toBe('failed');
+      expect(after.errorMessage).toContain(boom);
+    });
+
+    it('leaves a Stop-failed task alone', async () => {
+      const taskId = await stopped();
+      const before = await state(taskId);
+      const spy = failStart();
+      await processTaskJob(job(TASK_JOB_NAMES.START, { taskId, userId })).catch(() => undefined);
+      spy.mockRestore();
+      expect((await state(taskId)).task).toEqual(before.task);
+    });
+  });
+
   describe('negative controls: the same entry points do act on a task that is not Stop-failed', () => {
     it('the sweep re-drives a running task whose current row is pending', async () => {
       const taskId = await makeTask({ status: 'running', errorMessage: null, completedAt: null });
