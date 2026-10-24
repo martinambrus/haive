@@ -262,7 +262,7 @@ const WORD_CHAR = /[\p{L}\p{N}_$]/u;
 const MAX_REGEX_CHARS = 20_000;
 const MAX_REGEX_MISSES = 8;
 
-/** How many unclosed template literals one file may give back as plain text before the rest masks to EOF. */
+/** How many unclosed template literals or block comments one file may give back as plain text before the rest masks to EOF. */
 const MAX_STRAY_TICKS = 8;
 
 /** `//` right after `scheme:` is a URL in markup text, not a line comment. */
@@ -452,6 +452,13 @@ function jsNonCode(text: string): Span[] {
       i += 2;
     } else if (c === '/' && (next === '/' || next === '*')) {
       const close = text.indexOf(next === '/' ? '\n' : '*/', i + 2);
+      if (close < 0 && next === '*' && frames.length === 0 && strayTicks < MAX_STRAY_TICKS) {
+        // An unclosed block comment is a regex like /[/*]/ read as one: lex on as code.
+        strayTicks += 1;
+        prev = '';
+        i += 2;
+        continue;
+      }
       const bodyEnd = close < 0 ? text.length : close;
       if (frames.length === 0) spans.push([i + 2, bodyEnd]);
       i = next === '*' && close >= 0 ? close + 2 : bodyEnd;

@@ -1348,6 +1348,14 @@ describe('extractCodeSections — braces that are not code', () => {
     expect(sections.has('function-second')).toBe(true);
   });
 
+  it('keeps the sections after a regex that follows a condition and holds a slash-star', () => {
+    const js = 'function first(x) { if (x) /[/*]/.test(x); }\nfunction second() { return 2; }\n';
+    const sections = sectionsOf(js, 'cond.js');
+
+    expect(sections.has('function-first')).toBe(true);
+    expect(sections.has('function-second')).toBe(true);
+  });
+
   it('ends an object-literal member at its own closing brace', () => {
     const src = [
       'var api = {',
