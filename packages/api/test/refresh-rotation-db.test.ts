@@ -1,4 +1,4 @@
-import { eq, isNull, and } from 'drizzle-orm';
+import { eq, isNull, and, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -105,6 +105,32 @@ describe.skipIf(!url)('refresh rotation on Postgres', () => {
     expect(loserBody).toBe(await replay.text());
     expect([...loser.headers]).toEqual([...replay.headers]);
   });
+
+  it.each(['Pacific/Honolulu', 'Asia/Tokyo'])(
+    'records UTC revocation wall time with session TimeZone %s',
+    async (zone) => {
+      h.db = new Proxy(db, {
+        get(target, key) {
+          if (key === 'transaction')
+            return (fn: (tx: unknown) => Promise<unknown>) =>
+              target.transaction(async (tx) => {
+                await tx.execute(sql`SELECT set_config('TimeZone', ${zone}, true)`);
+                return fn(tx);
+              });
+          const value = Reflect.get(target, key, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const before = Date.now();
+      expect((await refresh()).status).toBe(200);
+      const after = Date.now();
+      const original = await db.query.refreshTokens.findFirst({
+        where: eq(schema.refreshTokens.tokenHash, tokenHash),
+      });
+      expect(original!.revokedAt!.getTime()).toBeGreaterThanOrEqual(before);
+      expect(original!.revokedAt!.getTime()).toBeLessThanOrEqual(after);
+    },
+  );
 
   it('a failed successor insert rolls the revocation back and sends no cookies', async () => {
     h.db = instrumentDb(db, async () => {}, true);

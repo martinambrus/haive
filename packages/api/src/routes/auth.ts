@@ -302,7 +302,7 @@ authRoutes.post('/refresh', async (c) => {
     // redemption waits for the winner's commit and then matches no row.
     const claimed = await tx
       .update(schema.refreshTokens)
-      .set({ revokedAt: sql`now()` })
+      .set({ revokedAt: new Date() })
       .where(and(eq(schema.refreshTokens.id, row.id), isNull(schema.refreshTokens.revokedAt)))
       .returning({ id: schema.refreshTokens.id });
     if (claimed.length === 0) throw new HttpError(401, 'Refresh token invalid or expired');
