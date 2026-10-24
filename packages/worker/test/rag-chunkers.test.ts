@@ -1251,6 +1251,17 @@ describe('extractCodeSections — line terminators other than LF', () => {
     expect(ids).toContain('function-next');
   });
 
+  it.each([
+    ['//', '// comment'],
+    ['#', '# comment'],
+    ['heredoc', "$s = <<<EOT\rit's { EOT\rEOT;"],
+  ])('ends a PHP %s line at a CR', (_name, line) => {
+    const src = `<?php\r${line}\rfunction save() { persist(); }\rfunction next() { ok(); }\r`;
+    const ids = extractCodeSections(src, 'a.php').map((s) => s.sectionId);
+    expect(ids).toContain('function-save');
+    expect(ids).toContain('function-next');
+  });
+
   it('keeps every line terminator in the masked text', () => {
     const src = 'a; // c\u2028b; // d\ru = 1;';
     expect(maskNonCode(src, 'js')).toBe('a; //  \u2028b; //  \ru = 1;');

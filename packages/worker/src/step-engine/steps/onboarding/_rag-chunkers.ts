@@ -249,7 +249,7 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
 type Span = [from: number, to: number];
 
 const PHP_OPEN_TAG = /<\?(?:php(?=\s|$)|=|(?=\s))/gi;
-const PHP_HEREDOC = /<<<[ \t]*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|([A-Za-z_]\w*))\r?\n/y;
+const PHP_HEREDOC = /<<<[ \t]*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|([A-Za-z_]\w*))(?:\r\n?|\n)/y;
 const REGEX_AFTER_WORD = /^(?:return|typeof|instanceof|in|new|delete|void|throw|case|do|else)$/;
 /** Keywords only in their own syntax: an identifier anywhere else, so a slash after one divides. */
 const CONTEXTUAL_WORDS = new Set(['of', 'yield', 'await']);
@@ -278,14 +278,14 @@ function isUrlScheme(text: string, slash: number): boolean {
   return !(before === '' && slash <= 40) && !/[{};)]$/.test(before);
 }
 
-/** Java ends a line at LF or CR; ECMAScript also at U+2028 and U+2029. */
-function isLineTerminator(c: string, java: boolean): boolean {
-  return c === '\n' || c === '\r' || (!java && (c === '\u2028' || c === '\u2029'));
+/** Java and PHP end a line at LF or CR; ECMAScript also at U+2028 and U+2029. */
+function isLineTerminator(c: string, lfCrOnly: boolean): boolean {
+  return c === '\n' || c === '\r' || (!lfCrOnly && (c === '\u2028' || c === '\u2029'));
 }
 
 /** Index of the first line terminator at or after `from`, else -1. */
-function lineEnd(text: string, from: number, java: boolean): number {
-  for (let i = from; i < text.length; i += 1) if (isLineTerminator(text[i]!, java)) return i;
+function lineEnd(text: string, from: number, lfCrOnly: boolean): number {
+  for (let i = from; i < text.length; i += 1) if (isLineTerminator(text[i]!, lfCrOnly)) return i;
   return -1;
 }
 
@@ -360,9 +360,9 @@ function heredocAt(text: string, open: number): { body: Span; end: number } | nu
     if (text.startsWith(label, at) && !WORD_CHAR.test(text[at + label.length] ?? ' ')) {
       return { body: [bodyStart, line], end: at + label.length };
     }
-    const newline = text.indexOf('\n', line);
+    const newline = lineEnd(text, line, true);
     if (newline < 0) break;
-    line = newline + 1;
+    line = newline + (text[newline] === '\r' && text[newline + 1] === '\n' ? 2 : 1);
   }
   return { body: [bodyStart, text.length], end: text.length };
 }
@@ -389,7 +389,11 @@ function phpNonCode(text: string): Span[] {
     } else if ((c === '/' && next === '/') || (c === '#' && next !== '[')) {
       const from = i + (c === '#' ? 1 : 2);
       i = from;
-      while (i < text.length && text[i] !== '\n' && !(text[i] === '?' && text[i + 1] === '>'))
+      while (
+        i < text.length &&
+        !isLineTerminator(text[i]!, true) &&
+        !(text[i] === '?' && text[i + 1] === '>')
+      )
         i += 1;
       spans.push([from, i]);
     } else if (c === '/' && next === '*') {
