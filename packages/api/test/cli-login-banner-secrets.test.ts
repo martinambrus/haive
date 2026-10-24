@@ -7,9 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
   ws: undefined as unknown,
-  stream: undefined as unknown,
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
   save: vi.fn(),
+  attach: vi.fn(),
+  start: vi.fn(),
+  remove: vi.fn(),
   queueError: undefined as Error | undefined,
   probeError: undefined as Error | undefined,
 }));
@@ -29,16 +31,20 @@ vi.mock('ws', async (original) => ({
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/auth/jwt.js', () => ({ verifyAccessToken: async () => ({ sub: 'user', tv: 0 }) }));
-vi.mock('../src/routes/terminal.js', () => ({ attachContainerStream: async () => h.stream }));
+vi.mock('../src/routes/terminal.js', () => ({ attachContainerStream: h.attach }));
 vi.mock('../src/queues.js', () => ({
   getCliExecQueueEvents: () => ({}),
   getUsagePollQueue: () => ({ add: async () => ({}) }),
   getCliExecQueue: () => ({
     add: async (name: string) => {
       if (h.queueError) throw h.queueError;
+      let delivered = false;
       return {
-        getState: async () => 'active',
+        getState: async () => (delivered ? 'unknown' : 'active'),
         waitUntilFinished: async () => {
+          // Completed jobs are removed and cannot supply a second container result.
+          if (delivered) throw new Error('job removed');
+          delivered = true;
           if (name !== 'cli-login-create' && h.probeError) throw h.probeError;
           return name === 'cli-login-create'
             ? { ok: true, containerRowId: 'row', dockerContainerId: 'container' }
@@ -68,6 +74,9 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   h.save.mockReset();
+  h.attach.mockReset();
+  h.start.mockReset().mockResolvedValue(undefined);
+  h.remove.mockReset().mockResolvedValue(undefined);
   h.queueError = undefined;
   h.probeError = undefined;
   providerName = 'claude-code';
@@ -94,7 +103,7 @@ beforeEach(() => {
     },
   });
   h.ws = ws;
-  h.stream = stream;
+  h.attach.mockResolvedValue(stream);
 });
 afterEach(async () => {
   ws.close();
@@ -105,7 +114,7 @@ afterEach(async () => {
 async function start(query = '', attached = true, providerId = PROVIDER) {
   const server = new EventEmitter();
   const docker = {
-    getContainer: () => ({ start: async () => {}, remove: async () => {}, resize: async () => {} }),
+    getContainer: () => ({ start: h.start, remove: h.remove, resize: async () => {} }),
   } as unknown as Docker;
   installCliLoginBannerWebSocket(server as Server, { docker });
   // The shared upgrade guard listens on the socket and the session registry tracks req.socket.
@@ -288,5 +297,92 @@ describe('CLI login banner credential logging', () => {
     expect(h.log.error).toHaveBeenCalled();
     assertNoCredentialText(TOKEN, CODE);
     expect(JSON.stringify(ws.send.mock.calls).includes(TOKEN)).toBe(false);
+  });
+});
+
+describe('CLI login banner startup cleanup', () => {
+  it.each([false, true])(
+    'ends the stream when start fails (remove fails: %s)',
+    async (removeFails) => {
+      h.start.mockRejectedValueOnce(new Error('start unavailable'));
+      h.remove.mockImplementationOnce(async () => {
+        expect(stream.writableEnded).toBe(true);
+        if (removeFails) throw new Error('remove unavailable');
+      });
+      await start('', false);
+      expect(stream.writableEnded).toBe(true);
+      expect(h.remove).toHaveBeenCalledWith({ force: true });
+      expect(ws.readyState).toBe(3);
+      expect(ws.send).toHaveBeenCalledWith(
+        JSON.stringify({ type: 'error', message: 'Failed to start login container' }),
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('handles a stream error while container start is still pending', async () => {
+    let finish!: () => void;
+    h.start.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await start('', false);
+    expect(h.start).toHaveBeenCalledOnce();
+    const failure = new Error('attach socket failed');
+    // EventEmitter throws here on the old code: no error listener exists yet.
+    try {
+      expect(() => stream.emit('error', failure)).not.toThrow();
+      await settle();
+      expect(stream.writableEnded).toBe(true);
+      expect(h.remove).toHaveBeenCalledOnce();
+      expect(ws.readyState).toBe(3);
+      expect(ws.send).toHaveBeenCalledWith(
+        JSON.stringify({ type: 'error', message: failure.message }),
+      );
+    } finally {
+      finish();
+      await settle();
+    }
+    expect(stream.listenerCount('data')).toBe(0);
+    expect(h.remove).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['attach', 'start'])('ends the stream when cancelled during %s', async (stage) => {
+    if (stage === 'attach')
+      h.attach.mockImplementationOnce(async () => {
+        ws.close();
+        return stream;
+      });
+    else
+      h.start.mockImplementationOnce(async () => {
+        ws.close();
+      });
+    await start('', false);
+    expect(stream.writableEnded).toBe(true);
+    expect(h.remove).toHaveBeenCalledOnce();
+    expect(stream.listenerCount('data')).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cleans up the stream and heartbeat if session timer setup fails', async () => {
+    const timeout = globalThis.setTimeout;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      ...args: Parameters<typeof setTimeout>
+    ) => {
+      if (args[1] === 10 * 60 * 1000) throw new Error('timer unavailable');
+      return timeout(...args);
+    }) as typeof setTimeout);
+    try {
+      await start('', false);
+      expect(stream.writableEnded).toBe(true);
+      expect(h.remove).toHaveBeenCalledOnce();
+      expect(ws.readyState).toBe(3);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.mocked(globalThis.setTimeout).mockRestore();
+    }
   });
 });
