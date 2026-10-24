@@ -184,7 +184,7 @@ describe.each(sites)('%s commit decisions', (site) => {
       if (args[0] === 'commit') return { code: 1, stdout: 'nothing to commit', stderr: '' };
       return undefined;
     });
-    await expect(apply()).rejects.toThrow(/staged.*failed/i);
+    await expect(apply()).rejects.toThrow(/^git staged read failed:/);
     expect(writes).toEqual([]);
     expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
   });

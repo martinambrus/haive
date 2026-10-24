@@ -75,4 +75,30 @@ describe('gitCommitStaged with real git', () => {
     expect(await command(root, ['show', '-s', '--format=%P', 'HEAD'])).toBe(`${main} ${side}`);
     expect((await gitRun(root, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).code).toBe(1);
   });
+
+  it('skips an empty unborn branch and commits its first staged file', async () => {
+    await command(root, ['init', '-q', '-b', 'main']);
+    expect(await gitCommitStaged(root, 'empty unborn branch', identity)).toBe(false);
+    expect((await gitRun(root, ['rev-parse', '-q', '--verify', 'HEAD'])).code).toBe(1);
+
+    await writeFileNoFollow(root, 'first', 'first file\n');
+    await command(root, ['add', 'first']);
+    expect(await gitCommitStaged(root, 'first commit', identity)).toBe(true);
+    expect(await command(root, ['show', 'HEAD:first'])).toBe('first file');
+    expect(await command(root, ['show', '-s', '--format=%P', 'HEAD'])).toBe('');
+  });
+
+  it('skips intent-to-add entries until their contents are staged', async () => {
+    await command(root, ['init', '-q', '-b', 'main']);
+    await command(root, ['commit', '-q', '--allow-empty', '-m', 'base']);
+    const head = await command(root, ['rev-parse', 'HEAD']);
+    await writeFileNoFollow(root, 'intent', 'not staged yet\n');
+    await command(root, ['add', '-N', 'intent']);
+
+    expect(await gitCommitStaged(root, 'intent only', identity)).toBe(false);
+    expect(await command(root, ['rev-parse', 'HEAD'])).toBe(head);
+    await command(root, ['add', 'intent']);
+    expect(await gitCommitStaged(root, 'stage contents', identity)).toBe(true);
+    expect(await command(root, ['show', 'HEAD:intent'])).toBe('not staged yet');
+  });
 });
