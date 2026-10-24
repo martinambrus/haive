@@ -105,7 +105,9 @@ describe.skipIf(!URL_)('an abandoned module database session', () => {
     const readSetting = (sql: postgres.Sql | postgres.TransactionSql) =>
       sql`SELECT setting::int, source FROM pg_settings
            WHERE name = 'client_connection_check_interval'`;
-    const connections = await Promise.all([handle.sql.reserve(), handle.sql.reserve()]);
+    const connections = await Promise.all(
+      Array.from({ length: handle.sql.options.max }, () => handle.sql.reserve()),
+    );
     try {
       for (const connection of connections) {
         expect(await readSetting(connection)).toMatchObject([{ setting: 500, source: 'client' }]);
@@ -116,23 +118,24 @@ describe.skipIf(!URL_)('an abandoned module database session', () => {
     const locked = await handle.withSchemaLock(readSetting);
     logger.info({ locked }, 'schema lock check interval');
     expect(locked).toMatchObject([{ setting: 500, source: 'client' }]);
-  });
+  }, 30_000);
 
-  it('ends statements on both sql connections soon after the pool closes', async () => {
+  it('ends statements on every sql connection soon after the pool closes', async () => {
     const id = freshId();
     const app = 'mdw-sql-runners';
     const handle = await open(id, app);
     const started = performance.now();
-    for (let i = 0; i < 2; i++) {
+    const poolSize = handle.sql.options.max;
+    for (let i = 0; i < poolSize; i++) {
       pending.push(handle.sql`SELECT pg_sleep(10)`.catch(() => {}));
     }
 
     const running = await poll(
       () => backends(app, id),
-      (rows) => rows.filter((r) => r.wait_event === 'PgSleep').length === 2,
+      (rows) => rows.filter((r) => r.wait_event === 'PgSleep').length === poolSize,
       3000,
     );
-    expect(running.filter((r) => r.wait_event === 'PgSleep')).toHaveLength(2);
+    expect(running.filter((r) => r.wait_event === 'PgSleep')).toHaveLength(poolSize);
 
     await handle.close();
     const closed = performance.now();
