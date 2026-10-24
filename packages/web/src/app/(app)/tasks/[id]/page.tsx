@@ -122,6 +122,7 @@ import { formatVoteScore, TaskVote, voteToneClass } from '@/components/task-vote
 import { PostgresTestButton, OllamaTestButton } from '@/components/connection-tester';
 import { EditorTab } from '@/components/editor/editor-tab';
 import { AttachmentsPanel } from '@/components/attachments/attachments-panel';
+import { attachmentUnavailableNote } from '@/lib/attachment-availability';
 import { CommitDiffViewer } from '@/components/commit-diff-viewer';
 import { PrStatusPanel } from '@/components/PrStatusPanel';
 import { StepTerminal } from '@/components/terminal/StepTerminal';
@@ -2312,7 +2313,13 @@ export default function TaskDetailPage() {
 
       {tab === 'editor' && !editorDisabled && <EditorTab taskId={id} />}
 
-      {tab === 'attachments' && <AttachmentsPanel taskId={id} taskEnded={taskEnded} />}
+      {tab === 'attachments' && (
+        <AttachmentsPanel
+          taskId={id}
+          taskEnded={taskEnded}
+          unavailableNote={attachmentUnavailableNote(task.repository)}
+        />
+      )}
 
       {tab === 'terminal' && (
         <TerminalTab

@@ -86,8 +86,10 @@ beforeEach(() => {
   holdList = null;
 });
 
-async function mount(): Promise<Renderer> {
-  const view = createRenderer(() => <AttachmentsPanel taskId={TASK} />);
+async function mount(
+  props: Partial<React.ComponentProps<typeof AttachmentsPanel>> = {},
+): Promise<Renderer> {
+  const view = createRenderer(() => <AttachmentsPanel taskId={TASK} {...props} />);
   for (let i = 0; i < 3; i += 1) await view.flush();
   return view;
 }
@@ -293,5 +295,47 @@ describe('removing from the attachments panel', () => {
     pick(view, FILES, loose('b.md'));
     await view.flush();
     expect(page(view)).not.toContain('locked');
+  });
+});
+
+describe('the attachments panel for a task that takes no uploads', () => {
+  const NOTE = 'This repository is imported read-only, so files cannot be attached.';
+  const fileInputs = (view: Renderer) =>
+    findAll(view.tree(), (h) => h.tag === 'input' && h.props.type === 'file');
+  const existing: TaskAttachment = {
+    id: 'a1',
+    taskId: TASK,
+    filename: 'a.md',
+    sizeBytes: 1,
+    contentType: null,
+    description: null,
+    createdAt: '2026-10-17T10:00:00.000Z',
+    expandedAt: null,
+    expandedFromId: null,
+  };
+
+  it('N1 shows the note in place of the pickers, and keeps a listed file downloadable and removable', async () => {
+    listed = [existing];
+    deleteReply = { code: 200, error: '' };
+    const view = await mount({ unavailableNote: NOTE });
+    expect(fileInputs(view)).toHaveLength(0);
+    expect(page(view)).toContain(NOTE);
+    const links = findAll(
+      view.tree(),
+      (h) => h.tag === 'a' && String(h.props.href).endsWith(`/tasks/${TASK}/attachments/a1/raw`),
+    );
+    expect(links).toHaveLength(1);
+    (
+      findAll(view.tree(), (h) => h.tag === 'button' && textOf(h) === 'Remove')[0]!.props
+        .onClick as () => void
+    )();
+    await view.flush();
+    expect(sent).toContain(`DELETE /tasks/${TASK}/attachments/a1`);
+  });
+
+  it('N2 offers both pickers and no note without the prop', async () => {
+    const view = await mount();
+    expect(fileInputs(view)).toHaveLength(2);
+    expect(page(view)).not.toContain(NOTE);
   });
 });

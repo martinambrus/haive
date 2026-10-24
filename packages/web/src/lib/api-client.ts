@@ -893,7 +893,7 @@ export interface Task {
   /** Joined on the list and detail endpoints so the UI can show which repo a
    *  task belongs to. Null when the task has no repository (or it was deleted).
    *  Absent on the create response, which returns only the raw inserted row. */
-  repository?: { id: string; name: string } | null;
+  repository?: { id: string; name: string; source: string; writable: boolean } | null;
   /** Set on GET /tasks/:id when a CLI invocation is currently in flight
    *  (started, not ended, not superseded). Drives the Terminal tab and the
    *  live cli-stream WebSocket. Always null on the list endpoint. */

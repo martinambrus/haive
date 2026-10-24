@@ -86,6 +86,9 @@ async function fakeFetch(input: unknown) {
   if (path === '/tasks/t1') {
     return { ok: true, status: 200, json: async () => structuredClone(net.detail) };
   }
+  if (path === '/tasks/t1/attachments') {
+    return { ok: true, status: 200, json: async () => ({ attachments: [] }) };
+  }
   net.unstubbed.push(path);
   return { ok: true, status: 200, json: async () => ({ providers: [], events: [] }) };
 }
@@ -239,5 +242,34 @@ describe('task page: an administrator pause', () => {
     ]);
     expect(stepCardText(own).some((t) => t.includes(STORED_LINE))).toBe(true);
     expect(stepCardText(own).some((t) => t.includes(PAUSED_WAIT))).toBe(false);
+  });
+});
+
+describe('task page: the Attachments tab', () => {
+  const NOTE = 'This repository is imported read-only, so files cannot be attached.';
+  const fileInputs = (view: Renderer) =>
+    findAll(view.tree(), (h) => h.tag === 'input' && h.props.type === 'file');
+  const openTab = async (task: Record<string, unknown>) => {
+    const view = await mount(task);
+    fire.click(buttons(view.tree(), 'attachments')[0]!);
+    for (let i = 0; i < 3; i += 1) await view.flush();
+    return view;
+  };
+
+  it('W1 names a read-only local repository and offers no picker', async () => {
+    const view = await openTab({
+      repository: { id: 'r1', name: 'Local', source: 'local_path', writable: false },
+    });
+    expect(textOf(view.tree())).toContain(NOTE);
+    expect(fileInputs(view)).toHaveLength(0);
+  });
+
+  it.each([
+    ['a writable local repository', 'local_path', true],
+    ['a read-only repository that is not local', 'git_https', false],
+  ])('W2 offers both pickers for %s', async (_name, source, writable) => {
+    const view = await openTab({ repository: { id: 'r1', name: 'Local', source, writable } });
+    expect(fileInputs(view)).toHaveLength(2);
+    expect(textOf(view.tree())).not.toContain(NOTE);
   });
 });
