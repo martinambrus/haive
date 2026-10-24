@@ -7,63 +7,68 @@ import { Redis } from 'ioredis';
 import { describe, expect, it } from 'vitest';
 import { CLI_POLLABLE_JOB_OPTS } from '@haive/shared';
 
-// Read the actual producers' options, without booting the application or its DB.
-// Running those options through BullMQ matters: count retention trims the WHOLE
-// queue's finished set, including jobs enqueued with a different retention policy.
-const producers = [
-  'packages/worker/src/queues/task-queue.ts',
-  'packages/api/src/routes/cli-providers.ts',
-  'packages/api/src/routes/cli-login-banner.ts',
-  'packages/api/src/lib/cli-version-refresh.ts',
-  'packages/worker/src/queues/cli-exec/handlers.ts',
-].flatMap((path) => {
-  const source = ts.createSourceFile(
-    path,
-    readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8'),
-    ts.ScriptTarget.Latest,
-    true,
-  );
-  const found: { label: string; opts: JobsOptions }[] = [];
-  const visit = (node: ts.Node) => {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      node.expression.name.text === 'add'
-    ) {
-      const [name, , options] = node.arguments;
-      if (name && options && name.getText(source).startsWith('CLI_EXEC_JOB_NAMES.')) {
-        let expression = options;
-        if (ts.isIdentifier(options)) {
-          let scope: ts.Node = node;
-          while (scope.parent && !ts.isArrowFunction(scope)) scope = scope.parent;
-          let initializer: ts.Expression | undefined;
-          const find = (child: ts.Node) => {
-            if (ts.isVariableDeclaration(child) && child.name.getText(source) === options.text)
-              initializer = child.initializer;
-            ts.forEachChild(child, find);
-          };
-          find(scope);
-          if (initializer) expression = initializer;
-        }
-        const js = ts.transpileModule(`(${expression.getText(source)})`, {
-          compilerOptions: { target: ts.ScriptTarget.ES2024 },
-        }).outputText;
-        const opts = runInNewContext(js, { CLI_POLLABLE_JOB_OPTS }) as JobsOptions;
-        found.push({
-          label: `${path}:${source.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${name.getText(source)}`,
-          opts,
-        });
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  return found;
-});
-
-const redisUrl = process.env.CLI_JOB_RETENTION_REDIS_URL;
+const redisUrl = process.env.CLI_JOB_RETENTION_TEST_REDIS_URL;
 // Opt-in only; never inherit the application's REDIS_URL.
 describe.skipIf(!redisUrl)('cli-job retention against isolated Redis', () => {
+  // Read the actual producers' options, without booting the application or its DB.
+  // Running those options through BullMQ matters: count retention trims the WHOLE
+  // queue's finished set, including jobs enqueued with a different retention policy.
+  const producers = !redisUrl
+    ? []
+    : [
+        'packages/worker/src/queues/task-queue.ts',
+        'packages/api/src/routes/cli-providers.ts',
+        'packages/api/src/routes/cli-login-banner.ts',
+        'packages/api/src/lib/cli-version-refresh.ts',
+        'packages/worker/src/queues/cli-exec/handlers.ts',
+      ].flatMap((path) => {
+        const source = ts.createSourceFile(
+          path,
+          readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8'),
+          ts.ScriptTarget.Latest,
+          true,
+        );
+        const found: { label: string; opts: JobsOptions }[] = [];
+        const visit = (node: ts.Node) => {
+          if (
+            ts.isCallExpression(node) &&
+            ts.isPropertyAccessExpression(node.expression) &&
+            node.expression.name.text === 'add'
+          ) {
+            const [name, , options] = node.arguments;
+            if (name && options && name.getText(source).startsWith('CLI_EXEC_JOB_NAMES.')) {
+              let expression = options;
+              if (ts.isIdentifier(options)) {
+                let scope: ts.Node = node;
+                while (scope.parent && !ts.isArrowFunction(scope)) scope = scope.parent;
+                let initializer: ts.Expression | undefined;
+                const find = (child: ts.Node) => {
+                  if (
+                    ts.isVariableDeclaration(child) &&
+                    child.name.getText(source) === options.text
+                  )
+                    initializer = child.initializer;
+                  ts.forEachChild(child, find);
+                };
+                find(scope);
+                if (initializer) expression = initializer;
+              }
+              const js = ts.transpileModule(`(${expression.getText(source)})`, {
+                compilerOptions: { target: ts.ScriptTarget.ES2024 },
+              }).outputText;
+              const opts = runInNewContext(js, { CLI_POLLABLE_JOB_OPTS }) as JobsOptions;
+              found.push({
+                label: `${path}:${source.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${name.getText(source)}`,
+                opts,
+              });
+            }
+          }
+          ts.forEachChild(node, visit);
+        };
+        visit(source);
+        return found;
+      });
+
   it.each(
     producers.flatMap((producer) =>
       ['completed', 'failed'].map((state) => ({ ...producer, state })),
@@ -71,8 +76,16 @@ describe.skipIf(!redisUrl)('cli-job retention against isolated Redis', () => {
   )(
     '$label preserves a young $state pollable result',
     async ({ opts, state }) => {
-      expect(redisUrl).toBe('redis://127.0.0.1:44935');
-      const connection = { host: '127.0.0.1', port: 44935, maxRetriesPerRequest: null };
+      const url = new URL(redisUrl!);
+      const connection = {
+        host: url.hostname,
+        port: Number(url.port || 6379),
+        db: Number(url.pathname.slice(1) || 0),
+        username: url.username ? decodeURIComponent(url.username) : undefined,
+        password: url.password ? decodeURIComponent(url.password) : undefined,
+        ...(url.protocol === 'rediss:' ? { tls: {} } : {}),
+        maxRetriesPerRequest: null,
+      };
       const name = `t420-retention-${randomUUID()}`;
       const redis = new Redis(connection);
       const queue = new Queue(name, { connection });
