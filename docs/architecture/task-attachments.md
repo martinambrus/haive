@@ -14,7 +14,7 @@ answered 409. Both forms also hide their attach controls for such a repository b
 repository itself and keeps the controls if that read fails, leaving the api's refusal to answer,
 and New Task drops files already picked when the person switches to such a repository. After a
 refused `start` with every file uploaded, a freshly picked file turns the plan starter's button into
-"Retry starting the build with the new files". The plan starter
+"Retry starting the build with the new files". The task page's Attachments tab shows the same line in place of its pickers, from the task payload's `repository` (`{id, name, source, writable}`, one `TASK_REPOSITORY_COLUMNS` for the list and the detail route), and says so too for a task with no repository, whose uploads answer 409 "Task has no repository"; its existing rows stay listed and removable, since the api refuses only the upload. `GET /repos/:id` and `PATCH /repos/:id/exclusions` leave out `fileTree` and `renderContext`, as the list does. The plan starter
 (`web/src/components/plan/plan-starter.tsx`) keeps that draft's id whenever a press leaves one,
 after a failed upload or a refused `start`, so its next press re-sends only the rows not yet
 uploaded and sends `start` to the SAME task; a form that forgot the id after a refused `start`
