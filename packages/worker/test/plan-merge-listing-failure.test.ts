@@ -1,3 +1,4 @@
+import { networkGitArgs, httpOrigin } from './support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -79,7 +80,7 @@ const COMMIT_ENV = {
 };
 const LISTING = ['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--diff-filter=U'];
 const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', args, { cwd, env: ENV, encoding: 'utf8' }).trim();
+  execFileSync('git', networkGitArgs(args), { cwd, env: ENV, encoding: 'utf8' }).trim();
 
 let root = '';
 let shim: FakeGit | null = null;
@@ -94,7 +95,7 @@ function conflictingFixture(): void {
   writeFileSync(path.join(origin, 'a.txt'), 'a\n');
   git(origin, 'add', '-A');
   git(origin, 'commit', '-qm', 'base');
-  execFileSync('git', ['clone', '-q', origin, h.repo], { env: ENV });
+  execFileSync('git', ['clone', '-q', httpOrigin(origin), h.repo], { env: ENV });
   git(h.repo, 'config', 'gc.auto', '0');
   writeFileSync(path.join(origin, 'a.txt'), 'theirs\n');
   git(origin, 'commit', '-qam', 'theirs');

@@ -1,3 +1,4 @@
+import { networkGitArgs } from '../../../../test/support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -32,7 +33,8 @@ const ctx = {
   logger: { info: vi.fn(), warn },
 } as never;
 
-const git = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
+const git = (cwd: string, args: string[]) =>
+  execFileSync('git', networkGitArgs(args), { cwd, stdio: 'pipe' });
 
 describe('run-app ready gate when the branch read gives no answer', () => {
   let dirs: string[] = [];

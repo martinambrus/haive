@@ -1,3 +1,4 @@
+import { networkGitArgs } from './support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -18,6 +19,7 @@ const GIT_ENV = {
   GIT_COMMITTER_EMAIL: 't@haive.local',
 };
 async function git(dir: string, args: string[]): Promise<string> {
+  args = networkGitArgs(args);
   const { stdout } = await exec('git', ['-c', 'gc.auto=0', ...args], { cwd: dir, env: GIT_ENV });
   return stdout.trim();
 }

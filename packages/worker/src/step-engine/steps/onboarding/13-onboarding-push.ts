@@ -1,3 +1,4 @@
+import { originGitRun } from '../../../repo/git-push.js';
 import { eq } from 'drizzle-orm';
 import { schema, type MergeResolveState } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
@@ -60,8 +61,8 @@ interface OnboardingPushApply {
   message: string;
 }
 
-/** Best-effort `git fetch origin <base>` with the step-12 credential. Never throws -
- *  a failure is surfaced (warn & continue), not fatal (mirrors 00a-sync-base). */
+/** Best-effort `git fetch origin <base>` with the step-12 credential. Network
+ *  failures warn-and-continue; an unsafe origin throws (mirrors 00a-sync-base). */
 async function fetchOrigin(
   ctx: StepContext,
   base: string,
@@ -81,7 +82,7 @@ async function fetchOrigin(
     }
   }
   argv.push('fetch', '--end-of-options', 'origin', `refs/heads/${base}`);
-  const res = await gitRun(ctx.repoPath, argv, env);
+  const res = await originGitRun(ctx.repoPath, argv, env);
   if (res.code !== 0) {
     return {
       ok: false,

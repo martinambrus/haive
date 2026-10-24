@@ -1,3 +1,4 @@
+import { originGitRun } from '../repo/git-push.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
@@ -640,7 +641,7 @@ async function squashFeatureMerge(
 }
 
 /** Best-effort authenticated `git fetch origin <base>` (same credential the push uses).
- *  Never throws — a failure is surfaced so the caller can warn-and-continue. */
+ *  Network failures warn-and-continue; an unsafe origin throws. */
 async function fetchForSync(
   db: Database,
   ctx: StepContext,
@@ -671,7 +672,7 @@ async function fetchForSync(
     'origin',
     `refs/heads/${base}:${fetchRef}`,
   );
-  const res = await gitRun(cwd, argv, env);
+  const res = await originGitRun(cwd, argv, env);
   if (res.code !== 0) {
     return {
       ok: false,

@@ -1,3 +1,4 @@
+import { networkGitArgs } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -29,6 +30,7 @@ const GIT_ENV = {
 };
 
 async function git(dir: string, args: string[]): Promise<string> {
+  args = networkGitArgs(args);
   const { stdout } = await exec('git', args, { cwd: dir, env: GIT_ENV });
   return stdout.toString();
 }

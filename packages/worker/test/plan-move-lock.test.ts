@@ -1,3 +1,4 @@
+import { httpOrigin } from './support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -135,7 +136,7 @@ function fixture(conflict: boolean): void {
   writeFileSync(path.join(origin, 'a.txt'), 'a\n');
   git(origin, 'add', '-A');
   git(origin, 'commit', '-qm', 'base');
-  execFileSync('git', ['clone', '-q', origin, h.repo], { env: ENV });
+  execFileSync('git', ['clone', '-q', httpOrigin(origin), h.repo], { env: ENV });
   git(h.repo, 'config', 'gc.auto', '0');
   writeFileSync(path.join(origin, conflict ? 'a.txt' : 'theirs.txt'), 'theirs\n');
   git(origin, 'add', '-A');

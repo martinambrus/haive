@@ -1,3 +1,4 @@
+import { networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,7 @@ let shim: KilledGit | null = null;
 const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 
 async function git(cwd: string, args: string[]): Promise<void> {
+  args = networkGitArgs(args);
   await exec('git', ['-c', 'gc.auto=0', ...args], {
     cwd,
     env: {
@@ -42,7 +44,7 @@ async function makeRepo(withOrigin: boolean): Promise<string> {
   if (withOrigin) {
     const bare = await mkTmp('sync-base-noexit-bare-');
     await git(bare, ['init', '--bare', '-b', 'main']);
-    await git(dir, ['remote', 'add', 'origin', `file://${bare}`]);
+    await git(dir, ['remote', 'add', 'origin', httpOrigin(bare)]);
     await git(dir, ['push', 'origin', 'main']);
   }
   return dir;

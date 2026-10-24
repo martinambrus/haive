@@ -1,3 +1,4 @@
+import { networkGitArgs } from '../../../../test/support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -16,7 +17,15 @@ const step = bundleResyncStep as Required<typeof bundleResyncStep>;
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync(
     'git',
-    ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'gc.auto=0', ...args],
+    [
+      '-c',
+      'user.name=t',
+      '-c',
+      'user.email=t@example.com',
+      '-c',
+      'gc.auto=0',
+      ...networkGitArgs(args),
+    ],
     { cwd, stdio: ['ignore', 'pipe', 'pipe'] },
   ).toString();
 

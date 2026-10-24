@@ -1,3 +1,4 @@
+import { originGitRun } from '../../../repo/git-push.js';
 import { eq } from 'drizzle-orm';
 import { lockRepositoryTasksKey, schema } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
@@ -77,8 +78,8 @@ interface SyncBaseApply {
   reason: string | null;
 }
 
-/** Best-effort `git fetch origin <base>` with the repo's bound credential. Never
- *  throws — a failure is surfaced (warn & continue), not fatal. */
+/** Best-effort `git fetch origin <base>` with the repo's bound credential. Network
+ *  failures warn-and-continue; an unsafe origin throws. */
 async function fetchOrigin(
   ctx: StepContext,
   base: string,
@@ -98,7 +99,7 @@ async function fetchOrigin(
     }
   }
   argv.push('fetch', '--end-of-options', 'origin', `refs/heads/${base}`);
-  const res = await gitRun(ctx.repoPath, argv, env);
+  const res = await originGitRun(ctx.repoPath, argv, env);
   if (res.code !== 0) {
     return {
       ok: false,
@@ -438,7 +439,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     const ff = (): Promise<{ code: number; stderr: string; stdout: string }> =>
       onCurrent
         ? gitRun(ctx.repoPath, ['merge', '--ff-only', `origin/${base}`])
-        : gitRun(ctx.repoPath, [
+        : originGitRun(ctx.repoPath, [
             'fetch',
             '--end-of-options',
             'origin',
@@ -581,7 +582,7 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
             kept.clear();
             asided = false;
           }
-          await gitRun(ctx.repoPath, [
+          await originGitRun(ctx.repoPath, [
             'fetch',
             '--deepen=50',
             '--end-of-options',

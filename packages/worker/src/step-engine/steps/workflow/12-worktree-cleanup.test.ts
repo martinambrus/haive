@@ -1,3 +1,4 @@
+import { networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import {
   chmod,
@@ -97,6 +98,15 @@ vi.mock('../../../repo/git-push.js', async (importOriginal) => {
       if (fetching) await fetchProbe.afterFetch?.();
       return result;
     },
+    originGitRun: async (...args: Parameters<typeof real.gitRun>) => {
+      const intercepted = fetchProbe.intercept?.(args[1], args[0]);
+      if (intercepted) return intercepted;
+      const fetching = args[1].includes('fetch');
+      if (fetching) fetchProbe.sections.push(claimFake.activeSections);
+      const result = await real.originGitRun(...args);
+      if (fetching) await fetchProbe.afterFetch?.();
+      return result;
+    },
   };
 });
 beforeEach(() => {
@@ -164,6 +174,7 @@ const GIT_ENV = {
 };
 
 async function git(dir: string, args: string[]): Promise<string> {
+  args = networkGitArgs(args);
   const { stdout } = await exec('git', args, { cwd: dir, env: GIT_ENV });
   return stdout.toString();
 }
@@ -220,7 +231,7 @@ async function divergeBase(parent: string, wt: string): Promise<void> {
 async function pushParentMainToOrigin(parent: string): Promise<string> {
   const bare = await mkdtemp(path.join(tmpdir(), 'wt-origin-'));
   await git(bare, ['init', '--bare', '-b', 'main']);
-  await git(parent, ['remote', 'add', 'origin', `file://${bare}`]);
+  await git(parent, ['remote', 'add', 'origin', httpOrigin(bare)]);
   await git(parent, ['push', '-u', 'origin', 'main']);
   return bare;
 }
@@ -230,7 +241,7 @@ async function pushParentMainToOrigin(parent: string): Promise<string> {
 async function advanceOrigin(bare: string, file: string, content: string): Promise<void> {
   const seed = await mkdtemp(path.join(tmpdir(), 'wt-seed-'));
   try {
-    await git(seed, ['clone', `file://${bare}`, '.']);
+    await git(seed, ['clone', httpOrigin(bare), '.']);
     await writeFile(path.join(seed, file), content, 'utf8');
     await git(seed, ['add', '-A']);
     await git(seed, ['commit', '-m', `origin: ${file}`]);
@@ -1096,7 +1107,7 @@ describe('12 merge phase + apply (real git)', () => {
     const bare = await mkdtemp(path.join(tmpdir(), 'wt-bare-'));
     try {
       await git(bare, ['init', '--bare', '-b', 'main']);
-      await git(parent, ['remote', 'add', 'origin', `file://${bare}`]);
+      await git(parent, ['remote', 'add', 'origin', httpOrigin(bare)]);
       const { merge, state } = await mergeThenApply(parent, det(wt, { hasOrigin: true }), {
         action: 'merge_remove',
         pushBase: true,
@@ -2118,7 +2129,7 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
       const h = makeDb();
       const detected = det(wt, {
         hasOrigin: true,
-        originUrl: `file://${bare}`,
+        originUrl: httpOrigin(bare),
         prWorkflowAvailable: true,
       });
       const out = await worktreeCleanupStep.apply(
@@ -2150,7 +2161,7 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
       const h = makeDb();
       const detected = det(wt, {
         hasOrigin: true,
-        originUrl: `file://${bare}`,
+        originUrl: httpOrigin(bare),
         prWorkflowAvailable: true,
       });
       await worktreeCleanupStep.apply(
@@ -3846,7 +3857,7 @@ it.each(['origin-keeps-advancing', 'origin-keeps-advancing without squash', 'pus
         },
       });
       expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
-      if (kind === 'push-failure') await git(parent, ['remote', 'add', 'origin', `file://${bare}`]);
+      if (kind === 'push-failure') await git(parent, ['remote', 'add', 'origin', httpOrigin(bare)]);
       else await git(parent, ['merge', '--no-ff', '--no-edit', 'origin/main']);
       await h.db.update().set({ status: 'running' }).where(null);
       const retried = await resolveMergePhase(

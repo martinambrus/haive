@@ -1,3 +1,4 @@
+import { networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -118,6 +119,7 @@ const GIT_ENV = {
   GIT_COMMITTER_EMAIL: 't@haive.local',
 };
 async function git(dir: string, args: string[]): Promise<string> {
+  args = networkGitArgs(args);
   const { stdout } = await exec('git', ['-c', 'gc.auto=0', ...args], { cwd: dir, env: GIT_ENV });
   return stdout.toString();
 }
@@ -133,7 +135,7 @@ async function gitCode(dir: string, args: string[]): Promise<number> {
 const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 
 /** ctx whose db stubs the credential lookup detect does (no bound credential → a
- *  plain fetch, which works against a file:// origin). */
+ *  plain fetch, which works against an HTTP origin). */
 function mkCtx(
   repoPath: string,
   repositoryId: string | null = null,
@@ -170,7 +172,7 @@ async function seedOrigin(): Promise<{ bare: string; seed: string }> {
   await git(bare, ['init', '--bare', '-b', 'main']);
   const seed = await mkdtemp(path.join(tmpdir(), 'sync-seed-'));
   await git(seed, ['init', '-b', 'main']);
-  await git(seed, ['remote', 'add', 'origin', `file://${bare}`]);
+  await git(seed, ['remote', 'add', 'origin', httpOrigin(bare)]);
   await writeFile(path.join(seed, 'a.txt'), '1\n', 'utf8');
   await git(seed, ['add', '-A']);
   await git(seed, ['commit', '-m', 'c1']);
@@ -179,7 +181,7 @@ async function seedOrigin(): Promise<{ bare: string; seed: string }> {
 }
 async function cloneLocal(bare: string): Promise<string> {
   const local = await mkdtemp(path.join(tmpdir(), 'sync-local-'));
-  await git(local, ['clone', `file://${bare}`, '.']);
+  await git(local, ['clone', httpOrigin(bare), '.']);
   return local;
 }
 async function advanceOrigin(seed: string, file: string): Promise<void> {
@@ -709,7 +711,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       await writeFile(path.join(local, 'a.txt'), '1\n', 'utf8');
       await git(local, ['add', '-A']);
       await git(local, ['commit', '-m', 'c1']);
-      await git(local, ['remote', 'add', 'origin', `file://${bare}`]);
+      await git(local, ['remote', 'add', 'origin', httpOrigin(bare)]);
       await git(local, ['config', '--add', 'remote.origin.fetch', ':::bad']);
       return { local, bare };
     }

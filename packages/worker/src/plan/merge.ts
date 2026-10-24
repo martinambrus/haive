@@ -1,3 +1,4 @@
+import { originGitRun } from '../repo/git-push.js';
 import { HAIVE_DATA_FILES, logger } from '@haive/shared';
 import { buildCredentialHelper, gitRun, scrubSecret } from '../repo/git-push.js';
 import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
@@ -102,7 +103,7 @@ export async function fetchOrigin(args: {
     Object.assign(env, helper.env);
     argv.push(...helper.argv);
   }
-  const res = await gitRun(
+  const res = await originGitRun(
     args.repoPath,
     [...argv, 'fetch', '--end-of-options', 'origin', `refs/heads/${args.branch}`],
     env,

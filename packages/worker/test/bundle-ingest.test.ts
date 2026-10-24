@@ -1,3 +1,4 @@
+import { httpOrigin } from './support/git-http.js';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -246,7 +247,7 @@ describe('handleResyncGit', () => {
     await run('git', ['add', '.'], work);
     await run('git', ['commit', '-m', 'init'], work);
     await run('git', ['push', 'origin', 'main'], work);
-    await gitClone(`file://${origin}`, path.join(tmpRoot, h.user, BUNDLE, 'extracted'), 'main');
+    await gitClone(httpOrigin(origin), path.join(tmpRoot, h.user, BUNDLE, 'extracted'), 'main');
 
     await mkdir(path.join(work, 'docs', DEEP), { recursive: true });
     for (let i = 0; i < 60; i++) {
@@ -263,7 +264,7 @@ describe('handleResyncGit', () => {
       repositoryId: '00000000-0000-4000-8000-0000000000c1',
       name: 'bundle',
       sourceType: 'git',
-      gitUrl: `file://${origin}`,
+      gitUrl: httpOrigin(origin),
       gitBranch: 'main',
       storageRoot: '',
     });
