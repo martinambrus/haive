@@ -20,9 +20,8 @@ import {
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { getIdeEnsureQueue, getIdeEnsureQueueEvents } from '../queues.js';
-import { verifyAccessToken } from '../auth/jwt.js';
+import { authenticateUpgrade } from '../lib/upgrade-auth.js';
 import {
-  ACCESS_COOKIE,
   isSessionSetCookie,
   withoutSessionCookies,
   withoutSessionSetCookies,
@@ -404,36 +403,6 @@ function extractIdeTarget(rawUrl: string): { id: string; repository: boolean } |
   const repository = parts[0] === 'repos';
   const id = parts[repository ? 1 : 0] ?? '';
   return isCanonicalUuid(id) ? { id, repository } : null;
-}
-
-async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {
-  const cookieHeader = req.headers.cookie;
-  if (!cookieHeader) return null;
-  const token = parseCookieValue(cookieHeader, ACCESS_COOKIE);
-  if (!token) return null;
-  try {
-    const payload = await verifyAccessToken(token);
-    const db = getDb();
-    const user = await db.query.users.findFirst({
-      where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
-    });
-    if (!user) return null;
-    if (user.status !== 'active') return null;
-    if (user.tokenVersion !== payload.tv) return null;
-    if (user.mustChangePassword) return null;
-    return { userId: user.id };
-  } catch {
-    return null;
-  }
-}
-
-function parseCookieValue(cookieHeader: string, name: string): string | null {
-  for (const part of cookieHeader.split(';')) {
-    const [k, ...rest] = part.trim().split('=');
-    if (k === name) return decodeURIComponent(rest.join('='));
-  }
-  return null;
 }
 
 function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {

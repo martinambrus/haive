@@ -1,5 +1,5 @@
 import http from 'node:http';
-import type { Server, IncomingMessage } from 'node:http';
+import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import Docker from 'dockerode';
@@ -9,8 +9,7 @@ import { logger } from '@haive/shared';
 import { terminalClientFrameSchema } from '@haive/shared';
 import type { TerminalServerFrame } from '@haive/shared';
 import { getDb } from '../db.js';
-import { verifyAccessToken } from '../auth/jwt.js';
-import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { authenticateUpgrade } from '../lib/upgrade-auth.js';
 import { TerminalLogBuffer } from '../terminal/log-buffer.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isUuid } from '../lib/uuid.js';
@@ -235,28 +234,6 @@ async function runTerminalSession(
   sendFrame(ws, { type: 'connected', sessionId });
 }
 
-async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {
-  const cookieHeader = req.headers.cookie;
-  if (!cookieHeader) return null;
-  const token = parseCookieValue(cookieHeader, ACCESS_COOKIE);
-  if (!token) return null;
-  try {
-    const payload = await verifyAccessToken(token);
-    const db = getDb();
-    const user = await db.query.users.findFirst({
-      where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
-    });
-    if (!user) return null;
-    if (user.status !== 'active') return null;
-    if (user.tokenVersion !== payload.tv) return null;
-    if (user.mustChangePassword) return null;
-    return { userId: user.id };
-  } catch {
-    return null;
-  }
-}
-
 async function loadContainerForUser(
   containerId: string,
   userId: string,
@@ -355,19 +332,6 @@ function extractContainerId(rawUrl: string, pathPrefix: string): string | null {
   if (!pathOnly.startsWith(pathPrefix)) return null;
   const remainder = pathOnly.slice(pathPrefix.length);
   return isUuid(remainder) ? remainder : null;
-}
-
-function parseCookieValue(header: string, name: string): string | null {
-  const parts = header.split(/;\s*/);
-  for (const part of parts) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    const key = part.slice(0, eq);
-    if (key === name) {
-      return decodeURIComponent(part.slice(eq + 1));
-    }
-  }
-  return null;
 }
 
 function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {

@@ -1,4 +1,4 @@
-import type { Server, IncomingMessage } from 'node:http';
+import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import { eq } from 'drizzle-orm';
@@ -6,8 +6,7 @@ import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
-import { verifyAccessToken } from '../auth/jwt.js';
-import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { authenticateUpgrade } from '../lib/upgrade-auth.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isUuid } from '../lib/uuid.js';
 
@@ -310,32 +309,6 @@ function fieldsToFrame(fields: string[]): StreamFrameOut | null {
   return null;
 }
 
-async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {
-  const cookieHeader = req.headers.cookie;
-  if (!cookieHeader) return null;
-  const token = parseCookieValue(cookieHeader, ACCESS_COOKIE);
-  if (!token) return null;
-  try {
-    const payload = await verifyAccessToken(token);
-    const db = getDb();
-    const user = await db.query.users.findFirst({
-      where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
-    });
-    if (
-      !user ||
-      user.status !== 'active' ||
-      user.tokenVersion !== payload.tv ||
-      user.mustChangePassword
-    ) {
-      return null;
-    }
-    return { userId: user.id };
-  } catch {
-    return null;
-  }
-}
-
 async function verifyInvocationOwnership(
   invocationId: string,
   userId: string,
@@ -360,17 +333,6 @@ function extractInvocationId(rawUrl: string, pathPrefix: string): string | null 
   if (!pathOnly.startsWith(pathPrefix)) return null;
   const remainder = pathOnly.slice(pathPrefix.length);
   return isUuid(remainder) ? remainder : null;
-}
-
-function parseCookieValue(header: string, name: string): string | null {
-  for (const part of header.split(/;\s*/)) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    if (part.slice(0, eq) === name) {
-      return decodeURIComponent(part.slice(eq + 1));
-    }
-  }
-  return null;
 }
 
 function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
