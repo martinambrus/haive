@@ -1296,6 +1296,14 @@ describe('extractCodeSections — line terminators other than LF', () => {
     expect(ids.includes('function-save')).toBe(isCode);
   });
 
+  it.each([
+    'const a = <p>/x</p>; const b = c / 2;',
+    'const a = <p className="x">/x/y</p>; const b = c / 2;',
+    'const a = <p>x</p> ; const b = c / 2;',
+  ])('reads no regex after a JSX tag: %s', (src) => {
+    expect(maskNonCode(src, 'js')).toBe(src);
+  });
+
   it('keeps every line terminator in the masked text', () => {
     const src = 'a; // c\u2028b; // d\ru = 1;';
     expect(maskNonCode(src, 'js')).toBe('a; //  \u2028b; //  \ru = 1;');

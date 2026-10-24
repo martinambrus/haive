@@ -456,6 +456,17 @@ function regexMayStart(prev: string | null): boolean {
   return prev !== '' && ![')', ']', '}', '>', '<', '.'].includes(prev);
 }
 
+/** Whether the `<` or `>` run before the slash at `slash` is a spaced operator (`a > /re/`), not the
+ *  end of a JSX tag (`<p>/x`) or the start of a closing one (`</p>`): spaces on both sides of it. */
+function spacedOperatorBefore(text: string, slash: number): boolean {
+  let j = slash - 1;
+  while (j >= 0 && (text[j] === ' ' || text[j] === '\t')) j -= 1;
+  if (j === slash - 1 || j < 0 || (text[j] !== '<' && text[j] !== '>')) return false;
+  let k = j;
+  while (k > 0 && (text[k - 1] === '<' || text[k - 1] === '>')) k -= 1;
+  return k > 0 && (text[k - 1] === ' ' || text[k - 1] === '\t');
+}
+
 /** The spans of a JS, TS or Java file that are not code: comments, strings, template literals (their
  *  `${}` expressions too) and regex literals. A string that is a bare name stays: it may be a key. */
 function jsNonCode(text: string, java: boolean, htmlComments = false): Span[] {
@@ -528,7 +539,8 @@ function jsNonCode(text: string, java: boolean, htmlComments = false): Span[] {
       if (frames.length === 0) spans.push([i + 2, bodyEnd]);
       i = next === '*' && close >= 0 ? close + 2 : bodyEnd;
     } else if (c === '/') {
-      const mayStart = regexMayStart(prev);
+      const mayStart =
+        regexMayStart(prev) || ((prev === '<' || prev === '>') && spacedOperatorBefore(text, i));
       const close = mayStart && regexMisses < MAX_REGEX_MISSES ? regexClose(text, i, java) : -1;
       if (close < 0) {
         if (mayStart) regexMisses += 1;
