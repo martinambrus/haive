@@ -17,6 +17,7 @@ import { verifyAccessToken } from '../src/auth/jwt.js';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { verifyPassword } from '../src/auth/password.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
+import { adminRoutes } from '../src/routes/admin.js';
 import { userSettingsRoutes } from '../src/routes/user-settings.js';
 import {
   PASSWORD,
@@ -30,9 +31,13 @@ import {
 describe.skipIf(!url)('password change compare-and-set on Postgres', () => {
   let db: ReturnType<typeof createDatabase>;
   let userId: string;
+  let adminId: string | undefined;
   let cookie: string;
   let release = () => {};
-  const app = new Hono<AppEnv>().onError(errorHandler).route('/user-settings', userSettingsRoutes);
+  const app = new Hono<AppEnv>()
+    .onError(errorHandler)
+    .route('/user-settings', userSettingsRoutes)
+    .route('/admin', adminRoutes);
   const change = (newPassword: string) =>
     app.request('/user-settings/password', {
       method: 'PUT',
@@ -45,6 +50,7 @@ describe.skipIf(!url)('password change compare-and-set on Postgres', () => {
   beforeEach(async () => {
     vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('cd'.repeat(32));
     h.close.mockClear();
+    adminId = undefined;
     h.db = db;
     const made = await makeUser(db);
     userId = made.user.id;
@@ -53,6 +59,10 @@ describe.skipIf(!url)('password change compare-and-set on Postgres', () => {
   afterEach(async () => {
     release();
     await db.delete(schema.users).where(eq(schema.users.id, userId));
+    if (adminId) {
+      await db.delete(schema.auditEvents).where(eq(schema.auditEvents.actorUserId, adminId));
+      await db.delete(schema.users).where(eq(schema.users.id, adminId));
+    }
     vi.restoreAllMocks();
   });
   afterAll(async () => {
@@ -85,6 +95,52 @@ describe.skipIf(!url)('password change compare-and-set on Postgres', () => {
     });
     expect((await change('synthetic-next-password-2')).status).toBe(200);
   });
+
+  it.each(['reset_password', 'deactivate'])(
+    'an admin %s racing a password change keeps both version bumps',
+    async (action) => {
+      const admin = await makeUser(db);
+      adminId = admin.user.id;
+      await db.update(schema.users).set({ role: 'admin' }).where(eq(schema.users.id, adminId));
+      let arrived!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        arrived = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.db = instrumentDb(db, async (table, opts) => {
+        if (
+          table === 'users' &&
+          opts.columns?.tokenVersion &&
+          !opts.columns.mustChangePassword &&
+          !opts.columns.passwordHash
+        ) {
+          arrived();
+          await held;
+        }
+      });
+      const reset = Promise.resolve(
+        app.request(`/admin/users/${userId}/action`, {
+          method: 'POST',
+          headers: { cookie: admin.cookie, 'content-type': 'application/json' },
+          body: JSON.stringify({ action }),
+        }),
+      );
+      try {
+        await ready;
+        expect((await change('synthetic-next-password-2')).status).toBe(200);
+      } finally {
+        release();
+      }
+      expect((await reset).status).toBe(200);
+      const user = await db.query.users.findFirst({ where: eq(schema.users.id, userId) });
+      expect(user!.tokenVersion).toBe(2);
+      expect(h.close.mock.calls).toEqual([[userId], [userId]]);
+      expect(user!.status).toBe(action === 'deactivate' ? 'deactivated' : 'active');
+      expect(user!.mustChangePassword).toBe(action === 'reset_password');
+    },
+  );
 
   it('one concurrent change wins, advances the version and closes sockets only once', async () => {
     const gate = concurrentReads('users', true);
