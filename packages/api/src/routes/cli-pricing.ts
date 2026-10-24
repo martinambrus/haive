@@ -240,6 +240,7 @@ cliPricingRoutes.delete('/prices/:id', async (c) => {
  *  catalog, rates and FX together. */
 cliPricingRoutes.post('/refresh', async (c) => {
   const job = await enqueueCliVersionRefresh();
+  if (!job.id) throw new HttpError(500, 'refresh was not queued', 'refresh_enqueue_failed');
   log.info({ jobId: job.id }, 'manual price refresh enqueued');
   return c.json({ jobId: job.id });
 });

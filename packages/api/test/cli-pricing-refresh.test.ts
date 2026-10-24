@@ -53,6 +53,13 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('pricing refresh', () => {
+  it('refuses a refresh without a job id', async () => {
+    h.add.mockResolvedValue({ id: '' });
+    const res = await refresh();
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ code: 'refresh_enqueue_failed' });
+  });
+
   it('queues a catalog refresh with an empty payload', async () => {
     const res = await refresh();
 
