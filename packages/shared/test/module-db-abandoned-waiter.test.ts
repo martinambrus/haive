@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabase, type Database } from '@haive/database';
+import { logger } from '../src/logger/index.js';
 import {
   moduleDatabaseName,
   openModuleDatabase,
@@ -24,7 +25,7 @@ const poll = async <T>(read: () => Promise<T>, done: (value: T) => boolean, limi
   return value;
 };
 
-describe.skipIf(!URL_)('an abandoned module schema-lock session', () => {
+describe.skipIf(!URL_)('an abandoned module database session', () => {
   let db: Database;
   let admin: postgres.Sql;
   const moduleIds: string[] = [];
@@ -98,6 +99,65 @@ describe.skipIf(!URL_)('an abandoned module schema-lock session', () => {
     await admin?.end({ timeout: 5 });
     await db?.$client.end({ timeout: 5 });
   });
+
+  it('inherits the startup check interval inside the schema lock', async () => {
+    const handle = await open(freshId(), 'mdw-lock-setting');
+    const readSetting = (sql: postgres.Sql | postgres.TransactionSql) =>
+      sql`SELECT setting::int, source FROM pg_settings
+           WHERE name = 'client_connection_check_interval'`;
+    const connections = await Promise.all(
+      Array.from({ length: handle.sql.options.max }, () => handle.sql.reserve()),
+    );
+    try {
+      for (const connection of connections) {
+        expect(await readSetting(connection)).toMatchObject([{ setting: 500, source: 'client' }]);
+      }
+    } finally {
+      for (const connection of connections) connection.release();
+    }
+    const locked = await handle.withSchemaLock(readSetting);
+    logger.info({ locked }, 'schema lock check interval');
+    expect(locked).toMatchObject([{ setting: 500, source: 'client' }]);
+  }, 30_000);
+
+  it('ends statements on every sql connection soon after the pool closes', async () => {
+    const id = freshId();
+    const app = 'mdw-sql-runners';
+    const handle = await open(id, app);
+    const started = performance.now();
+    const poolSize = handle.sql.options.max;
+    for (let i = 0; i < poolSize; i++) {
+      pending.push(handle.sql`SELECT pg_sleep(10)`.catch(() => {}));
+    }
+
+    const running = await poll(
+      () => backends(app, id),
+      (rows) => rows.filter((r) => r.wait_event === 'PgSleep').length === poolSize,
+      3000,
+    );
+    expect(running.filter((r) => r.wait_event === 'PgSleep')).toHaveLength(poolSize);
+
+    await handle.close();
+    const closed = performance.now();
+    const left = await poll(
+      () => backends(app, id),
+      (rows) => rows.length === 0,
+      GONE_WITHIN_MS,
+    );
+    const checked = performance.now();
+    logger.info(
+      {
+        closeMs: Math.round(closed - started),
+        backendCheckAfterCloseMs: Math.round(checked - closed),
+        remaining: left.length,
+      },
+      'sql pool close measurement',
+    );
+    expect(left, 'sql backends still on the server after close').toHaveLength(0);
+    expect(checked - started, 'backends ended well before pg_sleep(10) could finish').toBeLessThan(
+      8500,
+    );
+  }, 30_000);
 
   it('leaves the server soon after its pool closes while it waits for the lock', async () => {
     const id = freshId();

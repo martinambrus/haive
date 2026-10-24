@@ -120,14 +120,17 @@ the module loads again.
   it; the attempt counts toward `MODULE_REACTIVATION_ATTEMPTS`, so the next active pass ensures
   again, at most three times per reactivation, and after the third the flag reads failed (only the
   worker error log and the waiting steps' line say so) until a deactivation and an activation try
-  again. On the server a statement the ensure had already sent finishes or fails by itself and its
-  transaction rolls back, since no COMMIT arrives, except that a waiter on the schema lock and a
-  statement running inside `withSchemaLock` end about half a second after the pool closes: closing
-  the pool alone cancels neither (measured), so `withSchemaLock` sets
-  `client_connection_check_interval` to 500 ms as the first statement of its transaction
-  (`SET LOCAL`; it needs PostgreSQL 14 or later on Linux, which the stack runs; pinned by the
-  gated `module-db-abandoned-waiter.test.ts`); and whatever the ensure committed on its own
-  stays, so an ensure must be idempotent. A job start has the same deadline: `jobs` that has not
+  again. On the server a statement the ensure had already sent ends about half a second after the pool
+  closes and its transaction rolls back, since no COMMIT arrives: closing the pool alone cancels
+  nothing (measured: a `pg_sleep` backend was still running 3 s after `close()`), so
+  `openModuleDatabase` opens every connection of the pool with `client_connection_check_interval`
+  = 500 ms as a startup parameter (it needs PostgreSQL 14 or later on Linux, which the stack runs;
+  pinned by the gated `module-db-abandoned-waiter.test.ts`). That covers a waiter on the schema
+  lock, a statement inside `withSchemaLock`, and whatever a module sends through `ctx.sql` or a
+  teardown hook's handle. Haive's internal RAG and global-KB pools (`rag/connection.ts`,
+  `global-kb/connection.ts`) open with the same parameter; an external store does not get it, since a
+  pooler can refuse a startup parameter ([Global knowledge base](global-kb.md)). Whatever the ensure
+  committed on its own stays, so an ensure must be idempotent. A job start has the same deadline: `jobs` that has not
   returned by then counts as failed, with its claim released and its attempt counted as an
   ensure's are. The jobs it starts after the deadline are stopped at once and never count as
   started, though the module counts as running, and a teardown of it is refused, until that stop
