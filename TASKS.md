@@ -848,7 +848,7 @@ Decide: sanitise .git/config at import (allow-list keys), or refuse archives tha
 
 ### T388 · FNF[origin-url-revalidate] · a stored remote.origin.url is never re-validated, so network git can fetch/push file:// paths of other tenants (+3)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-24T17:47Z · was modular #269
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-25T00:50Z · merged PR #906 (da043a2aa), waiting for main CI · was modular #269
 
 1. isAllowedGitRemoteUrl (shared schemas/git-url.ts ~:94) guards only typed URLs. Since #255, getOriginUrl is the one read. Validate the URL there and switch the detectOrigin-only callers.
 2. `-c` does not reach a local-path transport child. Item 1 closes this.
