@@ -721,7 +721,12 @@ async function prePushSync(
       { error: string } | { behind: number; next: MergeResolveState | null }
     >(db, current, params, state.mergeDir, async (tx) => {
       if (!fetched.ok) return { error: `fetch failed: ${fetched.error}` };
-      const tip = await revParse(state.mergeDir, fetchRef);
+      let tip: string | null;
+      try {
+        tip = await revParse(state.mergeDir, fetchRef);
+      } catch (err) {
+        return { error: `could not record origin/${base}: ${(err as Error).message}` };
+      }
       if (!tip) return { error: `could not record origin/${base}: fetched commit unavailable` };
       const promoted = await gitRun(state.mergeDir, [
         'update-ref',
@@ -934,7 +939,9 @@ async function halt(
     const open = await gitRun(state.mergeDir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
     const baseline = state.fixBaseline;
     const feature =
-      open.code === 0 ? await revParse(state.mergeDir, `${state.featureBranch}^{commit}`) : null;
+      open.code === 0
+        ? await revParse(state.mergeDir, `${state.featureBranch}^{commit}`).catch(() => null)
+        : null;
     const mergeHead = open.stdout.trim();
     let own =
       open.code === 0 &&
@@ -1005,9 +1012,9 @@ async function putBackBeforeFeatureMerge(
   worktreePath: string | null,
 ): Promise<{ current: TaskStepRow } | { halted: MergeResolved }> {
   if (!spec.putBackBeforeMerge || (state.mergeStage ?? 'feature') !== 'feature') return { current };
-  if (await mergeOpenFor(state.mergeDir, state.featureBranch)) return { current };
   let notes: string[];
   try {
+    if (await mergeOpenFor(state.mergeDir, state.featureBranch)) return { current };
     notes = await spec.putBackBeforeMerge({
       ctx,
       worktreePath,
@@ -1102,10 +1109,13 @@ export async function resolveMergePhase(
   /** Tasks working in the checkout itself (no worktree of their own) have their tree changed by a merge opened there. */
   const othersIn = (conn: Parameters<typeof checkoutHoldingTasks>[0], repositoryId: string) =>
     checkoutHoldingTasks(conn, repositoryId, { excludeTaskId: params.taskId, rootOnly: true });
+  // Read before anything is set aside, so a failed read throws with nothing to put back.
+  let movedFrom = '';
   /** Why the files cannot be set aside, or null once they are. */
   const setAside = async (repositoryId: string, dir: string) => {
     let aside;
     try {
+      movedFrom = (await revParse(dir, 'HEAD')) ?? '';
       aside = await setAsideHaiveProjections(
         db,
         repositoryId,
@@ -1144,7 +1154,6 @@ export async function resolveMergePhase(
     dir: string,
     fn: (tx: Tx) => Promise<T>,
   ): Promise<T> => {
-    const before = repositoryId ? ((await revParse(dir, 'HEAD')) ?? '') : '';
     try {
       return await section(dir, fn);
     } catch (err) {
@@ -1154,7 +1163,7 @@ export async function resolveMergePhase(
           repositoryId,
           dir,
           kept,
-          before,
+          movedFrom,
           err,
           putBackSection(dir),
         );
@@ -1309,8 +1318,8 @@ export async function resolveMergePhase(
       // documented undo point, measured in the dir the merge runs in.
       let armed = withKept(pending);
       if (!armed.baseShaBefore) {
-        const baseHead = await gitRun(armed.mergeDir, ['rev-parse', 'HEAD']);
-        if (baseHead.code === 0) armed = { ...armed, baseShaBefore: baseHead.stdout.trim() };
+        const baseHead = await revParse(armed.mergeDir, 'HEAD');
+        if (baseHead) armed = { ...armed, baseShaBefore: baseHead };
       }
       // This pass has opened no merge yet, so a merge open here is an earlier attempt's.
       const staleOpen = await peekOpenMerge(armed.mergeDir);

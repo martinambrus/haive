@@ -16,13 +16,15 @@ const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
  * `['remote']` fails `git remote get-url origin`, `['rev-parse', 'HEAD']` fails `rev-parse HEAD` but
  * not `rev-parse --abbrev-ref HEAD`. The failure is `exit` (default 128) with a `fatal:` line, or,
  * with `hang`, a process that outlives any shortened `gitTimeoutLimits` and is killed by it.
+ * `from` and `until` (1-based, counted over the calls that match) fail only the Nth to Mth match.
  */
 export async function failGit(
   startsWith: string[],
-  opts: { exit?: number; hang?: boolean } = {},
+  opts: { exit?: number; hang?: boolean; from?: number; until?: number } = {},
 ): Promise<FakeGit> {
   const real = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
   const dir = await mkdtemp(path.join(tmpdir(), 'fake-git-'));
+  const counter = quote(path.join(dir, 'matches'));
   const failure = opts.hang
     ? 'exec sleep 30'
     : `echo "fatal: simulated failure" >&2; exit ${opts.exit ?? 128}`;
@@ -37,7 +39,10 @@ export async function failGit(
       `want=${quote(startsWith.join('\n'))}`,
       `got=$(tail_args "$@" | head -n ${startsWith.length})`,
       'if [ "$got" = "$want" ]; then',
-      `  ${failure}`,
+      `  seen=$(cat ${counter} 2>/dev/null || echo 0); seen=$((seen + 1)); echo "$seen" > ${counter}`,
+      `  if [ "$seen" -ge ${opts.from ?? 1} ] && [ "$seen" -le ${opts.until ?? Number.MAX_SAFE_INTEGER} ]; then`,
+      `    ${failure}`,
+      '  fi',
       'fi',
       `exec ${quote(real)} "$@"`,
       '',

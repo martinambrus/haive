@@ -72,7 +72,8 @@ const fetchProbe = vi.hoisted(() => ({
   sections: [] as number[],
   afterFetch: null as (() => Promise<void>) | null,
   intercept: null as
-    ((argv: string[]) => { code: number; stdout: string; stderr: string } | null) | null,
+    | ((argv: string[], dir: string) => { code: number; stdout: string; stderr: string } | null)
+    | null,
   pushes: [] as unknown[],
   upstreamError: null as string | null,
 }));
@@ -88,7 +89,7 @@ vi.mock('../../../repo/git-push.js', async (importOriginal) => {
         : result;
     },
     gitRun: async (...args: Parameters<typeof real.gitRun>) => {
-      const intercepted = fetchProbe.intercept?.(args[1]);
+      const intercepted = fetchProbe.intercept?.(args[1], args[0]);
       if (intercepted) return intercepted;
       const fetching = args[1].includes('fetch');
       if (fetching) fetchProbe.sections.push(claimFake.activeSections);
@@ -2530,6 +2531,39 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
         await rm(parent, { recursive: true, force: true });
       }
     });
+
+    it('K3 a failed read of MERGE_HEAD halts the pass before the hook runs, keeping the claim and the tip', async () => {
+      const { parent, wt } = await setupWorktree();
+      try {
+        await divergeBase(parent, wt);
+        await gitCode(parent, ['merge', '--no-ff', 'feature/x', '-m', 'Merge feature/x']);
+        expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(0);
+        const tip = await revOf(parent, 'feature/x');
+        const h = makeDb();
+        fetchProbe.intercept = (argv) =>
+          argv[0] === 'rev-parse' && argv.includes('MERGE_HEAD')
+            ? { code: 128, stdout: '', stderr: 'fatal: unreadable' }
+            : null;
+        const out = await resolveMergePhase(
+          h.db as never,
+          spied,
+          mkCurrent(det(wt), { action: 'merge_remove' }),
+          mkCtx(parent, h.db),
+          mkParams(h.db, dispatching),
+        );
+        fetchProbe.intercept = null;
+        expect(hook).not.toHaveBeenCalled();
+        expect(out).toMatchObject({ resolved: false, result: { status: 'failed' } });
+        const error = !out.resolved && out.result.status === 'failed' ? out.result.error : '';
+        expect(error.startsWith('Nothing was merged:')).toBe(true);
+        expect(error).toContain('rev-parse');
+        expect(await revOf(parent, 'feature/x')).toBe(tip);
+        expect(claimFake.claims.get(parent)?.stepId).toBe('step1');
+        expect(claimFake.released).toEqual([]);
+      } finally {
+        await rm(parent, { recursive: true, force: true });
+      }
+    });
   });
 });
 
@@ -4642,4 +4676,37 @@ describe('#280 fix6 pre-push ref lifetime', () => {
       }
     },
   );
+});
+
+it('K4 a failed read of the base tip at the first open of a cross-branch merge rejects before git merges', async () => {
+  const { parent, wt } = await setupWorktree();
+  const dir = path.join(parent, '.haive', 'worktrees', 'main--base');
+  try {
+    await git(parent, ['checkout', '-q', '-b', 'develop']);
+    const mainTip = await revOf(parent, 'main');
+    const h = makeDb();
+    fetchProbe.intercept = (argv, cwd) =>
+      argv[0] === 'rev-parse' && argv[argv.length - 1] === 'HEAD' && cwd === dir
+        ? { code: 128, stdout: '', stderr: 'fatal: unreadable' }
+        : null;
+    let thrown: unknown;
+    try {
+      await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt, { parentBranch: 'develop' }), { action: 'merge_remove' }),
+        mkCtx(parent, h.db),
+        mkParams(h.db),
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    fetchProbe.intercept = null;
+    expect(await revOf(parent, 'main')).toBe(mainTip);
+    expect(h.stateWrites.filter((s) => s.phase !== 'pending')).toEqual([]);
+    expect(String(thrown)).toContain('rev-parse');
+    expect(claimFake.claims.get(dir)?.stepId).toBe('step1');
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
 });

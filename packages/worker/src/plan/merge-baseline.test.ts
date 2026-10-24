@@ -60,6 +60,20 @@ describe('moveAsideRecordedLeftovers on a failed MERGE_HEAD read', () => {
     ).rejects.toThrow(/^git rev-parse MERGE_HEAD failed in /);
   });
 
+  it('D7 resolves when the scratch worktree directory is gone', async () => {
+    const db = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('db touched');
+        },
+      },
+    ) as Database;
+    const { wt } = await scratchWorktree();
+    await rm(wt, { recursive: true, force: true });
+    await expect(moveAsideRecordedLeftovers(db, 'r1', wt, 'origin/main')).resolves.toBeUndefined();
+  });
+
   it('resolves without touching the db when no merge is open', async () => {
     const { wt } = await scratchWorktree();
     const db = new Proxy(

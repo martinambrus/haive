@@ -1481,3 +1481,32 @@ it('a failed plan-base read releases the claim without opening a merge', async (
     await cleanup();
   }
 });
+
+it.each(['pending', 'resolving'] as const)(
+  'K2 a failed read of MERGE_HEAD rejects before anything is seeded or set aside, and keeps the claim (%s)',
+  async (phase) => {
+    const { local, cleanup } = await divergedCheckout();
+    let shim: Awaited<ReturnType<typeof failGit>> | null = null;
+    try {
+      const head = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      projections.setAside.mockResolvedValue({ outcome: 'clean' });
+      shim = await failGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+      let thrown: unknown;
+      try {
+        await mergePhaseBeside(local, [], phase);
+      } catch (err) {
+        thrown = err;
+      }
+      await shim.restore();
+      shim = null;
+      expect(projections.seed).not.toHaveBeenCalled();
+      expect(projections.setAside).not.toHaveBeenCalled();
+      expect(String(thrown)).toMatch(/rev-parse .*MERGE_HEAD/);
+      expect(claimFake.claims.get(local)?.stepId).toBe('step1');
+      await expectUntouched(local, head);
+    } finally {
+      await shim?.restore();
+      await cleanup();
+    }
+  },
+);

@@ -66,6 +66,7 @@ import { PROVIDER_FATAL_HEADLINES } from '../src/queues/cli-exec/failure-class.j
 import { claimMergeDir, releaseTaskMergeClaims } from '../src/step-engine/merge-dir-claim.js';
 import { abortLeftMerge, recordLeftOpenMerges } from '../src/step-engine/left-open-merge.js';
 import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
+import { failGit } from './support/fake-git.js';
 
 const log = logger.child({ module: 'repo-refresh-smoke' });
 
@@ -4454,6 +4455,189 @@ async function main(): Promise<void> {
         secondQueued && secondFree === false && aside.outcome === 'set-aside',
         { secondQueued, secondFree, outcome: aside.outcome },
       );
+    });
+
+    // M11. A git read that failed is unknown, never an answer (docs/architecture/plan-canvas.md, #255): the
+    // resolver reads HEAD before it sets anything aside.
+    const gitTask = async (c: Awaited<ReturnType<typeof cloned>>) => {
+      const [task] = await db
+        .insert(schema.tasks)
+        .values({
+          userId,
+          repositoryId: c.payload.repositoryId,
+          type: 'workflow',
+          title: 'repo-refresh-smoke',
+          status: 'running',
+        })
+        .returning({ id: schema.tasks.id, epoch: schema.tasks.orchestrationEpoch });
+      const ctx0 = await taskCtx(c.dest, task!.id);
+      const bump = () =>
+        db
+          .update(schema.tasks)
+          .set({ orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1` })
+          .where(eq(schema.tasks.id, task!.id));
+      // One pass of the step at the task's current epoch, as a Retry runs it.
+      const pass = async () => {
+        const now = (await db.query.tasks.findFirst({
+          where: eq(schema.tasks.id, task!.id),
+          columns: { orchestrationEpoch: true },
+        }))!;
+        const ctx = { ...ctx0, epoch: now.orchestrationEpoch };
+        const detected = await syncBaseStep.detect!(ctx);
+        const row = (await db.query.taskSteps.findFirst({
+          where: eq(schema.taskSteps.id, ctx0.taskStepId),
+        }))!;
+        const current = {
+          ...row,
+          detectOutput: detected,
+          formValues: { base: 'main', syncAction: 'merge' },
+        };
+        const params = {
+          db,
+          taskId: task!.id,
+          userId,
+          repoPath: c.dest,
+          workspacePath: c.dest,
+          cliProviderId: null,
+          stepDef: step,
+          epoch: now.orchestrationEpoch,
+        };
+        return resolveMergePhase(db, step, current as never, ctx, params as never);
+      };
+      const claim = () =>
+        db.query.mergeDirClaims.findFirst({
+          where: eq(schema.mergeDirClaims.mergeDir, c.dest),
+        });
+      return { taskId: task!.id, stepId: ctx0.taskStepId, pass, bump, claim };
+    };
+
+    await attempt('M11: a failed HEAD read ahead of the set-aside', async () => {
+      const c = await withPendingRender();
+      await commitFile(c.dest, 'local.txt', 'local\n', 'local work');
+      git(c.dest, 'add', '--', RENDER_REL);
+      const upstream = await push('m11-theirs.txt', 'theirs\n');
+      const bytes = await readFile(path.join(c.dest, RENDER_REL));
+      const staged = git(c.dest, 'ls-files', '-s', '--', RENDER_REL);
+      const t = await gitTask(c);
+      try {
+        let fired = 0;
+        restoreFaults.afterRestore = async () => {
+          delete restoreFaults.afterRestore;
+          fired += 1;
+          await t.bump();
+        };
+        const shim = await failGit(['rev-parse', '-q', '--verify', 'HEAD'], {
+          from: 1,
+          until: 1,
+        });
+        let thrown: unknown = null;
+        try {
+          await t.pass();
+        } catch (err) {
+          thrown = err;
+        } finally {
+          await shim.restore();
+          delete restoreFaults.afterRestore;
+        }
+        const message = thrown instanceof Error ? thrown.message : String(thrown);
+        const held = await t.claim();
+        check(
+          'M11: a pass whose first HEAD read fails rejects with that read, not with a superseded step',
+          /git rev-parse HEAD failed in /.test(message) && !(thrown instanceof StepSupersededError),
+          { thrown: message },
+        );
+        check('M11: and nothing was set aside before the read', fired === 0, { fired });
+        check(
+          'M11: and the staged render is as it was, in bytes and in the index',
+          (await readFile(path.join(c.dest, RENDER_REL)).catch(() => null))?.equals(bytes) ===
+            true && git(c.dest, 'ls-files', '-s', '--', RENDER_REL) === staged,
+          { staged, now: git(c.dest, 'ls-files', '-s', '--', RENDER_REL) },
+        );
+        check(
+          "M11: and the claim row is still the step's, with no merge open",
+          held?.taskStepId === t.stepId && !mergeOpen(c.dest),
+          { held },
+        );
+        const again = await t.pass();
+        check(
+          'M11: and a Retry with the shim gone lands the merge and releases the claim',
+          again.resolved &&
+            isAncestor(c.dest, upstream, 'HEAD') &&
+            (await t.claim()) === undefined &&
+            !mergeOpen(c.dest),
+          { again },
+        );
+      } finally {
+        delete restoreFaults.afterRestore;
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, t.taskId));
+      }
+    });
+
+    // Round 1 sets the files aside and a rewrite under the merge sends it round again; round 2's HEAD read fails.
+    await attempt('M11c: a failed HEAD read in a later round', async () => {
+      const { c, id } = await divergedOverPendingRender();
+      await applyPlanPatch(
+        db,
+        { ops: [{ op: 'upsert', nodeRef: 'root', parentRef: null, title: 'Root' }] },
+        { repositoryId: id, origin: 'user' },
+      );
+      await writePlanMirror(db, id, c.dest);
+      git(c.dest, 'add', '--', RENDER_REL);
+      const planPath = path.join(c.dest, PLAN_REL);
+      const planBytes = await readFile(planPath);
+      const renderBytes = await readFile(path.join(c.dest, RENDER_REL));
+      const staged = git(c.dest, 'ls-files', '-s', '--', RENDER_REL);
+      const headPlan = (() => {
+        try {
+          return execFileSync('git', ['show', `HEAD:${PLAN_REL}`], { cwd: c.dest, env: gitEnv });
+        } catch {
+          return null;
+        }
+      })();
+      const t = await gitTask(c);
+      try {
+        let rewrites = 0;
+        restoreFaults.afterRestore = async () => {
+          if (rewrites > 0) return;
+          const now = await readFile(planPath).catch(() => null);
+          if (now === null ? headPlan !== null : headPlan === null || !now.equals(headPlan)) return;
+          rewrites += 1;
+          await writeFile(planPath, planBytes);
+        };
+        const shim = await failGit(['rev-parse', '-q', '--verify', 'HEAD'], {
+          from: 2,
+          until: 2,
+        });
+        let thrown: unknown = null;
+        try {
+          await t.pass();
+        } catch (err) {
+          thrown = err;
+        } finally {
+          await shim.restore();
+          delete restoreFaults.afterRestore;
+        }
+        const message = thrown instanceof Error ? thrown.message : String(thrown);
+        const held = await t.claim();
+        check(
+          'M11c: a pass whose second-round HEAD read fails rejects with that read after one rewrite',
+          /git rev-parse HEAD failed in /.test(message) && rewrites === 1,
+          { thrown: message, rewrites },
+        );
+        check(
+          "M11c: and round 1's files are back, in bytes and in the index, with the claim kept",
+          (await readFile(path.join(c.dest, RENDER_REL)).catch(() => null))?.equals(renderBytes) ===
+            true &&
+            (await readFile(planPath).catch(() => null))?.equals(planBytes) === true &&
+            git(c.dest, 'ls-files', '-s', '--', RENDER_REL) === staged &&
+            held?.taskStepId === t.stepId &&
+            !mergeOpen(c.dest),
+          { staged, now: git(c.dest, 'ls-files', '-s', '--', RENDER_REL), held },
+        );
+      } finally {
+        delete restoreFaults.afterRestore;
+        await db.delete(schema.tasks).where(eq(schema.tasks.id, t.taskId));
+      }
     });
 
     if (failures > 0) {
