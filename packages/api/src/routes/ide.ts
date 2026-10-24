@@ -151,6 +151,11 @@ repoIdeAccessRoutes.post('/:id/ensure-ide', requireAuth, async (c) => {
   }
 });
 
+function isPortProxyPath(path: string): boolean {
+  const firstSegment = path.split(/[/?]/)[1]?.toLowerCase();
+  return firstSegment === 'proxy' || firstSegment === 'absproxy';
+}
+
 async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Response> {
   const userId = c.get('userId');
   const taskId = c.req.param('id');
@@ -161,6 +166,7 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
   const url = new URL(c.req.url);
   const prefix = target.prefix;
   const rest = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : '/';
+  if (isPortProxyPath(rest)) throw new HttpError(403, 'Forbidden');
   const upstreamUrl = `http://${ideRunnerName(target.sessionId)}:${IDE_INTERNAL_PORT}${rest || '/'}${url.search}`;
 
   const headers = upstreamRequestHeaders(c.req.raw.headers);
@@ -237,6 +243,10 @@ export function installIdeWebSocket(server: Server): void {
           return;
         }
         if (auth.session.revoked) return;
+        if (isPortProxyPath(rawUrl.slice(target.prefix.length))) {
+          rejectUpgrade(socket, 403, 'Forbidden');
+          return;
+        }
         // Bring the IDE container up before bridging (worker-only). Coalesced per
         // task; on timeout reject so the editor's reconnect retries once a slow
         // first-launch image pull finishes in the background.

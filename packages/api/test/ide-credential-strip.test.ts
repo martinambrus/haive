@@ -11,7 +11,7 @@ import type { AppEnv } from '../src/context.js';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const TASK = '00000000-0000-4000-8000-0000000000c1';
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({ db: undefined as unknown, ensure: vi.fn() }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', () => ({
@@ -25,7 +25,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 vi.mock('../src/queues.js', () => ({
   getIdeEnsureQueue: () => ({
-    add: async () => ({ waitUntilFinished: async () => ({ ok: true }) }),
+    add: h.ensure,
   }),
   getIdeEnsureQueueEvents: () => ({}),
 }));
@@ -54,9 +54,16 @@ app.onError(errorHandler);
 app.route('/ide', ideRoutes);
 
 function seedDb(owned = true): void {
-  const fake = createFakeDb({ users: schema.users, tasks: schema.tasks });
+  const fake = createFakeDb({
+    users: schema.users,
+    tasks: schema.tasks,
+    repositories: schema.repositories,
+  });
   fake.insert(schema.users, { id: USER, status: 'active', tokenVersion: 0 });
-  if (owned) fake.insert(schema.tasks, { id: TASK, userId: USER });
+  if (owned) {
+    fake.insert(schema.tasks, { id: TASK, userId: USER });
+    fake.insert(schema.repositories, { id: TASK, userId: USER });
+  }
   h.db = fake.db;
 }
 
@@ -67,6 +74,7 @@ let servers: Array<{ close: (cb: () => void) => unknown }> = [];
 
 beforeEach(() => {
   seedDb();
+  h.ensure.mockReset().mockResolvedValue({ waitUntilFinished: async () => ({ ok: true }) });
   fetchStub = vi.fn().mockImplementation(async () => new Response('up'));
   vi.stubGlobal('fetch', fetchStub);
 });
@@ -588,50 +596,33 @@ describe('IDE request header controls', () => {
   });
 });
 
-describe('IDE port proxy reach measurement', () => {
-  it.each(['proxy', 'absproxy'])(
-    'relays /%s/<port> through an editor stub to an internal port',
-    async (kind) => {
-      const internal = createServer((req, res) => {
-        res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify({ path: req.url, cookie: req.headers.cookie }));
-      });
-      await new Promise<void>((r) => internal.listen(0, '127.0.0.1', r));
-      servers.push(internal);
-      const internalPort = (internal.address() as AddressInfo).port;
-      // Model code-server's recorded /proxy and /absproxy behavior with real sockets
-      // and a second server representing a process on the IDE container's loopback.
-      const editor = createServer(async (req, res) => {
-        const path = req.url ?? '/';
-        const prefix = `/${kind}/${internalPort}`;
-        if (!path.startsWith(prefix + '/')) {
-          res.writeHead(404).end();
-          return;
-        }
-        const upstreamPath = kind === 'proxy' ? path.slice(prefix.length) : path;
-        const reply = await realFetch(`http://127.0.0.1:${internalPort}${upstreamPath}`, {
-          headers: { cookie: req.headers.cookie ?? '' },
-        });
-        res.setHeader('content-type', 'application/json');
-        res.end(await reply.text());
-      });
-      await new Promise<void>((r) => editor.listen(0, '127.0.0.1', r));
-      servers.push(editor);
-      const port = (editor.address() as AddressInfo).port;
-      fetchStub.mockImplementation((url: string, init: RequestInit) => {
-        const path = new URL(url);
-        return realFetch(`http://127.0.0.1:${port}${path.pathname}${path.search}`, init);
-      });
-      const response = await app.request(`/ide/${TASK}/${kind}/${internalPort}/probe?x=1`, {
-        headers: { cookie: 'haive_access=A; app=preview; haive_refresh=R; theme=dark' },
-      });
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({
-        path: kind === 'proxy' ? '/probe?x=1' : `/absproxy/${internalPort}/probe?x=1`,
-        cookie: 'app=preview; theme=dark',
-      });
-    },
-  );
+describe('IDE API port proxy refusal', () => {
+  for (const prefix of [`/ide/${TASK}`, `/ide/repos/${TASK}`]) {
+    it.each(['proxy', 'absproxy', 'PrOxY', 'AbSpRoXy'])(
+      `HTTP refuses ${prefix}/%s before contacting an editor`,
+      async (kind) => {
+        const response = await app.request(`${prefix}/${kind}/4321/probe?x=1`);
+        expect(response.status).toBe(403);
+        expect(fetchStub).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['proxy', 'absproxy', 'PrOxY', 'AbSpRoXy'])(
+      `WS refuses ${prefix}/%s before ensuring or contacting an editor`,
+      async (kind) => {
+        const rig = await wsRig();
+        const { head, reply } = await rig.upgrade([AUTH_LINE], `${prefix}/${kind}/4321/probe?x=1`);
+        expect(reply.split('\r\n')[0]).toBe('HTTP/1.1 403 Forbidden');
+        expect(head).toBe('');
+        expect(h.ensure).not.toHaveBeenCalled();
+        expect(net.connect).not.toHaveBeenCalled();
+      },
+    );
+  }
+
+  it('keeps ordinary assets whose later segments contain proxy available', async () => {
+    expect((await app.request(`/ide/${TASK}/static/proxy/asset.js`)).status).toBe(200);
+  });
 });
 
 describe('IDE malformed Connection controls', () => {
