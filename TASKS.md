@@ -990,7 +990,7 @@ The LiteLLM max_input_tokens value is fetched and dropped (shared model-pricing.
 
 ### T404 · FNF[stale-step-stamps] · a re-opened step keeps its old context and allowance stamp
 
-status: open · was modular #286
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:07Z · last: 2026-10-24T20:07Z · was modular #286
 Nothing clears task_steps.context_* or the allowance columns on Retry, loop-back or re-offer; e.g. step cd6fc797 on the old dev DB.
 Fix: clear the stamps on the reopening writes, or gate the badge structurally.
 
