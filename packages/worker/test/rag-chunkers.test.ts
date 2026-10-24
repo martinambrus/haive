@@ -1256,6 +1256,11 @@ describe('extractCodeSections — braces that are not code', () => {
       '<?php\n?>\n<script>function fake(a) {}</script>\n<?php\nif ($x) {\n  y();\n}\n',
       'fake.php',
     ],
+    [
+      'a PHP file with no open tag',
+      '<html>\n<script>function fake(a) {}</script>\n</html>\n',
+      'view.blade.php',
+    ],
   ])('finds no function in %s', (_what, src, file) => {
     expect(extractCodeSections(src, file).map((s) => s.sectionId)).not.toContain('function-fake');
   });

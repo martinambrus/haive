@@ -1004,9 +1004,13 @@ describe('per-file RAG budgets in the workflow sync', () => {
   });
 });
 
+const PHP_FILE = /\.(?:php|inc|module|install|theme|profile)$/;
+
 async function writeSource(
   rel: string,
-  body = 'export function source() { return "project code"; }\n',
+  body = PHP_FILE.test(rel)
+    ? '<?php function source() { return "project code"; }\n'
+    : 'export function source() { return "project code"; }\n',
   base = worktree,
 ) {
   const target = join(base, rel);
