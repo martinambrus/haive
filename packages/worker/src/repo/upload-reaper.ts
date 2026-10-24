@@ -23,6 +23,8 @@ const REAP_RETRY_MS = IDLE_MS;
 const SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 const UPLOADS_DIR = '_uploads';
 const BATCH = 100;
+const MAX_ORPHAN_FAILURES = 1000;
+const orphanFailures = new Map<string, { root: string; rel: string; code: string | undefined }>();
 const ENDED_TASK_STATUSES = ['completed', 'failed', 'cancelled'] as const;
 
 // Group 1 of every shape built from it is the session id.
@@ -342,6 +344,32 @@ async function liveRepositories(
   return live;
 }
 
+async function forgetGoneOrphanFailures(): Promise<void> {
+  for (const [key, { root, rel }] of orphanFailures) {
+    try {
+      if ((await lstatNoFollow(root, rel)) === null) orphanFailures.delete(key);
+    } catch {
+      // An unreadable path may still hold the file whose removal failed.
+    }
+  }
+}
+
+function logOrphanFailure(root: string, rel: string, err: unknown): void {
+  const key = path.join(root, rel);
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  const previous = orphanFailures.get(key);
+  if (previous === undefined || previous.code !== code) {
+    log.warn({ err, root, rel }, 'orphan upload file was not removed');
+  } else {
+    log.debug({ err, root, rel }, 'orphan upload file was not removed');
+  }
+  orphanFailures.delete(key);
+  orphanFailures.set(key, { root, rel, code });
+  if (orphanFailures.size > MAX_ORPHAN_FAILURES) {
+    orphanFailures.delete(orphanFailures.keys().next().value!);
+  }
+}
+
 async function reapOrphanPartials(
   db: Database,
   root: string,
@@ -384,8 +412,9 @@ async function reapOrphanPartials(
         if (recent.has(session) || kept?.has(session)) continue;
         try {
           if (await removeFile(root, rel)) removed += 1;
+          orphanFailures.delete(path.join(root, rel));
         } catch (err) {
-          log.warn({ err, rel }, 'orphan upload partial was not removed');
+          logOrphanFailure(root, rel, err);
         }
       }
     }
@@ -400,6 +429,7 @@ async function reapOrphanPartials(
 
 /** One reaper pass: claim the idle and the ended, finish what is reaping, sweep orphan partials. */
 export async function reapAbandonedUploads(db: Database): Promise<UploadReapResult> {
+  await forgetGoneOrphanFailures();
   const cutoff = new Date(Date.now() - IDLE_MS);
   const result: UploadReapResult = { sessions: 0, dumps: 0, orphans: 0 };
   const guarded = async <T>(what: string, run: () => Promise<T>, skipped: T): Promise<T> => {

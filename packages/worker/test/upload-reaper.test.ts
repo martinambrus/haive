@@ -24,6 +24,9 @@ const guard = vi.hoisted(() => ({
   removals: 0,
   removal: null as null | ((rel: string) => boolean),
   errors: [] as unknown[][],
+  warnings: [] as unknown[][],
+  debugs: [] as unknown[][],
+  removalCode: 'EACCES' as string | undefined,
 }));
 vi.mock('@haive/shared', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared')>();
@@ -33,7 +36,8 @@ vi.mock('@haive/shared', async (importOriginal) => {
       ...real.logger,
       child: () => ({
         info: () => undefined,
-        warn: () => undefined,
+        warn: (...args: unknown[]) => guard.warnings.push(args),
+        debug: (...args: unknown[]) => guard.debugs.push(args),
         error: (...args: unknown[]) => guard.errors.push(args),
       }),
     },
@@ -46,7 +50,7 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
     removeNoFollow: async (...args: Parameters<typeof real.removeNoFollow>) => {
       if (guard.removal?.(args[1])) {
         guard.removals += 1;
-        throw new Error('EACCES: the removal failed');
+        throw Object.assign(new Error('the removal failed'), { code: guard.removalCode });
       }
       return real.removeNoFollow(...args);
     },
@@ -153,6 +157,9 @@ beforeEach(async () => {
   guard.claims = 0;
   guard.removals = 0;
   guard.errors = [];
+  guard.warnings = [];
+  guard.debugs = [];
+  guard.removalCode = 'EACCES';
   guard.removal = null;
 });
 
@@ -1089,6 +1096,108 @@ describe('the finished-archive pass', () => {
     expect(await exists(bad.file)).toBe(true);
     expect(await exists(good.file)).toBe(false);
     expect(result.orphans).toBe(1);
+  });
+});
+
+describe('T323: repeated orphan removal failures', () => {
+  async function orphan(volume: 'repos' | 'bundles' = 'repos', id = randomUUID()) {
+    const file = path.join(uploadsDir(volume), `${id}.zip.partial`);
+    await writeFile(file, 'orphan');
+    await age(file, TTL + HOUR);
+    return file;
+  }
+
+  it('warns once across several passes, and again when the error code changes', async () => {
+    const file = await orphan();
+    guard.removal = () => true;
+
+    for (let i = 0; i < 3; i += 1) await reapAbandonedUploads(db());
+
+    expect(await exists(file)).toBe(true);
+    expect(guard.removals).toBe(3);
+    expect(guard.warnings).toHaveLength(1);
+    expect(guard.debugs).toHaveLength(2);
+
+    guard.removalCode = 'EPERM';
+    await reapAbandonedUploads(db());
+    await reapAbandonedUploads(db());
+
+    expect(guard.warnings).toHaveLength(2);
+    expect(guard.debugs).toHaveLength(3);
+  });
+
+  it('warns once for an error without a code', async () => {
+    await orphan();
+    guard.removal = () => true;
+    guard.removalCode = undefined;
+
+    await reapAbandonedUploads(db());
+    await reapAbandonedUploads(db());
+
+    expect(guard.warnings).toHaveLength(1);
+    expect(guard.debugs).toHaveLength(1);
+  });
+
+  it('forgets a failure after removal succeeds', async () => {
+    const id = randomUUID();
+    const file = await orphan('repos', id);
+    guard.removal = () => true;
+    await reapAbandonedUploads(db());
+
+    guard.removal = null;
+    await reapAbandonedUploads(db());
+    expect(await exists(file)).toBe(false);
+
+    await orphan('repos', id);
+    guard.removal = () => true;
+    await reapAbandonedUploads(db());
+
+    expect(guard.warnings).toHaveLength(2);
+  });
+
+  it('forgets a failed file removed by someone else between passes', async () => {
+    const id = randomUUID();
+    const file = await orphan('repos', id);
+    guard.removal = () => true;
+    await reapAbandonedUploads(db());
+
+    await rm(file);
+    await reapAbandonedUploads(db());
+    await orphan('repos', id);
+    await reapAbandonedUploads(db());
+
+    expect(guard.warnings).toHaveLength(2);
+    expect(guard.debugs).toHaveLength(0);
+  });
+
+  it('bounds the remembered paths and warns again for an evicted failure', async () => {
+    for (let i = 0; i < 1001; i += 1) await orphan();
+    const attempted: string[] = [];
+    guard.removal = (rel) => {
+      attempted.push(rel);
+      return true;
+    };
+    await reapAbandonedUploads(db());
+    expect(guard.warnings).toHaveLength(1001);
+
+    guard.removal = (rel) => rel === attempted[0];
+    await reapAbandonedUploads(db());
+
+    expect(guard.warnings).toHaveLength(1002);
+    expect(guard.debugs).toHaveLength(0);
+  });
+
+  it('warns separately for the same relative path in different storage roots', async () => {
+    const id = randomUUID();
+    await orphan('repos', id);
+    await orphan('bundles', id);
+    guard.removal = () => true;
+
+    await reapAbandonedUploads(db());
+    await reapAbandonedUploads(db());
+
+    expect(guard.warnings).toHaveLength(2);
+    expect(guard.debugs).toHaveLength(2);
   });
 });
 
