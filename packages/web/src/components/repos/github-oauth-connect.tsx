@@ -106,17 +106,18 @@ export function GithubOauthConnect({
 
   async function start(): Promise<void> {
     reset();
+    let cancelled = false;
+    cancelRef.current = () => {
+      cancelled = true;
+    };
     onError?.(null);
     try {
       const begin = await api.post<DeviceCodeStart>('/github-oauth/device-code', {});
+      if (cancelled) return;
       setUserCode(begin.userCode);
       setVerificationUri(begin.verificationUri);
       setPhase('awaiting_user');
 
-      let cancelled = false;
-      cancelRef.current = () => {
-        cancelled = true;
-      };
       // GitHub rejects a device poll faster than its stated interval, and the
       // documented floor is 5s — so the interval is honoured, never shortened.
       const intervalMs = Math.max(begin.interval, 5) * 1000;
@@ -131,12 +132,14 @@ export function GithubOauthConnect({
             const res = await api.post<PollResponse>('/github-oauth/poll', {
               deviceCode: begin.deviceCode,
             });
+            if (cancelled) return;
             if (res.status === 'ok') {
               reset();
               onConnected(res.credential);
               return;
             }
           } catch (err) {
+            if (cancelled) return;
             fail((err as ApiError).message ?? 'GitHub OAuth failed');
             return;
           }
@@ -145,6 +148,7 @@ export function GithubOauthConnect({
       };
       void tick();
     } catch (err) {
+      if (cancelled) return;
       fail((err as ApiError).message ?? 'Failed to start GitHub OAuth');
     }
   }
