@@ -1115,3 +1115,13 @@ describe('the steps that keep a saved CLI under the none option', () => {
     expect(page(view)).not.toContain('Ignores your saved per-step CLI choices');
   });
 });
+
+it('offers only enabled providers for a new task', async () => {
+  disabledClis.add(P3);
+  const view = await mount();
+  const select = cliPick(view);
+  expect(select).toBeDefined();
+  const options = findAll(select, (h) => h.tag === 'option').map((h) => h.props.value);
+  expect(options).toContain(P1);
+  expect(options).not.toContain(P3);
+});

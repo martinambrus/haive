@@ -388,7 +388,7 @@ describe.skipIf(!url)('task type draft routes on Postgres', () => {
       const refusals: [string, number][] = [
         [foreignProviderId, 404],
         [randomUUID(), 404],
-        [disabledProviderId, 409],
+        [disabledProviderId, 400],
         ['not-a-uuid', 400],
       ];
       for (const [cliProviderId, status] of refusals) {

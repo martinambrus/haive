@@ -13,7 +13,7 @@ function clampEffort(name: CliProviderName, level: string | null | undefined): s
   return scale && scale.values.includes(level) ? level : null;
 }
 
-/** The user's provider, refused with 404 when it is not theirs and 409 when it is disabled. */
+/** The user's provider, refused with 404 when it is not theirs and 400 when it is disabled. */
 export async function loadUsableProvider(
   db: Pick<Database, 'query'>,
   userId: string,
@@ -23,7 +23,9 @@ export async function loadUsableProvider(
     where: and(eq(schema.cliProviders.id, cliProviderId), eq(schema.cliProviders.userId, userId)),
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
-  if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
+  if (!provider.enabled) {
+    throw new HttpError(400, 'CLI provider is disabled', 'CLI_PROVIDER_DISABLED');
+  }
   return provider;
 }
 
@@ -34,7 +36,7 @@ export async function loadUsableProvider(
  *  table, which loop roles and fan-out seats share. Three callers must write it IDENTICALLY: a
  *  change on a step card, and the same change made from the CLIs tab before the step has a row.
  *
- *  Validates the provider first and throws the same 404/409 the card path has always thrown, so
+ *  Validates the provider first and throws the same 404/400 as the task creation path, so
  *  an unknown or disabled provider is rejected before anything is written. A null provider
  *  clears the slot: for this task, and from the saved preferences when remembered. */
 export async function writeStepCliChoice(

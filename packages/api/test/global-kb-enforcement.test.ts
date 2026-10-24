@@ -172,7 +172,7 @@ beforeEach(() => {
     transaction: (fn: (tx: never) => Promise<unknown>) =>
       fake.db.transaction((tx) => fn(lenient(tx) as never)),
   };
-  fake.insert(schema.cliProviders, { id: PROVIDER, userId: ADMIN });
+  fake.insert(schema.cliProviders, { id: PROVIDER, userId: ADMIN, enabled: true, name: 'codex' });
   addEntry(ENTRY, { title: TITLE, category: 'anti_pattern' });
 });
 

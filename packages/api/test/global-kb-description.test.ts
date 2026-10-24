@@ -71,7 +71,7 @@ beforeEach(() => {
   fake = makeFake();
   h.db = fake.db;
   h.gdb = fake.db;
-  fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER });
+  fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER, enabled: true, name: 'codex' });
   fake.insert(globalKbEntries, {
     id: ENTRY,
     namespace: 'default',
@@ -301,4 +301,21 @@ describe('POST /enrich and the description', () => {
     expect(fake.rows(schema.tasks)).toHaveLength(0);
     expect(fake.rows(globalKbEntries).filter((r) => r.status === 'skeleton')).toHaveLength(0);
   });
+});
+
+it('refuses a disabled enrich CLI before writing a skeleton or a task', async () => {
+  fake.patch(schema.cliProviders, PROVIDER, { enabled: false });
+  const before = fake.rows(globalKbEntries).length;
+  const res = await send('POST', '/enrich', {
+    title: 'Article',
+    seedText: 'Research it',
+    cliProviderId: PROVIDER,
+  });
+  expect(res.status).toBe(400);
+  expect(await res.json()).toMatchObject({
+    error: 'CLI provider is disabled',
+    code: 'CLI_PROVIDER_DISABLED',
+  });
+  expect(fake.rows(schema.tasks)).toHaveLength(0);
+  expect(fake.rows(globalKbEntries)).toHaveLength(before);
 });

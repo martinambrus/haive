@@ -137,7 +137,8 @@ describe('starting a plan build with clarifying questions', () => {
   it('refuses a disabled planner pick before creating the task', async () => {
     setup();
     const response = await build({ mode: 'from_repo', cliProviderId: OFF });
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 'CLI_PROVIDER_DISABLED' });
     expect(spawnPlanTask).not.toHaveBeenCalled();
   });
 
@@ -148,7 +149,8 @@ describe('starting a plan build with clarifying questions', () => {
       description: 'Clubs',
       questionerCliProviderId: OFF,
     });
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 'CLI_PROVIDER_DISABLED' });
     expect(spawnPlanTask).not.toHaveBeenCalled();
   });
 

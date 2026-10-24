@@ -137,7 +137,16 @@ describe("a step's CLI picked on a task", () => {
   it('refuses a disabled CLI before writing anything', async () => {
     const fake = setup();
     fake.patch(schema.cliProviders, CLI, { enabled: false });
-    expect(await pick('08c-code-review', { cliProviderId: CLI, remember: true })).toBe(409);
+    const res = await app.request(`/${TASK}/steps/08c-code-review/cli-provider`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cliProviderId: CLI, remember: true }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: 'CLI provider is disabled',
+      code: 'CLI_PROVIDER_DISABLED',
+    });
     expect(fake.rows(schema.taskStepCliChoices)).toEqual([]);
     expect(fake.rows(schema.userStepCliPreferences)).toEqual([]);
   });
