@@ -789,9 +789,29 @@ describe('a new task with attachments', () => {
     failStart = true;
     const view = await readyOnA(three());
     await submitForm(view);
-    expect(page(view)).toContain('The task was created but could not be started.');
+    expect(page(view)).toContain(
+      'The task was created but could not be started (the queue is draining).',
+    );
     expect(page(view)).not.toContain('created and started');
     expect(nav.pushed).toEqual([]);
+  });
+
+  it('stays and gives the reason when its start is refused after every upload landed', async () => {
+    failStart = true;
+    const view = await readyOnA(two());
+    await submitForm(view);
+    expect(writes()).toEqual(['POST /tasks', UPLOAD('a.md'), UPLOAD('b.md'), START]);
+    expect(nav.pushed).toEqual([]);
+    expect(page(view)).toContain(
+      'The task was created but could not be started (the queue is draining). Open it and press Start.',
+    );
+    expect(page(view)).not.toContain('could not be uploaded');
+    expect(failedList(view)).toBeUndefined();
+    expect(
+      findAll(view.tree(), (h) => h.tag === 'a' && h.props.href === '/tasks/task-new'),
+    ).toHaveLength(1);
+    expect(isDisabled(submitButton(view))).toBe(true);
+    expect(textOf(submitButton(view))).toBe('Created');
   });
 
   it('says the task did not start when its start answers that it is no longer created', async () => {
