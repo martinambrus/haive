@@ -1,6 +1,5 @@
 import type { Context } from 'hono';
 import { setCookie, deleteCookie, getCookie } from 'hono/cookie';
-import { parse } from 'hono/utils/cookie';
 import { ACCESS_TTL, REFRESH_TTL } from './jwt.js';
 
 export const ACCESS_COOKIE = 'haive_access';
@@ -34,11 +33,15 @@ export function withoutSessionCookies(header: string): string | null {
     }
     const pair = header.slice(start, end).trim();
     start = end + 1;
-    if (eq === -1 || pair.includes(';')) continue;
+    if (!pair || pair.includes(';')) continue;
+    if (eq === -1) {
+      kept.push(pair);
+      continue;
+    }
     const name = pair.slice(0, pair.indexOf('=')).trim();
-    // Use the same accepted name/value syntax as authentication, but retain the
-    // original pair: parsing and serializing would decode values or lose duplicates.
-    if (!SESSION_COOKIES.has(name) && Object.hasOwn(parse(pair), name)) kept.push(pair);
+    // Session readers accept different grammars. Remove their union by name,
+    // while keeping non-session data (including off-grammar values) verbatim.
+    if (name && !SESSION_COOKIES.has(name)) kept.push(pair);
   }
   return kept.length > 0 ? kept.join('; ') : null;
 }
