@@ -81,6 +81,8 @@ interface Blocking {
     ownerName: string | null;
     ownerEmail: string | null;
   }[];
+  parked: Blocking['tasks'];
+  parkedCapped: boolean;
   viewerId: string;
   total: number;
   capped: boolean;
@@ -1196,6 +1198,115 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
 
       expect([...named].sort()).toEqual([lowerFirst.id, higherFirst.id].sort());
     });
+  });
+
+  describe('GET /blocking, the parked list', () => {
+    const pausedBy = async (taskId: string, by: string, byAdmin: boolean) => {
+      await db.insert(schema.taskEvents).values({
+        taskId,
+        eventType: 'task.paused',
+        payload: byAdmin ? { by, byAdmin: true } : { by },
+      });
+    };
+    const seedParked = async () => {
+      const ids: Record<string, string> = {};
+      const add = async (key: string, over: Partial<typeof schema.tasks.$inferInsert>) => {
+        ids[key] = (await task({ title: key, ...over })).id;
+      };
+      await add('queued', { status: 'queued' });
+      await add('running', { status: 'running' });
+      await add('waiting_user', { status: 'waiting_user' });
+      await add('waiting_pr', { status: 'waiting_pr' });
+      await add('paused', { status: 'paused' });
+      await add('admin_waiting', { status: 'waiting_user', userId: ADMIN });
+      await add('failed_plain', { status: 'failed' });
+      await add('failed_admin_paused', { status: 'failed', pausedAt: new Date() });
+      await pausedBy(ids.failed_admin_paused!, ADMIN, true);
+      await add('failed_owner_paused', { status: 'failed', pausedAt: new Date() });
+      await pausedBy(ids.failed_owner_paused!, OWNER, false);
+      await add('failed_admin_dead', {
+        status: 'failed',
+        pausedAt: new Date(),
+        deadAt: new Date(),
+      });
+      await pausedBy(ids.failed_admin_dead!, ADMIN, true);
+      await add('created', { status: 'created' });
+      return ids;
+    };
+    const keysOf = (ids: Record<string, string>, rows: { id: string }[]) => {
+      const byId = new Map(Object.entries(ids).map(([key, id]) => [id, key]));
+      return rows.map((t) => byId.get(t.id)).sort();
+    };
+
+    it('in maintenance parks the tasks the drain does not wait for, and leaves tasks as it was', async () => {
+      h.state = 'maintenance';
+      const ids = await seedParked();
+      const body = await blocking();
+      expect(keysOf(ids, body.tasks)).toEqual(['queued', 'running']);
+      expect(keysOf(ids, body.parked)).toEqual([
+        'admin_waiting',
+        'failed_admin_paused',
+        'paused',
+        'waiting_pr',
+        'waiting_user',
+      ]);
+      expect(body.total).toBe(2 + body.jobs.length);
+      expect(body.capped).toBe(false);
+    });
+
+    it.each(['draining', 'normal'])(
+      'in %s parks only the failed task under an administrator pause',
+      async (state) => {
+        h.state = state;
+        const ids = await seedParked();
+        const body = await blocking();
+        expect(keysOf(ids, body.parked)).toEqual(['failed_admin_paused']);
+        expect(keysOf(ids, body.tasks)).toEqual([
+          'admin_waiting',
+          'paused',
+          'queued',
+          'running',
+          'waiting_pr',
+          'waiting_user',
+        ]);
+      },
+    );
+
+    it('carries pausedByAdmin, the owner and the live CLI on a parked row', async () => {
+      h.state = 'maintenance';
+      const ids = await seedParked();
+      await run(ids.waiting_user!, { startedAt: new Date() });
+      const body = await blocking();
+      const failed = body.parked.find((t) => t.id === ids.failed_admin_paused);
+      expect(failed?.pausedByAdmin).toBe(true);
+      expect(failed?.ownerEmail).toBe('owner@maintenance.test');
+      const waiting = body.parked.find((t) => t.id === ids.waiting_user);
+      expect(waiting?.pausedByAdmin).toBe(false);
+      expect(waiting?.hasLiveCli).toBe(true);
+    });
+
+    it.each([
+      { seeded: BLOCKING_LIST_CAP, capped: false },
+      { seeded: BLOCKING_LIST_CAP + 1, capped: true },
+    ])(
+      'with $seeded parked tasks, lists the cap and says parkedCapped is $capped',
+      async ({ seeded, capped }) => {
+        h.state = 'maintenance';
+        await db.insert(schema.tasks).values(
+          Array.from({ length: seeded }, (_, i) => ({
+            userId: OWNER,
+            type: TYPE,
+            title: `Parked ${i}`,
+            status: 'waiting_user' as const,
+          })),
+        );
+        const body = await blocking();
+        expect(body.parked).toHaveLength(BLOCKING_LIST_CAP);
+        expect(body.parkedCapped).toBe(capped);
+        expect(body.total).toBe(0);
+        expect(body.capped).toBe(false);
+      },
+    );
   });
 
   describe('GET /blocking per maintenance state', () => {

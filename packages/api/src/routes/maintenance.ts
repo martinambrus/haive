@@ -17,6 +17,7 @@ import {
   logger,
   maintenanceStateSchema,
   networkName,
+  nonBlockingTaskStatuses,
   parseMaintenanceState,
 } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -177,26 +178,45 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
 maintenanceRoutes.get('/blocking', async (c) => {
   const db = getDb();
   const state = parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
+  const blockingTask = {
+    id: schema.tasks.id,
+    title: schema.tasks.title,
+    type: schema.tasks.type,
+    status: schema.tasks.status,
+    pausedAt: schema.tasks.pausedAt,
+    currentStepId: schema.tasks.currentStepId,
+    updatedAt: schema.tasks.updatedAt,
+    ownerId: schema.users.id,
+    ownerName: schema.users.name,
+    // A display name is optional in this schema, and "unknown owner" is useless to an operator
+    // who has to go and ask whose work this is. The email always exists — decrypted here the
+    // same way `/admin/users` does it, since this list has the same admin-only audience.
+    ownerEmailEncrypted: schema.users.emailEncrypted,
+  };
   const fetched = await db
-    .select({
-      id: schema.tasks.id,
-      title: schema.tasks.title,
-      type: schema.tasks.type,
-      status: schema.tasks.status,
-      pausedAt: schema.tasks.pausedAt,
-      currentStepId: schema.tasks.currentStepId,
-      updatedAt: schema.tasks.updatedAt,
-      ownerId: schema.users.id,
-      ownerName: schema.users.name,
-      // A display name is optional in this schema, and "unknown owner" is useless to an operator
-      // who has to go and ask whose work this is. The email always exists — decrypted here the
-      // same way `/admin/users` does it, since this list has the same admin-only audience.
-      ownerEmailEncrypted: schema.users.emailEncrypted,
-    })
+    .select(blockingTask)
     .from(schema.tasks)
     .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
     // A dead task runs nothing, and none of this page's actions reach it; its owner cancels it.
     .where(and(inArray(schema.tasks.status, drainTaskStatuses(state)), isNull(schema.tasks.deadAt)))
+    .orderBy(desc(schema.tasks.updatedAt))
+    .limit(BLOCKING_LIST_CAP + 1);
+  const notWaitedFor = nonBlockingTaskStatuses(state);
+  // Not waited for, but only an administrator can act on them: parked while owners are locked out,
+  // or failed under a pause that is still held.
+  const parkedFetched = await db
+    .select(blockingTask)
+    .from(schema.tasks)
+    .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
+    .where(
+      and(
+        isNull(schema.tasks.deadAt),
+        or(
+          notWaitedFor.length > 0 ? inArray(schema.tasks.status, notWaitedFor) : undefined,
+          and(eq(schema.tasks.status, 'failed'), isNotNull(schema.tasks.pausedAt)),
+        ),
+      ),
+    )
     .orderBy(desc(schema.tasks.updatedAt))
     .limit(BLOCKING_LIST_CAP + 1);
   const rows = fetched.slice(0, BLOCKING_LIST_CAP);
@@ -220,16 +240,23 @@ maintenanceRoutes.get('/blocking', async (c) => {
 
   const adminPaused = await findAdminPausedTaskIds(
     db,
-    rows.filter((r) => r.pausedAt).map((r) => r.id),
+    [...rows, ...parkedFetched].filter((r) => r.pausedAt).map((r) => r.id),
   );
+  // A failed task whose pause is its owner's needs no administrator.
+  const parked = parkedFetched
+    .filter((r) => r.status !== 'failed' || adminPaused.has(r.id))
+    .slice(0, BLOCKING_LIST_CAP);
+  const shape = ({ ownerEmailEncrypted, ...r }: (typeof rows)[number]) => ({
+    ...r,
+    pausedByAdmin: adminPaused.has(r.id),
+    ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
+    hasLiveCli: withLiveCli.has(r.id),
+  });
 
   return c.json({
-    tasks: rows.map(({ ownerEmailEncrypted, ...r }) => ({
-      ...r,
-      pausedByAdmin: adminPaused.has(r.id),
-      ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
-      hasLiveCli: withLiveCli.has(r.id),
-    })),
+    tasks: rows.map(shape),
+    parked: parked.map(shape),
+    parkedCapped: parkedFetched.length > BLOCKING_LIST_CAP,
     jobs: jobs.map(({ ownerEmailEncrypted, ...r }) => ({
       ...r,
       ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,

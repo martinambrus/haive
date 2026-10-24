@@ -31,6 +31,8 @@ let state = 'normal';
 let holdState: { settle?: () => void } | null = null;
 let runs: Array<Record<string, unknown>> = [];
 let blockingTasks: Array<Record<string, unknown>> = [];
+let parkedTasks: Array<Record<string, unknown>> = [];
+let parkedCapped = false;
 let actions: string[] = [];
 
 const upgradeRun = (status: string) => ({
@@ -73,6 +75,8 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
       jobs: [],
       total: blockingTasks.length,
       capped: false,
+      parked: structuredClone(parkedTasks),
+      parkedCapped,
       viewerId: 'u1',
     });
   }
@@ -99,6 +103,8 @@ beforeEach(() => {
   holdState = null;
   runs = [];
   blockingTasks = [];
+  parkedTasks = [];
+  parkedCapped = false;
   actions = [];
 });
 afterEach(() => vi.useRealTimers());
@@ -239,5 +245,73 @@ describe('maintenance page task pause controls', () => {
     for (let i = 0; i < 3; i += 1) await view.flush();
 
     expect(actions).toEqual(['POST /admin/maintenance/tasks/task-1/action {"action":"pause"}']);
+  });
+});
+
+describe('maintenance page parked list', () => {
+  const parkedTask = (over: Record<string, unknown>) => ({
+    id: 'parked-1',
+    title: 'A parked task',
+    type: 'workflow',
+    status: 'waiting_user',
+    pausedAt: null,
+    pausedByAdmin: false,
+    currentStepId: null,
+    updatedAt: '2026-10-01T10:00:00.000Z',
+    ownerId: 'u2',
+    ownerName: 'Owner',
+    ownerEmail: null,
+    hasLiveCli: false,
+    ...over,
+  });
+  const buttons = (view: Renderer) =>
+    findAll(view.tree(), (h) => h.tag === 'button')
+      .map((b) => textOf(b))
+      .filter((t) => ['Pause', 'Resume', 'Take over pause'].includes(t));
+  const headings = (view: Renderer) =>
+    findAll(view.tree(), (h) => h.tag === 'h3').map((h) => textOf(h));
+
+  it('shows no Parked heading when nothing is parked', async () => {
+    const view = await mount();
+
+    expect(headings(view)).not.toContain('Parked');
+  });
+
+  it('lists parked rows under a Parked heading with the actions each state needs', async () => {
+    parkedTasks = [
+      parkedTask({ id: 'p-none' }),
+      parkedTask({ id: 'p-owner', pausedAt: '2026-10-01T09:00:00.000Z' }),
+      parkedTask({ id: 'p-admin', pausedAt: '2026-10-01T09:00:00.000Z', pausedByAdmin: true }),
+    ];
+    const view = await mount();
+
+    expect(headings(view)).toContain('Parked');
+    expect(buttons(view)).toEqual(['Pause', 'Resume', 'Take over pause', 'Resume']);
+  });
+
+  it('posts a parked row action to the task action route', async () => {
+    parkedTasks = [parkedTask({ pausedAt: '2026-10-01T09:00:00.000Z', pausedByAdmin: true })];
+    const view = await mount();
+    const resume = findAll(view.tree(), (h) => h.tag === 'button' && textOf(h) === 'Resume')[0]!;
+
+    fire.click(resume);
+    for (let i = 0; i < 3; i += 1) await view.flush();
+
+    expect(actions).toEqual(['POST /admin/maintenance/tasks/parked-1/action {"action":"resume"}']);
+  });
+
+  it('still says nothing is running when only parked rows exist', async () => {
+    parkedTasks = [parkedTask({})];
+    const view = await mount();
+
+    expect(textOf(view.tree())).toContain('Nothing is running. It is safe to upgrade.');
+  });
+
+  it('says so when the parked list is capped', async () => {
+    parkedTasks = [parkedTask({})];
+    parkedCapped = true;
+    const view = await mount();
+
+    expect(textOf(view.tree())).toContain('Showing the first 1 parked tasks. There are more.');
   });
 });

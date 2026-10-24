@@ -2454,6 +2454,9 @@ export interface BlockingJob {
 
 export interface BlockingResponse {
   tasks: BlockingTask[];
+  /** Tasks the drain does not wait for but only an administrator can act on; never counted in `total`. */
+  parked: BlockingTask[];
+  parkedCapped: boolean;
   jobs: BlockingJob[];
   total: number;
   /** The listing is capped server-side. Rendered, because reading a truncated list as the whole
