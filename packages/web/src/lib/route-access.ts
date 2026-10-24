@@ -9,7 +9,7 @@
  *
  * A cookie that EXISTS but no longer works satisfies both at once, so the browser bounces between
  * them until it gives up with `ERR_TOO_MANY_REDIRECTS`. That is not hypothetical: `reset_password`
- * and `set_role` both bump `tokenVersion`, which invalidates the cookie the browser still holds —
+ * bumps `tokenVersion`, which invalidates the cookie the browser still holds —
  * so an administrator resetting someone's password could lock them out of the login page.
  *
  * The fix is that the layout, which is the only side that KNOWS the session is dead, says so in
