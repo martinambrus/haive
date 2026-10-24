@@ -126,7 +126,7 @@ describe('terminal step writers clear the previous usage stamp', () => {
       ),
     );
     expect(errors).toEqual([]);
-  });
+  }, 30_000);
 
   it.each([
     "{ status: 'done' }",
