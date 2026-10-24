@@ -119,6 +119,7 @@ const DIFF_SUBCOMMANDS: ReadonlySet<string> = new Set([
  * with the per-subcommand flags `-c` cannot express inserted right after the subcommand.
  *
  * A flag already present is left alone, so a caller that names its own `--upload-pack` keeps it.
+ * A pack command that names `origin` also refuses the file transport (`protocol.file.allow=never`).
  */
 export function hardenGitArgs(args: readonly string[]): string[] {
   const at = gitSubcommandIndex(args);
