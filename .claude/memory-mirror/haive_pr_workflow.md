@@ -43,6 +43,8 @@ check Greptile on any PR; Codex is the whole review gate. From 2026-10-08 the qu
 applies again. MEASURED 2026-10-08: PR #433 (opened 08:01:46Z) had no `greptile` check run, comment or
 review by 08:17:20Z, so under that rule Greptile counts as spent for October unless one shows up later. CORRECTED the same day: a `greptile-apps` "Greptile Review" check run started on #440 at 12:47Z, so Greptile IS active in October. Before merging, wait for that check run to complete and for `mergeStateStatus` to read CLEAN (UNSTABLE means a check is still running); #440 was merged early by mistake. MEASURED 2026-10-09: no Greptile check run or review on any push between ~19:15Z 2026-10-08 and ~10:30Z 2026-10-09 (PRs #451, #452, #455, #456), so those merged with Codex alone under the 15-minute rule; CORRECTED the same day: Greptile reviewed #459 at ~10:35Z, so it was paused, not out of quota. A gap is not proof the quota is spent; check each new push.
 
+**GREPTILE OUT OF ALLOWANCE, 2026-10-24** (user): skip it; Codex alone is the review gate until it is back, and with Codex out too, merge on CI alone. See [[pr-watch-codex-first]].
+
 **GREPTILE HAS A MONTHLY QUOTA — NO REVIEW WITHIN 15 MINUTES MEANS IT IS SPENT.** Stated by the
 user on 2026-09-13: the plan allows 100 reviews a month and this repo had used 98. A spent quota
 looks exactly like an uninstalled app — MEASURED the same day on PRs #91–#99, the only apps producing

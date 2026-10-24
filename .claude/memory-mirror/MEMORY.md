@@ -1,4 +1,4 @@
-- [Shared task board](shared_task_board.md) — ALL open work is on origin branch `tasks` (TASKS.md); claim there (push = lock) before starting, grep it before filing findings
+- [Shared task board](shared_task_board.md) — ALL open work is in TASKS.md on main (moved off branch `tasks` 2026-10-24); claim there (push HEAD:main = lock) before starting, grep it before filing findings
 - [READ FIRST before any onboarding/workflow/plan task](onboarding_run_checkpoints.md) — read BEFORE the task is created, then run each check as its step lands
 - [/opus-sonnet workflow (retired)](haive_opus_sonnet_workflow.md) — retired 2026-10-17 for /sonnet-sonnet + /opus-opus; its how-to rules still apply; ledger in .claude/tmp/<slug>/
 - [/opus-sonnet cost profile](opus_sonnet_cost_profile.md) — measured 2026-10-16: verify ~45% of builder cost, edits <10%, driver 32%; subagents can spawn agents
@@ -7,6 +7,7 @@
 - [Building shared/database libs](haive_libs_build_host_vs_docker.md) — dev-libs runs as root; build-libs.sh chowns dist back for host builds
 - [Repos scope editor browser check](repo_scope_editor_browser_check.md) — reveal the scope editor without a full onboarding
 - [PR workflow](haive_pr_workflow.md) — branch + PR, merge commit; loop reviewers until no valid fix; quotas, no-👀 rule; Codex gate ON again 2026-10-18 (CI-only pause lifted)
+- [PR watch: reviewers first](pr_watch_codex_first.md) — Codex/Greptile findings → fix at once, CI ignored; skip a reviewer out of allowance; both out → CI-only merge
 - [Ship cycle](haive_ship_cycle.md) — after work, offer commit + push + watch CI as ONE yes/no question
 - [Chrome MCP browser-check gotchas](chrome_mcp_browser_check_gotchas.md) — scope clicks to the component; React inputs need the prototype setter
 - [lint-staged partial-stage hazard](lint_staged_partial_stage_hazard.md) — splitting one file across commits can corrupt the worktree
