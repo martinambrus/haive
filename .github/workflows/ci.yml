@@ -261,6 +261,7 @@ jobs:
           api test/new-work-fence-db.test.ts NEW_WORK_FENCE_TEST_URL new_work_fence_test pg
           api test/gate-retry-reask-db.test.ts GATE_RETRY_REASK_TEST_URL gate_retry_reask_test pg
           api test/gate-stop-wedge-db.test.ts GATE_STOP_WEDGE_TEST_URL gate_stop_wedge_test pg
+          database test/gate-wedge-heal.test.ts GATE_WEDGE_HEAL_TEST_URL gate_wedge_heal_test pg
           updater test/new-work-fence-db.test.ts UPDATER_FENCE_TEST_URL updater_fence_test pg
           updater test/rollback-failure-db.test.ts UPDATER_ROLLBACK_TEST_URL updater_rollback_test pg
           api test/integration-choice-routes-db.test.ts INTEGRATION_CHOICE_ROUTES_TEST_URL integration_choice_routes_test pg

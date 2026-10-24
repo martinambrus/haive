@@ -1,6 +1,6 @@
 import type { Job } from 'bullmq';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { configService, TASK_JOB_NAMES } from '@haive/shared';
+import { configService, logger, TASK_JOB_NAMES } from '@haive/shared';
 import {
   finishFailedStep,
   handleResult,
@@ -1229,6 +1229,75 @@ describe('a hand-off that a Retry overtakes after its epoch check', () => {
 
   describe('resolving the fix-loop gate', () => {
     const gate = { id: 'ts-1', stepId: 'epoch-chain-first', round: 1 };
+
+    describe('says why it applied nothing', () => {
+      let warn: ReturnType<typeof vi.spyOn>;
+      beforeEach(() => {
+        warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      });
+      afterEach(() => {
+        warn.mockRestore();
+      });
+      const resolve = (action: string, c: object = ctx()) =>
+        resolveFixLoopGate(db as never, c as never, gate as never, action, 1, '');
+
+      it('abort, once a Retry took the gate row', async () => {
+        h.state.readsAnswer = true;
+        h.state.sourceOwned = false;
+        await resolve('abort');
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]?.[0]).toMatchObject({
+          stepId: 'epoch-chain-first',
+          action: 'abort',
+          reason: 'row_not_owned',
+        });
+      });
+
+      it('accept, once a Retry took the gate row', async () => {
+        h.state.readsAnswer = true;
+        h.state.sourceOwned = false;
+        await resolve('accept');
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]?.[0]).toMatchObject({
+          stepId: 'epoch-chain-first',
+          action: 'accept',
+          reason: 'row_not_owned',
+        });
+      });
+
+      it.each(['accept', 'continue'])(
+        '%s, once the task moved to a newer epoch',
+        async (action) => {
+          h.state.readsAnswer = true;
+          h.state.onSelect = retryLands;
+          await resolve(action, withFixTarget(ctx()));
+          expect(warn).toHaveBeenCalledTimes(1);
+          expect(warn.mock.calls[0]?.[0]).toMatchObject({
+            stepId: 'epoch-chain-first',
+            action,
+            reason: 'task_moved',
+          });
+        },
+      );
+
+      it('continue, with no routable target', async () => {
+        h.state.readsAnswer = true;
+        await resolve('continue');
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]?.[0]).toMatchObject({
+          stepId: 'epoch-chain-first',
+          action: 'continue',
+          reason: 'no_routable_target',
+        });
+      });
+
+      it.each(['accept', 'continue'])('says nothing for a landed %s', async (action) => {
+        h.state.readsAnswer = true;
+        await resolve(action, withFixTarget(ctx()));
+        expect(h.state.taskWrites).toEqual([{ epochs: [5], landed: true }]);
+        expect(warn).not.toHaveBeenCalled();
+      });
+    });
 
     it('resolves nothing once a Retry reset the gate', async () => {
       h.state.readsAnswer = true;

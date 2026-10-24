@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
-import type { FormSchema, FormValues } from '@haive/shared';
+import { FIX_LOOP_ACTION_FIELD, type FormSchema, type FormValues } from '@haive/shared';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 import type { CliProviderRecord } from '../src/cli-adapters/types.js';
@@ -185,6 +185,7 @@ function makeProvider(): CliProviderRecord {
  *  reconcileReusedFormValues hook that records every call it receives. */
 function reuseFormStep(opts?: {
   optIn?: boolean;
+  form?: FormSchema;
   reconcile?: { calls: { detected: unknown; reused: FormValues }[]; result: FormValues };
 }): StepDefinition {
   const reconcile = opts?.reconcile;
@@ -214,6 +215,7 @@ function reuseFormStep(opts?: {
       return { ready: true };
     },
     form(): FormSchema {
+      if (opts?.form) return opts.form;
       return {
         title: 'Deps',
         fields: [
@@ -236,6 +238,23 @@ function reuseFormStep(opts?: {
     },
   };
 }
+
+const GATE_FORM: FormSchema = {
+  title: 'Gate',
+  fields: [
+    {
+      type: 'radio',
+      id: FIX_LOOP_ACTION_FIELD,
+      label: 'Proceed?',
+      options: [
+        { value: 'continue', label: 'Continue' },
+        { value: 'accept', label: 'Accept' },
+        { value: 'abort', label: 'Abort' },
+      ],
+      default: 'continue',
+    },
+  ],
+};
 
 function runParams(state: MockState, stepDef: StepDefinition) {
   return {
@@ -267,6 +286,23 @@ describe('advanceStep prior-task form-value reuse', () => {
       name: 'Acme',
       color: 'green',
     });
+  });
+
+  it('never auto-submits reused values into a gate form', async () => {
+    const state = freshState({ priorFormValues: { [FIX_LOOP_ACTION_FIELD]: 'continue' } });
+    const result = await advanceStep(runParams(state, reuseFormStep({ form: GATE_FORM })));
+    expect(result.status).toBe('waiting_form');
+    expect(state.taskStepRow.formValues ?? null).toBeNull();
+    expect(state.updates.some((u) => u.patch.status === 'running' && 'formValues' in u.patch)).toBe(
+      false,
+    );
+  });
+
+  it('parks a gate form whatever unrelated values a prior task left', async () => {
+    const state = freshState({ priorFormValues: { anything: 'else' } });
+    const result = await advanceStep(runParams(state, reuseFormStep({ form: GATE_FORM })));
+    expect(result.status).toBe('waiting_form');
+    expect(state.taskStepRow.formValues ?? null).toBeNull();
   });
 
   it('does not reuse and parks on waiting_form when auto-continue is off', async () => {

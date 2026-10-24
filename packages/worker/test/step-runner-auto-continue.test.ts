@@ -607,6 +607,45 @@ describe('advanceStep auto-continue', () => {
     expect(state.taskStepRow.formValues).toBeNull();
   });
 
+  it('a gate pre-answer is never auto-submitted into a gate form', async () => {
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: { 'cfg-step': { [FIX_LOOP_ACTION_FIELD]: 'continue' } },
+    };
+    const gate: FormSchema = {
+      title: 'Gate',
+      fields: [
+        {
+          type: 'radio',
+          id: FIX_LOOP_ACTION_FIELD,
+          label: 'Proceed?',
+          options: [
+            { value: 'continue', label: 'Go' },
+            { value: 'abort', label: 'Stop' },
+          ],
+          default: 'continue',
+        },
+      ],
+    };
+    const result = await run(state, makeStep({ form: () => gate }));
+    expect(result.status).toBe('waiting_form');
+    expect(state.taskStepRow.formValues).toBeNull();
+  });
+
+  it('a pre-answer to a non-gate form is still auto-submitted', async () => {
+    const state = freshState();
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: { 'cfg-step': { action: 'update' } },
+    };
+    const result = await run(state, makeStep({ form: () => QUESTION_FORM }));
+    expect(result.status).toBe('done');
+    expect((state.taskStepRow.formValues as Record<string, unknown>).action).toBe('update');
+  });
+
   it('a gate form that sets its own autoSubmit still waits for a person', async () => {
     const state = freshState();
     state.taskRow = { id: 'task-1', autoContinue: false, preAnswers: null };

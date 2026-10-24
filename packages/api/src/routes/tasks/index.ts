@@ -83,6 +83,7 @@ import {
   settleActiveStepsIn,
   stopActiveCliInvocations,
   supersedeLiveRuns,
+  withoutGateAnswer,
 } from '../../lib/task-control.js';
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
 import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
@@ -1759,8 +1760,8 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
   // Invalidate cached detect output on provider-sensitive steps so the next
   // advance re-detects against the new CLI's metadata (skills dir, agents
   // dir, etc.). Terminal (done/failed/skipped/cancelled) steps are left
-  // alone — rewriting history would be confusing. form_values is preserved
-  // so the user's prior submission flows into the regenerated schema.
+  // alone — rewriting history would be confusing. A saved fix-loop gate answer
+  // is dropped (a pending row refuses every write); any other answer is kept.
   // Select the steps to invalidate first, so each finishing run's timing can be folded
   // into carried_* before zeroing (mirrors the retry / worker reset — a plain reset
   // discards the prior run and undercounts effort). foldSit counts a failed step's
@@ -1795,6 +1796,7 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
         status: 'pending',
         detectOutput: null,
         formSchema: null,
+        formValues: withoutGateAnswer,
         statusMessage: null,
         startedAt: null,
         endedAt: null,
