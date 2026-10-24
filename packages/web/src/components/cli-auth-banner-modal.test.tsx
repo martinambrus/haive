@@ -214,6 +214,24 @@ describe('CLI auth banner socket close', () => {
     expect(textOf(view.draw()) === before).toBe(true);
   });
 
+  it('fix7 bounds queued verification after a success-phase server close', async () => {
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onopen?.();
+    socket.frame({ type: 'auth-success' });
+    socket.frame({ type: 'queue', running: 1, agents: 1, service: 0, ahead: 0 });
+    view.draw();
+    await vi.advanceTimersByTimeAsync(50_000);
+    view.draw();
+    expect(buttons(view.tree(), 'test connection')).toHaveLength(0);
+    socket.close();
+    view.draw();
+    expect(textOf(view.tree())).not.toContain('Waiting for a free CLI slot');
+    await vi.advanceTimersByTimeAsync(40_000);
+    view.draw();
+    expect(buttons(view.tree(), 'test connection')).toHaveLength(1);
+    expect(buttons(view.tree(), 'retry')).toHaveLength(0);
+  });
+
   it('fix3 preserves the URL-wait give-up error after a later server close', async () => {
     await exhaustUrlAttempts();
     expect(buttons(view.tree(), 'retry')).toHaveLength(1);

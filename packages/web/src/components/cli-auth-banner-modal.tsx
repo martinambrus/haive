@@ -238,13 +238,13 @@ export function CliAuthBannerModal({
 
     ws.onclose = () => {
       clearTimeout(connectTimeout);
-      if (
-        disposed ||
-        phaseRef.current === 'saved' ||
-        phaseRef.current === 'success' ||
-        phaseRef.current === 'error'
-      )
+      if (disposed) return;
+      if (phaseRef.current === 'success') {
+        // A closed socket cannot clear the queued probe; let the safety timer resume.
+        setQueueWait(null);
         return;
+      }
+      if (phaseRef.current === 'saved' || phaseRef.current === 'error') return;
       setQueueWait(null);
       setError('Connection closed. Retry the login.');
       changePhase('error');
