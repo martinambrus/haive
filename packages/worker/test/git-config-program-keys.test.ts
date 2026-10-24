@@ -18,7 +18,10 @@ vi.mock('../src/repo/credentials.js', () => ({
 import { gitRun } from '../src/repo/git-exec.js';
 import { buildCredentialHelper } from '../src/repo/git-push.js';
 
+import { startGitHttpServer } from './support/git-http-fixture.js';
+
 const run = promisify(execFile);
+let gitHttp: Awaited<ReturnType<typeof startGitHttpServer>>;
 
 const SCRUBBED = [
   'GIT_ASKPASS',
@@ -572,9 +575,11 @@ beforeAll(async () => {
   srv401 = await listen(challenge(401, 'WWW-Authenticate'));
   srv407 = await listen(challenge(407, 'Proxy-Authenticate'));
   await buildTemplates();
+  gitHttp = await startGitHttpServer(root);
 }, 120_000);
 
 afterAll(async () => {
+  await gitHttp?.close();
   for (const s of servers) {
     s.closeAllConnections();
     await new Promise<void>((resolve) => s.close(() => resolve()));
@@ -598,7 +603,24 @@ describe('hardened host git runs no program a repository config names', () => {
     expect(await exists(path.join(control.marks, control.mark)), 'positive control').toBe(true);
 
     const hardened = await c.setup();
-    await gitRun(hardened.cwd, hardened.argv, { ...hermetic, ...hardened.env });
+    const httpRows = [
+      'gpg-push-gpgsign',
+      'alternaterefs-client-fetch',
+      'gc-auto-fetch',
+      'submodule-recursion-fetch',
+      'submodule-recursion-push',
+    ];
+    if (httpRows.includes(c.id)) {
+      const g = gitAt(hardened.cwd);
+      const origin = (await g('remote', 'get-url', 'origin')).trim();
+      await g('remote', 'set-url', 'origin', gitHttp.httpOrigin(origin));
+    }
+    // Isolate the recursion key: its local submodule must remain reachable if that
+    // key is removed, independently of the parent's file-transport protection.
+    const recursionEnv: Record<string, string> = c.id.startsWith('submodule-recursion-')
+      ? { GIT_ALLOW_PROTOCOL: 'http:file' }
+      : {};
+    await gitRun(hardened.cwd, hardened.argv, { ...hermetic, ...recursionEnv, ...hardened.env });
     expect(await exists(path.join(hardened.marks, hardened.mark))).toBe(false);
   });
 
