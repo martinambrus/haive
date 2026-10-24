@@ -173,6 +173,32 @@ describe('POST /tasks', () => {
     expect(starts()).toEqual([{ taskId: body.task.id, userId: USER }]);
   });
 
+  it('with deferStart refuses a read-only local repository, which takes no attachments', async () => {
+    const t = setup();
+    const readOnly = '00000000-0000-4000-8000-0000000000f1';
+    t.fake.insert(schema.repositories, {
+      id: readOnly,
+      userId: USER,
+      name: 'ro',
+      status: 'ready',
+      source: 'local_path',
+      writable: false,
+    });
+    const res = await post('/', {
+      type: 'workflow',
+      title: 'a task',
+      description: 'do it',
+      repositoryId: readOnly,
+      deferStart: true,
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: 'Attachments are not supported for read-only local repositories',
+    });
+    expect(t.fake.rows(schema.tasks).filter((r) => r.id !== DRAFT)).toEqual([]);
+    expect((await create()).status).toBe(201);
+  });
+
   // The stalled re-driver gives a `queued` task with no START one, and leaves `created` alone.
   it('answers 201 with the task queued when its START cannot be queued', async () => {
     const t = setup();
