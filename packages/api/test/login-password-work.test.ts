@@ -16,13 +16,21 @@ vi.mock('../src/lib/auth-throttle.js', () => ({
   reserveAuthAttempt: async () => ({ refund: async () => {} }),
 }));
 vi.mock('../src/db.js', () => {
-  const tx = { execute: async () => {}, query: { users: { findFirst: async () => h.user } } };
+  const tx = {
+    insert: () => ({ values: async () => {} }),
+    execute: async () => {},
+    query: { users: { findFirst: async () => h.user } },
+  };
   return { getDb: () => ({ ...tx, transaction: async (fn: (t: unknown) => unknown) => fn(tx) }) };
 });
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
+  decryptEmail: () => 'synthetic@login.test.local',
   configService: { getEncryptionKey: async () => 'ab'.repeat(32), get: async () => null },
-  secretsService: { getEmailBlindIndexPepper: async () => 'ef'.repeat(32) },
+  secretsService: {
+    getJwtSecret: async () => 'cd'.repeat(32),
+    getEmailBlindIndexPepper: async () => 'ef'.repeat(32),
+  },
 }));
 import type { AppEnv } from '../src/context.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -75,6 +83,26 @@ describe('login password work without timing assertions', () => {
       'synthetic-password-1',
       'stored-password-hash',
     );
+  });
+
+  it('a deactivated account with the correct password still receives the same 401 and no cookies', async () => {
+    h.user = {
+      id: 'synthetic-id',
+      role: 'user',
+      tokenVersion: 0,
+      createdAt: new Date(),
+      status: 'deactivated',
+      passwordHash: 'stored-password-hash',
+    };
+    h.compare.mockResolvedValue(true);
+    const res = await send('login');
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: 'Invalid credentials', code: null });
+    expect(h.compare).toHaveBeenCalledExactlyOnceWith(
+      'synthetic-password-1',
+      'stored-password-hash',
+    );
+    expect(res.headers.getSetCookie()).toEqual([]);
   });
 
   it('duplicate registration already pays for one bcrypt hash before its unchanged 409', async () => {
