@@ -86,6 +86,23 @@ describe('GitHub device sign-in attempts', () => {
     t.unmount();
   });
 
+  it('propagates a caller callback error after a successful poll', async () => {
+    api.post.mockResolvedValueOnce(begun).mockResolvedValueOnce(approved);
+    const t = await mount();
+    const failure = new TypeError('Caller callback failed');
+    t.onConnected.mockImplementation(() => {
+      throw failure;
+    });
+    const completion = fire.click(buttons(t.view.tree(), 'sign in with github')[0]!);
+    const rejected = expect(completion).rejects.toBe(failure);
+    await t.flush();
+    await t.poll();
+    await rejected;
+    expect(t.onConnected).toHaveBeenCalledExactlyOnceWith(credential);
+    expect(t.onError.mock.calls.filter(([message]) => message !== null)).toEqual([]);
+    t.unmount();
+  });
+
   it.each(['cancel', 'restart', 'unmount'] as const)(
     'ignores a successful poll after %s',
     async (action) => {

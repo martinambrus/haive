@@ -128,25 +128,26 @@ export function GithubOauthConnect({
         while (!cancelled && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, intervalMs));
           if (cancelled) return;
+          let res: PollResponse;
           try {
-            const res = await api.post<PollResponse>('/github-oauth/poll', {
+            res = await api.post<PollResponse>('/github-oauth/poll', {
               deviceCode: begin.deviceCode,
             });
             if (cancelled) return;
-            if (res.status === 'ok') {
-              reset();
-              onConnected(res.credential);
-              return;
-            }
           } catch (err) {
             if (cancelled) return;
             fail((err as ApiError).message ?? 'GitHub OAuth failed');
             return;
           }
+          if (res.status === 'ok') {
+            reset();
+            onConnected(res.credential);
+            return;
+          }
         }
         if (!cancelled) fail('Device code expired. Start over.');
       };
-      void tick();
+      return tick();
     } catch (err) {
       if (cancelled) return;
       fail((err as ApiError).message ?? 'Failed to start GitHub OAuth');
@@ -176,7 +177,7 @@ export function GithubOauthConnect({
   return (
     <>
       {phase === 'idle' || phase === 'error' ? (
-        <Button type="button" onClick={() => void start()} disabled={configured === null}>
+        <Button type="button" onClick={start} disabled={configured === null}>
           {configured === null ? 'Checking...' : 'Sign in with GitHub'}
         </Button>
       ) : null}
