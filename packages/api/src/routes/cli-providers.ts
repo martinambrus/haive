@@ -82,8 +82,7 @@ async function loadPollableJob(
   name: string,
   owner?: { providerId: string; userId: string },
 ) {
-  // Compare the whole match: JavaScript's `$` also matches before a final newline.
-  if (POLLABLE_JOB_ID.exec(jobId)?.[0] !== jobId) {
+  if (!POLLABLE_JOB_ID.test(jobId)) {
     throw new HttpError(404, 'job not found — it may have expired', 'job_expired');
   }
   const job = await getCliExecQueue().getJob(jobId);
