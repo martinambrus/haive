@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +9,8 @@ const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const TRANSPORTS = new Set(['fetch', 'pull', 'push', 'ls-remote']);
 
 /** Follow argv initializers and .push additions within their lexical function.
- * This catches both inline arrays and the credential-prefixed argv our helpers build. */
+ * This catches both inline arrays and the credential-prefixed argv our helpers build.
+ * An argv returned by a helper call is invisible to this scan. */
 function unvalidatedOriginCalls(text: string, definesOrigin = false): number[] {
   const file = ts.createSourceFile('source.ts', text, ts.ScriptTarget.Latest, true);
   const bindings = new Map<ts.Node, Map<string, ts.Node[]>>();
@@ -109,10 +111,20 @@ describe('origin network operations', () => {
     ).toEqual([]);
   });
 
-  it('uses originGitRun everywhere in worker and api source, and catches a bypass at each current site', async () => {
+  it('uses originGitRun throughout server sources and operator scripts, and catches a bypass in each guarded file', async () => {
     const offenders: string[] = [];
     let guardedFiles = 0;
-    for (const root of ['packages/worker/src', 'packages/api/src']) {
+    const modules = await readdir(path.join(ROOT, 'modules'), { withFileTypes: true });
+    const roots = [
+      'packages/worker/src',
+      'packages/worker/scripts',
+      'packages/api/src',
+      'packages/shared/src',
+      ...modules
+        .filter((m) => m.isDirectory() && existsSync(path.join(ROOT, 'modules', m.name, 'src')))
+        .map((m) => `modules/${m.name}/src`),
+    ];
+    for (const root of roots) {
       for (const rel of await readdir(path.join(ROOT, root), { recursive: true })) {
         if (!rel.endsWith('.ts') || rel.endsWith('.test.ts')) continue;
         const name = `${root}/${rel}`;
