@@ -16,7 +16,7 @@ const h = vi.hoisted(() => {
   process.env.LOG_LEVEL = 'silent';
   return { db: undefined as unknown, invalidJwt: false };
 });
-const USER = '00000000-0000-4000-8000-000000000001';
+const USER = 'abcdefab-0000-4000-8000-000000000001';
 const ADMIN = '00000000-0000-4000-8000-000000000002';
 const ID = '00000000-0000-4000-8000-000000000003';
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -441,4 +441,36 @@ describe('revocation ordering', () => {
     expect(await pending).toBe(401);
     await gone.promise;
   });
+});
+
+describe('fix round admin controls', () => {
+  for (const action of ['deactivate', 'reset_password']) {
+    it(`uppercase id ${action} closes the selected user's socket`, async () => {
+      const { sockets } = await openAll();
+      // The fake compares strings literally; PostgreSQL compares UUID values. Model that
+      // one lookup here, keeping the selected row's canonical id and the HTTP param distinct.
+      const findFirst = fake.db.query.users.findFirst.bind(fake.db.query.users);
+      vi.spyOn(fake.db.query.users, 'findFirst')
+        .mockImplementationOnce(findFirst)
+        .mockImplementationOnce((opts) => findFirst({ ...opts, where: eq(schema.users.id, USER) }));
+      const update = fake.db.update.bind(fake.db);
+      vi.spyOn(fake.db, 'update').mockImplementation((table) => {
+        const builder = update(table);
+        if (table !== schema.users) return builder;
+        return {
+          set: (values) => ({ where: () => builder.set(values).where(eq(schema.users.id, USER)) }),
+        };
+      });
+      const response = await app.request(`/admin/users/${USER.toUpperCase()}/action`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: 'haive_access=admin-session' },
+        body: JSON.stringify({ action }),
+      });
+      expect(response.status).toBe(200);
+      await vi.waitFor(
+        () => expect(sockets.map((s) => s.codes)).toEqual(HANDLERS.map(() => [1008])),
+        { timeout: 1500 },
+      );
+    });
+  }
 });

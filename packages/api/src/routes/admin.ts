@@ -310,7 +310,7 @@ adminRoutes.post('/users/:id/action', async (c) => {
         .where(eq(schema.users.id, targetUserId));
       await insertAuditEvent(tx, audit);
     });
-    closeUserSockets(targetUserId);
+    closeUserSockets(target.id);
     logAuditEvent(audit);
     return c.json({ ok: true, action: 'deactivate' });
   }
@@ -358,7 +358,7 @@ adminRoutes.post('/users/:id/action', async (c) => {
         .where(eq(schema.users.id, targetUserId));
       await insertAuditEvent(tx, audit);
     });
-    closeUserSockets(targetUserId);
+    closeUserSockets(target.id);
     logAuditEvent(audit);
     return c.json({ ok: true, action: 'reset_password', temporaryPassword });
   }
