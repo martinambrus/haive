@@ -1008,7 +1008,7 @@ Recommendation: fall back to the default at run time, plus T391's create refusal
 
 ### T407 · FNF[plan-message-attribution] · plan chat records the task-level CLI as the answering provider (+1)
 
-status: open · was modular #289
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:45Z · last: 2026-10-24T19:45Z · was modular #289
 
 1. worker plan-chat.ts ~:343.
 2. plan-merge.ts ~:585 stores a value nothing reads.
