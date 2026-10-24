@@ -23,6 +23,7 @@ import {
   isImportMarker,
   isRenderContextSnapshot,
   isRtkChoiceRecorded,
+  namesGitData,
   PROJECT_STATE_IMPORT_STEP_ID,
 } from '@haive/shared/project-state';
 import { readUpgradeFile, RTK_BLOCK_FILES, RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
@@ -758,7 +759,9 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
 
       const rel = safeDiskRel(target.diskPath);
       if (rel === null) {
-        warnings.push(`refusing to restore ${target.diskPath}: not a path inside the repository`);
+        warnings.push(
+          `refusing to restore ${target.diskPath}: ${namesGitData(target.diskPath) ? 'it names git data' : 'not a path inside the repository'}`,
+        );
         continue;
       }
       // A kept path's ledger reverts too, so the next upgrade judges it against the version before.
@@ -824,7 +827,9 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       try {
         const rel = safeDiskRel(item.diskPath);
         if (rel === null) {
-          warnings.push(`refusing to undo ${item.diskPath}: not a path inside the repository`);
+          warnings.push(
+            `refusing to undo ${item.diskPath}: ${namesGitData(item.diskPath) ? 'it names git data' : 'not a path inside the repository'}`,
+          );
           continue;
         }
         const removal = await removeIfHaives(ctx.repoPath, rel, item, item.writtenHash);

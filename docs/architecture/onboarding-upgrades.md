@@ -510,9 +510,12 @@ key is null like the whole render file's (`isRtkConflict`).
 **The ledger follows the record: another install's claims are imported as markers.** The record
 carries one claim file per live row (`artifacts/<claimFileName(path)>`: path, portable template id,
 kind, schema version, template and written hashes, Haive version), written by 12, 02 and 04 through
-`writeProjectStateRecord`. A claim names a relative, canonical path with no `.git` segment in any
-letter case (`isClaimablePath`): a record never imports a claim to git data, 02's `safeDiskRel`
-refuses such a path as a backstop, and 01 neither lists nor reads a ledger row imported before the
+`writeProjectStateRecord`. A claim names a relative, canonical path with no segment git reads as
+`.git` (`isClaimablePath` through `namesGitData`, which mirrors git's NTFS and HFS+ checks: `.git`
+or `git~1` in any ASCII letter case, followed only by dots and spaces or by a `:` stream name, and
+`.git` with HFS+'s ignorable code points; a `\` separates segments as `/` does, and the check is linear in
+the path's length): a record never imports a claim to git data, 02's `safeDiskRel` refuses such a
+path as a backstop, and 01 neither lists nor reads a ledger row imported before the
 rule. A claim file at such a path that an earlier release wrote, under its own file name, does not
 refuse the record: the codec reads it apart (`gitDataClaims`), the sync keeps it in the base for the
 writer to remove at the next write (and marks the record due), and no merge, import or set-aside
