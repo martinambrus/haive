@@ -2,10 +2,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CliAuthBannerModal } from './cli-auth-banner-modal';
 import { buttons, createRenderer, fire, textOf, type Renderer } from '../../test/render-tree';
 
-vi.mock('react', async (original) => ({
-  ...(await original<typeof import('react')>()),
-  ...(await import('../../test/render-tree')).reactHooks,
-}));
+const h = vi.hoisted(() => ({ stateUpdate: vi.fn() }));
+vi.mock('react', async (original) => {
+  const { reactHooks } = await import('../../test/render-tree');
+  return {
+    ...(await original<typeof import('react')>()),
+    ...reactHooks,
+    useState(initial: unknown) {
+      const [value, set] = reactHooks.useState(initial);
+      const trackedSet = reactHooks.useMemo(
+        () => (update: unknown) => {
+          h.stateUpdate();
+          (set as (update: unknown) => void)(update);
+        },
+        [set],
+      );
+      return [value, trackedSet];
+    },
+  };
+});
 vi.mock('@xterm/xterm', () => ({ Terminal: class {} }));
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class {} }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
@@ -117,8 +132,11 @@ describe('CLI auth banner socket close', () => {
 
   it('uses the most recent phase when frames and close arrive before a render', () => {
     socket.frame({ type: 'auth-url', url: 'https://claude.ai/oauth/authorize' });
+    socket.frame({ type: 'auth-success' });
     socket.close();
-    assertClosedError();
+    view.draw();
+    expect(textOf(view.tree())).toContain('Authentication successful');
+    expect(buttons(view.tree(), 'retry')).toHaveLength(0);
   });
 
   it('clears the queued panel when the socket closes', () => {
@@ -149,11 +167,15 @@ describe('CLI auth banner socket close', () => {
     );
   });
 
-  it('ignores the close initiated when the modal is hidden', () => {
+  it('fix4 ignores late message and close callbacks after the modal is hidden', () => {
+    h.stateUpdate.mockClear();
     open = false;
     view.draw();
     expect(socket.close).toHaveBeenCalledWith(1000, 'unmount');
-    expect(textOf(view.tree())).toBe('');
+    socket.frame({ type: 'auth-url', url: 'https://claude.ai/oauth/authorize' });
+    socket.onclose?.();
+    socket.onerror?.();
+    expect(h.stateUpdate).not.toHaveBeenCalled();
   });
 
   it('ignores its own Close button and late close events after reopening', () => {
@@ -168,11 +190,28 @@ describe('CLI auth banner socket close', () => {
     expect(textOf(view.tree())).not.toContain('Connection closed');
   });
 
-  it('ignores close callbacks from an unmounted session', () => {
+  it('fix4 ignores late message and close callbacks after unmount', () => {
+    h.stateUpdate.mockClear();
     mounted = false;
     view.draw();
+    socket.frame({ type: 'error', message: 'Late failure' });
     socket.onclose?.();
-    expect(textOf(view.draw())).toBe('');
+    socket.onerror?.();
+    expect(h.stateUpdate).not.toHaveBeenCalled();
+  });
+
+  it('fix4 ignores frames, errors and closes from a socket disposed by Retry', () => {
+    socket.frame({ type: 'error', message: 'Retryable failure' });
+    view.draw();
+    fire.click(buttons(view.tree(), 'retry')[0]!);
+    view.draw();
+    const before = textOf(view.tree());
+    h.stateUpdate.mockClear();
+    socket.frame({ type: 'error', message: 'Late failure' });
+    socket.onclose?.();
+    socket.onerror?.();
+    expect(h.stateUpdate).not.toHaveBeenCalled();
+    expect(textOf(view.draw()) === before).toBe(true);
   });
 
   it('fix3 preserves the URL-wait give-up error after a later server close', async () => {
