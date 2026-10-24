@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ensureDirNoFollow } from '@haive/shared/fs-safe';
+import { ensureDirNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { gitCommitStaged } from './git-commit.js';
 import { gitRun } from './git-exec.js';
 
@@ -52,5 +52,27 @@ describe('gitCommitStaged with real git', () => {
     expect(
       (await gitRun(sup, ['diff', '--cached', '--quiet', '--ignore-submodules=none'])).code,
     ).toBe(0);
+  });
+
+  it('concludes an open merge even when its staged tree equals HEAD', async () => {
+    await command(root, ['init', '-q', '-b', 'main']);
+    await command(root, ['commit', '-q', '--allow-empty', '-m', 'base']);
+    await command(root, ['checkout', '-q', '-b', 'side']);
+    await writeFileNoFollow(root, 'f', 'same tree\n');
+    await command(root, ['add', 'f']);
+    await command(root, ['commit', '-qm', 'side']);
+    const side = await command(root, ['rev-parse', 'HEAD']);
+    await command(root, ['checkout', '-q', 'main']);
+    await writeFileNoFollow(root, 'f', 'same tree\n');
+    await command(root, ['add', 'f']);
+    await command(root, ['commit', '-qm', 'main']);
+    const main = await command(root, ['rev-parse', 'HEAD']);
+    await command(root, ['merge', '--no-commit', '--no-ff', 'side']);
+    expect((await gitRun(root, ['diff', '--cached', '--quiet'])).code).toBe(0);
+    expect(await command(root, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(side);
+
+    expect(await gitCommitStaged(root, 'conclude merge', identity)).toBe(true);
+    expect(await command(root, ['show', '-s', '--format=%P', 'HEAD'])).toBe(`${main} ${side}`);
+    expect((await gitRun(root, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).code).toBe(1);
   });
 });

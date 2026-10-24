@@ -189,6 +189,18 @@ describe.each(sites)('%s commit decisions', (site) => {
     expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
   });
 
+  it.each([128, 2, -1, 124])('rejects a failed merge read with code %i', async (code) => {
+    control.result.mockImplementation((_cwd: string, args: string[]): GitRunResult | undefined => {
+      if (args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) {
+        return { code, stdout: '', stderr: 'opaque diagnostic' };
+      }
+      return undefined;
+    });
+    await expect(apply()).rejects.toThrow(/^git merge read failed:/);
+    expect(writes).toEqual([]);
+    expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
+  });
+
   it('rejects a real commit failure even when its output mentions nothing to commit', async () => {
     const file =
       site === 'knowledge trees'
