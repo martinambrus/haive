@@ -52,6 +52,12 @@ and write where the work stands (branch, PR, evidence path) in its body.
 **Areas owned by one session.** Before claiming, check `## Areas`. Work touching another session's
 area needs a heads-up to that session first.
 
+**Keep the session's task list in sync.** The board is the shared sync point, not a replacement for
+the Claude Code task tool: the user watches progress in each session's CLI task list. Every board
+change you make (claim, progress, release, new task, new item, done) is mirrored in your session's
+TaskCreate/TaskUpdate the same turn, and every task you create or finish in the session goes onto the
+board. At session start, load the board's tasks you own or will work on into the session task list.
+
 **Status values**: `open` · `taken` · `parked` (waits on the user or on data; the reason says which) ·
 `blocked` (waits on another task; `blocked-by:` names it).
 
