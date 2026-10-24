@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { SHARED_VOLUME, ideRunnerName, repoIdeSessionId, volumeName } from '@haive/shared';
+import {
+  CODE_SERVER_IMAGE,
+  SHARED_VOLUME,
+  ideRunnerName,
+  repoIdeSessionId,
+  volumeName,
+} from '@haive/shared';
 
 const h = vi.hoisted(() => ({ exec: vi.fn(), boundary: vi.fn() }));
 vi.mock('node:child_process', async (importOriginal) => {
@@ -19,7 +25,7 @@ vi.mock('../src/sandbox/docker-runner.js', async (importOriginal) => ({
   },
 }));
 
-import { ensureRepoIdeRunnerStarted } from '../src/sandbox/ide-runner.js';
+import { ensureIdeRunnerStarted, ensureRepoIdeRunnerStarted } from '../src/sandbox/ide-runner.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -67,12 +73,41 @@ describe('repository editor launch', () => {
       `type=volume,source=${volumeName(SHARED_VOLUME.repos)},destination=/workspace/.git,volume-subpath=${SUBPATH}/.git,volume-nocopy=true,readonly`,
       `type=volume,source=${volumeName(SHARED_VOLUME.repos)},destination=/workspace,volume-subpath=${SUBPATH},volume-nocopy=true`,
     ]);
-    expect(args).toContain('--disable-proxy');
+    expect(args.indexOf(CODE_SERVER_IMAGE)).toBeGreaterThan(-1);
+    expect(args.indexOf('--disable-proxy')).toBeGreaterThan(args.indexOf(CODE_SERVER_IMAGE));
+    expect(args.slice(args.indexOf('--disable-proxy'))).toEqual(['--disable-proxy', '/workspace']);
     expect(args).toContain(`haive.repo.id=${REPO}`);
     expect(args.some((arg) => arg.startsWith('haive.task.id='))).toBe(false);
     expect(h.boundary).toHaveBeenCalledWith(
       { source: volumeName(SHARED_VOLUME.repos), target: '/workspace', subpath: SUBPATH },
       { hasWorktree: false, hasRepo: true },
     );
+  });
+});
+
+describe('task editor launch', () => {
+  it('passes --disable-proxy to code-server after the Docker image', async () => {
+    const taskId = '00000000-0000-4000-8000-0000000000c1';
+    const fake = createFakeDb({
+      repositories: schema.repositories,
+      tasks: schema.tasks,
+      taskSteps: schema.taskSteps,
+    });
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      storagePath: `/var/lib/haive/repos/${SUBPATH}`,
+    });
+    fake.insert(schema.tasks, { id: taskId, userId: USER, repositoryId: REPO, type: 'workflow' });
+    expect(
+      await ensureIdeRunnerStarted(fake.db as unknown as Database, taskId, USER, '{}'),
+    ).toEqual({ container: ideRunnerName(taskId) });
+    const runs = h.exec.mock.calls.filter(([, args]) => args[0] === 'run' && args[1] === '-d');
+    expect(runs).toHaveLength(1);
+    const args = runs[0]![1] as string[];
+    expect(args).toContain(`haive.task.id=${taskId}`);
+    expect(args.indexOf(CODE_SERVER_IMAGE)).toBeGreaterThan(-1);
+    expect(args.indexOf('--disable-proxy')).toBeGreaterThan(args.indexOf(CODE_SERVER_IMAGE));
+    expect(args.slice(args.indexOf('--disable-proxy'))).toEqual(['--disable-proxy', '/workspace']);
   });
 });

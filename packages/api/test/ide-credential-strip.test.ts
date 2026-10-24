@@ -588,6 +588,8 @@ describe('IDE request header controls', () => {
       AUTH_LINE,
       ...tainted.map(([name, value]) => `${name}: ${value}`),
       'Transfer-Encoding: chunked',
+      'Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits',
+      'Sec-WebSocket-Protocol: editor, terminal',
     ]);
     const lines = headLines(head).map((line) => line.toLowerCase());
     expect(head.split('\r\n')[0]).toBe('GET / HTTP/1.1');
@@ -601,6 +603,9 @@ describe('IDE request header controls', () => {
     expect(lines).toContain('upgrade: websocket');
     expect(lines.some((line) => line.startsWith('transfer-encoding:'))).toBe(false);
     expect(head).toContain('sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==');
+    expect(lines).toContain('sec-websocket-version: 13');
+    expect(lines).toContain('sec-websocket-extensions: permessage-deflate; client_max_window_bits');
+    expect(lines).toContain('sec-websocket-protocol: editor, terminal');
   });
 });
 
