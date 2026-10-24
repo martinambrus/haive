@@ -9,7 +9,14 @@ interface Inv {
   cliProviderId: string | null;
 }
 
-function fakeDb(invs: Inv[]) {
+interface Snap {
+  fiveHourPct: number | null;
+  sevenDayPct: number | null;
+  dailyPct: number | null;
+  status: string;
+}
+
+function fakeDb(invs: Inv[], opts: { snapshot?: Snap; providerName?: string } = {}) {
   const updates: Record<string, unknown>[] = [];
   const db = {
     select: () => ({ from: () => ({ where: async () => invs }) }),
@@ -21,8 +28,10 @@ function fakeDb(invs: Inv[]) {
       }),
     }),
     query: {
-      cliProviders: { findFirst: async () => ({ name: 'claude-code', model: null }) },
-      usageWindowSnapshots: { findFirst: async () => undefined },
+      cliProviders: {
+        findFirst: async () => ({ name: opts.providerName ?? 'claude-code', model: null }),
+      },
+      usageWindowSnapshots: { findFirst: async () => opts.snapshot },
     },
   };
   return { db: db as unknown as Database, updates };
@@ -66,21 +75,74 @@ describe('writeStepContextUsage', () => {
     });
   });
 
-  it('falls back to the stored totals for a row without a peak', async () => {
+  const nullTriple = { contextTokens: null, contextWindowSize: null, contextLeftPercent: null };
+
+  it('writes no context figure for a row without a peak, but keeps the allowance stamps', async () => {
+    const { db, updates } = fakeDb(
+      [
+        {
+          tokenUsage: {
+            inputTokens: 5,
+            outputTokens: 1,
+            totalTokens: 1006,
+            cacheReadTokens: 800,
+            cacheCreationTokens: 200,
+          },
+          cliProviderId: 'p1',
+        },
+      ],
+      { snapshot: { fiveHourPct: 40, sevenDayPct: 10, dailyPct: null, status: 'ok' } },
+    );
+    expect(await writeStepContextUsage(db, 's1')).toBe('p1');
+    expect(updates[0]).toMatchObject({ ...nullTriple, usageFiveHourPct: 40, usageSevenDayPct: 10 });
+  });
+
+  it('writes no context figure for a codex-shaped row without a peak', async () => {
+    const { db, updates } = fakeDb(
+      [
+        {
+          tokenUsage: {
+            inputTokens: 28526,
+            outputTokens: 100,
+            totalTokens: 28626,
+            cacheReadTokens: 12000,
+          },
+          cliProviderId: 'p1',
+        },
+      ],
+      { providerName: 'codex' },
+    );
+    await writeStepContextUsage(db, 's1');
+    expect(updates[0]).toMatchObject(nullTriple);
+  });
+
+  it('shows no figure when the heaviest invocation reported no per-request prompt', async () => {
     const { db, updates } = fakeDb([
       {
+        tokenUsage: { inputTokens: 900000, outputTokens: 1, totalTokens: 900001 },
+        cliProviderId: 'A',
+      },
+      {
         tokenUsage: {
-          inputTokens: 5,
+          inputTokens: 100,
           outputTokens: 1,
-          totalTokens: 1006,
-          cacheReadTokens: 800,
-          cacheCreationTokens: 200,
+          totalTokens: 101,
+          peakPromptTokens: 90000,
         },
-        cliProviderId: 'p1',
+        cliProviderId: 'B',
       },
     ]);
-    await writeStepContextUsage(db, 's1');
-    expect(updates[0]).toMatchObject({ contextTokens: 1005, contextLeftPercent: 99 });
+    expect(await writeStepContextUsage(db, 's1')).toBe('A');
+    expect(updates[0]).toMatchObject(nullTriple);
+  });
+
+  it('writes nothing for a deterministic step', async () => {
+    const { db, updates } = fakeDb([
+      { tokenUsage: null, cliProviderId: null },
+      { tokenUsage: null, cliProviderId: null },
+    ]);
+    expect(await writeStepContextUsage(db, 's1')).toBeNull();
+    expect(updates).toEqual([]);
   });
 
   it('picks the invocation with the largest peak and returns its provider', async () => {

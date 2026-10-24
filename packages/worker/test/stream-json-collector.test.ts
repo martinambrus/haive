@@ -442,12 +442,59 @@ describe('createStreamJsonCollector.getTokenUsage', () => {
     expect(c.getTokenUsage()?.peakPromptTokens).toBe(205004);
   });
 
-  it('leaves peakPromptTokens absent when assistant events report zero usage', () => {
+  const zeroUsage = { input_tokens: 0, output_tokens: 0 };
+  const zeroMsg = (id: string) => blockEvent(id, { type: 'text', text: 'z' }, zeroUsage);
+  const zaiResult = (extra: Record<string, unknown> = {}) => ({
+    type: 'result',
+    subtype: 'success',
+    result: 'done',
+    usage: { input_tokens: 31333, cache_read_input_tokens: 768, output_tokens: 69 },
+    ...extra,
+  });
+
+  it('leaves peakPromptTokens absent when several zero-usage messages share one result', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [zeroMsg('msg_z1'), zeroMsg('msg_z2'), peakResult]);
+    expect(c.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
+  });
+
+  it('takes the result prompt as the peak when one zero-usage message made the whole run', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [zeroMsg('msg_z'), zaiResult()]);
+    expect(c.getTokenUsage()?.peakPromptTokens).toBe(32101);
+  });
+
+  it('leaves the peak absent for a steered run of four zero-usage messages', () => {
     const c = createStreamJsonCollector();
     feed(c, [
-      blockEvent('msg_z', { type: 'text', text: 'z' }, { input_tokens: 0, output_tokens: 0 }),
-      peakResult,
+      zeroMsg('msg_1'),
+      zeroMsg('msg_2'),
+      zaiResult({ num_turns: 2 }),
+      zeroMsg('msg_3'),
+      zeroMsg('msg_4'),
+      zaiResult({ num_turns: 1 }),
     ]);
+    expect(c.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
+  });
+
+  it('keeps the message prompt as the peak when the one message carries usage', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [
+      blockEvent('msg_u', { type: 'text', text: 'u' }, usageOf(10, 5, 5000, 0)),
+      zaiResult({ usage: usageOf(900, 50, 90000, 0) }),
+    ]);
+    expect(c.getTokenUsage()?.peakPromptTokens).toBe(5010);
+  });
+
+  it('leaves the peak absent for one zero-usage message and no result', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [zeroMsg('msg_z')]);
+    expect(c.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
+  });
+
+  it('leaves the peak absent when the result prompt is 0', () => {
+    const c = createStreamJsonCollector();
+    feed(c, [zeroMsg('msg_z'), zaiResult({ usage: { input_tokens: 0, output_tokens: 7 } })]);
     expect(c.getTokenUsage()).not.toHaveProperty('peakPromptTokens');
   });
 });

@@ -508,6 +508,14 @@ export function createStreamJsonCollector(
           u.inputTokens + (u.cacheReadTokens ?? 0) + (u.cacheCreationTokens ?? 0),
         );
       }
+      // One message is one request, so the result's usage is that request's prompt even
+      // when the CLI (zai, muse) puts zero usage on the assistant event.
+      if (peakPrompt === 0 && assistantUsageByMessage.size === 1 && resultUsage) {
+        peakPrompt =
+          resultUsage.inputTokens +
+          (resultUsage.cacheReadTokens ?? 0) +
+          (resultUsage.cacheCreationTokens ?? 0);
+      }
       const base = resultUsage ?? assistantUsage;
       if (!base) return null;
       return {
