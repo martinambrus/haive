@@ -748,13 +748,6 @@ status: open · was modular #237
 7. amp's `usage.max_tokens` (272k) may be its context window. Measure.
 8. ollama's per-message prompt and result prompt disagree (display only).
 
-### T370 · FNF[plan-mirror-last-error] · refused/failed plan Pull or Save never records last_error
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-24T18:58Z (PR #890 merged b948852af, main CI running) · was modular #239
-DECIDED 2026-10-23: await the recovery; failures record last_error; refusals stay 409-only.
-worker plan-mirror-queue.ts pull() (~:532) and save() (~:361) return recoverAfterMoveFailure(...) without await, so throws never reach the outer catches.
-Verify the line numbers against T396 (merge-dir-reads) once it merges.
-
 ### T371 · FNF[docker-spawn-dedup] · twelve hand-rolled docker spawn helpers re-implement collect, deadline and kill (+1)
 
 status: open · kind: design · was modular #240
@@ -1057,6 +1050,7 @@ From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` r
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T370 — a refused or failed plan Pull or Save records last_error (recovery awaited) — PR #890 (b948852af), 2026-10-24
 - T311 — RAG chunker reads constructs only outside comments, strings and inline HTML (16 Codex rounds; leftovers in T413) — PR #889 (74eba9317), 2026-10-24
 - T328 — bundle git bounded; 01 refuses an unknown base; gate 3 keeps an earlier sha — PR #888 (214b76b1f), 2026-10-24
 - T383 — fix-loop gate re-offer follow-ups (was modular #263) — PR #887 (e5c41e2ec), 2026-10-24
