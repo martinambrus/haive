@@ -24,7 +24,7 @@ export async function loadUsableProvider(
   });
   if (!provider) throw new HttpError(404, 'CLI provider not found');
   if (!provider.enabled) {
-    throw new HttpError(400, 'CLI provider is disabled', 'CLI_PROVIDER_DISABLED');
+    throw new HttpError(400, 'CLI provider is disabled', 'cli_provider_disabled');
   }
   return provider;
 }

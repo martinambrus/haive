@@ -138,7 +138,7 @@ describe('starting a plan build with clarifying questions', () => {
     setup();
     const response = await build({ mode: 'from_repo', cliProviderId: OFF });
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ code: 'CLI_PROVIDER_DISABLED' });
+    expect(await response.json()).toMatchObject({ code: 'cli_provider_disabled' });
     expect(spawnPlanTask).not.toHaveBeenCalled();
   });
 
@@ -150,7 +150,7 @@ describe('starting a plan build with clarifying questions', () => {
       questionerCliProviderId: OFF,
     });
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({ code: 'CLI_PROVIDER_DISABLED' });
+    expect(await response.json()).toMatchObject({ code: 'cli_provider_disabled' });
     expect(spawnPlanTask).not.toHaveBeenCalled();
   });
 

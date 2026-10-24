@@ -144,8 +144,7 @@ describe("a step's CLI picked on a task", () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({
-      error: 'CLI provider is disabled',
-      code: 'CLI_PROVIDER_DISABLED',
+      code: 'cli_provider_disabled',
     });
     expect(fake.rows(schema.taskStepCliChoices)).toEqual([]);
     expect(fake.rows(schema.userStepCliPreferences)).toEqual([]);

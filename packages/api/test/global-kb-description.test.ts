@@ -313,8 +313,7 @@ it('refuses a disabled enrich CLI before writing a skeleton or a task', async ()
   });
   expect(res.status).toBe(400);
   expect(await res.json()).toMatchObject({
-    error: 'CLI provider is disabled',
-    code: 'CLI_PROVIDER_DISABLED',
+    code: 'cli_provider_disabled',
   });
   expect(fake.rows(schema.tasks)).toHaveLength(0);
   expect(fake.rows(globalKbEntries)).toHaveLength(before);

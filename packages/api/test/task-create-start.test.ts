@@ -325,8 +325,7 @@ describe('disabled providers on task writes', () => {
       });
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({
-        error: expect.stringMatching(/disabled/i),
-        code: 'CLI_PROVIDER_DISABLED',
+        code: 'cli_provider_disabled',
       });
       expect(t.fake.rows(schema.tasks)).toHaveLength(0);
       expect(h.add).not.toHaveBeenCalled();
@@ -345,7 +344,7 @@ describe('disabled providers on task writes', () => {
       body: JSON.stringify(body),
     });
     expect(res.status).toBe(400);
-    expect(await res.json()).toMatchObject({ code: 'CLI_PROVIDER_DISABLED' });
+    expect(await res.json()).toMatchObject({ code: 'cli_provider_disabled' });
     expect(t.fake.rows(schema.tasks)[0]?.cliProviderId).not.toBe(CLI);
     expect(t.fake.rows(schema.tasks)[0]?.summaryCliProviderId).not.toBe(CLI);
   });
