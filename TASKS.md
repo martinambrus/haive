@@ -845,7 +845,7 @@ status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T18:14Z ·
 
 ### T381 · FNF[agents-md-budget] · AGENTS.md has 9 bytes of headroom and nothing checks its size (+2)
 
-status: open · was modular #260
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:42Z · last: 2026-10-24T19:42Z · was modular #260
 
 1. Add scripts/test/agents-md-size.test.mjs that fails above 32768 bytes.
 2. The "Each router mounts its own requireAuth" line is over-general: 8 routers are public by design. Free some bytes and name the exception.
