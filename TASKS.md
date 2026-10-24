@@ -273,14 +273,6 @@ All PRE-EXISTING.
 4. POST /bundles/:id/sync has no already-syncing check (bundles.ts ~792-816); 409 or key the job.
 5. Web never shows lastSyncError; show it under a failed bundle (bundle-composer.tsx), browser check 375/768/1280.
 
-### T306 · FNF[test-fakes-12] · 12's apply runs unguarded; 04's skipped runs (+2)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:32Z · last: 2026-10-25T01:30Z · merged PR #911 (adad1b8d8), waiting for main CI · kind: test-only
-
-1. 12's 24 'written' runs are not wrapped in recordWritten (worker test/support/upgrade-apply-record.ts).
-2. 27 of 04's 61 runs report 'skipped' (no render snapshot in their fakes); seed or assert 'skipped'.
-3. api revive-beside-live.test.ts (~:530) logs "fake db: task_type_definitions was not given" as an unhandled error; give the fake the table.
-
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
 status: open
@@ -345,7 +337,7 @@ A full-repository review in the style of the Codex PR reviews once Track B is me
 ### T300 · live re-checks owed at the next real onboarding + workflow run
 
 status: parked · reason: needs a real onboarding + workflow run (LLM tokens; check running tasks first)
-Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908). Full list: task #300 text in the fnf-run ledger / memory.
+Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory.
 
 ### T298 · house rules PR8 · switch similarity on with per-rule floors
 
@@ -678,11 +670,6 @@ status: open · kind: design · was modular #203
 PRE-EXISTING. The reset route removes files before its database transaction (api repos.ts ~:2893, then ~:2935).
 Fix direction: after a failed reset, re-ask for the status without clearing the error, and keep Create disabled until the answer lands.
 
-### T363 · FNF[created-task-start-partial] · Start on a created task starts with whatever attachments landed
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:05Z · last: 2026-10-25T02:10Z · merged PR #913 (f5bbce839), migration 0211 applied on the dev install, waiting for main CI · was modular #208
-DECIDED 2026-10-23: record the expected attachment count on the task, and Start confirms "N of M missing". The start claim is in api lib/task-start.ts:10-23.
-
 ### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+14)
 
 status: open · was modular #211
@@ -895,12 +882,6 @@ Decide which stored targets a non-admin may point at private addresses.
 
 1. The Ollama pull stream relays 200 chars of the remote error and has no size or time cap.
 
-### T400 · FNF[ws-auth-one-copy] · WebSocket handshakes authenticate once; six copies of authenticateUpgrade can drift
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:53Z · last: 2026-10-25T01:55Z · merged PR #912 (eb54d0f3a), live handshake probe passed, waiting for main CI · was modular #282
-Copies: terminal.ts ~:360, terminal-shell.ts ~:614, cli-stream.ts ~:365, cli-login-banner.ts ~:1233, browser-vnc.ts ~:268, ide.ts ~:391.
-Fix: one shared authenticator, and close a user's sockets on deactivation or a token_version bump.
-
 ### T401 · FNF[flagged-user-web-polish] · a forced-password user sees pollers 403 every 5 s; no e2e for the forced flow or the 429
 
 status: open · (T377 landed as PR #886) · was modular #283
@@ -1012,6 +993,9 @@ From the T418 review (2026-10-25). PRE-EXISTING, minor. steps/workflow/_kb-commi
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T363 — the expected attachment count is recorded at create and Start confirms "N of M attachments are missing" (migration 0211; live flow owed, T300) — PR #913 (f5bbce839), 2026-10-25
+- T400 — one WebSocket upgrade authenticator and refusal; a deactivation, reset or password change closes the user's open and pending sockets (1008); upgrade sockets cannot crash the api (live probe passed) — PR #912 (eb54d0f3a), 2026-10-25
+- T306 — step 12's written runs guarded, 04's rollback runs seeded with the snapshot they need, the revive fake given its table (test-only; fake-db class hazard in T364) — PR #911 (adad1b8d8), 2026-10-25
 - T395 — Stop offered for a running task whose current row is pending; "Nothing was running to stop." on an empty Stop (browser-checked; running-task case owed, T300) — PR #908 (2f39fa5fd), 2026-10-25
 - T422 — no credential text in the login banner's logs or errors (sanitized error class and code); the modal handles an unexpected close (+1; leftovers in T426, T427) — PR #910 (dc444c013), 2026-10-25
 - T388 — host git re-validates a stored origin URL and refuses the file transport for pack commands (follow-ups in T417) — PR #906 (da043a2aa), 2026-10-25
