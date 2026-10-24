@@ -129,7 +129,8 @@ async function stagedCommit(gitRun: GitRun, cwd: string, rel: string): Promise<s
   return null;
 }
 
-/** The commit the submodule at `rel` has checked out, asked of a held descriptor on its directory
+/** The commit the submodule or untracked nested repository at `rel` has checked out; an unborn
+ *  repository returns a null commit for the unreadable reason. Asked of a held descriptor on its directory
  *  so that a name swapped after the check cannot point git at another repository. */
 async function checkedOutCommit(
   gitRun: GitRun,
@@ -156,7 +157,8 @@ async function checkedOutCommit(
   }
 }
 
-/** A link's target, or the commit a submodule is at; null when the path is neither. */
+/** A link's target, or the commit a submodule or untracked nested repository is at;
+ *  an unreadable reason when the nested repository is unborn, or null when neither can be read. */
 async function readLinkSide(
   workspacePath: string,
   gitRun: GitRun,
