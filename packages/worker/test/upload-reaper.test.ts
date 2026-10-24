@@ -251,6 +251,39 @@ async function session(
   return { id, file };
 }
 
+describe('T323: invalid completed dump paths', () => {
+  it('bounds invalid-path warning history by row id without evicting remembered rows', async () => {
+    const reap = reapAbandonedUploads;
+    for (let i = 0; i < 1001; i += 1) {
+      fake.insert(schema.dbUploads, {
+        id: randomUUID(),
+        userId: USER,
+        totalSize: 1,
+        bytesReceived: 1,
+        chunkSize: 1,
+        status: 'complete',
+        updatedAt: new Date(Date.now() - 5 * TTL),
+        dumpPath: path.join(storage, 'not-owned.sql'),
+        filename: 'a.sql',
+        dumpFormat: 'sql',
+      });
+    }
+
+    await reap(db());
+    expect(guard.warnings).toHaveLength(1001);
+    await reap(db());
+    expect(guard.warnings).toHaveLength(1002);
+    expect(guard.debugs).toHaveLength(1000);
+    await reap(db());
+    expect(guard.warnings).toHaveLength(1003);
+    expect(guard.debugs).toHaveLength(2000);
+    expect(new Set(guard.warnings.map(([data]) => (data as { dumpId: string }).dumpId)).size).toBe(
+      1001,
+    );
+    expect(fake.rows(schema.dbUploads).every((row) => row.status === 'complete')).toBe(true);
+  });
+});
+
 describe('U1: the row pass reaps an upload idle for 24 hours', () => {
   describe.each(KINDS)('$name', (kind) => {
     it('takes a session idle 24 h + 1 min: it is cancelled and its partial is gone', async () => {

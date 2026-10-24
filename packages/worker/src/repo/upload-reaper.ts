@@ -25,6 +25,8 @@ const UPLOADS_DIR = '_uploads';
 const BATCH = 100;
 const MAX_ORPHAN_FAILURES = 1000;
 const orphanFailures = new Map<string, { root: string; rel: string; code: string | undefined }>();
+const MAX_INVALID_DUMP_PATHS = 1000;
+const invalidDumpPaths = new Set<string>();
 const ENDED_TASK_STATUSES = ['completed', 'failed', 'cancelled'] as const;
 
 // Group 1 of every shape built from it is the session id.
@@ -162,7 +164,14 @@ async function claimEndedDumps(db: Database, cutoff: Date): Promise<void> {
     if (pinned.has(dump.id)) continue;
     try {
       if (ownedRel(repoRoot(), dump.userId, dump.stored, DUMP_FILE) === null) {
-        log.warn({ stored: dump.stored }, 'completed dump names a path that is not its own file');
+        const details = { dumpId: dump.id, stored: dump.stored };
+        const message = 'completed dump names a path that is not its own file';
+        if (invalidDumpPaths.has(dump.id)) {
+          log.debug(details, message);
+        } else {
+          log.warn(details, message);
+          if (invalidDumpPaths.size < MAX_INVALID_DUMP_PATHS) invalidDumpPaths.add(dump.id);
+        }
         continue;
       }
       await claimDump(db, dump.id, cutoff);
