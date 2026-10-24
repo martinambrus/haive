@@ -34,8 +34,7 @@ export function namesGitData(path: string): boolean {
   return path.split('/').some((seg) => {
     // No Unicode case folding: git compares only ASCII letters in these names.
     const ascii = seg.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
-    const ntfs = ascii.split(':', 1)[0]!.replace(/[. ]+$/, '');
-    if (ntfs === '.git' || ntfs === 'git~1') return true;
+    if (/^(?:\.git|git~1)[. ]*$/.test(ascii.split(':', 1)[0]!)) return true;
     return ascii.replace(/[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g, '') === '.git';
   });
 }

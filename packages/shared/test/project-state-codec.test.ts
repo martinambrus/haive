@@ -138,6 +138,16 @@ const ordinarySegments = [
 ];
 
 describe('git data filesystem aliases', () => {
+  it.each(['.', '. '])('checks a long run of %j followed by a non-alias in linear time', (unit) => {
+    const path = unit.repeat(200000) + 'x';
+    const started = performance.now();
+    const result = namesGitData(path);
+    const elapsed = performance.now() - started;
+
+    expect(result).toBe(false);
+    expect(elapsed).toBeLessThan(1000);
+  });
+
   it.each(['.git\n', '.git.\n', 'git~1\n', '.git\r'])(
     'keeps a non-alias control character in %s',
     (path) => {
