@@ -11,6 +11,7 @@ import { emptyProjectState, renderProjectState } from '@haive/shared/project-sta
 import { gate4PushStep } from '../step-engine/steps/workflow/11a-gate-4-push.js';
 import { runAppReadyStep } from '../step-engine/steps/run-app/99-run-app-ready.js';
 import type { StepContext } from '../step-engine/step-definition.js';
+import { killGit } from '../../test/support/kill-git.js';
 
 const handBack = vi.hoisted(() => ({ calls: [] as unknown[][], failOnce: false }));
 vi.mock('../step-engine/git-merge.js', async (importOriginal) => {
@@ -970,6 +971,34 @@ describe('a put-back cut short is resumed, not lost', () => {
     expect(commitsOf(h)).toEqual([first!.commit, second!.commit]);
     expect(await at(parent, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
     expect(await git(wt, ['status', '--porcelain'])).toBe('');
+  });
+
+  describe('update-ref gave no answer', () => {
+    let shim: Awaited<ReturnType<typeof killGit>> | null = null;
+    afterEach(async () => {
+      await shim?.restore();
+      shim = null;
+    });
+
+    it('keeps the record, says the outcome is unknown, and the Retry finishes from the recorded commit', async () => {
+      const { parent, wt, forked } = await fixture();
+      await commit(wt, stateFiles(BY_AGENT), 'agent edits a setting');
+      const preRevert = await revOf(wt);
+      const h = stubDb();
+      shim = await killGit(['update-ref']);
+      await expect(pass(parent, wt, h)).rejects.toThrow(/could not tell whether/);
+      expect(h.events.map((e) => e.eventType)).toEqual([PUT_BACK_EVENT]);
+      const recorded = commitsOf(h)[0]!;
+      await shim.restore();
+      shim = null;
+      await pass(parent, wt, h);
+      expect(await revOf(parent, 'feature/x')).toBe(recorded);
+      expect(await git(parent, ['rev-list', '--count', `${preRevert}..feature/x`])).toBe('1\n');
+      expect(await git(wt, ['status', '--porcelain'])).toBe('');
+      expect(await readFile(path.join(wt, GLOBS), 'utf8')).toBe(await at(parent, forked, GLOBS));
+      expect(h.events).toHaveLength(1);
+      expect((h.events[0]!.payload as { synced?: boolean }).synced).toBe(true);
+    });
   });
 });
 
