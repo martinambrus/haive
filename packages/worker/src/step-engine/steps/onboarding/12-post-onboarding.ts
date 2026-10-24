@@ -22,7 +22,7 @@ import {
 import { toolingUnitOf, withoutMachineLocalTooling } from '@haive/shared/project-state';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
-import { detectOrigin, getOriginUrl, GIT_MAX_BUFFER, gitRun } from '../../../repo/git-push.js';
+import { getOriginUrl, GIT_MAX_BUFFER, gitRun } from '../../../repo/git-push.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import {
@@ -141,6 +141,8 @@ interface PostOnboardingDetect {
   /** Whether the repo has a pushable origin remote (gates the push fields). */
   hasOrigin: boolean;
   originUrl: string | null;
+  /** Why the origin could not be read, so the push is not offered. Optional: a parked step replays a payload without it. */
+  originError?: string | null;
   /** Credential bound to the repo — the default selection for the push. */
   boundCredentialId: string | null;
   /** The user's stored git credentials, for the push credential picker. */
@@ -462,8 +464,17 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       ? await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD'])
       : { code: 1, stdout: '', stderr: '' };
     const currentBranch = cur.code === 0 ? cur.stdout.trim() : null;
-    const hasOrigin = hasGit ? await detectOrigin(ctx.repoPath) : false;
-    const originUrl = hasOrigin ? await getOriginUrl(ctx.repoPath) : null;
+    let hasOrigin = false;
+    let originUrl: string | null = null;
+    let originError: string | null = null;
+    if (hasGit) {
+      try {
+        originUrl = await getOriginUrl(ctx.repoPath);
+        hasOrigin = originUrl !== null;
+      } catch (err) {
+        originError = err instanceof Error ? err.message : String(err);
+      }
+    }
 
     const taskRow = await ctx.db
       .select({ repositoryId: schema.tasks.repositoryId })
@@ -488,6 +499,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       currentBranch,
       hasOrigin,
       originUrl,
+      originError,
       boundCredentialId: repo?.credentialsSecretId ?? null,
       credentials: rows.map((r) => ({ id: r.id, label: r.label, host: r.host })),
     };
@@ -587,6 +599,15 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           visibleWhen: { field: 'pushToOrigin', equals: true },
         },
       );
+    }
+    if (detected.originError) {
+      fields.push({
+        type: 'note',
+        id: 'originUnreadable',
+        label: 'Origin remote not read',
+        body: `Pushing is not offered: ${detected.originError}. Fix the git configuration and Retry this step to see it.`,
+        variant: 'warning',
+      });
     }
 
     return {

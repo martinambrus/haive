@@ -3,6 +3,7 @@ import { buildCredentialHelper, gitRun, scrubSecret } from '../repo/git-push.js'
 import { lstatNoFollow, relUnder } from '@haive/shared/fs-safe';
 import { ensureSandboxWritableTree } from '../repo/worktree-permissions.js';
 import { WORKTREE_SUBDIR } from '../repo/worktree-paths.js';
+import { isWorktreeRegistered } from '../repo/git-workspace.js';
 import { abortMerge as abortGitMerge, openMerge, utf8Name } from '../step-engine/git-merge.js';
 import { resolveHaiveProjectionConflicts } from './projection-merge.js';
 import type { Database } from '@haive/database';
@@ -60,10 +61,7 @@ export const PLAN_MERGE_LIVE_STATUSES = [
 export async function ensurePlanMergeWorktree(repoPath: string): Promise<string> {
   const worktreePath = planMergeWorktreePath(repoPath);
   await gitRun(repoPath, ['worktree', 'prune']);
-  const list = await gitRun(repoPath, ['worktree', 'list', '--porcelain']);
-  const registered =
-    list.code === 0 && list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
-  if (!registered) {
+  if (!(await isWorktreeRegistered(repoPath, worktreePath))) {
     // Anchored on the repository root, with the worktree walked below it. A LINK planted at that
     // path still answers non-null and is still removed — a name taken is not free space, the same
     // reading `_kb-legacy` settled on — but it is no longer followed to decide that.
@@ -315,6 +313,11 @@ export async function commitMerge(
   gitEnv: Record<string, string>,
 ): Promise<string | null> {
   const open = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+  if (open.code !== 0 && open.code !== 1) {
+    throw new Error(
+      `git rev-parse MERGE_HEAD failed in ${worktreePath}: ${(open.stderr || open.stdout).trim()}`,
+    );
+  }
   if (open.code === 0) {
     const commit = await gitRun(worktreePath, ['commit', '--no-edit', '-m', message], gitEnv);
     if (commit.code !== 0) {
@@ -323,6 +326,17 @@ export async function commitMerge(
   }
   const head = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
   return head.code === 0 ? head.stdout.trim() : null;
+}
+
+/** HEAD's commit; a failed read throws, since an empty answer reads as a HEAD that moved. */
+export async function headCommit(repoPath: string): Promise<string> {
+  const res = await gitRun(repoPath, ['rev-parse', 'HEAD']);
+  if (res.code !== 0) {
+    throw new Error(
+      `git rev-parse HEAD failed in ${repoPath}: ${(res.stderr || res.stdout).trim()}`,
+    );
+  }
+  return res.stdout.trim();
 }
 
 /**
@@ -338,7 +352,7 @@ export async function commitMerge(
  * once it has let go of the task-creation lock.
  */
 export async function landPlanMerge(repoPath: string, sha: string): Promise<string> {
-  const before = (await gitRun(repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
+  const before = await headCommit(repoPath);
   const res = await gitRun(repoPath, ['merge', '--ff-only', sha]);
   if (res.code !== 0) {
     const changed = await gitRun(repoPath, [

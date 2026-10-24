@@ -51,6 +51,7 @@ import {
   ensurePlanMergeWorktree,
   PLAN_MERGE_LIVE_STATUSES,
   fetchOrigin,
+  headCommit,
   landPlanMerge,
   mergeOriginInto,
   removePlanMergeWorktree,
@@ -141,6 +142,16 @@ async function flushCurrentPlanMirror(
   throw new Error('the plan changed repeatedly while its snapshot was being saved; try again');
 }
 
+async function requireGitCheckout(repoPath: string, refusal: string): Promise<void> {
+  const res = await gitRun(repoPath, ['rev-parse', '--is-inside-work-tree']);
+  if (res.code !== 0) {
+    throw new Error(
+      `git rev-parse failed in ${repoPath}: ${res.stderr.trim() || res.stdout.trim()}`,
+    );
+  }
+  if (res.stdout.trim() !== 'true') throw new Error(refusal);
+}
+
 async function currentBranch(repoPath: string): Promise<string | null> {
   const res = await gitRun(repoPath, ['branch', '--show-current']);
   if (res.code !== 0) {
@@ -187,8 +198,7 @@ export async function integrateOrigin(args: {
   kept: KeptFiles;
 }): Promise<IntegrateOutcome> {
   const db = getDb();
-  const head = await gitRun(args.repoPath, ['rev-parse', 'HEAD']);
-  const previousCommit = head.code === 0 ? head.stdout.trim() : null;
+  const previousCommit = await headCommit(args.repoPath);
 
   await fetchOrigin({
     repoPath: args.repoPath,
@@ -303,10 +313,10 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
     ({ files, repoPath } = await flushCurrentPlanMirror(repo.id));
     if (files.length === 0) throw new Error('the repository has no plan snapshot to save');
 
-    const inside = await gitRun(repoPath, ['rev-parse', '--is-inside-work-tree']);
-    if (inside.code !== 0 || inside.stdout.trim() !== 'true') {
-      throw new Error('repository snapshot cannot be committed because this is not a Git checkout');
-    }
+    await requireGitCheckout(
+      repoPath,
+      'repository snapshot cannot be committed because this is not a Git checkout',
+    );
 
     const resolved = await resolveGitEnv(getDb(), {
       userId: payload.userId,
@@ -331,7 +341,7 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
         throw new Error('this repository has no origin remote to push to');
       }
       const kept: KeptFiles = new Map();
-      const before = (await gitRun(repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
+      const before = await headCommit(repoPath);
       try {
         // Integrate BEFORE pushing rather than pushing and reading the rejection: a
         // push that fails prints a hint git is free to reword, and branching on that
@@ -445,10 +455,10 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
   }
 
   try {
-    const inside = await gitRun(repoPath, ['rev-parse', '--is-inside-work-tree']);
-    if (inside.code !== 0 || inside.stdout.trim() !== 'true') {
-      throw new Error('this repository is not a Git checkout, so there is nothing to pull');
-    }
+    await requireGitCheckout(
+      repoPath,
+      'this repository is not a Git checkout, so there is nothing to pull',
+    );
     if (!(await detectOrigin(repoPath))) {
       throw new Error('this repository has no origin remote to pull from');
     }
@@ -457,7 +467,7 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
     // The set-aside replaces plan.json, which a row stamped before 0196 takes its base from.
     await seedPlanBaseFromCheckout(db, repo.id, repoPath);
     const kept: KeptFiles = new Map();
-    const before = (await gitRun(repoPath, ['rev-parse', 'HEAD'])).stdout.trim();
+    const before = await headCommit(repoPath);
     // Before the dirty check below, which would refuse a file Haive wrote.
     const aside = await setAsideHaiveProjections(db, repo.id, repoPath, (conn) =>
       checkoutHoldingTasks(conn, repo.id),
@@ -540,7 +550,7 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
         pulled: {
           ...outcome,
           previousCommit,
-          fastForwarded: previousCommit !== currentCommit,
+          fastForwarded: integrated.landed,
         },
       });
     } catch (err) {

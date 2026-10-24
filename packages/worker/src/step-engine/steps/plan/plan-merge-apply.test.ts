@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
 import { PLAN_MERGE_MESSAGE_EVENT } from '@haive/shared';
+import { failGit, type FakeGit } from '../../../../test/support/fake-git.js';
 import { discardPlanMerge, planMergeStep } from './01-plan-merge.js';
 import { PLAN_MERGE_BASELINE_EVENT } from '../../../plan/merge-baseline.js';
 import { HAIVE_OWN_FILES_LINE, relocateFixerChanges, type FixBaseline } from '../../git-merge.js';
@@ -42,7 +43,10 @@ async function gitCode(dir: string, args: string[]): Promise<number> {
 }
 
 const dirs: string[] = [];
+let fake: FakeGit | null = null;
 afterEach(async () => {
+  await fake?.restore();
+  fake = null;
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
 });
 
@@ -822,5 +826,35 @@ describe("plan merge: discarding a cancelled conversation's merge", () => {
     }
     expect(await registered(local, wt)).toBe(true);
     expect(events.find((e) => e.eventType === 'plan_merge.discard_failed')).toBeDefined();
+  });
+});
+
+describe('plan merge: detect on a failed MERGE_HEAD read', () => {
+  it('rejects and leaves the open merge and HEAD untouched', async () => {
+    const local = await unrelatedPair();
+    const { db } = fakeDb();
+    const ctx = contextFor(local, db);
+    const first = await planMergeStep.detect!(ctx);
+    const wt = first.worktreePath;
+    const head = (await git(wt, ['rev-parse', 'HEAD'])).trim();
+    const mergeHead = (await git(wt, ['rev-parse', 'MERGE_HEAD'])).trim();
+
+    fake = await failGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+    await expect(planMergeStep.detect!(ctx)).rejects.toThrow(
+      /^git rev-parse MERGE_HEAD failed in /,
+    );
+    await fake.restore();
+    fake = null;
+
+    expect((await git(wt, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect((await git(wt, ['rev-parse', 'MERGE_HEAD'])).trim()).toBe(mergeHead);
+  });
+
+  it('reports the merge open on healthy git', async () => {
+    const local = await unrelatedPair();
+    const { db } = fakeDb();
+    const ctx = contextFor(local, db);
+    await planMergeStep.detect!(ctx);
+    expect((await planMergeStep.detect!(ctx)).mergeOpen).toBe(true);
   });
 });

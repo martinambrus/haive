@@ -142,6 +142,17 @@ describe('gate-4 push: detect', () => {
     expect(detected.hasOrigin).toBe(false);
     expect(detected.originUrl).toBeNull();
   });
+
+  it('rejects when git cannot read the origin, instead of reporting none', async () => {
+    const { dir } = await makeRepo(true);
+    // A bad fetch refspec makes `git remote get-url origin` exit 128 while rev-parse and log still work.
+    await git(dir, ['config', 'gc.auto', '0']);
+    await git(dir, ['config', '--add', 'remote.origin.fetch', ':::bad']);
+    const { ctx } = makeCtx(dir);
+    await expect(gate4PushStep.detect!(ctx)).rejects.toThrow(
+      /git remote get-url origin failed in /,
+    );
+  });
 });
 
 describe('gate-4 push: form', () => {

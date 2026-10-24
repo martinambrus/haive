@@ -14,22 +14,18 @@ export function scrubSecret(text: string, secret: string | null): string {
   return text.split(secret).join('***');
 }
 
-/** True when the repo at cwd has an `origin` remote. */
+/** True when the repo at cwd has an `origin` remote; throws when git could not say (see getOriginUrl). */
 export async function detectOrigin(cwd: string): Promise<boolean> {
-  const res = await gitRun(cwd, ['remote']);
-  return (
-    res.code === 0 &&
-    res.stdout
-      .split('\n')
-      .map((l) => l.trim())
-      .includes('origin')
-  );
+  return (await getOriginUrl(cwd)) !== null;
 }
 
-/** The origin remote URL, or null when there is no origin / the command fails. */
+/** The origin remote URL, or null when git says there is none: `remote get-url` exits 2 for a remote that does not exist. Any other failure is no answer and throws. */
 export async function getOriginUrl(cwd: string): Promise<string | null> {
   const res = await gitRun(cwd, ['remote', 'get-url', 'origin']);
-  return res.code === 0 ? res.stdout.trim() : null;
+  if (res.code === 0) return res.stdout.trim();
+  if (res.code === 2) return null;
+  const output = (res.stderr || res.stdout).trim().slice(0, 500);
+  throw new Error(`git remote get-url origin failed in ${cwd}: ${output}`);
 }
 
 /** Add `origin` pointing at url, or set-url when it already exists. Idempotent.

@@ -119,4 +119,69 @@ describe('run-app ready gate runtime bring-up', () => {
       expect(runAppReadyStep.form!(ctx, detected)).not.toBeNull();
     },
   );
+
+  describe('the origin read', () => {
+    const goodRuntime = () => {
+      m.ensureAppServing.mockResolvedValue({ mode: 'host', url: 'http://app.local' });
+      m.gitWorkspaceStatus.mockResolvedValue('ok');
+      m.gitRun.mockImplementation(async (_cwd: string, args: string[]) =>
+        args.includes('status')
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 0, stdout: 'main\n', stderr: '' },
+      );
+    };
+    // originError is added to the detect type by the change under test.
+    const originError = (d: object) => (d as { originError?: string | null }).originError ?? null;
+    const noteFields = (fields: { id: string; type: string; variant?: string }[]) =>
+      fields.filter((f) => f.type === 'note');
+
+    it('keeps serving and withholds the push when the origin read fails', async () => {
+      goodRuntime();
+      m.detectOrigin.mockRejectedValueOnce(
+        new Error('git remote get-url origin failed in /w: boom'),
+      );
+
+      const detected = await detect();
+
+      expect(detected).toMatchObject({
+        mode: 'host',
+        appUrl: 'http://app.local',
+        hasOrigin: false,
+        originError: expect.stringContaining('git remote get-url origin failed in /w'),
+      });
+      const fields = runAppReadyStep.form!(ctx, detected)!.fields;
+      const notes = noteFields(fields);
+      expect(notes).toHaveLength(1);
+      expect(notes[0]).toMatchObject({
+        variant: 'warning',
+        body: expect.stringContaining('git remote get-url origin failed in /w'),
+      });
+      expect(fields.map((f) => f.id)).not.toContain('push');
+      expect(fields.map((f) => f.id)).toContain('commit');
+    });
+
+    it('shows no note and no error when there is simply no origin', async () => {
+      goodRuntime();
+
+      const detected = await detect();
+
+      expect(detected.hasOrigin).toBe(false);
+      expect(originError(detected)).toBeNull();
+      const fields = runAppReadyStep.form!(ctx, detected)!.fields;
+      expect(noteFields(fields)).toHaveLength(0);
+      expect(fields.map((f) => f.id)).not.toContain('push');
+    });
+
+    it('offers the push when origin is readable', async () => {
+      goodRuntime();
+      m.detectOrigin.mockResolvedValue(true);
+
+      const detected = await detect();
+
+      expect(originError(detected)).toBeNull();
+      const fields = runAppReadyStep.form!(ctx, detected)!.fields;
+      expect(noteFields(fields)).toHaveLength(0);
+      expect(fields.map((f) => f.id)).toContain('push');
+    });
+  });
 });

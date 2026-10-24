@@ -3,8 +3,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import type { Database } from '@haive/database';
+import { gitTimeoutLimits } from './git-exec.js';
+import { failGit, noGit, type FakeGit } from '../../test/support/fake-git.js';
 import { detectOrigin, ensureOrigin, getOriginUrl, pushBranch, scrubSecret } from './git-push.js';
 
 const exec = promisify(execFile);
@@ -35,6 +37,97 @@ async function setupRepoWithBareOrigin(): Promise<{ work: string; bare: string }
 // db/userId are only touched on the credential path; the file:// tests use no
 // credential, so a bare stub is never dereferenced.
 const stubDb = {} as unknown as Database;
+
+describe('detectOrigin / getOriginUrl read a failed git as an error', () => {
+  const FAILED = /^git remote get-url origin failed in /;
+  const dirs: string[] = [];
+  const shims: FakeGit[] = [];
+  const savedShort = gitTimeoutLimits.short;
+
+  afterEach(async () => {
+    gitTimeoutLimits.short = savedShort;
+    for (const s of shims.splice(0)) await s.restore();
+    for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
+  });
+
+  async function repo(setup: (dir: string) => Promise<void> = async () => {}): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'gp-'));
+    dirs.push(dir);
+    await git(dir, ['init', '-b', 'main']);
+    await git(dir, ['config', 'gc.auto', '0']);
+    await setup(dir);
+    return dir;
+  }
+  const withOrigin = async (dir: string): Promise<void> => {
+    await git(dir, ['remote', 'add', 'origin', 'https://example.com/x.git']);
+  };
+
+  async function expectBothReject(dir: string): Promise<void> {
+    await expect(detectOrigin(dir)).rejects.toThrow(FAILED);
+    await expect(getOriginUrl(dir)).rejects.toThrow(FAILED);
+  }
+
+  it('rejects when the origin is unreadable', async () => {
+    const dir = await repo(async (d) => {
+      await withOrigin(d);
+      await git(d, ['config', '--add', 'remote.origin.fetch', ':::bad']);
+    });
+    await expectBothReject(dir);
+  });
+
+  it('rejects when git remote exits 128 on a repo with a good origin', async () => {
+    const dir = await repo(withOrigin);
+    shims.push(await failGit(['remote']));
+    await expectBothReject(dir);
+  });
+
+  it('rejects when git remote times out', async () => {
+    const dir = await repo(withOrigin);
+    gitTimeoutLimits.short = 300;
+    shims.push(await failGit(['remote'], { hang: true }));
+    await expectBothReject(dir);
+  });
+
+  it('rejects when git is not on PATH', async () => {
+    const dir = await repo(withOrigin);
+    shims.push(await noGit());
+    await expectBothReject(dir);
+  });
+
+  it('keys on exit 2 of get-url, not on the remote list', async () => {
+    const dir = await repo(withOrigin);
+    shims.push(await failGit(['remote', 'get-url'], { exit: 2 }));
+    expect(await detectOrigin(dir)).toBe(false);
+    expect(await getOriginUrl(dir)).toBeNull();
+  });
+
+  it('no remote at all is false / null', async () => {
+    const dir = await repo();
+    expect(await detectOrigin(dir)).toBe(false);
+    expect(await getOriginUrl(dir)).toBeNull();
+  });
+
+  it('only an upstream remote is false / null', async () => {
+    const dir = await repo(async (d) => {
+      await git(d, ['remote', 'add', 'upstream', 'https://example.com/u.git']);
+    });
+    expect(await detectOrigin(dir)).toBe(false);
+    expect(await getOriginUrl(dir)).toBeNull();
+  });
+
+  it('origin with a url is true / the url', async () => {
+    const dir = await repo(withOrigin);
+    expect(await detectOrigin(dir)).toBe(true);
+    expect(await getOriginUrl(dir)).toBe('https://example.com/x.git');
+  });
+
+  it('origin with only a fetch refspec is true (exit 0 means yes)', async () => {
+    const dir = await repo(async (d) => {
+      await git(d, ['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*']);
+    });
+    expect(await detectOrigin(dir)).toBe(true);
+  });
+});
 
 describe('git-push helpers', () => {
   it('detectOrigin / getOriginUrl reflect remote state', async () => {

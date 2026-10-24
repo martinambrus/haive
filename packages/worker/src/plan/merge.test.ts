@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { failGit, type FakeGit } from '../../test/support/fake-git.js';
 import { planMirrorPayloadSchema } from '@haive/shared/schemas';
 import { renderPlanMarkdownFromMirror, serializePlanMirror } from '@haive/shared/plan';
 import { mergePlanMirror } from '@haive/shared/plan-mirror-merge';
@@ -263,6 +264,97 @@ describe('ensurePlanMergeWorktree', () => {
     await removePlanMergeWorktree(local);
     const list = await git(local, ['worktree', 'list', '--porcelain']);
     expect(list).not.toContain(planMergeWorktreePath(local));
+  });
+});
+
+let shim: FakeGit | null = null;
+afterEach(async () => {
+  await shim?.restore();
+  shim = null;
+});
+
+/** A scratch worktree with a merge left open: the plan files auto-resolve and nothing is committed. */
+async function openMerge(): Promise<{ local: string; wt: string }> {
+  const { local, remote } = await unrelatedPair();
+  await write(remote, 'README.md', '# vareska-claude\n\nCreated by Haive as a blank project.\n');
+  await write(remote, '.haive-data/plan.json', '{"nodes":["remote"]}\n');
+  await write(remote, '.haive-data/plan.md', '# Plan\n\nremote\n');
+  await git(remote, ['add', '-A']);
+  await git(remote, ['commit', '-m', 'remote plan']);
+  await git(local, ['fetch', 'origin', 'main']);
+  const wt = await ensurePlanMergeWorktree(local);
+  await mergeOriginInto(wt, 'main', (await divergence(local, 'main')).unrelated, COMMIT_ENV);
+  return { local, wt };
+}
+
+describe('ensurePlanMergeWorktree on a failed worktree list', () => {
+  it('rejects and leaves the existing scratch worktree and its files alone', async () => {
+    const { local } = await unrelatedPair();
+    const wt = await ensurePlanMergeWorktree(local);
+    await write(wt, 'marker.txt', 'uncommitted\n');
+    shim = await failGit(['worktree', 'list']);
+    await expect(ensurePlanMergeWorktree(local)).rejects.toThrow(/^git worktree list failed in /);
+    await shim.restore();
+    shim = null;
+    expect(await readFile(path.join(wt, 'marker.txt'), 'utf8')).toBe('uncommitted\n');
+    expect(await git(local, ['worktree', 'list', '--porcelain'])).toContain(wt);
+  });
+
+  it('is idempotent on healthy git and keeps the uncommitted file', async () => {
+    const { local } = await unrelatedPair();
+    const wt = await ensurePlanMergeWorktree(local);
+    await write(wt, 'marker.txt', 'uncommitted\n');
+    await expect(ensurePlanMergeWorktree(local)).resolves.toBe(wt);
+    expect(await readFile(path.join(wt, 'marker.txt'), 'utf8')).toBe('uncommitted\n');
+  });
+});
+
+describe('commitMerge on a failed MERGE_HEAD read', () => {
+  it('rejects, leaves the merge open and makes no commit', async () => {
+    const { wt } = await openMerge();
+    const head = (await git(wt, ['rev-parse', 'HEAD'])).trim();
+    shim = await failGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
+    await expect(commitMerge(wt, 'msg', COMMIT_ENV)).rejects.toThrow(
+      /^git rev-parse MERGE_HEAD failed in /,
+    );
+    await shim.restore();
+    shim = null;
+    await expect(git(wt, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).resolves.toBeTruthy();
+    expect((await git(wt, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+  });
+
+  it('commits an open merge on healthy git and returns the new sha', async () => {
+    const { wt } = await openMerge();
+    const head = (await git(wt, ['rev-parse', 'HEAD'])).trim();
+    const sha = await commitMerge(wt, 'msg', COMMIT_ENV);
+    expect(sha).not.toBe(head);
+    expect(sha).toBe((await git(wt, ['rev-parse', 'HEAD'])).trim());
+  });
+
+  it('returns HEAD without committing when no merge is open', async () => {
+    const { local } = await unrelatedPair();
+    const wt = await ensurePlanMergeWorktree(local);
+    const head = (await git(wt, ['rev-parse', 'HEAD'])).trim();
+    await expect(commitMerge(wt, 'msg', COMMIT_ENV)).resolves.toBe(head);
+    expect((await git(wt, ['rev-parse', 'HEAD'])).trim()).toBe(head);
+  });
+});
+
+describe('landPlanMerge on a failed HEAD read', () => {
+  it('rejects and does not move the branch', async () => {
+    const { local } = await unrelatedPair();
+    const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
+    await git(local, ['checkout', '-b', 'side']);
+    await write(local, 'later.txt', 'x\n');
+    await git(local, ['add', '-A']);
+    await git(local, ['commit', '-m', 'the merge result']);
+    const sha = (await git(local, ['rev-parse', 'HEAD'])).trim();
+    await git(local, ['checkout', 'main']);
+    shim = await failGit(['rev-parse', 'HEAD']);
+    await expect(landPlanMerge(local, sha)).rejects.toThrow(/^git rev-parse HEAD failed in /);
+    await shim.restore();
+    shim = null;
+    expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
   });
 });
 

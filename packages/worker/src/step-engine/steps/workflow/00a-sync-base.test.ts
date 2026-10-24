@@ -10,6 +10,7 @@ import { resolveMergePhase } from '../../merge-resolver.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { claimFake } from '../../../../test/merge-dir-claim-fake.js';
 import { StepSupersededError } from '../../step-ownership.js';
+import { failGit } from '../../../../test/support/fake-git.js';
 
 const projections = vi.hoisted(() => ({
   setAside: vi.fn(),
@@ -247,6 +248,35 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(atResync).not.toBe(before);
       expect(atResync).toBe(await head());
     } finally {
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  });
+
+  it('a failed read of HEAD before the move leaves the base where it is, unclaimed and not set aside', async () => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    await advanceOrigin(seed, 'b.txt');
+    let shim: Awaited<ReturnType<typeof failGit>> | null = null;
+    try {
+      const before = (await git(local, ['rev-parse', 'HEAD'])).trim();
+      projections.setAside.mockResolvedValue({ outcome: 'clean' });
+      claimFake.claims.set(local, { taskId: 't1', stepId: 'step1', title: '' });
+      const ctx = mkCtx(local, 'repo-1');
+      const d = await syncBaseStep.detect!(ctx);
+      shim = await failGit(['rev-parse', 'HEAD']);
+      await expect(syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }))).rejects.toThrow(
+        /^git rev-parse HEAD failed in /,
+      );
+      await shim.restore();
+      shim = null;
+      expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
+      expect(projections.setAside).not.toHaveBeenCalled();
+      expect(claimFake.claims.has(local)).toBe(false);
+    } finally {
+      await shim?.restore();
+      claimFake.reset();
       await rm(bare, { recursive: true, force: true });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
@@ -666,6 +696,54 @@ describe('00a-sync-base detect + apply (real git)', () => {
     } finally {
       await rm(local, { recursive: true, force: true });
     }
+  });
+
+  describe('an origin git cannot read', () => {
+    // A bad fetch refspec makes `git remote get-url origin` exit 128 while rev-parse, status and branch still work.
+    async function unreadableOriginCheckout(): Promise<{ local: string; bare: string }> {
+      const bare = await mkdtemp(path.join(tmpdir(), 'sync-unreadable-bare-'));
+      await git(bare, ['init', '--bare', '-b', 'main']);
+      const local = await mkdtemp(path.join(tmpdir(), 'sync-unreadable-'));
+      await git(local, ['init', '-b', 'main']);
+      await git(local, ['config', 'gc.auto', '0']);
+      await writeFile(path.join(local, 'a.txt'), '1\n', 'utf8');
+      await git(local, ['add', '-A']);
+      await git(local, ['commit', '-m', 'c1']);
+      await git(local, ['remote', 'add', 'origin', `file://${bare}`]);
+      await git(local, ['config', '--add', 'remote.origin.fetch', ':::bad']);
+      return { local, bare };
+    }
+
+    it('detect rejects with the failure instead of reporting no origin', async () => {
+      const { local, bare } = await unreadableOriginCheckout();
+      try {
+        expect(await gitCode(local, ['remote', 'get-url', 'origin'])).toBe(128);
+        await expect(syncBaseStep.detect!(mkCtx(local))).rejects.toThrow(
+          /git remote get-url origin failed in /,
+        );
+      } finally {
+        await rm(bare, { recursive: true, force: true });
+        await rm(local, { recursive: true, force: true });
+      }
+    });
+
+    it('detect reports the origin once the refspec is repaired', async () => {
+      const { local, bare } = await unreadableOriginCheckout();
+      try {
+        await git(local, ['config', '--unset-all', 'remote.origin.fetch']);
+        await git(local, [
+          'config',
+          '--add',
+          'remote.origin.fetch',
+          '+refs/heads/*:refs/remotes/origin/*',
+        ]);
+        const d = await syncBaseStep.detect!(mkCtx(local));
+        expect(d.hasOrigin).toBe(true);
+      } finally {
+        await rm(bare, { recursive: true, force: true });
+        await rm(local, { recursive: true, force: true });
+      }
+    });
   });
 });
 

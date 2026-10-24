@@ -109,7 +109,7 @@ async function sourceFor(
 
 /** Fast-forward the checkout to its source. Answers why it was left as it was, or null once it is
  *  up to date. `merge --ff-only` never drops a commit or overwrites a local change: git refuses. */
-async function fastForward(
+export async function fastForward(
   db: Database,
   payload: RepoJobPayload,
   dest: string,
@@ -117,7 +117,12 @@ async function fastForward(
   const head = await gitRun(dest, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
   if (head.code !== 0) return 'Not refreshed: the checkout is not on a branch.';
   const branch = head.stdout.trim();
-  const source = await sourceFor(db, payload, dest);
+  let source: RefreshSource | null;
+  try {
+    source = await sourceFor(db, payload, dest);
+  } catch (err) {
+    return `Not refreshed: could not read the remote (${firstLine(err instanceof Error ? err.message : String(err))}).`;
+  }
   if (!source) return 'Nothing to refresh from: this repository has no remote.';
 
   const fetchError = await source.fetch(branch, []);
@@ -160,7 +165,11 @@ async function fastForward(
   // file it finds rewritten ends the transaction unmoved and goes back to the set-aside.
   let asided = false;
   const kept: KeptFiles = new Map();
-  const before = (await gitRun(dest, ['rev-parse', 'HEAD'])).stdout.trim();
+  const headRead = await gitRun(dest, ['rev-parse', 'HEAD']);
+  if (headRead.code !== 0) {
+    return `Not refreshed: the checkout's HEAD could not be read (${firstLine(headRead.stderr || headRead.stdout)}).`;
+  }
+  const before = headRead.stdout.trim();
   for (let attempt = 1; ; attempt++) {
     let aside;
     try {

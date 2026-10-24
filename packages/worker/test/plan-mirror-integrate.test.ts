@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
+import { failGit, type FakeGit } from './support/fake-git.js';
 
 const h = vi.hoisted(() => ({ db: null as unknown }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -27,7 +28,10 @@ async function git(dir: string, args: string[]): Promise<void> {
 }
 
 const dirs: string[] = [];
+let shim: FakeGit | null = null;
 afterEach(async () => {
+  await shim?.restore();
+  shim = null;
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
 });
 
@@ -164,6 +168,22 @@ describe('plan snapshot save and pull: a merge a conversation left open', () => 
     expect(await readFile(path.join(local, folder, 'files', 'docs', 'notes.txt'), 'utf8')).toBe(
       'scratch\n',
     );
+  });
+
+  it('rejects on a failed worktree list and leaves the abandoned worktree files', async () => {
+    const local = await unrelatedPair();
+    const { db } = fakeDb();
+    h.db = db;
+    const detected = await planMergeStep.detect!(contextFor(local, db));
+    const notes = path.join(detected.worktreePath, 'docs', 'notes.txt');
+    await mkdir(path.dirname(notes), { recursive: true });
+    await writeFile(notes, 'scratch\n', 'utf8');
+
+    shim = await failGit(['worktree', 'list']);
+    await expect(integrate(local)).rejects.toThrow(/git worktree list failed in /);
+    await shim.restore();
+    shim = null;
+    expect(await readFile(notes, 'utf8')).toBe('scratch\n');
   });
 
   it('refuses, under the lock, a save that finds a live conversation, and leaves its worktree', async () => {

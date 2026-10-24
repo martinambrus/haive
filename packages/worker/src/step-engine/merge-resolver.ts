@@ -19,6 +19,7 @@ import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { buildCredentialHelper, gitRun, pushBranch, scrubSecret } from '../repo/git-push.js';
+import { isWorktreeRegistered } from '../repo/git-workspace.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
 import {
   abortFailureNote,
@@ -308,10 +309,7 @@ async function ensureBaseWorktree(
   base: string,
 ): Promise<void> {
   await gitRun(ctx.repoPath, ['worktree', 'prune']);
-  const list = await gitRun(ctx.repoPath, ['worktree', 'list', '--porcelain']);
-  const registered =
-    list.code === 0 && list.stdout.split('\n').some((l) => l === `worktree ${worktreePath}`);
-  if (!registered) {
+  if (!(await isWorktreeRegistered(ctx.repoPath, worktreePath))) {
     // Split on the repository root, as the `ensureSandboxWritableTree` call below already does.
     if (await hasWorkspaceEntry(ctx.repoPath, relUnder(ctx.repoPath, worktreePath))) {
       await gitRun(ctx.repoPath, ['worktree', 'remove', '--force', worktreePath]);
