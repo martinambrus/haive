@@ -97,7 +97,9 @@ export function installTerminalShellWebSocket(
             rejectUpgrade(socket, ownership.status, ownership.message);
             return;
           }
+          if (auth.session.revoked) return;
           wss.handleUpgrade(req, socket, head, (ws) => {
+            if (!auth.session.accept(ws)) return;
             runScopedShellSession(
               ws,
               auth.userId,
@@ -133,7 +135,9 @@ export function installTerminalShellWebSocket(
           rejectUpgrade(socket, 409, `Task is ${ownership.taskStatus} - terminal disabled`);
           return;
         }
+        if (auth.session.revoked) return;
         wss.handleUpgrade(req, socket, head, (ws) => {
+          if (!auth.session.accept(ws)) return;
           runShellSession(ws, auth.userId, ids.taskId, ids.cliProviderId).catch((err) => {
             log.error(
               { err, taskId: ids.taskId, cliProviderId: ids.cliProviderId },
@@ -187,6 +191,10 @@ export async function runScopedShellSession(
     log.debug({ err, correlationId }, 'subscriber error');
   });
   await subscriber.connect().catch(() => undefined);
+  if (ws.readyState !== WebSocket.OPEN) {
+    await subscriber.quit().catch(() => undefined);
+    return;
+  }
   const publisher = getRedis();
 
   // Refcount/cleanup state — set up BEFORE the openSession await. React
@@ -350,6 +358,7 @@ export async function runScopedShellSession(
   }, KEEPALIVE_INTERVAL_MS);
 
   ws.on('message', async (raw) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw.toString());
@@ -585,6 +594,7 @@ export function extractRepoIds(
 }
 
 function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
+  if (socket.destroyed || socket.writableEnded) return;
   try {
     socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
   } catch {

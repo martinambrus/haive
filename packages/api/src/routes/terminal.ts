@@ -73,7 +73,10 @@ export function installTerminalWebSocket(server: Server, opts: TerminalWsOptions
           return;
         }
 
+        if (auth.session.revoked) return;
+
         wss.handleUpgrade(req, socket, head, (ws) => {
+          if (!auth.session.accept(ws)) return;
           runTerminalSession(ws, container, docker, auth.userId).catch((err) => {
             log.error({ err, containerId: container.id }, 'terminal session crashed');
             sendFrame(ws, { type: 'error', message: errorMessage(err) });
@@ -101,6 +104,10 @@ async function runTerminalSession(
 
   const dockerContainer = docker.getContainer(container.dockerContainerId!);
   const stream = await attachContainerStream(docker, container.dockerContainerId!);
+  if (ws.readyState !== WebSocket.OPEN) {
+    stream.end();
+    return;
+  }
 
   await incrementAttached(container.id);
 
@@ -167,6 +174,7 @@ async function runTerminalSession(
   }, LOG_FLUSH_INTERVAL_MS);
 
   ws.on('message', async (raw) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
     const text = raw.toString();
     if (text.length > MAX_INPUT_BYTES) {
       sendFrame(ws, { type: 'error', message: 'frame too large' });
@@ -207,7 +215,10 @@ async function runTerminalSession(
     }
   });
 
-  ws.on('close', async () => {
+  let cleanedUp = false;
+  const cleanup = async () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
     clearInterval(keepalive);
     clearInterval(flushInterval);
     stream.off('data', onStreamData);
@@ -228,7 +239,12 @@ async function runTerminalSession(
       log.warn({ err, containerId: container.id }, 'decrementAttached failed');
     });
     log.info({ sessionId, containerId: container.id }, 'terminal session closed');
-  });
+  };
+  ws.on('close', () => void cleanup());
+  if (ws.readyState !== WebSocket.OPEN) {
+    await cleanup();
+    return;
+  }
 
   // Only now: a client may send input the moment it reads this, and the handlers above take it.
   sendFrame(ws, { type: 'connected', sessionId });
@@ -335,6 +351,7 @@ function extractContainerId(rawUrl: string, pathPrefix: string): string | null {
 }
 
 function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
+  if (socket.destroyed || socket.writableEnded) return;
   try {
     socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
   } catch {

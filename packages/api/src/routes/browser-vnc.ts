@@ -74,11 +74,13 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
+        if (auth.session.revoked) return;
         // Fast path: if the desktop VNC is ALREADY reachable, bridge straight to it. Do NOT run
         // the ensure job on a reconnect — it re-navigates Chrome to the app root (page.goto),
         // which resets an in-progress session (e.g. an install wizard) each time the bridge
         // re-establishes. The VNC bridge only needs the desktop reachable, not re-navigated.
         let desktopHost = await reachableDesktopHost(taskId, vncPort);
+        if (auth.session.revoked) return;
         if (!desktopHost) {
           // Desktop is down (a worker-boot reap / restart / first open). The api can't start it
           // (spawning task containers is worker-only), so enqueue a worker ensure job and await
@@ -92,7 +94,9 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
           desktopHost = await resolveDesktopContainer(taskId, vncPort);
         }
         const host = desktopHost;
+        if (auth.session.revoked) return;
         wss.handleUpgrade(req, socket, head, (ws) => {
+          if (!auth.session.accept(ws)) return;
           runVncBridge(ws, host, vncPort, taskId);
         });
       } catch (err) {
@@ -243,6 +247,7 @@ async function taskBelongsToUser(taskId: string, userId: string): Promise<boolea
 }
 
 function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
+  if (socket.destroyed || socket.writableEnded) return;
   try {
     socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
   } catch {

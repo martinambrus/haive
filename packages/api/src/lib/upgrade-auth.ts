@@ -4,29 +4,35 @@ import { schema } from '@haive/database';
 import { getDb } from '../db.js';
 import { verifyAccessToken } from '../auth/jwt.js';
 import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { trackUserUpgrade, type UpgradeSession } from './user-sockets.js';
 
 /** Session policy for every WebSocket surface. Ownership and origin stay with the caller. */
 export async function authenticateUpgrade(
   req: IncomingMessage,
-): Promise<{ userId: string } | null> {
+): Promise<{ userId: string; session: UpgradeSession } | null> {
+  let session: UpgradeSession | undefined;
   try {
     const token = accessCookie(req.headers.cookie);
     if (!token) return null;
     const payload = await verifyAccessToken(token);
+    session = trackUserUpgrade(payload.sub, req.socket);
     const user = await getDb().query.users.findFirst({
       where: eq(schema.users.id, payload.sub),
       columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
     });
     if (
+      session.revoked ||
       !user ||
       user.status !== 'active' ||
       user.tokenVersion !== payload.tv ||
       user.mustChangePassword
     ) {
+      if (!session.revoked) session.dispose();
       return null;
     }
-    return { userId: user.id };
+    return { userId: user.id, session };
   } catch {
+    if (!session?.revoked) session?.dispose();
     // Malformed cookie escapes, invalid JWTs and unavailable storage all fail closed.
     return null;
   }

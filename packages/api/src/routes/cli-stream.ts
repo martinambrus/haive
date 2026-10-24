@@ -51,7 +51,9 @@ export function installCliStreamWebSocket(server: Server, opts: CliStreamWsOptio
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
+        if (auth.session.revoked) return;
         wss.handleUpgrade(req, socket, head, (ws) => {
+          if (!auth.session.accept(ws)) return;
           runStreamSession(ws, invocationId, ownership.steerable, ownership.startedAt).catch(
             (err) => {
               log.error({ err, invocationId }, 'cli-stream session crashed');
@@ -136,9 +138,15 @@ async function runStreamSession(
     idleMs: await resolveIdleMs(invocationId, startedAt),
   });
 
+  if (ws.readyState !== WebSocket.OPEN) return;
+
   // Dedicated Redis connection — XREAD BLOCK monopolizes the socket.
   const redis = getRedis().duplicate();
   await redis.connect().catch(() => undefined);
+  if (ws.readyState !== WebSocket.OPEN) {
+    await redis.quit().catch(() => undefined);
+    return;
+  }
 
   let closed = false;
   let lastId = '0';
@@ -336,6 +344,7 @@ function extractInvocationId(rawUrl: string, pathPrefix: string): string | null 
 }
 
 function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
+  if (socket.destroyed || socket.writableEnded) return;
   try {
     socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
   } catch {

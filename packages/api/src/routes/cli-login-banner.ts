@@ -261,7 +261,10 @@ export function installCliLoginBannerWebSocket(
           return;
         }
 
+        if (auth.session.revoked) return;
+
         wss.handleUpgrade(req, socket, head, (ws) => {
+          if (!auth.session.accept(ws)) return;
           runBannerSession({
             ws,
             userId: auth.userId,
@@ -348,6 +351,12 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     return;
   }
 
+  if (abort.aborted) {
+    stream.end();
+    await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
+    throw new LoginCancelled();
+  }
+
   try {
     await dockerContainer.start();
   } catch (err) {
@@ -360,6 +369,12 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       // ignore
     }
     return;
+  }
+
+  if (abort.aborted) {
+    stream.end();
+    await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
+    throw new LoginCancelled();
   }
 
   const session: BannerSession = {
@@ -452,7 +467,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   });
 
   ws.on('message', async (raw) => {
-    if (session.cleanedUp) return;
+    if (session.cleanedUp || ws.readyState !== WebSocket.OPEN) return;
     const text = raw.toString();
     let parsed: unknown;
     try {
@@ -1208,6 +1223,7 @@ function extractProviderId(rawUrl: string, pathPrefix: string): string | null {
 }
 
 function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
+  if (socket.destroyed || socket.writableEnded) return;
   try {
     socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
   } catch {
