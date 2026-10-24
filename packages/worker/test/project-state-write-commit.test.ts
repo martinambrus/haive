@@ -118,7 +118,7 @@ describe('12-post-onboarding: a claim file a person deleted by hand', () => {
     } as unknown as StepContext;
     const twelve = () =>
       postOnboardingStep.apply(ctx, {
-        detected: { hasGit: true, currentBranch: 'main' } as never,
+        detected: { hasGit: true } as never,
         formValues: { commit: true, commitMessage: 'chore: onboard' },
         iteration: 0,
         previousIterations: [],

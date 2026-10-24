@@ -84,7 +84,6 @@ async function setup(failure: 'none' | 'artifact-rows', detect: Record<string, u
     postOnboardingStep.apply(ctx, {
       detected: {
         hasGit: false,
-        currentBranch: null,
         hasOrigin: false,
         originUrl: null,
         boundCredentialId: null,
@@ -94,7 +93,7 @@ async function setup(failure: 'none' | 'artifact-rows', detect: Record<string, u
     } as never);
   const applyCommit = () =>
     postOnboardingStep.apply(ctx, {
-      detected: { hasGit: true, currentBranch: 'main', hasOrigin: false, credentials: [] },
+      detected: { hasGit: true, hasOrigin: false, credentials: [] },
       formValues: { commit: true, commitMessage: 'onboard' },
     } as never);
   return {

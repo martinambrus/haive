@@ -25,7 +25,7 @@ async function git(dir: string, args: string[]): Promise<string> {
 
 const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
 const ID_NOTE =
-  'The commit landed, but git gave no answer when its id was read, so this task has no commit id recorded.';
+  "The commit landed, but git gave no answer when its id was read, so this task's recorded commit id is not updated.";
 const FILES_NOTE =
   "The commit landed, but git gave no answer when its changed files were read, so they are not added to this task's file list.";
 
@@ -35,7 +35,10 @@ interface Recorded {
   warning: () => string | null;
 }
 
-function mkCtx(workspacePath: string): { ctx: StepContext; rec: Recorded } {
+function mkCtx(
+  workspacePath: string,
+  storedRow: Record<string, unknown> = { repositoryId: null, changedPaths: [] },
+): { ctx: StepContext; rec: Recorded } {
   let warningMessage: string | null = null;
   const rec: Recorded = { taskWrites: [], stepWrites: [], warning: () => warningMessage };
   const chain: Record<string, unknown> = {};
@@ -51,7 +54,7 @@ function mkCtx(workspacePath: string): { ctx: StepContext; rec: Recorded } {
   const db = {
     select: () => chain,
     query: {
-      tasks: { findFirst: async () => ({ repositoryId: null, changedPaths: [] }) },
+      tasks: { findFirst: async () => storedRow },
       users: { findFirst: async () => undefined },
       taskSteps: { findFirst: async () => ({ id: 'step1', warningMessage }) },
     },
@@ -106,8 +109,12 @@ async function dirtyRepo(): Promise<string> {
   return repo;
 }
 
-async function run(repo: string, install?: () => Promise<{ restore(): Promise<void> }>) {
-  const { ctx, rec } = mkCtx(repo);
+async function run(
+  repo: string,
+  install?: () => Promise<{ restore(): Promise<void> }>,
+  storedRow?: Record<string, unknown>,
+) {
+  const { ctx, rec } = mkCtx(repo, storedRow);
   const detected = await gate3CommitStep.detect!(ctx);
   if (install) shim = await install();
   const out = await gate3CommitStep.apply(ctx, {
@@ -121,12 +128,24 @@ async function run(repo: string, install?: () => Promise<{ restore(): Promise<vo
 }
 
 describe('10-gate-3-commit reads after the commit', () => {
-  it('a rev-parse HEAD with no answer records no id and says so', async () => {
+  it('a rev-parse HEAD with no answer leaves the stored id alone and says so', async () => {
     const repo = await dirtyRepo();
     const { out, rec, write } = await run(repo, () => killGit(['rev-parse', 'HEAD']));
     expect(out.committed).toBe(true);
     expect(out.commitSha).toBeNull();
-    expect(write.commitSha).toBeNull();
+    expect(write).not.toHaveProperty('commitSha');
+    expect(write.changedPaths).toContain('a.txt');
+    expect(rec.warning()).toContain(ID_NOTE);
+  });
+
+  it('a rev-parse HEAD with no answer never overwrites an earlier round id', async () => {
+    const repo = await dirtyRepo();
+    const { rec, write } = await run(repo, () => killGit(['rev-parse', 'HEAD']), {
+      repositoryId: null,
+      changedPaths: [],
+      commitSha: 'a'.repeat(40),
+    });
+    expect(write).not.toHaveProperty('commitSha');
     expect(rec.warning()).toContain(ID_NOTE);
   });
 

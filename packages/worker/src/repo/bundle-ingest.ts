@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { ensureDirNoFollow, lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
@@ -9,7 +8,7 @@ import { isBundleRootDir } from '../bundle-parser/classifier.js';
 import { parseBundle, persistBundleItems } from '../bundle-parser/index.js';
 import { buildAuthenticatedUrl, extractArchive, gitClone } from './clone.js';
 import { getDecryptedCredentials } from './credentials.js';
-import { hardenGitArgs } from './git-exec.js';
+import { gitRun } from './git-exec.js';
 
 /** Resolves the per-bundle storage root inside the haive_bundles volume. The
  *  layout is `<root>/<userId>/<bundleId>/extracted/`. The archive (if any)
@@ -42,57 +41,22 @@ export function bundleArchiveRel(
   return `${dir}/${name}`;
 }
 
-export function gitRevParseHead(cwd: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('git', hardenGitArgs(['rev-parse', 'HEAD']), { cwd });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout.on('data', (d: Buffer) => {
-      stdout += d.toString();
-    });
-    proc.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
-      if (code === 0) {
-        resolve(stdout.trim());
-        return;
-      }
-      reject(new Error(`git rev-parse failed (exit ${code}): ${stderr.trim()}`));
-    });
-  });
+export async function gitRevParseHead(cwd: string): Promise<string> {
+  const res = await gitRun(cwd, ['rev-parse', 'HEAD']);
+  if (res.code !== 0) {
+    throw new Error(`git rev-parse failed (exit ${res.noExit ?? res.code}): ${res.stderr.trim()}`);
+  }
+  return res.stdout.trim();
 }
 
-function gitFetchAndCheckout(cwd: string, branch?: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const args = ['pull', '--ff-only'];
-    if (branch) args.push('origin', branch);
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_ASKPASS: 'echo',
-    };
-    // A pull lists every file it changes, and output left unread in a pipe stops git once it fills.
-    const proc = spawn('git', hardenGitArgs(args), {
-      cwd,
-      env,
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
-    let stderr = '';
-    proc.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      const msg = stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
-      reject(new Error(`git pull failed (exit ${code}): ${msg}`));
-    });
-  });
+async function gitFetchAndCheckout(cwd: string, branch?: string): Promise<void> {
+  const args = ['pull', '--ff-only'];
+  if (branch) args.push('origin', branch);
+  const res = await gitRun(cwd, args, { GIT_ASKPASS: 'echo' });
+  if (res.code !== 0) {
+    const msg = res.stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
+    throw new Error(`git pull failed (exit ${res.noExit ?? res.code}): ${msg}`);
+  }
 }
 
 async function loadBundle(

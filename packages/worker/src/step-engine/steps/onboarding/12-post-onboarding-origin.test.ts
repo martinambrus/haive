@@ -1,18 +1,22 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import type { StepContext } from '../../step-definition.js';
+import { killGit, type KilledGit } from '../../../../test/support/kill-git.js';
 import { postOnboardingStep } from './12-post-onboarding.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const TASK = '00000000-0000-4000-8000-0000000000c1';
 
 const dirs: string[] = [];
+let killed: KilledGit | null = null;
 afterEach(async () => {
+  await killed?.restore();
+  killed = null;
   await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 
@@ -37,6 +41,13 @@ function ctxFor(root: string) {
     repositories: schema.repositories,
     repoCredentials: schema.repoCredentials,
     onboardingArtifacts: schema.onboardingArtifacts,
+    customBundles: schema.customBundles,
+    customBundleItems: schema.customBundleItems,
+    cliProviders: schema.cliProviders,
+    users: schema.users,
+    projectStateSync: schema.projectStateSync,
+    projectStateOutbox: schema.projectStateOutbox,
+    projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.tasks, { id: TASK, userId: USER, repositoryId: null, type: 'onboarding' });
   const noop = () => undefined;
@@ -121,5 +132,56 @@ describe('12-post-onboarding origin read', () => {
     } as never);
 
     expect(out).toMatchObject({ commitPerformed: false, pushRequested: false });
+  });
+
+  it('reads no branch in detect', async () => {
+    const ctx = ctxFor(await repo('good'));
+
+    const detected = await postOnboardingStep.detect!(ctx);
+
+    expect(detected).not.toHaveProperty('currentBranch');
+  });
+
+  it('answers detect the same when the branch read is killed', async () => {
+    const ctx = ctxFor(await repo('good'));
+    killed = await killGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+
+    const detected = await postOnboardingStep.detect!(ctx);
+
+    expect(detected).toMatchObject({
+      hasGit: true,
+      hasOrigin: true,
+      originUrl: 'https://example.com/x.git',
+    });
+  });
+
+  it('echoes no branch from apply', async () => {
+    const ctx = ctxFor(await repo('good'));
+    const detected = await postOnboardingStep.detect!(ctx);
+
+    const out = await postOnboardingStep.apply(ctx, {
+      detected,
+      formValues: { commit: false },
+    } as never);
+
+    expect(out).not.toHaveProperty('branch');
+  });
+
+  it('echoes no branch after git init, which still honours initBranch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'post-onboarding-init-'));
+    dirs.push(root);
+    await writeFile(join(root, 'AGENTS.md'), '# Agents\n');
+    const ctx = ctxFor(root);
+    const detected = await postOnboardingStep.detect!(ctx);
+    expect(detected).toMatchObject({ hasGit: false });
+
+    const out = await postOnboardingStep.apply(ctx, {
+      detected,
+      formValues: { commit: true, initBranch: 'trunk', commitMessage: 'x' },
+    } as never);
+
+    expect(out).toMatchObject({ commitPerformed: true, pushRequested: false });
+    expect(out).not.toHaveProperty('branch');
+    expect(git(root, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('trunk');
   });
 });

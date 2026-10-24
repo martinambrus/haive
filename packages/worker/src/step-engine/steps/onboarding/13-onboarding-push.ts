@@ -26,7 +26,6 @@ interface PostOnboardingPushHandoff {
   pushRequested?: boolean;
   pushCredentialId?: string | null;
   pushSetUpstream?: boolean;
-  branch?: string | null;
 }
 
 interface OnboardingPushDetect {

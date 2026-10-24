@@ -18,7 +18,6 @@ import { shellQuote } from '../../../sandbox/shell-quote.js';
 import { buildCommitDiffArtifact } from '../workflow/_commit-diff.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../../../repo/git-push.js';
-import { gitGaveNoAnswer } from '../../../repo/git-exec.js';
 import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
 import { putBackProjections, warnStep } from '../../../project-state/branch-revert.js';
 
@@ -176,7 +175,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     if (hasGit) {
       const branchRes = await gitRun(workspacePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
       branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
-      if (gitGaveNoAnswer(branchRes)) {
+      if (branchRes.code !== 0) {
         branchError = `could not read the checkout's current branch: ${(branchRes.stderr || branchRes.stdout).trim()}`;
         ctx.logger.warn(
           { workspacePath, branchError },
@@ -336,6 +335,11 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     const nothing = commit.code !== 0 && /nothing to commit/i.test(commitErr);
     if (commit.code !== 0 && !nothing) throw new Error(`git commit failed: ${commitErr}`);
     const pushTo = values.push && detected.hasOrigin ? detected.branch : null;
+    if (values.push && detected.hasOrigin && !pushTo) {
+      await warnStep(ctx, [
+        `The push you asked for was not made: ${detected.branchError ?? "the checkout's current branch was not read"}.`,
+      ]);
+    }
     // With a push asked for, a Retry after a failed put-back finds its commit made and still pushes.
     if (nothing && !pushTo) {
       return {
