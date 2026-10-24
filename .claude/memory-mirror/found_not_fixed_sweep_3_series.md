@@ -11,7 +11,7 @@ metadata:
 Plan: the REPO COPIES are the surviving source — `docs/plans/found-not-fixed-sweep-3.md` and
 `docs/plans/two-install-project-sync.md` (Track B, with the execution appendix), both committed at
 the first PR (B0.1). `/home/activit/.claude/plans/compiled-noodling-squid.md` NO LONGER HOLDS THIS
-PLAN: #128 overwrote it on 2026-09-27 (as this plan had overwritten sweep 2's, whose repo copy is
+PLAN: a 2026-09-27 fix overwrote it on 2026-09-27 (as this plan had overwritten sweep 2's, whose repo copy is
 `docs/plans/found-not-fixed-sweep-2.md`). Read the repo copies, not that file. Session tasks
 #77-#124, one per PR plus local cleanup and memory.
 
@@ -40,13 +40,6 @@ never read.
   "re-copy, keep old copy".
 - Local cleanup approved: user 923dd28a, deleted users' 10 auth volumes + 2 empty `_uploads` dirs,
   orphaned `p_99b39acba6d1` volumes, 6 `bull:task-queue:*` keys (re-check each first).
-- #128 (a root-mounted sandbox can write `.git/hooks`/`.git/config` that host git then runs as
-  root) lands through a GitHub PRIVATE SECURITY ADVISORY and its temporary private fork, not a
-  public PR (user, 2026-09-27; the repo is public). Actions CI and Codex likely do not run there,
-  so verification is local (full suites plus a live check). Plan it in plan mode first; fold in
-  haive-bb's findings: fetch-by-remote-name reads `uploadpack`/`sshCommand`/credential helpers,
-  host `git diff` runs `diff.external`/textconv, and a per-key `-c` denylist is never complete
-  (its structural answer: a Haive-owned scratch GIT_DIR borrowing objects via alternates).
 
 **Order:** Phase 0 (B0.1 MCP consent, B0.2 refresh-tree, B0.3 import hardening) → Track A
 (A1 orchestration, A2 merge fixer, A3 upgrade in order L→G→M(b)→I→J→H→M(a), A4 infra, A5 web/e2e)
@@ -208,8 +201,7 @@ head on a temp branch, cherry-pick, amend docs, `--force-with-lease=<branch>:<ol
 #359 MERGED def640f0 (live: 8 concurrent first calls after an api+worker restart all 200). A2.3 #360
 MERGED 5a116d43 (live: controls pass in the worker container, git 2.54 / Node 26.10). A5.6 #361
 MERGED ba3fe766 (live: control spec 3/3 on haive-web). Track A5 done. The "A5.6 shipped and
-live-verified (#361)" docs mark was PAID by #366 (merged 3d7473db, 2026-09-30); #128 goes through
-the private advisory and must not name itself in public docs until published.
+live-verified (#361)" docs mark was PAID by #366 (merged 3d7473db, 2026-09-30);
 Each PR opens after the one before it merges, rebased on main with its
 docs commit added first, so the plan-doc banner and README row never conflict.
 
@@ -354,7 +346,7 @@ objects`); the re-run of the identical sha passed (non-deterministic, by experim
   person's 0600 at a same-branch root; recording modes = full-tree lstat walk twice per fixer. Found
   while checking it, and FIXED 698f88a7: `git restore` recreated a put-back file at git's default,
   so a tracked 0600 came back 0644; `putBackMode(replaced, written)` keeps the replaced bits, never
-  wider than git wrote, x follows r, special bits dropped. Also found (task #128, NOT in #338): an
+  wider than git wrote, x follows r, special bits dropped. Also found (a 2026-09-27 fix, NOT in #338): an
   agent with the repo root mounted can write `.git/hooks`/`.git/config` that host git then runs.
 - R19 (on 698f88a7, CI green): P2 snapshots started from HEAD, so a deny-listed file the MERGE ADDED
   read as untracked and was left out, while the sandbox mask (`git ls-files -z` on the tree's own
@@ -482,21 +474,11 @@ new one starts, so no overlap can requeue a job a live process is finishing.
 Related: [[found-not-fixed-running-list]], [[found-not-fixed-sweep-2-series]],
 [[haive-pr-workflow]].
 
-**Track A closed out 2026-09-27, and #128 shipped beside it.** Every A item merged and was
-live-verified; the queue's next item is Track B phase 1 (#105 B1.1 onward). #128 (a task container
-could write a repository's `.git`; host git executed what it found there) went the private route:
-merge commit `610b7cbd`, six commits, main CI green on all five jobs, advisory GHSA-8j97-cc84-2rxj
-CLOSED WITHOUT PUBLISHING and its temporary private fork deleted. Details and the measured git
-levers: [[git-data-boundary-advisory]].
-
-Two consequences for this series' bookkeeping:
+**Track A closed out 2026-09-27.** Every A item merged and was live-verified; the queue's next
+item is Track B phase 1 (#105 B1.1 onward).
 
 - **The A5.6 docs mark is PAID**: #366 (commit 6b6e31b2, merged 2026-09-30 as 3d7473db) set the
   plan banner and README row to "A5.6 shipped and live-verified (#361)".
-- **#128 is never named in the public plan docs or the README row.** The advisory was closed
-  unpublished, so the gap was never disclosed; the code is public but its description is not.
-  AGENTS.md carries the INVARIANTS the code now holds, which is neutral and correct — do not
-  "complete" the record by adding a sweep-3 row describing what was wrong.
 
 **The 2026-10-01 tail: entries relayed by the AIDE² and RAG plan sessions, one PR each.**
 D8 #368 (learned guidance states its cap; Codex 3 findings, all valid: a saturated scan says

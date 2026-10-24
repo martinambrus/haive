@@ -28,7 +28,7 @@ merging. The `github-advanced-security` check ("Code scanning AI findings") fail
 (see [[found-not-fixed-running-list]]).
 
 MEASURED 2026-10-15 on #747: the "Username Password" detector flagged a test fixture pair
-(`appAuthUsername: 'ci-user', appAuthPassword: 's3cret'`, and the same two typed one line apart).
+(`appAuthUsername: 'ci-user', appAuthPassword: '<literal>'`, and the same two typed one line apart).
 Fix that worked: a runtime value (`const TYPED_PASSWORD = crypto.randomUUID()`) in place of the
 literal, applied to EVERY commit of the branch with `git filter-branch --tree-filter <script> --
 HEAD ^<main sha the branch merged>`. A plain `<branch base>..HEAD` range also walked main's commits

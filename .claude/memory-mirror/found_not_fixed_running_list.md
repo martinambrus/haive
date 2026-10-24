@@ -614,7 +614,7 @@ Sweep 3 ([[found-not-fixed-sweep-3-series]], plan `docs/plans/found-not-fixed-sw
   of the subpath divergence -> PR A, `resolveDdevWorkspace` reads `tasks.worktree_path` (root only when
   01 is `skipped`); #169 is really LIVENESS -> PR B, 06a and 08 exec only through an ensured handle;
   the other ten handle sites are probes and stay.)
-- **[task #169]** [NEW, found 2026-09-27 while fixing #128, verified by reading] **Eleven call sites build a
+- **[task #169]** [NEW, found 2026-09-27 while fixing a 2026-09-27 fix, verified by reading] **Eleven call sites build a
   runtime-runner handle from `runnerHandleForTask`/`appRunnerHandleForTask` rather than through
   `ensureDdevStarted`/`ensureAppRunnerStarted`, so none of them sees the boot-subpath check**
   (`08b-test-management`, `08-phase-5-verify`, `06a-db-migrate`, `_browser-runtime`,
@@ -622,7 +622,7 @@ Sweep 3 ([[found-not-fixed-sweep-3-series]], plan `docs/plans/found-not-fixed-sw
   resolved; since `610b7cbd` they mount ONE, so a handle naming another lands in the empty
   mount-point directory docker creates and `ddev` answers "not a DDEV project". A failed exec now
   names the mismatch (`staleHandleNote`), which is a diagnostic and not the fix. PRE-EXISTING
-  shape, made reachable by #128. Fix: see the DECIDED note above (only 06a and 08 need an ensure).
+  shape, made reachable by a 2026-09-27 fix. Fix: see the DECIDED note above (only 06a and 08 need an ensure).
 - **[task #142]** [NEW, found 2026-09-30 by the Opus review of the RAG article pass, MEASURED; the RAG entries
   below are F1-F8 of `docs/plans/rag-retrieval-improvements.md`, see [[rag-retrieval-plan]]]
   **The RAG chunker drops the FIRST function of nearly
@@ -1094,7 +1094,7 @@ Added 2026-10-01 by the backlog triage (two Sonnet agents checked every open ent
 
 - The environment mirror carried 01's prompt-only fields into a committed file: #381 (F17, 21c9d88c; 0170 applied, 0 of 10 mirrors keep a `__` key).
 - A Retry of a failed upgrade or rollback runs beside another live one: #339 (A3.1: index tasks_one_live_upgrade_per_repo_idx, 0168).
-- A fixer working at a repository root can run git: #128 (610b7cbd: a root .git is mounted read-only).
+- A fixer working at a repository root can run git: a 2026-09-27 fix (610b7cbd: a root .git is mounted read-only).
 - A discarded merge attempt kept what the fixer left outside the merge: #338 (A2.2: captureFixBaseline + relocateFixerChanges on all three callers).
 - The global KB page's Retry was dead on an entry whose `kb_author` task was cancelled: #355 + #357 (A5.3/A5.3b: Retry only while the source task is failed).
 - The tasks list does not fit a phone: #352 (A5.1: @container row, phone.spec guards it).
@@ -1162,16 +1162,6 @@ Added 2026-10-01 by the backlog triage (two Sonnet agents checked every open ent
   on CI.
 
 ## Closed 2026-09-26/27 (sweep 3, [[found-not-fixed-sweep-3-series]])
-
-- **A task container could write a repository's `.git`, and host git executed what it found there**
-  — SHIPPED as merge commit `610b7cbd` (six commits, main CI green on all five jobs) through
-  advisory GHSA-8j97-cc84-2rxj, which was then CLOSED without publishing, its private fork deleted.
-  `.git` is read-only in every agent sandbox, the task Terminal and the IDE; every host git argv is
-  built by `hardenGitArgs`; each runtime runner mounts one repository subpath and the DDEV dump as a
-  single read-only FILE. NO Codex round exists for it — integrations cannot reach a temporary
-  private fork and no public PR was ever opened — so an adversarial fork-agent review stood in (no
-  P1, six findings, all fixed in `399ed579`). Two spin-offs are open above. See
-  [[git-data-boundary-advisory]] for the git levers that were measured wrong on the first pass.
 
 - **Git output past execFile's 1 MiB buffer killed git; a bundle resync stalled on unread
   output**: closed by #360 (A2.3, merged 5a116d43, live-verified: both controls pass inside the
