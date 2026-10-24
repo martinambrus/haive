@@ -217,6 +217,24 @@ describe('CLI auth banner socket close', () => {
     expect(textOf(view.draw()) === before).toBe(true);
   });
 
+  it('fix9 gives an error-block Retry all three URL-wait attempts', async () => {
+    await exhaustUrlAttempts();
+    fire.click(buttons(view.tree(), 'retry')[0]!);
+    view.draw();
+    const sessions = FakeWebSocket.instances.length;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      socket = FakeWebSocket.instances.at(-1)!;
+      socket.readyState = FakeWebSocket.OPEN;
+      socket.onopen?.();
+      socket.frame({ type: 'phase', phase: 'awaiting-token' });
+      view.draw();
+      await vi.advanceTimersByTimeAsync(30_000);
+      view.draw();
+      expect(FakeWebSocket.instances.length).toBe(sessions + Math.min(attempt, 2));
+      expect(buttons(view.tree(), 'retry')).toHaveLength(attempt === 3 ? 1 : 0);
+    }
+  });
+
   it.each(['connecting', 'awaiting-token', 'submitting'])(
     'fix8 shows an error for an exit during %s',
     (phase) => {

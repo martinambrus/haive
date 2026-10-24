@@ -736,7 +736,14 @@ export function CliAuthBannerModal({
                 {verifying ? 'Testing...' : 'Test connection'}
               </Button>
             ) : (
-              <Button onClick={() => setRetryNonce((n) => n + 1)}>Retry</Button>
+              <Button
+                onClick={() => {
+                  setUrlAttempt(1);
+                  setRetryNonce((n) => n + 1);
+                }}
+              >
+                Retry
+              </Button>
             )}
           </div>
         )}
