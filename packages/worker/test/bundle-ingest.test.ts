@@ -1,6 +1,7 @@
+import { fixtureBase, httpOrigin, networkGitArgs } from './support/git-http.js';
+import { hardenGitArgs } from '@haive/shared/git-args';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import JSZip from 'jszip';
 import { describe, expect, it, afterEach, beforeEach, vi } from 'vitest';
@@ -31,7 +32,7 @@ import { bundleArchiveRel, gitRevParseHead, handleIngestZip } from '../src/repo/
 
 function run(cmd: string, args: string[], cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, {
+    const proc = spawn(cmd, cmd === 'git' ? hardenGitArgs(networkGitArgs(args)) : args, {
       cwd,
       env: {
         ...process.env,
@@ -56,7 +57,7 @@ function run(cmd: string, args: string[], cwd?: string): Promise<void> {
 let tmpRoot: string;
 
 beforeEach(async () => {
-  tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'haive-bundle-'));
+  tmpRoot = await mkdtemp(path.join(fixtureBase, 'haive-bundle-'));
 });
 
 afterEach(async () => {
@@ -197,7 +198,7 @@ describe('bundleArchiveRel', () => {
 });
 
 describe('bundle-ingest: git clone + rev-parse', () => {
-  it('clones a local bare repo and captures HEAD', async () => {
+  it('clones a bare HTTP repo and captures HEAD', async () => {
     const sourceRepo = path.join(tmpRoot, 'origin');
     const work = path.join(tmpRoot, 'work');
     const dest = path.join(tmpRoot, 'user-id', 'bundle-id', 'extracted');
@@ -217,7 +218,7 @@ describe('bundle-ingest: git clone + rev-parse', () => {
     await run('git', ['commit', '-m', 'init'], work);
     await run('git', ['push', 'origin', 'main'], work);
 
-    await gitClone(`file://${sourceRepo}`, dest, 'main');
+    await gitClone(httpOrigin(sourceRepo), dest, 'main');
     const head = await gitRevParseHead(dest);
     expect(head).toMatch(/^[0-9a-f]{40}$/);
     expect((await readdir(dest)).sort()).toContain('agents');

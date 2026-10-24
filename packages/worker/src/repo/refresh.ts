@@ -9,7 +9,7 @@ import {
 } from '@haive/shared/fs-safe';
 import { lockRepositoryTasksKey, schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger, type RepoJobPayload } from '@haive/shared';
-import { copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
+import { assertCloneUrl, copyTree, gitClone, persistDetection, withRootClaim } from './clone.js';
 import {
   MOVE_ATTEMPTS,
   putBackAfterFailure,
@@ -281,6 +281,7 @@ async function rebuild(
   if (!fromFolder && !fromRemote) {
     throw new Error('Nothing to refresh from: this repository has no remote.');
   }
+  if (fromRemote) assertCloneUrl(fromRemote);
   const aside = await moveAside(repoStorageRoot, rel);
   if (fromFolder) {
     await ensureDirNoFollow(repoStorageRoot, rel);

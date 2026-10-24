@@ -125,7 +125,9 @@ export function hardenGitArgs(args: readonly string[]): string[] {
   const at = gitSubcommandIndex(args);
   // Origin is a network remote. Refresh's explicit host-folder fetch keeps the file transport.
   const originSafety =
-    at !== -1 && PACK_COMMAND_FLAG[args[at]!] && args.slice(at + 1).includes('origin')
+    at !== -1 &&
+    (args[at] === 'clone' ||
+      (PACK_COMMAND_FLAG[args[at]!] && args.slice(at + 1).includes('origin')))
       ? ['-c', 'protocol.file.allow=never']
       : [];
   const out = [...GIT_CONFIG_SAFETY_ARGS, ...originSafety, ...args];
