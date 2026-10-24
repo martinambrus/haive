@@ -680,7 +680,7 @@ Fix direction: after a failed reset, re-ask for the status without clearing the 
 status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:05Z · last: 2026-10-25T00:05Z · was modular #208
 DECIDED 2026-10-23: record the expected attachment count on the task, and Start confirms "N of M missing". The start claim is in api lib/task-start.ts:10-23.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+12)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+14)
 
 status: open · was modular #211
 
@@ -697,6 +697,8 @@ status: open · was modular #211
 11. Same source, minor: the "no agents directory" branch (provider amp) has no test: the `_active-agents-target.ts` null return, 07_5-verify-files.ts ~:57-64, 11-final-review.ts ~:86-93, `collectReviewFindings(repo, null)`.
 12. (T378 review) PRE-EXISTING, minor: `useDeviceSignIn` has no test of its own; the attempt counter, the unmount bump (web lib/use-device-sign-in.ts ~:25-30) and its `live()` guards are exercised only through `runDeviceSignIn` with an injected `live`.
 13. (T306 review) PRE-EXISTING, minor to moderate (class hazard): database testing/fake-db.ts ~:169 throws a plain Error for a table the fake was not given, which a route turns into a 500 or a caught failure, so a test that expects a throw or a 500 can pass on the miss (proven for revive-beside-live, fixed in T306; not scanned for others). Fix: a sentinel error class and an afterEach check of misses.
+14. (T363 review) PRE-EXISTING, consequential: scripts/test/ci-gated-list.test.mjs ~:12 recognises a Postgres-gated test only by `pathname.startsWith(` or `CREATE|DROP DATABASE`, so a gated file with another guard idiom is invisible to the "every gated file has a GATED row" check and skips green in CI for ever (T363's DB file was the live case, fixed there). Fix: detect by `skipIf` plus a `*_URL` env var.
+15. (T363 review) PRE-EXISTING, minor: no e2e spec creates a task with attachments or presses Start on a created task (the only Start click is Run app, tests/e2e/tasks/new-task-type.spec.ts ~:232), so the attachments confirm flow is checked by hand only.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
