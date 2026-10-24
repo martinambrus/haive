@@ -29,7 +29,7 @@ export function seedRollbackSnapshot(
     writtenHash: 'a'.repeat(64),
     formValuesSnapshot: snapshot,
     source: 'onboarding',
-    sourceStepId: '12-post-onboarding',
+    sourceStepId: '07-generate-files',
     generatedAt: new Date('2026-01-01T00:00:00Z'),
   });
 }
