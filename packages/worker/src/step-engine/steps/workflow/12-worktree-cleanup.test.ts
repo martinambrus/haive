@@ -4757,3 +4757,41 @@ it('a refused pre-push origin warns, then the refused push halts with the merge 
     await rm(bare, { recursive: true, force: true });
   }
 });
+
+it.each([new Error('origin read unavailable'), 'origin read unavailable'])(
+  'a thrown pre-push fetch warns and still pushes the pinned local merge (%s)',
+  async (failure) => {
+    const { parent, wt } = await setupWorktree();
+    const bare = await pushParentMainToOrigin(parent);
+    try {
+      fetchProbe.intercept = (argv) => {
+        if (argv.includes('fetch')) throw failure;
+        return null;
+      };
+      const h = makeDb();
+      const ctx = mkCtx(parent, h.db);
+      const warn = vi.fn();
+      ctx.logger = { ...ctx.logger, warn } as unknown as StepContext['logger'];
+      const outcome = await resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt, { hasOrigin: true }), { action: 'merge_remove', pushBase: true }),
+        ctx,
+        mkParams(h.db),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.stringContaining('origin read unavailable') }),
+        expect.any(String),
+      );
+      expect(outcome.resolved).toBe(true);
+      expect(h.getState()).toMatchObject({ phase: 'done', merged: true, pushed: true });
+      expect(fetchProbe.pushes).toContainEqual(
+        expect.objectContaining({ sha: await revOf(parent, 'main') }),
+      );
+      expect(await gitCode(bare, ['show', 'main:feature.txt'])).toBe(0);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true });
+    }
+  },
+);

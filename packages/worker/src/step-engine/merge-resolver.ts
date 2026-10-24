@@ -24,7 +24,6 @@ import {
   gitRun,
   pushBranch,
   scrubSecret,
-  OriginUrlError,
 } from '../repo/git-push.js';
 import { isWorktreeRegistered } from '../repo/git-workspace.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
@@ -682,8 +681,12 @@ async function fetchForSync(
   try {
     res = await originGitRun(cwd, argv, env);
   } catch (err) {
-    if (!(err instanceof OriginUrlError)) throw err;
-    return { ok: false, error: err.message };
+    return {
+      ok: false,
+      error: scrubSecret(err instanceof Error ? err.message : String(err), secret)
+        .trim()
+        .slice(0, 300),
+    };
   }
   if (res.code !== 0) {
     return {
