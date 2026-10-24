@@ -131,7 +131,7 @@ the module loads again.
   returned by then counts as failed, with its claim released and its attempt counted as an
   ensure's are. The jobs it starts after the deadline are stopped at once and never count as
   started, though the module counts as running, and a teardown of it is refused, until that stop
-  ends. Nothing can cancel the abandoned call, so the next attempt can run beside it: `jobs` must
+  succeeds; a stop that fails is called again by each later pass and at shutdown. Nothing can cancel the abandoned call, so the next attempt can run beside it: `jobs` must
   tolerate a second call while an earlier one is still running (`startJobsWithinDeadline`,
   `modules/loader.ts`). At
   shutdown one deadline, `MODULE_SHUTDOWN_WAIT_MS` (5 s), covers the reconcile pass in flight and every

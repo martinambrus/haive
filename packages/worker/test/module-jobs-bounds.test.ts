@@ -550,42 +550,95 @@ describe('the bounds on module work', () => {
       expect(m.stop).toHaveBeenCalledOnce();
     });
 
-    it.each(['ends', 'fails'] as const)(
-      'keeps the module marked as running while the stop of a start that returned after the deadline runs, until that stop %s',
-      async (how) => {
-        const id = `late-stopping-${how}`;
+    it('keeps the module marked as running while the stop of a start that returned after the deadline runs, until that stop ends', async () => {
+      const id = 'late-stopping-ends';
+      const m = moduleWithHungStart(id, 'jobs');
+      let endStop!: () => void;
+      m.stop.mockImplementationOnce(() => new Promise<void>((resolve) => (endStop = resolve)));
+      vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const handle = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
+
+      const pass = track(handle.reconcile(new Set()));
+      await vi.advanceTimersByTimeAsync(MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
+      expect(pass.settled).toBe(true);
+      expect(moduleJobsStarted(id)).toBe(false);
+
+      m.end().resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(m.stop).toHaveBeenCalledOnce();
+      expect(moduleJobsStarted(id)).toBe(true);
+
+      endStop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(moduleJobsStarted(id)).toBe(false);
+    });
+
+    describe('a stop of a start that returned after the deadline fails', () => {
+      async function lateStartWithRefusedStop(id: string) {
         const m = moduleWithHungStart(id, 'jobs');
-        let endStop!: () => void;
-        m.stop.mockImplementationOnce(
-          () =>
-            new Promise<void>((resolve, reject) => {
-              endStop = how === 'ends' ? resolve : () => reject(new Error('stop refused'));
-            }),
-        );
+        m.stop.mockRejectedValueOnce(new Error('stop refused'));
         const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
         const handle = await startModuleJobs([m.loaded], [m.entry], new Set([id]));
-
         const pass = track(handle.reconcile(new Set()));
         await vi.advanceTimersByTimeAsync(MODULE_SCHEMA_ENSURE_TIMEOUT_MS);
         expect(pass.settled).toBe(true);
-        expect(moduleJobsStarted(id)).toBe(false);
-
         m.end().resolve();
         await vi.advanceTimersByTimeAsync(0);
         expect(m.stop).toHaveBeenCalledOnce();
+        return { m, warn, handle };
+      }
+
+      it('keeps the module marked as running, so a teardown of it stays refused', async () => {
+        const { warn } = await lateStartWithRefusedStop('late-stop-refused');
+
+        expect(moduleJobsStarted('late-stop-refused')).toBe(true);
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({ module: 'late-stop-refused', err: expect.any(Error) }),
+          expect.stringMatching(/failed to stop/),
+        );
+      });
+
+      it('calls the stop again on the next pass, and lets go of the module once it succeeds', async () => {
+        const id = 'late-stop-retried';
+        const { m, handle } = await lateStartWithRefusedStop(id);
+
+        await handle.reconcile(new Set([id]));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(m.stop).toHaveBeenCalledTimes(2);
+        expect(moduleJobsStarted(id)).toBe(false);
+
+        await handle.reconcile(new Set([id]));
+        await handle.stopAll();
+        expect(m.stop).toHaveBeenCalledTimes(2);
+      });
+
+      it('keeps the module marked as running after a retry that fails too, and calls the stop at shutdown', async () => {
+        const id = 'late-stop-shutdown';
+        const { m, handle } = await lateStartWithRefusedStop(id);
+        m.stop.mockRejectedValueOnce(new Error('still refused'));
+
+        await handle.reconcile(new Set([id]));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(m.stop).toHaveBeenCalledTimes(2);
         expect(moduleJobsStarted(id)).toBe(true);
 
-        endStop();
-        await vi.advanceTimersByTimeAsync(0);
+        await handle.shutdown(null);
+        expect(m.stop).toHaveBeenCalledTimes(3);
         expect(moduleJobsStarted(id)).toBe(false);
-        if (how === 'fails') {
-          expect(warn).toHaveBeenCalledWith(
-            expect.objectContaining({ module: id, err: expect.any(Error) }),
-            expect.stringMatching(/failed to stop/),
-          );
-        }
-      },
-    );
+      });
+
+      it('calls a stop that has not ended only once, whatever the passes do meanwhile', async () => {
+        const id = 'late-stop-hung';
+        const { m, handle } = await lateStartWithRefusedStop(id);
+        m.stop.mockImplementationOnce(() => new Promise<void>(() => {}));
+
+        await handle.reconcile(new Set([id]));
+        await handle.reconcile(new Set([id]));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(m.stop).toHaveBeenCalledTimes(2);
+        expect(moduleJobsStarted(id)).toBe(true);
+      });
+    });
 
     it('logs a start that fails after the deadline without counting it again', async () => {
       const m = moduleWithHungStart('failing-deadline', 'jobs');

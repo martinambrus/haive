@@ -294,8 +294,37 @@ function settledWithinStartWait(moduleId: string, work: Promise<unknown>): Promi
   });
 }
 
-// How many stops of jobs that started after their deadline still run, per module; a teardown waits for them too.
-const lateStops = new Map<string, number>();
+// Stops of jobs that started after their deadline and have not succeeded yet, per module; a teardown waits for them too.
+const lateStops = new Map<string, Set<() => Promise<void>>>();
+const lateStopsRunning = new Set<() => Promise<void>>();
+
+function runLateStop(moduleId: string, stop: () => Promise<void>): Promise<void> {
+  if (lateStopsRunning.has(stop)) return Promise.resolve();
+  lateStopsRunning.add(stop);
+  return (async () => stop())()
+    .then(() => {
+      const stops = lateStops.get(moduleId);
+      stops?.delete(stop);
+      if (stops?.size === 0) lateStops.delete(moduleId);
+    })
+    .catch((err: unknown) => {
+      logger.warn(
+        { err, module: moduleId },
+        'module jobs that started after their deadline failed to stop',
+      );
+    })
+    .finally(() => {
+      lateStopsRunning.delete(stop);
+    });
+}
+
+function retryLateStops(): Promise<void> {
+  const runs: Promise<void>[] = [];
+  for (const [moduleId, stops] of lateStops) {
+    for (const stop of [...stops]) runs.push(runLateStop(moduleId, stop));
+  }
+  return Promise.all(runs).then(() => undefined);
+}
 
 // `jobs` that has not returned within a schema ensure's deadline counts as failed; what it starts later is stopped at once.
 function startJobsWithinDeadline(
@@ -328,19 +357,10 @@ function startJobsWithinDeadline(
           { module: moduleId },
           'module jobs started after their deadline; stopping them',
         );
-        lateStops.set(moduleId, (lateStops.get(moduleId) ?? 0) + 1);
-        void (async () => stop())()
-          .catch((err: unknown) => {
-            logger.warn(
-              { err, module: moduleId },
-              'module jobs that started after their deadline failed to stop',
-            );
-          })
-          .finally(() => {
-            const left = (lateStops.get(moduleId) ?? 1) - 1;
-            if (left > 0) lateStops.set(moduleId, left);
-            else lateStops.delete(moduleId);
-          });
+        const stops = lateStops.get(moduleId) ?? new Set();
+        stops.add(stop);
+        lateStops.set(moduleId, stops);
+        void runLateStop(moduleId, stop);
       },
       (err: unknown) => {
         clearTimeout(timer);
@@ -444,7 +464,7 @@ export async function startModuleJobs(
   };
   const stopAll = (): Promise<void> => {
     closing = true;
-    return stopModules([...stops.keys()]);
+    return Promise.all([retryLateStops(), stopModules([...stops.keys()])]).then(() => undefined);
   };
   const shutdown = (inFlightPass: Promise<void> | null): Promise<void> =>
     new Promise<void>((resolve) => {
@@ -579,6 +599,7 @@ export async function startModuleJobs(
     nowDeactivated: ReadonlySet<string>,
     stamps?: ReadonlyMap<string, number>,
   ): Promise<void> => {
+    void retryLateStops();
     await stopModules([...stops.keys()].filter((moduleId) => nowDeactivated.has(moduleId)));
     for (const [index, module] of loaded.entries()) {
       if (closing) return;
