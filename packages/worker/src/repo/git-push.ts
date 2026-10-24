@@ -22,7 +22,7 @@ export async function detectOrigin(cwd: string): Promise<boolean> {
 
 /** An origin address refused by the same rule as a typed remote URL. */
 export class OriginUrlError extends Error {
-  constructor(url: string) {
+  constructor(url: string, direction: 'fetch' | 'push' = 'fetch') {
     let safe = url;
     if (safe.includes('://')) {
       try {
@@ -57,7 +57,9 @@ export class OriginUrlError extends Error {
     const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
     const fence = '`'.repeat(longest + 1);
     const span = longest > 0 ? `${fence} ${text} ${fence}` : `${fence}${text}${fence}`;
-    super(`origin URL is not allowed (expected https, http, ssh or an scp-style address): ${span}`);
+    super(
+      `origin URL is not allowed (${direction} URL; expected https, http, ssh or an scp-style address): ${span}. Fix the git configuration and Retry this step.`,
+    );
     this.name = 'OriginUrlError';
   }
 }
@@ -81,7 +83,7 @@ export async function getOriginUrl(cwd: string): Promise<string | null> {
     }
     const urls = res.stdout.trim().split('\n');
     for (const url of urls) {
-      if (!isAllowedGitRemoteUrl(url)) throw new OriginUrlError(url);
+      if (!isAllowedGitRemoteUrl(url)) throw new OriginUrlError(url, push ? 'push' : 'fetch');
     }
     first ??= urls[0];
   }

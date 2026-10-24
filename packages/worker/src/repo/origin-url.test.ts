@@ -138,7 +138,7 @@ describe('origin URL boundary', () => {
       expect(e.message).not.toContain('pa/ss');
       expect(e.message).not.toContain('ss@');
       expect(e.message).not.toContain('?');
-      expect(e.message.endsWith(`: \`${safe}\``)).toBe(true);
+      expect(e.message).toContain(`: \`${safe}\`.`);
       expect(e.message).toContain(safe);
     });
   });
@@ -146,8 +146,27 @@ describe('origin URL boundary', () => {
     ['git://host/[x](https://e.example)', '`git://host/[x](https://e.example)`'],
     ['/tmp/a`[x](relative)', '`` /tmp/a`[x](relative) ``'],
   ])('keeps refused address %s inside one Markdown code span', (url, span) => {
-    expect(new OriginUrlError(url).message.endsWith(`: ${span}`)).toBe(true);
+    expect(new OriginUrlError(url).message).toContain(`: ${span}.`);
   });
+  it.each(['fetch', 'push'] as const)(
+    'names the refused %s URL and how to retry',
+    async (direction) => {
+      const work = await repo();
+      await gitRun(work, ['remote', 'add', 'origin', 'https://example.test/r']);
+      await gitRun(work, [
+        'config',
+        `remote.origin.${direction === 'push' ? 'pushurl' : 'url'}`,
+        '/refused',
+      ]);
+      await expect(getOriginUrl(work)).rejects.toMatchObject({
+        name: 'OriginUrlError',
+        message: expect.stringContaining(`${direction} URL`),
+      });
+      await expect(getOriginUrl(work)).rejects.toThrow(
+        'Fix the git configuration and Retry this step.',
+      );
+    },
+  );
   it('accepts all allowed fetch/push addresses and returns the first fetch URL', async () => {
     const work = await repo();
     await gitRun(work, ['remote', 'add', 'origin', 'https://example.test/r']);
