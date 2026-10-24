@@ -126,6 +126,13 @@ All PRE-EXISTING.
 6. Import markers record a synthesized rtkEnabled:false (import-marker.ts ~44). [D, may be harmless]
 7. A sync outside persistDetection that adopts a teammate's rtk-enabled.json leaves the RTK question pending until boot; call raiseRtkQuestion after it. [E]
 
+### T412 · FNF[git-noexit-low-3] · gitClone and a few scripts still spawn git unbounded (+2)
+status: open
+From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it as its task #329.)
+1. Unbounded git spawns remain at repo/clone.ts:94,116,687 (gitClone: runs before its dir exists; carries the credential-helper argv, env and secret scrub — needs its own review), steps/onboarding/_credential-scan.ts:173, scripts/advance-bundle-items.ts:25, scripts/reset-bundle-to-commit.ts:43.
+2. Low: 99-run-app-ready.ts:315 drops a ticked push silently when the commit box is unticked.
+3. Display: 11-phase-8-learning.ts:549,1170 says "No commit recorded"/"(none)" when gate 3's sha read gave no answer after a landed commit.
+
 ### T117 · B3.2 · catch checkout moves Haive did not make (+5)
 status: open · kind: feature (designed; decisions D13-D16 taken)
 Full design: .claude/tmp/track-b/b3/b32/analysis/{detect,backstops}.md and the B3 ledger (2026-10-15).
