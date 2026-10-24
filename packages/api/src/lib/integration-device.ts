@@ -103,9 +103,12 @@ export async function pollDeviceSignIn(
   const dropRecord = async () => {
     try {
       await dropDeviceRecord(redis, userId, spec.id, handle);
-    } catch {
+    } catch (err) {
       // Cleanup must preserve the committed result or the original refusal. The record has a TTL.
-      logger.warn({ userId, providerId: spec.id }, 'device sign-in cleanup failed');
+      logger.warn(
+        { userId, providerId: spec.id, errorName: err instanceof Error ? err.name : undefined },
+        'device sign-in cleanup failed',
+      );
     }
   };
   const method = requireDeviceMethod(spec);

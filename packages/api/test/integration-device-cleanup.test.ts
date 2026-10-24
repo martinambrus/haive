@@ -61,7 +61,7 @@ beforeEach(() => {
     record: { deviceCode: 'fake-device-code', interval: 5, clientId: 'client-1', scopes: ['repo'] },
   });
   vi.mocked(finishSignIn).mockResolvedValue(result);
-  vi.mocked(dropDeviceRecord).mockRejectedValue(new Error('Redis unavailable'));
+  vi.mocked(dropDeviceRecord).mockRejectedValue(new TypeError('Redis unavailable'));
   vi.spyOn(logger, 'warn').mockImplementation(() => {});
   // Every vendor call stays in process; the real device-token parser reads this fake answer.
   vi.stubGlobal(
@@ -94,7 +94,7 @@ describe.each([
     expect(finishSignIn).toHaveBeenCalledTimes(1);
     expect(dropDeviceRecord).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(
-      { userId: 'user-1', providerId: 'github' },
+      { userId: 'user-1', providerId: 'github', errorName: 'TypeError' },
       'device sign-in cleanup failed',
     );
   });
