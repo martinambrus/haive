@@ -182,3 +182,15 @@ describe('step usage stamp across attempts', () => {
     },
   );
 });
+
+describe('non-terminal step writes preserve the frozen usage columns', () => {
+  it.each([{ status: 'running' } as const, { warningMessage: 'a warning' }])(
+    'keeps all six columns for %j',
+    async (patch) => {
+      const { db, seen } = mockDb([{ id: 'step1', ...previousUsage }]);
+      await updateOwnedStep(db, 'step1', patch);
+      expect({ ...previousUsage, ...seen.set }).toMatchObject(previousUsage);
+      for (const key of Object.keys(previousUsage)) expect(seen.set).not.toHaveProperty(key);
+    },
+  );
+});

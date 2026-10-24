@@ -327,6 +327,20 @@ describe('step usage stamp completion ownership', () => {
     expect(fake.rows(schema.taskSteps)[0]).toMatchObject(stamp);
   });
 
+  it.each(['pending', 'running', 'waiting_form', 'waiting_cli', 'failed', 'skipped'])(
+    'refuses %s even when endedAt still equals this completion',
+    async (status) => {
+      const { fake, db } = setup();
+      const newer = { status, endedAt: FINISHED_AT, ...emptyStamp };
+      fake.hooks.beforeUpdate = async () => {
+        fake.hooks.beforeUpdate = null;
+        await fake.db.update(schema.taskSteps).set(newer).where(eq(schema.taskSteps.id, STEP));
+      };
+      await writeStepContextUsage(db, STEP, FINISHED_AT);
+      expect(fake.rows(schema.taskSteps)[0]).toMatchObject(newer);
+    },
+  );
+
   it.each(['pending', 'running', 'waiting_form', 'waiting_cli', 'done', 'failed', 'skipped'])(
     'cannot replace an attempt that moved to %s while the stamp was being collected',
     async (status) => {
