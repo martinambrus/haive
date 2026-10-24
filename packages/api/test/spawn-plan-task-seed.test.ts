@@ -83,6 +83,7 @@ beforeEach(() => {
 describe('spawnPlanTask seeding', () => {
   beforeEach(() => {
     order.length = 0;
+    inserted.length = 0;
     taskQueue.add.mockClear();
   });
 
@@ -121,7 +122,8 @@ describe('spawnPlanTask seeding', () => {
   });
 
   it('still enqueues when there is nothing to seed', async () => {
-    await spawnPlanTask(args);
+    await spawnPlanTask({ ...args, expectedAttachmentCount: 3 });
+    expect(inserted[0]).toMatchObject({ expectedAttachmentCount: null });
     expect(order).toEqual([
       FENCE,
       ...BOUNDED_LOCK,
@@ -139,7 +141,13 @@ describe('spawnPlanTask seeding', () => {
     // row is created unstarted and the `start` action enqueues it once every
     // file has landed. Enqueueing here would be the exact race the deferral
     // exists to avoid.
-    const id = await spawnPlanTask({ ...args, type: 'plan_build' as const, enqueue: false });
+    const id = await spawnPlanTask({
+      ...args,
+      type: 'plan_build' as const,
+      enqueue: false,
+      expectedAttachmentCount: 3,
+    });
+    expect(inserted[0]).toMatchObject({ expectedAttachmentCount: 3 });
     expect(id).toBe('task-1');
     expect(order).toEqual([FENCE, ...BOUNDED_LOCK, 'insert', 'commit']);
     expect(taskQueue.add).not.toHaveBeenCalled();

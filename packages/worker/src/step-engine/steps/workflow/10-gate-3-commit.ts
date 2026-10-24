@@ -26,6 +26,7 @@ import type { Insight } from './08e-insights-triage.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { gitGaveNoAnswer, gitRun, type GitRunResult } from '../../../repo/git-exec.js';
+import { gitCommitStaged } from '../../../repo/git-commit.js';
 import { warnStep } from '../../../project-state/branch-revert.js';
 
 /** Cap on how many changed paths we persist to tasks.changed_paths. The estimator's
@@ -410,17 +411,12 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     }
     const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
     const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-    const commit = await gitRun(workspace, ['commit', '-m', message], commitEnv);
-    if (commit.code !== 0) {
-      const stderr = commit.stderr || commit.stdout;
-      if (/nothing to commit/i.test(stderr)) {
-        return {
-          committed: false,
-          commitSha: null,
-          message: 'nothing to commit',
-        };
-      }
-      throw new Error(`git commit failed: ${stderr}`);
+    if (!(await gitCommitStaged(workspace, message, commitEnv))) {
+      return {
+        committed: false,
+        commitSha: null,
+        message: 'nothing to commit',
+      };
     }
     const sha = await readLanded(workspace, ['rev-parse', 'HEAD']);
     const commitSha = sha.code === 0 ? sha.stdout.trim() : null;
