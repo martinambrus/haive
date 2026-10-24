@@ -1022,11 +1022,13 @@ describe('enforcement security audit', () => {
   it.each(['PUT', 'DELETE'])('rolls the row back when the %s store write fails', async (method) => {
     approve(ENTRY, FILES);
     const before = stored();
+    let auditRowsAtStoreWrite: number | undefined;
     fake.hooks.beforeUpdate = () => {
-      expect(auditFake.rows(schema.auditEvents)).toHaveLength(1);
+      auditRowsAtStoreWrite = auditFake.rows(schema.auditEvents).length;
       throw new Error('store write refused');
     };
     expect((await (method === 'PUT' ? enforce(ALWAYS) : unenforce())).status).toBe(500);
+    expect(auditRowsAtStoreWrite).toBe(1);
     expect(stored()).toEqual(before);
     expect(auditFake.rows(schema.auditEvents)).toEqual([]);
     expect(h.logAudit).not.toHaveBeenCalled();
