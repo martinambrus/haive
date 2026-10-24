@@ -8,6 +8,7 @@ import {
   isRefusedStatement,
   lockRepositoryTasksKey,
   schema,
+  type DbTx,
 } from '@haive/database';
 import {
   CONFIG_KEYS,
@@ -361,11 +362,11 @@ function serializeConfigSave<T>(run: () => Promise<T>): Promise<T> {
 
 globalKbRoutes.put('/config', (c) => serializeConfigSave(() => putConfig(c)));
 
-// Write the main-DB row before a change on another connection; log only after its commit.
-async function auditedChange<T>(event: AuditEvent, change: () => Promise<T>): Promise<T> {
+// Write the main-DB row first. Main-DB changes join its transaction; log only after commit.
+async function auditedChange<T>(event: AuditEvent, change: (tx: DbTx) => Promise<T>): Promise<T> {
   const result = await getDb().transaction(async (tx) => {
     await insertAuditEvent(tx, event);
-    return change();
+    return change(tx);
   });
   logAuditEvent(event);
   return result;
@@ -462,11 +463,12 @@ async function putConfig(c: Context<AppEnv>) {
           targetType: 'global_kb',
           metadata: { connectionStringSet: true },
         },
-        () =>
+        (tx) =>
           secretsService.set(
             SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
             given,
             'Global KB external connection string',
+            tx,
           ),
       );
     }
@@ -518,7 +520,7 @@ async function putConfig(c: Context<AppEnv>) {
         targetType: 'global_kb',
         metadata: { connectionStringSet: false },
       },
-      () => secretsService.delete(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING),
+      (tx) => secretsService.delete(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING, tx),
     );
   }
   return c.json(await configResponse(await resolveGlobalKbSettings(), c.get('userRole')));

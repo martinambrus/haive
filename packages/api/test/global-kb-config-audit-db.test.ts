@@ -466,13 +466,14 @@ describe.skipIf(!url)('PUT /global-kb/config writes its audit row first, on Post
     expect(all[1]!.metadata).toEqual({ connectionStringSet: false });
   });
 
-  it('W1: a commit that fails after the string was stored leaves it without a row and answers 500', async () => {
+  it('W1: a failed commit rolls the string update back with its audit row', async () => {
     await armExternalWithOld();
     await refuseAuditAtCommit(db);
     const res = await put({ connectionString: NEW });
     expect(res.status).toBe(500);
     await dropTriggers(db);
-    expect(await storedSecret()).toBe(NEW);
+    expect(await secretsService.get(SECRET_KEY)).toBe(OLD);
+    expect(await storedSecret()).toBe(OLD);
     expect(await rows()).toEqual([]);
   });
 
@@ -486,13 +487,14 @@ describe.skipIf(!url)('PUT /global-kb/config writes its audit row first, on Post
     expect(await rows()).toEqual([]);
   });
 
-  it('W3: a commit that fails after the string was removed leaves it without a row and answers 500', async () => {
+  it('W3: a failed commit rolls the string deletion back with its audit row', async () => {
     await setSecretDirectly(OLD);
     await refuseAuditAtCommit(db);
     const res = await put({ clearConnectionString: true });
     expect(res.status).toBe(500);
     await dropTriggers(db);
-    expect(await storedSecret()).toBeNull();
+    expect(await secretsService.get(SECRET_KEY)).toBe(OLD);
+    expect(await storedSecret()).toBe(OLD);
     expect(await rows()).toEqual([]);
   });
 });
