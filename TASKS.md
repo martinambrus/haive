@@ -128,6 +128,7 @@ From the #311 driver (2026-10-24). PRE-EXISTING unless noted. (Session fnf-run m
 2. Python defRe matches def/class inside triple-quoted strings (verify).
 3. PHP trait/interface/enum owners absent; `new class extends X {` names methods method-extends-*.
 4. LIMIT introduced by #311: JSX text lexed as JS blanks the rest of a line after an apostrophe, `//` or `/` (30 runs in 3 of 2417 TS files, 0 constructs lost).
+   Also: a stray backtick in JSX text that pairs with a LATER real template literal masks the code between them (#889 fixed only the unclosed case; needs a JSX-text signal).
 5. Ruby reader: `def self.x` named `self`, `module`, endless def.
 6. Doc: docs/plans/rag-retrieval-improvements.md:22-23 chunkSection split order is stale.
 
