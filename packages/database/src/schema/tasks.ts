@@ -605,7 +605,10 @@ export const taskSteps = pgTable(
      *  (token_usage.contextWindow), else a static-table fallback;
      *  context_left_percent = 100 - round(tokens / window * 100). All null on
      *  deterministic (no-CLI) steps, on steps whose CLI reported no per-request
-     *  figure, and on rows finalized before this feature. */
+     *  figure, and on rows finalized before this feature.
+     *  A finish other than a stamped done (failed, skipped, a gate close, or a
+     *  routing-verdict finish without usable usage) leaves all six columns null.
+     *  The web shows these columns only on a done row. */
     contextLeftPercent: integer('context_left_percent'),
     contextTokens: integer('context_tokens'),
     contextWindowSize: integer('context_window_size'),

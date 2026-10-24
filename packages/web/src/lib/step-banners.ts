@@ -16,6 +16,12 @@ import { parseStepId } from '@haive/shared/modularity';
  *  exist so that decision lives in one tested place instead of being re-derived per call site.
  */
 
+/** Usage stamps are collected only for done attempts. Retry, Resume, loops and re-offered forms can
+ *  reuse its row with its old figures; those figures have no meaning while it is open. */
+export function showsStepUsageStamp(step: { status: string }): boolean {
+  return step.status === 'done';
+}
+
 /** Copy shown in place of a queue/park line while execution is paused.
  *
  *  Pause gates job PICKUP, never work already in flight, so this replaces the copy of things

@@ -18,6 +18,7 @@ import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import {
   isUniqueViolationOf,
   ONE_LIVE_UPGRADE_INDEX,
+  CLEAR_STEP_USAGE_STAMP,
   schema,
   type Database,
 } from '@haive/database';
@@ -3777,6 +3778,7 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
     .set({
       status: 'failed',
       errorMessage: 'Task cancelled',
+      ...CLEAR_STEP_USAGE_STAMP,
       endedAt: now,
       // Mirror of the fold in cancelTaskRow (api/lib/cancel-task.ts): stamping ended_at over a
       // live waiting_started_at would turn the whole recorded park back into work, because

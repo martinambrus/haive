@@ -22,6 +22,7 @@ import {
   isLockNotAvailable,
   resetDagCurrentLevelForRetry,
   CLOSED_GAP_INTO_IDLE_MS,
+  CLEAR_STEP_USAGE_STAMP,
   type Database,
   ZERO_MERGE_RETRIES,
 } from '@haive/database';
@@ -1453,6 +1454,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         .update(schema.taskSteps)
         .set({
           status: 'skipped',
+          ...CLEAR_STEP_USAGE_STAMP,
           errorMessage: null,
           endedAt: now,
           idleMs: step.idleMs + closedIdleMs,
