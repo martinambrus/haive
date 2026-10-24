@@ -287,7 +287,7 @@ describe('an unreadable side of a changed file', () => {
     });
   });
 
-  it('flags a repository nobody added as a submodule, which has no pinned commit to show', async () => {
+  it('flags an unborn nested repository as unreadable', async () => {
     await repo(async (dir) => {
       await git(dir, ['init', '-q', 'nested']);
       const built = await buildCommitDiffArtifact(dir, gitRun);
@@ -317,6 +317,279 @@ describe('an unreadable side of a changed file', () => {
 
       expect(written.fileCount).toBe(1);
       expect(written.files[0].unreadable).toBe(true);
+    });
+  });
+});
+
+describe('untracked directory staging controls', () => {
+  async function repo(act: (dir: string) => Promise<void>): Promise<void> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'commit-diff-untracked-'));
+    try {
+      await git(dir, ['init', '-b', 'main']);
+      await writeFile(path.join(dir, '.git', 'info', 'exclude'), '.haive/\n');
+      await git(dir, ['commit', '--allow-empty', '-m', 'base']);
+      await act(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it.each(['untracked', 'M', 'A'])(
+    'reads the ref without its missing commit object (%s)',
+    async (state) => {
+      await repo(async (dir) => {
+        const nested = path.join(dir, 'nested');
+        const run = async (cwd: string, args: string[]) => {
+          const result = await gitRun(cwd, args, GIT_ENV);
+          expect(result.code).toBe(0);
+          return result;
+        };
+        await run(dir, ['init', '-b', 'main', 'nested']);
+        await run(nested, ['commit', '--allow-empty', '-m', 'first']);
+        if (state !== 'untracked') await run(dir, ['add', 'nested']);
+        await run(nested, ['commit', '--allow-empty', '-m', 'second']);
+        const head = (await run(nested, ['rev-parse', 'HEAD'])).stdout.trim();
+        await unlink(path.join(nested, '.git', 'objects', head.slice(0, 2), head.slice(2)));
+        // git add resolves the ref, without opening the object that it names.
+        const file = await buildFileEntry(
+          dir,
+          gitRun,
+          {
+            x: state === 'untracked' ? '?' : 'A',
+            y: state === 'untracked' ? '?' : state,
+            path: 'nested',
+          },
+          1000,
+        );
+        await run(dir, ['add', '-A']);
+        expect((await run(dir, ['ls-files', '-s', '-z'])).stdout).toBe(
+          `160000 ${head} 0\tnested\0`,
+        );
+        expect(file).toMatchObject({ link: 'gitlink', newContent: `Subproject commit ${head}\n` });
+        expect(file.unreadable).toBeUndefined();
+      });
+    },
+  );
+
+  it.each([-1, 124, 128, 0])(
+    'gives no staging reason for an inconclusive nested read (%s)',
+    async (code) => {
+      await repo(async (dir) => {
+        await git(dir, ['init', '-b', 'main', 'nested']);
+        const noAnswer: typeof gitRun = (cwd, args) =>
+          cwd !== dir && args.includes('rev-parse')
+            ? Promise.resolve({ code, stdout: '', stderr: 'opaque failure' })
+            : gitRun(cwd, args);
+        const file = await buildFileEntry(dir, noAnswer, { x: '?', y: '?', path: 'nested/' }, 1000);
+        expect(file).toMatchObject({ unreadable: true, oldContent: '', newContent: '' });
+        expect(file.unreadableReason).toBeUndefined();
+      });
+    },
+  );
+
+  it.each(['separate', 'submodule', 'symlink'])(
+    'compares git add with a %s .git marker',
+    async (kind) => {
+      await repo(async (dir) => {
+        const nested = path.join(dir, 'nested');
+        const run = async (cwd: string, args: string[]) => {
+          const result = await gitRun(cwd, args, GIT_ENV);
+          expect(result.code).toBe(0);
+          return result;
+        };
+        if (kind === 'submodule') {
+          const origin = path.join(dir, 'origin');
+          await run(dir, ['init', '-b', 'main', 'origin']);
+          await run(origin, ['commit', '--allow-empty', '-m', 'origin']);
+          await run(dir, [
+            '-c',
+            'protocol.file.allow=always',
+            'submodule',
+            'add',
+            origin,
+            'nested',
+          ]);
+          await rm(origin, { recursive: true });
+        } else {
+          await run(dir, [
+            'init',
+            '-b',
+            'main',
+            '--separate-git-dir',
+            path.join(dir, '.git', 'nested-data'),
+            'nested',
+          ]);
+          if (kind === 'symlink') {
+            await unlink(path.join(nested, '.git'));
+            await symlink(path.join(dir, '.git', 'nested-data'), path.join(nested, '.git'));
+          }
+        }
+        await run(nested, ['commit', '--allow-empty', '-m', 'nested']);
+        const head = (await run(nested, ['rev-parse', 'HEAD'])).stdout.trim();
+        const built = await buildCommitDiffArtifact(dir, gitRun);
+        await run(dir, ['add', '-A']);
+        expect((await run(dir, ['ls-files', '-s', '-z'])).stdout).toContain(
+          `160000 ${head} 0\tnested\0`,
+        );
+        const file = built.artifact.files.find((f) => f.path.replace(/\/$/, '') === 'nested');
+        if (kind === 'symlink') {
+          // fs-safe refuses this redirect, even though git add follows it.
+          expect(file).toMatchObject({ unreadable: true, newContent: '' });
+          expect(file?.unreadableReason).toBeUndefined();
+        } else {
+          expect(file).toMatchObject({
+            link: 'gitlink',
+            newContent: `Subproject commit ${head}\n`,
+          });
+          expect(file?.unreadable).toBeUndefined();
+        }
+      });
+    },
+  );
+
+  it.each(['M', 'A'])('never discovers upward after a tracked %s marker vanishes', async (y) => {
+    await repo(async (dir) => {
+      const nested = path.join(dir, 'nested');
+      await git(dir, ['init', '-b', 'main', 'nested']);
+      await git(nested, ['commit', '--allow-empty', '-m', 'nested']);
+      await git(dir, ['add', 'nested']);
+      let asked = false;
+      const swapping: typeof gitRun = async (cwd, args) => {
+        if (cwd !== dir && args.includes('rev-parse')) {
+          asked = true;
+          await rename(path.join(nested, '.git'), path.join(nested, 'saved-git'));
+        }
+        return gitRun(cwd, args);
+      };
+      const file = await buildFileEntry(dir, swapping, { x: 'A', y, path: 'nested' }, 1000);
+      expect(asked).toBe(true);
+      expect(file).toMatchObject({ unreadable: true, newContent: '' });
+      expect(file.link).toBeUndefined();
+      expect(file.unreadableReason).toBeUndefined();
+    });
+  });
+
+  it('previews the gitlink git add -A records for nested', async () => {
+    const name = 'nested';
+    await repo(async (dir) => {
+      const nested = path.join(dir, name);
+      await git(dir, ['init', '-b', 'main', name]);
+      await writeFile(path.join(nested, 'file.txt'), 'nested commit\n');
+      await git(nested, ['add', '-A']);
+      await git(nested, ['commit', '-m', 'nested']);
+      const head = (await git(nested, ['rev-parse', 'HEAD'])).stdout.trim();
+      // Dirty nested content is not part of the superproject's commit.
+      await writeFile(path.join(nested, 'file.txt'), 'not committed\n');
+      const built = await buildCommitDiffArtifact(dir, gitRun);
+      const status = await gitRun(dir, ['status', '--porcelain', '-z', '-uall']);
+      expect(parsePorcelainZ(status.stdout)).toEqual([{ x: '?', y: '?', path: `${name}/` }]);
+
+      expect((await gitRun(dir, ['add', '-A'])).code).toBe(0);
+      const index = await gitRun(dir, ['ls-files', '-s', '-z']);
+      expect(index.code).toBe(0);
+      expect(index.stdout).toBe(`160000 ${head} 0\t${name}\0`);
+      expect((await git(dir, ['diff', '--cached', '--numstat'])).stdout).toBe(`1\t0\t${name}\n`);
+      expect(built.artifact.files).toEqual([
+        {
+          path: `${name}/`,
+          status: 'added',
+          binary: false,
+          truncated: false,
+          link: 'gitlink',
+          oldContent: '',
+          newContent: `Subproject commit ${head}\n`,
+        },
+      ]);
+    });
+  });
+
+  it('explains an unborn nested repository that git add -A refuses', async () => {
+    await repo(async (dir) => {
+      await git(dir, ['init', '-b', 'main', 'nested']);
+      const built = await buildCommitDiffArtifact(dir, gitRun);
+      const add = await gitRun(dir, ['add', '-A']);
+      expect(add.code).toBeGreaterThan(0);
+      expect((await gitRun(dir, ['ls-files', '-s', '-z'])).stdout).toBe('');
+      expect(built.artifact.files).toEqual([
+        {
+          path: 'nested/',
+          status: 'added',
+          binary: false,
+          truncated: false,
+          unreadable: true,
+          unreadableReason:
+            'Nested repository HEAD could not be read; git add -A cannot stage it without a checked-out commit.',
+          oldContent: '',
+          newContent: '',
+        },
+      ]);
+    });
+  });
+
+  it.each(['directory', 'marker'])(
+    'keeps repository discovery on the held directory after a %s swap',
+    async (swap) => {
+      await repo(async (dir) => {
+        const nested = path.join(dir, 'nested');
+        await git(dir, ['init', '-b', 'main', 'nested']);
+        await git(nested, ['commit', '--allow-empty', '-m', 'nested']);
+        const head = (await git(nested, ['rev-parse', 'HEAD'])).stdout.trim();
+        const swapping: typeof gitRun = async (cwd, args) => {
+          if (args.includes('rev-parse') && cwd !== dir) {
+            if (swap === 'directory') {
+              await rename(nested, path.join(dir, 'moved'));
+              await symlink(dir, nested);
+            } else {
+              await rename(path.join(nested, '.git'), path.join(nested, 'saved-git'));
+            }
+          }
+          return gitRun(cwd, args);
+        };
+        const built = await buildCommitDiffArtifact(dir, swapping);
+        const file = built.artifact.files[0];
+        if (swap === 'directory') {
+          expect(file).toMatchObject({
+            link: 'gitlink',
+            newContent: `Subproject commit ${head}\n`,
+          });
+          expect(file?.unreadable).toBeUndefined();
+        } else {
+          expect(file).toMatchObject({ unreadable: true, newContent: '' });
+          expect(file?.unreadableReason).toBeUndefined();
+          expect(file?.link).toBeUndefined();
+        }
+      });
+    },
+  );
+
+  it('keeps plain directories as files and never borrows the parent HEAD', async () => {
+    await repo(async (dir) => {
+      await mkdir(path.join(dir, 'plain'));
+      await mkdir(path.join(dir, 'empty'));
+      await writeFile(path.join(dir, 'plain', 'file.txt'), 'plain content\n');
+      const built = await buildCommitDiffArtifact(dir, gitRun);
+      expect((await gitRun(dir, ['add', '-A'])).code).toBe(0);
+      const index = await gitRun(dir, ['ls-files', '-s', '-z']);
+      expect(index.stdout).toMatch(/^100644 [0-9a-f]{40,64} 0\tplain\/file.txt\0$/);
+      expect(built.artifact.files).toEqual([
+        {
+          path: 'plain/file.txt',
+          status: 'added',
+          binary: false,
+          truncated: false,
+          oldContent: '',
+          newContent: 'plain content\n',
+        },
+      ]);
+      const asked: string[][] = [];
+      const recording: typeof gitRun = (cwd, args) => {
+        asked.push(args);
+        return gitRun(cwd, args);
+      };
+      const plain = await buildFileEntry(dir, recording, { x: '?', y: '?', path: 'plain/' }, 1000);
+      expect(plain.unreadable).toBe(true);
+      expect(plain.link).toBeUndefined();
+      expect(asked.some((args) => args.includes('rev-parse'))).toBe(false);
     });
   });
 });
@@ -558,8 +831,10 @@ describe('a changed link or submodule', () => {
   it('asks a submodule through the directory it opened, not through its name', async () => {
     await repo(async (dir, { second }) => {
       await git(path.join(dir, 'sub'), ['checkout', '-q', second]);
+      let swapped = false;
       const swapping: typeof gitRun = async (cwd, args) => {
-        if (args[0] === 'rev-parse' && cwd !== dir) {
+        if (args.includes('rev-parse') && cwd !== dir) {
+          swapped = true;
           await rename(path.join(dir, 'sub'), path.join(dir, 'sub-moved'));
           await symlink(dir, path.join(dir, 'sub'));
         }
@@ -567,6 +842,7 @@ describe('a changed link or submodule', () => {
       };
       const built = await buildCommitDiffArtifact(dir, swapping);
 
+      expect(swapped).toBe(true);
       expect(built.artifact.files.find((f) => f.path === 'sub')?.newContent).toBe(
         subproject(second),
       );

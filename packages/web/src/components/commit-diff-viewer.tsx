@@ -692,7 +692,8 @@ export function CommitDiffViewer({ taskId, artifactPath }: CommitDiffViewerProps
                     />
                   ) : selectedFile.unreadable ? (
                     <div className="p-4 text-xs text-neutral-400">
-                      Could not read this file — diff not shown.
+                      {selectedFile.unreadableReason ??
+                        'Could not read this file — diff not shown.'}
                     </div>
                   ) : selectedFile.binary ? (
                     <div className="p-4 text-xs text-neutral-400">
