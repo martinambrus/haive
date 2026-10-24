@@ -402,8 +402,13 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
     }
     const log = undoLog(ctx);
     const row: FakeRow = Object.fromEntries(Object.keys(cols).map((k) => [k, null]));
-    Object.assign(row, { id: randomUUID() }, 'createdAt' in cols ? { createdAt: now() } : {});
+    const stamp = 'createdAt' in cols ? now() : null;
+    Object.assign(row, { id: randomUUID() }, stamp ? { createdAt: stamp } : {});
     Object.assign(row, values);
+    const written = values.createdAt;
+    if (stamp && is(written, SQL) && written.queryChunks.length === 1) {
+      if (text(written.queryChunks[0]) === 'clock_timestamp()') row.createdAt = stamp;
+    }
     if (tableRows(table).some((r) => r.id === row.id)) {
       throw new Error(`fake db: duplicate key on ${getTableName(table)}`);
     }

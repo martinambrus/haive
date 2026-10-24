@@ -53,6 +53,82 @@ function shortTime(iso: string | null): string {
   return new Date(iso).toLocaleString();
 }
 
+function TaskRow({
+  t,
+  viewerId,
+  busy,
+  act,
+}: {
+  t: BlockingTask;
+  viewerId: string;
+  busy: boolean;
+  act: (task: BlockingTask, action: 'pause' | 'resume' | 'stop') => Promise<void>;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-neutral-800 p-3">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <BlockingTaskTitle task={t} viewerId={viewerId} />
+          <Badge>{t.status}</Badge>
+          {/* The distinction that decides whether to wait or to act. */}
+          {t.hasLiveCli ? <Badge variant="info">CLI running</Badge> : null}
+          {t.pausedAt ? (
+            <Badge variant="warning">
+              {t.pausedByAdmin ? 'paused by admin' : 'paused by owner'}
+            </Badge>
+          ) : null}
+        </div>
+        <div className="mt-1 text-xs text-neutral-500">
+          {t.ownerName ?? t.ownerEmail ?? 'unknown owner'}
+          {t.currentStepId ? ` · ${t.currentStepId}` : ''} · {shortTime(t.updatedAt)}
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {t.pausedAt ? (
+          <>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={busy}
+              onClick={() => void act(t, 'resume')}
+            >
+              Resume
+            </Button>
+            {t.pausedByAdmin ? null : (
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                title="Keep it paused and make the pause an administrator's, so only an administrator can resume it."
+                onClick={() => void act(t, 'pause')}
+              >
+                Take over pause
+              </Button>
+            )}
+          </>
+        ) : (
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={busy}
+            onClick={() => void act(t, 'pause')}
+          >
+            Pause
+          </Button>
+        )}
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={busy || !t.hasLiveCli}
+          onClick={() => void act(t, 'stop')}
+        >
+          Stop CLI
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function MaintenancePage() {
   usePageTitle('Maintenance');
 
@@ -139,6 +215,8 @@ export default function MaintenancePage() {
 
   const liveRun = upgrade?.runs.find((r) => r.status === 'running') ?? null;
 
+  const parked = blocking?.parked ?? [];
+
   return (
     <div className="space-y-6">
       <div>
@@ -205,55 +283,27 @@ export default function MaintenancePage() {
         ) : null}
         <div className="space-y-2">
           {blocking?.tasks.map((t) => (
-            <div
-              key={t.id}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-neutral-800 p-3"
-            >
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <BlockingTaskTitle task={t} viewerId={blocking.viewerId} />
-                  <Badge>{t.status}</Badge>
-                  {/* The distinction that decides whether to wait or to act. */}
-                  {t.hasLiveCli ? <Badge variant="info">CLI running</Badge> : null}
-                  {t.pausedAt ? <Badge variant="warning">paused</Badge> : null}
-                </div>
-                <div className="mt-1 text-xs text-neutral-500">
-                  {t.ownerName ?? t.ownerEmail ?? 'unknown owner'}
-                  {t.currentStepId ? ` · ${t.currentStepId}` : ''} · {shortTime(t.updatedAt)}
-                </div>
-              </div>
-              <div className="flex gap-2">
-                {t.pausedAt ? (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={busy}
-                    onClick={() => void act(t, 'resume')}
-                  >
-                    Resume
-                  </Button>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={busy}
-                    onClick={() => void act(t, 'pause')}
-                  >
-                    Pause
-                  </Button>
-                )}
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={busy || !t.hasLiveCli}
-                  onClick={() => void act(t, 'stop')}
-                >
-                  Stop CLI
-                </Button>
-              </div>
-            </div>
+            <TaskRow key={t.id} t={t} viewerId={blocking.viewerId} busy={busy} act={act} />
           ))}
         </div>
+        {blocking && parked.length > 0 ? (
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium text-neutral-300">Parked</h3>
+            <p className="text-xs text-neutral-500">
+              These do not hold the drain. They wait on their owner, who is locked out while the
+              state is maintenance, or failed under an administrator&apos;s pause that only an
+              administrator can lift.
+            </p>
+            {blocking.parkedCapped ? (
+              <p className="text-xs text-amber-400">
+                Showing the first {parked.length} parked tasks. There are more.
+              </p>
+            ) : null}
+            {parked.map((t) => (
+              <TaskRow key={t.id} t={t} viewerId={blocking.viewerId} busy={busy} act={act} />
+            ))}
+          </div>
+        ) : null}
         {blocking && blocking.jobs.length > 0 ? (
           <div className="space-y-2">
             <h3 className="text-sm font-medium text-neutral-300">Background jobs</h3>

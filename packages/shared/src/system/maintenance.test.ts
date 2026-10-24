@@ -6,6 +6,7 @@ import {
   lockNewWorkFenceExclusive,
   lockNewWorkFenceShared,
   locksOutNonAdmins,
+  nonBlockingTaskStatuses,
   type MaintenanceState,
   NEW_WORK_FENCE_KEY,
   parseMaintenanceState,
@@ -126,5 +127,35 @@ describe('drainTaskStatuses', () => {
       }
       expect([...statuses(state)]).toEqual(before);
     }
+  });
+});
+
+describe('nonBlockingTaskStatuses', () => {
+  const FIVE = ['queued', 'running', 'paused', 'waiting_user', 'waiting_pr'];
+  const nonBlocking = (state: MaintenanceState): string[] => {
+    expect(typeof nonBlockingTaskStatuses).toBe('function');
+    return nonBlockingTaskStatuses(state);
+  };
+
+  it('is the parked three once owners are locked out, and nothing otherwise', () => {
+    expect(nonBlocking('maintenance').sort()).toEqual(['paused', 'waiting_pr', 'waiting_user']);
+    expect(nonBlocking('normal')).toEqual([]);
+    expect(nonBlocking('draining')).toEqual([]);
+  });
+
+  it('is disjoint from the drain and, with it, exactly the five live statuses', () => {
+    for (const state of ['normal', 'draining', 'maintenance'] as const) {
+      const drain: string[] = drainTaskStatuses(state);
+      const rest = nonBlocking(state);
+      expect(rest.filter((s) => drain.includes(s))).toEqual([]);
+      expect([...drain, ...rest].sort()).toEqual([...FIVE].sort());
+    }
+  });
+
+  it('hands out a list a caller can change without changing the next answer', () => {
+    const before = [...nonBlocking('maintenance')];
+    nonBlocking('maintenance').push('completed');
+    nonBlocking('maintenance').length = 0;
+    expect(nonBlocking('maintenance')).toEqual(before);
   });
 });

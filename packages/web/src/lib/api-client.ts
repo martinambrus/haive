@@ -2432,6 +2432,8 @@ export interface BlockingTask {
   type: string;
   status: string;
   pausedAt: string | null;
+  /** Absent from an api that predates it. */
+  pausedByAdmin?: boolean;
   currentStepId: string | null;
   updatedAt: string;
   ownerId: string | null;
@@ -2454,6 +2456,10 @@ export interface BlockingJob {
 
 export interface BlockingResponse {
   tasks: BlockingTask[];
+  /** Tasks the drain does not wait for but only an administrator can act on; never counted in
+   *  `total`. Absent, with `parkedCapped`, from an api that predates them. */
+  parked?: BlockingTask[];
+  parkedCapped?: boolean;
   jobs: BlockingJob[];
   total: number;
   /** The listing is capped server-side. Rendered, because reading a truncated list as the whole

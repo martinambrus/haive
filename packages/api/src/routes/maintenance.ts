@@ -17,6 +17,7 @@ import {
   logger,
   maintenanceStateSchema,
   networkName,
+  nonBlockingTaskStatuses,
   parseMaintenanceState,
 } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -27,7 +28,12 @@ import {
   type AuditEvent,
 } from '../lib/audit.js';
 import { clearTaskPause, stopActiveCliInvocations } from '../lib/task-control.js';
-import { appendTaskEvent } from './tasks/_helpers.js';
+import {
+  appendPauseEvent,
+  appendTaskEvent,
+  findAdminPausedTaskIds,
+  recordAdminResume,
+} from './tasks/_helpers.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { findLiveUpgradeRun, listUpgradeRuns } from '../lib/upgrade-run.js';
@@ -177,28 +183,65 @@ async function listBlockingJobs(db: ReturnType<typeof getDb>) {
 maintenanceRoutes.get('/blocking', async (c) => {
   const db = getDb();
   const state = parseMaintenanceState(await configService.getFresh(CONFIG_KEYS.MAINTENANCE_STATE));
+  const blockingTask = {
+    id: schema.tasks.id,
+    title: schema.tasks.title,
+    type: schema.tasks.type,
+    status: schema.tasks.status,
+    pausedAt: schema.tasks.pausedAt,
+    currentStepId: schema.tasks.currentStepId,
+    updatedAt: schema.tasks.updatedAt,
+    ownerId: schema.users.id,
+    ownerName: schema.users.name,
+    // A display name is optional in this schema, and "unknown owner" is useless to an operator
+    // who has to go and ask whose work this is. The email always exists — decrypted here the
+    // same way `/admin/users` does it, since this list has the same admin-only audience.
+    ownerEmailEncrypted: schema.users.emailEncrypted,
+  };
   const fetched = await db
-    .select({
-      id: schema.tasks.id,
-      title: schema.tasks.title,
-      type: schema.tasks.type,
-      status: schema.tasks.status,
-      pausedAt: schema.tasks.pausedAt,
-      currentStepId: schema.tasks.currentStepId,
-      updatedAt: schema.tasks.updatedAt,
-      ownerId: schema.users.id,
-      ownerName: schema.users.name,
-      // A display name is optional in this schema, and "unknown owner" is useless to an operator
-      // who has to go and ask whose work this is. The email always exists — decrypted here the
-      // same way `/admin/users` does it, since this list has the same admin-only audience.
-      ownerEmailEncrypted: schema.users.emailEncrypted,
-    })
+    .select(blockingTask)
     .from(schema.tasks)
     .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
     // A dead task runs nothing, and none of this page's actions reach it; its owner cancels it.
     .where(and(inArray(schema.tasks.status, drainTaskStatuses(state)), isNull(schema.tasks.deadAt)))
     .orderBy(desc(schema.tasks.updatedAt))
     .limit(BLOCKING_LIST_CAP + 1);
+  const notWaitedFor = nonBlockingTaskStatuses(state);
+  // Not waited for, but only an administrator can act on them: parked while owners are locked out,
+  // or failed under a pause an administrator holds. Whose pause stands is decided before the list
+  // is cut, so rows that need no administrator cannot crowd out the ones that do.
+  const failedPausedIds = (
+    await db
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          isNull(schema.tasks.deadAt),
+          eq(schema.tasks.status, 'failed'),
+          isNotNull(schema.tasks.pausedAt),
+        ),
+      )
+      .orderBy(desc(schema.tasks.updatedAt))
+  ).map((r) => r.id);
+  // Only the newest cap + 1 can reach the list, so no more ids than that go into the query below.
+  const heldIds = await findAdminPausedTaskIds(db, failedPausedIds);
+  const adminHeldFailed = failedPausedIds
+    .filter((id) => heldIds.has(id))
+    .slice(0, BLOCKING_LIST_CAP + 1);
+  const arms = [
+    notWaitedFor.length > 0 ? inArray(schema.tasks.status, notWaitedFor) : undefined,
+    adminHeldFailed.length > 0 ? inArray(schema.tasks.id, adminHeldFailed) : undefined,
+  ].filter((arm) => arm !== undefined);
+  const parkedFetched =
+    arms.length === 0
+      ? []
+      : await db
+          .select(blockingTask)
+          .from(schema.tasks)
+          .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
+          .where(and(isNull(schema.tasks.deadAt), or(...arms)))
+          .orderBy(desc(schema.tasks.updatedAt))
+          .limit(BLOCKING_LIST_CAP + 1);
   const rows = fetched.slice(0, BLOCKING_LIST_CAP);
   const { jobs, capped: jobsCapped } = await listBlockingJobs(db);
   const fieldKey = await configService.getEncryptionKey();
@@ -218,12 +261,22 @@ maintenanceRoutes.get('/blocking', async (c) => {
     );
   const withLiveCli = new Set(live.map((r) => r.taskId));
 
+  const adminPaused = await findAdminPausedTaskIds(
+    db,
+    [...rows, ...parkedFetched].filter((r) => r.pausedAt).map((r) => r.id),
+  );
+  const parked = parkedFetched.slice(0, BLOCKING_LIST_CAP);
+  const shape = ({ ownerEmailEncrypted, ...r }: (typeof rows)[number]) => ({
+    ...r,
+    pausedByAdmin: adminPaused.has(r.id),
+    ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
+    hasLiveCli: withLiveCli.has(r.id),
+  });
+
   return c.json({
-    tasks: rows.map(({ ownerEmailEncrypted, ...r }) => ({
-      ...r,
-      ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
-      hasLiveCli: withLiveCli.has(r.id),
-    })),
+    tasks: rows.map(shape),
+    parked: parked.map(shape),
+    parkedCapped: parkedFetched.length > BLOCKING_LIST_CAP,
     jobs: jobs.map(({ ownerEmailEncrypted, ...r }) => ({
       ...r,
       ownerEmail: ownerEmailEncrypted ? decryptEmail(ownerEmailEncrypted, fieldKey) : null,
@@ -280,48 +333,49 @@ maintenanceRoutes.post('/tasks/:id/action', async (c) => {
       if (task.status === 'completed' || task.status === 'cancelled') {
         throw new HttpError(409, `Cannot pause a ${task.status} task`);
       }
-      // Idempotent, and it keeps the ORIGINAL timestamp for the same reason the owner path does:
-      // that stamp anchors the runtime reaper's paused-grace.
-      if (task.pausedAt) return c.json({ ok: true, pausedAt: task.pausedAt.toISOString() });
-      const pausedAt = new Date();
-      const ev = auditEvent({ pausedAt: pausedAt.toISOString() });
-      const paused = await db.transaction(async (tx) => {
-        // Only the pause that changes the row is recorded.
-        const rows = await tx
-          .update(schema.tasks)
-          .set({ pausedAt, updatedAt: pausedAt })
-          .where(and(eq(schema.tasks.id, taskId), isNull(schema.tasks.pausedAt)))
-          .returning({ id: schema.tasks.id });
-        if (rows.length === 0) return false;
-        await appendTaskEvent(tx, taskId, null, 'task.paused', {
+      // Decided under the task row lock, so a concurrent owner Pause or Resume is judged as it is.
+      // A standing stamp stays (it anchors the reaper's paused-grace); the event alone takes over.
+      const now = new Date();
+      const result = await db.transaction(async (tx) => {
+        const [locked] = await tx
+          .select({ pausedAt: schema.tasks.pausedAt })
+          .from(schema.tasks)
+          .where(eq(schema.tasks.id, taskId))
+          .for('update');
+        if (!locked) return { stamp: null, ev: null };
+        let stamp = locked.pausedAt;
+        let ev: AuditEvent;
+        if (!stamp) {
+          stamp = now;
+          await tx
+            .update(schema.tasks)
+            .set({ pausedAt: now, updatedAt: now })
+            .where(and(eq(schema.tasks.id, taskId), isNull(schema.tasks.pausedAt)));
+          ev = auditEvent({ pausedAt: now.toISOString() });
+        } else if ((await findAdminPausedTaskIds(tx, [taskId])).has(taskId)) {
+          return { stamp, ev: null };
+        } else {
+          ev = auditEvent({ pausedAt: stamp.toISOString(), tookOver: true });
+        }
+        await appendPauseEvent(tx, taskId, {
           by: actorUserId,
           byAdmin: true,
           reason: 'maintenance',
         });
         await insertAuditEvent(tx, ev);
-        return true;
+        return { stamp, ev };
       });
-      if (!paused) {
-        const standing = await db.query.tasks.findFirst({
-          where: eq(schema.tasks.id, taskId),
-          columns: { pausedAt: true },
-        });
-        return c.json({ ok: true, pausedAt: standing?.pausedAt?.toISOString() ?? null });
-      }
-      logAuditEvent(ev);
-      return c.json({ ok: true, pausedAt: pausedAt.toISOString() });
+      if (result.ev) logAuditEvent(result.ev);
+      return c.json({ ok: true, pausedAt: result.stamp?.toISOString() ?? null });
     }
     case 'resume': {
       if (!task.pausedAt) return c.json({ ok: true, pausedAt: null });
-      const ev = auditEvent({});
-      const resumed = await db.transaction(async (tx) => {
+      const ev = await db.transaction(async (tx) => {
         // Only the resume that changes the row is recorded.
-        if (!(await clearTaskPause(tx, taskId))) return false;
-        await appendTaskEvent(tx, taskId, null, 'task.resumed', { by: actorUserId, byAdmin: true });
-        await insertAuditEvent(tx, ev);
-        return true;
+        if (!(await clearTaskPause(tx, taskId))) return null;
+        return recordAdminResume(tx, taskId, actorUserId, task.userId);
       });
-      if (resumed) logAuditEvent(ev);
+      if (ev) logAuditEvent(ev);
       return c.json({ ok: true, pausedAt: null });
     }
     case 'stop': {

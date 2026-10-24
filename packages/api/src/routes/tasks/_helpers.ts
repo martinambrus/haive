@@ -21,6 +21,8 @@ import {
   type TaskProviderUsage,
 } from '@haive/shared/stats-server';
 import { getDb } from '../../db.js';
+import { clearTaskPause } from '../../lib/task-control.js';
+import { insertAuditEvent, type AuditEvent } from '../../lib/audit.js';
 import { HttpError } from '../../context.js';
 import { compositionSurvivesWithout, type StepFlagMap } from '../../lib/step-flags.js';
 import { uploadsStorageRoot } from '../../lib/uploads.js';
@@ -1120,32 +1122,83 @@ export async function appendTaskEvent(
   });
 }
 
+/** Stamped at write time, which follows the task row lock: findAdminPausedTaskIds orders by it. */
+export async function appendPauseEvent(
+  tx: DbTx,
+  taskId: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await tx.insert(schema.taskEvents).values({
+    taskId,
+    taskStepId: null,
+    eventType: 'task.paused',
+    payload,
+    createdAt: sql`clock_timestamp()`,
+  });
+}
+
+/** Takes the caller's tx so the audit row commits or rolls back with the resume it records. */
+export async function recordAdminResume(
+  tx: DbTx,
+  taskId: string,
+  actorUserId: string,
+  ownerUserId: string,
+): Promise<AuditEvent> {
+  await appendTaskEvent(tx, taskId, null, 'task.resumed', { by: actorUserId, byAdmin: true });
+  const event: AuditEvent = {
+    actorUserId,
+    action: 'task.admin_resume',
+    targetType: 'task',
+    targetId: taskId,
+    metadata: { ownerUserId },
+  };
+  await insertAuditEvent(tx, event);
+  return event;
+}
+
+/** One statement binds at most 65534 parameters, so the ids go in chunks. */
+const ADMIN_PAUSE_READ_CHUNK = 10_000;
+
 /** Ids among `taskIds` whose newest `task.paused` event is an administrator's (`byAdmin`). */
 export async function findAdminPausedTaskIds(
   db: Pick<ReturnType<typeof getDb>, 'select'>,
   taskIds: string[],
 ): Promise<Set<string>> {
-  if (taskIds.length === 0) return new Set();
-  const events = await db
-    .select({ taskId: schema.taskEvents.taskId, payload: schema.taskEvents.payload })
-    .from(schema.taskEvents)
-    .where(
-      and(
-        inArray(schema.taskEvents.taskId, taskIds),
-        eq(schema.taskEvents.eventType, 'task.paused'),
-      ),
-    )
-    .orderBy(desc(schema.taskEvents.createdAt));
-  const newest = new Map<string, boolean>();
-  for (const { taskId, payload } of events) {
-    if (!newest.has(taskId)) newest.set(taskId, payload?.byAdmin === true);
+  const held = new Set<string>();
+  for (let from = 0; from < taskIds.length; from += ADMIN_PAUSE_READ_CHUNK) {
+    const events = await db
+      .select({ taskId: schema.taskEvents.taskId, payload: schema.taskEvents.payload })
+      .from(schema.taskEvents)
+      .where(
+        and(
+          inArray(schema.taskEvents.taskId, taskIds.slice(from, from + ADMIN_PAUSE_READ_CHUNK)),
+          eq(schema.taskEvents.eventType, 'task.paused'),
+        ),
+      )
+      .orderBy(desc(schema.taskEvents.createdAt), desc(schema.taskEvents.id));
+    const newest = new Map<string, boolean>();
+    for (const { taskId, payload } of events) {
+      if (!newest.has(taskId)) newest.set(taskId, payload?.byAdmin === true);
+    }
+    for (const [taskId, byAdmin] of newest) if (byAdmin) held.add(taskId);
   }
-  return new Set([...newest].filter(([, byAdmin]) => byAdmin).map(([taskId]) => taskId));
+  return held;
 }
 
 /** An administrator's pause is lifted only by an administrator. */
 export function adminPauseLocks(pausedByAdmin: boolean, role: string | undefined): boolean {
   return pausedByAdmin && role !== 'admin';
+}
+
+/** Judged again under the task row lock the caller holds. */
+export async function liftReadPause(
+  tx: DbTx,
+  taskId: string,
+  read: Date,
+  role: string | undefined,
+): Promise<boolean> {
+  if (adminPauseLocks((await findAdminPausedTaskIds(tx, [taskId])).has(taskId), role)) return false;
+  return clearTaskPause(tx, taskId, read);
 }
 
 /** The model-health canary validates THE task's model, so swapping the CLI on a
