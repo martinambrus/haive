@@ -37,6 +37,10 @@ export const authRoutes = new Hono<AppEnv>();
  *  a value that changed under a running api would make the gate non-deterministic. */
 const setupToken = (process.env.SETUP_TOKEN ?? '').trim();
 
+// Precomputed at the same bcrypt cost as hashPassword. Missing accounts still pay for one
+// comparison; computing a fresh dummy hash per request would instead pay for two bcrypt calls.
+const DUMMY_PASSWORD_HASH = '$2b$12$clVUqMEwkUB8y3yHyeL0ru4nrgQgbyWo51lQ2DOZC58HntkbLzeM6';
+
 /** Compare two secrets without leaking their contents through timing.
  *
  *  Both sides are hashed first so the comparison is over fixed-width buffers — `timingSafeEqual`
@@ -232,12 +236,10 @@ authRoutes.post('/login', async (c) => {
   const user = await db.query.users.findFirst({
     where: eq(schema.users.emailBlindIndex, blindIndex),
   });
-  if (!user || user.status !== 'active') {
+  const ok = await verifyPassword(body.password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+  if (!user || user.status !== 'active' || !ok) {
     throw new HttpError(401, 'Invalid credentials');
   }
-
-  const ok = await verifyPassword(body.password, user.passwordHash);
-  if (!ok) throw new HttpError(401, 'Invalid credentials');
 
   const { accessToken, refreshToken, expiresAt } = await issueTokens(
     user.id,
