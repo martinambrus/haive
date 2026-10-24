@@ -29,9 +29,30 @@ const POLL_INTERVAL_MS = 2_000;
  *  finished result is never reaped out from under a poll that is still running. */
 export const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 
-const STILL_QUEUED_MESSAGE =
-  'Still queued behind running CLI jobs. The job keeps going in the background — reopen this ' +
-  'page later to see the result.';
+function pollTimeout(phase: QueuedJobPhase): Error {
+  const state = phase === 'running' ? 'running' : 'queued behind running CLI jobs';
+  return new Error(
+    `Still ${state}. The job keeps going in the background — reopen this page later to see the result.`,
+  );
+}
+
+const MAX_CONSECUTIVE_POLL_FAILURES = 3;
+
+function pollDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
 
 type PollResponse<TDone> =
   | { status: 'pending'; state?: string }
@@ -41,25 +62,55 @@ type PollResponse<TDone> =
 /** Start a cli-exec job and poll its status route until it finishes.
  *
  *  Resolves with the done response, or throws with a message fit to show the user: the job's
- *  own failure reason, an expired job, or the still-queued notice once the poll window is
+ *  own failure reason, an expired job, or the last observed phase once the poll window is
  *  spent. Giving up polling does NOT cancel the job — it runs to completion either way. */
 async function runQueuedJob<TDone>(
   startPath: string,
   statusPath: (jobId: string) => string,
   onPhase?: (phase: QueuedJobPhase) => void,
+  signal?: AbortSignal,
 ): Promise<TDone> {
-  const { jobId } = await api.post<{ jobId: string }>(startPath);
-  onPhase?.('queued');
+  signal?.throwIfAborted();
+  const { jobId } = signal
+    ? await api.post<{ jobId: string }>(startPath, undefined, signal)
+    : await api.post<{ jobId: string }>(startPath);
+  signal?.throwIfAborted();
+  let phase: QueuedJobPhase = 'queued';
+  onPhase?.(phase);
 
   const deadline = Date.now() + POLL_TIMEOUT_MS;
+  let failures = 0;
   for (;;) {
-    const res = await api.get<PollResponse<TDone>>(statusPath(jobId));
+    signal?.throwIfAborted();
+    if (Date.now() >= deadline) throw pollTimeout(phase);
+    let res: PollResponse<TDone>;
+    try {
+      res = signal
+        ? await api.get<PollResponse<TDone>>(statusPath(jobId), signal)
+        : await api.get<PollResponse<TDone>>(statusPath(jobId));
+    } catch (error) {
+      signal?.throwIfAborted();
+      const { status, code } = error as { status?: number; code?: string };
+      // Expiry and other client refusals are final; retry only transient requests.
+      if (
+        code === 'job_expired' ||
+        (status !== undefined && status < 500 && status !== 408 && status !== 429) ||
+        ++failures >= MAX_CONSECUTIVE_POLL_FAILURES
+      )
+        throw error;
+      if (Date.now() >= deadline) throw pollTimeout(phase);
+      await pollDelay(Math.min(POLL_INTERVAL_MS, deadline - Date.now()), signal);
+      continue;
+    }
+    signal?.throwIfAborted();
+    failures = 0;
     if (res.status === 'done') return res;
     if (res.status === 'failed') throw new Error(res.error);
 
-    onPhase?.(jobPhaseForState(res.state));
-    if (Date.now() >= deadline) throw new Error(STILL_QUEUED_MESSAGE);
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    phase = jobPhaseForState(res.state);
+    onPhase?.(phase);
+    if (Date.now() >= deadline) throw pollTimeout(phase);
+    await pollDelay(Math.min(POLL_INTERVAL_MS, deadline - Date.now()), signal);
   }
 }
 
@@ -99,6 +150,14 @@ export async function runCatalogVersionRefresh(
   return entry;
 }
 
-export async function runPricingRefresh(onPhase?: (phase: QueuedJobPhase) => void): Promise<void> {
-  await runQueuedJob('/cli-pricing/refresh', (jobId) => `/cli-pricing/refresh/${jobId}`, onPhase);
+export async function runPricingRefresh(
+  onPhase?: (phase: QueuedJobPhase) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  await runQueuedJob(
+    '/cli-pricing/refresh',
+    (jobId) => `/cli-pricing/refresh/${jobId}`,
+    onPhase,
+    signal,
+  );
 }

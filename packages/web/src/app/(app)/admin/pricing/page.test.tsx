@@ -25,12 +25,14 @@ vi.mock('@/lib/api-client', () => ({ api: h }));
 
 let status: Record<string, unknown>;
 let loads: number;
+let mounted: boolean;
 const JOB = 'repeat:cli-refresh-versions-repeatable:1792800000000';
 const JOB_PATH = `/cli-pricing/refresh/${JOB}`;
 
 beforeEach(() => {
   vi.useFakeTimers();
   loads = 0;
+  mounted = true;
   status = { status: 'pending', state: 'waiting', message: 'completed' };
   h.post.mockReset().mockResolvedValue({ jobId: JOB });
   h.get.mockReset().mockImplementation(async (path: string) => {
@@ -49,7 +51,7 @@ async function settle(view: ReturnType<typeof createRenderer>) {
   view.draw();
 }
 async function start() {
-  const view = createRenderer(() => createElement(PricingPage));
+  const view = createRenderer(() => (mounted ? createElement(PricingPage) : null));
   await settle(view);
   fire.click(buttons(view.tree(), /^refresh now$/i)[0]!);
   await settle(view);
@@ -57,6 +59,18 @@ async function start() {
 }
 
 describe('pricing refresh job', () => {
+  it('stops polling on unmount without loading the completed result', async () => {
+    const view = await start();
+    const polls = h.get.mock.calls.filter(([path]) => path === JOB_PATH).length;
+    mounted = false;
+    view.draw();
+    status = { status: 'done' };
+    await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS);
+    expect(h.get.mock.calls.filter(([path]) => path === JOB_PATH)).toHaveLength(polls);
+    expect(loads).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('keeps Save rate enabled while the refresh is queued and running', async () => {
     const view = await start();
     fire.type(controls(view.tree(), 'model')[0]!, 'test-model');
@@ -75,7 +89,7 @@ describe('pricing refresh job', () => {
     await vi.advanceTimersByTimeAsync(120_000);
     view.draw();
     expect(loads).toBe(1);
-    expect(h.get).toHaveBeenCalledWith(JOB_PATH);
+    expect(h.get).toHaveBeenCalledWith(JOB_PATH, expect.any(AbortSignal));
 
     status = { status: 'pending', state: 'active', message: 'failed' };
     await vi.advanceTimersByTimeAsync(2000);

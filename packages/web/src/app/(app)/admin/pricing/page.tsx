@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api-client';
 import { runPricingRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { Button, Badge, Input, FormError } from '@/components/ui';
@@ -86,6 +86,8 @@ export default function PricingPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [refreshPhase, setRefreshPhase] = useState<QueuedJobPhase | null>(null);
+  const refreshAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => refreshAbort.current?.abort(), []);
   const [filter, setFilter] = useState('');
   const [providerFilter, setProviderFilter] = useState('');
 
@@ -133,15 +135,21 @@ export default function PricingPage() {
   }
 
   async function refreshNow() {
+    if (refreshAbort.current) return;
+    const controller = new AbortController();
+    refreshAbort.current = controller;
     setRefreshPhase('queued');
     setError(null);
     try {
-      await runPricingRefresh(setRefreshPhase);
-      await load();
+      await runPricingRefresh(setRefreshPhase, controller.signal);
+      if (!controller.signal.aborted) await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to refresh pricing');
+      if (!controller.signal.aborted) {
+        setError(err instanceof Error ? err.message : 'Failed to refresh pricing');
+      }
     } finally {
-      setRefreshPhase(null);
+      refreshAbort.current = null;
+      if (!controller.signal.aborted) setRefreshPhase(null);
     }
   }
 
