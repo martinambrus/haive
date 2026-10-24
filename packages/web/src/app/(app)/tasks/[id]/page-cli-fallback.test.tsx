@@ -297,6 +297,7 @@ describe('terminal provider preselect', () => {
       'old',
     ],
     ['no enabled provider', [{ id: 'disabled', enabled: false, createdAt: NOW }], null],
+    ['no configured provider', [], null],
   ])('uses the server default: %s', async (_name, providers, expected) => {
     net.providers = providers.map((p) => ({ ...providerRow(p.id, 'codex', p.id), ...p }));
     net.defaultProviderId = expected;
@@ -306,10 +307,14 @@ describe('terminal provider preselect', () => {
       await view.flush();
       const select = findAll(view.tree(), (h) => h.tag === 'select' && h.props.value === expected);
       if (expected) expect(select).toHaveLength(1);
-      else
+      else {
         expect(
           findAll(view.tree(), (h) => h.tag === 'select' && h.props.value === 'disabled'),
         ).toHaveLength(0);
+        expect(textOf(view.tree())).toContain(
+          providers.length > 0 ? 'Every CLI provider is disabled.' : 'No CLI providers configured.',
+        );
+      }
     } finally {
       net.providers = null;
       net.defaultProviderId = null;

@@ -107,7 +107,9 @@ export default function RepoTerminalPage() {
       />
     ) : (
       <Card className="p-4 text-sm text-neutral-400">
-        No CLI providers configured. Add one in{' '}
+        {providers.length > 0
+          ? 'Every CLI provider is disabled. Enable one in '
+          : 'No CLI providers configured. Add one in '}
         <Link href="/cli-providers" className="text-indigo-400 underline">
           Settings → CLI providers
         </Link>{' '}

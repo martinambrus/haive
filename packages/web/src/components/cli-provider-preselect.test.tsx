@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRenderer, findAll } from '../../test/render-tree';
+import { createRenderer, findAll, textOf } from '../../test/render-tree';
 import RepoTerminalPage from '../app/(app)/repos/[id]/terminal/page';
 import { PlanStarter } from './plan/plan-starter';
 import { PlanChat } from './plan/plan-chat';
@@ -23,6 +23,7 @@ vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
 vi.mock('@/components/terminal/InteractiveShell', () => ({ InteractiveShell: () => null }));
 vi.mock('@/components/markdown/markdown-view', () => ({ MarkdownView: () => null }));
 const net = vi.hoisted(() => ({
+  providers: null as { id: string; enabled: boolean; label: string; name: string }[] | null,
   preferred: null as string | null,
   defaultProviderId: 'old' as string | null,
 }));
@@ -32,7 +33,7 @@ vi.mock('@/lib/api-client', async (original) => ({
     get: async (path: string) =>
       path === '/cli-providers'
         ? {
-            providers: [
+            providers: net.providers ?? [
               { id: 'new', enabled: true, label: 'New', name: 'codex' },
               { id: 'old', enabled: true, label: 'Old', name: 'codex' },
             ],
@@ -48,6 +49,7 @@ vi.mock('@/lib/api-client', async (original) => ({
   markPlanNodeRead: async () => undefined,
 }));
 afterEach(() => {
+  net.providers = null;
   net.preferred = null;
   net.defaultProviderId = 'old';
   vi.unstubAllGlobals();
@@ -110,4 +112,16 @@ describe.each([
       count,
     );
   });
+});
+
+it.each([
+  [[], 'No CLI providers configured.'],
+  [[{ id: 'off', enabled: false, label: 'Off', name: 'codex' }], 'Every CLI provider is disabled.'],
+])('explains why the repo terminal has no usable CLI: %j', async (providers, message) => {
+  net.providers = providers;
+  net.defaultProviderId = null;
+  const view = createRenderer(() => <RepoTerminalPage />);
+  for (let i = 0; i < 5; i++) await view.flush();
+  expect(findAll(view.tree(), (h) => h.tag === 'option')).toHaveLength(0);
+  expect(textOf(view.tree())).toContain(message);
 });
