@@ -482,17 +482,24 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const body = createTaskRequestSchema.parse(await c.req.json());
   const db = getDb();
 
+  if (body.deferStart && !body.repositoryId) {
+    throw new HttpError(409, 'Task has no repository; cannot attach files');
+  }
+
   if (body.repositoryId) {
     const repo = await db.query.repositories.findFirst({
       where: and(
         eq(schema.repositories.id, body.repositoryId),
         eq(schema.repositories.userId, userId),
       ),
-      columns: { id: true, source: true, writable: true },
+      columns: { id: true, source: true, writable: true, storagePath: true },
     });
     if (!repo) throw new HttpError(404, 'Repository not found');
     if (body.deferStart && isReadOnlyLocalRepo(repo)) {
       throw new HttpError(409, 'Attachments are not supported for read-only local repositories');
+    }
+    if (body.deferStart && !repo.storagePath) {
+      throw new HttpError(409, 'This repository is not ready for uploads yet');
     }
   }
 

@@ -54,7 +54,13 @@ function setup() {
     databaseSnapshots: schema.databaseSnapshots,
     dbUploads: schema.dbUploads,
   });
-  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
+  fake.insert(schema.repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'repo',
+    status: 'ready',
+    storagePath: '/unused/task-create-start',
+  });
   h.db = fake.db;
   const task = () => fake.rows(schema.tasks).find((r) => r.id !== DRAFT)!;
   return { fake, task };
@@ -200,6 +206,31 @@ describe('POST /tasks', () => {
     expect(t.task().status).toBe('queued');
     expect(starts()).toEqual([{ taskId: body.task.id, userId: USER }]);
   });
+
+  it.each(['no repository', 'no storage path'])(
+    'refuses a deferred start with %s before creating a task',
+    async (missing) => {
+      const t = setup();
+      if (missing === 'no storage path') {
+        t.fake.patch(schema.repositories, REPO, { storagePath: null });
+      }
+      const body = {
+        type: 'workflow',
+        title: 'draft',
+        description: 'do it',
+        ...(missing === 'no storage path' ? { repositoryId: REPO } : {}),
+        deferStart: true,
+        expectedAttachmentCount: 1,
+      };
+      const res = await post('/', body);
+      expect(res.status).toBe(409);
+      expect(t.fake.rows(schema.tasks)).toHaveLength(0);
+      expect(t.fake.rows(schema.taskEvents)).toHaveLength(0);
+      expect(h.add).not.toHaveBeenCalled();
+      // Immediate creates still work without an upload destination.
+      expect((await post('/', { ...body, deferStart: false })).status).toBe(201);
+    },
+  );
 
   it('with deferStart refuses a read-only local repository, which takes no attachments', async () => {
     const t = setup();
