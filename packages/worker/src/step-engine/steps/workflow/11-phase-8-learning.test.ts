@@ -1087,6 +1087,31 @@ describe('the investigation in the gate diff', () => {
     expect(entry?.editPath).toBe(draft);
   });
 
+  it.each([
+    { name: 'binary', content: Buffer.from('before\0after'), binary: true, truncated: false },
+    {
+      name: 'over-cap',
+      content: Buffer.alloc(512 * 1024 + 1, 'a'),
+      binary: false,
+      truncated: true,
+    },
+  ])(
+    'bounds a $name investigation before writing its artifact',
+    async ({ content, binary, truncated }) => {
+      const { entry, warnings } = await entryFor((file) => writeFile(file, content));
+      expect(warnings).toEqual([]);
+      expect(entry).toMatchObject({
+        status: 'modified',
+        binary,
+        truncated,
+        oldContent: '',
+        newContent: '',
+      });
+      expect(entry?.editPath).toBeUndefined();
+      expect(entry?.unreadable).toBeUndefined();
+    },
+  );
+
   it('treats an existing empty investigation as modified, not absent', async () => {
     const { entry, draft, warnings } = await entryFor((file) => writeFile(file, ''));
 

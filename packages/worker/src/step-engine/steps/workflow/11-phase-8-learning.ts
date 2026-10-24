@@ -36,6 +36,7 @@ import {
 import { loadRepoStackAnchors, techAnchorFacets } from '../_repo-stack.js';
 import { buildTaskHistoryDigest, type TaskHistoryDigest } from './_task-history-digest.js';
 import { KNOWLEDGE_DIFF_ARTIFACT_NAME, buildKnowledgeDiffArtifact } from './_knowledge-diff.js';
+import { readDiffContent } from './_commit-diff.js';
 import { revertKnowledgeBase } from './_kb-commit.js';
 import type { CommitDiffFile } from '@haive/shared/commit-diff-artifact';
 import {
@@ -900,10 +901,10 @@ async function investigationDiffFile(
 ): Promise<CommitDiffFile> {
   const rel = investigationRelPath(inv);
   const wa = workspaceAnchor(worktree);
-  let oldContent: string | null;
+  let previous: Awaited<ReturnType<typeof readDiffContent>>;
   try {
     // Strict: only absence reads as null (a new file); a link, a pipe or a refused read throws.
-    oldContent = await readTextNoFollow(wa.anchor, `${wa.prefix}${rel}`, { strict: true });
+    previous = await readDiffContent(wa.anchor, `${wa.prefix}${rel}`, { strict: true });
   } catch {
     return {
       path: rel,
@@ -915,14 +916,16 @@ async function investigationDiffFile(
       newContent: '',
     };
   }
+  const binary = previous?.binary ?? false;
+  const truncated = previous?.truncated ?? false;
   return {
     path: rel,
-    status: oldContent === null ? 'added' : 'modified',
-    binary: false,
-    truncated: false,
-    oldContent: oldContent ?? '',
-    newContent: content,
-    editPath: investigationDraftPath(worktree),
+    status: previous === null ? 'added' : 'modified',
+    binary,
+    truncated,
+    oldContent: previous?.content ?? '',
+    newContent: binary || truncated ? '' : content,
+    ...(!binary && !truncated ? { editPath: investigationDraftPath(worktree) } : {}),
   };
 }
 

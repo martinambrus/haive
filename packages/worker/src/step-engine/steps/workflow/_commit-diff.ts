@@ -192,6 +192,26 @@ async function readLinkSide(
   return commit === null ? null : { link: 'gitlink', text: subprojectText(commit) };
 }
 
+/** A bounded text side, with metadata only for binary or oversized content. */
+export async function readDiffContent(
+  anchor: string,
+  rel: string,
+  opts: { strict?: boolean } = {},
+): Promise<{ content: string; binary: boolean; truncated: boolean } | null> {
+  const read = await readFileNoFollow(anchor, rel, {
+    ...opts,
+    maxBytes: PER_FILE_CONTENT_CAP + 1,
+  });
+  if (read === null) return null;
+  const truncated = read.size > PER_FILE_CONTENT_CAP;
+  const binary = !truncated && read.data.includes(0);
+  return {
+    content: binary || truncated ? '' : read.data.toString('utf8'),
+    binary,
+    truncated,
+  };
+}
+
 export async function buildFileEntry(
   workspacePath: string,
   gitRun: GitRun,
@@ -213,9 +233,7 @@ export async function buildFileEntry(
     // `readFile` by the same path — two resolutions of a name git reported, in a tree the agents
     // write. A FIFO or a vanished file is flagged unreadable; a link is read for what it points at.
     const wa = workspaceAnchor(workspacePath);
-    const read = await readFileNoFollow(wa.anchor, `${wa.prefix}${e.path}`, {
-      maxBytes: PER_FILE_CONTENT_CAP + 1,
-    });
+    const read = await readDiffContent(wa.anchor, `${wa.prefix}${e.path}`);
     if (read === null) {
       const side = await readLinkSide(workspacePath, gitRun, e);
       if (side === null || 'unreadableReason' in side) {
@@ -226,12 +244,9 @@ export async function buildFileEntry(
         newContent = side.text;
       }
     } else {
-      if (read.size > PER_FILE_CONTENT_CAP) {
-        newTooBig = true;
-      } else {
-        newBinary = read.data.includes(0);
-        if (!newBinary) newContent = read.data.toString('utf8');
-      }
+      newTooBig = read.truncated;
+      newBinary = read.binary;
+      newContent = read.content;
     }
   }
 
