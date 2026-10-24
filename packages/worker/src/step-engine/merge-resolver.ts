@@ -1,4 +1,3 @@
-import { originGitRun } from '../repo/git-push.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
@@ -20,6 +19,7 @@ import { resolveTaskDispatch } from '../orchestrator/dispatcher.js';
 import { houseRulesOptOut } from '../orchestrator/house-rules.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import {
+  originGitRun,
   buildCredentialHelper,
   gitRun,
   pushBranch,

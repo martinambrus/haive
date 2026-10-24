@@ -1,3 +1,6 @@
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 const h = vi.hoisted(() => ({ getOriginUrl: vi.fn(), ensureOrigin: vi.fn(), pushBranch: vi.fn() }));
 vi.mock('../../../repo/git-push.js', async (original) => ({
@@ -32,20 +35,21 @@ beforeEach(() => {
   h.getOriginUrl.mockResolvedValue(null);
 });
 describe('11a apply reads the current origin and validates a typed URL', () => {
-  it.each(['/tmp/other', 'file:///tmp/other', 'ext::sh'])(
-    'rejects %s before writing the remote',
-    async (remoteUrl) => {
-      const parsed = gitRemoteUrlSchema.safeParse(remoteUrl);
-      expect(parsed.success).toBe(false);
-      if (parsed.success) throw new Error('expected a refused URL');
-      await expect(apply(detected, { push: true, remoteUrl })).rejects.toMatchObject({
-        name: 'Error',
-        message: parsed.error.issues[0]!.message,
-      });
-      expect(h.ensureOrigin).not.toHaveBeenCalled();
-      expect(h.pushBranch).not.toHaveBeenCalled();
-    },
-  );
+  it.each([
+    path.join(tmpdir(), 'other'),
+    pathToFileURL(path.join(tmpdir(), 'other')).href,
+    'ext::sh',
+  ])('rejects %s before writing the remote', async (remoteUrl) => {
+    const parsed = gitRemoteUrlSchema.safeParse(remoteUrl);
+    expect(parsed.success).toBe(false);
+    if (parsed.success) throw new Error('expected a refused URL');
+    await expect(apply(detected, { push: true, remoteUrl })).rejects.toMatchObject({
+      name: 'Error',
+      message: parsed.error.issues[0]!.message,
+    });
+    expect(h.ensureOrigin).not.toHaveBeenCalled();
+    expect(h.pushBranch).not.toHaveBeenCalled();
+  });
   it('uses an origin added since detect without demanding another URL', async () => {
     h.getOriginUrl.mockResolvedValue('https://example.test/r');
     await apply(detected, { push: true });

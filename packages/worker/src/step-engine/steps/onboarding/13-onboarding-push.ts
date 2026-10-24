@@ -1,9 +1,9 @@
-import { originGitRun } from '../../../repo/git-push.js';
 import { eq } from 'drizzle-orm';
 import { schema, type MergeResolveState } from '@haive/database';
 import type { FormField, FormSchema } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
+  originGitRun,
   buildCredentialHelper,
   detectOrigin,
   getOriginUrl,

@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
@@ -11,7 +13,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 async function repo(bare = false): Promise<string> {
-  const dir = await mkdtemp('/tmp/t388-origin-');
+  const dir = await mkdtemp(path.join(tmpdir(), 't388-origin-'));
   dirs.push(dir);
   expect((await gitRun(dir, ['init', ...(bare ? ['--bare'] : []), '-b', 'main'])).code).toBe(0);
   if (!bare) {
@@ -73,14 +75,23 @@ describe('origin URL boundary', () => {
     await gitRun(work, ['remote', 'add', 'origin', 'https://example.test/r']);
     if (key === 'pushurl')
       await gitRun(work, ['config', '--add', 'remote.origin.pushurl', 'ssh://git@example.test/r']);
-    await gitRun(work, ['config', '--add', `remote.origin.${key}`, '/tmp/other-user']);
+    await gitRun(work, [
+      'config',
+      '--add',
+      `remote.origin.${key}`,
+      path.join(tmpdir(), 'other-user'),
+    ]);
     await expect(getOriginUrl(work)).rejects.toMatchObject({ name: 'OriginUrlError' });
-    await expect(detectOrigin(work)).rejects.toThrow('/tmp/other-user');
+    await expect(detectOrigin(work)).rejects.toThrow(path.join(tmpdir(), 'other-user'));
   });
   it('validates the rewritten URL git actually uses', async () => {
     const work = await repo();
     await gitRun(work, ['remote', 'add', 'origin', 'https://example.test/r']);
-    await gitRun(work, ['config', 'url./tmp/other-user.insteadOf', 'https://example.test/']);
+    await gitRun(work, [
+      'config',
+      `url.${path.join(tmpdir(), 'other-user')}.insteadOf`,
+      'https://example.test/',
+    ]);
     await expect(getOriginUrl(work)).rejects.toMatchObject({ name: 'OriginUrlError' });
   });
   it.each([

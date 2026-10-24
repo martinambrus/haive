@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import { gitRun } from './git-exec.js';
@@ -10,7 +12,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 async function repo(): Promise<string> {
-  const dir = await mkdtemp('/tmp/t388-ensure-');
+  const dir = await mkdtemp(path.join(tmpdir(), 't388-ensure-'));
   dirs.push(dir);
   await gitRun(dir, ['init']);
   return dir;
