@@ -248,7 +248,8 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
 
 type Span = [from: number, to: number];
 
-const PHP_OPEN_TAG = /<\?(?:php(?=\s|$)|=|(?=\s))/gi;
+/** A short `<?` needs no space after it; `<?xml` stays markup, as most installs turn short tags off. */
+const PHP_OPEN_TAG = /<\?(?:php(?=\s|$)|=|(?!xml\b))/gi;
 /** PHP reads any byte from 0x80 up as a label character, so every non-ASCII code unit is one. */
 const PHP_LABEL = String.raw`[A-Za-z_\u0080-\uFFFF][\w\u0080-\uFFFF]*`;
 const PHP_LABEL_CHAR = /[\w\u0080-\uFFFF]/;

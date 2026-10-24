@@ -1091,12 +1091,12 @@ describe('maskNonCode', () => {
     );
   });
 
-  it('reads the code of an echo tag, and <?php glued to a word as no tag', () => {
+  it('reads the code of an echo tag, and <?php glued to a word as a short tag', () => {
     expect(maskNonCode('<b>{</b><?= $x ?><i>}</i>\n<?php $ok = 1;', 'php')).toBe(
       `${blank('<b>{</b>')}<?= $x ?>${blank('<i>}</i>')}\n<?php $ok = 1;`,
     );
-    expect(maskNonCode('<?phpx {\n<?php $ok = 1;', 'php')).toBe(
-      `${blank('<?phpx {')}\n<?php $ok = 1;`,
+    expect(maskNonCode('<?phpinfo(); ?><i>{</i>', 'php')).toBe(
+      `<?phpinfo(); ?>${blank('<i>{</i>')}`,
     );
   });
 
@@ -1286,6 +1286,14 @@ describe('extractCodeSections — line terminators other than LF', () => {
     const src = 'let b = 1; const x = a <!--b; function save() { persist(); }\n';
     const ids = extractCodeSections(src, file).map((s) => s.sectionId);
     expect(ids).toContain('function-save');
+  });
+
+  it.each([
+    ['a short tag with no space after it', '<?function save() { return 1; }', true],
+    ['an XML declaration', '<?xml version="1.0"?>\n<a>function save() { return 1; }</a>', false],
+  ])('reads %s', (_name, src, isCode) => {
+    const ids = extractCodeSections(src, 'a.php').map((s) => s.sectionId);
+    expect(ids.includes('function-save')).toBe(isCode);
   });
 
   it('keeps every line terminator in the masked text', () => {
