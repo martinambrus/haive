@@ -633,3 +633,28 @@ describe('IDE port proxy reach measurement', () => {
     },
   );
 });
+
+describe('IDE malformed Connection controls', () => {
+  it.each(['Upgrade, a b', 'Upgrade, x/y', 'Upgrade, "q"'])(
+    'WS replays the head despite invalid nominated header names: %s',
+    async (connection) => {
+      const rig = await wsRig();
+      const { head } = await rig.upgrade([AUTH_LINE, `Connection: ${connection}`]);
+      expect(head).toContain('GET / HTTP/1.1');
+      expect(head).toContain('connection: Upgrade');
+      expect(head).toContain('sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==');
+      expect((await app.request(`/ide/${TASK}/healthz`)).status).toBe(200);
+    },
+  );
+  it.each(['Upgrade, a b', 'Upgrade, x/y', 'Upgrade, "q"'])(
+    'HTTP ignores invalid nominated header names: %s',
+    async (connection) => {
+      const forwarded = await httpForwarded([
+        ['connection', connection],
+        ['x-app', 'kept'],
+      ]);
+      expect(forwarded.has('connection')).toBe(false);
+      expect(forwarded.get('x-app')).toBe('kept');
+    },
+  );
+});

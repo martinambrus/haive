@@ -70,7 +70,7 @@ function upstreamRequestHeaders(source: Headers): Headers {
     .split(',')
     .map((name) => name.trim().toLowerCase())
     .filter(Boolean);
-  for (const name of [
+  const dropped = new Set([
     'host',
     'authorization',
     'connection',
@@ -81,11 +81,13 @@ function upstreamRequestHeaders(source: Headers): Headers {
     'upgrade',
     'forwarded',
     ...connectionHeaders,
-  ]) {
-    headers.delete(name);
-  }
+  ]);
+  // Only actual header keys are valid inputs to Headers.delete: Connection's
+  // nominated names can contain invalid tokens, which must never throw here.
   for (const name of [...headers.keys()]) {
-    if (name.startsWith('proxy-') || name.startsWith('x-forwarded-')) headers.delete(name);
+    if (dropped.has(name) || name.startsWith('proxy-') || name.startsWith('x-forwarded-')) {
+      headers.delete(name);
+    }
   }
   // code-server runs repository-controlled code, so the Haive session must not reach it.
   const keptCookie = withoutSessionCookies(headers.get('cookie') ?? '');
@@ -342,31 +344,35 @@ function proxyWsUpgrade(
   session.onRevoke(() => teardown('session revoked', false));
 
   upstream.on('connect', () => {
-    if (session.revoked) return;
-    const lines = [`${req.method ?? 'GET'} ${strippedPath} HTTP/1.1`];
-    const incoming = new Headers();
-    for (const [name, value] of Object.entries(req.headers)) {
-      if (Array.isArray(value)) {
-        for (const item of value) incoming.append(name, item);
-      } else if (value !== undefined) {
-        incoming.set(name, value);
+    try {
+      if (session.revoked) return;
+      const lines = [`${req.method ?? 'GET'} ${strippedPath} HTTP/1.1`];
+      const incoming = new Headers();
+      for (const [name, value] of Object.entries(req.headers)) {
+        if (Array.isArray(value)) {
+          for (const item of value) incoming.append(name, item);
+        } else if (value !== undefined) {
+          incoming.set(name, value);
+        }
       }
+      const headers = upstreamRequestHeaders(incoming);
+      lines.push(`Host: ${host}:${IDE_INTERNAL_PORT}`);
+      // The handler already checked the browser's Origin. code-server requires
+      // the upstream Origin to match its Host, which is the container here.
+      headers.set('origin', `http://${host}:${IDE_INTERNAL_PORT}`);
+      headers.set('connection', 'Upgrade');
+      headers.set('upgrade', 'websocket');
+      for (const [name, value] of headers) lines.push(`${name}: ${value}`);
+      upstream.write(`${lines.join('\r\n')}\r\n\r\n`);
+      if (head && head.length) upstream.write(head);
+      relayUpgradeResponse(upstream, socket, teardown, session);
+      socket.pipe(upstream);
+      counted = true;
+      void acquireIdeSession(taskId);
+      log.info({ taskId, host }, 'ide ws bridge connected');
+    } catch (err) {
+      teardown(`upgrade request failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const headers = upstreamRequestHeaders(incoming);
-    lines.push(`Host: ${host}:${IDE_INTERNAL_PORT}`);
-    // The handler already checked the browser's Origin. code-server requires
-    // the upstream Origin to match its Host, which is the container here.
-    headers.set('origin', `http://${host}:${IDE_INTERNAL_PORT}`);
-    headers.set('connection', 'Upgrade');
-    headers.set('upgrade', 'websocket');
-    for (const [name, value] of headers) lines.push(`${name}: ${value}`);
-    upstream.write(`${lines.join('\r\n')}\r\n\r\n`);
-    if (head && head.length) upstream.write(head);
-    relayUpgradeResponse(upstream, socket, teardown, session);
-    socket.pipe(upstream);
-    counted = true;
-    void acquireIdeSession(taskId);
-    log.info({ taskId, host }, 'ide ws bridge connected');
   });
   upstream.on('error', (err) => teardown(`upstream error: ${err.message}`));
   upstream.on('close', () => teardown('upstream closed'));
