@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import TaskDetailPage from './page';
 import {
   buttons,
@@ -48,6 +48,7 @@ vi.mock('@/components/terminal/InteractiveShell', () => ({
 const net = vi.hoisted(() => ({
   detail: {} as Record<string, unknown>,
   unstubbed: [] as string[],
+  patchError: null as string | null,
   stopResult: { killed: 0, cancelled: 0, stopped: 0 },
 }));
 
@@ -82,10 +83,17 @@ const taskRow = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-async function fakeFetch(input: unknown) {
+async function fakeFetch(input: unknown, init?: { method?: string }) {
   const path = new URL(String(input), 'http://localhost').pathname;
   if (path === '/tasks/t1/cancel-active-cli') {
     return { ok: true, status: 200, json: async () => net.stopResult };
+  }
+  if (path === '/tasks/t1' && init?.method === 'PATCH') {
+    return {
+      ok: !net.patchError,
+      status: net.patchError ? 500 : 200,
+      json: async () => (net.patchError ? { error: net.patchError } : {}),
+    };
   }
   if (path === '/tasks/t1') {
     return { ok: true, status: 200, json: async () => structuredClone(net.detail) };
@@ -112,6 +120,9 @@ beforeAll(() => {
   vi.stubGlobal('document', eventTarget());
   vi.stubGlobal('requestAnimationFrame', () => 0);
   vi.stubGlobal('cancelAnimationFrame', () => {});
+});
+beforeEach(() => {
+  net.patchError = null;
 });
 afterAll(() => {
   vi.useRealTimers();
@@ -363,5 +374,41 @@ describe('task page: step usage stamp', () => {
       step.endedAt = null;
       expect(stamps(await mount({ pausedAt: null }, [step])), status).toHaveLength(0);
     }
+  });
+});
+
+describe('task page auto-continue action lifecycle (#395)', () => {
+  const toggle = (view: Renderer) =>
+    findAll(view.tree(), (h) => h.props['data-action'] === 'auto-continue')[0]!;
+
+  it('clears an empty Stop notice when toggling auto-continue', async () => {
+    vi.stubGlobal('confirm', () => true);
+    net.stopResult = { killed: 0, cancelled: 0, stopped: 0 };
+    const view = await mount({ pausedAt: null, currentStepId: '07-implement' }, [
+      { ...stepRow(), status: 'running' },
+    ]);
+    await menuLabels(view);
+    fire.click(
+      findAll(view.tree(), (h) => h.props.role === 'menuitem' && textOf(h).trim() === 'Stop')[0]!,
+    );
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(findAll(view.tree(), (h) => h.props.role === 'status')).toHaveLength(1);
+    fire.check(toggle(view), true);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(findAll(view.tree(), (h) => h.props.role === 'status')).toHaveLength(0);
+  });
+
+  it('clears an earlier toggle error on the next toggle', async () => {
+    const view = await mount({ pausedAt: null, currentStepId: '07-implement' }, [
+      { ...stepRow(), status: 'running' },
+    ]);
+    net.patchError = 'toggle failed probe';
+    fire.check(toggle(view), true);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(textOf(view.tree())).toContain('toggle failed probe');
+    net.patchError = null;
+    fire.check(toggle(view), true);
+    for (let i = 0; i < 5; i += 1) await view.flush();
+    expect(textOf(view.tree())).not.toContain('toggle failed probe');
   });
 });

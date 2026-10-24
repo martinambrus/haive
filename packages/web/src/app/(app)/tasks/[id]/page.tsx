@@ -1513,6 +1513,8 @@ export default function TaskDetailPage() {
 
   async function toggleAutoContinue() {
     if (!task || autoContinueBusy) return;
+    setActionError(null);
+    setActionNotice(null);
     const next = !task.autoContinue;
     setAutoContinueBusy(true);
     // Optimistic flip; the 2s poll reconciles with the server either way.
@@ -3877,6 +3879,7 @@ function StepCardImpl({
                   type="checkbox"
                   checked={autoContinue}
                   disabled={autoContinueBusy}
+                  data-action="auto-continue"
                   onChange={onToggleAutoContinue}
                   className="h-3.5 w-3.5 rounded border-neutral-700 bg-neutral-950"
                 />
