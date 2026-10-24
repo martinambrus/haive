@@ -163,13 +163,12 @@ async function recordMessage(
   taskStepId: string,
   role: 'user' | 'assistant',
   body: string,
-  cliProviderId?: string | null,
 ): Promise<void> {
   await db.insert(schema.taskEvents).values({
     taskId,
     taskStepId,
     eventType: PLAN_MERGE_MESSAGE_EVENT,
-    payload: { role, body, ...(cliProviderId ? { cliProviderId } : {}) },
+    payload: { role, body },
   });
 }
 
@@ -582,14 +581,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       ]
         .filter(Boolean)
         .join(' ');
-      await recordMessage(
-        ctx.db,
-        ctx.taskId,
-        ctx.taskStepId,
-        'assistant',
-        result.summary,
-        ctx.cliProviderId,
-      );
+      await recordMessage(ctx.db, ctx.taskId, ctx.taskStepId, 'assistant', result.summary);
       // Re-enter either way — but `needsAgentPass` decides what the next pass IS.
       // Resolved, it becomes a collect pass and parks for confirmation; unresolved,
       // it runs the agent again until the budget is spent and then parks with the

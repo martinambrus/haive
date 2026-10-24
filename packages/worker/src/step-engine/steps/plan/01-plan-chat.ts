@@ -337,12 +337,19 @@ export const planChatStep: StepDefinition<PlanChatDetect, PlanChatApply> = {
             ]
           : []),
       ];
+      // The runner pairs this id with llmOutput, so a later CLI choice or run
+      // cannot change who answered. Without a run there is no provider to name.
+      const [invocation] = args.llmInvocationId
+        ? await ctx.db
+            .select({ cliProviderId: schema.cliInvocations.cliProviderId })
+            .from(schema.cliInvocations)
+            .where(eq(schema.cliInvocations.id, args.llmInvocationId))
+            .limit(1)
+        : [];
       await ctx.db.insert(schema.planNodeMessages).values({
         nodeId: d.nodeId,
         taskId: ctx.taskId,
-        // The provider that answered THIS turn. Read here rather than from the
-        // task later: the conversation's CLI can be changed between turns.
-        cliProviderId: ctx.cliProviderId,
+        cliProviderId: invocation?.cliProviderId ?? null,
         role: 'assistant',
         body:
           result.error !== null
