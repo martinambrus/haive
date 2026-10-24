@@ -2525,6 +2525,7 @@ repoRoutes.post('/:id/remote', async (c) => {
     try {
       const { stdout, stderr } = await execGit('git', hardenGitArgs(args), {
         cwd: root,
+        env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(root) },
         timeout: 10_000,
       });
       return {

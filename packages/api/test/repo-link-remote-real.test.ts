@@ -82,3 +82,57 @@ it('relinks a nested directory when it has its own repository', async () => {
   expect(await git(`${root}/nested`, ['remote', 'get-url', 'origin'])).toBe('https://new.test/r');
   expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://old.test/r');
 });
+
+it('does not discover a parent through an empty .git directory', async () => {
+  const { root, link, fake } = await setup(true);
+  await ensureDirNoFollow(root, 'nested/.git');
+  expect((await link()).status).toBe(409);
+  expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://old.test/r');
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+});
+it.each(['worktree', 'submodule'])('links its own %s gitfile', async (kind) => {
+  const { root, link } = await setup(true);
+  await git(root, [
+    '-c',
+    'user.name=T',
+    '-c',
+    'user.email=t@example.test',
+    'commit',
+    '--allow-empty',
+    '-m',
+    'seed',
+  ]);
+  if (kind === 'worktree') {
+    await ensureDirNoFollow(root, 'owner');
+    await git(`${root}/owner`, ['init']);
+    await git(`${root}/owner`, [
+      '-c',
+      'user.name=T',
+      '-c',
+      'user.email=t@example.test',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'seed',
+    ]);
+    await git(`${root}/owner`, ['worktree', 'add', '--detach', `${root}/nested`]);
+  } else {
+    await git(`${root}/nested`, ['init']);
+    await git(`${root}/nested`, [
+      '-c',
+      'user.name=T',
+      '-c',
+      'user.email=t@example.test',
+      'commit',
+      '--allow-empty',
+      '-m',
+      'seed',
+    ]);
+    await git(root, ['submodule', 'add', 'https://submodule.test/r', 'nested']);
+    await git(root, ['submodule', 'absorbgitdirs', 'nested']);
+  }
+  const response = await link();
+  expect(response.status, await response.text()).toBe(200);
+  expect(await git(`${root}/nested`, ['remote', 'get-url', 'origin'])).toBe('https://new.test/r');
+  expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://old.test/r');
+});
