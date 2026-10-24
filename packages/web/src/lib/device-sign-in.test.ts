@@ -130,7 +130,7 @@ describe('runDeviceSignIn', () => {
     expect(t.poll).not.toHaveBeenCalled();
   });
 
-  it('ignores a successful poll when the attempt was cancelled meanwhile', async () => {
+  it('reports a connection a poll made even if it was cancelled meanwhile, since it exists', async () => {
     let live = true;
     const t = harness({ live: () => live });
     t.poll.mockImplementation(async () => {
@@ -138,7 +138,7 @@ describe('runDeviceSignIn', () => {
       return { status: 'ok', connection };
     });
 
-    expect(await t.run()).toEqual({ kind: 'cancelled' });
+    expect(await t.run()).toEqual({ kind: 'connected', connection });
   });
 
   it('passes a failure of the provider or the api on, ending the sign-in', async () => {

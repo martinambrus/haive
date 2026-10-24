@@ -50,9 +50,8 @@ export function useDeviceSignIn(onConnected: (connection: IntegrationConnection)
         onWaiting: ({ userCode, verificationUri }) =>
           setPhase({ kind: 'waiting', providerId, userCode, verificationUri }),
       });
-      if (!live()) return;
       if (result.kind === 'connected') {
-        setPhase({ kind: 'idle' });
+        if (live()) setPhase({ kind: 'idle' });
         connected.current(result.connection);
       } else if (result.kind === 'expired' && live()) {
         setPhase({ kind: 'failed', providerId, message: 'The code expired. Start again.' });

@@ -34,8 +34,8 @@ export async function runDeviceSignIn(input: {
     await input.wait(Math.max(interval, 1) * 1000);
     if (!input.live()) return { kind: 'cancelled' };
     const polled = await input.poll(begun.handle);
-    if (!input.live()) return { kind: 'cancelled' };
     if (polled.status === 'ok') return { kind: 'connected', connection: polled.connection };
+    if (!input.live()) return { kind: 'cancelled' };
     interval = polled.interval;
   }
   return { kind: 'expired' };
