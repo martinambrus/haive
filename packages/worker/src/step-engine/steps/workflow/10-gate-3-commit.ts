@@ -161,6 +161,7 @@ async function persistCommitOutcome(
   ctx: StepContext,
   workspace: string,
   commitSha: string | null,
+  keepStoredSha: boolean,
 ): Promise<string[]> {
   const notes: string[] = [];
   try {
@@ -181,7 +182,11 @@ async function persistCommitOutcome(
     );
     await ctx.db
       .update(schema.tasks)
-      .set({ commitSha, changedPaths: merged, updatedAt: new Date() })
+      .set({
+        ...(keepStoredSha ? {} : { commitSha }),
+        changedPaths: merged,
+        updatedAt: new Date(),
+      })
       .where(eq(schema.tasks.id, ctx.taskId));
   } catch (err) {
     ctx.logger.warn({ err }, 'failed to persist commit outcome (sha / changed paths)');
@@ -420,10 +425,10 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const sha = await readLanded(workspace, ['rev-parse', 'HEAD']);
     const commitSha = sha.code === 0 ? sha.stdout.trim() : null;
     ctx.logger.info({ commitSha, message }, 'workflow commit finalised');
-    const notes = await persistCommitOutcome(ctx, workspace, commitSha);
+    const notes = await persistCommitOutcome(ctx, workspace, commitSha, gitGaveNoAnswer(sha));
     if (gitGaveNoAnswer(sha)) {
       notes.unshift(
-        'The commit landed, but git gave no answer when its id was read, so this task has no commit id recorded.',
+        "The commit landed, but git gave no answer when its id was read, so this task's recorded commit id is not updated.",
       );
     }
     await warnStep(ctx, notes);
