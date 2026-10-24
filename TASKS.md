@@ -84,7 +84,7 @@ board. At session start, load the board's tasks you own or will work on into the
 # Open tasks
 
 ### T311 · FNF[rag-chunker-2] · chunker false matches, wrong method owners, braces in strings (+5)
-status: parked · reason: user decision — merge PR #889 with the lexer edge cases below as known limits, or keep fixing? (asked 2026-10-24T12:53Z) · last owner: fnf-run@ACTIVIT21
+status: taken · owner: fnf-run@ACTIVIT21 · since: 2026-10-24T12:56Z · last: 2026-10-24T12:56Z (user: fix r3 first)
 branch: fnf/311-rag-chunker-2 (pushed) · PR #889 (CI 11/11 green on 6d80205cd) · worktree on ACTIVIT21: .claude/worktrees/p311 · evidence/ledger/fix briefs: .claude/tmp/fnf-run/p311/ on ACTIVIT21
 All PRE-EXISTING, measured on the eval tree at 9c0c8ee77 (evidence .claude/tmp/rag-plan/p1/evidence/metrics-main.json). File: `_rag-chunkers.ts`.
 1. The PHP class pattern matches "class" inside comments: 563 methods get a wrong owner, 120 lose theirs.
