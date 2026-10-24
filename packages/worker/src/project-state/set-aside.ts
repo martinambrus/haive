@@ -33,7 +33,7 @@ import {
 import { readBlob } from '../plan/projection-merge.js';
 import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { gitRun } from '../repo/git-exec.js';
-import { gitOperationInProgress } from '../repo/git-operation.js';
+import { GitOperationUnreadableError, gitOperationInProgress } from '../repo/git-operation.js';
 import { refreshProjectState } from './refresh.js';
 import {
   readProjectStateBase,
@@ -100,6 +100,25 @@ const refuse = (file: string, why: string): Refused => ({
 });
 
 const NOT_HAIVE = 'holds changes Haive did not write';
+
+async function openOperationRefusal(
+  repoPath: string,
+  file: string,
+  unmerged: boolean,
+): Promise<Refused | null> {
+  try {
+    if (unmerged || (await gitOperationInProgress(repoPath))) {
+      return refuse(file, 'is part of a merge or rebase that is still open');
+    }
+    return null;
+  } catch (err) {
+    if (!(err instanceof GitOperationUnreadableError)) throw err;
+    return refuse(
+      file,
+      `could not be checked for an open merge or rebase (${err.message.split('\n')[0]})`,
+    );
+  }
+}
 
 const sha256 = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex');
 
@@ -460,12 +479,12 @@ async function restoreJudged(
   }
   if (judged.generation !== (await guard.generation(tx)))
     return { changed: [...judged.prints.keys()][0] ?? '' };
-  if (dirty.unmerged || (await gitOperationInProgress(repoPath))) {
-    return refuse(
-      mine[0] ?? dirty.paths[0] ?? '',
-      'is part of a merge or rebase that is still open',
-    );
-  }
+  const open = await openOperationRefusal(
+    repoPath,
+    mine[0] ?? dirty.paths[0] ?? '',
+    dirty.unmerged,
+  );
+  if (open) return open;
   const holding = guard.fence ? await guard.fence(tx) : 0;
   if (holding > 0) return { outcome: 'held', holding };
   await restoreFaults.beforeCapture?.();
@@ -725,9 +744,8 @@ async function setAsideOnce(
   if (dirty.paths.length === 0) return { outcome: 'clean' };
   const holdingEarly = fence ? await fence(db) : 0;
   if (holdingEarly > 0) return { outcome: 'held', holding: holdingEarly };
-  if (dirty.unmerged || (await gitOperationInProgress(repoPath))) {
-    return refuse(dirty.paths[0]!, 'is part of a merge or rebase that is still open');
-  }
+  const open = await openOperationRefusal(repoPath, dirty.paths[0]!, dirty.unmerged);
+  if (open) return open;
   const stray = dirty.paths.find(
     (p) =>
       !p.startsWith(STATE_PREFIX) &&
@@ -803,9 +821,8 @@ export async function restoreProjectionsInTx(
   await lockPlanMirror(tx, repositoryId);
   const dirty = await dirtyProjections(repoPath);
   if (dirty.paths.length === 0) return { outcome: 'clean' };
-  if (dirty.unmerged || (await gitOperationInProgress(repoPath))) {
-    return refuse(dirty.paths[0]!, 'is part of a merge or rebase that is still open');
-  }
+  const open = await openOperationRefusal(repoPath, dirty.paths[0]!, dirty.unmerged);
+  if (open) return open;
   const stray = dirty.paths.find(
     (p) =>
       !p.startsWith(STATE_PREFIX) &&
@@ -849,7 +866,13 @@ export async function resyncHaiveProjections(
   repoPath: string,
 ): Promise<boolean> {
   // A merge or rebase still open holds an intermediate record: nothing is read in until it ends.
-  if (await gitOperationInProgress(repoPath)) return false;
+  try {
+    if (await gitOperationInProgress(repoPath)) return false;
+  } catch (err) {
+    if (!(err instanceof GitOperationUnreadableError)) throw err;
+    logger.warn({ err, repositoryId }, 'projections not re-synced: git cannot be read');
+    return false;
+  }
   let synced = true;
   try {
     restoreFaults.beforeResync?.('state');

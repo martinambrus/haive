@@ -1,14 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Database } from '@haive/database';
+import type { Database, MergeResolveState } from '@haive/database';
 import type { ProjectStateSyncOutcome } from './sync.js';
 
 const calls = vi.hoisted(() => ({
   outcome: 'applied' as string,
   refreshed: true,
   dirty: { state: false, plan: false },
+  unreadable: false,
 }));
 
-vi.mock('../repo/git-operation.js', () => ({ gitOperationInProgress: async () => false }));
+vi.mock('../repo/git-operation.js', () => {
+  class GitOperationUnreadableError extends Error {}
+  return {
+    GitOperationUnreadableError,
+    gitOperationInProgress: async () => {
+      if (calls.unreadable) {
+        throw new GitOperationUnreadableError(
+          'git rev-parse --git-path MERGE_HEAD failed in /repo: fatal: bad config line 11',
+        );
+      }
+      return false;
+    },
+  };
+});
 vi.mock('./sync.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./sync.js')>()),
   syncProjectStateFromCheckout: async () => ({ outcome: calls.outcome }),
@@ -24,6 +38,7 @@ vi.mock('../plan/mirror.js', async (importOriginal) => ({
 }));
 
 const { resyncHaiveProjections } = await import('./set-aside.js');
+const { settleProjections } = await import('../step-engine/merge-projections.js');
 const { schema } = await import('@haive/database');
 
 /** The outbox and plan mark rows the re-sync reads, nothing else. */
@@ -45,6 +60,7 @@ beforeEach(() => {
   calls.outcome = 'applied';
   calls.refreshed = true;
   calls.dirty = { state: false, plan: false };
+  calls.unreadable = false;
 });
 
 describe('resyncHaiveProjections settles only a state sync that finished', () => {
@@ -80,5 +96,22 @@ describe('resyncHaiveProjections settles only a state sync that finished', () =>
   it('answers true when the pending state was written', async () => {
     calls.dirty.state = true;
     expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(true);
+  });
+});
+
+describe('an unreadable git never makes a re-sync throw', () => {
+  it('answers false from resyncHaiveProjections', async () => {
+    calls.unreadable = true;
+    expect(await resyncHaiveProjections(marksDb(), 'repo-1', '/repo')).toBe(false);
+  });
+
+  it('answers false from settleProjections and saves nothing', async () => {
+    calls.unreadable = true;
+    const save = vi.fn();
+    const given = { mergeDir: '/repo', keptMetadata: { 'a.json': { mode: 0o600 } } };
+    expect(
+      await settleProjections(marksDb(), 'repo-1', given as unknown as MergeResolveState, save),
+    ).toBe(false);
+    expect(save).not.toHaveBeenCalled();
   });
 });

@@ -4457,8 +4457,9 @@ async function main(): Promise<void> {
       );
     });
 
-    // M11. A git read that failed is unknown, never an answer (docs/architecture/plan-canvas.md, #255): the
-    // resolver reads HEAD before it sets anything aside.
+    // M11-M13. A git read that failed is unknown, never an answer (docs/architecture/plan-canvas.md, #255): the
+    // resolver reads HEAD before it sets anything aside, the set-aside gates refuse on an unreadable
+    // `--git-path`, and a refresh stays ready.
     const gitTask = async (c: Awaited<ReturnType<typeof cloned>>) => {
       const [task] = await db
         .insert(schema.tasks)
@@ -4638,6 +4639,83 @@ async function main(): Promise<void> {
         delete restoreFaults.afterRestore;
         await db.delete(schema.tasks).where(eq(schema.tasks.id, t.taskId));
       }
+    });
+
+    await attempt('M12: a set-aside whose open-merge check failed', async () => {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      git(c.dest, 'add', '--', RENDER_REL);
+      const bytes = await readFile(path.join(c.dest, RENDER_REL));
+      const staged = git(c.dest, 'ls-files', '-s', '--', RENDER_REL);
+      let restored = false;
+      restoreFaults.beforeRestore = () => {
+        restored = true;
+      };
+      const shim = await failGit(['rev-parse', '--git-path']);
+      let aside;
+      try {
+        aside = await setAsideHaiveProjections(db, id, c.dest);
+      } finally {
+        await shim.restore();
+        delete restoreFaults.beforeRestore;
+      }
+      check(
+        'M12: an unreadable `--git-path` refuses the set-aside as "could not be checked"',
+        aside.outcome === 'refused' && /could not be checked/.test(aside.reason),
+        aside,
+      );
+      check(
+        'M12: and nothing moved: the file and its staged entry are as they were',
+        !restored &&
+          (await readFile(path.join(c.dest, RENDER_REL)).catch(() => null))?.equals(bytes) ===
+            true &&
+          git(c.dest, 'ls-files', '-s', '--', RENDER_REL) === staged,
+        { restored, staged, now: git(c.dest, 'ls-files', '-s', '--', RENDER_REL) },
+      );
+
+      // CONTROL, on a checkout of its own: an open rebase is the known refusal, healthy git.
+      const k = await withPendingRender();
+      const rebaseDir = path.join(k.dest, '.git', 'rebase-merge');
+      await mkdir(rebaseDir);
+      let control;
+      try {
+        control = await setAsideHaiveProjections(db, k.payload.repositoryId, k.dest);
+      } finally {
+        await rm(rebaseDir, { recursive: true, force: true });
+      }
+      check(
+        'M12: control: an open rebase is refused as "still open", not as unchecked',
+        control.outcome === 'refused' &&
+          /still open/.test(control.reason) &&
+          !/could not be checked/.test(control.reason),
+        control,
+      );
+    });
+
+    await attempt('M13: a refresh whose open-merge check failed stays ready', async () => {
+      const c = await withPendingRender();
+      const id = c.payload.repositoryId;
+      const head = git(c.dest, 'rev-parse', 'HEAD');
+      const bytes = await readFile(path.join(c.dest, RENDER_REL));
+      await push('m13-theirs.txt', 'theirs\n');
+      const shim = await failGit(['rev-parse', '--git-path']);
+      try {
+        await handleRefresh(c.payload, db, storage);
+      } finally {
+        await shim.restore();
+      }
+      const row = await statusOf(id);
+      check(
+        'M13: the repository stays ready and says it was not refreshed',
+        row.status === 'ready' && (row.statusMessage ?? '').startsWith('Not refreshed:'),
+        row,
+      );
+      check(
+        'M13: and the checkout did not move, its pending render untouched',
+        git(c.dest, 'rev-parse', 'HEAD') === head &&
+          (await readFile(path.join(c.dest, RENDER_REL)).catch(() => null))?.equals(bytes) === true,
+        { head: git(c.dest, 'rev-parse', 'HEAD') },
+      );
     });
 
     if (failures > 0) {

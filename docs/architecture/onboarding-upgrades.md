@@ -628,7 +628,7 @@ step: its base (`synced_snapshot`) is only ever the plan.json last read in. A va
 not refused: the sync that runs first imports it, so the database holds it and the set-aside loses
 nothing. After the move, `resyncHaiveProjections` runs the sync, writes the record if the outbox is
 dirty, reconciles the plan and flushes it, each in its own try; it reads nothing in while a merge or
-rebase is open, and looks again under the lock as the sweep does. The revision is bumped again after
+rebase is open or while git cannot say whether one is, and looks again under the lock as the sweep does. The revision is bumped again after
 the restore, since a sweep that ran between the two would have stamped it written. 00a calls it
 only when the base is the checked-out branch (a ref-only update moves no file), and again after a
 merge it drove; `persistDetection` keeps its two importers, because the legacy mirror files
