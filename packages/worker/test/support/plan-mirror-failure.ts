@@ -36,6 +36,7 @@ export { h };
 vi.mock('../../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../../src/secrets/user-git-identity.js', () => ({ resolveGitEnv: async () => ({}) }));
 vi.mock('../../src/repo/refresh.js', () => ({ checkoutHoldingTasks: async () => 0 }));
+vi.mock('../../src/repo/git-workspace.js', () => ({ requireUsableGit: async () => true }));
 vi.mock('../../src/repo/git-operation.js', async (original) => ({
   ...(await original<typeof import('../../src/repo/git-operation.js')>()),
   gitOperationInProgress: async () => false,

@@ -18,6 +18,12 @@ const h = vi.hoisted(() => ({
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/secrets/user-git-identity.js', () => ({ resolveGitEnv: async () => ({}) }));
+vi.mock('../src/repo/git-workspace.js', () => ({
+  requireUsableGit: async () => {
+    if (h.probe && h.probe.code !== 0) throw new Error('git cannot use it: boom');
+    return !h.probe || h.probe.stdout === 'true';
+  },
+}));
 vi.mock('../src/repo/refresh.js', () => ({ checkoutHoldingTasks: async () => 0 }));
 vi.mock('../src/repo/git-push.js', async (original) => {
   const real = await original<typeof import('../src/repo/git-push.js')>();
@@ -214,7 +220,7 @@ describe('plan pull reads git before it acts', () => {
     async (code) => {
       h.probe = { code, stdout: '', stderr: 'boom' };
       const err = await failure();
-      expect(err?.message).toMatch(/git rev-parse failed in \/repo/);
+      expect(err?.message).toMatch(/git cannot use it/);
       expect(err?.message).not.toMatch(/not a Git checkout/);
       expect(h.fetch).not.toHaveBeenCalled();
     },

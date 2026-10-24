@@ -33,6 +33,7 @@ import { getBullRedis } from '../redis.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../repo/git-push.js';
 import { gitGaveNoAnswer } from '../repo/git-exec.js';
+import { requireUsableGit } from '../repo/git-workspace.js';
 import { checkoutHoldingTasks } from '../repo/refresh.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
 import {
@@ -150,13 +151,7 @@ async function flushCurrentPlanMirror(
 }
 
 async function requireGitCheckout(repoPath: string, refusal: string): Promise<void> {
-  const res = await gitRun(repoPath, ['rev-parse', '--is-inside-work-tree']);
-  if (res.code !== 0) {
-    throw new Error(
-      `git rev-parse failed in ${repoPath}: ${res.stderr.trim() || res.stdout.trim()}`,
-    );
-  }
-  if (res.stdout.trim() !== 'true') throw new Error(refusal);
+  if (!(await requireUsableGit(repoPath))) throw new Error(refusal);
 }
 
 async function currentBranch(repoPath: string): Promise<string | null> {
