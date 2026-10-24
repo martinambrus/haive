@@ -4720,3 +4720,40 @@ it('K4 a failed read of the base tip at the first open of a cross-branch merge r
     await rm(parent, { recursive: true, force: true });
   }
 });
+
+it('a refused pre-push origin warns, then the refused push halts with the merge preserved', async () => {
+  const { parent, wt } = await setupWorktree();
+  const bare = await pushParentMainToOrigin(parent);
+  try {
+    // Bypass only the fixture address mapping to install the refused repository config.
+    await git(parent, ['config', 'remote.origin.url', 'file:///refused-origin']);
+    const h = makeDb();
+    const ctx = mkCtx(parent, h.db);
+    const warn = vi.fn();
+    ctx.logger = { ...ctx.logger, warn } as unknown as StepContext['logger'];
+    const outcome = await resolveMergePhase(
+      h.db as never,
+      step,
+      mkCurrent(det(wt, { hasOrigin: true }), { action: 'merge_remove', pushBase: true }),
+      ctx,
+      mkParams(h.db),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.stringContaining('origin URL is not allowed') }),
+      expect.stringContaining('pushing the local base as-is'),
+    );
+    expect(outcome).toMatchObject({
+      resolved: false,
+      result: {
+        status: 'failed',
+        error: expect.stringContaining('pushing'),
+      },
+    });
+    expect(h.getState()).toMatchObject({ phase: 'pushing', merged: true, pushed: false });
+    expect(await gitCode(parent, ['show', 'main:feature.txt'])).toBe(0);
+    expect(await gitCode(bare, ['show', 'main:feature.txt'])).not.toBe(0);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true });
+  }
+});
