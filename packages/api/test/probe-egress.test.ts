@@ -1,7 +1,8 @@
+import dns from 'node:dns';
 import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   createGuardedFetch,
   createGuardedPgSocket,
@@ -146,6 +147,20 @@ describe('guarded fetch', () => {
     const res = await f(`http://127.0.0.1:${server.port}/empty`);
     expect(res.status).toBe(204);
     expect(res.body).toBeNull();
+  });
+
+  it('resolves an exempt host through the system lookup, so a hosts-file name reaches it', async () => {
+    const lookup = vi
+      .spyOn(dns.promises, 'lookup')
+      .mockResolvedValue([{ address: '127.0.0.1', family: 4 }] as never);
+    try {
+      const f = createGuardedFetch({ allowHosts: new Set(['hosts-only.test']) });
+      const res = await f(`http://hosts-only.test:${server.port}/`);
+      expect(res.status).toBe(200);
+      expect(lookup).toHaveBeenCalledWith('hosts-only.test', { all: true });
+    } finally {
+      lookup.mockRestore();
+    }
   });
 
   it('rejects a status a Response cannot hold as a fetch failure', async () => {

@@ -400,6 +400,13 @@ function stubNames(answers: Record<string, string[] | Error>) {
   };
   vi.spyOn(dns.promises.Resolver.prototype, 'resolve4').mockImplementation(answer(4) as never);
   vi.spyOn(dns.promises.Resolver.prototype, 'resolve6').mockImplementation(answer(6) as never);
+  vi.spyOn(dns.promises, 'lookup').mockImplementation((async (host: string) => {
+    const result = answers[host];
+    if (result instanceof Error || result === undefined) {
+      throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: 'ENOTFOUND' });
+    }
+    return result.map((address) => ({ address, family: net.isIPv4(address) ? 4 : 6 }));
+  }) as never);
 }
 
 describe('PR-4 a name that resolves to a blocked address', () => {

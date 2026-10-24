@@ -82,7 +82,8 @@ that set per request for a non-admin and hands it to `egressFor(role, hosts)`: t
 (so `host.docker.internal` is exempt only when that is what is configured, and not otherwise). A project's
 `<name>.ddev.site` is NOT exempt: it resolves to 127.0.0.1 in public DNS, so from the api container it
 reaches the api's own loopback and never a DDEV Postgres. The exemption lifts only the address classification: the
-name must still resolve, and the guarded fetch still never follows a redirect, so an exempt host cannot
+name must still resolve (through the system resolver, so a `host-gateway` name in `/etc/hosts` works; every
+other host resolves through c-ares, which never reads that file), and the guarded fetch still never follows a redirect, so an exempt host cannot
 hand the request on to one that is not listed. An IP literal that is not itself listed, any other private
 name, and everything for a multi-host Postgres string stay refused. Anything that cannot be read adds no host. The probe sends
 no credential and reports only what the guarded fetch reports.

@@ -1,3 +1,4 @@
+import dns from 'node:dns';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -33,8 +34,15 @@ function notFound(host: string): NodeJS.ErrnoException {
   });
 }
 
+// An exempt host may be named only in /etc/hosts (host-gateway), which c-ares never reads.
+const systemResolve: Resolver = (hostname) => dns.promises.lookup(hostname, { all: true });
+
 function probeLookup(host: string, seams: ProbeSeams): net.LookupFunction {
-  const resolve = seams.resolve ?? dnsResolver()(LOOKUP_TIMEOUT_MS).resolve;
+  const resolve =
+    seams.resolve ??
+    (seams.allowHosts?.has(host.toLowerCase())
+      ? systemResolve
+      : dnsResolver()(LOOKUP_TIMEOUT_MS).resolve);
   const inner = guardedLookup(resolve, classifierFor(host, seams));
   return (hostname, options, callback) => {
     inner(hostname, options, (err, address, family) => {
