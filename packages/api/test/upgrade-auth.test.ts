@@ -109,6 +109,8 @@ import { installIdeWebSocket } from '../src/routes/ide.js';
 import { adminRoutes } from '../src/routes/admin.js';
 import { userSettingsRoutes } from '../src/routes/user-settings.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
+import { closeUserSockets } from '../src/lib/user-sockets.js';
+import { upgradeListenerFiles } from './helpers/upgrade-listeners.js';
 
 const HANDLERS = [
   { file: 'terminal', install: installTerminalWebSocket, path: `/terminal/${ID}` },
@@ -258,9 +260,9 @@ describe('upgrade authentication on every surface', () => {
       }
     });
   }
-  it('all six routes import the one authenticator', () => {
-    for (const file of new Set(HANDLERS.map((h) => h.file))) {
-      const source = readFileSync(new URL(`../src/routes/${file}.ts`, import.meta.url), 'utf8');
+  it('all upgrade routes import the one authenticator', () => {
+    for (const file of upgradeListenerFiles()) {
+      const source = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8');
       expect(source.includes("from '../lib/upgrade-auth.js'")).toBe(true);
       expect(source.includes('function authenticateUpgrade(')).toBe(false);
     }
@@ -542,4 +544,22 @@ describe('accepted websocket transport controls', () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
     });
   }
+});
+
+describe('real transport registry cleanup controls', () => {
+  it('normal closes remove every registered session', async () => {
+    const { sockets } = await openAll();
+    for (const { client } of sockets) client.close(1000);
+    await vi.waitFor(() =>
+      expect(sockets.every((s) => s.client.readyState === WebSocket.CLOSED)).toBe(true),
+    );
+    expect(closeUserSockets(USER)).toBe(0);
+  });
+
+  it('a refused authenticated handshake leaves the registry empty', async () => {
+    fake.patch(schema.users, USER, { mustChangePassword: true });
+    const port = await start(installCliStreamWebSocket);
+    expect(await handshake(port, `/cli-stream/${ID}`, 'haive_access=user-session')).toBe(401);
+    expect(closeUserSockets(USER)).toBe(0);
+  });
 });

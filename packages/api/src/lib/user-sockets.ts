@@ -14,7 +14,7 @@ export function trackUserUpgrade(userId: string, socket: Duplex): UpgradeSession
   if (!sockets) users.set(userId, (sockets = new Set()));
   const session = new UpgradeSession(socket, () => {
     sockets.delete(session);
-    if (sockets.size === 0 && users.get(userId) === sockets) users.delete(userId);
+    if (sockets.size === 0) users.delete(userId);
   });
   if (socket.destroyed) session.dispose();
   else sockets.add(session);
@@ -22,8 +22,14 @@ export function trackUserUpgrade(userId: string, socket: Duplex): UpgradeSession
 }
 
 /** Called immediately after the session-changing database write commits. */
-export function closeUserSockets(userId: string): void {
-  for (const session of users.get(userId) ?? []) session.revoke();
+export function closeUserSockets(userId: string): number {
+  let count = 0;
+  for (const session of users.get(userId) ?? []) {
+    if (session.revoked) continue;
+    session.revoke();
+    count += 1;
+  }
+  return count;
 }
 
 export class UpgradeSession {

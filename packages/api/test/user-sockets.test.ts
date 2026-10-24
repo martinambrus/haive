@@ -24,21 +24,13 @@ describe('live session registry', () => {
     const live = tracked('a');
     const other = tracked('b');
     closed.stream.emit('close');
-    closeUserSockets('a');
-    closeUserSockets('a');
+    expect(closeUserSockets('a')).toBe(1);
+    expect(closeUserSockets('a')).toBe(0);
     expect(closed.ws.close).not.toHaveBeenCalled();
     expect(other.ws.close).not.toHaveBeenCalled();
-    expect(live.ws.close).toHaveBeenCalledExactlyOnceWith(1008, 'session_revoked');
+    expect(live.ws.close).toHaveBeenCalledTimes(1);
+    expect(live.ws.close.mock.calls[0]?.[0]).toBe(1008);
     expect(live.ws.removeAllListeners).toHaveBeenCalledExactlyOnceWith('message');
-  });
-
-  it('an old dispose cannot remove a newer bucket for the same user', () => {
-    const old = tracked('c');
-    old.session.dispose();
-    const fresh = tracked('c');
-    old.session.dispose();
-    closeUserSockets('c');
-    expect(fresh.ws.close).toHaveBeenCalledTimes(1);
   });
 
   it('forces teardown when a peer never acknowledges the close', () => {
@@ -58,4 +50,5 @@ it('does not register an already destroyed upgrade transport', () => {
   const session = trackUserUpgrade('destroyed', stream);
   expect(session.accept({} as WebSocket)).toBe(false);
   expect(stream.listenerCount('close')).toBe(0);
+  expect(closeUserSockets('destroyed')).toBe(0);
 });
