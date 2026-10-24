@@ -1,0 +1,136 @@
+- [Shared task board](shared_task_board.md) — ALL open work is on origin branch `tasks` (TASKS.md); claim there (push = lock) before starting, grep it before filing findings
+- [READ FIRST before any onboarding/workflow/plan task](onboarding_run_checkpoints.md) — read BEFORE the task is created, then run each check as its step lands
+- [/opus-sonnet workflow (retired)](haive_opus_sonnet_workflow.md) — retired 2026-10-17 for /sonnet-sonnet + /opus-opus; its how-to rules still apply; ledger in .claude/tmp/<slug>/
+- [/opus-sonnet cost profile](opus_sonnet_cost_profile.md) — measured 2026-10-16: verify ~45% of builder cost, edits <10%, driver 32%; subagents can spawn agents
+- [Skill trial: duo vs trio](skill_trial_duo_vs_trio.md) — trials 1-3, replay matrices; /codex-sonnet pilots: #229 (#836) and #280 (#837, 8 Codex runs); brief lessons: no TMPDIR in repo, keep husky on, verify red-on-base yourself
+- [Onboarding step file layout](onboarding_step_layout.md) — where each onboarding capability lives under steps/onboarding/
+- [Building shared/database libs](haive_libs_build_host_vs_docker.md) — dev-libs runs as root; build-libs.sh chowns dist back for host builds
+- [Repos scope editor browser check](repo_scope_editor_browser_check.md) — reveal the scope editor without a full onboarding
+- [PR workflow](haive_pr_workflow.md) — branch + PR, merge commit; loop reviewers until no valid fix; quotas, no-👀 rule; Codex gate ON again 2026-10-18 (CI-only pause lifted)
+- [Ship cycle](haive_ship_cycle.md) — after work, offer commit + push + watch CI as ONE yes/no question
+- [Chrome MCP browser-check gotchas](chrome_mcp_browser_check_gotchas.md) — scope clicks to the component; React inputs need the prototype setter
+- [lint-staged partial-stage hazard](lint_staged_partial_stage_hazard.md) — splitting one file across commits can corrupt the worktree
+- [gh run watch lies](gh_run_watch_exit_status_lies.md) — `--exit-status` lies both ways; filter by FULL sha, one watcher per push
+- [Read the watcher's CI field](pr_watch_read_ci_field.md) — a red smoke sat unread for 4 pushes on #472; check `bad[...]` before replying/merging
+- [A cancelled CI run is not a red one](ci_cancelled_run_is_not_red.md) — `cancel-in-progress` killed it; watch the superseding sha
+- [Worker tsx watch goes stale](haive_worker_tsx_watch_goes_stale.md) — verify a restart line before judging a source change; check node etime after a pull
+- [Modals close on Escape](haive_modals_close_on_escape.md) — every modal dismisses on ESC; use the shared Dialog
+- [Literal NUL makes source binary](literal_nul_makes_source_binary.md) — grep skips such files silently; write the escape, verify with `file`
+- [GPU stack restart](haive_gpu_stack_restart.md) — restart GPU-aware, then prove Ollama is on the card
+- [Host ollama shadows port](haive_host_ollama_shadows_container_port.md) — host daemon owns 127.0.0.1:11434; probe via a container
+- [Adding a dependency](haive_adding_a_dependency.md) — lockfile-only, then `pnpm docker rebuild` with NO service
+- [A new dep breaks the existing stack](new_dep_breaks_existing_stack.md) — CI passes, the pull kills the container; `pnpm docker rebuild`
+- [SSR hydration UTC trap](haive_ssr_hydration_utc_trap.md) — Intl/Date.now() in render mismatches; symptom is a blank chart
+- [Never send keys to a task shell's tmux](haive_task_shell_tmux_send_keys.md) — `haive-task` is the user's live CLI session
+- [Applying a migration](haive_applying_a_migration.md) — `pnpm docker migrate` runs the real runner; never edit an applied one
+- [Drizzle binds arrays as records](drizzle_binds_arrays_as_records.md) — `sql.param()` when an operator wants a real array
+- [Editing worker source restarts the worker](haive_host_build_restarts_worker.md) — writes under packages/worker/src orphan jobs; use worktrees
+- [No amendments in plan docs](plan_docs_no_amendments.md) — fold new content into its section; never append `# Amendment`
+- [Windows and WSL share one Docker daemon](windows_wsl_share_one_docker_daemon.md) — same engine; namespace installs or they collide
+- [Next middleware header loop](next_middleware_request_headers_rsc_loop.md) — `NextResponse.next({request:{headers}})` loops RSC; use `usePathname()`
+- [next build on the dev tree](haive_next_build_on_dev_tree.md) — rewrites next-env.d.ts and shares .next; revert the file after
+- [Dev host masks installer tests](haive_dev_host_masks_installer_tests.md) — images are cached here, so installs never exercise pulls
+- [vitest isolate: false](vitest_isolate_false_not_viable.md) — the hint vitest prints; taking it breaks 45 tests
+- [Second stack starves live tasks](haive_second_stack_starves_live_tasks.md) — check running tasks before a test install
+- [Global KB purge pending](global_kb_purge_pending.md) — 3 benchmark entries kept for TASK-185; purge via API once runs pass 09_6_4/09_6_5
+- [DDEV RAG test DB cleanup](ddev_rag_test_db_cleanup.md) — drop haive_rag_ddevtest from herplast2 DDEV once cbf0be06's 10-rag-populate ran
+- [Worktree breaks format:check](worktree_breaks_format_check.md) — FIXED in #214; prettier ignore-path traps recorded
+- [Onboarding artifacts re-check](onboarding_artifacts_recheck.md) — two questions parked until a run passes 07 and 12
+- [pgrep -f matches its own shell](pgrep_f_matches_calling_shell.md) — exited process reads as running; check with ps | grep '[n]ame'
+- [Astra vs Sol comparison](codex_astra_vs_sol_comparison.md) — parked: compare the two codex models once onboarding ends
+- [Task auth volume refresh](haive_task_auth_volume_no_refresh.md) — #101; pre-#101 volumes never self-heal; compare before replacing
+- [MCP config is per task, not per invocation](haive_mcp_config_is_per_task_not_per_invocation.md) — profiles race; SHELVED with a reopen condition
+- [CLI context capture](cli_context_capture_harness.md) — zero-token recorder shows what claude/codex/grok send the model
+- [Codex multi-agent not off](codex_multi_agent_not_off.md) — 0.154.0 keeps spawn_agent despite Haive's flag; no lever yet
+- [Agent listing per CLI](cli_agent_listing_levers.md) — every call lists repo agents (names+descriptions); sizes and levers
+- [Worktree guard vs rtk git](worktree_guard_rtk_git.md) — bare `git` becomes `rtk git` and is refused; use `/usr/bin/git`
+- [WSL reboot leaves api/worker dead](haive_wsl_reboot_api_worker_exit_127.md) — Exited (127) on a docker.sock race; `pnpm docker restart`
+- [RTK summarizes wrapped commands](rtk_docker_logs_summarized.md) — use `/usr/bin/` when output is evidence
+- [Bash refuses control-char escapes](bash_tool_control_char_escapes.md) — build VT/FF/DEL at runtime; Edit/Write decode \u escapes
+- [Stacked PR gets no CI](stacked_pr_gets_no_ci.md) — PR into a feature branch runs nothing, nor the retarget; close+reopen
+- [Prettier unescapes NUL](prettier_unescapes_nul.md) — `\0` becomes a literal byte after the hook; key on a JSON pair
+- [Worktree guard command shapes](worktree_guard_command_shapes.md) — loops, variables, heredocs, sleep refused; never build `rm` from a variable
+- [Global KB entries re-scoped](global_kb_entries_rescoped.md) — six drafts moved to base tech 2026-09-15; some left alone on purpose
+- [Date in a raw sql tuple](drizzle_date_in_raw_sql_tuple.md) — postgres.js rejects Date on the 2nd keyset page; ISO literal + `::timestamp`
+- [No planning block in chat](no_planning_block_in_chat.md) — keep the "what I need next" enumeration internal
+- [CI uid differs from dev host](ci_uid_differs_from_dev_host.md) — host is uid 1000, runner is not; uid branches diverge
+- [Node 26 FileHandle GC is fatal](node26_filehandle_gc_is_fatal.md) — unclosed handle kills the process; vitest passes yet exits 1
+- [Fixed /tmp path in a test masks failure](fixed_tmp_path_in_test_masks_failure.md) — leftovers pass locally, fail clean; delete first
+- [Plan slug collision](plan_slug_collision.md) — ~/.claude/plans and docs/plans can share a slug; read both H1s first
+- [/proc/self/fd is per child](proc_self_fd_is_per_child.md) — descriptor paths resolve in the CHILD; needs spawn + stdio
+- [container-cleanup smoke races cancel](container_cleanup_smoke_races_cancel.md) — fixed in #179; PARKED experiment for the next onboarding
+- [Remote branches auto-delete on merge](haive_remote_branches_auto_deleted.md) — `git branch -r` shows stale refs; prune + `ls-remote` first
+- [Skills never natively invoked](haive_skills_never_natively_invoked.md) — 0 `Skill` calls; bundled skills ate the budget; re-check pending
+- [RTK grep is ripgrep](rtk_grep_is_rg.md) — `{{` errors in rg, reported as 0 matches; /usr/bin/grep -F for literals
+- [Worker UI check without an LLM](haive_worker_ui_check_without_llm.md) — run a step's apply() from temp tsx under packages/worker/test/
+- [Skills re-check for all CLIs after onboarding](skills_recheck_all_clis_after_onboarding.md) — after 09_5, every CLI lists and uses the skills
+- [Own the post-step verification](own_post_step_verification.md) — arm a watcher, run the check when it lands; never hand over a SELECT
+- [Frontmatter YAML re-check](frontmatter_yaml_recheck_next_onboarding.md) — next onboarding: frontmatter parses in every CLI
+- [Breadth refusal re-check](plan_breadth_refusal_recheck.md) — parked: after a real plan build, breadth-cap refusals near 0
+- [Test-harness proxy and bounding assertions](test_harness_proxy_and_bounding_assertions.md) — proxies reach DEFAULT arms only
+- [Prompt guard/fence verification](prompt_guard_fence_verification.md) — ten live checks; `07_7` is the regression risk
+- [Worktree resolves shared from the main checkout](worktree_resolves_shared_from_main_checkout.md) — stale main shared/dist breaks worktrees; `pnpm docker libs`; per-package @haive relink for branch-local libs
+- [A conflicted PR gets no CI at all](conflicted_pr_gets_no_ci.md) — no merge ref, no run; `PR #<n>` run is CodeQL
+- [Invariants-doc lever](invariants_doc_lever.md) — doc size moved Codex citations 0.9% → 38.6%; check at `12-post-onboarding`
+- [Found, not fixed — running list](found_not_fixed_running_list.md) — surface omissions in wait windows and across sessions; its Bundles section maps every open item to a PR
+- [FNF items as tasks, by bundle](fnf_items_as_tasks.md) — every haive session files found-not-fixed items by bundle; procedure in /sonnet-sonnet (same in /opus-opus), map in the running list
+- [Onboarding reset open items](onboarding_reset_open_items.md) — what #181's reset does not do; re-surface when touched
+- [repo-scan-cap-order thin timeout](repo_scan_cap_order_thin_timeout.md) — 1432ms vs 5s default; capture failure text first
+- [Onboarding hash claims design](onboarding_hash_claims_design.md) — hasher shared, 07 has the bytes; append path not hashed alike
+- [Commit message backticks](commit_message_backticks_substituted.md) — `git commit -m` runs them; use -F with a file
+- [Todo tools model-gated](todo_tools_model_gated.md) — CLAUDE_CODE_ENABLE_TODO_TOOLS=1 restores Task tools for Opus 5
+- [Grep/Glob not in default toolset](grep_glob_not_in_default_toolset.md) — gone by build default since ~2.1.241; use Bash/Explore
+- [Review corpus harvester](review_corpus_harvester.md) — untracked at packages/worker/tmp/; golden-replay numbers live here
+- [git fixture ENOTEMPTY on .git/objects/pack](git_fixture_enotempty_autogc.md) — set `gc.auto=0` in any new git fixture
+- [Agent isolation open items](agent_isolation_open_items.md) — shipped #191-#198; verification items 1/2/4 open
+- [External text escapes the isolation scan](mcp_server_name_escapes_isolation_scan.md) — FIXED #211; digest half reaches across repos
+- [Inode reuse breaks "replaced directory" tests](inode_reuse_breaks_replaced_dir_tests.md) — rm+mkdir cannot fixture a replacement
+- [GitHub rate-limit traps](github_rate_limit_traps.md) — per-user; search has its own budget; 403 = throttled OR inaccessible
+- [Attachments fix series](attachments_fix_series.md) — DONE 2026-09-23 (#221-#225); leftovers in the FNF list
+- [Attachments follow-ups series](attachments_followups_series.md) — DONE 2026-09-24 (#226-#241); decisions not to re-litigate
+- [Agent rules series](agent_rules_series.md) — DONE 2026-09-24 (0165/0166); OWED: a real run's `agent_rules` stamp
+- [Agent rules follow-ups](agent_rules_followups_series.md) — SHIPPED 2026-09-24 (#249-#265); decisions not to re-litigate
+- [fs-safe live verification](fs_safe_live_verification.md) — most PASSED 2026-09-23; rest needs a workflow task
+- [Web dep bump browser check](web_dep_bump_browser_check.md) — host `next dev` replaces haive-web; revert files it writes
+- [Found-not-fixed sweep](found_not_fixed_sweep_series.md) — SHIPPED 2026-09-25 (#267-#300); decisions not to re-litigate
+- [Found-not-fixed sweep 2](found_not_fixed_sweep_2_series.md) — SHIPPED 2026-09-26 (#301-#325); decisions not to re-litigate
+- [Found-not-fixed sweep 3 + two-install sync](found_not_fixed_sweep_3_series.md) — Track B B1+B2 COMPLETE; B3.1a/b-1/b-3 merged; in flight B3.1b-2 #751; then B3.1c #274, B3.2 #117 (decided); open-work index in .claude/tmp/track-b/b3/ledger.md
+- [Recovery/context follow-ups series](recovery_context_followups_series.md) — all MERGED + verified (#243-#264); H-series DONE
+- [Step CLI switch scope](step_cli_switch_is_user_global.md) — per-task since #373; only "Also for my later tasks" is user-wide
+- [Typecheck with the package script](typecheck_with_package_script.md) — `tsc -p .` skips test/; use `pnpm typecheck`
+- [Worker convention guards](worker_convention_guards_run_full_suite.md) — run the full worker suite before pushing a new git argv
+- [Remove a PR's worktree after merge](remove_worktree_after_merge.md) — merged worktrees fill WSL's disk; never force a dirty one
+- [Scripted splice end marker](scripted_splice_end_marker.md) — generic `};` end dropped 997 lines; check `git diff --stat`
+- [WSL host disk layout](wsl_host_disk_layout.md) — vhdx on C: (15 GB free 2026-10-02); in-WSL df lies
+- [DB invariant breaks smoke fixtures](db_invariant_breaks_smoke_fixtures.md) — new unique index refuses seeded states; run smokes on scratch
+- [GitGuardian flags fixture ids](gitguardian_fixture_false_positives.md) — patterned uuids; read the watcher's `apps=[...]`
+- [Plan-doc review depth](plan_doc_review_depth.md) — state invariants; go structural at the second instance of a class
+- [AIDE² paper mapped onto Haive](aide2_bounded_plan_context_evidence.md) — plan fan-outs resend the whole plan; plan PR #367
+- [AIDE² first wave](aide2_first_wave_series.md) — COMPLETE 2026-10-08 (#395 #396 #397 #401 #436 #437); synced + boot-stamp verified; ledger .claude/tmp/aide2/
+- [House rules series](house_rules_series.md) — PR1-PR6 merged + live-checked; PR7a #464 + PR7b #486 MERGED 2026-10-10 (PR7a live check unverified, #299); PR8 parked on data; ledger .claude/tmp/house-rules/
+- [RAG retrieval plan](rag_retrieval_plan.md) — research lives in docs/plans/rag-retrieval-improvements.md; fold new data THERE
+- [AGENTS.md split review check](agents_md_split_review_check.md) — after the split merges, check Codex still cites topic files
+- [Weekly usage not visible](weekly_usage_not_visible.md) — readable only if `display.externalUsageWritePath` is set
+- [Claude config notice is noise](claude_config_notice_is_noise.md) — 'config file not found' leads a failed sandbox claude error but is routine; the cause is the LAST stderr line; throwaway-container repro recipe
+- [Stale local main makes a hybrid dev tree](git_checkout_stale_main_hybrid_tree.md) — `checkout -f main` rewrites to OLD content; use `checkout -f -B main origin/main` after checking the gap
+- [Retry looks stuck](haive_retry_looks_stuck_diagnosis.md) — pending row + 'progress update failed' every 2.5 s = OLD pass still running; queue keys are bull:haive-<name>; do not restart the worker
+- [Serialize full suite runs](haive_serialize_full_suite_runs.md) — every full vitest/e2e/smoke run takes `flock -w 1800 /tmp/haive-full-suite.lock`; parallel suites saturated 8 cores and faked timeouts
+- [Backlog run DONE](backlog_run_paused.md) — bundles 2/13/3 merged (#472 #468 #489); leftovers (RAG, Track B, #194/#199) are tasks in session 3813bbf6
+- [Background watcher dies with its worktree](background_watcher_cwd_worktree.md) — start gh watchers from the main checkout or with --repo; never remove the worktree first
+- [Throwaway container on an ephemeral port](throwaway_container_ephemeral_port.md) — `-p 127.0.0.1::6379`; a fixed port hit h1-smoke-redis once
+- [House-rules PR8 resume](house_rules_pr8_resume.md) — parked on data: check at a workflow `07`; needs an ENFORCED `files` rule or nothing accumulates
+- [gh api lists stop at 30](gh_api_lists_paginate_at_30.md) — PR comments/reviews/reactions need `--paginate`; check unresolved threads via GraphQL before merge
+- [Dev-stack sync: always libs](dev_stack_sync_always_libs.md) — after EVERY pull run `pnpm docker libs` + wait for a fresh worker ready; other merges change shared
+- [Declared verify commands live check](declared_verify_commands_live_check.md) — PARKED: set a Custom+Off slot before the next workflow task, check 06/08/gate 2
+- [haive-e7 owns module/task-type refactor](haive_e7_module_refactor_handoff.md) — route findings in its file areas to it; heads-up before touching them
+- [Modularity series](modularity_series.md) — merged plan twinkling-frolicking-toast; resume from .claude/tmp/modularity/ledger.md
+- [Database change: run shared suite](database_change_run_shared_suite.md) — shared tests pin database lock keys; run shared+database+api+worker
+- [Fresh worktree skips lint-staged](fresh_worktree_skips_lint_staged.md) — no node_modules means no hook, no prettier; install before the first commit
+- [Fresh worktree needs modules built](fresh_worktree_needs_modules_built.md) — build web-kit + ./modules/* too, or worker/api tests miss module manifests
+- [Smoke key by name, not line](smoke_key_by_name_not_line.md) — ci.yml key moved 130→148; a line-number sed passed an empty key silently
+- [Reviewer finding vs user decision](reviewer_finding_vs_user_decision.md) — check a finding's remedy against recorded user decisions before accepting; 8189d156c reversed one
+- [Prettier rewrites JSON fixtures](prettier_rewrites_json_fixtures.md) — commit hook pretty-prints .json; byte-compare passes pre-commit, fails CI; compare canonical JSON
+- [TaskUpdate description replaces](taskupdate_description_replaces.md) — it overwrites, never appends; TaskGet first, write back the full list
+- [Agent read-cost measurement](agent_read_cost_measurement.md) — share of prompt tokens that is file content; end results at compact_boundary; scripts in .claude/tmp/read-cost/
+- [Series parked for a skill test](series_parked_for_skill_test.md) — workflow chosen 2026-10-17: Opus max session runs /sonnet-sonnet per task (Sonnet drivers, Opus diff review + FNF filing); pilot 1 #226 merged #834 ($8.99, session 2/3 of it: compact first); 3 decisions owed
+- [Codex exec as builder](codex_exec_as_builder.md) — headless flags, `< /dev/null`, effort none..max (no ultra), effort in ~/.codex/sessions; smoke passed 2026-10-17
