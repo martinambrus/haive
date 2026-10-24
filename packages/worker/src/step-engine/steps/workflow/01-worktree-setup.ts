@@ -17,7 +17,7 @@ import {
   sandboxWorktreePath,
   worktreeDirName,
 } from '../../../repo/worktree-paths.js';
-import { gitRun } from '../../../repo/git-exec.js';
+import { gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
 import { isWorktreeRegistered } from '../../../repo/git-workspace.js';
 
 const FALLBACK_GIT_IDENTITY = {
@@ -44,6 +44,9 @@ interface WorktreeDetect {
   /** The proposal is this task's own branch from an earlier apply, so a Retry re-enters its
    *  worktree. Absent on a detect stored before the field existed. */
   proposalIsOwnBranch?: boolean;
+  /** Why the checkout's branch could not be read, when its git run gave no answer. Absent on a
+   *  detect stored before the field existed. */
+  currentBranchError?: string | null;
 }
 
 interface WorktreeApply {
@@ -204,6 +207,9 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       };
     }
     const branch = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    const currentBranchError = gitGaveNoAnswer(branch)
+      ? `could not read the checkout's current branch: ${(branch.stderr || branch.stdout).trim()}`
+      : null;
     const status = await gitRun(ctx.repoPath, ['--no-optional-locks', 'status', '--porcelain']);
     // Never PROPOSE a name that already exists here. `git worktree add <path> <branch>`
     // adopts an existing branch and its commits instead of forking the base 00a-sync-base
@@ -229,6 +235,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       proposalBumpedFrom: isOwn || proposedBranch === baseProposal ? null : baseProposal,
       syncedBase,
       proposalIsOwnBranch: isOwn,
+      currentBranchError,
     };
   },
 
@@ -283,6 +290,15 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
         label: 'Branch name adjusted',
         body: `**${detected.proposalBumpedFrom}** already exists in this repository, so **${detected.proposedBranch}** is proposed instead. Two tasks cannot share a branch — they would work in the same worktree directory. The original name frees up once the task holding it is completed or cancelled.`,
         variant: 'info',
+      });
+    }
+    if (detected.currentBranchError && !detected.syncedBase) {
+      fields.push({
+        type: 'note',
+        id: 'currentBranchUnreadable',
+        label: 'Current branch not read',
+        body: `${detected.currentBranchError}. The earlier sync step recorded no base branch, so the worktree would be branched from main. Retry this step to read the branch again.`,
+        variant: 'warning',
       });
     }
     return {
