@@ -6,6 +6,9 @@ import { databaseName } from '../naming/index.js';
 
 const log = logger.child({ module: 'module-db' });
 
+// pg.end() cannot cancel a waiter or a running statement; the server drops them once it sees the closed socket.
+const SCHEMA_LOCK_CONNECTION_CHECK_MS = 500;
+
 export type ModuleSchemaContext = {
   moduleId: string;
   sql: postgres.Sql;
@@ -59,6 +62,9 @@ export async function openModuleDatabase(
     sql: pg,
     withSchemaLock: <T>(run: (tx: postgres.TransactionSql) => Promise<T>) =>
       pg.begin(async (tx) => {
+        await tx.unsafe(
+          `SET LOCAL client_connection_check_interval = ${SCHEMA_LOCK_CONNECTION_CHECK_MS}`,
+        );
         await tx`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
         return run(tx) as Promise<T>;
       }) as Promise<T>,

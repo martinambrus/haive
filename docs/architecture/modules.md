@@ -121,9 +121,13 @@ the module loads again.
   again, at most three times per reactivation, and after the third the flag reads failed (only the
   worker error log and the waiting steps' line say so) until a deactivation and an activation try
   again. On the server a statement the ensure had already sent finishes or fails by itself and its
-  transaction rolls back, since no COMMIT arrives; a waiter on the schema lock stays until the lock
-  is free, because closing the pool does not cancel it (measured); and whatever the ensure
-  committed on its own stays, so an ensure must be idempotent. At
+  transaction rolls back, since no COMMIT arrives, except that a waiter on the schema lock and a
+  statement running inside `withSchemaLock` end about half a second after the pool closes: closing
+  the pool alone cancels neither (measured), so `withSchemaLock` sets
+  `client_connection_check_interval` to 500 ms as the first statement of its transaction
+  (`SET LOCAL`; it needs PostgreSQL 14 or later on Linux, which the stack runs; pinned by the
+  gated `module-db-abandoned-waiter.test.ts`); and whatever the ensure committed on its own
+  stays, so an ensure must be idempotent. At
   shutdown one deadline, `MODULE_SHUTDOWN_WAIT_MS` (5 s), covers the reconcile pass in flight and every
   module stop together, and the terminal manager's stop runs beside it under its own 5 s bound (it
   refuses a terminal open from the moment it begins, and tears down the session of an open that was
