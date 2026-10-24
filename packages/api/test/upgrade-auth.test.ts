@@ -675,6 +675,75 @@ describe('real transport registry cleanup controls', () => {
   });
 });
 
+describe('terminal startup failure cleanup', () => {
+  for (const stage of ['increment', 'timers'] as const) {
+    it(`ends the attach stream and closes the websocket when ${stage} fails`, async () => {
+      const stream = new PassThrough();
+      vi.spyOn(http, 'request').mockImplementation(((
+        opts: http.RequestOptions,
+        ...args: unknown[]
+      ) => {
+        if (!opts.path?.startsWith('/containers/test-container/attach'))
+          return Reflect.apply(realRequest, http, [opts, ...args]);
+        const req = new EventEmitter();
+        Object.assign(req, {
+          end: () => queueMicrotask(() => req.emit('upgrade', {}, stream, Buffer.alloc(0))),
+        });
+        return req;
+      }) as typeof http.request);
+      const failure = new Error(`${stage} unavailable`);
+      let keepalive: ReturnType<typeof setInterval> | undefined;
+      const clear = vi.spyOn(globalThis, 'clearInterval');
+      if (stage === 'increment') {
+        vi.spyOn(fake.db, 'update').mockImplementationOnce(() => {
+          throw failure;
+        });
+      } else {
+        const interval = globalThis.setInterval;
+        vi.spyOn(globalThis, 'setInterval')
+          .mockImplementationOnce(((...args: Parameters<typeof setInterval>) => {
+            keepalive = interval(...args);
+            return keepalive;
+          }) as typeof setInterval)
+          .mockImplementationOnce(() => {
+            throw failure;
+          });
+      }
+      const docker = {
+        modem: { getSocketPath: () => undefined },
+        getContainer: () => ({}),
+      } as never;
+      const port = await start((s) => installTerminalWebSocket(s, { docker }));
+      const client = new WebSocket(`ws://127.0.0.1:${port}/terminal/${ID}`, {
+        headers: { cookie: 'haive_access=user-session' },
+      });
+      clients.add(client);
+      const frames: unknown[] = [];
+      client.on('message', (raw) => frames.push(JSON.parse(raw.toString())));
+      const closed = new Promise<number>((resolve, reject) => {
+        client.once('close', resolve);
+        client.once('error', reject);
+      });
+      try {
+        expect(await closed).toBe(1011);
+        expect(frames).toContainEqual({ type: 'error', message: failure.message });
+        expect(stream.writableEnded).toBe(true);
+        await vi.waitFor(() => {
+          expect(fake.rows(schema.containers)[0]?.attachedWsCount ?? 0).toBe(0);
+          const sessions = fake.rows(schema.terminalSessions);
+          expect(sessions).toHaveLength(stage === 'increment' ? 0 : 1);
+          for (const session of sessions) expect(session.endedAt).toBeInstanceOf(Date);
+        });
+        if (keepalive) expect(clear).toHaveBeenCalledWith(keepalive);
+      } finally {
+        // Also bound the timer in the red control, before production cleanup exists.
+        if (keepalive) clearInterval(keepalive);
+        stream.destroy();
+      }
+    });
+  }
+});
+
 describe('revocation resource teardown', () => {
   async function revoke(sockets: Awaited<ReturnType<typeof openAll>>['sockets']) {
     expect((await deactivate()).status).toBe(200);
