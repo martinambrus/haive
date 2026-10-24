@@ -450,7 +450,7 @@ Plan I4, part d. Browser check at 1280, 768 and 390.
 
 ### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+4)
 
-status: open · was modular #138
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T03:25Z · last: 2026-10-25T03:25Z · was modular #138
 Items 2-5 merged (#781, #808).
 
 1. PRE-EXISTING, from reading the code (not reproduced). The PR is opened against the origin read from disk (12-worktree-cleanup.ts ~:226, ~:808-813), but pr-poll needs repositories.remote_url (pr-poll-queue.ts ~:136-142), which is NULL for local_path repos. Fix: record the origin on the PR row and poll from it, or backfill remote_url. Reproduce first.
