@@ -208,22 +208,35 @@ maintenanceRoutes.get('/blocking', async (c) => {
     .limit(BLOCKING_LIST_CAP + 1);
   const notWaitedFor = nonBlockingTaskStatuses(state);
   // Not waited for, but only an administrator can act on them: parked while owners are locked out,
-  // or failed under a pause that is still held.
-  const parkedFetched = await db
-    .select(blockingTask)
-    .from(schema.tasks)
-    .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
-    .where(
-      and(
-        isNull(schema.tasks.deadAt),
-        or(
-          notWaitedFor.length > 0 ? inArray(schema.tasks.status, notWaitedFor) : undefined,
-          and(eq(schema.tasks.status, 'failed'), isNotNull(schema.tasks.pausedAt)),
+  // or failed under a pause an administrator holds. Whose pause stands is decided before the list
+  // is cut, so rows that need no administrator cannot crowd out the ones that do.
+  const failedPausedIds = (
+    await db
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          isNull(schema.tasks.deadAt),
+          eq(schema.tasks.status, 'failed'),
+          isNotNull(schema.tasks.pausedAt),
         ),
-      ),
-    )
-    .orderBy(desc(schema.tasks.updatedAt))
-    .limit(BLOCKING_LIST_CAP + 1);
+      )
+  ).map((r) => r.id);
+  const adminHeldFailed = [...(await findAdminPausedTaskIds(db, failedPausedIds))];
+  const arms = [
+    notWaitedFor.length > 0 ? inArray(schema.tasks.status, notWaitedFor) : undefined,
+    adminHeldFailed.length > 0 ? inArray(schema.tasks.id, adminHeldFailed) : undefined,
+  ].filter((arm) => arm !== undefined);
+  const parkedFetched =
+    arms.length === 0
+      ? []
+      : await db
+          .select(blockingTask)
+          .from(schema.tasks)
+          .leftJoin(schema.users, eq(schema.users.id, schema.tasks.userId))
+          .where(and(isNull(schema.tasks.deadAt), or(...arms)))
+          .orderBy(desc(schema.tasks.updatedAt))
+          .limit(BLOCKING_LIST_CAP + 1);
   const rows = fetched.slice(0, BLOCKING_LIST_CAP);
   const { jobs, capped: jobsCapped } = await listBlockingJobs(db);
   const fieldKey = await configService.getEncryptionKey();
@@ -247,10 +260,7 @@ maintenanceRoutes.get('/blocking', async (c) => {
     db,
     [...rows, ...parkedFetched].filter((r) => r.pausedAt).map((r) => r.id),
   );
-  // A failed task whose pause is its owner's needs no administrator.
-  const parked = parkedFetched
-    .filter((r) => r.status !== 'failed' || adminPaused.has(r.id))
-    .slice(0, BLOCKING_LIST_CAP);
+  const parked = parkedFetched.slice(0, BLOCKING_LIST_CAP);
   const shape = ({ ownerEmailEncrypted, ...r }: (typeof rows)[number]) => ({
     ...r,
     pausedByAdmin: adminPaused.has(r.id),

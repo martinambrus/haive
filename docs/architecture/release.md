@@ -61,13 +61,16 @@ until the deadline. The wait counts by the state the draining phase left in forc
 the state it reads under the fence, so the two agree (a recount that counted more would reopen a
 drain the wait had ended). `GET /admin/maintenance/blocking` reads the state past the cache and
 lists the same statuses through the same function, so the page shows exactly what the updater waits
-for, and under `maintenance` a parked task is not in `tasks` and holds nothing. The same response
-lists those tasks apart, in `parked` (`nonBlockingTaskStatuses`, in `@haive/shared`: the complement
-of `drainTaskStatuses`), together with every failed task an administrator's pause holds, so an
-administrator can still Pause or Resume them from the page, where they show as "Parked". `parked` counts
-toward neither `total` nor `capped` (`parkedCapped` says its own cut-off), and the updater never waits
-for it. It does not filter by owner role: an administrator's own parked task (who passes the gate and
-could still answer it) is listed there too, though it is not waited for.
+for, and under `maintenance` a parked task is not in `tasks` and holds nothing. The same response lists
+those tasks apart, in `parked` (`nonBlockingTaskStatuses`, in `@haive/shared`: the complement of
+`drainTaskStatuses`), together with every live (not dead) failed task an administrator's pause holds, so
+an administrator can still Pause or Resume them from the page, where they show as "Parked". Whose pause
+stands is decided first, by `findAdminPausedTaskIds` over the ids of the failed tasks that carry one,
+and the list is cut after that, so failed tasks under an owner's pause cannot crowd the others out.
+`parked` counts toward neither `total` nor `capped` (`parkedCapped` says its own cut-off), and the
+updater never waits for it. It does not filter by owner role: an administrator's own parked task (who
+passes the gate and could still answer it) is listed there too, though it is not waited for. A page
+newer than its api reads a response without `parked` as an empty list.
 Every api route that starts such work refuses with 503 while the state is `draining` or
 `maintenance`: the task routes, and every route that writes a job's in-progress status (repository
 create, upload and refresh, bundle create, upload, replace and sync, provider create, clone and image

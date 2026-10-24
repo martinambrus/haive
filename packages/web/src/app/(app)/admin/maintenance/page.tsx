@@ -215,6 +215,8 @@ export default function MaintenancePage() {
 
   const liveRun = upgrade?.runs.find((r) => r.status === 'running') ?? null;
 
+  const parked = blocking?.parked ?? [];
+
   return (
     <div className="space-y-6">
       <div>
@@ -284,7 +286,7 @@ export default function MaintenancePage() {
             <TaskRow key={t.id} t={t} viewerId={blocking.viewerId} busy={busy} act={act} />
           ))}
         </div>
-        {blocking && blocking.parked.length > 0 ? (
+        {blocking && parked.length > 0 ? (
           <div className="space-y-2">
             <h3 className="text-sm font-medium text-neutral-300">Parked</h3>
             <p className="text-xs text-neutral-500">
@@ -294,10 +296,10 @@ export default function MaintenancePage() {
             </p>
             {blocking.parkedCapped ? (
               <p className="text-xs text-amber-400">
-                Showing the first {blocking.parked.length} parked tasks. There are more.
+                Showing the first {parked.length} parked tasks. There are more.
               </p>
             ) : null}
-            {blocking.parked.map((t) => (
+            {parked.map((t) => (
               <TaskRow key={t.id} t={t} viewerId={blocking.viewerId} busy={busy} act={act} />
             ))}
           </div>

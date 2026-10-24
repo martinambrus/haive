@@ -33,6 +33,7 @@ let runs: Array<Record<string, unknown>> = [];
 let blockingTasks: Array<Record<string, unknown>> = [];
 let parkedTasks: Array<Record<string, unknown>> = [];
 let parkedCapped = false;
+let predatesParked = false;
 let actions: string[] = [];
 
 const upgradeRun = (status: string) => ({
@@ -75,8 +76,7 @@ async function fakeFetch(input: unknown, init?: { method?: string; body?: string
       jobs: [],
       total: blockingTasks.length,
       capped: false,
-      parked: structuredClone(parkedTasks),
-      parkedCapped,
+      ...(predatesParked ? {} : { parked: structuredClone(parkedTasks), parkedCapped }),
       viewerId: 'u1',
     });
   }
@@ -105,6 +105,7 @@ beforeEach(() => {
   blockingTasks = [];
   parkedTasks = [];
   parkedCapped = false;
+  predatesParked = false;
   actions = [];
 });
 afterEach(() => vi.useRealTimers());
@@ -270,6 +271,15 @@ describe('maintenance page parked list', () => {
       .filter((t) => ['Pause', 'Resume', 'Take over pause'].includes(t));
   const headings = (view: Renderer) =>
     findAll(view.tree(), (h) => h.tag === 'h3').map((h) => textOf(h));
+
+  it('renders the blocking list when the api sends no parked field', async () => {
+    predatesParked = true;
+    blockingTasks = [parkedTask({ title: 'Still running', status: 'running' })];
+    const view = await mount();
+
+    expect(textOf(view.tree())).toContain('Still running');
+    expect(headings(view)).not.toContain('Parked');
+  });
 
   it('shows no Parked heading when nothing is parked', async () => {
     const view = await mount();

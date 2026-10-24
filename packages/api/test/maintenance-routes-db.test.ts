@@ -1475,6 +1475,61 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
         expect(body.capped).toBe(false);
       },
     );
+
+    describe('with many failed tasks under a pause', () => {
+      const failedPaused = (n: number) =>
+        Array.from({ length: n }, (_, i) => ({
+          userId: OWNER,
+          type: TYPE,
+          title: `Failed ${i}`,
+          status: 'failed' as const,
+          pausedAt: new Date(),
+        }));
+
+      it('lists a waiting task that 201 newer failed tasks under no administrator pause would crowd out', async () => {
+        h.state = 'maintenance';
+        const waiting = await task({
+          status: 'waiting_user',
+          updatedAt: new Date('2020-01-01T00:00:00Z'),
+        });
+        await db.insert(schema.tasks).values(failedPaused(BLOCKING_LIST_CAP + 1));
+        const body = await blocking();
+        expect(body.parked.map((t) => t.id)).toEqual([waiting.id]);
+        expect(body.parkedCapped).toBe(false);
+      });
+
+      it('lists the one failed task under an administrator pause among 250 that are not', async () => {
+        h.state = 'maintenance';
+        const held = await task({
+          status: 'failed',
+          pausedAt: new Date(),
+          updatedAt: new Date('2020-01-01T00:00:00Z'),
+        });
+        await pausedBy(held.id, ADMIN, true);
+        await db.insert(schema.tasks).values(failedPaused(250));
+        const body = await blocking();
+        expect(body.parked.map((t) => t.id)).toEqual([held.id]);
+        expect(body.parkedCapped).toBe(false);
+      });
+
+      it('lists the cap and says parkedCapped when 201 failed tasks each hold an administrator pause', async () => {
+        h.state = 'maintenance';
+        const rows = await db
+          .insert(schema.tasks)
+          .values(failedPaused(BLOCKING_LIST_CAP + 1))
+          .returning({ id: schema.tasks.id });
+        await db.insert(schema.taskEvents).values(
+          rows.map((r) => ({
+            taskId: r.id,
+            eventType: 'task.paused',
+            payload: { by: ADMIN, byAdmin: true },
+          })),
+        );
+        const body = await blocking();
+        expect(body.parked).toHaveLength(BLOCKING_LIST_CAP);
+        expect(body.parkedCapped).toBe(true);
+      });
+    });
   });
 
   describe('GET /blocking per maintenance state', () => {
