@@ -1,31 +1,7 @@
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
-import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
-import type { CliProviderName } from '@haive/shared';
-import { getCliProviderMetadata } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { listFilesMatching } from './_helpers.js';
-
-interface ActiveAgentsTarget {
-  dir: string;
-  ext: '.md' | '.toml';
-}
-
-async function resolveActiveAgentsTarget(ctx: StepContext): Promise<ActiveAgentsTarget | null> {
-  const defaultTarget: ActiveAgentsTarget = { dir: '.claude/agents', ext: '.md' };
-  if (!ctx.cliProviderId) return defaultTarget;
-  const row = await ctx.db.query.cliProviders.findFirst({
-    where: eq(schema.cliProviders.id, ctx.cliProviderId),
-    columns: { name: true },
-  });
-  if (!row) return defaultTarget;
-  const meta = getCliProviderMetadata(row.name as CliProviderName);
-  if (!meta.projectAgentsDir || !meta.agentFileFormat) return null;
-  return {
-    dir: meta.projectAgentsDir,
-    ext: meta.agentFileFormat === 'toml' ? '.toml' : '.md',
-  };
-}
+import { resolveActiveAgentsTarget } from './_active-agents-target.js';
 
 interface FileCheck {
   id: string;
