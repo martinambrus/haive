@@ -1,7 +1,6 @@
-import { networkGitArgs, httpOrigin } from './support/git-http.js';
+import { fixtureBase, networkGitArgs, httpOrigin } from './support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { failGit, type FakeGit } from './support/fake-git.js';
@@ -87,7 +86,7 @@ let shim: FakeGit | null = null;
 
 /** local and origin each hold one commit the other lacks, both editing a.txt. */
 function conflictingFixture(): void {
-  root = mkdtempSync(path.join(tmpdir(), 'plan-merge-listing-'));
+  root = mkdtempSync(path.join(fixtureBase, 'plan-merge-listing-'));
   const origin = path.join(root, 'origin');
   h.repo = path.join(root, 'local');
   execFileSync('git', ['init', '-q', '-b', 'main', origin], { env: ENV });

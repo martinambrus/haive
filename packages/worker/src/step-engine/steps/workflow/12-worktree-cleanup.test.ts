@@ -1,4 +1,4 @@
-import { networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
+import { fixtureBase, networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import {
   chmod,
@@ -11,7 +11,6 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
@@ -198,7 +197,7 @@ async function writeIn(dir: string, files: Record<string, string>): Promise<void
 async function setupWorktree(
   seed: Record<string, string> = {},
 ): Promise<{ parent: string; wt: string }> {
-  const parent = await mkdtemp(path.join(tmpdir(), 'wt-parent-'));
+  const parent = await mkdtemp(path.join(fixtureBase, 'wt-parent-'));
   await git(parent, ['init', '-b', 'main']);
   await git(parent, ['config', 'gc.auto', '0']);
   await writeFile(path.join(parent, 'base.txt'), 'base\n', 'utf8');
@@ -229,7 +228,7 @@ async function divergeBase(parent: string, wt: string): Promise<void> {
 
 /** Give `parent` an `origin` (a fresh bare) and push its current `main`. */
 async function pushParentMainToOrigin(parent: string): Promise<string> {
-  const bare = await mkdtemp(path.join(tmpdir(), 'wt-origin-'));
+  const bare = await mkdtemp(path.join(fixtureBase, 'wt-origin-'));
   await git(bare, ['init', '--bare', '-b', 'main']);
   await git(parent, ['remote', 'add', 'origin', httpOrigin(bare)]);
   await git(parent, ['push', '-u', 'origin', 'main']);
@@ -239,7 +238,7 @@ async function pushParentMainToOrigin(parent: string): Promise<string> {
 /** Advance origin's `main` by one commit (via an ephemeral clone) so the parent's
  *  remote-tracking ref goes stale until it next fetches. */
 async function advanceOrigin(bare: string, file: string, content: string): Promise<void> {
-  const seed = await mkdtemp(path.join(tmpdir(), 'wt-seed-'));
+  const seed = await mkdtemp(path.join(fixtureBase, 'wt-seed-'));
   try {
     await git(seed, ['clone', httpOrigin(bare), '.']);
     await writeFile(path.join(seed, file), content, 'utf8');
@@ -1104,7 +1103,7 @@ describe('12 merge phase + apply (real git)', () => {
 
   it('pushBase pushes the integrated base branch to origin', async () => {
     const { parent, wt } = await setupWorktree();
-    const bare = await mkdtemp(path.join(tmpdir(), 'wt-bare-'));
+    const bare = await mkdtemp(path.join(fixtureBase, 'wt-bare-'));
     try {
       await git(bare, ['init', '--bare', '-b', 'main']);
       await git(parent, ['remote', 'add', 'origin', httpOrigin(bare)]);
@@ -1127,7 +1126,7 @@ describe('12 merge phase + apply (real git)', () => {
   it('push failure halts but preserves the local merge', async () => {
     const { parent, wt } = await setupWorktree();
     try {
-      await git(parent, ['remote', 'add', 'origin', 'file:///nonexistent/repo.git']);
+      await git(parent, ['remote', 'add', 'origin', path.join(fixtureBase, 'nonexistent.git')]);
       const h = makeDb();
       const ctx = mkCtx(parent, h.db);
       const merge = await resolveMergePhase(

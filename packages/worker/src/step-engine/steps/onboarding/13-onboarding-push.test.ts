@@ -1,7 +1,6 @@
-import { networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
+import { fixtureBase, networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -36,7 +35,7 @@ async function git(cwd: string, args: string[]): Promise<void> {
 }
 
 async function mkTmp(prefix: string): Promise<string> {
-  const dir = await mkdtemp(path.join(tmpdir(), prefix));
+  const dir = await mkdtemp(path.join(fixtureBase, prefix));
   tmpDirs.push(dir);
   return dir;
 }

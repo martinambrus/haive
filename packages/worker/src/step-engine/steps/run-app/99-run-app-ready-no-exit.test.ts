@@ -1,7 +1,6 @@
-import { networkGitArgs } from '../../../../test/support/git-http.js';
+import { fixtureBase, networkGitArgs } from '../../../../test/support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -41,7 +40,7 @@ describe('run-app ready gate when the branch read gives no answer', () => {
   let shim: KilledGit | FakeGit | null = null;
 
   async function makeRepo(withOrigin: boolean): Promise<string> {
-    const repo = await mkdtemp(path.join(tmpdir(), 'run-app-ready-'));
+    const repo = await mkdtemp(path.join(fixtureBase, 'run-app-ready-'));
     dirs.push(repo);
     git(repo, ['init', '-b', 'main']);
     git(repo, ['config', 'gc.auto', '0']);
@@ -51,7 +50,7 @@ describe('run-app ready gate when the branch read gives no answer', () => {
     git(repo, ['add', '-A']);
     git(repo, ['commit', '-m', 'one']);
     if (withOrigin) {
-      const bare = await mkdtemp(path.join(tmpdir(), 'run-app-ready-origin-'));
+      const bare = await mkdtemp(path.join(fixtureBase, 'run-app-ready-origin-'));
       dirs.push(bare);
       git(bare, ['init', '--bare', '-b', 'main']);
       git(repo, ['remote', 'add', 'origin', `file://${bare}`]);
@@ -151,7 +150,7 @@ describe('run-app ready gate apply when a push is asked for', () => {
   let dirs: string[] = [];
 
   async function makeRepo(withOrigin: boolean, dirty: boolean): Promise<string> {
-    const repo = await mkdtemp(path.join(tmpdir(), 'run-app-apply-'));
+    const repo = await mkdtemp(path.join(fixtureBase, 'run-app-apply-'));
     dirs.push(repo);
     git(repo, ['init', '-b', 'main']);
     git(repo, ['config', 'gc.auto', '0']);
@@ -161,7 +160,7 @@ describe('run-app ready gate apply when a push is asked for', () => {
     git(repo, ['add', '-A']);
     git(repo, ['commit', '-m', 'one']);
     if (withOrigin) {
-      const bare = await mkdtemp(path.join(tmpdir(), 'run-app-apply-origin-'));
+      const bare = await mkdtemp(path.join(fixtureBase, 'run-app-apply-origin-'));
       dirs.push(bare);
       git(bare, ['init', '--bare', '-b', 'main']);
       git(repo, ['remote', 'add', 'origin', `file://${bare}`]);

@@ -1,19 +1,27 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { hardenGitArgs } from '../../../shared/dist/git-args.js';
+import path from 'node:path';
+import { hardenGitArgs } from '@haive/shared/git-args';
 
+const base = process.argv[2];
+if (!base || !path.isAbsolute(base)) throw new Error('fixture base directory required');
+
+// The alpine worker image has no git http-backend in git --exec-path.
+// These fixtures run on the host and in CI only.
 // A separate process lets fixtures that use execFileSync still speak real smart HTTP.
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const child = spawn('git', hardenGitArgs(['-c', 'http.receivepack=true', 'http-backend']), {
     env: {
       ...process.env,
-      GIT_PROJECT_ROOT: '/',
+      GIT_PROJECT_ROOT: base,
       GIT_HTTP_EXPORT_ALL: '1',
       PATH_INFO: decodeURIComponent(url.pathname),
       QUERY_STRING: url.search.slice(1),
       REQUEST_METHOD: req.method,
       CONTENT_TYPE: req.headers['content-type'] ?? '',
+      HTTP_CONTENT_ENCODING: req.headers['content-encoding'] ?? '',
+      HTTP_GIT_PROTOCOL: req.headers['git-protocol'] ?? '',
       REMOTE_USER: 'test',
     },
     stdio: ['pipe', 'pipe', 'pipe'],

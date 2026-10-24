@@ -1,7 +1,6 @@
-import { httpOrigin } from './support/git-http.js';
+import { fixtureBase, httpOrigin } from './support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StepContext } from '../src/step-engine/step-definition.js';
@@ -128,7 +127,7 @@ let origin = '';
 
 /** local and origin each hold one commit the other lacks; `conflict` makes both edit the same file. */
 function fixture(conflict: boolean): void {
-  root = mkdtempSync(path.join(tmpdir(), 'plan-move-lock-'));
+  root = mkdtempSync(path.join(fixtureBase, 'plan-move-lock-'));
   origin = path.join(root, 'origin');
   h.repo = path.join(root, 'local');
   execFileSync('git', ['init', '-q', '-b', 'main', origin], { env: ENV });

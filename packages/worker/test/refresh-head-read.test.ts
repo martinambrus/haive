@@ -1,7 +1,6 @@
-import { networkGitArgs } from './support/git-http.js';
+import { fixtureBase, networkGitArgs } from './support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -37,7 +36,7 @@ describe('fastForward reads HEAD before it moves the checkout', () => {
   });
 
   async function tmp(prefix: string): Promise<string> {
-    const dir = await mkdtemp(path.join(tmpdir(), prefix));
+    const dir = await mkdtemp(path.join(fixtureBase, prefix));
     dirs.push(dir);
     return dir;
   }

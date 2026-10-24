@@ -1,7 +1,6 @@
-import { networkGitArgs } from '../../../../test/support/git-http.js';
+import { fixtureBase, networkGitArgs } from '../../../../test/support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { FormSchema } from '@haive/shared';
@@ -50,7 +49,7 @@ afterEach(async () => {
 });
 
 async function makeBundle(name: string): Promise<Fixture> {
-  const root = await mkdtemp(path.join(tmpdir(), 'bundle-resync-'));
+  const root = await mkdtemp(path.join(fixtureBase, 'bundle-resync-'));
   dirs.push(root);
   const bare = path.join(root, 'origin.git');
   const seed = path.join(root, 'seed');

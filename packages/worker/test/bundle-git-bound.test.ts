@@ -1,7 +1,6 @@
-import { networkGitArgs, httpOrigin } from './support/git-http.js';
+import { fixtureBase, networkGitArgs, httpOrigin } from './support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '@haive/shared';
@@ -40,7 +39,7 @@ let restore: (() => Promise<void>) | null = null;
 const saved = { ...gitTimeoutLimits };
 
 beforeEach(async () => {
-  tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'bundle-git-bound-'));
+  tmpRoot = await mkdtemp(path.join(fixtureBase, 'bundle-git-bound-'));
 });
 
 afterEach(async () => {

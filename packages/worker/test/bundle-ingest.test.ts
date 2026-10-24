@@ -1,7 +1,6 @@
-import { httpOrigin } from './support/git-http.js';
+import { fixtureBase, httpOrigin } from './support/git-http.js';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import JSZip from 'jszip';
 import { describe, expect, it, afterEach, beforeEach, vi } from 'vitest';
@@ -62,7 +61,7 @@ function run(cmd: string, args: string[], cwd?: string): Promise<void> {
 let tmpRoot: string;
 
 beforeEach(async () => {
-  tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'haive-bundle-'));
+  tmpRoot = await mkdtemp(path.join(fixtureBase, 'haive-bundle-'));
 });
 
 afterEach(async () => {

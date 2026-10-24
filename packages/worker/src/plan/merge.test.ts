@@ -1,7 +1,6 @@
-import { networkGitArgs } from '../../test/support/git-http.js';
+import { fixtureBase, networkGitArgs } from '../../test/support/git-http.js';
 import { execFile, execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile, readFile, lstat, chmod } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -127,8 +126,8 @@ async function write(dir: string, file: string, body: string | Buffer): Promise<
  * commit.
  */
 async function unrelatedPair(): Promise<{ local: string; remote: string }> {
-  const remote = await mkdtemp(path.join(tmpdir(), 'planmerge-remote-'));
-  const local = await mkdtemp(path.join(tmpdir(), 'planmerge-local-'));
+  const remote = await mkdtemp(path.join(fixtureBase, 'planmerge-remote-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'planmerge-local-'));
   dirs.push(remote, local);
 
   await git(remote, ['init', '-b', 'main']);
@@ -161,7 +160,7 @@ describe('divergence', () => {
 
   it('counts a plain fast-forward as behind, not unrelated', async () => {
     const { remote } = await unrelatedPair();
-    const clone = await mkdtemp(path.join(tmpdir(), 'planmerge-clone-'));
+    const clone = await mkdtemp(path.join(fixtureBase, 'planmerge-clone-'));
     dirs.push(clone);
     await git(clone, ['clone', remote, '.']);
     await quietGit(clone);
@@ -184,7 +183,7 @@ describe('divergence on a failed git read', () => {
   const REAL_GIT = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
 
   async function withShim<T>(body: string, run: () => Promise<T>): Promise<T> {
-    const shimDir = await mkdtemp(path.join(tmpdir(), 'planmerge-shim-'));
+    const shimDir = await mkdtemp(path.join(fixtureBase, 'planmerge-shim-'));
     dirs.push(shimDir);
     await writeFile(
       path.join(shimDir, 'git'),
@@ -221,7 +220,7 @@ describe('divergence on a failed git read', () => {
   });
 
   it('rejects in a directory that is not a git repository', async () => {
-    const outer = await mkdtemp(path.join(tmpdir(), 'planmerge-notrepo-'));
+    const outer = await mkdtemp(path.join(fixtureBase, 'planmerge-notrepo-'));
     dirs.push(outer);
     const inner = path.join(outer, 'inner');
     await mkdir(inner);
@@ -566,8 +565,8 @@ async function relatedPair(
   ours: PlanMirror | null,
   theirs: PlanMirror | null,
 ): Promise<{ local: string; wt: string }> {
-  const remote = await mkdtemp(path.join(tmpdir(), 'planmerge-remote-'));
-  const local = await mkdtemp(path.join(tmpdir(), 'planmerge-local-'));
+  const remote = await mkdtemp(path.join(fixtureBase, 'planmerge-remote-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'planmerge-local-'));
   dirs.push(remote, local);
   await git(remote, ['init', '-b', 'main']);
   await quietGit(remote);
@@ -701,7 +700,12 @@ describe('mergeOriginInto: plan.json merges three-way', () => {
     const { local, wt } = await relatedPair(base, ours, theirs);
     await write(wt, PLAN_MD, 'same on both sides\n');
     await commitAll(wt, 'md');
-    const remoteDir = new URL((await git(local, ['remote', 'get-url', 'origin'])).trim()).pathname;
+    const remoteDir = path.join(
+      fixtureBase,
+      decodeURIComponent(
+        new URL((await git(local, ['remote', 'get-url', 'origin'])).trim()).pathname,
+      ),
+    );
     await write(remoteDir, PLAN_MD, 'same on both sides\n');
     await commitAll(remoteDir, 'md');
     await git(local, ['fetch', 'origin', 'main']);
@@ -769,7 +773,12 @@ describe('mergeOriginInto: plan.json merges three-way', () => {
       planOf([[NODE_X, 'X ours']]),
     );
     // One shared plan commit is the merge base, so plan.json merges cleanly to the garbled side.
-    const remoteDir = new URL((await git(local, ['remote', 'get-url', 'origin'])).trim()).pathname;
+    const remoteDir = path.join(
+      fixtureBase,
+      decodeURIComponent(
+        new URL((await git(local, ['remote', 'get-url', 'origin'])).trim()).pathname,
+      ),
+    );
     await git(remoteDir, ['fetch', '-q', local, 'HEAD']);
     await git(remoteDir, ['reset', '-q', '--hard', 'FETCH_HEAD']);
     await removePlanMergeWorktree(local);
@@ -841,8 +850,8 @@ async function relatedFilesPair(
   ours: Files,
   theirs: Files,
 ): Promise<{ local: string; wt: string }> {
-  const remote = await mkdtemp(path.join(tmpdir(), 'planmerge-remote-'));
-  const local = await mkdtemp(path.join(tmpdir(), 'planmerge-local-'));
+  const remote = await mkdtemp(path.join(fixtureBase, 'planmerge-remote-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'planmerge-local-'));
   dirs.push(remote, local);
   await git(remote, ['init', '-b', 'main']);
   await quietGit(remote);
@@ -1179,7 +1188,7 @@ describe('landPlanMerge', () => {
 
 describe('unlandedResolvedMerge', () => {
   async function mergedInScratch(): Promise<{ local: string; wt: string; sha: string }> {
-    const local = await mkdtemp(path.join(tmpdir(), 'planmerge-unlanded-'));
+    const local = await mkdtemp(path.join(fixtureBase, 'planmerge-unlanded-'));
     dirs.push(local);
     await git(local, ['init', '-b', 'main']);
     await quietGit(local);

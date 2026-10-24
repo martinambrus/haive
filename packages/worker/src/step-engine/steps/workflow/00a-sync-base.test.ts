@@ -1,7 +1,6 @@
-import { networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
+import { fixtureBase, networkGitArgs, httpOrigin } from '../../../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -168,9 +167,9 @@ function applyArgs(detected: unknown, formValues: Record<string, unknown>): neve
 
 /** A bare origin on `main` with one commit, plus a seed working clone to advance it. */
 async function seedOrigin(): Promise<{ bare: string; seed: string }> {
-  const bare = await mkdtemp(path.join(tmpdir(), 'sync-bare-'));
+  const bare = await mkdtemp(path.join(fixtureBase, 'sync-bare-'));
   await git(bare, ['init', '--bare', '-b', 'main']);
-  const seed = await mkdtemp(path.join(tmpdir(), 'sync-seed-'));
+  const seed = await mkdtemp(path.join(fixtureBase, 'sync-seed-'));
   await git(seed, ['init', '-b', 'main']);
   await git(seed, ['remote', 'add', 'origin', httpOrigin(bare)]);
   await writeFile(path.join(seed, 'a.txt'), '1\n', 'utf8');
@@ -180,7 +179,7 @@ async function seedOrigin(): Promise<{ bare: string; seed: string }> {
   return { bare, seed };
 }
 async function cloneLocal(bare: string): Promise<string> {
-  const local = await mkdtemp(path.join(tmpdir(), 'sync-local-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'sync-local-'));
   await git(local, ['clone', httpOrigin(bare), '.']);
   return local;
 }
@@ -684,7 +683,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
   });
 
   it('no origin remote → skipped, base still recorded for 01', async () => {
-    const local = await mkdtemp(path.join(tmpdir(), 'sync-noremote-'));
+    const local = await mkdtemp(path.join(fixtureBase, 'sync-noremote-'));
     await git(local, ['init', '-b', 'main']);
     await writeFile(path.join(local, 'a.txt'), '1\n', 'utf8');
     await git(local, ['add', '-A']);
@@ -703,9 +702,9 @@ describe('00a-sync-base detect + apply (real git)', () => {
   describe('an origin git cannot read', () => {
     // A bad fetch refspec makes `git remote get-url origin` exit 128 while rev-parse, status and branch still work.
     async function unreadableOriginCheckout(): Promise<{ local: string; bare: string }> {
-      const bare = await mkdtemp(path.join(tmpdir(), 'sync-unreadable-bare-'));
+      const bare = await mkdtemp(path.join(fixtureBase, 'sync-unreadable-bare-'));
       await git(bare, ['init', '--bare', '-b', 'main']);
-      const local = await mkdtemp(path.join(tmpdir(), 'sync-unreadable-'));
+      const local = await mkdtemp(path.join(fixtureBase, 'sync-unreadable-'));
       await git(local, ['init', '-b', 'main']);
       await git(local, ['config', 'gc.auto', '0']);
       await writeFile(path.join(local, 'a.txt'), '1\n', 'utf8');
