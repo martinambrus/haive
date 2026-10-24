@@ -25,7 +25,8 @@ import {
 import type { Insight } from './08e-insights-triage.js';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
-import { gitRun } from '../../../repo/git-exec.js';
+import { gitGaveNoAnswer, gitRun, type GitRunResult } from '../../../repo/git-exec.js';
+import { warnStep } from '../../../project-state/branch-revert.js';
 
 /** Cap on how many changed paths we persist to tasks.changed_paths. The estimator's
  *  file-overlap anchor (00b-estimate) needs the touched-file SET, not every path in a
@@ -142,6 +143,12 @@ function generatedCommitMessage(output: unknown): string | null {
   return trimmed;
 }
 
+/** The commit has landed, so a read that gave no answer is made once more before it is given up on. */
+async function readLanded(workspace: string, args: string[]): Promise<GitRunResult> {
+  const first = await gitRun(workspace, args);
+  return gitGaveNoAnswer(first) ? gitRun(workspace, args) : first;
+}
+
 /** Persist the durable commit outcome (sha + touched paths) onto the TASK ROW so a
  *  completed task's changed-file set survives worktree teardown and step-output resets
  *  (see the step-output-not-durable rule) — the anchor 00b-estimate ranks prior tasks by
@@ -154,9 +161,15 @@ async function persistCommitOutcome(
   ctx: StepContext,
   workspace: string,
   commitSha: string | null,
-): Promise<void> {
+): Promise<string[]> {
+  const notes: string[] = [];
   try {
-    const names = await gitRun(workspace, ['show', '--name-only', '-z', '--format=', 'HEAD']);
+    const names = await readLanded(workspace, ['show', '--name-only', '-z', '--format=', 'HEAD']);
+    if (gitGaveNoAnswer(names)) {
+      notes.push(
+        "The commit landed, but git gave no answer when its changed files were read, so they are not added to this task's file list.",
+      );
+    }
     const thisCommit = names.code === 0 ? names.stdout.split('\0').filter((s) => s.length > 0) : [];
     const row = await ctx.db.query.tasks.findFirst({
       where: eq(schema.tasks.id, ctx.taskId),
@@ -173,6 +186,7 @@ async function persistCommitOutcome(
   } catch (err) {
     ctx.logger.warn({ err }, 'failed to persist commit outcome (sha / changed paths)');
   }
+  return notes;
 }
 
 export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> = {
@@ -403,10 +417,16 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       }
       throw new Error(`git commit failed: ${stderr}`);
     }
-    const sha = await gitRun(workspace, ['rev-parse', 'HEAD']);
+    const sha = await readLanded(workspace, ['rev-parse', 'HEAD']);
     const commitSha = sha.code === 0 ? sha.stdout.trim() : null;
     ctx.logger.info({ commitSha, message }, 'workflow commit finalised');
-    await persistCommitOutcome(ctx, workspace, commitSha);
+    const notes = await persistCommitOutcome(ctx, workspace, commitSha);
+    if (gitGaveNoAnswer(sha)) {
+      notes.unshift(
+        'The commit landed, but git gave no answer when its id was read, so this task has no commit id recorded.',
+      );
+    }
+    await warnStep(ctx, notes);
     return { committed: true, commitSha, message };
   },
 };
