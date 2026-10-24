@@ -976,7 +976,7 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
     await markProjectStateDirty(tx, id);
     return rows;
   });
-  const { fileTree: _drop, ...rest } = updated[0]!;
+  const { fileTree: _drop, renderContext: _context, ...rest } = updated[0]!;
   return c.json({ repository: rest });
 });
 

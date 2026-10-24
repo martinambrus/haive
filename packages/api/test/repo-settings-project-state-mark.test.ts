@@ -49,6 +49,8 @@ beforeEach(() => {
       source: 'local_path',
       rtkEnabled: true,
       rtkVersion: '0.1.0',
+      fileTree: { files: ['a.ts'] },
+      renderContext: { rtkEnabled: true },
     });
   }
   h.db = fake.db;
@@ -70,6 +72,9 @@ describe('a settings edit marks the project state record dirty', () => {
     });
 
     expect(res.status).toBe(200);
+    const { repository } = (await res.json()) as { repository: Record<string, unknown> };
+    expect(repository).not.toHaveProperty('fileTree');
+    expect(repository).not.toHaveProperty('renderContext');
     expect(fake.rows(schema.repositories).find((r) => r.id === REPO)?.scopeExcludeGlobs).toEqual([
       'node_modules',
       'vendor',
