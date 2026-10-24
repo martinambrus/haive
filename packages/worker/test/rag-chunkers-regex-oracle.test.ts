@@ -130,6 +130,12 @@ const CASES: string[] = [
   // a label before a comment is no URL scheme
   'function first(){ retry:// a ` in the comment\nwork(); }\nfunction second(){ return 1; }\nconst t = ``;',
   'switch (k) { case 1:// c `\n break; }\nfunction second(){ return 1; }\nconst t = ``;',
+  // identifiers with combining marks and joiners
+  'let caf\u00e9 = 6; const n = caf\u00e9 / 2; function save() { persist(); } const ratio = n / 3;',
+  'let cafe\u0301 = 6; const n = cafe\u0301 / 2; function save() { persist(); } const ratio = n / 3;',
+  'let na\u00efve = 6; const n = na\u00efve / 2; function save() { persist(); } const ratio = n / 3;',
+  'let nai\u0308ve = 6; const n = nai\u0308ve / 2; function save() { persist(); } const ratio = n / 3;',
+  'let $x\u200D = 6; const n = $x\u200D / 2; function save() { persist(); } const ratio = n / 3;',
 ];
 
 const KNOWN_LIMITS = new Map<string, string>([

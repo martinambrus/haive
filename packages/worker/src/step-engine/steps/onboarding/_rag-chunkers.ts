@@ -254,8 +254,8 @@ const REGEX_AFTER_WORD = /^(?:return|typeof|instanceof|in|new|delete|void|throw|
 /** Keywords only in their own syntax: an identifier anywhere else, so a slash after one divides. */
 const CONTEXTUAL_WORDS = new Set(['of', 'yield', 'await']);
 const BARE_NAME = /^[A-Za-z_$][\w$]*$/;
-const WORD_START = /[\p{L}_$]/u;
-const WORD_CHAR = /[\p{L}\p{N}_$]/u;
+const WORD_START = /[\p{ID_Start}_$]/u;
+const WORD_CHAR = /[\p{ID_Continue}$\u200C\u200D]/u;
 
 /** A '/' that opens no regex literal would otherwise scan to the end of its line from every call: a
  *  literal longer than MAX_REGEX_CHARS is not read as one, and a line gives up on regex literals after
