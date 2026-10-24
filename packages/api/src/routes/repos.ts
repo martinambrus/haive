@@ -2534,18 +2534,25 @@ repoRoutes.post('/:id/remote', async (c) => {
         stderr: stderr.toString().trim(),
       };
     } catch (err) {
-      const e = err as { code?: unknown; stdout?: string; stderr?: string };
+      const e = err as { code?: unknown; stdout?: string; stderr?: string; message?: string };
       return {
         ok: false,
         code: typeof e.code === 'number' ? e.code : -1,
         stdout: (e.stdout ?? '').toString().trim(),
-        stderr: (e.stderr ?? '').toString().trim(),
+        stderr: (e.stderr || e.message || '').toString().trim(),
       };
     }
   };
 
   const inside = await git(['rev-parse', '--is-inside-work-tree']);
-  if (!inside.ok || inside.stdout !== 'true') {
+  if (!inside.ok || !['true', 'false'].includes(inside.stdout)) {
+    const reason = inside.stderr || inside.stdout || 'no answer';
+    throw new HttpError(
+      409,
+      `This repository could not be examined: git rev-parse --is-inside-work-tree failed (exit ${inside.code}): ${reason}`,
+    );
+  }
+  if (inside.stdout === 'false') {
     throw new HttpError(409, 'This repository is not a Git checkout, so it cannot have a remote');
   }
 
