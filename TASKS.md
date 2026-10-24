@@ -677,7 +677,7 @@ Fix direction: after a failed reset, re-ask for the status without clearing the 
 
 ### T363 · FNF[created-task-start-partial] · Start on a created task starts with whatever attachments landed
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:05Z · last: 2026-10-25T00:05Z · was modular #208
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:05Z · last: 2026-10-25T02:10Z · merged PR #913 (f5bbce839), migration 0211 applied on the dev install, waiting for main CI · was modular #208
 DECIDED 2026-10-23: record the expected attachment count on the task, and Start confirms "N of M missing". The start claim is in api lib/task-start.ts:10-23.
 
 ### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+14)
