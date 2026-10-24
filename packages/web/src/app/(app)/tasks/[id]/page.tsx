@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { startTaskWithAttachmentConfirmation } from '@/lib/start-task';
 import { ragUsageStyle } from '@/lib/rag-usage';
 import { showsToolUsage } from '@/lib/call-log-cells';
 import { useParams } from 'next/navigation';
@@ -1290,7 +1291,15 @@ export default function TaskDetailPage() {
   async function runAction(action: TaskAction) {
     setActionError(null);
     try {
-      await api.post(`/tasks/${id}/action`, { action });
+      if (action === 'start') {
+        const result = await startTaskWithAttachmentConfirmation(id);
+        if (!result) {
+          setTab('attachments');
+          return;
+        }
+      } else {
+        await api.post(`/tasks/${id}/action`, { action });
+      }
       await reload();
     } catch (err) {
       setActionError((err as Error).message ?? 'Action failed');

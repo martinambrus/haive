@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { startTaskWithAttachmentConfirmation } from '@/lib/start-task';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Lock, Unlock } from 'lucide-react';
@@ -37,7 +38,6 @@ import {
   getSavedStepClis,
   attachmentUploadName,
   uploadTaskAttachment,
-  startTask,
   type CliProvider,
   type PlanBlocker,
   type OnboardingStatus,
@@ -762,7 +762,10 @@ export default function NewTaskPage() {
       }
 
       const deferStart = attachmentFiles.length > 0;
-      if (deferStart) body.deferStart = true;
+      if (deferStart) {
+        body.deferStart = true;
+        body.expectedAttachmentCount = attachmentFiles.length;
+      }
       const data = await api.post<{ task: Task }>('/tasks', body);
       const failed: AttachmentOutcome['failed'] = [];
       let start: AttachmentOutcome['start'] = null;
@@ -780,11 +783,11 @@ export default function NewTaskPage() {
           }
         }
         setAttachmentUploading(false);
-        // Started whatever the uploads did, so it is never left `created`; if this call fails,
-        // the task page's Start is the retry.
+        // The server checks the original uploads before starting; the task page is the repair surface.
         try {
-          const { started, status } = await startTask(data.task.id);
-          start = { started, status };
+          const result = await startTaskWithAttachmentConfirmation(data.task.id);
+          if (result) start = { started: result.started, status: result.status };
+          else startError = 'Start cancelled. Add the missing files in the task’s Attachments tab';
         } catch (e) {
           startError = e instanceof Error ? e.message : 'Failed to start the task';
         }

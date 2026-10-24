@@ -9,6 +9,7 @@ export function planBuildBody(
   opts: {
     description?: string;
     deferStart?: boolean;
+    expectedAttachmentCount?: number;
     clarify: boolean;
     plannerCliProviderId: string;
     questionerCliProviderId: string;
@@ -18,7 +19,9 @@ export function planBuildBody(
     mode,
     clarify: opts.clarify,
     ...(opts.description ? { description: opts.description } : {}),
-    ...(opts.deferStart ? { deferStart: true } : {}),
+    ...(opts.deferStart
+      ? { deferStart: true, expectedAttachmentCount: opts.expectedAttachmentCount }
+      : {}),
     ...(opts.plannerCliProviderId ? { cliProviderId: opts.plannerCliProviderId } : {}),
     ...(opts.clarify && opts.questionerCliProviderId
       ? { questionerCliProviderId: opts.questionerCliProviderId }

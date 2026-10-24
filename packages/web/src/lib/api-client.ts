@@ -2218,6 +2218,7 @@ export function buildPlan(
      *  picks a job up immediately, so uploading afterwards would race the first
      *  step's detect. */
     deferStart?: boolean;
+    expectedAttachmentCount?: number;
     /** Ask clarifying questions about an outline before expanding it. Unset: on for a brief,
      *  off for a knowledge-base build. */
     clarify?: boolean;
@@ -2237,9 +2238,13 @@ export function getPlanBuildClis(repositoryId: string): Promise<{
 
 /** Enqueue a task that was created but never started. Idempotent server-side, so
  *  a double-click cannot start it twice. */
-export function startTask(taskId: string): Promise<{ ok: true; started: boolean; status: string }> {
+export function startTask(
+  taskId: string,
+  confirmMissingAttachments = false,
+): Promise<{ ok: true; started: boolean; status: string }> {
   return api.post<{ ok: true; started: boolean; status: string }>(`/tasks/${taskId}/action`, {
     action: 'start',
+    ...(confirmMissingAttachments ? { confirmMissingAttachments: true } : {}),
   });
 }
 
