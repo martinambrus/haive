@@ -25,6 +25,7 @@ import {
 import {
   archiveFormatSchema,
   CLI_EXEC_JOB_NAMES,
+  CLI_POLLABLE_JOB_OPTS,
   CONFIG_KEYS,
   configService,
   QUEUE_NAMES,
@@ -1407,8 +1408,8 @@ const workerDeps: WorkerDeps = {
     const opts: JobsOptions = {
       attempts: 2,
       backoff: { type: 'exponential', delay: 5000 },
-      removeOnComplete: 100,
-      removeOnFail: 100,
+      // Keep INVOKE's age aligned so its finishes cannot prune young polled results.
+      ...CLI_POLLABLE_JOB_OPTS,
     };
     // Fair scheduling (kill-switch'd): composite priority round-robins across tasks
     // (primary = this task's in-flight rank) so one task's fan-out cannot front-load
