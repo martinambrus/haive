@@ -24,7 +24,7 @@ const poll = async <T>(read: () => Promise<T>, done: (value: T) => boolean, limi
   return value;
 };
 
-describe.skipIf(!URL_)('an abandoned module schema-lock session', () => {
+describe.skipIf(!URL_)('an abandoned module database session', () => {
   let db: Database;
   let admin: postgres.Sql;
   const moduleIds: string[] = [];
@@ -98,6 +98,39 @@ describe.skipIf(!URL_)('an abandoned module schema-lock session', () => {
     await admin?.end({ timeout: 5 });
     await db?.$client.end({ timeout: 5 });
   });
+
+  it('ends statements on both sql connections soon after the pool closes', async () => {
+    const id = freshId();
+    const app = 'mdw-sql-runners';
+    const handle = await open(id, app);
+    const started = performance.now();
+    for (let i = 0; i < 2; i++) {
+      pending.push(handle.sql`SELECT pg_sleep(10)`.catch(() => {}));
+    }
+
+    const running = await poll(
+      () => backends(app, id),
+      (rows) => rows.filter((r) => r.wait_event === 'PgSleep').length === 2,
+      3000,
+    );
+    expect(running.filter((r) => r.wait_event === 'PgSleep')).toHaveLength(2);
+
+    await handle.close();
+    const closed = performance.now();
+    const left = await poll(
+      () => backends(app, id),
+      (rows) => rows.length === 0,
+      GONE_WITHIN_MS,
+    );
+    const checked = performance.now();
+    process.stdout.write(
+      `sql pool: close=${Math.round(closed - started)}ms, backend check after close=${Math.round(checked - closed)}ms, remaining=${left.length}\n`,
+    );
+    expect(left, 'sql backends still on the server after close').toHaveLength(0);
+    expect(checked - started, 'backends ended well before pg_sleep(10) could finish').toBeLessThan(
+      8500,
+    );
+  }, 30_000);
 
   it('leaves the server soon after its pool closes while it waits for the lock', async () => {
     const id = freshId();
