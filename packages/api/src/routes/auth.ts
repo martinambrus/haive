@@ -296,7 +296,8 @@ authRoutes.post('/refresh', async (c) => {
     throw new HttpError(401, 'User not found or token revoked');
   }
 
-  const { accessToken, refreshToken: newRefresh } = await db.transaction(async (tx) => {
+  const tokens = await issueTokens(user.id, user.role, user.tokenVersion);
+  await db.transaction(async (tx) => {
     // The read above validates the token; only this guarded write claims it. A concurrent
     // redemption waits for the winner's commit and then matches no row.
     const claimed = await tx
@@ -306,15 +307,13 @@ authRoutes.post('/refresh', async (c) => {
       .returning({ id: schema.refreshTokens.id });
     if (claimed.length === 0) throw new HttpError(401, 'Refresh token invalid or expired');
 
-    const tokens = await issueTokens(user.id, user.role, user.tokenVersion);
     await tx.insert(schema.refreshTokens).values({
       userId: user.id,
       tokenHash: hashRefreshToken(tokens.refreshToken),
       expiresAt: tokens.expiresAt,
     });
-    return tokens;
   });
-  setAuthCookies(c, accessToken, newRefresh);
+  setAuthCookies(c, tokens.accessToken, tokens.refreshToken);
 
   return c.json({ ok: true });
 });

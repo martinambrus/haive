@@ -116,7 +116,13 @@ userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c)
 
   const newHash = await hashPassword(body.newPassword);
   const newTokenVersion = user.tokenVersion + 1;
-  const { accessToken, refreshToken } = await db.transaction(async (tx) => {
+  const accessToken = await signAccessToken({
+    sub: user.id,
+    role: user.role,
+    tv: newTokenVersion,
+  });
+  const { token: refreshToken, expiresAt } = await signRefreshToken(user.id, newTokenVersion);
+  await db.transaction(async (tx) => {
     const changed = await tx
       .update(schema.users)
       .set({
@@ -136,18 +142,11 @@ userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c)
       );
     }
 
-    const accessToken = await signAccessToken({
-      sub: user.id,
-      role: user.role,
-      tv: newTokenVersion,
-    });
-    const { token: refreshToken, expiresAt } = await signRefreshToken(user.id, newTokenVersion);
     await tx.insert(schema.refreshTokens).values({
       userId: user.id,
       tokenHash: hashRefreshToken(refreshToken),
       expiresAt,
     });
-    return { accessToken, refreshToken };
   });
 
   closeUserSockets(userId);

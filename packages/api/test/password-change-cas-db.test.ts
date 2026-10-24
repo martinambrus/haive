@@ -59,6 +59,33 @@ describe.skipIf(!url)('password change compare-and-set on Postgres', () => {
     await db.$client.end({ timeout: 5 });
   });
 
+  it('signs with the pool before holding a transaction connection', async () => {
+    let inTransaction = false;
+    h.db = new Proxy(db, {
+      get(target, key) {
+        if (key === 'transaction')
+          return (fn: (tx: unknown) => Promise<unknown>) =>
+            target.transaction(async (tx) => {
+              inTransaction = true;
+              try {
+                return await fn(tx);
+              } finally {
+                inTransaction = false;
+              }
+            });
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    vi.mocked(secretsService.getJwtSecret).mockImplementation(async () => {
+      expect(inTransaction, 'pool-backed signing must not hold a transaction connection').toBe(
+        false,
+      );
+      return 'cd'.repeat(32);
+    });
+    expect((await change('synthetic-next-password-2')).status).toBe(200);
+  });
+
   it('one concurrent change wins, advances the version and closes sockets only once', async () => {
     const gate = concurrentReads('users', true);
     release = gate.release;
