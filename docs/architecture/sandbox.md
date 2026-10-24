@@ -154,15 +154,17 @@ commits and pushes.
 
 `08-phase-5-verify` and `08b-test-management` do not start a project's tests, lint or typecheck in the
 worker process, which runs as root over the repository. `runStepCommandInSandbox`
-(`sandbox/step-command.ts`) runs the argv in the task's sandbox image instead, with the worktree
+(`sandbox/step-command.ts`) runs the argv in the task's sandbox image instead (the image and network
+policy of `ctx.cliProviderId`: the task's own CLI, else the default provider, see
+[Step summaries](step-summaries.md)), with the worktree
 mounted at `SANDBOX_WORKDIR` (read-write; read-only only for a local-path repository with no worktree),
 the git-data boundary and the secret masks. No auth volume and no provider env are passed: the
 project's own code runs there and has no use for the CLI's credentials. `cwdRel` is relative to the
 worktree root and must not leave it. The run holds an agent lease for its length (see
 [Runtime and agent capacity](runtime-capacity.md)).
 
-A command is reported as **not run**, never as a failing check, when the task has no CLI provider (so
-no image), the provider row is gone, no agent slot frees in time, or the binary is not on the image's
+A command is reported as **not run**, never as a failing check, when there is no CLI provider to take
+the image from (the task names none and the user has no enabled provider), the provider row is gone, no agent slot frees in time, or the binary is not on the image's
 PATH. The last is read from a Haive-owned exit status (`BINARY_MISSING_EXIT`, 199) of a preamble that
 checks `command -v`, so a project's own exit 127 stays the project's. A path the command writes
 back to the worktree is read by the worker from the worktree afterwards: the phpcs report goes under
