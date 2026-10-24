@@ -149,7 +149,11 @@ is dropped and the flag set, so the gate asks again, and the dropped answer is n
 on such a row, since a source step that auto-submits its defaults (`08-phase-5-verify`) would
 otherwise answer the gate itself with `continue` and run with the gate's values; the gate parks
 again and asks. Abort, an accept with no next step, a dead run list and a continue
-with no routable target close the row before they act. On a task that failed before the
+with no routable target close the row before they act. A resolver that finds the gate no longer its
+own (`row_not_owned`: a Retry, Skip or Stop took the row), the task moved to a newer epoch
+(`task_moved`), the reopen of a failed task refused (`revive_refused`, with the refusal's own
+reason) or no fix target to route to (`no_routable_target`) applies nothing and logs a
+`fix-loop gate answer not applied` warning naming the step, the action and that `reason`. On a task that failed before the
 answer was sent, the pickup guard admits the answer onto the `done` row as it would onto the parked
 form (`gateAnswerSentAfterFailure`, the task's `completed_at` against the job's own timestamp); a
 failure after it was sent, such as a Stop, keeps it out. `advanceStep`'s own `done` short-circuit
