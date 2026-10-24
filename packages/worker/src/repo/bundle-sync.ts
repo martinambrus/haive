@@ -1,60 +1,31 @@
-import { spawn } from 'node:child_process';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { gitRevParseHead } from './bundle-ingest.js';
-import { hardenGitArgs } from './git-exec.js';
+import { gitRun } from './git-exec.js';
 
 /** Read-only `git fetch` against the bundle's local clone. Does NOT update
  *  the working tree — the explicit upgrade task is the only path that pulls
  *  + re-parses, so the daily tick can run unattended without breaking
  *  anything. */
-function gitFetch(cwd: string, branch: string | null): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const args = ['fetch', '--quiet', 'origin'];
-    if (branch) args.push(branch);
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_ASKPASS: 'echo',
-    };
-    const proc = spawn('git', hardenGitArgs(args), { cwd, env });
-    let stderr = '';
-    proc.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      const msg = stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
-      reject(new Error(`git fetch failed (exit ${code}): ${msg}`));
-    });
-  });
+async function gitFetch(cwd: string, branch: string | null): Promise<void> {
+  const args = ['fetch', '--quiet', 'origin'];
+  if (branch) args.push(branch);
+  const res = await gitRun(cwd, args, { GIT_ASKPASS: 'echo' });
+  if (res.code !== 0) {
+    const msg = res.stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
+    throw new Error(`git fetch failed (exit ${res.noExit ?? res.code}): ${msg}`);
+  }
 }
 
-function gitRevParse(cwd: string, ref: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('git', hardenGitArgs(['rev-parse', ref]), { cwd });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout.on('data', (d: Buffer) => {
-      stdout += d.toString();
-    });
-    proc.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
-      if (code === 0) {
-        resolve(stdout.trim());
-        return;
-      }
-      reject(new Error(`git rev-parse ${ref} failed (exit ${code}): ${stderr.trim()}`));
-    });
-  });
+async function gitRevParse(cwd: string, ref: string): Promise<string> {
+  const res = await gitRun(cwd, ['rev-parse', ref]);
+  if (res.code !== 0) {
+    throw new Error(
+      `git rev-parse ${ref} failed (exit ${res.noExit ?? res.code}): ${res.stderr.trim()}`,
+    );
+  }
+  return res.stdout.trim();
 }
 
 export interface BundleGitSyncTickResult {

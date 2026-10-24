@@ -1,10 +1,9 @@
-import { spawn } from 'node:child_process';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { BundleJobPayload, FormSchema, FormValues } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { gitRevParseHead, handleResyncGit } from '../../../repo/bundle-ingest.js';
-import { hardenGitArgs } from '../../../repo/git-exec.js';
+import { gitRun } from '../../../repo/git-exec.js';
 
 interface BundleResyncCandidate {
   bundleId: string;
@@ -34,51 +33,22 @@ const FIELD_ID = 'bundlesToPull';
 /** `git fetch` plus `git rev-parse origin/<branch>` returning the remote head.
  *  Pure read operation — does NOT update the local working tree, so on its
  *  own it cannot break a parser run. The actual pull happens in apply(). */
-function fetchRemoteHead(cwd: string, branch: string | null): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const fetchArgs = ['fetch', '--quiet', 'origin'];
-    if (branch) fetchArgs.push(branch);
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_ASKPASS: 'echo',
-    };
-    const fetchProc = spawn('git', hardenGitArgs(fetchArgs), { cwd, env });
-    let stderr = '';
-    fetchProc.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    fetchProc.on('error', reject);
-    fetchProc.on('exit', (code, signal) => {
-      if (code !== 0) {
-        const msg = stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
-        reject(new Error(`git fetch failed (exit ${code ?? signal}): ${msg}`));
-        return;
-      }
-      const ref = branch ? `origin/${branch}` : 'origin/HEAD';
-      const revProc = spawn('git', hardenGitArgs(['rev-parse', ref]), { cwd });
-      let stdout = '';
-      let revStderr = '';
-      revProc.stdout.on('data', (d: Buffer) => {
-        stdout += d.toString();
-      });
-      revProc.stderr.on('data', (d: Buffer) => {
-        revStderr += d.toString();
-      });
-      revProc.on('error', reject);
-      revProc.on('exit', (revCode, revSignal) => {
-        if (revCode === 0) {
-          resolve(stdout.trim());
-          return;
-        }
-        reject(
-          new Error(
-            `git rev-parse ${ref} failed (exit ${revCode ?? revSignal}): ${revStderr.trim()}`,
-          ),
-        );
-      });
-    });
-  });
+async function fetchRemoteHead(cwd: string, branch: string | null): Promise<string> {
+  const fetchArgs = ['fetch', '--quiet', 'origin'];
+  if (branch) fetchArgs.push(branch);
+  const fetched = await gitRun(cwd, fetchArgs, { GIT_ASKPASS: 'echo' });
+  if (fetched.code !== 0) {
+    const msg = fetched.stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
+    throw new Error(`git fetch failed (exit ${fetched.noExit ?? fetched.code}): ${msg}`);
+  }
+  const ref = branch ? `origin/${branch}` : 'origin/HEAD';
+  const rev = await gitRun(cwd, ['rev-parse', ref]);
+  if (rev.code !== 0) {
+    throw new Error(
+      `git rev-parse ${ref} failed (exit ${rev.noExit ?? rev.code}): ${rev.stderr.trim()}`,
+    );
+  }
+  return rev.stdout.trim();
 }
 
 async function loadGitBundles(ctx: StepContext): Promise<BundleResyncCandidate[]> {

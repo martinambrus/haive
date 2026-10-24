@@ -1,11 +1,14 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { FormSchema } from '@haive/shared';
 import type { StepContext } from '../../step-definition.js';
+import { gitTimeoutLimits } from '../../../repo/git-exec.js';
+import { failGit } from '../../../../test/support/fake-git.js';
 import { killGit } from '../../../../test/support/kill-git.js';
+import { shimGit } from '../../../../test/support/shim-git.js';
 import { bundleResyncStep } from './00-bundle-resync.js';
 
 const step = bundleResyncStep as Required<typeof bundleResyncStep>;
@@ -27,7 +30,11 @@ interface Fixture {
 const dirs: string[] = [];
 let restore: (() => Promise<void>) | null = null;
 
+const savedLimits = { ...gitTimeoutLimits };
+
 afterEach(async () => {
+  gitTimeoutLimits.long = savedLimits.long;
+  gitTimeoutLimits.short = savedLimits.short;
   if (restore) await restore();
   restore = null;
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
@@ -168,5 +175,57 @@ describe('00-bundle-resync form', () => {
     const select = multiSelect(form) as { defaults: string[] };
     expect(select.defaults).toEqual([a.id]);
     expect(notes(form)).toHaveLength(0);
+  });
+});
+
+describe('00-bundle-resync git bounds', () => {
+  it('shows a bundle whose fetch hangs', async () => {
+    const a = await makeBundle('alpha');
+    const ctx = ctxFor([a]);
+    gitTimeoutLimits.long = 300;
+    restore = (await failGit(['fetch'], { hang: true })).restore;
+    const detected = await step.detect(ctx);
+    expect(detected.candidates[0]?.fetchError).toMatch(/git fetch failed \(exit 124\)/);
+    expect(detected.candidates[0]?.fetchError).toMatch(/timed out/);
+    expect(detected.candidates[0]?.hasUpstreamChange).toBe(false);
+  }, 10_000);
+
+  it('shows a bundle whose rev-parse of the remote head hangs', async () => {
+    const a = await makeBundle('alpha');
+    const ctx = ctxFor([a]);
+    gitTimeoutLimits.short = 300;
+    restore = (await failGit(['rev-parse', 'origin/main'], { hang: true })).restore;
+    const detected = await step.detect(ctx);
+    expect(detected.candidates[0]?.fetchError).toMatch(
+      /git rev-parse origin\/main failed \(exit 124\)/,
+    );
+  }, 10_000);
+
+  it('scrubs a url from a failed fetch', async () => {
+    const a = await makeBundle('alpha');
+    const ctx = ctxFor([a]);
+    restore = (
+      await shimGit(
+        `if [ "$SUB" = fetch ]; then echo "fatal: unable to access 'https://user:s3cret@example.com/r.git/': boom" >&2; exit 128; fi\nexec "$REAL_GIT" "$@"`,
+      )
+    ).restore;
+    const detected = await step.detect(ctx);
+    const err = detected.candidates[0]?.fetchError ?? '';
+    expect(err).toMatch(/git fetch failed \(exit 128\)/);
+    expect(err).toContain('https://***@');
+    expect(err).not.toContain('s3cret');
+  });
+
+  it('runs the fetch with askpass echo and no prompt', async () => {
+    const a = await makeBundle('alpha');
+    const ctx = ctxFor([a]);
+    const seen = path.join(path.dirname(a.bare), 'seen');
+    restore = (
+      await shimGit(
+        `if [ "$SUB" = fetch ]; then echo "$GIT_ASKPASS $GIT_TERMINAL_PROMPT" >> '${seen}'; fi\nexec "$REAL_GIT" "$@"`,
+      )
+    ).restore;
+    await step.detect(ctx);
+    expect((await readFile(seen, 'utf8')).trim()).toBe('echo 0');
   });
 });
