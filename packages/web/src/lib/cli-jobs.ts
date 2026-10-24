@@ -25,7 +25,7 @@ export interface SignOutResult {
 const POLL_INTERVAL_MS = 2_000;
 
 /** How long the browser keeps polling before handing the wait back to the user. Must stay
- *  under the server's POLLABLE_JOB_RETENTION_S (packages/api/src/routes/cli-providers.ts) so a
+ *  under CLI_POLLABLE_JOB_OPTS' retention (packages/shared/src/constants/index.ts) so a
  *  finished result is never reaped out from under a poll that is still running. */
 export const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 

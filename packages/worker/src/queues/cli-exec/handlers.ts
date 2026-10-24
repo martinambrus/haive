@@ -8,6 +8,7 @@ import { schema, type Database } from '@haive/database';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
 import {
   CLI_EXEC_JOB_NAMES,
+  CLI_POLLABLE_JOB_OPTS,
   CONFIG_CONCURRENCY_CHANNEL,
   CONFIG_KEYS,
   CONFIG_RUNTIME_LIMITS_CHANNEL,
@@ -1181,7 +1182,7 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
     {
       name: CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
       data: { force: false } satisfies RefreshCliVersionsJobPayload,
-      opts: { removeOnComplete: true, removeOnFail: 10 },
+      opts: CLI_POLLABLE_JOB_OPTS,
     },
   );
   await pruneJobSchedulers(queue, [VERSION_REFRESH_JOB_ID]);
@@ -1202,7 +1203,7 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
   await queue.add(
     CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
     { force: true } satisfies RefreshCliVersionsJobPayload,
-    { removeOnComplete: true, removeOnFail: 10 },
+    CLI_POLLABLE_JOB_OPTS,
   );
 }
 
@@ -1220,7 +1221,7 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
  *  defers a refresh (the gates are INVOKE-only), so a delayed refresh is always future work
  *  rather than something already trying to run.
  *
- *  Deliberately not a fixed `jobId`: with `removeOnFail: 10` a failed refresh would keep that
+ *  Deliberately not a fixed `jobId`: a retained failed refresh would keep that
  *  id in the failed set, and every later `add` for it would silently return the old job instead
  *  of running — trading a slot leak for a refresh that never runs again. Fails OPEN, since a
  *  duplicate refresh is cheap and no refresh at all is not. */

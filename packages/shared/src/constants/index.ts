@@ -423,6 +423,13 @@ export const CLI_EXEC_JOB_NAMES = {
   PROVISION_OLLAMA_MODEL: 'cli-provision-ollama-model',
 } as const;
 
+/** Finished CLI jobs stay readable beyond the browser's 10-minute poll window
+ *  (packages/web/src/lib/cli-jobs.ts), including refreshes started by the worker. */
+export const CLI_POLLABLE_JOB_OPTS = {
+  removeOnComplete: { age: 900 },
+  removeOnFail: { age: 900 },
+} as const;
+
 export interface CliSignOutJobPayload {
   providerId: string;
   userId: string;
