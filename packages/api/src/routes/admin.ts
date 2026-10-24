@@ -329,7 +329,6 @@ adminRoutes.post('/users/:id/action', async (c) => {
         .where(eq(schema.users.id, targetUserId));
       await insertAuditEvent(tx, audit);
     });
-    closeUserSockets(targetUserId);
     logAuditEvent(audit);
     return c.json({ ok: true, action: 'activate' });
   }

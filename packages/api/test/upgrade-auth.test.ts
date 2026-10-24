@@ -473,4 +473,16 @@ describe('fix round admin controls', () => {
       );
     });
   }
+
+  it('activate leaves established sockets open', async () => {
+    const { sockets } = await openAll();
+    const response = await app.request(`/admin/users/${USER}/action`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: 'haive_access=admin-session' },
+      body: JSON.stringify({ action: 'activate' }),
+    });
+    expect(response.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(sockets.map((s) => s.client.readyState)).toEqual(HANDLERS.map(() => WebSocket.OPEN));
+  });
 });
