@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const url = process.env.TASK_START_ATTACHMENTS_TEST_URL;
-if (url && new URL(url).pathname !== '/haive_t363') {
-  throw new Error('Use the dedicated haive_t363 scratch database for these route tests');
+if (url && !new URL(url).pathname.startsWith('/task_start_attachments_test')) {
+  throw new Error(
+    'Use the dedicated task_start_attachments_test scratch database for these route tests',
+  );
 }
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-000000003631');
 const h = vi.hoisted(() => ({ db: undefined as unknown, add: vi.fn() }));
