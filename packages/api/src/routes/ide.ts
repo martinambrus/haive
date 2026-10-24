@@ -21,6 +21,7 @@ import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { getIdeEnsureQueue, getIdeEnsureQueueEvents } from '../queues.js';
 import { authenticateUpgrade } from '../lib/upgrade-auth.js';
+import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import type { UpgradeSession } from '../lib/user-sockets.js';
 import {
   isSessionSetCookie,
@@ -181,6 +182,7 @@ export function installIdeWebSocket(server: Server): void {
   void resetStaleIdeRefcounts().catch((err) => log.warn({ err }, 'boot ide refcount reset failed'));
 
   server.on('upgrade', (req, socket, head) => {
+    guardUpgradeSocket(socket);
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(WS_PATH_PREFIX)) return;
     if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {

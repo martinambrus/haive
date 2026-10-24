@@ -8,7 +8,7 @@ function tracked(userId: string) {
   const stream = new PassThrough();
   streams.add(stream);
   const session = trackUserUpgrade(userId, stream);
-  const ws = { close: vi.fn(), removeAllListeners: vi.fn() };
+  const ws = { close: vi.fn(), removeAllListeners: vi.fn(), on: vi.fn() };
   expect(session.accept(ws as unknown as WebSocket)).toBe(true);
   return { stream, session, ws };
 }
@@ -49,4 +49,13 @@ describe('live session registry', () => {
     vi.advanceTimersByTime(1000);
     expect(stream.destroyed).toBe(true);
   });
+});
+
+it('does not register an already destroyed upgrade transport', () => {
+  const stream = new PassThrough();
+  stream.destroy();
+  stream.emit('close');
+  const session = trackUserUpgrade('destroyed', stream);
+  expect(session.accept({} as WebSocket)).toBe(false);
+  expect(stream.listenerCount('close')).toBe(0);
 });

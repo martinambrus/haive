@@ -486,3 +486,33 @@ describe('fix round admin controls', () => {
     expect(sockets.map((s) => s.client.readyState)).toEqual(HANDLERS.map(() => WebSocket.OPEN));
   });
 });
+
+// Every handler spends time in this DB await, before ws/IDE has installed transport handlers.
+describe('upgrade transport controls', () => {
+  for (const handler of HANDLERS) {
+    it(`survives a reset during authentication on ${handler.path}`, async () => {
+      const captured = deferred<void>();
+      const resume = deferred<void>();
+      const findFirst = fake.db.query.users.findFirst.bind(fake.db.query.users);
+      vi.spyOn(fake.db.query.users, 'findFirst').mockImplementationOnce(async (opts) => {
+        captured.resolve();
+        await resume.promise;
+        return findFirst(opts);
+      });
+      const port = await start(handler.install);
+      const client = net.connect(port, '127.0.0.1');
+      await new Promise<void>((resolve) => client.once('connect', resolve));
+      client.write(
+        `GET ${handler.path} HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nCookie: haive_access=user-session\r\n\r\n`,
+      );
+      await captured.promise;
+      const peer = [...peers][0]!;
+      const closed = new Promise<void>((resolve) => peer.once('close', () => resolve()));
+      client.resetAndDestroy();
+      await closed;
+      resume.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(peer.destroyed).toBe(true);
+    });
+  }
+});

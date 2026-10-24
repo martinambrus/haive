@@ -24,6 +24,7 @@ import {
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { authenticateUpgrade } from '../lib/upgrade-auth.js';
+import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isCanonicalUuid } from '../lib/uuid.js';
 
@@ -61,6 +62,7 @@ export function installTerminalShellWebSocket(
   void resetStaleRefcounts().catch((err) => log.warn({ err }, 'boot refcount reset failed'));
 
   server.on('upgrade', (req, socket, head) => {
+    guardUpgradeSocket(socket);
     const rawUrl = req.url ?? '';
     const isRepo = rawUrl.startsWith(repoPathPrefix);
     const isTask = rawUrl.startsWith(pathPrefix);

@@ -16,6 +16,7 @@ import {
 import { getDb } from '../db.js';
 import { getRuntimeEnsureQueue, getRuntimeEnsureQueueEvents } from '../queues.js';
 import { authenticateUpgrade } from '../lib/upgrade-auth.js';
+import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isCanonicalUuid } from '../lib/uuid.js';
 
@@ -50,6 +51,7 @@ export function installBrowserVncWebSocket(server: Server, opts: BrowserVncWsOpt
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
+    guardUpgradeSocket(socket);
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(pathPrefix)) return;
     if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {

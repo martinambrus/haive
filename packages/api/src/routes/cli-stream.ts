@@ -7,6 +7,7 @@ import { logger } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { authenticateUpgrade } from '../lib/upgrade-auth.js';
+import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isUuid } from '../lib/uuid.js';
 
@@ -27,6 +28,7 @@ export function installCliStreamWebSocket(server: Server, opts: CliStreamWsOptio
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (req, socket, head) => {
+    guardUpgradeSocket(socket);
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(pathPrefix)) return;
     if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {

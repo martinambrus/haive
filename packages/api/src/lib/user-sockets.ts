@@ -15,7 +15,8 @@ export function trackUserUpgrade(userId: string, socket: Duplex): UpgradeSession
     sockets.delete(session);
     if (sockets.size === 0 && users.get(userId) === sockets) users.delete(userId);
   });
-  sockets.add(session);
+  if (socket.destroyed) session.dispose();
+  else sockets.add(session);
   return session;
 }
 
