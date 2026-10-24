@@ -134,13 +134,27 @@ async function checkedOutCommit(
   gitRun: GitRun,
   workspacePath: string,
   rel: string,
-): Promise<string | null> {
+  requireOwnGit = false,
+): Promise<{ commit: string | null } | null> {
   const wa = workspaceAnchor(workspacePath);
   const dir = await openDirNoFollow(wa.anchor, `${wa.prefix}${rel}`).catch(() => null);
   if (dir === null) return null;
   try {
-    const res = await gitRun(`/proc/self/fd/${dir.fd}`, ['rev-parse', 'HEAD']);
-    return res.code === 0 ? res.stdout.trim() : null;
+    const cwd = `/proc/self/fd/${dir.fd}`;
+    if (requireOwnGit) {
+      // Inspect the held directory, not its name. A plain directory must never borrow the
+      // superproject's HEAD, even if its .git marker vanishes before git starts.
+      const marker = await lstatNoFollow(cwd, '.git');
+      if (marker?.kind !== 'directory' && marker?.kind !== 'file') return null;
+    }
+    const res = await gitRun(cwd, [
+      ...(requireOwnGit ? ['--git-dir=.git'] : []),
+      'rev-parse',
+      '--verify',
+      'HEAD^{commit}',
+    ]);
+    const sha = res.stdout.trim();
+    return { commit: res.code === 0 && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha) ? sha : null };
   } finally {
     await dir.close().catch(() => undefined);
   }
@@ -151,18 +165,32 @@ async function readLinkSide(
   workspacePath: string,
   gitRun: GitRun,
   e: PorcelainEntry,
-): Promise<{ link: CommitDiffLink; text: string } | null> {
+): Promise<{ link: CommitDiffLink; text: string } | { unreadableReason: string } | null> {
   const wa = workspaceAnchor(workspacePath);
   const rel = `${wa.prefix}${e.path}`;
   const target = await readLinkNoFollow(wa.anchor, rel);
   if (target !== null) return { link: 'symlink', text: target };
   if ((await lstatNoFollow(wa.anchor, rel))?.kind !== 'directory') return null;
   const staged = await stagedCommit(gitRun, workspacePath, e.path);
-  if (staged === null) return null;
+  if (staged === null) {
+    if (e.x !== '?' || e.y !== '?') return null;
+    // git status keeps an untracked repository as dir/ even with -uall. git add -A
+    // records its checked-out commit as a gitlink, or refuses it if HEAD is unborn.
+    const checkout = await checkedOutCommit(gitRun, workspacePath, e.path, true);
+    if (checkout === null) return null;
+    return checkout.commit === null
+      ? {
+          unreadableReason:
+            'Nested repository HEAD could not be read; git add -A cannot stage it without a checked-out commit.',
+        }
+      : { link: 'gitlink', text: subprojectText(checkout.commit) };
+  }
   // Y = M (checkout ahead of the index) or A (intent to add: the empty blob) means a repository is
   // checked out; git run in an uninitialised submodule's empty directory reports the superproject.
   const commit =
-    e.y === 'M' || e.y === 'A' ? await checkedOutCommit(gitRun, workspacePath, e.path) : staged;
+    e.y === 'M' || e.y === 'A'
+      ? ((await checkedOutCommit(gitRun, workspacePath, e.path))?.commit ?? null)
+      : staged;
   return commit === null ? null : { link: 'gitlink', text: subprojectText(commit) };
 }
 
@@ -177,6 +205,7 @@ export async function buildFileEntry(
   const oldRef = status === 'renamed' && e.oldPath ? e.oldPath : e.path;
 
   let unreadable = false;
+  let unreadableReason: string | undefined;
   let link: CommitDiffLink | undefined;
   let newContent = '';
   let newBinary = false;
@@ -191,8 +220,9 @@ export async function buildFileEntry(
     });
     if (read === null) {
       const side = await readLinkSide(workspacePath, gitRun, e);
-      if (side === null) {
+      if (side === null || 'unreadableReason' in side) {
         unreadable = true;
+        unreadableReason = side?.unreadableReason;
       } else {
         link = side.link;
         newContent = side.text;
@@ -247,6 +277,7 @@ export async function buildFileEntry(
   };
   if (status === 'renamed' && e.oldPath) file.oldPath = e.oldPath;
   if (unreadable) file.unreadable = true;
+  if (unreadableReason) file.unreadableReason = unreadableReason;
   if (link) file.link = link;
   return file;
 }
