@@ -29,7 +29,12 @@ import {
   upsertRegion,
   type FormSchema,
 } from '@haive/shared';
-import { isRtkChoiceRecorded, rtkLeftoversToRemove, sameValue } from '@haive/shared/project-state';
+import {
+  isRtkChoiceRecorded,
+  namesGitData,
+  rtkLeftoversToRemove,
+  sameValue,
+} from '@haive/shared/project-state';
 import type { StepDefinition } from '../../step-definition.js';
 import {
   updateApplicableTemplateIds,
@@ -420,8 +425,7 @@ export function safeDiskRel(diskPath: string): string | null {
   } catch {
     return null;
   }
-  // Git data, in any letter case: git refuses a `.git` segment on a case-insensitive filesystem.
-  if (rel.split('/').some((seg) => seg.toLowerCase() === '.git')) return null;
+  if (namesGitData(rel)) return null;
   // `toSafeRel('')` is NOT an error: it drops empty segments and returns `''`, which addresses the
   // ANCHOR itself — legitimate for a read, never for one of these writes or deletes. Left to fall
   // through it would reach the primitives, which refuse it by throwing, in the one branch that has
@@ -1141,7 +1145,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         }
         if (now === null || !entry.liveArtifactId || now.hash !== entry.newContentHash) {
           warnings.push(
-            `did not record ${entry.diskPath} as up to date: it changed after the upgrade was planned`,
+            `did not record ${entry.diskPath} as up to date: ${namesGitData(entry.diskPath) ? 'it names git data' : 'it changed after the upgrade was planned'}`,
           );
           skippedCount += 1;
           continue;
@@ -1301,7 +1305,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       if (action === 'delete') {
         const rel = safeDiskRel(entry.diskPath);
         if (rel === null) {
-          warnings.push(`refusing to delete ${entry.diskPath}: not a path inside the repository`);
+          warnings.push(
+            `refusing to delete ${entry.diskPath}: ${namesGitData(entry.diskPath) ? 'it names git data' : 'not a path inside the repository'}`,
+          );
           skippedCount += 1;
           continue;
         }
@@ -1377,7 +1383,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       if (action === 'strip') {
         const rel = safeDiskRel(entry.diskPath);
         if (rel === null) {
-          warnings.push(`refusing to edit ${entry.diskPath}: not a path inside the repository`);
+          warnings.push(
+            `refusing to edit ${entry.diskPath}: ${namesGitData(entry.diskPath) ? 'it names git data' : 'not a path inside the repository'}`,
+          );
           skippedCount += 1;
           continue;
         }
@@ -1466,7 +1474,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       // this branch is NOT inside a `try`, so a throw here would abort every remaining entry.
       const rel = safeDiskRel(entry.diskPath);
       if (rel === null) {
-        warnings.push(`refusing to write ${entry.diskPath}: not a path inside the repository`);
+        warnings.push(
+          `refusing to write ${entry.diskPath}: ${namesGitData(entry.diskPath) ? 'it names git data' : 'not a path inside the repository'}`,
+        );
         skippedCount += 1;
         continue;
       }

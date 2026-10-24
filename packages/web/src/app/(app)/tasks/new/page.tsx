@@ -481,7 +481,7 @@ export default function NewTaskPage() {
   // and "(inherit)"/"(off)" on the summary one — which is what the server's
   // cli_choice_recorded / summary_cli_choice_recorded flags are for. A repo with no
   // recorded choice resolves to the default, so switching repositories never carries
-  // the previous one's pick over. Waits for `providers` so a provider deleted since
+  // the previous one's pick over. Waits for `providers` so a provider deleted or disabled since
   // that task falls back instead of selecting a dead option.
   const memoryRepositoryId = cliMemoryRepositoryId(fields, repositoryId);
   useEffect(() => {
@@ -496,7 +496,7 @@ export default function NewTaskPage() {
       )
       .then((res) => {
         if (cancelled) return;
-        const ids = providers.map((p) => p.id);
+        const ids = providers.filter((p) => p.enabled).map((p) => p.id);
         if (cliPickedFor.current !== memoryRepositoryId) {
           cliPickedFor.current = null;
           setCliProviderId(resolveCliChoiceValue(res.cliChoice, ids));
@@ -1177,11 +1177,13 @@ export default function NewTaskPage() {
                   className="h-10 min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
                 >
                   <option value="">(none — no default CLI)</option>
-                  {(providers ?? []).map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.label} ({p.name})
-                    </option>
-                  ))}
+                  {(providers ?? [])
+                    .filter((p) => p.enabled)
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.label} ({p.name})
+                      </option>
+                    ))}
                 </select>
                 {/* Two-state lock: on = force this CLI on every step for this task
                 only (ignoreSavedStepClis). Styled HTML tooltip (not the native
@@ -1245,11 +1247,13 @@ export default function NewTaskPage() {
                 className="h-10 min-w-0 rounded-md border border-neutral-800 bg-neutral-950 px-3 text-sm text-neutral-100 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
               >
                 <option value="">(inherit — same CLI as the step)</option>
-                {(providers ?? []).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label} ({p.name})
-                  </option>
-                ))}
+                {(providers ?? [])
+                  .filter((p) => p.enabled)
+                  .map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label} ({p.name})
+                    </option>
+                  ))}
                 <option value={SUMMARY_CLI_OFF}>(off — no AI summary)</option>
               </select>
               <p className="text-xs text-neutral-500">

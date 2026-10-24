@@ -1001,19 +1001,22 @@ describe('writeProjectStateRecord: one claim per live ledger row', () => {
     expect(written).not.toContain(claimPath('.claude/agents/old.md'));
   });
 
-  it('removes the claim file of a git-data path an earlier release wrote, though no claim may name it now', async () => {
-    const s = await setup();
-    s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/code-reviewer.md'));
-    s.syncSeed({ [s.col.baseSnapshot]: { claims: [{ path: '.git/config' }] } });
-    const legacy = claimPath('.git/config');
-    await mkdir(join(s.root, STATE_DIR, 'artifacts'), { recursive: true });
-    await writeFile(join(s.root, legacy), '{"path":".git/config"}\n');
+  it.each(['.git/config', '.git./config'])(
+    'removes the claim file of git-data path %j an earlier release wrote, though no claim may name it now',
+    async (diskPath) => {
+      const s = await setup();
+      s.fake.insert(schema.onboardingArtifacts, row('.claude/agents/code-reviewer.md'));
+      s.syncSeed({ [s.col.baseSnapshot]: { claims: [{ path: diskPath }] } });
+      const legacy = claimPath(diskPath);
+      await mkdir(join(s.root, STATE_DIR, 'artifacts'), { recursive: true });
+      await writeFile(join(s.root, legacy), JSON.stringify({ path: diskPath }) + '\n');
 
-    const { removed } = await s.writeFull(context(), true);
+      const { removed } = await s.writeFull(context(), true);
 
-    expect(removed).toEqual([legacy]);
-    expect(await claimFiles(s.root)).toEqual([claimPath('.claude/agents/code-reviewer.md')]);
-  });
+      expect(removed).toEqual([legacy]);
+      expect(await claimFiles(s.root)).toEqual([claimPath('.claude/agents/code-reviewer.md')]);
+    },
+  );
 
   it('leaves a claim file the previous base never named, though no row produces it', async () => {
     const s = await setup();

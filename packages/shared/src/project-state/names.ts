@@ -29,9 +29,15 @@ export function isCanonicalRepoPath(path: string): boolean {
   return path.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
 }
 
-/** Whether a path names git data: a `.git` segment in any letter case, as git refuses one on a
- *  case-insensitive filesystem. */
-export const namesGitData = (path: string): boolean => /(^|\/)\.git(\/|$)/i.test(path);
+/** Whether any segment names git data under git's NTFS or HFS+ protections. */
+export function namesGitData(path: string): boolean {
+  return path.split(/[\/\\]/).some((seg) => {
+    // No Unicode case folding: git compares only ASCII letters in these names.
+    const ascii = seg.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
+    if (/^(?:\.git|git~1)[. ]*$/.test(ascii.split(':', 1)[0]!)) return true;
+    return ascii.replace(/[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g, '') === '.git';
+  });
+}
 
 /** A repository path a claim may name: canonical, and outside git data. */
 export function isClaimablePath(path: string): boolean {

@@ -68,7 +68,7 @@
       "drizzle-orm": "0.45.2",
       "protobufjs": "^7.6.5",
       "@grpc/grpc-js": "^1.14.5",
-      "dompurify": "^3.4.16",
+      "dompurify": "^3.4.17",
       "uuid": "^11.1.1",
       "ws": "^8.22.0",
       "postcss": "^8.5.29",
@@ -78,7 +78,7 @@
       "katex": "^0.18.2",
       "brace-expansion": "^5.0.12",
       "nanoid": "^3.3.18",
-      "markdown-it": "^14.3.1",
+      "markdown-it": "^14.3.3",
       "@haive/shared": "workspace:*",
       "@haive/database": "workspace:*",
       "@haive/web-kit": "workspace:*"

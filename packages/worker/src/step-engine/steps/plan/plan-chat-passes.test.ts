@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { planChatStep } from './01-plan-chat.js';
 import { applyAgentPatch } from './_plan-prompt.js';
 
@@ -212,5 +213,66 @@ describe('plan chat history', () => {
     expect(prompt).toContain('turn-38-');
     expect(prompt).not.toContain('turn-0-');
     expect(prompt).toMatch(/\(\d+ earlier turns of this conversation are not shown\)/);
+  });
+});
+
+describe('plan chat provider attribution', () => {
+  const taskId = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const nodeId = 'aaaaaaaa-0000-4000-8000-000000000002';
+  const invocationId = 'aaaaaaaa-0000-4000-8000-000000000003';
+  const ran = 'bbbbbbbb-0000-4000-8000-000000000001';
+  const other = 'cccccccc-0000-4000-8000-000000000001';
+
+  async function reply(taskProvider: string | null, runId: string | null, output: unknown) {
+    const fake = createFakeDb({
+      cliInvocations: schema.cliInvocations,
+      planNodeMessages: schema.planNodeMessages,
+    });
+    fake.insert(schema.cliInvocations, { id: invocationId, cliProviderId: ran });
+    // A newer run must not replace the one whose reply apply received.
+    fake.insert(schema.cliInvocations, {
+      id: 'aaaaaaaa-0000-4000-8000-000000000004',
+      cliProviderId: other,
+    });
+    const db = fake.db as unknown as Database;
+    await planChatStep.apply(
+      {
+        taskId,
+        cliProviderId: taskProvider,
+        repoPath: '/repo',
+        db,
+        logger: { warn() {} },
+      } as never,
+      {
+        detected: detected({ nodeId, pendingQuestion: 'What belongs here?' }),
+        formValues: {},
+        llmOutput: output,
+        llmInvocationId: runId,
+        iteration: 0,
+        previousIterations: [],
+      },
+    );
+    return db.select().from(schema.planNodeMessages);
+  }
+
+  it('records the run provider when the step context names none', async () => {
+    const turns = await reply(null, invocationId, { ops: [], reply: 'The mail queue.' });
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.cliProviderId).toBe(ran);
+  });
+
+  it('records the run provider when a per-step choice overrides the task CLI', async () => {
+    const turns = await reply(other, invocationId, { ops: [], reply: 'The mail queue.' });
+    expect(turns[0]?.cliProviderId).toBe(ran);
+  });
+
+  it('records no provider when no run produced the reply', async () => {
+    const turns = await reply(other, null, null);
+    expect(turns[0]?.cliProviderId).toBeNull();
+  });
+
+  it('does not guess when the supplied invocation no longer exists', async () => {
+    const turns = await reply(other, 'aaaaaaaa-0000-4000-8000-000000000005', 'A prose reply.');
+    expect(turns[0]?.cliProviderId).toBeNull();
   });
 });

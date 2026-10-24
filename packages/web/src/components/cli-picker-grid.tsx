@@ -88,13 +88,6 @@ export function CliPickerGrid({
       {providerOptions}
     </>
   );
-  const seatOptions = (
-    <>
-      <option value="">(none — use the default)</option>
-      {providerOptions}
-    </>
-  );
-
   // Per-step effort dropdown: given the effective provider for a (step, role) and the
   // remembered effort, render a select of that CLI's effort scale. A CLI change clears
   // the stored effort server-side, so this re-derives its options + selected value from
@@ -219,8 +212,8 @@ export function CliPickerGrid({
               onChange={(e) => void onChange(e.target.value || null, seat.id, undefined, remember)}
               className={cliSelectClass}
             >
-              <option value="">(step default)</option>
-              {seatOptions}
+              <option value="">(none — use the step’s CLI)</option>
+              {providerOptions}
             </select>
             {effortSelectFor(seatProviders?.[seat.id] ?? '', seatEfforts?.[seat.id], seat.id)}
           </div>

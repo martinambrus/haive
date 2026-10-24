@@ -675,7 +675,12 @@ export async function handleExtract(
     // Only remove the archive after successful extract + detection. Leaving it
     // in place on failure lets the user (or a retry) look at what actually
     // arrived on disk instead of silently masking the error.
-    await removeNoFollow(archive.anchor, archive.rel).catch(() => {});
+    await removeNoFollow(archive.anchor, archive.rel).catch((err: unknown) => {
+      logger.warn(
+        { err, repositoryId: payload.repositoryId, rel: archive.rel },
+        'extracted repository archive was not removed',
+      );
+    });
     logger.info({ repositoryId: payload.repositoryId, dest }, 'Repo extract complete');
   });
 }

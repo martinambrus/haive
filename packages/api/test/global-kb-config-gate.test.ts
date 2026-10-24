@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   }),
   db: undefined as unknown,
   auditFails: [] as string[],
+  auditExecutors: [] as unknown[],
   audits: [] as { table: unknown; row: unknown }[],
   auditLog: { info: vi.fn(), error: vi.fn() },
   vectorType: null as string | null,
@@ -165,23 +166,27 @@ const send = (method: string, url: string, body?: unknown) =>
 const put = (body: unknown) => send('PUT', '/global-kb/config', body);
 const written = () => h.set.mock.calls.map(([key, value]) => [key, value]);
 const auditDb = () => {
-  const open = (rows: { table: unknown; row: unknown }[]): Record<string, unknown> => ({
-    insert: (table: unknown) => ({
-      values: async (row: unknown) => {
-        if (h.auditFails.includes((row as { action: string }).action)) {
-          throw new Error('audit insert refused');
-        }
-        h.events.push('audit');
-        rows.push({ table, row });
+  const open = (rows: { table: unknown; row: unknown }[]): Record<string, unknown> => {
+    const tx = {
+      insert: (table: unknown) => ({
+        values: async (row: unknown) => {
+          if (h.auditFails.includes((row as { action: string }).action)) {
+            throw new Error('audit insert refused');
+          }
+          h.events.push('audit');
+          h.auditExecutors.push(tx);
+          rows.push({ table, row });
+        },
+      }),
+      transaction: async (inner: (child: unknown) => Promise<unknown>) => {
+        const child: typeof rows = [];
+        const result = await inner(open(child));
+        rows.push(...child);
+        return result;
       },
-    }),
-    transaction: async (inner: (child: unknown) => Promise<unknown>) => {
-      const child: typeof rows = [];
-      const result = await inner(open(child));
-      rows.push(...child);
-      return result;
-    },
-  });
+    };
+    return tx;
+  };
   return {
     transaction: async (run: (tx: unknown) => Promise<unknown>) => {
       const rows: { table: unknown; row: unknown }[] = [];
@@ -201,6 +206,7 @@ beforeEach(() => {
   h.connect.mockClear();
   h.db = auditDb();
   h.audits = [];
+  h.auditExecutors = [];
   h.auditFails = [];
   h.auditLog.info.mockClear();
   h.auditLog.error.mockClear();
@@ -368,6 +374,7 @@ describe('PUT /global-kb/config by an admin', () => {
       SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
       STORED_STRING,
       expect.any(String),
+      h.auditExecutors[0],
     );
     expect(JSON.stringify(await res.json())).not.toContain('secret');
   });
@@ -448,6 +455,7 @@ describe('PUT /global-kb/config audit trail', () => {
       SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
       NEW_STRING,
       expect.any(String),
+      h.auditExecutors[0],
     );
     expect(actions()).toEqual(['global_kb.connection_string.update', 'config.global_kb']);
     expect(h.audits[0]?.table).toBe(schema.auditEvents);
@@ -640,7 +648,10 @@ describe('PUT /global-kb/config removing the stored connection string', () => {
 
     expect(res.status).toBe(200);
     expect(h.deleteSecret).toHaveBeenCalledTimes(1);
-    expect(h.deleteSecret).toHaveBeenCalledWith(SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING);
+    expect(h.deleteSecret).toHaveBeenCalledWith(
+      SECRET_KEYS.GLOBAL_KB_CONNECTION_STRING,
+      h.auditExecutors[0],
+    );
     expect(h.setSecret).not.toHaveBeenCalled();
     expect(h.set).not.toHaveBeenCalled();
     expect(h.audits).toHaveLength(1);

@@ -558,6 +558,15 @@ describe('the CLI choice the form starts from', () => {
     holdLastCli = true;
   });
 
+  it('drops a remembered disabled provider from both CLI choices', async () => {
+    disabledClis.add(P3);
+    const view = await mount();
+    chooseType(view, 'repoless');
+    await release(view, LAST_CLI(), 200, remembered(P3));
+    expect(valueOf(cliPick(view))).toBe('');
+    expect(valueOf(summaryPick(view))).toBe('');
+  });
+
   it('is the latest one across repositories for a type that needs none', async () => {
     const view = await mount();
     chooseType(view, 'repoless');
@@ -1114,4 +1123,15 @@ describe('the steps that keep a saved CLI under the none option', () => {
     expect(page(view)).toContain('With the lock on, your saved per-step CLI choices are ignored');
     expect(page(view)).not.toContain('Ignores your saved per-step CLI choices');
   });
+});
+
+it('offers only enabled providers for a new task', async () => {
+  disabledClis.add(P3);
+  const view = await mount();
+  for (const select of [cliPick(view), summaryPick(view)]) {
+    expect(select).toBeDefined();
+    const options = findAll(select, (h) => h.tag === 'option').map((h) => h.props.value);
+    expect(options).toContain(P1);
+    expect(options).not.toContain(P3);
+  }
 });

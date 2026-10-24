@@ -77,7 +77,7 @@ const makeFake = () =>
 
 beforeEach(() => {
   fake = makeFake();
-  fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER });
+  fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER, enabled: true });
   h.db = fake.db;
   h.gdb = fake.db;
   h.definition.mockClear();
@@ -140,7 +140,7 @@ describe('POST /enrich pins the kb_author step list', () => {
       new Error('socket closed'),
     ]) {
       fake = makeFake();
-      fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER });
+      fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER, enabled: true });
       h.db = fake.db;
       h.gdb = fake.db;
       fake.hooks.beforeInsert = (table) => {

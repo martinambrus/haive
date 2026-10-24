@@ -8,6 +8,7 @@ import { configService, CONFIG_KEYS, type ConfigService } from '../config/config
 import { secretsService, SECRET_KEYS } from '../config/secrets.service.js';
 
 const log = logger.child({ module: 'global-kb-connection' });
+const CONNECTION_CHECK_MS = 500;
 
 /** Postgres NOTICEs — the idempotent schema DDL answers "already exists, skipping"
  *  on every boot — at debug. With no handler postgres.js `console.log`s each one,
@@ -160,7 +161,11 @@ async function resolveInternal(
   const url = new URL(haiveUrl);
   url.pathname = `/${dbName}`;
 
-  const pg = postgres(url.toString(), poolOptions(opts));
+  const pg = postgres(url.toString(), {
+    ...poolOptions(opts),
+    // Internal only: end abandoned statements on Haive's server when close() drops the socket.
+    connection: { client_connection_check_interval: CONNECTION_CHECK_MS },
+  });
   return buildConnection('internal', pg, settings);
 }
 

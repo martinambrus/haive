@@ -6,6 +6,7 @@ import { IN_STACK_OLLAMA_URL } from '../constants/index.js';
 import { logger } from '../logger/index.js';
 
 const log = logger.child({ module: 'rag-connection' });
+const CONNECTION_CHECK_MS = 500;
 
 /** Postgres NOTICEs — the idempotent schema DDL answers "already exists, skipping"
  *  on every sync — at debug. With no handler postgres.js `console.log`s each one
@@ -182,7 +183,12 @@ export async function openExistingRagDatabase(
 ): Promise<RagConnection | null> {
   if (!(await ragDatabaseExists(haiveDb, dbName))) return null;
 
-  const pg = postgres(internalRagUrl(dbName), { max: 1, onnotice });
+  const pg = postgres(internalRagUrl(dbName), {
+    max: 1,
+    onnotice,
+    // This is Haive's own server: stop abandoned statements after close() drops the socket.
+    connection: { client_connection_check_interval: CONNECTION_CHECK_MS },
+  });
   return {
     mode: 'internal',
     pg,
@@ -212,7 +218,11 @@ async function resolveInternal(
     if (!isDuplicateDatabase(err)) throw err;
   }
 
-  const pg = postgres(internalRagUrl(dbName), poolOptions(opts));
+  const pg = postgres(internalRagUrl(dbName), {
+    ...poolOptions(opts),
+    // Internal only: user-supplied stores may refuse startup parameters.
+    connection: { client_connection_check_interval: CONNECTION_CHECK_MS },
+  });
   return {
     mode: 'internal',
     pg,

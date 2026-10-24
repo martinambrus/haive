@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
 import { upgradePlanStep } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
@@ -39,9 +39,11 @@ afterEach(async () => {
 });
 
 describe('01 and a ledger row that names a path in git data', () => {
-  it.each(['.git/config', 'sub/.GIT/config'])(
+  it.each(['.git/config', 'sub/.GIT/config', '.git./config'])(
     'neither lists %s nor reads its bytes into the plan',
     async (diskPath) => {
+      await mkdir(dirname(join(repo, diskPath)), { recursive: true });
+      await writeFile(join(repo, diskPath), GIT_CONFIG, 'utf8');
       const fake = newDb();
       seedProviders(fake, PROVIDERS);
       seedRepository(fake, { source: 'git_https', rtkEnabled: false, renderContext: COLUMN });

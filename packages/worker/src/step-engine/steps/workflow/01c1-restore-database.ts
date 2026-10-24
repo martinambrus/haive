@@ -370,7 +370,13 @@ export const restoreDatabaseStep: StepDefinition<RestoreDetect, { imported: bool
       }
       // Delete the dump immediately + mark the upload consumed (the env now holds it).
       if (d.dbUploadId) {
-        if (dump) await removeNoFollow(dump.anchor, dump.rel).catch(() => {});
+        if (dump)
+          await removeNoFollow(dump.anchor, dump.rel).catch((err: unknown) => {
+            ctx.logger.warn(
+              { err, taskId: ctx.taskId, dbUploadId: d.dbUploadId, rel: dump.rel },
+              'imported database dump was not removed',
+            );
+          });
         await ctx.db
           .update(schema.dbUploads)
           .set({ status: 'consumed', updatedAt: new Date() })

@@ -11,6 +11,7 @@ import {
   startTask,
   uploadTaskAttachment,
   type CliProvider,
+  type CliProvidersResponse,
   type Repository,
 } from '@/lib/api-client';
 import { attachmentUnavailableNote } from '@/lib/attachment-availability';
@@ -108,14 +109,14 @@ export function PlanStarter({
   useEffect(() => {
     let cancelled = false;
     void Promise.all([
-      api.get<{ providers: CliProvider[] }>('/cli-providers'),
+      api.get<CliProvidersResponse>('/cli-providers'),
       getPlanBuildClis(repositoryId).catch(() => null),
     ])
       .then(([res, clis]) => {
         if (cancelled) return;
         const enabled = res.providers.filter((p) => p.enabled);
         const pick = (id: string | null | undefined) =>
-          id && enabled.some((p) => p.id === id) ? id : (enabled[0]?.id ?? '');
+          id && enabled.some((p) => p.id === id) ? id : (res.defaultProviderId ?? '');
         setProviders(enabled);
         setPlannerId(pick(clis?.plannerCliProviderId));
         setQuestionerId(pick(clis?.questionerCliProviderId));

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { eq, asc } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { schema, type Database, type DbTx } from '@haive/database';
 import { decrypt, encrypt } from '../crypto/index.js';
 import { logger } from '../logger/index.js';
 import { configService } from './config.service.js';
@@ -60,10 +60,12 @@ export class SecretsService {
     return this.get(key);
   }
 
-  async set(key: string, value: string, description?: string): Promise<void> {
+  async set(key: string, value: string, description?: string, executor?: DbTx): Promise<void> {
     this.ensureInitialized();
     const encryptedValue = encrypt(value, this.encryptionKey!);
-    await this.db!.insert(schema.systemSecrets)
+    const db = executor ?? this.db!;
+    await db
+      .insert(schema.systemSecrets)
       .values({
         key,
         encryptedValue,
@@ -78,12 +80,15 @@ export class SecretsService {
           updatedAt: new Date(),
         },
       });
-    this.cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+    // An executor's transaction may still roll back. Never cache its uncommitted value.
+    if (executor) this.cache.delete(key);
+    else this.cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
   }
 
-  async delete(key: string): Promise<void> {
+  async delete(key: string, executor?: DbTx): Promise<void> {
     this.ensureInitialized();
-    await this.db!.delete(schema.systemSecrets).where(eq(schema.systemSecrets.key, key));
+    const db = executor ?? this.db!;
+    await db.delete(schema.systemSecrets).where(eq(schema.systemSecrets.key, key));
     this.cache.delete(key);
   }
 

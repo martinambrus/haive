@@ -4,18 +4,24 @@ const h = vi.hoisted(() => ({
   db: undefined as unknown,
   add: vi.fn(async (..._args: unknown[]) => ({ id: 'job-1' })),
   getJob: vi.fn(async (_id: string): Promise<undefined> => undefined),
+  getJobs: vi.fn(async (_states: string[]): Promise<{ id: string; name: string }[]> => []),
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({
-  getCliExecQueue: () => ({ add: h.add, getJob: h.getJob }),
+  getCliExecQueue: () => ({ add: h.add, getJob: h.getJob, getJobs: h.getJobs }),
   getUsagePollQueue: () => ({ add: vi.fn() }),
 }));
 
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { secretsService } from '@haive/shared';
+import {
+  CLI_EXEC_JOB_NAMES,
+  CLI_POLLABLE_JOB_OPTS,
+  VERSION_REFRESH_JOB_ID,
+  secretsService,
+} from '@haive/shared';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -45,7 +51,10 @@ describe('the CLI catalog routes require a session', () => {
     });
     fake.insert(schema.users, { id: USER, role: 'user', status: 'active', tokenVersion: 0 });
     h.db = fake.db;
-    h.add.mockClear();
+    h.add.mockReset();
+    h.add.mockResolvedValue({ id: '1' });
+    h.getJobs.mockReset();
+    h.getJobs.mockResolvedValue([]);
     h.getJob.mockClear();
     vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('cd'.repeat(32));
   });
@@ -77,14 +86,106 @@ describe('the CLI catalog routes require a session', () => {
     expect((await call('GET', '/catalog', false)).status).toBe(401);
   });
 
-  it('queues a forced refresh for a signed-in user', async () => {
+  it('queues a refresh for a signed-in user', async () => {
     const reply = await call('POST', '/catalog/claude-code/refresh-versions', true);
 
     expect(reply.status).toBe(202);
-    expect(reply.body).toEqual({ jobId: 'job-1' });
+    expect(reply.body).toEqual({ jobId: '1' });
     expect(h.add).toHaveBeenCalledTimes(1);
-    expect(h.add.mock.calls[0]?.[0]).toBe('cli-refresh-versions');
-    expect(h.add.mock.calls[0]?.[1]).toEqual({ force: true });
+    expect(h.add).toHaveBeenCalledWith(
+      CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
+      {},
+      CLI_POLLABLE_JOB_OPTS,
+    );
+    expect(h.add.mock.calls[0]?.[2]).not.toHaveProperty('jobId');
+  });
+
+  it('reuses the refresh on a second POST while it is in flight', async () => {
+    const jobs: { id: string; name: string }[] = [];
+    h.getJobs.mockImplementation(async () => jobs);
+    h.add.mockImplementation(async (name) => {
+      const job = { id: String(jobs.length + 1), name: String(name) };
+      jobs.push(job);
+      return job;
+    });
+
+    const first = await call('POST', '/catalog/claude-code/refresh-versions', true);
+    const second = await call('POST', '/catalog/codex/refresh-versions', true);
+
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    expect(second.body.jobId).toBe(first.body.jobId);
+    expect(h.add).toHaveBeenCalledTimes(1);
+    expect(h.getJobs).toHaveBeenCalledWith(['active', 'wait', 'prioritized'], 0, 99);
+  });
+
+  it.each(['active', 'wait', 'prioritized'])('reuses a refresh from %s', async (state) => {
+    h.getJobs.mockImplementation(async (states) =>
+      states.includes(state) ? [{ id: '42', name: 'cli-refresh-versions' }] : [],
+    );
+
+    const reply = await call('POST', '/catalog/claude-code/refresh-versions', true);
+
+    expect(reply.status).toBe(202);
+    expect(reply.body).toEqual({ jobId: '42' });
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('reuses a scheduler refresh id', async () => {
+    const id = `repeat:${VERSION_REFRESH_JOB_ID}:1792800000000`;
+    h.getJobs.mockResolvedValue([{ id, name: 'cli-refresh-versions' }]);
+
+    const reply = await call('POST', '/catalog/claude-code/refresh-versions', true);
+
+    expect(reply.status).toBe(202);
+    expect(reply.body).toEqual({ jobId: id });
+    expect(h.add).not.toHaveBeenCalled();
+  });
+
+  it('adds a refresh when only other job kinds are in flight', async () => {
+    h.getJobs.mockResolvedValue([{ id: '42', name: 'cli-probe' }]);
+
+    const reply = await call('POST', '/catalog/claude-code/refresh-versions', true);
+
+    expect(reply.status).toBe(202);
+    expect(reply.body).toEqual({ jobId: '1' });
+    expect(h.add).toHaveBeenCalledTimes(1);
+    expect(h.add.mock.calls[0]?.[2]).not.toHaveProperty('jobId');
+  });
+
+  it.each([new Error('Redis unavailable'), new SyntaxError('invalid job JSON')])(
+    'still enqueues when the in-flight scan fails: %s',
+    async (err) => {
+      h.getJobs.mockRejectedValue(err);
+
+      const reply = await call('POST', '/catalog/claude-code/refresh-versions', true);
+
+      expect(reply.status).toBe(202);
+      expect(reply.body).toEqual({ jobId: '1' });
+      expect(h.add).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('can enqueue twice when simultaneous POSTs both scan an empty queue', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let scans = 0;
+    h.getJobs.mockImplementation(async () => {
+      if (++scans === 2) release();
+      await gate;
+      return [];
+    });
+    let nextId = 0;
+    h.add.mockImplementation(async () => ({ id: String(++nextId) }));
+
+    const replies = await Promise.all([
+      call('POST', '/catalog/claude-code/refresh-versions', true),
+      call('POST', '/catalog/codex/refresh-versions', true),
+    ]);
+
+    expect(replies.map((r) => r.status)).toEqual([202, 202]);
+    expect(new Set(replies.map((r) => r.body.jobId)).size).toBe(2);
+    expect(h.add).toHaveBeenCalledTimes(2);
   });
 
   it('lets a signed-in user reach the poll handler', async () => {

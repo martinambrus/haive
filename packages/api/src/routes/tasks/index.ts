@@ -75,6 +75,7 @@ import {
   assertNewWorkAllowed,
   requireNewWorkAllowed,
 } from '../../middleware/maintenance.js';
+import { loadUsableProvider } from '../../lib/step-cli-choice.js';
 import { HttpError, type AppEnv } from '../../context.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import {
@@ -519,28 +520,10 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
   }
 
   if (body.cliProviderId) {
-    const provider = await db.query.cliProviders.findFirst({
-      where: and(
-        eq(schema.cliProviders.id, body.cliProviderId),
-        eq(schema.cliProviders.userId, userId),
-      ),
-      columns: { id: true },
-    });
-    if (!provider) throw new HttpError(404, 'CLI provider not found');
+    await loadUsableProvider(db, userId, body.cliProviderId, 'cliProviderId');
   }
-
-  // Ownership only, no `enabled` check — same as cliProviderId above. A provider the
-  // user disables later must not wedge the task: the worker re-checks `enabled` when it
-  // dispatches the summary and falls back to the step's CLI if it is gone.
   if (body.summaryCliProviderId) {
-    const provider = await db.query.cliProviders.findFirst({
-      where: and(
-        eq(schema.cliProviders.id, body.summaryCliProviderId),
-        eq(schema.cliProviders.userId, userId),
-      ),
-      columns: { id: true },
-    });
-    if (!provider) throw new HttpError(404, 'Summary CLI provider not found');
+    await loadUsableProvider(db, userId, body.summaryCliProviderId, 'summaryCliProviderId');
   }
 
   const definition = await definitionForCreate(db, body.type, { generic: true });
@@ -1677,18 +1660,7 @@ taskRoutes.patch('/:id/summary-cli', async (c) => {
   if (!task) throw new HttpError(404, 'Task not found');
 
   if (body.summaryCliProviderId) {
-    const provider = await db.query.cliProviders.findFirst({
-      where: and(
-        eq(schema.cliProviders.id, body.summaryCliProviderId),
-        eq(schema.cliProviders.userId, userId),
-      ),
-    });
-    if (!provider) throw new HttpError(404, 'CLI provider not found');
-    // Rejected rather than stored: maybeEnqueueStepSummary honors the choice only while the
-    // provider is still enabled, and resolveDispatch merely ORDERS a preferred provider first
-    // — so a disabled id does not fail, it silently hands the recap to the default provider.
-    // Refusing here is what keeps the stored value and the run in agreement.
-    if (!provider.enabled) throw new HttpError(409, 'CLI provider is disabled');
+    await loadUsableProvider(db, userId, body.summaryCliProviderId);
   }
 
   const patch: Partial<typeof schema.tasks.$inferInsert> = { updatedAt: new Date() };
@@ -1731,18 +1703,7 @@ taskRoutes.patch('/:id/cli-provider', async (c) => {
   }
   refuseDeadTask(task);
 
-  if (body.cliProviderId) {
-    const provider = await db.query.cliProviders.findFirst({
-      where: and(
-        eq(schema.cliProviders.id, body.cliProviderId),
-        eq(schema.cliProviders.userId, userId),
-      ),
-    });
-    if (!provider) throw new HttpError(404, 'CLI provider not found');
-    if (!provider.enabled) {
-      throw new HttpError(409, 'CLI provider is disabled');
-    }
-  }
+  if (body.cliProviderId) await loadUsableProvider(db, userId, body.cliProviderId);
 
   await db
     .update(schema.tasks)

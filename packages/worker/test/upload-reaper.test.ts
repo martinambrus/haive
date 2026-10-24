@@ -24,6 +24,11 @@ const guard = vi.hoisted(() => ({
   removals: 0,
   removal: null as null | ((rel: string) => boolean),
   errors: [] as unknown[][],
+  warnings: [] as unknown[][],
+  debugs: [] as unknown[][],
+  removalCode: 'EACCES' as string | undefined,
+  statFailure: null as string | null,
+  ignoreParkedProtection: false,
 }));
 vi.mock('@haive/shared', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared')>();
@@ -33,7 +38,8 @@ vi.mock('@haive/shared', async (importOriginal) => {
       ...real.logger,
       child: () => ({
         info: () => undefined,
-        warn: () => undefined,
+        warn: (...args: unknown[]) => guard.warnings.push(args),
+        debug: (...args: unknown[]) => guard.debugs.push(args),
         error: (...args: unknown[]) => guard.errors.push(args),
       }),
     },
@@ -43,10 +49,21 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
   return {
     ...real,
+    lstatNoFollow: async (...args: Parameters<typeof real.lstatNoFollow>) => {
+      if (guard.statFailure && args[1].endsWith('.partial')) {
+        const err =
+          guard.statFailure === 'containment'
+            ? new real.PathContainmentError('link', args[0], args[1], args[1])
+            : Object.assign(new Error('the stat failed'), { code: guard.statFailure });
+        if (args[2]?.strict) throw err;
+        return null;
+      }
+      return real.lstatNoFollow(...args);
+    },
     removeNoFollow: async (...args: Parameters<typeof real.removeNoFollow>) => {
       if (guard.removal?.(args[1])) {
         guard.removals += 1;
-        throw new Error('EACCES: the removal failed');
+        throw Object.assign(new Error('the removal failed'), { code: guard.removalCode });
       }
       return real.removeNoFollow(...args);
     },
@@ -54,13 +71,24 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
 });
 // The fake db evaluates no subquery, so the live-task check of the ended-dump claim is dropped here
 // and the pass's own read decides; upload-reaper-db.test.ts runs the statement as written on Postgres.
-vi.mock('drizzle-orm', async (original) => ({
-  ...(await original<typeof import('drizzle-orm')>()),
-  notExists: () => {
-    guard.claims += 1;
-    return undefined;
-  },
-}));
+vi.mock('drizzle-orm', async (original) => {
+  const real = await original<typeof import('drizzle-orm')>();
+  return {
+    ...real,
+    // The fake db supports gt and eq but not gte.
+    gte: (...args: Parameters<typeof real.gte>) => real.or(real.gt(...args), real.eq(...args)),
+    eq: (...args: Parameters<typeof real.eq>) =>
+      guard.ignoreParkedProtection &&
+      args[0] === schema.dbUploads.status &&
+      args[1] === 'reap_failed'
+        ? real.eq(schema.dbUploads.updatedAt, new Date(0))
+        : real.eq(...args),
+    notExists: () => {
+      guard.claims += 1;
+      return undefined;
+    },
+  };
+});
 
 const USER = 'aaaaaaaa-1111-4111-8111-111111111111';
 const OTHER_USER = 'bbbbbbbb-2222-4222-8222-222222222222';
@@ -153,7 +181,12 @@ beforeEach(async () => {
   guard.claims = 0;
   guard.removals = 0;
   guard.errors = [];
+  guard.warnings = [];
+  guard.debugs = [];
+  guard.removalCode = 'EACCES';
   guard.removal = null;
+  guard.statFailure = null;
+  guard.ignoreParkedProtection = false;
 });
 
 afterEach(async () => {
@@ -219,6 +252,82 @@ async function session(
   });
   return { id, file };
 }
+
+describe('T323: unreadable reaping files', () => {
+  describe.each(KINDS)('$name', (kind) => {
+    it.each(['EACCES', 'containment'])(
+      'keeps an unreadable file reaping after a stat refusal: %s',
+      async (reason) => {
+        const stuck = await session(kind, { idleMs: TTL - HOUR, status: 'reaping' });
+        guard.statFailure = reason;
+
+        const result = await reapAbandonedUploads(db());
+
+        expect(rowOf(kind, stuck.id).status).toBe('reaping');
+        expect(await exists(stuck.file)).toBe(true);
+        expect(result.sessions).toBe(0);
+        expect(guard.errors).toHaveLength(0);
+
+        guard.statFailure = null;
+        expect((await reapAbandonedUploads(db())).sessions).toBe(1);
+        expect(rowOf(kind, stuck.id).status).toBe('cancelled');
+        expect(await exists(stuck.file)).toBe(false);
+      },
+    );
+
+    it.each(['EACCES', 'containment'])(
+      'parks a file still unreadable after 24 hours: %s',
+      async (reason) => {
+        const stuck = await session(kind, { idleMs: TTL + HOUR, status: 'reaping' });
+        guard.statFailure = reason;
+
+        const result = await reapAbandonedUploads(db());
+
+        expect(rowOf(kind, stuck.id).status).toBe('reap_failed');
+        expect(await exists(stuck.file)).toBe(true);
+        expect(result.sessions).toBe(0);
+        expect(guard.errors).toHaveLength(1);
+
+        await reapAbandonedUploads(db());
+        expect(rowOf(kind, stuck.id).status).toBe('reap_failed');
+        expect(guard.errors).toHaveLength(1);
+      },
+    );
+  });
+});
+
+describe('T323: invalid completed dump paths', () => {
+  it('bounds invalid-path warning history by row id without evicting remembered rows', async () => {
+    const reap = reapAbandonedUploads;
+    for (let i = 0; i < 1001; i += 1) {
+      fake.insert(schema.dbUploads, {
+        id: randomUUID(),
+        userId: USER,
+        totalSize: 1,
+        bytesReceived: 1,
+        chunkSize: 1,
+        status: 'complete',
+        updatedAt: new Date(Date.now() - 5 * TTL),
+        dumpPath: path.join(storage, 'not-owned.sql'),
+        filename: 'a.sql',
+        dumpFormat: 'sql',
+      });
+    }
+
+    await reap(db());
+    expect(guard.warnings).toHaveLength(1001);
+    await reap(db());
+    expect(guard.warnings).toHaveLength(1002);
+    expect(guard.debugs).toHaveLength(1000);
+    await reap(db());
+    expect(guard.warnings).toHaveLength(1003);
+    expect(guard.debugs).toHaveLength(2000);
+    expect(new Set(guard.warnings.map(([data]) => (data as { dumpId: string }).dumpId)).size).toBe(
+      1001,
+    );
+    expect(fake.rows(schema.dbUploads).every((row) => row.status === 'complete')).toBe(true);
+  });
+});
 
 describe('U1: the row pass reaps an upload idle for 24 hours', () => {
   describe.each(KINDS)('$name', (kind) => {
@@ -487,10 +596,10 @@ describe('U2: the file pass reaps a session partial nothing names', () => {
 
     await reapAbandonedUploads(db());
 
-    for (const gone of [orphan, orphanTar, orphanDump, orphanBundle, archive]) {
+    for (const gone of [orphan, orphanTar, orphanDump, orphanBundle, archive, dump]) {
       expect(await exists(gone), gone).toBe(false);
     }
-    for (const kept of [fresh, sound, dump, notUuid, wrongExt, suffixed, upper, longExt]) {
+    for (const kept of [fresh, sound, notUuid, wrongExt, suffixed, upper, longExt]) {
       expect(await exists(kept), kept).toBe(true);
     }
   });
@@ -989,10 +1098,14 @@ describe('the finished-archive pass', () => {
     expect(await exists(archive.file)).toBe(true);
   });
 
-  it.each(['cloning', 'ready'] as const)('keeps the archive of a %s repository', async (repo) => {
+  it.each([
+    ['cloning', false],
+    ['ready', true],
+    ['error', true],
+  ] as const)('T323: with repository %s its old archive is removed: %s', async (repo, removed) => {
     const a = await archive({ repo });
     await reapAbandonedUploads(db());
-    expect(await exists(a.file)).toBe(true);
+    expect(await exists(a.file)).toBe(!removed);
   });
 
   it('keeps a legacy archive named by its session id while its owner has a cloning repository', async () => {
@@ -1040,7 +1153,6 @@ describe('the finished-archive pass', () => {
   });
 
   it.each([
-    ['a dump name', (id: string) => `db-${id}.zip`],
     ['a name that is no id', () => 'x.zip'],
     ['a notification sound', () => 'notification-sound.mp3'],
   ])('does not touch %s', async (_label, name) => {
@@ -1086,6 +1198,217 @@ describe('the finished-archive pass', () => {
     expect(await exists(good.file)).toBe(false);
     expect(result.orphans).toBe(1);
   });
+});
+
+describe('T323: repeated orphan removal failures', () => {
+  async function orphan(volume: 'repos' | 'bundles' = 'repos', id = randomUUID()) {
+    const file = path.join(uploadsDir(volume), `${id}.zip.partial`);
+    await writeFile(file, 'orphan');
+    await age(file, TTL + HOUR);
+    return file;
+  }
+
+  it('logs every removed orphan with its relative path and pass at debug level', async () => {
+    const files: [string, string][] = [
+      [await orphan(), 'repository'],
+      [await orphan('bundles'), 'bundle'],
+    ];
+    for (const [name, pass] of [
+      [`${randomUUID()}.zip`, 'finished archive'],
+      [`db-${randomUUID()}.sql`, 'finished dump'],
+    ] as const) {
+      const file = path.join(uploadsDir('repos'), name);
+      await writeFile(file, 'orphan');
+      await age(file, TTL + HOUR);
+      files.push([file, pass]);
+    }
+
+    const result = await reapAbandonedUploads(db());
+
+    expect(result.orphans).toBe(4);
+    expect(guard.warnings).toHaveLength(0);
+    expect(guard.debugs).toHaveLength(4);
+    for (const [file, pass] of files) {
+      const root = pass === 'bundle' ? roots.bundles : roots.repos;
+      expect(guard.debugs).toContainEqual([
+        { rel: path.relative(root, file), pass },
+        'orphan upload file removed',
+      ]);
+    }
+  });
+
+  it('warns once across several passes, and again when the error code changes', async () => {
+    const file = await orphan();
+    guard.removal = () => true;
+
+    for (let i = 0; i < 3; i += 1) await reapAbandonedUploads(db());
+
+    expect(await exists(file)).toBe(true);
+    expect(guard.removals).toBe(3);
+    expect(guard.warnings).toHaveLength(1);
+    expect(guard.debugs).toHaveLength(2);
+
+    guard.removalCode = 'EPERM';
+    await reapAbandonedUploads(db());
+    await reapAbandonedUploads(db());
+
+    expect(guard.warnings).toHaveLength(2);
+    expect(guard.debugs).toHaveLength(3);
+  });
+
+  it('warns once for an error without a code', async () => {
+    await orphan();
+    guard.removal = () => true;
+    guard.removalCode = undefined;
+
+    await reapAbandonedUploads(db());
+    await reapAbandonedUploads(db());
+
+    expect(guard.warnings).toHaveLength(1);
+    expect(guard.debugs).toHaveLength(1);
+  });
+
+  it.each(['EACCES', 'containment'])(
+    'remembers a failure while stat refuses it: %s',
+    async (reason) => {
+      const file = await orphan();
+      guard.removal = () => true;
+      await reapAbandonedUploads(db());
+
+      guard.statFailure = reason;
+      await reapAbandonedUploads(db());
+      guard.statFailure = null;
+      await reapAbandonedUploads(db());
+
+      expect(await exists(file)).toBe(true);
+      expect(guard.warnings).toHaveLength(1);
+      expect(guard.debugs).toHaveLength(1);
+    },
+  );
+
+  it('forgets a failure after removal succeeds', async () => {
+    const id = randomUUID();
+    const file = await orphan('repos', id);
+    guard.removal = () => true;
+    await reapAbandonedUploads(db());
+
+    guard.removal = null;
+    await reapAbandonedUploads(db());
+    expect(await exists(file)).toBe(false);
+
+    await orphan('repos', id);
+    guard.removal = () => true;
+    await reapAbandonedUploads(db());
+
+    expect(guard.warnings).toHaveLength(2);
+  });
+
+  it('forgets a failed file removed by someone else between passes', async () => {
+    const id = randomUUID();
+    const file = await orphan('repos', id);
+    guard.removal = () => true;
+    await reapAbandonedUploads(db());
+
+    await rm(file);
+    await reapAbandonedUploads(db());
+    await orphan('repos', id);
+    await reapAbandonedUploads(db());
+
+    expect(guard.warnings).toHaveLength(2);
+    expect(guard.debugs).toHaveLength(0);
+  });
+
+  it('keeps remembered failures at capacity across repeated passes', async () => {
+    for (let i = 0; i < 1001; i += 1) await orphan();
+    guard.removal = () => true;
+    await reapAbandonedUploads(db());
+    expect(guard.warnings).toHaveLength(1001);
+
+    await reapAbandonedUploads(db());
+    expect(guard.warnings).toHaveLength(1002);
+    expect(guard.debugs).toHaveLength(1000);
+
+    await reapAbandonedUploads(db());
+    expect(guard.warnings).toHaveLength(1003);
+    expect(guard.debugs).toHaveLength(2000);
+
+    guard.removalCode = 'EPERM';
+    await reapAbandonedUploads(db());
+    expect(guard.warnings).toHaveLength(2004);
+    await reapAbandonedUploads(db());
+    expect(guard.warnings).toHaveLength(2005);
+    expect(guard.debugs).toHaveLength(3000);
+  });
+
+  it('warns separately for the same relative path in different storage roots', async () => {
+    const id = randomUUID();
+    await orphan('repos', id);
+    await orphan('bundles', id);
+    guard.removal = () => true;
+
+    await reapAbandonedUploads(db());
+    await reapAbandonedUploads(db());
+
+    expect(guard.warnings).toHaveLength(2);
+    expect(guard.debugs).toHaveLength(2);
+  });
+});
+
+describe('T323: one cutoff throughout an upload reaper pass', () => {
+  describe.each(KINDS)('$name', (kind) => {
+    it.each(['uploading', 'completing'])(
+      'protects a %s session stamped exactly at the cutoff',
+      async (status) => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(Date.now());
+        const boundary = await session(kind, { idleMs: TTL, fileAgeMs: TTL + HOUR, status });
+
+        const protectedPass = await reapAbandonedUploads(db());
+
+        expect(rowOf(kind, boundary.id).status).toBe(status);
+        expect(await exists(boundary.file)).toBe(true);
+        expect(protectedPass).toEqual({ sessions: 0, dumps: 0, orphans: 0 });
+
+        vi.setSystemTime(Date.now() + 1);
+        expect((await reapAbandonedUploads(db())).sessions).toBe(1);
+        expect(rowOf(kind, boundary.id).status).toBe('cancelled');
+        expect(await exists(boundary.file)).toBe(false);
+      },
+    );
+  });
+
+  it.each([
+    ['repos', (id: string) => `${id}.zip.partial`],
+    ['repos', (id: string) => `db-${id}.sql.partial`],
+    ['repos', (id: string) => `${id}.zip`],
+    ['repos', (id: string) => `db-${id}.sql`],
+    ['bundles', (id: string) => `${id}.zip.partial`],
+  ] as const)(
+    'keeps a session crossing the cutoff during the %s pass (%#)',
+    async (volume, name) => {
+      const now = Date.now();
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(now);
+      const keeper = await session(KINDS[2]!, {
+        idleMs: TTL - MIN,
+        fileAgeMs: HOUR,
+        status: 'complete',
+      });
+      const file = path.join(uploadsDir(volume), name(keeper.id));
+      await writeFile(file, 'orphan');
+      await age(file, 5 * TTL);
+      fake.hooks.beforeUpdate = (table) => {
+        if (table === schema.customBundleUploads) vi.setSystemTime(now + 2 * MIN);
+      };
+
+      expect((await reapAbandonedUploads(db())).orphans).toBe(0);
+      expect(await exists(file)).toBe(true);
+      expect(rowOf(KINDS[2]!, keeper.id).updatedAt).toEqual(new Date(now - TTL + MIN));
+
+      expect((await reapAbandonedUploads(db())).orphans).toBe(1);
+      expect(await exists(file)).toBe(false);
+    },
+  );
 });
 
 describe('startUploadReaper', () => {
@@ -1509,5 +1832,113 @@ describe('a removal that fails for 24 h parks its row as reap_failed', () => {
       expect(rowOf(kind, parked.id).status).toBe('reap_failed');
       expect(await exists(parked.file)).toBe(true);
     });
+  });
+});
+
+describe('T323: the orphan finished-dump pass', () => {
+  const dumps = KINDS[1]!;
+
+  it.each(['sql', 'sql.gz', 'dump', 'backup', 'zip', 'partial'])(
+    'removes an old rowless .%s dump',
+    async (ext) => {
+      const file = path.join(uploadsDir('repos'), `db-${randomUUID()}.${ext}`);
+      await writeFile(file, 'dump');
+      await age(file, TTL + HOUR);
+
+      const result = await reapAbandonedUploads(db());
+
+      expect(await exists(file)).toBe(false);
+      expect(result.orphans).toBe(1);
+    },
+  );
+
+  it.each([
+    'uploading',
+    'completing',
+    'complete',
+    'cancelled',
+    'consumed',
+    'reaping',
+    'reap_failed',
+  ])('keeps an old file whose %s row is still owned by the row passes', async (status) => {
+    const upload = await session(dumps, {
+      idleMs: 5 * TTL,
+      fileAgeMs: 5 * TTL,
+      status,
+      name: dumps.finished,
+    });
+    // Hold the row passes back without renewing the row's timestamp. The keep-set must own
+    // every status, even without recentSessions' separate protection for reap_failed.
+    fake.hooks.beforeUpdate = fake.hooks.beforeDelete = (table) => {
+      if (table === schema.dbUploads) throw new Error('the row pass is unavailable');
+    };
+    guard.ignoreParkedProtection = true;
+    if (status === 'reaping') guard.removal = () => true;
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(upload.file)).toBe(true);
+    expect(rowOf(dumps, upload.id).status).toBe(status);
+    expect(guard.removals).toBe(status === 'reaping' ? 1 : 0);
+    expect(
+      guard.warnings.filter(
+        ([, message]) => message === 'upload reaper skipped the finished dump pass',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('keeps an old complete dump with an old row while a running task needs it', async () => {
+    const upload = await session(dumps, {
+      idleMs: 5 * TTL,
+      status: 'complete',
+      name: dumps.finished,
+    });
+    fake.insert(schema.tasks, {
+      id: randomUUID(),
+      userId: USER,
+      dbUploadId: upload.id,
+      status: 'running',
+      updatedAt: new Date(Date.now() - 5 * TTL),
+    });
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(upload.file)).toBe(true);
+    expect(rowOf(dumps, upload.id).status).toBe('complete');
+  });
+
+  it('keeps a young finished dump without a row', async () => {
+    const file = path.join(uploadsDir('repos'), `db-${randomUUID()}.sql`);
+    await writeFile(file, 'dump');
+    await age(file, TTL - HOUR);
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(file)).toBe(true);
+  });
+
+  it('keeps an old rowless dump while another session with that id was touched recently', async () => {
+    const upload = await session(KINDS[0]!, { idleMs: HOUR });
+    const file = path.join(uploadsDir('repos'), `db-${upload.id}.sql`);
+    await writeFile(file, 'dump');
+    await age(file, 5 * TTL);
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(file)).toBe(true);
+  });
+
+  it('removes an old finished dump symlink without touching its target', async () => {
+    const target = path.join(storage, 'dump-target.sql');
+    await writeFile(target, 'keep');
+    const file = path.join(uploadsDir('repos'), `db-${randomUUID()}.sql`);
+    await symlink(target, file);
+    const old = new Date(Date.now() - 5 * TTL);
+    await lutimes(file, old, old);
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(file)).toBe(false);
+    expect(await readFile(target, 'utf8')).toBe('keep');
   });
 });

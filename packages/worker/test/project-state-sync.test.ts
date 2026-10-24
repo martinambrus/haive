@@ -2999,78 +2999,80 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
     expect(ledger(s).filter((r) => r.supersededAt != null)).toEqual([]);
   });
 
-  describe('a claim file at a git-data path an earlier release wrote', () => {
-    const LEGACY = '.git/config';
-    const legacyFile = `${STATE_DIR}/${claimFileName(LEGACY)}`;
-    const legacyClaim = () => claim(LEGACY, H('9'));
-    const putLegacy = (s: Setup) => s.put(legacyFile, canonicalJson(legacyClaim()));
+  describe.each(['.git/config', '.git./config'])(
+    'a claim file at git-data path %j an earlier release wrote',
+    (LEGACY) => {
+      const legacyFile = `${STATE_DIR}/${claimFileName(LEGACY)}`;
+      const legacyClaim = () => claim(LEGACY, H('9'));
+      const putLegacy = (s: Setup) => s.put(legacyFile, canonicalJson(legacyClaim()));
 
-    it('syncs the rest of the record, imports no marker for it and lists it in the base', async () => {
-      const s = await setup();
-      await s.putRecord(withClaims(claim(GUIDE, H('4'))));
-      await putLegacy(s);
+      it('syncs the rest of the record, imports no marker for it and lists it in the base', async () => {
+        const s = await setup();
+        await s.putRecord(withClaims(claim(GUIDE, H('4'))));
+        await putLegacy(s);
 
-      const { outcome } = await s.run();
+        const { outcome } = await s.run();
 
-      expect(outcome).toBe('applied');
-      expect(s.syncRow()?.lastError ?? null).toBeNull();
-      expect(ledger(s).map((r) => r.diskPath)).toEqual([GUIDE]);
-      expect(baseClaims(s).map((c) => c.path)).toEqual([LEGACY, GUIDE]);
-    });
-
-    it('marks the outbox dirty, so the sweep writes the record and removes the file', async () => {
-      const s = await setup();
-      await s.putRecord(withClaims(claim(GUIDE, H('4'))));
-      await putLegacy(s);
-
-      await s.run();
-
-      const [mark, ...rest] = dirtyMarks(s);
-      expect(rest).toEqual([]);
-      expect(mark).toMatchObject({ repositoryId: REPO });
-      expect(mark!.revision as number).toBeGreaterThan(mark!.writtenRevision as number);
-    });
-
-    it('imports no marker when it is the only claim of the checkout and the base already lists it', async () => {
-      const s = await setup({
-        column: column(BASE),
-        sync: { base: json({ ...normalizeProjectState(record(BASE)), claims: [legacyClaim()] }) },
+        expect(outcome).toBe('applied');
+        expect(s.syncRow()?.lastError ?? null).toBeNull();
+        expect(ledger(s).map((r) => r.diskPath)).toEqual([GUIDE]);
+        expect(baseClaims(s).map((c) => c.path)).toEqual([LEGACY, GUIDE]);
       });
-      await s.putRecord(record(BASE));
-      await putLegacy(s);
 
-      const { outcome } = await s.run();
+      it('marks the outbox dirty, so the sweep writes the record and removes the file', async () => {
+        const s = await setup();
+        await s.putRecord(withClaims(claim(GUIDE, H('4'))));
+        await putLegacy(s);
 
-      expect(outcome).toBe('unchanged');
-      expect(ledger(s)).toEqual([]);
-      expect(baseClaims(s)).toEqual([legacyClaim()]);
-      expect(dirtyMarks(s)).toHaveLength(1);
-    });
+        await s.run();
 
-    it('keeps the claims of the base when it is the only claim file the checkout holds', async () => {
-      const [g, a] = [claim(GUIDE, H('4')), claim(AGENT, H('5'))];
-      const s = await claimed({ base: [g, a], local: [g, a], incoming: [] });
-      await putLegacy(s);
+        const [mark, ...rest] = dirtyMarks(s);
+        expect(rest).toEqual([]);
+        expect(mark).toMatchObject({ repositoryId: REPO });
+        expect(mark!.revision as number).toBeGreaterThan(mark!.writtenRevision as number);
+      });
 
-      const { outcome } = await s.run();
+      it('imports no marker when it is the only claim of the checkout and the base already lists it', async () => {
+        const s = await setup({
+          column: column(BASE),
+          sync: { base: json({ ...normalizeProjectState(record(BASE)), claims: [legacyClaim()] }) },
+        });
+        await s.putRecord(record(BASE));
+        await putLegacy(s);
 
-      expect(outcome).toBe('unchanged');
-      expect(live(s)).toHaveLength(2);
-      expect(baseClaims(s).map((c) => c.path)).toEqual([AGENT, LEGACY, GUIDE]);
-    });
+        const { outcome } = await s.run();
 
-    it('is left in the base for the writer, which removes the file and the claim from the base', async () => {
-      const s = await setup();
-      await s.putRecord(record(BASE));
-      await putLegacy(s);
+        expect(outcome).toBe('unchanged');
+        expect(ledger(s)).toEqual([]);
+        expect(baseClaims(s)).toEqual([legacyClaim()]);
+        expect(dirtyMarks(s)).toHaveLength(1);
+      });
 
-      expect((await s.run()).outcome).toBe('applied');
-      await s.write(contextA(), true);
+      it('keeps the claims of the base when it is the only claim file the checkout holds', async () => {
+        const [g, a] = [claim(GUIDE, H('4')), claim(AGENT, H('5'))];
+        const s = await claimed({ base: [g, a], local: [g, a], incoming: [] });
+        await putLegacy(s);
 
-      expect(Object.keys(await treeOf(s.root))).not.toContain(legacyFile);
-      expect(baseClaims(s)).toEqual([]);
-    });
-  });
+        const { outcome } = await s.run();
+
+        expect(outcome).toBe('unchanged');
+        expect(live(s)).toHaveLength(2);
+        expect(baseClaims(s).map((c) => c.path)).toEqual([AGENT, LEGACY, GUIDE]);
+      });
+
+      it('is left in the base for the writer, which removes the file and the claim from the base', async () => {
+        const s = await setup();
+        await s.putRecord(record(BASE));
+        await putLegacy(s);
+
+        expect((await s.run()).outcome).toBe('applied');
+        await s.write(contextA(), true);
+
+        expect(Object.keys(await treeOf(s.root))).not.toContain(legacyFile);
+        expect(baseClaims(s)).toEqual([]);
+      });
+    },
+  );
 
   it('defers while a reset holds the root claim, writing nothing', async () => {
     const s = await setup();
