@@ -719,8 +719,97 @@ describe('terminal replay ordering', () => {
 });
 
 describe('terminal startup failure cleanup', () => {
+  for (const stage of ['attach', 'setup'] as const) {
+    it(`cleans up once when the websocket is not OPEN after ${stage}`, async () => {
+      fake.patch(schema.containers, ID, { attachedWsCount: 1 });
+      const stream = new PassThrough();
+      let accepted!: WebSocket;
+      const upgrade = WebSocketServer.prototype.handleUpgrade;
+      vi.spyOn(WebSocketServer.prototype, 'handleUpgrade').mockImplementation(function (
+        this: WebSocketServer,
+        req,
+        socket,
+        head,
+        callback,
+      ) {
+        upgrade.call(this, req, socket, head, (ws, request) => {
+          accepted = ws;
+          callback(ws, request);
+        });
+      });
+      // Hold the transport in CLOSING without emitting close: each not-OPEN branch
+      // must release its own resources before the eventual close callback runs.
+      const closing = () =>
+        Object.defineProperty(accepted, 'readyState', {
+          configurable: true,
+          value: WebSocket.CLOSING,
+        });
+      vi.spyOn(http, 'request').mockImplementation(((
+        opts: http.RequestOptions,
+        ...args: unknown[]
+      ) => {
+        if (!opts.path?.startsWith('/containers/test-container/attach'))
+          return Reflect.apply(realRequest, http, [opts, ...args]);
+        const req = new EventEmitter();
+        Object.assign(req, {
+          end: () =>
+            queueMicrotask(() => {
+              if (stage === 'attach') closing();
+              req.emit('upgrade', {}, stream, Buffer.alloc(0));
+            }),
+        });
+        return req;
+      }) as typeof http.request);
+      const intervals: Array<ReturnType<typeof setInterval>> = [];
+      const interval = globalThis.setInterval;
+      const clear = vi.spyOn(globalThis, 'clearInterval');
+      if (stage === 'setup') {
+        vi.spyOn(globalThis, 'setInterval').mockImplementation(((
+          ...args: Parameters<typeof setInterval>
+        ) => {
+          expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(2);
+          intervals.push(interval(...args));
+          if (intervals.length === 2) closing();
+          return intervals.at(-1)!;
+        }) as typeof setInterval);
+      }
+      const docker = {
+        modem: { getSocketPath: () => undefined },
+        getContainer: () => ({}),
+      } as never;
+      const port = await start((s) => installTerminalWebSocket(s, { docker }));
+      const client = new WebSocket(`ws://127.0.0.1:${port}/terminal/${ID}`, {
+        headers: { cookie: 'haive_access=user-session' },
+      });
+      clients.add(client);
+      const frames: unknown[] = [];
+      client.on('message', (raw) => frames.push(JSON.parse(raw.toString())));
+      try {
+        await vi.waitFor(() => {
+          expect(stream.writableEnded).toBe(true);
+          expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(1);
+          const sessions = fake.rows(schema.terminalSessions);
+          expect(sessions).toHaveLength(stage === 'attach' ? 0 : 1);
+          for (const session of sessions) expect(session.endedAt).toBeInstanceOf(Date);
+        });
+        expect(frames).toEqual([]);
+        for (const timer of intervals) expect(clear).toHaveBeenCalledWith(timer);
+      } finally {
+        if (accepted) Reflect.deleteProperty(accepted, 'readyState');
+        client.close();
+        await new Promise<void>((resolve) => client.once('close', () => resolve()));
+        // The later close listener must not decrement a second time.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        for (const timer of intervals) clearInterval(timer);
+        stream.destroy();
+      }
+      expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(1);
+    });
+  }
+
   for (const stage of ['increment', 'timers'] as const) {
     it(`ends the attach stream and closes the websocket when ${stage} fails`, async () => {
+      fake.patch(schema.containers, ID, { attachedWsCount: 1 });
       const stream = new PassThrough();
       vi.spyOn(http, 'request').mockImplementation(((
         opts: http.RequestOptions,
@@ -739,6 +828,7 @@ describe('terminal startup failure cleanup', () => {
       const clear = vi.spyOn(globalThis, 'clearInterval');
       if (stage === 'increment') {
         vi.spyOn(fake.db, 'update').mockImplementationOnce(() => {
+          expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(1);
           throw failure;
         });
       } else {
@@ -749,6 +839,7 @@ describe('terminal startup failure cleanup', () => {
             return keepalive;
           }) as typeof setInterval)
           .mockImplementationOnce(() => {
+            expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(2);
             throw failure;
           });
       }
@@ -772,7 +863,7 @@ describe('terminal startup failure cleanup', () => {
         expect(frames).toContainEqual({ type: 'error', message: failure.message });
         expect(stream.writableEnded).toBe(true);
         await vi.waitFor(() => {
-          expect(fake.rows(schema.containers)[0]?.attachedWsCount ?? 0).toBe(0);
+          expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(1);
           const sessions = fake.rows(schema.terminalSessions);
           expect(sessions).toHaveLength(stage === 'increment' ? 0 : 1);
           for (const session of sessions) expect(session.endedAt).toBeInstanceOf(Date);
