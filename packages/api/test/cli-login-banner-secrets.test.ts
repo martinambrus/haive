@@ -102,7 +102,7 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function start(query = '', attached = true) {
+async function start(query = '', attached = true, providerId = PROVIDER) {
   const server = new EventEmitter();
   const docker = {
     getContainer: () => ({ start: async () => {}, remove: async () => {}, resize: async () => {} }),
@@ -111,10 +111,10 @@ async function start(query = '', attached = true) {
   server.emit(
     'upgrade',
     {
-      url: `/cli-login-banner/${PROVIDER}${query}`,
+      url: `/cli-login-banner/${providerId}${query}`,
       headers: { cookie: `${ACCESS_COOKIE}=synthetic-session` },
     },
-    {},
+    { write: vi.fn(), destroy: vi.fn() },
     Buffer.alloc(0),
   );
   await settle();
@@ -214,6 +214,15 @@ describe('CLI login banner credential logging', () => {
     await start();
     stream.emit('error', new Error(`synthetic transport failure: ${CODE}`));
     await settle();
+    assertNoCredentialText(CODE);
+  });
+
+  it.each([true, false])('fix6 logs query-free upgrade paths (valid id: %s)', async (valid) => {
+    const id = valid ? PROVIDER : 'malformed-provider';
+    await start(`?code=${CODE}`, valid, id);
+    const path = `/cli-login-banner/${id}`;
+    expect(h.log.info.mock.calls.some(([fields]) => fields?.path === path)).toBe(true);
+    if (!valid) expect(h.log.warn.mock.calls.some(([fields]) => fields?.path === path)).toBe(true);
     assertNoCredentialText(CODE);
   });
 

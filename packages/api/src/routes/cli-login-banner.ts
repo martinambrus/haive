@@ -241,6 +241,7 @@ export function installCliLoginBannerWebSocket(
 
   server.on('upgrade', (req, socket, head) => {
     const rawUrl = req.url ?? '';
+    const requestPath = rawUrl.split('?', 1)[0] ?? '';
     if (!rawUrl.startsWith(pathPrefix)) return;
     if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {
       rejectUpgrade(socket, 403, 'Forbidden');
@@ -249,10 +250,10 @@ export function installCliLoginBannerWebSocket(
 
     void (async () => {
       try {
-        log.info('banner ws upgrade received');
+        log.info({ path: requestPath }, 'banner ws upgrade received');
         const providerId = extractProviderId(rawUrl, pathPrefix);
         if (!providerId) {
-          log.warn('banner ws reject: invalid providerId');
+          log.warn({ path: requestPath }, 'banner ws reject: invalid providerId');
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
