@@ -92,10 +92,16 @@ export async function gitRun(
   cwd: string,
   args: string[],
   env?: Record<string, string>,
-  io?: { maxBuffer?: number; encoding?: BufferEncoding; input?: Buffer; timeout?: number },
+  io?: {
+    maxBuffer?: number;
+    encoding?: BufferEncoding;
+    input?: Buffer;
+    timeout?: number;
+    allowFileTransport?: boolean;
+  },
 ): Promise<GitRunResult> {
-  const argv = hardenGitArgs(args);
-  const { input, ...output } = io ?? {};
+  const { input, allowFileTransport, ...output } = io ?? {};
+  const argv = hardenGitArgs(args, { allowFileTransport });
   const timeout = output.timeout ?? gitDefaultTimeoutMs(argv);
   try {
     const run = exec('git', argv, {
