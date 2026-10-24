@@ -47,8 +47,9 @@ async function readStages(worktreePath: string, path: string): Promise<Map<Stage
   for (const entry of listing.stdout.split('\0')) {
     const m = /^\d+ ([0-9a-f]+) ([123])\t/.exec(entry);
     if (!m) continue;
-    const bytes = await readBlob(worktreePath, m[1]!);
-    if (bytes) stages.set(Number(m[2]) as Stage, bytes);
+    const blob = await gitRun(worktreePath, ['cat-file', 'blob', m[1]!], undefined, BYTES);
+    if (blob.code !== 0) return new Map();
+    stages.set(Number(m[2]) as Stage, Buffer.from(blob.stdout, 'latin1'));
   }
   return stages;
 }
@@ -245,8 +246,9 @@ async function readStageNumbers(worktreePath: string, path: string): Promise<Set
   return stages;
 }
 
-async function unmergedInState(worktreePath: string): Promise<string[]> {
-  return ((await unmergedPaths(worktreePath)) ?? []).filter((p) => p.startsWith(STATE_PREFIX));
+async function unmergedInState(worktreePath: string): Promise<string[] | null> {
+  const all = await unmergedPaths(worktreePath);
+  return all === null ? null : all.filter((p) => p.startsWith(STATE_PREFIX));
 }
 
 async function indexedInState(worktreePath: string): Promise<string[]> {
@@ -270,6 +272,11 @@ async function indexedInState(worktreePath: string): Promise<string[]> {
 /** Merge the whole record three-way and stage the result; a unit both sides changed takes theirs. */
 async function mergeStateRecord(worktreePath: string): Promise<void> {
   const baseSha = await gitRun(worktreePath, ['merge-base', 'HEAD', 'MERGE_HEAD']);
+  if (baseSha.code !== 0 && baseSha.code !== 1) {
+    throw new Error(
+      `the merge base could not be found: ${(baseSha.stderr || baseSha.stdout).trim()}`,
+    );
+  }
   const base =
     baseSha.code === 0
       ? readRecord(await readStateTree(worktreePath, baseSha.stdout.trim()), 'base')
@@ -338,7 +345,7 @@ export async function resolveHaiveProjectionConflicts(
     } catch (err) {
       why = err instanceof Error ? err.message : String(err);
     }
-    for (const left of await unmergedInState(worktreePath)) {
+    for (const left of (await unmergedInState(worktreePath)) ?? []) {
       why ??= 'the record was left unmerged';
       if (!(await takeIncoming(worktreePath, left))) {
         out.warnings.push(`${left}: could not be resolved`);
@@ -347,7 +354,8 @@ export async function resolveHaiveProjectionConflicts(
     if (why !== null) {
       out.warnings.push(`${PROJECT_STATE_DIR}: ${why}; took the incoming side`);
     }
-    if ((await unmergedInState(worktreePath)).length === 0) out.resolved.push(...inState);
+    const left = await unmergedInState(worktreePath);
+    if (left !== null && left.length === 0) out.resolved.push(...inState);
   }
 
   if (conflicted.has(jsonPath)) {

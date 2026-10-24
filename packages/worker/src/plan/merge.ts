@@ -174,8 +174,12 @@ export async function conflictedPaths(worktreePath: string): Promise<ConflictedP
     undefined,
     { encoding: 'latin1' },
   );
+  if (res.code !== 0) {
+    throw new Error(
+      `git diff --diff-filter=U failed in ${worktreePath}: ${(res.stderr || res.stdout).trim()}`,
+    );
+  }
   const found: ConflictedPaths = { paths: [], undecodable: 0, undecodableShown: [] };
-  if (res.code !== 0) return found;
   for (const raw of new Set(res.stdout.split('\0').filter(Boolean))) {
     const name = utf8Name(raw);
     if (name === null) {
