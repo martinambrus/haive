@@ -4,6 +4,7 @@ const kill = vi.hoisted(() => vi.fn(async (_taskId: string) => 0));
 vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: kill }));
 vi.mock('../src/db.js', () => ({ getDb: () => undefined }));
 
+import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { FIX_LOOP_ACTION_FIELD } from '@haive/shared';
@@ -194,5 +195,30 @@ describe('stopping a task', () => {
       expect(fake.rows(schema.taskSteps)[0]).toMatchObject({ status: 'pending' });
       expect(fake.rows(schema.tasks)[0]).toMatchObject({ status: 'running' });
     });
+  });
+});
+
+it('a Stop clears the prior attempt usage stamp on the reopened row', async () => {
+  const { fake, step } = setup();
+  await fake.db
+    .update(schema.taskSteps)
+    .set({
+      contextLeftPercent: 40,
+      contextTokens: 120000,
+      contextWindowSize: 200000,
+      usageFiveHourPct: 25,
+      usageSevenDayPct: 50,
+      usageDailyPct: 75,
+    })
+    .where(eq(schema.taskSteps.id, String(step.id)));
+  await stopActiveCliInvocations(fake.db as never, TASK, { failTask: true });
+  expect(fake.rows(schema.taskSteps).find((r) => r.id === step.id)).toMatchObject({
+    status: 'failed',
+    contextLeftPercent: null,
+    contextTokens: null,
+    contextWindowSize: null,
+    usageFiveHourPct: null,
+    usageSevenDayPct: null,
+    usageDailyPct: null,
   });
 });

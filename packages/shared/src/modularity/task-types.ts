@@ -73,7 +73,7 @@ export type TaskTypeAvailability =
   | {
       available: false;
       reason: TaskTypeUnavailableReason;
-      stepIds?: string[];
+      missingStepIds?: string[];
       issues?: CompositionIssue[];
       modules?: TaskTypeModuleRef[];
     };
@@ -128,7 +128,7 @@ export function resolveTaskTypeAvailability(
   }
   const missingSteps = definition.stepIds.filter((id) => !catalog.stepIds.has(id));
   if (missingSteps.length > 0) {
-    return { available: false, reason: 'missing-step', stepIds: missingSteps };
+    return { available: false, reason: 'missing-step', missingStepIds: missingSteps };
   }
   // A step with no composable entry is internal: what it requires and provides is unknown.
   const checked =
@@ -189,7 +189,7 @@ export const publicTaskTypeSchema = z.object({
   dispatchesCli: z.boolean(),
   available: z.boolean(),
   reason: z.enum(PUBLIC_TASK_TYPE_UNAVAILABLE_REASONS).optional(),
-  stepIds: z.array(z.string()).optional(),
+  missingStepIds: z.array(z.string()).optional(),
   modules: z.array(taskTypeModuleRefSchema).optional(),
 });
 export type PublicTaskType = z.infer<typeof publicTaskTypeSchema>;

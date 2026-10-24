@@ -5,6 +5,7 @@ const h = vi.hoisted(() => ({
   getDb: vi.fn(),
   write: vi.fn(),
   defs: [] as unknown[],
+  catalog: [] as unknown[],
 }));
 
 vi.mock('../src/db.js', () => ({
@@ -39,7 +40,8 @@ import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 function rows(table: unknown) {
-  const result = table === schema.taskTypeDefinitions ? h.defs : [];
+  const result =
+    table === schema.taskTypeDefinitions ? h.defs : table === schema.stepCatalog ? h.catalog : [];
   const chain: Record<string, unknown> = {
     then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) =>
       Promise.resolve(result).then(resolve, reject),
@@ -65,6 +67,7 @@ beforeEach(() => {
   h.getDb.mockClear();
   h.write.mockClear();
   h.defs = [];
+  h.catalog = [];
 });
 
 describe('/admin/task-types for a regular user', () => {
@@ -99,6 +102,36 @@ describe('/admin/task-types for a regular user', () => {
 });
 
 describe('GET /task-types', () => {
+  it('names only absent steps in missingStepIds, leaving the stored run list intact', async () => {
+    h.catalog = [{ stepId: 'installed', composable: false, dispatchesCli: false }];
+    h.defs = [
+      {
+        slug: 'onboarding',
+        displayName: 'Onboarding',
+        description: null,
+        runListStrategy: 'static',
+        stepIds: ['installed', 'gone'],
+        source: 'builtin',
+        enabled: true,
+        selectable: true,
+        requiresRepository: true,
+        sortOrder: 0,
+      },
+    ];
+    const res = await send('GET', '/task-types');
+    expect(res.status).toBe(200);
+    const { taskTypes } = (await res.json()) as { taskTypes: Record<string, unknown>[] };
+    expect(taskTypes).toHaveLength(1);
+    expect(taskTypes[0]).toMatchObject({
+      available: false,
+      reason: 'missing-step',
+      missingStepIds: ['gone'],
+    });
+    expect(taskTypes[0]).not.toHaveProperty('stepIds');
+    expect(h.defs[0]).toHaveProperty('stepIds', ['installed', 'gone']);
+    expect(h.write).not.toHaveBeenCalled();
+  });
+
   it('answers a regular user, listing only what the database returned', async () => {
     h.defs = [
       {

@@ -475,7 +475,7 @@ taskTypeRoutes.get('/', async (c) => {
         ? {}
         : {
             reason: availability.reason,
-            stepIds: availability.stepIds,
+            missingStepIds: availability.missingStepIds,
             modules: availability.modules,
           }),
     });

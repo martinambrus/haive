@@ -281,3 +281,27 @@ describe('task page: the Attachments tab', () => {
     expect(fileInputs(view)).toHaveLength(0);
   });
 });
+
+describe('task page: step usage stamp', () => {
+  it('hides the finished attempt stamp when that row is reopened', async () => {
+    const step = {
+      ...stepRow(),
+      status: 'done',
+      endedAt: PAUSED_AT as string | null,
+      contextLeftPercent: 40,
+      contextTokens: 120000,
+      contextWindowSize: 200000,
+      usageFiveHourPct: 25,
+      usageSevenDayPct: 50,
+      usageDailyPct: 75,
+    };
+    const stamps = (view: Renderer) =>
+      findAll(view.tree(), (h) => String(h.props.title).includes('when this step finished'));
+    expect(stamps(await mount({ pausedAt: null }, [step]))).toHaveLength(4);
+    for (const status of ['pending', 'running', 'waiting_cli', 'waiting_form']) {
+      step.status = status;
+      step.endedAt = null;
+      expect(stamps(await mount({ pausedAt: null }, [step])), status).toHaveLength(0);
+    }
+  });
+});

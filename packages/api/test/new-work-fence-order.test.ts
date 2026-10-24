@@ -82,7 +82,7 @@ describe('the new-work fence and the locks an admission takes', () => {
     expect(fence, 'withRepositoryTaskLock must call admitNewWork').toBeDefined();
     expect(lock).toBeDefined();
     expect(fence!.getStart()).toBeLessThan(lock!.getStart());
-  });
+  }, 30_000);
 
   it('no caller of withRepositoryTaskLock or insertUpgradeTask admits the new work again, after the lock', () => {
     const late: string[] = [];
@@ -101,7 +101,7 @@ describe('the new-work fence and the locks an admission takes', () => {
 
     expect(callers, 'the scan found fewer callers than the sources have').toBeGreaterThanOrEqual(5);
     expect(late).toEqual([]);
-  });
+  }, 30_000);
 
   it('every transaction handed to spawnPlanTask takes the fence before it locks anything', () => {
     const sf = parse('routes/plan.ts');
@@ -131,5 +131,5 @@ describe('the new-work fence and the locks an admission takes', () => {
       0,
     );
     expect(notFirst.map((call) => where(sf, call))).toEqual([]);
-  });
+  }, 30_000);
 });

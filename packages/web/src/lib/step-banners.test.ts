@@ -9,6 +9,7 @@ import {
   modelIdentityBanner,
   moduleStopBanner,
   parkBanner,
+  showsStepUsageStamp,
   PAUSED_WAIT_TEXT,
   QUEUED_WAIT_TEXT,
   type DeadStepRow,
@@ -532,4 +533,17 @@ describe('moduleStopBanner', () => {
     expect(moduleStopBanner(reworded, stop)).not.toBeNull();
     expect(moduleStopBanner(unrelated, null)).toBeNull();
   });
+});
+
+describe('showsStepUsageStamp', () => {
+  it.each(['done'])('admits a stamped %s attempt', (status) => {
+    expect(showsStepUsageStamp({ status })).toBe(true);
+  });
+
+  it.each(['pending', 'running', 'waiting_form', 'waiting_cli', 'failed', 'skipped', 'unknown'])(
+    'hides a previous stamp while the row is %s',
+    (status) => {
+      expect(showsStepUsageStamp({ status })).toBe(false);
+    },
+  );
 });

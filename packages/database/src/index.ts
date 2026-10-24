@@ -24,6 +24,7 @@ export { waitForDatabaseReady, type WaitForDatabaseOptions } from './wait-for-re
 export { resetDagCurrentLevelForRetry } from './dag-reset.js';
 export { ZERO_MERGE_RETRIES } from './merge-retry-reset.js';
 export { CLOSED_GAP_INTO_IDLE_MS } from './closed-gap.js';
+export { CLEAR_STEP_USAGE_STAMP } from './step-usage-stamp.js';
 export {
   hasPgCode,
   isDuplicateDatabase,
