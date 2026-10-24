@@ -469,7 +469,7 @@ function spacedOperatorBefore(text: string, slash: number): boolean {
 
 /** The spans of a JS, TS or Java file that are not code: comments, strings, template literals (their
  *  `${}` expressions too) and regex literals. A string that is a bare name stays: it may be a key. */
-function jsNonCode(text: string, java: boolean, htmlComments = false): Span[] {
+function jsNonCode(text: string, java: boolean, htmlComments = false, module = false): Span[] {
   const spans: Span[] = [];
   // The open template literals and `${` expressions, innermost last: -1 is template text, n >= 1
   // the braces open in an expression. Spans are recorded for the outermost template only.
@@ -479,7 +479,7 @@ function jsNonCode(text: string, java: boolean, htmlComments = false): Span[] {
   let regexMisses = 0;
   let strayTicks = 0;
   let sawGenerator = false;
-  let sawAsync = false;
+  let sawAsync = module;
   let i = 0;
   if (!java && text.startsWith('#!')) {
     const close = lineEnd(text, 2, false);
@@ -636,12 +636,15 @@ function jsNonCode(text: string, java: boolean, htmlComments = false): Span[] {
 /** `content` with the body of every comment and string blanked, so that a pattern or a brace count
  *  cannot match inside one: PHP loses its inline HTML and heredocs too, JS its template and regex
  *  literals. Same length and line ends; the delimiters stay. */
-export function maskNonCode(content: string, syntax: 'php' | 'js' | 'script' | 'java'): string {
+export function maskNonCode(
+  content: string,
+  syntax: 'php' | 'js' | 'script' | 'module' | 'java',
+): string {
   let masked = '';
   let cursor = 0;
   for (const [from, to] of syntax === 'php'
     ? phpNonCode(content)
-    : jsNonCode(content, syntax === 'java', syntax === 'script')) {
+    : jsNonCode(content, syntax === 'java', syntax === 'script', syntax === 'module')) {
     masked +=
       content.slice(cursor, from) + content.slice(from, to).replace(/[^\r\n\u2028\u2029]/g, ' ');
     cursor = to;
@@ -858,9 +861,13 @@ function commentRunStart(content: string, start: number, headerAt: number): numb
   return runStart < 0 || runStart === headerAt ? start : runStart;
 }
 
-function jsRanges(content: string, members: boolean, script = false): SectionRange[] {
+function jsRanges(
+  content: string,
+  members: boolean,
+  flavour: 'js' | 'script' | 'module' = 'js',
+): SectionRange[] {
   const ranges: SectionRange[] = [];
-  const code = maskNonCode(content, !members ? 'java' : script ? 'script' : 'js');
+  const code = maskNonCode(content, members ? flavour : 'java');
   let match: RegExpExecArray | null;
   const headerAt = content.search(/\S/);
   // Java shares this reader but is read as before: no members, no comment join.
@@ -1110,8 +1117,12 @@ export function extractCodeSections(content: string, filePath: string): RagSecti
     case 'tsx':
     case 'java':
       // Java shares this reader, but its constructors and synchronized blocks are not object members.
-      // A .js or .cjs file is a script, where Annex B reads `<!--` and a leading `-->` as comments.
-      ranges = jsRanges(content, lang !== 'java', ext === '.js' || ext === '.cjs');
+      // .js/.cjs are scripts (Annex B `<!--` comments); .mjs is a module (top-level await).
+      ranges = jsRanges(
+        content,
+        lang !== 'java',
+        ext === '.js' || ext === '.cjs' ? 'script' : ext === '.mjs' ? 'module' : 'js',
+      );
       break;
     case 'python':
       ranges = pythonRanges(content);

@@ -1304,6 +1304,17 @@ describe('extractCodeSections — line terminators other than LF', () => {
     expect(maskNonCode(src, 'js')).toBe(src);
   });
 
+  it.each([
+    ['a.mjs', true],
+    ['a.cjs', false],
+  ])('reads a top-level await in %s by its module context', (file, isModule) => {
+    const src = isModule
+      ? 'await /`/.test(input);\nfunction save() { persist(); }\nconst t = ``;\n'
+      : 'let await = 6; const n = await / 2; function save() { persist(); } const r = n / 3;\n';
+    const ids = extractCodeSections(src, file).map((s) => s.sectionId);
+    expect(ids).toContain('function-save');
+  });
+
   it('keeps every line terminator in the masked text', () => {
     const src = 'a; // c\u2028b; // d\ru = 1;';
     expect(maskNonCode(src, 'js')).toBe('a; //  \u2028b; //  \ru = 1;');
