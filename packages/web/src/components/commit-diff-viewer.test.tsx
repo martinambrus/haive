@@ -96,6 +96,7 @@ describe('the diff viewer shows an unreadable file as unreadable', () => {
       ).tree(),
     );
     expect(text).toContain(reason);
+    expect(text).not.toContain(MESSAGE);
     expect(text).not.toContain('Empty file added.');
   });
 
