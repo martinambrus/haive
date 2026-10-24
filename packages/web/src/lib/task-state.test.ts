@@ -7,6 +7,7 @@ import {
   pausedResumeHint,
   taskBadgeKind,
   taskClockEndMs,
+  taskCanStop,
   taskMenuKeys,
   taskNotStarted,
   taskStatusWord,
@@ -338,8 +339,10 @@ describe('Stop eligibility controls (#395)', () => {
     expect(taskMenuKeys({ status: 'running', deadAt: DEAD_AT }, opts)).not.toContain('stop');
   });
 
-  it.each(['running', 'waiting_cli'])('keeps Stop for a %s row', () => {
-    expect(taskMenuKeys({ status: 'running' }, { stepRunning: true })).toContain('stop');
+  it.each(['running', 'waiting_cli'])('keeps Stop for a %s row', (currentStepStatus) => {
+    expect(taskCanStop({ status: 'running' }, { stepRunning: false, currentStepStatus })).toBe(
+      true,
+    );
   });
 });
 
