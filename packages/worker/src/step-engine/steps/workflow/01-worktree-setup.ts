@@ -119,6 +119,10 @@ export function nextFreeBranchName(
   return `${base}-${limit + 1}`;
 }
 
+function baseUnreadableText(error: string): string {
+  return `${error}. The earlier sync step recorded no base branch, so this step cannot tell which branch to fork the worktree from. Retry this step to read the branch again.`;
+}
+
 /** Local branch names in the parent clone. An empty set on failure: a missing list must
  *  only weaken the uniqueness proposal, never block setup — the claim guard in apply is
  *  the check that has to be right. */
@@ -273,6 +277,7 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     }
     // Base is chosen + freshened earlier by 00a-sync-base; show it read-only here.
     const base = detected.syncedBase ?? detected.currentBranch ?? 'main';
+    const baseUnknown = Boolean(detected.currentBranchError) && !detected.syncedBase;
     const fields: FormField[] = [
       {
         type: 'text',
@@ -297,15 +302,17 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
         type: 'note',
         id: 'currentBranchUnreadable',
         label: 'Current branch not read',
-        body: `${detected.currentBranchError}. The earlier sync step recorded no base branch, so the worktree would be branched from main. Retry this step to read the branch again.`,
+        body: baseUnreadableText(detected.currentBranchError),
         variant: 'warning',
       });
     }
     return {
       title: 'Worktree setup',
-      description: detected.proposalIsOwnBranch
-        ? `Base branch: ${base}. Working tree ${detected.isClean ? 'clean' : 'dirty'}. This task already has a worktree on ${detected.proposedBranch}: submitting re-enters it and keeps its work. A different name starts a new worktree from ${base}.`
-        : `Base branch: ${base}. Working tree ${detected.isClean ? 'clean' : 'dirty'}. A new worktree will be created inside the repo at .haive/worktrees/<branch>, branched from ${base}.`,
+      description: baseUnknown
+        ? `Base branch: not known. Working tree ${detected.isClean ? 'clean' : 'dirty'}. The worktree cannot be prepared until the base branch can be read.`
+        : detected.proposalIsOwnBranch
+          ? `Base branch: ${base}. Working tree ${detected.isClean ? 'clean' : 'dirty'}. This task already has a worktree on ${detected.proposedBranch}: submitting re-enters it and keeps its work. A different name starts a new worktree from ${base}.`
+          : `Base branch: ${base}. Working tree ${detected.isClean ? 'clean' : 'dirty'}. A new worktree will be created inside the repo at .haive/worktrees/<branch>, branched from ${base}.`,
       fields,
       submitLabel: 'Prepare workspace',
     };
@@ -360,7 +367,11 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
     } else {
       // Prefer the base 00a-sync-base picked + freshened; fall back to a legacy form
       // value (older tasks) then the parent's current branch.
-      base = args.detected.syncedBase ?? values.baseBranch ?? args.detected.currentBranch ?? 'main';
+      const known = args.detected.syncedBase ?? values.baseBranch ?? args.detected.currentBranch;
+      if ((known === null || known === undefined) && args.detected.currentBranchError) {
+        throw new Error(baseUnreadableText(args.detected.currentBranchError));
+      }
+      base = known ?? 'main';
     }
     // A base from an older task's form or 00a output was never checked; it reaches git below.
     if (!isBranchName(base)) {
