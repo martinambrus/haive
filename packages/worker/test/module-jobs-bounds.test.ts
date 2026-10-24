@@ -630,13 +630,49 @@ describe('the bounds on module work', () => {
       it('calls a stop that has not ended only once, whatever the passes do meanwhile', async () => {
         const id = 'late-stop-hung';
         const { m, handle } = await lateStartWithRefusedStop(id);
-        m.stop.mockImplementationOnce(() => new Promise<void>(() => {}));
+        let endStop!: () => void;
+        m.stop.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              endStop = resolve;
+            }),
+        );
 
         await handle.reconcile(new Set([id]));
         await handle.reconcile(new Set([id]));
         await vi.advanceTimersByTimeAsync(0);
         expect(m.stop).toHaveBeenCalledTimes(2);
         expect(moduleJobsStarted(id)).toBe(true);
+
+        endStop();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(moduleJobsStarted(id)).toBe(false);
+      });
+
+      it('makes a shutdown wait for a retried stop that is still running', async () => {
+        const id = 'late-stop-shutdown-waits';
+        const { m, handle } = await lateStartWithRefusedStop(id);
+        let endStop!: () => void;
+        m.stop.mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              endStop = resolve;
+            }),
+        );
+
+        await handle.reconcile(new Set([id]));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(m.stop).toHaveBeenCalledTimes(2);
+
+        const shutdown = track(handle.shutdown(null));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(shutdown.settled).toBe(false);
+        expect(m.stop).toHaveBeenCalledTimes(2);
+
+        endStop();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(shutdown.settled).toBe(true);
+        expect(moduleJobsStarted(id)).toBe(false);
       });
     });
 

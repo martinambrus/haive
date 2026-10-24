@@ -296,12 +296,12 @@ function settledWithinStartWait(moduleId: string, work: Promise<unknown>): Promi
 
 // Stops of jobs that started after their deadline and have not succeeded yet, per module; a teardown waits for them too.
 const lateStops = new Map<string, Set<() => Promise<void>>>();
-const lateStopsRunning = new Set<() => Promise<void>>();
+const lateStopsRunning = new Map<() => Promise<void>, Promise<void>>();
 
 function runLateStop(moduleId: string, stop: () => Promise<void>): Promise<void> {
-  if (lateStopsRunning.has(stop)) return Promise.resolve();
-  lateStopsRunning.add(stop);
-  return (async () => stop())()
+  const running = lateStopsRunning.get(stop);
+  if (running) return running;
+  const run = (async () => stop())()
     .then(() => {
       const stops = lateStops.get(moduleId);
       stops?.delete(stop);
@@ -316,6 +316,8 @@ function runLateStop(moduleId: string, stop: () => Promise<void>): Promise<void>
     .finally(() => {
       lateStopsRunning.delete(stop);
     });
+  lateStopsRunning.set(stop, run);
+  return run;
 }
 
 function retryLateStops(): Promise<void> {
