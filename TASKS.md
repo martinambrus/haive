@@ -84,7 +84,7 @@ board. At session start, load the board's tasks you own or will work on into the
 # Open tasks
 
 ### T311 · FNF[rag-chunker-2] · chunker false matches, wrong method owners, braces in strings (+5)
-status: taken · owner: fnf-run@ACTIVIT21 · since: 2026-10-24T12:56Z · last: 2026-10-24T12:56Z (user: fix r3 first)
+status: taken · owner: fnf-run@ACTIVIT21 · since: 2026-10-24T12:56Z · last: 2026-10-24T13:23Z (user: fix r3 first)
 branch: fnf/311-rag-chunker-2 (pushed) · PR #889 (CI 11/11 green on 6d80205cd) · worktree on ACTIVIT21: .claude/worktrees/p311 · evidence/ledger/fix briefs: .claude/tmp/fnf-run/p311/ on ACTIVIT21
 All PRE-EXISTING, measured on the eval tree at 9c0c8ee77 (evidence .claude/tmp/rag-plan/p1/evidence/metrics-main.json). File: `_rag-chunkers.ts`.
 1. The PHP class pattern matches "class" inside comments: 563 methods get a wrong owner, 120 lose theirs.
@@ -97,8 +97,8 @@ Fix: a lexer pass marking comment/string spans shared by PHP and JS. Needs one r
 State 2026-10-24: 16 commits on the branch; full worker suite green at 19320b360 (session run after the crash); measured on the eval tree: wrong method owners 753→0, PHP unmatched 48→0, 0 constructs newly lost; ruler unchanged across fix rounds. 3 Codex rounds, each fixed one class:
 - r1 (fixed af669c010): unclosed template literal (stray backtick in JSX text) masked to EOF.
 - r2 (fixed ef082d0e1, 6d80205cd): `//` after a URL scheme in JSX text read as a comment; unclosed `/*` masked to EOF.
-- r3 OPEN (threads 4367141152, 4367141160, not replied): (a) postfix `++`/`--` before `/` lets a regex start, masking up to the next `/` on the line (`n++ / 2; function save(){} … n / 3` loses save) — fix: record `++`/`--` as an operand in `prev`; (b) Java `"""` text blocks are read with the single-line string reader, so a `/*` inside one masks following classes — fix: recognise text blocks for Java (or language-specific masking).
-Next owner: either fix r3 (a)+(b) and run one more Codex round, or merge with r3 listed as known limits (user to decide).
+- r3 (fixed 61f1f86b2, 7e278ba33): (a) postfix `++`/`--` before `/` lets a regex start, masking up to the next `/` on the line (`n++ / 2; function save(){} … n / 3` loses save) — fix: record `++`/`--` as an operand in `prev`; (b) Java `"""` text blocks are read with the single-line string reader, so a `/*` inside one masks following classes — fix: recognise text blocks for Java (or language-specific masking).
+- r4 OPEN: `n! / 2` (TS non-null) and `obj. return / 2` (property across whitespace) read `/` as regex. User decision 2026-10-24: keep looping with Codex until clean. Round 5 rewrites the slash rule on the previous significant token and checks it against the TypeScript parser as an oracle.
 
 ### T323 · FNF[uploads-3] · leftover upload files never cleaned; unlink failures warn forever (+3)
 status: open (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Previous brief, reusable: .claude/tmp/fnf-run/p323/drive.md on ACTIVIT21)
