@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
-const h = vi.hoisted(() => ({ db: undefined as unknown, git: vi.fn() }));
+const h = vi.hoisted(() => ({ db: undefined as unknown, git: vi.fn(), entry: vi.fn() }));
+vi.mock('@haive/shared/fs-safe', async (original) => ({
+  ...(await original<typeof import('@haive/shared/fs-safe')>()),
+  lstatNoFollow: h.entry,
+}));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set(key: string, value: string): void }, next: () => unknown) => {
@@ -34,6 +38,7 @@ beforeEach(() => {
     remoteUrl: null,
   });
   h.db = fake.db;
+  h.entry.mockReset().mockResolvedValue({ kind: 'directory' });
   h.git.mockReset().mockResolvedValue({ stdout: '', stderr: '' });
 });
 const link = () =>

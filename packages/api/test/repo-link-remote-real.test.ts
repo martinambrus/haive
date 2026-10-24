@@ -68,3 +68,17 @@ it('relink clears planted push URLs and extra fetch URLs in real git', async () 
   );
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe('https://new.test/r');
 });
+it('does not relink the parent of a nested non-repository', async () => {
+  const { root, link, fake } = await setup(true);
+  expect((await link()).status).toBe(409);
+  expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://old.test/r');
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+});
+it('relinks a nested directory when it has its own repository', async () => {
+  const { root, link } = await setup(true);
+  await git(`${root}/nested`, ['init']);
+  const response = await link();
+  expect(response.status, await response.text()).toBe(200);
+  expect(await git(`${root}/nested`, ['remote', 'get-url', 'origin'])).toBe('https://new.test/r');
+  expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://old.test/r');
+});

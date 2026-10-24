@@ -2544,6 +2544,19 @@ repoRoutes.post('/:id/remote', async (c) => {
     }
   };
 
+  // Without its own .git entry, upward discovery would relink a parent checkout.
+  const entry = await lstatNoFollow(root, '.git', { strict: true }).catch((err: unknown) => {
+    throw new HttpError(
+      409,
+      `This repository could not be examined: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
+  if (!entry || entry.kind === 'symlink') {
+    throw new HttpError(
+      409,
+      'This repository has no usable .git entry of its own, so it cannot have a remote',
+    );
+  }
   const inside = await git(['rev-parse', '--is-inside-work-tree']);
   if (!inside.ok || !['true', 'false'].includes(inside.stdout)) {
     const reason = inside.stderr || inside.stdout || 'no answer';
