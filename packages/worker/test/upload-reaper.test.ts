@@ -251,6 +251,49 @@ async function session(
   return { id, file };
 }
 
+describe('T323: unreadable reaping files', () => {
+  describe.each(KINDS)('$name', (kind) => {
+    it.each(['EACCES', 'containment'])(
+      'keeps an unreadable file reaping after a stat refusal: %s',
+      async (reason) => {
+        const stuck = await session(kind, { idleMs: TTL - HOUR, status: 'reaping' });
+        guard.statFailure = reason;
+
+        const result = await reapAbandonedUploads(db());
+
+        expect(rowOf(kind, stuck.id).status).toBe('reaping');
+        expect(await exists(stuck.file)).toBe(true);
+        expect(result.sessions).toBe(0);
+        expect(guard.errors).toHaveLength(0);
+
+        guard.statFailure = null;
+        expect((await reapAbandonedUploads(db())).sessions).toBe(1);
+        expect(rowOf(kind, stuck.id).status).toBe('cancelled');
+        expect(await exists(stuck.file)).toBe(false);
+      },
+    );
+
+    it.each(['EACCES', 'containment'])(
+      'parks a file still unreadable after 24 hours: %s',
+      async (reason) => {
+        const stuck = await session(kind, { idleMs: TTL + HOUR, status: 'reaping' });
+        guard.statFailure = reason;
+
+        const result = await reapAbandonedUploads(db());
+
+        expect(rowOf(kind, stuck.id).status).toBe('reap_failed');
+        expect(await exists(stuck.file)).toBe(true);
+        expect(result.sessions).toBe(0);
+        expect(guard.errors).toHaveLength(1);
+
+        await reapAbandonedUploads(db());
+        expect(rowOf(kind, stuck.id).status).toBe('reap_failed');
+        expect(guard.errors).toHaveLength(1);
+      },
+    );
+  });
+});
+
 describe('T323: invalid completed dump paths', () => {
   it('bounds invalid-path warning history by row id without evicting remembered rows', async () => {
     const reap = reapAbandonedUploads;

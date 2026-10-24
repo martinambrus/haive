@@ -104,7 +104,7 @@ function finalRelOf(partialRel: string): string {
 }
 
 async function removeFile(root: string, rel: string): Promise<boolean> {
-  const info = await lstatNoFollow(root, rel);
+  const info = await lstatNoFollow(root, rel, { strict: true });
   if (info === null || (info.kind !== 'file' && info.kind !== 'symlink')) return false;
   return removeNoFollow(root, rel);
 }
