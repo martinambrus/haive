@@ -86,6 +86,17 @@ describe('pricing refresh', () => {
     expect(h.add).toHaveBeenCalledTimes(1);
   });
 
+  it('still enqueues when the bounded scan fails', async () => {
+    h.getJobs.mockRejectedValue(new Error('Redis unavailable'));
+
+    const res = await refresh();
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ jobId: '1' });
+    expect(h.getJobs).toHaveBeenCalledWith(['active', 'wait', 'prioritized'], 0, 99);
+    expect(h.add).toHaveBeenCalledTimes(1);
+  });
+
   it('requires a session before scanning or enqueueing', async () => {
     expect((await refresh('/pricing/refresh', null)).status).toBe(401);
     expect(h.getJobs).not.toHaveBeenCalled();

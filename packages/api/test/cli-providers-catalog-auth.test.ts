@@ -107,7 +107,7 @@ describe('the CLI catalog routes require a session', () => {
     expect(second.status).toBe(202);
     expect(second.body.jobId).toBe(first.body.jobId);
     expect(h.add).toHaveBeenCalledTimes(1);
-    expect(h.getJobs).toHaveBeenCalledWith(['active', 'wait', 'prioritized']);
+    expect(h.getJobs).toHaveBeenCalledWith(['active', 'wait', 'prioritized'], 0, 99);
   });
 
   it.each(['active', 'wait', 'prioritized'])('reuses a refresh from %s', async (state) => {
@@ -143,6 +143,19 @@ describe('the CLI catalog routes require a session', () => {
     expect(h.add).toHaveBeenCalledTimes(1);
     expect(h.add.mock.calls[0]?.[2]).not.toHaveProperty('jobId');
   });
+
+  it.each([new Error('Redis unavailable'), new SyntaxError('invalid job JSON')])(
+    'still enqueues when the in-flight scan fails: %s',
+    async (err) => {
+      h.getJobs.mockRejectedValue(err);
+
+      const reply = await call('POST', '/catalog/claude-code/refresh-versions', true);
+
+      expect(reply.status).toBe(202);
+      expect(reply.body).toEqual({ jobId: '1' });
+      expect(h.add).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('can enqueue twice when simultaneous POSTs both scan an empty queue', async () => {
     let release!: () => void;
