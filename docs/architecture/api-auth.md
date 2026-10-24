@@ -75,10 +75,22 @@ factory that refuses unix paths, several hosts and blocked literals and otherwis
 same lookup. `probeOllama` and `ollamaEmbed` in shared take an optional `fetchFn`; the worker keeps the
 default. `POST /global-kb/test-db` was already `requireAdmin`.
 
-What a non-admin loses: on a default install `http://ollama:11434` and `host.docker.internal` resolve to
-private addresses, so the Ollama tests, the model download and capability hint, the Global KB status
-panel, and Test connection against a DDEV or LAN Postgres report the address as unreachable. Whether to
-exempt the in-stack Ollama name is a separate decision. Targets that are a STORED setting are not
+What a non-admin keeps: a target whose HOST (the parsed hostname, never a prefix) equals one of the install's
+own known hosts is allowed although it resolves private. `probeEgressFor(c)` (`lib/probe-hosts.ts`) builds
+that set per request for a non-admin and hands it to `egressFor(role, hosts)`: the in-stack Ollama names
+(`IN_STACK_OLLAMA_HOSTS`: `ollama` and its container name), the host of the configured Global KB Ollama URL
+(so `host.docker.internal` is exempt only when that is what is configured, and not otherwise), and
+`<name>.ddev.site` for the `name:` in `.ddev/config.yaml` of the caller's OWN repositories (read through
+`readTextNoFollow`, 64 KiB, a symlink reads as nothing; a config that overrides `project_tld` contributes
+nothing, and another user's repository never does). The exemption lifts only the address classification: the
+name must still resolve, and the guarded fetch still never follows a redirect, so an exempt host cannot
+hand the request on to one that is not listed. An IP literal that is not itself listed, any other private
+name, and everything for a multi-host Postgres string stay refused. Anything that cannot be read (config,
+repositories) adds no host. Accepted: `*.ddev.site` resolves to 127.0.0.1 in public DNS, so a user who
+writes a `name:` into their own repository can aim a probe at the api container's loopback. The probe sends
+no credential and reports only what the guarded fetch reports.
+
+Targets that are a STORED setting are not
 covered, deliberately: `POST /global-kb/release-embed-model`, the RAG store and embedder URL read by rag
 search and `PATCH /repositories/:id/tooling`, and the forge calls in integration-mcp. Private stores and
 forges are legitimate there (`integrations.md`, the closed embedder-settings decision, the pin in

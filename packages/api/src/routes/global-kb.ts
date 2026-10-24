@@ -60,7 +60,7 @@ import { getGlobalKbSyncQueue } from '../queues.js';
 import { enqueueStart, markQueuedForStart } from '../lib/task-start.js';
 import { definitionForCreate } from '../lib/task-type-definition.js';
 import { isUuid } from '../lib/uuid.js';
-import { egressFor } from '../lib/probe-egress.js';
+import { probeEgressFor } from '../lib/probe-hosts.js';
 import { boundedLockWait } from '../lib/repository-busy.js';
 import { requireAdmin, requireAuth } from '../middleware/auth.js';
 import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
@@ -548,7 +548,7 @@ globalKbRoutes.post('/test-ollama', async (c) => {
   const parsed = testOllamaSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) throw new HttpError(400, 'invalid test request', 'invalid_body');
   const { ollamaUrl, model, dimensions } = parsed.data;
-  const { fetchFn } = egressFor(c.get('userRole'));
+  const { fetchFn } = await probeEgressFor(c);
   if (!(await probeOllama(ollamaUrl, fetchFn))) {
     return c.json({ ok: false, message: `Ollama unreachable at ${ollamaUrl}` });
   }

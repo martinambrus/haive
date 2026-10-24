@@ -17,6 +17,12 @@ const NO_BODY_STATUS = new Set([204, 205, 304]);
 export interface ProbeSeams {
   resolve?: Resolver;
   isBlocked?: Classifier;
+  allowHosts?: ReadonlySet<string>;
+}
+
+function classifierFor(host: string, seams: ProbeSeams): Classifier {
+  if (seams.allowHosts?.has(host.toLowerCase())) return () => false;
+  return seams.isBlocked ?? ((a) => isBlockedAddress(a));
 }
 
 function notFound(host: string): NodeJS.ErrnoException {
@@ -29,7 +35,7 @@ function notFound(host: string): NodeJS.ErrnoException {
 
 function probeLookup(host: string, seams: ProbeSeams): net.LookupFunction {
   const resolve = seams.resolve ?? dnsResolver()(LOOKUP_TIMEOUT_MS).resolve;
-  const inner = guardedLookup(resolve, seams.isBlocked ?? ((a) => isBlockedAddress(a)));
+  const inner = guardedLookup(resolve, classifierFor(host, seams));
   return (hostname, options, callback) => {
     inner(hostname, options, (err, address, family) => {
       if (
@@ -67,8 +73,7 @@ export function createGuardedFetch(seams: ProbeSeams = {}) {
         return;
       }
       const host = stripBrackets(url.hostname);
-      const isBlocked = seams.isBlocked ?? ((a: string) => isBlockedAddress(a));
-      if (net.isIP(host) !== 0 && isBlocked(host)) {
+      if (net.isIP(host) !== 0 && classifierFor(host, seams)(host)) {
         fail(notFound(host));
         return;
       }
@@ -151,12 +156,11 @@ function refusedSocket(host: string): net.Socket {
 export function createGuardedPgSocket(seams: ProbeSeams = {}) {
   return (options: PgSocketOptions): net.Socket => {
     const host = options.host?.[0] ?? '';
-    const isBlocked = seams.isBlocked ?? ((a: string) => isBlockedAddress(a));
     if (
       options.path ||
       options.host?.length !== 1 ||
       host.includes('/') ||
-      (net.isIP(host) !== 0 && isBlocked(host))
+      (net.isIP(host) !== 0 && classifierFor(host, seams)(host))
     ) {
       return refusedSocket(host);
     }
@@ -172,10 +176,19 @@ export function createGuardedPgSocket(seams: ProbeSeams = {}) {
 
 export const guardedPgSocket = createGuardedPgSocket();
 
-export function egressFor(role: string | undefined): {
+export function egressFor(
+  role: string | undefined,
+  allowHosts?: ReadonlySet<string>,
+): {
   fetchFn: typeof fetch;
   pgSocket: ((options: PgSocketOptions) => net.Socket) | undefined;
 } {
   if (role === 'admin') return { fetchFn: fetch, pgSocket: undefined };
-  return { fetchFn: guardedFetch as typeof fetch, pgSocket: guardedPgSocket };
+  if (allowHosts === undefined || allowHosts.size === 0) {
+    return { fetchFn: guardedFetch as typeof fetch, pgSocket: guardedPgSocket };
+  }
+  return {
+    fetchFn: createGuardedFetch({ allowHosts }) as typeof fetch,
+    pgSocket: createGuardedPgSocket({ allowHosts }),
+  };
 }

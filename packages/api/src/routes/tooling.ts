@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { ollamaEmbed } from '@haive/shared/rag';
-import { egressFor } from '../lib/probe-egress.js';
+import { probeEgressFor } from '../lib/probe-hosts.js';
 import { requireAuth } from '../middleware/auth.js';
 import type { AppEnv } from '../context.js';
 
@@ -21,7 +21,7 @@ tooling.post('/test-postgres', async (c) => {
     return c.json({ ok: false, error: 'connectionString is required' }, 400);
   }
 
-  const { pgSocket } = egressFor(c.get('userRole'));
+  const { pgSocket } = await probeEgressFor(c);
   try {
     const postgres = (await import('postgres')).default;
     const sql = postgres(connStr, {
@@ -65,7 +65,7 @@ tooling.post('/test-ollama', async (c) => {
     return c.json({ ok: false, error: 'ollamaUrl is required' }, 400);
   }
 
-  const { fetchFn } = egressFor(c.get('userRole'));
+  const { fetchFn } = await probeEgressFor(c);
   // Test connectivity
   try {
     const resp = await fetchFn(`${url}/api/tags`, {
@@ -153,7 +153,7 @@ tooling.post('/ollama-model-capabilities', async (c) => {
     return c.json({ ok: false, error: 'ollamaUrl and model are required' }, 400);
   }
 
-  const { fetchFn } = egressFor(c.get('userRole'));
+  const { fetchFn } = await probeEgressFor(c);
   try {
     const resp = await fetchFn(`${url}/api/show`, {
       method: 'POST',
@@ -207,8 +207,8 @@ tooling.post('/ollama-model-capabilities', async (c) => {
 
 const activePulls = new Map<string, AbortController>();
 
-tooling.post('/pull-ollama-model', (c) => {
-  const { fetchFn } = egressFor(c.get('userRole'));
+tooling.post('/pull-ollama-model', async (c) => {
+  const { fetchFn } = await probeEgressFor(c);
   const pullId = crypto.randomUUID();
 
   return streamSSE(c, async (stream) => {

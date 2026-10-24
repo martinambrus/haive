@@ -1,10 +1,17 @@
 import dns from 'node:dns';
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const h = vi.hoisted(() => ({ db: undefined as unknown, open: false }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  fake: undefined as unknown as { insert(table: unknown, row: unknown): unknown },
+  open: false,
+}));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/lib/egress-guard.js', async (importOriginal) => {
@@ -19,7 +26,7 @@ vi.mock('../src/lib/egress-guard.js', async (importOriginal) => {
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { secretsService } from '@haive/shared';
+import { CONFIG_KEYS, configService, secretsService } from '@haive/shared';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
@@ -117,10 +124,11 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
-  const fake = createFakeDb({ users: schema.users });
+  const fake = createFakeDb({ users: schema.users, repositories: schema.repositories });
   fake.insert(schema.users, { id: ADMIN, role: 'admin', status: 'active', tokenVersion: 0 });
   fake.insert(schema.users, { id: USER, role: 'user', status: 'active', tokenVersion: 0 });
   h.db = fake.db;
+  h.fake = fake;
   h.open = false;
   ollama.hits = 0;
   ollama.mode = 'normal';
@@ -578,4 +586,171 @@ describe('PR-7 the guarded path works end to end', () => {
     expect(pg.conns).toBeGreaterThanOrEqual(1);
     expect(Buffer.concat(pg.first).length).toBeGreaterThan(0);
   }, 20_000);
+});
+
+describe("PR-9 a user may probe the install's own Ollama and DDEV hosts", () => {
+  const roots: string[] = [];
+  afterEach(async () => {
+    for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+  });
+
+  const configuredOllama = (url: string | null) =>
+    vi
+      .spyOn(configService, 'get')
+      .mockImplementation(async (key: string) =>
+        key === CONFIG_KEYS.GLOBAL_KB_OLLAMA_URL ? url : null,
+      );
+
+  async function repoWithDdev(owner: string, config: string | null): Promise<string> {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'probe-ddev-'));
+    roots.push(root);
+    if (config !== null) {
+      await mkdir(path.join(root, '.ddev'));
+      await writeFile(path.join(root, '.ddev', 'config.yaml'), config);
+    }
+    h.fake.insert(schema.repositories, {
+      id: crypto.randomUUID(),
+      userId: owner,
+      name: 'r',
+      source: 'local',
+      localPath: root,
+      status: 'ready',
+    });
+    return root;
+  }
+
+  describe.each(OLLAMA_PROBES)('$name', (probe) => {
+    it('B1 reaches the in-stack ollama host for a user although it resolves private', async () => {
+      stubNames({ ollama: ['127.0.0.1'] });
+      const reply = await post('user', probe.path, probe.body(`http://ollama:${ollama.port}`));
+      expect(ollama.hits).toBeGreaterThanOrEqual(1);
+      expect(probe.works(reply)).toBe(true);
+    });
+
+    it('B1 reaches host.docker.internal for a user only when it is the configured Ollama host', async () => {
+      stubNames({ 'host.docker.internal': ['127.0.0.1'] });
+      const url = `http://host.docker.internal:${ollama.port}`;
+      const before = await within(post('user', probe.path, probe.body(url)));
+      await settle();
+      expect(probe.refused(before as Reply)).toBe(true);
+      expect(ollama.hits).toBe(0);
+      configuredOllama(`http://host.docker.internal:11434`);
+      const reply = await post('user', probe.path, probe.body(url));
+      expect(ollama.hits).toBeGreaterThanOrEqual(1);
+      expect(probe.works(reply)).toBe(true);
+    });
+
+    it('B3 still refuses another private name and an IP literal', async () => {
+      stubNames({ 'ollama.other.test': ['127.0.0.1'], notollama: ['127.0.0.1'] });
+      configuredOllama(`http://host.docker.internal:11434`);
+      for (const url of [
+        `http://ollama.other.test:${ollama.port}`,
+        `http://notollama:${ollama.port}`,
+        `http://ollama@127.0.0.1:${ollama.port}`,
+        'http://10.0.0.5:11434',
+      ]) {
+        const reply = await within(post('user', probe.path, probe.body(url)));
+        await settle();
+        expect(reply).not.toBe(NO_ANSWER);
+        expect(probe.refused(reply as Reply)).toBe(true);
+      }
+      expect(ollama.hits).toBe(0);
+    });
+
+    it('B1 does not follow a redirect from an exempt host', async () => {
+      stubNames({ ollama: ['127.0.0.1'] });
+      ollama.mode = 'redirect';
+      const reply = await within(
+        post('user', probe.path, probe.body(`http://ollama:${ollama.port}`)),
+      );
+      await settle();
+      expect((probe.failed ?? probe.refused)(reply as Reply)).toBe(true);
+      expect(target.hits).toBe(0);
+    });
+  });
+
+  it("B2 test-postgres reaches <project>.ddev.site of the user's own repository", async () => {
+    await repoWithDdev(USER, 'name: myproj\ntype: php\n');
+    stubNames({ 'myproj.ddev.site': ['127.0.0.1'] });
+    await post('user', PG_PATH, {
+      connectionString: `postgres://u:p@myproj.ddev.site:${pg.port}/db`,
+    });
+    expect(pg.conns).toBeGreaterThanOrEqual(1);
+  }, 20_000);
+
+  it('B2 reads a quoted name with a comment, and test-ollama reaches the same host', async () => {
+    await repoWithDdev(USER, 'name: "quoted-proj" # the project\n');
+    stubNames({ 'quoted-proj.ddev.site': ['127.0.0.1'] });
+    const reply = await post('user', '/tooling/test-ollama', {
+      ollamaUrl: `http://quoted-proj.ddev.site:${ollama.port}`,
+      model: 'm',
+      dimensions: 2,
+    });
+    expect(ollama.hits).toBeGreaterThanOrEqual(1);
+    expect(reply.body?.ok).toBe(true);
+  });
+
+  it("B3 refuses a ddev.site name that is in nobody's repository, another user's, or an overridden tld", async () => {
+    await repoWithDdev(ADMIN, 'name: adminproj\n');
+    await repoWithDdev(USER, 'name: tldproj\nproject_tld: example.test\n');
+    await repoWithDdev(USER, null);
+    stubNames({
+      'adminproj.ddev.site': ['127.0.0.1'],
+      'other.ddev.site': ['127.0.0.1'],
+      'tldproj.example.test': ['127.0.0.1'],
+      'tldproj.ddev.site': ['127.0.0.1'],
+    });
+    for (const host of [
+      'adminproj.ddev.site',
+      'other.ddev.site',
+      'tldproj.example.test',
+      'tldproj.ddev.site',
+    ]) {
+      const reply = await within(
+        post('user', PG_PATH, { connectionString: `postgres://u:p@${host}:${pg.port}/db` }),
+      );
+      await settle();
+      expect(pgRefused(reply as Reply)).toBe(true);
+    }
+    expect(pg.conns).toBe(0);
+  });
+
+  it('B3 refuses a private IP literal and a multi-host string for test-postgres', async () => {
+    await repoWithDdev(USER, 'name: myproj\n');
+    stubNames({ 'myproj.ddev.site': ['127.0.0.1'] });
+    for (const cs of [
+      'postgres://u:p@10.0.0.5:5432/db',
+      `postgres://u:p@myproj.ddev.site:${pg.port},127.0.0.1:${pg.port}/db`,
+    ]) {
+      const reply = await within(post('user', PG_PATH, { connectionString: cs }));
+      await settle();
+      expect(pgRefused(reply as Reply)).toBe(true);
+    }
+    expect(pg.conns).toBe(0);
+  });
+
+  it('B3 reads no config through a symlinked .ddev', async () => {
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'probe-ddev-out-'));
+    roots.push(outside);
+    await writeFile(path.join(outside, 'config.yaml'), 'name: linked\n');
+    const root = await repoWithDdev(USER, null);
+    await symlink(outside, path.join(root, '.ddev'));
+    stubNames({ 'linked.ddev.site': ['127.0.0.1'] });
+    const reply = await within(
+      post('user', PG_PATH, { connectionString: `postgres://u:p@linked.ddev.site:${pg.port}/db` }),
+    );
+    await settle();
+    expect(pgRefused(reply as Reply)).toBe(true);
+    expect(pg.conns).toBe(0);
+  });
+
+  it('B4 an admin is unchanged: a private host stays reachable', async () => {
+    stubNames({ localhost: ['127.0.0.1'] });
+    const reply = await post('admin', '/tooling/test-ollama', {
+      ollamaUrl: `http://localhost:${ollama.port}`,
+      model: 'm',
+      dimensions: 2,
+    });
+    expect(reply.body?.ok).toBe(true);
+  });
 });
