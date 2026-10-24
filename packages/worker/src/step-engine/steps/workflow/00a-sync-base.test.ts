@@ -5,6 +5,8 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FormSchema } from '@haive/shared';
+import * as gitPush from '../../../repo/git-push.js';
+import * as gitExec from '../../../repo/git-exec.js';
 import { syncBaseStep } from './00a-sync-base.js';
 import { resolveMergePhase } from '../../merge-resolver.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -1571,3 +1573,48 @@ describe('K5 the abort of a merge this pass opened, with its files set aside', (
     }
   });
 });
+
+it.each(['detect', 'fetch'])(
+  'a refused origin at %s skips sync with a warning and no fetch',
+  async (phase) => {
+    const { bare, seed } = await seedOrigin();
+    const local = await cloneLocal(bare);
+    let originSpy: ReturnType<typeof vi.spyOn> | undefined;
+    const run = vi.spyOn(gitExec, 'gitRun');
+    try {
+      const refuse = () => git(local, ['config', 'remote.origin.url', 'file:///refused-origin']);
+      if (phase === 'detect') await refuse();
+      else
+        originSpy = vi.spyOn(gitPush, 'detectOrigin').mockImplementation(async () => {
+          await refuse();
+          return true;
+        });
+      const ctx = mkCtx(local);
+      const warn = vi.fn();
+      ctx.logger = { ...ctx.logger, warn } as unknown as StepContext['logger'];
+      const detected = await syncBaseStep.detect!(ctx);
+      expect(detected).toMatchObject({
+        hasOrigin: true,
+        fetchOk: false,
+        fetchError: expect.stringContaining('origin URL is not allowed'),
+      });
+      const form = await syncBaseStep.form!(ctx, detected);
+      expect(form!.fields).toContainEqual(
+        expect.objectContaining({ id: 'fetchFailed', variant: 'warning' }),
+      );
+      expect(await syncBaseStep.apply(ctx, applyArgs(detected, { base: 'main' }))).toMatchObject({
+        synced: false,
+        strategy: 'skipped',
+        reason: expect.stringContaining('origin URL is not allowed'),
+      });
+      expect(warn).toHaveBeenCalled();
+      expect(run.mock.calls.some(([, argv]) => argv.includes('fetch'))).toBe(false);
+    } finally {
+      originSpy?.mockRestore();
+      run.mockRestore();
+      await rm(bare, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
+      await rm(local, { recursive: true, force: true });
+    }
+  },
+);
