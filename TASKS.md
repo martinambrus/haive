@@ -145,7 +145,7 @@ From the T414 review (2026-10-24). All PRE-EXISTING, consequential for dependenc
 2. No test sanitizes through DOMPurify or parses through markdown-it: packages/web/vitest.config.mts sets no DOM environment; mermaid-loader.test.ts is import-level; markdown-extensions.test.ts never passes a string to tiptap-markdown (`html: true` path).
 3. PR CI builds the production web stage but never starts it (.github/workflows/ci.yml ~:407-430); the first boot is release.yml ~:235-252, after publish, although next.config.mjs ~:8-13 records a standalone MODULE_NOT_FOUND crash loop that shipped once. Fix: boot the built image and curl /login (200 + CSP) and an unauthenticated /dashboard (307 to /login), as the T414 session check did.
 
-### T417 · FNF[origin-url-2] · origin follow-ups after T388: clone URLs, relink push URLs, remote-helper syntax, nested probe (+3)
+### T417 · FNF[origin-url-2] · origin follow-ups after T388: clone URLs, relink push URLs, remote-helper syntax, nested probe (+4)
 
 status: blocked · blocked-by: T388 (same files)
 From the T388 review (2026-10-24). All PRE-EXISTING.
@@ -154,6 +154,7 @@ From the T388 review (2026-10-24). All PRE-EXISTING.
 2. A relink (`remote set-url origin <url>`, git-push.ts ensureOrigin and api repos.ts link-remote) replaces only the first fetch URL and leaves `remote.origin.pushurl`, so a leftover push URL keeps receiving pushes (with the bound credential, see T340 item 2) while the UI shows the new remote. Consequential, narrow. Fix: clear push URLs on relink.
 3. The rule admits `a.b::x` (shared schemas/git-url.ts ~:44-52, :85), which git reads as remote helper `git-remote-a.b`; inert unless such an executable is on PATH. Minor. Fix: refuse `::` transport syntax.
 4. The link-remote probe uses upward `.git` discovery (api repos.ts ~:2547), so a localPath nested inside another repository would set that repository's origin; repo/git-workspace.ts ~:15-48 checks `.git` first. Minor.
+5. (T388 fix-round reviews) The two operator scripts run `git fetch --all` (scripts/advance-bundle-items.ts ~:66, reset-bundle-to-commit.ts ~:88), which reaches every remote with neither the origin rule nor `protocol.file.allow=never`. PRE-EXISTING, minor (operator-run). Fix: fetch `origin` through the same validation, or refuse a remote the rule refuses.
 
 ### T418 · FNF[git-wording] · "nothing to commit" is still matched by git's English wording
 
