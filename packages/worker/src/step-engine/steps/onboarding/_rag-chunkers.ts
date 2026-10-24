@@ -260,8 +260,13 @@ const REGEX_AFTER_WORD = /^(?:return|typeof|instanceof|in|new|delete|void|throw|
 /** Keywords only in their own syntax: an identifier anywhere else, so a slash after one divides. */
 const CONTEXTUAL_WORDS = new Set(['of', 'yield', 'await']);
 const BARE_NAME = /^[A-Za-z_$][\w$]*$/;
-const WORD_START = /[\p{ID_Start}_$]/u;
-const WORD_CHAR = /[\p{ID_Continue}$\u200C\u200D]/u;
+const WORD_START = /^[\p{ID_Start}_$]/u;
+const WORD_CHAR = /^[\p{ID_Continue}$\u200C\u200D]/u;
+
+/** The whole code point at `at`, so an identifier character outside the BMP is read as one. */
+function codePointAt(text: string, at: number): string {
+  return String.fromCodePoint(text.codePointAt(at) ?? 0);
+}
 
 /** A '/' that opens no regex literal would otherwise scan to the end of its line from every call: a
  *  literal longer than MAX_REGEX_CHARS is not read as one, and a line gives up on regex literals after
@@ -439,7 +444,7 @@ function regexClose(text: string, open: number, java: boolean): number {
  *  '' after a literal or a number, its punctuation otherwise, and null at the start of the text. */
 function regexMayStart(prev: string | null): boolean {
   if (prev === null) return true;
-  if (WORD_START.test(prev[0] ?? '')) return REGEX_AFTER_WORD.test(prev);
+  if (WORD_START.test(prev)) return REGEX_AFTER_WORD.test(prev);
   return prev !== '' && ![')', ']', '}', '>', '<', '.'].includes(prev);
 }
 
@@ -544,9 +549,11 @@ function jsNonCode(text: string, java: boolean): Span[] {
       }
       prev = c;
       i += 1;
-    } else if (WORD_START.test(c)) {
-      let end = i + 1;
-      while (end < text.length && WORD_CHAR.test(text[end]!)) end += 1;
+    } else if (WORD_START.test(codePointAt(text, i))) {
+      let end = i + codePointAt(text, i).length;
+      while (end < text.length && WORD_CHAR.test(codePointAt(text, end))) {
+        end += codePointAt(text, end).length;
+      }
       const word = text.slice(i, end);
       if (word === 'async' || word === 'import' || word === 'export') sawAsync = true;
       const operandBefore: boolean = prev !== null && !regexMayStart(prev);

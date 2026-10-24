@@ -44,7 +44,8 @@ function oracleMask(text: string): string {
   for (const [from, to] of [...regexRanges(text), ...commentRanges(text)]) {
     for (let k = from; k < to; k += 1) blank.add(k);
   }
-  return [...text]
+  return text
+    .split('')
     .map((c, k) => (blank.has(k) && !/[\r\n\u2028\u2029]/.test(c) ? ' ' : c))
     .join('');
 }
@@ -71,6 +72,8 @@ const CASES: string[] = [
   // division after keyword-named properties
   'const n = obj. return / 2; function save() { persist(); } const ratio = n / 3;',
   'const a = obj.return / 2; function f1() { x(); } const c = d / 3;',
+  'let \u{1D465} = 6; const n = \u{1D465} / 2; function save() { persist(); } const ratio = n / 3;',
+  'let a\u{1D7D8} = 6; const n = a\u{1D7D8} / 2; const r = /a/.test(s); const ratio = n / 3;',
   'class C { #return = 6; run() { const n = this.#return / 2; function save() { persist(); } const ratio = n / 3; } }',
   'class C { #typeof = 6; #of = 2; run() { const n = this.#typeof / this.#of / 2; const r = /a/.test(s); } }',
   'class C { #in = 1; has(o) { return #in in o ? /a/.exec(s) : 0; } }',
