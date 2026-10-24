@@ -77,5 +77,7 @@ describe('the repository lock is only taken through boundedLockWait', () => {
       unwrappedLockCalls(relative(SRC, file), readFileSync(file, 'utf8')),
     );
     expect(unwrapped).toEqual([]);
-  });
+    // A parse of every api source file: well under a second on a quiet host, but a loaded runner can
+    // pass the 5 s default, as new-work-fence-order.test.ts's source walk did (T372).
+  }, 30_000);
 });
