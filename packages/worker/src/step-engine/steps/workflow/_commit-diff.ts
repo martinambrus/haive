@@ -13,6 +13,7 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import { gitGaveNoAnswer } from '../../../repo/git-exec.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
 /** Runs git in `cwd` and returns stdout/stderr/exit code. Matches the gitRun
@@ -134,27 +135,22 @@ async function checkedOutCommit(
   gitRun: GitRun,
   workspacePath: string,
   rel: string,
-  requireOwnGit = false,
 ): Promise<{ commit: string | null } | null> {
   const wa = workspaceAnchor(workspacePath);
   const dir = await openDirNoFollow(wa.anchor, `${wa.prefix}${rel}`).catch(() => null);
   if (dir === null) return null;
   try {
     const cwd = `/proc/self/fd/${dir.fd}`;
-    if (requireOwnGit) {
-      // Inspect the held directory, not its name. A plain directory must never borrow the
-      // superproject's HEAD, even if its .git marker vanishes before git starts.
-      const marker = await lstatNoFollow(cwd, '.git');
-      if (marker?.kind !== 'directory' && marker?.kind !== 'file') return null;
-    }
-    const res = await gitRun(cwd, [
-      ...(requireOwnGit ? ['--git-dir=.git'] : []),
-      'rev-parse',
-      '--verify',
-      'HEAD^{commit}',
-    ]);
+    // Inspect the held directory, not its name. A plain directory must never borrow the
+    // superproject's HEAD, even if its .git marker vanishes before git starts.
+    const marker = await lstatNoFollow(cwd, '.git');
+    if (marker?.kind !== 'directory' && marker?.kind !== 'file') return null;
+    const res = await gitRun(cwd, ['--git-dir=.git', 'rev-parse', '--verify', '--quiet', 'HEAD']);
+    if (gitGaveNoAnswer(res)) return null;
+    if (res.code === 1) return { commit: null };
+    if (res.code !== 0) return null;
     const sha = res.stdout.trim();
-    return { commit: res.code === 0 && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha) ? sha : null };
+    return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha) ? { commit: sha } : null;
   } finally {
     await dir.close().catch(() => undefined);
   }
@@ -176,7 +172,7 @@ async function readLinkSide(
     if (e.x !== '?' || e.y !== '?') return null;
     // git status keeps an untracked repository as dir/ even with -uall. git add -A
     // records its checked-out commit as a gitlink, or refuses it if HEAD is unborn.
-    const checkout = await checkedOutCommit(gitRun, workspacePath, e.path, true);
+    const checkout = await checkedOutCommit(gitRun, workspacePath, e.path);
     if (checkout === null) return null;
     return checkout.commit === null
       ? {

@@ -334,6 +334,141 @@ describe('untracked directory staging controls', () => {
     }
   }
 
+  it.each(['untracked', 'M', 'A'])(
+    'reads the ref without its missing commit object (%s)',
+    async (state) => {
+      await repo(async (dir) => {
+        const nested = path.join(dir, 'nested');
+        const run = async (cwd: string, args: string[]) => {
+          const result = await gitRun(cwd, args, GIT_ENV);
+          expect(result.code).toBe(0);
+          return result;
+        };
+        await run(dir, ['init', '-b', 'main', 'nested']);
+        await run(nested, ['commit', '--allow-empty', '-m', 'first']);
+        if (state !== 'untracked') await run(dir, ['add', 'nested']);
+        await run(nested, ['commit', '--allow-empty', '-m', 'second']);
+        const head = (await run(nested, ['rev-parse', 'HEAD'])).stdout.trim();
+        await unlink(path.join(nested, '.git', 'objects', head.slice(0, 2), head.slice(2)));
+        // git add resolves the ref, without opening the object that it names.
+        const file = await buildFileEntry(
+          dir,
+          gitRun,
+          {
+            x: state === 'untracked' ? '?' : 'A',
+            y: state === 'untracked' ? '?' : state,
+            path: 'nested',
+          },
+          1000,
+        );
+        await run(dir, ['add', '-A']);
+        expect((await run(dir, ['ls-files', '-s', '-z'])).stdout).toBe(
+          `160000 ${head} 0\tnested\0`,
+        );
+        expect(file).toMatchObject({ link: 'gitlink', newContent: `Subproject commit ${head}\n` });
+        expect(file.unreadable).toBeUndefined();
+      });
+    },
+  );
+
+  it.each([-1, 124, 128, 0])(
+    'gives no staging reason for an inconclusive nested read (%s)',
+    async (code) => {
+      await repo(async (dir) => {
+        await git(dir, ['init', '-b', 'main', 'nested']);
+        const noAnswer: typeof gitRun = (cwd, args) =>
+          cwd !== dir && args.includes('rev-parse')
+            ? Promise.resolve({ code, stdout: '', stderr: 'opaque failure' })
+            : gitRun(cwd, args);
+        const file = await buildFileEntry(dir, noAnswer, { x: '?', y: '?', path: 'nested/' }, 1000);
+        expect(file).toMatchObject({ unreadable: true, oldContent: '', newContent: '' });
+        expect(file.unreadableReason).toBeUndefined();
+      });
+    },
+  );
+
+  it.each(['separate', 'submodule', 'symlink'])(
+    'compares git add with a %s .git marker',
+    async (kind) => {
+      await repo(async (dir) => {
+        const nested = path.join(dir, 'nested');
+        const run = async (cwd: string, args: string[]) => {
+          const result = await gitRun(cwd, args, GIT_ENV);
+          expect(result.code).toBe(0);
+          return result;
+        };
+        if (kind === 'submodule') {
+          const origin = path.join(dir, 'origin');
+          await run(dir, ['init', '-b', 'main', 'origin']);
+          await run(origin, ['commit', '--allow-empty', '-m', 'origin']);
+          await run(dir, [
+            '-c',
+            'protocol.file.allow=always',
+            'submodule',
+            'add',
+            origin,
+            'nested',
+          ]);
+          await rm(origin, { recursive: true });
+        } else {
+          await run(dir, [
+            'init',
+            '-b',
+            'main',
+            '--separate-git-dir',
+            path.join(dir, '.git', 'nested-data'),
+            'nested',
+          ]);
+          if (kind === 'symlink') {
+            await unlink(path.join(nested, '.git'));
+            await symlink(path.join(dir, '.git', 'nested-data'), path.join(nested, '.git'));
+          }
+        }
+        await run(nested, ['commit', '--allow-empty', '-m', 'nested']);
+        const head = (await run(nested, ['rev-parse', 'HEAD'])).stdout.trim();
+        const built = await buildCommitDiffArtifact(dir, gitRun);
+        await run(dir, ['add', '-A']);
+        expect((await run(dir, ['ls-files', '-s', '-z'])).stdout).toContain(
+          `160000 ${head} 0\tnested\0`,
+        );
+        const file = built.artifact.files.find((f) => f.path.replace(/\/$/, '') === 'nested');
+        if (kind === 'symlink') {
+          // fs-safe refuses this redirect, even though git add follows it.
+          expect(file).toMatchObject({ unreadable: true, newContent: '' });
+          expect(file?.unreadableReason).toBeUndefined();
+        } else {
+          expect(file).toMatchObject({
+            link: 'gitlink',
+            newContent: `Subproject commit ${head}\n`,
+          });
+          expect(file?.unreadable).toBeUndefined();
+        }
+      });
+    },
+  );
+
+  it.each(['M', 'A'])('never discovers upward after a tracked %s marker vanishes', async (y) => {
+    await repo(async (dir) => {
+      const nested = path.join(dir, 'nested');
+      await git(dir, ['init', '-b', 'main', 'nested']);
+      await git(nested, ['commit', '--allow-empty', '-m', 'nested']);
+      await git(dir, ['add', 'nested']);
+      let asked = false;
+      const swapping: typeof gitRun = async (cwd, args) => {
+        if (cwd !== dir && args.includes('rev-parse')) {
+          asked = true;
+          await rename(path.join(nested, '.git'), path.join(nested, 'saved-git'));
+        }
+        return gitRun(cwd, args);
+      };
+      const file = await buildFileEntry(dir, swapping, { x: 'A', y, path: 'nested' }, 1000);
+      expect(asked).toBe(true);
+      expect(file).toMatchObject({ unreadable: true, newContent: '' });
+      expect(file.link).toBeUndefined();
+      expect(file.unreadableReason).toBeUndefined();
+    });
+  });
+
   it.each(['nested', ':(top)nested'])(
     'previews the gitlink git add -A records for %s',
     async (name) => {
@@ -422,7 +557,7 @@ describe('untracked directory staging controls', () => {
           expect(file?.unreadable).toBeUndefined();
         } else {
           expect(file).toMatchObject({ unreadable: true, newContent: '' });
-          expect(file?.unreadableReason).toContain('HEAD could not be read');
+          expect(file?.unreadableReason).toBeUndefined();
           expect(file?.link).toBeUndefined();
         }
       });
