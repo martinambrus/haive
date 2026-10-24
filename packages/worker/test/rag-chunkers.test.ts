@@ -1052,6 +1052,8 @@ describe('maskNonCode', () => {
     ['a heredoc', '$a = <<<EOT\n{ "}"\nEOT;'],
     ['an indented heredoc closing', '$a = <<<EOT\n  {\n  EOT;'],
     ['a nowdoc', "$a = <<<'EOT'\n{ $b }\nEOT;"],
+    ['a heredoc with a body line that only starts with the label', '$a = <<<EOT\nEOTX {\n}\nEOT;'],
+    ['a ${} interpolation holding quotes', '$a = "a ${b["}"]} c";'],
     ['inline HTML', '?>\n<div>{</div>\n<?php'],
     ['inline HTML around an echo tag', '?><b>{</b><?= $x ?><i>}</i><?php'],
     ['a // comment that a close tag ends', '// a ?> } <?php'],
@@ -1083,6 +1085,21 @@ describe('maskNonCode', () => {
     expect(maskNonCode("<? $a = '{'; ?>\n", 'php')).toBe(`<? $a = '${blank('{')}'; ?>\n`);
   });
 
+  it('ends a // comment at a close tag and reads the code that follows it', () => {
+    expect(maskNonCode('<?php // a { ?> <b>}</b> <?php $ok = 1;', 'php')).toBe(
+      `<?php //${blank(' a { ')}?>${blank(' <b>}</b> ')}<?php $ok = 1;`,
+    );
+  });
+
+  it('reads the code of an echo tag, and <?php glued to a word as no tag', () => {
+    expect(maskNonCode('<b>{</b><?= $x ?><i>}</i>\n<?php $ok = 1;', 'php')).toBe(
+      `${blank('<b>{</b>')}<?= $x ?>${blank('<i>}</i>')}\n<?php $ok = 1;`,
+    );
+    expect(maskNonCode('<?phpx {\n<?php $ok = 1;', 'php')).toBe(
+      `${blank('<?phpx {')}\n<?php $ok = 1;`,
+    );
+  });
+
   it('keeps delimiters, the docblock opener and an attribute', () => {
     expect(maskNonCode("<?php\n/** Doc */\n/* c */\n# d\n#[Attr('x')]\n", 'php')).toBe(
       `<?php\n/**${blank(' Doc ')}*/\n/*${blank(' c ')}*/\n#${blank(' d')}\n#[Attr('${blank('x')}')]\n`,
@@ -1104,6 +1121,9 @@ describe('maskNonCode', () => {
     ['a regex after return', 'return /{/.test(s);'],
     ['a regex after a parenthesis', 'f(/{/);'],
     ['a regex that starts with a bracket', 'f(/>{/);'],
+    ['a slash inside a regex class', 'f(/[/]{/);'],
+    ['a string on the line after a // comment', "// c\n'{';"],
+    ['an escaped backtick in a template', 'var a = `a \\` { b`;'],
     ['a regex after a comma', 'f(a, /}/);'],
     ['a regex after an arrow', 'var f = () => /}/;'],
   ])('blanks %s of a JS file', (_what, snippet) => {
@@ -1119,10 +1139,19 @@ describe('maskNonCode', () => {
     for (const src of [
       'x = a / b / c;\n',
       'x = (a + b) / 2 + y[0] / 3 + 4 / 5;\n',
+      'x = 1 / 2 / 3;\nx = "k" / 2 / 3;\n',
       'var h = <p>{a}</p> <b>{b}</b>;\nvar i = <br />;\n',
+      'var h = <p>{a}/{b}</p>;\nvar i = <p>/usr/bin</p>;\n',
+      'x = a++ / 2;\ny = b / 3;\n',
     ]) {
       expect(maskNonCode(src, 'js')).toBe(src);
     }
+  });
+
+  it('blanks a template whose expression holds braces and another template', () => {
+    expect(maskNonCode('var a = `${ {x:1}.x + `inner` } tail`;', 'js')).toBe(
+      `var a = \`${blank('${ {x:1}.x + `inner` } tail')}\`;`,
+    );
   });
 
   it('keeps a string that is a bare name, as a key reads as a name', () => {
@@ -1184,6 +1213,13 @@ describe('extractCodeSections — braces that are not code', () => {
     expect([...sections.keys()]).toEqual(['function-host', 'function-next_one']);
     expect(sections.get('function-host')).toContain("'end-of-host'");
     expect(sections.get('function-next_one')).toBe(NEXT);
+  });
+
+  it.each([
+    ['PHP', '<?php\nfunction f($a /* ) */, $b = 1) {\n  return $b;\n}\n', 'f.module', 'function-f'],
+    ['JS', "function g(a /* ' ) */, b) {\n  return b;\n}\n", 'g.js', 'function-g'],
+  ])('reads a %s signature past a parenthesis in a comment', (_lang, src, file, id) => {
+    expect(extractCodeSections(src, file).map((s) => s.sectionId)).toEqual([id]);
   });
 
   it('ends an object-literal member at its own closing brace', () => {
@@ -1366,6 +1402,27 @@ describe('extractCodeSections — closing lines in front of a head', () => {
     ).toBe(true);
   });
 
+  it('keeps a closing bracket, parenthesis and semicolon with the member they close', () => {
+    const js = [
+      'register([',
+      '  {',
+      '    run: function () {',
+      '      return 1;',
+      '    }',
+      '  }',
+      ']);',
+      'var x = 1;',
+      'function after() {',
+      '  return x;',
+      '}',
+      '',
+    ].join('\n');
+    const sections = byId(js, 'register.js');
+
+    expect(sections.get('function-run')!.endsWith('  }\n]);')).toBe(true);
+    expect(sections.get('function-after')!.startsWith('var x = 1;\nfunction after() {')).toBe(true);
+  });
+
   it('keeps the closing brace of a PHP class with its last method and the next class head with its first', () => {
     const sections = byId(classes, 'AB.php');
 
@@ -1431,6 +1488,32 @@ describe('extractCodeSections — Ruby definitions', () => {
 
     expect(sections.get('class-Box')!.trimEnd().endsWith('  end\nend')).toBe(true);
     expect(sections.get('function-make')!.startsWith('BOX = Box.new\n\ndef make')).toBe(true);
+  });
+
+  it('takes the end of its own block only, and only a line that starts with the word', () => {
+    const rb = [
+      'module Util',
+      '  def a = 1',
+      'end',
+      '',
+      'ending = 1',
+      '',
+      'def b',
+      '  2',
+      'end',
+      '',
+    ].join('\n');
+    const sections = byId(rb, 'util.rb');
+
+    expect(sections.get('function-a')!.trimEnd().endsWith('  def a = 1')).toBe(true);
+    expect(sections.get('function-b')!.startsWith('end\n\nending = 1\n\ndef b')).toBe(true);
+  });
+
+  it('does not read a line that only starts with the letters end as an end', () => {
+    const sections = byId('def a\n  1\nendpoint = 2\n\ndef b\n  2\nend\n', 'a.rb');
+
+    expect(sections.get('function-a')).not.toContain('endpoint');
+    expect(sections.get('function-b')!.startsWith('endpoint = 2\n\ndef b')).toBe(true);
   });
 
   it('does not read a Python line that starts with end as the end of a definition', () => {
