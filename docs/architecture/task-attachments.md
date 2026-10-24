@@ -5,7 +5,7 @@ builder's first step reads the uploads dir and the worker picks a job up immedia
 `POST /plan/build` with `deferStart` creates the row WITHOUT enqueueing; the client streams
 files through the ordinary attachment route and finalizes with the `start` task action, which
 claims `status = 'created'` in one atomic UPDATE (a second click matches no row and enqueues
-nothing). An upload that fails therefore cannot start anything — the draft is the repair
+nothing; see the next paragraph for the count it checks first). An upload that fails therefore cannot start anything — the draft is the repair
 surface, reachable from its Attachments tab. A read-only local repository takes no attachments
 (the attachment route refuses it), so `POST /plan/build` and `POST /tasks` refuse a `deferStart`
 for one before they create the row; otherwise the draft was made and every upload into it then
@@ -22,7 +22,7 @@ made a second build with no attachments while the first stayed `created` holding
 `POST /tasks` takes the same `deferStart`, and the
 New Task page sends it only when files are picked; there the rule differs: the page tries every
 file, then sends `start` whatever the uploads did (the task page's Attachments panel is the retry
-surface). When any upload failed, or the `start` itself was refused (a 409 "busy" among them), it
+surface), and a short count is confirmed as below. When any upload failed, or the `start` itself was refused (a 409 "busy" among them), it
 stays put, names each failed file with its error, says whether the task started and, when the start
 was refused, the api's reason, and links the task; the form stays locked, so the submit cannot create a
 second task. The task page's Attachments tab does the same with a pick: it tries every file, reloads
@@ -31,7 +31,27 @@ clear it). A `start` that never arrives (the tab closed mid-upload, a drain refu
 the task `created`, and the task page says so in a banner with Start (`taskNotStarted`,
 `web/src/lib/task-state.ts`, keyed on the status and the dead stamp). A normal create never shows it:
 `markQueuedForStart` moves the row to `queued` in the create transaction. This replaced the inline-document seed hook,
-which could carry exactly one file. `_ATTACHMENTS.md` is regenerated after every write: the
+which could carry exactly one file.
+
+**Start confirms when fewer files landed than were picked.** Both creates take
+`expectedAttachmentCount` with `deferStart` (0 to 10,000) and store it on the task,
+`tasks.expected_attachment_count` (migration 0211; NULL when not recorded: older tasks and every create
+without `deferStart`, which start as before). The count is set once and never lowered, so a file the
+owner deleted on purpose costs one confirmation. `markQueuedForStart` takes the repository key, locks the
+task row, re-reads it, and only for a `created` row with a count compares it with the task's parentless
+`task_attachments` rows (the uploads; rows an archive expansion wrote carry a parent and do not count).
+Short, it throws, and the `start` action answers 409 `task_attachments_missing` with `landed` and
+`expected` and changes nothing, unless the request carries `confirmMissingAttachments: true`. A repeat
+`start` meets a row that is no longer `created` and answers `started: false`, with or without the flag.
+Every web sender (New Task, the plan starter, the task page's banner and menu) goes through
+`startTaskWithAttachmentConfirmation` (`web/src/lib/start-task.ts`), which keys on that code and the
+two counts, never on the message, asks "N of M attachments are missing. Start anyway?", resends once
+with the flag on yes, and on no leaves the task `created` with its Attachments tab as the repair
+surface. The count says how many are missing, not which. `POST /tasks` also refuses `deferStart` for a
+task with no repository or no storage path, as `POST /plan/build` does, since every upload into it would
+answer 409.
+
+`_ATTACHMENTS.md` is regenerated after every write: the
 prompt notice names that file unconditionally, so a path that skipped it handed the agent a
 pointer to nothing. Every writer — upload, delete and archive expansion — goes through ONE
 function, `rewriteAttachmentsManifest`

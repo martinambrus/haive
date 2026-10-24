@@ -1229,6 +1229,7 @@ planRoutes.post('/:id/plan/build', requireNewWorkAllowed, async (c) => {
     userId,
     repositoryId,
     type: 'plan_build',
+    expectedAttachmentCount: body.deferStart ? (body.expectedAttachmentCount ?? null) : null,
     title: body.title?.trim() || `Build plan: ${repo.name}`,
     description: body.description,
     // `planBuildDeferred` records HOW the task was created and never changes;
@@ -1257,9 +1258,8 @@ planRoutes.post('/:id/plan/build', requireNewWorkAllowed, async (c) => {
             }),
         }
       : {}),
-    // Uploads cannot ride a seed hook: the api does not know how many files are
-    // coming or whether they all arrive. So the row is created unstarted and the
-    // client finalizes with the `start` action once every upload succeeds —
+    // Uploads cannot ride a seed hook: the api cannot know whether they all arrive.
+    // The row is created unstarted and the client finalizes with `start` after the uploads —
     // which keeps the invariant the seed hook existed for (the files are on disk
     // before the worker's first detect) without pretending to own the transfer.
     ...(body.deferStart ? { enqueue: false } : {}),

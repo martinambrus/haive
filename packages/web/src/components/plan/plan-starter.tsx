@@ -2,13 +2,13 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { startTaskWithAttachmentConfirmation } from '@/lib/start-task';
 import { FolderUp, Paperclip, X } from 'lucide-react';
 import {
   api,
   attachmentUploadName,
   buildPlan,
   getPlanBuildClis,
-  startTask,
   uploadTaskAttachment,
   type CliProvider,
   type CliProvidersResponse,
@@ -185,6 +185,7 @@ export function PlanStarter({
             planBuildBody('greenfield', {
               description,
               deferStart,
+              expectedAttachmentCount: files.length,
               clarify: askBrief,
               plannerCliProviderId: plannerId,
               questionerCliProviderId: questionerId,
@@ -231,10 +232,19 @@ export function PlanStarter({
 
       setProgress('Starting the build…');
       try {
-        await startTask(taskId);
+        const started = await startTaskWithAttachmentConfirmation(taskId);
+        if (!started) {
+          setError(
+            'The build was not started. Open the draft task’s Attachments tab to add the missing files.',
+          );
+          setDraftTaskId(taskId);
+          setProgress(null);
+          setBusy(false);
+          return;
+        }
       } catch (e) {
         setError(
-          `The task was created but could not be started (${e instanceof Error ? e.message : 'Failed to start the build'}). Nothing was lost — the draft task is waiting with every file attached. Press "Retry starting the build", or open the draft and press Start.`,
+          `The task was created but could not be started (${e instanceof Error ? e.message : 'Failed to start the build'}). Nothing was lost — the draft task is waiting. Press "Retry starting the build", or open the draft and press Start.`,
         );
         setProgress(null);
         setDraftTaskId(taskId);

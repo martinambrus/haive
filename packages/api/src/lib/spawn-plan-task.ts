@@ -35,6 +35,9 @@ export async function spawnPlanTask(args: {
    *  `start` task action once they all land. The row sits at `created`, which is
    *  what that action claims. */
   enqueue?: boolean;
+  /** Original uploads to require at Start; stored only with enqueue: false, otherwise ignored.
+   *  Null or omitted leaves the count unrecorded. */
+  expectedAttachmentCount?: number | null;
 }): Promise<string> {
   const create = async (tx: DbTx): Promise<string> => {
     await admitNewWork(tx);
@@ -58,6 +61,8 @@ export async function spawnPlanTask(args: {
         runListSnapshot,
         customSteps,
         status: 'created',
+        expectedAttachmentCount:
+          args.enqueue === false ? (args.expectedAttachmentCount ?? null) : null,
       })
       .returning();
     if (!task) throw new HttpError(500, 'failed to create plan task');
