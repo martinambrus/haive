@@ -63,6 +63,9 @@ async function loadOwnedProvider(db: Database, userId: string, providerId: strin
 const CLI_PROVIDER_LABEL_MAX_LENGTH = 255;
 const MAX_CLONE_ATTEMPTS = 1000;
 
+// Plain adds use BullMQ's counter; refresh reuse can also return this scheduler's tick id.
+const POLLABLE_JOB_ID = /^(?:[1-9][0-9]*|repeat:cli-refresh-versions-repeatable:[1-9][0-9]*)$/;
+
 /** Load a job the UI is polling, or 404.
  *
  *  `name` pins the job kind so one poll route can never read another kind's return value —
@@ -76,6 +79,10 @@ async function loadPollableJob(
   name: string,
   owner?: { providerId: string; userId: string },
 ) {
+  // Compare the whole match: JavaScript's `$` also matches before a final newline.
+  if (POLLABLE_JOB_ID.exec(jobId)?.[0] !== jobId) {
+    throw new HttpError(404, 'job not found — it may have expired', 'job_expired');
+  }
   const job = await getCliExecQueue().getJob(jobId);
   const data = job?.data as { providerId?: string; userId?: string } | undefined;
   if (
