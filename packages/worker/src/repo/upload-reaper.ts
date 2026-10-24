@@ -347,7 +347,7 @@ async function liveRepositories(
 async function forgetGoneOrphanFailures(): Promise<void> {
   for (const [key, { root, rel }] of orphanFailures) {
     try {
-      if ((await lstatNoFollow(root, rel)) === null) orphanFailures.delete(key);
+      if ((await lstatNoFollow(root, rel, { strict: true })) === null) orphanFailures.delete(key);
     } catch {
       // An unreadable path may still hold the file whose removal failed.
     }

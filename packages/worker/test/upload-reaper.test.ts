@@ -27,6 +27,7 @@ const guard = vi.hoisted(() => ({
   warnings: [] as unknown[][],
   debugs: [] as unknown[][],
   removalCode: 'EACCES' as string | undefined,
+  statFailure: null as string | null,
 }));
 vi.mock('@haive/shared', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared')>();
@@ -47,6 +48,17 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
   return {
     ...real,
+    lstatNoFollow: async (...args: Parameters<typeof real.lstatNoFollow>) => {
+      if (guard.statFailure && args[1].endsWith('.partial')) {
+        const err =
+          guard.statFailure === 'containment'
+            ? new real.PathContainmentError('link', args[0], args[1], args[1])
+            : Object.assign(new Error('the stat failed'), { code: guard.statFailure });
+        if (args[2]?.strict) throw err;
+        return null;
+      }
+      return real.lstatNoFollow(...args);
+    },
     removeNoFollow: async (...args: Parameters<typeof real.removeNoFollow>) => {
       if (guard.removal?.(args[1])) {
         guard.removals += 1;
@@ -161,6 +173,7 @@ beforeEach(async () => {
   guard.debugs = [];
   guard.removalCode = 'EACCES';
   guard.removal = null;
+  guard.statFailure = null;
 });
 
 afterEach(async () => {
@@ -1136,6 +1149,24 @@ describe('T323: repeated orphan removal failures', () => {
     expect(guard.warnings).toHaveLength(1);
     expect(guard.debugs).toHaveLength(1);
   });
+
+  it.each(['EACCES', 'containment'])(
+    'remembers a failure while stat refuses it: %s',
+    async (reason) => {
+      const file = await orphan();
+      guard.removal = () => true;
+      await reapAbandonedUploads(db());
+
+      guard.statFailure = reason;
+      await reapAbandonedUploads(db());
+      guard.statFailure = null;
+      await reapAbandonedUploads(db());
+
+      expect(await exists(file)).toBe(true);
+      expect(guard.warnings).toHaveLength(1);
+      expect(guard.debugs).toHaveLength(1);
+    },
+  );
 
   it('forgets a failure after removal succeeds', async () => {
     const id = randomUUID();
