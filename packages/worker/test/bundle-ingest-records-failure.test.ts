@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,6 +12,7 @@ vi.mock('../src/repo/credentials.js', () => ({
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import type { BundleJobPayload } from '@haive/shared';
+import { gitRun } from '../src/repo/git-exec.js';
 import { handleIngestGit, handleIngestZip, handleResyncGit } from '../src/repo/bundle-ingest.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
@@ -74,4 +75,34 @@ describe('a bundle handler that throws before it starts working', () => {
     expect(stored.status).toBe('failed');
     expect(stored.lastSyncError).toBe((err as Error).message);
   });
+});
+
+it('a refused bundle URL records failure without wiping its existing extracted tree', async () => {
+  const dest = path.join(root, USER, BUNDLE, 'extracted');
+  await mkdir(dest, { recursive: true });
+  expect((await gitRun(dest, ['init'])).code).toBe(0);
+  await writeFile(path.join(dest, 'keep'), 'existing bundle');
+  const config = await readFile(path.join(dest, '.git/config'), 'utf8');
+  const fake = createFakeDb({ customBundles: schema.customBundles });
+  fake.insert(schema.customBundles, {
+    id: BUNDLE,
+    userId: USER,
+    repositoryId: REPO,
+    name: 'kit',
+    sourceType: 'git',
+    gitUrl: 'file:///x',
+    status: 'syncing',
+  });
+  const error = await handleIngestGit(
+    { bundleId: BUNDLE, userId: USER },
+    fake.db as unknown as Database,
+    root,
+  ).catch((e: unknown) => e);
+  expect(error).toMatchObject({ name: 'OriginUrlError' });
+  expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+    status: 'failed',
+    lastSyncError: (error as Error).message,
+  });
+  expect(await readFile(path.join(dest, 'keep'), 'utf8')).toBe('existing bundle');
+  expect(await readFile(path.join(dest, '.git/config'), 'utf8')).toBe(config);
 });
