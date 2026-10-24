@@ -161,11 +161,6 @@ From the T388 review (2026-10-24). All PRE-EXISTING.
 status: open
 From the T388 review (2026-10-24). PRE-EXISTING, minor. Same class as T388 item 4 (exit code, not wording), another command: steps/workflow/_kb-commit.ts ~:69, 10-gate-3-commit.ts ~:416, 11d-skill-sync.ts ~:527, run-app/99-run-app-ready.ts ~:335. A localized or reworded git turns "nothing to commit" into a failure. Fix: decide by `git diff --cached --quiet` (exit 1 = staged changes) before committing, or by the commit's exit code plus a staged-paths read.
 
-### T419 · CI skips TASKS.md-only pushes to main
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:08Z · last: 2026-10-24T19:08Z
-User decision 2026-10-24: board-only pushes start no CI. Every board push to main ran the full CI (9 jobs; the push concurrency group is per sha, so none cancel), and with several PRs open the runner pool saturated. Fix: `paths-ignore: ['TASKS.md']` on ci.yml's push trigger only (a PR must keep its required checks). CodeQL is GitHub's default setup (no workflow file, no path filter) and stays. Board edits run prettier on TASKS.md before pushing, since format:check no longer sees a board-only push.
-
 ### T420 · FNF[cli-job-polling-2] · the pricing page ignores its refresh job; other jobs can trim a polled result early (+1)
 
 status: open
@@ -707,7 +702,7 @@ status: open · was modular #211
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
 status: open · was modular #213
-Items 1-2 merged (#831). 3. PERF: the bundle file browser runs fs-safe lstat per file (5000 files took 8.8 s). Fix: a walk that holds directory descriptors. 4. new-repo-form.tsx shows only the first 100 matches, with no note. 5. github-oauth.ts:110-111 echoes an unbounded GitHub error body. Reuse the forge excerpt helper. 6. The /user/repos loop makes one extra empty request. Fix: stop when the Link header has no rel="next".
+Items 1-2 merged (#831). 3. PERF: the bundle file browser runs fs-safe lstat per file (5000 files took 8.8 s). Fix: a walk that holds directory descriptors. 4. new-repo-form.tsx shows only the first 100 matches, with no note. 5. github-oauth.ts:110-111 echoes an unbounded GitHub error body, and a body that echoed the request's token would reach the response and the error log (T378 review, fake-vendor repro). Reuse the forge excerpt helper. 6. The /user/repos loop makes one extra empty request. Fix: stop when the Link header has no rel="next".
 
 ### T366 · FNF[shutdown-deadline] · the worker shutdown's per-part limits are summed by hand
 
@@ -831,22 +826,6 @@ status: open · was modular #257
 3. set-aside.ts ~:250 headOid, ~:1113 headEntry and projection-merge.ts ~:32 readBlob count a failed read as absent.
 4. git-merge.ts ~:632, :636, :1356, :1373, :1419: resolvingPaths and `rev-list --parents` failures.
    Fix: one shared reader module with an explicit failure contract. Do this after T396.
-
-### T380 · FNF[cli-job-poll-routes] · version refresh does not coalesce; poll routes pass raw job ids to BullMQ; force is dead (+2)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T18:14Z · last: 2026-10-24T19:16Z (PR #895 open after fix round 1) · was modular #259 (a Codex attempt was discarded, nothing kept)
-
-1. POST /cli-providers/catalog/:name/refresh-versions (api cli-providers.ts ~:280-289) enqueues a job on every call. Fix: reuse the in-flight job.
-2. The poll routes (~:90) pass the raw path id. Fix: validate the id shape, answer 404 otherwise.
-3. RefreshCliVersionsJobPayload.force (shared constants ~:437-439) is dead. Fix: drop it.
-
-### T381 · FNF[agents-md-budget] · AGENTS.md has 9 bytes of headroom and nothing checks its size (+2)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:42Z · last: 2026-10-24T19:42Z · was modular #260
-
-1. Add scripts/test/agents-md-size.test.mjs that fails above 32768 bytes.
-2. The "Each router mounts its own requireAuth" line is over-general: 8 routers are public by design. Free some bytes and name the exception.
-3. Point at anonymous-routes.test.ts's PUBLIC list as the register of public routes.
 
 ### T382 · FNF[auth-endpoint-hardening] · refresh rotation not CAS; login timing; no admin-authz sweep (+4)
 
@@ -1034,14 +1013,6 @@ status: open · area: modular-haive-plan owns merge-resolver.ts landing sections
 1. merge-resolver.ts ~:1320-1322, ~:1362: persist baseShaBefore before the merge.
 2. reopen (~:1642) never calls ensureBaseWorktree.
 
-### T411 · FNF[module-db-session-bounds] · module statements outside withSchemaLock outlive their pool's close
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T18:14Z · last: 2026-10-24T19:01Z (PR #893 open) · was modular #264 finding
-PRE-EXISTING. #264 (PR #885) sets client_connection_check_interval only inside withSchemaLock. Queries a module sends through ctx.sql, or through a teardown hook's handle, still run on the server after close(): a pg_sleep backend was measured alive 2 s after close(). The pool is opened with no connection-level setting at packages/shared/src/module-db/index.ts:55.
-Fix: pass `connection: { client_connection_check_interval: 500 }` in the postgres() options (needs PG >= 14; the stack pins 18).
-
----
-
 ### T421 · FNF[git-data-ledger-rows] · ledger rows recorded at git-data paths stay live forever
 
 status: open
@@ -1051,6 +1022,10 @@ From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` r
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T381 — AGENTS.md size test; requireAuth exceptions and the PUBLIC register named — PR #898 (4f91759b1), 2026-10-24
+- T380 — version refresh coalesces, poll routes check job ids, dead force flag gone (leftovers in T420) — PR #895 (892f3ea30), 2026-10-24
+- T411 — module, RAG and global-KB pools open every connection with client_connection_check_interval, so statements end with the pool — PR #893 (bce6d8a7b), 2026-10-24
+- T419 — CI skips pushes that change only TASKS.md (pull requests keep every check) — PR #894 (0a63e34c0), 2026-10-24
 - T370 — a refused or failed plan Pull or Save records last_error (recovery awaited) — PR #890 (b948852af), 2026-10-24
 - T311 — RAG chunker reads constructs only outside comments, strings and inline HTML (16 Codex rounds; leftovers in T413) — PR #889 (74eba9317), 2026-10-24
 - T328 — bundle git bounded; 01 refuses an unknown base; gate 3 keeps an earlier sha — PR #888 (214b76b1f), 2026-10-24
