@@ -126,6 +126,12 @@ describe('cancelTaskRow', () => {
     expect(recorded.updateCalls[1]?.set).toMatchObject({
       status: 'failed',
       errorMessage: 'Task cancelled',
+      contextLeftPercent: null,
+      contextTokens: null,
+      contextWindowSize: null,
+      usageFiveHourPct: null,
+      usageSevenDayPct: null,
+      usageDailyPct: null,
     });
   });
 

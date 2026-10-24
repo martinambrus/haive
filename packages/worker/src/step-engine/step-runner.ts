@@ -3650,7 +3650,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // Surface B: freeze context-window usage on the finished step (best-effort; never
     // blocks completion). No-op for deterministic steps (no CLI invocations). Returns
     // the provider whose allowance this step consumed, or null.
-    const usageProviderId = await writeStepContextUsage(db, current.id).catch((err) => {
+    const usageProviderId = await writeStepContextUsage(db, done.id, done.endedAt).catch((err) => {
       log.warn({ err, stepId: meta.id }, 'failed to record step context usage');
       return null;
     });

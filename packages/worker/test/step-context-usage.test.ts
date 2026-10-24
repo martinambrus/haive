@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { CliTokenUsage } from '@haive/shared';
-import type { Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import { eq } from 'drizzle-orm';
 import { writeStepContextUsage } from '../src/step-engine/step-context-usage.js';
 import { createStreamJsonCollector } from '../src/queues/cli-exec-queue.js';
+
+const FINISHED_AT = new Date('2026-10-24T12:00:00Z');
 
 interface Inv {
   tokenUsage: CliTokenUsage | null;
@@ -67,7 +71,7 @@ function collectorUsage(): CliTokenUsage {
 describe('writeStepContextUsage', () => {
   it('uses the collector peak, not the cumulative totals', async () => {
     const { db, updates } = fakeDb([{ tokenUsage: collectorUsage(), cliProviderId: 'p1' }]);
-    expect(await writeStepContextUsage(db, 's1')).toBe('p1');
+    expect(await writeStepContextUsage(db, 's1', FINISHED_AT)).toBe('p1');
     expect(updates[0]).toMatchObject({
       contextTokens: 120006,
       contextWindowSize: 200000,
@@ -93,7 +97,7 @@ describe('writeStepContextUsage', () => {
       ],
       { snapshot: { fiveHourPct: 40, sevenDayPct: 10, dailyPct: null, status: 'ok' } },
     );
-    expect(await writeStepContextUsage(db, 's1')).toBe('p1');
+    expect(await writeStepContextUsage(db, 's1', FINISHED_AT)).toBe('p1');
     expect(updates[0]).toMatchObject({ ...nullTriple, usageFiveHourPct: 40, usageSevenDayPct: 10 });
   });
 
@@ -112,7 +116,7 @@ describe('writeStepContextUsage', () => {
       ],
       { providerName: 'codex' },
     );
-    await writeStepContextUsage(db, 's1');
+    await writeStepContextUsage(db, 's1', FINISHED_AT);
     expect(updates[0]).toMatchObject(nullTriple);
   });
 
@@ -132,7 +136,7 @@ describe('writeStepContextUsage', () => {
         cliProviderId: 'B',
       },
     ]);
-    expect(await writeStepContextUsage(db, 's1')).toBe('A');
+    expect(await writeStepContextUsage(db, 's1', FINISHED_AT)).toBe('A');
     expect(updates[0]).toMatchObject(nullTriple);
   });
 
@@ -141,7 +145,7 @@ describe('writeStepContextUsage', () => {
       { tokenUsage: null, cliProviderId: null },
       { tokenUsage: null, cliProviderId: null },
     ]);
-    expect(await writeStepContextUsage(db, 's1')).toBeNull();
+    expect(await writeStepContextUsage(db, 's1', FINISHED_AT)).toBeNull();
     expect(updates).toEqual([]);
   });
 
@@ -166,7 +170,7 @@ describe('writeStepContextUsage', () => {
         cliProviderId: 'B',
       },
     ]);
-    expect(await writeStepContextUsage(db, 's1')).toBe('B');
+    expect(await writeStepContextUsage(db, 's1', FINISHED_AT)).toBe('B');
     expect(updates[0]).toMatchObject({ contextTokens: 90000 });
   });
 });
@@ -213,7 +217,7 @@ describe('writeStepContextUsage window order', () => {
       [{ tokenUsage: recorded(383759, 1000000), cliProviderId: 'p1' }],
       claude,
     );
-    await writeStepContextUsage(db, 's1');
+    await writeStepContextUsage(db, 's1', FINISHED_AT);
     expect(updates[0]).toMatchObject({
       contextTokens: 383759,
       contextWindowSize: 1000000,
@@ -226,7 +230,7 @@ describe('writeStepContextUsage window order', () => {
       [{ tokenUsage: recorded(383759), cliProviderId: 'p1' }],
       claude,
     );
-    await writeStepContextUsage(db, 's1');
+    await writeStepContextUsage(db, 's1', FINISHED_AT);
     expect(updates[0]).toMatchObject({ contextWindowSize: 200000 });
   });
 
@@ -236,7 +240,7 @@ describe('writeStepContextUsage window order', () => {
         [{ tokenUsage: recorded(1000, bad), cliProviderId: 'p1' }],
         claude,
       );
-      await writeStepContextUsage(db, 's1');
+      await writeStepContextUsage(db, 's1', FINISHED_AT);
       expect(updates[0], String(bad)).toMatchObject({ contextWindowSize: 200000 });
     }
   });
@@ -247,7 +251,7 @@ describe('writeStepContextUsage window order', () => {
       { name: 'openrouter', model: 'vendor/small' },
       [{ id: 'vendor/small', contextLength: 64000 }],
     );
-    await writeStepContextUsage(db, 's1');
+    await writeStepContextUsage(db, 's1', FINISHED_AT);
     expect(updates[0]).toMatchObject({ contextWindowSize: 64000 });
   });
 
@@ -257,7 +261,7 @@ describe('writeStepContextUsage window order', () => {
       { name: 'openrouter', model: 'vendor/unlisted' },
       [{ id: 'vendor/small', contextLength: 64000 }],
     );
-    await writeStepContextUsage(db, 's1');
+    await writeStepContextUsage(db, 's1', FINISHED_AT);
     expect(updates[0]).toMatchObject({ contextWindowSize: 1000000 });
   });
 
@@ -269,7 +273,76 @@ describe('writeStepContextUsage window order', () => {
       ],
       claude,
     );
-    expect(await writeStepContextUsage(db, 's1')).toBe('B');
+    expect(await writeStepContextUsage(db, 's1', FINISHED_AT)).toBe('B');
     expect(updates[0]).toMatchObject({ contextTokens: 90000, contextWindowSize: 1000000 });
   });
+});
+
+describe('step usage stamp completion ownership', () => {
+  const STEP = '00000000-0000-4000-8000-000000000001';
+  const PROVIDER = '00000000-0000-4000-8000-000000000002';
+  const stamp = {
+    contextLeftPercent: 75,
+    contextTokens: 50000,
+    contextWindowSize: 200000,
+    usageFiveHourPct: 25,
+    usageSevenDayPct: 50,
+    usageDailyPct: 75,
+  };
+  const emptyStamp = Object.fromEntries(Object.keys(stamp).map((key) => [key, null]));
+
+  function setup() {
+    const fake = createFakeDb({
+      taskSteps: schema.taskSteps,
+      cliInvocations: schema.cliInvocations,
+      cliProviders: schema.cliProviders,
+      usageWindowSnapshots: schema.usageWindowSnapshots,
+    });
+    fake.insert(schema.taskSteps, {
+      id: STEP,
+      status: 'done',
+      endedAt: FINISHED_AT,
+      ...emptyStamp,
+    });
+    fake.insert(schema.cliInvocations, {
+      taskStepId: STEP,
+      cliProviderId: PROVIDER,
+      mode: 'cli',
+      tokenUsage: { inputTokens: 50000, peakPromptTokens: 50000 },
+    });
+    fake.insert(schema.cliProviders, { id: PROVIDER, name: 'claude-code', model: null });
+    fake.insert(schema.usageWindowSnapshots, {
+      providerId: PROVIDER,
+      status: 'ok',
+      fiveHourPct: 25,
+      sevenDayPct: 50,
+      dailyPct: 75,
+    });
+    return { fake, db: fake.db as unknown as Database };
+  }
+
+  it('records all six measurements on the completion it was given', async () => {
+    const { fake, db } = setup();
+    await writeStepContextUsage(db, STEP, FINISHED_AT);
+    expect(fake.rows(schema.taskSteps)[0]).toMatchObject(stamp);
+  });
+
+  it.each(['pending', 'running', 'waiting_form', 'waiting_cli', 'done', 'failed', 'skipped'])(
+    'cannot replace an attempt that moved to %s while the stamp was being collected',
+    async (status) => {
+      const { fake, db } = setup();
+      const newer = {
+        status,
+        endedAt: status === 'done' ? new Date(FINISHED_AT.getTime() + 1000) : null,
+        ...emptyStamp,
+        ...(status === 'done' ? { contextLeftPercent: 90, usageFiveHourPct: 10 } : {}),
+      };
+      fake.hooks.beforeUpdate = async () => {
+        fake.hooks.beforeUpdate = null;
+        await fake.db.update(schema.taskSteps).set(newer).where(eq(schema.taskSteps.id, STEP));
+      };
+      await writeStepContextUsage(db, STEP, FINISHED_AT);
+      expect(fake.rows(schema.taskSteps)[0]).toMatchObject(newer);
+    },
+  );
 });

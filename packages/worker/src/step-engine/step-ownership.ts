@@ -1,6 +1,6 @@
 import { and, eq, notInArray } from 'drizzle-orm';
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
-import { schema, type Database } from '@haive/database';
+import { CLEAR_STEP_USAGE_STAMP, schema, type Database } from '@haive/database';
 import { currentBuildStamp } from '../build-stamp.js';
 
 type TaskStepRow = typeof schema.taskSteps.$inferSelect;
@@ -39,6 +39,14 @@ const owned = (id: string) =>
     notInArray(schema.taskSteps.status, ['pending', 'skipped', 'failed']),
   );
 
+/** A terminal transition belongs to this attempt even when it has no usage figures.
+ *  Leave an existing finished stamp alone on non-status writes (recaps, warnings, etc.). */
+function stepPatch(patch: PgUpdateSetSource<typeof schema.taskSteps>) {
+  const finished =
+    patch.status === 'done' || patch.status === 'failed' || patch.status === 'skipped';
+  return { ...patch, ...(finished ? CLEAR_STEP_USAGE_STAMP : {}), updatedAt: new Date() };
+}
+
 /** A pass lost its row: a Retry, a Skip or a Stop that arrived meanwhile left it `pending`,
  *  `skipped` or `failed`. */
 export class StepSupersededError extends Error {
@@ -57,11 +65,7 @@ export async function updateOwnedStep(
   id: string,
   patch: PgUpdateSetSource<typeof schema.taskSteps>,
 ): Promise<TaskStepRow> {
-  const rows = await db
-    .update(schema.taskSteps)
-    .set({ ...patch, updatedAt: new Date() })
-    .where(owned(id))
-    .returning();
+  const rows = await db.update(schema.taskSteps).set(stepPatch(patch)).where(owned(id)).returning();
   const row = rows[0];
   if (!row) throw new StepSupersededError(id);
   return row;
@@ -129,7 +133,7 @@ export async function openPendingStep(
   const flip = (h: Database | DbHandle) =>
     h
       .update(schema.taskSteps)
-      .set({ ...patch, updatedAt: new Date() })
+      .set(stepPatch(patch))
       .where(and(eq(schema.taskSteps.id, id), eq(schema.taskSteps.status, 'pending')))
       .returning();
   if (epoch == null) return (await flip(db))[0] ?? null;

@@ -59,6 +59,7 @@ import {
   modelIdentityBanner,
   moduleStopBanner,
   parkBanner,
+  showsStepUsageStamp,
   type DeadStepRow,
   type TaskStopRow,
 } from '@/lib/step-banners';
@@ -2977,6 +2978,7 @@ function StepTokens({
 // with its own hover title. Renders nothing on deterministic steps / when no usage
 // data was captured.
 function StepUsageStamp({ step }: { step: TaskStep }) {
+  if (!showsStepUsageStamp(step)) return null;
   const parts: { key: string; remaining: number; title: string }[] = [];
   if (step.contextLeftPercent != null) {
     const tokens =

@@ -9,6 +9,7 @@ import {
   insertOwnedRun,
   lockOwnedStep,
   updateOwnedStep,
+  openPendingStep,
 } from '../src/step-engine/step-ownership.js';
 
 /** Values a drizzle condition binds, in order. */
@@ -135,4 +136,49 @@ describe('insertOwnedRun', () => {
     await insertOwnedRun(db, 'step1', { ...values, haiveBuild: null });
     expect(inserted[0]!.haiveBuild).toBe(stamp);
   });
+});
+
+const previousUsage = {
+  contextLeftPercent: 40,
+  contextTokens: 120000,
+  contextWindowSize: 200000,
+  usageFiveHourPct: 25,
+  usageSevenDayPct: 50,
+  usageDailyPct: 75,
+};
+const noUsage = Object.fromEntries(Object.keys(previousUsage).map((key) => [key, null]));
+
+describe('step usage stamp across attempts', () => {
+  it.each(['done', 'failed', 'skipped'] as const)(
+    'discards the first stamp when a reopened step finishes %s without figures',
+    async (status) => {
+      const row = { id: 'step1', status: 'done', ...previousUsage };
+      const db = {
+        update: () => ({
+          set: (patch: Record<string, unknown>) => ({
+            where: () => ({
+              returning: async () => {
+                Object.assign(row, patch);
+                return [{ ...row }];
+              },
+            }),
+          }),
+        }),
+      } as unknown as Database;
+      // Retry / Resume reuse the same row; a deterministic completion or failure has no
+      // measurement writer to replace the first attempt's figures.
+      await updateOwnedStep(db, row.id, { status: 'running', endedAt: null });
+      await updateOwnedStep(db, row.id, { status, endedAt: new Date() });
+      expect(row).toMatchObject(noUsage);
+    },
+  );
+
+  it.each(['failed', 'skipped'] as const)(
+    'discards the old stamp when a pending attempt finishes %s before it is claimed',
+    async (status) => {
+      const { db, seen } = mockDb([{ id: 'step1', status }]);
+      await openPendingStep(db, 'task1', null, 'step1', { status, endedAt: new Date() });
+      expect(seen.set).toMatchObject(noUsage);
+    },
+  );
 });

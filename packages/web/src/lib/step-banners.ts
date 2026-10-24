@@ -1,6 +1,12 @@
 import { leftOpenMerges, type MergeLeftOpenOutcome } from '@haive/shared/merge-left-open';
 import { parseStepId } from '@haive/shared/modularity';
 
+/** Usage stamps describe a finished attempt. Retry, Resume, loops and re-offered forms can
+ *  reuse its row with its old figures; those figures have no meaning while it is open. */
+export function showsStepUsageStamp(step: { status: string }): boolean {
+  return step.status === 'done' || step.status === 'failed' || step.status === 'skipped';
+}
+
 /** Banner visibility for step cards, invocation terminals and attachment rows.
  *
  *  ONE RULE: a message column is display copy, not state. `task_steps.status_message`,

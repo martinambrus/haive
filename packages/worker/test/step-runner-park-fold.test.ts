@@ -215,3 +215,34 @@ describe('advanceStep park fold on resume', () => {
     expect(state.updates.at(-1)?.patch).toMatchObject({ status: 'skipped' });
   });
 });
+
+describe('advanceStep usage stamp across attempts', () => {
+  it.each(['done', 'failed', 'skipped'] as const)(
+    'finishes a reopened attempt %s without retaining the old figures',
+    async (status) => {
+      const oldStamp = {
+        contextLeftPercent: 40,
+        contextTokens: 120000,
+        contextWindowSize: 200000,
+        usageFiveHourPct: 25,
+        usageSevenDayPct: 50,
+        usageDailyPct: 75,
+      };
+      const state: MockState = {
+        taskStepRow: { ...stepRow('pending', false), ...oldStamp },
+        updates: [],
+      };
+      const params = runParams(state);
+      if (status === 'failed') {
+        params.stepDef.apply = async () => {
+          throw new Error('second attempt failed');
+        };
+      }
+      if (status === 'skipped') params.stepDef.shouldRun = () => false;
+      expect((await advanceStep(params)).status).toBe(status);
+      expect(state.taskStepRow).toMatchObject(
+        Object.fromEntries(Object.keys(oldStamp).map((key) => [key, null])),
+      );
+    },
+  );
+});
