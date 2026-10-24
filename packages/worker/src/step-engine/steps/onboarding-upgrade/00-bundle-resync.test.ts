@@ -229,3 +229,54 @@ describe('00-bundle-resync git bounds', () => {
     expect((await readFile(seen, 'utf8')).trim()).toBe('echo 0');
   });
 });
+
+describe('00-bundle-resync local head read', () => {
+  it('shows a bundle whose local head read was killed', async () => {
+    const a = await makeBundle('alpha');
+    const ctx = ctxFor([a]);
+    restore = (await killGit(['rev-parse', 'HEAD'])).restore;
+    const detected = await step.detect(ctx);
+    expect(detected.candidates[0]?.fetchError).toMatch(
+      /could not read the local head: git rev-parse failed/,
+    );
+    expect(detected.candidates[0]?.hasUpstreamChange).toBe(false);
+    const form = step.form(ctx, detected);
+    expect(form).not.toBeNull();
+    const found = notes(form);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ id: 'fetchFailed' });
+    const body = (found[0] as { body: string }).body;
+    expect(body).toContain('alpha');
+    expect(body).toContain('could not read the local head');
+  });
+
+  it('shows a bundle whose local head read exited non-zero', async () => {
+    const a = await makeBundle('alpha');
+    const ctx = ctxFor([a]);
+    restore = (await failGit(['rev-parse', 'HEAD'], { exit: 128 })).restore;
+    const detected = await step.detect(ctx);
+    expect(detected.candidates[0]?.fetchError).toMatch(/could not read the local head/);
+    expect(detected.candidates[0]?.fetchError).toMatch(/exit 128/);
+  });
+
+  it('keeps the fetch error when the local head read fails too', async () => {
+    const a = await makeBundle('alpha');
+    git(a.clone, 'remote', 'set-url', 'origin', path.join(path.dirname(a.bare), 'missing.git'));
+    const ctx = ctxFor([a]);
+    restore = (await failGit(['rev-parse', 'HEAD'], { exit: 128 })).restore;
+    const detected = await step.detect(ctx);
+    expect(detected.candidates[0]?.fetchError).toMatch(/git fetch failed/);
+    expect(detected.candidates[0]?.fetchError).not.toMatch(/local head/);
+  });
+
+  it('returns no hasAny key', async () => {
+    const a = await makeBundle('alpha');
+    const clean = await step.detect(ctxFor([a]));
+    expect(clean).not.toHaveProperty('hasAny');
+    const b = await makeBundle('beta');
+    drift(b);
+    const drifted = await step.detect(ctxFor([b]));
+    expect(drifted.candidates[0]?.hasUpstreamChange).toBe(true);
+    expect(drifted).not.toHaveProperty('hasAny');
+  });
+});

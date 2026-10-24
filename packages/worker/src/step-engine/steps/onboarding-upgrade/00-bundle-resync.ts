@@ -18,9 +18,6 @@ interface BundleResyncCandidate {
 
 export interface BundleResyncDetect {
   candidates: BundleResyncCandidate[];
-  /** True when at least one candidate has remote drift; gates whether the
-   *  form renders the multi-select. */
-  hasAny: boolean;
 }
 
 export interface BundleResyncApply {
@@ -86,8 +83,8 @@ async function loadGitBundles(ctx: StepContext): Promise<BundleResyncCandidate[]
     let localHead: string | null = null;
     try {
       localHead = await gitRevParseHead(row.storageRoot);
-    } catch {
-      localHead = null;
+    } catch (err) {
+      fetchError ??= `could not read the local head: ${err instanceof Error ? err.message : String(err)}`;
     }
     const hasUpstreamChange =
       remoteCommit !== null && localHead !== null && remoteCommit !== localHead;
@@ -133,8 +130,7 @@ export const bundleResyncStep: StepDefinition<BundleResyncDetect, BundleResyncAp
 
   async detect(ctx): Promise<BundleResyncDetect> {
     const candidates = await loadGitBundles(ctx);
-    const hasAny = candidates.some((c) => c.hasUpstreamChange);
-    return { candidates, hasAny };
+    return { candidates };
   },
 
   form(_ctx, detected): FormSchema | null {
