@@ -272,13 +272,6 @@ All PRE-EXISTING.
 4. POST /bundles/:id/sync has no already-syncing check (bundles.ts ~792-816); 409 or key the job.
 5. Web never shows lastSyncError; show it under a failed bundle (bundle-composer.tsx), browser check 375/768/1280.
 
-### T304 · FNF[claims-2] · .git refusal misses NTFS aliases (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:28Z · last: 2026-10-24T19:28Z
-
-1. Low: isClaimablePath (shared project-state/names.ts) and 02's safeDiskRel accept `.git.`, `.git `, `git~1`, `.git::$INDEX_ALLOCATION`; one shared predicate mirroring git's is_ntfs_dotgit / is_hfs_dotgit.
-2. Cosmetic: 02's refusal warning says "not a path inside the repository" for `.git/...` (02-upgrade-apply.ts ~1295, ~1371, ~1460); reword (check tests first).
-
 ### T306 · FNF[test-fakes-12] · 12's apply runs unguarded; 04's skipped runs (+2)
 
 status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:32Z · last: 2026-10-24T21:32Z · kind: test-only
@@ -787,14 +780,6 @@ Sites:
 
 1. A role-admin owner's Retry under an administrator's pause lifts it with no byAdmin event or audit row (api tasks/_helpers.ts ~:1181).
 
-### T374 · FNF[audit-gkb-enforcement] · house-rule enforce/un-enforce writes no audit row (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:35Z · last: 2026-10-24T19:35Z · was modular #247
-DECIDED 2026-10-23: write the main-DB audit row first, and roll it back if the store write fails.
-Sites: api global-kb.ts PUT ~:1275, DELETE ~:1356.
-
-1. SecretsService.set and delete take no executor (shared config/secrets.service.ts:59, :74).
-
 ### T375 · FNF[diff-artifact-edges] · an untracked nested repo shows as unreadable although gate 3 commits it as a gitlink (+1)
 
 status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:07Z · last: 2026-10-24T21:07Z · was modular #250
@@ -881,14 +866,6 @@ status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z ·
 status: open · kind: design · was modular #270
 `maintenance.auto=false` closes gc.recentObjectsHook. An explicit gc still runs that hook.
 Measure growth, then find a safe repack/prune under hardened args.
-
-### T391 · FNF[cli-picker-preselect] · pickers preselect the newest provider; create accepts a disabled provider (+2)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:52Z · last: 2026-10-24T19:52Z · with T372 item 2 · was modular #272
-
-1. GET /cli-providers sorts desc(createdAt) with no tie-break. Pickers at tasks/[id]/page.tsx ~:1192, terminal/page.tsx ~:43-50, plan-chat.tsx ~:172, plan-starter.tsx ~:115 and repos/[id]/plan/page.tsx ~:356 should preselect via resolveDefaultCliProvider.
-2. api tasks/index.ts ~:518 accepts a disabled provider. Fix: answer 400 with the reason, and hide it in the dropdown.
-3. The seat dropdown shows two empty options (cli-picker-grid.tsx ~:219-221). 09_6's provider query has no ORDER BY.
 
 ### T392 · FNF[dispatch-adapter-build-error] · an adapter build error aborts the whole dispatch instead of trying the next provider
 
@@ -990,14 +967,6 @@ Recommendation: fall back to the default at run time, plus T391's create refusal
 1. (T391 review) PRE-EXISTING, minor: the effort dropdown stays enabled for a step whose effective CLI is the task's own disabled provider and sends that id (web cli-picker-grid.tsx ~:100-139, ~:193; tasks/[id]/page.tsx ~:1452), so an effort change is refused (409 before T391, 400 after) until the CLI is switched.
 2. (T391 review) PRE-EXISTING, informational: the shell sockets check ownership only, never `enabled` (api terminal-shell.ts ~:513-531, ~:553-586; worker terminal-container.ts ~:181-186), so "disabled providers are not offered in terminals" is enforced by the web alone.
 
-### T407 · FNF[plan-message-attribution] · plan chat records the task-level CLI as the answering provider (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:45Z · last: 2026-10-24T19:45Z · was modular #289
-
-1. worker plan-chat.ts ~:343.
-2. plan-merge.ts ~:585 stores a value nothing reads.
-3. resolveActiveAgentsTarget is duplicated in 07_5-verify-files.ts and 11-final-review.ts.
-
 ### T408 · FNF[default-change-provider-sensitive] · disabling/deleting the oldest provider moves the default CLI but parked provider-sensitive steps keep old detect output
 
 status: open · kind: design · was modular #290
@@ -1035,6 +1004,10 @@ From the T400 Codex run (2026-10-24), confirmed by the session.
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T391 — pickers preselect the oldest enabled provider; create refuses a disabled one (+2, with T372's picker label) — PR #902 (a4bb484eb), 2026-10-24
+- T407 — plan chat records the provider that answered (+1) — PR #899 (525098023), 2026-10-24
+- T374 — house-rule enforce/un-enforce write audit rows (+1) — PR #900 (42c518d8c), 2026-10-24
+- T304 — .git refusal catches NTFS aliases (+1) — PR #901 (0fce71181), 2026-10-24
 - T381 — AGENTS.md size test; requireAuth exceptions and the PUBLIC register named — PR #898 (4f91759b1), 2026-10-24
 - T380 — version refresh coalesces, poll routes check job ids, dead force flag gone (leftovers in T420) — PR #895 (892f3ea30), 2026-10-24
 - T411 — module, RAG and global-KB pools open every connection with client_connection_check_interval, so statements end with the pool — PR #893 (bce6d8a7b), 2026-10-24
