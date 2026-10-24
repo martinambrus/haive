@@ -1017,6 +1017,11 @@ From the T422 review (2026-10-24). PRE-EXISTING, consequential in kind, rare (me
 status: open
 From the T422 review (2026-10-24). PRE-EXISTING, minor, latent. api routes/cli-login-banner.ts ~:199-211 `extractClaudeOauthToken`: run inline, a 100-character body is accepted and cut to 108 characters, and a 90-character body followed by "Store this token securely" is accepted with 5 characters of the prose appended. Today's tokens match; a format change would save a wrong token, which the probe should then reject visibly. Fix: end the token at the first character outside its alphabet, and test the boundary.
 
+### T428 · FNF[refresh-result-hidden] · a version or price refresh that fails reports ok:false that no page reads
+
+status: open
+From the T420 review (2026-10-25). PRE-EXISTING design, minor. worker queues/cli-exec/handlers.ts ~:967-1010 records a refresh's source failures and completes the job with `ok: false` ("cannot fail the job"); web lib/cli-jobs.ts `runPricingRefresh` (since T420) and the catalog refresh discard the result, so a price-feed failure shows only as a per-CLI fetchError badge after the reload, and FX and catalog failures show nowhere. Fix: return the result and show the failed sources on the page.
+
 ## Done
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
