@@ -72,6 +72,10 @@ const PULL_BUSY = 'this repository has a task in flight; finish or cancel it bef
 const SAVE_BUSY =
   'this repository has a task in flight; the plan commit stays local and nothing was pushed; finish or cancel it before saving and pushing';
 
+export class PlanMirrorRefusal extends Error {
+  override readonly name = 'PlanMirrorRefusal';
+}
+
 async function requireOwnedRepository(repositoryId: string, userId?: string) {
   const repo = await getDb().query.repositories.findFirst({
     where: userId
@@ -244,7 +248,7 @@ export async function integrateOrigin(args: {
           ),
         )
         .limit(1);
-      if (open) throw new Error('A merge conversation is open for this repository');
+      if (open) throw new PlanMirrorRefusal('A merge conversation is open for this repository');
       return mergeInScratch(tx, args, gap, previousCommit, fence);
     });
     if (moved.retry && attempt < MOVE_ATTEMPTS) continue;
@@ -357,9 +361,9 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
           identity,
           kept,
         });
-        if (integrated.held !== undefined) throw new Error(SAVE_BUSY);
+        if (integrated.held !== undefined) throw new PlanMirrorRefusal(SAVE_BUSY);
         if (integrated.refused !== undefined) {
-          throw new Error(
+          throw new PlanMirrorRefusal(
             `${integrated.refused}; the plan commit stays local and nothing was pushed`,
           );
         }
@@ -414,7 +418,9 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
 
     return resultFor(repo.id, files, { committed, commitSha, pushed, branch });
   } catch (err) {
-    await recordPlanMirrorError(getDb(), repo.id, err).catch(() => undefined);
+    if (!(err instanceof PlanMirrorRefusal)) {
+      await recordPlanMirrorError(getDb(), repo.id, err).catch(() => undefined);
+    }
     throw err;
   }
 }
@@ -452,7 +458,7 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
     )
     .limit(1);
   if (busy.length > 0) {
-    throw new Error(PULL_BUSY);
+    throw new PlanMirrorRefusal(PULL_BUSY);
   }
 
   try {
@@ -473,9 +479,11 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
     const aside = await setAsideHaiveProjections(db, repo.id, repoPath, (conn) =>
       checkoutHoldingTasks(conn, repo.id),
     );
-    if (aside.outcome === 'held') throw new Error(PULL_BUSY);
+    if (aside.outcome === 'held') throw new PlanMirrorRefusal(PULL_BUSY);
     if (aside.outcome === 'refused') {
-      throw new Error(`${aside.reason}; nothing was pulled and the checkout was not moved`);
+      throw new PlanMirrorRefusal(
+        `${aside.reason}; nothing was pulled and the checkout was not moved`,
+      );
     }
     if (aside.outcome === 'set-aside') for (const [file, was] of aside.kept) kept.set(file, was);
 
@@ -516,9 +524,11 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
         identity,
         kept,
       });
-      if (integrated.held !== undefined) throw new Error(PULL_BUSY);
+      if (integrated.held !== undefined) throw new PlanMirrorRefusal(PULL_BUSY);
       if (integrated.refused !== undefined) {
-        throw new Error(`${integrated.refused}; nothing was pulled and the checkout was not moved`);
+        throw new PlanMirrorRefusal(
+          `${integrated.refused}; nothing was pulled and the checkout was not moved`,
+        );
       }
       const previousCommit = integrated.previousCommit;
       if (integrated.conflict) {
@@ -558,7 +568,9 @@ export async function pull(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
       return await recoverAfterMoveFailure(db, repo.id, repoPath, kept, before, err);
     }
   } catch (err) {
-    await recordPlanMirrorError(db, repo.id, err).catch(() => undefined);
+    if (!(err instanceof PlanMirrorRefusal)) {
+      await recordPlanMirrorError(db, repo.id, err).catch(() => undefined);
+    }
     throw err;
   }
 }
