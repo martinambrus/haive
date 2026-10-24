@@ -793,7 +793,7 @@ Sites:
 
 ### T374 · FNF[audit-gkb-enforcement] · house-rule enforce/un-enforce writes no audit row (+1)
 
-status: open · was modular #247
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:35Z · last: 2026-10-24T19:35Z · was modular #247
 DECIDED 2026-10-23: write the main-DB audit row first, and roll it back if the store write fails.
 Sites: api global-kb.ts PUT ~:1275, DELETE ~:1356.
 
