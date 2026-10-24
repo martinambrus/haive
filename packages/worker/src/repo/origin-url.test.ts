@@ -84,6 +84,19 @@ describe('origin URL boundary', () => {
     await expect(getOriginUrl(work)).rejects.toMatchObject({ name: 'OriginUrlError' });
     await expect(detectOrigin(work)).rejects.toThrow(path.join(tmpdir(), 'other-user'));
   });
+  it('validates a pushInsteadOf rewrite even when the fetch URL is allowed', async () => {
+    const work = await repo();
+    await gitRun(work, ['remote', 'add', 'origin', 'https://example.test/r']);
+    await gitRun(work, [
+      'config',
+      `url.${path.join(tmpdir(), 'other-user')}.pushInsteadOf`,
+      'https://example.test/',
+    ]);
+    expect((await gitRun(work, ['remote', 'get-url', '--all', 'origin'])).stdout.trim()).toBe(
+      'https://example.test/r',
+    );
+    await expect(getOriginUrl(work)).rejects.toMatchObject({ name: 'OriginUrlError' });
+  });
   it('validates the rewritten URL git actually uses', async () => {
     const work = await repo();
     await gitRun(work, ['remote', 'add', 'origin', 'https://example.test/r']);
