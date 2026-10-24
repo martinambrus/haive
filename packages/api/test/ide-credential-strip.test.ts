@@ -276,7 +276,7 @@ const TABLE: Row[] = [
     input: NEAR.map((n) => `${n}=1`).join('; '),
     exact: NEAR.map((n) => `${n}=1`).join('; '),
   },
-  { name: 'bare name', input: 'flag; haive_refresh=R', exact: 'flag' },
+  { name: 'bare name is not a cookie pair', input: 'flag; haive_refresh=R', exact: null },
   { name: 'empty pairs tolerated', input: 'a=1;;b=2;;', parsed: { a: '1', b: '2' } },
   { name: 'empty pairs around haive', input: ';;haive_access=A;;b=2', parsed: { b: '2' } },
   { name: 'haive first', input: 'haive_access=A; a=1; b=2', exact: 'a=1; b=2' },
