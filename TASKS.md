@@ -281,7 +281,7 @@ status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T19:28Z ·
 
 ### T306 · FNF[test-fakes-12] · 12's apply runs unguarded; 04's skipped runs (+2)
 
-status: open · kind: test-only
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T21:32Z · last: 2026-10-24T21:32Z · kind: test-only
 
 1. 12's 24 'written' runs are not wrapped in recordWritten (worker test/support/upgrade-apply-record.ts).
 2. 27 of 04's 61 runs report 'skipped' (no render snapshot in their fakes); seed or assert 'skipped'.
