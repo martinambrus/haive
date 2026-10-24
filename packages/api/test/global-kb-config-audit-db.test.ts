@@ -11,7 +11,7 @@ if (url && !new URL(url).pathname.startsWith('/global_kb_config_audit_test'))
 
 const h = vi.hoisted(() => {
   process.env.LOG_LEVEL = 'fatal';
-  return { db: undefined as unknown, userId: '' };
+  return { db: undefined as unknown, gdb: undefined as unknown, userId: '' };
 });
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -29,6 +29,19 @@ vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   },
 }));
 
+vi.mock('@haive/shared/global-kb', async (original) => ({
+  ...(await original<typeof import('@haive/shared/global-kb')>()),
+  withGlobalKb: async (_db: unknown, fn: (ctx: unknown) => Promise<unknown>) =>
+    fn({ db: h.gdb, settings: { namespace: 'default' } }),
+}));
+
+import postgres from 'postgres';
+import {
+  createGlobalKbDb,
+  ensureGlobalKbSchema,
+  globalKbEntries,
+  houseRuleContentToken,
+} from '@haive/shared/global-kb';
 import { Hono } from 'hono';
 import {
   CONFIG_KEYS,
@@ -106,9 +119,34 @@ const dropTriggers = async (db: Database) => {
   await db.execute(sql.raw('DROP FUNCTION IF EXISTS refuse_gkb_secret();'));
 };
 
-describe.skipIf(!url)('PUT /global-kb/config writes its audit row first, on Postgres', () => {
+describe.skipIf(!url)('global KB config and enforcement write audit rows first on Postgres', () => {
   let db: Database;
   let app: Hono<AppEnv>;
+  let store: ReturnType<typeof postgres>;
+  let storeDb: ReturnType<typeof createGlobalKbDb>;
+  const storeName = `global_kb_config_audit_test_store_${randomUUID().replaceAll('-', '')}`;
+  let storeCreated = false;
+  let entryId: string;
+
+  const enforcement = async (method: 'PUT' | 'DELETE') => {
+    const [row] = await storeDb
+      .select()
+      .from(globalKbEntries)
+      .where(eq(globalKbEntries.id, entryId));
+    return app.request(`/global-kb/entries/${entryId}/enforcement`, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      ...(method === 'PUT'
+        ? {
+            body: JSON.stringify({
+              mode: 'files',
+              globs: ['src/**/*.ts'],
+              expectedHash: houseRuleContentToken(row!),
+            }),
+          }
+        : {}),
+    });
+  };
 
   const put = (body: unknown) =>
     app.request('/global-kb/config', {
@@ -142,6 +180,14 @@ describe.skipIf(!url)('PUT /global-kb/config writes its audit row first, on Post
     db = createDatabase(url as string);
     h.db = db;
     await dropTriggers(db);
+    await db.execute(sql.raw(`CREATE DATABASE "${storeName}"`));
+    storeCreated = true;
+    const storeUrl = new URL(url!);
+    storeUrl.pathname = `/${storeName}`;
+    store = postgres(storeUrl.toString());
+    await ensureGlobalKbSchema({ pg: store, embeddingDimensions: 3 });
+    storeDb = createGlobalKbDb(store);
+    h.gdb = storeDb;
     Object.assign(configService, { redis, initialized: true });
     redisValues.set(CONFIG_KEYS.ENCRYPTION_KEY, generateEncryptionKey());
     await secretsService.initialize(db);
@@ -151,6 +197,8 @@ describe.skipIf(!url)('PUT /global-kb/config writes its audit row first, on Post
   });
 
   afterAll(async () => {
+    if (store) await store.end({ timeout: 5 });
+    if (storeCreated) await db.execute(sql.raw(`DROP DATABASE "${storeName}" WITH (FORCE)`));
     await dropTriggers(db);
     await db.delete(schema.systemSecrets).where(eq(schema.systemSecrets.key, SECRET_KEY));
     await db.$client.end({ timeout: 5 });
@@ -158,6 +206,17 @@ describe.skipIf(!url)('PUT /global-kb/config writes its audit row first, on Post
 
   beforeEach(async () => {
     h.userId = randomUUID();
+    entryId = randomUUID();
+    await storeDb.insert(globalKbEntries).values({
+      id: entryId,
+      namespace: 'default',
+      title: 'Rule',
+      body: 'Rule text must never enter the audit row.',
+      description: 'Description',
+      category: 'best_practice',
+      status: 'active',
+      source: 'user',
+    });
     const key = redisValues.get(CONFIG_KEYS.ENCRYPTION_KEY)!;
     redisValues.clear();
     redisValues.set(CONFIG_KEYS.ENCRYPTION_KEY, key);
@@ -169,9 +228,65 @@ describe.skipIf(!url)('PUT /global-kb/config writes its audit row first, on Post
   });
 
   afterEach(async () => {
+    await store.unsafe('DROP TRIGGER IF EXISTS refuse_store_write ON global_kb_entries');
+    await store.unsafe('DROP FUNCTION IF EXISTS refuse_store_write()');
+    await storeDb.delete(globalKbEntries).where(eq(globalKbEntries.id, entryId));
     await dropTriggers(db);
     await db.delete(schema.auditEvents).where(eq(schema.auditEvents.actorUserId, h.userId));
     await db.delete(schema.systemSecrets).where(eq(schema.systemSecrets.key, SECRET_KEY));
+  });
+
+  it('E1: enforcement and removal each write exactly one main-DB audit row', async () => {
+    expect((await enforcement('PUT')).status).toBe(200);
+    expect((await enforcement('DELETE')).status).toBe(200);
+    const all = await rows();
+    expect(all.map((r) => r.action)).toEqual([
+      'global_kb.house_rule.enforce',
+      'global_kb.house_rule.unenforce',
+    ]);
+    for (const row of all) {
+      expect(row.targetType).toBe('global_kb_entry');
+      expect(row.targetId).toBe(entryId);
+      expect(row.metadata).toEqual({ namespace: 'default', mode: 'files', globCount: 1 });
+    }
+  });
+
+  it('E2: refusing the main audit row prevents the store write', async () => {
+    await refuseAudit(db, []);
+    expect((await enforcement('PUT')).status).toBe(500);
+    const [row] = await storeDb
+      .select()
+      .from(globalKbEntries)
+      .where(eq(globalKbEntries.id, entryId));
+    expect(row!.enforcedHash).toBeNull();
+    expect(await rows()).toEqual([]);
+  });
+
+  it.each(['PUT', 'DELETE'] as const)(
+    'E3: a failed %s store write rolls back its audit row',
+    async (method) => {
+      if (method === 'DELETE') expect((await enforcement('PUT')).status).toBe(200);
+      const before = await rows();
+      await store.unsafe(
+        "CREATE FUNCTION refuse_store_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'store refused'; END $$",
+      );
+      await store.unsafe(
+        'CREATE TRIGGER refuse_store_write BEFORE UPDATE ON global_kb_entries FOR EACH ROW EXECUTE FUNCTION refuse_store_write()',
+      );
+      expect((await enforcement(method)).status).toBe(500);
+      expect(await rows()).toEqual(before);
+    },
+  );
+
+  it('E4: the documented cross-store commit window leaves no false audit row', async () => {
+    await refuseAuditAtCommit(db);
+    expect((await enforcement('PUT')).status).toBe(500);
+    const [row] = await storeDb
+      .select()
+      .from(globalKbEntries)
+      .where(eq(globalKbEntries.id, entryId));
+    expect(row!.enforcedHash).not.toBeNull();
+    expect(await rows()).toEqual([]);
   });
 
   it('S1: a refused audit row fails a new connection string and leaves the old one', async () => {
@@ -351,13 +466,14 @@ describe.skipIf(!url)('PUT /global-kb/config writes its audit row first, on Post
     expect(all[1]!.metadata).toEqual({ connectionStringSet: false });
   });
 
-  it('W1: a commit that fails after the string was stored leaves it without a row and answers 500', async () => {
+  it('W1: a failed commit rolls the string update back with its audit row', async () => {
     await armExternalWithOld();
     await refuseAuditAtCommit(db);
     const res = await put({ connectionString: NEW });
     expect(res.status).toBe(500);
     await dropTriggers(db);
-    expect(await storedSecret()).toBe(NEW);
+    expect(await secretsService.get(SECRET_KEY)).toBe(OLD);
+    expect(await storedSecret()).toBe(OLD);
     expect(await rows()).toEqual([]);
   });
 
@@ -371,13 +487,14 @@ describe.skipIf(!url)('PUT /global-kb/config writes its audit row first, on Post
     expect(await rows()).toEqual([]);
   });
 
-  it('W3: a commit that fails after the string was removed leaves it without a row and answers 500', async () => {
+  it('W3: a failed commit rolls the string deletion back with its audit row', async () => {
     await setSecretDirectly(OLD);
     await refuseAuditAtCommit(db);
     const res = await put({ clearConnectionString: true });
     expect(res.status).toBe(500);
     await dropTriggers(db);
-    expect(await storedSecret()).toBeNull();
+    expect(await secretsService.get(SECRET_KEY)).toBe(OLD);
+    expect(await storedSecret()).toBe(OLD);
     expect(await rows()).toEqual([]);
   });
 });

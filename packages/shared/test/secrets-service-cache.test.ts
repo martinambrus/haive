@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Database } from '@haive/database';
+import type { Database, DbTx } from '@haive/database';
 import { encrypt, generateEncryptionKey } from '../src/crypto/index.js';
 
 const h = vi.hoisted(() => ({ key: '' }));
@@ -21,6 +21,13 @@ describe('SecretsService cache', () => {
     stored = encrypt('old', h.key);
     reads = 0;
     const db = {
+      insert: () => ({
+        values: (row: { encryptedValue: string }) => ({
+          onConflictDoUpdate: async () => {
+            stored = row.encryptedValue;
+          },
+        }),
+      }),
       delete: () => ({
         where: async () => {
           stored = null;
@@ -70,6 +77,26 @@ describe('SecretsService cache', () => {
     expect(await service.get('k')).toBe('old');
     await service.delete('k');
     expect(await service.get('k')).toBeNull();
+    expect(reads).toBe(2);
+  });
+
+  it('invalidates an executor write so a rollback never serves its uncommitted value', async () => {
+    expect(await service.get('k')).toBe('old');
+    const executor = {
+      insert: vi.fn(() => ({ values: () => ({ onConflictDoUpdate: async () => {} }) })),
+    } as unknown as DbTx;
+    await service.set('k', 'uncommitted', undefined, executor);
+    expect(executor.insert).toHaveBeenCalledTimes(1);
+    expect(await service.get('k')).toBe('old');
+    expect(reads).toBe(2);
+  });
+
+  it('uses the executor for a deletion that rolls back', async () => {
+    expect(await service.get('k')).toBe('old');
+    const executor = { delete: vi.fn(() => ({ where: async () => {} })) } as unknown as DbTx;
+    await service.delete('k', executor);
+    expect(executor.delete).toHaveBeenCalledTimes(1);
+    expect(await service.get('k')).toBe('old');
     expect(reads).toBe(2);
   });
 
