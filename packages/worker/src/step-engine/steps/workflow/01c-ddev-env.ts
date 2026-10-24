@@ -87,7 +87,10 @@ async function ddevConfigExists(workspace: string): Promise<boolean> {
  *  `configHash` covers the whole authored `.ddev/` input tree (php ini, web-build
  *  Dockerfile, extra compose/config, …), falling back to a config.yaml-only hash on
  *  a non-git workspace — 07c recomputes the same way so both sides stay comparable. */
-async function readDdevBaseline(workspace: string | null): Promise<DdevBaseline | null> {
+export async function readDdevBaseline(
+  workspace: string | null,
+  logger: StepContext['logger'],
+): Promise<DdevBaseline | null> {
   if (!workspace) return null;
   const { anchor, rel } = ddevConfigRef(workspace);
   // Lenient: `null` covers absent, unreadable and refused alike, and the documented contract for
@@ -95,12 +98,21 @@ async function readDdevBaseline(workspace: string | null): Promise<DdevBaseline 
   const text = await readTextNoFollow(anchor, rel);
   if (text === null) return null;
   const parsed = parseDdevConfig(text);
+  let inputsHash: string | null;
+  try {
+    inputsHash = await hashDdevInputs(workspace);
+  } catch (err) {
+    logger.warn(
+      { err, workspace },
+      'ddev env: the .ddev/ inputs could not be hashed; no baseline recorded, so the reconcile step is skipped',
+    );
+    return null;
+  }
   return {
     phpVersion: parsed.phpVersion,
     dbType: parsed.dbType,
     dbVersion: parsed.dbVersion,
-    configHash:
-      (await hashDdevInputs(workspace)) ?? createHash('sha256').update(text).digest('hex'),
+    configHash: inputsHash ?? createHash('sha256').update(text).digest('hex'),
   };
 }
 
@@ -313,7 +325,7 @@ export const ddevEnvStep: StepDefinition<DdevEnvDetect, DdevEnvApply> = {
     await ensureDdevWithProgress(ctx, d.repoSubpath);
     const imported = false;
 
-    const baseline = await readDdevBaseline(d.workspace);
+    const baseline = await readDdevBaseline(d.workspace, ctx.logger);
     ctx.logger.info({ taskId: ctx.taskId, imported, baseline }, 'ddev env ready');
     return {
       started: true,

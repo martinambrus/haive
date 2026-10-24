@@ -248,8 +248,15 @@ async function loadReconcileState(ctx: StepContext): Promise<{
       // Hash the whole authored `.ddev/` tree (php ini, web-build Dockerfile, extra
       // compose/config, …), not just config.yaml — so an input edit outside config.yaml
       // still drives a restart. Fall back to config.yaml only on a non-git workspace.
-      targetHash =
-        (await hashDdevInputs(workspace)) ?? createHash('sha256').update(text).digest('hex');
+      try {
+        targetHash =
+          (await hashDdevInputs(workspace)) ?? createHash('sha256').update(text).digest('hex');
+      } catch (err) {
+        ctx.logger.warn(
+          { err, workspace },
+          '07c-ddev-reconcile: the .ddev/ inputs could not be hashed; DDEV is left as booted',
+        );
+      }
     }
   }
 
@@ -396,7 +403,11 @@ export const ddevReconcileStep: StepDefinition<ReconcileDetect, ReconcileApply> 
       return noop('no DDEV baseline/workspace — nothing to reconcile');
     }
     if (drift.kind === 'none') {
-      return noop('DDEV config unchanged since boot');
+      return noop(
+        targetHash === null
+          ? 'the .ddev/ inputs could not be hashed — DDEV left as booted'
+          : 'DDEV config unchanged since boot',
+      );
     }
     if (drift.kind === 'unsupported') {
       throw new Error(drift.unsupportedReason ?? 'unsupported DDEV database change');

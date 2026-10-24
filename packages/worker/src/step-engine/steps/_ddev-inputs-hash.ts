@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { readFileNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../repo/worktree-paths.js';
 import { gitRun } from '../../repo/git-push.js';
+import { gitGaveNoAnswer } from '../../repo/git-exec.js';
 
 export interface DdevInputEntry {
   /** workspace-relative path, e.g. `.ddev/php/extra.ini`. */
@@ -38,7 +39,9 @@ export function hashDdevEntries(entries: DdevInputEntry[]): string {
  *  an authored input is edited: `config.yaml`, `config.*.yaml`, `docker-compose.*.yaml`,
  *  `web-build/Dockerfile`, `php/*.ini`, `nginx_full/*`, `apache/*`, `mysql/*.cnf`, ….
  *  Returns null when `workspace` is not a git repo (git exits non-zero) so callers can
- *  fall back to a `config.yaml`-only hash and stay comparable on both sides of the diff. */
+ *  fall back to a `config.yaml`-only hash and stay comparable on both sides of the diff.
+ *  Throws when git gave no answer (no exit status, or the time bound), so a caller cannot take
+ *  that for "not a repo". */
 export async function hashDdevInputs(workspace: string): Promise<string | null> {
   const ls = await gitRun(workspace, [
     'ls-files',
@@ -49,6 +52,11 @@ export async function hashDdevInputs(workspace: string): Promise<string | null> 
     '--',
     '.ddev',
   ]);
+  if (gitGaveNoAnswer(ls)) {
+    throw new Error(
+      `git ls-files .ddev gave no answer in ${workspace}: ${(ls.stderr || ls.stdout).trim()}`,
+    );
+  }
   if (ls.code !== 0) return null;
 
   // The workspace is a WORKTREE, which sits under `.haive/` and so can never be the anchor;
