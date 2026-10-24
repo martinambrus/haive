@@ -1362,6 +1362,21 @@ describe('extractCodeSections — braces that are not code', () => {
     expect(sectionsOf(js, 'post.js').has('function-save')).toBe(true);
   });
 
+  it('keeps every class around a Java text block that holds a comment opener', () => {
+    const java = [
+      'class First { String s = """',
+      '    /* literal comment opener',
+      '    """; }',
+      'class Second {}',
+      '/* documentation */',
+      'class Third {}',
+      '',
+    ].join('\n');
+    const ids = [...sectionsOf(java, 'Text.java').keys()];
+
+    expect(ids).toEqual(expect.arrayContaining(['class-First', 'class-Second', 'class-Third']));
+  });
+
   it('ends an object-literal member at its own closing brace', () => {
     const src = [
       'var api = {',

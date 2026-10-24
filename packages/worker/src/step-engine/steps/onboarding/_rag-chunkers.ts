@@ -288,6 +288,15 @@ function lineStringEnd(text: string, open: number): number {
   return -1;
 }
 
+/** Index just past the `"""` that closes the Java text block opening at `open`, else -1. */
+function textBlockEnd(text: string, open: number): number {
+  for (let i = open + 3; i < text.length; i += 1) {
+    if (text[i] === '\\') i += 1;
+    else if (text.startsWith('"""', i)) return i + 3;
+  }
+  return -1;
+}
+
 /** Index just past the '}' that closes the '{' at `open`; a quoted string inside is skipped. */
 function interpolationEnd(text: string, open: number): number {
   let depth = 0;
@@ -405,7 +414,7 @@ function regexMayStart(prev: string | null): boolean {
 
 /** The spans of a JS, TS or Java file that are not code: comments, strings, template literals (their
  *  `${}` expressions too) and regex literals. A string that is a bare name stays: it may be a key. */
-function jsNonCode(text: string): Span[] {
+function jsNonCode(text: string, java: boolean): Span[] {
   const spans: Span[] = [];
   // The open template literals and `${` expressions, innermost last: -1 is template text, n >= 1
   // the braces open in an expression. Spans are recorded for the outermost template only.
@@ -475,6 +484,11 @@ function jsNonCode(text: string): Span[] {
         while (/[a-z]/.test(text[i] ?? '')) i += 1;
         prev = '';
       }
+    } else if (java && text.startsWith('"""', i) && textBlockEnd(text, i) >= 0) {
+      const end = textBlockEnd(text, i);
+      if (frames.length === 0) spans.push([i + 3, end - 3]);
+      prev = '';
+      i = end;
     } else if (c === "'" || c === '"') {
       const end = lineStringEnd(text, i);
       if (end < 0) {
@@ -531,10 +545,12 @@ function jsNonCode(text: string): Span[] {
 /** `content` with the body of every comment and string blanked, so that a pattern or a brace count
  *  cannot match inside one: PHP loses its inline HTML and heredocs too, JS its template and regex
  *  literals. Same length and line ends; the delimiters stay. */
-export function maskNonCode(content: string, syntax: 'php' | 'js'): string {
+export function maskNonCode(content: string, syntax: 'php' | 'js' | 'java'): string {
   let masked = '';
   let cursor = 0;
-  for (const [from, to] of syntax === 'php' ? phpNonCode(content) : jsNonCode(content)) {
+  for (const [from, to] of syntax === 'php'
+    ? phpNonCode(content)
+    : jsNonCode(content, syntax === 'java')) {
     masked += content.slice(cursor, from) + content.slice(from, to).replace(/[^\r\n]/g, ' ');
     cursor = to;
   }
@@ -752,7 +768,7 @@ function commentRunStart(content: string, start: number, headerAt: number): numb
 
 function jsRanges(content: string, members: boolean): SectionRange[] {
   const ranges: SectionRange[] = [];
-  const code = maskNonCode(content, 'js');
+  const code = maskNonCode(content, members ? 'js' : 'java');
   let match: RegExpExecArray | null;
   const headerAt = content.search(/\S/);
   // Java shares this reader but is read as before: no members, no comment join.
