@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { and, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
-import { LIVE_TASK_STATUSES, schema } from '@haive/database';
+import { schema } from '@haive/database';
 import {
   CONFIG_KEYS,
   CONTAINER_FAMILY,
@@ -50,10 +50,6 @@ const log = logger.child({ module: 'maintenance' });
 export const maintenanceRoutes = new Hono<AppEnv>();
 maintenanceRoutes.use('*', requireAuth);
 maintenanceRoutes.use('*', requireAdmin);
-
-/** Every unfinished status. `created` is in: a draft runs nothing but would find its module
- *  deactivated once started. */
-export const LIVE_TASK_STATES = LIVE_TASK_STATUSES;
 
 /** The most rows either list of GET /blocking answers. */
 export const BLOCKING_LIST_CAP = 200;

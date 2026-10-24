@@ -6,10 +6,16 @@ import { createDatabase, schema, type Database } from '@haive/database';
 import { configService, TASK_JOB_NAMES, type WorkflowType } from '@haive/shared';
 import { computeTaskTiming } from '@haive/shared/timing';
 import {
+  moduleTeardownRunning,
+  type LoadedWorkerModule,
+  type WorkerModuleEntry,
+} from '../src/modules/loader.js';
+import {
   markModuleSchemaFailed,
   markModuleSchemaReady,
   markModuleSchemaUnready,
 } from '../src/modules/schema-ready.js';
+import { runModuleTeardown } from '../src/queues/module-control-queue.js';
 import { processTaskJob, setContainerCleanupRunner } from '../src/queues/task-queue.js';
 import { stepRegistry } from '../src/step-engine/registry.js';
 
@@ -507,5 +513,53 @@ describe.skipIf(!url)('a module step whose schema is unready, on Postgres', () =
     expect(row!.statusMessage).toMatch(/^Paused/);
     expect(advances().at(-1)!.opts.delay).toBe(30_000);
     noPhaseRan();
+  });
+
+  it('J1: a step of a module with no schema ensure parks while its teardown hook runs, and runs once the hook has ended', async () => {
+    markModuleSchemaReady(MODULE);
+    await db.delete(schema.modules);
+    await setModule(OFF);
+    let endHook!: () => void;
+    let hookStarted!: () => void;
+    const started = new Promise<void>((resolve) => (hookStarted = resolve));
+    const entry: WorkerModuleEntry = {
+      packageName: `@haive/module-${MODULE}`,
+      manifest: {},
+      teardown: () =>
+        new Promise<void>((resolve) => {
+          endHook = resolve;
+          hookStarted();
+        }),
+    };
+    const tearingDown = runModuleTeardown(
+      {
+        db,
+        loaded: [{ manifest: { id: MODULE } } as unknown as LoadedWorkerModule],
+        entries: [entry],
+        jobsStarted: () => false,
+        teardownRunning: moduleTeardownRunning,
+      },
+      MODULE,
+    );
+    await started;
+    await db
+      .update(schema.modules)
+      .set({ deactivatedAt: null })
+      .where(eq(schema.modules.moduleId, MODULE));
+
+    await runningTask();
+    await tick();
+    const [parked] = await rows();
+    expect(parked).toMatchObject({ stepId: STEP, status: 'pending' });
+    expect(parked!.waitingStartedAt).toBeInstanceOf(Date);
+    expect(parked!.statusMessage).toMatch(/teardown hook is still running/);
+    expect(parked!.statusMessage).toContain(MODULE);
+    noPhaseRan();
+    expect(advances()[0]!.opts.delay).toBe(5000);
+
+    endHook();
+    expect(await tearingDown).toMatchObject({ moduleId: MODULE, tornDownAt: null });
+    await runNext();
+    expect(phases.detect).toHaveBeenCalledTimes(1);
   });
 });

@@ -249,6 +249,7 @@ jobs:
           api test/integrations-broker.test.ts INTEGRATIONS_BROKER_TEST_URL integrations_broker_test pg
           api test/custom-mcp-db.test.ts CUSTOM_MCP_TEST_URL custom_mcp_test pg
           shared test/create-database-race.test.ts RACE_PG_URL create_database_race_test pg
+          shared test/module-db-abandoned-waiter.test.ts MODULE_DB_WAITER_TEST_URL module_db_waiter_test pg
           shared test/integrations-refresh-db.test.ts INTEGRATIONS_REFRESH_TEST_URL integrations_refresh_test pg
           shared test/integrations-clients-db.test.ts INTEGRATIONS_CLIENTS_TEST_URL integrations_clients_test pg
           shared test/integrations-resolution-db.test.ts INTEGRATIONS_RESOLUTION_TEST_URL integrations_resolution_test pg
