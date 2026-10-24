@@ -173,9 +173,10 @@ schema setup still run (jobs normally stop within one reconcile pass of the deac
 that outlives its wait keeps the refusal until it ends; a boot schema ensure that outlived its wait
 keeps it until it ends or its deadline runs out, and a job start that does not return keeps it
 until the same deadline runs out; the refusal says so), and while an earlier
-teardown hook of the module still runs. A teardown with a hook marks a module that has a schema
-ensure unready, so after Activate its steps park until a pass has ensured the schema again, and
-while the hook still runs (past its timeout it holds the module) their line names the hook.
+teardown hook of the module still runs. A teardown with a hook marks the module unready, so after
+Activate its steps park while the hook runs (past its timeout it holds the module) and their line
+names the hook. A module that has a schema ensure stays unready after the hook until a pass has
+ensured the schema again; one with none has no setup to wait for and is released when the hook ends.
 The hook has 10 minutes (`TEARDOWN_HOOK_TIMEOUT_MS`); past
 that the job fails, the hook may go on, and until it ends the module is held: no schema ensure, no job
 start and no second teardown, with one warning per hold in the worker log, and the hook can no longer

@@ -20,7 +20,7 @@ import {
   type LoadedWorkerModule,
   type WorkerModuleEntry,
 } from '../modules/loader.js';
-import { markModuleSchemaUnready } from '../modules/schema-ready.js';
+import { markModuleSchemaReady, markModuleSchemaUnready } from '../modules/schema-ready.js';
 
 const log = logger.child({ module: 'module-control' });
 
@@ -146,14 +146,15 @@ export async function runModuleTeardown(
   if (teardown) {
     // The jobs reconcile starts nothing of this module while its hook drops data.
     const endTeardown = beginModuleTeardown(moduleId);
-    if (deps.entries[index]?.ensureSchema) markModuleSchemaUnready(moduleId);
-    await runHook(
-      db,
-      moduleId,
-      teardown,
-      deps.hookTimeoutMs ?? TEARDOWN_HOOK_TIMEOUT_MS,
-      endTeardown,
-    );
+    markModuleSchemaUnready(moduleId);
+    // With no schema ensure to run again, the end of the hook is all the module waits for.
+    const release = deps.entries[index]?.ensureSchema
+      ? endTeardown
+      : () => {
+          endTeardown();
+          markModuleSchemaReady(moduleId);
+        };
+    await runHook(db, moduleId, teardown, deps.hookTimeoutMs ?? TEARDOWN_HOOK_TIMEOUT_MS, release);
   }
 
   // Conditional: a module activated again while the hook ran must not read as torn down.

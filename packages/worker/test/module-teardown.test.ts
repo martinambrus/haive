@@ -3,6 +3,7 @@ import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { moduleDatabaseName } from '@haive/shared/module-db';
+import { moduleSchemaNotReady, moduleSchemaWaitMessage } from '../src/modules/activation.js';
 import {
   MODULE_JOBS_RECONCILE_MS,
   moduleTeardownRunning,
@@ -196,6 +197,27 @@ describe.skipIf(!url)('module teardown on Postgres', () => {
     const result = await runModuleTeardown(deps(['alpha'], { alpha: hook }), 'alpha');
     expect(result).toEqual({ moduleId: 'alpha', tornDownAt: null });
     expect(await row('alpha')).toMatchObject({ deactivatedAt: null, tornDownAt: null });
+  });
+
+  it('holds the steps of a module with no schema ensure, activated again while the hook runs, until the hook ends', async () => {
+    await setModule('alpha', { deactivatedAt: OFF });
+    const seen: Array<{ notReady: boolean; wait: string | null }> = [];
+    const hook: Hook = async () => {
+      await db
+        .update(schema.modules)
+        .set({ deactivatedAt: null })
+        .where(eq(schema.modules.moduleId, 'alpha'));
+      seen.push({
+        notReady: moduleSchemaNotReady('module.alpha.x'),
+        wait: await moduleSchemaWaitMessage(db, 'module.alpha.x'),
+      });
+    };
+    await runModuleTeardown(deps(['alpha'], { alpha: hook }), 'alpha');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.notReady).toBe(true);
+    expect(seen[0]?.wait).toMatch(/teardown hook is still running.*module\.alpha\.x/);
+    expect(moduleSchemaNotReady('module.alpha.x')).toBe(false);
+    expect(await moduleSchemaWaitMessage(db, 'module.alpha.x')).toBeNull();
   });
 
   it('records nothing when the module is marked missing while the hook runs', async () => {
