@@ -140,22 +140,24 @@ step's own. An answer that reopens the task (continue, or accept with a next ste
 records the answer and points the task at its next step in one transaction, under the new-work fence
 and then the repository lock when the task had failed, so a refused or overtaken reopen leaves the
 gate parked with nothing recorded. The refused answer stays saved on its row. A task Retry, a settle
-and a CLI switch (of one step or of the whole task) that reset a row to `pending` drop it (`withoutGateAnswer`,
-`api/src/lib/task-control.ts`), because every write to a `pending` row is refused: a kept answer was
-a no-op that the stalled sweep re-drove for good. Migration `0210_heal_wedged_fix_loop_gate_rows`
-heals the rows an older build left that way (`pending`, unparked, holding a saved answer): the answer
-is dropped and the flag set, so the gate asks again, and the dropped answer is not restored
-(`gate-wedge-heal.test.ts` runs the file's SQL on Postgres). A Retry and a settle also set `pause_form_on_retry`
-on such a row, since a source step that auto-submits its defaults (`08-phase-5-verify`) would
-otherwise answer the gate itself with `continue` and run with the gate's values; the gate parks
-again and asks. `advanceStep` never auto-submits a form that carries the gate field, whatever
-supplies the answer: its defaults, the answers a step reuses from a prior task, or a pre-answer.
-Abort, an accept with no next step, a dead run list and a continue
-with no routable target close the row before they act. A resolver that finds the gate no longer its
-own (`row_not_owned`: a Retry, Skip or Stop took the row), the task moved to a newer epoch
-(`task_moved`), the reopen of a failed task refused (`revive_refused`, with the refusal's own
-reason) or no fix target to route to (`no_routable_target`) applies nothing and logs a
-`fix-loop gate answer not applied` warning naming the step, the action and that `reason`. On a task that failed before the
+and a CLI switch (of one step or of the whole task) that reset a row to `pending` drop it
+(`withoutGateAnswer`, `api/src/lib/task-control.ts`), because every write to a `pending` row is
+refused: a kept answer was a no-op that the stalled sweep re-drove for good. A Retry and a settle
+also set `pause_form_on_retry` on such a row, since a source step that auto-submits its defaults
+(`08-phase-5-verify`) would otherwise answer the gate itself with `continue` and run with the
+gate's values; the gate parks again and asks. `advanceStep` never auto-submits a form that carries
+the gate field, whatever supplies the answer: its defaults, the answers a step reuses from a prior
+task, or a pre-answer. Migration `0210_heal_wedged_fix_loop_gate_rows` heals the rows an older
+build left wedged (`pending`, unparked, holding a saved answer): it drops the answer and sets the
+flag, so the gate asks again, and the dropped answer is not restored. `gate-wedge-heal.test.ts`
+runs the file's SQL on Postgres, and `smoke:gate-reoffer` drives the real worker over a Retry, a
+never-answered gate, a pre-answered one, a Stop and a healed legacy row. Abort, an accept with no
+next step, a dead run list and a continue with no routable target close the row before they act.
+A resolver that finds the gate no longer its own (`row_not_owned`: a Retry, Skip or Stop took the
+row), the task moved to a newer epoch (`task_moved`), the reopen of a failed task refused
+(`revive_refused`, with the refusal's own reason) or no fix target to route to
+(`no_routable_target`) applies nothing and logs a `fix-loop gate answer not applied` warning naming
+the step, the action and that `reason`. On a task that failed before the
 answer was sent, the pickup guard admits the answer onto the `done` row as it would onto the parked
 form (`gateAnswerSentAfterFailure`, the task's `completed_at` against the job's own timestamp); a
 failure after it was sent, such as a Stop, keeps it out. `advanceStep`'s own `done` short-circuit
