@@ -148,7 +148,9 @@ is dropped and the flag set, so the gate asks again, and the dropped answer is n
 (`gate-wedge-heal.test.ts` runs the file's SQL on Postgres). A Retry and a settle also set `pause_form_on_retry`
 on such a row, since a source step that auto-submits its defaults (`08-phase-5-verify`) would
 otherwise answer the gate itself with `continue` and run with the gate's values; the gate parks
-again and asks. Abort, an accept with no next step, a dead run list and a continue
+again and asks. `advanceStep` never auto-submits a form that carries the gate field, whatever
+supplies the answer: its defaults, the answers a step reuses from a prior task, or a pre-answer.
+Abort, an accept with no next step, a dead run list and a continue
 with no routable target close the row before they act. A resolver that finds the gate no longer its
 own (`row_not_owned`: a Retry, Skip or Stop took the row), the task moved to a newer epoch
 (`task_moved`), the reopen of a failed task refused (`revive_refused`, with the refusal's own
