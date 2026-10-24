@@ -165,7 +165,7 @@ From the T388 review (2026-10-24). PRE-EXISTING, minor. Same class as T388 item 
 
 ### T420 · FNF[cli-job-polling-2] · the pricing page ignores its refresh job; other jobs can trim a polled result early (+1)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:45Z · last: 2026-10-25T00:45Z
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:45Z · last: 2026-10-25T02:30Z · merged PR #914 (d6b37bac3), browser-checked, waiting for main CI
 From the T380 review (2026-10-24). PRE-EXISTING, minor.
 
 1. packages/web/src/app/(app)/admin/pricing/page.tsx ~:137-140 ignores the `jobId` "Refresh now" returns and re-reads once after a fixed 4 s, while the refresh can queue behind agents for minutes, so the page can show stale numbers. Poll the job (web lib/cli-jobs.ts) instead.
