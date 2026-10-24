@@ -56,6 +56,7 @@ import {
   probeOllama,
   releaseEmbedModelIfUnused,
 } from '@haive/shared/rag';
+import { loadUsableProvider } from '../lib/step-cli-choice.js';
 import { getDb } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getGlobalKbSyncQueue } from '../queues.js';
@@ -662,14 +663,7 @@ globalKbRoutes.post('/enrich', requireNewWorkAllowed, async (c) => {
     });
     if (!repo) throw new HttpError(404, 'Repository not found');
   }
-  const provider = await db.query.cliProviders.findFirst({
-    where: and(
-      eq(schema.cliProviders.id, data.cliProviderId),
-      eq(schema.cliProviders.userId, userId),
-    ),
-    columns: { id: true },
-  });
-  if (!provider) throw new HttpError(404, 'CLI provider not found');
+  await loadUsableProvider(db, userId, data.cliProviderId);
 
   // Refused here, a disabled type writes no skeleton; the task's transaction reads it again.
   await definitionForCreate(db, 'kb_author', { generic: false });

@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, notInArray, sql } from 'drizzle-orm';
 import { Queue } from 'bullmq';
-import { schema, type Database } from '@haive/database';
+import { CLEAR_STEP_USAGE_STAMP, schema, type Database } from '@haive/database';
 import {
   CLI_RULES_TEMPLATE_KIND,
   configService,
@@ -740,7 +740,7 @@ const REMOVED_STEP_IDS = ['06-workflow-prefs'];
 async function skipRemovedSteps(db: Database): Promise<void> {
   await db
     .update(schema.taskSteps)
-    .set({ status: 'skipped', endedAt: new Date() })
+    .set({ status: 'skipped', endedAt: new Date(), ...CLEAR_STEP_USAGE_STAMP })
     .where(
       and(
         inArray(schema.taskSteps.stepId, REMOVED_STEP_IDS),

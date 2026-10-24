@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { CLEAR_STEP_USAGE_STAMP, schema } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD } from '@haive/shared';
 import { getDb } from '../db.js';
 import { killTaskSandboxes } from './sandbox-kill.js';
@@ -238,6 +238,7 @@ async function failStuckSteps(
     .update(schema.taskSteps)
     .set({
       status: 'failed',
+      ...CLEAR_STEP_USAGE_STAMP,
       errorMessage: `Stopped by ${by}`,
       endedAt: now,
       statusMessage: null,

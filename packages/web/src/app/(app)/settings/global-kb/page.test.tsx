@@ -120,12 +120,12 @@ const CONFIG = {
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-async function mount(config: Record<string, unknown> = {}) {
+async function mount(config: Record<string, unknown> = {}, providers: unknown[] = []) {
   api.get.mockImplementation(async (path: string) => {
     if (path === CONFIG_PATH) return { ...CONFIG, ...config };
     if (path.startsWith('/global-kb/entries')) return { entries: [], total: 0, frameworks: [] };
     if (path === '/repos') return { repositories: [] };
-    if (path === '/cli-providers') return { providers: [] };
+    if (path === '/cli-providers') return { providers };
     throw new Error(`unexpected GET ${path}`);
   });
   hooks.slots = [];
@@ -172,6 +172,7 @@ async function mount(config: Record<string, unknown> = {}) {
   field('cfg-mode');
 
   return {
+    field,
     settle,
     button,
     press: (name: string) => press(button(name), name),
@@ -211,6 +212,7 @@ async function mount(config: Record<string, unknown> = {}) {
 const configPuts = () => api.put.mock.calls.filter(([path]) => path === CONFIG_PATH);
 
 beforeEach(() => {
+  window.location.search = '';
   api.get.mockReset();
   api.post.mockReset();
   api.put.mockReset();
@@ -393,5 +395,29 @@ describe('Save connection', () => {
     expect(configPuts()).toEqual([
       [CONFIG_PATH, { mode: 'external', connectionString: 'postgres://typed:secret@elsewhere/kb' }],
     ]);
+  });
+});
+
+describe('the enrichment CLI picker', () => {
+  const providers = [
+    { id: 'on', name: 'codex', label: 'Same label', enabled: true },
+    { id: 'off', name: 'codex', label: 'Same label', enabled: false },
+  ];
+
+  it.each([
+    ['on', 'on'],
+    ['off', ''],
+    ['missing', ''],
+  ])('accepts only an enabled CLI from ?cli=%s', async (requested, expected) => {
+    window.location.search = `?repo=repo-1&cli=${requested}`;
+    const view = await mount({}, providers);
+    const picker = view.field('enrich-cli');
+    expect(picker.props.value).toBe(expected);
+    expect(
+      flatten(picker.props.children)
+        .filter((e) => e.type === 'option')
+        .map((e) => e.props.value),
+    ).toEqual(['', 'on']);
+    expect(view.field('enrich-repo').props.value).toBe('repo-1');
   });
 });

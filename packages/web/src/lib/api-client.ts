@@ -526,6 +526,12 @@ export interface CliModelLimits {
   learnedAt: string;
 }
 
+/** The server computes the default with the same Date-based rule as dispatch. */
+export interface CliProvidersResponse {
+  providers: CliProvider[];
+  defaultProviderId: string | null;
+}
+
 export interface CliProvider {
   id: string;
   userId: string;

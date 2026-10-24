@@ -1,5 +1,5 @@
 import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { CLEAR_STEP_USAGE_STAMP, schema } from '@haive/database';
 import {
   logger,
   TASK_JOB_NAMES,
@@ -67,6 +67,7 @@ export async function cancelTaskRow(
     .update(schema.taskSteps)
     .set({
       status: 'failed',
+      ...CLEAR_STEP_USAGE_STAMP,
       errorMessage: 'Task cancelled',
       endedAt: now,
       // A parked step holds its live wait in waiting_started_at, which computeStepContribution
