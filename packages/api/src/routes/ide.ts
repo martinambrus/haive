@@ -55,6 +55,8 @@ const IDE_ENSURE_TIMEOUT_MS = 180_000;
 const HOP_BY_HOP = [
   'connection',
   'keep-alive',
+  'te',
+  'trailer',
   'transfer-encoding',
   'upgrade',
   'content-encoding',
@@ -73,6 +75,7 @@ function upstreamRequestHeaders(source: Headers): Headers {
   const dropped = new Set([
     'host',
     'authorization',
+    'expect',
     'connection',
     'keep-alive',
     'te',
@@ -163,6 +166,10 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
   const target = ideTarget(taskId, userId, repository);
   if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
 
+  if (!(await configService.getBoolean(CONFIG_KEYS.IDE_ENABLED, true))) {
+    throw new HttpError(403, 'IDE disabled');
+  }
+
   const url = new URL(c.req.url);
   const prefix = target.prefix;
   const rest = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : '/';
@@ -191,7 +198,13 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
   }
 
   const outHeaders = new Headers(resp.headers);
-  for (const h of HOP_BY_HOP) outHeaders.delete(h);
+  const droppedResponseHeaders = new Set([
+    ...HOP_BY_HOP,
+    ...(outHeaders.get('connection') ?? '').split(',').map((name) => name.trim().toLowerCase()),
+  ]);
+  for (const name of [...outHeaders.keys()]) {
+    if (droppedResponseHeaders.has(name) || name.startsWith('proxy-')) outHeaders.delete(name);
+  }
   withoutSessionSetCookies(outHeaders);
   // Re-prefix a root-absolute redirect so it stays inside the proxy namespace.
   const loc = outHeaders.get('location');
@@ -373,7 +386,7 @@ function proxyWsUpgrade(
       headers.set('connection', 'Upgrade');
       headers.set('upgrade', 'websocket');
       for (const [name, value] of headers) lines.push(`${name}: ${value}`);
-      upstream.write(`${lines.join('\r\n')}\r\n\r\n`);
+      upstream.write(Buffer.from(`${lines.join('\r\n')}\r\n\r\n`, 'latin1'));
       if (head && head.length) upstream.write(head);
       relayUpgradeResponse(upstream, socket, teardown, session);
       socket.pipe(upstream);

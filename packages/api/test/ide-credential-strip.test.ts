@@ -11,7 +11,7 @@ import type { AppEnv } from '../src/context.js';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const TASK = '00000000-0000-4000-8000-0000000000c1';
-const h = vi.hoisted(() => ({ db: undefined as unknown, ensure: vi.fn() }));
+const h = vi.hoisted(() => ({ db: undefined as unknown, ensure: vi.fn(), enabled: true }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', () => ({
@@ -42,7 +42,7 @@ vi.mock('../src/auth/jwt.js', async (importOriginal) => ({
 }));
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
-  configService: { getBoolean: async () => true },
+  configService: { getBoolean: async () => h.enabled },
 }));
 
 import { ideRoutes, installIdeWebSocket } from '../src/routes/ide.js';
@@ -74,6 +74,7 @@ let servers: Array<{ close: (cb: () => void) => unknown }> = [];
 
 beforeEach(() => {
   seedDb();
+  h.enabled = true;
   h.ensure.mockReset().mockResolvedValue({ waitUntilFinished: async () => ({ ok: true }) });
   fetchStub = vi.fn().mockImplementation(async () => new Response('up'));
   vi.stubGlobal('fetch', fetchStub);
@@ -655,4 +656,76 @@ describe('IDE malformed Connection controls', () => {
       expect(forwarded.get('x-app')).toBe('kept');
     },
   );
+});
+
+describe('IDE proxy boundary controls', () => {
+  it('drops response hop-by-hop and Connection-nominated headers', async () => {
+    const dropped: HeaderPairs = [
+      ['connection', 'keep-alive, X-Private, a b, x/y, "q"'],
+      ['keep-alive', 'timeout=5'],
+      ['te', 'trailers'],
+      ['trailer', 'x-trailer'],
+      ['proxy-authenticate', 'Basic'],
+      ['proxy-authorization', 'Basic secret'],
+      ['proxy-connection', 'keep-alive'],
+      ['proxy-custom', 'secret'],
+      ['x-private', 'secret'],
+      ['transfer-encoding', 'chunked'],
+      ['upgrade', 'websocket'],
+      ['content-encoding', 'identity'],
+      ['content-length', '2'],
+    ];
+    fetchStub.mockResolvedValue(
+      new Response('up', {
+        headers: [...dropped, ['x-app', 'kept'], ['set-cookie', 'app=ok']],
+      }),
+    );
+    const response = await app.request(`/ide/${TASK}/`);
+    expect(response.status).toBe(200);
+    for (const [name] of dropped) expect(response.headers.has(name), name).toBe(false);
+    expect(response.headers.get('x-app')).toBe('kept');
+    expect(response.headers.getSetCookie()).toEqual(['app=ok']);
+    expect(await response.text()).toBe('up');
+  });
+
+  it('removes Expect before a real undici request', async () => {
+    let gotExpect: string | undefined = 'not reached';
+    const upstream = createServer((req, res) => {
+      gotExpect = req.headers.expect;
+      res.end('saved');
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    servers.push(upstream);
+    const port = (upstream.address() as AddressInfo).port;
+    fetchStub.mockImplementation((_url: string, init: RequestInit) =>
+      realFetch(`http://127.0.0.1:${port}/save`, init),
+    );
+    const response = await app.request(`/ide/${TASK}/save`, {
+      method: 'POST',
+      body: 'payload',
+      headers: { expect: '100-continue' },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('saved');
+    expect(gotExpect).toBeUndefined();
+  });
+
+  it.each([`/ide/${TASK}`, `/ide/repos/${TASK}`])(
+    'refuses HTTP to a running editor when disabled: %s',
+    async (prefix) => {
+      h.enabled = false;
+      expect((await app.request(`${prefix}/static/a.js`)).status).toBe(403);
+      expect(fetchStub).not.toHaveBeenCalled();
+    },
+  );
+
+  it('replays non-ASCII cookie and other header bytes without UTF-8 re-encoding', async () => {
+    const rig = await wsRig();
+    // net.write encodes these as UTF-8 c3 a9; Node exposes those octets as latin1.
+    const { head } = await rig.upgrade([AUTH_LINE, 'Cookie: name=café', 'X-App: café']);
+    expect(head).toContain('cookie: name=cafÃ©\r\n');
+    expect(head).toContain('x-app: cafÃ©');
+    expect(head).not.toContain('haive_access');
+    expect(await httpCookie('name=cafÃ©; haive_access=A')).toBe('name=cafÃ©');
+  });
 });
