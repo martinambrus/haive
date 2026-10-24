@@ -1130,6 +1130,35 @@ describe('T323: repeated orphan removal failures', () => {
     return file;
   }
 
+  it('logs every removed orphan with its relative path and pass at debug level', async () => {
+    const files: [string, string][] = [
+      [await orphan(), 'repository'],
+      [await orphan('bundles'), 'bundle'],
+    ];
+    for (const [name, pass] of [
+      [`${randomUUID()}.zip`, 'finished archive'],
+      [`db-${randomUUID()}.sql`, 'finished dump'],
+    ] as const) {
+      const file = path.join(uploadsDir('repos'), name);
+      await writeFile(file, 'orphan');
+      await age(file, TTL + HOUR);
+      files.push([file, pass]);
+    }
+
+    const result = await reapAbandonedUploads(db());
+
+    expect(result.orphans).toBe(4);
+    expect(guard.warnings).toHaveLength(0);
+    expect(guard.debugs).toHaveLength(4);
+    for (const [file, pass] of files) {
+      const root = pass === 'bundle' ? roots.bundles : roots.repos;
+      expect(guard.debugs).toContainEqual([
+        { rel: path.relative(root, file), pass },
+        'orphan upload file removed',
+      ]);
+    }
+  });
+
   it('warns once across several passes, and again when the error code changes', async () => {
     const file = await orphan();
     guard.removal = () => true;
