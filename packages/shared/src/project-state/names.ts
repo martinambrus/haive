@@ -31,7 +31,7 @@ export function isCanonicalRepoPath(path: string): boolean {
 
 /** Whether any segment names git data under git's NTFS or HFS+ protections. */
 export function namesGitData(path: string): boolean {
-  return path.split('/').some((seg) => {
+  return path.split(/[\/\\]/).some((seg) => {
     // No Unicode case folding: git compares only ASCII letters in these names.
     const ascii = seg.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
     if (/^(?:\.git|git~1)[. ]*$/.test(ascii.split(':', 1)[0]!)) return true;

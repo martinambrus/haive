@@ -74,6 +74,13 @@ function classify(
 }
 
 describe('safeDiskRel', () => {
+  it.each(['x\\.git', '.git\\x', 'a\\.git\\b', 'a\\git~1\\b', 'x\\.git:x'])(
+    'refuses git data behind backslash separators in %j',
+    (path) => {
+      expect(safeDiskRel(path)).toBeNull();
+    },
+  );
+
   it.each(
     [
       '.git',

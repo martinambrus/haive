@@ -138,6 +138,14 @@ const ordinarySegments = [
 ];
 
 describe('git data filesystem aliases', () => {
+  it.each(['x\\.git', '.git\\x', 'a\\.git\\b', 'a\\git~1\\b', 'x\\.git:x'])(
+    'refuses git data behind backslash separators in %j',
+    (path) => {
+      expect(namesGitData(path)).toBe(true);
+      expect(isClaimablePath(path)).toBe(false);
+    },
+  );
+
   it.each(['.', '. '])('checks a long run of %j followed by a non-alias in linear time', (unit) => {
     const path = unit.repeat(200000) + 'x';
     const started = performance.now();
