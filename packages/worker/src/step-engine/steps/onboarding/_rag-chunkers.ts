@@ -250,8 +250,9 @@ type Span = [from: number, to: number];
 
 const PHP_OPEN_TAG = /<\?(?:php(?=\s|$)|=|(?=\s))/gi;
 const PHP_HEREDOC = /<<<[ \t]*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|([A-Za-z_]\w*))\r?\n/y;
-const REGEX_AFTER_WORD =
-  /^(?:return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/;
+const REGEX_AFTER_WORD = /^(?:return|typeof|instanceof|in|new|delete|void|throw|case|do|else)$/;
+/** Keywords only in their own syntax: an identifier anywhere else, so a slash after one divides. */
+const CONTEXTUAL_WORDS = new Set(['of', 'yield', 'await']);
 const BARE_NAME = /^[A-Za-z_$][\w$]*$/;
 const WORD_START = /[\p{L}_$]/u;
 const WORD_CHAR = /[\p{L}\p{N}_$]/u;
@@ -423,6 +424,8 @@ function jsNonCode(text: string, java: boolean): Span[] {
   let prev: string | null = null;
   let regexMisses = 0;
   let strayTicks = 0;
+  let sawGenerator = false;
+  let sawAsync = false;
   let i = 0;
   while (true) {
     if (i >= text.length) {
@@ -515,8 +518,16 @@ function jsNonCode(text: string, java: boolean): Span[] {
       let end = i + 1;
       while (end < text.length && WORD_CHAR.test(text[end]!)) end += 1;
       const word = text.slice(i, end);
+      if (word === 'async' || word === 'import' || word === 'export') sawAsync = true;
+      const operandBefore: boolean = prev !== null && !regexMayStart(prev);
       if (prev === '.') prev = '';
-      else if (word === 'default' && prev === 'export') prev = ';';
+      else if (CONTEXTUAL_WORDS.has(word)) {
+        const keyword: boolean =
+          word === 'of'
+            ? operandBefore
+            : !operandBefore && (word === 'yield' ? sawGenerator : sawAsync);
+        prev = keyword ? '/' : '';
+      } else if (word === 'default' && prev === 'export') prev = ';';
       else prev = word;
       i = end;
     } else if (c >= '0' && c <= '9') {
@@ -536,6 +547,12 @@ function jsNonCode(text: string, java: boolean): Span[] {
     } else if (c === '!' && next !== '=' && prev !== null && !regexMayStart(prev)) {
       i += 1;
     } else {
+      if (
+        c === '*' &&
+        (prev === 'function' || prev === null || ['{', '}', ',', ';'].includes(prev))
+      ) {
+        sawGenerator = true;
+      }
       prev = c;
       i += 1;
     }

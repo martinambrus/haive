@@ -1168,7 +1168,6 @@ describe('maskNonCode', () => {
       'typeof',
       'instanceof',
       'in',
-      'of',
       'new',
       'delete',
       'void',
@@ -1176,10 +1175,15 @@ describe('maskNonCode', () => {
       'case',
       'do',
       'else',
-      'yield',
-      'await',
     ]) {
       expect(maskNonCode(`${word} /{/.test(s);\n`, 'js')).not.toMatch(/[{}]/);
+    }
+    for (const src of [
+      'for (x of /{/.test(s)) {}\n',
+      'function* g() { yield /{/.test(s); }\n',
+      'async function f() { await /{/.test(s); }\n',
+    ]) {
+      expect(maskNonCode(src, 'js')).toContain(`/${blank('{')}/`);
     }
     expect(maskNonCode('/{/.test(s);\n', 'js')).toBe(`/${blank('{')}/.test(s);\n`);
     expect(maskNonCode('x = [.../a/.exec(s)];\n', 'js')).toBe(

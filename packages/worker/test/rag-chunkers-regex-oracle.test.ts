@@ -98,6 +98,19 @@ const CASES: string[] = [
   // a '}' that ends a block versus an object literal
   'function g() {}\n/a+/.test(s); function f1() { x(); }',
   'const a = {}\n/ 2; function f1() { x(); } const c = d / 3;',
+  // contextual keywords used as identifiers
+  'let of = 6; const n = of / 2; function save() { persist(); } const ratio = n / 3;',
+  'let of = 6; let n = of / 2; function f1() { x(); } const c = d / 3;',
+  'let of = 6; f(of / 2); function f1() { x(); } const c = d / 3;',
+  'let of = 6; f(a, of / 2); function f1() { x(); } const c = d / 3;',
+  'for (x of /a/g.exec(s)) {} function f1() { x(); }',
+  'for (const [a] of /a/.exec(s)) {} function f1() { x(); }',
+  'let yield_ = 1; const n = yield / 2; function f1() { x(); } const c = d / 3;',
+  'function* g() { yield /a/ } function f1() { x(); }',
+  'const n = await / 2; function f1() { x(); } const c = d / 3;',
+  'async function f() { await /a/.test(s) } function f1() { x(); }',
+  'let as = 4; as / 2; function f1() { x(); } const c = d / 3;',
+  'let from = 4; from / 2; function f1() { x(); } const c = d / 3;',
 ];
 
 const KNOWN_LIMITS = new Map<string, string>([
