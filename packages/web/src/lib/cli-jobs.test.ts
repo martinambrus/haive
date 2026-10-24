@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { CLI_POLLABLE_JOB_OPTS } from '@haive/shared/constants';
-import { jobPhaseForState, POLL_TIMEOUT_MS } from './cli-jobs';
+import { jobPhaseForState, POLL_TIMEOUT_MS, runPricingRefresh } from './cli-jobs';
 
 describe('jobPhaseForState', () => {
   it('calls only an active job running', () => {
@@ -33,5 +33,100 @@ describe('POLL_TIMEOUT_MS', () => {
     ]) {
       expect(POLL_TIMEOUT_MS).toBeLessThan(retention.age * 1000);
     }
+  });
+});
+
+const h = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
+vi.mock('./api-client', () => ({ api: h }));
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  h.post.mockReset().mockResolvedValue({ jobId: '42' });
+  h.get.mockReset().mockResolvedValue({ status: 'pending', state: 'waiting' });
+});
+afterEach(() => vi.useRealTimers());
+
+describe('queued job polling', () => {
+  it.each(['waiting', 'active'])('names the last observed phase at timeout (%s)', async (state) => {
+    h.get.mockResolvedValue({ status: 'pending', state });
+    const result = runPricingRefresh().catch((error: Error) => error);
+    await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS);
+    expect(((await result) as Error).message).toContain(
+      state === 'active' ? 'Still running.' : 'Still queued behind running CLI jobs.',
+    );
+  });
+
+  it('retries transient poll failures, resetting the bound after a successful poll', async () => {
+    h.get
+      .mockRejectedValueOnce(new TypeError('network down'))
+      .mockRejectedValueOnce(Object.assign(new Error('unavailable'), { status: 503 }))
+      .mockResolvedValueOnce({ status: 'pending', state: 'active' })
+      .mockRejectedValueOnce(new TypeError('network down again'))
+      .mockResolvedValueOnce({ status: 'done' });
+    const result = runPricingRefresh().then(
+      () => 'done',
+      () => 'failed',
+    );
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(await result).toBe('done');
+    expect(h.get).toHaveBeenCalledTimes(5);
+    expect(h.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up after three consecutive failed poll requests', async () => {
+    h.get.mockRejectedValue(new TypeError('offline'));
+    const result = runPricingRefresh().catch((error: Error) => error);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await result).toMatchObject({ message: 'offline' });
+    expect(h.get).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not retry an expired job or a refused request', async () => {
+    for (const failure of [
+      Object.assign(new Error('expired'), { code: 'job_expired', status: 404 }),
+      Object.assign(new Error('forbidden'), { status: 403 }),
+    ]) {
+      h.get.mockClear().mockRejectedValue(failure);
+      await expect(runPricingRefresh()).rejects.toBe(failure);
+      expect(h.get).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('aborts before enqueueing', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(runPricingRefresh(undefined, controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(h.post).not.toHaveBeenCalled();
+    expect(h.get).not.toHaveBeenCalled();
+  });
+
+  it('aborts the wait between polls and clears its timer', async () => {
+    const controller = new AbortController();
+    const result = runPricingRefresh(undefined, controller.signal).catch((error: Error) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    expect(await result).toMatchObject({ name: 'AbortError' });
+    await vi.advanceTimersByTimeAsync(POLL_TIMEOUT_MS);
+    expect(h.get).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('passes cancellation to an in-flight GET without retrying it', async () => {
+    const controller = new AbortController();
+    h.get.mockImplementation(
+      (_path: string, signal?: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    const result = runPricingRefresh(undefined, controller.signal).catch((error: Error) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.get).toHaveBeenCalledWith('/cli-pricing/refresh/42', controller.signal);
+    controller.abort();
+    expect(await result).toMatchObject({ name: 'AbortError' });
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

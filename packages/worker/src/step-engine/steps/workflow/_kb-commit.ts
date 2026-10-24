@@ -3,6 +3,7 @@ import type { Database } from '@haive/database';
 import { hasWorkspaceEntry } from '../../workspace-probe.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
+import { gitCommitStaged } from '../../../repo/git-commit.js';
 
 export const FALLBACK_GIT_IDENTITY = {
   GIT_AUTHOR_NAME: 'Haive',
@@ -63,13 +64,8 @@ export async function commitKnowledgeTrees(opts: {
   }
   const userEnv = await resolveGitEnv(opts.db, { userId: opts.userId, taskId: opts.taskId });
   const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-  const commit = await gitRun(workspace, ['commit', '-m', message], commitEnv);
-  if (commit.code !== 0) {
-    const stderr = commit.stderr || commit.stdout;
-    if (/nothing to commit/i.test(stderr)) {
-      return { committed: false, commitSha: null, message: 'nothing to commit' };
-    }
-    throw new Error(`git commit failed: ${stderr}`);
+  if (!(await gitCommitStaged(workspace, message, commitEnv))) {
+    return { committed: false, commitSha: null, message: 'nothing to commit' };
   }
   const sha = await gitRun(workspace, ['rev-parse', 'HEAD']);
   return { committed: true, commitSha: sha.code === 0 ? sha.stdout.trim() : null, message };

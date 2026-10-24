@@ -87,7 +87,11 @@ import {
   withoutGateAnswer,
 } from '../../lib/task-control.js';
 import { repriceTaskCliJobs } from '../../lib/reprice-cli-jobs.js';
-import { enqueueStart, markQueuedForStart } from '../../lib/task-start.js';
+import {
+  enqueueStart,
+  markQueuedForStart,
+  MissingTaskAttachmentsError,
+} from '../../lib/task-start.js';
 import { isTaskDead, loadTaskDead, refuseDeadTask } from '../../lib/task-dead.js';
 import { loadTaskStop, loadTaskStops } from '../../lib/task-stop.js';
 import { acceptsSavedDatabase, definitionForCreate } from '../../lib/task-type-definition.js';
@@ -478,17 +482,24 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const body = createTaskRequestSchema.parse(await c.req.json());
   const db = getDb();
 
+  if (body.deferStart && !body.repositoryId) {
+    throw new HttpError(409, 'Task has no repository; cannot attach files');
+  }
+
   if (body.repositoryId) {
     const repo = await db.query.repositories.findFirst({
       where: and(
         eq(schema.repositories.id, body.repositoryId),
         eq(schema.repositories.userId, userId),
       ),
-      columns: { id: true, source: true, writable: true },
+      columns: { id: true, source: true, writable: true, storagePath: true },
     });
     if (!repo) throw new HttpError(404, 'Repository not found');
     if (body.deferStart && isReadOnlyLocalRepo(repo)) {
       throw new HttpError(409, 'Attachments are not supported for read-only local repositories');
+    }
+    if (body.deferStart && !repo.storagePath) {
+      throw new HttpError(409, 'This repository is not ready for uploads yet');
     }
   }
 
@@ -726,6 +737,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         runListSnapshot,
         customSteps,
         status: 'created',
+        expectedAttachmentCount: body.deferStart ? (body.expectedAttachmentCount ?? null) : null,
       })
       .returning();
   };
@@ -1221,14 +1233,31 @@ taskRoutes.post('/:id/action', async (c) => {
       // `deferStart`): the row was made unstarted so the caller could upload
       // attachments, and this enqueues it once they landed.
       //
-      // Idempotent by construction. The UPDATE claims the `created` status
-      // atomically, so a second click matches no row and enqueues nothing —
-      // guarding with a read-then-write instead would let two clicks both pass
-      // the read and put the same task on the queue twice.
-      const started = await db.transaction(async (tx) => {
-        await admitNewWork(tx);
-        return markQueuedForStart(tx, id);
-      });
+      // Idempotent by construction. With a recorded count, the repository key
+      // and task row FOR UPDATE serialize the status re-read, original-upload
+      // count and claim in one transaction. A repeat returns before counting,
+      // with or without confirmation. The UPDATE claims `created` atomically
+      // for unrecorded counts too, so only one click enqueues START.
+      const started = await db
+        .transaction(async (tx) => {
+          await admitNewWork(tx);
+          return markQueuedForStart(tx, id, body.confirmMissingAttachments);
+        })
+        .catch((err: unknown) => {
+          if (err instanceof MissingTaskAttachmentsError) return err;
+          throw err;
+        });
+      if (started instanceof MissingTaskAttachmentsError) {
+        return c.json(
+          {
+            error: started.message,
+            code: 'task_attachments_missing',
+            landed: started.landed,
+            expected: started.expected,
+          },
+          409,
+        );
+      }
       if (!started) {
         return c.json({ ok: true, started: false, status: task.status });
       }

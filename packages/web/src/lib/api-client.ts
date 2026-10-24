@@ -166,10 +166,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>(path),
-  post: <T>(path: string, body?: unknown) =>
+  get: <T>(path: string, signal?: AbortSignal) => request<T>(path, { signal }),
+  post: <T>(path: string, body?: unknown, signal?: AbortSignal) =>
     request<T>(path, {
       method: 'POST',
+      signal,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     }),
   put: <T>(path: string, body?: unknown) =>
@@ -2219,6 +2220,7 @@ export function buildPlan(
      *  picks a job up immediately, so uploading afterwards would race the first
      *  step's detect. */
     deferStart?: boolean;
+    expectedAttachmentCount?: number;
     /** Ask clarifying questions about an outline before expanding it. Unset: on for a brief,
      *  off for a knowledge-base build. */
     clarify?: boolean;
@@ -2237,10 +2239,15 @@ export function getPlanBuildClis(repositoryId: string): Promise<{
 }
 
 /** Enqueue a task that was created but never started. Idempotent server-side, so
- *  a double-click cannot start it twice. */
-export function startTask(taskId: string): Promise<{ ok: true; started: boolean; status: string }> {
+ *  a double-click cannot start it twice. A short recorded upload count returns
+ *  409 task_attachments_missing with landed/expected; confirmMissingAttachments bypasses it. */
+export function startTask(
+  taskId: string,
+  confirmMissingAttachments = false,
+): Promise<{ ok: true; started: boolean; status: string }> {
   return api.post<{ ok: true; started: boolean; status: string }>(`/tasks/${taskId}/action`, {
     action: 'start',
+    ...(confirmMissingAttachments ? { confirmMissingAttachments: true } : {}),
   });
 }
 

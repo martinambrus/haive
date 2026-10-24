@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PlanStarter } from './plan-starter';
 import {
   buttons,
@@ -86,6 +86,36 @@ beforeEach(() => {
 });
 
 describe('PlanStarter when the start is refused', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it.each([true, false])(
+    'confirms missing uploads and keeps the draft when declined: %s',
+    async (yes) => {
+      const confirm = vi.fn(() => yes);
+      vi.stubGlobal('window', { confirm });
+      net.startTask.mockRejectedValueOnce(
+        Object.assign(new Error('arbitrary copy'), {
+          status: 409,
+          code: 'task_attachments_missing',
+          body: { landed: 1, expected: 2 },
+        }),
+      );
+      const view = await mount();
+      await press(view);
+      expect(net.buildPlan.mock.calls[0]![1]).toMatchObject({ expectedAttachmentCount: 2 });
+      expect(confirm).toHaveBeenCalledWith('1 of 2 attachments are missing. Start anyway?');
+      expect(net.startTask.mock.calls).toEqual(
+        yes ? [['draft-1'], ['draft-1', true]] : [['draft-1']],
+      );
+      expect(onNavigate.mock.calls).toEqual(yes ? [['/tasks/draft-1']] : []);
+      if (!yes) {
+        expect(page(view)).toContain('Attachments');
+        await press(view);
+        expect(net.buildPlan).toHaveBeenCalledTimes(1);
+        expect(onNavigate).toHaveBeenCalledWith('/tasks/draft-1');
+      }
+    },
+  );
+
   it('C1: the next press starts the same draft and creates nothing', async () => {
     net.startTask
       .mockReset()

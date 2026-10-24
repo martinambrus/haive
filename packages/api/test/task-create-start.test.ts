@@ -46,6 +46,7 @@ function setup() {
   const fake = createFakeDb({
     cliProviders: schema.cliProviders,
     tasks: schema.tasks,
+    taskAttachments: schema.taskAttachments,
     taskEvents: schema.taskEvents,
     repositories: schema.repositories,
     taskDatabaseStates: schema.taskDatabaseStates,
@@ -53,7 +54,13 @@ function setup() {
     databaseSnapshots: schema.databaseSnapshots,
     dbUploads: schema.dbUploads,
   });
-  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', status: 'ready' });
+  fake.insert(schema.repositories, {
+    id: REPO,
+    userId: USER,
+    name: 'repo',
+    status: 'ready',
+    storagePath: '/unused/task-create-start',
+  });
   h.db = fake.db;
   const task = () => fake.rows(schema.tasks).find((r) => r.id !== DRAFT)!;
   return { fake, task };
@@ -71,6 +78,32 @@ const starts = () =>
   h.add.mock.calls.filter(([name]) => name === TASK_JOB_NAMES.START).map(([, data]) => data);
 
 describe('POST /tasks', () => {
+  it.each([true, false])('records the picked count only for deferStart=%s', async (deferStart) => {
+    const t = setup();
+    const res = await post('/', {
+      type: 'workflow',
+      title: 'draft',
+      description: 'do it',
+      repositoryId: REPO,
+      deferStart,
+      expectedAttachmentCount: 3,
+    });
+    expect(res.status).toBe(201);
+    expect(t.task().expectedAttachmentCount).toBe(deferStart ? 3 : null);
+  });
+  it.each([-1, 1.5, 10001, '2'])('rejects invalid expected attachment count %s', async (count) => {
+    const t = setup();
+    const res = await post('/', {
+      type: 'workflow',
+      title: 'draft',
+      description: 'do it',
+      repositoryId: REPO,
+      deferStart: true,
+      expectedAttachmentCount: count,
+    });
+    expect(res.status).toBe(400);
+    expect(t.fake.rows(schema.tasks)).toHaveLength(0);
+  });
   const SNAPSHOT = '00000000-0000-4000-8000-0000000000c1';
   function savedDatabase() {
     const t = setup();
@@ -173,6 +206,31 @@ describe('POST /tasks', () => {
     expect(t.task().status).toBe('queued');
     expect(starts()).toEqual([{ taskId: body.task.id, userId: USER }]);
   });
+
+  it.each(['no repository', 'no storage path'])(
+    'refuses a deferred start with %s before creating a task',
+    async (missing) => {
+      const t = setup();
+      if (missing === 'no storage path') {
+        t.fake.patch(schema.repositories, REPO, { storagePath: null });
+      }
+      const body = {
+        type: 'workflow',
+        title: 'draft',
+        description: 'do it',
+        ...(missing === 'no storage path' ? { repositoryId: REPO } : {}),
+        deferStart: true,
+        expectedAttachmentCount: 1,
+      };
+      const res = await post('/', body);
+      expect(res.status).toBe(409);
+      expect(t.fake.rows(schema.tasks)).toHaveLength(0);
+      expect(t.fake.rows(schema.taskEvents)).toHaveLength(0);
+      expect(h.add).not.toHaveBeenCalled();
+      // Immediate creates still work without an upload destination.
+      expect((await post('/', { ...body, deferStart: false })).status).toBe(201);
+    },
+  );
 
   it('with deferStart refuses a read-only local repository, which takes no attachments', async () => {
     const t = setup();
@@ -277,19 +335,73 @@ describe('POST /tasks with an uploaded dump', () => {
 });
 
 describe('the start action', () => {
-  function draft() {
+  function draft(expectedAttachmentCount: number | null = null) {
     const t = setup();
     t.fake.insert(schema.tasks, {
       id: DRAFT,
       userId: USER,
       type: 'plan_build',
       title: 'draft',
+      expectedAttachmentCount,
       repositoryId: REPO,
       status: 'created',
     });
     const row = () => t.fake.rows(schema.tasks).find((r) => r.id === DRAFT)!;
     return { ...t, row };
   }
+
+  it.each([
+    { expected: 3, landed: 1, expanded: 0, confirm: false, status: 409 },
+    { expected: 3, landed: 1, expanded: 0, confirm: true, status: 200 },
+    { expected: 2, landed: 2, expanded: 0, confirm: false, status: 200 },
+    { expected: null, landed: 0, expanded: 0, confirm: false, status: 200 },
+    { expected: 0, landed: 0, expanded: 0, confirm: false, status: 200 },
+    { expected: 2, landed: 1, expanded: 3, confirm: false, status: 409 },
+  ])('checks original uploads before claiming START: %j', async (test) => {
+    const t = draft(test.expected);
+    for (let i = 0; i < test.landed + test.expanded; i++) {
+      t.fake.insert(schema.taskAttachments, {
+        taskId: DRAFT,
+        userId: USER,
+        filename: `${i}.md`,
+        storedPath: `/uploads/${i}.md`,
+        sizeBytes: 1,
+        expandedFromId: i < test.landed ? null : String(t.fake.rows(schema.taskAttachments)[0]!.id),
+      });
+    }
+    const before = structuredClone(t.row());
+    const res = await post(`/${DRAFT}/action`, {
+      action: 'start',
+      confirmMissingAttachments: test.confirm,
+    });
+    expect(res.status).toBe(test.status);
+    if (test.status === 409) {
+      expect(await res.json()).toMatchObject({
+        code: 'task_attachments_missing',
+        landed: test.landed,
+        expected: test.expected,
+      });
+      expect(t.row()).toEqual(before);
+      expect(t.fake.rows(schema.taskEvents)).toHaveLength(0);
+      expect(starts()).toHaveLength(0);
+    } else {
+      expect(await res.json()).toMatchObject({ started: true, status: 'queued' });
+      // The short count cannot make a repeated, already-started action conflict.
+      const startedRow = structuredClone(t.row());
+      const events = structuredClone(t.fake.rows(schema.taskEvents));
+      for (const confirmMissingAttachments of [false, true]) {
+        const again = await post(`/${DRAFT}/action`, {
+          action: 'start',
+          confirmMissingAttachments,
+        });
+        expect(again.status).toBe(200);
+        expect(await again.json()).toMatchObject({ started: false });
+        expect(t.row()).toEqual(startedRow);
+        expect(t.fake.rows(schema.taskEvents)).toEqual(events);
+        expect(starts()).toHaveLength(1);
+      }
+    }
+  });
 
   it('answers started with the task queued when its START cannot be queued', async () => {
     const t = draft();
