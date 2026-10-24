@@ -1389,7 +1389,10 @@ globalKbRoutes.delete('/entries/:id/enforcement', requireAdmin, async (c) => {
     // Read the audit context before opening the store transaction, then verify it under its lock.
     const [seen] = await conn.select().from(globalKbEntries).where(eq(globalKbEntries.id, id));
     if (!seen) throw new HttpError(404, 'global KB entry not found');
-    const metadata = enforcementAuditMetadata(seen.namespace, seen.enforce ?? ALWAYS);
+    if (seen.enforce === null) {
+      throw new HttpError(404, 'this entry was never enforced', 'not_enforced');
+    }
+    const metadata = enforcementAuditMetadata(seen.namespace, seen.enforce);
     return auditedChange(
       {
         actorUserId: c.get('userId'),

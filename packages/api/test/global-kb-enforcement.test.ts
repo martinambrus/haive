@@ -549,11 +549,28 @@ describe('DELETE /entries/:id/enforcement', () => {
   });
 
   it('answers 404 for an entry that was never enforced, and for one that does not exist', async () => {
+    let auditInsertAttempts = 0;
+    auditFake.hooks.beforeInsert = () => {
+      auditInsertAttempts += 1;
+    };
     const never = await unenforce();
     expect(never.status).toBe(404);
     expect((await asJson(never)).code).toBe('not_enforced');
 
     expect((await unenforce(MISSING)).status).toBe(404);
+    expect(auditInsertAttempts).toBe(0);
+  });
+
+  it('still refuses if enforcement disappears while waiting for the lock', async () => {
+    approve(ENTRY, FILES);
+    fake.hooks.beforeLock = () => {
+      fake.patch(globalKbEntries, ENTRY, { enforce: null, enforcedHash: null });
+    };
+
+    const res = await unenforce();
+
+    expect(res.status).toBe(404);
+    expect((await asJson(res)).code).toBe('not_enforced');
   });
 });
 
@@ -920,6 +937,7 @@ describe('a wait for the corpus lock that runs out', () => {
   it.each(lockingRoutes)(
     'stays a 500 on %s when the lock fails for another reason',
     async (_route, run) => {
+      approve(ENTRY, FILES);
       fake.hooks.beforeLock = () => {
         throw new Error('terminating connection due to administrator command');
       };
