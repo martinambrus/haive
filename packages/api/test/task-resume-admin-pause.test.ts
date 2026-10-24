@@ -373,6 +373,27 @@ describe('Retry of a failed paused task', () => {
       expect(fake.rows(schema.tasks)[0]?.pausedAt).toBeInstanceOf(Date);
     });
 
+    it('leaves an administrator pause that took over and kept the owner stamp', async () => {
+      const fake = make();
+      await pauseBy(OWNER);
+      const read = fake.rows(schema.tasks)[0]?.pausedAt;
+      fake.hooks.beforeUpdate = async (table) => {
+        if (table !== schema.tasks) return;
+        fake.hooks.beforeUpdate = null;
+        await (h.db as typeof fake.db).insert(schema.taskEvents).values({
+          taskId: TASK,
+          eventType: 'task.paused',
+          payload: { by: ADMIN.id, byAdmin: true, reason: 'maintenance' },
+          createdAt: new Date(Date.now() + 500),
+        });
+      };
+
+      const res = await retryBy(OWNER);
+
+      expect(res.status).toBe(200);
+      expect(fake.rows(schema.tasks)[0]?.pausedAt).toEqual(read);
+    });
+
     it('leaves the administrator pause that replaced the owner hold the Retry read', async () => {
       const fake = make();
       await pauseBy(OWNER);

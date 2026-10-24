@@ -21,6 +21,7 @@ import {
   type TaskProviderUsage,
 } from '@haive/shared/stats-server';
 import { getDb } from '../../db.js';
+import { clearTaskPause } from '../../lib/task-control.js';
 import { insertAuditEvent, type AuditEvent } from '../../lib/audit.js';
 import { HttpError } from '../../context.js';
 import { compositionSurvivesWithout, type StepFlagMap } from '../../lib/step-flags.js';
@@ -1166,6 +1167,17 @@ export async function findAdminPausedTaskIds(
 /** An administrator's pause is lifted only by an administrator. */
 export function adminPauseLocks(pausedByAdmin: boolean, role: string | undefined): boolean {
   return pausedByAdmin && role !== 'admin';
+}
+
+/** Judged again under the task row lock the caller holds. */
+export async function liftReadPause(
+  tx: DbTx,
+  taskId: string,
+  read: Date,
+  role: string | undefined,
+): Promise<boolean> {
+  if (adminPauseLocks((await findAdminPausedTaskIds(tx, [taskId])).has(taskId), role)) return false;
+  return clearTaskPause(tx, taskId, read);
 }
 
 /** The model-health canary validates THE task's model, so swapping the CLI on a

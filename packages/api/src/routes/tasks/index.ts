@@ -107,6 +107,7 @@ import {
   findAdminPausedTaskIds,
   findQueuedInvocationStepIds,
   loadFinishedRunsRevision,
+  liftReadPause,
   loadTaskTypeLabels,
   recordAdminResume,
   resolveCurrentStepCliProviderIds,
@@ -1259,13 +1260,11 @@ taskRoutes.post('/:id/action', async (c) => {
       if (task.status !== 'failed') {
         throw new HttpError(409, `Cannot retry task in status ${task.status}`);
       }
-      // Retry lifts only the hold it read, and never an administrator's: a 409 would strand a
-      // failed task, which the maintenance list omits.
-      const liftPause =
-        task.pausedAt &&
-        !adminPauseLocks((await findAdminPausedTaskIds(db, [id])).has(id), c.get('userRole'))
-          ? task.pausedAt
-          : undefined;
+      // Retry lifts only the hold it read, and never an administrator's; it still revives the task,
+      // since a refusal would leave its owner nothing to do until an administrator acts.
+      const liftPause = task.pausedAt
+        ? { read: task.pausedAt, role: c.get('userRole') }
+        : undefined;
       // A task that stopped on a step re-runs that step. START replays the task from its first
       // step, which only a task that never reached one still needs.
       const [target] = task.currentStepId
@@ -1342,7 +1341,7 @@ taskRoutes.post('/:id/action', async (c) => {
         if (!moved) throw new HttpError(409, 'The task is no longer failed; reload it');
         // Retrying a paused task means "run it". Leaving the hold set would restart the task
         // straight into the pause park, with Retry apparently doing nothing.
-        if (liftPause) await clearTaskPause(tx, id, liftPause);
+        if (liftPause) await liftReadPause(tx, id, liftPause.read, liftPause.role);
       });
       // Answering a parked form revives the task, so its pass can open a row between the settle
       // above and the bump. None can at the old epoch after it, so settle once more.

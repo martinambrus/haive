@@ -49,12 +49,7 @@ import { HttpError, type AppEnv } from '../../context.js';
 import { admitNewWork, assertNewWorkAllowed } from '../../middleware/maintenance.js';
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
-import {
-  cancelLiveRuns,
-  clearTaskPause,
-  reofferParkedSteps,
-  withoutGateAnswer,
-} from '../../lib/task-control.js';
+import { cancelLiveRuns, reofferParkedSteps, withoutGateAnswer } from '../../lib/task-control.js';
 import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
@@ -68,6 +63,7 @@ import {
   enrichStepsWithCliPreferences,
   enrichStepsWithSkipFlag,
   isStepSkippable,
+  liftReadPause,
   propagateModelHealthCliToTaskDefault,
   rolledUpRunsOf,
 } from './_helpers.js';
@@ -257,7 +253,7 @@ async function moveTaskToStep(
   >,
   leftActive: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
-  opts: { fromFailed?: boolean; liftPause?: Date } = {},
+  opts: { fromFailed?: boolean; liftPause?: { read: Date; role: string | undefined } } = {},
 ) {
   // The task leaves `failed` here for every caller, so the revival checks sit here too.
   await refuseReviveBesideLive(tx, taskId);
@@ -286,7 +282,9 @@ async function moveTaskToStep(
     throw new HttpError(409, opts.fromFailed ? RETRY_RACED_MESSAGE : ENDED_TASK_MESSAGE);
   }
   // A task Retry means "run it", so the hold it read goes with it.
-  if (opts.liftPause) await clearTaskPause(tx, taskId, opts.liftPause);
+  if (opts.liftPause) {
+    await liftReadPause(tx, taskId, opts.liftPause.read, opts.liftPause.role);
+  }
   const late = await rowsActivatedMeanwhile(tx, taskId, [step.id]);
   await resetRowsForRerun(tx, taskId, late, now);
   return { epoch: bumped.epoch, leftActive: [...leftActive, ...late] };
@@ -308,7 +306,7 @@ export async function retryTaskAtStep(
   taskId: string,
   userId: string,
   target: typeof schema.taskSteps.$inferSelect,
-  opts: { liftPause?: Date } = {},
+  opts: { liftPause?: { read: Date; role: string | undefined } } = {},
 ): Promise<{ epoch: number }> {
   const rows = await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.taskId, taskId));
   const downstream = rows.filter(

@@ -837,7 +837,7 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
 
     describe('when an administrator pause lands while the owner request waits on the task row lock', () => {
       const adminStamp = () => new Date(Date.now() + 60_000);
-      const holdRowLock = async (taskId: string, stamp: Date) => {
+      const holdRowLock = async (taskId: string, stamp: Date | null) => {
         let release = () => {};
         const gate = new Promise<void>((resolve) => {
           release = resolve;
@@ -854,7 +854,12 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
             .for('update');
           locked();
           await gate;
-          await tx.update(schema.tasks).set({ pausedAt: stamp }).where(eq(schema.tasks.id, taskId));
+          if (stamp) {
+            await tx
+              .update(schema.tasks)
+              .set({ pausedAt: stamp })
+              .where(eq(schema.tasks.id, taskId));
+          }
           await tx.insert(schema.taskEvents).values({
             taskId,
             eventType: 'task.paused',
@@ -908,6 +913,47 @@ describe.skipIf(!url)('maintenance routes on Postgres', () => {
 
         expect(res.status).toBe(200);
         expect(await stored(row.id)).toEqual(stamp);
+      });
+
+      describe.each([
+        ['START replay', false],
+        ['step target', true],
+      ])('a takeover that keeps the stamp, %s', (_shape, onStep) => {
+        it("leaves the administrator's pause in place on a Retry that read the owner hold", async () => {
+          const STEP = '07-phase-2-implement';
+          const row = await task(
+            onStep
+              ? { status: 'failed', currentStepId: STEP, currentRound: 0 }
+              : { status: 'failed' },
+          );
+          if (onStep) {
+            await db.insert(schema.taskSteps).values({
+              taskId: row.id,
+              stepId: STEP,
+              stepIndex: 7,
+              round: 0,
+              title: 'Implement',
+              status: 'failed',
+            });
+          }
+          as(OWNER, 'user');
+          expect((await ownerAct(row.id, 'pause')).status).toBe(200);
+          const stamp = await stored(row.id);
+          const lock = await holdRowLock(row.id, null);
+
+          const pending = ownerAct(row.id, 'retry');
+          await waitUntilBlocked();
+          lock.release();
+          await lock.done;
+          const res = await pending;
+
+          expect(res.status).toBe(200);
+          expect(
+            (await db.query.tasks.findFirst({ where: eq(schema.tasks.id, row.id) }))?.status,
+          ).not.toBe('failed');
+          expect(await stored(row.id)).toEqual(stamp);
+          expect((await findAdminPausedTaskIds(db, [row.id])).has(row.id)).toBe(true);
+        });
       });
     });
 
