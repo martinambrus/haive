@@ -101,7 +101,8 @@ left. Seven rules keep it that way, each MEASURED on git 2.43 and 2.54:
   no shared ref. Each pass deletes its own ref when it ends; a crashed pass's leftovers are swept
   only in the sections that end the step (`done`, or a halt), never at a pass's start, since two
   passes of one step can be fetching at once. A failure to record it warns and pushes the local base,
-  as a failed fetch does. The push runs outside a section, since it is network-bound, and sends the
+  as a failed fetch does. A refused origin (`OriginUrlError`) gets the same warning at the fetch, and
+  the push then refuses it and halts the step for a Retry. The push runs outside a section, since it is network-bound, and sends the
   commit a section read from the base ref (read in the repository's own checkout, whose refs the
   base worktree shares; a tip that cannot be read halts the step rather than pushing by name, and
   the plan merge and plan mirror refuse the same way) (`<sha>:refs/heads/<base>`, with the upstream set afterwards; a failed upstream setup does not fail the push, it is logged and

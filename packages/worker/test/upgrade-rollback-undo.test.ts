@@ -48,6 +48,7 @@ import type { StepContext } from '../src/step-engine/step-definition.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 import { recordWritten, ROLLBACK_RECORD_WRITE_TABLES } from './support/upgrade-apply-record.js';
+import { seedRollbackSnapshot } from './support/upgrade-rollback-snapshot.js';
 
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
@@ -72,6 +73,7 @@ async function setup() {
     customBundleItems: schema.customBundleItems,
     cliProviders: schema.cliProviders,
     repositories: schema.repositories,
+    ...ROLLBACK_RECORD_WRITE_TABLES,
   });
   const row = fake.insert(schema.onboardingArtifacts, {
     userId: USER,
@@ -84,6 +86,12 @@ async function setup() {
     templateContentHash: sha256Hex(normalizeContent('HAIVE\n')),
     writtenHash: sha256Hex(normalizeContent('HAIVE\n')),
     source: 'upgrade',
+  });
+  fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+  seedRollbackSnapshot(fake, {
+    userId: USER,
+    repositoryId: REPO,
+    taskId: '00000000-0000-4000-8000-0000000000c3',
   });
   const noop = () => undefined;
   const ctx = {
@@ -113,7 +121,7 @@ async function setup() {
 describe('rolling back a file an upgrade introduced', () => {
   it('deletes it while it holds what the upgrade wrote', async () => {
     const { root, fake, ctx, detected } = await setup();
-    const out = await upgradeRollbackStep.apply(ctx, { detected } as never);
+    const out = await recordWritten(upgradeRollbackStep.apply(ctx, { detected } as never));
     expect(out.revertedCount).toBe(1);
     await expect(lstat(join(root, REL))).rejects.toMatchObject({ code: 'ENOENT' });
     expect(fake.rows(schema.onboardingArtifacts)[0]!.supersededAt).toBeInstanceOf(Date);
@@ -125,7 +133,7 @@ describe('rolling back a file an upgrade introduced', () => {
     detected.newArtifactsToUndo = [
       { ...undo, diskPath: 'AGENTS.md', templateKind: CLI_RULES_TEMPLATE_KIND },
     ];
-    await upgradeRollbackStep.apply(ctx, { detected } as never);
+    await recordWritten(upgradeRollbackStep.apply(ctx, { detected } as never));
     await expect(lstat(join(root, 'AGENTS.md'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
@@ -146,11 +154,14 @@ describe('rolling back a file an upgrade introduced', () => {
       supersededAt: new Date(),
     });
     const undo = { ...detected.newArtifactsToUndo[0]!, retiredRowId: retired.id };
-    await upgradeRollbackStep.apply(ctx, {
-      detected: { ...detected, newArtifactsToUndo: [undo] },
-    } as never);
+    await recordWritten(
+      upgradeRollbackStep.apply(ctx, {
+        detected: { ...detected, newArtifactsToUndo: [undo] },
+      } as never),
+    );
     await expect(lstat(join(root, REL))).rejects.toMatchObject({ code: 'ENOENT' });
     expect(fake.rows(schema.onboardingArtifacts).filter((r) => r.supersededAt == null)).toEqual([
+      expect.objectContaining({ diskPath: '.claude/workflow-config.json', source: 'onboarding' }),
       expect.objectContaining({
         diskPath: REL,
         source: 'rollback',
@@ -172,9 +183,11 @@ describe('rolling back a file an upgrade introduced', () => {
       writtenHash: sha256Hex(region),
       fileCreated: true,
     };
-    await upgradeRollbackStep.apply(ctx, {
-      detected: { ...detected, newArtifactsToUndo: [undo] },
-    } as never);
+    await recordWritten(
+      upgradeRollbackStep.apply(ctx, {
+        detected: { ...detected, newArtifactsToUndo: [undo] },
+      } as never),
+    );
     return join(root, 'AGENTS.md');
   };
 
@@ -191,7 +204,7 @@ describe('rolling back a file an upgrade introduced', () => {
   it('never takes a file a person saved while its bytes were being judged', async () => {
     const { root, ctx, detected } = await setup();
     h.swap = { when: normalizeContent('HAIVE\n'), path: join(root, REL), content: 'MINE\n' };
-    await upgradeRollbackStep.apply(ctx, { detected } as never);
+    await recordWritten(upgradeRollbackStep.apply(ctx, { detected } as never));
     expect(h.swap).toBeNull();
     expect(await readFile(join(root, REL), 'utf8')).toBe('MINE\n');
   });
@@ -211,7 +224,7 @@ describe('rolling back a file an upgrade introduced', () => {
       },
     ];
     h.swap = { when: region, path: join(root, 'AGENTS.md'), content: 'MINE\n' };
-    await upgradeRollbackStep.apply(ctx, { detected } as never);
+    await recordWritten(upgradeRollbackStep.apply(ctx, { detected } as never));
     expect(h.swap).toBeNull();
     expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toBe('MINE\n');
   });

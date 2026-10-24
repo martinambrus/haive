@@ -1,6 +1,6 @@
+import { fixtureBase, networkGitArgs, httpOrigin } from './support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { failGit, type FakeGit } from './support/fake-git.js';
@@ -79,14 +79,14 @@ const COMMIT_ENV = {
 };
 const LISTING = ['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--diff-filter=U'];
 const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', args, { cwd, env: ENV, encoding: 'utf8' }).trim();
+  execFileSync('git', networkGitArgs(args), { cwd, env: ENV, encoding: 'utf8' }).trim();
 
 let root = '';
 let shim: FakeGit | null = null;
 
 /** local and origin each hold one commit the other lacks, both editing a.txt. */
 function conflictingFixture(): void {
-  root = mkdtempSync(path.join(tmpdir(), 'plan-merge-listing-'));
+  root = mkdtempSync(path.join(fixtureBase, 'plan-merge-listing-'));
   const origin = path.join(root, 'origin');
   h.repo = path.join(root, 'local');
   execFileSync('git', ['init', '-q', '-b', 'main', origin], { env: ENV });
@@ -94,7 +94,7 @@ function conflictingFixture(): void {
   writeFileSync(path.join(origin, 'a.txt'), 'a\n');
   git(origin, 'add', '-A');
   git(origin, 'commit', '-qm', 'base');
-  execFileSync('git', ['clone', '-q', origin, h.repo], { env: ENV });
+  execFileSync('git', ['clone', '-q', httpOrigin(origin), h.repo], { env: ENV });
   git(h.repo, 'config', 'gc.auto', '0');
   writeFileSync(path.join(origin, 'a.txt'), 'theirs\n');
   git(origin, 'commit', '-qam', 'theirs');

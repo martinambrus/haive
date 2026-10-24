@@ -87,6 +87,19 @@ describe('the diff viewer shows an unreadable file as unreadable', () => {
     expect(text).not.toContain('Could not read');
   });
 
+  it('shows why an unborn nested repository cannot be staged', async () => {
+    const reason =
+      'Nested repository HEAD could not be read; git add -A cannot stage it without a checked-out commit.';
+    const text = textOf(
+      (
+        await mount([file('nested/', 'added', { unreadable: true, unreadableReason: reason })])
+      ).tree(),
+    );
+    expect(text).toContain(reason);
+    expect(text).not.toContain(MESSAGE);
+    expect(text).not.toContain('Empty file added.');
+  });
+
   it('a file without the field and empty contents reads as before', async () => {
     const text = textOf((await mount([file('a.txt', 'modified')])).tree());
     expect(text).toContain('No content changes.');

@@ -1,6 +1,6 @@
+import { fixtureBase, networkGitArgs } from '../../test/support/git-http.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -34,6 +34,7 @@ afterEach(async () => {
 });
 
 async function git(dir: string, args: string[], allowFail = false): Promise<string> {
+  args = networkGitArgs(args);
   try {
     const { stdout } = await exec('git', args, { cwd: dir, env: { ...process.env, ...IDENT } });
     return stdout.toString();
@@ -57,8 +58,8 @@ async function commitFiles(dir: string, files: Files): Promise<void> {
 
 /** A scratch worktree with `origin/main` not yet merged, the two sides having changed the same files. */
 async function divergedPair(base: Files, ours: Files, theirs: Files): Promise<string> {
-  const remote = await mkdtemp(path.join(tmpdir(), 'nox-remote-'));
-  const local = await mkdtemp(path.join(tmpdir(), 'nox-local-'));
+  const remote = await mkdtemp(path.join(fixtureBase, 'nox-remote-'));
+  const local = await mkdtemp(path.join(fixtureBase, 'nox-local-'));
   dirs.push(remote, local);
   await git(remote, ['init', '-q', '-b', 'main']);
   await git(remote, ['config', 'gc.auto', '0']);

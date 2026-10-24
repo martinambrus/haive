@@ -15,6 +15,8 @@ export interface CommitDiffFile {
   /** A side could not be read: git exited non-zero or the working file could not be opened;
    *  contents are omitted. Absent means both sides were read. */
   unreadable?: boolean;
+  /** Optional explanation when the builder can identify why this side is unavailable. */
+  unreadableReason?: string;
   /** The new side is a link, not a file; its text is a symlink's target or a submodule's
    *  `Subproject commit <sha>`. Such a file has no `editPath`. */
   link?: CommitDiffLink;

@@ -1,7 +1,7 @@
+import { fixtureBase, networkGitArgs } from './support/smoke-git-http.js';
 import { execFile } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { and, eq } from 'drizzle-orm';
@@ -33,7 +33,7 @@ const ENV = {
   GIT_COMMITTER_EMAIL: 't@haive.local',
 };
 const git = async (dir: string, args: string[]): Promise<string> =>
-  (await exec('git', args, { cwd: dir, env: ENV })).stdout.toString();
+  (await exec('git', networkGitArgs(args), { cwd: dir, env: ENV })).stdout.toString();
 
 async function exists(p: string): Promise<boolean> {
   return stat(p).then(
@@ -44,7 +44,7 @@ async function exists(p: string): Promise<boolean> {
 
 async function main(): Promise<void> {
   let exitCode = 0;
-  const root = await mkdtemp(path.join(tmpdir(), 'plan-merge-cancel-smoke-'));
+  const root = await mkdtemp(path.join(fixtureBase, 'plan-merge-cancel-smoke-'));
   const remote = path.join(root, 'remote');
   const local = path.join(root, 'local');
   initRedis(process.env.REDIS_URL!);

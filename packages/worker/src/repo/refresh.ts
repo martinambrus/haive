@@ -24,7 +24,13 @@ import {
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
 import { GIT_TIMED_OUT, gitGaveNoAnswer, type GitRunResult } from './git-exec.js';
-import { buildCredentialHelper, detectOrigin, gitRun, scrubSecret } from './git-push.js';
+import {
+  buildCredentialHelper,
+  detectOrigin,
+  gitRun,
+  originGitRun,
+  scrubSecret,
+} from './git-push.js';
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 const firstLine = (text: string): string => text.trim().split('\n')[0] ?? '';
@@ -110,12 +116,16 @@ async function sourceFor(
           return `the stored credential could not be read (${err instanceof Error ? err.message : String(err)})`;
         }
       }
-      const res = await gitRun(
-        dest,
-        [...argv, 'fetch', ...extra, '--end-of-options', 'origin', `refs/heads/${branch}`],
-        env,
-      );
-      return res.code === 0 ? null : scrubSecret(firstLine(res.stderr || res.stdout), secret);
+      try {
+        const res = await originGitRun(
+          dest,
+          [...argv, 'fetch', ...extra, '--end-of-options', 'origin', `refs/heads/${branch}`],
+          env,
+        );
+        return res.code === 0 ? null : scrubSecret(firstLine(res.stderr || res.stdout), secret);
+      } catch (err) {
+        return firstLine(err instanceof Error ? err.message : String(err));
+      }
     },
   };
 }

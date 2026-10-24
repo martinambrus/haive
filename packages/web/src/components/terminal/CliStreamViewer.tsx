@@ -7,7 +7,14 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ClipboardAddon } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import { restoreSteers, type RestoredSteer } from '@/lib/steer-history';
-import { api, apiWebSocketUrl, type StoredCleanTranscript, type TaskEvent } from '@/lib/api-client';
+import { stopResultNotice } from '@/lib/task-state';
+import {
+  api,
+  apiWebSocketUrl,
+  type StopActivityResult,
+  type StoredCleanTranscript,
+  type TaskEvent,
+} from '@/lib/api-client';
 import {
   appendModelText,
   appendUserTurn,
@@ -153,6 +160,7 @@ export function CliStreamViewer({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const [cancelNotice, setCancelNotice] = useState<string | null>(null);
   // Mid-run steering: enabled only when the connected frame reports this
   // invocation is steerable. The text is delivered to the running CLI's stdin
   // and applied at its next tool-call boundary.
@@ -227,8 +235,10 @@ export function CliStreamViewer({
     if (cancelling) return;
     setCancelling(true);
     setCancelError(null);
+    setCancelNotice(null);
     try {
-      await api.post(`/tasks/${taskId}/cancel-active-cli`, {});
+      const result = await api.post<StopActivityResult>(`/tasks/${taskId}/cancel-active-cli`, {});
+      setCancelNotice(stopResultNotice(result));
     } catch (err) {
       setCancelError((err as Error).message ?? 'Cancel failed');
     } finally {
@@ -721,6 +731,11 @@ export function CliStreamViewer({
           )}
           {errorMsg && <span className="text-red-400">{errorMsg}</span>}
           {cancelError && <span className="text-red-400">cancel: {cancelError}</span>}
+          {cancelNotice && (
+            <div role="status" className="text-neutral-400">
+              <InlineMarkdown body={cancelNotice} />
+            </div>
+          )}
           {cliPendingChars !== null && (
             <button
               type="button"
@@ -738,6 +753,7 @@ export function CliStreamViewer({
               <span>Read-only — use Cancel to stop the running CLI</span>
               <button
                 type="button"
+                data-action="cancel-cli"
                 onClick={() => void cancelActiveCli()}
                 disabled={cancelling || state !== 'connected'}
                 className="rounded border border-red-700 px-2 py-0.5 text-red-300 hover:bg-red-950 disabled:opacity-50"

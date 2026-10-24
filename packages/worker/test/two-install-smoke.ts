@@ -1,3 +1,4 @@
+import { fixtureBase, httpOrigin, networkGitArgs } from './support/smoke-git-http.js';
 /**
  * Two installations, each with its own database, sharing one git remote: A onboards a repository
  * through the real deterministic onboarding steps (01, 02, 04, 06_5, 07, 12, their LLM passes
@@ -8,7 +9,6 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -113,7 +113,11 @@ const gitEnv = {
   GIT_COMMITTER_EMAIL: 't@example.com',
 };
 const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', ['-c', 'gc.auto=0', ...args], { cwd, env: gitEnv, encoding: 'utf8' }).trim();
+  execFileSync('git', ['-c', 'gc.auto=0', ...networkGitArgs(args)], {
+    cwd,
+    env: gitEnv,
+    encoding: 'utf8',
+  }).trim();
 
 /** What a person submitting the form untouched sends: every field's own default. */
 function defaultValues(form: FormSchema | null): Record<string, unknown> {
@@ -487,12 +491,12 @@ async function main(): Promise<void> {
     );
     dbA = createDatabase(urlA);
     dbB = createDatabase(urlB.toString());
-    tmp = await mkdtemp(path.join(tmpdir(), 'two-install-smoke-'));
+    tmp = await mkdtemp(path.join(fixtureBase, 'two-install-smoke-'));
 
     const origin = path.join(tmp, 'origin.git');
     git(tmp, 'init', '-q', '--bare', '-b', 'main', origin);
     const seed = path.join(tmp, 'seed');
-    git(tmp, 'clone', '-q', `file://${origin}`, seed);
+    git(tmp, 'clone', '-q', httpOrigin(origin), seed);
     await writeFile(path.join(seed, 'README.md'), '# two-install smoke\n');
     await writeFile(
       path.join(seed, 'composer.json'),
@@ -501,7 +505,7 @@ async function main(): Promise<void> {
     git(seed, 'add', 'README.md', 'composer.json');
     git(seed, 'commit', '-q', '-m', 'seed');
     git(seed, 'push', '-q', 'origin', 'HEAD:main');
-    const remoteUrl = `file://${origin}`;
+    const remoteUrl = httpOrigin(origin);
 
     // ---- A onboards ----------------------------------------------------------------------
     // Known before the clone runs, so a clone that fails still has its rows removed.
@@ -2361,12 +2365,12 @@ async function main(): Promise<void> {
       const origin = path.join(tmp!, `land-${label}.git`);
       git(tmp!, 'init', '-q', '--bare', '-b', 'main', origin);
       const seedDir = path.join(tmp!, `land-${label}-seed`);
-      git(tmp!, 'clone', '-q', `file://${origin}`, seedDir);
+      git(tmp!, 'clone', '-q', httpOrigin(origin), seedDir);
       await writeFile(path.join(seedDir, 'README.md'), `# ${label}\n`);
       git(seedDir, 'add', 'README.md');
       git(seedDir, 'commit', '-q', '-m', 'seed');
       git(seedDir, 'push', '-q', 'origin', 'HEAD:main');
-      const url = `file://${origin}`;
+      const url = httpOrigin(origin);
       const userOfA = randomUUID();
       landUsers.push(userOfA);
       const x = await cloneInstall('A', dbA!, path.join(tmp!, `land-${label}-a`), url, userOfA);
@@ -2737,12 +2741,12 @@ async function main(): Promise<void> {
       git(tmp!, 'init', '-q', '--bare', '-b', 'main', origin);
       const remote = path.join(tmp!, 'land-c8-remote');
       const local = path.join(tmp!, 'land-c8-local');
-      git(tmp!, 'clone', '-q', `file://${origin}`, remote);
+      git(tmp!, 'clone', '-q', httpOrigin(origin), remote);
       await writeFile(path.join(remote, 'README.md'), 'one\n');
       git(remote, 'add', 'README.md');
       git(remote, 'commit', '-q', '-m', 'seed');
       git(remote, 'push', '-q', 'origin', 'HEAD:main');
-      git(tmp!, 'clone', '-q', `file://${origin}`, local);
+      git(tmp!, 'clone', '-q', httpOrigin(origin), local);
       await writeFile(path.join(remote, 'README.md'), 'two\n');
       git(remote, 'commit', '-q', '-am', 'edit');
       git(remote, 'push', '-q', 'origin', 'HEAD:main');
@@ -2885,7 +2889,7 @@ async function main(): Promise<void> {
         'remote',
         'set-url',
         'origin',
-        `file://${path.join(tmp!, 'land-nowhere.git')}`,
+        httpOrigin(path.join(tmp!, 'land-nowhere.git')),
       );
       const files = [RECORD_RENDER, planFileRel, planMdRel];
       const before = await Promise.all(files.map((rel) => fileOf(y, rel)));
@@ -2953,12 +2957,12 @@ async function main(): Promise<void> {
       const origin = path.join(tmp!, 'rtk-source.git');
       git(tmp!, 'init', '-q', '--bare', '-b', 'main', origin);
       const seedDir = path.join(tmp!, 'rtk-source-seed');
-      git(tmp!, 'clone', '-q', `file://${origin}`, seedDir);
+      git(tmp!, 'clone', '-q', httpOrigin(origin), seedDir);
       await writeFile(path.join(seedDir, 'README.md'), '# rtk\n');
       git(seedDir, 'add', 'README.md');
       git(seedDir, 'commit', '-q', '-m', 'seed');
       git(seedDir, 'push', '-q', 'origin', 'HEAD:main');
-      const url = `file://${origin}`;
+      const url = httpOrigin(origin);
       const userOfSource = randomUUID();
       landUsers.push(userOfSource);
       const source = await cloneInstall(

@@ -13,6 +13,7 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import { gitGaveNoAnswer } from '../../../repo/git-exec.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
 /** Runs git in `cwd` and returns stdout/stderr/exit code. Matches the gitRun
@@ -128,42 +129,87 @@ async function stagedCommit(gitRun: GitRun, cwd: string, rel: string): Promise<s
   return null;
 }
 
-/** The commit the submodule at `rel` has checked out, asked of a held descriptor on its directory
+/** The commit the submodule or untracked nested repository at `rel` has checked out; an unborn
+ *  repository returns a null commit for the unreadable reason. Asked of a held descriptor on its directory
  *  so that a name swapped after the check cannot point git at another repository. */
 async function checkedOutCommit(
   gitRun: GitRun,
   workspacePath: string,
   rel: string,
-): Promise<string | null> {
+): Promise<{ commit: string | null } | null> {
   const wa = workspaceAnchor(workspacePath);
   const dir = await openDirNoFollow(wa.anchor, `${wa.prefix}${rel}`).catch(() => null);
   if (dir === null) return null;
   try {
-    const res = await gitRun(`/proc/self/fd/${dir.fd}`, ['rev-parse', 'HEAD']);
-    return res.code === 0 ? res.stdout.trim() : null;
+    const cwd = `/proc/self/fd/${dir.fd}`;
+    // Inspect the held directory, not its name. A plain directory must never borrow the
+    // superproject's HEAD, even if its .git marker vanishes before git starts.
+    const marker = await lstatNoFollow(cwd, '.git');
+    if (marker?.kind !== 'directory' && marker?.kind !== 'file') return null;
+    const res = await gitRun(cwd, ['--git-dir=.git', 'rev-parse', '--verify', '--quiet', 'HEAD']);
+    if (gitGaveNoAnswer(res)) return null;
+    if (res.code === 1) return { commit: null };
+    if (res.code !== 0) return null;
+    const sha = res.stdout.trim();
+    return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha) ? { commit: sha } : null;
   } finally {
     await dir.close().catch(() => undefined);
   }
 }
 
-/** A link's target, or the commit a submodule is at; null when the path is neither. */
+/** A link's target, or the commit a submodule or untracked nested repository is at;
+ *  an unreadable reason when the nested repository is unborn, or null when neither can be read. */
 async function readLinkSide(
   workspacePath: string,
   gitRun: GitRun,
   e: PorcelainEntry,
-): Promise<{ link: CommitDiffLink; text: string } | null> {
+): Promise<{ link: CommitDiffLink; text: string } | { unreadableReason: string } | null> {
   const wa = workspaceAnchor(workspacePath);
   const rel = `${wa.prefix}${e.path}`;
   const target = await readLinkNoFollow(wa.anchor, rel);
   if (target !== null) return { link: 'symlink', text: target };
   if ((await lstatNoFollow(wa.anchor, rel))?.kind !== 'directory') return null;
   const staged = await stagedCommit(gitRun, workspacePath, e.path);
-  if (staged === null) return null;
+  if (staged === null) {
+    if (e.x !== '?' || e.y !== '?') return null;
+    // git status keeps an untracked repository as dir/ even with -uall. git add -A
+    // records its checked-out commit as a gitlink, or refuses it if HEAD is unborn.
+    const checkout = await checkedOutCommit(gitRun, workspacePath, e.path);
+    if (checkout === null) return null;
+    return checkout.commit === null
+      ? {
+          unreadableReason:
+            'Nested repository HEAD could not be read; git add -A cannot stage it without a checked-out commit.',
+        }
+      : { link: 'gitlink', text: subprojectText(checkout.commit) };
+  }
   // Y = M (checkout ahead of the index) or A (intent to add: the empty blob) means a repository is
   // checked out; git run in an uninitialised submodule's empty directory reports the superproject.
   const commit =
-    e.y === 'M' || e.y === 'A' ? await checkedOutCommit(gitRun, workspacePath, e.path) : staged;
+    e.y === 'M' || e.y === 'A'
+      ? ((await checkedOutCommit(gitRun, workspacePath, e.path))?.commit ?? null)
+      : staged;
   return commit === null ? null : { link: 'gitlink', text: subprojectText(commit) };
+}
+
+/** A bounded text side, with metadata only for binary or oversized content. */
+export async function readDiffContent(
+  anchor: string,
+  rel: string,
+  opts: { strict?: boolean } = {},
+): Promise<{ content: string; binary: boolean; truncated: boolean } | null> {
+  const read = await readFileNoFollow(anchor, rel, {
+    ...opts,
+    maxBytes: PER_FILE_CONTENT_CAP + 1,
+  });
+  if (read === null) return null;
+  const truncated = read.size > PER_FILE_CONTENT_CAP;
+  const binary = !truncated && read.data.includes(0);
+  return {
+    content: binary || truncated ? '' : read.data.toString('utf8'),
+    binary,
+    truncated,
+  };
 }
 
 export async function buildFileEntry(
@@ -177,6 +223,7 @@ export async function buildFileEntry(
   const oldRef = status === 'renamed' && e.oldPath ? e.oldPath : e.path;
 
   let unreadable = false;
+  let unreadableReason: string | undefined;
   let link: CommitDiffLink | undefined;
   let newContent = '';
   let newBinary = false;
@@ -186,24 +233,20 @@ export async function buildFileEntry(
     // `readFile` by the same path — two resolutions of a name git reported, in a tree the agents
     // write. A FIFO or a vanished file is flagged unreadable; a link is read for what it points at.
     const wa = workspaceAnchor(workspacePath);
-    const read = await readFileNoFollow(wa.anchor, `${wa.prefix}${e.path}`, {
-      maxBytes: PER_FILE_CONTENT_CAP + 1,
-    });
+    const read = await readDiffContent(wa.anchor, `${wa.prefix}${e.path}`);
     if (read === null) {
       const side = await readLinkSide(workspacePath, gitRun, e);
-      if (side === null) {
+      if (side === null || 'unreadableReason' in side) {
         unreadable = true;
+        unreadableReason = side?.unreadableReason;
       } else {
         link = side.link;
         newContent = side.text;
       }
     } else {
-      if (read.size > PER_FILE_CONTENT_CAP) {
-        newTooBig = true;
-      } else {
-        newBinary = read.data.includes(0);
-        if (!newBinary) newContent = read.data.toString('utf8');
-      }
+      newTooBig = read.truncated;
+      newBinary = read.binary;
+      newContent = read.content;
     }
   }
 
@@ -247,6 +290,7 @@ export async function buildFileEntry(
   };
   if (status === 'renamed' && e.oldPath) file.oldPath = e.oldPath;
   if (unreadable) file.unreadable = true;
+  if (unreadableReason) file.unreadableReason = unreadableReason;
   if (link) file.link = link;
   return file;
 }

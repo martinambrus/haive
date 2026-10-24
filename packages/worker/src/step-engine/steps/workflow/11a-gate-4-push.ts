@@ -1,10 +1,11 @@
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
+import { gitRemoteUrlSchema } from '@haive/shared/schemas';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
-  detectOrigin,
+  OriginUrlError,
   ensureOrigin,
   getOriginUrl,
   gitRun,
@@ -27,6 +28,7 @@ interface PushGateDetect {
   branch: string | null;
   hasOrigin: boolean;
   originUrl: string | null;
+  originError?: string | null;
   recentCommits: string;
   repositoryId: string | null;
   boundCredentialId: string | null;
@@ -106,8 +108,15 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
     const branchRes = await gitRun(workspacePath, ['rev-parse', '--abbrev-ref', 'HEAD']);
     const branch = branchRes.code === 0 ? branchRes.stdout.trim() : null;
 
-    const hasOrigin = await detectOrigin(workspacePath);
-    const originUrl = hasOrigin ? await getOriginUrl(workspacePath) : null;
+    let originUrl: string | null = null;
+    let originError: string | null = null;
+    try {
+      originUrl = await getOriginUrl(workspacePath);
+    } catch (err) {
+      if (!(err instanceof OriginUrlError)) throw err;
+      originError = err.message;
+    }
+    const hasOrigin = originUrl !== null;
 
     const logRes = await gitRun(workspacePath, ['log', '--oneline', '-10']);
     const recentCommits =
@@ -121,6 +130,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       branch,
       hasOrigin,
       originUrl,
+      originError,
       recentCommits,
       repositoryId,
       boundCredentialId: repo?.credentialsSecretId ?? null,
@@ -158,6 +168,23 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
             id: 'push',
             label: 'Push to origin',
             default: false,
+          },
+        ],
+        submitLabel: 'Finalise',
+      };
+    }
+
+    if (detected.originError) {
+      return {
+        title: 'Gate 4: Push',
+        description: descriptionLines.join('\n'),
+        fields: [
+          {
+            type: 'note',
+            id: 'originError',
+            label: 'Push unavailable',
+            body: detected.originError,
+            variant: 'warning',
           },
         ],
         submitLabel: 'Finalise',
@@ -247,6 +274,14 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
     };
     const detected = args.detected;
 
+    if (detected.originError) {
+      return {
+        pushed: false,
+        remote: null,
+        branch: detected.branch,
+        message: detected.originError,
+      };
+    }
     if (!values.push) {
       return { pushed: false, remote: null, branch: detected.branch, message: 'push skipped' };
     }
@@ -261,11 +296,20 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
 
     // Establish origin. For the no-origin path the user supplies a clean URL
     // (no embedded token); we persist that, never the credentialed URL.
-    if (!detected.hasOrigin) {
+    let hasOrigin: boolean;
+    try {
+      hasOrigin = (await getOriginUrl(workspace)) !== null;
+    } catch (err) {
+      if (!(err instanceof OriginUrlError)) throw err;
+      return { pushed: false, remote: null, branch, message: err.message };
+    }
+    if (!hasOrigin) {
       const remoteUrl = (values.remoteUrl ?? '').trim();
       if (!remoteUrl) {
         throw new Error('origin remote URL is required to push');
       }
+      const parsed = gitRemoteUrlSchema.safeParse(remoteUrl);
+      if (!parsed.success) throw new Error(parsed.error.issues[0]!.message);
       await ensureOrigin(workspace, remoteUrl);
       // Persist the remote (and the chosen credential) onto the repo row so
       // future pushes/clones are pre-wired. Plain runtime write; idempotent.
@@ -287,15 +331,20 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       await warnStep(ctx, await putBackProjections({ ctx, worktree: workspace, branch, target }));
     }
 
-    const setUpstream = detected.hasOrigin ? values.setUpstream !== false : true;
-    await pushBranch({
-      cwd: workspace,
-      branch,
-      setUpstream,
-      credentialId: values.credentialId || undefined,
-      db: ctx.db,
-      userId: ctx.userId,
-    });
+    const setUpstream = hasOrigin ? values.setUpstream !== false : true;
+    try {
+      await pushBranch({
+        cwd: workspace,
+        branch,
+        setUpstream,
+        credentialId: values.credentialId || undefined,
+        db: ctx.db,
+        userId: ctx.userId,
+      });
+    } catch (err) {
+      if (!(err instanceof OriginUrlError)) throw err;
+      return { pushed: false, remote: null, branch, message: err.message };
+    }
     ctx.logger.info({ branch, remote: 'origin' }, 'workflow push finalised');
     return { pushed: true, remote: 'origin', branch, message: `pushed ${branch} to origin` };
   },

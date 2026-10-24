@@ -1,6 +1,6 @@
+import { fixtureBase, networkGitArgs, httpOrigin } from './support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { logger } from '@haive/shared';
@@ -22,7 +22,15 @@ const LEAK = "fatal: unable to access 'https://user:s3cret@example.com/r.git/': 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync(
     'git',
-    ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'gc.auto=0', ...args],
+    [
+      '-c',
+      'user.name=t',
+      '-c',
+      'user.email=t@example.com',
+      '-c',
+      'gc.auto=0',
+      ...networkGitArgs(args),
+    ],
     { cwd, stdio: ['ignore', 'pipe', 'pipe'] },
   ).toString();
 
@@ -31,7 +39,7 @@ let restore: (() => Promise<void>) | null = null;
 const saved = { ...gitTimeoutLimits };
 
 beforeEach(async () => {
-  tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'bundle-git-bound-'));
+  tmpRoot = await mkdtemp(path.join(fixtureBase, 'bundle-git-bound-'));
 });
 
 afterEach(async () => {
@@ -54,7 +62,7 @@ async function makeOriginAndClone(): Promise<{ origin: string; extracted: string
   git(work, 'commit', '-m', 'one');
   git(work, 'push', 'origin', 'main');
   const extracted = path.join(tmpRoot, USER, BUNDLE, 'extracted');
-  await gitClone(`file://${origin}`, extracted, 'main');
+  await gitClone(httpOrigin(origin), extracted, 'main');
   git(extracted, 'config', 'gc.auto', '0');
   return { origin, extracted };
 }
@@ -68,7 +76,7 @@ function bundleDb(origin: string, storageRoot: string) {
     name: 'bundle',
     sourceType: 'git',
     status: 'active',
-    gitUrl: `file://${origin}`,
+    gitUrl: httpOrigin(origin),
     gitBranch: 'main',
     storageRoot,
   });

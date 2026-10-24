@@ -1,3 +1,4 @@
+import { fixtureBase, networkGitArgs } from './support/smoke-git-http.js';
 /**
  * Integration smoke for the plan canvas persistence layer against a real Postgres.
  *
@@ -10,7 +11,6 @@
  * plan model onto a fresh clone.
  */
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNull, like, notInArray, sql } from 'drizzle-orm';
@@ -1025,7 +1025,7 @@ async function main(): Promise<void> {
     dirtyMirrorState,
   );
 
-  const tmpDir = await mkdtemp(path.join(os.tmpdir(), 'plan-mirror-'));
+  const tmpDir = await mkdtemp(path.join(fixtureBase, 'plan-mirror-'));
   state.tmpDir = tmpDir;
   const written = await writePlanMirror(db, repositoryId, tmpDir);
   check(
@@ -1155,7 +1155,7 @@ async function main(): Promise<void> {
   check('import into a repo that already has a plan does nothing', noop.imported === false, noop);
 
   // A schemaVersion the reader does not know is ignored, not mis-parsed.
-  const bumpedDir = await mkdtemp(path.join(os.tmpdir(), 'plan-mirror-v'));
+  const bumpedDir = await mkdtemp(path.join(fixtureBase, 'plan-mirror-v'));
   await mkdir(path.join(bumpedDir, '.haive-data'), { recursive: true });
   await writeFile(
     path.join(bumpedDir, HAIVE_DATA_FILES.plan),
@@ -1704,7 +1704,7 @@ async function main(): Promise<void> {
   // the property that matters is the one a merge cannot infer: a node present
   // only locally is KEPT, because "someone added it here" and "someone deleted
   // it there" are indistinguishable from the file and only one is reversible.
-  const pullDir = await mkdtemp(path.join(os.tmpdir(), 'plan-pull-'));
+  const pullDir = await mkdtemp(path.join(fixtureBase, 'plan-pull-'));
   await mkdir(path.join(pullDir, '.haive-data'), { recursive: true });
 
   const localOnly = await applyPlanPatch(
@@ -1819,7 +1819,7 @@ async function main(): Promise<void> {
 
   // No snapshot at all is a RESULT, not a failure: a repo that has never had one
   // committed is the common case.
-  const emptyDir = await mkdtemp(path.join(os.tmpdir(), 'plan-pull-empty-'));
+  const emptyDir = await mkdtemp(path.join(fixtureBase, 'plan-pull-empty-'));
   const nothing = await reconcilePlanFromCheckout(db, freshRepoB!.id, emptyDir);
   check(
     'a repo with no committed snapshot reports it rather than failing',
@@ -1841,11 +1841,11 @@ async function main(): Promise<void> {
     GIT_COMMITTER_EMAIL: 'smoke@haive.local',
   };
   const git = async (cwd: string, args: string[]) => {
-    const res = await gitRun(cwd, args, GIT_ID);
+    const res = await gitRun(cwd, networkGitArgs(args), GIT_ID);
     if (res.code !== 0) throw new Error(`git ${args.join(' ')} failed: ${res.stderr}`);
     return res.stdout.trim();
   };
-  const holdRoot = await mkdtemp(path.join(os.tmpdir(), 'plan-hold-'));
+  const holdRoot = await mkdtemp(path.join(fixtureBase, 'plan-hold-'));
   const originDir = path.join(holdRoot, 'origin.git');
   const bDir = path.join(holdRoot, 'b');
   const aDir = path.join(holdRoot, 'a');
