@@ -32,6 +32,7 @@ vi.mock('@haive/shared', async (importOriginal) => ({
     getEmailBlindIndexPepper: async () => 'ef'.repeat(32),
   },
 }));
+import { SALT_ROUNDS } from '../src/auth/password.js';
 import type { AppEnv } from '../src/context.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { authRoutes } from '../src/routes/auth.js';
@@ -51,14 +52,14 @@ beforeEach(() => {
 });
 
 describe('login password work without timing assertions', () => {
-  it('an unknown account compares exactly once against a fixed cost-12 dummy hash', async () => {
+  it('an unknown account compares exactly once against a fixed dummy hash at the configured bcrypt cost', async () => {
     const res = await send('login');
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: 'Invalid credentials', code: null });
     expect(h.compare).toHaveBeenCalledTimes(1);
     const [password, dummy] = h.compare.mock.calls[0]!;
     expect(password).toBe('synthetic-password-1');
-    expect(bcrypt.getRounds(dummy)).toBe(12);
+    expect(bcrypt.getRounds(dummy)).toBe(SALT_ROUNDS);
     h.compare.mockClear();
     await send('login');
     expect(h.compare).toHaveBeenCalledExactlyOnceWith(password, dummy);

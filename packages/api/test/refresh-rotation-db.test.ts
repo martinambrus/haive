@@ -92,7 +92,7 @@ describe.skipIf(!url)('refresh rotation on Postgres', () => {
     expect(replies.map((r) => r.status).sort()).toEqual([200, 401]);
     const loser = replies.find((r) => r.status === 401)!;
     expect(loser.headers.getSetCookie()).toEqual([]);
-    expect(await loser.json()).toEqual({ error: 'Refresh token invalid or expired', code: null });
+    const loserBody = await loser.text();
     const live = await db
       .select()
       .from(schema.refreshTokens)
@@ -100,7 +100,10 @@ describe.skipIf(!url)('refresh rotation on Postgres', () => {
     expect(live).toHaveLength(1);
     expect(live[0]!.tokenHash).not.toBe(tokenHash);
     h.db = db;
-    expect((await refresh()).status).toBe(401);
+    const replay = await refresh();
+    expect(loser.status).toBe(replay.status);
+    expect(loserBody).toBe(await replay.text());
+    expect([...loser.headers]).toEqual([...replay.headers]);
   });
 
   it('a failed successor insert rolls the revocation back and sends no cookies', async () => {
