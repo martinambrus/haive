@@ -880,7 +880,7 @@ See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or
 
 ### T395 · FNF[web-stop-pending-current] · offer Stop for a running task whose current row is pending; notice on stopped:0
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:49Z · last: 2026-10-24T20:49Z · was modular #277
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:49Z · last: 2026-10-25T01:15Z · merged PR #908 (2f39fa5fd), browser-checked, waiting for main CI · was modular #277
 DECIDED 2026-10-24: yes. Sites: web lib/task-state.ts ~:31, tasks/[id]/page.tsx ~:1591, ~:3884, admin maintenance/page.tsx ~:248; the response is dropped at ~:1299-1307. Key the gate on structural columns, in a separate small web commit. Browser check at 1280, 768 and 390.
 
 ### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+14)
