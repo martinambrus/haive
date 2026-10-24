@@ -353,6 +353,19 @@ describe('maintenance Stop controls (#395)', () => {
     },
   );
 
+  it.each(['done', 'skipped', 'failed', 'waiting_form', null])(
+    'disables Stop with no live CLI and a %s current row',
+    async (currentStepStatus) => {
+      blockingTasks = [{ ...row, currentStepStatus }];
+      const view = await mount();
+      const stop = findAll(
+        view.tree(),
+        (h) => h.tag === 'button' && h.props['data-action'] === 'stop',
+      )[0]!;
+      expect(stop.props.disabled).toBe(true);
+    },
+  );
+
   it.each([
     { killed: 0, cancelled: 0, stopped: 0, notice: true },
     { killed: 1, cancelled: 0, stopped: 0, notice: false },

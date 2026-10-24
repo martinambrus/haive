@@ -125,6 +125,7 @@ function TaskRow({
             busy ||
             !taskCanStop(t, { stepRunning: t.hasLiveCli, currentStepStatus: t.currentStepStatus })
           }
+          data-action="stop"
           onClick={() => void act(t, 'stop')}
         >
           Stop CLI
