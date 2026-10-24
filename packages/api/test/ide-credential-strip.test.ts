@@ -587,3 +587,49 @@ describe('IDE request header controls', () => {
     expect(head).toContain('sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==');
   });
 });
+
+describe('IDE port proxy reach measurement', () => {
+  it.each(['proxy', 'absproxy'])(
+    'relays /%s/<port> through an editor stub to an internal port',
+    async (kind) => {
+      const internal = createServer((req, res) => {
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ path: req.url, cookie: req.headers.cookie }));
+      });
+      await new Promise<void>((r) => internal.listen(0, '127.0.0.1', r));
+      servers.push(internal);
+      const internalPort = (internal.address() as AddressInfo).port;
+      // Model code-server's recorded /proxy and /absproxy behavior with real sockets
+      // and a second server representing a process on the IDE container's loopback.
+      const editor = createServer(async (req, res) => {
+        const path = req.url ?? '/';
+        const prefix = `/${kind}/${internalPort}`;
+        if (!path.startsWith(prefix + '/')) {
+          res.writeHead(404).end();
+          return;
+        }
+        const upstreamPath = kind === 'proxy' ? path.slice(prefix.length) : path;
+        const reply = await realFetch(`http://127.0.0.1:${internalPort}${upstreamPath}`, {
+          headers: { cookie: req.headers.cookie ?? '' },
+        });
+        res.setHeader('content-type', 'application/json');
+        res.end(await reply.text());
+      });
+      await new Promise<void>((r) => editor.listen(0, '127.0.0.1', r));
+      servers.push(editor);
+      const port = (editor.address() as AddressInfo).port;
+      fetchStub.mockImplementation((url: string, init: RequestInit) => {
+        const path = new URL(url);
+        return realFetch(`http://127.0.0.1:${port}${path.pathname}${path.search}`, init);
+      });
+      const response = await app.request(`/ide/${TASK}/${kind}/${internalPort}/probe?x=1`, {
+        headers: { cookie: 'haive_access=A; app=preview; haive_refresh=R; theme=dark' },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        path: kind === 'proxy' ? '/probe?x=1' : `/absproxy/${internalPort}/probe?x=1`,
+        cookie: 'app=preview; theme=dark',
+      });
+    },
+  );
+});

@@ -67,6 +67,7 @@ describe('repository editor launch', () => {
       `type=volume,source=${volumeName(SHARED_VOLUME.repos)},destination=/workspace/.git,volume-subpath=${SUBPATH}/.git,volume-nocopy=true,readonly`,
       `type=volume,source=${volumeName(SHARED_VOLUME.repos)},destination=/workspace,volume-subpath=${SUBPATH},volume-nocopy=true`,
     ]);
+    expect(args).toContain('--disable-proxy');
     expect(args).toContain(`haive.repo.id=${REPO}`);
     expect(args.some((arg) => arg.startsWith('haive.task.id='))).toBe(false);
     expect(h.boundary).toHaveBeenCalledWith(
