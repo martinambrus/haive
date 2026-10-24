@@ -1,12 +1,6 @@
 import { leftOpenMerges, type MergeLeftOpenOutcome } from '@haive/shared/merge-left-open';
 import { parseStepId } from '@haive/shared/modularity';
 
-/** Usage stamps describe a finished attempt. Retry, Resume, loops and re-offered forms can
- *  reuse its row with its old figures; those figures have no meaning while it is open. */
-export function showsStepUsageStamp(step: { status: string }): boolean {
-  return step.status === 'done' || step.status === 'failed' || step.status === 'skipped';
-}
-
 /** Banner visibility for step cards, invocation terminals and attachment rows.
  *
  *  ONE RULE: a message column is display copy, not state. `task_steps.status_message`,
@@ -21,6 +15,12 @@ export function showsStepUsageStamp(step: { status: string }): boolean {
  *  Retry button, and a running CLI advertising "Queued — machine at capacity". These predicates
  *  exist so that decision lives in one tested place instead of being re-derived per call site.
  */
+
+/** Usage stamps are collected only for done attempts. Retry, Resume, loops and re-offered forms can
+ *  reuse its row with its old figures; those figures have no meaning while it is open. */
+export function showsStepUsageStamp(step: { status: string }): boolean {
+  return step.status === 'done';
+}
 
 /** Copy shown in place of a queue/park line while execution is paused.
  *

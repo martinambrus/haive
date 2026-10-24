@@ -536,11 +536,11 @@ describe('moduleStopBanner', () => {
 });
 
 describe('showsStepUsageStamp', () => {
-  it.each(['done', 'failed', 'skipped'])('admits a finished %s attempt', (status) => {
+  it.each(['done'])('admits a stamped %s attempt', (status) => {
     expect(showsStepUsageStamp({ status })).toBe(true);
   });
 
-  it.each(['pending', 'running', 'waiting_form', 'waiting_cli', 'unknown'])(
+  it.each(['pending', 'running', 'waiting_form', 'waiting_cli', 'failed', 'skipped', 'unknown'])(
     'hides a previous stamp while the row is %s',
     (status) => {
       expect(showsStepUsageStamp({ status })).toBe(false);
