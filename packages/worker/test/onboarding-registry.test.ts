@@ -253,7 +253,6 @@ describe('onboarding registry', () => {
     const ctx = {} as never;
     const schema = postOnboardingStep.form!(ctx, {
       hasGit: true,
-      currentBranch: 'main',
       hasOrigin: false,
       originUrl: null,
       boundCredentialId: null,
@@ -268,7 +267,6 @@ describe('onboarding registry', () => {
     const ctx = {} as never;
     const schema = postOnboardingStep.form!(ctx, {
       hasGit: false,
-      currentBranch: null,
       hasOrigin: false,
       originUrl: null,
       boundCredentialId: null,

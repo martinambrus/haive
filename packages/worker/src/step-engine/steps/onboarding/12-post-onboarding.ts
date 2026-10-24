@@ -22,7 +22,7 @@ import {
 import { toolingUnitOf, withoutMachineLocalTooling } from '@haive/shared/project-state';
 import type { StepDefinition, StepContext } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
-import { getOriginUrl, GIT_MAX_BUFFER, gitRun } from '../../../repo/git-push.js';
+import { getOriginUrl, GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
 import { writePlanMirror } from '../../../plan/mirror.js';
 import {
@@ -136,8 +136,6 @@ interface PostOnboardingDetect {
    *  path then runs `git init` first — without it `git add` fails with
    *  "fatal: not a git repository" and the whole step dies. */
   hasGit: boolean;
-  /** The branch the onboarding commit lands on (parent checkout's current branch). */
-  currentBranch: string | null;
   /** Whether the repo has a pushable origin remote (gates the push fields). */
   hasOrigin: boolean;
   originUrl: string | null;
@@ -160,7 +158,6 @@ interface PostOnboardingOutput {
   pushRequested: boolean;
   pushCredentialId: string | null;
   pushSetUpstream: boolean;
-  branch: string | null;
   /** What the project state record write did; 'failed' when it or the retire after it threw.
    *  Optional because it is read back from a persisted output that may predate it. */
   recordWrite?: 'written' | 'failed' | 'skipped';
@@ -450,7 +447,6 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
   async detect(ctx): Promise<PostOnboardingDetect> {
     const empty: PostOnboardingDetect = {
       hasGit: false,
-      currentBranch: null,
       hasOrigin: false,
       originUrl: null,
       boundCredentialId: null,
@@ -460,10 +456,6 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     // for a user who never asked for a commit — the artifact rows and the .haive-data
     // mirror below still have to be written. The commit path re-checks and throws.
     const hasGit = (await gitWorkspaceStatus(ctx.repoPath)) === 'ok';
-    const cur = hasGit
-      ? await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD'])
-      : { code: 1, stdout: '', stderr: '' };
-    const currentBranch = cur.code === 0 ? cur.stdout.trim() : null;
     let hasOrigin = false;
     let originUrl: string | null = null;
     let originError: string | null = null;
@@ -496,7 +488,6 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     return {
       ...empty,
       hasGit,
-      currentBranch,
       hasOrigin,
       originUrl,
       originError,
@@ -624,8 +615,6 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     let commitPerformed = false;
     let commitSha: string | null = null;
     const stagedPaths: string[] = [];
-    // Reassigned by the no-git path below, where the branch only exists after `git init`.
-    let branch = args.detected.currentBranch;
     let pushRequested = false;
     let pushCredentialId: string | null = null;
     let pushSetUpstream = true;
@@ -666,7 +655,6 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       pushRequested,
       pushCredentialId,
       pushSetUpstream,
-      branch,
       recordWrite,
     });
 
@@ -796,7 +784,6 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         const initBranch =
           (typeof values.initBranch === 'string' ? values.initBranch : '').trim() || 'main';
         await initGitWorkspace(ctx.repoPath, initBranch);
-        branch = initBranch;
         didInit = true;
         await gitExec(['add', '-A'], { cwd: ctx.repoPath, maxBuffer: GIT_MAX_BUFFER });
         ctx.logger.info({ initBranch }, 'post-onboarding: initialized git repository');

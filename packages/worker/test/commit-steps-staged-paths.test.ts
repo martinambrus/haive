@@ -113,7 +113,7 @@ describe('commit steps report the staged paths by their real names', () => {
   it('12-post-onboarding', async () => {
     const repo = await repoWithAgents();
     const out = await postOnboardingStep.apply(mkCtx(repo, { wroteFiles: EXPECTED }), {
-      detected: { hasGit: true, currentBranch: 'main' } as never,
+      detected: { hasGit: true } as never,
       formValues: { commit: true, commitMessage: 'chore: onboard' },
       iteration: 0,
       previousIterations: [],
@@ -127,7 +127,7 @@ describe('commit steps report the staged paths by their real names', () => {
       const repo = await repoWithAgents();
       await writeFile(path.join(repo, 'CLAUDE.md'), 'my own notes\n');
       const out = await postOnboardingStep.apply(mkCtx(repo, generateOutput), {
-        detected: { hasGit: true, currentBranch: 'main' } as never,
+        detected: { hasGit: true } as never,
         formValues: { commit: true, commitMessage: 'chore: onboard' },
         iteration: 0,
         previousIterations: [],
@@ -145,7 +145,7 @@ describe('commit steps report the staged paths by their real names', () => {
     const out = await postOnboardingStep.apply(
       mkCtx(repo, { wroteFiles: EXPECTED, skippedFiles: [], leftAsIs: ['.claude/agents/é.md'] }),
       {
-        detected: { hasGit: true, currentBranch: 'main' } as never,
+        detected: { hasGit: true } as never,
         formValues: { commit: true, commitMessage: 'chore: onboard' },
         iteration: 0,
         previousIterations: [],
@@ -285,7 +285,7 @@ describe('commit steps stage only the paths their step outputs record', () => {
   ) {
     stepOutputs.current = outputs;
     return postOnboardingStep.apply(ctxFor(repo, artifactPaths, repositoryRow, planNodes), {
-      detected: { hasGit: true, currentBranch: 'main' } as never,
+      detected: { hasGit: true } as never,
       formValues: { commit: true, commitMessage: 'chore: onboard' },
       iteration: 0,
       previousIterations: [],
@@ -474,7 +474,7 @@ describe('commit steps stage only the paths their step outputs record', () => {
       '07-generate-files': { output: { wroteFiles: ['.claude/agents/a.md'], skippedFiles: [] } },
     };
     const out = await postOnboardingStep.apply(ctxFor(repo), {
-      detected: { hasGit: false, currentBranch: null } as never,
+      detected: { hasGit: false } as never,
       formValues: { commit: true, initBranch: 'main' },
       iteration: 0,
       previousIterations: [],

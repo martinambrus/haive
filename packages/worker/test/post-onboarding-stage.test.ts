@@ -53,7 +53,7 @@ describe('12 apply stages what it owns, and nothing git ignores', () => {
     postOnboardingStep.apply(
       { db, repoPath: repo, taskId: 't1', userId: 'u1', logger } as never as StepContext,
       {
-        detected: { hasGit: true, currentBranch: 'main' },
+        detected: { hasGit: true },
         formValues: { commit: true, commitMessage: 'onboard' },
       } as never,
     );
