@@ -1,6 +1,7 @@
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
+import { gitRemoteUrlSchema } from '@haive/shared/schemas';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
@@ -261,11 +262,13 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
 
     // Establish origin. For the no-origin path the user supplies a clean URL
     // (no embedded token); we persist that, never the credentialed URL.
-    if (!detected.hasOrigin) {
+    const hasOrigin = (await getOriginUrl(workspace)) !== null;
+    if (!hasOrigin) {
       const remoteUrl = (values.remoteUrl ?? '').trim();
       if (!remoteUrl) {
         throw new Error('origin remote URL is required to push');
       }
+      gitRemoteUrlSchema.parse(remoteUrl);
       await ensureOrigin(workspace, remoteUrl);
       // Persist the remote (and the chosen credential) onto the repo row so
       // future pushes/clones are pre-wired. Plain runtime write; idempotent.
@@ -287,7 +290,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       await warnStep(ctx, await putBackProjections({ ctx, worktree: workspace, branch, target }));
     }
 
-    const setUpstream = detected.hasOrigin ? values.setUpstream !== false : true;
+    const setUpstream = hasOrigin ? values.setUpstream !== false : true;
     await pushBranch({
       cwd: workspace,
       branch,
