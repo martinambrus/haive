@@ -96,7 +96,7 @@ export async function originGitRun(...args: Parameters<typeof gitRun>): Promise<
   return gitRun(...args);
 }
 
-/** Add `origin` pointing at url, or set-url when it already exists. Idempotent.
+/** Add `origin` pointing at url, or replace all its URLs when it already exists. Idempotent.
  *  Does NOT persist to the repositories row — that stays in the caller. */
 export async function ensureOrigin(
   cwd: string,
@@ -105,9 +105,27 @@ export async function ensureOrigin(
   const add = await gitRun(cwd, ['remote', 'add', 'origin', url]);
   if (add.code === 0) return { added: true, updated: false };
   if (add.code === 3) {
-    const updated = await gitRun(cwd, ['remote', 'set-url', 'origin', url]);
+    const updated = await gitRun(cwd, [
+      'config',
+      '--local',
+      '--replace-all',
+      'remote.origin.url',
+      url,
+    ]);
     if (updated.code !== 0) {
-      throw new Error(`git remote set-url origin failed: ${updated.stderr || updated.stdout}`);
+      throw new Error(`git config origin URL failed: ${updated.stderr || updated.stdout}`);
+    }
+    const cleared = await gitRun(cwd, [
+      'config',
+      '--local',
+      '--unset-all',
+      'remote.origin.pushurl',
+    ]);
+    // Exit 5 means the key did not exist. Every other failure leaves the relink incomplete.
+    if (cleared.code !== 0 && cleared.code !== 5) {
+      throw new Error(
+        `git config clear origin push URLs failed: ${cleared.stderr || cleared.stdout}`,
+      );
     }
     return { added: false, updated: true };
   }

@@ -50,7 +50,7 @@ describe('link origin uses git exit codes', () => {
       .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
       .mockRejectedValueOnce(fail(3, 'different language'));
     expect((await link()).status).toBe(200);
-    expect(h.git.mock.calls[2]![1]).toContain('set-url');
+    expect(h.git.mock.calls[2]![1]).toContain('--replace-all');
     expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe('https://example.test/r');
   });
   it('does not mistake an unrelated failure with already-exists words for exit 3', async () => {
@@ -61,7 +61,7 @@ describe('link origin uses git exit codes', () => {
     expect(h.git).toHaveBeenCalledTimes(2);
     expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
   });
-  it('fails a non-zero set-url without persisting the row', async () => {
+  it('fails a non-zero URL replacement without persisting the row', async () => {
     h.git
       .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
       .mockRejectedValueOnce(fail(3, 'remote origin already exists'))
@@ -71,4 +71,22 @@ describe('link origin uses git exit codes', () => {
     expect(await res.text()).toContain('Could not update');
     expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
   });
+});
+it.each([0, 5])('accepts push URL cleanup exit %s', async (code) => {
+  h.git
+    .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
+    .mockRejectedValueOnce(fail(3, 'different language'))
+    .mockResolvedValueOnce({ stdout: '', stderr: '' });
+  if (code === 5) h.git.mockRejectedValueOnce(fail(5, 'missing key'));
+  expect((await link()).status).toBe(200);
+  expect(h.git.mock.calls[3]![1]).toContain('--unset-all');
+});
+it('does not persist a relink whose push URL cleanup failed', async () => {
+  h.git
+    .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
+    .mockRejectedValueOnce(fail(3, 'different language'))
+    .mockResolvedValueOnce({ stdout: '', stderr: '' })
+    .mockRejectedValueOnce(fail(128, 'different language'));
+  expect((await link()).status).toBe(409);
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
 });
