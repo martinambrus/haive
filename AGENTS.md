@@ -20,21 +20,21 @@ The legacy markdown step content has been ported into TypeScript step modules un
 
 ```
 haive/
-  package.json                 pnpm workspace root
+  package.json  pnpm workspace root
   pnpm-workspace.yaml
   turbo.json
   tsconfig.base.json
-  docker-compose.yml           postgres, redis, mailpit, api, worker, web
-  docker-compose.dev.yml       dev override: port exposure, hot reload, db-migrate one-shot
+  docker-compose.yml  postgres, redis, mailpit, api, worker, web
+  docker-compose.dev.yml  dev override: port exposure, hot reload, db-migrate one-shot
   packages/
-    shared/                    @haive/shared    types, schemas, crypto, config, logger
-    database/                  @haive/database  Drizzle schema and migrations
-    api/                       @haive/api       Hono REST + WebSocket terminal proxy
-    worker/                    @haive/worker    BullMQ workers, step engine, sandbox manager, CLI adapters
-    web/                       @haive/web       Next.js Conductor-style UI
-    web-kit/                   @haive/web-kit   UI primitives and host contract shared by web and modules
+    shared/  @haive/shared  types, schemas, crypto, config, logger
+    database/  @haive/database  Drizzle schema and migrations
+    api/  @haive/api  Hono REST + WebSocket terminal proxy
+    worker/  @haive/worker  BullMQ workers, step engine, sandbox manager, CLI adapters
+    web/  @haive/web  Next.js Conductor-style UI
+    web-kit/  @haive/web-kit  UI primitives and host contract shared by web and modules
   tests/
-    e2e/                       Playwright specs
+    e2e/  Playwright specs
     fixtures/
 ```
 
@@ -176,7 +176,10 @@ in-progress task steps.
   `hosts × 3` such closes. `pg-startup-storm.test.ts` (database) pins every shape.
 - Secrets are stored via envelope encryption: per-user DEK encrypts the secret, master KEK from `CONFIG_ENCRYPTION_KEY` encrypts the DEK. AES-256-GCM throughout.
 - Drizzle schema lives in `packages/database/src/schema/`. Migrations are hand-written SQL in `packages/database/migrations/`, applied in filename order by the runner in `packages/database/src/migrate/`, one transaction per file with its `schema_migrations` row written inside it. **To add one:** iterate with `pnpm db:push`, then write `NNNN_name.sql` in that directory, keeping the guarded idempotent style (`ADD COLUMN IF NOT EXISTS`, `DO $$ … EXCEPTION WHEN duplicate_object`) — a developer's database is often legitimately AHEAD of the baseline and must survive your file. Declare a new column LAST in its Drizzle table: `ALTER TABLE ADD COLUMN` appends while `drizzle-kit push` builds the table in declaration order, so a column declared anywhere else makes the two schemas differ by column ORDER and turns `schema-parity` red — a failure no migration can fix. Never edit an applied migration: its sha256 is recorded, and a change hard-fails every install that ran it. `0000_baseline.sql` is generated and FROZEN; re-cutting the schema means a later numbered baseline, never an edit to that one. `pre-baseline/` is the record written before the directory was executable and is NEVER run — see its README: 19 of those files are unsafe to replay and one is destructive.
-- Each router in `api/src/routes/` mounts its own `requireAuth`; a route above it is public.
+- Each router in `api/src/routes/` mounts its own `requireAuth`, except the WebSocket and task/MCP-token
+  routers, which authenticate themselves. Any other route it does not cover (one above it, or in a
+  router without it) is public and must be in `PUBLIC` (`api/test/anonymous-routes.test.ts`) with its
+  reason.
 - A request that changes state, and every WebSocket handshake, is refused when it comes from a page
   other than the app's own (`isForeignOrigin`, `api/src/lib/request-origin.ts`). The session cookie
   is `SameSite=Lax`, and every page on the same site still sends it: on localhost that is every
@@ -215,7 +218,7 @@ in-progress task steps.
 
 ## Phasing
 
-Phase 0 scaffold is complete when `pnpm install` and `pnpm docker:dev` boot all services on a clean host with only Docker installed. Subsequent phases build the database schemas, auth, repository management, CLI adapters, sandbox, terminal proxy, step engine, sub-agent emulator, autonomous workflow, and environment replication in that order.
+Phase 0 scaffold is complete when `pnpm install` and `pnpm docker:dev` boot all services on a clean host with only Docker installed.
 
 ## Constraints
 
