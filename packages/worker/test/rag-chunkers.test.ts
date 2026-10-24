@@ -1239,6 +1239,24 @@ describe('maskNonCode', () => {
   });
 });
 
+describe('extractCodeSections — line terminators other than LF', () => {
+  it.each([
+    ['CR', '\r'],
+    ['U+2028', '\u2028'],
+    ['U+2029', '\u2029'],
+  ])('ends a // comment at a %s', (_name, lt) => {
+    const src = `const x = 1; // comment${lt}function save() { persist(); }${lt}function next(){ ok(); }`;
+    const ids = extractCodeSections(src, 'a.js').map((s) => s.sectionId);
+    expect(ids).toContain('function-save');
+    expect(ids).toContain('function-next');
+  });
+
+  it('keeps every line terminator in the masked text', () => {
+    const src = 'a; // c\u2028b; // d\ru = 1;';
+    expect(maskNonCode(src, 'js')).toBe('a; //  \u2028b; //  \ru = 1;');
+  });
+});
+
 describe('extractCodeSections — braces that are not code', () => {
   const NEXT = 'function next_one() {\n  return 1;\n}';
   const sectionsOf = (src: string, file: string) =>

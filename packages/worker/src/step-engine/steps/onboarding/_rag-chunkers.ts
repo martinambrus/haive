@@ -278,6 +278,17 @@ function isUrlScheme(text: string, slash: number): boolean {
   return !(before === '' && slash <= 40) && !/[{};)]$/.test(before);
 }
 
+/** Java ends a line at LF or CR; ECMAScript also at U+2028 and U+2029. */
+function isLineTerminator(c: string, java: boolean): boolean {
+  return c === '\n' || c === '\r' || (!java && (c === '\u2028' || c === '\u2029'));
+}
+
+/** Index of the first line terminator at or after `from`, else -1. */
+function lineEnd(text: string, from: number, java: boolean): number {
+  for (let i = from; i < text.length; i += 1) if (isLineTerminator(text[i]!, java)) return i;
+  return -1;
+}
+
 /** Index just past the quote that closes the string opening at `open`, else the end of the text. */
 function quotedEnd(text: string, open: number): number {
   for (let i = open + 1; i < text.length; i += 1) {
@@ -289,11 +300,11 @@ function quotedEnd(text: string, open: number): number {
 
 /** `quotedEnd` for a JS string, which is -1 when its line ends first: such a quote is text, as an
  *  apostrophe is in markup. */
-function lineStringEnd(text: string, open: number): number {
+function lineStringEnd(text: string, open: number, java: boolean): number {
   for (let i = open + 1; i < text.length; i += 1) {
     if (text[i] === '\\') i += text[i + 1] === '\r' && text[i + 2] === '\n' ? 2 : 1;
     else if (text[i] === text[open]) return i + 1;
-    else if (text[i] === '\n') return -1;
+    else if (isLineTerminator(text[i]!, java)) return -1;
   }
   return -1;
 }
@@ -401,11 +412,11 @@ function phpNonCode(text: string): Span[] {
 }
 
 /** Index of the '/' that closes the regex literal opening at `open`, or -1 when its line ends first. */
-function regexClose(text: string, open: number): number {
+function regexClose(text: string, open: number, java: boolean): number {
   let inClass = false;
   const limit = Math.min(text.length, open + MAX_REGEX_CHARS);
   for (let i = open + 1; i < limit; i += 1) {
-    if (text[i] === '\n') return -1;
+    if (isLineTerminator(text[i]!, java)) return -1;
     if (text[i] === '\\') i += 1;
     else if (text[i] === '[') inClass = true;
     else if (text[i] === ']') inClass = false;
@@ -467,12 +478,12 @@ function jsNonCode(text: string, java: boolean): Span[] {
       }
     } else if (/\s/.test(c)) {
       i += 1;
-      if (c === '\n') regexMisses = 0;
+      if (isLineTerminator(c, java)) regexMisses = 0;
     } else if (c === '/' && next === '/' && isUrlScheme(text, i)) {
       prev = '';
       i += 2;
     } else if (c === '/' && (next === '/' || next === '*')) {
-      const close = text.indexOf(next === '/' ? '\n' : '*/', i + 2);
+      const close = next === '/' ? lineEnd(text, i + 2, java) : text.indexOf('*/', i + 2);
       if (close < 0 && next === '*' && frames.length === 0 && strayTicks < MAX_STRAY_TICKS) {
         // An unclosed block comment is a regex like /[/*]/ read as one: lex on as code.
         strayTicks += 1;
@@ -485,7 +496,7 @@ function jsNonCode(text: string, java: boolean): Span[] {
       i = next === '*' && close >= 0 ? close + 2 : bodyEnd;
     } else if (c === '/') {
       const mayStart = regexMayStart(prev);
-      const close = mayStart && regexMisses < MAX_REGEX_MISSES ? regexClose(text, i) : -1;
+      const close = mayStart && regexMisses < MAX_REGEX_MISSES ? regexClose(text, i, java) : -1;
       if (close < 0) {
         if (mayStart) regexMisses += 1;
         prev = c;
@@ -502,7 +513,7 @@ function jsNonCode(text: string, java: boolean): Span[] {
       prev = '';
       i = end;
     } else if (c === "'" || c === '"') {
-      const end = lineStringEnd(text, i);
+      const end = lineStringEnd(text, i, java);
       if (end < 0) {
         prev = c;
         i += 1;
@@ -579,7 +590,8 @@ export function maskNonCode(content: string, syntax: 'php' | 'js' | 'java'): str
   for (const [from, to] of syntax === 'php'
     ? phpNonCode(content)
     : jsNonCode(content, syntax === 'java')) {
-    masked += content.slice(cursor, from) + content.slice(from, to).replace(/[^\r\n]/g, ' ');
+    masked +=
+      content.slice(cursor, from) + content.slice(from, to).replace(/[^\r\n\u2028\u2029]/g, ' ');
     cursor = to;
   }
   return masked + content.slice(cursor);

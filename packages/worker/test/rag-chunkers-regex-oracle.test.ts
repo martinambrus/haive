@@ -44,7 +44,9 @@ function oracleMask(text: string): string {
   for (const [from, to] of [...regexRanges(text), ...commentRanges(text)]) {
     for (let k = from; k < to; k += 1) blank.add(k);
   }
-  return [...text].map((c, k) => (blank.has(k) && !/[\r\n]/.test(c) ? ' ' : c)).join('');
+  return [...text]
+    .map((c, k) => (blank.has(k) && !/[\r\n\u2028\u2029]/.test(c) ? ' ' : c))
+    .join('');
 }
 
 const CASES: string[] = [
@@ -130,6 +132,13 @@ const CASES: string[] = [
   // a label before a comment is no URL scheme
   'function first(){ retry:// a ` in the comment\nwork(); }\nfunction second(){ return 1; }\nconst t = ``;',
   'switch (k) { case 1:// c `\n break; }\nfunction second(){ return 1; }\nconst t = ``;',
+  // every ECMAScript line terminator ends a line
+  'const a = 1; // c\rfunction f1() { x(); }\rconst b = 2;',
+  'const a = 1; // c\u2028function f1() { x(); }\u2028const b = 2;',
+  'const a = 1; // c\u2029function f1() { x(); }\u2029const b = 2;',
+  '// c\r/a+/.test(s); function f1() { x(); }',
+  "const s = 'a\rb'; function f1() { x(); }",
+  'x = 1 /a/g.exec(s); function f1() { x(); }',
   // identifiers with combining marks and joiners
   'let caf\u00e9 = 6; const n = caf\u00e9 / 2; function save() { persist(); } const ratio = n / 3;',
   'let cafe\u0301 = 6; const n = cafe\u0301 / 2; function save() { persist(); } const ratio = n / 3;',
