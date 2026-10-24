@@ -18,6 +18,7 @@ import { shellQuote } from '../../../sandbox/shell-quote.js';
 import { buildCommitDiffArtifact } from '../workflow/_commit-diff.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { detectOrigin, gitRun, pushBranch } from '../../../repo/git-push.js';
+import { gitCommitStaged } from '../../../repo/git-commit.js';
 import { gitWorkspaceStatus } from '../../../repo/git-workspace.js';
 import { putBackProjections, warnStep } from '../../../project-state/branch-revert.js';
 
@@ -330,10 +331,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     const message = (values.commitMessage ?? '').trim() || 'chore: run-app session edits';
     const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
     const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-    const commit = await gitRun(workspace, ['commit', '-m', message], commitEnv);
-    const commitErr = commit.stderr || commit.stdout;
-    const nothing = commit.code !== 0 && /nothing to commit/i.test(commitErr);
-    if (commit.code !== 0 && !nothing) throw new Error(`git commit failed: ${commitErr}`);
+    const nothing = !(await gitCommitStaged(workspace, message, commitEnv));
     const pushTo = values.push && detected.hasOrigin ? detected.branch : null;
     if (values.push && detected.hasOrigin && !pushTo) {
       await warnStep(ctx, [
