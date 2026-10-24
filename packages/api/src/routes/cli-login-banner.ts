@@ -204,26 +204,31 @@ interface BannerSession {
 const CAPTURE_TIMEOUT_MS = 60_000;
 const CLAUDE_OAUTH_PREFIX = 'sk-ant-oat01-';
 
-// Observed constant across claude oauth tokens (95 body chars after the
-// prefix, total 108). TTY wrapping inserts whitespace mid-token, so we scan
-// through whitespace but only accept the capture when exactly BODY_LEN
-// token-alphabet chars have been collected. Paragraph text like
-// "Store this token securely" would exceed 95 contiguous non-ws chars only
-// if the token itself didn't already stop us first.
-const CLAUDE_OAUTH_BODY_LEN = 95;
+// A plausibility floor, not a format length: observed bodies have 95 chars.
+const CLAUDE_OAUTH_MIN_BODY_LEN = 64;
 
 function extractClaudeOauthToken(text: string): string | null {
   const start = text.indexOf(CLAUDE_OAUTH_PREFIX);
   if (start < 0) return null;
+  const lines = text.slice(start + CLAUDE_OAUTH_PREFIX.length).split(/\r\n|[\r\n]/);
   let body = '';
-  let i = start + CLAUDE_OAUTH_PREFIX.length;
-  while (i < text.length && body.length < CLAUDE_OAUTH_BODY_LEN) {
-    const c = text[i]!;
-    if (/[A-Za-z0-9_-]/.test(c)) body += c;
-    else if (!/\s/.test(c)) break;
-    i++;
+  for (let i = 0; i < lines.length; i++) {
+    const line = i === 0 ? lines[i]! : lines[i]!.replace(/^[ \t]+/, '');
+    if (i > 0) {
+      // Only token-only lines can be TTY continuations. Blank lines, prose
+      // with word separators and a second prefix terminate the first token.
+      if (line.startsWith(CLAUDE_OAUTH_PREFIX) || /[ \t]+\S/.test(line)) break;
+      // A chunk can end mid-token or just after a wrap. Wait for more output
+      // before deciding whether its last line continues the capture.
+      if (i === lines.length - 1 && /^[A-Za-z0-9_-]*$/.test(line)) return null;
+      if (!line) break;
+    }
+    const fragment = line.match(/^[A-Za-z0-9_-]*/)?.[0] ?? '';
+    body += fragment;
+    if (fragment.length !== line.length) break;
+    if (i === lines.length - 1) return null;
   }
-  return body.length === CLAUDE_OAUTH_BODY_LEN ? CLAUDE_OAUTH_PREFIX + body : null;
+  return body.length >= CLAUDE_OAUTH_MIN_BODY_LEN ? CLAUDE_OAUTH_PREFIX + body : null;
 }
 
 export interface CliLoginBannerOpts {

@@ -154,12 +154,119 @@ function paste() {
   ws.emit('message', Buffer.from(JSON.stringify({ type: 'token-input', token: CODE })));
 }
 
+describe('Claude OAuth token capture controls', () => {
+  const token = (length: number) => 'sk-ant-oat01-' + 'Az9_xQ7-vR2'.repeat(20).slice(0, length);
+
+  async function ready() {
+    await start();
+    stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
+    paste();
+  }
+
+  it.each([64, 95, 100, 90])('saves the complete %i-character body', async (length) => {
+    const expected = token(length);
+    await ready();
+    stream.emit('data', Buffer.from(`${expected}\n\nStore this token securely\n`));
+    await settle();
+    expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected).toBe(
+      true,
+    );
+    assertNoCredentialText(expected, CODE);
+  });
+
+  it.each([' ', '\n', '\n\n'])(
+    'ends a shorter token before prose separated by %j',
+    async (separator) => {
+      const expected = token(90);
+      await ready();
+      stream.emit('data', Buffer.from(`${expected}${separator}Store this token securely\n`));
+      await settle();
+      expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected).toBe(
+        true,
+      );
+      assertNoCredentialText(expected, CODE);
+    },
+  );
+
+  it.each(['.', '/', '=', ':'])(
+    'ends a token at the non-alphabet delimiter %s',
+    async (delimiter) => {
+      const expected = token(100);
+      await ready();
+      stream.emit('data', Buffer.from(`${expected}${delimiter}prose\n`));
+      await settle();
+      expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected).toBe(
+        true,
+      );
+    },
+  );
+
+  it('captures line wraps and ANSI styling without joining the following paragraph', async () => {
+    const expected = token(100);
+    await ready();
+    stream.emit(
+      'data',
+      Buffer.from(
+        `\x1b[32m${expected.slice(0, 47)}\x1b[0m\r\n  ` +
+          `\x1b[1m${expected.slice(47, 80)}\x1b[0m\n\t${expected.slice(80)}\n\nKeep it safe\n`,
+      ),
+    );
+    await settle();
+    expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected).toBe(
+      true,
+    );
+    assertNoCredentialText(expected, CODE);
+  });
+
+  it('keeps the first token when two tokens appear in one output', async () => {
+    await ready();
+    stream.emit('data', Buffer.from(`${TOKEN}\n\n${token(100)}\n\n`));
+    await settle();
+    expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(true);
+  });
+
+  it.each([20, 63])('rejects a %i-character token body below the minimum', async (length) => {
+    await ready();
+    stream.emit('data', Buffer.from(`${token(length)}\n\nStore this token securely\n`));
+    await settle();
+    expect(h.save.mock.calls.length === 0).toBe(true);
+  });
+
+  it.each(['', '\r\n  '])('waits for a boundary across a chunk ending in %j', async (wrap) => {
+    const expected = token(100);
+    await ready();
+    stream.emit('data', Buffer.from(expected.slice(0, 108) + wrap));
+    await settle();
+    expect(h.save.mock.calls.length === 0).toBe(true);
+    stream.emit('data', Buffer.from(`${expected.slice(108)}\n\n`));
+    await settle();
+    expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected).toBe(
+      true,
+    );
+  });
+
+  it.each(['prefix', 'authorization URL', 'pasted code'])(
+    'requires the existing %s signal',
+    async (missing) => {
+      await start();
+      if (missing !== 'authorization URL') {
+        stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
+      }
+      if (missing !== 'pasted code') paste();
+      const output = missing === 'prefix' ? TOKEN.slice('sk-ant-oat01-'.length) : TOKEN;
+      stream.emit('data', Buffer.from(`${output}\n\n`));
+      await settle();
+      expect(h.save.mock.calls.length === 0).toBe(true);
+    },
+  );
+});
+
 describe('CLI login banner credential logging', () => {
   it('captures a wrapped Claude token without logging any six-character substring', async () => {
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
     paste();
-    stream.emit('data', Buffer.from(`${TOKEN.slice(0, 47)}\n${TOKEN.slice(47)}\n`));
+    stream.emit('data', Buffer.from(`${TOKEN.slice(0, 47)}\n${TOKEN.slice(47)}\n\n`));
     await settle();
     expect(h.save.mock.calls.some(([, input]) => input.value === TOKEN)).toBe(true);
     expect(
@@ -267,7 +374,7 @@ describe('CLI login banner credential logging', () => {
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
     paste();
-    stream.emit('data', Buffer.from(TOKEN));
+    stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
     await settle();
     assertNoCredentialText(TOKEN, CODE);
     expect(
@@ -283,7 +390,7 @@ describe('CLI login banner credential logging', () => {
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
     paste();
-    stream.emit('data', Buffer.from(TOKEN));
+    stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
     await settle();
     expect(h.log.error).toHaveBeenCalled();
     assertNoCredentialText(TOKEN, CODE);
