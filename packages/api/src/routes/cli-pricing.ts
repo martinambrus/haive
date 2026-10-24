@@ -3,7 +3,6 @@ import { Hono } from 'hono';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
-  CLI_EXEC_JOB_NAMES,
   CLI_PROVIDER_LIST,
   DISPLAY_CURRENCIES,
   PRICE_FEEDS,
@@ -13,7 +12,7 @@ import {
   type CliProviderName,
 } from '@haive/shared';
 import { getDb } from '../db.js';
-import { getCliExecQueue } from '../queues.js';
+import { enqueueCliVersionRefresh } from '../lib/cli-version-refresh.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -237,12 +236,7 @@ cliPricingRoutes.delete('/prices/:id', async (c) => {
  *  job: prices ride that job precisely so one button refreshes versions, the OpenRouter
  *  catalog, rates and FX together. */
 cliPricingRoutes.post('/refresh', async (c) => {
-  const queue = getCliExecQueue();
-  const job = await queue.add(
-    CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
-    { force: true },
-    { removeOnComplete: true, removeOnFail: 10 },
-  );
+  const job = await enqueueCliVersionRefresh();
   log.info({ jobId: job.id }, 'manual price refresh enqueued');
   return c.json({ jobId: job.id });
 });

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { CLI_POLLABLE_JOB_OPTS } from '@haive/shared/constants';
 import { jobPhaseForState, POLL_TIMEOUT_MS } from './cli-jobs';
 
 describe('jobPhaseForState', () => {
@@ -25,9 +26,12 @@ describe('jobPhaseForState', () => {
 
 describe('POLL_TIMEOUT_MS', () => {
   it('stays under the server-side job retention', () => {
-    // POLLABLE_JOB_RETENTION_S in packages/api/src/routes/cli-providers.ts. Polling past the
-    // point where the finished job is reaped would report "expired" for work that succeeded —
-    // the exact false failure this change exists to remove.
-    expect(POLL_TIMEOUT_MS).toBeLessThan(900 * 1000);
+    // Polling past retention would report "expired" for work that succeeded.
+    for (const retention of [
+      CLI_POLLABLE_JOB_OPTS.removeOnComplete,
+      CLI_POLLABLE_JOB_OPTS.removeOnFail,
+    ]) {
+      expect(POLL_TIMEOUT_MS).toBeLessThan(retention.age * 1000);
+    }
   });
 });

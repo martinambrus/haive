@@ -3,6 +3,8 @@ import { Hono } from 'hono';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_EXEC_JOB_NAMES,
+  VERSION_REFRESH_JOB_ID,
+  CLI_POLLABLE_JOB_OPTS,
   CLI_INSTALL_METADATA,
   CLI_PROVIDER_CATALOG,
   CLI_PROVIDER_LIST,
@@ -26,7 +28,6 @@ import {
   type CliSignOutJobPayload,
   type CliSignOutJobResult,
   type OllamaProvisionJobPayload,
-  type RefreshCliVersionsJobPayload,
   type SandboxImageBuildJobPayload,
   type SandboxImageRemoveJobPayload,
 } from '@haive/shared';
@@ -49,6 +50,7 @@ import {
   requireNewWorkAllowed,
 } from '../middleware/maintenance.js';
 import { getCliExecQueue, getUsagePollQueue } from '../queues.js';
+import { enqueueCliVersionRefresh } from '../lib/cli-version-refresh.js';
 
 async function loadOwnedProvider(db: Database, userId: string, providerId: string) {
   const provider = await db.query.cliProviders.findFirst({
@@ -62,17 +64,10 @@ async function loadOwnedProvider(db: Database, userId: string, providerId: strin
 const CLI_PROVIDER_LABEL_MAX_LENGTH = 255;
 const MAX_CLONE_ATTEMPTS = 1000;
 
-/** How long a finished cli-exec job stays readable so the browser can poll for its result.
- *  Must outlast the client's poll window (POLL_TIMEOUT_MS in
- *  packages/web/src/lib/cli-jobs.ts): a job reaped between finishing and the final poll
- *  would be reported as expired for work that actually succeeded. */
-const POLLABLE_JOB_RETENTION_S = 900;
-
-/** Enqueue options shared by every cli-exec job the UI starts and then polls. */
-const POLLABLE_JOB_OPTS = {
-  removeOnComplete: { age: POLLABLE_JOB_RETENTION_S },
-  removeOnFail: { age: POLLABLE_JOB_RETENTION_S },
-} as const;
+// BullMQ ids: plain adds use its counter; scheduler ticks use repeat:<schedulerId>:<ms>.
+const POLLABLE_JOB_ID = new RegExp(
+  `^(?:[1-9][0-9]*|repeat:${VERSION_REFRESH_JOB_ID.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:[1-9][0-9]*)$`,
+);
 
 /** Load a job the UI is polling, or 404.
  *
@@ -87,6 +82,9 @@ async function loadPollableJob(
   name: string,
   owner?: { providerId: string; userId: string },
 ) {
+  if (!POLLABLE_JOB_ID.test(jobId)) {
+    throw new HttpError(404, 'job not found — it may have expired', 'job_expired');
+  }
   const job = await getCliExecQueue().getJob(jobId);
   const data = job?.data as { providerId?: string; userId?: string } | undefined;
   if (
@@ -280,9 +278,7 @@ cliProviderRoutes.get('/catalog', async (c) => {
 cliProviderRoutes.post('/catalog/:name/refresh-versions', async (c) => {
   // Parsed for the 400 on an unknown CLI name; the job itself refreshes every catalog entry.
   cliProviderNameSchema.parse(c.req.param('name'));
-  const payload: RefreshCliVersionsJobPayload = { force: true };
-  const queue = getCliExecQueue();
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS, payload, POLLABLE_JOB_OPTS);
+  const job = await enqueueCliVersionRefresh();
   if (!job.id) throw new HttpError(500, 'refresh was not queued', 'refresh_enqueue_failed');
 
   return c.json({ jobId: job.id }, 202);
@@ -660,7 +656,7 @@ cliProviderRoutes.post('/:id/test', async (c) => {
   };
 
   const queue = getCliExecQueue();
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, POLLABLE_JOB_OPTS);
+  const job = await queue.add(CLI_EXEC_JOB_NAMES.PROBE, payload, CLI_POLLABLE_JOB_OPTS);
   if (!job.id) throw new HttpError(500, 'probe was not queued', 'probe_enqueue_failed');
 
   return c.json({ jobId: job.id }, 202);
@@ -706,7 +702,7 @@ cliProviderRoutes.post('/:id/sign-out', async (c) => {
 
   const payload: CliSignOutJobPayload = { providerId: provider.id, userId };
   const queue = getCliExecQueue();
-  const job = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, POLLABLE_JOB_OPTS);
+  const job = await queue.add(CLI_EXEC_JOB_NAMES.SIGN_OUT, payload, CLI_POLLABLE_JOB_OPTS);
   if (!job.id) throw new HttpError(500, 'sign-out was not queued', 'sign_out_enqueue_failed');
 
   return c.json({ jobId: job.id }, 202);
