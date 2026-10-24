@@ -84,8 +84,8 @@ board. At session start, load the board's tasks you own or will work on into the
 # Open tasks
 
 ### T311 · FNF[rag-chunker-2] · chunker false matches, wrong method owners, braces in strings (+5)
-status: taken · owner: fnf-run@ACTIVIT21 · since: 2026-10-23 · last: 2026-10-24T11:00Z
-branch: fnf/311-rag-chunker-2 · worktree: /home/activit/haive/.claude/worktrees/p311 · evidence: .claude/tmp/fnf-run/p311/
+status: parked · reason: user decision — merge PR #889 with the lexer edge cases below as known limits, or keep fixing? (asked 2026-10-24T12:53Z) · last owner: fnf-run@ACTIVIT21
+branch: fnf/311-rag-chunker-2 (pushed) · PR #889 (CI 11/11 green on 6d80205cd) · worktree on ACTIVIT21: .claude/worktrees/p311 · evidence/ledger/fix briefs: .claude/tmp/fnf-run/p311/ on ACTIVIT21
 All PRE-EXISTING, measured on the eval tree at 9c0c8ee77 (evidence .claude/tmp/rag-plan/p1/evidence/metrics-main.json). File: `_rag-chunkers.ts`.
 1. The PHP class pattern matches "class" inside comments: 563 methods get a wrong owner, 120 lose theirs.
 2. Function/arrow patterns match inside strings, comments, inline HTML, template literals (31 PHP + 7 JS false sections).
@@ -94,6 +94,11 @@ All PRE-EXISTING, measured on the eval tree at 9c0c8ee77 (evidence .claude/tmp/r
 5. A short span with a closer plus the next head goes whole to the next section; split at the first worded line.
 6. `.rb` sections stop before `end`; Ruby ranges should end after `end`.
 Fix: a lexer pass marking comment/string spans shared by PHP and JS. Needs one reindex.
+State 2026-10-24: 16 commits on the branch; full worker suite green at 19320b360 (session run after the crash); measured on the eval tree: wrong method owners 753→0, PHP unmatched 48→0, 0 constructs newly lost; ruler unchanged across fix rounds. 3 Codex rounds, each fixed one class:
+- r1 (fixed af669c010): unclosed template literal (stray backtick in JSX text) masked to EOF.
+- r2 (fixed ef082d0e1, 6d80205cd): `//` after a URL scheme in JSX text read as a comment; unclosed `/*` masked to EOF.
+- r3 OPEN (threads 4367141152, 4367141160, not replied): (a) postfix `++`/`--` before `/` lets a regex start, masking up to the next `/` on the line (`n++ / 2; function save(){} … n / 3` loses save) — fix: record `++`/`--` as an operand in `prev`; (b) Java `"""` text blocks are read with the single-line string reader, so a `/*` inside one masks following classes — fix: recognise text blocks for Java (or language-specific masking).
+Next owner: either fix r3 (a)+(b) and run one more Codex round, or merge with r3 listed as known limits (user to decide).
 
 ### T323 · FNF[uploads-3] · leftover upload files never cleaned; unlink failures warn forever (+3)
 status: open (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Previous brief, reusable: .claude/tmp/fnf-run/p323/drive.md on ACTIVIT21)
