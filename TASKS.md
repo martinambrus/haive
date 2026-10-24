@@ -134,7 +134,7 @@ Seen 2026-10-24 by fnf-run on a push (alerts #108-#116, opened 2026-10-23). (Ses
 3. zod → 4.6.6 (1 high): Dependabot PR #859.
 Route: one lockfile PR, a web browser check of markdown rendering (MarkdownView) since dompurify + markdown-it sit under it.
 
-### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+5)
+### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+7)
 status: open
 From the #311 driver (2026-10-24). PRE-EXISTING unless noted. (Session fnf-run mirrors it as task #330.) Evidence/harness (ruler, lexer-diff, oracle-cross, mutants): .claude/tmp/fnf-run/p311/ on ACTIVIT21.
 1. Go/Rust readers count braces in strings/comments (goRanges/rustRanges read raw content); verify with a ruler first.
@@ -142,6 +142,8 @@ From the #311 driver (2026-10-24). PRE-EXISTING unless noted. (Session fnf-run m
 3. PHP trait/interface/enum owners absent; `new class extends X {` names methods method-extends-*.
 4. LIMIT introduced by #311: JSX text lexed as JS blanks the rest of a line after an apostrophe, `//` or `/` (30 runs in 3 of 2417 TS files, 0 constructs lost).
    Also: a stray backtick in JSX text that pairs with a LATER real template literal masks the code between them (#889 fixed only the unclosed case; needs a JSX-text signal).
+5. PRE-EXISTING (main too, probed 2026-10-24): a function/class/method named with non-ASCII characters (`function café()`, `class Näme`) yields no section in PHP or JS: JS_NAME and the PHP construct patterns are ASCII `\w`. PHP allows any byte >= 0x80; JS allows ID_Start/ID_Continue.
+6. PRE-EXISTING: section extraction splits and looks back on LF only (`_rag-chunkers.ts` lastIndexOf('\n') ~780-787, split('\n') ~859, ~999), so a CR-only file's sections may be cut imprecisely; #889's CR controls only check the section ids.
 5. Ruby reader: `def self.x` named `self`, `module`, endless def.
 6. Doc: docs/plans/rag-retrieval-improvements.md:22-23 chunkSection split order is stale.
 
