@@ -1087,6 +1087,16 @@ describe('the investigation in the gate diff', () => {
     expect(entry?.editPath).toBe(draft);
   });
 
+  it('treats an existing empty investigation as modified, not absent', async () => {
+    const { entry, draft, warnings } = await entryFor((file) => writeFile(file, ''));
+
+    expect(warnings).toEqual([]);
+    expect(entry).toMatchObject({ status: 'modified', oldContent: '' });
+    expect(entry?.newContent).toContain('# Null deref');
+    expect(entry?.unreadable).toBeUndefined();
+    expect(entry?.editPath).toBe(draft);
+  });
+
   it('is flagged unreadable, with no editPath, when its path holds a pipe', async () => {
     const { entry, warnings } = await entryFor((file) => exec('mkfifo', [file]));
 

@@ -900,10 +900,10 @@ async function investigationDiffFile(
 ): Promise<CommitDiffFile> {
   const rel = investigationRelPath(inv);
   const wa = workspaceAnchor(worktree);
-  let oldContent = '';
+  let oldContent: string | null;
   try {
     // Strict: only absence reads as null (a new file); a link, a pipe or a refused read throws.
-    oldContent = (await readTextNoFollow(wa.anchor, `${wa.prefix}${rel}`, { strict: true })) ?? '';
+    oldContent = await readTextNoFollow(wa.anchor, `${wa.prefix}${rel}`, { strict: true });
   } catch {
     return {
       path: rel,
@@ -917,10 +917,10 @@ async function investigationDiffFile(
   }
   return {
     path: rel,
-    status: oldContent ? 'modified' : 'added',
+    status: oldContent === null ? 'added' : 'modified',
     binary: false,
     truncated: false,
-    oldContent,
+    oldContent: oldContent ?? '',
     newContent: content,
     editPath: investigationDraftPath(worktree),
   };
