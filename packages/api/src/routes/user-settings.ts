@@ -26,6 +26,7 @@ import { requireAuth, requireAuthAllowingPasswordChange } from '../middleware/au
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
+import { closeUserSockets } from '../lib/user-sockets.js';
 import { ensureUploadsDir, uploadFileRel, uploadsRel, uploadsStorageRoot } from '../lib/uploads.js';
 
 /** Notification sounds are short clips — cap well below the archive upload
@@ -126,6 +127,8 @@ userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c)
       updatedAt: new Date(),
     })
     .where(eq(schema.users.id, userId));
+
+  closeUserSockets(userId);
 
   const accessToken = await signAccessToken({
     sub: user.id,

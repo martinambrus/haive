@@ -108,13 +108,21 @@ async function start(query = '', attached = true, providerId = PROVIDER) {
     getContainer: () => ({ start: async () => {}, remove: async () => {}, resize: async () => {} }),
   } as unknown as Docker;
   installCliLoginBannerWebSocket(server as Server, { docker });
+  // The shared upgrade guard listens on the socket and the session registry tracks req.socket.
+  const socket = Object.assign(new EventEmitter(), {
+    write: vi.fn(),
+    end: vi.fn(),
+    destroy: vi.fn(),
+    destroyed: false,
+  });
   server.emit(
     'upgrade',
     {
       url: `/cli-login-banner/${providerId}${query}`,
       headers: { cookie: `${ACCESS_COOKIE}=synthetic-session` },
+      socket,
     },
-    { write: vi.fn(), destroy: vi.fn() },
+    socket,
     Buffer.alloc(0),
   );
   await settle();

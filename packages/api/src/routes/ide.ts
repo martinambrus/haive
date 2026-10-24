@@ -20,9 +20,10 @@ import {
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
 import { getIdeEnsureQueue, getIdeEnsureQueueEvents } from '../queues.js';
-import { verifyAccessToken } from '../auth/jwt.js';
+import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
+import type { UpgradeSession } from '../lib/user-sockets.js';
 import {
-  ACCESS_COOKIE,
   isSessionSetCookie,
   withoutSessionCookies,
   withoutSessionSetCookies,
@@ -181,6 +182,7 @@ export function installIdeWebSocket(server: Server): void {
   void resetStaleIdeRefcounts().catch((err) => log.warn({ err }, 'boot ide refcount reset failed'));
 
   server.on('upgrade', (req, socket, head) => {
+    guardUpgradeSocket(socket);
     const rawUrl = req.url ?? '';
     if (!rawUrl.startsWith(WS_PATH_PREFIX)) return;
     if (isForeignOrigin(req.headers.origin, req.headers.host, trustedOrigins())) {
@@ -206,6 +208,7 @@ export function installIdeWebSocket(server: Server): void {
           rejectUpgrade(socket, 404, 'Not Found');
           return;
         }
+        if (auth.session.revoked) return;
         // Bring the IDE container up before bridging (worker-only). Coalesced per
         // task; on timeout reject so the editor's reconnect retries once a slow
         // first-launch image pull finishes in the background.
@@ -222,7 +225,8 @@ export function installIdeWebSocket(server: Server): void {
           rejectUpgrade(socket, 503, 'IDE starting');
           return;
         }
-        proxyWsUpgrade(req, socket, head, target);
+        if (auth.session.revoked) return;
+        proxyWsUpgrade(req, socket, head, target, auth.session);
       } catch (err) {
         log.error({ err, url: rawUrl }, 'ide upgrade handler failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
@@ -239,6 +243,7 @@ function relayUpgradeResponse(
   upstream: net.Socket,
   socket: Duplex,
   teardown: (reason: string) => void,
+  session: UpgradeSession,
 ): void {
   let buffered = Buffer.alloc(0);
   const onData = (chunk: Buffer): void => {
@@ -260,6 +265,10 @@ function relayUpgradeResponse(
         return !(isSetCookie && isSessionSetCookie(line.slice(colon + 1)));
       })
       .join('\r\n');
+    if (/^HTTP\/1\.[01] 101(?: |$)/.test(head.split('\r\n')[0] ?? '') && !session.acceptRaw()) {
+      teardown('session revoked');
+      return;
+    }
     socket.write(Buffer.concat([Buffer.from(head, 'latin1'), buffered.subarray(end)]));
     buffered = Buffer.alloc(0);
     upstream.pipe(socket);
@@ -276,6 +285,7 @@ function proxyWsUpgrade(
   socket: Duplex,
   head: Buffer,
   target: IdeTarget,
+  session: UpgradeSession,
 ): void {
   const taskId = target.sessionId;
   const prefix = target.prefix;
@@ -286,7 +296,7 @@ function proxyWsUpgrade(
   let closed = false;
   let counted = false;
 
-  const teardown = (reason: string): void => {
+  const teardown = (reason: string, closeSocket = true): void => {
     if (closed) return;
     closed = true;
     if (counted) void releaseIdeSession(taskId);
@@ -296,14 +306,17 @@ function proxyWsUpgrade(
       /* ignore */
     }
     try {
-      socket.destroy();
+      if (closeSocket) socket.destroy();
     } catch {
       /* ignore */
     }
     log.info({ taskId, reason }, 'ide ws bridge closed');
   };
 
+  session.onRevoke(() => teardown('session revoked', false));
+
   upstream.on('connect', () => {
+    if (session.revoked) return;
     const lines = [`${req.method ?? 'GET'} ${strippedPath} HTTP/1.1`];
     for (const [k, v] of Object.entries(req.headers)) {
       if (k.toLowerCase() === 'host') {
@@ -332,7 +345,7 @@ function proxyWsUpgrade(
     }
     upstream.write(`${lines.join('\r\n')}\r\n\r\n`);
     if (head && head.length) upstream.write(head);
-    relayUpgradeResponse(upstream, socket, teardown);
+    relayUpgradeResponse(upstream, socket, teardown, session);
     socket.pipe(upstream);
     counted = true;
     void acquireIdeSession(taskId);
@@ -404,43 +417,4 @@ function extractIdeTarget(rawUrl: string): { id: string; repository: boolean } |
   const repository = parts[0] === 'repos';
   const id = parts[repository ? 1 : 0] ?? '';
   return isCanonicalUuid(id) ? { id, repository } : null;
-}
-
-async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {
-  const cookieHeader = req.headers.cookie;
-  if (!cookieHeader) return null;
-  const token = parseCookieValue(cookieHeader, ACCESS_COOKIE);
-  if (!token) return null;
-  try {
-    const payload = await verifyAccessToken(token);
-    const db = getDb();
-    const user = await db.query.users.findFirst({
-      where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
-    });
-    if (!user) return null;
-    if (user.status !== 'active') return null;
-    if (user.tokenVersion !== payload.tv) return null;
-    if (user.mustChangePassword) return null;
-    return { userId: user.id };
-  } catch {
-    return null;
-  }
-}
-
-function parseCookieValue(cookieHeader: string, name: string): string | null {
-  for (const part of cookieHeader.split(';')) {
-    const [k, ...rest] = part.trim().split('=');
-    if (k === name) return decodeURIComponent(rest.join('='));
-  }
-  return null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  try {
-    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
-  } catch {
-    /* ignore */
-  }
-  socket.destroy();
 }

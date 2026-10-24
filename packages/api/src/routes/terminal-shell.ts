@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Server, IncomingMessage } from 'node:http';
-import type { Duplex } from 'node:stream';
+import type { Server } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Redis } from 'ioredis';
 import { eq } from 'drizzle-orm';
@@ -23,8 +22,8 @@ import {
 } from '@haive/shared';
 import { getDb } from '../db.js';
 import { getRedis } from '../redis.js';
-import { verifyAccessToken } from '../auth/jwt.js';
-import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
+import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isCanonicalUuid } from '../lib/uuid.js';
 
@@ -62,6 +61,7 @@ export function installTerminalShellWebSocket(
   void resetStaleRefcounts().catch((err) => log.warn({ err }, 'boot refcount reset failed'));
 
   server.on('upgrade', (req, socket, head) => {
+    guardUpgradeSocket(socket);
     const rawUrl = req.url ?? '';
     const isRepo = rawUrl.startsWith(repoPathPrefix);
     const isTask = rawUrl.startsWith(pathPrefix);
@@ -98,7 +98,9 @@ export function installTerminalShellWebSocket(
             rejectUpgrade(socket, ownership.status, ownership.message);
             return;
           }
+          if (auth.session.revoked) return;
           wss.handleUpgrade(req, socket, head, (ws) => {
+            if (!auth.session.accept(ws)) return;
             runScopedShellSession(
               ws,
               auth.userId,
@@ -134,7 +136,9 @@ export function installTerminalShellWebSocket(
           rejectUpgrade(socket, 409, `Task is ${ownership.taskStatus} - terminal disabled`);
           return;
         }
+        if (auth.session.revoked) return;
         wss.handleUpgrade(req, socket, head, (ws) => {
+          if (!auth.session.accept(ws)) return;
           runShellSession(ws, auth.userId, ids.taskId, ids.cliProviderId).catch((err) => {
             log.error(
               { err, taskId: ids.taskId, cliProviderId: ids.cliProviderId },
@@ -188,6 +192,10 @@ export async function runScopedShellSession(
     log.debug({ err, correlationId }, 'subscriber error');
   });
   await subscriber.connect().catch(() => undefined);
+  if (ws.readyState !== WebSocket.OPEN) {
+    await subscriber.quit().catch(() => undefined);
+    return;
+  }
   const publisher = getRedis();
 
   // Refcount/cleanup state — set up BEFORE the openSession await. React
@@ -351,6 +359,7 @@ export async function runScopedShellSession(
   }, KEEPALIVE_INTERVAL_MS);
 
   ws.on('message', async (raw) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw.toString());
@@ -477,32 +486,6 @@ function openSession(args: OpenSessionArgs): Promise<TerminalOpenResult> {
   });
 }
 
-async function authenticateUpgrade(req: IncomingMessage): Promise<{ userId: string } | null> {
-  const cookieHeader = req.headers.cookie;
-  if (!cookieHeader) return null;
-  const token = parseCookieValue(cookieHeader, ACCESS_COOKIE);
-  if (!token) return null;
-  try {
-    const payload = await verifyAccessToken(token);
-    const db = getDb();
-    const user = await db.query.users.findFirst({
-      where: eq(schema.users.id, payload.sub),
-      columns: { id: true, status: true, tokenVersion: true, mustChangePassword: true },
-    });
-    if (
-      !user ||
-      user.status !== 'active' ||
-      user.tokenVersion !== payload.tv ||
-      user.mustChangePassword
-    ) {
-      return null;
-    }
-    return { userId: user.id };
-  } catch {
-    return null;
-  }
-}
-
 interface OwnershipResult {
   taskTerminal: boolean;
   taskStatus: string;
@@ -609,26 +592,6 @@ export function extractRepoIds(
 ): { repositoryId: string; cliProviderId: string } | null {
   const parsed = parseTwoSegmentPath(rawUrl, pathPrefix);
   return parsed ? { repositoryId: parsed[0], cliProviderId: parsed[1] } : null;
-}
-
-function parseCookieValue(header: string, name: string): string | null {
-  for (const part of header.split(/;\s*/)) {
-    const eq = part.indexOf('=');
-    if (eq === -1) continue;
-    if (part.slice(0, eq) === name) {
-      return decodeURIComponent(part.slice(eq + 1));
-    }
-  }
-  return null;
-}
-
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  try {
-    socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\n\r\n`);
-  } catch {
-    // ignore
-  }
-  socket.destroy();
 }
 
 function sendJson(ws: WebSocket, frame: Record<string, unknown>): void {
