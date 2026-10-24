@@ -103,6 +103,51 @@ describe('GitHub device sign-in attempts', () => {
     t.unmount();
   });
 
+  it('keeps the newer code and one poll loop when starts resolve out of order', async () => {
+    const first = deferred<typeof begun>();
+    const second = deferred<typeof begun>();
+    api.post
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockResolvedValue({ status: 'pending', error: 'authorization_pending' });
+    const t = await mount();
+    await t.click('sign in with github');
+    await t.click('sign in with github');
+
+    second.resolve({ ...begun, deviceCode: 'handle-2', userCode: 'NEW-CODE' });
+    await t.flush();
+    expect(textOf(t.view.tree())).toContain('NEW-CODE');
+    first.resolve(begun);
+    await t.flush();
+    expect(textOf(t.view.tree())).toContain('NEW-CODE');
+    expect(textOf(t.view.tree())).not.toContain(begun.userCode);
+
+    await t.poll();
+    await t.poll();
+    expect(api.post.mock.calls).toEqual([
+      ['/github-oauth/device-code', {}],
+      ['/github-oauth/device-code', {}],
+      ['/github-oauth/poll', { deviceCode: 'handle-2' }],
+      ['/github-oauth/poll', { deviceCode: 'handle-2' }],
+    ]);
+    expect(t.onConnected).not.toHaveBeenCalled();
+    expect(t.onError.mock.calls.filter(([message]) => message !== null)).toEqual([]);
+    t.unmount();
+  });
+
+  it('does not poll after cancellation during the interval wait', async () => {
+    api.post.mockResolvedValueOnce(begun).mockResolvedValue(approved);
+    const t = await mount();
+    await t.click('sign in with github');
+    await vi.advanceTimersByTimeAsync(1000);
+    await t.click('cancel');
+    await t.poll();
+    expect(api.post.mock.calls).toEqual([['/github-oauth/device-code', {}]]);
+    expect(t.onConnected).not.toHaveBeenCalled();
+    expect(t.onError.mock.calls.filter(([message]) => message !== null)).toEqual([]);
+    t.unmount();
+  });
+
   it.each(['cancel', 'restart', 'unmount'] as const)(
     'ignores a successful poll after %s',
     async (action) => {
