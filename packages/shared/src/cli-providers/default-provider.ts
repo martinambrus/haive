@@ -24,3 +24,11 @@ export function resolveDefaultCliProvider<T extends DefaultProviderCandidate>(
 ): T | null {
   return orderByDefaultPriority(providers)[0] ?? null;
 }
+
+/** The CLI a task runs on: its own when it names one (even a disabled one), else the default. */
+export function resolveTaskCliProviderId(
+  taskCliProviderId: string | null,
+  providers: readonly DefaultProviderCandidate[],
+): string | null {
+  return taskCliProviderId ?? resolveDefaultCliProvider(providers)?.id ?? null;
+}
