@@ -758,14 +758,6 @@ Sites:
   On a timeout they return different things: partial stdout, [], null, or "timed out".
   Fix: one shared runDockerCommand(args, {timeoutMs}) returning {stdout, stderr, exit, timedOut}, plus a test that kills a hung child.
 
-### T372 · FNF[api-test-hygiene] · fence-order test timeout; picker double label; stepIds misnamed (+2)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:38Z · last: 2026-10-24T20:38Z · item 2 ships with T391 · was modular #245
-
-1. api test/new-work-fence-order.test.ts:87 runs under the 5 s default timeout. Fix: 30 s.
-2. MOVED to T391 (the same defect as its item 3; ships with it): cli-picker-grid.tsx shows "(step default)" and the none option for one state.
-3. PublicTaskType.stepIds carries only the missing steps. Fix: rename it to missingStepIds.
-
 ### T373 · FNF[audit-strict-admin-actions] · module/task-type/upgrade-start actions still audit best-effort (+1)
 
 status: open · was modular #246
@@ -1034,6 +1026,7 @@ From the T422 review (2026-10-24). PRE-EXISTING, minor, latent. api routes/cli-l
 
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T372 — fence-order test budget; stepIds named for what they hold (picker label shipped with T391) — PR #904 (7fe56b9e0), 2026-10-24
 - T404 — a re-opened step clears its context and allowance stamp; the page shows stamps on done rows only (browser-checked; ratchet budget follow-up #907) — PR #903 (6e9daa2e6), 2026-10-24
 - T391 — pickers preselect the oldest enabled provider; create refuses a disabled one (+2, with T372's picker label) — PR #902 (a4bb484eb), 2026-10-24
 - T407 — plan chat records the provider that answered (+1) — PR #899 (525098023), 2026-10-24
