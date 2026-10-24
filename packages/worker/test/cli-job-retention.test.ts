@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { Queue, Worker, type JobsOptions } from 'bullmq';
 import ts from 'typescript';
@@ -10,64 +10,154 @@ import { CLI_POLLABLE_JOB_OPTS } from '@haive/shared';
 const redisUrl = process.env.CLI_JOB_RETENTION_TEST_REDIS_URL;
 // Opt-in only; never inherit the application's REDIS_URL.
 describe.skipIf(!redisUrl)('cli-job retention against isolated Redis', () => {
-  // Read the actual producers' options, without booting the application or its DB.
-  // Running those options through BullMQ matters: count retention trims the WHOLE
-  // queue's finished set, including jobs enqueued with a different retention policy.
-  const producers = !redisUrl
-    ? []
-    : [
-        'packages/worker/src/queues/task-queue.ts',
-        'packages/api/src/routes/cli-providers.ts',
-        'packages/api/src/routes/cli-login-banner.ts',
-        'packages/api/src/lib/cli-version-refresh.ts',
-        'packages/worker/src/queues/cli-exec/handlers.ts',
-      ].flatMap((path) => {
-        const source = ts.createSourceFile(
-          path,
-          readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8'),
-          ts.ScriptTarget.Latest,
-          true,
-        );
-        const found: { label: string; opts: JobsOptions }[] = [];
-        const visit = (node: ts.Node) => {
-          if (
-            ts.isCallExpression(node) &&
-            ts.isPropertyAccessExpression(node.expression) &&
-            node.expression.name.text === 'add'
-          ) {
-            const [name, , options] = node.arguments;
-            if (name && options && name.getText(source).startsWith('CLI_EXEC_JOB_NAMES.')) {
-              let expression = options;
-              if (ts.isIdentifier(options)) {
-                let scope: ts.Node = node;
-                while (scope.parent && !ts.isArrowFunction(scope)) scope = scope.parent;
-                let initializer: ts.Expression | undefined;
-                const find = (child: ts.Node) => {
-                  if (
-                    ts.isVariableDeclaration(child) &&
-                    child.name.getText(source) === options.text
-                  )
-                    initializer = child.initializer;
-                  ts.forEachChild(child, find);
-                };
-                find(scope);
-                if (initializer) expression = initializer;
-              }
-              const js = ts.transpileModule(`(${expression.getText(source)})`, {
-                compilerOptions: { target: ts.ScriptTarget.ES2024 },
-              }).outputText;
-              const opts = runInNewContext(js, { CLI_POLLABLE_JOB_OPTS }) as JobsOptions;
-              found.push({
-                label: `${path}:${source.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${name.getText(source)}`,
-                opts,
-              });
+  // Scan every production source file, following the queue receiver rather than the
+  // job name: a dynamic name or a new producer file must obey the same policy.
+  function scan(source: ts.SourceFile) {
+    const found: { label: string; site: string; opts: JobsOptions }[] = [];
+    function initializer(id: ts.Identifier): ts.Expression {
+      for (let scope: ts.Node | undefined = id.parent; scope; scope = scope.parent) {
+        if (!ts.isBlock(scope) && !ts.isSourceFile(scope)) continue;
+        for (const statement of scope.statements) {
+          if (!ts.isVariableStatement(statement)) continue;
+          for (const declaration of statement.declarationList.declarations) {
+            if (ts.isIdentifier(declaration.name) && declaration.name.text === id.text) {
+              if (!declaration.initializer) throw new Error(`No initializer for ${id.text}`);
+              return declaration.initializer;
             }
           }
-          ts.forEachChild(node, visit);
-        };
-        visit(source);
-        return found;
+        }
+      }
+      throw new Error(`Unresolved options/queue identifier ${id.text} in ${source.fileName}`);
+    }
+    function isCliQueue(expression: ts.Expression): boolean {
+      if (ts.isIdentifier(expression)) {
+        try {
+          return isCliQueue(initializer(expression));
+        } catch {
+          return false;
+        }
+      }
+      return (
+        (ts.isCallExpression(expression) &&
+          expression.expression.getText(source) === 'getCliExecQueue') ||
+        (ts.isNewExpression(expression) &&
+          expression.arguments?.[0]?.getText(source) === 'QUEUE_NAMES.CLI_EXEC')
+      );
+    }
+    function record(node: ts.CallExpression, name: ts.Expression, options?: ts.Expression) {
+      const site = `${source.fileName} ${name.getText(source)}`;
+      if (!options) throw new Error(`${site}: cli-exec add requires retention options`);
+      const expression =
+        ts.isIdentifier(options) && options.text !== 'CLI_POLLABLE_JOB_OPTS'
+          ? initializer(options)
+          : options;
+      const js = ts.transpileModule(`(${expression.getText(source)})`, {
+        compilerOptions: { target: ts.ScriptTarget.ES2024 },
+      }).outputText;
+      const opts = runInNewContext(js, { CLI_POLLABLE_JOB_OPTS }) as JobsOptions;
+      for (const key of ['removeOnComplete', 'removeOnFail'] as const) {
+        const retention = opts[key];
+        if (
+          retention !== true &&
+          (!retention ||
+            typeof retention !== 'object' ||
+            retention.count !== undefined ||
+            !('age' in retention) ||
+            typeof retention.age !== 'number' ||
+            retention.age < CLI_POLLABLE_JOB_OPTS[key].age)
+        )
+          throw new Error(`${site}: ${key} must remove only itself or retain by age without count`);
+      }
+      found.push({
+        site,
+        label: `${site}:${source.getLineAndCharacterOfPosition(node.getStart()).line + 1}`,
+        opts,
       });
+    }
+    function visit(node: ts.Node) {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        isCliQueue(node.expression.expression)
+      ) {
+        if (node.expression.name.text === 'add') {
+          const [name, , options] = node.arguments;
+          if (!name) throw new Error('cli-exec add has no name');
+          record(node, name, options);
+        } else if (node.expression.name.text === 'upsertJobScheduler') {
+          const template = node.arguments[2];
+          if (!template || !ts.isObjectLiteralExpression(template))
+            throw new Error('Missing scheduler template');
+          const property = (key: string) =>
+            template.properties.find(
+              (p): p is ts.PropertyAssignment =>
+                ts.isPropertyAssignment(p) && p.name.getText(source) === key,
+            )?.initializer;
+          const name = property('name');
+          if (!name) throw new Error('Missing scheduler job name');
+          record(node, name, property('opts'));
+        }
+      }
+      ts.forEachChild(node, visit);
+    }
+    visit(source);
+    return found;
+  }
+
+  function scanTree(path: string): ReturnType<typeof scan> {
+    return readdirSync(new URL(`../../../${path}`, import.meta.url), {
+      withFileTypes: true,
+    }).flatMap((entry) => {
+      const child = `${path}/${entry.name}`;
+      if (entry.isDirectory()) return scanTree(child);
+      if (!entry.name.endsWith('.ts') || entry.name.endsWith('.test.ts')) return [];
+      return scan(
+        ts.createSourceFile(
+          child,
+          readFileSync(new URL(`../../../${child}`, import.meta.url), 'utf8'),
+          ts.ScriptTarget.Latest,
+          true,
+        ),
+      );
+    });
+  }
+  const producers = redisUrl ? ['packages/worker/src', 'packages/api/src'].flatMap(scanTree) : [];
+
+  it('discovers the complete set of cli-exec adds and scheduler templates', () => {
+    expect(producers.map(({ site }) => site).sort()).toEqual(
+      [
+        'packages/api/src/lib/cli-version-refresh.ts CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS',
+        'packages/api/src/routes/cli-login-banner.ts CLI_EXEC_JOB_NAMES.LOGIN_CREATE',
+        'packages/api/src/routes/cli-login-banner.ts CLI_EXEC_JOB_NAMES.PROBE',
+        'packages/api/src/routes/cli-providers.ts CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE',
+        'packages/api/src/routes/cli-providers.ts CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE',
+        'packages/api/src/routes/cli-providers.ts CLI_EXEC_JOB_NAMES.PROBE',
+        'packages/api/src/routes/cli-providers.ts CLI_EXEC_JOB_NAMES.PROVISION_OLLAMA_MODEL',
+        'packages/api/src/routes/cli-providers.ts CLI_EXEC_JOB_NAMES.REMOVE_SANDBOX_IMAGE',
+        'packages/api/src/routes/cli-providers.ts CLI_EXEC_JOB_NAMES.SIGN_OUT',
+        'packages/worker/src/queues/cli-exec/handlers.ts CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS',
+        'packages/worker/src/queues/cli-exec/handlers.ts CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS',
+        'packages/worker/src/queues/task-queue.ts CLI_EXEC_JOB_NAMES.INVOKE',
+      ].sort(),
+    );
+  });
+
+  it('resolves method options locally, even when another function uses the same name', () => {
+    const source = ts.createSourceFile(
+      'scope-control.ts',
+      `
+      const deps = { async enqueue() {
+        const queue = getCliExecQueue();
+        const opts = { ...CLI_POLLABLE_JOB_OPTS };
+        await queue.add(dynamicName, {}, opts);
+      } };
+      function unrelated() { const opts = { removeOnComplete: 1, removeOnFail: 1 }; }
+    `,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    expect(scan(source).map(({ opts }) => opts)).toEqual([CLI_POLLABLE_JOB_OPTS]);
+  });
 
   it.each(
     producers.flatMap((producer) =>
