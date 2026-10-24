@@ -1,5 +1,5 @@
 import dns from 'node:dns';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
@@ -669,43 +669,10 @@ describe("PR-9 a user may probe the install's own Ollama and DDEV hosts", () => 
     });
   });
 
-  it("B2 test-postgres reaches <project>.ddev.site of the user's own repository", async () => {
+  it("B2 refuses <project>.ddev.site for a user although it is in the user's own repository", async () => {
     await repoWithDdev(USER, 'name: myproj\ntype: php\n');
-    stubNames({ 'myproj.ddev.site': ['127.0.0.1'] });
-    await post('user', PG_PATH, {
-      connectionString: `postgres://u:p@myproj.ddev.site:${pg.port}/db`,
-    });
-    expect(pg.conns).toBeGreaterThanOrEqual(1);
-  }, 20_000);
-
-  it('B2 reads a quoted name with a comment, and test-ollama reaches the same host', async () => {
-    await repoWithDdev(USER, 'name: "quoted-proj" # the project\n');
-    stubNames({ 'quoted-proj.ddev.site': ['127.0.0.1'] });
-    const reply = await post('user', '/tooling/test-ollama', {
-      ollamaUrl: `http://quoted-proj.ddev.site:${ollama.port}`,
-      model: 'm',
-      dimensions: 2,
-    });
-    expect(ollama.hits).toBeGreaterThanOrEqual(1);
-    expect(reply.body?.ok).toBe(true);
-  });
-
-  it("B3 refuses a ddev.site name that is in nobody's repository, another user's, or an overridden tld", async () => {
-    await repoWithDdev(ADMIN, 'name: adminproj\n');
-    await repoWithDdev(USER, 'name: tldproj\nproject_tld: example.test\n');
-    await repoWithDdev(USER, null);
-    stubNames({
-      'adminproj.ddev.site': ['127.0.0.1'],
-      'other.ddev.site': ['127.0.0.1'],
-      'tldproj.example.test': ['127.0.0.1'],
-      'tldproj.ddev.site': ['127.0.0.1'],
-    });
-    for (const host of [
-      'adminproj.ddev.site',
-      'other.ddev.site',
-      'tldproj.example.test',
-      'tldproj.ddev.site',
-    ]) {
+    stubNames({ 'x.ddev.site': ['127.0.0.1'], 'myproj.ddev.site': ['127.0.0.1'] });
+    for (const host of ['x.ddev.site', 'myproj.ddev.site']) {
       const reply = await within(
         post('user', PG_PATH, { connectionString: `postgres://u:p@${host}:${pg.port}/db` }),
       );
@@ -716,31 +683,14 @@ describe("PR-9 a user may probe the install's own Ollama and DDEV hosts", () => 
   });
 
   it('B3 refuses a private IP literal and a multi-host string for test-postgres', async () => {
-    await repoWithDdev(USER, 'name: myproj\n');
-    stubNames({ 'myproj.ddev.site': ['127.0.0.1'] });
     for (const cs of [
       'postgres://u:p@10.0.0.5:5432/db',
-      `postgres://u:p@myproj.ddev.site:${pg.port},127.0.0.1:${pg.port}/db`,
+      `postgres://u:p@ollama:${pg.port},127.0.0.1:${pg.port}/db`,
     ]) {
       const reply = await within(post('user', PG_PATH, { connectionString: cs }));
       await settle();
       expect(pgRefused(reply as Reply)).toBe(true);
     }
-    expect(pg.conns).toBe(0);
-  });
-
-  it('B3 reads no config through a symlinked .ddev', async () => {
-    const outside = await mkdtemp(path.join(os.tmpdir(), 'probe-ddev-out-'));
-    roots.push(outside);
-    await writeFile(path.join(outside, 'config.yaml'), 'name: linked\n');
-    const root = await repoWithDdev(USER, null);
-    await symlink(outside, path.join(root, '.ddev'));
-    stubNames({ 'linked.ddev.site': ['127.0.0.1'] });
-    const reply = await within(
-      post('user', PG_PATH, { connectionString: `postgres://u:p@linked.ddev.site:${pg.port}/db` }),
-    );
-    await settle();
-    expect(pgRefused(reply as Reply)).toBe(true);
     expect(pg.conns).toBe(0);
   });
 

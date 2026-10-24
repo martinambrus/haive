@@ -79,15 +79,12 @@ What a non-admin keeps: a target whose HOST (the parsed hostname, never a prefix
 own known hosts is allowed although it resolves private. `probeEgressFor(c)` (`lib/probe-hosts.ts`) builds
 that set per request for a non-admin and hands it to `egressFor(role, hosts)`: the in-stack Ollama names
 (`IN_STACK_OLLAMA_HOSTS`: `ollama` and its container name), the host of the configured Global KB Ollama URL
-(so `host.docker.internal` is exempt only when that is what is configured, and not otherwise), and
-`<name>.ddev.site` for the `name:` in `.ddev/config.yaml` of the caller's OWN repositories (read through
-`readTextNoFollow`, 64 KiB, a symlink reads as nothing; a config that overrides `project_tld` contributes
-nothing, and another user's repository never does). The exemption lifts only the address classification: the
+(so `host.docker.internal` is exempt only when that is what is configured, and not otherwise). A project's
+`<name>.ddev.site` is NOT exempt: it resolves to 127.0.0.1 in public DNS, so from the api container it
+reaches the api's own loopback and never a DDEV Postgres. The exemption lifts only the address classification: the
 name must still resolve, and the guarded fetch still never follows a redirect, so an exempt host cannot
 hand the request on to one that is not listed. An IP literal that is not itself listed, any other private
-name, and everything for a multi-host Postgres string stay refused. Anything that cannot be read (config,
-repositories) adds no host. Accepted: `*.ddev.site` resolves to 127.0.0.1 in public DNS, so a user who
-writes a `name:` into their own repository can aim a probe at the api container's loopback. The probe sends
+name, and everything for a multi-host Postgres string stay refused. Anything that cannot be read adds no host. The probe sends
 no credential and reports only what the guarded fetch reports.
 
 Targets that are a STORED setting are not
