@@ -1024,7 +1024,7 @@ status: open · area: modular-haive-plan owns merge-resolver.ts landing sections
 
 ### T411 · FNF[module-db-session-bounds] · module statements outside withSchemaLock outlive their pool's close
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T18:14Z · last: 2026-10-24T18:14Z · was modular #264 finding
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T18:14Z · last: 2026-10-24T19:01Z (PR #893 open) · was modular #264 finding
 PRE-EXISTING. #264 (PR #885) sets client_connection_check_interval only inside withSchemaLock. Queries a module sends through ctx.sql, or through a teardown hook's handle, still run on the server after close(): a pg_sleep backend was measured alive 2 s after close(). The pool is opened with no connection-level setting at packages/shared/src/module-db/index.ts:55.
 Fix: pass `connection: { client_connection_check_interval: 500 }` in the postgres() options (needs PG >= 14; the stack pins 18).
 
