@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StepContext } from '../../step-definition.js';
+import { killGit, type KilledGit } from '../../../../test/support/kill-git.js';
 
 vi.mock('./_helpers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./_helpers.js')>()),
@@ -17,6 +18,7 @@ import { onboardingPushStep } from './13-onboarding-push.js';
 
 const exec = promisify(execFile);
 const tmpDirs: string[] = [];
+let shim: KilledGit | null = null;
 
 async function git(cwd: string, args: string[]): Promise<void> {
   await exec('git', ['-c', 'gc.auto=0', ...args], {
@@ -69,6 +71,8 @@ function mkCtx(repoPath: string): StepContext {
 }
 
 afterEach(async () => {
+  await shim?.restore();
+  shim = null;
   while (tmpDirs.length) {
     await rm(tmpDirs.pop()!, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -101,5 +105,40 @@ describe('13-onboarding-push detect', () => {
       originUrl: url,
       baseBranch: 'main',
     });
+  });
+
+  it('rejects when the branch read ends with no exit status', async () => {
+    const dir = await makeRepo();
+    await addBareOrigin(dir);
+    shim = await killGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+    await expect(onboardingPushStep.detect!(mkCtx(dir))).rejects.toThrow(
+      /could not read the checkout's current branch/,
+    );
+  });
+
+  it('is not ready on an unborn HEAD', async () => {
+    const dir = await mkTmp('onb-push-unborn-');
+    await git(dir, ['init', '-b', 'main']);
+    const detected = await onboardingPushStep.detect!(mkCtx(dir));
+    expect(detected).toMatchObject({ ready: false });
+  });
+
+  it('counts commits behind and ahead of origin', async () => {
+    const dir = await makeRepo();
+    await addBareOrigin(dir);
+    await writeFile(path.join(dir, 'b.txt'), '2\n', 'utf8');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'c2']);
+    const detected = await onboardingPushStep.detect!(mkCtx(dir));
+    expect(detected).toMatchObject({ behindBy: 0, aheadBy: 1 });
+  });
+
+  it('rejects when a commit count ends with no exit status', async () => {
+    const dir = await makeRepo();
+    await addBareOrigin(dir);
+    shim = await killGit(['rev-list', '--count']);
+    await expect(onboardingPushStep.detect!(mkCtx(dir))).rejects.toThrow(
+      /git rev-list --count .* failed in /,
+    );
   });
 });

@@ -6,7 +6,7 @@ import { lstatNoFollow, relUnder, toSafeRel } from '@haive/shared/fs-safe';
 import { KB_DIR, LEGACY_KNOWLEDGE_MIGRATIONS } from '@haive/shared/knowledge-paths';
 import { LEGACY_IMPORT_SUBDIR } from './_kb-legacy.js';
 import type { Database } from '@haive/database';
-import { GIT_MAX_BUFFER, gitExec, gitRun } from '../../../repo/git-exec.js';
+import { GIT_MAX_BUFFER, gitExec, gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
 import { loadPreviousStepOutput } from './_helpers.js';
 import { sanitizeKbRelPath } from './_kb-write.js';
 
@@ -52,7 +52,11 @@ function strings(raw: unknown): string[] {
 }
 
 async function inHead(repoPath: string, rel: string): Promise<boolean> {
-  return (await gitRun(repoPath, ['cat-file', '-e', `HEAD:${rel}`])).code === 0;
+  const res = await gitRun(repoPath, ['cat-file', '-e', `HEAD:${rel}`]);
+  if (gitGaveNoAnswer(res)) {
+    throw new Error(`could not tell whether ${rel} is in HEAD: git gave no answer`);
+  }
+  return res.code === 0;
 }
 
 /** The legacy knowledge move, read from git and the disk instead of a record, so an 08 Retry that
@@ -62,6 +66,9 @@ async function inHead(repoPath: string, rel: string): Promise<boolean> {
 async function collectLegacyMoves(repoPath: string, plan: StagePlan): Promise<void> {
   for (const { from, to } of LEGACY_KNOWLEDGE_MIGRATIONS) {
     const tree = await gitRun(repoPath, ['ls-tree', '-r', '-z', '--name-only', 'HEAD', '--', from]);
+    if (gitGaveNoAnswer(tree)) {
+      throw new Error(`could not list ${from} in HEAD: git gave no answer`);
+    }
     if (tree.code !== 0) continue;
     for (const srcRel of tree.stdout.split('\0')) {
       const src = repoRel(srcRel);
@@ -95,6 +102,9 @@ async function collectRepairRemovals(
         '--',
         ...literal([`${dir}/${id}/`]),
       ]);
+      if (gitGaveNoAnswer(tree)) {
+        throw new Error(`could not list ${dir}/${id} in HEAD: git gave no answer`);
+      }
       if (tree.code !== 0) continue;
       for (const srcRel of tree.stdout.split('\0')) {
         const src = repoRel(srcRel);
@@ -312,9 +322,10 @@ export async function commitRecorded(
   const run = (args: string[], extra?: NodeJS.ProcessEnv) =>
     gitExec(args, { cwd: repoPath, env: { ...env, ...extra }, maxBuffer: GIT_MAX_BUFFER });
   for (const mark of ['MERGE_HEAD', 'CHERRY_PICK_HEAD']) {
-    if ((await gitRun(repoPath, ['rev-parse', '-q', '--verify', mark])).code === 0) {
-      throw new Error(`cannot do a partial commit during a ${mark.split('_')[0]!.toLowerCase()}`);
-    }
+    const open = await gitRun(repoPath, ['rev-parse', '-q', '--verify', mark]);
+    const name = mark.split('_')[0]!.toLowerCase();
+    if (open.code === 0) throw new Error(`cannot do a partial commit during a ${name}`);
+    if (open.code !== 1) throw new Error(`could not check for a ${name}: git exited ${open.code}`);
   }
   const head = await gitRun(repoPath, ['rev-parse', '-q', '--verify', 'HEAD^{commit}']);
   const parent = head.code === 0 ? head.stdout.trim() : '';

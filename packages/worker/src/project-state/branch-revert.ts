@@ -7,7 +7,7 @@ import { HAIVE_DATA_DIR, HAIVE_DATA_FILES } from '@haive/shared';
 import { lstatNoFollow, removeNoFollow, type EntryKind } from '@haive/shared/fs-safe';
 import { isBranchName } from '@haive/shared/git-args';
 import { PROJECT_STATE_DIR } from '@haive/shared/project-state';
-import { GIT_MAX_BUFFER, gitRun, type GitRunResult } from '../repo/git-exec.js';
+import { GIT_MAX_BUFFER, gitGaveNoAnswer, gitRun, type GitRunResult } from '../repo/git-exec.js';
 import { workspaceAnchor } from '../repo/worktree-paths.js';
 import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import { handBackAfterMove, isHaiveProjection, revParse } from '../step-engine/git-merge.js';
@@ -397,6 +397,11 @@ async function moveBranch(ctx: RevertCtx, branch: string, revert: ProjectionReve
     revert.commit,
     revert.preRevertSha,
   ]);
+  if (gitGaveNoAnswer(moved)) {
+    throw new Error(
+      `could not tell whether ${branch} moved while its Haive files were being put back: ${detail(moved)}`,
+    );
+  }
   if (moved.code !== 0) {
     await dropRecord(ctx, revert.commit);
     throw new Error(`${branch} moved while its Haive files were being put back: ${detail(moved)}`);

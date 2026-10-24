@@ -20,7 +20,7 @@ that starts after the fast-forward is not fenced out, since nothing that starts 
 the window writer 1 in [Onboarding reset](onboarding-reset.md) leaves open for the reset. It loses nothing
 here either, since the fetch writes no working tree, the fast-forward stops at a change git sees and
 the rebuild renames; what it can cost is a git lock collision that fails one side, which a Retry
-clears. Before the checkout moves, a plan row stamped before migration 0196 takes its plan base from the plan.json still on disk (`seedPlanBaseFromCheckout`); a seed that fails fails the refresh and leaves a usable checkout where it was, since afterwards no Pull could recover that base. Only a checkout that is not usable (no `HEAD` at its own top level) is rebuilt, and whatever
+clears. Before the checkout moves, a plan row stamped before migration 0196 takes its plan base from the plan.json still on disk (`seedPlanBaseFromCheckout`); a seed that fails fails the refresh and leaves a usable checkout where it was, since afterwards no Pull could recover that base. Only a checkout that is not usable (no `HEAD` at its own top level) is rebuilt; a checkout git gave no answer about (no exit status, or the time bound) is unknown, not unusable, so the refresh answers "the checkout could not be examined" and moves nothing. When it is rebuilt, whatever
 stood there is renamed to a `<repoId>.aside-<time>` sibling first, never removed. A read-only folder
 import is re-scanned as before, and a repository with no remote and no folder answers 409 without
 touching its row.

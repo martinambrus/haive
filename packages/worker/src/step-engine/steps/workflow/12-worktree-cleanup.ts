@@ -246,7 +246,11 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
     let prWorkflowAvailable = false;
     if (mode === 'worktree') {
       const res = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
-      parentBranch = res.code === 0 ? res.stdout.trim() : null;
+      if (res.code !== 0)
+        throw new Error(
+          `could not read the parent checkout's branch: ${(res.stderr || res.stdout).trim()}`,
+        );
+      parentBranch = res.stdout.trim();
       if (output.worktreePath)
         uncommitted = await readUncommittedChanges(output.worktreePath, MAX_LISTED_UNCOMMITTED);
       if (output.branchName) {

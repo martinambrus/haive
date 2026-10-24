@@ -19,6 +19,15 @@ export interface GitRunResult {
  *  reader that takes exit 1 for "no" never takes this for an answer. */
 export const GIT_NO_EXIT = -1;
 
+/** The `code` of a run that outlived its time limit and was killed for it. */
+export const GIT_TIMED_OUT = 124;
+
+/** Whether a run gave no answer: it ended without an exit status or at its time limit. A reader
+ *  that takes a non-zero exit for "no", "absent" or "clean" must not take this for one. */
+export function gitGaveNoAnswer(res: Pick<GitRunResult, 'code'>): boolean {
+  return res.code === GIT_NO_EXIT || res.code === GIT_TIMED_OUT;
+}
+
 /** execFile kills a child whose output outgrows its buffer, 1 MiB by default, and a merge or a
  *  commit killed that way is left half-written; git's output grows with the repository. */
 export const GIT_MAX_BUFFER = 64 * 1024 * 1024;
@@ -116,7 +125,7 @@ export async function gitRun(
       return {
         stdout: (e.stdout ?? '').toString(),
         stderr: withLine(stderr, timedOutLine(argv, timeout)),
-        code: 124,
+        code: GIT_TIMED_OUT,
       };
     }
     if (typeof e.code !== 'number') {
