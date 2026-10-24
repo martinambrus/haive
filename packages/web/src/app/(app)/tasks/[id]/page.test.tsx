@@ -49,6 +49,7 @@ const net = vi.hoisted(() => ({
   detail: {} as Record<string, unknown>,
   missing: false,
   actions: [] as Record<string, unknown>[],
+  attachmentFetches: [] as string[],
   unstubbed: [] as string[],
 }));
 
@@ -110,6 +111,7 @@ async function fakeFetch(input: unknown, init?: { body?: string }) {
     return { ok: true, status: 200, json: async () => structuredClone(net.detail) };
   }
   if (path === '/tasks/t1/attachments') {
+    net.attachmentFetches.push(path);
     return { ok: true, status: 200, json: async () => ({ attachments: [] }) };
   }
   net.unstubbed.push(path);
@@ -334,6 +336,7 @@ describe('task page missing attachment confirmation', () => {
     const confirm = vi.fn(() => yes);
     vi.stubGlobal('window', { ...eventTarget(), confirm });
     net.actions = [];
+    net.attachmentFetches = [];
     net.missing = true;
     const view = await mount({ status: 'created', pausedAt: null });
     fire.click(buttons(view.tree(), /^start$/)[0]!);
@@ -345,7 +348,7 @@ describe('task page missing attachment confirmation', () => {
         : [{ action: 'start' }],
     );
     expect((net.detail.task as Record<string, unknown>).status).toBe(yes ? 'queued' : 'created');
-    if (!yes) expect(textOf(view.tree())).toContain('Attachments');
+    expect(net.attachmentFetches).toEqual(yes ? [] : ['/tasks/t1/attachments']);
     net.missing = false;
   });
 });

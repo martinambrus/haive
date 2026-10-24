@@ -758,8 +758,14 @@ describe('a new task with attachments', () => {
         ? [{ action: 'start' }, { action: 'start', confirmMissingAttachments: true }]
         : [{ action: 'start' }],
     );
+    const outcomes = findAll(view.tree(), (h) => h.props.role === 'alert');
+    expect(outcomes).toHaveLength(yes ? 0 : 1);
+    if (!yes) {
+      expect(
+        findAll(outcomes[0]!, (h) => h.tag === 'a' && h.props.href === '/tasks/task-new'),
+      ).toHaveLength(1);
+    }
     expect(nav.pushed).toEqual(yes ? ['/tasks/task-new'] : []);
-    if (!yes) expect(page(view)).toContain('Attachments');
   });
 
   it('creates the task unstarted, uploads every file, then starts it', async () => {
