@@ -31,6 +31,8 @@ describe('version refresh scheduler', () => {
       expect(opts.removeOnFail.age).toBeGreaterThan(600);
       expect(opts).not.toHaveProperty('jobId');
     }
+    expect(scheduled.data).toEqual({});
+    expect(boot[1]).toEqual({});
     expect(scheduled.name).toBe(CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS);
     expect(boot[0]).toBe(CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS);
   });

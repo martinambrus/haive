@@ -81,14 +81,14 @@ describe('the CLI catalog routes require a session', () => {
     expect((await call('GET', '/catalog', false)).status).toBe(401);
   });
 
-  it('queues a forced refresh for a signed-in user', async () => {
+  it('queues a refresh for a signed-in user', async () => {
     const reply = await call('POST', '/catalog/claude-code/refresh-versions', true);
 
     expect(reply.status).toBe(202);
     expect(reply.body).toEqual({ jobId: '1' });
     expect(h.add).toHaveBeenCalledTimes(1);
     expect(h.add.mock.calls[0]?.[0]).toBe('cli-refresh-versions');
-    expect(h.add.mock.calls[0]?.[1]).toEqual({ force: true });
+    expect(h.add.mock.calls[0]?.[1]).toEqual({});
   });
 
   it('reuses the refresh on a second POST while it is in flight', async () => {

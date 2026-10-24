@@ -1181,7 +1181,7 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
     { every: VERSION_REFRESH_INTERVAL_MS },
     {
       name: CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
-      data: { force: false } satisfies RefreshCliVersionsJobPayload,
+      data: {} satisfies RefreshCliVersionsJobPayload,
       opts: CLI_POLLABLE_JOB_OPTS,
     },
   );
@@ -1190,7 +1190,7 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
   // scheduler. Skipped when a refresh is already in flight.
   //
   // MEASURED 2026-08-24: under `tsx watch` a boot happens on every source edit, and this kick
-  // had no dedup, so each one enqueued another `{force:true}` refresh. The Worker's
+  // had no dedup, so each one enqueued another refresh. The Worker's
   // `lockDuration` is 30 min — right for an INVOKE agent, and applied to every job name in the
   // queue — so each refresh SIGKILLed by the next reload stayed uncollectable in `active` for
   // half an hour. Four boots inside one lock window left four refreshes holding every slot on
@@ -1202,7 +1202,7 @@ export async function scheduleCliVersionRefresh(): Promise<void> {
   }
   await queue.add(
     CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
-    { force: true } satisfies RefreshCliVersionsJobPayload,
+    {} satisfies RefreshCliVersionsJobPayload,
     CLI_POLLABLE_JOB_OPTS,
   );
 }

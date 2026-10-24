@@ -276,7 +276,7 @@ cliProviderRoutes.get('/catalog', async (c) => {
 cliProviderRoutes.post('/catalog/:name/refresh-versions', async (c) => {
   // Parsed for the 400 on an unknown CLI name; the job itself refreshes every catalog entry.
   cliProviderNameSchema.parse(c.req.param('name'));
-  const payload: RefreshCliVersionsJobPayload = { force: true };
+  const payload: RefreshCliVersionsJobPayload = {};
   const queue = getCliExecQueue();
   // Match the worker's boot check: a delayed scheduler tick is future work. This scan/add
   // is best effort; simultaneous requests can both see an empty queue and enqueue a refresh.

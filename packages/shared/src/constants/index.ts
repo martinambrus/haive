@@ -441,9 +441,7 @@ export interface CliSignOutJobResult {
   failed: { name: string; stderr: string }[];
 }
 
-export interface RefreshCliVersionsJobPayload {
-  force?: boolean;
-}
+export type RefreshCliVersionsJobPayload = Record<string, never>;
 
 export interface RefreshCliVersionsJobResult {
   ok: boolean;
