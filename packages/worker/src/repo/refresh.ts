@@ -23,6 +23,7 @@ import {
 } from '../project-state/set-aside.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
+import { GIT_TIMED_OUT, gitGaveNoAnswer, type GitRunResult } from './git-exec.js';
 import { buildCredentialHelper, detectOrigin, gitRun, scrubSecret } from './git-push.js';
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -51,11 +52,23 @@ export async function checkoutHoldingTasks(
 const holdingRefusal = (holding: number): string =>
   `Not refreshed: ${plural(holding, 'task')} ${holding === 1 ? 'is' : 'are'} using this repository. Refresh once ${holding === 1 ? 'it finishes' : 'they finish'}.`;
 
-/** A git work tree whose top level is `dest` itself and that has a commit to stand on. */
-async function usableCheckout(dest: string): Promise<boolean> {
+const whyNoAnswer = (res: GitRunResult): string =>
+  res.noExit ?? (res.code === GIT_TIMED_OUT ? 'timed out' : `git exited ${res.code}`);
+
+/** A git work tree whose top level is `dest` itself and that has a commit to stand on. A git run
+ *  that gave no answer is `unknown`, which must not read as "not usable": a rebuild moves the folder. */
+export async function usableCheckout(
+  dest: string,
+): Promise<'usable' | 'unusable' | { unknown: string }> {
   const cdup = await gitRun(dest, ['rev-parse', '--show-cdup']);
-  if (cdup.code !== 0 || cdup.stdout.trim() !== '') return false;
-  return (await gitRun(dest, ['rev-parse', '--verify', '--quiet', 'HEAD'])).code === 0;
+  if (gitGaveNoAnswer(cdup)) {
+    const there = await lstatNoFollow(path.dirname(dest), path.basename(dest));
+    return there?.kind === 'directory' ? { unknown: whyNoAnswer(cdup) } : 'unusable';
+  }
+  if (cdup.code !== 0 || cdup.stdout.trim() !== '') return 'unusable';
+  const head = await gitRun(dest, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+  if (head.code === 0) return 'usable';
+  return head.code === 1 ? 'unusable' : { unknown: whyNoAnswer(head) };
 }
 
 interface RefreshSource {
@@ -289,7 +302,17 @@ export async function handleRefresh(
     db,
     payload.repositoryId,
     async () => {
-      const usable = await usableCheckout(dest);
+      const state = await usableCheckout(dest);
+      if (typeof state === 'object') {
+        await persistDetection(
+          db,
+          payload.repositoryId,
+          dest,
+          `Not refreshed: the checkout could not be examined (${state.unknown}). Nothing was moved.`,
+        );
+        return;
+      }
+      const usable = state === 'usable';
       const holding = await checkoutHoldingTasks(db, payload.repositoryId);
       if (holding > 0) {
         const refusal = holdingRefusal(holding);

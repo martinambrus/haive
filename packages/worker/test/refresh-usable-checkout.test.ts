@@ -1,0 +1,106 @@
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import { afterEach, describe, expect, it } from 'vitest';
+import { usableCheckout } from '../src/repo/refresh.js';
+import { failGit, noGit, type FakeGit } from './support/fake-git.js';
+import { killGit } from './support/kill-git.js';
+
+const exec = promisify(execFile);
+const GIT_ENV = {
+  ...process.env,
+  GIT_AUTHOR_NAME: 'T',
+  GIT_AUTHOR_EMAIL: 't@haive.local',
+  GIT_COMMITTER_NAME: 'T',
+  GIT_COMMITTER_EMAIL: 't@haive.local',
+};
+async function git(dir: string, args: string[]): Promise<void> {
+  await exec('git', ['-c', 'gc.auto=0', ...args], { cwd: dir, env: GIT_ENV });
+}
+
+describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
+  const dirs: string[] = [];
+  let shim: FakeGit | null = null;
+  afterEach(async () => {
+    await shim?.restore();
+    shim = null;
+    for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
+  });
+
+  async function tmp(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), 'uc-'));
+    dirs.push(dir);
+    return dir;
+  }
+
+  async function intact(): Promise<string> {
+    const dir = await tmp();
+    await git(dir, ['init', '-b', 'main']);
+    await writeFile(path.join(dir, 'a.txt'), 'x\n', 'utf8');
+    await git(dir, ['add', '-A']);
+    await git(dir, ['commit', '-m', 'a']);
+    return dir;
+  }
+
+  it('an intact checkout is usable', async () => {
+    expect(await usableCheckout(await intact())).toBe('usable');
+  });
+
+  it('a killed --show-cdup read is unknown', async () => {
+    const dir = await intact();
+    shim = await killGit(['rev-parse', '--show-cdup']);
+    expect(await usableCheckout(dir)).toEqual({ unknown: expect.stringContaining('SIGKILL') });
+  });
+
+  it('a killed HEAD read is unknown', async () => {
+    const dir = await intact();
+    shim = await killGit(['rev-parse', '--verify', '--quiet', 'HEAD']);
+    expect(await usableCheckout(dir)).toEqual({ unknown: expect.stringContaining('SIGKILL') });
+  });
+
+  it('no git on PATH is unknown while the folder exists', async () => {
+    const dir = await intact();
+    shim = await noGit();
+    expect(await usableCheckout(dir)).toEqual({ unknown: expect.stringContaining('ENOENT') });
+  });
+
+  it('a HEAD read that exits 128 is unknown, one that exits 1 is unusable', async () => {
+    const dir = await intact();
+    shim = await failGit(['rev-parse', '--verify', '--quiet', 'HEAD'], { exit: 128 });
+    expect(await usableCheckout(dir)).toEqual({ unknown: 'git exited 128' });
+    await shim.restore();
+    shim = await failGit(['rev-parse', '--verify', '--quiet', 'HEAD'], { exit: 1 });
+    expect(await usableCheckout(dir)).toBe('unusable');
+  });
+
+  it('an empty folder is unusable', async () => {
+    expect(await usableCheckout(await tmp())).toBe('unusable');
+  });
+
+  it('a repository with no commit is unusable', async () => {
+    const dir = await tmp();
+    await git(dir, ['init', '-b', 'main']);
+    expect(await usableCheckout(dir)).toBe('unusable');
+  });
+
+  it('a folder inside another repository is unusable', async () => {
+    const outer = await intact();
+    const sub = path.join(outer, 'sub');
+    await mkdir(sub);
+    expect(await usableCheckout(sub)).toBe('unusable');
+  });
+
+  it('a file standing where the checkout should be is unusable, not unknown', async () => {
+    const dir = await tmp();
+    const file = path.join(dir, 'checkout');
+    await writeFile(file, 'not a directory\n', 'utf8');
+    expect(await usableCheckout(file)).toBe('unusable');
+  });
+
+  it('a path that does not exist is unusable', async () => {
+    const dir = await tmp();
+    expect(await usableCheckout(path.join(dir, 'missing'))).toBe('unusable');
+  });
+});
