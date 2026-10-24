@@ -35,6 +35,8 @@ function commentRanges(text: string): Array<[number, number]> {
     for (const child of node.getChildren(file)) walk(child);
   };
   walk(file);
+  const shebang = ts.getShebang(text);
+  if (shebang) out.push([2, shebang.length]);
   return out;
 }
 
@@ -79,6 +81,8 @@ const CASES: string[] = [
   'const yes = n < /a/.source.length; function f1() { x(); } const c = d / 3;',
   'const yes = n << /a/.source.length; function f1() { x(); } const c = d / 3;',
   'const yes = n >>> /a/.source.length; function f1() { x(); } const c = d / 3;',
+  '#!/usr/bin/env node\n/`/.test(input);\nfunction save() { persist(); }\nconst t = ``;',
+  '#!/usr/bin/env node\nconst n = a / 2; function f1() { x(); } const c = d / 3;',
   'class C { #return = 6; run() { const n = this.#return / 2; function save() { persist(); } const ratio = n / 3; } }',
   'class C { #typeof = 6; #of = 2; run() { const n = this.#typeof / this.#of / 2; const r = /a/.test(s); } }',
   'class C { #in = 1; has(o) { return #in in o ? /a/.exec(s) : 0; } }',

@@ -481,6 +481,11 @@ function jsNonCode(text: string, java: boolean, htmlComments = false): Span[] {
   let sawGenerator = false;
   let sawAsync = false;
   let i = 0;
+  if (!java && text.startsWith('#!')) {
+    const close = lineEnd(text, 2, false);
+    i = close < 0 ? text.length : close;
+    spans.push([2, i]);
+  }
   while (true) {
     if (i >= text.length) {
       if (frames.length === 0 || strayTicks >= MAX_STRAY_TICKS) break;
