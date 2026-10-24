@@ -887,7 +887,7 @@ See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or
 status: open · was modular #277
 DECIDED 2026-10-24: yes. Sites: web lib/task-state.ts ~:31, tasks/[id]/page.tsx ~:1591, ~:3884, admin maintenance/page.tsx ~:248; the response is dropped at ~:1299-1307. Key the gate on structural columns, in a separate small web commit. Browser check at 1280, 768 and 390.
 
-### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+12)
+### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+13)
 
 status: open · was modular #279 (T396 landed as PR #884; re-check every item against T322/T325, PRs #877/#879, first)
 FIRST re-check each item on main: the #322 and #325 series fixed some of them.
@@ -902,6 +902,7 @@ FIRST re-check each item on main: the #322 and #325 series fixed some of them.
 8. differingFrom returns [] on failure.
 9. commitMerge returns null if the post-commit HEAD read fails.
 10. git-operation.ts ~:31: a git dir outside the checkout.
+11. PRE-EXISTING, minor (found by the T388 driver, 2026-10-24): repo/refresh.ts ~:149-158 reads any non-zero `merge-base HEAD <target>` as "no history in common" (exit 1 is the only "none"; 128 is no answer), and ~:151 reads a failed `--is-shallow-repository` as not shallow. Fix: exit-1-only, else "could not be compared".
 
 ### T398 · FNF[ide-proxy-hardening] · the IDE proxy replays forwarded headers and transfer-encoding; serves /proxy/<port> on the api origin (+2)
 
