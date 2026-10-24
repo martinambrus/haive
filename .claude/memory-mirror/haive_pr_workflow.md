@@ -192,6 +192,9 @@ by the user on 2026-09-15: Codex is quick to respond, so when no 👀 reaction a
 minutes of opening it or pushing to it, treat Codex as out of allowance, stop waiting on it, and go
 ahead with the PR merge (CI still has to be green, and Greptile keeps its own quota rule above). The
 user first said 2 minutes, then widened it to 4 the same day, for leeway in unexpected situations.
+REFINED 2026-10-24 (user, [[pr-watch-codex-first]]): before treating that silence as spent,
+re-request `@codex review` once; only a retry that stays silent for 4 minutes (or Running past 15)
+counts Codex out for that push.
 
 **Why:** the user's reading of how Codex behaves: with allowance it reacts almost at once, so a longer
 silence is a spent allowance, not a slow review. MEASURED on #103: 👀 was on the PR by the first
