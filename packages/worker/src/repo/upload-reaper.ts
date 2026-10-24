@@ -480,6 +480,18 @@ export async function reapAbandonedUploads(db: Database): Promise<UploadReapResu
     0,
   );
   result.orphans += await guarded(
+    'the finished dump pass',
+    () =>
+      reapOrphanPartials(db, repoRoot(), [DUMP_FILE], async (ids) => {
+        const rows = await db
+          .select({ id: schema.dbUploads.id })
+          .from(schema.dbUploads)
+          .where(inArray(schema.dbUploads.id, ids));
+        return new Set(rows.map((row) => row.id));
+      }),
+    0,
+  );
+  result.orphans += await guarded(
     'the bundle file pass',
     () => reapOrphanPartials(db, bundleRoot(), [ARCHIVE_PARTIAL]),
     0,

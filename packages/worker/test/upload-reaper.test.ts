@@ -494,10 +494,10 @@ describe('U2: the file pass reaps a session partial nothing names', () => {
 
     await reapAbandonedUploads(db());
 
-    for (const gone of [orphan, orphanTar, orphanDump, orphanBundle, archive]) {
+    for (const gone of [orphan, orphanTar, orphanDump, orphanBundle, archive, dump]) {
       expect(await exists(gone), gone).toBe(false);
     }
-    for (const kept of [fresh, sound, dump, notUuid, wrongExt, suffixed, upper, longExt]) {
+    for (const kept of [fresh, sound, notUuid, wrongExt, suffixed, upper, longExt]) {
       expect(await exists(kept), kept).toBe(true);
     }
   });
@@ -1051,7 +1051,6 @@ describe('the finished-archive pass', () => {
   });
 
   it.each([
-    ['a dump name', (id: string) => `db-${id}.zip`],
     ['a name that is no id', () => 'x.zip'],
     ['a notification sound', () => 'notification-sound.mp3'],
   ])('does not touch %s', async (_label, name) => {
@@ -1622,5 +1621,102 @@ describe('a removal that fails for 24 h parks its row as reap_failed', () => {
       expect(rowOf(kind, parked.id).status).toBe('reap_failed');
       expect(await exists(parked.file)).toBe(true);
     });
+  });
+});
+
+describe('T323: the orphan finished-dump pass', () => {
+  const dumps = KINDS[1]!;
+
+  it.each(['sql', 'sql.gz', 'dump', 'backup', 'zip', 'partial'])(
+    'removes an old rowless .%s dump',
+    async (ext) => {
+      const file = path.join(uploadsDir('repos'), `db-${randomUUID()}.${ext}`);
+      await writeFile(file, 'dump');
+      await age(file, TTL + HOUR);
+
+      const result = await reapAbandonedUploads(db());
+
+      expect(await exists(file)).toBe(false);
+      expect(result.orphans).toBe(1);
+    },
+  );
+
+  it.each([
+    'uploading',
+    'completing',
+    'complete',
+    'cancelled',
+    'consumed',
+    'reaping',
+    'reap_failed',
+  ])('keeps an old file whose %s row is still owned by the row passes', async (status) => {
+    const upload = await session(dumps, {
+      idleMs: status === 'consumed' || status === 'reap_failed' ? 5 * TTL : HOUR,
+      fileAgeMs: 5 * TTL,
+      status,
+      name: dumps.finished,
+    });
+    if (status === 'reaping') guard.removal = () => true;
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(upload.file)).toBe(true);
+    expect(rowOf(dumps, upload.id).status).toBe(status);
+    expect(guard.removals).toBe(status === 'reaping' ? 1 : 0);
+  });
+
+  it('keeps an old complete dump with an old row while a running task needs it', async () => {
+    const upload = await session(dumps, {
+      idleMs: 5 * TTL,
+      status: 'complete',
+      name: dumps.finished,
+    });
+    fake.insert(schema.tasks, {
+      id: randomUUID(),
+      userId: USER,
+      dbUploadId: upload.id,
+      status: 'running',
+      updatedAt: new Date(Date.now() - 5 * TTL),
+    });
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(upload.file)).toBe(true);
+    expect(rowOf(dumps, upload.id).status).toBe('complete');
+  });
+
+  it('keeps a young finished dump without a row', async () => {
+    const file = path.join(uploadsDir('repos'), `db-${randomUUID()}.sql`);
+    await writeFile(file, 'dump');
+    await age(file, TTL - HOUR);
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(file)).toBe(true);
+  });
+
+  it('keeps an old rowless dump while another session with that id was touched recently', async () => {
+    const upload = await session(KINDS[0]!, { idleMs: HOUR });
+    const file = path.join(uploadsDir('repos'), `db-${upload.id}.sql`);
+    await writeFile(file, 'dump');
+    await age(file, 5 * TTL);
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(file)).toBe(true);
+  });
+
+  it('removes an old finished dump symlink without touching its target', async () => {
+    const target = path.join(storage, 'dump-target.sql');
+    await writeFile(target, 'keep');
+    const file = path.join(uploadsDir('repos'), `db-${randomUUID()}.sql`);
+    await symlink(target, file);
+    const old = new Date(Date.now() - 5 * TTL);
+    await lutimes(file, old, old);
+
+    await reapAbandonedUploads(db());
+
+    expect(await exists(file)).toBe(false);
+    expect(await readFile(target, 'utf8')).toBe('keep');
   });
 });
