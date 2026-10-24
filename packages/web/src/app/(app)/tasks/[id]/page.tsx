@@ -3958,6 +3958,7 @@ function StepCardImpl({
                       size="sm"
                       variant="secondary"
                       disabled={actionBusy}
+                      data-action="retry"
                       onClick={() => onAction('retry')}
                       title={title}
                     >

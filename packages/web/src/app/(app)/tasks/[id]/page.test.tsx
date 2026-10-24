@@ -313,7 +313,7 @@ describe('task page Stop controls (#395)', () => {
     expect(textOf(view.tree()).includes('Nothing was running to stop.')).toBe(notice);
   });
 
-  it('shows the header Stop notice through polling and clears it on the next successful Stop', async () => {
+  it('shows the header Stop notice through polling and clears it on the next step Retry', async () => {
     vi.stubGlobal('confirm', () => true);
     net.stopResult = { killed: 0, cancelled: 0, stopped: 0 };
     const view = await mount({ pausedAt: null }, [{ ...stepRow(), status: 'running' }]);
@@ -334,8 +334,9 @@ describe('task page Stop controls (#395)', () => {
     vi.advanceTimersByTime(2000);
     for (let i = 0; i < 5; i += 1) await view.flush();
     expect(notices()).toHaveLength(1);
-    net.stopResult = { killed: 0, cancelled: 0, stopped: 1 };
-    fire.click(buttons(view.tree(), 'stop')[0]!);
+    const row = findAll(view.tree(), (h) => h.props['data-step-id'] === 's1')[0]!;
+    const retry = findAll(row, (h) => h.tag === 'button' && h.props['data-action'] === 'retry')[0]!;
+    fire.click(retry);
     for (let i = 0; i < 5; i += 1) await view.flush();
     expect(notices()).toHaveLength(0);
   });
