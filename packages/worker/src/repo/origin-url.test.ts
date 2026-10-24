@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Database } from '@haive/database';
 import { gitRun } from './git-exec.js';
-import { detectOrigin, getOriginUrl, pushBranch } from './git-push.js';
+import { detectOrigin, getOriginUrl, originGitRun, pushBranch } from './git-push.js';
 import { fetchOrigin } from '../plan/merge.js';
 
 const dirs: string[] = [];
@@ -33,6 +33,17 @@ async function repo(bare = false): Promise<string> {
   return dir;
 }
 describe('origin URL boundary', () => {
+  it('refuses an absent origin even when git would rewrite the bare remote name', async () => {
+    const work = await repo();
+    await gitRun(work, ['config', 'url.http://127.0.0.1:1/repo.insteadOf', 'origin']);
+    expect(await getOriginUrl(work)).toBeNull();
+    expect((await gitRun(work, ['ls-remote', '--get-url', 'origin'])).stdout.trim()).toBe(
+      'http://127.0.0.1:1/repo',
+    );
+    await expect(originGitRun(work, ['fetch', 'origin'])).rejects.toThrow(
+      'origin remote is not configured',
+    );
+  });
   it.each(['url', 'pushurl'])(
     'refuses a local %s before a helper reaches the second repository',
     async (key) => {

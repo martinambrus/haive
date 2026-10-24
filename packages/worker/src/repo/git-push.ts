@@ -57,7 +57,7 @@ export async function getOriginUrl(cwd: string): Promise<string | null> {
 
 /** Origin transports always re-read the checkout immediately before git talks to the remote. */
 export async function originGitRun(...args: Parameters<typeof gitRun>): Promise<GitRunResult> {
-  await getOriginUrl(args[0]);
+  if ((await getOriginUrl(args[0])) === null) throw new Error('origin remote is not configured');
   return gitRun(...args);
 }
 
