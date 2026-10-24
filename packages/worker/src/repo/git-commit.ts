@@ -7,7 +7,7 @@ export async function gitCommitStaged(
   message: string,
   env?: Record<string, string>,
 ): Promise<boolean> {
-  const staged = await gitRun(cwd, ['diff', '--cached', '--quiet']);
+  const staged = await gitRun(cwd, ['diff', '--cached', '--quiet', '--ignore-submodules=none']);
   if (staged.code === 0) return false;
   if (staged.code !== 1) {
     throw new Error(`git staged read failed: ${staged.stderr || staged.stdout}`);
