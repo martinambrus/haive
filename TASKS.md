@@ -941,7 +941,7 @@ From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` r
 
 ### T423 · FNF[terminal-attach] · a failed attach-count write leaves the docker attach stream open; the count is read-then-write (+1)
 
-status: open
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:50Z · last: 2026-10-25T02:50Z
 From the T400 review (2026-10-24). PRE-EXISTING, minor.
 
 1. api routes/terminal.ts ~:106-112: `await incrementAttached(...)` throwing (database down) leaves the docker attach stream opened at ~:106 open; the `.catch` at ~:80 closes only the ws.
