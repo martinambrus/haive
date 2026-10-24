@@ -33,8 +33,24 @@ import { isForeignOrigin, trustedOrigins } from '../lib/request-origin.js';
 import { isUuid } from '../lib/uuid.js';
 
 // CLI output, authorization URLs and upstream errors can contain credentials.
-// Log only session identifiers, lengths and fixed messages in this module.
+// Log only session identifiers, lengths, error classes/codes and fixed messages.
 const log = logger.child({ module: 'cli-login-banner-ws' });
+
+/** Keep diagnostics without serializing query messages, bound params or stacks. */
+function safeErrorDetails(err: unknown): { name: string; code?: string | number } {
+  const name = err instanceof Error ? err.constructor.name : 'UnknownError';
+  // Drizzle wraps the driver's code in cause. Bound traversal also handles cycles.
+  for (
+    let current = err, depth = 0;
+    depth < 5 && current !== null && typeof current === 'object';
+    depth++
+  ) {
+    const { code, cause } = current as { code?: unknown; cause?: unknown };
+    if (typeof code === 'string' || typeof code === 'number') return { name, code };
+    current = cause;
+  }
+  return { name };
+}
 
 const WS_PATH_PREFIX = '/cli-login-banner/';
 const RAW_BUFFER_MAX = 64 * 1024;
@@ -278,7 +294,7 @@ export function installCliLoginBannerWebSocket(
               log.info({ providerId }, 'login dialog closed by the user');
               return;
             }
-            log.error({ providerId }, 'banner session crashed');
+            log.error({ error: safeErrorDetails(err), providerId }, 'banner session crashed');
             wsSend(ws, { type: 'error', message: 'Login session failed. Retry the login.' });
             try {
               ws.close(1011, 'internal_error');
@@ -287,8 +303,8 @@ export function installCliLoginBannerWebSocket(
             }
           });
         });
-      } catch {
-        log.error('upgrade failed');
+      } catch (err) {
+        log.error({ error: safeErrorDetails(err) }, 'upgrade failed');
         rejectUpgrade(socket, 500, 'Internal Server Error');
       }
     })();
@@ -339,8 +355,8 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   let stream: Duplex;
   try {
     stream = await attachContainerStream(docker, createResult.dockerContainerId);
-  } catch {
-    log.error({ providerId }, 'attach failed');
+  } catch (err) {
+    log.error({ error: safeErrorDetails(err), providerId }, 'attach failed');
     await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
     wsSend(ws, { type: 'error', message: 'Failed to attach to login container' });
     try {
@@ -353,8 +369,8 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
 
   try {
     await dockerContainer.start();
-  } catch {
-    log.error({ providerId }, 'start failed');
+  } catch (err) {
+    log.error({ error: safeErrorDetails(err), providerId }, 'start failed');
     await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
     wsSend(ws, { type: 'error', message: 'Failed to start login container' });
     try {
@@ -430,8 +446,11 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       session.docker
         .getContainer(session.dockerContainerId)
         .resize({ h: 40, w: 120 })
-        .catch(() => {
-          log.warn({ providerId: session.providerId }, 'initial pty resize failed');
+        .catch((err) => {
+          log.warn(
+            { error: safeErrorDetails(err), providerId: session.providerId },
+            'initial pty resize failed',
+          );
         });
     };
     setTimeout(sizeTerminalPty, 250);
@@ -447,8 +466,8 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     wsSend(ws, { type: 'exit' });
     void cleanupSession(session);
   });
-  stream.on('error', () => {
-    log.warn({ providerId }, 'stream error');
+  stream.on('error', (err: Error) => {
+    log.warn({ error: safeErrorDetails(err), providerId }, 'stream error');
     if (session.probePending) return;
     wsSend(ws, { type: 'error', message: 'Login stream failed. Retry the login.' });
     void cleanupSession(session);
@@ -474,8 +493,11 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       // Terminal-login keystrokes (incl. the pasted auth code + Enter) -> stdin.
       try {
         session.stream.write(msg.data);
-      } catch {
-        log.warn({ providerId: session.providerId }, 'terminal input write failed');
+      } catch (err) {
+        log.warn(
+          { error: safeErrorDetails(err), providerId: session.providerId },
+          'terminal input write failed',
+        );
       }
       return;
     }
@@ -485,8 +507,11 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
           h: msg.rows,
           w: msg.cols,
         });
-      } catch {
-        log.warn({ providerId: session.providerId }, 'terminal resize failed');
+      } catch (err) {
+        log.warn(
+          { error: safeErrorDetails(err), providerId: session.providerId },
+          'terminal resize failed',
+        );
       }
       return;
     }
@@ -516,8 +541,11 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
           }
         }, 150);
         log.info({ providerId: session.providerId, wrote }, 'token written');
-      } catch {
-        log.warn({ providerId: session.providerId }, 'stream write failed');
+      } catch (err) {
+        log.warn(
+          { error: safeErrorDetails(err), providerId: session.providerId },
+          'stream write failed',
+        );
       }
       if (session.providerName === 'claude-code') {
         startCaptureWatchdog(session);
@@ -814,8 +842,11 @@ function startAmpCredsPoller(session: BannerSession): void {
           });
         }
       })
-      .catch(() => {
-        log.warn({ providerId: session.providerId }, 'amp creds poll exec failed');
+      .catch((err) => {
+        log.warn(
+          { error: safeErrorDetails(err), providerId: session.providerId },
+          'amp creds poll exec failed',
+        );
       });
   }, AMP_POLL_INTERVAL_MS);
   session.credsPoller = poller;
@@ -883,8 +914,11 @@ function startAntigravityCredsPoller(session: BannerSession): void {
           });
         }
       })
-      .catch(() => {
-        log.warn({ providerId: session.providerId }, 'antigravity creds poll exec failed');
+      .catch((err) => {
+        log.warn(
+          { error: safeErrorDetails(err), providerId: session.providerId },
+          'antigravity creds poll exec failed',
+        );
       });
   }, ANTIGRAVITY_POLL_INTERVAL_MS);
   session.credsPoller = poller;
@@ -961,7 +995,10 @@ async function saveOauthTokenAndProbe(session: BannerSession, oauthToken: string
       log.info({ providerId: session.providerId }, 'login dialog closed while verifying');
       return; // the finally below still clears probePending and tears the session down
     }
-    log.error({ providerId: session.providerId }, 'save-token/probe failed');
+    log.error(
+      { error: safeErrorDetails(err), providerId: session.providerId },
+      'save-token/probe failed',
+    );
     wsSend(session.ws, {
       type: 'error',
       message: 'Failed to save credentials or verify the login. Retry the login.',
@@ -997,7 +1034,10 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
       log.info({ providerId: session.providerId }, 'login dialog closed while verifying');
       return; // the finally below still clears probePending and tears the session down
     }
-    log.error({ providerId: session.providerId }, 'post-login probe failed');
+    log.error(
+      { error: safeErrorDetails(err), providerId: session.providerId },
+      'post-login probe failed',
+    );
     wsSend(session.ws, {
       type: 'error',
       message: 'Failed to verify the login.',
@@ -1044,8 +1084,8 @@ async function awaitQueuedJob<T>(job: Job, abort: AbortHandle, ws: WebSocket): P
       if (ahead === null) return;
       announced = true;
       wsSend(ws, { type: 'queue', running: active.length, agents, service, ahead });
-    } catch {
-      log.debug({ jobId: job.id }, 'queue position read failed');
+    } catch (err) {
+      log.debug({ error: safeErrorDetails(err), jobId: job.id }, 'queue position read failed');
     }
   };
   void report();
@@ -1080,8 +1120,8 @@ async function discardPendingLogin(pending: { job: Job | null }, docker: Docker)
       log.info({ jobId: job.id }, 'login cancelled while queued; job removed');
       return;
     }
-  } catch {
-    log.debug({ jobId: job.id }, 'queued-job removal skipped');
+  } catch (err) {
+    log.debug({ error: safeErrorDetails(err), jobId: job.id }, 'queued-job removal skipped');
   }
   try {
     const result = (await job.waitUntilFinished(
@@ -1092,8 +1132,11 @@ async function discardPendingLogin(pending: { job: Job | null }, docker: Docker)
       await teardownContainer(result.containerRowId, docker, result.dockerContainerId);
       log.info({ jobId: job.id }, 'login cancelled after start; container destroyed');
     }
-  } catch {
-    log.debug({ jobId: job.id }, 'cancelled login produced no container to destroy');
+  } catch (err) {
+    log.debug(
+      { error: safeErrorDetails(err), jobId: job.id },
+      'cancelled login produced no container to destroy',
+    );
   }
 }
 
@@ -1177,16 +1220,16 @@ async function teardownContainer(
 ): Promise<void> {
   try {
     await docker.getContainer(dockerContainerId).remove({ force: true });
-  } catch {
-    log.warn({ dockerContainerId }, 'docker remove failed');
+  } catch (err) {
+    log.warn({ error: safeErrorDetails(err), dockerContainerId }, 'docker remove failed');
   }
   const db = getDb();
   await db
     .update(schema.containers)
     .set({ status: 'destroyed', destroyedAt: new Date() })
     .where(eq(schema.containers.id, containerRowId))
-    .catch(() => {
-      log.warn({ containerRowId }, 'container row update failed');
+    .catch((err) => {
+      log.warn({ error: safeErrorDetails(err), containerRowId }, 'container row update failed');
     });
 }
 

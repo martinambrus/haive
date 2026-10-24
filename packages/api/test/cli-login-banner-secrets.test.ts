@@ -209,6 +209,26 @@ describe('CLI login banner credential logging', () => {
     expect(JSON.stringify(ws.send.mock.calls).includes(CODE)).toBe(false);
   });
 
+  it('fix1 logs only the error class and nested code for a failed credential write', async () => {
+    class DrizzleQueryError extends Error {}
+    const cause = Object.assign(new Error(`synthetic driver params: ${TOKEN}`), { code: '23505' });
+    h.save.mockRejectedValueOnce(
+      new DrizzleQueryError(`synthetic query params: ${TOKEN}`, { cause }),
+    );
+    await start();
+    stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
+    paste();
+    stream.emit('data', Buffer.from(TOKEN));
+    await settle();
+    assertNoCredentialText(TOKEN, CODE);
+    expect(
+      h.log.error.mock.calls.some(
+        ([fields]) => fields?.error?.name === 'DrizzleQueryError' && fields.error.code === '23505',
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(ws.send.mock.calls).includes(TOKEN)).toBe(false);
+  });
+
   it('does not log or return credential text carried by a save error', async () => {
     h.save.mockRejectedValueOnce(new Error(`synthetic save failure: ${TOKEN}`));
     await start();
