@@ -892,7 +892,7 @@ Decide which stored targets a non-admin may point at private addresses.
 
 ### T400 · FNF[ws-auth-one-copy] · WebSocket handshakes authenticate once; six copies of authenticateUpgrade can drift
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:53Z · last: 2026-10-24T20:53Z · was modular #282
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T20:53Z · last: 2026-10-25T01:55Z · merged PR #912 (eb54d0f3a), live handshake probe passed, waiting for main CI · was modular #282
 Copies: terminal.ts ~:360, terminal-shell.ts ~:614, cli-stream.ts ~:365, cli-login-banner.ts ~:1233, browser-vnc.ts ~:268, ide.ts ~:391.
 Fix: one shared authenticator, and close a user's sockets on deactivation or a token_version bump.
 
