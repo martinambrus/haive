@@ -778,7 +778,10 @@ function jsRanges(content: string, members: boolean): SectionRange[] {
   return ranges;
 }
 
-function pythonRanges(content: string, closer?: RegExp): SectionRange[] {
+const RUBY_END = /^end\b/;
+const RUBY_CLAUSE = /^(?:rescue|ensure|else)\b/;
+
+function pythonRanges(content: string, ruby = false): SectionRange[] {
   const ranges: SectionRange[] = [];
   const lines = content.split('\n');
 
@@ -808,12 +811,14 @@ function pythonRanges(content: string, closer?: RegExp): SectionRange[] {
           continue;
         }
         const lineIndent = line.length - line.trimStart().length;
-        if (lineIndent <= indent) break;
+        // A Ruby method's own rescue, else and ensure stand at the indentation of its `def`.
+        const clause = ruby && lineIndent === indent && RUBY_CLAUSE.test(line.trim());
+        if (lineIndent <= indent && !clause) break;
         i += 1;
       }
-      // A definition that closes with a keyword (Ruby's `end`) owns that line, at its own indentation.
+      // A Ruby definition owns its `end` line.
       const next = lines[i];
-      if (closer && next !== undefined && closer.test(next.trim())) {
+      if (ruby && next !== undefined && RUBY_END.test(next.trim())) {
         if (next.length - next.trimStart().length === indent) i += 1;
       }
       ranges.push({
@@ -974,7 +979,7 @@ export function extractCodeSections(content: string, filePath: string): RagSecti
       ranges = pythonRanges(content);
       break;
     case 'ruby':
-      ranges = pythonRanges(content, /^end\b/);
+      ranges = pythonRanges(content, true);
       break;
     case 'go':
       ranges = goRanges(content);

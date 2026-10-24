@@ -1622,6 +1622,38 @@ describe('extractCodeSections — Ruby definitions', () => {
     expect(sections.get('function-b')!.startsWith('end\n\nending = 1\n\ndef b')).toBe(true);
   });
 
+  it('ends a Ruby method that has rescue, else and ensure clauses after its own end', () => {
+    const rb = [
+      'def a',
+      '  work',
+      'rescue => e',
+      '  handle(e)',
+      'else',
+      '  ok',
+      'ensure',
+      '  done',
+      'end',
+      '',
+      'def b',
+      '  2',
+      'end',
+      '',
+    ].join('\n');
+    const sections = byId(rb, 'a.rb');
+
+    expect(sections.get('function-a')!.trimEnd().endsWith('ensure\n  done\nend')).toBe(true);
+    expect(sections.get('function-b')!.startsWith('def b')).toBe(true);
+  });
+
+  it('does not read a Python line that starts with rescue as part of a definition', () => {
+    const sections = byId(
+      'def a():\n    return 1\n\nrescue = 3\n\ndef b():\n    return 2\n',
+      'a.py',
+    );
+
+    expect(sections.get('function-a')).not.toContain('rescue');
+  });
+
   it('does not read a line that only starts with the letters end as an end', () => {
     const sections = byId('def a\n  1\nendpoint = 2\n\ndef b\n  2\nend\n', 'a.rb');
 
