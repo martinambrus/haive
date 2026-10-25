@@ -99,19 +99,6 @@ All PRE-EXISTING.
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
-### T412 · FNF[git-noexit-low-3] · gitClone and a few scripts still spawn git unbounded (+4)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T19:56Z · last: 2026-10-25T20:56Z
-
-Codex progress 2026-10-25T20:56Z: PR929 merged89752556c after exact898 all11SUCCESS/CLEAN/botclean/0threads. Main CI40232785502 pending; task remains taken. Parent80/final207 controls and earlier frozen full13,653 passed with disclosed telemetry-only delta; T397 separate. Dev loaded/healthy.
-From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it as its task #329.)
-
-1. Unbounded git spawns remain at repo/clone.ts:94,116,687 (gitClone: runs before its dir exists; carries the credential-helper argv, env and secret scrub — needs its own review), steps/onboarding/_credential-scan.ts:173, scripts/advance-bundle-items.ts:25, scripts/reset-bundle-to-commit.ts:43.
-2. Low: 99-run-app-ready.ts:315 drops a ticked push silently when the commit box is unticked.
-3. Display: 11-phase-8-learning.ts:549,1170 says "No commit recorded"/"(none)" when gate 3's sha read gave no answer after a landed commit.
-4. (T388 review) The operator scripts run `fetch --all` with no origin validation (scripts/advance-bundle-items.ts ~:66, reset-bundle-to-commit.ts ~:88); route them through the T388 origin read when they are bounded. Minor.
-5. (T417 review) PRE-EXISTING, minor: scripts/reset-bundle-to-commit.ts ~:156-157 writes repository files by pathname (`mkdir`, `writeFile`) under `repo.storagePath`, outside fs-safe and outside the fs-ratchet's scan (src only). Operator script.
-
 ### T416 · FNF[web-runtime-tests] · proxy(), DOMPurify and markdown-it run only in a browser; CI never boots the production web image (+2)
 
 status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T19:15Z · last: 2026-10-25T20:56Z
@@ -916,6 +903,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T412 — bound remaining clone/operator Git, root-anchored reset writes, independent push choice and truthful missing-SHA learning — PR #929 (89752556c), 2026-10-25; main CI40232785502 green; T397 separate.
 
 - T288 — locked stale-import checks, empty state directories and atomic RTK question convergence — PR #927 (0dbad8dc6), 2026-10-25; main CI40230306594 green. Unowned malformed RTK settings remain for manual repair with accepted warnings; T317 separate.
 
