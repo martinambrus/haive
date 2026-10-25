@@ -99,17 +99,6 @@ All PRE-EXISTING.
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
-### T416 · FNF[web-runtime-tests] · proxy(), DOMPurify and markdown-it run only in a browser; CI never boots the production web image (+2)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T19:15Z · last: 2026-10-25T20:56Z
-
-Codex progress 2026-10-25T20:56Z: PR928 merged15f532bea after exact59c all12SUCCESS/CLEAN/botclean/0threads, including independent browser job and production image boot. Main CI40232945840 pending; task remains taken. No product/dependency/schema change.
-From the T414 review (2026-10-24). All PRE-EXISTING, consequential for dependency bumps (a browser is the only gate today).
-
-1. No test executes `proxy()` (packages/web/src/proxy.ts: auth redirect ~:22, CSP header ~:36, cookie clearing ~:41-42); proxy-matcher.test.ts imports only `config`. The CSP is the control markdown-rendering.md names for never fetching agent-named images.
-2. No test sanitizes through DOMPurify or parses through markdown-it: packages/web/vitest.config.mts sets no DOM environment; mermaid-loader.test.ts is import-level; markdown-extensions.test.ts never passes a string to tiptap-markdown (`html: true` path).
-3. PR CI builds the production web stage but never starts it (.github/workflows/ci.yml ~:407-430); the first boot is release.yml ~:235-252, after publish, although next.config.mjs ~:8-13 records a standalone MODULE_NOT_FOUND crash loop that shipped once. Fix: boot the built image and curl /login (200 + CSP) and an unauthenticated /dashboard (307 to /login), as the T414 session check did.
-
 ### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+7)
 
 status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:26Z · last: 2026-10-25T20:26Z
@@ -903,6 +892,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T416 — real proxy/parser/sanitizer/CSP browser checks and same-built production web image boot; independent browser CI budget — PR #928 (15f532bea), 2026-10-25; main CI40232945840 all8 green.
 
 - T412 — bound remaining clone/operator Git, root-anchored reset writes, independent push choice and truthful missing-SHA learning — PR #929 (89752556c), 2026-10-25; main CI40232785502 green; T397 separate.
 
