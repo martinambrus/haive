@@ -18,9 +18,7 @@ export type { GitRunResult };
  *  or surfaced to the user. Defensive: git masks credential-helper passwords in
  *  most errors, but a misconfigured remote can echo them. */
 export function scrubSecret(text: string, secret: string | null): string {
-  text = redactGitText(text);
-  if (!secret) return text;
-  return text.split(secret).join('***');
+  return redactGitText(secret ? text.split(secret).join('***') : text);
 }
 
 /** True when the repo at cwd has an `origin` remote; throws when git could not say (see getOriginUrl). */
@@ -80,7 +78,7 @@ export async function getOriginUrl(cwd: string): Promise<string | null> {
     }
     first ??= urls[0];
   }
-  return redactGitUrl(first!);
+  return redactGitUrl(first!, true);
 }
 
 /** Origin transports always re-read the checkout immediately before git talks to the remote. */
@@ -183,7 +181,7 @@ export async function taskRemoteUrl(ctx: {
     ),
     columns: { remoteUrl: true },
   });
-  if (repo?.remoteUrl) return repo.remoteUrl;
+  if (repo?.remoteUrl) return redactGitUrl(repo.remoteUrl, true);
   const steps = await ctx.db.query.taskSteps.findMany({
     where: and(
       eq(schema.taskSteps.taskId, ctx.taskId),
@@ -210,7 +208,7 @@ export async function taskRemoteUrl(ctx: {
       typeof detected?.originUrl === 'string' &&
       isAllowedGitRemoteUrl(detected.originUrl)
     )
-      return detected.originUrl;
+      return redactGitUrl(detected.originUrl, true);
   }
   return null;
 }

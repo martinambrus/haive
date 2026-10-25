@@ -555,7 +555,7 @@ export const worktreeCleanupStep: StepDefinition<WorktreeCleanupDetect, Worktree
         {
           type: 'checkbox',
           id: 'pushBase',
-          label: `Push ${base} to origin (${detected.originUrl ?? 'origin'}) after merging`,
+          label: `Push ${base} to origin (${detected.originUrl ? redactGitUrl(detected.originUrl) : 'origin'}) after merging`,
           default: false,
           visibleWhen: { field: 'action', equals: 'merge_remove' },
         },
@@ -921,7 +921,7 @@ async function openPullRequestForCleanup(
       prState: 'open',
       prFinalizeMode: finalizeMode,
       prCredentialId: credentialId,
-      prRemoteUrl: redactGitUrl(d.originUrl),
+      prRemoteUrl: redactGitUrl(d.originUrl, true),
       prPollError: null,
       updatedAt: new Date(),
     })

@@ -1,3 +1,4 @@
+import { redactGitUrl } from '@haive/shared/schemas';
 import { lstatNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -568,7 +569,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         {
           type: 'checkbox',
           id: 'pushToOrigin',
-          label: `Push to origin (${detected.originUrl ?? 'origin'}) after committing`,
+          label: `Push to origin (${detected.originUrl ? redactGitUrl(detected.originUrl) : 'origin'}) after committing`,
           default: false,
           visibleWhen: { field: 'commit', equals: true },
         },

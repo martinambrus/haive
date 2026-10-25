@@ -118,3 +118,15 @@ it('records a legacy lookup failure instead of silently dropping the poll', asyn
   expect(writes[0]?.prPollError).toBe('lookup unavailable');
   expect(h.state).not.toHaveBeenCalled();
 });
+
+it('preserves an explicit default port while sanitizing a legacy polling stamp', async () => {
+  const { db, writes } = fixture({
+    prRemoteUrl: 'https://fixture-user:fixture-password@github.com:443/acme/app.git',
+  });
+  await runPrPollTick(db as never);
+  expect(h.resolve).toHaveBeenCalledWith(
+    expect.objectContaining({ remoteUrl: 'https://github.com:443/acme/app.git' }),
+  );
+  expect(writes[0]?.prRemoteUrl === 'https://github.com:443/acme/app.git').toBe(true);
+  expect(JSON.stringify(writes).includes('fixture-password')).toBe(false);
+});

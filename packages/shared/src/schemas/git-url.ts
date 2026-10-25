@@ -153,11 +153,15 @@ export function redactGitUrl(url: string, forTransport = false): string {
     if (!url.includes('://')) return url;
     try {
       const parsed = new URL(url);
-      const keepUser = parsed.protocol === 'ssh:';
-      if (!parsed.password && (keepUser || !parsed.username)) return url;
-      if (!keepUser) parsed.username = '';
-      parsed.password = '';
-      return parsed.toString();
+      if (!parsed.password && (parsed.protocol === 'ssh:' || !parsed.username)) return url;
+      const start = url.indexOf('://') + 3;
+      const authority = url.slice(start).split(/[/?#]/)[0]!;
+      const at = authority.lastIndexOf('@');
+      if (at < 0) return url;
+      // Slice the original spelling: URL.toString() drops explicit default ports,
+      // but Git includes them in its credential challenge. SSH's login is identity.
+      const login = parsed.protocol === 'ssh:' ? authority.slice(0, at).split(':')[0] + '@' : '';
+      return url.slice(0, start) + login + url.slice(start + at + 1);
     } catch {
       return url.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/)?.[0] ?? '(unparseable URL)';
     }
@@ -165,13 +169,12 @@ export function redactGitUrl(url: string, forTransport = false): string {
   let safe = url;
   if (safe.includes('://')) {
     try {
-      let parsed = new URL(safe);
       const start = safe.indexOf('://') + 3;
       const end = safe.indexOf('/', start);
       const authority = safe.slice(start, end < 0 ? undefined : end);
       const at = authority.lastIndexOf('@');
       // Remove userinfo before interpreting a ? or # inside malformed credentials.
-      if (at >= 0) parsed = new URL(safe.slice(0, start) + safe.slice(start + at + 1));
+      const parsed = new URL(at >= 0 ? safe.slice(0, start) + safe.slice(start + at + 1) : safe);
       parsed.username = '';
       parsed.password = '';
       parsed.search = '';
@@ -197,7 +200,17 @@ export function redactGitUrl(url: string, forTransport = false): string {
 
 /** Diagnostic output can contain several URLs; use the same userinfo policy for each one. */
 export function redactGitText(text: string): string {
-  return text.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s'"<>`]+/g, (url) => redactGitUrl(url));
+  return text.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s]+/g, (candidate) => {
+    const start = candidate.indexOf('://') + 3;
+    const slash = candidate.indexOf('/', start);
+    const at = candidate.lastIndexOf('@', slash < 0 ? candidate.length : slash);
+    // Quotes, angle brackets and backticks can occur in legacy userinfo. Do not
+    // cut it before its @ or a suffix would survive. Outside userinfo they delimit
+    // the URL, so quoted URLs still leave the surrounding diagnostic text intact.
+    const boundary = candidate.slice(at < start ? start : at + 1).search(/['"<>`]/);
+    const end = boundary < 0 ? candidate.length : (at < start ? start : at + 1) + boundary;
+    return redactGitUrl(candidate.slice(0, end)) + candidate.slice(end);
+  });
 }
 
 export const gitRemoteUrlSchema = z

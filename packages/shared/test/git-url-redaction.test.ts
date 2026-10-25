@@ -20,3 +20,52 @@ it('redacts every URL in command errors with the same helper', () => {
   expect(redactGitText(message).includes('fixture-password')).toBe(false);
   expect(redactGitText(message)).toContain('https://example.test/r');
 });
+
+// Assertions deliberately compare booleans so a red control never prints a secret.
+it.each(["'", '"', '<', '>', '`', '?', '#'])(
+  'redacts delimiter case %# without consuming prose',
+  (delimiter) => {
+    const secret = `fixture-prefix${delimiter}fixture-suffix`;
+    const raw = `https://user:${secret}@example.test/repo.git`;
+    const message = `failed '${raw}' then retry https://other.test/public`;
+    const safe = redactGitText(message);
+    expect(safe.includes('fixture-suffix')).toBe(false);
+    expect(safe.includes('fixture-prefix')).toBe(false);
+    expect(safe).toContain('then retry https://other.test/public');
+    expect(safe).toContain('https://example.test/repo.git');
+  },
+);
+it.each(['https://user:fixture-secret@bad[host/repo', 'https://user:fixture-secret@/repo'])(
+  'redacts malformed URL case %# and preserves following text',
+  (url) => {
+    const safe = redactGitText(`failed ${url} then retry`);
+    expect(safe.includes('fixture-secret')).toBe(false);
+    expect(safe).toContain('then retry');
+  },
+);
+it.each(['https://example.test:443/repo', 'http://example.test:80/repo'])(
+  'preserves the original transport authority when removing credentials: %s',
+  (url) => {
+    expect(gitRemoteUrlSchema.parse(url.replace('://', '://user:fixture-secret@')) === url).toBe(
+      true,
+    );
+  },
+);
+
+it('keeps SSH login and exact authority spelling in sanitized transport identity', () => {
+  const raw = 'ssh://fixture-login:fixture-password@EXAMPLE.test:22/owner/repo';
+  expect(redactGitUrl(raw, true) === 'ssh://fixture-login@EXAMPLE.test:22/owner/repo').toBe(true);
+  expect(redactGitUrl(raw) === 'ssh://EXAMPLE.test:22/owner/repo').toBe(true);
+  expect(redactGitUrl('fixture-login@example.test:owner/repo', true)).toBe(
+    'fixture-login@example.test:owner/repo',
+  );
+});
+it('retains quoted URL boundaries, adjacent prose and independent URLs', () => {
+  const input = 'see "https://example.test/repo"<next> and `https://other.test/repo`';
+  expect(redactGitText(input)).toBe(input);
+});
+
+it('does not mistake a query @ for transport userinfo', () => {
+  const raw = 'https://example.test?contact=user@other.test';
+  expect(redactGitUrl(raw, true)).toBe(raw);
+});

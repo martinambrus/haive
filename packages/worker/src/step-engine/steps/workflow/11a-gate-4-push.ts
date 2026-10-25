@@ -1,7 +1,7 @@
 import { desc, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { FormSchema } from '@haive/shared';
-import { gitRemoteUrlSchema } from '@haive/shared/schemas';
+import { gitRemoteUrlSchema, redactGitUrl } from '@haive/shared/schemas';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
@@ -201,7 +201,7 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
           {
             type: 'checkbox',
             id: 'push',
-            label: `Push ${detected.branch ?? 'HEAD'} to origin (${detected.originUrl ?? 'origin'})`,
+            label: `Push ${detected.branch ?? 'HEAD'} to origin (${detected.originUrl ? redactGitUrl(detected.originUrl) : 'origin'})`,
             default: false,
           },
           {
