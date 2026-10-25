@@ -127,7 +127,9 @@ From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it
 
 ### T416 · FNF[web-runtime-tests] · proxy(), DOMPurify and markdown-it run only in a browser; CI never boots the production web image (+2)
 
-status: open
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T19:15Z · last: 2026-10-25T19:15Z
+
+Codex continuation: validate test gaps against the newer authentication/browser coverage; add meaningful proxy/CSP, real parser/sanitizer and isolated production-image boot controls where missing. No dev-stack lifecycle or live providers.
 From the T414 review (2026-10-24). All PRE-EXISTING, consequential for dependency bumps (a browser is the only gate today).
 
 1. No test executes `proxy()` (packages/web/src/proxy.ts: auth redirect ~:22, CSP header ~:36, cookie clearing ~:41-42); proxy-matcher.test.ts imports only `config`. The CSP is the control markdown-rendering.md names for never fetching agent-named images.
