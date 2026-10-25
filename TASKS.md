@@ -154,9 +154,10 @@ settings/review-watermarks.json, descendant wins via merge-base --is-ancestor; _
 
 ### T266 · FNF[record-writer] · 04's set and record writes run unfenced (+5)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-25T22:20Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-25T22:51Z
 
-Codex progress 2026-10-25T22:20Z: PR931 currentb4607e075 fixes pending-journal conflict-answer race; freshxhighreview and exactbotclean, parent2actualPGcasespass, originalthread resolved. Newhead CI11/12green; onlysmokepending. Guarded migration0213 and supported dev migrate/libs required aftermerge. ManualRTKpolicy unchanged.
+Codex progress 2026-10-25T22:51Z: PR #931 HEAD4024b5e16: fresh review and parent10PG controls pass prior diagnostic corrections. New required remote finding: pending journal can be stranded by accepted clean checkout move. High driver validating realPG/git interleaving and shared move/restore fences; current HEAD must not merge until corrected/reviewed. No new task claimed; finish T413/T266 then PAUSE.
+
 All PRE-EXISTING. Items 4, 7, 8 moved to T310.
 
 1. 04's set and record writes run with no lock and no column fence.
