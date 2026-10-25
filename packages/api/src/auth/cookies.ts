@@ -8,14 +8,41 @@ export const REFRESH_COOKIE = 'haive_refresh';
 const SESSION_COOKIES = new Set([ACCESS_COOKIE, REFRESH_COOKIE]);
 
 export function withoutSessionCookies(header: string): string | null {
-  const kept = header
-    .split(';')
-    .filter((pair) => {
-      const eq = pair.indexOf('=');
-      return !SESSION_COOKIES.has((eq === -1 ? pair : pair.slice(0, eq)).trim());
-    })
-    .map((pair) => pair.trim())
-    .filter((pair) => pair !== '');
+  const kept: string[] = [];
+  let start = 0;
+  while (start < header.length) {
+    let end = header.indexOf(';', start);
+    if (end === -1) end = header.length;
+    const first = header.slice(start, end);
+    const eq = first.indexOf('=');
+    if (
+      eq !== -1 &&
+      first
+        .slice(eq + 1)
+        .trimStart()
+        .startsWith('"')
+    ) {
+      const opener = start + eq + 1 + first.slice(eq + 1).indexOf('"');
+      const closer = header.indexOf('"', opener + 1);
+      // RFC 6265 cookie-octet excludes semicolons, even in quoted values.
+      // Consume the whole malformed quoted pair, rather than promoting its
+      // contents into independent pairs. An unterminated quote consumes the rest.
+      if (closer === -1) break;
+      end = header.indexOf(';', closer + 1);
+      if (end === -1) end = header.length;
+    }
+    const pair = header.slice(start, end).trim();
+    start = end + 1;
+    if (!pair || pair.includes(';')) continue;
+    if (eq === -1) {
+      kept.push(pair);
+      continue;
+    }
+    const name = pair.slice(0, pair.indexOf('=')).trim();
+    // Session readers accept different grammars. Remove their union by name,
+    // while keeping non-session data (including off-grammar values) verbatim.
+    if (name && !SESSION_COOKIES.has(name)) kept.push(pair);
+  }
   return kept.length > 0 ? kept.join('; ') : null;
 }
 
