@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 declare global {
   interface Window {
@@ -14,6 +14,22 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/tests/e2e/harness/web-runtime/index.html');
   await page.waitForFunction(() => !!window.runtimeFixture);
 });
+
+// SVG links can use xlink:href, which an ordinary [href] selector does not match.
+// Inspect Attr.localName so both namespaced and unnamespaced forms reach the assertions.
+function svgLinkAttributes(page: Page) {
+  return page.locator('#output svg, #output svg *').evaluateAll((elements) =>
+    elements.flatMap((element) =>
+      Array.from(element.attributes)
+        .filter((attribute) => attribute.localName === 'href')
+        .map((attribute) => ({
+          name: attribute.name,
+          namespaceURI: attribute.namespaceURI,
+          value: attribute.value,
+        })),
+    ),
+  );
+}
 
 test('the actual markdown-it string path parses formatting, task lists and preserved image labels', async ({
   page,
@@ -55,7 +71,7 @@ test('HTML and unsafe link input cannot create executable editor DOM or fetch im
   expect(await (await request.get('http://127.0.0.1:46113/count')).text()).toBe(before);
 });
 
-test('real mermaid rendering runs DOMPurify and strips resource and link attributes from SVG', async ({
+test('real mermaid rendering sanitizes resource input and preserves a safe HTTPS SVG link', async ({
   page,
   request,
 }) => {
@@ -74,12 +90,36 @@ test('real mermaid rendering runs DOMPurify and strips resource and link attribu
   expect(
     await page
       .locator(
-        '#output img, #output image, #output foreignObject, #output script, #output [href], #output [src], #output [onerror]',
+        '#output img, #output image, #output foreignObject, #output script, #output [src], #output [onerror]',
       )
       .evaluateAll((elements) => elements.map((element) => element.outerHTML)),
   ).toEqual([]);
+  const links = await svgLinkAttributes(page);
+  expect(links.map((attribute) => attribute.value)).toEqual(['https://example.test/remote']);
+  expect(
+    links.every(
+      (attribute) =>
+        attribute.namespaceURI === null ||
+        attribute.namespaceURI === 'http://www.w3.org/1999/xlink',
+    ),
+  ).toBe(true);
   expect(await page.evaluate(() => window.runtimeExecuted)).toBeUndefined();
   expect(await (await request.get('http://127.0.0.1:46113/count')).text()).toBe(before);
+});
+
+test('real mermaid rendering removes an unsafe JavaScript SVG link in every attribute namespace', async ({
+  page,
+}) => {
+  const svg = await page.evaluate(() =>
+    window.runtimeFixture.mermaid(
+      'flowchart LR\n A[Start] --> B[Done]\n click B "javascript:window.runtimeExecuted=true" "tooltip"',
+    ),
+  );
+  expect(svg).not.toBeNull();
+  await expect(page.locator('#output svg')).toContainText('Start');
+  await expect(page.locator('#output svg')).toContainText('Done');
+  expect(await svgLinkAttributes(page)).toEqual([]);
+  expect(await page.evaluate(() => window.runtimeExecuted)).toBeUndefined();
 });
 
 test('the browser enforces the actual CSP while allowing an API image', async ({

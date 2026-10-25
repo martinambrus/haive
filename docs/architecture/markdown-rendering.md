@@ -6,8 +6,10 @@ starts the developer stack. `packages/web/test/browser-runtime.ts` imports the a
 extensions and Mermaid loader. Chromium parses markdown strings through tiptap-markdown's
 `html: true` path, checks safe DOM and image-label round trips, renders Mermaid through its real
 DOMPurify dependency, and verifies browser CSP enforcement against allowed and refused image
-origins. Generated Mermaid theme CSS is legitimate; the resource and executable input assertions
-apply to agent-authored markup. `proxy.test.ts` calls the real Next proxy with NextRequest and
+origins. Mermaid's safe HTTPS links may remain as SVG `xlink:href`; the tests inspect attribute
+namespaces and require JavaScript links to lose their target without navigating them. Generated
+Mermaid theme CSS is legitimate; the resource and executable input assertions apply to agent-authored
+markup. `proxy.test.ts` calls the real Next proxy with NextRequest and
 NextResponse, substituting only the upstream auth fetch; the existing session-recovery harness
 covers real authentication/cookie recovery. Neither fixture is a production route.
 
