@@ -344,6 +344,10 @@ export interface Repository {
   branch: string | null;
   status: 'cloning' | 'ready' | 'error';
   statusMessage: string | null;
+  /** List-only retry capability. Absent means unknown; the API still checks admission. */
+  canRetry?: boolean;
+  /** List-only: recorded reason an errored upload cannot be retried. Absent means unknown. */
+  retryUnavailableReason?: string | null;
   detectedFramework: string | null;
   detectedLanguages: Record<string, number> | null;
   /** Top-level dir/file names only (server-derived). The full fileTree is no

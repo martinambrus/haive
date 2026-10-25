@@ -231,7 +231,10 @@ const UPLOAD_UNAVAILABLE =
 
 // This is recorded availability only. The worker opens the archive safely at extraction time;
 // the API must never probe a stored upload path to guess whether it is still on disk.
-function retryableUpload(row: typeof schema.repoUploads.$inferSelect, userId: string): boolean {
+function retryableUpload(
+  row: Pick<typeof schema.repoUploads.$inferSelect, 'status' | 'archivePath' | 'archiveFormat'>,
+  userId: string,
+): boolean {
   return (
     row.status === 'complete' &&
     uploadFileRel(userId, row.archivePath) !== null &&
@@ -252,6 +255,26 @@ repoRoutes.get('/', async (c) => {
     // Large, and this list is polled every 5s.
     columns: { renderContext: false },
   });
+
+  const erroredUploads = rows.filter(
+    (repo) => repo.status === 'error' && repo.source === 'upload' && !repo.remoteUrl,
+  );
+  const uploads =
+    erroredUploads.length === 0
+      ? []
+      : await db.query.repoUploads.findMany({
+          where: and(
+            eq(schema.repoUploads.userId, userId),
+            inArray(
+              schema.repoUploads.id,
+              erroredUploads.map((repo) => repo.id),
+            ),
+          ),
+          columns: { id: true, status: true, archivePath: true, archiveFormat: true },
+        });
+  const retrySources = new Set(
+    uploads.filter((row) => retryableUpload(row, userId)).map((row) => row.id),
+  );
 
   // Per-repo task counts for the list badges. "Open" = non-terminal, matching
   // cancelOpenTasksForRepo. "Active" = open tasks not blocked on the user
@@ -341,8 +364,15 @@ repoRoutes.get('/', async (c) => {
       // (which is what `onboarded: false` does) blocks the user outright.
       const nothingToOnboard =
         markers !== null && !onboarded && root ? !(await hasOnboardableSource(root)) : false;
+      const retryUnavailable =
+        repo.status === 'error' &&
+        repo.source === 'upload' &&
+        !repo.remoteUrl &&
+        !retrySources.has(repo.id);
       return {
         ...rest,
+        canRetry: repo.status === 'error' && !retryUnavailable,
+        retryUnavailableReason: retryUnavailable ? UPLOAD_UNAVAILABLE : null,
         topLevelPaths: deriveTopLevelPaths(fileTree),
         openTaskCount: counts.open,
         activeTaskCount: counts.active,
