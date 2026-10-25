@@ -171,6 +171,23 @@ plant or clear the session; its other cookies, `forwarded` and `x-forwarded-*` s
 editor is served from the api origin, which is on the state-change allow list on purpose, so this removes the
 credentials from the container's reach and nothing more.
 
+## Container attachment startup
+
+The container WebSocket routes (`api/src/routes/terminal.ts` and `cli-login-banner.ts`) own
+an acquired Docker attach stream through startup. They install its error listener before
+asynchronous setup and close the stream through one cleanup path if that setup fails.
+Terminal output listeners follow the count/session setup so buffered output still follows the
+connected frame. The login banner finishes EOF token capture before deciding whether an active
+probe defers cleanup.
+
+The terminal route increments `containers.attached_ws_count` only after acquiring the stream,
+and cleanup decrements only when that increment completed. Both updates are atomic
+`greatest(attached_ws_count + delta, 0)` operations; a failed increment must not decrement
+another attachment, and repeated cleanup must not release twice. This persisted count has no
+operational reader and is not reconciled after an API process crash, so it does not prove that
+a socket is still connected. Its longer-term purpose and the dormant worker count helpers are
+tracked separately in T436.
+
 ## A step's project commands run in the sandbox
 
 `08-phase-5-verify` and `08b-test-management` do not start a project's tests, lint or typecheck in the

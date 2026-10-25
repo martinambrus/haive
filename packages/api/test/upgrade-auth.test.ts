@@ -11,6 +11,7 @@ import { schema } from '@haive/database';
 import { terminalSessionKey } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 import { eq } from 'drizzle-orm';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import type { AppEnv } from '../src/context.js';
 
 const h = vi.hoisted(() => {
@@ -673,6 +674,227 @@ describe('real transport registry cleanup controls', () => {
     expect(await handshake(port, `/cli-stream/${ID}`, 'haive_access=user-session')).toBe(401);
     expect(closeUserSockets(USER)).toBe(0);
   });
+});
+
+describe('terminal replay ordering', () => {
+  it('sends connected before output buffered by the attach stream', async () => {
+    const stream = new PassThrough();
+    stream.write('replayed output\n');
+    vi.spyOn(http, 'request').mockImplementation(((
+      opts: http.RequestOptions,
+      ...args: unknown[]
+    ) => {
+      if (!opts.path?.startsWith('/containers/test-container/attach'))
+        return Reflect.apply(realRequest, http, [opts, ...args]);
+      const req = new EventEmitter();
+      Object.assign(req, {
+        end: () => queueMicrotask(() => req.emit('upgrade', {}, stream, Buffer.alloc(0))),
+      });
+      return req;
+    }) as typeof http.request);
+    // Model a database round trip so buffered data can flow across the await.
+    fake.hooks.beforeUpdate = async (table) => {
+      if (table === schema.containers) await new Promise<void>((resolve) => setImmediate(resolve));
+    };
+    const docker = {
+      modem: { getSocketPath: () => undefined },
+      getContainer: () => ({}),
+    } as never;
+    const port = await start((s) => installTerminalWebSocket(s, { docker }));
+    const client = new WebSocket(`ws://127.0.0.1:${port}/terminal/${ID}`, {
+      headers: { cookie: 'haive_access=user-session' },
+    });
+    clients.add(client);
+    const frames: Array<{ type: string; data?: string }> = [];
+    client.on('message', (raw) => frames.push(JSON.parse(raw.toString())));
+    try {
+      await vi.waitFor(() => expect(frames).toHaveLength(2));
+      expect(frames[0]?.type).toBe('connected');
+      expect(frames[1]).toEqual({ type: 'output', data: 'replayed output\n' });
+    } finally {
+      client.close();
+      await vi.waitFor(() => expect(stream.writableEnded).toBe(true));
+      stream.destroy();
+    }
+  });
+});
+
+describe('terminal startup failure cleanup', () => {
+  for (const stage of ['attach', 'setup'] as const) {
+    it(`cleans up once when the websocket is not OPEN after ${stage}`, async () => {
+      fake.patch(schema.containers, ID, { attachedWsCount: 1 });
+      const stream = new PassThrough();
+      let accepted!: WebSocket;
+      const upgrade = WebSocketServer.prototype.handleUpgrade;
+      vi.spyOn(WebSocketServer.prototype, 'handleUpgrade').mockImplementation(function (
+        this: WebSocketServer,
+        req,
+        socket,
+        head,
+        callback,
+      ) {
+        upgrade.call(this, req, socket, head, (ws, request) => {
+          accepted = ws;
+          callback(ws, request);
+        });
+      });
+      // Hold the transport in CLOSING without emitting close: each not-OPEN branch
+      // must release its own resources before the eventual close callback runs.
+      const closing = () =>
+        Object.defineProperty(accepted, 'readyState', {
+          configurable: true,
+          value: WebSocket.CLOSING,
+        });
+      vi.spyOn(http, 'request').mockImplementation(((
+        opts: http.RequestOptions,
+        ...args: unknown[]
+      ) => {
+        if (!opts.path?.startsWith('/containers/test-container/attach'))
+          return Reflect.apply(realRequest, http, [opts, ...args]);
+        const req = new EventEmitter();
+        Object.assign(req, {
+          end: () =>
+            queueMicrotask(() => {
+              if (stage === 'attach') closing();
+              req.emit('upgrade', {}, stream, Buffer.alloc(0));
+            }),
+        });
+        return req;
+      }) as typeof http.request);
+      const intervals: Array<ReturnType<typeof setInterval>> = [];
+      const interval = globalThis.setInterval;
+      const clear = vi.spyOn(globalThis, 'clearInterval');
+      if (stage === 'setup') {
+        vi.spyOn(globalThis, 'setInterval').mockImplementation(((
+          ...args: Parameters<typeof setInterval>
+        ) => {
+          expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(2);
+          intervals.push(interval(...args));
+          if (intervals.length === 2) closing();
+          return intervals.at(-1)!;
+        }) as typeof setInterval);
+      }
+      const docker = {
+        modem: { getSocketPath: () => undefined },
+        getContainer: () => ({}),
+      } as never;
+      const port = await start((s) => installTerminalWebSocket(s, { docker }));
+      const client = new WebSocket(`ws://127.0.0.1:${port}/terminal/${ID}`, {
+        headers: { cookie: 'haive_access=user-session' },
+      });
+      clients.add(client);
+      const frames: unknown[] = [];
+      client.on('message', (raw) => frames.push(JSON.parse(raw.toString())));
+      try {
+        await vi.waitFor(() => {
+          expect(stream.writableEnded).toBe(true);
+          expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(1);
+          const sessions = fake.rows(schema.terminalSessions);
+          expect(sessions).toHaveLength(stage === 'attach' ? 0 : 1);
+          for (const session of sessions) expect(session.endedAt).toBeInstanceOf(Date);
+        });
+        expect(frames).toEqual([]);
+        for (const timer of intervals) expect(clear).toHaveBeenCalledWith(timer);
+      } finally {
+        if (accepted) Reflect.deleteProperty(accepted, 'readyState');
+        client.close();
+        await new Promise<void>((resolve) => client.once('close', () => resolve()));
+        // The later close listener must not decrement a second time.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        for (const timer of intervals) clearInterval(timer);
+        stream.destroy();
+      }
+      expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(1);
+    });
+  }
+
+  for (const { stage, bound } of [
+    { stage: 'increment', bound: false },
+    { stage: 'timers', bound: false },
+    { stage: 'increment', bound: true },
+    { stage: 'timers', bound: true },
+  ] as const) {
+    it(`${bound ? 'bound error: ' : ''}ends the attach stream and closes the websocket when ${stage} fails`, async () => {
+      fake.patch(schema.containers, ID, { attachedWsCount: 1 });
+      const stream = new PassThrough();
+      vi.spyOn(http, 'request').mockImplementation(((
+        opts: http.RequestOptions,
+        ...args: unknown[]
+      ) => {
+        if (!opts.path?.startsWith('/containers/test-container/attach'))
+          return Reflect.apply(realRequest, http, [opts, ...args]);
+        const req = new EventEmitter();
+        Object.assign(req, {
+          end: () => queueMicrotask(() => req.emit('upgrade', {}, stream, Buffer.alloc(0))),
+        });
+        return req;
+      }) as typeof http.request);
+      const failure = bound
+        ? new DrizzleQueryError(
+            'update containers set attached_ws_count = $1',
+            ['synthetic-bound-private-value'],
+            new Error('synthetic-bound-private-value'),
+          )
+        : new Error(`${stage} unavailable`);
+      let keepalive: ReturnType<typeof setInterval> | undefined;
+      const clear = vi.spyOn(globalThis, 'clearInterval');
+      if (stage === 'increment') {
+        vi.spyOn(fake.db, 'update').mockImplementationOnce(() => {
+          expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(1);
+          throw failure;
+        });
+      } else {
+        const interval = globalThis.setInterval;
+        vi.spyOn(globalThis, 'setInterval')
+          .mockImplementationOnce(((...args: Parameters<typeof setInterval>) => {
+            keepalive = interval(...args);
+            return keepalive;
+          }) as typeof setInterval)
+          .mockImplementationOnce(() => {
+            expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(2);
+            throw failure;
+          });
+      }
+      const docker = {
+        modem: { getSocketPath: () => undefined },
+        getContainer: () => ({}),
+      } as never;
+      const port = await start((s) => installTerminalWebSocket(s, { docker }));
+      const client = new WebSocket(`ws://127.0.0.1:${port}/terminal/${ID}`, {
+        headers: { cookie: 'haive_access=user-session' },
+      });
+      clients.add(client);
+      const frames: unknown[] = [];
+      client.on('message', (raw) => frames.push(JSON.parse(raw.toString())));
+      const closed = new Promise<number>((resolve, reject) => {
+        client.once('close', resolve);
+        client.once('error', reject);
+      });
+      try {
+        expect(await closed).toBe(1011);
+        const errorFrame = {
+          type: 'error',
+          message: bound ? 'Database operation failed' : failure.message,
+        };
+        expect(frames.some((frame) => JSON.stringify(frame) === JSON.stringify(errorFrame))).toBe(
+          true,
+        );
+        expect(JSON.stringify(frames).includes('synthetic-bound-private-value')).toBe(false);
+        expect(stream.writableEnded).toBe(true);
+        await vi.waitFor(() => {
+          expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(1);
+          const sessions = fake.rows(schema.terminalSessions);
+          expect(sessions).toHaveLength(stage === 'increment' ? 0 : 1);
+          for (const session of sessions) expect(session.endedAt).toBeInstanceOf(Date);
+        });
+        if (keepalive) expect(clear).toHaveBeenCalledWith(keepalive);
+      } finally {
+        // Also bound the timer in the red control, before production cleanup exists.
+        if (keepalive) clearInterval(keepalive);
+        stream.destroy();
+      }
+    });
+  }
 });
 
 describe('revocation resource teardown', () => {

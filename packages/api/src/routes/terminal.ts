@@ -4,7 +4,7 @@ import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, WebSocket } from 'ws';
 import Docker from 'dockerode';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared';
 import { terminalClientFrameSchema } from '@haive/shared';
@@ -105,20 +105,13 @@ async function runTerminalSession(
   const sessionId = crypto.randomUUID();
   log.info({ sessionId, containerId: container.id }, 'terminal session opened');
 
+  const logBuffer = new TerminalLogBuffer();
   const dockerContainer = docker.getContainer(container.dockerContainerId!);
   const stream = await attachContainerStream(docker, container.dockerContainerId!);
-  if (ws.readyState !== WebSocket.OPEN) {
-    stream.end();
-    return;
-  }
-
-  await incrementAttached(container.id);
-
-  const logBuffer = new TerminalLogBuffer();
-  const dbSessionId = await createTerminalSession(userId, container.id).catch((err) => {
-    log.warn({ err, sessionId }, 'createTerminalSession failed');
-    return null;
-  });
+  let attached = false;
+  let dbSessionId: string | null = null;
+  let keepalive: ReturnType<typeof setInterval> | undefined;
+  let flushInterval: ReturnType<typeof setInterval> | undefined;
 
   let allowControlChars = false;
   let oauthBuffer = '';
@@ -150,20 +143,6 @@ async function runTerminalSession(
     }
   };
 
-  stream.on('data', onStreamData);
-  stream.on('end', onStreamEnd);
-  stream.on('error', onStreamError);
-
-  const keepalive = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      try {
-        ws.ping();
-      } catch {
-        // ignore
-      }
-    }
-  }, KEEPALIVE_INTERVAL_MS);
-
   const flushLogs = async () => {
     if (!dbSessionId || !logBuffer.hasPending()) return;
     const snap = logBuffer.consume();
@@ -172,58 +151,12 @@ async function runTerminalSession(
     });
   };
 
-  const flushInterval = setInterval(() => {
-    void flushLogs();
-  }, LOG_FLUSH_INTERVAL_MS);
-
-  ws.on('message', async (raw) => {
-    if (ws.readyState !== WebSocket.OPEN) return;
-    const text = raw.toString();
-    if (text.length > MAX_INPUT_BYTES) {
-      sendFrame(ws, { type: 'error', message: 'frame too large' });
-      return;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      sendFrame(ws, { type: 'error', message: 'invalid json' });
-      return;
-    }
-    const result = terminalClientFrameSchema.safeParse(parsed);
-    if (!result.success) {
-      sendFrame(ws, { type: 'error', message: 'invalid frame' });
-      return;
-    }
-    const frame = result.data;
-    if (frame.type === 'input') {
-      const payload = allowControlChars ? frame.data : stripControlBytes(frame.data);
-      if (!payload) return;
-      try {
-        stream.write(payload);
-      } catch (err) {
-        log.warn({ err, sessionId }, 'stream write failed');
-      }
-    } else if (frame.type === 'resize') {
-      try {
-        await dockerContainer.resize({ h: frame.rows, w: frame.cols });
-      } catch (err) {
-        log.warn({ err, sessionId }, 'resize failed');
-      }
-    } else if (frame.type === 'ping') {
-      sendFrame(ws, { type: 'pong' });
-    } else if (frame.type === 'set_control_passthrough') {
-      allowControlChars = frame.allow;
-      log.info({ sessionId, allow: frame.allow }, 'terminal control passthrough toggled');
-    }
-  });
-
   let cleanedUp = false;
   const cleanup = async () => {
     if (cleanedUp) return;
     cleanedUp = true;
-    clearInterval(keepalive);
-    clearInterval(flushInterval);
+    if (keepalive) clearInterval(keepalive);
+    if (flushInterval) clearInterval(flushInterval);
     stream.off('data', onStreamData);
     stream.off('end', onStreamEnd);
     stream.off('error', onStreamError);
@@ -238,19 +171,98 @@ async function runTerminalSession(
         log.warn({ err, dbSessionId }, 'markTerminalSessionEnded failed');
       });
     }
-    await decrementAttached(container.id).catch((err) => {
-      log.warn({ err, containerId: container.id }, 'decrementAttached failed');
-    });
+    if (attached) {
+      await decrementAttached(container.id).catch((err) => {
+        log.warn({ err, containerId: container.id }, 'decrementAttached failed');
+      });
+    }
     log.info({ sessionId, containerId: container.id }, 'terminal session closed');
   };
-  ws.on('close', () => void cleanup());
-  if (ws.readyState !== WebSocket.OPEN) {
-    await cleanup();
-    return;
-  }
 
-  // Only now: a client may send input the moment it reads this, and the handlers above take it.
-  sendFrame(ws, { type: 'connected', sessionId });
+  try {
+    if (ws.readyState !== WebSocket.OPEN) {
+      await cleanup();
+      return;
+    }
+    stream.on('error', onStreamError);
+
+    await incrementAttached(container.id);
+    attached = true;
+    dbSessionId = await createTerminalSession(userId, container.id).catch((err) => {
+      log.warn({ err, sessionId }, 'createTerminalSession failed');
+      return null;
+    });
+
+    stream.on('data', onStreamData);
+    stream.on('end', onStreamEnd);
+
+    keepalive = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.ping();
+        } catch {
+          // ignore
+        }
+      }
+    }, KEEPALIVE_INTERVAL_MS);
+    flushInterval = setInterval(() => {
+      void flushLogs();
+    }, LOG_FLUSH_INTERVAL_MS);
+
+    ws.on('message', async (raw) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      const text = raw.toString();
+      if (text.length > MAX_INPUT_BYTES) {
+        sendFrame(ws, { type: 'error', message: 'frame too large' });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        sendFrame(ws, { type: 'error', message: 'invalid json' });
+        return;
+      }
+      const result = terminalClientFrameSchema.safeParse(parsed);
+      if (!result.success) {
+        sendFrame(ws, { type: 'error', message: 'invalid frame' });
+        return;
+      }
+      const frame = result.data;
+      if (frame.type === 'input') {
+        const payload = allowControlChars ? frame.data : stripControlBytes(frame.data);
+        if (!payload) return;
+        try {
+          stream.write(payload);
+        } catch (err) {
+          log.warn({ err, sessionId }, 'stream write failed');
+        }
+      } else if (frame.type === 'resize') {
+        try {
+          await dockerContainer.resize({ h: frame.rows, w: frame.cols });
+        } catch (err) {
+          log.warn({ err, sessionId }, 'resize failed');
+        }
+      } else if (frame.type === 'ping') {
+        sendFrame(ws, { type: 'pong' });
+      } else if (frame.type === 'set_control_passthrough') {
+        allowControlChars = frame.allow;
+        log.info({ sessionId, allow: frame.allow }, 'terminal control passthrough toggled');
+      }
+    });
+
+    ws.on('close', () => void cleanup());
+    if (ws.readyState !== WebSocket.OPEN) {
+      await cleanup();
+      return;
+    }
+
+    // Only now: a client may send input the moment it reads this, and the handlers above take it.
+    sendFrame(ws, { type: 'connected', sessionId });
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
 }
 
 async function loadContainerForUser(
@@ -319,29 +331,17 @@ async function markTerminalSessionEnded(dbSessionId: string): Promise<void> {
 
 async function incrementAttached(containerId: string): Promise<void> {
   const db = getDb();
-  const rows = await db
-    .select({ count: schema.containers.attachedWsCount })
-    .from(schema.containers)
-    .where(eq(schema.containers.id, containerId))
-    .limit(1);
-  const current = rows[0]?.count ?? 0;
   await db
     .update(schema.containers)
-    .set({ attachedWsCount: current + 1 })
+    .set({ attachedWsCount: sql`greatest(${schema.containers.attachedWsCount} + ${1}, 0)` })
     .where(eq(schema.containers.id, containerId));
 }
 
 async function decrementAttached(containerId: string): Promise<void> {
   const db = getDb();
-  const rows = await db
-    .select({ count: schema.containers.attachedWsCount })
-    .from(schema.containers)
-    .where(eq(schema.containers.id, containerId))
-    .limit(1);
-  const current = rows[0]?.count ?? 0;
   await db
     .update(schema.containers)
-    .set({ attachedWsCount: Math.max(0, current - 1) })
+    .set({ attachedWsCount: sql`greatest(${schema.containers.attachedWsCount} + ${-1}, 0)` })
     .where(eq(schema.containers.id, containerId));
 }
 

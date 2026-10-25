@@ -380,221 +380,260 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     return;
   }
 
-  if (abort.aborted) {
-    stream.end();
-    await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
-    throw new LoginCancelled();
-  }
-
-  try {
-    await dockerContainer.start();
-  } catch (err) {
-    log.error({ error: safeErrorDetails(err), providerId }, 'start failed');
-    await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
-    wsSend(ws, { type: 'error', message: 'Failed to start login container' });
-    try {
-      ws.close(1011, 'start_failed');
-    } catch {
-      // ignore
-    }
-    return;
-  }
-
-  if (abort.aborted) {
-    stream.end();
-    await teardownContainer(createResult.containerRowId, docker, createResult.dockerContainerId);
-    throw new LoginCancelled();
-  }
-
-  const session: BannerSession = {
-    ws,
-    userId,
-    providerId,
-    providerName,
-    containerRowId: createResult.containerRowId,
-    dockerContainerId: createResult.dockerContainerId,
-    stream,
-    docker,
-    abort,
-    pending,
-    rawBuffer: '',
-    cleanBuffer: '',
-    ansiTail: '',
-    decoder: new StringDecoder('utf8'),
-    authUrlSent: false,
-    authSuccessSent: false,
-    tokenSubmitted: false,
-    tokenSubmittedAt: null,
-    captureWatchdog: null,
-    probePending: false,
-    createdAt: Date.now(),
-    heartbeat: setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.ping();
-        } catch {
-          // ignore
-        }
+  let activeSession: BannerSession | null = null;
+  let startupCleanup: Promise<void> | null = null;
+  let heartbeat: NodeJS.Timeout | undefined;
+  let timeout: NodeJS.Timeout | undefined;
+  const cleanup = (): Promise<void> => {
+    if (activeSession) return cleanupSession(activeSession);
+    return (startupCleanup ??= (async () => {
+      if (heartbeat) clearInterval(heartbeat);
+      if (timeout) clearTimeout(timeout);
+      try {
+        stream.end();
+      } catch {
+        // ignore
       }
-    }, HEARTBEAT_MS),
-    timeout: setTimeout(() => {
-      log.info({ providerId }, 'session timeout reached');
-      void cleanupSession(session);
-    }, SESSION_TIMEOUT_MS),
-    cleanedUp: false,
-    credsPoller: null,
-    credsBaseline: null,
-    ampPasteFlow: false,
-    urlDebugged: false,
-    firstChunkLogged: false,
-    menuAdvanceTimer: null,
-    menuAdvanceCount: 0,
+      await teardownContainer(
+        createResult.containerRowId!,
+        docker,
+        createResult.dockerContainerId!,
+      );
+    })());
   };
 
-  wsSend(ws, {
-    type: 'phase',
-    // Device-code providers wait on a browser approval; everything else waits on
-    // a token/code the user pastes back into the modal.
-    phase: DEVICE_CODE_PROVIDERS.has(providerName) ? 'awaiting-approval' : 'awaiting-token',
-  });
-
-  if (TERMINAL_LOGIN_PROVIDERS.has(providerName)) {
-    // Start polling for the creds file now — success is the token write, not
-    // anything parsed from the stream.
-    startAntigravityCredsPoller(session);
-    // agy's TUI only renders (and prints the OAuth URL) once its PTY has a real
-    // winsize. The container is created Tty:true with NO size, so until a resize
-    // arrives agy sits at a 0x0 PTY and emits nothing — which is exactly why the
-    // field-only flow hung at "Waiting for sign-in URL...". Push a fixed sane
-    // size right after start, and once more after agy has opened the PTY, so the
-    // hidden flow works without any client xterm attached. (When the debug xterm
-    // IS shown it will also send its own resize frames; these are harmless.)
-    const sizeTerminalPty = () => {
-      session.docker
-        .getContainer(session.dockerContainerId)
-        .resize({ h: 40, w: 120 })
-        .catch((err) => {
-          log.warn(
-            { error: safeErrorDetails(err), providerId: session.providerId },
-            'initial pty resize failed',
-          );
-        });
-    };
-    setTimeout(sizeTerminalPty, 250);
-    setTimeout(sizeTerminalPty, 1200);
-  }
-
-  stream.on('data', (chunk: Buffer) => onStreamData(session, chunk));
-  stream.on('end', () => {
-    captureClaudeOauthToken(session, session.cleanBuffer + '\n\n');
-    if (session.probePending) {
-      log.info({ providerId }, 'stream ended while probe pending; deferring cleanup');
-      return;
-    }
-    wsSend(ws, { type: 'exit' });
-    void cleanupSession(session);
-  });
+  // Cover the await in start as well as the established session, including errors
+  // emitted while ending a failed attach stream.
   stream.on('error', (err: Error) => {
     log.warn({ error: safeErrorDetails(err), providerId }, 'stream error');
-    if (session.probePending) return;
+    if (activeSession?.probePending) return;
     wsSend(ws, { type: 'error', message: safeErrorMessage(err) });
-    void cleanupSession(session);
+    void cleanup().catch((error) => {
+      log.warn({ error: safeErrorDetails(error), providerId }, 'stream cleanup failed');
+    });
+    if (!activeSession) {
+      try {
+        ws.close(1011, 'stream_error');
+      } catch {
+        // ignore
+      }
+    }
   });
 
-  ws.on('message', async (raw) => {
-    if (session.cleanedUp || ws.readyState !== WebSocket.OPEN) return;
-    const text = raw.toString();
-    let parsed: unknown;
+  try {
+    if (abort.aborted) throw new LoginCancelled();
+
     try {
-      parsed = JSON.parse(text);
-    } catch {
-      return;
-    }
-    const msg = parsed as {
-      type?: string;
-      token?: string;
-      data?: string;
-      rows?: number;
-      cols?: number;
-    };
-    if (msg.type === 'input' && typeof msg.data === 'string') {
-      // Terminal-login keystrokes (incl. the pasted auth code + Enter) -> stdin.
+      await dockerContainer.start();
+    } catch (err) {
+      log.error({ error: safeErrorDetails(err), providerId }, 'start failed');
+      await cleanup();
+      wsSend(ws, { type: 'error', message: 'Failed to start login container' });
       try {
-        session.stream.write(msg.data);
-      } catch (err) {
-        log.warn(
-          { error: safeErrorDetails(err), providerId: session.providerId },
-          'terminal input write failed',
-        );
+        ws.close(1011, 'start_failed');
+      } catch {
+        // ignore
       }
       return;
     }
-    if (msg.type === 'resize' && typeof msg.rows === 'number' && typeof msg.cols === 'number') {
-      try {
-        await session.docker.getContainer(session.dockerContainerId).resize({
-          h: msg.rows,
-          w: msg.cols,
-        });
-      } catch (err) {
-        log.warn(
-          { error: safeErrorDetails(err), providerId: session.providerId },
-          'terminal resize failed',
-        );
-      }
+
+    if (abort.aborted) throw new LoginCancelled();
+
+    // A stream error during start already ended the stream and began teardown.
+    if (startupCleanup) {
+      await startupCleanup;
       return;
     }
-    if (msg.type === 'token-input' && typeof msg.token === 'string' && msg.token.trim()) {
-      const token = msg.token.trim();
-      log.info(
-        { providerId: session.providerId, tokenLength: token.length },
-        'token received, writing to stream',
-      );
-      wsSend(ws, { type: 'phase', phase: 'submitting' });
-      session.tokenSubmitted = true;
-      session.tokenSubmittedAt = Date.now();
-      session.authSuccessSent = false;
-      session.rawBuffer = '';
-      session.cleanBuffer = '';
-      session.ansiTail = '';
-      try {
-        // Write the token first, then send Enter as a SEPARATE write on the
-        // next tick so claude-code's Ink input registers the paste before it
-        // sees the submit keystroke. Sending both in the same write is
-        // interpreted as a single paste event and does not trigger submit.
-        const wrote = session.stream.write(token);
-        setTimeout(() => {
+
+    const session: BannerSession = {
+      ws,
+      userId,
+      providerId,
+      providerName,
+      containerRowId: createResult.containerRowId,
+      dockerContainerId: createResult.dockerContainerId,
+      stream,
+      docker,
+      abort,
+      pending,
+      rawBuffer: '',
+      cleanBuffer: '',
+      ansiTail: '',
+      decoder: new StringDecoder('utf8'),
+      authUrlSent: false,
+      authSuccessSent: false,
+      tokenSubmitted: false,
+      tokenSubmittedAt: null,
+      captureWatchdog: null,
+      probePending: false,
+      createdAt: Date.now(),
+      heartbeat: (heartbeat = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
           try {
-            session.stream.write('\r');
+            ws.ping();
           } catch {
             // ignore
           }
-        }, 150);
-        log.info({ providerId: session.providerId, wrote }, 'token written');
-      } catch (err) {
-        log.warn(
-          { error: safeErrorDetails(err), providerId: session.providerId },
-          'stream write failed',
-        );
-      }
-      if (session.providerName === 'claude-code') {
-        startCaptureWatchdog(session);
-      } else if (session.providerName === 'antigravity') {
-        // agy reads the pasted authorization code on stdin and writes its OAuth
-        // token to ~/.gemini/antigravity-cli/antigravity-oauth-token on success.
-        // Poll for that file — the post-paste agy TUI output is unreliable.
-        startAntigravityCredsPoller(session);
-      }
-    } else if (msg.type === 'ping') {
-      wsSend(ws, { type: 'pong' });
-    }
-  });
+        }
+      }, HEARTBEAT_MS)),
+      timeout: (timeout = setTimeout(() => {
+        log.info({ providerId }, 'session timeout reached');
+        void cleanupSession(session);
+      }, SESSION_TIMEOUT_MS)),
+      cleanedUp: false,
+      credsPoller: null,
+      credsBaseline: null,
+      ampPasteFlow: false,
+      urlDebugged: false,
+      firstChunkLogged: false,
+      menuAdvanceTimer: null,
+      menuAdvanceCount: 0,
+    };
 
-  ws.on('close', () => {
-    void cleanupSession(session);
-  });
-  ws.on('error', () => {
-    void cleanupSession(session);
-  });
+    activeSession = session;
+
+    wsSend(ws, {
+      type: 'phase',
+      // Device-code providers wait on a browser approval; everything else waits on
+      // a token/code the user pastes back into the modal.
+      phase: DEVICE_CODE_PROVIDERS.has(providerName) ? 'awaiting-approval' : 'awaiting-token',
+    });
+
+    if (TERMINAL_LOGIN_PROVIDERS.has(providerName)) {
+      // Start polling for the creds file now — success is the token write, not
+      // anything parsed from the stream.
+      startAntigravityCredsPoller(session);
+      // agy's TUI only renders (and prints the OAuth URL) once its PTY has a real
+      // winsize. The container is created Tty:true with NO size, so until a resize
+      // arrives agy sits at a 0x0 PTY and emits nothing — which is exactly why the
+      // field-only flow hung at "Waiting for sign-in URL...". Push a fixed sane
+      // size right after start, and once more after agy has opened the PTY, so the
+      // hidden flow works without any client xterm attached. (When the debug xterm
+      // IS shown it will also send its own resize frames; these are harmless.)
+      const sizeTerminalPty = () => {
+        session.docker
+          .getContainer(session.dockerContainerId)
+          .resize({ h: 40, w: 120 })
+          .catch((err) => {
+            log.warn(
+              { error: safeErrorDetails(err), providerId: session.providerId },
+              'initial pty resize failed',
+            );
+          });
+      };
+      setTimeout(sizeTerminalPty, 250);
+      setTimeout(sizeTerminalPty, 1200);
+    }
+
+    stream.on('data', (chunk: Buffer) => onStreamData(session, chunk));
+    stream.on('end', () => {
+      captureClaudeOauthToken(session, session.cleanBuffer + '\n\n');
+      if (session.probePending) {
+        log.info({ providerId }, 'stream ended while probe pending; deferring cleanup');
+        return;
+      }
+      wsSend(ws, { type: 'exit' });
+      void cleanupSession(session);
+    });
+
+    ws.on('message', async (raw) => {
+      if (session.cleanedUp || ws.readyState !== WebSocket.OPEN) return;
+      const text = raw.toString();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        return;
+      }
+      const msg = parsed as {
+        type?: string;
+        token?: string;
+        data?: string;
+        rows?: number;
+        cols?: number;
+      };
+      if (msg.type === 'input' && typeof msg.data === 'string') {
+        // Terminal-login keystrokes (incl. the pasted auth code + Enter) -> stdin.
+        try {
+          session.stream.write(msg.data);
+        } catch (err) {
+          log.warn(
+            { error: safeErrorDetails(err), providerId: session.providerId },
+            'terminal input write failed',
+          );
+        }
+        return;
+      }
+      if (msg.type === 'resize' && typeof msg.rows === 'number' && typeof msg.cols === 'number') {
+        try {
+          await session.docker.getContainer(session.dockerContainerId).resize({
+            h: msg.rows,
+            w: msg.cols,
+          });
+        } catch (err) {
+          log.warn(
+            { error: safeErrorDetails(err), providerId: session.providerId },
+            'terminal resize failed',
+          );
+        }
+        return;
+      }
+      if (msg.type === 'token-input' && typeof msg.token === 'string' && msg.token.trim()) {
+        const token = msg.token.trim();
+        log.info(
+          { providerId: session.providerId, tokenLength: token.length },
+          'token received, writing to stream',
+        );
+        wsSend(ws, { type: 'phase', phase: 'submitting' });
+        session.tokenSubmitted = true;
+        session.tokenSubmittedAt = Date.now();
+        session.authSuccessSent = false;
+        session.rawBuffer = '';
+        session.cleanBuffer = '';
+        session.ansiTail = '';
+        try {
+          // Write the token first, then send Enter as a SEPARATE write on the
+          // next tick so claude-code's Ink input registers the paste before it
+          // sees the submit keystroke. Sending both in the same write is
+          // interpreted as a single paste event and does not trigger submit.
+          const wrote = session.stream.write(token);
+          setTimeout(() => {
+            try {
+              session.stream.write('\r');
+            } catch {
+              // ignore
+            }
+          }, 150);
+          log.info({ providerId: session.providerId, wrote }, 'token written');
+        } catch (err) {
+          log.warn(
+            { error: safeErrorDetails(err), providerId: session.providerId },
+            'stream write failed',
+          );
+        }
+        if (session.providerName === 'claude-code') {
+          startCaptureWatchdog(session);
+        } else if (session.providerName === 'antigravity') {
+          // agy reads the pasted authorization code on stdin and writes its OAuth
+          // token to ~/.gemini/antigravity-cli/antigravity-oauth-token on success.
+          // Poll for that file — the post-paste agy TUI output is unreliable.
+          startAntigravityCredsPoller(session);
+        }
+      } else if (msg.type === 'ping') {
+        wsSend(ws, { type: 'pong' });
+      }
+    });
+
+    ws.on('close', () => {
+      void cleanupSession(session);
+    });
+    ws.on('error', () => {
+      void cleanupSession(session);
+    });
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
 }
 
 /** Whether this session's CLI reads a token or code back on stdin. Per-provider
