@@ -55,11 +55,49 @@ const IDE_ENSURE_TIMEOUT_MS = 180_000;
 const HOP_BY_HOP = [
   'connection',
   'keep-alive',
+  'te',
+  'trailer',
   'transfer-encoding',
   'upgrade',
   'content-encoding',
   'content-length',
 ];
+
+// Both transports cross the same boundary. Connection can nominate arbitrary
+// headers, so collect its tokens before removing it. No client forwarding metadata
+// is trusted; fetch derives the HTTP Host, and the upgrade path sets Host/Origin.
+function upstreamRequestHeaders(source: Headers): Headers {
+  const headers = new Headers(source);
+  const connectionHeaders = (headers.get('connection') ?? '')
+    .split(',')
+    .map((name) => name.trim().toLowerCase())
+    .filter(Boolean);
+  const dropped = new Set([
+    'host',
+    'authorization',
+    'expect',
+    'connection',
+    'keep-alive',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade',
+    'forwarded',
+    ...connectionHeaders,
+  ]);
+  // Only actual header keys are valid inputs to Headers.delete: Connection's
+  // nominated names can contain invalid tokens, which must never throw here.
+  for (const name of [...headers.keys()]) {
+    if (dropped.has(name) || name.startsWith('proxy-') || name.startsWith('x-forwarded-')) {
+      headers.delete(name);
+    }
+  }
+  // code-server runs repository-controlled code, so the Haive session must not reach it.
+  const keptCookie = withoutSessionCookies(headers.get('cookie') ?? '');
+  if (keptCookie === null) headers.delete('cookie');
+  else headers.set('cookie', keptCookie);
+  return headers;
+}
 
 // ---- HTTP reverse proxy ---------------------------------------------------
 
@@ -116,6 +154,11 @@ repoIdeAccessRoutes.post('/:id/ensure-ide', requireAuth, async (c) => {
   }
 });
 
+function isPortProxyPath(path: string): boolean {
+  const firstSegment = path.split(/[/?]/)[1]?.toLowerCase();
+  return firstSegment === 'proxy' || firstSegment === 'absproxy';
+}
+
 async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Response> {
   const userId = c.get('userId');
   const taskId = c.req.param('id');
@@ -123,19 +166,17 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
   const target = ideTarget(taskId, userId, repository);
   if (!(await targetBelongsToUser(target))) throw new HttpError(404, 'Not found');
 
+  if (!(await configService.getBoolean(CONFIG_KEYS.IDE_ENABLED, true))) {
+    throw new HttpError(403, 'IDE disabled');
+  }
+
   const url = new URL(c.req.url);
   const prefix = target.prefix;
   const rest = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : '/';
+  if (isPortProxyPath(rest)) throw new HttpError(403, 'Forbidden');
   const upstreamUrl = `http://${ideRunnerName(target.sessionId)}:${IDE_INTERNAL_PORT}${rest || '/'}${url.search}`;
 
-  const headers = new Headers(c.req.raw.headers);
-  headers.delete('host');
-  // code-server runs repo-controlled code, so the Haive session must not reach it.
-  headers.delete('authorization');
-  headers.delete('proxy-authorization');
-  const keptCookie = withoutSessionCookies(headers.get('cookie') ?? '');
-  if (keptCookie === null) headers.delete('cookie');
-  else headers.set('cookie', keptCookie);
+  const headers = upstreamRequestHeaders(c.req.raw.headers);
   // Force identity so undici's auto-decompression can't desync content-encoding.
   headers.set('accept-encoding', 'identity');
 
@@ -157,7 +198,13 @@ async function proxyHttp(c: Context<AppEnv>, repository = false): Promise<Respon
   }
 
   const outHeaders = new Headers(resp.headers);
-  for (const h of HOP_BY_HOP) outHeaders.delete(h);
+  const droppedResponseHeaders = new Set([
+    ...HOP_BY_HOP,
+    ...(outHeaders.get('connection') ?? '').split(',').map((name) => name.trim().toLowerCase()),
+  ]);
+  for (const name of [...outHeaders.keys()]) {
+    if (droppedResponseHeaders.has(name) || name.startsWith('proxy-')) outHeaders.delete(name);
+  }
   withoutSessionSetCookies(outHeaders);
   // Re-prefix a root-absolute redirect so it stays inside the proxy namespace.
   const loc = outHeaders.get('location');
@@ -209,6 +256,10 @@ export function installIdeWebSocket(server: Server): void {
           return;
         }
         if (auth.session.revoked) return;
+        if (isPortProxyPath(rawUrl.slice(target.prefix.length))) {
+          rejectUpgrade(socket, 403, 'Forbidden');
+          return;
+        }
         // Bring the IDE container up before bridging (worker-only). Coalesced per
         // task; on timeout reject so the editor's reconnect retries once a slow
         // first-launch image pull finishes in the background.
@@ -316,40 +367,35 @@ function proxyWsUpgrade(
   session.onRevoke(() => teardown('session revoked', false));
 
   upstream.on('connect', () => {
-    if (session.revoked) return;
-    const lines = [`${req.method ?? 'GET'} ${strippedPath} HTTP/1.1`];
-    for (const [k, v] of Object.entries(req.headers)) {
-      if (k.toLowerCase() === 'host') {
-        lines.push(`Host: ${host}:${IDE_INTERNAL_PORT}`);
-        continue;
+    try {
+      if (session.revoked) return;
+      const lines = [`${req.method ?? 'GET'} ${strippedPath} HTTP/1.1`];
+      const incoming = new Headers();
+      for (const [name, value] of Object.entries(req.headers)) {
+        if (Array.isArray(value)) {
+          for (const item of value) incoming.append(name, item);
+        } else if (value !== undefined) {
+          incoming.set(name, value);
+        }
       }
-      // code-server refuses an Origin whose host is not the Host header, and here the Host is
-      // the container's; the upgrade handler already checked the browser's Origin.
-      if (k.toLowerCase() === 'origin') {
-        lines.push(`Origin: http://${host}:${IDE_INTERNAL_PORT}`);
-        continue;
-      }
-      if (k.toLowerCase() === 'authorization' || k.toLowerCase() === 'proxy-authorization') {
-        continue;
-      }
-      if (k.toLowerCase() === 'cookie') {
-        const kept = typeof v === 'string' ? withoutSessionCookies(v) : null;
-        if (kept !== null) lines.push(`${k}: ${kept}`);
-        continue;
-      }
-      if (Array.isArray(v)) {
-        for (const vv of v) lines.push(`${k}: ${vv}`);
-      } else if (v !== undefined) {
-        lines.push(`${k}: ${v}`);
-      }
+      const headers = upstreamRequestHeaders(incoming);
+      lines.push(`Host: ${host}:${IDE_INTERNAL_PORT}`);
+      // The handler already checked the browser's Origin. code-server requires
+      // the upstream Origin to match its Host, which is the container here.
+      headers.set('origin', `http://${host}:${IDE_INTERNAL_PORT}`);
+      headers.set('connection', 'Upgrade');
+      headers.set('upgrade', 'websocket');
+      for (const [name, value] of headers) lines.push(`${name}: ${value}`);
+      upstream.write(Buffer.from(`${lines.join('\r\n')}\r\n\r\n`, 'latin1'));
+      if (head && head.length) upstream.write(head);
+      relayUpgradeResponse(upstream, socket, teardown, session);
+      socket.pipe(upstream);
+      counted = true;
+      void acquireIdeSession(taskId);
+      log.info({ taskId, host }, 'ide ws bridge connected');
+    } catch (err) {
+      teardown(`upgrade request failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-    upstream.write(`${lines.join('\r\n')}\r\n\r\n`);
-    if (head && head.length) upstream.write(head);
-    relayUpgradeResponse(upstream, socket, teardown, session);
-    socket.pipe(upstream);
-    counted = true;
-    void acquireIdeSession(taskId);
-    log.info({ taskId, host }, 'ide ws bridge connected');
   });
   upstream.on('error', (err) => teardown(`upstream error: ${err.message}`));
   upstream.on('close', () => teardown('upstream closed'));

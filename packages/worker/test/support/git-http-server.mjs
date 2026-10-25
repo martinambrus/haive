@@ -10,6 +10,10 @@ const expected = auth
   : null;
 let authenticated = 0;
 
+// receive-pack runs auto maintenance after every push, detached on newer git: the likeliest
+// writer still in a bare when a test removes it (ENOTEMPTY). Removals retry as well.
+const BACKEND_ARGS = ['-c', 'http.receivepack=true', '-c', 'receive.autogc=false', 'http-backend'];
+
 // The alpine worker image has no git http-backend in git --exec-path.
 // These fixtures run on the host and in CI only.
 // A separate process lets fixtures that use execFileSync still speak real smart HTTP.
@@ -33,7 +37,7 @@ const server = createServer((req, res) => {
     res.end();
     return;
   }
-  const child = spawn('git', ['-c', 'http.receivepack=true', 'http-backend'], {
+  const child = spawn('git', BACKEND_ARGS, {
     env: {
       ...process.env,
       GIT_CONFIG_GLOBAL: '/dev/null',

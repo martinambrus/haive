@@ -1129,7 +1129,7 @@ describe('12 merge phase + apply (real git)', () => {
       expect(await gitCode(bare, ['show', 'main:feature.txt'])).toBe(0);
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -2159,7 +2159,7 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
       expect(h.getWarning()).toContain(GLOBS);
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -2191,7 +2191,7 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
       );
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -2616,7 +2616,7 @@ describe('12 pre-push base sync (origin advanced after 00a)', () => {
       expect(claimFake.claims.get(parent)?.stepId).toBe('other-step');
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -2637,7 +2637,7 @@ describe('12 pre-push base sync (origin advanced after 00a)', () => {
       expect(await gitCode(bare, ['show', 'main:feature.txt'])).toBe(0);
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -2659,7 +2659,7 @@ describe('12 pre-push base sync (origin advanced after 00a)', () => {
       expect(await gitCode(bare, ['show', 'main:origin-new.txt'])).toBe(0);
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -2712,7 +2712,7 @@ describe('12 pre-push base sync (origin advanced after 00a)', () => {
       expect((await git(bare, ['show', 'main:base.txt'])).trim()).toBe('resolved');
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -2751,7 +2751,7 @@ describe('12 pre-push base sync (origin advanced after 00a)', () => {
         expect(await gitCode(bare, ['show', 'main:feature.txt'])).not.toBe(0);
       } finally {
         await rm(parent, { recursive: true, force: true });
-        await rm(bare, { recursive: true, force: true });
+        await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       }
     },
   );
@@ -3894,7 +3894,7 @@ it.each(['origin-keeps-advancing', 'origin-keeps-advancing without squash', 'pus
       );
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   },
 );
@@ -3964,7 +3964,7 @@ describe('#280 fix1 claims and push', () => {
       expect(await git(bare, ['rev-parse', 'main'])).toBe(await git(parent, ['rev-parse', 'main']));
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -4052,7 +4052,7 @@ describe('#280 fix1 claims and push', () => {
         ]);
       } finally {
         await rm(parent, { recursive: true, force: true });
-        await rm(bare, { recursive: true, force: true });
+        await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       }
     },
   );
@@ -4092,7 +4092,7 @@ describe('#280 fix1 claims and push', () => {
       ).toBe('refs/haive/pre-push/other/leftover');
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 });
@@ -4141,7 +4141,7 @@ describe('#280 fix1 squash warnings and halt', () => {
       expect(h.getWarning()).toContain('tracking unavailable');
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -4251,7 +4251,7 @@ it('#280 fix2 retries a pushing halt after its cross-branch base worktree vanish
     expect(await git(bare, ['rev-parse', 'main'])).toBe(await git(parent, ['rev-parse', 'main']));
   } finally {
     await rm(parent, { recursive: true, force: true });
-    await rm(bare, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true, maxRetries: 5 });
   }
 });
 
@@ -4276,7 +4276,7 @@ it('#280 fix2 leaves this step’s leftover refs untouched when its claim is los
     ).toBe(ref);
   } finally {
     await rm(parent, { recursive: true, force: true });
-    await rm(bare, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true, maxRetries: 5 });
   }
 });
 
@@ -4327,7 +4327,7 @@ describe('#280 fix3 base-sync exhaustion', () => {
       expect(fetchProbe.pushes).toEqual([]);
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 });
@@ -4581,7 +4581,7 @@ describe('#280 fix6 pre-push ref lifetime', () => {
       ).toBe('');
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -4767,7 +4767,7 @@ it('a refused pre-push origin warns, then the refused push halts with the merge 
     expect(await gitCode(bare, ['show', 'main:feature.txt'])).not.toBe(0);
   } finally {
     await rm(parent, { recursive: true, force: true });
-    await rm(bare, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true, maxRetries: 5 });
   }
 });
 
@@ -4804,7 +4804,7 @@ it.each([new Error('origin read unavailable'), 'origin read unavailable'])(
       expect(await gitCode(bare, ['show', 'main:feature.txt'])).toBe(0);
     } finally {
       await rm(parent, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   },
 );
