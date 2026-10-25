@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
@@ -479,3 +481,23 @@ describe('a step recap', () => {
     expect(stubs.recordLedgerEntry.mock.calls[0]?.[4]).toEqual({ whileStepDone: true });
   });
 });
+
+it.each([true, false])(
+  'fix6 persists safe invocation and mining failures and resumes safely (bound: %s)',
+  async (bound) => {
+    const message = 'ordinary diagnosis\n  exact whitespace';
+    const secret = randomBytes(24).toString('base64url');
+    const err = bound
+      ? new DrizzleQueryError('select $1', [secret], new Error(secret))
+      : new Error(message);
+    stubs.executeByKind.mockRejectedValueOnce(err);
+    const { db, writes } = fakeDb({});
+    await handleCliExecJob(db, base).catch(() => undefined);
+    const expected = bound ? 'Database operation failed' : message;
+    expect(runWrites(writes).some((w) => w.set.errorMessage === expected)).toBe(true);
+    expect(miningWrites(writes).some((w) => w.set.errorMessage === expected)).toBe(true);
+    expect(
+      stubs.resumeStepIfLinked.mock.calls.some((args: unknown[]) => args[2] === expected),
+    ).toBe(true);
+  },
+);

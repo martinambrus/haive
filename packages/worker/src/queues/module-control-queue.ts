@@ -1,3 +1,4 @@
+import { safeProcessor } from './safe-processor.js';
 import { Worker } from 'bullmq';
 import { and, eq, isNotNull, isNull, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -9,6 +10,7 @@ import {
   type ModuleTeardownResult,
 } from '@haive/shared';
 import { openModuleDatabase, type ModuleDatabase } from '@haive/shared/module-db';
+import { safeErrorForTransport } from '@haive/shared/logger';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import {
@@ -178,12 +180,14 @@ export async function runModuleTeardown(
 
 export async function processModuleControlJob(
   deps: ModuleControlDeps,
-  job: { name: string; data: ModuleTeardownPayload },
+  job: { name: string; id?: string; data: ModuleTeardownPayload },
 ): Promise<ModuleTeardownResult> {
   if (job.name !== MODULE_CONTROL_JOB_NAMES.TEARDOWN) {
     throw new Error(`Unknown module-control job: ${job.name}`);
   }
-  return runModuleTeardown(deps, job.data.moduleId);
+  return runModuleTeardown(deps, job.data.moduleId).catch((err) => {
+    throw safeErrorForTransport(err, job);
+  });
 }
 
 export function startModuleControlWorker(
@@ -191,7 +195,7 @@ export function startModuleControlWorker(
 ): Worker<ModuleTeardownPayload, ModuleTeardownResult> {
   const worker = new Worker<ModuleTeardownPayload, ModuleTeardownResult>(
     QUEUE_NAMES.MODULE_CONTROL,
-    (job) =>
+    safeProcessor((job) =>
       processModuleControlJob(
         {
           ...modules,
@@ -201,6 +205,7 @@ export function startModuleControlWorker(
         },
         job,
       ),
+    ),
     // A worker that dies mid-hook fails the job instead of running the hook again unasked.
     { connection: getBullRedis(), concurrency: 1, maxStalledCount: 0 },
   );

@@ -22,6 +22,7 @@ import {
 } from '@haive/shared';
 import type { Redis } from 'ioredis';
 import { createRedisConnection } from '@haive/shared';
+import { safeErrorMessage } from '@haive/shared/logger';
 import { ensureShellContainer, seedShellTrust } from './terminal-container.js';
 import {
   resolveRepoMount,
@@ -179,7 +180,7 @@ export class TerminalSessionManager {
         }
         const reply = await this.openSession(req).catch((err): TerminalOpenResult => ({
           ok: false,
-          error: err instanceof Error ? err.message : String(err),
+          error: safeErrorMessage(err),
         }));
         if (this.started) {
           await this.redis.publish(replyChannel, JSON.stringify(reply));

@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import {
   readFileNoFollow,
@@ -1680,7 +1681,7 @@ export async function recordPlanMirrorError(
   repositoryId: string,
   err: unknown,
 ): Promise<void> {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = safeErrorMessage(err);
   await db
     .insert(schema.planMirrorState)
     .values({

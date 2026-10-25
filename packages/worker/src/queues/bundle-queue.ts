@@ -1,3 +1,4 @@
+import { safeProcessor } from './safe-processor.js';
 import { Queue, Worker, type Job } from 'bullmq';
 import { BUNDLE_JOB_NAMES, QUEUE_NAMES, logger, type BundleJobPayload } from '@haive/shared';
 import { getDb } from '../db.js';
@@ -47,7 +48,7 @@ export async function scheduleBundleGitSyncTick(): Promise<void> {
 export function startBundleWorker(bundleStorageRoot: string): Worker {
   const worker = new Worker<BundleJobPayload>(
     QUEUE_NAMES.BUNDLE,
-    async (job: Job<BundleJobPayload>) => {
+    safeProcessor(async (job: Job<BundleJobPayload>) => {
       const db = getDb();
       const payload = job.data;
       switch (job.name) {
@@ -66,7 +67,7 @@ export function startBundleWorker(bundleStorageRoot: string): Worker {
         default:
           throw new Error(`Unknown bundle job: ${job.name}`);
       }
-    },
+    }),
     {
       connection: getBullRedis(),
       concurrency: 2,

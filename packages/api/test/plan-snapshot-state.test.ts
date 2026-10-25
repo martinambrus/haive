@@ -1,6 +1,8 @@
+import { randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
@@ -25,7 +27,8 @@ vi.mock('../src/middleware/auth.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { HAIVE_DATA_FILES } from '@haive/shared';
+import { HAIVE_DATA_FILES, configService } from '@haive/shared';
+import { savePlanMirror, pullPlanMirror } from '../src/lib/plan-mirror.js';
 import { planRoutes } from '../src/routes/plan.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -43,6 +46,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -67,6 +71,35 @@ async function snapshot(mirror: { revision: number; writtenRevision: number } | 
 }
 
 describe('the plan snapshot state', () => {
+  it.each(['save', 'pull'] as const)(
+    'does not return a bound query value from %s',
+    async (operation) => {
+      vi.spyOn(configService, 'get').mockResolvedValue('true');
+      const fake = createFakeDb({ repositories: schema.repositories, tasks: schema.tasks });
+      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo', storagePath: root });
+      h.db = fake.db;
+      const secret = randomBytes(24).toString('base64url');
+      const run = operation === 'save' ? savePlanMirror : pullPlanMirror;
+      vi.mocked(run).mockClear();
+      vi.mocked(run).mockRejectedValueOnce(
+        new DrizzleQueryError('select $1', [secret], new Error(secret)),
+      );
+      const res = await app.request(`/${REPO}/plan/snapshot/${operation}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      const text = await res.text();
+      expect(res.status).toBe(409);
+      expect(run).toHaveBeenCalledOnce();
+      expect(
+        Array.from({ length: secret.length - 5 }, (_, i) => secret.slice(i, i + 6)).some((part) =>
+          text.includes(part),
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('is updating while a write is owed', async () => {
     await writeSnapshotFiles();
     expect(await snapshot({ revision: 3, writtenRevision: 2 })).toMatchObject({

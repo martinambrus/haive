@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { schema, type Database } from '@haive/database';
 import { logger, type RefreshCliVersionsJobResult } from '@haive/shared';
 
@@ -110,7 +111,7 @@ export async function refreshRubyVersions(db: Database): Promise<RefreshCliVersi
       errors: [],
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = safeErrorMessage(err);
     log.warn({ err, runtime }, 'ruby version refresh failed; declared versions fall back to apt');
     // Record the failure WITHOUT touching `versions`: a stale catalog still resolves versions
     // that built yesterday, which beats dropping every Ruby project back to apt because a

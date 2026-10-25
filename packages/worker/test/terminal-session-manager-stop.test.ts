@@ -1,4 +1,6 @@
+import { randomBytes } from 'node:crypto';
 import { PassThrough } from 'node:stream';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TERMINAL_REPLY_CHANNEL_PREFIX, TERMINAL_REQUEST_CHANNEL } from '@haive/shared';
 
@@ -73,6 +75,37 @@ async function startedManager(unsubscribe: (...channels: string[]) => Promise<un
 }
 
 describe('terminal manager stop', () => {
+  it('does not publish a database error message in the terminal open reply', async () => {
+    const { mgr, publish } = await startedManager(async () => undefined);
+    const secret = randomBytes(24).toString('base64url');
+    const internals = mgr as unknown as {
+      openSession: () => Promise<unknown>;
+      handleSubscriberMessage: (channel: string, raw: string) => Promise<void>;
+    };
+    vi.spyOn(internals, 'openSession').mockRejectedValueOnce(
+      new DrizzleQueryError('select $1', [secret], new Error(secret)),
+    );
+    await internals.handleSubscriberMessage(
+      TERMINAL_REQUEST_CHANNEL,
+      JSON.stringify({
+        op: 'open',
+        correlationId: 'control',
+        userId: 'user',
+        scope: 'task',
+        taskId: 'task',
+        cliProviderId: 'provider',
+      }),
+    );
+    const text = JSON.stringify(publish.mock.calls);
+    expect(publish).toHaveBeenCalledOnce();
+    expect(
+      Array.from({ length: secret.length - 5 }, (_, i) => secret.slice(i, i + 6)).some((part) =>
+        text.includes(part),
+      ),
+    ).toBe(false);
+    await mgr.stop();
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();

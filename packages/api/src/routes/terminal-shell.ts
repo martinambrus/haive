@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { randomUUID } from 'node:crypto';
 import type { Server } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -254,7 +255,7 @@ export async function runScopedShellSession(
     cliProviderId,
   }).catch((err) => {
     log.warn({ err, scope, scopeId, cliProviderId, correlationId }, 'open-session request failed');
-    return { ok: false as const, error: errorMessage(err) };
+    return { ok: false as const, error: safeErrorMessage(err) };
   });
 
   if (!reply.ok) {
@@ -601,11 +602,6 @@ function sendJson(ws: WebSocket, frame: Record<string, unknown>): void {
   } catch {
     // ignore
   }
-}
-
-function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
 }
 
 export async function resetStaleRefcounts(redis: Redis = getRedis()): Promise<void> {
