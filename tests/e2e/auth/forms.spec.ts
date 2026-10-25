@@ -58,8 +58,8 @@ test.describe('auth forms (UI submission)', () => {
       const user = await registerUser(sql, ctx, { prefix: 'reg-dupe-ui' });
       userId = user.userId;
 
-      // A second invite, because the FORM needs one to render at all. It stays unredeemed: the
-      // route rejects the duplicate email before it ever looks at the invite.
+      // A second valid invite renders the form and admits the request through the closed gate.
+      // It stays unredeemed because the duplicate-email check fails before invite consumption.
       const invite = await seedInvite(sql);
       inviteId = invite.id;
 
