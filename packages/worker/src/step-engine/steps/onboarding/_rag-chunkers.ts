@@ -500,14 +500,52 @@ interface JsxFrame {
   resume: 'tag' | 'text';
 }
 
-/** Read a bounded opening tag in a JSX-capable file, keeping a TSX generic arrow
- *  head in code. A later raw closing-tag string never decides where JSX starts. */
-function jsxOpeningAt(text: string, at: number): boolean {
+/** One token from a bounded JSX lookahead, skipping JS trivia and comments. */
+function jsxHeadToken(text: string, from: number): { text: string; word: boolean; end: number } {
+  let i = from;
+  while (i < text.length) {
+    if (/\s/.test(text[i]!)) i += 1;
+    else if (text.startsWith('//', i)) {
+      const end = lineEnd(text, i + 2, false);
+      i = end < 0 ? text.length : end;
+    } else if (text.startsWith('/*', i)) {
+      const end = text.indexOf('*/', i + 2);
+      i = end < 0 ? text.length : end + 2;
+    } else break;
+  }
+  const start = i;
+  const word = i < text.length && WORD_START.test(codePointAt(text, i));
+  if (word) {
+    i += codePointAt(text, i).length;
+    while (i < text.length && WORD_CHAR.test(codePointAt(text, i)))
+      i += codePointAt(text, i).length;
+  } else if (i < text.length) i += 1;
+  return { text: text.slice(start, i), word, end: i };
+}
+
+// TypeScript's hard reserved words cannot name a type parameter, but may name a JSX tag.
+const TS_RESERVED_NAME =
+  /^(?:break|case|catch|class|const|continue|debugger|default|delete|do|else|enum|export|extends|false|finally|for|function|if|import|in|instanceof|new|null|return|super|switch|this|throw|true|try|typeof|var|void|while|with)$/;
+
+/** Match TypeScript's JSX generic-arrow prefix decision on tokens, not head spelling.
+ *  The prefix suffices; nested constraints and parameter/return syntax stay ordinary code. */
+function tsxGenericHead(header: string): boolean {
+  let name = jsxHeadToken(header, 1);
+  if (name.text === 'const') name = jsxHeadToken(header, name.end);
+  if (!name.word || TS_RESERVED_NAME.test(name.text)) return false;
+  const next = jsxHeadToken(header, name.end);
+  if (next.text === ',' || next.text === '=') return true;
+  if (next.text !== 'extends') return false;
+  const constraint = jsxHeadToken(header, next.end).text;
+  return constraint !== '' && !['=', '>', '/'].includes(constraint);
+}
+
+/** Read a bounded opening tag only after ruling out the token-level generic prefix. */
+function jsxOpeningAt(text: string, at: number, tsx: boolean): boolean {
   const header = text.slice(at, at + MAX_PARAMS_CHARS);
+  if (tsx && tsxGenericHead(header)) return false;
   const head = /^<(?:[A-Za-z][\w.:-]*(?=[\s/>])|(?=>))/.exec(header.slice(0, 256));
   if (!head) return false;
-  const genericHead = /^<[A-Za-z_$][\w$]*(?:\s+extends\b|\s*=)/.test(header);
-  let angles = 1;
   let braces = 0;
   for (let i = head[0].length; i < header.length; i += 1) {
     const c = header[i];
@@ -517,24 +555,7 @@ function jsxOpeningAt(text: string, at: number): boolean {
     } else if (c === '"' || c === "'" || c === '`') i = quotedEnd(header, i) - 1;
     else if (c === '{') braces += 1;
     else if (c === '}') braces -= 1;
-    else if (genericHead && c === '<' && braces === 0) angles += 1;
-    else if (c === '>' && braces === 0) {
-      if (genericHead && (header[i - 1] === '=' || --angles > 0)) continue;
-      // A TSX arrow needs a constrained/defaulted parameter (or a trailing comma,
-      // which the tag head already rejects). Other opening tags stay JSX.
-      if (genericHead) {
-        let next = at + i + 1;
-        const lookaheadEnd = Math.min(text.length, next + MAX_PARAMS_CHARS);
-        while (next < lookaheadEnd && /\s/.test(text[next]!)) next += 1;
-        const paramsEnd = text[next] === '(' ? parenEnd(text, next) : null;
-        if (
-          paramsEnd !== null &&
-          GENERIC_ARROW_TAIL.test(text.slice(paramsEnd, paramsEnd + MAX_PARAMS_CHARS))
-        )
-          return false;
-      }
-      return true;
-    }
+    else if (c === '>' && braces === 0) return true;
   }
   return false;
 }
@@ -546,7 +567,7 @@ function jsNonCode(
   java: boolean,
   htmlComments = false,
   module = false,
-  jsxEnabled = false,
+  jsxMode: boolean | 'tsx' = false,
 ): Span[] {
   const spans: Span[] = [];
   // The open template literals and `${` expressions, innermost last: -1 is template text, n >= 1
@@ -615,12 +636,12 @@ function jsNonCode(
       continue;
     }
     if (
-      jsxEnabled &&
+      jsxMode &&
       !java &&
       top === undefined &&
       c === '<' &&
       regexMayStart(prev) &&
-      jsxOpeningAt(text, i)
+      jsxOpeningAt(text, i, jsxMode === 'tsx')
     ) {
       jsx.push({ mode: 'tag', depth: 0, closing: false, braces: 0, resume: 'text' });
       i += 1;
@@ -840,7 +861,7 @@ function simpleNonCode(text: string, syntax: 'go' | 'rust' | 'python'): Span[] {
 export function maskNonCode(
   content: string,
   syntax: 'php' | 'js' | 'script' | 'module' | 'java' | 'go' | 'rust' | 'python',
-  jsx = false,
+  jsx: boolean | 'tsx' = false,
 ): string {
   let masked = '';
   let cursor = 0;
@@ -911,7 +932,6 @@ function parenEnd(content: string, open: number): number | null {
 const RETURN_TYPE = String.raw`(?::[^;{}=()]*[^\s;{}=:<,()|&?])?`;
 const BLOCK_TAIL = new RegExp(String.raw`\s*${RETURN_TYPE}\s*\{`, 'y');
 const ARROW_TAIL = new RegExp(String.raw`\s*${RETURN_TYPE}\s*=>\s*\{`, 'y');
-const GENERIC_ARROW_TAIL = new RegExp(String.raw`^\s*${RETURN_TYPE}\s*=>`);
 
 /** Index of the '{' that opens the body of the function whose parameter list opens at `open`, with
  *  `tail` saying what may sit between the list and the brace. Null for a declaration with no body. */
@@ -1100,7 +1120,7 @@ function jsRanges(
   content: string,
   members: boolean,
   flavour: 'js' | 'script' | 'module' = 'js',
-  jsx = members,
+  jsx: boolean | 'tsx' = members,
 ): SectionRange[] {
   const ranges: SectionRange[] = [];
   const code = maskNonCode(content, members ? flavour : 'java', jsx);
@@ -1194,47 +1214,69 @@ function pythonRanges(content: string): SectionRange[] {
   return ranges;
 }
 
-/** End of an endless Ruby expression, including continued lines inside delimiters or
- *  after an operator/backslash. Strings, regexps and comments cannot contribute delimiters. */
+/** Ruby names allow extended bytes and optional method punctuation. */
+const RUBY_NAME_START = /[A-Za-z_\u0080-\uFFFF]/;
+const RUBY_NAME_CHAR = /[\w\u0080-\uFFFF]/;
+const RUBY_PREFIX_OPERATORS = new Set(['not', 'and', 'or', 'defined?']);
+
+/** End of an endless expression: completed tokens stop at a top-level newline,
+ *  while operators require another value. Literal bodies cannot change depth. */
 function rubyExpressionEnd(content: string, from: number): number {
   let depth = 0;
-  let last = '';
+  let continues = false;
   let operandExpected = true;
+  let qualifiedName = false;
   for (let i = from; i < content.length; i += 1) {
     const c = content[i]!;
     if (c === '"' || c === "'") {
       i = quotedEnd(content, i) - 1;
-      last = 'value';
+      continues = false;
       operandExpected = false;
+      qualifiedName = false;
+    } else if (RUBY_NAME_START.test(c)) {
+      const start = i;
+      while (i + 1 < content.length && RUBY_NAME_CHAR.test(content[i + 1]!)) i += 1;
+      const suffix = content[i + 1];
+      if (suffix === '?' || (suffix === '!' && !['=', '~'].includes(content[i + 2] ?? ''))) i += 1;
+      const word = content.slice(start, i + 1);
+      continues = !qualifiedName && RUBY_PREFIX_OPERATORS.has(word);
+      operandExpected = continues;
+      qualifiedName = false;
     } else if (c === '/' && operandExpected) {
       const close = regexClose(content, i, true, true);
       if (close >= 0) {
         i = close;
         while (/[imoxnesu]/.test(content[i + 1] ?? '')) i += 1;
-        last = 'value';
+        continues = false;
         operandExpected = false;
       } else {
-        last = '/';
+        continues = true;
         operandExpected = true;
       }
+      qualifiedName = false;
     } else if (c === '#') {
       const end = lineEnd(content, i, true);
       i = (end < 0 ? content.length : end) - 1;
     } else if (isLineTerminator(c, true)) {
-      if (depth === 0 && !/[-+*/%&|^.,?:=<>!~\\]$/.test(last)) {
-        return i + (c === '\r' && content[i + 1] === '\n' ? 2 : 1);
-      }
+      if (depth === 0 && !continues) return i + (c === '\r' && content[i + 1] === '\n' ? 2 : 1);
     } else if ('([{'.includes(c)) {
       depth += 1;
-      last = c;
+      continues = false;
       operandExpected = true;
+      qualifiedName = false;
     } else if (')]}'.includes(c)) {
       depth = Math.max(0, depth - 1);
-      last = c;
+      continues = false;
       operandExpected = false;
+      qualifiedName = false;
+    } else if (c === '.' || c === ':' || c === '@' || c === '$') {
+      qualifiedName = true;
+      continues = c === '.' || c === ':';
+      operandExpected = c !== '.';
     } else if (!/\s/.test(c)) {
-      last = c;
-      operandExpected = /[-+*/%&|^,?:=<>!~\\]/.test(c);
+      continues = /[-+*/%&|^,?=<>!~\\]/.test(c);
+      operandExpected = continues;
+      qualifiedName = false;
     }
   }
   return content.length;
@@ -1462,7 +1504,7 @@ export function extractCodeSections(content: string, filePath: string): RagSecti
         content,
         lang !== 'java',
         ext === '.js' || ext === '.cjs' ? 'script' : ext === '.mjs' ? 'module' : 'js',
-        JSX_EXTENSIONS.has(ext),
+        ext === '.tsx' ? 'tsx' : JSX_EXTENSIONS.has(ext),
       );
       break;
     case 'python':
