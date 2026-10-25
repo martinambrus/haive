@@ -139,3 +139,19 @@ it.each(['active', 'failed', 'syncing'])(
     expect(text).toContain('https://example.test/repo');
   },
 );
+it('redacts legacy credential URLs in saved bundle errors before detect, form and apply', async () => {
+  const row = {
+    ...baseRow,
+    sourceType: 'git',
+    status: 'failed',
+    lastSyncError: 'failed https://fixture-user:fixture-password@example.test/repo',
+  };
+  const ctx = makeCtx(row, [[{ repositoryId: 'repo-1' }], [row], [], []]);
+  const detected = await customBundlesStep.detect!(ctx);
+  const form = await customBundlesStep.form!(ctx, detected);
+  const applied = await customBundlesStep.apply!(makeCtx(row, READS), applyArgs(['bundle-1']));
+  const text = JSON.stringify({ detected, form, applied });
+  expect(text.includes('fixture-password')).toBe(false);
+  expect(text.includes('fixture-user')).toBe(false);
+  expect(text).toContain('failed https://example.test/repo');
+});

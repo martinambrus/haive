@@ -33,7 +33,7 @@ sanitized identity.
 or backtick characters in its authority; those characters delimit display text only after the
 userinfo. A quoted legacy URL also keeps whitespace inside its userinfo; unquoted whitespace
 separates prose. `scrubSecret` replaces a known intact secret before rewriting URLs, since rewriting
-first can destroy the match and expose a suffix. Legacy bundle onboarding forms and repository
+first can destroy the match and expose a suffix. Legacy bundle onboarding forms, bundle API diagnostics and repository
 refresh queue payloads redact their own reads, including failed bundles that never reach sync.
 This protects new copies of old rows; it does not rewrite historical rows or prior step outputs.
 

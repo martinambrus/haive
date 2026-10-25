@@ -606,3 +606,24 @@ it.each([false, true])(
     expect(queue.jobs).toHaveLength(0);
   },
 );
+it('redacts credential URLs from a legacy failed bundle diagnostic in the summary', async () => {
+  fake.insert(schema.customBundles, {
+    id: BUNDLE,
+    userId: USER,
+    repositoryId: REPO,
+    name: 'kit',
+    sourceType: 'git',
+    enabledKinds: ['agent'],
+    status: 'failed',
+    storageRoot: '/bundles/kit',
+    updatedAt: new Date(),
+    gitUrl: 'https://example.test/repo',
+    lastSyncError: 'failed https://fixture-user:fixture-password@example.test/repo',
+  });
+  const res = await app.request('/');
+  expect(res.status).toBe(200);
+  const text = await res.text();
+  expect(text.includes('fixture-password')).toBe(false);
+  expect(text.includes('fixture-user')).toBe(false);
+  expect(text).toContain('failed https://example.test/repo');
+});

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Hono } from 'hono';
-import { credentialFitsGitRemote, redactGitUrl } from '@haive/shared/schemas';
+import { credentialFitsGitRemote, redactGitText, redactGitUrl } from '@haive/shared/schemas';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -201,7 +201,7 @@ function bundleSummaryFromRow(
     gitCredentialsId: row.gitCredentialsId,
     lastSyncAt: row.lastSyncAt ? row.lastSyncAt.toISOString() : null,
     lastSyncCommit: row.lastSyncCommit,
-    lastSyncError: row.lastSyncError,
+    lastSyncError: row.lastSyncError ? redactGitText(row.lastSyncError) : row.lastSyncError,
     itemCounts: { agent: counts?.agent ?? 0, skill: counts?.skill ?? 0 },
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
