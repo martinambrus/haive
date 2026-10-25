@@ -10,6 +10,7 @@ import {
 } from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
+  PROJECT_STATE_LIMITS,
   RENDER_UNIT,
   ENVIRONMENT_UNIT,
   bundleDescriptors,
@@ -836,6 +837,39 @@ const hashFiles = (files: ReadonlyMap<string, string>): string =>
     ? 'absent'
     : projectStateHash(new Map([...files].map(([rel, text]) => [rel, gitBlobId(text)])));
 
+/** Changed paths are a subset of each bounded complete record; their union can temporarily be
+ *  larger than either record. Validate both sides before reading only these journal-owned paths. */
+function validateRecoveryIntent(intent: WriteIntent): void {
+  if (!Array.isArray(intent.changes) || intent.changes.length > 2 * PROJECT_STATE_LIMITS.maxEntries)
+    throw new ProjectStateUnreadableError('the recovery record has too many changed paths');
+  const names = new Set<string>();
+  const before = new Map<string, string>();
+  const after = new Map<string, string>();
+  for (const change of intent.changes) {
+    if (
+      !change ||
+      typeof change.rel !== 'string' ||
+      !isCanonicalRepoPath(change.rel) ||
+      names.has(change.rel) ||
+      change.before === change.after ||
+      (change.before !== null && typeof change.before !== 'string') ||
+      (change.after !== null && typeof change.after !== 'string')
+    )
+      throw new ProjectStateUnreadableError('the recovery record has an invalid changed path');
+    names.add(change.rel);
+    if (change.before !== null) before.set(change.rel, change.before);
+    if (change.after !== null) after.set(change.rel, change.after);
+  }
+  for (const [side, files] of [
+    ['before', before],
+    ['planned', after],
+  ] as const) {
+    const bounds = recordReadable(files);
+    if (!bounds.readable)
+      throw new ProjectStateUnreadableError(`the recovery record's ${side} side: ${bounds.reason}`);
+  }
+}
+
 /** Undo only recognized bytes from an uncommitted writer. A hand edit holds the entire journal,
  *  so neither it nor its siblings are touched. Each restoration is itself a compare-and-swap and
  *  idempotent across another crash. The transaction that commits a write consumes its journal. */
@@ -846,20 +880,27 @@ async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
   const intent = row?.intent as WriteIntent | null;
   if (!intent) return;
-  const files = (await readStateFiles(repoPath)) ?? new Map<string, string>();
+  validateRecoveryIntent(intent);
+  const atBefore = new Set<string>();
   for (const change of intent.changes) {
-    const now = files.get(change.rel) ?? null;
-    if (now !== change.before && now !== change.after)
-      throw new ProjectStateRecoveryHeldError(`${PROJECT_STATE_DIR}/${change.rel}`);
+    const path = `${PROJECT_STATE_DIR}/${change.rel}`;
+    const read = await readFileNoFollow(repoPath, path, {
+      strict: true,
+      maxBytes: PROJECT_STATE_LIMITS.maxFileBytes,
+    });
+    const matches = (text: string | null) =>
+      text === null
+        ? read === null
+        : read !== null && !read.truncated && read.data.equals(Buffer.from(text));
+    if (matches(change.before)) atBefore.add(change.rel);
+    else if (!matches(change.after)) throw new ProjectStateRecoveryHeldError(path);
   }
   for (const change of [...intent.changes].reverse()) {
     const path = `${PROJECT_STATE_DIR}/${change.rel}`;
-    if ((files.get(change.rel) ?? null) === change.before) continue;
+    if (atBefore.has(change.rel)) continue;
     if (change.before === null) {
-      const gone = await removeFileIfNoFollow(
-        repoPath,
-        path,
-        (data) => data.toString('utf8') === change.after,
+      const gone = await removeFileIfNoFollow(repoPath, path, (data) =>
+        data.equals(Buffer.from(change.after!)),
       );
       if (gone === 'kept') throw new ProjectStateRecoveryHeldError(path);
     } else if (change.after === null) {
@@ -875,7 +916,7 @@ async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string
       });
     } else {
       const result = await rewriteFileIfNoFollow(repoPath, path, (data) =>
-        data.toString('utf8') === change.after ? Buffer.from(change.before!) : null,
+        data.equals(Buffer.from(change.after!)) ? Buffer.from(change.before!) : null,
       );
       if (result !== 'rewritten') throw new ProjectStateRecoveryHeldError(path);
     }

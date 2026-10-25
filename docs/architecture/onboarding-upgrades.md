@@ -613,6 +613,14 @@ stamp, so a crash after COMMIT cannot undo committed output.
 The sweep first undoes an uncommitted journal, then runs its normal sync/write. Every path must
 still hold either its before or planned bytes before any undo begins, and every individual restore
 is a parked compare-and-swap or exclusive creation; a hand edit holds the journal with a named error.
+Recovery reads only journal-owned paths through strict fs-safe reads after validating each recorded
+before/planned side against the unchanged record entry, per-file and aggregate byte limits. A valid
+claim rename can temporarily hold 4,097 entries (or more than 16 MiB) when the new file lands before
+the old one is removed, even though both complete records fit. Applying the ordinary whole-tree
+reader to that intermediate union would strand its undo forever. Recovery instead recognizes every
+changed path before any undo, bounds the two-side payload and each read, and compares raw bytes
+again in each removal/rewrite CAS; unrelated files are never read or rewritten by that undo. The
+ordinary reader and final writer output still enforce 4,096 entries, 1 MiB per file and 16 MiB total.
 Another crash during the undo can repeat it. A live holder, reset or open git operation holds recovery
 as it holds a write. Removed files regain their recorded mode and owner; rewritten files keep their
 held metadata. Direct sync producers defer while a journal exists, including one that appeared while

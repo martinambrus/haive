@@ -1,13 +1,27 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { claimRepositoryRoot, createDatabase, schema, type Database } from '@haive/database';
 import {
+  claimFileName,
+  PROJECT_STATE_LIMITS,
+  recordReadable,
   emptyProjectState,
   gitBlobId,
   projectStateHash,
@@ -460,6 +474,246 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       JSON.parse(await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8'))
         .projectInfo.name,
     ).toBe('pending');
+  });
+
+  it.each(['entries', 'bytes'] as const)(
+    'recovers a real claim rename whose transient union exceeds the %s limit',
+    { timeout: 180_000 },
+    async (limit) => {
+      const s = await fixture();
+      const [task] = await db!
+        .insert(schema.tasks)
+        .values({
+          userId: s.userId,
+          repositoryId: s.repo.id,
+          type: 'onboarding',
+          title: 'record bounds',
+          status: 'completed',
+        })
+        .returning();
+      const count = limit === 'entries' ? PROJECT_STATE_LIMITS.maxEntries - 4 : 1;
+      for (let start = 0; start < count; start += 500)
+        await db!.insert(schema.onboardingArtifacts).values(
+          Array.from({ length: Math.min(500, count - start) }, (_, offset) => ({
+            userId: s.userId,
+            repositoryId: s.repo.id,
+            taskId: task!.id,
+            diskPath: `.claude/agents/agent-${String(start + offset).padStart(4, '0')}.md`,
+            templateId: `agent.agent-${start + offset}`,
+            templateKind: 'agent',
+            templateSchemaVersion: 1,
+            templateContentHash: 'a'.repeat(64),
+            writtenHash: 'b'.repeat(64),
+            sourceStepId: '12-post-onboarding',
+            source: 'onboarding' as const,
+            haiveVersion: '1.2.3',
+          })),
+        );
+      await s.write();
+      const stateRoot = join(s.root, '.haive-data/state');
+      if (limit === 'bytes') {
+        const files = (await readStateFiles(s.root))!;
+        let remaining =
+          PROJECT_STATE_LIMITS.maxTotalBytes -
+          [...files.values()].reduce((n, text) => n + Buffer.byteLength(text), 0);
+        for (let index = 0; remaining > 0; index++) {
+          const size = Math.min(PROJECT_STATE_LIMITS.maxFileBytes, remaining);
+          await writeFile(join(stateRoot, `opaque-${index}.txt`), 'x'.repeat(size));
+          remaining -= size;
+        }
+        await s.write(); // The real writer imports/stamps these permitted unknown units without owning them.
+      }
+      const before = (await readStateFiles(s.root))!;
+      expect(recordReadable(before)).toEqual({ readable: true });
+      if (limit === 'entries')
+        expect((await readdir(stateRoot, { recursive: true })).length).toBe(4096);
+      else
+        expect([...before.values()].reduce((n, text) => n + Buffer.byteLength(text), 0)).toBe(
+          PROJECT_STATE_LIMITS.maxTotalBytes,
+        );
+      const oldPath = '.claude/agents/agent-0000.md';
+      const nextPath = '.claude/agents/zgent-0000.md'; // Same length, so complete before/after byte totals agree.
+      const oldRel = claimFileName(oldPath);
+      const nextRel = claimFileName(nextPath);
+      await chmod(join(stateRoot, oldRel), 0o640);
+      const oldMetadata = await stat(join(stateRoot, oldRel));
+      const sync = await db!
+        .select()
+        .from(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, s.repo.id));
+      await db!
+        .update(schema.onboardingArtifacts)
+        .set({ diskPath: nextPath })
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, s.repo.id),
+            eq(schema.onboardingArtifacts.diskPath, oldPath),
+          ),
+        );
+      let additions = 0;
+      seam.afterWrite = async () => {
+        additions++;
+        throw new Error('new claim landed before old removal');
+      };
+      await expect(
+        writeProjectStateColumn(db!, {
+          repositoryId: s.repo.id,
+          repoPath: s.root,
+          column: { ...context(), rtkChoiceRecorded: false } as never,
+          keepColumnOnFailure: true,
+        }),
+      ).rejects.toThrow('new claim landed before old removal');
+      seam.afterWrite = null;
+      expect(additions).toBe(1);
+      const intent = (await s.outbox())!.writeIntent as {
+        changes: { rel: string; before: string | null; after: string | null }[];
+      };
+      expect(intent.changes).toHaveLength(2);
+      expect(await readFile(join(stateRoot, oldRel), 'utf8')).toBe(before.get(oldRel));
+      const newBytes = await readFile(join(stateRoot, nextRel), 'utf8');
+      const planned = new Map(before);
+      for (const change of intent.changes) {
+        if (change.after === null) planned.delete(change.rel);
+        else planned.set(change.rel, change.after);
+      }
+      expect(recordReadable(planned)).toEqual({ readable: true });
+      if (limit === 'entries')
+        expect((await readdir(stateRoot, { recursive: true })).length).toBe(4097);
+      else
+        expect(
+          [...before.values()].reduce((n, text) => n + Buffer.byteLength(text), 0) +
+            Buffer.byteLength(newBytes),
+        ).toBeGreaterThan(PROJECT_STATE_LIMITS.maxTotalBytes);
+      await expect(readStateFiles(s.root)).rejects.toThrow(
+        limit === 'entries' ? 'more than 4096 entries' : 'more than 16 MiB',
+      );
+      const recoveryError = await recoverProjectStateWrite(db!, s.repo.id, s.root).then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+      expect(
+        recoveryError,
+        `recovery ${limit}: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+      ).toBeUndefined();
+      expect((await s.outbox())!.writeIntent).toBeNull();
+      expect(await readStateFiles(s.root)).toEqual(before);
+      expect(
+        await db!
+          .select()
+          .from(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
+      ).toEqual(sync);
+      const restored = await stat(join(stateRoot, oldRel));
+      expect([restored.mode & 0o777, restored.uid, restored.gid]).toEqual([
+        oldMetadata.mode & 0o777,
+        oldMetadata.uid,
+        oldMetadata.gid,
+      ]);
+      await s.write();
+      await expect(readFile(join(stateRoot, oldRel))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readFile(join(stateRoot, nextRel), 'utf8')).toBe(newBytes);
+      expect(recordReadable((await readStateFiles(s.root))!)).toEqual({ readable: true });
+    },
+  );
+
+  it.each(['manual', 'ancestor-link'] as const)(
+    'recognizes every journal path before undo, preserves %s divergence, and repeats an interrupted undo',
+    async (divergence) => {
+      const s = await fixture(null);
+      let writes = 0;
+      seam.afterWrite = async () => {
+        if (++writes === 2) throw new Error('two first-record files landed');
+      };
+      await expect(s.write()).rejects.toThrow('two first-record files landed');
+      seam.afterWrite = null;
+      const state = join(s.root, '.haive-data/state');
+      const format = await readFile(join(state, 'format.json'));
+      const render = await readFile(join(state, 'project/render.json'));
+      const box = await s.outbox();
+      if (divergence === 'manual') await writeFile(join(state, 'format.json'), 'manual data');
+      else {
+        await rename(join(state, 'project'), join(s.root, 'kept-project'));
+        await symlink(join(s.root, 'kept-project'), join(state, 'project'));
+      }
+      await expect(recoverProjectStateWrite(db!, s.repo.id, s.root)).rejects.toThrow();
+      expect(
+        await readFile(
+          divergence === 'manual'
+            ? join(state, 'project/render.json')
+            : join(s.root, 'kept-project/render.json'),
+        ),
+      ).toEqual(render);
+      expect(await readFile(join(state, 'format.json'))).toEqual(
+        divergence === 'manual' ? Buffer.from('manual data') : format,
+      );
+      expect(await s.outbox()).toEqual(box);
+      if (divergence === 'manual') await writeFile(join(state, 'format.json'), format);
+      else {
+        await rm(join(state, 'project'));
+        await rename(join(s.root, 'kept-project'), join(state, 'project'));
+      }
+      seam.afterRemove = async () => {
+        throw new Error('undo interrupted after removal');
+      };
+      await expect(recoverProjectStateWrite(db!, s.repo.id, s.root)).rejects.toThrow(
+        'undo interrupted after removal',
+      );
+      seam.afterRemove = null;
+      expect(await s.outbox()).toEqual(box);
+      await recoverProjectStateWrite(db!, s.repo.id, s.root);
+      expect((await s.outbox())!.writeIntent).toBeNull();
+      expect((await readStateFiles(s.root))?.size ?? 0).toBe(0);
+      expect(
+        await db!
+          .select()
+          .from(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
+      ).toEqual([]);
+      expect(
+        (
+          await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
+        )[0]!.renderContext,
+      ).toBeNull();
+    },
+  );
+
+  it('recovery CAS preserves raw editor bytes installed after recognition', async () => {
+    const s = await fixture();
+    await s.write();
+    seam.afterWrite = async () => {
+      throw new Error('partial unicode render');
+    };
+    await expect(
+      writeProjectStateColumn(db!, {
+        repositoryId: s.repo.id,
+        repoPath: s.root,
+        column: { ...context('�'), rtkChoiceRecorded: false } as never,
+        keepColumnOnFailure: true,
+      }),
+    ).rejects.toThrow('partial unicode render');
+    seam.afterWrite = null;
+    const path = join(s.root, '.haive-data/state/project/render.json');
+    const planned = await readFile(path);
+    const offset = planned.indexOf(Buffer.from('�'));
+    expect(offset).toBeGreaterThan(0);
+    const editor = Buffer.concat([
+      planned.subarray(0, offset),
+      Buffer.from([0xff]),
+      planned.subarray(offset + 3),
+    ]);
+    expect(editor.toString('utf8')).toBe(planned.toString('utf8'));
+    const before = await s.outbox();
+    seam.beforeRewrite = async () => {
+      seam.beforeRewrite = null;
+      await writeFile(path, editor);
+    };
+    const failure = await recoverProjectStateWrite(db!, s.repo.id, s.root).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+    expect.soft(failure).toMatchObject({ name: 'ProjectStateRecoveryHeldError' });
+    expect.soft(await readFile(path)).toEqual(editor);
+    expect.soft(await s.outbox()).toEqual(before);
   });
 
   it('imports an unseen checkout instead of overwriting its project settings', async () => {
