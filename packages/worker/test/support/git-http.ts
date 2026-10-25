@@ -9,5 +9,5 @@ const fixture = await startGitHttpServer(fixtureBase);
 export const { httpOrigin, networkGitArgs } = fixture;
 afterAll(async () => {
   await fixture.close();
-  await rm(fixtureBase, { recursive: true, force: true });
+  await rm(fixtureBase, { recursive: true, force: true, maxRetries: 5 });
 });
