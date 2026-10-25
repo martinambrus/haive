@@ -4,11 +4,12 @@ import { serve } from '@hono/node-server';
 import jwt from 'jsonwebtoken';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { configService, secretsService } from '@haive/shared';
+import { configService, secretsService, decryptEmail, CONFIG_KEYS } from '@haive/shared';
 import { eq } from 'drizzle-orm';
 import { initDatabase } from '../src/db.js';
 import { initRedis, closeRedis } from '../src/redis.js';
 import { authRoutes } from '../src/routes/auth.js';
+import { userSettingsRoutes } from '../src/routes/user-settings.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { requireAuth } from '../src/middleware/auth.js';
 import { setAuthCookies } from '../src/auth/cookies.js';
@@ -32,7 +33,9 @@ if (!redisUrl || new URL(redisUrl).host !== '127.0.0.1:46437') {
 const db = initDatabase(url);
 initRedis(redisUrl);
 configService.getEncryptionKey = async () => FIELD_KEY;
-configService.get = async () => null;
+let registrationMode: 'open' | 'closed' = 'closed';
+configService.get = async (key) =>
+  key === CONFIG_KEYS.REGISTRATION_MODE ? registrationMode : null;
 secretsService.getJwtSecret = async () => 'cd'.repeat(32);
 secretsService.getEmailBlindIndexPepper = async () => 'ef'.repeat(32);
 const web = 'http://127.0.0.1:46100';
@@ -53,6 +56,10 @@ app.use('*', async (c, next) => {
 });
 app.post('/__fixture/me-status', async (c) => {
   meStatus = (await c.req.json<{ status: 503 | null }>()).status;
+  return c.json({ ok: true });
+});
+app.post('/__fixture/registration-mode', async (c) => {
+  registrationMode = (await c.req.json<{ mode: 'open' | 'closed' }>()).mode;
   return c.json({ ok: true });
 });
 app.post('/__fixture/hold-me', (c) => {
@@ -91,7 +98,7 @@ app.post('/__fixture/session', async (c) => {
     .insert(schema.refreshTokens)
     .values({ userId: user.id, tokenHash: hashRefreshToken(token), expiresAt });
   setAuthCookies(c, access, token);
-  return c.json({ id: user.id });
+  return c.json({ id: user.id, email: decryptEmail(user.emailEncrypted, FIELD_KEY) });
 });
 app.delete('/__fixture/session/:id', async (c) => {
   await db.delete(schema.users).where(eq(schema.users.id, c.req.param('id')));
@@ -129,6 +136,7 @@ app.get('/system/state', requireAuth, (c) => c.json({ globalPause: false, mainte
 app.get('/user-settings/account', requireAuth, (c) =>
   c.json({ name: null, phone: null, email: 'synthetic@fixture.test' }),
 );
+app.route('/user-settings', userSettingsRoutes);
 app.get('/health', (c) => c.json({ ok: true }));
 app.get('*', requireAuth, (c) =>
   c.json({ tasks: [], repositories: [], providers: [], state: 'normal' }),

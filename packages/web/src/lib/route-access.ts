@@ -14,6 +14,8 @@ export interface RouteRequest {
   path: string;
   hasAccessCookie: boolean;
   hasRefreshCookie: boolean;
+  /** A read-only /auth/me check succeeded on this request. Presence alone is not proof. */
+  sessionAuthenticated?: boolean;
   /** `?session=expired` — allow the login form even if cookies still exist. */
   sessionRejected: boolean;
 }
@@ -26,7 +28,7 @@ export function decideRouteAccess(req: RouteRequest): RouteDecision {
     // bounce back to the protected page, which would ask for recovery again.
     if (req.sessionRejected) return { action: 'continue' };
     // A visitor who is genuinely signed in has no use for the login form.
-    if (req.hasAccessCookie) return { action: 'redirect', to: '/dashboard' };
+    if (req.sessionAuthenticated) return { action: 'redirect', to: '/dashboard' };
     return { action: 'continue' };
   }
 

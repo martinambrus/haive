@@ -12,10 +12,17 @@ const RECOVERY_STAMP = 'haive:session-recovery-at';
 export function SessionRecovery() {
   const [attempt, setAttempt] = useState(0);
   const [waiting, setWaiting] = useState(true);
+  const [slow, setSlow] = useState(false);
   useEffect(() => {
     let active = true;
     setWaiting(true);
+    setSlow(false);
+    // Explain a slow response without aborting a possibly committed single-use rotation.
+    const slowTimer = setTimeout(() => {
+      if (active) setSlow(true);
+    }, 5_000);
     void recoverBrowserSession(API_BASE_URL).then((result) => {
+      clearTimeout(slowTimer);
       if (!active) return;
       if (result === 'rejected') {
         window.location.replace('/login?session=expired');
@@ -39,6 +46,7 @@ export function SessionRecovery() {
     });
     return () => {
       active = false;
+      clearTimeout(slowTimer);
     };
   }, [attempt]);
 
@@ -47,7 +55,9 @@ export function SessionRecovery() {
       <MarkdownView
         body={
           waiting
-            ? 'Checking your session…'
+            ? slow
+              ? 'Your session check is taking longer than usual. Keep this page open while it finishes.'
+              : 'Checking your session…'
             : 'Your session could not be checked. Try again when the connection is available.'
         }
       />

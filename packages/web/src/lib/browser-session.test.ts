@@ -83,3 +83,30 @@ describe('browser refresh coordination', () => {
     expect(await recoverBrowserSession(API)).toBe('unavailable');
   });
 });
+
+describe('local writer fallback', () => {
+  it('does not start an expired waiter after the preceding write completes', async () => {
+    vi.stubGlobal('navigator', {});
+    const timers: AbortController[] = [];
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => {
+      const timer = new AbortController();
+      timers.push(timer);
+      return timer.signal;
+    });
+    const { withBrowserSessionLock } = await import('./browser-session');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const first = withBrowserSessionLock(() => gate);
+    await Promise.resolve();
+    const writer = vi.fn(async () => 'must not run');
+    const second = withBrowserSessionLock(writer);
+    const rejected = expect(second).rejects.toThrow('expired');
+    timers[1]!.abort(new Error('expired'));
+    await rejected;
+    release();
+    await first;
+    await Promise.resolve();
+    expect(writer).not.toHaveBeenCalled();
+    timeout.mockRestore();
+  });
+});

@@ -23,7 +23,7 @@ import type { HostApi, HostApiError as ApiError } from '@haive/web-kit/host';
 import { resolveApiOrigin, type RuntimeApiConfig } from './api-origin';
 // Runtime too, and for the same reason: `route-access` has no imports of its own.
 import { decideSessionEnd } from './route-access';
-import { recoverBrowserSession } from './browser-session';
+import { recoverBrowserSession, withBrowserSessionLock } from './browser-session';
 
 declare global {
   interface Window {
@@ -109,7 +109,7 @@ export function refreshSession(): Promise<boolean> {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const doFetch = () =>
+  const fetchWithCurrentCookies = () =>
     fetch(`${API_BASE}${path}`, {
       ...init,
       credentials: 'include',
@@ -118,6 +118,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         ...(init?.headers ?? {}),
       },
     });
+  // Cookie selection happens when fetch starts, inside the same lock as refresh/keepalive.
+  // Release on response headers, then do any 401 refresh outside the lock to avoid reentry.
+  const method = init?.method ?? 'GET';
+  const writesSession =
+    (method === 'POST' && ['/auth/login', '/auth/register', '/auth/logout'].includes(path)) ||
+    (method === 'PUT' && path === '/user-settings/password');
+  const doFetch = () =>
+    writesSession ? withBrowserSessionLock(fetchWithCurrentCookies) : fetchWithCurrentCookies();
 
   let res = await doFetch();
 

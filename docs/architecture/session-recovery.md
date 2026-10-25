@@ -13,26 +13,58 @@ reloading its current URL. That server render reads the role, forced-password fl
 preferences and modules using the same authenticated cookie header. There is no return-path
 parameter or internal authentication header.
 
-`recoverBrowserSession` coordinates the recovery shell, API retry and keepalive with one Web Lock
-per app origin. Hold it through the refresh response, since a winner may have committed in
-Postgres while its cookies are still in flight. A second tab checks the jar after acquiring the
-lock. The keepalive requests rotation even when access still works; recovery first checks access
-so that a stale SSR refusal does not cause another rotation. Same-tab API callers also share their
-existing promise. Explicit logout remains the API operation that clears cookies.
+`withBrowserSessionLock` coordinates every browser session cookie writer: recovery, API 401
+retry, keepalive, login, registration, logout and own-password change. They use one Web Lock per
+app origin. Fetch construction and cookie selection happen inside that lock, and it is held
+through response headers: a refresh may have committed while its replacement cookies are still
+in flight. A later logout must present the installed successor, and a later login or password
+change must install its own pair after that response. API retry releases the writer lock before
+acquiring it again for refresh, avoiding lock reentry. Same-tab API refresh callers still share
+one promise. Failed logout, including a lock-acquisition failure, stays on the current page and
+shows an error; it must never report sign-out by navigating away without a successful response.
+
+Lock acquisition expires after 20 seconds. Read-only `/auth/me` probes have five-second bounds,
+but **an active refresh POST has no application cancellation deadline**. Aborting after its
+single-use CAS commits can permanently discard the only successor cookies. Recovery changes its
+message after five seconds while the request and lock remain active; eventual headers still
+install cookies and finish recovery. A genuine network failure, lost response or destruction of
+the lock-owning document remains a single-use protocol limit. No redeemed token is made reusable
+to conceal it. A second tab checks the jar after acquiring the lock. Keepalive requests rotation
+even when access still works; recovery first checks access so that a stale SSR refusal does not
+cause another rotation.
 
 A refresh refusal is followed by a fresh `/auth/me` read. Only two refused tokens under the lock
 produce a rejected-session verdict. Network errors, API 5xx and timeouts produce an unavailable
 verdict and a retry screen. Without Web Locks (for example plain HTTP on a non-localhost host), a
 refusal stays on that retry screen because another tab's response might still be in flight;
-successful recovery still works. Requests and lock acquisition have time bounds. The recovery
+successful recovery still works. A local queue still serializes writers within that document,
+and an expired queued writer never starts later; cross-tab ordering requires Web Locks. The recovery
 shell records an automatic reload in sessionStorage and refuses a second one within 30 seconds,
 so an inconsistent upstream cannot cause a reload loop; manual retry remains available. If
 sessionStorage is unavailable it also offers retry instead of an automatic reload.
 
 `/login?session=expired` permits the login form despite cookie presence. It never deletes cookies:
 the navigation may be a delayed result from an old request after another tab has recovered. The
-proxy otherwise preserves public-page, private-page and CSP routing. Role and forced-password
-guards continue to read the API's authenticated data and API middleware enforces authorization.
+proxy checks `/auth/me` read-only before redirecting an unmarked public page to the dashboard.
+Cookie presence alone is insufficient: retaining invalid access cookies must still permit bare
+`/setup`, `/register`, direct invitations and public navigation onward from the login form.
+A valid authenticated session keeps its dashboard redirect. A failed or uncertain probe permits
+the public page and never deletes cookies. Private-page and CSP routing remain unchanged. Role
+and forced-password guards read the API's authenticated data and API middleware enforces
+authorization.
+
+## Cookie transport boundary
+
+The current session transport requires the browser-facing web and API URLs to use **the same
+hostname**. Different ports on that hostname work: host-only cookies are shared across ports,
+and credentialed CORS plus the existing request-origin gate allow the web to call its API. The
+loopback harness tests exactly this contract (`127.0.0.1:46100` and `127.0.0.1:46101`).
+
+An explicit API URL on a different hostname remains configurable, but host-only API cookies do
+not reach the web hostname's proxy or server layout. A successful API login alone therefore
+cannot establish that server-rendered web session; CORS cannot transfer those cookies. Different
+sites add the existing SameSite=Lax restriction as well. This is a pre-existing deployment limit,
+not fixed by browser recovery. No cookie Domain, SSO or proxy transport redesign is included here.
 
 ## Isolated regression harness
 
@@ -71,7 +103,13 @@ Use `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to select an already installed Chromium if 
 `SESSION_RECOVERY_RESULTS` changes the default `/tmp/haive-session-recovery-results` artifact path.
 Set `SESSION_RECOVERY_AUTH_CHECKS=1` together with `PLAYWRIGHT_API_BASE` and
 `PLAYWRIGHT_DATABASE_URL` pointing at the same isolated API and database to include the existing
-auth endpoint Playwright checks. The harness lives under `harness/`, which the normal Chromium
-project excludes. The isolated server's `/__fixture/*` controls exist only in this test entry point. They create
-synthetic users, inject 503 responses and hold a real `/auth/me` response for ordering controls.
+auth endpoint Playwright checks alongside the original recovery spec. That mode excludes the
+zero-user ordering spec because the existing auth checks intentionally keep a bootstrap owner;
+run the default ordering/recovery checks first on a fresh scratch database. The harness lives
+under `harness/`, which the normal Chromium project excludes. The isolated server's `/__fixture/*` controls exist only in this test entry point. They create
+synthetic users, select registration mode, inject 503 responses and hold a real `/auth/me`
+response. The fixture also mounts the actual own-password route. Node-side interception can hold
+committed refresh response headers without prematurely updating the browser cookie jar. The
+ordering controls require a fresh scratch database so the setup case really has zero users;
+run them before the optional existing auth checks, whose bootstrap owner intentionally remains.
 They must never be mounted in the production application.

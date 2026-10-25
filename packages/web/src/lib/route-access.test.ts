@@ -43,7 +43,9 @@ describe('the redirect loop this exists to prevent', () => {
 
   // An ordinary visitor to /login still follows the cookie-presence routing hint.
   it('does not clear cookies without the marker', () => {
-    expect(decideRouteAccess(req({ path: '/login', hasAccessCookie: true }))).toEqual({
+    expect(
+      decideRouteAccess(req({ path: '/login', hasAccessCookie: true, sessionAuthenticated: true })),
+    ).toEqual({
       action: 'redirect',
       to: '/dashboard',
     });
@@ -52,7 +54,9 @@ describe('the redirect loop this exists to prevent', () => {
 
 describe('ordinary routing is unchanged', () => {
   it('sends a signed-in visitor away from the login form', () => {
-    expect(decideRouteAccess(req({ path: '/login', hasAccessCookie: true }))).toEqual({
+    expect(
+      decideRouteAccess(req({ path: '/login', hasAccessCookie: true, sessionAuthenticated: true })),
+    ).toEqual({
       action: 'redirect',
       to: '/dashboard',
     });
