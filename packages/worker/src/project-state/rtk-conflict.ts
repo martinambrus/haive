@@ -47,85 +47,89 @@ const toolingOf = (stored: unknown): Record<string, unknown> | null => {
 export async function raiseRtkQuestion(db: Database, repositoryId: string): Promise<boolean> {
   return db.transaction(async (tx) => {
     await lockProjectState(tx, repositoryId);
-    const [repo] = await tx
-      .select({
-        onboardingTooling: schema.repositories.onboardingTooling,
-        rtkEnabled: schema.repositories.rtkEnabled,
-        rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
-        renderContext: schema.repositories.renderContext,
-      })
-      .from(schema.repositories)
-      .where(eq(schema.repositories.id, repositoryId))
-      .limit(1)
-      // Every writer of rtk_enabled updates this row, so a question cannot be raised past a switch-off.
-      .for('update');
-    const column = readRenderContextColumn(repo?.renderContext);
-    const rtkChoiceRecorded = column.kind === 'column' && column.column.rtkChoiceRecorded;
-    if (
-      repo &&
-      (!repo.rtkEnabled || isRtkChoiceRecorded(rtkChoiceRecorded, repo.rtkChoiceMadeAt))
-    ) {
-      await convergeRtkQuestion(tx, repositoryId, null);
-      return false;
-    }
-    const importedTooling = toolingOf(repo?.onboardingTooling);
-    if (!repo || importedTooling?.rtkEnabled !== false) return false;
-    const taskIds = (
-      await tx
-        .select({ id: schema.tasks.id })
-        .from(schema.tasks)
-        .where(eq(schema.tasks.repositoryId, repositoryId))
-    ).map((t) => t.id);
-    const local04 =
-      taskIds.length === 0
-        ? []
-        : await tx
-            .select({ output: schema.taskSteps.output })
-            .from(schema.taskSteps)
-            .where(
-              and(
-                inArray(schema.taskSteps.taskId, taskIds),
-                eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
-              ),
-            );
-    const rows = await tx
-      .select({ id: schema.projectStateConflicts.id })
-      .from(schema.projectStateConflicts)
-      .where(
-        and(
-          eq(schema.projectStateConflicts.repositoryId, repositoryId),
-          eq(schema.projectStateConflicts.unit, RTK_ENABLED_UNIT),
-        ),
-      )
-      .limit(1);
-    if (
-      !needsRtkQuestion({
-        importedTooling,
-        rtkEnabled: repo.rtkEnabled,
-        local04Toolings: local04.map((r) => (r.output as { tooling?: unknown } | null)?.tooling),
-        hasAnyRowForUnit: rows.length > 0,
-        rtkChoiceMadeAt: repo.rtkChoiceMadeAt,
-        rtkChoiceRecorded,
-      })
-    ) {
-      return false;
-    }
-    const written = await tx
-      .insert(schema.projectStateConflicts)
-      .values({
-        repositoryId,
-        unit: RTK_ENABLED_UNIT,
-        base: conflictSide(true),
-        local: conflictSide(true),
-        incoming: conflictSide(false),
-      })
-      .onConflictDoNothing({
-        target: [schema.projectStateConflicts.repositoryId, schema.projectStateConflicts.unit],
-        where: isNull(schema.projectStateConflicts.resolvedAt),
-      })
-      .returning({ id: schema.projectStateConflicts.id });
-    return written.length > 0;
+    return raiseRtkQuestionLocked(tx, repositoryId);
   });
+}
+
+type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
+
+/** The same lifecycle in a transaction already holding lockProjectState. */
+export async function raiseRtkQuestionLocked(tx: Tx, repositoryId: string): Promise<boolean> {
+  const [repo] = await tx
+    .select({
+      onboardingTooling: schema.repositories.onboardingTooling,
+      rtkEnabled: schema.repositories.rtkEnabled,
+      rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
+      renderContext: schema.repositories.renderContext,
+    })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1)
+    // Every writer of rtk_enabled updates this row, so a question cannot be raised past a switch-off.
+    .for('update');
+  const column = readRenderContextColumn(repo?.renderContext);
+  const rtkChoiceRecorded = column.kind === 'column' && column.column.rtkChoiceRecorded;
+  if (repo && (!repo.rtkEnabled || isRtkChoiceRecorded(rtkChoiceRecorded, repo.rtkChoiceMadeAt))) {
+    await convergeRtkQuestion(tx, repositoryId, null);
+    return false;
+  }
+  const importedTooling = toolingOf(repo?.onboardingTooling);
+  if (!repo || importedTooling?.rtkEnabled !== false) return false;
+  const taskIds = (
+    await tx
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.repositoryId, repositoryId))
+  ).map((t) => t.id);
+  const local04 =
+    taskIds.length === 0
+      ? []
+      : await tx
+          .select({ output: schema.taskSteps.output })
+          .from(schema.taskSteps)
+          .where(
+            and(
+              inArray(schema.taskSteps.taskId, taskIds),
+              eq(schema.taskSteps.stepId, '04-tooling-infrastructure'),
+            ),
+          );
+  const rows = await tx
+    .select({ id: schema.projectStateConflicts.id })
+    .from(schema.projectStateConflicts)
+    .where(
+      and(
+        eq(schema.projectStateConflicts.repositoryId, repositoryId),
+        eq(schema.projectStateConflicts.unit, RTK_ENABLED_UNIT),
+      ),
+    )
+    .limit(1);
+  if (
+    !needsRtkQuestion({
+      importedTooling,
+      rtkEnabled: repo.rtkEnabled,
+      local04Toolings: local04.map((r) => (r.output as { tooling?: unknown } | null)?.tooling),
+      hasAnyRowForUnit: rows.length > 0,
+      rtkChoiceMadeAt: repo.rtkChoiceMadeAt,
+      rtkChoiceRecorded,
+    })
+  ) {
+    return false;
+  }
+  const written = await tx
+    .insert(schema.projectStateConflicts)
+    .values({
+      repositoryId,
+      unit: RTK_ENABLED_UNIT,
+      base: conflictSide(true),
+      local: conflictSide(true),
+      incoming: conflictSide(false),
+    })
+    .onConflictDoNothing({
+      target: [schema.projectStateConflicts.repositoryId, schema.projectStateConflicts.unit],
+      where: isNull(schema.projectStateConflicts.resolvedAt),
+    })
+    .returning({ id: schema.projectStateConflicts.id });
+  return written.length > 0;
 }
 
 /** Boot entry: asks the question of every repository that needs it, and closes one whose RTK is off by
