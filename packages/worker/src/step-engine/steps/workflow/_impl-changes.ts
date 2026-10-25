@@ -6,6 +6,7 @@ import { isSingleLine, survivesFence } from '../_untrusted-repo.js';
 import { GIT_MAX_BUFFER } from '../../../repo/git-push.js';
 import { gitExec } from '../../../repo/git-exec.js';
 import { parsePorcelainZ } from './_commit-diff.js';
+import { nestedRepositoryHead } from '../../../repo/nested-repository.js';
 
 /** How many changed files a prompt lists. The cap is for prompt size; what matters
  *  is that a list cut down to it says so — see changedFilesBlock. */
@@ -37,6 +38,8 @@ export interface ImplementationFileSet {
    *  file changed" — the renderer and the scope fence both say so explicitly, and both
    *  resolve the unrecorded case to the wider (pre-existing) scope. */
   changedLines?: ChangedLineNotes;
+  /** Checkout boundaries, never files whose contents the parent change wrote. Optional on old rows. */
+  nestedRepositories?: Record<string, 'unborn' | 'with commits'>;
 }
 
 /** Per-file note on the changed-file list: which lines this change wrote.
@@ -119,6 +122,7 @@ interface DirtyScan {
   /** Paths git reports as untracked (`??`). They appear in no diff at all — there is no
    *  old side to diff against — so the line notes have to learn "new file" from here. */
   untracked: string[];
+  nestedRepositories: NonNullable<ImplementationFileSet['nestedRepositories']>;
   /** The `git status` failure, or null when the scan ran (a clean tree is a RESULT). */
   error: string | null;
 }
@@ -149,11 +153,20 @@ async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
     );
     const files: string[] = [];
     const untracked: string[] = [];
+    const nestedRepositories: NonNullable<ImplementationFileSet['nestedRepositories']> = {};
     for (const entry of parsePorcelainZ(stdout)) {
       files.push(entry.path);
-      if (entry.x === '?' && entry.y === '?') untracked.push(entry.path);
+      if (entry.x === '?' && entry.y === '?') {
+        untracked.push(entry.path);
+        // -uall expands ordinary directories, but never an embedded checkout.
+        if (entry.path.endsWith('/')) {
+          const head = await nestedRepositoryHead(worktreePath, entry.path);
+          if (head)
+            nestedRepositories[entry.path] = head.commit === null ? 'unborn' : 'with commits';
+        }
+      }
     }
-    return { files, untracked, error: null };
+    return { files, untracked, nestedRepositories, error: null };
   } catch (err) {
     const detail = err as { stderr?: unknown; message?: unknown };
     const stderr = typeof detail.stderr === 'string' ? detail.stderr.trim() : '';
@@ -164,6 +177,7 @@ async function dirtyWorktreeFiles(worktreePath: string): Promise<DirtyScan> {
     return {
       files: [],
       untracked: [],
+      nestedRepositories: {},
       error:
         reason.length > MAX_SCAN_ERROR_CHARS
           ? `${reason.slice(0, MAX_SCAN_ERROR_CHARS)} (truncated)`
@@ -450,7 +464,10 @@ export async function collectChangeSet(
   // it covers committed (DAG) and uncommitted (single-agent) work alike — see
   // resolveDiffBase. An untracked file is in no diff at all, so it is named here.
   const measured = await changedLineNotes(worktreePath, baseBranch);
-  for (const p of scan.untracked) measured[p] ??= 'new file';
+  for (const p of scan.untracked) {
+    const nested = scan.nestedRepositories[p];
+    measured[p] ??= nested ? `nested repository (${nested})` : 'new file';
+  }
   // A committed deletion may be unreported, and the sandbox masks git: only this list names it.
   const deletions = await readCommittedDeletions(worktreePath, baseBranch, { forkPointOnly: true });
   for (const p of deletions ?? []) {
@@ -479,6 +496,13 @@ export async function collectChangeSet(
         ? [scan.error, COMMITTED_CHANGE_UNREAD].filter(Boolean).join('; ')
         : scan.error,
     changedLines,
+    ...(Object.keys(scan.nestedRepositories).length
+      ? {
+          nestedRepositories: Object.fromEntries(
+            Object.entries(scan.nestedRepositories).filter(([p]) => listed.includes(p)),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -543,9 +567,14 @@ export async function collectChangedLineMap(
   }
   // Named by git status, an agent or the path list, but no hunk says which lines: all count.
   for (const path of [...scan.files, ...reported, ...named]) {
+    // A checkout boundary supplies no file lines. In particular it does not put
+    // all files inside that independent repository into the parent's lint scope.
+    if (Object.hasOwn(scan.nestedRepositories, path.endsWith('/') ? path : `${path}/`)) continue;
     if (!diffed.has(path)) map.set(path, { whole: true, ranges: [] });
   }
-  return map.size > 0 ? map : null;
+  // A measured set containing only nested repositories has no file lines; this is
+  // a valid empty scope, not a failed read that should run lint unscoped.
+  return map.size > 0 || Object.keys(scan.nestedRepositories).length > 0 ? map : null;
 }
 
 /** The sentence a pass after a fix opens with when the fixer's re-read of the change failed. */
@@ -593,10 +622,20 @@ export function changedFilesBlock(value: MaybeFileSet, header: string, fallback:
   ].join('\n');
 
   const parts = [list];
+  if (Object.keys(set?.nestedRepositories ?? {}).some((p) => files.includes(p))) {
+    parts.push(
+      '',
+      'NESTED REPOSITORIES: each such entry is a checkout boundary, not a file. Its note',
+      'states whether it has a checked-out commit; it supplies no changed file contents or',
+      'line ranges. Do not open it as a file or treat its contents as newly added. Review',
+      'the boundary and integration; files inside it need their own listed changes or',
+      'demonstrated blast radius to be in scope.',
+    );
+  }
   if (Object.keys(notes).length > 0) {
     parts.push(
       '',
-      'LINES: the note after a file is the part of it THIS change wrote, numbered as in the file',
+      'LINES: line notes after files name the part THIS change wrote, numbered as in the file',
       'you will read. A bare number can also mark where lines were deleted. Read the whole file',
       'for context — but a file listed with NO note has none recorded, so treat all of it as',
       'changed rather than assuming any of it is untouched.',

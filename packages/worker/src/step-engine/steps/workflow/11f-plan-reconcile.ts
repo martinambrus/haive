@@ -160,7 +160,7 @@ function buildReconcilePrompt(d: PlanReconcileDetect): string {
           '',
         ]
       : []),
-    '## Files this task changed',
+    '## Paths this task changed',
     '',
     ...d.changedPaths
       .filter(isListableName)
@@ -171,6 +171,8 @@ function buildReconcilePrompt(d: PlanReconcileDetect): string {
           `(${d.changedPaths.filter((p) => !isListableName(p)).length} changed files have names that cannot be listed safely and are left out.)`,
         ]
       : []),
+    'A listed path ending in / is a nested repository, not a file. Do not infer changes',
+    'inside it or propose a file code link for that directory.',
     '',
     ...(d.spec ? ['## What the task set out to do', '', d.spec, ''] : []),
     '## What to propose',
