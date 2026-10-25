@@ -162,7 +162,11 @@ it.each([true, false])(
         },
       },
     } as unknown as Database;
-    const result = await handleProbeJob(db, { providerId: PROVIDER, userId: USER });
+    const result = await handleProbeJob(db, {
+      providerId: PROVIDER,
+      userId: USER,
+      targetMode: 'cli',
+    });
     expect(reads).toBe(2);
     expect(result).toMatchObject({
       ok: false,
