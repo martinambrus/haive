@@ -60,6 +60,10 @@ export const CODE_EXTENSIONS: Record<string, string> = {
   '.java': 'java',
 };
 
+/** .ts permits angle assertions; JSX is read only in the JS/JSX and TSX formats.
+ *  Vue/Svelte keep their established script reader. */
+const JSX_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.jsx', '.tsx']);
+
 /** Minified / generated bundle files. These are machine-generated, single-line,
  *  and semantically useless to embed — they pollute the RAG index with false
  *  hits and waste embedding budget. Skipped at collection time even when their
@@ -114,7 +118,7 @@ export function fileBudget(
 const MIN_GAP_CHARS = 120;
 
 /** The lines a span starts with that hold nothing but closing brackets, semicolons or commas. */
-const CLOSING_LINES = /^(?:[ \t]*(?:[)\]};,]+[ \t]*)?\r?\n)*/;
+const CLOSING_LINES = /^(?:[ \t]*(?:[)\]};,]+[ \t]*)?(?:\r\n|[\r\n\u2028\u2029]))*/;
 
 /* ------------------------------------------------------------------ */
 /* Hashing / slugify                                                   */
@@ -185,7 +189,7 @@ const HEADING_RE = /^(#{1,3})\s+(.+)$/;
  *  Nothing is lost by dropping it — every child section already carries the
  *  parent heading in its breadcrumb, and therefore in its chunk context header. */
 export function isHeadingOnlyMarkdown(text: string): boolean {
-  const lines = text.split('\n').filter((l) => l.trim().length > 0);
+  const lines = text.split(/\r\n|[\r\n]/).filter((l) => l.trim().length > 0);
   return lines.length === 1 && HEADING_RE.test(lines[0]!.trim());
 }
 
@@ -200,7 +204,7 @@ export function isHeadingOnlyChunk(content: string): boolean {
 }
 
 export function extractMarkdownSections(content: string, _filePath: string): RagSection[] {
-  const lines = content.split('\n');
+  const { lines, offsets } = sourceLines(content);
   const sections: RagSection[] = [];
   // Heading-only sections are dropped, but held aside: a document that is
   // NOTHING but headings would otherwise index to zero chunks and become
@@ -211,33 +215,31 @@ export function extractMarkdownSections(content: string, _filePath: string): Rag
   const stack: Array<string | undefined> = [undefined, undefined, undefined];
   let currentId = 'intro';
   let currentBreadcrumb: string[] = [];
-  let currentLines: string[] = [];
+  let currentStart = 0;
 
-  const flush = (): void => {
-    const text = currentLines.join('\n').trim();
+  const flush = (end: number): void => {
+    const text = content.slice(currentStart, end).trim();
     if (!text) return;
     const section = { sectionId: currentId, content: text, breadcrumb: currentBreadcrumb };
     if (isHeadingOnlyMarkdown(text)) headingOnly.push(section);
     else sections.push(section);
   };
 
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     const m = HEADING_RE.exec(line);
     if (m) {
-      flush();
+      flush(offsets[index]!);
       const level = m[1]!.length;
       const title = m[2]!.trim();
       stack[level - 1] = title;
       for (let deeper = level; deeper < stack.length; deeper += 1) stack[deeper] = undefined;
       currentId = safeSectionId(slugifyHeading(title));
       currentBreadcrumb = stack.slice(0, level).filter((s): s is string => !!s);
-      currentLines = [line];
-    } else {
-      currentLines.push(line);
+      currentStart = offsets[index]!;
     }
   }
 
-  flush();
+  flush(content.length);
 
   return uniqueSectionIds(sections.length > 0 ? sections : headingOnly);
 }
@@ -260,7 +262,7 @@ const PHP_HEREDOC = new RegExp(
 const REGEX_AFTER_WORD = /^(?:return|typeof|instanceof|in|new|delete|void|throw|case|do|else)$/;
 /** Keywords only in their own syntax: an identifier anywhere else, so a slash after one divides. */
 const CONTEXTUAL_WORDS = new Set(['of', 'yield', 'await']);
-const BARE_NAME = /^[A-Za-z_$][\w$]*$/;
+const BARE_NAME = /^[$_\p{ID_Start}][$\u200C\u200D\p{ID_Continue}]*$/u;
 const WORD_START = /^[\p{ID_Start}_$]/u;
 const WORD_CHAR = /^[\p{ID_Continue}$\u200C\u200D]/u;
 
@@ -306,6 +308,28 @@ function atLineStart(text: string, at: number): boolean {
 function lineEnd(text: string, from: number, lfCrOnly: boolean): number {
   for (let i = from; i < text.length; i += 1) if (isLineTerminator(text[i]!, lfCrOnly)) return i;
   return -1;
+}
+
+/** Start of the physical line containing the position just before `at`. */
+function lineStartAt(text: string, at: number): number {
+  let i = at - 1;
+  while (i >= 0 && !isLineTerminator(text[i]!, false)) i -= 1;
+  return i + 1;
+}
+
+/** Original line bodies and offsets; CRLF counts once and is never normalised. */
+function sourceLines(text: string): { lines: string[]; offsets: number[] } {
+  const lines: string[] = [];
+  const offsets: number[] = [];
+  let from = 0;
+  for (const match of text.matchAll(/\r\n|[\r\n]/g)) {
+    offsets.push(from);
+    lines.push(text.slice(from, match.index));
+    from = match.index + match[0].length;
+  }
+  offsets.push(from);
+  lines.push(text.slice(from));
+  return { lines, offsets };
 }
 
 /** Index just past the quote that closes the string opening at `open`, else the end of the text. */
@@ -434,12 +458,13 @@ function phpNonCode(text: string): Span[] {
   return spans;
 }
 
-/** Index of the '/' that closes the regex literal opening at `open`, or -1 when its line ends first. */
-function regexClose(text: string, open: number, java: boolean): number {
+/** Index of the '/' that closes a regex, or -1 when it cannot close within the bound.
+ *  JS stays on one line; Ruby explicitly permits a multiline regexp value. */
+function regexClose(text: string, open: number, java: boolean, multiline = false): number {
   let inClass = false;
   const limit = Math.min(text.length, open + MAX_REGEX_CHARS);
   for (let i = open + 1; i < limit; i += 1) {
-    if (isLineTerminator(text[i]!, java)) return -1;
+    if (!multiline && isLineTerminator(text[i]!, java)) return -1;
     if (text[i] === '\\') i += 1;
     else if (text[i] === '[') inClass = true;
     else if (text[i] === ']') inClass = false;
@@ -467,14 +492,265 @@ function spacedOperatorBefore(text: string, slash: number): boolean {
   return k > 0 && (text[k - 1] === ' ' || text[k - 1] === '\t');
 }
 
+interface JsxFrame {
+  mode: 'tag' | 'text' | 'expression';
+  depth: number;
+  closing: boolean;
+  braces: number;
+  resume: 'tag' | 'text';
+}
+
+/** One token from a bounded JSX lookahead, skipping JS trivia and comments. */
+function jsxHeadToken(text: string, from: number): { text: string; word: boolean; end: number } {
+  let i = from;
+  while (i < text.length) {
+    if (/\s/.test(text[i]!)) i += 1;
+    else if (text.startsWith('//', i)) {
+      const end = lineEnd(text, i + 2, false);
+      i = end < 0 ? text.length : end;
+    } else if (text.startsWith('/*', i)) {
+      const end = text.indexOf('*/', i + 2);
+      i = end < 0 ? text.length : end + 2;
+    } else break;
+  }
+  const start = i;
+  const word = i < text.length && WORD_START.test(codePointAt(text, i));
+  if (word) {
+    i += codePointAt(text, i).length;
+    while (i < text.length && WORD_CHAR.test(codePointAt(text, i)))
+      i += codePointAt(text, i).length;
+  } else if (text[i] === '"' || text[i] === "'" || text[i] === '`') i = quotedEnd(text, i);
+  else if (text.startsWith('=>', i)) i += 2;
+  else if (i < text.length) i += 1;
+  return { text: text.slice(start, i), word, end: i };
+}
+
+// TypeScript's hard reserved words cannot name a type parameter, but may name a JSX tag.
+const TS_RESERVED_NAME =
+  /^(?:break|case|catch|class|const|continue|debugger|default|delete|do|else|enum|export|extends|false|finally|for|function|if|import|in|instanceof|new|null|return|super|switch|this|throw|true|try|typeof|var|void|while|with)$/;
+
+/** A possible generic prefix. Contextual identifiers alone cannot distinguish a tag. */
+function tsxGenericHead(header: string): boolean {
+  let name = jsxHeadToken(header, 1);
+  if (name.text === 'const') name = jsxHeadToken(header, name.end);
+  if (!name.word || TS_RESERVED_NAME.test(name.text)) return false;
+  const next = jsxHeadToken(header, name.end);
+  if (next.text === ',' || next.text === '=') return true;
+  if (next.text !== 'extends') return false;
+  const constraint = jsxHeadToken(header, next.end).text;
+  return constraint !== '' && !['=', '>', '/'].includes(constraint);
+}
+
+/** Require structural arrow evidence instead of guessing await/yield function scope.
+ *  Each type-parameter, parameter and annotation window uses the signature reader's bound. */
+function tsxGenericArrow(text: string, at: number): boolean {
+  const head = text.slice(at, at + MAX_PARAMS_CHARS);
+  if (!tsxGenericHead(head)) return false;
+  let cursor = 1;
+  let angles = 1;
+  while (angles > 0) {
+    const token = jsxHeadToken(head, cursor);
+    if (token.text === '') return false;
+    cursor = token.end;
+    if (token.text === '<') angles += 1;
+    else if (token.text === '>') angles -= 1;
+  }
+  const parameters = text.slice(at + cursor, at + cursor + MAX_PARAMS_CHARS);
+  const first = jsxHeadToken(parameters, 0);
+  if (first.text !== '(') return false;
+  let name = jsxHeadToken(head, 1);
+  if (name.text === 'const') name = jsxHeadToken(head, name.end);
+  const end = tsxParametersEnd(parameters, first.end, name.text);
+  if (end === null) return false;
+  const tail = text.slice(at + cursor + end, at + cursor + end + MAX_PARAMS_CHARS);
+  let token: ReturnType<typeof jsxHeadToken>;
+  token = jsxHeadToken(tail, 0);
+  if (token.text === '=>') return true;
+  if (token.text !== ':') return false;
+  const closes = new Map([
+    ['(', ')'],
+    ['[', ']'],
+    ['{', '}'],
+    ['<', '>'],
+  ]);
+  const stack: string[] = [];
+  while (true) {
+    token = jsxHeadToken(tail, token.end);
+    if (token.text === '' || (stack.length === 0 && token.text === ';')) return false;
+    if (token.text === '<' && jsxHeadToken(tail, token.end).text === '/') return false;
+    if (token.text === '=>' && stack.length === 0) return true;
+    const close = closes.get(token.text);
+    if (close) stack.push(close);
+    else if ([')', ']', '}', '>'].includes(token.text)) {
+      if (stack.pop() !== token.text) return false;
+    }
+  }
+}
+
+/** The existing bounded ordinary-JSX opening header, shared by both walks. */
+function jsxTagHeader(
+  text: string,
+  at: number,
+): { name: string; end: number; selfClosing: boolean } | null {
+  const header = text.slice(at, at + MAX_PARAMS_CHARS);
+  const head = /^<(?:([A-Za-z][\w.:-]*)(?=[\s/>])|(?=>))/.exec(header.slice(0, 256));
+  if (!head) return null;
+  let braces = 0;
+  for (let i = head[0].length; i < header.length; i += 1) {
+    const c = header[i];
+    if ((c === '"' || c === "'") && braces === 0) {
+      const close = header.indexOf(c, i + 1);
+      i = close < 0 ? header.length : close;
+    } else if (c === '"' || c === "'" || c === '`') i = quotedEnd(header, i) - 1;
+    else if (c === '{') braces += 1;
+    else if (c === '}') braces -= 1;
+    else if (c === '>' && braces === 0)
+      return { name: head[1] ?? '', end: at + i + 1, selfClosing: header[i - 1] === '/' };
+  }
+  return null;
+}
+
+function jsxClosingTag(text: string, at: number): { name: string; end: number } | null {
+  const match = /^<\/(?:([A-Za-z][\w.:-]*))?\s*>/.exec(text.slice(at, at + MAX_PARAMS_CHARS));
+  return match ? { name: match[1] ?? '', end: at + match[0].length } : null;
+}
+
+/** Read a bounded opening tag after testing structural generic-arrow evidence. */
+function jsxOpeningAt(text: string, at: number, tsx: boolean): boolean {
+  return !(tsx && tsxGenericArrow(text, at)) && jsxTagHeader(text, at) !== null;
+}
+
+/** A bounded parameter walk reuses the real JS lexer's opaque literal spans. JSX is
+ *  disabled in that inner pass, so it cannot re-enter this generic-arrow guard. */
+function tsxParametersEnd(text: string, from: number, candidateName: string): number | null {
+  const literals = new Map<number, number>();
+  const readLiterals = (from: number, afterValue = false): void => {
+    for (const start of literals.keys()) if (start >= from) literals.delete(start);
+    // A JSX text apostrophe/backtick must not determine how a later JS child is lexed.
+    // Seed resumed code after a JSX value as an operand, so a slash still divides.
+    const prefix = afterValue ? '0 ' : '';
+    const code = prefix + text.slice(from);
+    for (const [start, end] of jsNonCode(code, false)) {
+      const delimiter = code[start - 1];
+      if (delimiter && '"\'`/'.includes(delimiter) && code[end] === delimiter) {
+        let after = end + 1;
+        if (delimiter === '/') while (/[a-z]/.test(code[after] ?? '')) after += 1;
+        literals.set(from + start - 1 - prefix.length, from + after - prefix.length);
+      }
+    }
+  };
+  readLiterals(0);
+  let cursor = from;
+  let parens = 1;
+  let braces = 0;
+  let prev: string | null = '(';
+  let arrowInCode = false;
+  let jsxText = false;
+  const elements: Array<{ name: string; resumeText: boolean }> = [];
+  const expressionEnds: number[] = [];
+  while (cursor < text.length) {
+    if (jsxText) {
+      if (text[cursor] === '{') {
+        expressionEnds.push(braces);
+        braces += 1;
+        jsxText = false;
+        prev = '{';
+        cursor += 1;
+        readLiterals(cursor);
+      } else if (text[cursor] === '<') {
+        const close = jsxClosingTag(text, cursor);
+        if (close) {
+          const element = elements.pop();
+          if (!element || close.name !== element.name) return null;
+          cursor = close.end;
+          jsxText = element.resumeText;
+          if (!jsxText) readLiterals(cursor, true);
+          prev = '';
+        } else {
+          const open = jsxTagHeader(text, cursor);
+          if (!open) return null;
+          if (!open.selfClosing) elements.push({ name: open.name, resumeText: true });
+          cursor = open.end;
+        }
+      } else cursor += 1;
+      continue;
+    }
+    const token = jsxHeadToken(text, cursor);
+    if (token.text === '') return null;
+    const start = token.end - token.text.length;
+    cursor = token.end;
+    const literalEnd = literals.get(start);
+    if (literalEnd !== undefined) {
+      cursor = literalEnd;
+      prev = '';
+      continue;
+    }
+    if (token.text === '<') {
+      const close = jsxClosingTag(text, start);
+      if (close) {
+        // A candidate's own unmatched close cannot belong to its parameter list.
+        // Function bodies/concise-arrow values can contain their own JSX instead.
+        if (close.name === candidateName && elements.length === 0 && braces === 0 && !arrowInCode)
+          return null;
+        cursor = close.end;
+        prev = '';
+        continue;
+      }
+      const open = jsxTagHeader(text, start);
+      if (
+        open &&
+        regexMayStart(prev) &&
+        !tsxGenericHead(text.slice(start, start + MAX_PARAMS_CHARS))
+      ) {
+        if (!open.selfClosing) {
+          elements.push({ name: open.name, resumeText: false });
+          jsxText = true;
+        }
+        cursor = open.end;
+        if (open.selfClosing) readLiterals(cursor, true);
+        prev = '';
+        continue;
+      }
+    }
+    if (token.text === '(' && elements.length === 0) parens += 1;
+    else if (token.text === ')' && elements.length === 0) {
+      parens -= 1;
+      if (parens === 0) return cursor;
+    } else if (token.text === '{') braces += 1;
+    else if (token.text === '}') {
+      braces -= 1;
+      if (expressionEnds[expressionEnds.length - 1] === braces) {
+        expressionEnds.pop();
+        jsxText = true;
+      }
+    }
+    if (token.text === '=>' && braces === 0 && elements.length === 0) arrowInCode = true;
+    if ((token.text === '+' || token.text === '-') && text[cursor] === token.text) {
+      cursor += 1;
+      prev = regexMayStart(prev) ? token.text : '';
+    } else if (token.text === '!' && text[cursor] !== '=' && !regexMayStart(prev)) prev = '';
+    else if (token.word) prev = prev === '.' ? '' : token.text;
+    else if (/^[0-9"'`]/.test(token.text)) prev = '';
+    else prev = token.text;
+  }
+  return null;
+}
+
 /** The spans of a JS, TS or Java file that are not code: comments, strings, template literals (their
  *  `${}` expressions too) and regex literals. A string that is a bare name stays: it may be a key. */
-function jsNonCode(text: string, java: boolean, htmlComments = false, module = false): Span[] {
+function jsNonCode(
+  text: string,
+  java: boolean,
+  htmlComments = false,
+  module = false,
+  jsxMode: boolean | 'tsx' = false,
+): Span[] {
   const spans: Span[] = [];
   // The open template literals and `${` expressions, innermost last: -1 is template text, n >= 1
   // the braces open in an expression. Spans are recorded for the outermost template only.
   const frames: number[] = [];
   let templateOpen = 0;
+  const jsx: JsxFrame[] = [];
   let prev: string | null = null;
   let regexMisses = 0;
   let strayTicks = 0;
@@ -499,6 +775,54 @@ function jsNonCode(text: string, java: boolean, htmlComments = false, module = f
     const c = text[i]!;
     const next = text[i + 1];
     const top = frames[frames.length - 1];
+    const markup = jsx[jsx.length - 1];
+    if (top === undefined && markup && markup.mode !== 'expression') {
+      if (c === '{') {
+        markup.resume = markup.mode;
+        markup.mode = 'expression';
+        markup.braces = 1;
+        prev = '{';
+        i += 1;
+      } else if (markup.mode === 'text' && c === '<') {
+        markup.mode = 'tag';
+        markup.closing = next === '/';
+        i += next === '/' ? 2 : 1;
+      } else if (markup.mode === 'tag' && (c === '"' || c === "'")) {
+        const close = text.indexOf(c, i + 1);
+        const end = close < 0 ? text.length : close + 1;
+        spans.push([i, end]);
+        i = end;
+      } else if (markup.mode === 'tag' && c === '>') {
+        if (markup.closing) markup.depth -= 1;
+        else if (text[i - 1] !== '/') markup.depth += 1;
+        i += 1;
+        if (markup.depth === 0) {
+          jsx.pop();
+          prev = '';
+        } else markup.mode = 'text';
+      } else {
+        const from = i++;
+        while (
+          i < text.length &&
+          (markup.mode === 'text' ? text[i] !== '<' && text[i] !== '{' : !/[>{"']/.test(text[i]!))
+        )
+          i += 1;
+        spans.push([from, i]);
+      }
+      continue;
+    }
+    if (
+      jsxMode &&
+      !java &&
+      top === undefined &&
+      c === '<' &&
+      regexMayStart(prev) &&
+      jsxOpeningAt(text, i, jsxMode === 'tsx')
+    ) {
+      jsx.push({ mode: 'tag', depth: 0, closing: false, braces: 0, resume: 'text' });
+      i += 1;
+      continue;
+    }
     if (top === -1) {
       if (c === '\\') i += 2;
       else if (c === '$' && next === '{') {
@@ -578,6 +902,10 @@ function jsNonCode(text: string, java: boolean, htmlComments = false, module = f
       frames.push(-1);
       i += 1;
     } else if (c === '{' || c === '}') {
+      if (top === undefined && markup?.mode === 'expression') {
+        markup.braces += c === '{' ? 1 : -1;
+        if (markup.braces === 0) markup.mode = markup.resume;
+      }
       if (top !== undefined) {
         frames[frames.length - 1] = top + (c === '{' ? 1 : -1);
         if (frames[frames.length - 1] === 0) frames.pop();
@@ -633,18 +961,91 @@ function jsNonCode(text: string, java: boolean, htmlComments = false, module = f
   return spans;
 }
 
+/** Lexical spans for the small brace/indentation readers. Rust raw strings and nested
+ *  comments differ from Go; a Rust lifetime is deliberately not a character literal. */
+function simpleNonCode(text: string, syntax: 'go' | 'rust' | 'python'): Span[] {
+  const spans: Span[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i]!;
+    if ((syntax === 'python' && c === '#') || (syntax !== 'python' && text.startsWith('//', i))) {
+      const end = lineEnd(text, i, true);
+      const to = end < 0 ? text.length : end;
+      spans.push([i + (syntax === 'python' ? 1 : 0), to]);
+      i = to;
+    } else if (syntax !== 'python' && text.startsWith('/*', i)) {
+      const from = i;
+      let depth = 1;
+      i += 2;
+      while (i < text.length && depth > 0) {
+        if (syntax === 'rust' && text.startsWith('/*', i)) {
+          depth += 1;
+          i += 2;
+        } else if (text.startsWith('*/', i)) {
+          depth -= 1;
+          i += 2;
+        } else i += 1;
+      }
+      spans.push([from, i]);
+    } else if (syntax === 'rust' && (c === 'r' || (c === 'b' && text[i + 1] === 'r'))) {
+      const raw = /^(?:b)?r(#{0,255})"/.exec(text.slice(i, i + 260));
+      if (!raw) {
+        i += 1;
+        continue;
+      }
+      const close = text.indexOf('"' + raw[1]!, i + raw[0].length);
+      const end = close < 0 ? text.length : close + 1 + raw[1]!.length;
+      spans.push([i, end]);
+      i = end;
+    } else if (syntax === 'go' && c === '`') {
+      const close = text.indexOf('`', i + 1);
+      const end = close < 0 ? text.length : close + 1;
+      spans.push([i, end]);
+      i = end;
+    } else if (c === '"' || c === "'") {
+      const triple = syntax === 'python' && text.startsWith(c.repeat(3), i);
+      let end: number;
+      if (triple) {
+        end = i + 3;
+        while (end < text.length && !text.startsWith(c.repeat(3), end)) {
+          end += text[end] === '\\' ? 2 : 1;
+        }
+        end = Math.min(text.length, end + 3);
+      } else if (syntax === 'rust' && c === "'") {
+        // One character (or an escape) followed immediately by a quote; otherwise this is 'a.
+        const character =
+          /^'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|[^\r\n])|[^'\\\r\n])'/u.exec(
+            text.slice(i, i + 32),
+          );
+        if (!character) {
+          i += 1;
+          continue;
+        }
+        end = i + character[0].length;
+      } else end = quotedEnd(text, i);
+      spans.push([i, end]);
+      i = end;
+    } else i += 1;
+  }
+  return spans;
+}
+
 /** `content` with the body of every comment and string blanked, so that a pattern or a brace count
  *  cannot match inside one: PHP loses its inline HTML and heredocs too, JS its template and regex
- *  literals. Same length and line ends; the delimiters stay. */
+ *  literals. Same length and line ends. The established PHP/JS modes keep delimiters;
+ *  Go/Rust and Python strings mask delimiters too; JSX text/tag masking is opt-in. */
 export function maskNonCode(
   content: string,
-  syntax: 'php' | 'js' | 'script' | 'module' | 'java',
+  syntax: 'php' | 'js' | 'script' | 'module' | 'java' | 'go' | 'rust' | 'python',
+  jsx: boolean | 'tsx' = false,
 ): string {
   let masked = '';
   let cursor = 0;
   for (const [from, to] of syntax === 'php'
     ? phpNonCode(content)
-    : jsNonCode(content, syntax === 'java', syntax === 'script', syntax === 'module')) {
+    : syntax === 'go' || syntax === 'rust' || syntax === 'python'
+      ? simpleNonCode(content, syntax)
+      : jsNonCode(content, syntax === 'java', syntax === 'script', syntax === 'module', jsx)) {
     masked +=
       content.slice(cursor, from) + content.slice(from, to).replace(/[^\r\n\u2028\u2029]/g, ' ');
     cursor = to;
@@ -719,7 +1120,7 @@ function bodyAfterParams(content: string, open: number, tail: RegExp): number | 
 }
 
 // A docblock attaches to the construct it is directly followed by. '/**/' opens nothing.
-const PHP_FUNCTION_HEAD = String.raw`(\/\*\*(?!\/)(?:(?!\*\/)[\s\S])*\*\/\s*)?(?:(?:public|protected|private|static|abstract|final)\s+)*function\s+&?\s*(\w+)\s*\(`;
+const PHP_FUNCTION_HEAD = String.raw`(\/\*\*(?!\/)(?:(?!\*\/)[\s\S])*\*\/\s*)?(?:(?:public|protected|private|static|abstract|final)\s+)*function\s+&?\s*(${PHP_LABEL})\s*\(`;
 
 function phpRanges(content: string): SectionRange[] {
   const ranges: SectionRange[] = [];
@@ -740,12 +1141,24 @@ function phpRanges(content: string): SectionRange[] {
   // Class extents are NOT emitted as sections of their own — that would
   // duplicate every method inside them. They exist only to name the method that
   // sits within, so a chunk can say which class it belongs to.
-  const classes: Array<{ name: string; start: number; end: number }> = [];
-  const classRe = /class\s+(\w+)[^{;]*\{/gi;
+  const classes: Array<{ name?: string; kind: string; start: number; end: number }> = [];
+  // An anonymous class is an owner boundary too, but contributes no invented name.
+  const classRe = new RegExp(
+    String.raw`\b(class|trait|interface|enum)\b(?:\s+(${PHP_LABEL}))?[^{};]*\{`,
+    'gi',
+  );
   let match: RegExpExecArray | null;
   while ((match = classRe.exec(code)) !== null) {
     const end = blockEndFromMatch(code, match);
-    if (end !== null) classes.push({ name: match[1]!, start: match.index, end });
+    if (end !== null) {
+      const name = match[2];
+      classes.push({
+        name: name && !/^(?:extends|implements)$/i.test(name) ? name : undefined,
+        kind: match[1]!.toLowerCase(),
+        start: match.index,
+        end,
+      });
+    }
   }
 
   // Functions (standalone and methods)
@@ -753,24 +1166,39 @@ function phpRanges(content: string): SectionRange[] {
   const funcRe = new RegExp(PHP_FUNCTION_HEAD, 'gi');
   while ((match = funcRe.exec(code)) !== null) {
     const brace = bodyAfterParams(code, match.index + match[0].length - 1, BLOCK_TAIL);
-    const end = brace === null ? null : braceBlockEnd(code, brace);
+    // Interface methods have signatures ending at ';', without a body.
+    const close = parenEnd(code, match.index + match[0].length - 1);
+    const declaration = close === null ? null : new RegExp(String.raw`\s*${RETURN_TYPE}\s*;`, 'y');
+    if (declaration && close !== null) declaration.lastIndex = close;
+    const signature = declaration?.exec(code);
+    const end =
+      brace !== null
+        ? braceBlockEnd(code, brace)
+        : signature && close !== null
+          ? close + signature[0].length
+          : null;
     if (end === null) continue;
     const name = match[2]!;
     // The file docblock stays its own section even when the function follows it directly.
     const start = match.index === fileDoc?.start ? match.index + match[1]!.length : match.index;
-    const owner = classes.find((c) => start > c.start && end <= c.end);
+    const owner = classes
+      .filter((c) => start > c.start && end <= c.end)
+      .sort((a, b) => b.start - a.start)[0];
+    if (brace === null && owner?.kind !== 'interface') continue;
     ranges.push({
-      sectionId: owner ? `method-${owner.name}-${name}` : `function-${name}`,
+      sectionId: owner?.name ? `method-${owner.name}-${name}` : `function-${name}`,
       start,
       end,
-      breadcrumb: owner ? [`class ${owner.name}`, `function ${name}`] : [`function ${name}`],
+      breadcrumb: owner?.name
+        ? [`${owner.kind} ${owner.name}`, `function ${name}`]
+        : [`function ${name}`],
     });
   }
 
   return ranges;
 }
 
-const JS_NAME = String.raw`[A-Za-z_$][\w$]*`;
+const JS_NAME = String.raw`[$_\p{ID_Start}][$\u200C\u200D\p{ID_Continue}]*`;
 const JS_GENERICS = String.raw`(?:<[^(){};]*>\s*)?`;
 const JS_MEMBER_START = String.raw`(?:^|(?<=[{,;}]))[ \t]*`;
 // A member key: a name, bare or in matching quotes. Any other quoted key ("my-key") is not read.
@@ -844,14 +1272,17 @@ function commentRunStart(content: string, start: number, headerAt: number): numb
   if (end >= 2 && content.startsWith('*/', end - 2)) {
     const open = content.lastIndexOf('/*', end - 2);
     if (open >= 0 && content.indexOf('*/', open + 2) === end - 2) {
-      const before = content.slice(content.lastIndexOf('\n', open - 1) + 1, open);
+      const before = content.slice(lineStartAt(content, open), open);
       if (before.trim() === '') runStart = open;
     }
   } else if (end > 0) {
-    let lineAt = content.lastIndexOf('\n', end - 1) + 1;
+    let lineAt = lineStartAt(content, end);
     runStart = lineCommentAt(content, lineAt);
     while (runStart >= 0 && lineAt >= 2) {
-      const prevAt = content.lastIndexOf('\n', lineAt - 2) + 1;
+      const prevAt = lineStartAt(
+        content,
+        lineAt - (content[lineAt - 2] === '\r' && content[lineAt - 1] === '\n' ? 2 : 1),
+      );
       const prev = lineCommentAt(content, prevAt);
       if (prev < 0) break;
       runStart = prev;
@@ -865,9 +1296,10 @@ function jsRanges(
   content: string,
   members: boolean,
   flavour: 'js' | 'script' | 'module' = 'js',
+  jsx: boolean | 'tsx' = members,
 ): SectionRange[] {
   const ranges: SectionRange[] = [];
-  const code = maskNonCode(content, members ? flavour : 'java');
+  const code = maskNonCode(content, members ? flavour : 'java', jsx);
   let match: RegExpExecArray | null;
   const headerAt = content.search(/\S/);
   // Java shares this reader but is read as before: no members, no comment join.
@@ -876,7 +1308,10 @@ function jsRanges(
 
   // Classes. Their extents also name the class a member sits in.
   const classes: Array<{ name: string; start: number; end: number }> = [];
-  const classRe = /class\s+(\w+)(?:\s+extends\s+\w+)?\s*\{/g;
+  const classRe = new RegExp(
+    String.raw`\bclass\s+(${JS_NAME})(?:\s+extends\s+${JS_NAME})?\s*\{`,
+    'gu',
+  );
   while ((match = classRe.exec(code)) !== null) {
     const end = blockEndFromMatch(code, match);
     if (end !== null) {
@@ -893,7 +1328,7 @@ function jsRanges(
 
   for (const { source, arrow, member } of JS_FORMS) {
     if (member && !members) continue;
-    const formRe = new RegExp(source, 'gm');
+    const formRe = new RegExp(source, 'gmu');
     while ((match = formRe.exec(code)) !== null) {
       const name = match[1]!;
       if (JS_CONTROL_NAMES.has(name)) continue;
@@ -925,66 +1360,635 @@ function jsRanges(
 const RUBY_END = /^end\b/;
 const RUBY_CLAUSE = /^(?:rescue|ensure|else)\b/;
 
-function pythonRanges(content: string, ruby = false): SectionRange[] {
+function pythonRanges(content: string): SectionRange[] {
   const ranges: SectionRange[] = [];
-  const lines = content.split('\n');
-
-  // Offset of each line start, so the line-based scan can report file offsets.
-  const offsets: number[] = [];
-  let acc = 0;
-  for (const line of lines) {
-    offsets.push(acc);
-    acc += line.length + 1;
-  }
-
-  const defRe = /^(\s*)(def|class)\s+(\w+)/;
+  const { lines: codeLines, offsets } = sourceLines(maskNonCode(content, 'python'));
+  const defRe = /^([ \t]*)(?:async[ \t]+)?(def|class)[ \t]+(\w+)/;
   let i = 0;
-  while (i < lines.length) {
-    const m = defRe.exec(lines[i]!);
-    if (m) {
-      const indent = m[1]!.length;
-      const kind = m[2] === 'class' ? 'class' : 'function';
-      const name = m[3]!;
-      const startLine = i;
+  while (i < codeLines.length) {
+    const m = defRe.exec(codeLines[i]!);
+    if (!m) {
       i += 1;
-      // Collect lines with greater indentation (body)
-      while (i < lines.length) {
-        const line = lines[i]!;
-        if (line.trim() === '') {
-          i += 1;
-          continue;
-        }
-        const lineIndent = line.length - line.trimStart().length;
-        // A Ruby method's own rescue, else and ensure stand at the indentation of its `def`.
-        const clause = ruby && lineIndent === indent && RUBY_CLAUSE.test(line.trim());
-        if (lineIndent <= indent && !clause) break;
-        i += 1;
-      }
-      // A Ruby definition owns its `end` line.
-      const next = lines[i];
-      if (ruby && next !== undefined && RUBY_END.test(next.trim())) {
-        if (next.length - next.trimStart().length === indent) i += 1;
-      }
-      ranges.push({
-        sectionId: `${kind}-${name}`,
-        start: offsets[startLine]!,
-        end: i < lines.length ? offsets[i]! : content.length,
-        breadcrumb: [`${kind} ${name}`],
-      });
-    } else {
+      continue;
+    }
+    const indent = m[1]!.length;
+    const kind = m[2] === 'class' ? 'class' : 'function';
+    const name = m[3]!;
+    const startLine = i++;
+    while (i < codeLines.length) {
+      const line = codeLines[i]!;
+      if (line.trim() !== '' && line.length - line.trimStart().length <= indent) break;
       i += 1;
     }
+    ranges.push({
+      sectionId: `${kind}-${name}`,
+      start: offsets[startLine]!,
+      end: offsets[i] ?? content.length,
+      breadcrumb: [`${kind} ${name}`],
+    });
   }
+  return ranges;
+}
 
+/** Ruby names allow extended bytes and optional method punctuation. */
+const RUBY_NAME_START = /[A-Za-z_\u0080-\uFFFF]/;
+const RUBY_NAME_CHAR = /[\w\u0080-\uFFFF]/;
+const RUBY_PREFIX_OPERATORS = new Set(['not', 'and', 'or', 'defined?']);
+
+interface RubyCodeState {
+  depth: number;
+  continues: boolean;
+  operandExpected: boolean;
+  nameContext: 'bare' | 'receiver' | 'constant' | 'value';
+  commandName: boolean;
+  parameterBinding: boolean;
+}
+
+function rubyCodeState(parameters = false): RubyCodeState {
+  return {
+    depth: 0,
+    continues: false,
+    operandExpected: true,
+    nameContext: 'bare',
+    commandName: false,
+    parameterBinding: parameters,
+  };
+}
+
+function rubyValue(state: RubyCodeState): void {
+  state.continues = false;
+  state.operandExpected = false;
+  state.nameContext = 'bare';
+  state.commandName = false;
+}
+
+function rubyCommandArgument(content: string, at: number, state: RubyCodeState): boolean {
+  return (
+    state.commandName &&
+    /[ \t]/.test(content[at - 1] ?? '') &&
+    !/[=\s]/.test(content[at + 1] ?? ' ')
+  );
+}
+
+/** One code token, shared by endless expressions and code inside literal interpolation.
+ *  The caller handles literals before their punctuation can reach this depth counter. */
+function rubyCodeToken(
+  content: string,
+  at: number,
+  state: RubyCodeState,
+  locals: Set<string>,
+  parameters = false,
+): number {
+  const c = content[at]!;
+  if (c === '?' && state.operandExpected && content[at + 1] && !/\s/.test(content[at + 1]!)) {
+    let end = at + 1;
+    for (
+      let prefix = /^\\(?:[CM]-|c)/.exec(content.slice(end));
+      prefix;
+      prefix = /^\\(?:[CM]-|c)/.exec(content.slice(end))
+    )
+      end += prefix[0].length;
+    if (content[end] === '\\') end += 1;
+    rubyValue(state);
+    return end + codePointAt(content, end).length;
+  }
+  if (RUBY_NAME_START.test(c)) {
+    let end = at + 1;
+    while (end < content.length && RUBY_NAME_CHAR.test(content[end]!)) end += 1;
+    const suffix = content[end];
+    if (suffix === '?' || (suffix === '!' && !['=', '~'].includes(content[end + 1] ?? '')))
+      end += 1;
+    const word = content.slice(at, end);
+    state.continues = state.nameContext === 'bare' && RUBY_PREFIX_OPERATORS.has(word);
+    if (state.parameterBinding) locals.add(word);
+    if (
+      state.nameContext === 'bare' &&
+      /^[ \t]*(?:=(?!=|~|>)|(?:[-+*/%&|^]|<<|>>|\*\*|&&|\|\|)=)/.test(content.slice(end))
+    )
+      locals.add(word);
+    state.commandName =
+      !state.continues &&
+      (state.nameContext === 'receiver' ||
+        (state.nameContext !== 'value' &&
+          !/[0-9]/.test(content[at - 1] ?? '') &&
+          !/^\p{Lu}/u.test(word) &&
+          (state.nameContext === 'constant' || !locals.has(word)) &&
+          !/^(?:true|false|nil|self|__FILE__|__LINE__|__ENCODING__|_[1-9])$/.test(word)));
+    state.operandExpected = state.continues;
+    state.nameContext = 'bare';
+    return end;
+  }
+  if (c === '#') {
+    const end = lineEnd(content, at, true);
+    return end < 0 ? content.length : end;
+  }
+  if ('([{'.includes(c)) {
+    state.depth += 1;
+    rubyValue(state);
+    state.operandExpected = true;
+  } else if (')]}'.includes(c)) {
+    state.depth = Math.max(0, state.depth - 1);
+    rubyValue(state);
+  } else if (c === '.' || c === ':' || c === '@' || c === '$') {
+    state.nameContext =
+      c === '.'
+        ? 'receiver'
+        : c === ':' && (content[at - 1] === ':' || content[at + 1] === ':')
+          ? 'constant'
+          : 'value';
+    if (parameters && state.depth === 0 && c === ':') state.parameterBinding = false;
+    state.commandName = false;
+    state.continues = c === '.' || c === ':';
+    state.operandExpected = c !== '.';
+  } else if (!/\s/.test(c)) {
+    if (parameters && state.depth === 0) {
+      if (c === ',' || c === ';') state.parameterBinding = true;
+      else if (c === '=') state.parameterBinding = false;
+    }
+    state.continues = /[-+*/%&|^,?=<>!~\\]/.test(c);
+    state.operandExpected = state.continues;
+    state.nameContext = 'bare';
+    state.commandName = false;
+  }
+  return at + 1;
+}
+
+interface RubyLiteralFrame {
+  mode: 'literal';
+  open: string;
+  close: string;
+  paired: boolean;
+  interpolates: boolean;
+  regexp: boolean;
+  options: boolean;
+  depth: number;
+  inClass: boolean;
+  body: number;
+  locals: Set<string>;
+}
+
+function rubyPercentAt(content: string, at: number, locals: Set<string>): RubyLiteralFrame | null {
+  let open = at + 1;
+  const type = /[qQwWiIrxs]/.test(content[open] ?? '') ? content[open++]! : '';
+  const delimiter = content[open];
+  if (!delimiter || /[A-Za-z0-9\u0080-\uFFFF]/.test(delimiter) || (!type && /\s/.test(delimiter)))
+    return null;
+  const close =
+    ({ '(': ')', '[': ']', '{': '}', '<': '>' } as Record<string, string>)[delimiter] ?? delimiter;
+  return {
+    mode: 'literal',
+    open: delimiter,
+    close,
+    paired: close !== delimiter,
+    interpolates: !['q', 'w', 'i', 's'].includes(type),
+    regexp: false,
+    options: type === 'r',
+    depth: 1,
+    inClass: false,
+    body: open + 1,
+    locals,
+  };
+}
+
+interface RubyBlockScope {
+  close: '}' | 'end' | 'statement';
+  depth: number;
+  locals: Set<string>;
+  awaitingParameters: boolean;
+  method?: {
+    header: 'name' | 'receiver-name' | 'signature' | 'signature-done' | 'body';
+    receiverLocals: Set<string>;
+    endingBase: number;
+  };
+}
+interface RubyCodeFrame {
+  mode: 'code';
+  end: '}' | ')' | '|' | 'lambda-body' | 'method-body' | 'expression';
+  state: RubyCodeState;
+  locals: Set<string>;
+  scopes: RubyBlockScope[];
+  endings: Array<{
+    kind: 'block' | 'loop' | 'keyword' | 'method';
+    depth: number;
+    scope?: RubyBlockScope;
+    header?: boolean;
+  }>;
+  lambda?: { depth: number; locals: Set<string>; headerRead: boolean };
+  parameters: boolean;
+  statementStart: boolean;
+  argumentlessControl: boolean;
+}
+function rubyCodeFrame(
+  locals: Set<string>,
+  end: RubyCodeFrame['end'] = '}',
+  parameters = end !== '}' && end !== 'expression',
+): RubyCodeFrame {
+  return {
+    mode: 'code',
+    end,
+    state: rubyCodeState(parameters),
+    locals,
+    scopes: [],
+    endings: [],
+    parameters,
+    statementStart: true,
+    argumentlessControl: false,
+  };
+}
+function rubyFrameLocals(frame: RubyCodeFrame): Set<string> {
+  return frame.scopes[frame.scopes.length - 1]?.locals ?? frame.locals;
+}
+function rubyCodeStart(frame: RubyCodeFrame): void {
+  frame.state = { ...rubyCodeState(), depth: frame.state.depth };
+  frame.statementStart = true;
+  frame.argumentlessControl = false;
+}
+
+/** One advancing Ruby walk for endless expressions, literals and interpolation.
+ *  Closures capture local names; method frames start with their own binding set. */
+function rubyExpressionEnd(
+  content: string,
+  at: number,
+  locals: Set<string>,
+  parameters = false,
+): number {
+  const frames: Array<RubyLiteralFrame | RubyCodeFrame> = [
+    rubyCodeFrame(locals, 'expression', parameters),
+  ];
+  let cursor = at;
+  while (cursor < content.length) {
+    const frame = frames[frames.length - 1]!;
+    const c = content[cursor]!;
+    if (frame.mode === 'literal') {
+      if (c === '\\') cursor = Math.min(content.length, cursor + 2);
+      else if (frame.interpolates && content.startsWith('#{', cursor)) {
+        frames.push(rubyCodeFrame(frame.locals));
+        cursor += 2;
+      } else {
+        if (frame.regexp && c === '[') frame.inClass = true;
+        else if (frame.regexp && c === ']') frame.inClass = false;
+        if (frame.paired && c === frame.open) frame.depth += 1;
+        else if (c === frame.close && !frame.inClass && --frame.depth === 0) {
+          cursor += 1;
+          if (frame.options) while (/[imoxnesu]/.test(content[cursor] ?? '')) cursor += 1;
+          frames.pop();
+          if (!frames.length) return cursor;
+          const parent = frames[frames.length - 1]!;
+          if (parent.mode === 'code') rubyValue(parent.state);
+          continue;
+        }
+        cursor += 1;
+      }
+      continue;
+    }
+    const wordAt = RUBY_NAME_START.test(c)
+      ? /^[\w\u0080-\uFFFF]+[!?]?/.exec(content.slice(cursor))?.[0]
+      : undefined;
+    let activeScope = frame.scopes[frame.scopes.length - 1];
+    const statementBoundary =
+      isLineTerminator(c, true) ||
+      ';)]}'.includes(c) ||
+      (wordAt === 'end' && frame.state.nameContext === 'bare');
+    while (
+      activeScope?.close === 'statement' &&
+      activeScope.depth === frame.state.depth &&
+      !frame.state.continues &&
+      frame.endings.length === activeScope.method!.endingBase &&
+      statementBoundary
+    ) {
+      frame.scopes.pop();
+      activeScope = frame.scopes[frame.scopes.length - 1];
+    }
+    if (
+      frame.end === 'expression' &&
+      frame.state.depth === 0 &&
+      !frame.state.continues &&
+      frame.endings.length === 0 &&
+      !frame.lambda &&
+      isLineTerminator(c, true)
+    )
+      return cursor + (c === '\r' && content[cursor + 1] === '\n' ? 2 : 1);
+    const methodBody =
+      frame.end === 'method-body' &&
+      frame.state.depth === 0 &&
+      (c === ';' || (isLineTerminator(c, true) && !frame.state.continues));
+    const lambdaBody =
+      frame.end === 'lambda-body' &&
+      frame.state.depth === 0 &&
+      !frame.state.operandExpected &&
+      (c === '{' || wordAt === 'do');
+    if ((frame.state.depth === 0 && c === frame.end) || lambdaBody || methodBody) {
+      frames.pop();
+      if (!lambdaBody && !methodBody) cursor += 1;
+      const parent = frames[frames.length - 1]!;
+      if (parent.mode === 'code' && frame.parameters) {
+        parent.state.operandExpected = true;
+        parent.state.continues = false;
+        parent.state.commandName = false;
+      }
+      continue;
+    }
+    const trivia = /\s/.test(c) || c === '#';
+    // Optional control arguments may end before a postfix modifier. A real operand
+    // (including a parenthesis/begin) or a hard newline ends that possibility.
+    const controlModifier =
+      frame.argumentlessControl &&
+      frame.state.nameContext === 'bare' &&
+      /^(?:if|unless|while|until)$/.test(wordAt ?? '');
+    if (
+      (isLineTerminator(c, true) && !frame.state.continues) ||
+      (!trivia && !(c === '\\' && isLineTerminator(content[cursor + 1] ?? '', true)))
+    )
+      frame.argumentlessControl = false;
+    const scope = frame.scopes[frame.scopes.length - 1];
+    const method = scope?.method;
+    if (scope && method && method.header !== 'body') {
+      if ((method.header === 'name' || method.header === 'receiver-name') && !trivia) {
+        if (method.header === 'name' && c === '(') {
+          method.header = 'receiver-name';
+          frames.push(rubyCodeFrame(method.receiverLocals, ')', false));
+          cursor += 1;
+          continue;
+        }
+        if (method.header === 'receiver-name' && c === '.') {
+          cursor += 1;
+          continue;
+        }
+        const head =
+          /^(?:(?:self|[A-Za-z_\u0080-\uFFFF][\w\u0080-\uFFFF]*)[ \t]*(?:\.|::)[ \t]*)*(?:[A-Za-z_\u0080-\uFFFF][\w\u0080-\uFFFF]*[!?=]?|\[\]=?|<=>|===|==|!=|=~|!~|<=|>=|<<|>>|\*\*|[+\-*/%&|^~<>!]@?)/.exec(
+            content.slice(cursor, cursor + MAX_PARAMS_CHARS),
+          );
+        method.header = 'signature';
+        if (head) {
+          cursor += head[0].length;
+          rubyCodeStart(frame);
+          continue;
+        }
+      } else if (method.header === 'signature' || method.header === 'signature-done') {
+        if (isLineTerminator(c, true) || c === ';') method.header = 'body';
+        else if (!trivia) {
+          if (c === '(' && method.header === 'signature') {
+            method.header = 'signature-done';
+            frames.push(rubyCodeFrame(scope.locals, ')'));
+            cursor += 1;
+            continue;
+          }
+          const parenthesized = method.header === 'signature-done';
+          method.header = 'body';
+          if (c === '=' && !['=', '>'].includes(content[cursor + 1] ?? '')) {
+            scope.close = 'statement';
+            const ending = frame.endings.findIndex((ending) => ending.scope === scope);
+            if (ending >= 0) frame.endings.splice(ending, 1);
+            method.endingBase = frame.endings.length;
+            cursor += 1;
+            rubyCodeStart(frame);
+            frame.state.continues = true;
+            continue;
+          }
+          if (!parenthesized && c !== ';' && c !== '{' && wordAt !== 'end') {
+            frames.push(rubyCodeFrame(scope.locals, 'method-body'));
+            continue;
+          }
+        }
+      }
+    }
+    if (scope?.awaitingParameters && !trivia) {
+      scope.awaitingParameters = false;
+      if (c === '|') {
+        cursor += 1;
+        if (content[cursor] === '|') {
+          cursor += 1;
+          rubyCodeStart(frame);
+        } else frames.push(rubyCodeFrame(scope.locals, '|'));
+        continue;
+      }
+    }
+    if (frame.lambda && !frame.lambda.headerRead && !trivia) {
+      frame.lambda.headerRead = true;
+      if (c === '(') {
+        frames.push(rubyCodeFrame(frame.lambda.locals, ')'));
+        cursor += 1;
+        continue;
+      }
+      if (c !== '{' && wordAt !== 'do') {
+        frames.push(rubyCodeFrame(frame.lambda.locals, 'lambda-body'));
+        continue;
+      }
+    }
+    if (content.startsWith('->', cursor)) {
+      frame.lambda = {
+        depth: frame.state.depth,
+        locals: new Set(rubyFrameLocals(frame)),
+        headerRead: false,
+      };
+      cursor += 2;
+      frame.state.operandExpected = true;
+      frame.state.continues = true;
+      frame.state.commandName = false;
+      frame.statementStart = false;
+      continue;
+    }
+    const currentLocals = rubyFrameLocals(frame);
+    const valueExpected =
+      frame.state.operandExpected || rubyCommandArgument(content, cursor, frame.state);
+    const percent =
+      c === '%' && valueExpected ? rubyPercentAt(content, cursor, currentLocals) : null;
+    const regexp = c === '/' && valueExpected && regexClose(content, cursor, true, true) >= 0;
+    if (percent || c === "'" || c === '"' || c === '`' || regexp) {
+      const literal: RubyLiteralFrame = percent ?? {
+        mode: 'literal',
+        open: c,
+        close: c,
+        paired: false,
+        interpolates: c !== "'",
+        regexp,
+        options: regexp,
+        depth: 1,
+        inClass: false,
+        body: cursor + 1,
+        locals: currentLocals,
+      };
+      frames.push(literal);
+      cursor = literal.body;
+      frame.statementStart = false;
+      continue;
+    }
+    const pending = frame.lambda?.depth === frame.state.depth ? frame.lambda : undefined;
+    if (c === '{' && (pending || !frame.state.operandExpected)) {
+      frame.scopes.push({
+        close: '}',
+        depth: frame.state.depth + 1,
+        locals: pending?.locals ?? new Set(currentLocals),
+        awaitingParameters: !pending,
+      });
+      if (pending) frame.lambda = undefined;
+    }
+    const previousDepth = frame.state.depth;
+    const previousOperand = frame.state.operandExpected;
+    const previousContext = frame.state.nameContext;
+    const statementStart = frame.statementStart;
+    cursor = rubyCodeToken(content, cursor, frame.state, rubyFrameLocals(frame), frame.parameters);
+    if (c === '}' && scope?.close === '}' && scope.depth === previousDepth) frame.scopes.pop();
+    const label = content[cursor] === ':' && content[cursor + 1] !== ':';
+    if (wordAt && previousContext === 'bare' && !label) {
+      const top = frame.endings[frame.endings.length - 1];
+      if (wordAt === 'do') {
+        if (top?.kind === 'loop' && top.header && top.depth === previousDepth) top.header = false;
+        else {
+          const block: RubyBlockScope = {
+            close: 'end',
+            depth: previousDepth,
+            locals: pending?.locals ?? new Set(rubyFrameLocals(frame)),
+            awaitingParameters: !pending,
+          };
+          frame.scopes.push(block);
+          frame.endings.push({ kind: 'block', depth: previousDepth, scope: block });
+          if (pending) frame.lambda = undefined;
+        }
+        rubyCodeStart(frame);
+      } else if (wordAt === 'end') {
+        const ending = frame.endings.pop();
+        if (ending?.scope) frame.scopes.splice(frame.scopes.indexOf(ending.scope), 1);
+        rubyValue(frame.state);
+      } else if (/^(?:if|unless|while|until)$/.test(wordAt)) {
+        if (!controlModifier && (previousOperand || statementStart))
+          frame.endings.push({
+            kind: /^(?:while|until)$/.test(wordAt) ? 'loop' : 'keyword',
+            depth: previousDepth,
+            header: true,
+          });
+        frame.state.operandExpected = true;
+        frame.state.continues = true;
+        frame.state.commandName = false;
+      } else if (wordAt === 'def') {
+        const method: RubyBlockScope = {
+          close: 'end',
+          depth: previousDepth,
+          locals: new Set(),
+          awaitingParameters: false,
+          method: {
+            header: 'name',
+            endingBase: frame.endings.length,
+            receiverLocals: rubyFrameLocals(frame),
+          },
+        };
+        frame.scopes.push(method);
+        frame.endings.push({ kind: 'method', depth: previousDepth, scope: method, header: true });
+        rubyCodeStart(frame);
+      } else if (/^(?:case|begin|for|class|module)$/.test(wordAt)) {
+        frame.endings.push({
+          kind: wordAt === 'for' ? 'loop' : 'keyword',
+          depth: previousDepth,
+          header: true,
+        });
+        rubyCodeStart(frame);
+      } else if (/^(?:return|break|next|yield|redo|retry)$/.test(wordAt)) {
+        rubyCodeStart(frame);
+        frame.argumentlessControl = true;
+        frame.statementStart = false;
+      } else if (/^(?:then|else|elsif|when|rescue|ensure|in)$/.test(wordAt)) rubyCodeStart(frame);
+    }
+    if (isLineTerminator(c, true) && !frame.state.continues) {
+      const top = frame.endings[frame.endings.length - 1];
+      if (top?.header && top.depth === frame.state.depth) top.header = false;
+      const statementDepth = frame.scopes[frame.scopes.length - 1]?.depth ?? 0;
+      if (!frame.parameters && frame.state.depth === statementDepth) rubyCodeStart(frame);
+    } else if (c === ';' && !frame.parameters) rubyCodeStart(frame);
+    else if (
+      !trivia &&
+      !/^(?:do|begin|then|else|elsif|when|rescue|ensure|in|return|break|next|yield)$/.test(
+        wordAt ?? '',
+      )
+    )
+      frame.statementStart = false;
+  }
+  return content.length;
+}
+
+/** Ruby's module is ancestry, while classes keep their established whole-class section.
+ *  Indentation bounds these heuristic ranges; an endless def has no closing end of its own. */
+function rubyRanges(content: string): SectionRange[] {
+  const ranges: SectionRange[] = [];
+  const { lines, offsets } = sourceLines(content);
+  const modules: Array<{ indent: number; name: string }> = [];
+  for (let i = 0; i < lines.length;) {
+    const line = lines[i]!;
+    const indent = line.length - line.trimStart().length;
+    if (
+      RUBY_END.test(line.trim()) &&
+      modules.length &&
+      indent <= modules[modules.length - 1]!.indent
+    ) {
+      modules.pop();
+      i += 1;
+      continue;
+    }
+    const module = /^[ \t]*module[ \t]+([\w:]+)/.exec(line);
+    if (module) {
+      modules.push({ indent, name: module[1]! });
+      i += 1;
+      continue;
+    }
+    const m = /^[ \t]*(def|class)[ \t]+((?:self\.)?\w+[!?=]?)/.exec(line);
+    if (!m) {
+      i += 1;
+      continue;
+    }
+    const kind = m[1] === 'class' ? 'class' : 'function';
+    const name = m[2]!;
+    const tail = line.slice(m[0].length).trimStart();
+    const close = tail.startsWith('(') ? parenEnd(tail, 0) : 0;
+    const endless = kind === 'function' && close !== null && /^\s*=(?!=|>)/.test(tail.slice(close));
+    const startLine = i++;
+    if (endless) {
+      const expressionStart =
+        offsets[startLine]! +
+        line.length -
+        tail.length +
+        close! +
+        tail.slice(close!).indexOf('=') +
+        1;
+      const parameters = tail.startsWith('(') ? tail.slice(1, close! - 1) : '';
+      const locals = new Set<string>();
+      rubyExpressionEnd(parameters, 0, locals, true);
+      const end = rubyExpressionEnd(content, expressionStart, locals);
+      while (i < lines.length && offsets[i]! < end) i += 1;
+    }
+    while (!endless && i < lines.length) {
+      const body = lines[i]!;
+      if (!body.trim()) {
+        i += 1;
+        continue;
+      }
+      const bodyIndent = body.length - body.trimStart().length;
+      const clause = !endless && bodyIndent === indent && RUBY_CLAUSE.test(body.trim());
+      if (bodyIndent <= indent && !clause) break;
+      i += 1;
+    }
+    if (
+      !endless &&
+      lines[i] !== undefined &&
+      RUBY_END.test(lines[i]!.trim()) &&
+      lines[i]!.length - lines[i]!.trimStart().length === indent
+    )
+      i += 1;
+    ranges.push({
+      sectionId: `${kind}-${name}`,
+      start: offsets[startLine]!,
+      end: offsets[i] ?? content.length,
+      breadcrumb: [...modules.map((owner) => `module ${owner.name}`), `${kind} ${name}`],
+    });
+  }
   return ranges;
 }
 
 function goRanges(content: string): SectionRange[] {
+  const code = maskNonCode(content, 'go');
   const ranges: SectionRange[] = [];
   const funcRe = /func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\([^)]*\)[^{]*\{/g;
   let match: RegExpExecArray | null;
-  while ((match = funcRe.exec(content)) !== null) {
-    const end = blockEndFromMatch(content, match);
+  while ((match = funcRe.exec(code)) !== null) {
+    const end = blockEndFromMatch(code, match);
     if (end !== null) {
       ranges.push({
         sectionId: `function-${match[1]!}`,
@@ -998,12 +2002,13 @@ function goRanges(content: string): SectionRange[] {
 }
 
 function rustRanges(content: string): SectionRange[] {
+  const code = maskNonCode(content, 'rust');
   const ranges: SectionRange[] = [];
   let match: RegExpExecArray | null;
 
   const fnRe = /(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*(?:<[^>]*>)?\s*\([^)]*\)[^{]*\{/g;
-  while ((match = fnRe.exec(content)) !== null) {
-    const end = blockEndFromMatch(content, match);
+  while ((match = fnRe.exec(code)) !== null) {
+    const end = blockEndFromMatch(code, match);
     if (end !== null) {
       ranges.push({
         sectionId: `function-${match[1]!}`,
@@ -1015,8 +2020,8 @@ function rustRanges(content: string): SectionRange[] {
   }
 
   const implRe = /impl\s+(?:<[^>]*>\s+)?(\w+)(?:\s+for\s+\w+)?\s*\{/g;
-  while ((match = implRe.exec(content)) !== null) {
-    const end = blockEndFromMatch(content, match);
+  while ((match = implRe.exec(code)) !== null) {
+    const end = blockEndFromMatch(code, match);
     if (end !== null) {
       ranges.push({
         sectionId: `impl-${match[1]!}`,
@@ -1067,7 +2072,9 @@ export function assembleSections(content: string, ranges: SectionRange[]): RagSe
       return to;
     }
     const previous = slices[slices.length - 1];
-    const continuesLine = content[from - 1] !== '\n' && !/^\s*\n/.test(text);
+    const continuesLine =
+      !isLineTerminator(content[from - 1] ?? '', false) &&
+      !/^[ \t]*(?:\r\n|[\r\n\u2028\u2029])/.test(text);
     if (previous && (!hasNext || continuesLine || !/[\p{L}\p{N}_]/u.test(text))) {
       previous.to = from + text.trimEnd().length;
       return to;
@@ -1118,17 +2125,19 @@ export function extractCodeSections(content: string, filePath: string): RagSecti
     case 'java':
       // Java shares this reader, but its constructors and synchronized blocks are not object members.
       // .js/.cjs are scripts (Annex B `<!--` comments); .mjs is a module (top-level await).
+      // Vue/Svelte keep their existing script reader: the whole file is not JSX.
       ranges = jsRanges(
         content,
         lang !== 'java',
         ext === '.js' || ext === '.cjs' ? 'script' : ext === '.mjs' ? 'module' : 'js',
+        ext === '.tsx' ? 'tsx' : JSX_EXTENSIONS.has(ext),
       );
       break;
     case 'python':
       ranges = pythonRanges(content);
       break;
     case 'ruby':
-      ranges = pythonRanges(content, true);
+      ranges = rubyRanges(content);
       break;
     case 'go':
       ranges = goRanges(content);
@@ -1183,6 +2192,25 @@ export function chunkSection(section: RagSection, opts: ChunkOptions = {}): RagC
   }
 
   const chunks: RagChunk[] = [];
+  const lineBreaks: Span[] = [];
+  const paragraphBreaks: Span[] = [];
+  let previous: Span | undefined;
+  for (const match of trimmed.matchAll(/\r\n|[\r\n\u2028\u2029]/g)) {
+    const span: Span = [match.index, match.index + match[0].length];
+    lineBreaks.push(span);
+    if (previous?.[1] === span[0]) paragraphBreaks.push([previous[0], span[1]]);
+    previous = span;
+  }
+  const lastBreak = (breaks: Span[], limit: number): Span | undefined => {
+    let lo = 0;
+    let hi = breaks.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (breaks[mid]![0] <= limit) lo = mid + 1;
+      else hi = mid;
+    }
+    return breaks[lo - 1];
+  };
   let start = 0;
   let idx = 0;
   while (start < trimmed.length) {
@@ -1190,21 +2218,16 @@ export function chunkSection(section: RagSection, opts: ChunkOptions = {}): RagC
     let splitAt = end;
     // Prefer splitting at paragraph break
     if (end < trimmed.length) {
-      const paraBreak = trimmed.lastIndexOf('\n\n', end);
-      if (paraBreak > start + maxSize / 2) {
-        splitAt = paraBreak + 2;
-      } else {
-        const lineBreak = trimmed.lastIndexOf('\n', end);
-        if (lineBreak > start + maxSize / 2) {
-          splitAt = lineBreak + 1;
-        } else {
-          // Try sentence break
-          const sentBreak = trimmed.lastIndexOf('. ', end);
-          if (sentBreak > start + maxSize / 2) {
-            splitAt = sentBreak + 2;
-          }
-        }
+      const paragraph = lastBreak(paragraphBreaks, end);
+      const line = lastBreak(lineBreaks, end);
+      if (paragraph && paragraph[0] > start + maxSize / 2) splitAt = paragraph[1];
+      else if (line && line[0] > start + maxSize / 2) splitAt = line[1];
+      else {
+        const sentBreak = trimmed.lastIndexOf('. ', end);
+        if (sentBreak > start + maxSize / 2) splitAt = sentBreak + 2;
       }
+      // Never put half of a CRLF on either side of a cut.
+      if (trimmed[splitAt - 1] === '\r' && trimmed[splitAt] === '\n') splitAt -= 1;
     }
 
     chunks.push(emit(trimmed.slice(start, splitAt), idx));
@@ -1216,6 +2239,7 @@ export function chunkSection(section: RagSection, opts: ChunkOptions = {}): RagC
     // dropped the overlap on the first chunk and only avoided looping by luck.
     // Multi-chunk sections are the norm now, so the guard has to actually hold.
     start = Math.max(splitAt - overlap, start + 1);
+    if (trimmed[start - 1] === '\r' && trimmed[start] === '\n') start += 1;
   }
 
   return chunks;

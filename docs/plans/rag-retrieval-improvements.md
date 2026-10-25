@@ -20,8 +20,8 @@ How retrieval works today (resolve by symbol; line numbers drift):
   `_rag-chunkers.ts`: construct regexes per language (`phpRanges`, `jsRanges`, …), then
   `assembleSections` (a span between constructs of 120 trimmed characters or more becomes a
   `chunk-<n>` gap section, and a shorter one that is not blank joins a neighbouring section), then
-  `chunkSection` (2,000 chars, 200 overlap; split at a paragraph break, else at `'. '`, else a hard
-  cut), then `capChunks` (`MAX_CHUNKS_PER_FILE`, 80). Every chunk carries a
+  `chunkSection` (2,000 chars, 200 overlap; split at a paragraph break, else a line end, else at `'. '`,
+  else a hard cut), then `capChunks` (`MAX_CHUNKS_PER_FILE`, 80). Every chunk carries a
   `[path > class > function]` header inside `content`, so the header is embedded and indexed, and
   `chunk_hash` covers header and body.
 - **Embedding.** `qwen3-embedding:4b` (2,560 dims) through the in-stack Ollama. Documents and
@@ -446,6 +446,17 @@ the non-blank characters (main: 0.16%; what remains is 13 small files with no co
 M1, M2 and M4, finds one more JS construct (M3 176 → 175) and changes 3,838 of the 22,035 code chunk
 hashes. A first after store, built before that fix, measured paraphrase hits@20 at 74 of 100, real
 MRR@5 at 0.429 and overall MRR@5 at 0.569; the fix brought them back to 77, 0.452 and 0.582.
+
+Chunker follow-up (T413, 2026-10-25): Go/Rust mask strings and comments before matching or
+counting braces; Python masks triple-quoted bodies before its indentation scan. PHP methods use the
+nearest class/trait/interface/enum owner without inventing names for anonymous owners. PHP
+labels retain the byte >= 0x80 rule while JS names use Unicode ID_Start/ID_Continue. JSX text and
+attribute text are separate from expressions, so prose punctuation cannot mask later code. CR and
+CRLF retain their original bytes in code and Markdown sections and at chunk cuts. Ruby singleton
+names and module ancestry are retained; an endless definition has no `end` of its own. Ruby remains
+an indentation heuristic, and class bodies keep their existing whole-class sections. These corrections
+intentionally change affected section ids, breadcrumbs or bodies (and therefore chunk hashes); no
+new retrieval/store measurements or provider runs were made for this follow-up.
 
 ### P2. Query-side experiments (no reindex)
 
