@@ -187,7 +187,7 @@ describe('git-push helpers', () => {
       );
     } finally {
       await rm(work, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -213,7 +213,7 @@ describe('git-push helpers', () => {
       );
     } finally {
       await rm(work, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -236,7 +236,7 @@ describe('git-push helpers', () => {
       expect((await git(bare, ['rev-parse', 'main'])).trim()).toBe(sha);
     } finally {
       await rm(work, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     }
   });
 
@@ -260,7 +260,7 @@ describe('git-push helpers', () => {
       ).rejects.toThrow(/git push failed/);
     } finally {
       await rm(work, { recursive: true, force: true });
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(other, { recursive: true, force: true });
     }
   });

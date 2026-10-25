@@ -237,6 +237,9 @@ export async function startIdeRunner(params: {
       '/udata',
       '--disable-telemetry',
       '--disable-update-check',
+      // Preview apps run in their runtime runner. Never expose arbitrary IDE
+      // container ports as active content on the authenticated api origin.
+      '--disable-proxy',
       '/workspace',
     ],
     { timeout: 120_000 },

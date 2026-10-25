@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http';
 import net, { type AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
+import { createAdaptorServer } from '@hono/node-server';
 import { parse } from 'hono/utils/cookie';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
@@ -10,7 +11,7 @@ import type { AppEnv } from '../src/context.js';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const TASK = '00000000-0000-4000-8000-0000000000c1';
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({ db: undefined as unknown, ensure: vi.fn(), enabled: true }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', () => ({
@@ -24,7 +25,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 }));
 vi.mock('../src/queues.js', () => ({
   getIdeEnsureQueue: () => ({
-    add: async () => ({ waitUntilFinished: async () => ({ ok: true }) }),
+    add: h.ensure,
   }),
   getIdeEnsureQueueEvents: () => ({}),
 }));
@@ -41,7 +42,7 @@ vi.mock('../src/auth/jwt.js', async (importOriginal) => ({
 }));
 vi.mock('@haive/shared', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/shared')>()),
-  configService: { getBoolean: async () => true },
+  configService: { getBoolean: async () => h.enabled },
 }));
 
 import { ideRoutes, installIdeWebSocket } from '../src/routes/ide.js';
@@ -53,18 +54,28 @@ app.onError(errorHandler);
 app.route('/ide', ideRoutes);
 
 function seedDb(owned = true): void {
-  const fake = createFakeDb({ users: schema.users, tasks: schema.tasks });
+  const fake = createFakeDb({
+    users: schema.users,
+    tasks: schema.tasks,
+    repositories: schema.repositories,
+  });
   fake.insert(schema.users, { id: USER, status: 'active', tokenVersion: 0 });
-  if (owned) fake.insert(schema.tasks, { id: TASK, userId: USER });
+  if (owned) {
+    fake.insert(schema.tasks, { id: TASK, userId: USER });
+    fake.insert(schema.repositories, { id: TASK, userId: USER });
+  }
   h.db = fake.db;
 }
 
 const realConnect = net.connect.bind(net);
+const realFetch = globalThis.fetch;
 let fetchStub: ReturnType<typeof vi.fn>;
 let servers: Array<{ close: (cb: () => void) => unknown }> = [];
 
 beforeEach(() => {
   seedDb();
+  h.enabled = true;
+  h.ensure.mockReset().mockResolvedValue({ waitUntilFinished: async () => ({ ok: true }) });
   fetchStub = vi.fn().mockImplementation(async () => new Response('up'));
   vi.stubGlobal('fetch', fetchStub);
 });
@@ -208,7 +219,7 @@ describe('IDE-1 http proxy strips Haive credentials', () => {
     expect(forwarded.get('cookie')).toBe('other=1; theme=dark');
     expect(forwarded.has('authorization')).toBe(false);
     expect(forwarded.has('proxy-authorization')).toBe(false);
-    expect(forwarded.get('x-forwarded-for')).toBe('1.2.3.4');
+    expect(forwarded.has('x-forwarded-for')).toBe(false);
     expect(forwarded.get('user-agent')).toBe('ua');
     expect(forwarded.has('host')).toBe(false);
   });
@@ -230,9 +241,9 @@ describe('IDE-2 websocket proxy strips Haive credentials', () => {
     expect(lower).not.toContain('proxy-authorization:');
     expect(lower).toContain('cookie: other=1; theme=dark');
     expect(head).toContain(`Host: ${ideRunnerName(TASK)}:8080`);
-    expect(head).toContain(`Origin: http://${ideRunnerName(TASK)}:8080`);
+    expect(head).toContain(`origin: http://${ideRunnerName(TASK)}:8080`);
     expect(head).toContain('sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==');
-    expect(head).toContain('x-forwarded-for: 1.2.3.4');
+    expect(head.toLowerCase()).not.toContain('x-forwarded-for:');
   });
 });
 
@@ -275,6 +286,13 @@ const TABLE: Row[] = [
     exact: NEAR.map((n) => `${n}=1`).join('; '),
   },
   { name: 'bare name', input: 'flag; haive_refresh=R', exact: 'flag' },
+  {
+    name: 'JSON value',
+    input: 'prefs={"theme":"dark"}; haive_access=A; a=1',
+    exact: 'prefs={"theme":"dark"}; a=1',
+  },
+  { name: 'off-grammar pair', input: 'a b=1; p=a"b; haive_refresh=R', exact: 'a b=1; p=a"b' },
+  { name: 'backslash value', input: 'p=a\\b; haive_access=A', exact: 'p=a\\b' },
   { name: 'empty pairs tolerated', input: 'a=1;;b=2;;', parsed: { a: '1', b: '2' } },
   { name: 'empty pairs around haive', input: ';;haive_access=A;;b=2', parsed: { b: '2' } },
   { name: 'haive first', input: 'haive_access=A; a=1; b=2', exact: 'a=1; b=2' },
@@ -488,5 +506,231 @@ describe('IDE-8 upstream cannot set or clear the Haive session cookies', () => {
     );
     expect(got).toContain('Sec-WebSocket-Accept: abc');
     expect(got.endsWith('\r\n\r\nFRAME-BYTES')).toBe(true);
+  });
+});
+
+describe('IDE request header controls', () => {
+  it('streams a real chunked POST through HTTP to a stub upstream', async () => {
+    let received: { body: string; headers: Record<string, unknown> } | undefined;
+    const upstream = createServer(async (req, res) => {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      received = { body, headers: req.headers };
+      res.end('saved');
+    });
+    await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r));
+    servers.push(upstream);
+    const upstreamPort = (upstream.address() as AddressInfo).port;
+    fetchStub.mockImplementation((url: string, init: RequestInit) => {
+      const path = new URL(url);
+      return realFetch(`http://127.0.0.1:${upstreamPort}${path.pathname}${path.search}`, init);
+    });
+    const proxy = createAdaptorServer({ fetch: app.fetch });
+    await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r));
+    servers.push(proxy);
+    const port = (proxy.address() as AddressInfo).port;
+    const reply = await new Promise<string>((resolve, reject) => {
+      let reply = '';
+      const socket = realConnect(port, '127.0.0.1', () => {
+        socket.write(
+          [
+            `POST /ide/${TASK}/save HTTP/1.1`,
+            `Host: 127.0.0.1:${port}`,
+            'Transfer-Encoding: chunked',
+            'Connection: close',
+            'Cookie: haive_access=A; app=ok',
+            '',
+            '4',
+            'test',
+            '3',
+            '=ok',
+            '0',
+            '',
+            '',
+          ].join('\r\n'),
+        );
+      });
+      socket.on('data', (chunk) => (reply += chunk.toString()));
+      socket.on('end', () => resolve(reply));
+      socket.on('error', reject);
+    });
+    expect(reply.split('\r\n')[0]).toBe('HTTP/1.1 200 OK');
+    expect(received?.body).toBe('test=ok');
+    expect(received?.headers.cookie).toBe('app=ok');
+  });
+
+  const tainted: HeaderPairs = [
+    ['connection', 'keep-alive, x-private, X-Other'],
+    ['keep-alive', 'timeout=10'],
+    ['proxy-connection', 'keep-alive'],
+    ['proxy-authenticate', 'Basic'],
+    ['proxy-custom', 'secret'],
+    ['te', 'trailers'],
+    ['trailer', 'x-trailer'],
+    ['x-private', 'secret'],
+    ['x-other', 'secret2'],
+    ['forwarded', 'host=evil;proto=https'],
+    ['x-forwarded-for', '1.2.3.4'],
+    ['x-forwarded-host', 'evil'],
+    ['x-forwarded-proto', 'https'],
+    ['x-forwarded-prefix', '/evil'],
+  ];
+
+  it('drops connection-scoped and client forwarding headers on HTTP', async () => {
+    const forwarded = await httpForwarded([...tainted, ['upgrade', 'websocket']]);
+    for (const [name] of tainted) expect(forwarded.has(name), name).toBe(false);
+    expect(forwarded.has('upgrade')).toBe(false);
+  });
+
+  it('rebuilds only the WebSocket transport headers on a real upgrade', async () => {
+    const rig = await wsRig();
+    const { head } = await rig.upgrade([
+      AUTH_LINE,
+      ...tainted.map(([name, value]) => `${name}: ${value}`),
+      'Transfer-Encoding: chunked',
+      'Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits',
+      'Sec-WebSocket-Protocol: editor, terminal',
+    ]);
+    const lines = headLines(head).map((line) => line.toLowerCase());
+    expect(head.split('\r\n')[0]).toBe('GET / HTTP/1.1');
+    for (const [name] of tainted.filter(([name]) => name !== 'connection')) {
+      expect(
+        lines.some((line) => line.startsWith(`${name}:`)),
+        name,
+      ).toBe(false);
+    }
+    expect(lines.filter((line) => line.startsWith('connection:'))).toEqual(['connection: upgrade']);
+    expect(lines).toContain('upgrade: websocket');
+    expect(lines.some((line) => line.startsWith('transfer-encoding:'))).toBe(false);
+    expect(head).toContain('sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==');
+    expect(lines).toContain('sec-websocket-version: 13');
+    expect(lines).toContain('sec-websocket-extensions: permessage-deflate; client_max_window_bits');
+    expect(lines).toContain('sec-websocket-protocol: editor, terminal');
+  });
+});
+
+describe('IDE API port proxy refusal', () => {
+  for (const prefix of [`/ide/${TASK}`, `/ide/repos/${TASK}`]) {
+    it.each(['proxy', 'absproxy', 'PrOxY', 'AbSpRoXy'])(
+      `HTTP refuses ${prefix}/%s before contacting an editor`,
+      async (kind) => {
+        const response = await app.request(`${prefix}/${kind}/4321/probe?x=1`);
+        expect(response.status).toBe(403);
+        expect(fetchStub).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['proxy', 'absproxy', 'PrOxY', 'AbSpRoXy'])(
+      `WS refuses ${prefix}/%s before ensuring or contacting an editor`,
+      async (kind) => {
+        const rig = await wsRig();
+        const { head, reply } = await rig.upgrade([AUTH_LINE], `${prefix}/${kind}/4321/probe?x=1`);
+        expect(reply.split('\r\n')[0]).toBe('HTTP/1.1 403 Forbidden');
+        expect(head).toBe('');
+        expect(h.ensure).not.toHaveBeenCalled();
+        expect(net.connect).not.toHaveBeenCalled();
+      },
+    );
+  }
+
+  it('keeps ordinary assets whose later segments contain proxy available', async () => {
+    expect((await app.request(`/ide/${TASK}/static/proxy/asset.js`)).status).toBe(200);
+  });
+});
+
+describe('IDE malformed Connection controls', () => {
+  it.each(['Upgrade, a b', 'Upgrade, x/y', 'Upgrade, "q"'])(
+    'WS replays the head despite invalid nominated header names: %s',
+    async (connection) => {
+      const rig = await wsRig();
+      const { head } = await rig.upgrade([AUTH_LINE, `Connection: ${connection}`]);
+      expect(head).toContain('GET / HTTP/1.1');
+      expect(head).toContain('connection: Upgrade');
+      expect(head).toContain('sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==');
+      expect((await app.request(`/ide/${TASK}/healthz`)).status).toBe(200);
+    },
+  );
+  it.each(['Upgrade, a b', 'Upgrade, x/y', 'Upgrade, "q"'])(
+    'HTTP ignores invalid nominated header names: %s',
+    async (connection) => {
+      const forwarded = await httpForwarded([
+        ['connection', connection],
+        ['x-app', 'kept'],
+      ]);
+      expect(forwarded.has('connection')).toBe(false);
+      expect(forwarded.get('x-app')).toBe('kept');
+    },
+  );
+});
+
+describe('IDE proxy boundary controls', () => {
+  it('drops response hop-by-hop and Connection-nominated headers', async () => {
+    const dropped: HeaderPairs = [
+      ['connection', 'keep-alive, X-Private, a b, x/y, "q"'],
+      ['keep-alive', 'timeout=5'],
+      ['te', 'trailers'],
+      ['trailer', 'x-trailer'],
+      ['proxy-authenticate', 'Basic'],
+      ['proxy-authorization', 'Basic secret'],
+      ['proxy-connection', 'keep-alive'],
+      ['proxy-custom', 'secret'],
+      ['x-private', 'secret'],
+      ['transfer-encoding', 'chunked'],
+      ['upgrade', 'websocket'],
+      ['content-encoding', 'identity'],
+      ['content-length', '2'],
+    ];
+    fetchStub.mockResolvedValue(
+      new Response('up', {
+        headers: [...dropped, ['x-app', 'kept'], ['set-cookie', 'app=ok']],
+      }),
+    );
+    const response = await app.request(`/ide/${TASK}/`);
+    expect(response.status).toBe(200);
+    for (const [name] of dropped) expect(response.headers.has(name), name).toBe(false);
+    expect(response.headers.get('x-app')).toBe('kept');
+    expect(response.headers.getSetCookie()).toEqual(['app=ok']);
+    expect(await response.text()).toBe('up');
+  });
+
+  it('removes Expect before a real undici request', async () => {
+    let gotExpect: string | undefined = 'not reached';
+    const upstream = createServer((req, res) => {
+      gotExpect = req.headers.expect;
+      res.end('saved');
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    servers.push(upstream);
+    const port = (upstream.address() as AddressInfo).port;
+    fetchStub.mockImplementation((_url: string, init: RequestInit) =>
+      realFetch(`http://127.0.0.1:${port}/save`, init),
+    );
+    const response = await app.request(`/ide/${TASK}/save`, {
+      method: 'POST',
+      body: 'payload',
+      headers: { expect: '100-continue' },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('saved');
+    expect(gotExpect).toBeUndefined();
+  });
+
+  it.each([`/ide/${TASK}`, `/ide/repos/${TASK}`])(
+    'refuses HTTP to a running editor when disabled: %s',
+    async (prefix) => {
+      h.enabled = false;
+      expect((await app.request(`${prefix}/static/a.js`)).status).toBe(403);
+      expect(fetchStub).not.toHaveBeenCalled();
+    },
+  );
+
+  it('replays non-ASCII cookie and other header bytes without UTF-8 re-encoding', async () => {
+    const rig = await wsRig();
+    // net.write encodes these as UTF-8 c3 a9; Node exposes those octets as latin1.
+    const { head } = await rig.upgrade([AUTH_LINE, 'Cookie: name=café', 'X-App: café']);
+    expect(head).toContain('cookie: name=cafÃ©\r\n');
+    expect(head).toContain('x-app: cafÃ©');
+    expect(head).not.toContain('haive_access');
+    expect(await httpCookie('name=cafÃ©; haive_access=A')).toBe('name=cafÃ©');
   });
 });

@@ -151,17 +151,25 @@ and workspace tasks execute repository code; the repository Terminal remains the
 commits and pushes.
 
 **The editor proxy never forwards the Haive session.** code-server runs `--auth none` and executes
-repository code, and its own `/proxy/<port>` relays every cookie it receives to whatever listens in the
-container, so `routes/ide.ts` removes `haive_access` and `haive_refresh` (every occurrence, matched by
-trimmed exact name, `withoutSessionCookies` in `auth/cookies.ts`), `Authorization` and
-`Proxy-Authorization` from the HTTP request and from the WebSocket replay before anything is forwarded; a
-Cookie header left with no pairs is dropped. Other cookies and headers pass unchanged: an app previewed
-through `/proxy/<port>` keeps its own session cookies. The response direction drops an upstream `Set-Cookie` for `haive_access` or
-`haive_refresh` (exact name, `isSessionSetCookie`), on HTTP responses and on the WebSocket upgrade
-response head, so the container cannot plant or clear the session; its other cookies, `forwarded` and
-`x-forwarded-*` still reach the browser. The editor is served from
-the api origin, which is on the state-change allow list on purpose, so this removes the credentials from
-the container's reach and nothing more.
+repository code, so `routes/ide.ts` removes `haive_access` and `haive_refresh` (every occurrence, by trimmed
+exact name, `withoutSessionCookies` in `auth/cookies.ts`), `Authorization` and `Proxy-Authorization` from the
+HTTP request and from the WebSocket replay before anything is forwarded; a Cookie header left with no pairs is
+dropped. The filter cuts the header into `;` groups by the quote rules, drops a group that still holds a `;`
+inside quotes, and forwards every other non-session pair byte for byte, so a quoted value cannot smuggle or hide
+a session pair. The request also loses its hop-by-hop headers (`connection` and every name it nominates,
+`keep-alive`, `te`, `trailer`, `transfer-encoding`, `upgrade` off the upgrade path, `proxy-*`), `expect`, and
+the client's `forwarded` and `x-forwarded-*`; names are matched against the request's own header list, so a
+malformed `Connection` token is ignored rather than thrown, and the WebSocket connect handler tears down only
+its own session on any error. The replay head is written as latin1 so non-ASCII header bytes arrive unchanged.
+code-server's port proxy is off twice: the api answers 403 to `/proxy/<port>` and `/absproxy/<port>` (first
+segment, any case) on both transports before anything reaches the container, and new editors launch with
+`--disable-proxy`; an editor container started before that flag keeps its old launch until it is recreated
+(T431). `IDE_ENABLED=false` refuses the HTTP proxy as it does the ensure. The response direction drops the
+same hop-by-hop headers and an upstream `Set-Cookie` for `haive_access` or `haive_refresh` (exact name,
+`isSessionSetCookie`), on HTTP responses and on the WebSocket upgrade response head, so the container cannot
+plant or clear the session; its other cookies, `forwarded` and `x-forwarded-*` still reach the browser. The
+editor is served from the api origin, which is on the state-change allow list on purpose, so this removes the
+credentials from the container's reach and nothing more.
 
 ## A step's project commands run in the sandbox
 
