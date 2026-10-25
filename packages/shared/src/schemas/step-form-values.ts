@@ -15,5 +15,8 @@ export function normalizeStepFormValues(
   const parsed = gitRemoteUrlSchema.safeParse(raw);
   if (!parsed.success)
     return { success: false, issues: ['remoteUrl: must be a supported Git remote URL'] };
-  return { success: true, data: { ...values, remoteUrl: parsed.data } };
+  return {
+    success: true,
+    data: parsed.data === raw ? values : { ...values, remoteUrl: parsed.data },
+  };
 }
