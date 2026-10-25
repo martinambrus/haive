@@ -163,7 +163,40 @@ describe('Claude OAuth token capture controls', () => {
     paste();
   }
 
-  it.each([64, 95, 100, 90])('saves the complete %i-character body', async (length) => {
+  it.each([
+    ['trailing blanks', ' \t\r\n'],
+    ['cursor forward', '\x1b[2C\r\n'],
+    ['CR CR LF', '\r\r\n'],
+    ['LF CR', '\n\r'],
+  ])('fix-round1 D2 captures an 80-column wrap with %s', async (_label, wrap) => {
+    await ready();
+    stream.emit('data', Buffer.from(`${TOKEN.slice(0, 80)}${wrap}${TOKEN.slice(80)}\n\n`));
+    await settle();
+    expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(true);
+    assertNoCredentialText(TOKEN, CODE);
+  });
+
+  it('fix-round1 D2 captures exactly or refuses a final fragment followed by prose', async () => {
+    await ready();
+    stream.emit(
+      'data',
+      Buffer.from(`${TOKEN.slice(0, 80)}\n${TOKEN.slice(80)} (valid for 1 year)\n`),
+    );
+    await settle();
+    expect(h.save.mock.calls.every(([, input]) => input.value === TOKEN)).toBe(true);
+    assertNoCredentialText(TOKEN, CODE);
+  });
+
+  it('fix-round1 D2 captures exactly or refuses an escape split at the wrap', async () => {
+    await ready();
+    stream.emit('data', Buffer.from(`${TOKEN.slice(0, 80)}\x1b[`));
+    stream.emit('data', Buffer.from(`32m\n${TOKEN.slice(80)}\x1b[0m\n\n`));
+    await settle();
+    expect(h.save.mock.calls.every(([, input]) => input.value === TOKEN)).toBe(true);
+    assertNoCredentialText(TOKEN, CODE);
+  });
+
+  it.each([95, 100, 90])('saves the complete %i-character body', async (length) => {
     const expected = token(length);
     await ready();
     stream.emit('data', Buffer.from(`${expected}\n\nStore this token securely\n`));
@@ -225,12 +258,15 @@ describe('Claude OAuth token capture controls', () => {
     expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(true);
   });
 
-  it.each([20, 63])('rejects a %i-character token body below the minimum', async (length) => {
-    await ready();
-    stream.emit('data', Buffer.from(`${token(length)}\n\nStore this token securely\n`));
-    await settle();
-    expect(h.save.mock.calls.length === 0).toBe(true);
-  });
+  it.each([20, 63, 64, 89])(
+    'rejects a %i-character token body below the minimum',
+    async (length) => {
+      await ready();
+      stream.emit('data', Buffer.from(`${token(length)}\n\nStore this token securely\n`));
+      await settle();
+      expect(h.save.mock.calls.length === 0).toBe(true);
+    },
+  );
 
   it.each(['', '\r\n  '])('waits for a boundary across a chunk ending in %j', async (wrap) => {
     const expected = token(100);
