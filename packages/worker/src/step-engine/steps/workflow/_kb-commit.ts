@@ -57,7 +57,8 @@ export async function commitKnowledgeTrees(opts: {
   const absent: string[] = [];
   const wa = workspaceAnchor(workspace);
   for (const spec of KB_PATHSPECS) {
-    const entry = await lstatNoFollow(wa.anchor, `${wa.prefix}${spec}`);
+    // Only genuine absence may fall back to Git; a refused probe must stop before staging.
+    const entry = await lstatNoFollow(wa.anchor, `${wa.prefix}${spec}`, { strict: true });
     if (!entry) absent.push(spec);
     else if (entry.kind !== 'symlink') present.push(spec);
   }

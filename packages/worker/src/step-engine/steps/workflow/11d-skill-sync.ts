@@ -508,7 +508,8 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
       for (const dir of targetDirs) {
         // A DIRECTORY check, and a link is not one: `git add` on a linked skills dir would stage
         // whatever it points at, or fail, depending on where that lands.
-        const entry = await lstatNoFollow(wa.anchor, `${wa.prefix}${dir}`);
+        // A refused probe is not absence and must never fall back to path-based Git.
+        const entry = await lstatNoFollow(wa.anchor, `${wa.prefix}${dir}`, { strict: true });
         if (!entry) absent.push(dir);
         else if (entry.kind === 'directory') present.push(dir);
       }
