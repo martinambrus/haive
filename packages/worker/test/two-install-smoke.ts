@@ -1960,15 +1960,28 @@ async function main(): Promise<void> {
           isDeepStrictEqual(rtkHistory.rows[0]!.incoming, { v: false }),
         rtkHistory,
       );
-      const otherPending = await rowsOf<{ unit: string }>(
-        b.db,
-        sql`select unit from project_state_conflicts where repository_id = ${b.repositoryId}
-          and unit <> ${renderUnit} and resolved_at is null`,
-      );
-      check(
+      const pendingUnitsOf = (install: Install) =>
+        rowsOf<{ unit: string }>(
+          install.db,
+          sql`select unit from project_state_conflicts where repository_id = ${install.repositoryId}
+            and resolved_at is null order by unit`,
+        );
+      const checkPendingUnits = async (name: string, install: Install, expected: string[]) => {
+        const pending = await pendingUnitsOf(install);
+        check(
+          name,
+          'rows' in pending &&
+            isDeepStrictEqual(
+              pending.rows.map((r) => r.unit),
+              expected,
+            ),
+          pending,
+        );
+      };
+      await checkPendingUnits(
         'B holds no pending question outside the render setting both changed',
-        'rows' in otherPending && otherPending.rows.length === 0,
-        otherPending,
+        b,
+        [renderUnit],
       );
       const pendingB = await renderQuestionsOf(b);
       const row = 'rows' in pendingB && pendingB.rows.length === 1 ? pendingB.rows[0]! : null;
@@ -2046,10 +2059,16 @@ async function main(): Promise<void> {
           ),
         { plan: writerPlan.error, afterWrite, baseAfter, columnAfter },
       );
+      await checkPendingUnits('B’s writer leaves only the same render question pending', b, [
+        renderUnit,
+      ]);
       const again = await syncProjectStateFromCheckout(b.db, {
         repositoryId: b.repositoryId,
         repoPath: b.repoPath,
       });
+      await checkPendingUnits('B’s repeated sync leaves only the same render question pending', b, [
+        renderUnit,
+      ]);
       const stillPending = await renderQuestionsOf(b);
       check(
         'and the next sync meets the same conflict, with no second row',
@@ -2083,7 +2102,7 @@ async function main(): Promise<void> {
           isDeepStrictEqual(admission.units, ['project/render.json#acceptedAgentIds']),
         admission,
       );
-      const noConflictOnA = await renderQuestionsOf(a);
+      const noConflictOnA = await pendingUnitsOf(a);
       check(
         'and A, whose value stands, holds none',
         'rows' in noConflictOnA && noConflictOnA.rows.length === 0,
@@ -2135,6 +2154,7 @@ async function main(): Promise<void> {
         repositoryId: b.repositoryId,
         repoPath: b.repoPath,
       });
+      await checkPendingUnits('B has no pending unit after taking theirs and syncing', b, []);
       check(
         "B answers take theirs: the row is closed, the column holds A's value, the file and the base agree",
         taken.kind === 'resolved' &&
@@ -2178,6 +2198,8 @@ async function main(): Promise<void> {
         { repeated, flipped },
       );
 
+      await checkPendingUnits('B’s repeated and refused answers open no pending unit', b, []);
+
       const cutAgent2 =
         BASELINE_AGENT_SPECS.find(
           (spec) => spec.id !== 'code-reviewer' && spec.id !== cutAgent && idsA.includes(spec.id),
@@ -2207,6 +2229,11 @@ async function main(): Promise<void> {
           sql`update repositories set render_context = jsonb_set(render_context, '{acceptedAgentIds}', ${JSON.stringify(idsB2)}::jsonb) where id = ${b.repositoryId}`,
         );
         await refresh(b, 'storage-b');
+        await checkPendingUnits(
+          'B’s second refresh leaves only the new render question pending',
+          b,
+          [renderUnit],
+        );
         const second = await renderQuestionsOf(b);
         const open = 'rows' in second ? second.rows.find((r) => r.resolved_at === null) : undefined;
         check(
@@ -2234,6 +2261,7 @@ async function main(): Promise<void> {
           repositoryId: b.repositoryId,
           repoPath: b.repoPath,
         });
+        await checkPendingUnits('B has no pending unit after keeping mine and syncing', b, []);
         check(
           "B answers keep mine: the column stays, B's value goes to the file and the base, and the next sync finds nothing",
           kept.kind === 'resolved' &&
@@ -2253,7 +2281,7 @@ async function main(): Promise<void> {
         git(b.repoPath, 'push', '-q', 'origin', 'HEAD:main');
         await refresh(a, 'storage-a');
         const columnA = await repoStateOf(a);
-        const afterA = await renderQuestionsOf(a);
+        const afterA = await pendingUnitsOf(a);
         const noneOnA = 'rows' in afterA && afterA.rows.length === 0;
         check(
           "A takes B's pushed answer on its next refresh and holds no conflict",
