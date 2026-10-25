@@ -672,7 +672,17 @@ commit step stages from that list and the file may never have been staged.
 **A checkout move sets Haive's own pending files aside, then re-syncs.** The files the outbox and the
 plan flush write (`.haive-data/state/**`, `plan.json`, `plan.md`) are projections of rows, so a move
 of the checkout (`git merge --ff-only` in 00a and in refresh) must not be stopped by one, nor lose
-one. `setAsideHaiveProjections` (`project-state/set-aside.ts`) lists the projection paths that differ
+one. A pending record undo journal defers the move even when the checkout is clean: a writer may
+have committed its intent before its first file. The shared final move check reads that journal
+under the project-state and plan locks before its clean fast path, so refresh, plan Pull/Save/confirm
+and checkout merges cannot turn its recognized before/planned bytes into a third version. Set-aside
+also checks before its first pass, and both state judgment and state restore repeat the check under
+the project-state lock before marks, base changes or files. A put-back that includes state paths
+refuses under those locks too, before index or byte changes; it throws naming the kept paths, since
+silently dropping a staged put-back could lose the person's index state. Plan-only put-backs touch
+no record-journal path. The journal remains dirty and intact for ordinary fenced recovery; after
+that drain the caller can retry its move. No move resolves manual divergence or rolls the abandoned
+writer's context forward. `setAsideHaiveProjections` (`project-state/set-aside.ts`) lists the projection paths that differ
 from HEAD or are untracked and, when a state file is among them, runs the sync first. Each state
 file must then equal what the sync base renders there (`renderProjectState` over `base_snapshot`,
 which the writer sets to what it wrote and the sync to what it read; the raw checkout watermark

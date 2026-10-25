@@ -48,6 +48,7 @@ import {
   loadPendingRenderConflicts,
   loadPendingSettingConflicts,
   lockProjectState,
+  ProjectStateMovedError,
   overlayClaims,
   overlayEnvironment,
   overlayRender,
@@ -101,6 +102,21 @@ const refuse = (file: string, why: string): Refused => ({
 });
 
 const NOT_HAIVE = 'holds changes Haive did not write';
+/** An early refusal is advisory; every state-byte restore and final move repeats it while holding
+ *  the project-state lock. Even a clean checkout may belong to a committed, not-yet-applied write. */
+async function pendingStateWrite(db: DbOrTx, repositoryId: string): Promise<Refused | null> {
+  const [row] = await db
+    .select({ intent: schema.projectStateOutbox.writeIntent })
+    .from(schema.projectStateOutbox)
+    .where(eq(schema.projectStateOutbox.repositoryId, repositoryId))
+    .limit(1);
+  return row?.intent != null
+    ? refuse(
+        PROJECT_STATE_DIR,
+        'is waiting for project settings recovery; retry after recovery finishes',
+      )
+    : null;
+}
 
 async function openOperationRefusal(
   repoPath: string,
@@ -430,6 +446,7 @@ interface RestoreGuard {
   lock: (tx: Tx) => Promise<unknown>;
   judgeLock: (tx: Tx) => Promise<unknown>;
   offender: (tx: Tx) => Promise<string | null>;
+  blocked?: (tx: Tx) => Promise<Refused | null>;
   mark: (tx: Tx) => Promise<unknown>;
   base?: (tx: Tx) => Promise<unknown>;
   generation: (tx: Tx) => Promise<string>;
@@ -450,6 +467,8 @@ async function judgeAndMark(
   guard: RestoreGuard,
 ): Promise<{ stopped: SetAsideResult } | { prints: Map<string, string>; generation: string }> {
   await guard.judgeLock(tx);
+  const blocked = await guard.blocked?.(tx);
+  if (blocked) return { stopped: blocked };
   const prints = new Map<string, string>();
   for (const path of paths) prints.set(path, await fingerprint(repoPath, path));
   const offender = await guard.offender(tx);
@@ -473,6 +492,8 @@ async function restoreJudged(
   after?: (tx: Tx) => Promise<void>,
 ): Promise<SetAsideResult | Changed | null> {
   await guard.lock(tx);
+  const blocked = await guard.blocked?.(tx);
+  if (blocked) return blocked;
   const dirty = await dirtyProjections(repoPath);
   const mine = dirty.paths.filter((path) => guard.owns(path));
   for (const path of new Set([...mine, ...judged.prints.keys()])) {
@@ -566,6 +587,7 @@ const stateGuard = (
   lock: guardLock(repositoryId, fence, (tx) => lockProjectState(tx, repositoryId)),
   judgeLock: (tx) => lockProjectState(tx, repositoryId),
   offender: (tx) => stateOffender(tx, repositoryId, repoPath, state),
+  blocked: (tx) => pendingStateWrite(tx, repositoryId),
   mark: (tx) => markProjectStateDirty(tx, repositoryId),
   base: (tx) => rebaseProjectStateOnHeadLocked(tx, { repositoryId, repoPath, head }),
   generation: (tx) => readProjectStateBase(tx, repositoryId),
@@ -695,6 +717,8 @@ export async function setAsideHaiveProjections(
   fence?: CheckoutFence,
   sections?: { restore: RestoreSection; putBack: RestoreSection },
 ): Promise<SetAsideResult> {
+  const pending = await pendingStateWrite(db, repositoryId);
+  if (pending) return pending;
   const restored = new Set<string>();
   const kept: KeptFiles = new Map();
   // A stop after anything was captured puts it back, since no move follows; the put-back skips what was not restored.
@@ -820,6 +844,8 @@ export async function restoreProjectionsInTx(
 ): Promise<RestoreInTxResult> {
   await lockProjectState(tx, repositoryId);
   await lockPlanMirror(tx, repositoryId);
+  const pending = await pendingStateWrite(tx, repositoryId);
+  if (pending) return pending;
   const dirty = await dirtyProjections(repoPath);
   if (dirty.paths.length === 0) return { outcome: 'clean' };
   const open = await openOperationRefusal(repoPath, dirty.paths[0]!, dirty.unmerged);
@@ -998,6 +1024,13 @@ export async function putBackProjections(
   await (section ?? ((fn) => db.transaction(fn)))(async (tx) => {
     await lockProjectState(tx, repositoryId);
     await lockPlanMirror(tx, repositoryId);
+    if ([...kept.keys()].some((path) => path.startsWith(STATE_PREFIX))) {
+      const pending = await pendingStateWrite(tx, repositoryId);
+      if (pending)
+        throw new ProjectStateMovedError(
+          `${pending.reason}. The set-aside state files were not put back: ${[...kept.keys()].filter((path) => path.startsWith(STATE_PREFIX)).join(', ')}`,
+        );
+    }
     // Each path is swapped only while it still holds what the restore left (HEAD's blob, or nothing).
     for (const [path, { bytes, index, indexPatch, mode, owner, parents }] of kept) {
       await putBackIndex(repoPath, path, index, indexPatch);

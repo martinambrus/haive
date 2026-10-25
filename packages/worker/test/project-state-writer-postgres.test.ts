@@ -28,11 +28,18 @@ import {
   writeProjectStateColumn,
 } from '../src/project-state/write.js';
 import { refreshProjectState, sweepDirtyProjectStates } from '../src/project-state/refresh.js';
+import { handleRefresh } from '../src/repo/refresh.js';
+import {
+  putBackProjections,
+  restoreFaults,
+  setAsideHaiveProjections,
+} from '../src/project-state/set-aside.js';
 
 const seam = vi.hoisted(() => ({
   afterWrite: null as null | (() => Promise<void>),
   beforeRewrite: null as null | (() => Promise<void>),
   afterRemove: null as null | (() => Promise<void>),
+  afterSetAside: null as null | (() => Promise<void>),
 }));
 vi.mock('@haive/shared/fs-safe', async (original) => {
   const real = await original<typeof import('@haive/shared/fs-safe')>();
@@ -57,6 +64,18 @@ vi.mock('@haive/shared/fs-safe', async (original) => {
   };
 });
 
+vi.mock('../src/project-state/set-aside.js', async (original) => {
+  const real = await original<typeof import('../src/project-state/set-aside.js')>();
+  return {
+    ...real,
+    setAsideHaiveProjections: async (...args: Parameters<typeof real.setAsideHaiveProjections>) => {
+      const result = await real.setAsideHaiveProjections(...args);
+      await seam.afterSetAside?.();
+      return result;
+    },
+  };
+});
+
 // Deliberately no DATABASE_URL fallback. This suite is opt-in, only on its exclusive fixture.
 const url = process.env.T266_DATABASE_URL;
 if (url && !/^\/(?:codex|test)_t266_[a-z0-9_]+$/.test(new URL(url).pathname))
@@ -71,6 +90,8 @@ afterEach(async () => {
   seam.afterWrite = null;
   seam.beforeRewrite = null;
   seam.afterRemove = null;
+  seam.afterSetAside = null;
+  delete restoreFaults.afterBase;
   for (const id of users.splice(0)) await db!.delete(schema.users).where(eq(schema.users.id, id));
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
@@ -243,6 +264,203 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       expect((await s.render()).acceptedAgentIds).toEqual(['docs-writer']);
     },
   );
+
+  const moveFixture = async () => {
+    const s = await fixture();
+    const source = join(s.root, 'source');
+    const storage = join(s.root, 'storage');
+    const dest = join(storage, s.userId, s.repo.id);
+    await mkdir(source);
+    const git = (dir: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+    git(source, 'init', '-q', '-b', 'main');
+    git(source, 'config', 'user.name', 'T266');
+    git(source, 'config', 'user.email', 't266@haive.local');
+    await writeProjectStateRecord(db!, {
+      repositoryId: s.repo.id,
+      repoPath: source,
+      context: context() as never,
+      rtkChoiceRecorded: false,
+    });
+    git(source, 'add', '.haive-data/state');
+    git(source, 'commit', '-qm', 'initial record');
+    await mkdir(join(dest, '..'), { recursive: true });
+    git(source, 'clone', '-q', source, dest);
+    git(dest, 'config', 'user.name', 'T266');
+    git(dest, 'config', 'user.email', 't266@haive.local');
+    await db!
+      .update(schema.repositories)
+      .set({ storagePath: dest })
+      .where(eq(schema.repositories.id, s.repo.id));
+    await diskRecord(source, 'incoming');
+    git(source, 'add', '.haive-data/state');
+    git(source, 'commit', '-qm', 'incoming changes journal path');
+    const payload = {
+      repositoryId: s.repo.id,
+      userId: s.userId,
+      source: 'local_path' as const,
+      localPath: source,
+    };
+    const refresh = () => handleRefresh(payload, db!, storage);
+    const snapshot = async () => ({
+      head: git(dest, 'rev-parse', 'HEAD'),
+      files: await readStateFiles(dest),
+      outbox: await s.outbox(),
+      sync: await db!
+        .select()
+        .from(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
+      columns: await db!
+        .select({
+          renderContext: schema.repositories.renderContext,
+          applicableTemplateIds: schema.repositories.applicableTemplateIds,
+          scopeExcludeGlobs: schema.repositories.scopeExcludeGlobs,
+          rtkEnabled: schema.repositories.rtkEnabled,
+          rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
+          onboardingEnvironment: schema.repositories.onboardingEnvironment,
+          onboardingTooling: schema.repositories.onboardingTooling,
+        })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, s.repo.id)),
+    });
+    const leaveIntent = async (afterPrepared?: () => Promise<void>) => {
+      let prepared = false;
+      const wrapped = new Proxy(db!, {
+        get(target, prop) {
+          if (prop !== 'transaction') return Reflect.get(target, prop);
+          return async (fn: Parameters<Database['transaction']>[0]) => {
+            const result = await target.transaction(fn);
+            if (!prepared && result && typeof result === 'object' && 'intentId' in result) {
+              prepared = true;
+              await afterPrepared?.();
+              throw new Error('paused before filesystem');
+            }
+            return result;
+          };
+        },
+      }) as Database;
+      await expect(
+        writeProjectStateColumn(wrapped, {
+          repositoryId: s.repo.id,
+          repoPath: dest,
+          column: { ...context('planned'), rtkChoiceRecorded: false } as never,
+          keepColumnOnFailure: true,
+        }),
+      ).rejects.toThrow('paused before filesystem');
+      expect(prepared).toBe(true);
+    };
+    return { s, source, storage, dest, git, payload, refresh, snapshot, leaveIntent };
+  };
+  it.each(['active', 'persisted', 'late'] as const)(
+    'defers a clean public refresh with a %s journal and retries after explicit recovery',
+    async (timing) => {
+      const m = await moveFixture();
+      let before: Awaited<ReturnType<typeof m.snapshot>> | undefined;
+      if (timing === 'active')
+        await m.leaveIntent(async () => {
+          before = await m.snapshot();
+          await m.refresh();
+        });
+      else {
+        if (timing === 'persisted') {
+          await m.leaveIntent();
+          before = await m.snapshot();
+        } else
+          seam.afterSetAside = async () => {
+            seam.afterSetAside = null;
+            expect(m.git(m.dest, 'status', '--porcelain')).toBe('');
+            await m.leaveIntent();
+            before = await m.snapshot();
+          };
+        await m.refresh();
+      }
+      expect(before!.outbox!.writeIntent).toBeTruthy();
+      expect.soft(await m.snapshot()).toEqual(before);
+      const [repo] = await db!
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, m.s.repo.id));
+      expect.soft(repo!.statusMessage).toContain('recovery');
+      let recovered = false;
+      try {
+        await recoverProjectStateWrite(db!, m.s.repo.id, m.dest);
+        recovered = true;
+      } catch {
+        /* red receipt also establishes the stranded journal */
+      }
+      expect.soft(recovered).toBe(true);
+      if (!recovered) return;
+      expect((await m.s.outbox())!.writeIntent).toBeNull();
+      expect(await readStateFiles(m.dest)).toEqual(before!.files);
+      await m.refresh();
+      expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(m.git(m.source, 'rev-parse', 'HEAD'));
+      expect(
+        JSON.parse(await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8'))
+          .projectInfo.name,
+      ).toBe('incoming');
+    },
+  );
+  it('ordinary clean public refresh still lands without a journal', async () => {
+    const m = await moveFixture();
+    await m.refresh();
+    expect(m.git(m.dest, 'rev-parse', 'HEAD')).toBe(m.git(m.source, 'rev-parse', 'HEAD'));
+    expect((await m.s.outbox())!.writeIntent).toBeNull();
+  });
+  it('public refresh never repairs manual divergence in an interrupted journal', async () => {
+    const m = await moveFixture();
+    await m.leaveIntent();
+    await diskRecord(m.dest, 'manual edit');
+    const before = await m.snapshot();
+    await m.refresh();
+    expect(await m.snapshot()).toEqual(before);
+    await expect(recoverProjectStateWrite(db!, m.s.repo.id, m.dest)).rejects.toThrow(
+      'changed after the attempted write',
+    );
+    expect(await m.snapshot()).toEqual(before);
+  });
+  it('set-aside refuses a journal admitted between judgment and filesystem restore', async () => {
+    const m = await moveFixture();
+    await writeProjectStateColumn(db!, {
+      repositoryId: m.s.repo.id,
+      repoPath: m.dest,
+      column: { ...context('pending'), rtkChoiceRecorded: false } as never,
+    });
+    let before: Awaited<ReturnType<typeof m.snapshot>> | undefined;
+    restoreFaults.afterBase = async () => {
+      delete restoreFaults.afterBase;
+      await m.leaveIntent();
+      before = await m.snapshot();
+    };
+    const outcome = await setAsideHaiveProjections(db!, m.s.repo.id, m.dest);
+    expect(before!.outbox!.writeIntent).toBeTruthy();
+    expect
+      .soft(outcome)
+      .toMatchObject({ outcome: 'refused', reason: expect.stringContaining('recovery') });
+    expect.soft(await m.snapshot()).toEqual(before);
+  });
+  it('put-back cannot rewrite a state file owned by a newer journal', async () => {
+    const m = await moveFixture();
+    await writeProjectStateColumn(db!, {
+      repositoryId: m.s.repo.id,
+      repoPath: m.dest,
+      column: { ...context('pending'), rtkChoiceRecorded: false } as never,
+    });
+    const aside = await setAsideHaiveProjections(db!, m.s.repo.id, m.dest);
+    expect(aside.outcome).toBe('set-aside');
+    if (aside.outcome !== 'set-aside') throw new Error('expected actual kept state');
+    await m.leaveIntent();
+    const before = await m.snapshot();
+    await expect(putBackProjections(db!, m.s.repo.id, m.dest, aside.kept)).rejects.toThrow(
+      'recovery',
+    );
+    expect(await m.snapshot()).toEqual(before);
+    await recoverProjectStateWrite(db!, m.s.repo.id, m.dest);
+    await putBackProjections(db!, m.s.repo.id, m.dest, aside.kept);
+    expect(
+      JSON.parse(await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8'))
+        .projectInfo.name,
+    ).toBe('pending');
+  });
 
   it('imports an unseen checkout instead of overwriting its project settings', async () => {
     const s = await fixture();
