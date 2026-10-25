@@ -99,9 +99,9 @@ All PRE-EXISTING.
 
 ### T288 · FNF[sync-reader] · project-state sync reader defects (+6)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:36Z · last: 2026-10-25T19:34Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:36Z · last: 2026-10-25T20:26Z
 
-Codex progress 2026-10-25T19:34Z: PR927head9a1b2961e: freshreviews/botclean, localfull13,518pass/4expected/531skip. CI two-install smoke fails stale all-history count after correctRTKconvergence; reproduced on isolatedrealPG, focused fixture correction active. User accepts manualrepair/existingwarnings; T317 separate.
+Codex progress 2026-10-25T20:26Z: PR927 merged 0dbad8dc6 after exact 21c3d79f all 11 checks, clean bot review and no unresolved threads. Main CI40230306594 pending. Real-PG two-install146 checks and pending-guard counterfactual passed; production full13,518 passed before fixture-only corrections. Accepted manual RTK repair/warnings; T317 separate.
 All PRE-EXISTING.
 
 1. DEFERRED (overlaps fnf/278): gitOperationInProgress (repo/git-operation.ts) reads an out-of-tree git dir as "merge open"; every caller holds forever for such repos.
