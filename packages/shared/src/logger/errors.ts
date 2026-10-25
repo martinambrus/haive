@@ -1,4 +1,3 @@
-import { DrizzleQueryError } from 'drizzle-orm/errors';
 import pino from 'pino';
 
 const sanitizedErrors = new WeakSet<object>();
@@ -13,14 +12,12 @@ function* errorChain(err: unknown): Generator<Record<string, unknown>> {
   }
 }
 
-/** A driver can attach query/params non-enumerably; wrappers can hide them in cause. */
+/** Drivers decorate unbound connection failures too; only actual bound values need hiding. */
 export function boundQueryError(err: unknown): Record<string, unknown> | undefined {
   for (const current of errorChain(err)) {
     if (
-      current instanceof DrizzleQueryError ||
-      (current instanceof Error && current.constructor.name === 'DrizzleQueryError') ||
-      Object.hasOwn(current, 'query') ||
-      Object.hasOwn(current, 'params')
+      (Array.isArray(current.params) && current.params.length > 0) ||
+      (Array.isArray(current.parameters) && current.parameters.length > 0)
     ) {
       return current;
     }

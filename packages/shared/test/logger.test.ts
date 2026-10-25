@@ -72,20 +72,21 @@ it.each(['err', 'error', 'bare', 'implicit', 'wrapped'] as const)(
   },
 );
 
-it.each(['query', 'params'])(
+it.each(['params', 'parameters'])(
   'detects a non-enumerable own %s property through deep causes',
   (key) => {
     let err = Object.defineProperty(new Error(secret), key, {
-      value: key === 'query' ? query : [secret],
+      value: [secret],
     });
     for (let i = 0; i < 12; i++) err = new Error(secret, { cause: err });
     assertSafe(serializeError(err));
   },
 );
 
-it('detects a DrizzleQueryError class even without its query/params fields', () => {
-  class DrizzleQueryError extends Error {}
-  assertSafe(serializeError(new DrizzleQueryError(secret)));
+it('keeps unbound Drizzle errors unchanged', () => {
+  const err = new DrizzleQueryError(query, [], new Error('ordinary'));
+  expect(safeErrorMessage(err) === err.message).toBe(true);
+  expect(serializeError(err)).toEqual(pino.stdSerializers.err(err));
 });
 
 it('keeps the default serializer for other errors, including cause and extra fields', () => {
@@ -127,5 +128,27 @@ it.each(['err', 'error', 'bare'] as const)(
       expect((entry.err ?? entry.error).type === err.constructor.name).toBe(true);
     }
     assertSafe(lines);
+  },
+);
+
+it.each(['127.0.0.1:1', 'haive-connection-control.invalid:1'])(
+  'fix2 preserves real connection messages and codes in the logger for %s',
+  async (host) => {
+    const sql = postgres(`postgres://synthetic:synthetic@${host}/connection_control`, {
+      max: 1,
+      connect_timeout: 1,
+    });
+    let err: Error & { code: string };
+    try {
+      err = await sql`select 1`.catch((err) => err);
+    } finally {
+      await sql.end({ timeout: 5 });
+    }
+    const lines = capture();
+    logger.error({ err: err! });
+    const entry = JSON.parse(lines[0]!);
+    expect(entry.err.message === err!.message && entry.err.code === err!.code).toBe(true);
+    expect(entry.err.stack === err!.stack).toBe(true);
+    expect(safeErrorMessage(err!) === err!.message).toBe(true);
   },
 );
