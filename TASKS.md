@@ -112,6 +112,8 @@ All PRE-EXISTING.
 6. Import markers record a synthesized rtkEnabled:false (import-marker.ts ~44). [D, may be harmless]
 7. A sync outside persistDetection that adopts a teammate's rtk-enabled.json leaves the RTK question pending until boot; call raiseRtkQuestion after it. [E]
 
+User decision 2026-10-25: item 5 unowned malformed RTK settings remain for manual repair; existing repeated warnings are accepted. Preserve the writer ownership rule. No change to the separate T317 first-import decision. Items 1/4/6 validated as intended/obsolete/harmless under current readers; actionable 2/3/7 implemented at7713e3ca with strengthened rollback control9a1b2961e; fresh source review clean, final test review/full suite/PR gates pending.
+
 ### T412 · FNF[git-noexit-low-3] · gitClone and a few scripts still spawn git unbounded (+4)
 
 status: open
