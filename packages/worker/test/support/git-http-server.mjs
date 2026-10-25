@@ -5,8 +5,8 @@ import path from 'node:path';
 const base = process.argv[2];
 if (!base || !path.isAbsolute(base)) throw new Error('fixture base directory required');
 
-// receive-pack's auto maintenance detaches on newer git and can still write objects/ after
-// the push returns, so a test that then removes the bare fails ENOTEMPTY.
+// receive-pack runs auto maintenance after every push, detached on newer git: the likeliest
+// writer still in a bare when a test removes it (ENOTEMPTY). Removals retry as well.
 const BACKEND_ARGS = ['-c', 'http.receivepack=true', '-c', 'receive.autogc=false', 'http-backend'];
 
 // The alpine worker image has no git http-backend in git --exec-path.
