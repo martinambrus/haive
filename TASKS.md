@@ -192,7 +192,9 @@ settings/review-watermarks.json, descendant wins via merge-base --is-ancestor; _
 
 ### T266 · FNF[record-writer] · 04's set and record writes run unfenced (+5)
 
-status: open
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-25T20:30Z
+
+Codex continuation: validate writer fencing, durable dirty recovery and unseen-checkout protection on shipped T288 base; preserve manual malformed-RTK policy and separate T317/T310 decisions.
 All PRE-EXISTING. Items 4, 7, 8 moved to T310.
 
 1. 04's set and record writes run with no lock and no column fence.
