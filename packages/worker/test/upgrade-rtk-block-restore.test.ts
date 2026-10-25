@@ -58,15 +58,29 @@ async function setup(agents: string = AGENTS_LEFT, offered: string[] = ['AGENTS.
     taskId: '00000000-0000-4000-8000-0000000000c3',
   });
   const noop = () => undefined;
-  const ctxFor = (taskId: string) =>
-    ({
+  const ctxFor = (taskId: string) => {
+    // A cycle ends the previous task before its next upgrade/rollback takes the checkout.
+    for (const row of fake.rows(schema.tasks))
+      fake.patch(schema.tasks, row.id as string, { status: 'completed' });
+    if (fake.rows(schema.tasks).some((row) => row.id === taskId))
+      fake.patch(schema.tasks, taskId, { status: 'running' });
+    else
+      fake.insert(schema.tasks, {
+        id: taskId,
+        userId: USER,
+        repositoryId: REPO,
+        type: 'onboarding_upgrade',
+        status: 'running',
+      });
+    return {
       db: fake.db,
       repoPath: root,
       taskId,
       userId: USER,
       throwIfCancelled: () => {},
       logger: { info: noop, warn: noop, error: noop, debug: noop },
-    }) as unknown as StepContext;
+    } as unknown as StepContext;
+  };
   const plan = {
     repositoryId: REPO,
     ranBackfill: false,

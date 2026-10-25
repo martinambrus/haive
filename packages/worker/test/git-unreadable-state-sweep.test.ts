@@ -130,6 +130,7 @@ function sweepDb(fake: ReturnType<typeof createFakeDb>): Database {
 
 function setup(storagePaths: string[]) {
   const fake = createFakeDb({
+    tasks: schema.tasks,
     repositories: schema.repositories,
     projectStateOutbox: schema.projectStateOutbox,
   });
