@@ -27,10 +27,39 @@ describe('ensureOrigin exit codes', () => {
       updated: true,
     });
   });
-  it('fails when set-url fails', async () => {
+  it('fails when replacing the URL fails', async () => {
     const work = await repo();
     await gitRun(work, ['remote', 'add', 'origin', 'https://example.test/old']);
-    shims.push(await failGit(['remote', 'set-url']));
-    await expect(ensureOrigin(work, 'https://example.test/new')).rejects.toThrow(/set-url/);
+    shims.push(await failGit(['config', '--local', '--replace-all']));
+    await expect(ensureOrigin(work, 'https://example.test/new')).rejects.toThrow(
+      /config origin URL/,
+    );
   });
+});
+it('fails when push URL cleanup fails instead of reporting a successful relink', async () => {
+  const work = await repo();
+  await gitRun(work, ['remote', 'add', 'origin', 'https://example.test/old']);
+  shims.push(await failGit(['config', '--local', '--unset-all'], { exit: 128 }));
+  await expect(ensureOrigin(work, 'https://example.test/new')).rejects.toThrow(
+    /clear origin push URLs/,
+  );
+});
+
+it('keeps the previous fetch URL when clearing planted push URLs fails', async () => {
+  const work = await repo();
+  await gitRun(work, ['remote', 'add', 'origin', 'https://example.test/old']);
+  await gitRun(work, ['config', 'remote.origin.pushurl', 'https://planted.test/r']);
+  const shim = await failGit(['config', '--local', '--unset-all'], { exit: 128 });
+  shims.push(shim);
+  await expect(ensureOrigin(work, 'https://example.test/new')).rejects.toThrow(
+    /clear origin push URLs/,
+  );
+  await shim.restore();
+  shims.pop();
+  expect((await gitRun(work, ['remote', 'get-url', 'origin'])).stdout.trim()).toBe(
+    'https://example.test/old',
+  );
+  expect((await gitRun(work, ['remote', 'get-url', '--push', 'origin'])).stdout.trim()).toBe(
+    'https://planted.test/r',
+  );
 });

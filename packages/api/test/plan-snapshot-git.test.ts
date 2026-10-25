@@ -27,6 +27,7 @@ import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { HAIVE_DATA_FILES } from '@haive/shared';
+import { hardenGitArgs } from '@haive/shared/git-args';
 import { planRoutes } from '../src/routes/plan.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -45,7 +46,7 @@ let logFile = '';
 const savedPath = process.env.PATH;
 
 function git(...args: string[]): void {
-  execFileSync(REAL_GIT, ['-C', root, ...args], {
+  execFileSync(REAL_GIT, hardenGitArgs(['-C', root, ...args], { allowFileTransport: true }), {
     stdio: 'ignore',
     env: {
       ...process.env,
@@ -65,7 +66,7 @@ beforeEach(async () => {
   await mkdir(root);
   await mkdir(shimDir);
   await writeFile(logFile, '');
-  execFileSync(REAL_GIT, ['init', '-q', '-b', 'main', root], { stdio: 'ignore' });
+  execFileSync(REAL_GIT, hardenGitArgs(['init', '-q', '-b', 'main', root]), { stdio: 'ignore' });
   git('config', 'gc.auto', '0');
   for (const rel of [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown]) {
     await mkdir(path.dirname(path.join(root, rel)), { recursive: true });
@@ -74,7 +75,9 @@ beforeEach(async () => {
   git('add', '-A');
   git('commit', '-q', '-m', 'plan');
   const origin = path.join(base, 'origin.git');
-  execFileSync(REAL_GIT, ['init', '-q', '--bare', '-b', 'main', origin], { stdio: 'ignore' });
+  execFileSync(REAL_GIT, hardenGitArgs(['init', '-q', '--bare', '-b', 'main', origin]), {
+    stdio: 'ignore',
+  });
   git('remote', 'add', 'origin', origin);
   git('push', '-q', '-u', 'origin', 'main');
   git('remote', 'set-url', 'origin', 'https://example.test/repo.git');
@@ -300,3 +303,21 @@ describe('the plan snapshot repository root', () => {
     expect(res.status).toBe(500);
   });
 });
+
+it.each([false, true])(
+  'does not report parent git facts for a nested root (empty .git: %s)',
+  async (emptyGit) => {
+    root = path.join(root, 'nested');
+    await mkdir(root);
+    if (emptyGit) await mkdir(path.join(root, '.git'));
+    expect(await snapshot()).toMatchObject({
+      gitAvailable: emptyGit ? null : false,
+      hasOrigin: emptyGit ? null : false,
+      originUrl: null,
+      branch: null,
+      committed: false,
+    });
+    for (const sub of ['ls-files', 'status', 'remote', 'branch', 'rev-list'])
+      expect(await ran(sub)).toBe(false);
+  },
+);
