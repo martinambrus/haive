@@ -15,7 +15,13 @@ changes the render context of a repository with a claim writes it in the same tr
 01's own functions (`step-engine/_upgrade-render.ts`); none keeps an id it does not render. 01, 02, 04
 and the sync all expand the context through `unionExpandedFor`, so the set holds the custom bundle
 items (`custom.*`) and `cli-rules` as well as the manifest's templates: 02 writes it inside its fenced
-transaction, 04 from the context it restored. 12 keeps its own rule for the `cli-rules` region on disk.
+transaction, 04 from the context it restored. 12 keeps its own rule for the `cli-rules` region on disk. Its artifact snapshots describe what 07
+rendered, while its applicable set reads the live RTK switch at the actual write, under the
+project-state lock and a repository row lock: a switch between 07 and 12 leaves the snapshots as
+history and the set truthful. 04 captures the column at apply entry and fences its applicable-set
+and record writes against it, with the current task still holding the checkout; a newer column or
+a released task refuses those writes. It does not extend that fence to the artifact rollback choices
+(T310).
 upgrade-status compares a claim the set holds against the manifest, and reports a claim the set does
 not hold as changed while 02 could still act on one of its paths: one that is absent, one holding the
 bytes its row records as Haive's, or an RTK settings file whose hook can come out. A path 02 keeps (a
@@ -568,6 +574,56 @@ bundle: each write adds or removes it. The ledger is unaffected. The sync reads 
 into the base as the checkout holds them and leaves them out of the merge: a conflict row on one could
 not be answered by anybody, and `upgradeAdmission` would hold every upgrade for it.
 
+**A record writer imports unseen checkout bytes before replacing them.** Migration 0213 appends
+`project_state_sync.synced_hash`, separate from `base_snapshot`: the base deliberately keeps the old
+side of a contested key, while the watermark acknowledges the raw, complete checkout read. It uses
+`projectStateHash` over the files' `gitBlobId`s, including unknown files and the original whitespace;
+`absent` means no files, empty directories included. A writer reads the bounded checkout under the
+project-state lock. An unstamped or changed valid record goes through the sync's same three-way
+import (`syncProjectStateLocked`) there, with no nested pool transaction. A context that import moved
+commits as the newer context and refuses the stale writer, which must plan again. Pending conflict
+rows still overlay incoming values in the files and retain their previous base. A refused or unread
+record is held, never stamped or overwritten; files with no render unit hold too, while a truly empty
+record can be created. Rejected settings still follow the ownership rules above, including manual
+repair of an unowned malformed RTK file. That case keeps its warning and dirty revision after writing
+the other units, since no writer supplied a replacement. Sync stamps only after the checkout is
+re-read just before its commit, and rolls its imports back if it moved. A successful writer stamps
+only the exact expected complete output, after comparing the original bytes again on each parked
+rewrite or removal (new files use exclusive creation). Answer writers and HEAD-base rebases
+invalidate the watermark rather than acknowledge sibling files they did not import. The working-tree
+`rebaseProjectStateOnCheckout` and its `rebaseLocked` wrapper still have only test callers; they are
+retained deliberately, and the set-aside production path uses `rebaseProjectStateOnHeadLocked`.
+
+**A filesystem attempt has a committed undo journal before its first mutation.** The writer takes
+`lockRepositoryTasksKey` then `lockProjectState`, checks the column and its own task (or, for a
+background refresh, opposing live onboarding/upgrade tasks and a reset claim), and commits a dirty
+outbox revision with `write_intent` (0213). Both phases hold the repository row too: root claims
+update that row without taking either advisory lock, so a reset claiming just after the last check
+must wait until the writer's files and transaction finish. This bounded journal contains only changed record paths,
+their before/planned bytes and the mode and owner needed to restore a removal; both sides obey the
+record reader's entry and byte limits. It then reacquires the same ordered locks, checks the checkout,
+reset epoch (including the epoch refresh read with its column, so a completed reset cannot be
+resurrected through the otherwise-compatible NULL column fence), column, holder, journal identity and database inputs again, and holds them through the
+last file and database write. A refusal before preparation creates no intent. A new holder or changed
+checkout after preparation leaves only that dirty intent, with no file, column, applicable-set or
+base write by the record transaction. All pool operations are between transactions; code inside one
+uses its `tx` only. A successful transaction consumes its journal with the watermark and revision
+stamp, so a crash after COMMIT cannot undo committed output.
+
+The sweep first undoes an uncommitted journal, then runs its normal sync/write. Every path must
+still hold either its before or planned bytes before any undo begins, and every individual restore
+is a parked compare-and-swap or exclusive creation; a hand edit holds the journal with a named error.
+Another crash during the undo can repeat it. A live holder, reset or open git operation holds recovery
+as it holds a write. Removed files regain their recorded mode and owner; rewritten files keep their
+held metadata. Direct sync producers defer while a journal exists, including one that appeared while
+they waited for the lock, so they cannot import partial writer output. Dirty journal rows are swept
+even with a NULL render column, which a failed foreground writer may leave under the existing
+failure-clear rule. Recovery never publishes the abandoned target context or base: it restores the
+prior files and leaves a NULL column NULL; the step's Retry can then write its snapshot. An actual
+process death leaves the previously committed column in place, so normal refresh can finish after
+undo. The failed foreground writer still preserves the attempted local side of pending conflicts,
+as before. The journal intentionally does not track or undo another writer's database mutations.
+
 **The record is kept current by an outbox, not only by 12, 02 and 04.** `project_state_outbox`
 (migration 0194, one row per repository, mirroring `plan_mirror_state`) carries `revision`,
 `written_revision` and `last_error`. A mutation of something the record holds calls
@@ -601,7 +657,8 @@ of the checkout (`git merge --ff-only` in 00a and in refresh) must not be stoppe
 one. `setAsideHaiveProjections` (`project-state/set-aside.ts`) lists the projection paths that differ
 from HEAD or are untracked and, when a state file is among them, runs the sync first. Each state
 file must then equal what the sync base renders there (`renderProjectState` over `base_snapshot`,
-which the writer sets to what it wrote and the sync to what it read, so no hash column exists), and
+which the writer sets to what it wrote and the sync to what it read; the raw checkout watermark
+is separate and never substitutes for this per-file ownership comparison), and
 `plan.json` must hash to `plan_mirror_state.synced_hash` while the database holds a plan; `plan.md`
 is rendered from it on every flush and is never judged. A file that is not what Haive last wrote
 (one the sync could not take, such as an unreadable edit, or one held back by a pending conflict)

@@ -1,7 +1,8 @@
+import { isRtkChoiceRecorded } from '@haive/shared/project-state';
 import { redactGitUrl } from '@haive/shared/schemas';
 import { lstatNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { lockRepositoryTasksKey, schema } from '@haive/database';
 import type {
   FormField,
   FormSchema,
@@ -31,6 +32,7 @@ import {
   failIfColumnStale,
   ProjectStateWriteError,
   writeProjectStateRecord,
+  lockProjectState,
 } from '../../../project-state/write.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
 import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
@@ -329,6 +331,16 @@ async function recordOnboardingArtifacts(
     new Set([...rows.map((r) => r.diskPath), ...(retireCliRulesRow ? [CLI_RULES_DISK_PATH] : [])]),
   );
   await ctx.db.transaction(async (tx) => {
+    await lockRepositoryTasksKey(tx, repositoryId);
+    await lockProjectState(tx, repositoryId);
+    const [live] = await tx
+      .select({
+        rtkEnabled: schema.repositories.rtkEnabled,
+        rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
+      })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .for('update');
     if (supersedePaths.length > 0) {
       await tx
         .update(schema.onboardingArtifacts)
@@ -342,8 +354,18 @@ async function recordOnboardingArtifacts(
         );
     }
     await tx.insert(schema.onboardingArtifacts).values(rows);
+    // 07's rows describe what it rendered then. The applicable set describes what renders now:
+    // a person's intervening RTK choice takes precedence at this actual, row-locked write.
+    const current =
+      live && isRtkChoiceRecorded(detect.rtkEnabled !== undefined, live.rtkChoiceMadeAt)
+        ? { ...renderCtx, rtkEnabled: live.rtkEnabled }
+        : renderCtx;
+    const applicable = [
+      ...expanded.filter((r) => r.templateKind !== 'rtk-config'),
+      ...expandManifestFor(current, manifest).filter((r) => r.templateKind === 'rtk-config'),
+    ];
+    await updateApplicableTemplateIds(tx, repositoryId, applicable);
   });
-  await updateApplicableTemplateIds(ctx.db, repositoryId, expanded);
 
   ctx.logger.info(
     { rowsWritten: rows.length, templateSetHash: manifest.setHash },
@@ -676,6 +698,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             repoPath: ctx.repoPath,
             context: renderContext,
             rtkChoiceRecorded,
+            holdingTaskId: ctx.taskId,
           });
           recorded = true;
           recordWrite = 'written';

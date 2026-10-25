@@ -10,7 +10,7 @@ import { createFakeDb } from '@haive/database/testing';
 import { renderContextColumnSchema } from '@haive/shared/project-state';
 import {
   failIfColumnStale,
-  ProjectStateWriteError,
+  ProjectStateMovedError,
   writeProjectStateRecord,
 } from '../src/project-state/write.js';
 
@@ -167,10 +167,9 @@ describe('writeProjectStateRecord: a context the column schema refuses', () => {
 
     const err = await s.write(valid()).catch((e: unknown) => e);
 
-    expect(err).toBeInstanceOf(ProjectStateWriteError);
-    expect((err as ProjectStateWriteError).columnStale).toBe(false);
+    expect(err).toBeInstanceOf(ProjectStateMovedError);
     expect(() => failIfColumnStale(err)).not.toThrow();
-    expect(s.renderContext()).toBeNull();
+    expect(s.renderContext()).not.toBeNull();
     expect(s.syncRows()).toEqual([]);
   });
 
@@ -184,8 +183,8 @@ describe('writeProjectStateRecord: a context the column schema refuses', () => {
 
     const err = await s.write(valid()).catch((e: unknown) => e);
 
-    expect((err as ProjectStateWriteError).columnStale).toBe(true);
-    expect(() => failIfColumnStale(err)).toThrow(err as Error);
+    expect(err).toBeInstanceOf(ProjectStateMovedError);
+    expect(() => failIfColumnStale(err)).not.toThrow();
     expect(s.renderContext()).not.toBeNull();
   });
 

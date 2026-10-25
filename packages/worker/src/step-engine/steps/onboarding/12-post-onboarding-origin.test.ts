@@ -73,7 +73,10 @@ async function ctxForRecording(root: string) {
     name: 'acme',
     source: 'upload',
   });
-  await ctx.db.update(schema.tasks).set({ repositoryId: REPO }).where(eq(schema.tasks.id, TASK));
+  await ctx.db
+    .update(schema.tasks)
+    .set({ repositoryId: REPO, status: 'running' })
+    .where(eq(schema.tasks.id, TASK));
   await ctx.db.insert(schema.taskSteps).values({
     taskId: TASK,
     stepId: '07-generate-files',

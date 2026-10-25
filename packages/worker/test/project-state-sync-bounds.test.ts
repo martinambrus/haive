@@ -73,6 +73,7 @@ async function setup(seed: { column?: unknown; base?: unknown } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'project-state-bounds-'));
   dirs.push(root);
   const fake = createFakeDb({
+    projectStateOutbox: schema.projectStateOutbox,
     repositories: schema.repositories,
     projectStateSync: schema.projectStateSync,
     tasks: schema.tasks,

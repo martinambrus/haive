@@ -138,6 +138,14 @@ describe('04 apply restoring a retired import marker', () => {
     };
     const root = await mkdtemp(join(tmpdir(), 'upgrade-rollback-imported-'));
     dirs.push(root);
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      repositoryId: REPO,
+      type: 'onboarding_upgrade',
+      status: 'running',
+      title: 'rollback',
+    });
     await recordWritten(upgradeRollbackStep.apply(ctxOf(fake.db, root), { detected } as never));
     expect(fake.rows(schema.onboardingArtifacts).filter((r) => r.supersededAt == null)).toEqual([
       expect.objectContaining({

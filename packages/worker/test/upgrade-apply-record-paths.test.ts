@@ -58,6 +58,7 @@ async function setup(installJson?: string) {
     await writeFile(join(root, '.haive/install.json'), installJson, 'utf8');
   }
   const fake = createFakeDb({
+    tasks: schema.tasks,
     onboardingArtifacts: schema.onboardingArtifacts,
     repositories: schema.repositories,
     customBundles: schema.customBundles,
@@ -90,6 +91,23 @@ async function setup(installJson?: string) {
   } as UpgradePlanOutput;
   const noop = () => undefined;
   let crash = false;
+  // A real apply owns a live task and an existing repository; these fixtures exercise the same fence.
+  if (!fake.rows(schema.repositories).length)
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'acme',
+      source: 'blank',
+      rtkEnabled: false,
+    });
+  fake.insert(schema.tasks, {
+    id: TASK,
+    userId: USER,
+    repositoryId: REPO,
+    type: 'onboarding_upgrade',
+    title: 'upgrade',
+    status: 'running',
+  });
   const ctx = {
     db: fake.db,
     repoPath: root,
@@ -159,17 +177,19 @@ describe('02 reports the record files it wrote', () => {
 
   it('lists both, and so the commit step stages both, when only the database half failed', async () => {
     const s = await setup();
-    // The write's lock is refused; the one that clears the column goes through.
-    let locks = 0;
-    s.fake.hooks.beforeLock = () => {
-      locks += 1;
-      if (locks === 1) throw new Error('database refused');
+    // Fail the semantic transaction after the files, not the new durable-intent preparation.
+    let refused = false;
+    s.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.projectStateSync && !refused) {
+        refused = true;
+        throw new Error('database refused');
+      }
     };
 
     const out = await s.apply({ recordWriteFails: true });
 
-    // The files stand on disk, where a later sync takes them as the intended context, while the
-    // column and the sync row stayed as they were: the upgrade must still commit them.
+    // The files were reached before the SQL rollback. The undo journal owns recovery; the step
+    // still reports those actual paths to its commit stage.
     for (const rel of RECORD_PATHS) expect(existsSync(join(s.root, rel)), rel).toBe(true);
     expect(s.column()).toBeNull();
     expect(s.syncRows()).toEqual([]);
@@ -982,6 +1002,7 @@ describe('02 and the legacy tooling mirror', () => {
 
   it('keeps it when the record cannot carry the tooling', async () => {
     const s = await withTooling(HAIVE_TOOLING, false);
+    await s.apply(); // A complete existing record, rather than an unimported partial state directory.
     s.fake.patch(schema.repositories, REPO, {
       onboardingTooling: { schemaVersion: 2, tooling: { ragMode: 'internal' } },
     });

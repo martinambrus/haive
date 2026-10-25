@@ -1,11 +1,16 @@
-import { and, asc, eq, isNotNull, lt, sql } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { readRenderContextColumn } from '@haive/shared/project-state';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { syncProjectStateFromCheckout } from './sync.js';
-import { ProjectStateMovedError, writeProjectStateColumn } from './write.js';
+import {
+  ProjectStateMovedError,
+  ProjectStateRecoveryHeldError,
+  recoverProjectStateWrite,
+  writeProjectStateColumn,
+} from './write.js';
 
 const SWEEP_BATCH = 25;
 
@@ -59,6 +64,16 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
   const repoPath = repo?.storagePath ?? repo?.localPath ?? null;
   if (!repoPath || (await gitOperationInProgress(repoPath))) return false;
 
+  try {
+    await recoverProjectStateWrite(db, repositoryId, repoPath);
+  } catch (err) {
+    if (err instanceof ProjectStateRecoveryHeldError) {
+      await setOutboxError(db, repositoryId, err.message);
+      return false;
+    }
+    if (err instanceof ProjectStateMovedError) return false;
+    throw err;
+  }
   const synced = await syncProjectStateFromCheckout(db, {
     repositoryId,
     repoPath,
@@ -75,7 +90,10 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
   }
 
   const [after] = await db
-    .select({ renderContext: schema.repositories.renderContext })
+    .select({
+      renderContext: schema.repositories.renderContext,
+      onboardingResetAt: schema.repositories.onboardingResetAt,
+    })
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
@@ -95,8 +113,10 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
       repoPath,
       column: read.column,
       expectedColumns: [after!.renderContext],
+      expectedResetAt: after!.onboardingResetAt,
       keepColumnOnFailure: true,
       refuseDuringGitOperation: true,
+      refuseWhileHeld: true,
     });
   } catch (err) {
     if (err instanceof ProjectStateMovedError) return false;
@@ -119,7 +139,10 @@ export async function sweepDirtyProjectStates(db: Database): Promise<number> {
     .where(
       and(
         lt(schema.projectStateOutbox.writtenRevision, schema.projectStateOutbox.revision),
-        isNotNull(schema.repositories.renderContext),
+        or(
+          isNotNull(schema.repositories.renderContext),
+          isNotNull(schema.projectStateOutbox.writeIntent),
+        ),
       ),
     )
     .orderBy(asc(schema.projectStateOutbox.updatedAt))

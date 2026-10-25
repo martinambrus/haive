@@ -294,6 +294,7 @@ export const projectStateSync = pgTable('project_state_sync', {
   baseSnapshot: jsonb('base_snapshot').notNull(),
   lastError: text('last_error'),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  syncedHash: text('synced_hash'),
 });
 
 /** One unit of the project state record that this install and the checkout both changed, differently,
@@ -335,6 +336,7 @@ export const projectStateOutbox = pgTable(
     writtenRevision: integer('written_revision').notNull().default(0),
     lastError: text('last_error'),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    writeIntent: jsonb('write_intent'),
   },
   (table) => [
     check('project_state_outbox_revision_nonnegative', sql`${table.revision} >= 0`),
