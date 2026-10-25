@@ -430,25 +430,6 @@ Recommendation: delete the route.
 status: open · was modular #127
 Plan I4, part d. Browser check at 1280, 768 and 390.
 
-### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+4)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T19:34Z
-
-Codex progress 2026-10-25T19:34Z: Finald4a60c2b bundle correction freshxhighreviewclean; parent17controls and actualNext/API/Postgres/Redis Retry+redaction acceptance pass. PR922 exact-head botclean, finalCIworker smoke running. Migration0212stillnotmerged.
-Items 2-5 merged (#781, #808).
-
-1. PRE-EXISTING, from reading the code (not reproduced). The PR is opened against the origin read from disk (12-worktree-cleanup.ts ~:226, ~:808-813), but pr-poll needs repositories.remote_url (pr-poll-queue.ts ~:136-142), which is NULL for local_path repos. Fix: record the origin on the PR row and poll from it, or backfill remote_url. Reproduce first.
-2. PRE-EXISTING, security-adjacent. The git transport's inline credential helper (repo/git-push.ts ~:68) prints the token for whatever host git asks for. Binding a credential to a repository checks only ownership (api repos.ts ~:379-388, ~:2482-2491). The terminal helper route (api internal.ts ~:18) returns the bound token with no host check.
-   Fix:
-   - refuse a bind whose credential does not fit the remote;
-   - make the helper answer only for the credential's own host;
-   - run the fit check before 12's push.
-3. (T388 review) PRE-EXISTING, minor: an accepted origin URL is returned raw, userinfo included, into step output (worker repo/git-push.ts getOriginUrl; 11a-gate-4-push.ts ~:111, 12-worktree-cleanup.ts ~:267), so a token embedded in a remote URL reaches the step's detect output. Fix: redact userinfo wherever a URL is shown or stored.
-4. (T417 review) PRE-EXISTING, consequential: bundle clones keep the credential in `remote.origin.url` (worker repo/bundle-ingest.ts ~:194-197 `buildAuthenticatedUrl`), a plaintext secret at rest beside the envelope-encrypted copy, and stale after a rotation; the resyncs (bundle-ingest.ts ~:53-61, bundle-sync.ts ~:13-18, 00-bundle-resync.ts ~:35-40) depend on it. Fix: move all four to `buildCredentialHelper`.
-5. (T417 review) PRE-EXISTING, consequential: a relink clears `remote.origin.url` and `pushurl` only; `url.<base>.insteadOf`/`pushInsteadOf`, `include.path` and `remote.origin.vcs` in an uploaded repository's `.git/config` survive, and `getOriginUrl` checks only the rewritten URL's shape, never its host, so the bound credential can go to a host the UI does not show. Same fix as item 2 (a host-bound helper).
-
-Recovery review (2026-10-25) confirmed required corrections before shipping: (a) REGRESSION: scrubSecret redacts URLs before the intact known secret, exposing a suffix when userinfo includes a quote; (b) REGRESSION: display redaction drops explicit default ports reused as a local-path credential binding; (c) PRE-EXISTING task gap: bundle creation checks credential ownership without shared host fit; (d) PRE-EXISTING task gap: onboarding bundle form still exposes legacy URL userinfo. Evidence: .claude/tmp/board-run/T340/codex-review-recovery.md and session-review-probe.log. Existing host-git config execution boundary remains T387; unbounded streaming clones remain T412.
-
 ### T341 · FNF[credential-connection-coupling] · deleting a Git credential silently deletes its connection; re-sign-in duplicates the credential (+13)
 
 status: open · was modular #140
@@ -946,6 +927,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T340 — Git destination-bound credentials, retained PR remote, safe URL state and diagnostic forwarding — PR #922 (e487dfee5), 2026-10-25; main CI40226900960 green; migration0212 applied and shared libraries rebuilt.
 
 - T423 — failed terminal/login attach startup closes owned resources; atomic clamped attachment counts and safe failure frames — PR #925 (e2c2e9874), 2026-10-25; main CI40222956422 green.
 
