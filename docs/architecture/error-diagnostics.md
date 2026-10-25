@@ -32,11 +32,15 @@ columns and helpers returning a failure inside a successful job result sanitize 
 before persistence or return. This includes the project-state outbox, bundle ingestion, CLI
 image probes and Ollama provisioning. A later safe rethrow does not repair an earlier raw write.
 
-Git bundle failures first call `safeErrorMessage` on the original error. Bound errors keep their
+The Git bundle ingest handler first calls `safeErrorMessage` on the original error. Bound errors keep their
 fixed safe message and original error object so the queue boundary can log their class and SQLSTATE;
 a known password that happens to match a word in that fixed message must not rewrite it. Ordinary
 errors then replace known secrets before URL scanning, and only a text-changing scrub replaces
 the error with its sanitized message.
+Bundle origin cleanup follows the same bound-error rule when its legacy URL update fails.
+It continues rebuilding ordinary errors without a raw cause, which could restore a credential to logs.
+The upgrade bundle detector and apply warning sanitize their own failure text before storing
+it in step output; detection also logs the original error while its structure remains available.
 
 The onboarding and upgrade commit wrappers choose `safeErrorMessage` before adding their
 existing staging/commit prefix, and keep the original error as `cause`. Identity resolution

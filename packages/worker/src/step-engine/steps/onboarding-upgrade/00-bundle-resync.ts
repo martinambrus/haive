@@ -6,6 +6,7 @@ import type { BundleJobPayload, FormSchema, FormValues } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { gitRevParseHead, handleResyncGit } from '../../../repo/bundle-ingest.js';
 import { gitRun } from '../../../repo/git-exec.js';
+import { safeErrorMessage } from '@haive/shared/logger';
 
 interface BundleResyncCandidate {
   bundleId: string;
@@ -89,7 +90,8 @@ async function loadGitBundles(ctx: StepContext): Promise<BundleResyncCandidate[]
     try {
       remoteCommit = await fetchRemoteHead(ctx.db, row, row.gitBranch ?? null);
     } catch (err) {
-      fetchError = err instanceof Error ? err.message : String(err);
+      fetchError = safeErrorMessage(err);
+      ctx.logger.warn({ err, bundleId: row.id }, 'bundle upstream check failed');
     }
     let localHead: string | null = null;
     try {
@@ -208,7 +210,7 @@ export const bundleResyncStep: StepDefinition<BundleResyncDetect, BundleResyncAp
         await handleResyncGit(payload, ctx.db, bundleStorageRoot);
         resyncedBundleIds.push(target.bundleId);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = safeErrorMessage(err);
         warnings.push(`bundle ${target.name} resync failed: ${msg}`);
         ctx.logger.warn({ err, bundleId: target.bundleId }, 'bundle resync failed');
       }

@@ -1,6 +1,7 @@
 import { schema, type Database } from '@haive/database';
 import { eq } from 'drizzle-orm';
 import { redactGitUrl } from '@haive/shared/schemas';
+import { boundQueryError, safeErrorMessage } from '@haive/shared/logger';
 import { assertCloneUrl } from './clone.js';
 import { buildCredentialHelper, ensureOrigin, scrubSecret } from './git-push.js';
 
@@ -35,8 +36,11 @@ export async function bundleGitAuth(
       secret: auth?.secret ?? null,
     };
   } catch (err) {
-    throw new Error(
-      scrubSecret(err instanceof Error ? err.message : String(err), auth?.secret ?? null),
-    );
+    // The legacy-URL write can fail after Git succeeds. Keep bound structure for
+    // the caller's safe persistence/logging, without scrubbing the fixed DB text.
+    if (boundQueryError(err)) throw err;
+    // Ordinary failures keep the existing scrub and no raw cause: a cause could
+    // put the credential back into diagnostics after its message was cleaned.
+    throw new Error(scrubSecret(safeErrorMessage(err), auth?.secret ?? null));
   }
 }
