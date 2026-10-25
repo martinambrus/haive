@@ -17,6 +17,7 @@ import {
 } from '@haive/shared/rules-files';
 import { and, asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
+import { safeErrorMessage } from '@haive/shared/logger';
 import {
   CLI_RULES_END,
   CLI_RULES_START,
@@ -1374,7 +1375,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
               ctx.logger.warn({ err: dropErr, diskPath: entry.diskPath }, 'removal record left'),
             );
           }
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = safeErrorMessage(err);
           warnings.push(`failed to delete ${entry.diskPath}: ${msg}`);
         }
         continue;
@@ -1853,7 +1854,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           await ctx.db.delete(schema.taskEvents).where(eq(schema.taskEvents.id, id));
         }
       } catch (err) {
-        const cause = err instanceof Error ? err.message : String(err);
+        const cause = safeErrorMessage(err);
         warnings.push(`${path}: the earlier record of its removal could not be voided: ${cause}`);
       }
     };
@@ -1918,7 +1919,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         writtenPaths.push(...err.written);
         deletedPaths.push(...err.removed);
       }
-      const message = err instanceof Error ? err.message : String(err);
+      const message = safeErrorMessage(err);
       const failed = recordWritten
         ? 'the record was written, but retiring the files it replaces failed'
         : 'project state record write failed';
@@ -1942,7 +1943,7 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           else if (entry !== undefined) await voidEarlier(path, ids);
         }
       } catch (lookupErr) {
-        const cause = lookupErr instanceof Error ? lookupErr.message : String(lookupErr);
+        const cause = safeErrorMessage(lookupErr);
         warnings.push(`did not list the files this task removed earlier: ${cause}`);
         ctx.logger.warn({ err: lookupErr }, 'earlier removals not listed');
       }

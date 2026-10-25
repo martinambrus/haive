@@ -9,6 +9,7 @@ import type {
   OnboardingToolingMirror,
 } from '@haive/shared';
 import { HAIVE_DATA_DIR, RTK_SETTINGS_PATHS } from '@haive/shared';
+import { safeErrorMessage } from '@haive/shared/logger';
 import {
   buildCliRulesBlock,
   CLI_RULES_DISK_PATH,
@@ -420,9 +421,7 @@ async function writeHaiveDataMirror(
   try {
     await writePlanMirror(ctx.db, repositoryId, ctx.repoPath, changes);
   } catch (err) {
-    warnings.push(
-      `haive-data mirror: plan mirror failed (${err instanceof Error ? err.message : String(err)})`,
-    );
+    warnings.push(`haive-data mirror: plan mirror failed (${safeErrorMessage(err)})`);
   } finally {
     filesWritten.push(...changes.written);
     filesRemoved.push(...changes.removed);
@@ -636,7 +635,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
       artifactRowsWritten = res.rowsWritten;
       warnings.push(...res.warnings);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = safeErrorMessage(err);
       warnings.push(`onboarding-artifacts recording failed: ${message}`);
       ctx.logger.warn({ err }, 'onboarding-artifacts recording failed');
     }
@@ -697,7 +696,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             ownFiles.push(...err.written);
             ownRemoved.push(...err.removed);
           }
-          const message = err instanceof Error ? err.message : String(err);
+          const message = safeErrorMessage(err);
           warnings.push(`project state record write failed: ${message}`);
           ctx.logger.warn({ err }, 'project state record write failed');
           if (!recorded) {
@@ -728,7 +727,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         );
         warnings.push(...res.warnings);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = safeErrorMessage(err);
         warnings.push(`haive-data mirror write failed: ${message}`);
         ctx.logger.warn({ err }, 'haive-data mirror write failed');
       }
