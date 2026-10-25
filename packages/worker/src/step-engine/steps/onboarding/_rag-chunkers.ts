@@ -1395,30 +1395,104 @@ const RUBY_NAME_START = /[A-Za-z_\u0080-\uFFFF]/;
 const RUBY_NAME_CHAR = /[\w\u0080-\uFFFF]/;
 const RUBY_PREFIX_OPERATORS = new Set(['not', 'and', 'or', 'defined?']);
 
+/** Percent-quoted Ruby bodies balance their own delimiter, never expression brackets. */
+function rubyPercentEnd(content: string, at: number): number | null {
+  let open = at + 1;
+  const type = /[qQwWiIrxs]/.test(content[open] ?? '') ? content[open++]! : '';
+  const delimiter = content[open];
+  if (!delimiter || /[A-Za-z0-9\u0080-\uFFFF]/.test(delimiter) || (!type && /\s/.test(delimiter)))
+    return null;
+  const close =
+    ({ '(': ')', '[': ']', '{': '}', '<': '>' } as Record<string, string>)[delimiter] ?? delimiter;
+  const paired = close !== delimiter;
+  const interpolates = !['q', 'w', 'i', 's'].includes(type);
+  let depth = 1;
+  for (let i = open + 1; i < content.length; i += 1) {
+    if (content[i] === '\\') i += 1;
+    else if (interpolates && content[i] === '#' && content[i + 1] === '{')
+      i = interpolationEnd(content, i + 1) - 1;
+    else if (paired && content[i] === delimiter) depth += 1;
+    else if (content[i] === close && --depth === 0) {
+      i += 1;
+      if (type === 'r') while (/[imoxnesu]/.test(content[i] ?? '')) i += 1;
+      return i;
+    }
+  }
+  return content.length;
+}
+
 /** End of an endless expression: completed tokens stop at a top-level newline,
  *  while operators require another value. Literal bodies cannot change depth. */
-function rubyExpressionEnd(content: string, from: number): number {
+function rubyExpressionEnd(
+  content: string,
+  from: number,
+  locals: Set<string>,
+  parameters = false,
+): number {
   let depth = 0;
   let continues = false;
   let operandExpected = true;
-  let qualifiedName = false;
+  let nameContext: 'bare' | 'receiver' | 'constant' | 'value' = 'bare';
+  let commandName = false;
+  let parameterBinding = parameters;
   for (let i = from; i < content.length; i += 1) {
     const c = content[i]!;
-    if (c === '"' || c === "'") {
+    const commandArgument =
+      commandName && /[ \t]/.test(content[i - 1] ?? '') && !/[=\s]/.test(content[i + 1] ?? ' ');
+    const percentEnd =
+      c === '%' && (operandExpected || commandArgument) ? rubyPercentEnd(content, i) : null;
+    if (percentEnd !== null) {
+      i = percentEnd - 1;
+      continues = false;
+      operandExpected = false;
+      nameContext = 'bare';
+      commandName = false;
+    } else if (c === '"' || c === "'") {
       i = quotedEnd(content, i) - 1;
       continues = false;
       operandExpected = false;
-      qualifiedName = false;
+      nameContext = 'bare';
+      commandName = false;
+    } else if (c === '?' && operandExpected && content[i + 1] && !/\s/.test(content[i + 1]!)) {
+      // A character literal is a value, not a bare command name or an expression bracket.
+      let end = i + 1;
+      for (
+        let prefix = /^\\(?:[CM]-|c)/.exec(content.slice(end));
+        prefix;
+        prefix = /^\\(?:[CM]-|c)/.exec(content.slice(end))
+      )
+        end += prefix[0].length;
+      if (content[end] === '\\') end += 1;
+      i = end + codePointAt(content, end).length - 1;
+      continues = false;
+      operandExpected = false;
+      nameContext = 'bare';
+      commandName = false;
     } else if (RUBY_NAME_START.test(c)) {
       const start = i;
       while (i + 1 < content.length && RUBY_NAME_CHAR.test(content[i + 1]!)) i += 1;
       const suffix = content[i + 1];
       if (suffix === '?' || (suffix === '!' && !['=', '~'].includes(content[i + 2] ?? ''))) i += 1;
       const word = content.slice(start, i + 1);
-      continues = !qualifiedName && RUBY_PREFIX_OPERATORS.has(word);
+      continues = nameContext === 'bare' && RUBY_PREFIX_OPERATORS.has(word);
+      // The same lexical pass collects parameter bindings, skipping their defaults.
+      if (parameterBinding) locals.add(word);
+      if (
+        nameContext === 'bare' &&
+        /^[ \t]*(?:=(?!=|~|>)|(?:[-+*/%&|^]|<<|>>|\*\*|&&|\|\|)=)/.test(content.slice(i + 1))
+      )
+        locals.add(word);
+      commandName =
+        !continues &&
+        (nameContext === 'receiver' ||
+          (nameContext !== 'value' &&
+            !/[0-9]/.test(content[start - 1] ?? '') &&
+            !/^\p{Lu}/u.test(word) &&
+            (nameContext === 'constant' || !locals.has(word)) &&
+            !/^(?:true|false|nil|self|__FILE__|__LINE__|__ENCODING__)$/.test(word)));
       operandExpected = continues;
-      qualifiedName = false;
-    } else if (c === '/' && operandExpected) {
+      nameContext = 'bare';
+    } else if (c === '/' && (operandExpected || commandArgument)) {
       const close = regexClose(content, i, true, true);
       if (close >= 0) {
         i = close;
@@ -1429,7 +1503,8 @@ function rubyExpressionEnd(content: string, from: number): number {
         continues = true;
         operandExpected = true;
       }
-      qualifiedName = false;
+      nameContext = 'bare';
+      commandName = false;
     } else if (c === '#') {
       const end = lineEnd(content, i, true);
       i = (end < 0 ? content.length : end) - 1;
@@ -1439,20 +1514,34 @@ function rubyExpressionEnd(content: string, from: number): number {
       depth += 1;
       continues = false;
       operandExpected = true;
-      qualifiedName = false;
+      nameContext = 'bare';
+      commandName = false;
     } else if (')]}'.includes(c)) {
       depth = Math.max(0, depth - 1);
       continues = false;
       operandExpected = false;
-      qualifiedName = false;
+      nameContext = 'bare';
+      commandName = false;
     } else if (c === '.' || c === ':' || c === '@' || c === '$') {
-      qualifiedName = true;
+      nameContext =
+        c === '.'
+          ? 'receiver'
+          : c === ':' && (content[i - 1] === ':' || content[i + 1] === ':')
+            ? 'constant'
+            : 'value';
+      if (parameters && depth === 0 && c === ':') parameterBinding = false;
+      commandName = false;
       continues = c === '.' || c === ':';
       operandExpected = c !== '.';
     } else if (!/\s/.test(c)) {
+      if (parameters && depth === 0) {
+        if (c === ',') parameterBinding = true;
+        else if (c === '=') parameterBinding = false;
+      }
       continues = /[-+*/%&|^,?=<>!~\\]/.test(c);
       operandExpected = continues;
-      qualifiedName = false;
+      nameContext = 'bare';
+      commandName = false;
     }
   }
   return content.length;
@@ -1501,7 +1590,10 @@ function rubyRanges(content: string): SectionRange[] {
         close! +
         tail.slice(close!).indexOf('=') +
         1;
-      const end = rubyExpressionEnd(content, expressionStart);
+      const parameters = tail.startsWith('(') ? tail.slice(1, close! - 1) : '';
+      const locals = new Set<string>();
+      rubyExpressionEnd(parameters, 0, locals, true);
+      const end = rubyExpressionEnd(content, expressionStart, locals);
       while (i < lines.length && offsets[i]! < end) i += 1;
     }
     while (!endless && i < lines.length) {
