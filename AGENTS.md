@@ -155,7 +155,7 @@ in-progress task steps.
 
 - All modules are `"type": "module"`. Use `.js` extensions in import paths even for TypeScript sources because of `NodeNext` module resolution.
 - Zod is used for both validation and for generating `FormSchema` field metadata where possible.
-- Logger is `pino` from `@haive/shared/logger`. Never `console.log` from server code. ONE exception, and it is structural rather than a lapse: `packages/database/src/migrate/` is a CLI and `@haive/shared` DEPENDS ON `@haive/database`, so importing the logger back would be a dependency cycle. It emits one JSON line per event through its own `emit()`.
+- Server logs use `pino` from `@haive/shared/logger`, never `console.log`. The CLI in `packages/database/src/migrate/` emits JSON through its own `emit()`: shared depends on database, so importing shared would create a cycle.
 - Host-side IO on a repository path goes through `@haive/shared/fs-safe`, never through a path-based `node:fs` call. The worker and the api run as root over trees that repositories and sandboxed agents write, so a path resolved by name is a path they can redirect; the primitives take `(anchor, rel)`, resolve `rel` one held directory descriptor at a time, refuse a link in any component, and verify the held inode through `/proc/self/fd` (Node-only, Linux-only, out of the root barrel and of every subpath web imports). Anchors are `<storage>/<userId>/<repoId>` or a repository's `localPath` — never `.haive`, a worktree or an uploads dir, since the sandbox mounts the whole repository root read-write. `packages/shared/test/fs-ratchet.test.ts` pins the remaining path-based calls per file (`fs-ratchet.json`, exact counts): a conversion lowers its entry, and a new call needs a reason in the PR. A child process follows the same rule: `runTool` (`worker/src/repo/tool-spawn.ts`) hands `tar`, `unzip` and `pdftotext` what they read and write as held descriptors, named `/proc/self/fd/N` in the child, never a path they would resolve by name, and runs them with PATH and LANG only, as uid 65534 under a root worker. A tool that re-opens its input (unzip seeks) needs that uid to be able to read it. Every upload is written 0644, and a file that is not is copied through the descriptor into a private, already unlinked file the uid can read (`toolReadable`), so the original's mode is never changed.
 - postgres.js is patched (`patches/postgres@3.4.9.patch`, pnpm `patchedDependencies`; upstream
   porsager/postgres#1209, unreleased) so a connection whose backend died rejects what it still owes
@@ -310,6 +310,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
   fingerprints. `_review-findings.ts`.
 - [Review dimensions](docs/architecture/review-dimensions.md): the 14 dimensions, repository
   policy and task override. `REVIEW_DIMENSIONS`.
+
+- [Error diagnostics](docs/architecture/error-diagnostics.md): bound query errors, logs, queue transport and stored failure text. `safeErrorMessage`, `safeErrorForTransport`.
 
 ### Spend and statistics
 
