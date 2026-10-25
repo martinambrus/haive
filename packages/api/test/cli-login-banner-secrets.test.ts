@@ -314,6 +314,19 @@ describe('Claude OAuth token capture controls', () => {
     assertNoCredentialText(expected, CODE);
   });
 
+  it('fix-round1 D5 scans 30000 trailing blanks in under 50 ms', async () => {
+    vi.useRealTimers();
+    await ready();
+    const bytes = Buffer.from(`${TOKEN.slice(0, 80)}\n${TOKEN.slice(80)}${' '.repeat(30000)}\n\n`);
+    const began = performance.now();
+    stream.emit('data', bytes);
+    const elapsed = performance.now() - began;
+    await settle();
+    expect(elapsed < 50).toBe(true);
+    expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(true);
+    assertNoCredentialText(TOKEN, CODE);
+  });
+
   it.each([95, 100, 90])('saves the complete %i-character body', async (length) => {
     const expected = token(length);
     await ready();

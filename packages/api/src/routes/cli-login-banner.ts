@@ -223,7 +223,7 @@ function extractClaudeOauthToken(text: string): string | null {
     if (i > 0) {
       // Only token-only lines can be TTY continuations. Blank lines, prose
       // with word separators and a second prefix terminate the first token.
-      if (line.startsWith(CLAUDE_OAUTH_PREFIX) || /[ \t]+\S/.test(line)) break;
+      if (line.startsWith(CLAUDE_OAUTH_PREFIX) || /[ \t]\S/.test(line)) break;
       // A chunk can end mid-token or just after a wrap. Wait for more output
       // before deciding whether its last line continues the capture.
       if (i === lines.length - 1 && /^[A-Za-z0-9_-]*$/.test(line)) return null;
