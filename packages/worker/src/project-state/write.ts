@@ -486,6 +486,7 @@ export async function writeProjectStateColumn(
   const written: string[] = [];
   const removed: string[] = [];
   let attempted: ProjectRender | null = null;
+  let mutatedFiles = false;
   try {
     const portable = portableRender(column);
     attempted = portable;
@@ -565,6 +566,7 @@ export async function writeProjectStateColumn(
                 createParents: true,
                 mode: 'create-exclusive',
               });
+              mutatedFiles = true;
             } catch (err) {
               if ((err as NodeJS.ErrnoException).code === 'EEXIST')
                 throw new ProjectStateMovedError();
@@ -575,6 +577,7 @@ export async function writeProjectStateColumn(
               data.equals(Buffer.from(before)) ? Buffer.from(text) : null,
             );
             if (result !== 'rewritten') throw new ProjectStateMovedError();
+            mutatedFiles = true;
           }
         }
         if (!written.includes(path)) written.push(path);
@@ -591,6 +594,7 @@ export async function writeProjectStateColumn(
           (data) => before !== undefined && data.equals(Buffer.from(before)),
         );
         if (gone === 'kept') throw new ProjectStateMovedError();
+        if (gone === 'removed') mutatedFiles = true;
         const was = written.indexOf(path);
         if (was >= 0) written.splice(was, 1);
         if (!removed.includes(path)) removed.push(path);
@@ -794,7 +798,10 @@ export async function writeProjectStateColumn(
         .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
     });
   } catch (err) {
-    if (err instanceof ProjectStateMovedError) throw err;
+    // Admission and a CAS refused before our first mutation changed no semantic state. Once a
+    // file did change, a moved checkout is a partial-write failure just like a SQL rollback: retain
+    // its path report and foreground pending-local-side cleanup (background writers keep column).
+    if (err instanceof ProjectStateMovedError && !mutatedFiles) throw err;
     const cleared =
       keepColumnOnFailure === true ||
       (await clearRenderContext(

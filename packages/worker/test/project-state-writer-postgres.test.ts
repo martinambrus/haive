@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -13,6 +13,7 @@ import {
   projectStateHash,
   renderProjectState,
 } from '@haive/shared/project-state';
+import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
 import { REFERENCE_CONTEXT, expandManifestFor } from '../src/step-engine/template-manifest.js';
@@ -22,11 +23,13 @@ import {
   lockProjectState,
   recoverProjectStateWrite,
   writeProjectStateRecord,
+  writeProjectStateColumn,
 } from '../src/project-state/write.js';
 import { refreshProjectState, sweepDirtyProjectStates } from '../src/project-state/refresh.js';
 
 const seam = vi.hoisted(() => ({
   afterWrite: null as null | (() => Promise<void>),
+  beforeRewrite: null as null | (() => Promise<void>),
   afterRemove: null as null | (() => Promise<void>),
 }));
 vi.mock('@haive/shared/fs-safe', async (original) => {
@@ -34,6 +37,7 @@ vi.mock('@haive/shared/fs-safe', async (original) => {
   return {
     ...real,
     rewriteFileIfNoFollow: async (...args: Parameters<typeof real.rewriteFileIfNoFollow>) => {
+      await seam.beforeRewrite?.();
       const result = await real.rewriteFileIfNoFollow(...args);
       if (result === 'rewritten') await seam.afterWrite?.();
       return result;
@@ -63,6 +67,7 @@ const dirs: string[] = [];
 const users: string[] = [];
 afterEach(async () => {
   seam.afterWrite = null;
+  seam.beforeRewrite = null;
   seam.afterRemove = null;
   for (const id of users.splice(0)) await db!.delete(schema.users).where(eq(schema.users.id, id));
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
@@ -974,5 +979,283 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
         .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
     ).toEqual([]);
     await expect(s.render()).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+  it('keeps an attempted pending local side after render landed and a later file CAS loses to an editor', async () => {
+    const s = await fixture();
+    await db!
+      .update(schema.repositories)
+      .set({ rtkVersion: '1.0.0' })
+      .where(eq(schema.repositories.id, s.repo.id));
+    await s.write();
+    await db!
+      .update(schema.repositories)
+      .set({ renderContext: { ...context('mine'), rtkChoiceRecorded: false } })
+      .where(eq(schema.repositories.id, s.repo.id));
+    const renderPath = join(s.root, '.haive-data/state/project/render.json');
+    await writeFile(renderPath, JSON.stringify(context('theirs'), null, 4) + '\n');
+    expect(
+      (await syncProjectStateFromCheckout(db!, { repositoryId: s.repo.id, repoPath: s.root }))
+        .outcome,
+    ).toBe('conflict');
+    await db!
+      .update(schema.repositories)
+      .set({ rtkVersion: '2.0.0' })
+      .where(eq(schema.repositories.id, s.repo.id));
+    const settingPath = join(s.root, '.haive-data/state/settings/rtk-version.json');
+    let editorWrote = false;
+    seam.afterWrite = async () => {
+      if (editorWrote) return;
+      editorWrote = true;
+      // The first actual change normalizes the incoming render. The next path's preimage is now stale.
+      expect(await readFile(renderPath, 'utf8')).not.toBe(
+        JSON.stringify(context('theirs'), null, 4) + '\n',
+      );
+      await writeFile(settingPath, '"editor version"\n');
+    };
+    const error = await s.write('my attempted choice').catch((err: unknown) => err);
+    seam.afterWrite = null;
+    expect(error).toBeInstanceOf(Error);
+    expect(editorWrote).toBe(true);
+    expect(error).toMatchObject({
+      name: 'ProjectStateWriteError',
+      columnStale: false,
+      written: expect.arrayContaining(['.haive-data/state/project/render.json']),
+    });
+    expect((error as { written: string[] }).written).not.toContain(
+      '.haive-data/state/settings/rtk-version.json',
+    );
+    expect(await readFile(settingPath, 'utf8')).toBe('"editor version"\n');
+    expect((await s.outbox())!.writeIntent).toBeTruthy();
+    const [pending] = await db!
+      .select()
+      .from(schema.projectStateConflicts)
+      .where(eq(schema.projectStateConflicts.repositoryId, s.repo.id));
+    expect(pending!.local).toMatchObject({ v: { name: 'my attempted choice' } });
+    expect(pending!.resolvedAt).toBeNull();
+    expect(
+      (
+        await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
+      )[0]!.renderContext,
+    ).toBeNull();
+  });
+
+  it('leaves committed pending semantics alone when the first actual file CAS loses', async () => {
+    const s = await fixture();
+    await s.write();
+    await db!
+      .update(schema.repositories)
+      .set({ renderContext: { ...context('mine'), rtkChoiceRecorded: false } })
+      .where(eq(schema.repositories.id, s.repo.id));
+    const renderPath = join(s.root, '.haive-data/state/project/render.json');
+    await writeFile(renderPath, JSON.stringify(context('theirs'), null, 4) + '\n');
+    expect(
+      (await syncProjectStateFromCheckout(db!, { repositoryId: s.repo.id, repoPath: s.root }))
+        .outcome,
+    ).toBe('conflict');
+    let editorWrote = false;
+    seam.beforeRewrite = async () => {
+      if (editorWrote) return;
+      editorWrote = true;
+      await writeFile(renderPath, JSON.stringify(context('editor before first mutation')) + '\n');
+    };
+    await expect(s.write('unwritten attempted choice')).rejects.toThrow('settings changed');
+    seam.beforeRewrite = null;
+    expect(editorWrote).toBe(true);
+    expect((await s.render()).projectInfo.name).toBe('editor before first mutation');
+    const [pending] = await db!
+      .select()
+      .from(schema.projectStateConflicts)
+      .where(eq(schema.projectStateConflicts.repositoryId, s.repo.id));
+    expect(pending!.local).toMatchObject({ v: { name: 'mine' } });
+    expect(
+      (
+        await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
+      )[0]!.renderContext,
+    ).toMatchObject(context('mine'));
+  });
+
+  it.each(['02', '12'] as const)(
+    '%s reports a post-mutation CAS as a failed record without staging the editor-owned path',
+    async (step) => {
+      const s = await fixture();
+      const git = (...args: string[]) =>
+        execFileSync('git', args, { cwd: s.root, encoding: 'utf8' });
+      if (step === '12') {
+        git('init', '-q', '-b', 'main');
+        git('config', 'user.name', 'T266');
+        git('config', 'user.email', 't266@haive.local');
+        await writeFile(join(s.root, 'README.md'), 'fixture\n');
+        git('add', 'README.md');
+        git('commit', '-qm', 'seed');
+      }
+      await db!
+        .update(schema.repositories)
+        .set({ rtkVersion: '1.0.0' })
+        .where(eq(schema.repositories.id, s.repo.id));
+      await s.write();
+      if (step === '12') {
+        git('add', '.haive-data/state');
+        git('commit', '-qm', 'record before attempt');
+      }
+      await db!
+        .update(schema.repositories)
+        .set({ renderContext: { ...context('mine'), rtkChoiceRecorded: false } })
+        .where(eq(schema.repositories.id, s.repo.id));
+      const renderPath = join(s.root, '.haive-data/state/project/render.json');
+      await writeFile(renderPath, JSON.stringify(context('theirs'), null, 4) + '\n');
+      expect(
+        (await syncProjectStateFromCheckout(db!, { repositoryId: s.repo.id, repoPath: s.root }))
+          .outcome,
+      ).toBe('conflict');
+      await db!
+        .update(schema.repositories)
+        .set({ rtkVersion: '2.0.0' })
+        .where(eq(schema.repositories.id, s.repo.id));
+      const [task] = await db!
+        .insert(schema.tasks)
+        .values({
+          userId: s.userId,
+          repositoryId: s.repo.id,
+          type: step === '12' ? 'onboarding' : 'onboarding_upgrade',
+          title: 'attempt',
+          status: 'running',
+        })
+        .returning();
+      const attempted = {
+        ...REFERENCE_CONTEXT,
+        projectInfo: { ...REFERENCE_CONTEXT.projectInfo, name: 'my attempted choice' },
+        cliProviders: [],
+      };
+      if (step === '12')
+        await db!.insert(schema.taskSteps).values({
+          taskId: task!.id,
+          stepId: '07-generate-files',
+          stepIndex: 7,
+          title: 'generated',
+          status: 'done',
+          detectOutput: attempted,
+          output: { wroteFiles: [], skippedFiles: [] },
+        });
+      const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} };
+      const ctx = {
+        db: db!,
+        repoPath: s.root,
+        workspacePath: s.root,
+        taskId: task!.id,
+        userId: s.userId,
+        logger,
+        throwIfCancelled() {},
+      } as unknown as StepContext;
+      let edited = false;
+      const editorPath = '.haive-data/state/settings/rtk-version.json';
+      seam.afterWrite = async () => {
+        if (!edited) {
+          edited = true;
+          await writeFile(join(s.root, editorPath), '"editor version"\n');
+        }
+      };
+      if (step === '02') {
+        const output = await upgradeApplyStep.apply(ctx, {
+          detected: {
+            repositoryId: s.repo.id,
+            ranBackfill: false,
+            entries: [],
+            counts: {},
+            installedTemplateSetHash: null,
+            currentTemplateSetHash: 'set',
+            renderCtxSnapshot: { ...REFERENCE_CONTEXT, projectInfo: attempted.projectInfo },
+            rtkFollowsLive: false,
+            backfilledRows: 0,
+          },
+          formValues: {},
+          iteration: 0,
+          previousIterations: [],
+        } as never);
+        expect(output.recordWrite).toBe('failed');
+        expect(output.writtenPaths).toContain('.haive-data/state/project/render.json');
+        expect(output.writtenPaths).not.toContain(editorPath);
+      } else {
+        const output = await postOnboardingStep.apply(ctx, {
+          detected: { hasGit: true },
+          formValues: { commit: true, commitMessage: 'record reached files' },
+          iteration: 0,
+          previousIterations: [],
+        } as never);
+        expect(output.recordWrite).toBe('failed');
+        expect(output.stagedPaths).toContain('.haive-data/state/project/render.json');
+        expect(output.stagedPaths).not.toContain(editorPath);
+        expect(git('show', `HEAD:${editorPath}`)).toBe('"1.0.0"\n');
+      }
+      seam.afterWrite = null;
+      expect(edited).toBe(true);
+      expect(await readFile(join(s.root, editorPath), 'utf8')).toBe('"editor version"\n');
+      const [pending] = await db!
+        .select()
+        .from(schema.projectStateConflicts)
+        .where(eq(schema.projectStateConflicts.repositoryId, s.repo.id));
+      expect(pending!.local).toMatchObject({ v: { name: 'my attempted choice' } });
+      expect((await s.outbox())!.writeIntent).toBeTruthy();
+    },
+  );
+
+  it('background CAS failure keeps its column and a dirty journal until safe recovery can retry', async () => {
+    const s = await fixture();
+    await db!
+      .update(schema.repositories)
+      .set({ rtkVersion: '1.0.0' })
+      .where(eq(schema.repositories.id, s.repo.id));
+    await s.write();
+    const mine = { ...context('mine'), rtkChoiceRecorded: false };
+    await db!
+      .update(schema.repositories)
+      .set({ renderContext: mine })
+      .where(eq(schema.repositories.id, s.repo.id));
+    await writeFile(
+      join(s.root, '.haive-data/state/project/render.json'),
+      JSON.stringify(context('theirs'), null, 4) + '\n',
+    );
+    expect(
+      (await syncProjectStateFromCheckout(db!, { repositoryId: s.repo.id, repoPath: s.root }))
+        .outcome,
+    ).toBe('conflict');
+    await db!
+      .update(schema.repositories)
+      .set({ rtkVersion: '2.0.0' })
+      .where(eq(schema.repositories.id, s.repo.id));
+    const path = join(s.root, '.haive-data/state/settings/rtk-version.json');
+    let edited = false;
+    seam.afterWrite = async () => {
+      if (!edited) {
+        edited = true;
+        await writeFile(path, '"editor version"\n');
+      }
+    };
+    await expect(
+      writeProjectStateColumn(db!, {
+        repositoryId: s.repo.id,
+        repoPath: s.root,
+        column: mine as never,
+        expectedColumns: [mine],
+        keepColumnOnFailure: true,
+        refuseWhileHeld: true,
+      }),
+    ).rejects.toMatchObject({ name: 'ProjectStateWriteError', columnStale: false });
+    seam.afterWrite = null;
+    expect(
+      (
+        await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
+      )[0]!.renderContext,
+    ).toEqual(mine);
+    const dirty = await s.outbox();
+    expect(dirty!.revision).toBeGreaterThan(dirty!.writtenRevision);
+    expect(dirty!.writeIntent).toBeTruthy();
+    expect(await sweepDirtyProjectStates(db!)).toBe(0);
+    expect(await readFile(path, 'utf8')).toBe('"editor version"\n');
+    await writeFile(path, '"1.0.0"\n'); // Explicit manual repair to a recognized preimage releases the held undo.
+    expect(await sweepDirtyProjectStates(db!)).toBe(1);
+    expect(await readFile(path, 'utf8')).toBe('"2.0.0"\n');
+    const clean = await s.outbox();
+    expect(clean!.writeIntent).toBeNull();
+    expect(clean!.writtenRevision).toBe(clean!.revision);
   });
 });

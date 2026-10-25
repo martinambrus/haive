@@ -622,7 +622,12 @@ failure-clear rule. Recovery never publishes the abandoned target context or bas
 prior files and leaves a NULL column NULL; the step's Retry can then write its snapshot. An actual
 process death leaves the previously committed column in place, so normal refresh can finish after
 undo. The failed foreground writer still preserves the attempted local side of pending conflicts,
-as before. The journal intentionally does not track or undo another writer's database mutations.
+as before. A CAS or final-hash refusal before the writer's first successful filesystem mutation
+remains a moved-checkout refusal with no semantic cleanup. After an actual mutation it is a partial
+`ProjectStateWriteError`, with the reached paths and the same foreground failure-clear/pending-local
+cleanup as a SQL rollback; background writers keep their column. Merely listing an unchanged file
+for staging does not count as a mutation, and an editor-owned refused path is never reported as
+written. The journal intentionally does not track or undo another writer's database mutations.
 
 **The record is kept current by an outbox, not only by 12, 02 and 04.** `project_state_outbox`
 (migration 0194, one row per repository, mirroring `plan_mirror_state`) carries `revision`,
