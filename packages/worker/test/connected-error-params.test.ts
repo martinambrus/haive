@@ -12,7 +12,8 @@ vi.mock('../src/bundle-parser/index.js', () => ({
   parseBundle: async () => ({ items: [], ambiguous: [], dropped: [] }),
   persistBundleItems: h.persist,
 }));
-vi.mock('../src/repo/clone.js', () => ({
+vi.mock('../src/repo/clone.js', async (original) => ({
+  ...(await original<object>()),
   extractArchive: async () => ({ note: null, dropped: [] }),
   gitClone: async () => undefined,
   buildAuthenticatedUrl: () => {
