@@ -90,3 +90,22 @@ it('does not read later prose or email addresses as userinfo', () => {
   const input = 'see "https://example.test:443/repo" then contact support@example.test';
   expect(redactGitText(input)).toContain('then contact support@example.test');
 });
+it.each(
+  ["'", '"', '`', '<', '>'].flatMap((quote) =>
+    [' ', '\t', '\r', '\n'].map((space) => [quote, space]),
+  ),
+)('redacts combined authority delimiters conservatively: case %#', (quote, space) => {
+  const raw = `failed 'https://user:fixture-prefix${quote}${space}fixture-suffix@example.test/repo' then retry`;
+  const safe = redactGitText(raw);
+  expect(safe.includes('fixture-prefix')).toBe(false);
+  expect(safe.includes('fixture-suffix')).toBe(false);
+  expect(safe).toContain('then retry');
+});
+it.each([
+  'see https://example.test then contact support@example.test',
+  'see "https://example.test:443" then contact support@example.test',
+  'see https://example.test/repo then retry https://other.test/repo',
+])('preserves standalone ordinary URL prose: case %#', (text) => {
+  expect(redactGitText(text)).toContain('then');
+  expect(redactGitText(text)).toContain(text.slice(text.indexOf('then')));
+});

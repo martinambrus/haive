@@ -208,25 +208,44 @@ export function gitRemoteIdentity(url: string): string {
 
 /** Diagnostic output can contain several URLs; use the same userinfo policy for each one. */
 export function redactGitText(text: string): string {
-  // Git quotes malformed URLs too. A whitespace character inside quoted
-  // userinfo belongs to that URL, while whitespace outside quotes separates prose.
-  text = text.replace(
-    /(['"`])([a-zA-Z][a-zA-Z0-9+.-]*:\/\/(?:(?!\1)[\s\S])*?)\1(?=$|[\s.,:;)\]}<>])/g,
-    (quoted, quote: string, url: string) => {
-      const start = url.indexOf('://') + 3;
-      const slash = url.indexOf('/', start);
-      const authority = url.slice(start, slash < 0 ? undefined : slash);
-      return /\s/.test(authority) && authority.includes('@')
-        ? quote + redactGitUrl(url) + quote
-        : quoted;
-    },
-  );
-  // Userinfo may contain legacy quote/angle/backtick delimiters. Consume it whole
-  // through its last @ before the first slash, then honor those delimiters again
-  // so independent adjacent URLs are each visited by replace.
-  return text.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/(?:[^\s/]*@)?[^\s'"<>`]+/g, (url) =>
-    redactGitUrl(url),
-  );
+  const starts = /[a-zA-Z][a-zA-Z0-9+.-]*:\/\//g;
+  let output = '';
+  let cursor = 0;
+  for (let match = starts.exec(text); match; match = starts.exec(text)) {
+    const start = match.index;
+    const authorityStart = starts.lastIndex;
+    const delimiter = text.slice(authorityStart).search(/[\s'"<>`]/);
+    let end = delimiter < 0 ? text.length : authorityStart + delimiter;
+    const first = text.slice(start, end);
+    const slash = text.indexOf('/', authorityStart);
+    // A path establishes the authority's end. Before a path, malformed userinfo
+    // can contain quotes AND whitespace, so a text delimiter alone proves nothing.
+    if (slash < 0 || slash >= end) {
+      let ordinaryAuthority = false;
+      try {
+        const url = new URL(first);
+        ordinaryAuthority = !!url.hostname && !url.username && !url.password;
+      } catch {
+        // An invalid authority is ambiguous: look for its @ before accepting a cut.
+      }
+      if (!ordinaryAuthority) {
+        const next = text.slice(authorityStart).search(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\//);
+        const bound = Math.min(
+          slash < 0 ? text.length : slash,
+          next < 0 ? text.length : authorityStart + next,
+        );
+        const at = text.lastIndexOf('@', bound - 1);
+        if (at >= authorityStart) {
+          const suffixEnd = text.slice(at + 1).search(/[\s'"<>`]/);
+          end = suffixEnd < 0 ? text.length : at + 1 + suffixEnd;
+        }
+      }
+    }
+    output += text.slice(cursor, start) + redactGitUrl(text.slice(start, end));
+    cursor = end;
+    starts.lastIndex = end;
+  }
+  return output + text.slice(cursor);
 }
 
 export const gitRemoteUrlSchema = z
