@@ -58,6 +58,8 @@ interface LearningDetect {
   /** Absent on a payload persisted before verify recorded why a selected check did not run. */
   verifyNotRun?: string[];
   commitSha: string | null;
+  /** Structural gate outcome; absent on older persisted detection payloads. */
+  committed?: boolean;
   commitMessage: string;
   isBugFix: boolean;
   /** Curated, bounded, complexity-tiered digest of what actually happened during
@@ -547,7 +549,13 @@ function stubLearning(detect: LearningDetect): LearningEntry[] {
       detect.filesTouched.map((f) => `- ${f}`).join('\n') || '- (none)',
       '',
       `Verification: ${detect.verifyPassed ? 'passed' : 'did not pass'}${notRunSuffix(detect.verifyNotRun)}`,
-      detect.commitSha ? `Commit: ${detect.commitSha}` : 'No commit recorded.',
+      detect.commitSha
+        ? `Commit: ${detect.commitSha}`
+        : detect.committed === true
+          ? 'Commit recorded; SHA unavailable.'
+          : detect.committed === false
+            ? 'No commit recorded.'
+            : 'Commit outcome not recorded.',
       '',
       'LLM synthesis skipped — stub learning entry written from deterministic context.',
     ].join('\n'),
@@ -1035,6 +1043,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       verifyPassed: verifyOutput.passed === true,
       verifyNotRun: verifyNotRunNotes(verifyOutput),
       commitSha: commitOutput.commitSha ?? null,
+      committed: commitOutput.committed,
       commitMessage: commitOutput.message ?? '',
       isBugFix: await detectBugFix(ctx, meta.title, meta.description),
       feature: meta.feature,
@@ -1170,7 +1179,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
         `Feature/area: ${detected.feature ?? '(unspecified)'}`,
         `Implementation summary: ${detected.implementSummary || '(none)'}`,
         `Verification passed: ${detected.verifyPassed}${notRunSuffix(detected.verifyNotRun)}`,
-        `Commit sha: ${detected.commitSha ?? '(none)'}`,
+        `Commit sha: ${detected.commitSha ?? (detected.committed === true ? 'unavailable (commit recorded)' : detected.committed === false ? '(none)' : 'unavailable (commit outcome not recorded)')}`,
         `Files touched: ${detected.filesTouched.join(', ') || '(none)'}`,
         '',
         '=== Existing learnings (reconcile against these; use their id as targetId) ===',

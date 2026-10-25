@@ -58,7 +58,7 @@ import { seedBlankScaffold } from './blank-scaffold.js';
 import { buildCredentialHelper, OriginUrlError, scrubSecret } from './git-push.js';
 import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from './tool-spawn.js';
 import { splitUploadPath } from './worktree-paths.js';
-import { hardenGitArgs } from './git-exec.js';
+import { gitRun as boundedGitRun } from './git-exec.js';
 
 /** Clone `url` into `dest`. When `auth` is supplied (an inline git credential
  *  helper from buildCredentialHelper), the token rides in env and git resolves
@@ -70,31 +70,19 @@ export async function gitClone(
   auth?: { argv: string[]; env: Record<string, string>; secret: string },
 ): Promise<void> {
   assertCloneUrl(url);
-  return new Promise((resolve, reject) => {
-    const args = [...(auth?.argv ?? []), 'clone', '--depth', '1'];
-    if (branch) args.push('--branch', branch);
-    args.push('--', redactGitUrl(url, true), dest);
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: '0',
-      GIT_ASKPASS: 'echo',
-      ...(auth?.env ?? {}),
-    };
-    const proc = spawn('git', hardenGitArgs(args), { env });
-    let stderr = '';
-    proc.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      const msg = scrubSecret(stderr, auth?.secret ?? null).trim();
-      reject(new Error(`git clone failed (exit ${code}): ${msg}`));
-    });
+  const args = [...(auth?.argv ?? []), 'clone', '--depth', '1'];
+  if (branch) args.push('--branch', branch);
+  args.push('--', redactGitUrl(url, true), dest);
+  // The destination does not exist yet: run in the worker's cwd, as spawn did,
+  // while keeping the shared deadline, hardening and no-exit result contract.
+  const result = await boundedGitRun(process.cwd(), args, {
+    GIT_ASKPASS: 'echo',
+    ...(auth?.env ?? {}),
   });
+  if (result.code !== 0) {
+    const msg = scrubSecret(result.stderr, auth?.secret ?? null).trim();
+    throw new Error(`git clone failed (exit ${result.code}): ${msg}`);
+  }
 }
 
 /** Legacy database rows cross the same URL boundary as newly submitted remotes. */
@@ -107,26 +95,18 @@ export function assertCloneUrl(
 
 /** Point origin at a (tokenless) URL. Used after a credentialed clone so the
  *  embedded token does not persist in .git/config. */
-export function gitSetOriginUrl(dest: string, url: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(
-      'git',
-      hardenGitArgs(['-C', dest, 'remote', 'set-url', 'origin', redactGitUrl(url, true)]),
+export async function gitSetOriginUrl(dest: string, url: string): Promise<void> {
+  const result = await boundedGitRun(dest, [
+    'remote',
+    'set-url',
+    'origin',
+    redactGitUrl(url, true),
+  ]);
+  if (result.code !== 0) {
+    throw new Error(
+      `git remote set-url failed (exit ${result.code}): ${scrubSecret(result.stderr, null).trim()}`,
     );
-    let stderr = '';
-    proc.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      const msg = stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
-      reject(new Error(`git remote set-url failed (exit ${code}): ${msg}`));
-    });
-  });
+  }
 }
 
 const MIRROR_READ_CAP = 1024 * 1024;
@@ -721,24 +701,11 @@ export async function handleExtract(
 
 /** Run a git command in `cwd`, rejecting on a non-zero exit. Local-only (no
  *  network, no credentials), so unlike gitClone there is nothing to redact. */
-function gitRun(cwd: string, args: string[], env?: Record<string, string>): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('git', hardenGitArgs(['-C', cwd, ...args]), {
-      env: { ...process.env, ...(env ?? {}) },
-    });
-    let stderr = '';
-    proc.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error(`git ${args[0]} failed (exit ${code}): ${stderr.trim()}`));
-    });
-  });
+async function gitRun(cwd: string, args: string[], env?: Record<string, string>): Promise<void> {
+  const result = await boundedGitRun(cwd, args, env);
+  if (result.code !== 0) {
+    throw new Error(`git ${args[0]} failed (exit ${result.code}): ${result.stderr.trim()}`);
+  }
 }
 
 /** Identity for the seed commit. `git init` inherits no user config inside the

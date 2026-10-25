@@ -269,6 +269,48 @@ describe('the pushes Haive makes of a task branch put its Haive files back first
     expect(h.warning()).toBeNull();
   });
 
+  it('the run-app push-only choice puts projections back and leaves session staging and edits alone', async () => {
+    const { parent, wt, bare, forked } = await fixture();
+    await commit(
+      wt,
+      { ...stateFiles(BY_AGENT), 'feature.txt': 'feature committed\n' },
+      'feature work',
+    );
+    await write(wt, { 'staged.txt': 'staged session\n', 'unstaged.txt': 'unstaged session\n' });
+    await git(wt, ['add', '--', 'staged.txt']);
+    const staged = await git(wt, ['diff', '--cached', '--binary', '--', 'staged.txt']);
+    const h = stubDb();
+    const out = await runAppReadyStep.apply(stepCtx(parent, h.db), {
+      detected: {
+        mode: 'none',
+        appUrl: null,
+        liveBrowser: null,
+        directAccess: false,
+        dbAccess: false,
+        workspacePath: wt,
+        hasGit: true,
+        branch: 'feature/x',
+        hasOrigin: true,
+        dirtyFiles: 2,
+        diffArtifactPath: null,
+        changedFileCount: 2,
+        baseBranch: 'main',
+      },
+      formValues: { commit: false, push: true },
+      iteration: 0,
+      previousIterations: [],
+    } as never);
+    expect(out).toMatchObject({ committed: false, commitSha: null, pushed: true });
+    expect(await at(bare, 'feature/x', 'feature.txt')).toBe('feature committed\n');
+    expect(await at(bare, 'feature/x', 'staged.txt')).toBeNull();
+    expect(await at(bare, 'feature/x', 'unstaged.txt')).toBeNull();
+    expect(await at(bare, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
+    expect(await git(wt, ['diff', '--cached', '--binary', '--', 'staged.txt'])).toBe(staged);
+    expect(await readFile(path.join(wt, 'staged.txt'), 'utf8')).toBe('staged session\n');
+    expect(await readFile(path.join(wt, 'unstaged.txt'), 'utf8')).toBe('unstaged session\n');
+    expect(h.warning()).toContain(GLOBS);
+  });
+
   it('the run-app ready gate pushes the session commit with them put back', async () => {
     const { parent, wt, bare, forked } = await fixture();
     await write(wt, { ...stateFiles(BY_AGENT), 'session.txt': 'session\n' });

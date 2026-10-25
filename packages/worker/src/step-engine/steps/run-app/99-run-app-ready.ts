@@ -275,7 +275,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       fields.push({
         type: 'checkbox',
         id: 'push',
-        label: `Push ${detected.branch ?? 'this branch'} to origin after committing`,
+        label: `Push ${detected.branch ?? 'this branch'} to origin before finishing`,
         default: false,
       });
     }
@@ -313,7 +313,7 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     };
     const detected = args.detected;
 
-    if (!values.commit || !detected.hasGit) {
+    if ((!values.commit && !values.push) || !detected.hasGit) {
       return {
         finished: true,
         committed: false,
@@ -324,14 +324,24 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
     }
 
     const workspace = detected.workspacePath;
-    const add = await gitRun(workspace, ['add', '-A']);
-    if (add.code !== 0) {
-      throw new Error(`git add failed: ${add.stderr || add.stdout}`);
+    let nothing = true;
+    // A push can publish commits already on the branch. Leaving commit unticked
+    // must keep the user's index and uncommitted session edits untouched.
+    if (values.commit) {
+      const add = await gitRun(workspace, ['add', '-A']);
+      if (add.code !== 0) {
+        throw new Error(`git add failed: ${add.stderr || add.stdout}`);
+      }
+      const message = (values.commitMessage ?? '').trim() || 'chore: run-app session edits';
+      const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
+      const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
+      nothing = !(await gitCommitStaged(workspace, message, commitEnv));
     }
-    const message = (values.commitMessage ?? '').trim() || 'chore: run-app session edits';
-    const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
-    const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-    const nothing = !(await gitCommitStaged(workspace, message, commitEnv));
+    const commitNote = values.commit
+      ? nothing
+        ? 'nothing to commit'
+        : 'committed'
+      : 'finished without committing';
     const pushTo = values.push && detected.hasOrigin ? detected.branch : null;
     if (values.push && detected.hasOrigin && !pushTo) {
       await warnStep(ctx, [
@@ -345,13 +355,13 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
         committed: false,
         commitSha: null,
         pushed: false,
-        message: 'nothing to commit',
+        message: commitNote,
       };
     }
     const shaRes = nothing ? null : await gitRun(workspace, ['rev-parse', 'HEAD']);
     const commitSha = shaRes?.code === 0 ? shaRes.stdout.trim() : null;
 
-    // Optional best-effort push: the commit is already safe on the branch, so a
+    // Optional best-effort push: existing commits are safe on the branch, so a
     // push failure must never block teardown. Uses the repo's bound credential.
     let pushed = false;
     let pushNote = '';
@@ -391,13 +401,13 @@ export const runAppReadyStep: StepDefinition<RunAppReadyDetect, RunAppReadyApply
       }
     }
 
-    ctx.logger.info({ commitSha, pushed }, 'run-app session committed');
+    ctx.logger.info({ committed: !nothing, commitSha, pushed }, 'run-app session finished');
     return {
       finished: true,
       committed: !nothing,
       commitSha,
       pushed,
-      message: `${nothing ? 'nothing to commit' : 'committed'}${pushed ? ' and pushed' : ''}${pushNote}`,
+      message: `${commitNote}${pushed ? ' and pushed' : ''}${pushNote}`,
     };
   },
 };

@@ -1,3 +1,4 @@
+import { validateFormValues } from '@haive/shared';
 import { fixtureBase, networkGitArgs } from '../../../../test/support/git-http.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -206,7 +207,7 @@ describe('run-app ready gate apply when a push is asked for', () => {
   ) {
     const { applyCtx, warning } = mkApplyCtx();
     const detected = {
-      mode: 'host',
+      mode: 'host' as const,
       appUrl: null,
       liveBrowser: null,
       directAccess: false,
@@ -220,9 +221,13 @@ describe('run-app ready gate apply when a push is asked for', () => {
       changedFileCount: 1,
       ...detectedPatch,
     };
+    const form = runAppReadyStep.form!(applyCtx, detected)!;
+    const validated = validateFormValues(form, formValues);
+    expect(validated.success).toBe(true);
+    if (!validated.success) throw new Error(validated.issues.join('; '));
     const out = await runAppReadyStep.apply(applyCtx, {
       detected,
-      formValues,
+      formValues: detected.branch ? validated.data : formValues,
       iteration: 0,
       previousIterations: [],
     } as never);
@@ -292,14 +297,38 @@ describe('run-app ready gate apply when a push is asked for', () => {
     expect(warning()).toBeNull();
   });
 
-  it('keeps the early return without a warning when commit is unticked or there is no git (negative control)', async () => {
+  it('keeps the early return without a warning when there is no git (negative control)', async () => {
     const repo = await makeRepo(true, true);
-    const a = await apply(repo, {}, { commit: false, push: true });
     const b = await apply(repo, { hasGit: false }, { commit: true, push: true });
 
-    expect(a.out).toMatchObject({ committed: false, message: 'finished without committing' });
-    expect(a.warning()).toBeNull();
     expect(b.out).toMatchObject({ committed: false, message: 'no git repo' });
     expect(b.warning()).toBeNull();
+  });
+  it('honors push without committing and preserves staged and unstaged session work', async () => {
+    const repo = await makeRepo(true, true);
+    await writeFile(path.join(repo, 'staged.txt'), 'staged bytes');
+    git(repo, ['add', '--', 'staged.txt']);
+    const head = git(repo, ['rev-parse', 'HEAD']).toString();
+    const index = git(repo, ['diff', '--cached', '--binary']).toString();
+    const status = git(repo, ['status', '--porcelain=v1', '-z']).toString();
+    const { out } = await apply(repo, { branch: 'main' }, { commit: false, push: true });
+    expect(out).toMatchObject({ committed: false, commitSha: null, pushed: true });
+    expect(git(repo, ['rev-parse', 'HEAD']).toString()).toBe(head);
+    expect(git(repo, ['diff', '--cached', '--binary']).toString()).toBe(index);
+    expect(git(repo, ['status', '--porcelain=v1', '-z']).toString()).toBe(status);
+    expect(git(repo, ['ls-remote', 'origin', 'refs/heads/main']).toString()).toContain(head.trim());
+  });
+
+  it('finishes without Git mutations when both choices are unticked', async () => {
+    const repo = await makeRepo(true, true);
+    const head = git(repo, ['rev-parse', 'HEAD']).toString();
+    const { out, warning } = await apply(repo, {}, { commit: false, push: false });
+    expect(out).toMatchObject({
+      committed: false,
+      pushed: false,
+      message: 'finished without committing',
+    });
+    expect(git(repo, ['rev-parse', 'HEAD']).toString()).toBe(head);
+    expect(warning()).toBeNull();
   });
 });
