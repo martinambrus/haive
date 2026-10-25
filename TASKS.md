@@ -99,7 +99,9 @@ All PRE-EXISTING.
 
 ### T288 · FNF[sync-reader] · project-state sync reader defects (+6)
 
-status: open (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Previous brief, reusable: .claude/tmp/fnf-run/p288/drive.md on ACTIVIT21 — it scoped items 2,3,5,6,7 and deferred 1/4 for the fnf/278 overlap)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:36Z · last: 2026-10-25T18:36Z
+
+Codex continuation: recover the reader fixes with fixtures; validate deferred overlap against current main and preserve pending design decisions. Prior attempt record: (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Previous brief, reusable: .claude/tmp/fnf-run/p288/drive.md on ACTIVIT21 — it scoped items 2,3,5,6,7 and deferred 1/4 for the fnf/278 overlap)
 All PRE-EXISTING.
 
 1. DEFERRED (overlaps fnf/278): gitOperationInProgress (repo/git-operation.ts) reads an out-of-tree git dir as "merge open"; every caller holds forever for such repos.
