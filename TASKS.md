@@ -324,7 +324,7 @@ A full-repository review in the style of the Codex PR reviews once Track B is me
 ### T300 · live re-checks owed at the next real onboarding + workflow run
 
 status: parked · reason: needs a real onboarding + workflow run (LLM tokens; check running tasks first)
-Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory.
+Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory. Also owed (T427): replay the raw attach bytes of one real `claude setup-token` run through the OAuth capture and pin its wrap, newline and escape shapes in a fixture.
 
 ### T298 · house rules PR8 · switch similarity on with per-rule floors
 
@@ -777,7 +777,7 @@ status: open · was modular #257
 
 ### T382 · FNF[auth-endpoint-hardening] · refresh rotation not CAS; login timing; no admin-authz sweep (+4)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:00Z · last: 2026-10-25T02:00Z · (T377 landed as PR #886) · was modular #261
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:00Z · last: 2026-10-25T00:18Z · (T377 landed as PR #886) · was modular #261 · PR #918 fix round 2 pushed (register order tests), waiting for review and CI
 
 1. api auth.ts ~:280-295: rotate with `UPDATE … WHERE revoked_at IS NULL RETURNING`, in a transaction.
 2. Login answers 401 before bcrypt for unknown accounts. Compare against a dummy hash; register's 409 too.
@@ -958,7 +958,7 @@ From the T422 review (2026-10-24). PRE-EXISTING, consequential in kind, rare (me
 
 ### T427 · FNF[claude-token-extract] · the Claude OAuth capture depends on an exact 95-character token body
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:40Z · last: 2026-10-25T02:40Z
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:40Z · last: 2026-10-25T00:18Z · PR #920 open (fix round 1 in), waiting for review and CI
 From the T422 review (2026-10-24). PRE-EXISTING, minor, latent. api routes/cli-login-banner.ts ~:199-211 `extractClaudeOauthToken`: run inline, a 100-character body is accepted and cut to 108 characters, and a 90-character body followed by "Store this token securely" is accepted with 5 characters of the prose appended. Today's tokens match; a format change would save a wrong token, which the probe should then reject visibly. Fix: end the token at the first character outside its alphabet, and test the boundary.
 
 ### T428 · FNF[refresh-result-hidden] · a version or price refresh that fails reports ok:false that no page reads
@@ -988,6 +988,16 @@ From the T398 review (2026-10-25). PRE-EXISTING.
 
 status: open
 From the T382 review (2026-10-25). PRE-EXISTING, consequential if it reproduces (verified by reading only). web app/(app)/layout.tsx ~:77-95: (a) a refresh 401, including a redemption that lost T382's new race, ends the session at once (redirect to `/login?session=expired`, then web proxy.ts ~:37-42 deletes both cookies) without the `/auth/me` re-check the browser client does (web lib/api-client.ts ~:66-71); (b) the rotated Set-Cookie is read only to build an internal header (~:86-92) and nothing forwards it to the browser, so the browser keeps the refresh token that call just revoked, and a returning user whose access cookie expired may be bounced to sign-in. A layout cannot set cookies, so the fix likely moves the server-side refresh into the proxy (which can) or skips it. Reproduce first.
+
+### T433 · FNF[cli-login-url-capture] · the login banner sends the auth URL before its chunk completes
+
+status: open
+From the T427 review (2026-10-25), F2. PRE-EXISTING, minor, latent. api routes/cli-login-banner.ts ~:673-699 (authUrlSent set once ~:677; shared auth-banner-parser.ts ~:77-99): the URL is sent as soon as its prefix appears, so a chunk boundary inside it sends the head of the URL (function-level: a 50-character head of a 65-character URL is returned as the URL) and the user gets a broken link with no correction. Wait for a terminator after the URL (whitespace, end of line or a closing escape) before sending, or re-send when the URL grows. Real chunking of the URL frame not observed.
+
+### T434 · FNF[token-save-before-probe] [design] · a captured CLI token overwrites the stored one before the probe verifies it
+
+status: open
+From the T427 review (2026-10-25), F3. PRE-EXISTING design. api routes/cli-login-banner.ts ~:976-982 (`onExisting: 'overwrite'`, then the probe): any wrong capture replaces the user's working CLAUDE_CODE_OAUTH_TOKEN before the probe runs, so a failed probe leaves the user with neither. Keep the old value until the probe passes (probe with the candidate, then write), or restore it on a failed probe. Needs a decision on how the probe gets the candidate (it reads the stored secret today).
 
 ## Done
 
