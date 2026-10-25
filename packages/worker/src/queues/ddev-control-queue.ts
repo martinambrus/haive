@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { safeProcessor } from './safe-processor.js';
 import { Worker, type Job } from 'bullmq';
 import { eq } from 'drizzle-orm';
@@ -93,11 +94,8 @@ export async function runDdevControl(payload: DdevControlPayload): Promise<DdevC
     }
     return { ok: false, output: '', error: `unknown action: ${String(payload.action)}` };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log.warn(
-      { taskId: payload.taskId, action: payload.action, err: message },
-      'ddev-control failed',
-    );
+    const message = safeErrorMessage(err);
+    log.warn({ taskId: payload.taskId, action: payload.action, err }, 'ddev-control failed');
     return { ok: false, output: '', error: message };
   }
 }

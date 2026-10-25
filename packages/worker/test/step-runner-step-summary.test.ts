@@ -1,3 +1,4 @@
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import type { CliExecJobPayload } from '@haive/shared';
@@ -394,3 +395,92 @@ describe('fan-out summary prompt is bounded', () => {
     expect(prompt).toContain('one short line per agent in the form');
   });
 });
+
+it.each([true, false])(
+  'fix6 preserves ordinary step diagnoses and sanitizes bound ones (bound: %s)',
+  async (bound) => {
+    const state = freshState({ summaryLlmEnabled: false });
+    const message = 'ordinary diagnosis\n  exact whitespace';
+    const err = bound
+      ? new DrizzleQueryError(
+          'select $1',
+          ['B8nM2qW9eR3tY7uI4oP6aS1dF5gH0jK'],
+          new Error('synthetic driver'),
+        )
+      : new Error(message);
+    const stepDef = baseStep();
+    stepDef.apply = async () => {
+      throw err;
+    };
+    const result = await advanceStep({
+      db: makeMockDb(state),
+      taskId: 'task-1',
+      userId: 'user-1',
+      repoPath: '/tmp',
+      workspacePath: '/tmp',
+      cliProviderId: 'prov-1',
+      stepDef,
+      providers: [makeProvider()],
+      deps: { enqueueCliInvocation: async () => {} },
+    });
+    expect(result.status).toBe('failed');
+    expect(state.taskStepRow.errorMessage === (bound ? 'Database operation failed' : message)).toBe(
+      true,
+    );
+  },
+);
+
+it.each([true, false])(
+  'fix6 records safe recap failures before and after insert (bound: %s)',
+  async (bound) => {
+    for (const stage of ['read', 'enqueue']) {
+      const state = freshState({ summaryLlmEnabled: true });
+      const db = makeMockDb(state);
+      const message = 'ordinary recap failure\n  exact whitespace';
+      const err = bound
+        ? new DrizzleQueryError(
+            'select $1',
+            ['F8gH2jK9lZ3xC7vB4nM6qW1eR5tY0uI'],
+            new Error('synthetic driver'),
+          )
+        : new Error(message);
+      const writes: Record<string, unknown>[] = [];
+      const update = db.update.bind(db);
+      db.update = ((table: never) => ({
+        set: (value: never) => {
+          writes.push(value);
+          return update(table).set(value);
+        },
+      })) as never;
+      const tasks = db.query.tasks as unknown as {
+        findFirst: (options: { columns?: Record<string, unknown> }) => Promise<unknown>;
+      };
+      const read = tasks.findFirst;
+      tasks.findFirst = async (options) => {
+        if (stage === 'read' && options.columns?.summaryLlmEnabled) throw err;
+        return read(options);
+      };
+      const result = await advanceStep({
+        db,
+        taskId: 'task-1',
+        userId: 'user-1',
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: 'prov-1',
+        stepDef: baseStep(),
+        providers: [makeProvider()],
+        deps: {
+          enqueueCliInvocation: async () => {
+            throw err;
+          },
+        },
+      });
+      expect(result.status).toBe('done');
+      expect(
+        [...writes, ...state.inserts.map((entry) => entry.row)].some(
+          (row) => row.errorMessage === (bound ? 'Database operation failed' : message),
+        ),
+      ).toBe(true);
+    }
+  },
+);

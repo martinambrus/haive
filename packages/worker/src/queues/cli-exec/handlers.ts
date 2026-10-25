@@ -456,7 +456,7 @@ async function runCliExecJob(
     };
   } catch (err) {
     const durationMs = Date.now() - startedAt;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = safeErrorMessage(err);
     log.error({ err, invocationId: payload.invocationId }, 'cli exec failed');
     await publishCliExit(payload.invocationId, -1);
     await db.transaction(async (tx) => {
@@ -807,7 +807,7 @@ export async function handleBuildSandboxImageJob(
       durationMs: result.durationMs,
     };
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
+    const errMsg = safeErrorMessage(err);
     await writeWhileWanted(db, provider.id, imageTag, {
       sandboxImageBuildStatus: 'failed',
       sandboxImageBuildError: errMsg,

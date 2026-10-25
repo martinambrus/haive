@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { safeProcessor } from './safe-processor.js';
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import { DelayedError, Queue, Worker, type Job, type JobsOptions } from 'bullmq';
@@ -4097,7 +4098,7 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
     }
   } catch (err) {
     if (err instanceof RagCleanupDeferredError) throw err;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = safeErrorMessage(err);
     const taskId = (job.data as TaskJobPayload).taskId;
     logger.error({ taskId, jobName: job.name, err }, 'task job failed');
     if (
