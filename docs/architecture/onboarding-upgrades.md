@@ -616,7 +616,14 @@ is a parked compare-and-swap or exclusive creation; a hand edit holds the journa
 Another crash during the undo can repeat it. A live holder, reset or open git operation holds recovery
 as it holds a write. Removed files regain their recorded mode and owner; rewritten files keep their
 held metadata. Direct sync producers defer while a journal exists, including one that appeared while
-they waited for the lock, so they cannot import partial writer output. Dirty journal rows are swept
+they waited for the lock, so they cannot import partial writer output. Pending conflict answers for
+render, claims, settings/environment and RTK also return the existing busy/defer result while a
+journal exists. They check only after owner/conflict authorization and hold the same project-state
+lock from the journal read through any answer write: answering another render key could otherwise
+rewrite a journal-owned file beyond both recognized versions and permanently hold recovery. The
+answer leaves files, columns, conflict rows, bases and hashes untouched; after recovery or a committed
+write consumes the journal it can be retried normally. Plan answers use their separate plan mirror,
+whose files are outside the record journal. Dirty journal rows are swept
 even with a NULL render column, which a failed foreground writer may leave under the existing
 failure-clear rule. Recovery never publishes the abandoned target context or base: it restores the
 prior files and leaves a NULL column NULL; the step's Retry can then write its snapshot. An actual

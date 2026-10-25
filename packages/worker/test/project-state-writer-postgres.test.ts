@@ -18,6 +18,7 @@ import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
 import { REFERENCE_CONTEXT, expandManifestFor } from '../src/step-engine/template-manifest.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
+import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import {
   lockProjectState,
@@ -126,6 +127,122 @@ async function diskRecord(root: string, name: string) {
 }
 
 describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
+  it.each(['prepared', 'partial'] as const)(
+    'defers conflict answers while a %s record journal owns another render key',
+    async (phase) => {
+      const s = await fixture();
+      await s.write();
+      const mine = {
+        ...context(),
+        acceptedAgentIds: ['docs-writer'],
+        rtkChoiceRecorded: false,
+      };
+      await db!
+        .update(schema.repositories)
+        .set({ renderContext: mine })
+        .where(eq(schema.repositories.id, s.repo.id));
+      const renderPath = join(s.root, '.haive-data/state/project/render.json');
+      await writeFile(
+        renderPath,
+        JSON.stringify(
+          {
+            ...context(),
+            acceptedAgentIds: ['security-auditor'],
+          },
+          null,
+          4,
+        ) + '\n',
+      );
+      expect(
+        (
+          await syncProjectStateFromCheckout(db!, {
+            repositoryId: s.repo.id,
+            repoPath: s.root,
+          })
+        ).outcome,
+      ).toBe('conflict');
+      const [conflict] = await db!
+        .select()
+        .from(schema.projectStateConflicts)
+        .where(eq(schema.projectStateConflicts.repositoryId, s.repo.id));
+      expect(conflict!.unit).toBe('project/render.json#acceptedAgentIds');
+      const answer = (userId = s.userId) =>
+        resolveProjectStateConflict(db!, {
+          repositoryId: s.repo.id,
+          userId,
+          conflictId: conflict!.id,
+          answer: 'keep_mine',
+        });
+      const snapshot = async () => ({
+        bytes: await readFile(renderPath, 'utf8'),
+        repo: await db!
+          .select()
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, s.repo.id)),
+        sync: await db!
+          .select()
+          .from(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
+        conflicts: await db!
+          .select()
+          .from(schema.projectStateConflicts)
+          .where(eq(schema.projectStateConflicts.repositoryId, s.repo.id)),
+        outbox: await s.outbox(),
+      });
+      const refuse = async () => {
+        const before = await snapshot();
+        expect(before.outbox!.writeIntent).toBeTruthy();
+        expect(await answer(randomUUID())).toEqual({ kind: 'not_found' });
+        expect.soft(await answer()).toEqual({ kind: 'busy' });
+        expect.soft(await snapshot()).toEqual(before);
+      };
+      const attempted = { ...mine, projectInfo: { name: 'journal target' } };
+      let checked = false;
+      const wrapped = new Proxy(db!, {
+        get(target, prop) {
+          if (prop !== 'transaction') return Reflect.get(target, prop);
+          return async (fn: Parameters<Database['transaction']>[0]) => {
+            const result = await target.transaction(fn);
+            // A semantic preparation receipt proves the journal committed and its locks released.
+            if (!checked && result && typeof result === 'object' && 'intentId' in result) {
+              checked = true;
+              if (phase === 'prepared') await refuse();
+            }
+            return result;
+          };
+        },
+      }) as Database;
+      if (phase === 'partial')
+        seam.afterWrite = async () => {
+          throw new Error('partial journal');
+        };
+      const write = () =>
+        writeProjectStateColumn(wrapped, {
+          repositoryId: s.repo.id,
+          repoPath: s.root,
+          column: attempted as never,
+          expectedColumns: [mine],
+          keepColumnOnFailure: true,
+        });
+      if (phase === 'partial') {
+        await expect(write()).rejects.toThrow('partial journal');
+        seam.afterWrite = null;
+        await refuse();
+        expect((await s.render()).projectInfo.name).toBe('journal target');
+        await recoverProjectStateWrite(db!, s.repo.id, s.root);
+        expect((await s.render()).projectInfo.name).toBe('local');
+        expect((await s.outbox())!.writeIntent).toBeNull();
+      } else {
+        await write();
+        expect((await s.render()).projectInfo.name).toBe('journal target');
+        expect((await s.outbox())!.writeIntent).toBeNull();
+      }
+      expect(checked).toBe(true);
+      expect(await answer()).toMatchObject({ kind: 'resolved' });
+      expect((await s.render()).acceptedAgentIds).toEqual(['docs-writer']);
+    },
+  );
+
   it('imports an unseen checkout instead of overwriting its project settings', async () => {
     const s = await fixture();
     await s.write();
