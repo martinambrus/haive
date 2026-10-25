@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Hono } from 'hono';
+import { redactGitUrl } from '@haive/shared/schemas';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -195,7 +196,7 @@ function bundleSummaryFromRow(
     status: row.status as BundleSummary['status'],
     archiveFilename: row.archiveFilename,
     archiveFormat: (row.archiveFormat as ArchiveFormat | null) ?? null,
-    gitUrl: row.gitUrl,
+    gitUrl: row.gitUrl ? redactGitUrl(row.gitUrl) : null,
     gitBranch: row.gitBranch,
     gitCredentialsId: row.gitCredentialsId,
     lastSyncAt: row.lastSyncAt ? row.lastSyncAt.toISOString() : null,

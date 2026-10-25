@@ -37,7 +37,7 @@ import {
   type RepoJobPayload,
 } from '@haive/shared';
 import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
-import { isAllowedGitRemoteUrl } from '@haive/shared/schemas';
+import { isAllowedGitRemoteUrl, redactGitUrl } from '@haive/shared/schemas';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import {
   ENVIRONMENT_UNIT,
@@ -123,7 +123,10 @@ export function assertCloneUrl(
  *  embedded token does not persist in .git/config. */
 export function gitSetOriginUrl(dest: string, url: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('git', hardenGitArgs(['-C', dest, 'remote', 'set-url', 'origin', url]));
+    const proc = spawn(
+      'git',
+      hardenGitArgs(['-C', dest, 'remote', 'set-url', 'origin', redactGitUrl(url, true)]),
+    );
     let stderr = '';
     proc.stderr.on('data', (d: Buffer) => {
       stderr += d.toString();
@@ -794,7 +797,7 @@ export async function handleClone(
   repoStorageRoot: string,
 ): Promise<void> {
   if (!payload.remoteUrl) throw new Error('remoteUrl required for clone job');
-  const remoteUrl = payload.remoteUrl;
+  const remoteUrl = redactGitUrl(payload.remoteUrl, true);
   assertCloneUrl(remoteUrl);
   return withRootClaim(db, payload.repositoryId, async () => {
     const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);

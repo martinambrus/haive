@@ -164,7 +164,7 @@ it('prevents an uploaded remote helper from inheriting the credential environmen
   });
   await gitRun(work, ['config', 'remote.origin.vcs', 'haivefixture']);
   await gitRun(work, ['config', 'protocol.haivefixture.allow', 'always']);
-  const env = {
+  const env: Record<string, string> = {
     ...auth.env,
     PATH: `${root}/bin:${process.env.PATH}`,
     HAIVE_MARKER: `${root}/marker`,

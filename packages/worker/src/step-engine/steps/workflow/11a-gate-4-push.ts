@@ -306,12 +306,13 @@ export const gate4PushStep: StepDefinition<PushGateDetect, PushGateApply> = {
       return { pushed: false, remote: null, branch, message: err.message };
     }
     if (!hasOrigin) {
-      const remoteUrl = (values.remoteUrl ?? '').trim();
-      if (!remoteUrl) {
+      const suppliedUrl = (values.remoteUrl ?? '').trim();
+      if (!suppliedUrl) {
         throw new Error('origin remote URL is required to push');
       }
-      const parsed = gitRemoteUrlSchema.safeParse(remoteUrl);
+      const parsed = gitRemoteUrlSchema.safeParse(suppliedUrl);
       if (!parsed.success) throw new Error(parsed.error.issues[0]!.message);
+      const remoteUrl = parsed.data;
       if (values.credentialId)
         await buildCredentialHelper(ctx.db, values.credentialId, ctx.userId, remoteUrl);
       await ensureOrigin(workspace, remoteUrl);

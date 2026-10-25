@@ -146,6 +146,60 @@ export function gitCredentialTarget(
   return { protocol: url.protocol.slice(0, -1), host };
 }
 
+/** Remove URL credentials from display/persistence. Transport keeps a non-secret SSH login
+ *  and the original address shape; diagnostics also omit query/fragment and malformed userinfo. */
+export function redactGitUrl(url: string, forTransport = false): string {
+  if (forTransport) {
+    if (!url.includes('://')) return url;
+    try {
+      const parsed = new URL(url);
+      const keepUser = parsed.protocol === 'ssh:';
+      if (!parsed.password && (keepUser || !parsed.username)) return url;
+      if (!keepUser) parsed.username = '';
+      parsed.password = '';
+      return parsed.toString();
+    } catch {
+      return url.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/)?.[0] ?? '(unparseable URL)';
+    }
+  }
+  let safe = url;
+  if (safe.includes('://')) {
+    try {
+      let parsed = new URL(safe);
+      const start = safe.indexOf('://') + 3;
+      const end = safe.indexOf('/', start);
+      const authority = safe.slice(start, end < 0 ? undefined : end);
+      const at = authority.lastIndexOf('@');
+      // Remove userinfo before interpreting a ? or # inside malformed credentials.
+      if (at >= 0) parsed = new URL(safe.slice(0, start) + safe.slice(start + at + 1));
+      parsed.username = '';
+      parsed.password = '';
+      parsed.search = '';
+      parsed.hash = '';
+      if (!parsed.hostname && !parsed.pathname.startsWith('/')) {
+        // Opaque URLs have no authority for URL to separate from userinfo.
+        const start = safe.indexOf('://') + 3;
+        const at = safe.lastIndexOf('@');
+        if (at >= start) safe = safe.slice(0, start) + safe.slice(at + 1);
+        safe = safe.split(/[?#]/)[0]!;
+      } else {
+        safe = parsed.toString();
+      }
+    } catch {
+      // A malformed authority cannot be redacted reliably; keep only its scheme.
+      safe = safe.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/)?.[0] ?? '(unparseable URL)';
+    }
+  } else {
+    safe = safe.slice(safe.lastIndexOf('@') + 1).split(/[?#]/)[0]!;
+  }
+  return safe;
+}
+
+/** Diagnostic output can contain several URLs; use the same userinfo policy for each one. */
+export function redactGitText(text: string): string {
+  return text.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s'"<>`]+/g, (url) => redactGitUrl(url));
+}
+
 export const gitRemoteUrlSchema = z
   .string()
   .trim()
@@ -156,7 +210,8 @@ export const gitRemoteUrlSchema = z
       'must be an https, http or ssh URL, or an scp-style address with a user or a ' +
       'dotted host (git@github.com:owner/repo.git). A local file:// path is not a ' +
       'remote; for a single-word host write ssh://host/path.',
-  });
+  })
+  .transform((value) => redactGitUrl(value, true));
 
 /* MEASURED against git 2.54.0, which is what decides whether any of this is
  * right:

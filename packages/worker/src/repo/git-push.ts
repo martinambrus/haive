@@ -2,6 +2,8 @@ import {
   credentialFitsGitRemote,
   gitCredentialTarget,
   isAllowedGitRemoteUrl,
+  redactGitUrl,
+  redactGitText,
 } from '@haive/shared/schemas';
 import { schema, type Database } from '@haive/database';
 import { and, desc, eq, inArray } from 'drizzle-orm';
@@ -16,6 +18,7 @@ export type { GitRunResult };
  *  or surfaced to the user. Defensive: git masks credential-helper passwords in
  *  most errors, but a misconfigured remote can echo them. */
 export function scrubSecret(text: string, secret: string | null): string {
+  text = redactGitText(text);
   if (!secret) return text;
   return text.split(secret).join('***');
 }
@@ -32,36 +35,7 @@ export class OriginUrlError extends Error {
     direction: 'fetch' | 'push' = 'fetch',
     context: 'step' | 'clone' | 'refresh' | 'bundle' = 'step',
   ) {
-    let safe = url;
-    if (safe.includes('://')) {
-      try {
-        let parsed = new URL(safe);
-        const start = safe.indexOf('://') + 3;
-        const end = safe.indexOf('/', start);
-        const authority = safe.slice(start, end < 0 ? undefined : end);
-        const at = authority.lastIndexOf('@');
-        // Remove userinfo before interpreting a ? or # inside malformed credentials.
-        if (at >= 0) parsed = new URL(safe.slice(0, start) + safe.slice(start + at + 1));
-        parsed.username = '';
-        parsed.password = '';
-        parsed.search = '';
-        parsed.hash = '';
-        if (!parsed.hostname && !parsed.pathname.startsWith('/')) {
-          // Opaque URLs have no authority for URL to separate from userinfo.
-          const start = safe.indexOf('://') + 3;
-          const at = safe.lastIndexOf('@');
-          if (at >= start) safe = safe.slice(0, start) + safe.slice(at + 1);
-          safe = safe.split(/[?#]/)[0]!;
-        } else {
-          safe = parsed.toString();
-        }
-      } catch {
-        // A malformed authority cannot be redacted reliably; keep only its scheme.
-        safe = safe.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/)?.[0] ?? '(unparseable URL)';
-      }
-    } else {
-      safe = safe.slice(safe.lastIndexOf('@') + 1).split(/[?#]/)[0]!;
-    }
+    const safe = redactGitUrl(url);
     const text = safe.replace(/[\r\n]+/g, ' ');
     const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
     const fence = '`'.repeat(longest + 1);
@@ -95,7 +69,9 @@ export async function getOriginUrl(cwd: string): Promise<string | null> {
     ]);
     if (!push && res.code === 2) return null;
     if (res.code !== 0) {
-      const output = (res.stderr || res.stdout).trim().slice(0, 500);
+      const output = redactGitText(res.stderr || res.stdout)
+        .trim()
+        .slice(0, 500);
       throw new Error(`git remote get-url origin failed in ${cwd}: ${output}`);
     }
     const urls = res.stdout.trim().split('\n');
@@ -104,7 +80,7 @@ export async function getOriginUrl(cwd: string): Promise<string | null> {
     }
     first ??= urls[0];
   }
-  return first!;
+  return redactGitUrl(first!);
 }
 
 /** Origin transports always re-read the checkout immediately before git talks to the remote. */
@@ -119,6 +95,7 @@ export async function ensureOrigin(
   cwd: string,
   url: string,
 ): Promise<{ added: boolean; updated: boolean }> {
+  url = redactGitUrl(url, true);
   const add = await gitRun(cwd, ['remote', 'add', 'origin', url]);
   if (add.code === 0) return { added: true, updated: false };
   if (add.code === 3) {
