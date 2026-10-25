@@ -488,6 +488,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
 
   stream.on('data', (chunk: Buffer) => onStreamData(session, chunk));
   stream.on('end', () => {
+    captureClaudeOauthToken(session, session.cleanBuffer + '\n\n');
     if (session.probePending) {
       log.info({ providerId }, 'stream ended while probe pending; deferring cleanup');
       return;
@@ -605,6 +606,35 @@ function usesTokenPaste(session: BannerSession): boolean {
   return TOKEN_PASTE_PROVIDERS.has(session.providerName) || session.ampPasteFlow;
 }
 
+function canDetectAuth(session: BannerSession): boolean {
+  return (
+    session.authUrlSent &&
+    !session.authSuccessSent &&
+    (session.tokenSubmitted || !usesTokenPaste(session))
+  );
+}
+
+function captureClaudeOauthToken(session: BannerSession, text: string): boolean {
+  if (session.cleanedUp || session.providerName !== 'claude-code' || !canDetectAuth(session)) {
+    return false;
+  }
+  const oauthToken = extractClaudeOauthToken(text);
+  if (!oauthToken) return false;
+  session.authSuccessSent = true;
+  session.probePending = true;
+  stopCaptureWatchdog(session);
+  log.info(
+    {
+      providerId: session.providerId,
+      tokenLen: oauthToken.length,
+    },
+    'claude oauth token captured from stdout',
+  );
+  wsSend(session.ws, { type: 'auth-success' });
+  void saveOauthTokenAndProbe(session, oauthToken);
+  return true;
+}
+
 function onStreamData(session: BannerSession, chunk: Buffer): void {
   const text = session.decoder.write(chunk);
 
@@ -709,32 +739,13 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
     }
   }
 
-  const canDetect =
-    session.authUrlSent &&
-    !session.authSuccessSent &&
-    (session.tokenSubmitted || !usesTokenPaste(session));
-  if (!canDetect) return;
+  if (!canDetectAuth(session)) return;
 
   if (session.providerName === 'claude-code') {
     // `claude setup-token` prints the long-lived OAuth token to stdout and
     // does NOT write ~/.claude/.credentials.json. We capture the token from
     // the output stream and persist it to cli_providers.envVars.
-    const oauthToken = extractClaudeOauthToken(session.cleanBuffer);
-    if (oauthToken) {
-      session.authSuccessSent = true;
-      session.probePending = true;
-      stopCaptureWatchdog(session);
-      log.info(
-        {
-          providerId: session.providerId,
-          tokenLen: oauthToken.length,
-        },
-        'claude oauth token captured from stdout',
-      );
-      wsSend(session.ws, { type: 'auth-success' });
-      void saveOauthTokenAndProbe(session, oauthToken);
-      return;
-    }
+    if (captureClaudeOauthToken(session, session.cleanBuffer)) return;
     // Only act on explicit error signals; success for claude-code requires
     // the token pattern above (other 'success' phrasings are misleading here).
     const signal = detectAuthResult(session.cleanBuffer);

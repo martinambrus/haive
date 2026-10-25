@@ -245,6 +245,56 @@ describe('Claude OAuth token capture controls', () => {
     },
   );
 
+  it.each(['', '\n', '\r\n', '\n '])(
+    'fix-round1 D1 captures exactly once at stream end after %j',
+    async (ending) => {
+      await ready();
+      stream.emit('data', Buffer.from(`${TOKEN}${ending}`));
+      expect(h.save.mock.calls.length === 0).toBe(true);
+      stream.emit('end');
+      // The save/probe is still awaiting its first promise: end must defer cleanup.
+      expect(
+        ws.readyState === 1 && !ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'exit'),
+      ).toBe(true);
+      stream.emit('end');
+      await settle();
+      expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(
+        true,
+      );
+      expect(
+        ws.send.mock.calls.filter(([raw]) => JSON.parse(raw).type === 'auth-success').length === 1,
+      ).toBe(true);
+      expect(
+        ws.send.mock.calls.filter(([raw]) => JSON.parse(raw).type === 'saved').length === 1,
+      ).toBe(true);
+      assertNoCredentialText(TOKEN, CODE);
+    },
+  );
+
+  it.each(['prefix', 'authorization URL', 'pasted code'])(
+    'fix-round1 D1 keeps the %s gate at stream end',
+    async (missing) => {
+      await start();
+      if (missing !== 'authorization URL') {
+        stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
+      }
+      if (missing !== 'pasted code') paste();
+      const output = missing === 'prefix' ? TOKEN.slice('sk-ant-oat01-'.length) : TOKEN;
+      stream.emit('data', Buffer.from(output));
+      stream.emit('end');
+      await settle();
+      expect(h.save.mock.calls.length === 0).toBe(true);
+    },
+  );
+
+  it('fix-round1 D1 does not save again at end after a data capture', async () => {
+    await ready();
+    stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
+    stream.emit('end');
+    await settle();
+    expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(true);
+  });
+
   it.each([95, 100, 90])('saves the complete %i-character body', async (length) => {
     const expected = token(length);
     await ready();
