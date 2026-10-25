@@ -898,16 +898,6 @@ From the T400 review (2026-10-24). PRE-EXISTING, minor.
 1. api routes/terminal.ts ~:106-112: `await incrementAttached(...)` throwing (database down) leaves the docker attach stream opened at ~:106 open; the `.catch` at ~:80 closes only the ws.
 2. terminal.ts ~:317-343 moves `containers.attached_ws_count` by read-then-write, so concurrent closes lose updates (a revoke now closes several sockets of one container at once). Nothing reads the column for a decision (only these writes and a web type). Fix: one atomic `SET attached_ws_count = greatest(attached_ws_count + $d, 0)`.
 
-### T424 · FNF[nested-repo-worktree] · gate 3 offers a commit that git add will refuse for an unborn nested repo; the review collector calls a nested repo a new file (+1)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:43Z
-
-Codex progress 2026-10-25T18:43Z: PR #926 merged9df65b116 after exact7b4c842 clean bot/11checksSUCCESS/CLEAN/0threads. MainCI40222131082 running. Dev checkout loaded9df, fixture services stopped and owned nested/globalKB scratch DBs dropped.
-From the T375 review (2026-10-24). PRE-EXISTING, minor.
-
-1. worker 10-gate-3-commit.ts ~:375, ~:407-410: with an unborn nested repo (`git init`, no commit) in the worktree the whole `git add -A` fails, but the form still defaults the commit on and the failure shows only at Finalise. Since T375 the preview says why. Fix: say so in the form, or stage around it.
-2. worker `_impl-changes.ts` ~:147-156, ~:447, ~:453: an untracked nested repo enters the review scope as one changed "file" `nested/`, marked 'new file' (`-uall` cannot expand an embedded repo). Downstream effect on reviewers not traced.
-
 ### T425 · FNF[orphan-gitlink] · gate 3 commits an agent-left nested repository as a gitlink with no .gitmodules entry
 
 status: open · kind: design
@@ -960,6 +950,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T424 — exclude unborn nested repositories from outer commits and retain review boundary metadata — PR #926 (9df65b116), 2026-10-25; main CI40222131082 green.
 
 - T415 — upload Retry uses durable same-repository archive source; unavailable-source capability and recovery copy stay truthful — PR #924 (f96c58cb1), 2026-10-25; main CI40221151472 green; bot timeout explicitly unreviewed, fresh local reviews clean.
 
