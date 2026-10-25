@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
 import { LIVE_TASK_STATUSES, schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import { safeErrorMessage } from '@haive/shared/logger';
 import { MODULE_DEPENDENTS_CAP, isStepOfModule } from '@haive/shared/modularity';
 import { recordAuditEvent } from '../lib/audit.js';
 import { killTaskSandboxesOrThrow } from '../lib/sandbox-kill.js';
@@ -147,8 +148,6 @@ const dependentsInModuleStep = async (db: Reader, moduleId: string): Promise<Mod
   return rows.filter((row) => isStepOfModule(row.currentStepId, moduleId));
 };
 
-const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
-
 // The stop commits before the kill, so a kill that throws is noted on the result, never thrown.
 const stopTask = async (
   db: Database,
@@ -167,7 +166,7 @@ const stopTask = async (
     return { ...counts, killed: await killTaskSandboxesOrThrow(taskId) };
   } catch (err) {
     log.error({ err, taskId }, 'sandbox kill for an urgent stop failed');
-    return { ...counts, killed: 0, killError: errorText(err) };
+    return { ...counts, killed: 0, killError: safeErrorMessage(err) };
   }
 };
 
@@ -230,10 +229,10 @@ export async function deactivateUrgently(
         });
       } catch (err) {
         log.error({ err, taskId: id, moduleId }, 'event or audit write for an urgent stop failed');
-        entry.eventError = errorText(err);
+        entry.eventError = safeErrorMessage(err);
       }
     } catch (err) {
-      report.failed.push({ id, title, error: errorText(err) });
+      report.failed.push({ id, title, error: safeErrorMessage(err) });
     }
   }
   return { kind: 'ok', deactivatedAt: stamped.deactivatedAt, ...report };

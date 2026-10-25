@@ -1,3 +1,4 @@
+import { safeProcessor } from './safe-processor.js';
 import { Queue, Worker, type Job } from 'bullmq';
 import { and, asc, eq, inArray, isNull, lt } from 'drizzle-orm';
 import { lockRepositoryTasksKey, schema } from '@haive/database';
@@ -11,6 +12,7 @@ import {
   type PlanMirrorJobResult,
 } from '@haive/shared';
 import { lockPlanMerge } from '@haive/shared/plan';
+import { safeErrorForTransport } from '@haive/shared/logger';
 import type {
   ProjectStateResolvePayload,
   ProjectStateResolveResult,
@@ -649,7 +651,7 @@ export function startPlanMirrorWorker(): Worker<
     PlanMirrorJobResult | ProjectStateResolveResult | number
   >(
     QUEUE_NAMES.PLAN_MIRROR,
-    async (job: Job<PlanMirrorJobPayload | ProjectStateResolvePayload>) => {
+    safeProcessor(async (job: Job<PlanMirrorJobPayload | ProjectStateResolvePayload>) => {
       if (job.name === PLAN_MIRROR_JOB_NAMES.RESOLVE_PROJECT_STATE) {
         return resolveProjectStateConflict(getDb(), job.data as ProjectStateResolvePayload);
       }
@@ -659,15 +661,19 @@ export function startPlanMirrorWorker(): Worker<
           if (!data.repositoryId) throw new Error('repositoryId required');
           return refresh(data.repositoryId, data.userId);
         case PLAN_MIRROR_JOB_NAMES.SAVE:
-          return save(data);
+          return save(data).catch((err) => {
+            throw safeErrorForTransport(err, job);
+          });
         case PLAN_MIRROR_JOB_NAMES.PULL:
-          return pull(data);
+          return pull(data).catch((err) => {
+            throw safeErrorForTransport(err, job);
+          });
         case PLAN_MIRROR_JOB_NAMES.SWEEP:
           return sweepAll();
         default:
           throw new Error(`unknown plan-mirror job: ${job.name}`);
       }
-    },
+    }),
     { connection: getBullRedis(), concurrency: 2 },
   );
   worker.on('failed', (job, err) => {

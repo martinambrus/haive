@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { schema, type Database } from '@haive/database';
 import {
   CLI_INSTALL_METADATA,
@@ -55,9 +56,9 @@ export async function refreshAllCliVersions(db: Database): Promise<RefreshCliVer
         'refreshed cli versions',
       );
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
+      const error = safeErrorMessage(err);
       errors.push({ name, error });
-      log.warn({ name, error }, 'failed to refresh cli versions');
+      log.warn({ err, name, error }, 'failed to refresh cli versions');
       await db
         .insert(schema.cliPackageVersions)
         .values({
@@ -122,9 +123,9 @@ export async function refreshAllToolVersions(db: Database): Promise<RefreshCliVe
         'refreshed tool versions',
       );
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
+      const error = safeErrorMessage(err);
       errors.push({ name, error });
-      log.warn({ name, error }, 'failed to refresh tool versions');
+      log.warn({ err, name, error }, 'failed to refresh tool versions');
       await db
         .insert(schema.toolPackageVersions)
         .values({

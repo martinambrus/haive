@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { Server } from 'node:http';
 import { Duplex } from 'node:stream';
 import type Docker from 'dockerode';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
@@ -14,7 +15,8 @@ const h = vi.hoisted(() => ({
   remove: vi.fn(),
   probe: vi.fn(),
   queueError: undefined as Error | undefined,
-  probeError: undefined as Error | undefined,
+  createError: undefined as string | undefined,
+  probeError: undefined as Error | string | undefined,
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
@@ -49,7 +51,9 @@ vi.mock('../src/queues.js', () => ({
           delivered = true;
           if (name !== 'cli-login-create' && h.probeError) throw h.probeError;
           return name === 'cli-login-create'
-            ? { ok: true, containerRowId: 'row', dockerContainerId: 'container' }
+            ? h.createError
+              ? { ok: false, error: h.createError }
+              : { ok: true, containerRowId: 'row', dockerContainerId: 'container' }
             : { cli: { authStatus: 'ok' } };
         },
       };
@@ -80,6 +84,7 @@ beforeEach(() => {
   h.start.mockReset().mockResolvedValue(undefined);
   h.remove.mockReset().mockResolvedValue(undefined);
   h.queueError = undefined;
+  h.createError = undefined;
   h.probeError = undefined;
   providerName = 'claude-code';
   h.db = {
@@ -637,6 +642,63 @@ describe('Claude OAuth token capture controls', () => {
 });
 
 describe('CLI login banner credential logging', () => {
+  it.each(['queue', 'probe', 'stream'] as const)(
+    'sanitizes a structured DB failure from %s',
+    async (source) => {
+      const err = new DrizzleQueryError(
+        'insert into secrets (value) values ($1)',
+        [TOKEN],
+        new Error(TOKEN),
+      );
+      if (source === 'queue') h.queueError = err;
+      if (source === 'probe') {
+        providerName = 'grok';
+        h.probeError = err;
+      }
+      await start('', source !== 'queue');
+      if (source === 'stream') stream.emit('error', err);
+      if (source === 'probe')
+        stream.emit('data', Buffer.from('https://accounts.x.ai/oauth2/device\n\nSigned in\n'));
+      await settle();
+      const sent = JSON.stringify(ws.send.mock.calls);
+      expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'error')).toBe(true);
+      expect(
+        Array.from({ length: TOKEN.length - 5 }, (_, i) => TOKEN.slice(i, i + 6)).some((part) =>
+          sent.includes(part),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    'provider not found',
+    'no adapter registered for synthetic',
+    'Database operation failed (23505)',
+  ])('fix7 forwards the worker reason: %s', async (message) => {
+    h.createError = message;
+    await start('', false);
+    expect(
+      ws.send.mock.calls.some(([raw]) => {
+        const frame = JSON.parse(raw);
+        return frame.type === 'error' && frame.message === message;
+      }),
+    ).toBe(true);
+  });
+
+  it('fix7 preserves the non-Error post-login fallback', async () => {
+    providerName = 'grok';
+    h.probeError = 'synthetic non-Error rejection';
+    await start();
+    stream.emit('data', Buffer.from('https://accounts.x.ai/oauth2/device\n\nSigned in\n'));
+    await settle();
+    expect(
+      ws.send.mock.calls.some(([raw]) => {
+        const frame = JSON.parse(raw);
+        return frame.type === 'error' && frame.message === 'post-login probe failed';
+      }),
+    ).toBe(true);
+  });
+
   it('captures a wrapped Claude token without logging any six-character substring', async () => {
     await start();
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
@@ -793,35 +855,46 @@ describe('CLI login banner startup cleanup', () => {
     },
   );
 
-  it('handles a stream error while container start is still pending', async () => {
-    let finish!: () => void;
-    h.start.mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          finish = resolve;
-        }),
-    );
-    await start('', false);
-    expect(h.start).toHaveBeenCalledOnce();
-    const failure = new Error('attach socket failed');
-    // EventEmitter throws here on the old code: no error listener exists yet.
-    try {
-      expect(() => stream.emit('error', failure)).not.toThrow();
-      await settle();
-      expect(stream.writableEnded).toBe(true);
-      expect(h.remove).toHaveBeenCalledOnce();
-      expect(ws.readyState).toBe(3);
-      expect(ws.send).toHaveBeenCalledWith(
-        JSON.stringify({ type: 'error', message: failure.message }),
+  it.each([false, true])(
+    'handles a stream error while container start is still pending (bound: %s)',
+    async (bound) => {
+      let finish!: () => void;
+      h.start.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
       );
-    } finally {
-      finish();
-      await settle();
-    }
-    expect(stream.listenerCount('data')).toBe(0);
-    expect(h.remove).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
-  });
+      await start('', false);
+      expect(h.start).toHaveBeenCalledOnce();
+      const failure = bound
+        ? new DrizzleQueryError('select $1', [TOKEN], new Error(TOKEN))
+        : new Error('attach socket failed');
+      // EventEmitter throws here on the old code: no error listener exists yet.
+      try {
+        expect(() => stream.emit('error', failure)).not.toThrow();
+        await settle();
+        expect(stream.writableEnded).toBe(true);
+        expect(h.remove).toHaveBeenCalledOnce();
+        expect(ws.readyState).toBe(3);
+        const errorFrame = {
+          type: 'error',
+          message: bound ? 'Database operation failed' : failure.message,
+        };
+        expect(ws.send.mock.calls.some(([raw]) => raw === JSON.stringify(errorFrame))).toBe(true);
+      } finally {
+        finish();
+        await settle();
+      }
+      expect(stream.listenerCount('data')).toBe(0);
+      expect(h.remove).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+      if (bound) {
+        assertNoCredentialText(TOKEN);
+        expect(JSON.stringify(ws.send.mock.calls).includes(TOKEN)).toBe(false);
+      }
+    },
+  );
 
   it.each(['attach', 'start'])('ends the stream when cancelled during %s', async (stage) => {
     if (stage === 'attach')

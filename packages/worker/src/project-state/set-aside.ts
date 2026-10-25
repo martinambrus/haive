@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -1051,7 +1052,7 @@ export async function putBackAfterFailure(
     logger.error(
       {
         err: putErr,
-        failure: err instanceof Error ? err.message : String(err),
+        failure: safeErrorMessage(err),
         repositoryId,
         paths,
       },
@@ -1059,7 +1060,7 @@ export async function putBackAfterFailure(
     );
     throw new AggregateError(
       [err, putErr],
-      `${err instanceof Error ? err.message : String(err)}; Haive's set-aside files (${paths.join(', ')}) could not be put back: ${putErr instanceof Error ? putErr.message : String(putErr)}`,
+      `${safeErrorMessage(err)}; Haive's set-aside files (${paths.join(', ')}) could not be put back: ${safeErrorMessage(putErr)}`,
     );
   }
   throw err;

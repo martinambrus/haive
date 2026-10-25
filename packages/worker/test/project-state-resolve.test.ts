@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -685,6 +686,33 @@ describe('a render file that changed under the answer', () => {
 });
 
 describe('a failure after the file would be rewritten', () => {
+  it.each(['ordinary', 'bound-original', 'bound-put-back'] as const)(
+    'recovery preserves ordinary String diagnostics and hides bound members: %s',
+    async (shape) => {
+      const s = await setup();
+      const secret = 'RECOVERY_BOUND_SECRET_426';
+      const bound = () =>
+        new DrizzleQueryError('update fixture set value = $1', [secret], new Error(secret));
+      const original = shape === 'bound-original' ? bound() : new TypeError('original\n  failure');
+      const putBack = shape === 'bound-put-back' ? bound() : new RangeError('put-back\n  failure');
+      let commits = 0;
+      s.fake.hooks.beforeCommit = () => {
+        // The first transaction reached the file rewrite; the second reached the put-back.
+        throw ++commits === 1 ? original : putBack;
+      };
+      const err = await s.answer('keep_mine').catch((error: unknown) => error);
+      expect(commits).toBe(2);
+      expect(err).toBeInstanceOf(AggregateError);
+      const aggregate = err as AggregateError;
+      expect(aggregate.errors).toEqual([original, putBack]);
+      expect(aggregate.message).toBe(
+        `${shape === 'bound-original' ? 'Database operation failed' : String(original)}; putting the render file's bytes back failed too: ${shape === 'bound-put-back' ? 'Database operation failed' : String(putBack)}`,
+      );
+      expect(aggregate.message.includes(secret)).toBe(false);
+      expect(s.rowOf(s.ids[KEY]!).resolvedAt).toBeNull();
+    },
+  );
+
   const failures: [string, (s: Awaited<ReturnType<typeof setup>>) => void][] = [
     [
       'the commit',
@@ -1061,4 +1089,19 @@ describe('a claim question', () => {
     });
     expect(s.dump()).toEqual(before);
   });
+});
+
+it('fix4 sanitizes both failures when resolving and putting back fail', async () => {
+  const s = await setup();
+  const secret = randomBytes(24).toString('base64url');
+  s.fake.hooks.beforeCommit = () => {
+    throw new DrizzleQueryError('select $1', [secret], new Error(secret));
+  };
+  const err = await s.answer('keep_mine').catch((err: unknown) => err);
+  expect(err instanceof AggregateError).toBe(true);
+  expect(
+    Array.from({ length: secret.length - 5 }, (_, i) => secret.slice(i, i + 6)).some((part) =>
+      (err as Error).message.includes(part),
+    ),
+  ).toBe(false);
 });

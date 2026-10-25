@@ -1,3 +1,4 @@
+import { safeProcessor } from '../safe-processor.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -6,6 +7,7 @@ import { DelayedError, Worker, type Job, type Queue } from 'bullmq';
 import { and, eq, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CLAUDE_USAGE_OAUTH_SECRET } from '@haive/shared/claude-oauth';
+import { safeErrorMessage, safeErrorForTransport } from '@haive/shared/logger';
 import {
   CLI_EXEC_JOB_NAMES,
   VERSION_REFRESH_JOB_ID,
@@ -454,7 +456,7 @@ async function runCliExecJob(
     };
   } catch (err) {
     const durationMs = Date.now() - startedAt;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = safeErrorMessage(err);
     log.error({ err, invocationId: payload.invocationId }, 'cli exec failed');
     await publishCliExit(payload.invocationId, -1);
     await db.transaction(async (tx) => {
@@ -805,7 +807,7 @@ export async function handleBuildSandboxImageJob(
       durationMs: result.durationMs,
     };
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
+    const errMsg = safeErrorMessage(err);
     await writeWhileWanted(db, provider.id, imageTag, {
       sandboxImageBuildStatus: 'failed',
       sandboxImageBuildError: errMsg,
@@ -1037,7 +1039,7 @@ export async function handleLoginCreateJob(
   try {
     commandSpec = buildSetupTokenCommand(provider, executable);
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: safeErrorMessage(err) };
   }
 
   // Ensure the per-user auth volume(s) are owned by the sandbox user (uid 1000)
@@ -1085,7 +1087,7 @@ export async function handleLoginCreateJob(
     };
   } catch (err) {
     log.error({ err, providerId: provider.id }, 'login container create failed');
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: safeErrorMessage(err) };
   }
 }
 
@@ -1485,7 +1487,7 @@ export async function startCliExecWorker(
     | void
   >(
     QUEUE_NAMES.CLI_EXEC,
-    async (job: Job<CliExecQueuePayload>, token?: string) => {
+    safeProcessor(async (job: Job<CliExecQueuePayload>, token?: string) => {
       const db = getDb();
       if (job.name === CLI_EXEC_JOB_NAMES.INVOKE) {
         const payload = job.data as CliExecJobPayload;
@@ -1514,7 +1516,9 @@ export async function startCliExecWorker(
         return;
       }
       if (job.name === CLI_EXEC_JOB_NAMES.PROBE) {
-        return handleProbeJob(db, job.data as CliProbeJobPayload);
+        return handleProbeJob(db, job.data as CliProbeJobPayload).catch((err) => {
+          throw safeErrorForTransport(err, job);
+        });
       }
       if (job.name === CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE) {
         return handleBuildSandboxImageJob(db, job.data as SandboxImageBuildJobPayload);
@@ -1526,7 +1530,9 @@ export async function startCliExecWorker(
         return handleRefreshCliVersionsJob(db);
       }
       if (job.name === CLI_EXEC_JOB_NAMES.LOGIN_CREATE) {
-        return handleLoginCreateJob(db, job.data as CliLoginCreateJobPayload);
+        return handleLoginCreateJob(db, job.data as CliLoginCreateJobPayload).catch((err) => {
+          throw safeErrorForTransport(err, job);
+        });
       }
       if (job.name === CLI_EXEC_JOB_NAMES.SIGN_OUT) {
         return handleSignOutJob(db, job.data as CliSignOutJobPayload);
@@ -1535,7 +1541,7 @@ export async function startCliExecWorker(
         return handleProvisionOllamaModelJob(db, job.data as OllamaProvisionJobPayload);
       }
       throw new Error(`unknown cli-exec job ${job.name}`);
-    },
+    }),
     {
       connection: getBullRedis(),
       concurrency,

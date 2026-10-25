@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -101,8 +102,8 @@ export async function fetchOllamaModelPrices(db: Database): Promise<OllamaPriceF
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       html = await resp.text();
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      log.warn({ slug, error }, 'failed to fetch ollama model page');
+      const error = safeErrorMessage(err);
+      log.warn({ err, slug, error }, 'failed to fetch ollama model page');
       errors.push(`${slug}: ${error}`);
       continue;
     }

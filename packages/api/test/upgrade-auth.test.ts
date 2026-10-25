@@ -11,6 +11,7 @@ import { schema } from '@haive/database';
 import { terminalSessionKey } from '@haive/shared';
 import { createFakeDb } from '@haive/database/testing';
 import { eq } from 'drizzle-orm';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import type { AppEnv } from '../src/context.js';
 
 const h = vi.hoisted(() => {
@@ -807,8 +808,13 @@ describe('terminal startup failure cleanup', () => {
     });
   }
 
-  for (const stage of ['increment', 'timers'] as const) {
-    it(`ends the attach stream and closes the websocket when ${stage} fails`, async () => {
+  for (const { stage, bound } of [
+    { stage: 'increment', bound: false },
+    { stage: 'timers', bound: false },
+    { stage: 'increment', bound: true },
+    { stage: 'timers', bound: true },
+  ] as const) {
+    it(`${bound ? 'bound error: ' : ''}ends the attach stream and closes the websocket when ${stage} fails`, async () => {
       fake.patch(schema.containers, ID, { attachedWsCount: 1 });
       const stream = new PassThrough();
       vi.spyOn(http, 'request').mockImplementation(((
@@ -823,7 +829,13 @@ describe('terminal startup failure cleanup', () => {
         });
         return req;
       }) as typeof http.request);
-      const failure = new Error(`${stage} unavailable`);
+      const failure = bound
+        ? new DrizzleQueryError(
+            'update containers set attached_ws_count = $1',
+            ['synthetic-bound-private-value'],
+            new Error('synthetic-bound-private-value'),
+          )
+        : new Error(`${stage} unavailable`);
       let keepalive: ReturnType<typeof setInterval> | undefined;
       const clear = vi.spyOn(globalThis, 'clearInterval');
       if (stage === 'increment') {
@@ -860,7 +872,14 @@ describe('terminal startup failure cleanup', () => {
       });
       try {
         expect(await closed).toBe(1011);
-        expect(frames).toContainEqual({ type: 'error', message: failure.message });
+        const errorFrame = {
+          type: 'error',
+          message: bound ? 'Database operation failed' : failure.message,
+        };
+        expect(frames.some((frame) => JSON.stringify(frame) === JSON.stringify(errorFrame))).toBe(
+          true,
+        );
+        expect(JSON.stringify(frames).includes('synthetic-bound-private-value')).toBe(false);
         expect(stream.writableEnded).toBe(true);
         await vi.waitFor(() => {
           expect(fake.rows(schema.containers)[0]?.attachedWsCount).toBe(1);

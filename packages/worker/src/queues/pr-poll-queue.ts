@@ -1,3 +1,5 @@
+import { safeErrorMessage } from '@haive/shared/logger';
+import { safeProcessor } from './safe-processor.js';
 import { Queue, Worker } from 'bullmq';
 import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
 import {
@@ -77,9 +79,9 @@ export async function schedulePrPollTick(): Promise<void> {
 export function startPrPollWorker(): Worker {
   return new Worker(
     QUEUE_NAMES.PR_POLL,
-    async () => {
+    safeProcessor(async () => {
       await runPrPollTick(getDb());
-    },
+    }),
     { connection: getBullRedis(), concurrency: 1 },
   );
 }
@@ -188,7 +190,7 @@ async function pollTask(db: Database, task: PrWaitTask): Promise<void> {
     log.info({ taskId: task.id, prUrl: task.prUrl }, 'pull request closed without merging');
   } catch (err) {
     if (err instanceof ForgeRateLimitError && host) noteRateLimit(host, err.retryAfterMs);
-    await recordPollError(db, task.id, err instanceof Error ? err.message : String(err));
+    await recordPollError(db, task.id, safeErrorMessage(err));
   }
 }
 

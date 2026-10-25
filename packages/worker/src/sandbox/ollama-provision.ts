@@ -1,5 +1,6 @@
 import { and, eq, ne, notInArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
+import { safeErrorMessage } from '@haive/shared/logger';
 import {
   logger,
   isOllamaCloudModel,
@@ -259,7 +260,7 @@ export async function provisionOllamaProvider(
     await setProvisionStatus(db, provider.id, 'ready', null);
     return { ok: true, providerId: provider.id, model };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = safeErrorMessage(err);
     log.warn({ err, model, providerId: provider.id }, 'ollama model provisioning failed');
     await setProvisionStatus(db, provider.id, 'failed', message);
     return { ok: false, providerId: provider.id, model, error: message };
