@@ -52,14 +52,22 @@ async function mounted() {
   return view;
 }
 describe('repository upload retry', () => {
-  it('replaces stale Retry copy with recovery instructions and hides Retry', async () => {
-    repo.canRetry = false;
-    repo.retryUnavailableReason = UNAVAILABLE;
-    const view = await mounted();
-    expect(textOf(view.tree())).toContain(UNAVAILABLE);
-    expect(textOf(view.tree())).not.toContain('Use Retry to start again.');
-    expect(buttons(view.tree(), /^retry$/i)).toHaveLength(0);
-  });
+  it.each(['upload', 'blank', 'git_https', 'github_https', 'github_oauth', 'gitlab_https'])(
+    'replaces stale Retry copy with recovery instructions and hides Retry for %s',
+    async (source) => {
+      repo.source = source;
+      const recovery =
+        source === 'upload'
+          ? UNAVAILABLE
+          : 'This repository has no remote. Delete this repository and create it again from a repository URL or local folder.';
+      repo.canRetry = false;
+      repo.retryUnavailableReason = recovery;
+      const view = await mounted();
+      expect(textOf(view.tree())).toContain(recovery);
+      expect(textOf(view.tree())).not.toContain('Use Retry to start again.');
+      expect(buttons(view.tree(), /^retry$/i)).toHaveLength(0);
+    },
+  );
   it('offers Retry when availability has not yet been checked, and displays an API refusal', async () => {
     const view = await mounted();
     h.post.mockRejectedValue(new Error(UNAVAILABLE));
@@ -70,6 +78,7 @@ describe('repository upload retry', () => {
     expect(textOf(view.tree())).toContain(UNAVAILABLE);
   });
   it('keeps Retry for remote repositories', async () => {
+    repo.canRetry = true;
     repo.source = 'git_https';
     repo.remoteUrl = 'https://example.com/r.git';
     repo.retryUnavailableReason = null;

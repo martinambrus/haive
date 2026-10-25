@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
@@ -108,6 +111,128 @@ describe.skipIf(!url)('upload retry against Postgres', () => {
     expect(res.status).toBe(409);
     expect(await res.text()).toMatch(/delete.*repository.*upload.*again/i);
     expect(h.add).not.toHaveBeenCalled();
+  });
+  it.each(['blank', 'git_https', 'github_https', 'github_oauth', 'gitlab_https'] as const)(
+    'does not promise Retry for %s without a remote, even with stale Retry copy',
+    async (source) => {
+      await h.db
+        .update(schema.repositories)
+        .set({ source, statusMessage: 'Use Retry to start again.' })
+        .where(eq(schema.repositories.id, repoId));
+      const repo = await listed();
+      expect(repo.canRetry).toBe(false);
+      expect(repo.retryUnavailableReason).toMatch(
+        /no remote.*delete.*repository.*(create|add).*again/i,
+      );
+      expect((await app.request(`/${repoId}/refresh-tree`, { method: 'POST' })).status).toBe(409);
+      expect(h.add).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    'git_https',
+    'github_https',
+    'github_oauth',
+    'gitlab_https',
+    'upload',
+    'blank',
+    'local_path',
+  ] as const)(
+    'keeps Retry for %s with a usable source despite a temporary root fence',
+    async (source) => {
+      await h.db
+        .update(schema.repositories)
+        .set({
+          source,
+          remoteUrl: source === 'local_path' ? null : 'https://example.com/r.git',
+          localPath: source === 'local_path' ? '/host-fs/repo' : null,
+          rootClaimedAt: new Date(),
+          rootClaimKind: 'reset',
+        })
+        .where(eq(schema.repositories.id, repoId));
+      expect((await listed()).canRetry).toBe(true);
+      expect((await listed()).retryUnavailableReason).toBeNull();
+      expect((await app.request(`/${repoId}/refresh-tree`, { method: 'POST' })).status).toBe(409);
+    },
+  );
+  it('keeps an available upload retry visible while a task holds the repository', async () => {
+    await source();
+    await h.db.insert(schema.tasks).values({
+      repositoryId: repoId,
+      userId: h.userId,
+      type: 'workflow',
+      title: 'holds root',
+      status: 'running',
+    });
+    expect((await listed()).canRetry).toBe(true);
+    expect((await listed()).retryUnavailableReason).toBeNull();
+    expect((await app.request(`/${repoId}/refresh-tree`, { method: 'POST' })).status).toBe(409);
+    expect(h.add).not.toHaveBeenCalled();
+  });
+  it('persists a single-shot upload source that drives a later failed-upload retry', async () => {
+    const storage = await mkdtemp(path.join(tmpdir(), 'upload-source-'));
+    const previous = process.env.REPO_STORAGE_ROOT;
+    process.env.REPO_STORAGE_ROOT = storage;
+    try {
+      const bytes = new Uint8Array([80, 75, 3, 4, 0, 1, 2, 3]);
+      const form = new FormData();
+      form.set('archive', new File([bytes], 'source.zip'));
+      form.set('name', 'Single shot');
+      form.set('branch', 'fixture-branch');
+      const res = await app.request('/upload', { method: 'POST', body: form });
+      expect(res.status).toBe(201);
+      const { repository } = (await res.json()) as { repository: { id: string } };
+      const expectedPath = path.join(storage, '_uploads', h.userId, `${repository.id}.zip`);
+      const upload = await h.db.query.repoUploads.findFirst({
+        where: eq(schema.repoUploads.id, repository.id),
+      });
+      expect(upload).toMatchObject({
+        id: repository.id,
+        userId: h.userId,
+        filename: 'source.zip',
+        archiveFormat: 'zip',
+        archivePath: expectedPath,
+        totalSize: bytes.length,
+        bytesReceived: bytes.length,
+        chunkSize: bytes.length,
+        status: 'complete',
+      });
+      expect(await readFile(expectedPath)).toEqual(Buffer.from(bytes));
+      expect(h.add).toHaveBeenCalledWith(
+        REPO_JOB_NAMES.EXTRACT,
+        expect.objectContaining({
+          repositoryId: repository.id,
+          archivePath: expectedPath,
+          archiveFormat: 'zip',
+          branch: 'fixture-branch',
+        }),
+        expect.objectContaining({ attempts: 1 }),
+      );
+      await h.db
+        .update(schema.repositories)
+        .set({ status: 'error' })
+        .where(eq(schema.repositories.id, repository.id));
+      h.add.mockClear();
+      expect((await app.request(`/${repository.id}/refresh-tree`, { method: 'POST' })).status).toBe(
+        200,
+      );
+      expect(h.add).toHaveBeenCalledTimes(1);
+      expect(h.add).toHaveBeenCalledWith(
+        REPO_JOB_NAMES.EXTRACT,
+        expect.objectContaining({
+          repositoryId: repository.id,
+          userId: h.userId,
+          source: 'upload',
+          archivePath: expectedPath,
+          archiveFormat: 'zip',
+          branch: 'fixture-branch',
+        }),
+        expect.objectContaining({ attempts: 1 }),
+      );
+    } finally {
+      if (previous === undefined) delete process.env.REPO_STORAGE_ROOT;
+      else process.env.REPO_STORAGE_ROOT = previous;
+      await rm(storage, { recursive: true, force: true });
+    }
   });
   it('admits exactly one simultaneous extraction retry', async () => {
     await source();

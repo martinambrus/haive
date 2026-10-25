@@ -226,6 +226,9 @@ export async function addRepoJobOrMarkError(
   }
 }
 
+const NO_REFRESH_SOURCE =
+  'This repository has no remote. Delete this repository and create it again from a repository URL or local folder.';
+
 const UPLOAD_UNAVAILABLE =
   'The uploaded archive is no longer available. Delete this repository and upload it again.';
 
@@ -364,15 +367,20 @@ repoRoutes.get('/', async (c) => {
       // (which is what `onboarded: false` does) blocks the user outright.
       const nothingToOnboard =
         markers !== null && !onboarded && root ? !(await hasOnboardableSource(root)) : false;
-      const retryUnavailable =
-        repo.status === 'error' &&
-        repo.source === 'upload' &&
-        !repo.remoteUrl &&
-        !retrySources.has(repo.id);
+      // Capability describes a durable source, not transient root/task/queue fences: the
+      // Retry action remains available while those clear, with the route explaining a refusal.
+      const retryUnavailableReason =
+        repo.status !== 'error' || repo.remoteUrl || repo.source === 'local_path'
+          ? null
+          : repo.source === 'upload'
+            ? retrySources.has(repo.id)
+              ? null
+              : UPLOAD_UNAVAILABLE
+            : NO_REFRESH_SOURCE;
       return {
         ...rest,
-        canRetry: repo.status === 'error' && !retryUnavailable,
-        retryUnavailableReason: retryUnavailable ? UPLOAD_UNAVAILABLE : null,
+        canRetry: repo.status === 'error' && retryUnavailableReason === null,
+        retryUnavailableReason,
         topLevelPaths: deriveTopLevelPaths(fileTree),
         openTaskCount: counts.open,
         activeTaskCount: counts.active,
@@ -3271,7 +3279,7 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
     if (!upload || !retryableUpload(upload, userId)) throw new HttpError(409, UPLOAD_UNAVAILABLE);
   }
   if (!retryUpload && repo.source !== 'local_path' && !repo.remoteUrl) {
-    throw new HttpError(409, 'Nothing to refresh from: this repository has no remote.');
+    throw new HttpError(409, NO_REFRESH_SOURCE);
   }
   const holding = await db.query.tasks.findMany({
     where: and(

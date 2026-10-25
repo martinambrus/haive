@@ -8,10 +8,12 @@ import { createFakeDb } from '@haive/database/testing';
 import type { RepoJobPayload } from '@haive/shared';
 import { handleExtract } from '../src/repo/clone.js';
 
+const claim = vi.hoisted(() => ({ release: vi.fn(async () => {}) }));
+
 // Root-claim SQL is covered against Postgres by the claim tests; this fixture exercises extraction.
 vi.mock('@haive/database', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@haive/database')>()),
-  acquireRootClaim: async () => ({ release: async () => {}, lost: () => false }),
+  acquireRootClaim: async () => ({ release: claim.release, lost: () => false }),
 }));
 
 vi.mock('../src/plan/sync-checkout.js', () => ({ syncPlanFromCheckout: async () => {} }));
@@ -33,6 +35,7 @@ function makeDb() {
   });
 }
 beforeEach(async () => {
+  claim.release.mockClear();
   root = await mkdtemp(path.join(tmpdir(), 'extract-retry-'));
   fake = makeDb();
   payload = {
@@ -80,6 +83,7 @@ describe('extract upload retry', () => {
     expect(await readdir(path.join(root, USER, REPO))).not.toContain('partial.txt');
     expect(await readFile(path.join(root, USER, REPO, 'README.md'), 'utf8')).toBe('# fresh\n');
     expect(fake.rows(schema.repositories)[0]!.status).toBe('ready');
+    expect(claim.release).toHaveBeenCalledTimes(1);
     await expect(readFile(payload.archivePath!)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
@@ -88,7 +92,7 @@ describe('extract upload retry', () => {
       /delete.*repository.*upload.*again/i,
     );
     expect(fake.rows(schema.repoUploads)[0]!.status).toBe('cancelled');
-    expect(fake.rows(schema.repositories)[0]!.rootClaimedAt).toBeNull();
+    expect(claim.release).toHaveBeenCalledTimes(1);
   });
 
   it('does not replace a tree while a task holds it', async () => {
@@ -104,6 +108,7 @@ describe('extract upload retry', () => {
       /using this repository/i,
     );
     expect(fake.rows(schema.repoUploads)[0]!.status).toBe('complete');
+    expect(claim.release).toHaveBeenCalledTimes(1);
     expect(await readFile(payload.archivePath!)).not.toHaveLength(0);
   });
 });
