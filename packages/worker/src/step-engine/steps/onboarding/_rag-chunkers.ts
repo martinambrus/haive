@@ -1395,8 +1395,138 @@ const RUBY_NAME_START = /[A-Za-z_\u0080-\uFFFF]/;
 const RUBY_NAME_CHAR = /[\w\u0080-\uFFFF]/;
 const RUBY_PREFIX_OPERATORS = new Set(['not', 'and', 'or', 'defined?']);
 
-/** Percent-quoted Ruby bodies balance their own delimiter, never expression brackets. */
-function rubyPercentEnd(content: string, at: number): number | null {
+interface RubyCodeState {
+  depth: number;
+  continues: boolean;
+  operandExpected: boolean;
+  nameContext: 'bare' | 'receiver' | 'constant' | 'value';
+  commandName: boolean;
+  parameterBinding: boolean;
+}
+
+function rubyCodeState(parameters = false): RubyCodeState {
+  return {
+    depth: 0,
+    continues: false,
+    operandExpected: true,
+    nameContext: 'bare',
+    commandName: false,
+    parameterBinding: parameters,
+  };
+}
+
+function rubyValue(state: RubyCodeState): void {
+  state.continues = false;
+  state.operandExpected = false;
+  state.nameContext = 'bare';
+  state.commandName = false;
+}
+
+function rubyCommandArgument(content: string, at: number, state: RubyCodeState): boolean {
+  return (
+    state.commandName &&
+    /[ \t]/.test(content[at - 1] ?? '') &&
+    !/[=\s]/.test(content[at + 1] ?? ' ')
+  );
+}
+
+/** One code token, shared by endless expressions and code inside literal interpolation.
+ *  The caller handles literals before their punctuation can reach this depth counter. */
+function rubyCodeToken(
+  content: string,
+  at: number,
+  state: RubyCodeState,
+  locals: Set<string>,
+  parameters = false,
+): number {
+  const c = content[at]!;
+  if (c === '?' && state.operandExpected && content[at + 1] && !/\s/.test(content[at + 1]!)) {
+    let end = at + 1;
+    for (
+      let prefix = /^\\(?:[CM]-|c)/.exec(content.slice(end));
+      prefix;
+      prefix = /^\\(?:[CM]-|c)/.exec(content.slice(end))
+    )
+      end += prefix[0].length;
+    if (content[end] === '\\') end += 1;
+    rubyValue(state);
+    return end + codePointAt(content, end).length;
+  }
+  if (RUBY_NAME_START.test(c)) {
+    let end = at + 1;
+    while (end < content.length && RUBY_NAME_CHAR.test(content[end]!)) end += 1;
+    const suffix = content[end];
+    if (suffix === '?' || (suffix === '!' && !['=', '~'].includes(content[end + 1] ?? '')))
+      end += 1;
+    const word = content.slice(at, end);
+    state.continues = state.nameContext === 'bare' && RUBY_PREFIX_OPERATORS.has(word);
+    if (state.parameterBinding) locals.add(word);
+    if (
+      state.nameContext === 'bare' &&
+      /^[ \t]*(?:=(?!=|~|>)|(?:[-+*/%&|^]|<<|>>|\*\*|&&|\|\|)=)/.test(content.slice(end))
+    )
+      locals.add(word);
+    state.commandName =
+      !state.continues &&
+      (state.nameContext === 'receiver' ||
+        (state.nameContext !== 'value' &&
+          !/[0-9]/.test(content[at - 1] ?? '') &&
+          !/^\p{Lu}/u.test(word) &&
+          (state.nameContext === 'constant' || !locals.has(word)) &&
+          !/^(?:true|false|nil|self|__FILE__|__LINE__|__ENCODING__)$/.test(word)));
+    state.operandExpected = state.continues;
+    state.nameContext = 'bare';
+    return end;
+  }
+  if (c === '#') {
+    const end = lineEnd(content, at, true);
+    return end < 0 ? content.length : end;
+  }
+  if ('([{'.includes(c)) {
+    state.depth += 1;
+    rubyValue(state);
+    state.operandExpected = true;
+  } else if (')]}'.includes(c)) {
+    state.depth = Math.max(0, state.depth - 1);
+    rubyValue(state);
+  } else if (c === '.' || c === ':' || c === '@' || c === '$') {
+    state.nameContext =
+      c === '.'
+        ? 'receiver'
+        : c === ':' && (content[at - 1] === ':' || content[at + 1] === ':')
+          ? 'constant'
+          : 'value';
+    if (parameters && state.depth === 0 && c === ':') state.parameterBinding = false;
+    state.commandName = false;
+    state.continues = c === '.' || c === ':';
+    state.operandExpected = c !== '.';
+  } else if (!/\s/.test(c)) {
+    if (parameters && state.depth === 0) {
+      if (c === ',') state.parameterBinding = true;
+      else if (c === '=') state.parameterBinding = false;
+    }
+    state.continues = /[-+*/%&|^,?=<>!~\\]/.test(c);
+    state.operandExpected = state.continues;
+    state.nameContext = 'bare';
+    state.commandName = false;
+  }
+  return at + 1;
+}
+
+interface RubyLiteralFrame {
+  mode: 'literal';
+  open: string;
+  close: string;
+  paired: boolean;
+  interpolates: boolean;
+  regexp: boolean;
+  options: boolean;
+  depth: number;
+  inClass: boolean;
+  body: number;
+}
+
+function rubyPercentAt(content: string, at: number): RubyLiteralFrame | null {
   let open = at + 1;
   const type = /[qQwWiIrxs]/.test(content[open] ?? '') ? content[open++]! : '';
   const delimiter = content[open];
@@ -1404,18 +1534,80 @@ function rubyPercentEnd(content: string, at: number): number | null {
     return null;
   const close =
     ({ '(': ')', '[': ']', '{': '}', '<': '>' } as Record<string, string>)[delimiter] ?? delimiter;
-  const paired = close !== delimiter;
-  const interpolates = !['q', 'w', 'i', 's'].includes(type);
-  let depth = 1;
-  for (let i = open + 1; i < content.length; i += 1) {
-    if (content[i] === '\\') i += 1;
-    else if (interpolates && content[i] === '#' && content[i + 1] === '{')
-      i = interpolationEnd(content, i + 1) - 1;
-    else if (paired && content[i] === delimiter) depth += 1;
-    else if (content[i] === close && --depth === 0) {
-      i += 1;
-      if (type === 'r') while (/[imoxnesu]/.test(content[i] ?? '')) i += 1;
-      return i;
+  return {
+    mode: 'literal',
+    open: delimiter,
+    close,
+    paired: close !== delimiter,
+    interpolates: !['q', 'w', 'i', 's'].includes(type),
+    regexp: false,
+    options: type === 'r',
+    depth: 1,
+    inClass: false,
+    body: open + 1,
+  };
+}
+
+/** Ruby literals and their interpolation code use explicit frames: nested percent,
+ *  quote and regexp bodies stay opaque without recursive scanner calls. */
+function rubyPercentEnd(content: string, at: number, locals: Set<string>): number | null {
+  const first = rubyPercentAt(content, at);
+  if (!first) return null;
+  const frames: Array<RubyLiteralFrame | { mode: 'code'; state: RubyCodeState }> = [first];
+  let cursor = first.body;
+  while (cursor < content.length) {
+    const frame = frames[frames.length - 1]!;
+    const c = content[cursor]!;
+    if (frame.mode === 'literal') {
+      if (c === '\\') cursor = Math.min(content.length, cursor + 2);
+      else if (frame.interpolates && content.startsWith('#{', cursor)) {
+        frames.push({ mode: 'code', state: rubyCodeState() });
+        cursor += 2;
+      } else {
+        if (frame.regexp && c === '[') frame.inClass = true;
+        else if (frame.regexp && c === ']') frame.inClass = false;
+        if (frame.paired && c === frame.open) frame.depth += 1;
+        else if (c === frame.close && !frame.inClass && --frame.depth === 0) {
+          cursor += 1;
+          if (frame.options) while (/[imoxnesu]/.test(content[cursor] ?? '')) cursor += 1;
+          frames.pop();
+          if (!frames.length) return cursor;
+          const parent = frames[frames.length - 1]!;
+          if (parent.mode === 'code') rubyValue(parent.state);
+          continue;
+        }
+        cursor += 1;
+      }
+      continue;
+    }
+    if (c === '}' && frame.state.depth === 0) {
+      frames.pop();
+      cursor += 1;
+      continue;
+    }
+    const valueExpected =
+      frame.state.operandExpected || rubyCommandArgument(content, cursor, frame.state);
+    const percent = c === '%' && valueExpected ? rubyPercentAt(content, cursor) : null;
+    const regexp = c === '/' && valueExpected && regexClose(content, cursor, true, true) >= 0;
+    if (percent || c === "'" || c === '"' || c === '`' || regexp) {
+      const literal: RubyLiteralFrame = percent ?? {
+        mode: 'literal',
+        open: c,
+        close: c,
+        paired: false,
+        interpolates: c !== "'",
+        regexp,
+        options: regexp,
+        depth: 1,
+        inClass: false,
+        body: cursor + 1,
+      };
+      frames.push(literal);
+      cursor = literal.body;
+    } else {
+      if (isLineTerminator(c, true) && frame.state.depth === 0 && !frame.state.continues)
+        frame.state = rubyCodeState();
+      cursor = rubyCodeToken(content, cursor, frame.state, locals);
     }
   }
   return content.length;
@@ -1429,120 +1621,25 @@ function rubyExpressionEnd(
   locals: Set<string>,
   parameters = false,
 ): number {
-  let depth = 0;
-  let continues = false;
-  let operandExpected = true;
-  let nameContext: 'bare' | 'receiver' | 'constant' | 'value' = 'bare';
-  let commandName = false;
-  let parameterBinding = parameters;
-  for (let i = from; i < content.length; i += 1) {
-    const c = content[i]!;
-    const commandArgument =
-      commandName && /[ \t]/.test(content[i - 1] ?? '') && !/[=\s]/.test(content[i + 1] ?? ' ');
-    const percentEnd =
-      c === '%' && (operandExpected || commandArgument) ? rubyPercentEnd(content, i) : null;
+  const state = rubyCodeState(parameters);
+  for (let cursor = from; cursor < content.length;) {
+    const c = content[cursor]!;
+    const valueExpected = state.operandExpected || rubyCommandArgument(content, cursor, state);
+    const percentEnd = c === '%' && valueExpected ? rubyPercentEnd(content, cursor, locals) : null;
+    const regexpEnd = c === '/' && valueExpected ? regexClose(content, cursor, true, true) : -1;
     if (percentEnd !== null) {
-      i = percentEnd - 1;
-      continues = false;
-      operandExpected = false;
-      nameContext = 'bare';
-      commandName = false;
+      cursor = percentEnd;
+      rubyValue(state);
     } else if (c === '"' || c === "'") {
-      i = quotedEnd(content, i) - 1;
-      continues = false;
-      operandExpected = false;
-      nameContext = 'bare';
-      commandName = false;
-    } else if (c === '?' && operandExpected && content[i + 1] && !/\s/.test(content[i + 1]!)) {
-      // A character literal is a value, not a bare command name or an expression bracket.
-      let end = i + 1;
-      for (
-        let prefix = /^\\(?:[CM]-|c)/.exec(content.slice(end));
-        prefix;
-        prefix = /^\\(?:[CM]-|c)/.exec(content.slice(end))
-      )
-        end += prefix[0].length;
-      if (content[end] === '\\') end += 1;
-      i = end + codePointAt(content, end).length - 1;
-      continues = false;
-      operandExpected = false;
-      nameContext = 'bare';
-      commandName = false;
-    } else if (RUBY_NAME_START.test(c)) {
-      const start = i;
-      while (i + 1 < content.length && RUBY_NAME_CHAR.test(content[i + 1]!)) i += 1;
-      const suffix = content[i + 1];
-      if (suffix === '?' || (suffix === '!' && !['=', '~'].includes(content[i + 2] ?? ''))) i += 1;
-      const word = content.slice(start, i + 1);
-      continues = nameContext === 'bare' && RUBY_PREFIX_OPERATORS.has(word);
-      // The same lexical pass collects parameter bindings, skipping their defaults.
-      if (parameterBinding) locals.add(word);
-      if (
-        nameContext === 'bare' &&
-        /^[ \t]*(?:=(?!=|~|>)|(?:[-+*/%&|^]|<<|>>|\*\*|&&|\|\|)=)/.test(content.slice(i + 1))
-      )
-        locals.add(word);
-      commandName =
-        !continues &&
-        (nameContext === 'receiver' ||
-          (nameContext !== 'value' &&
-            !/[0-9]/.test(content[start - 1] ?? '') &&
-            !/^\p{Lu}/u.test(word) &&
-            (nameContext === 'constant' || !locals.has(word)) &&
-            !/^(?:true|false|nil|self|__FILE__|__LINE__|__ENCODING__)$/.test(word)));
-      operandExpected = continues;
-      nameContext = 'bare';
-    } else if (c === '/' && (operandExpected || commandArgument)) {
-      const close = regexClose(content, i, true, true);
-      if (close >= 0) {
-        i = close;
-        while (/[imoxnesu]/.test(content[i + 1] ?? '')) i += 1;
-        continues = false;
-        operandExpected = false;
-      } else {
-        continues = true;
-        operandExpected = true;
-      }
-      nameContext = 'bare';
-      commandName = false;
-    } else if (c === '#') {
-      const end = lineEnd(content, i, true);
-      i = (end < 0 ? content.length : end) - 1;
-    } else if (isLineTerminator(c, true)) {
-      if (depth === 0 && !continues) return i + (c === '\r' && content[i + 1] === '\n' ? 2 : 1);
-    } else if ('([{'.includes(c)) {
-      depth += 1;
-      continues = false;
-      operandExpected = true;
-      nameContext = 'bare';
-      commandName = false;
-    } else if (')]}'.includes(c)) {
-      depth = Math.max(0, depth - 1);
-      continues = false;
-      operandExpected = false;
-      nameContext = 'bare';
-      commandName = false;
-    } else if (c === '.' || c === ':' || c === '@' || c === '$') {
-      nameContext =
-        c === '.'
-          ? 'receiver'
-          : c === ':' && (content[i - 1] === ':' || content[i + 1] === ':')
-            ? 'constant'
-            : 'value';
-      if (parameters && depth === 0 && c === ':') parameterBinding = false;
-      commandName = false;
-      continues = c === '.' || c === ':';
-      operandExpected = c !== '.';
-    } else if (!/\s/.test(c)) {
-      if (parameters && depth === 0) {
-        if (c === ',') parameterBinding = true;
-        else if (c === '=') parameterBinding = false;
-      }
-      continues = /[-+*/%&|^,?=<>!~\\]/.test(c);
-      operandExpected = continues;
-      nameContext = 'bare';
-      commandName = false;
-    }
+      cursor = quotedEnd(content, cursor);
+      rubyValue(state);
+    } else if (regexpEnd >= 0) {
+      cursor = regexpEnd + 1;
+      while (/[imoxnesu]/.test(content[cursor] ?? '')) cursor += 1;
+      rubyValue(state);
+    } else if (isLineTerminator(c, true) && state.depth === 0 && !state.continues) {
+      return cursor + (c === '\r' && content[cursor + 1] === '\n' ? 2 : 1);
+    } else cursor = rubyCodeToken(content, cursor, state, locals, parameters);
   }
   return content.length;
 }
