@@ -14,7 +14,8 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  * and a jsonb column's key that holds a string (`jsonb_typeof(column -> 'key') = 'string'`) —
  * and throws on anything else, so a drizzle upgrade or a new query shape fails loudly instead of
  * matching every row. Of an update's SQL values it evaluates `<column> + <integer>` and
- * `greatest(<column> + <integer>, 0)` and stores any other as it is. The foreign-key cascade is read off the schema.
+ * `greatest(<column> + <integer>, 0)` and stores any other as it is. The foreign-key cascade is
+ * read off the schema.
  *
  * A transaction keeps an undo log, so a throw takes back exactly what IT wrote and a nested one is
  * a savepoint. There is no isolation: a write is visible to every reader the moment it is made,
