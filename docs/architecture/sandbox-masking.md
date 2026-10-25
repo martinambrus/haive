@@ -29,13 +29,25 @@ values from saved approvals while keeping that authority spelling; display label
 `redactGitUrl`'s display policy. PR origin stamps and legacy poll fallbacks preserve the same
 sanitized identity.
 
-`redactGitText` removes userinfo even when a legacy diagnostic URL contains quote, angle-bracket
-or backtick characters in its authority; those characters delimit display text only after the
-userinfo. A quoted legacy URL also keeps whitespace inside its userinfo; unquoted whitespace
-separates prose. `scrubSecret` replaces a known intact secret before rewriting URLs, since rewriting
-first can destroy the match and expose a suffix. Legacy bundle onboarding forms, bundle API diagnostics and repository
-refresh queue payloads redact their own reads, including failed bundles that never reach sync.
-This protects new copies of old rows; it does not rewrite historical rows or prior step outputs.
+`redactGitText` scans URL authorities once instead of treating each quote or whitespace as a
+reliable cut. A path ends the authority. Before a path, an invalid or userinfo-bearing prefix is
+ambiguous: the scanner looks through combined quote/whitespace delimiters to the last `@` before
+the path or another URL, then redacts the whole authority. This deliberately hides intervening
+ambiguous text rather than exposing a credential suffix. A syntactically complete ordinary URL
+without userinfo keeps its normal text boundary, so following prose and email addresses survive.
+This is URL diagnostic redaction, not arbitrary-text secret recognition: it cannot infer a
+credential whose prefix is indistinguishable from a complete ordinary URL followed by prose,
+and it does not recognize schemeless secrets. `scrubSecret` therefore replaces a known intact
+secret before URL scanning. Legacy bundle forms, bundle API diagnostics and refresh queue
+payloads redact their own reads, including failed bundles that never reach sync. Historical rows
+and prior step outputs are not rewritten.
+
+The push gate's `remoteUrl` is normalized before the submit route stores answers or queues them,
+using `normalizeStepFormValues` (shared). Invalid destinations get a static error that never echoes
+the input. The helper recognizes only `11a-gate-4-push` and its named URL field; arbitrary answers
+in other forms retain their meaning. The worker applies the same rule before persisting submitted,
+auto-submitted or reused answers, and before copying pre-answers into form defaults. Existing
+ownership, failed-task admission, dead-task and round checks still precede the submit write.
 
 `git-exec-guard.test.ts` finds a spawn by its first argument, never by the name of the function that carries it: any `<name>('git', …)` in the worker, api and shared sources, the worker's `scripts/` and every module's sources must pass `hardenGitArgs(…)` as the argv, so an alias such as `promisify(execFile)` hides nothing (the learning and skill-sync steps once spawned git through one). A text scan cannot see a git command held in a variable or run through a shell string, so neither is used, and a new package that runs git needs its sources added to the guard's `scanRoots`. `child-process-ratchet.test.ts` (`@haive/shared`) covers what the scan cannot see: over every package and the root `scripts/` it pins, per file, each `child_process` call whose command is not provably a plain non-git program (a variable, a shell string, a path to git, a shell wrapper, a literal `git`), so a new one lands where a reviewer sees it. The reach of the unhardened form was MEASURED on git 2.43.0, the dev host's (the reproductions pin it on whichever git runs the suite): a registered submodule's own `core.fsmonitor` runs under `git status` only when the status pathspec reaches the submodule (the learning gate's `.haive-data/knowledge_base` does, once one is registered there), `add`, `commit`, `show` and `rev-parse` do not run it, and a repository's hooks run on `commit`. The reproductions in `11-phase-8-learning.test.ts` and `11d-skill-sync.test.ts` are shaped by that: a marker file written by the monitor script or the pre-commit hook must not appear.
 
