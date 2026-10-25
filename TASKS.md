@@ -153,9 +153,9 @@ settings/review-watermarks.json, descendant wins via merge-base --is-ancestor; _
 
 ### T266 · FNF[record-writer] · 04's set and record writes run unfenced (+5)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-25T20:56Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-25T22:20Z
 
-Codex progress 2026-10-25T20:56Z: Writer fencing and bounded undo journal implemented in validation; realPG16 controls and actual SIGKILL recovery passed before final pending-side control. Original foreground failure-clear/local-pending semantics retained; null-column recovery never invents target context. Wider regression fixtures/contracts still being checked before fresh review. Manual malformed-RTK policy preserved.
+Codex progress 2026-10-25T22:20Z: PR931 currentb4607e075 fixes pending-journal conflict-answer race; freshxhighreview and exactbotclean, parent2actualPGcasespass, originalthread resolved. Newhead CI11/12green; onlysmokepending. Guarded migration0213 and supported dev migrate/libs required aftermerge. ManualRTKpolicy unchanged.
 All PRE-EXISTING. Items 4, 7, 8 moved to T310.
 
 1. 04's set and record writes run with no lock and no column fence.
