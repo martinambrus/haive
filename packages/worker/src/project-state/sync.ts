@@ -112,13 +112,19 @@ const gone = (rel: string): Refusal =>
 
 /** Every file below the state directory, or null when there is none. The codec reads a record whole,
  *  so the whole tree is read, and the caps stop the walk as it goes: a planted tree is not read on. */
-export async function readStateFiles(repoPath: string): Promise<Map<string, string> | null> {
+export async function readStateFiles(
+  repoPath: string,
+  options: { boundedDirectoryReads?: boolean } = {},
+): Promise<Map<string, string> | null> {
   const files = new Map<string, string>();
   const pending = [''];
   let entries = 0;
   let bytes = 0;
   for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
-    const listing = await readdirNoFollow(repoPath, stateRel(dir), { strict: true });
+    const listing = await readdirNoFollow(repoPath, stateRel(dir), {
+      strict: true,
+      ...(options.boundedDirectoryReads ? { maxEntries: MAX_ENTRIES - entries } : {}),
+    });
     if (listing === null) {
       if (dir === '') return null;
       throw gone(dir);

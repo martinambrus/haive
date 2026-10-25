@@ -3,6 +3,11 @@ import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
 import {
   lstatNoFollow,
+  openDirNoFollow,
+  fileIdentity,
+  readdirNoFollow,
+  removeEmptyDirectoryIfNoFollow,
+  type FileIdentity,
   readFileNoFollow,
   removeFileIfNoFollow,
   rewriteFileIfNoFollow,
@@ -725,7 +730,20 @@ export async function writeProjectStateColumn(
         if (change.after === null) after.delete(change.rel);
         else after.set(change.rel, change.after);
       }
-      const intent: WriteIntent = { id: randomUUID(), changes };
+      const plannedDirs = new Set<string>();
+      for (const change of changes)
+        if (change.after !== null) {
+          const parts = change.rel.split('/');
+          for (let depth = 0; depth < parts.length; depth++)
+            plannedDirs.add(parts.slice(0, depth).join('/'));
+        }
+      const absentDirs: string[] = [];
+      for (const dir of plannedDirs) {
+        const stat = await lstatNoFollow(repoPath, recoveryDirPath(dir), { strict: true });
+        if (stat === null) absentDirs.push(dir);
+        else if (stat.kind !== 'directory') throw new ProjectStateMovedError();
+      }
+      const intent: WriteIntent = { id: randomUUID(), changes, absentDirs };
       await markProjectStateDirty(tx, repositoryId);
       await tx
         .update(schema.projectStateOutbox)
@@ -824,6 +842,8 @@ export async function writeProjectStateColumn(
 
 interface WriteIntent {
   id: string;
+  /** Planned ancestors absent at preparation; omitted by journals from earlier workers. */
+  absentDirs?: string[];
   changes: {
     rel: string;
     before: string | null;
@@ -836,6 +856,9 @@ const hashFiles = (files: ReadonlyMap<string, string>): string =>
   files.size === 0
     ? 'absent'
     : projectStateHash(new Map([...files].map(([rel, text]) => [rel, gitBlobId(text)])));
+
+const recoveryDirPath = (dir: string): string =>
+  dir === '' ? PROJECT_STATE_DIR : `${PROJECT_STATE_DIR}/${dir}`;
 
 /** Changed paths are a subset of each bounded complete record; their union can temporarily be
  *  larger than either record. Validate both sides before reading only these journal-owned paths. */
@@ -859,6 +882,36 @@ function validateRecoveryIntent(intent: WriteIntent): void {
     names.add(change.rel);
     if (change.before !== null) before.set(change.rel, change.before);
     if (change.after !== null) after.set(change.rel, change.after);
+  }
+  if (intent.absentDirs !== undefined) {
+    if (
+      !Array.isArray(intent.absentDirs) ||
+      intent.absentDirs.length > PROJECT_STATE_LIMITS.maxEntries
+    )
+      throw new ProjectStateUnreadableError('the recovery record has too many directories');
+    const plannedDirs = new Set<string>();
+    const beforeDirs = new Set<string>();
+    for (const [files, dirs] of [
+      [after, plannedDirs],
+      [before, beforeDirs],
+    ] as const)
+      for (const rel of files.keys()) {
+        const parts = rel.split('/');
+        for (let depth = 0; depth < parts.length; depth++)
+          dirs.add(parts.slice(0, depth).join('/'));
+      }
+    const seen = new Set<string>();
+    for (const dir of intent.absentDirs) {
+      if (
+        typeof dir !== 'string' ||
+        (dir !== '' && !isCanonicalRepoPath(dir)) ||
+        seen.has(dir) ||
+        !plannedDirs.has(dir) ||
+        beforeDirs.has(dir)
+      )
+        throw new ProjectStateUnreadableError('the recovery record has an invalid directory');
+      seen.add(dir);
+    }
   }
   for (const [side, files] of [
     ['before', before],
@@ -895,12 +948,39 @@ async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string
     if (matches(change.before)) atBefore.add(change.rel);
     else if (!matches(change.after)) throw new ProjectStateRecoveryHeldError(path);
   }
+  const directories = new Map<string, FileIdentity>();
+  const absentDirs = new Set(intent.absentDirs ?? []);
+  const additions = new Set(
+    intent.changes.filter((change) => change.after !== null).map((change) => change.rel),
+  );
+  for (const dir of absentDirs) {
+    const path = recoveryDirPath(dir);
+    const listing = await readdirNoFollow(repoPath, path, {
+      strict: true,
+      maxEntries: PROJECT_STATE_LIMITS.maxEntries,
+    });
+    if (listing === null) continue;
+    for (const entry of listing) {
+      const child = dir === '' ? entry.name : `${dir}/${entry.name}`;
+      if (!(entry.isDirectory() ? absentDirs.has(child) : entry.isFile() && additions.has(child)))
+        throw new ProjectStateRecoveryHeldError(path);
+    }
+    const held = await openDirNoFollow(repoPath, path);
+    try {
+      directories.set(dir, await fileIdentity(held));
+    } finally {
+      await held.close();
+    }
+  }
   for (const change of [...intent.changes].reverse()) {
     const path = `${PROJECT_STATE_DIR}/${change.rel}`;
     if (atBefore.has(change.rel)) continue;
     if (change.before === null) {
-      const gone = await removeFileIfNoFollow(repoPath, path, (data) =>
-        data.equals(Buffer.from(change.after!)),
+      const gone = await removeFileIfNoFollow(
+        repoPath,
+        path,
+        (data) => data.equals(Buffer.from(change.after!)),
+        { maxBytes: PROJECT_STATE_LIMITS.maxFileBytes },
       );
       if (gone === 'kept') throw new ProjectStateRecoveryHeldError(path);
     } else if (change.after === null) {
@@ -915,12 +995,21 @@ async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string
           : {}),
       });
     } else {
-      const result = await rewriteFileIfNoFollow(repoPath, path, (data) =>
-        data.equals(Buffer.from(change.after!)) ? Buffer.from(change.before!) : null,
+      const result = await rewriteFileIfNoFollow(
+        repoPath,
+        path,
+        (data) => (data.equals(Buffer.from(change.after!)) ? Buffer.from(change.before!) : null),
+        { maxBytes: PROJECT_STATE_LIMITS.maxFileBytes },
       );
       if (result !== 'rewritten') throw new ProjectStateRecoveryHeldError(path);
     }
   }
+  for (const [dir, identity] of [...directories].sort(([a], [b]) => b.length - a.length)) {
+    if ((await removeEmptyDirectoryIfNoFollow(repoPath, recoveryDirPath(dir), identity)) === 'kept')
+      throw new ProjectStateRecoveryHeldError(recoveryDirPath(dir));
+  }
+  // Validate the restored footprint, including empty directories, before consuming its intent.
+  await readStateFiles(repoPath, { boundedDirectoryReads: true });
   await tx
     .update(schema.projectStateOutbox)
     .set({ writeIntent: null })

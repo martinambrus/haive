@@ -620,7 +620,17 @@ the old one is removed, even though both complete records fit. Applying the ordi
 reader to that intermediate union would strand its undo forever. Recovery instead recognizes every
 changed path before any undo, bounds the two-side payload and each read, and compares raw bytes
 again in each removal/rewrite CAS; unrelated files are never read or rewritten by that undo. The
-ordinary reader and final writer output still enforce 4,096 entries, 1 MiB per file and 16 MiB total.
+ordinary reader and final writer output still enforce 4,096 entries, 1 MiB per file and 16 MiB total. Both parked undo CAS reads carry the same 1 MiB cap before allocation, including a larger editor
+file installed after recognition. New journals also record planned ancestor directories that were
+absent before preparation. Recovery checks those paths and their bounded known-child listings before
+any undo, then removes only still-empty matching directory identities through a parked, nonrecursive
+fs-safe operation. Preexisting directories are never eligible; links and foreign children hold the
+intent, including children arriving during removal. An identical empty replacement is the same
+semantic planned footprint, as identical file bytes are under file CAS, but an inode replacement
+during an attempt refuses that attempt. Directory cleanup repeats after a crash, and a bounded
+ordinary footprint read must succeed before the journal is consumed. Older journals without directory
+history still undo their files; unknown directories are preserved, and an unreadable leftover footprint
+keeps that older intent for explicit repair rather than claiming recovery succeeded.
 Another crash during the undo can repeat it. A live holder, reset or open git operation holds recovery
 as it holds a write. Removed files regain their recorded mode and owner; rewritten files keep their
 held metadata. Direct sync producers defer while a journal exists, including one that appeared while

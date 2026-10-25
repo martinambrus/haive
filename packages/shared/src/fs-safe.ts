@@ -1152,6 +1152,95 @@ export async function removeFileIfIdentityNoFollow(
   return result === 'rewritten' ? 'kept' : result;
 }
 
+/** Remove only the empty directory whose held identity was recognized by the caller. A raced
+ *  leaf/link is kept, and a directory gaining a child is put back; nothing is removed recursively. */
+export async function removeEmptyDirectoryIfNoFollow(
+  anchor: string,
+  rel: string,
+  identity: FileIdentity,
+): Promise<'removed' | 'absent' | 'kept'> {
+  const safe = toSafeRel(rel);
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (leaf === undefined) throw new PathContainmentError('invalid-path', anchor, rel, rel);
+  let dir: HeldDir;
+  try {
+    dir = await walkDir(anchor, safe, segs);
+  } catch (err) {
+    if (!isPathContainmentError(err) && ABSENT.has(errno(err) ?? '')) return 'absent';
+    throw err;
+  }
+  try {
+    const st = await lstat(at(dir.fh.fd, leaf), { bigint: true }).catch((err: unknown) => {
+      if (ABSENT.has(errno(err) ?? '')) return null;
+      throw err;
+    });
+    if (st === null) return 'absent';
+    if (!st.isDirectory() || st.dev !== identity.dev || st.ino !== identity.ino) return 'kept';
+    const parked = `.${parkLeaf(leaf)}.haive-park-${process.pid}-${randomUUID()}`;
+    try {
+      await rename(at(dir.fh.fd, leaf), at(dir.fh.fd, parked));
+    } catch (err) {
+      if (ABSENT.has(errno(err) ?? '')) return 'absent';
+      throw err;
+    }
+    let active = true;
+    const putBack = async () => {
+      active = false;
+      try {
+        await restoreNoReplace(dir, parked, leaf);
+      } catch (err) {
+        throw new ParkedFileError(safe, [...segs, parked].join('/'), errno(err), { cause: err });
+      }
+    };
+    let fh: FileHandle | undefined;
+    try {
+      try {
+        fh = await open(at(dir.fh.fd, parked), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+      } catch (err) {
+        if (['ENOTDIR', 'ELOOP'].includes(errno(err) ?? '')) {
+          await putBack();
+          return 'kept';
+        }
+        throw err;
+      }
+      await assertHeldAt(fh, below(dir.real, parked), anchor, safe, safe);
+      const held = await fileIdentity(fh);
+      let empty = held.dev === identity.dev && held.ino === identity.ino;
+      if (empty) {
+        const listing = await opendir(fdPath(fh.fd), { bufferSize: 1 });
+        for await (const _entry of listing) {
+          empty = false;
+          break;
+        }
+      }
+      if (!empty) {
+        await putBack();
+        return 'kept';
+      }
+      await assertHeldAt(fh, below(dir.real, parked), anchor, safe, safe);
+      try {
+        await rmdir(at(dir.fh.fd, parked));
+      } catch (err) {
+        if (['ENOTEMPTY', 'EEXIST', 'ENOTDIR'].includes(errno(err) ?? '')) {
+          await putBack();
+          return 'kept';
+        }
+        throw err;
+      }
+      active = false;
+      return 'removed';
+    } catch (err) {
+      if (active) await putBack();
+      throw err;
+    } finally {
+      if (fh) await closeQuietly(fh);
+    }
+  } finally {
+    await closeQuietly(dir.fh);
+  }
+}
+
 /** Replace the regular file's bytes with what `edit` returns (null keeps them), on its own inode and
  *  judged on the bytes it replaces: parked like `removeFileIfNoFollow`, so a save meanwhile is kept. */
 export async function rewriteFileIfNoFollow(

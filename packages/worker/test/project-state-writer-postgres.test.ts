@@ -53,6 +53,9 @@ const seam = vi.hoisted(() => ({
   afterWrite: null as null | (() => Promise<void>),
   beforeRewrite: null as null | (() => Promise<void>),
   afterRemove: null as null | (() => Promise<void>),
+  beforeRemove: null as null | (() => Promise<void>),
+  beforeDirRemove: null as null | (() => Promise<void>),
+  afterDirRemove: null as null | (() => Promise<void>),
   afterSetAside: null as null | (() => Promise<void>),
 }));
 vi.mock('@haive/shared/fs-safe', async (original) => {
@@ -65,7 +68,16 @@ vi.mock('@haive/shared/fs-safe', async (original) => {
       if (result === 'rewritten') await seam.afterWrite?.();
       return result;
     },
+    removeEmptyDirectoryIfNoFollow: async (
+      ...args: Parameters<typeof real.removeEmptyDirectoryIfNoFollow>
+    ) => {
+      await seam.beforeDirRemove?.();
+      const result = await real.removeEmptyDirectoryIfNoFollow(...args);
+      if (result === 'removed') await seam.afterDirRemove?.();
+      return result;
+    },
     removeFileIfNoFollow: async (...args: Parameters<typeof real.removeFileIfNoFollow>) => {
+      await seam.beforeRemove?.();
       const result = await real.removeFileIfNoFollow(...args);
       await seam.afterRemove?.();
       return result;
@@ -104,6 +116,9 @@ afterEach(async () => {
   seam.afterWrite = null;
   seam.beforeRewrite = null;
   seam.afterRemove = null;
+  seam.beforeRemove = null;
+  seam.beforeDirRemove = null;
+  seam.afterDirRemove = null;
   seam.afterSetAside = null;
   delete restoreFaults.afterBase;
   for (const id of users.splice(0)) await db!.delete(schema.users).where(eq(schema.users.id, id));
@@ -474,6 +489,284 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       JSON.parse(await readFile(join(m.dest, '.haive-data/state/project/render.json'), 'utf8'))
         .projectInfo.name,
     ).toBe('pending');
+  });
+
+  it(
+    'undo removes a new empty directory so a supported 4096-entry record is readable again',
+    { timeout: 180_000 },
+    async () => {
+      const s = await fixture();
+      const [task] = await db!
+        .insert(schema.tasks)
+        .values({
+          userId: s.userId,
+          repositoryId: s.repo.id,
+          type: 'onboarding',
+          title: 'directory footprint',
+          status: 'completed',
+        })
+        .returning();
+      const count = PROJECT_STATE_LIMITS.maxEntries - 4;
+      for (let start = 0; start < count; start += 500)
+        await db!.insert(schema.onboardingArtifacts).values(
+          Array.from({ length: Math.min(500, count - start) }, (_, offset) => ({
+            userId: s.userId,
+            repositoryId: s.repo.id,
+            taskId: task!.id,
+            diskPath: `.claude/agents/agent-${String(start + offset).padStart(4, '0')}.md`,
+            templateId: `agent.agent-${start + offset}`,
+            templateKind: 'agent',
+            templateSchemaVersion: 1,
+            templateContentHash: 'a'.repeat(64),
+            writtenHash: 'b'.repeat(64),
+            sourceStepId: '12-post-onboarding',
+            source: 'onboarding' as const,
+            haiveVersion: '1.2.3',
+          })),
+        );
+      await s.write();
+      const state = join(s.root, '.haive-data/state');
+      const before = (await readStateFiles(s.root))!;
+      expect((await readdir(state, { recursive: true })).length).toBe(4096);
+      const sync = await db!
+        .select()
+        .from(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, s.repo.id));
+      for (const index of ['0000', '0001'])
+        await db!
+          .update(schema.onboardingArtifacts)
+          .set({ supersededAt: new Date() })
+          .where(
+            and(
+              eq(schema.onboardingArtifacts.repositoryId, s.repo.id),
+              eq(schema.onboardingArtifacts.diskPath, `.claude/agents/agent-${index}.md`),
+            ),
+          );
+      await db!.insert(schema.customBundles).values({
+        userId: s.userId,
+        repositoryId: s.repo.id,
+        sourceType: 'zip',
+        name: 'new directory',
+        storageRoot: join(s.root, 'bundle-storage'),
+      });
+      seam.afterWrite = async () => {
+        throw new Error('bundle landed before obsolete claims removed');
+      };
+      await expect(
+        writeProjectStateColumn(db!, {
+          repositoryId: s.repo.id,
+          repoPath: s.root,
+          column: { ...context(), rtkChoiceRecorded: false } as never,
+          keepColumnOnFailure: true,
+        }),
+      ).rejects.toThrow('bundle landed before obsolete claims removed');
+      seam.afterWrite = null;
+      const intent = (await s.outbox())!.writeIntent as {
+        changes: { rel: string; after: string | null }[];
+      };
+      expect(intent.changes).toHaveLength(3);
+      const planned = new Map(before);
+      for (const change of intent.changes) {
+        if (change.after === null) planned.delete(change.rel);
+        else planned.set(change.rel, change.after);
+      }
+      expect(recordReadable(before)).toEqual({ readable: true });
+      expect(recordReadable(planned)).toEqual({ readable: true });
+      expect((await readdir(state, { recursive: true })).length).toBe(4098);
+      await recoverProjectStateWrite(db!, s.repo.id, s.root);
+      expect.soft((await readdir(state, { recursive: true })).length).toBe(4096);
+      await expect(readStateFiles(s.root)).resolves.toEqual(before);
+      expect((await s.outbox())!.writeIntent).toBeNull();
+      expect(
+        await db!
+          .select()
+          .from(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
+      ).toEqual(sync);
+      await s.write();
+      expect((await readdir(state, { recursive: true })).length).toBe(4096);
+      expect(recordReadable((await readStateFiles(s.root))!)).toEqual({ readable: true });
+    },
+  );
+  it.each(['remove', 'rewrite'] as const)(
+    'recovery %s rejects an oversized post-recognition editor file before allocating it',
+    async (kind) => {
+      const s = await fixture(kind === 'remove' ? null : context());
+      if (kind === 'rewrite') await s.write();
+      seam.afterWrite = async () => {
+        throw new Error('partial for bounded CAS');
+      };
+      await expect(
+        writeProjectStateColumn(db!, {
+          repositoryId: s.repo.id,
+          repoPath: s.root,
+          column: { ...context('planned'), rtkChoiceRecorded: false } as never,
+          keepColumnOnFailure: true,
+        }),
+      ).rejects.toThrow('partial for bounded CAS');
+      seam.afterWrite = null;
+      const path = join(
+        s.root,
+        '.haive-data/state',
+        kind === 'remove' ? 'format.json' : 'project/render.json',
+      );
+      const editor = Buffer.alloc(PROJECT_STATE_LIMITS.maxFileBytes + 1, 120);
+      const before = await s.outbox();
+      let allocations = 0;
+      let spy: { mockRestore(): void } | undefined;
+      const inject = async () => {
+        seam.beforeRemove = null;
+        seam.beforeRewrite = null;
+        await writeFile(path, editor);
+        const original = Buffer.allocUnsafe;
+        spy = vi.spyOn(Buffer, 'allocUnsafe').mockImplementation((size: number) => {
+          if (size > PROJECT_STATE_LIMITS.maxFileBytes) allocations++;
+          return original(size);
+        });
+      };
+      if (kind === 'remove') seam.beforeRemove = inject;
+      else seam.beforeRewrite = inject;
+      try {
+        await expect(recoverProjectStateWrite(db!, s.repo.id, s.root)).rejects.toMatchObject({
+          name: 'ProjectStateRecoveryHeldError',
+        });
+      } finally {
+        spy?.mockRestore();
+      }
+      expect.soft(allocations).toBe(0);
+      expect(await readFile(path)).toEqual(editor);
+      expect(await s.outbox()).toEqual(before);
+    },
+  );
+
+  it.each([
+    'preexisting',
+    'foreign',
+    'link',
+    'foreign-race',
+    'replace-race',
+    'undo-crash',
+    'legacy',
+  ] as const)(
+    'directory recovery preserves %s state and consumes only a completed undo',
+    async (kind) => {
+      const s = await fixture();
+      await s.write();
+      const directory = join(s.root, '.haive-data/state/bundles');
+      let prior: Awaited<ReturnType<typeof stat>> | undefined;
+      if (kind === 'preexisting') {
+        await mkdir(directory);
+        await chmod(directory, 0o750);
+        prior = await stat(directory);
+      }
+      await db!.insert(schema.customBundles).values({
+        userId: s.userId,
+        repositoryId: s.repo.id,
+        sourceType: 'zip',
+        name: 'directory controls',
+        storageRoot: join(s.root, 'bundle-storage'),
+      });
+      seam.afterWrite = async () => {
+        throw new Error('bundle partial');
+      };
+      await expect(
+        writeProjectStateColumn(db!, {
+          repositoryId: s.repo.id,
+          repoPath: s.root,
+          column: { ...context(), rtkChoiceRecorded: false } as never,
+          keepColumnOnFailure: true,
+        }),
+      ).rejects.toThrow('bundle partial');
+      seam.afterWrite = null;
+      if (kind === 'legacy') {
+        const intent = { ...((await s.outbox())!.writeIntent as Record<string, unknown>) };
+        delete intent.absentDirs;
+        await db!
+          .update(schema.projectStateOutbox)
+          .set({ writeIntent: intent })
+          .where(eq(schema.projectStateOutbox.repositoryId, s.repo.id));
+      }
+      const box = await s.outbox();
+      const descriptor = (await readdir(directory))[0]!;
+      const descriptorBytes = await readFile(join(directory, descriptor));
+      if (kind === 'foreign') await writeFile(join(directory, 'foreign'), 'person');
+      if (kind === 'link') {
+        await rename(directory, join(s.root, 'kept-bundles'));
+        await symlink(join(s.root, 'kept-bundles'), directory);
+      }
+      let replacement: Awaited<ReturnType<typeof stat>> | undefined;
+      if (kind === 'foreign-race')
+        seam.beforeDirRemove = async () => {
+          seam.beforeDirRemove = null;
+          await writeFile(join(directory, 'foreign'), 'late person');
+        };
+      if (kind === 'replace-race')
+        seam.beforeDirRemove = async () => {
+          seam.beforeDirRemove = null;
+          await rename(directory, join(s.root, 'kept-empty'));
+          await mkdir(directory);
+          replacement = await stat(directory);
+        };
+      if (kind === 'undo-crash')
+        seam.afterDirRemove = async () => {
+          seam.afterDirRemove = null;
+          throw new Error('undo stopped after rmdir');
+        };
+      if (['foreign', 'link', 'foreign-race', 'replace-race', 'undo-crash'].includes(kind)) {
+        await expect(recoverProjectStateWrite(db!, s.repo.id, s.root)).rejects.toThrow();
+        expect(await s.outbox()).toEqual(box);
+        if (kind === 'foreign' || kind === 'link')
+          expect(await readFile(join(directory, descriptor))).toEqual(descriptorBytes);
+        if (kind === 'foreign' || kind === 'foreign-race')
+          expect(await readFile(join(directory, 'foreign'), 'utf8')).toBe(
+            kind === 'foreign' ? 'person' : 'late person',
+          );
+        if (kind === 'replace-race') expect((await stat(directory)).ino).toBe(replacement!.ino);
+        if (kind !== 'undo-crash') return;
+        await expect(stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+      await recoverProjectStateWrite(db!, s.repo.id, s.root);
+      expect((await s.outbox())!.writeIntent).toBeNull();
+      if (kind === 'preexisting') {
+        const after = await stat(directory);
+        expect([after.ino, after.mode & 0o777, after.uid, after.gid]).toEqual([
+          prior!.ino,
+          Number(prior!.mode) & 0o777,
+          prior!.uid,
+          prior!.gid,
+        ]);
+      } else if (kind === 'legacy') expect(await readdir(directory)).toEqual([]);
+      else await expect(stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(recordReadable((await readStateFiles(s.root))!)).toEqual({ readable: true });
+    },
+  );
+  it('recovery rewrite still accepts a recognized file exactly at the 1 MiB CAS bound', async () => {
+    const s = await fixture();
+    await s.write();
+    const before = await s.render();
+    const planned = { ...context('large'), projectInfo: { name: 'large', padding: '' } };
+    const baseSize = Buffer.byteLength(
+      renderProjectState({ ...emptyProjectState(), render: planned }).get('project/render.json')!,
+    );
+    planned.projectInfo.padding = 'x'.repeat(PROJECT_STATE_LIMITS.maxFileBytes - baseSize);
+    seam.afterWrite = async () => {
+      throw new Error('exact-bound partial');
+    };
+    await expect(
+      writeProjectStateColumn(db!, {
+        repositoryId: s.repo.id,
+        repoPath: s.root,
+        column: { ...planned, rtkChoiceRecorded: false } as never,
+        keepColumnOnFailure: true,
+      }),
+    ).rejects.toThrow('exact-bound partial');
+    seam.afterWrite = null;
+    expect((await stat(join(s.root, '.haive-data/state/project/render.json'))).size).toBe(
+      PROJECT_STATE_LIMITS.maxFileBytes,
+    );
+    await recoverProjectStateWrite(db!, s.repo.id, s.root);
+    expect(await s.render()).toEqual(before);
+    expect((await s.outbox())!.writeIntent).toBeNull();
   });
 
   it.each(['entries', 'bytes'] as const)(
