@@ -5,7 +5,7 @@ import { access } from 'node:fs/promises';
 import { lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { isAllowedGitRemoteUrl } from '@haive/shared/schemas';
+import { isAllowedGitRemoteUrl, redactEditableGitUrl } from '@haive/shared/schemas';
 import { hardenGitArgs } from '@haive/shared/git-args';
 import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
@@ -393,7 +393,7 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
         if (pushOrigin.ok) {
           const urls = [...origin.stdout.split('\n'), ...pushOrigin.stdout.split('\n')];
           hasOrigin = urls.every(isAllowedGitRemoteUrl);
-          originUrl = hasOrigin ? origin.stdout.split('\n')[0]! : null;
+          originUrl = hasOrigin ? redactEditableGitUrl(origin.stdout.split('\n')[0]!) : null;
         } else hasOrigin = null;
       } else hasOrigin = origin.code === 2 ? false : null;
       const [trackedResults, status, branchResult, upstream] = await Promise.all([

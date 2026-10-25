@@ -133,11 +133,11 @@ describe('bundle git credentials and environment', () => {
     ).restore;
     await expect(resync(fake)).rejects.toThrow(/git pull failed \(exit 128\)/);
     const err = String(fake.rows(schema.customBundles)[0]?.lastSyncError);
-    expect(err).toContain('https://***@');
+    expect(err).toContain('https://example.com/');
     expect(err).not.toContain('s3cret');
   }, 10_000);
 
-  it('runs the pull with askpass echo and no prompt', async () => {
+  it('runs the pull without interactive prompting', async () => {
     const { origin } = await makeOriginAndClone();
     const fake = bundleDb(origin, '');
     const seen = path.join(tmpRoot, 'seen');
@@ -150,7 +150,7 @@ describe('bundle git credentials and environment', () => {
     expect((await readFile(seen, 'utf8')).trim()).toBe('echo 0');
   }, 10_000);
 
-  it('runs the tick fetch with askpass echo and no prompt', async () => {
+  it('runs the tick fetch without interactive prompting', async () => {
     const { origin, extracted } = await makeOriginAndClone();
     const seen = path.join(tmpRoot, 'seen');
     restore = (
@@ -183,7 +183,7 @@ describe('bundle git credentials and environment', () => {
     }
     const msg = String((warned[0] as { err: Error }).err.message);
     expect(msg).toMatch(/git fetch failed \(exit 128\)/);
-    expect(msg).toContain('https://***@');
+    expect(msg).toContain('https://example.com/');
     expect(msg).not.toContain('s3cret');
   }, 10_000);
 });

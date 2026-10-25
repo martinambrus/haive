@@ -92,12 +92,18 @@ export async function fetchOrigin(args: {
   db: Database;
   userId: string;
   credentialId?: string | null;
+  remoteUrl?: string | null;
 }): Promise<void> {
   const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
   const argv: string[] = [];
   let secret: string | null = null;
   if (args.credentialId) {
-    const helper = await buildCredentialHelper(args.db, args.credentialId, args.userId);
+    const helper = await buildCredentialHelper(
+      args.db,
+      args.credentialId,
+      args.userId,
+      args.remoteUrl,
+    );
     secret = helper.secret;
     Object.assign(env, helper.env);
     argv.push(...helper.argv);

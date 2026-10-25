@@ -4,7 +4,7 @@ import { FIX_LOOP_ACTION_FIELD, type FormSchema } from '@haive/shared';
 import { restoreDatabaseStep } from '../src/step-engine/steps/workflow/01c1-restore-database.js';
 import { advanceStep } from '../src/step-engine/step-runner.js';
 import { recordLedgerEntry } from '../src/step-engine/task-ledger.js';
-import type { StepDefinition } from '../src/step-engine/step-definition.js';
+import { ReopenStepFormError, type StepDefinition } from '../src/step-engine/step-definition.js';
 import { preRagSourceSelectionStep } from '../src/step-engine/steps/workflow/01g-rag-source-selection.js';
 import { workflowRagSourceSelectionStep } from '../src/step-engine/steps/workflow/11b1-rag-source-selection.js';
 import { ragSourceSelectionStep } from '../src/step-engine/steps/onboarding/09_7-rag-source-selection.js';
@@ -1111,4 +1111,200 @@ describe('advanceStep outcome after a Retry or Skip took the row over', () => {
     expect((await pass).status).toBe('done');
     expect(doneWrites(state)).toHaveLength(1);
   });
+});
+it.each(['submitted', 'pre_answer'] as const)(
+  'normalizes the known push gate URL before %s answer and schema persistence',
+  async (source) => {
+    const state = freshState();
+    state.taskStepRow.stepId = '11a-gate-4-push';
+    const values = {
+      push: true,
+      remoteUrl: 'https://fixture-user:fixture-password@example.test:443/repo',
+    };
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: source === 'pre_answer' ? { '11a-gate-4-push': values } : null,
+    };
+    const def = makeStep({
+      form: () => ({
+        title: 'Push',
+        fields: [
+          { type: 'checkbox', id: 'push', label: 'Push' },
+          { type: 'text', id: 'remoteUrl', label: 'Remote' },
+        ],
+      }),
+    });
+    def.metadata.id = '11a-gate-4-push';
+    const result = await run(state, def, source === 'submitted' ? values : undefined);
+    expect(result.status).toBe('done');
+    expect(
+      JSON.stringify(
+        state.updates.map(({ patch }) => ({
+          formValues: patch.formValues,
+          formSchema: patch.formSchema,
+          output: patch.output,
+        })),
+      ).includes('fixture-password'),
+    ).toBe(false);
+    expect(state.taskStepRow.formValues).toMatchObject({
+      remoteUrl: 'https://example.test:443/repo',
+    });
+  },
+);
+it('refuses an invalid push gate URL without saving it or echoing credentials', async () => {
+  const state = freshState();
+  state.taskStepRow.stepId = '11a-gate-4-push';
+  const def = makeStep({
+    form: () => ({ title: 'Push', fields: [{ type: 'text', id: 'remoteUrl', label: 'Remote' }] }),
+  });
+  def.metadata.id = '11a-gate-4-push';
+  const result = await run(state, def, {
+    remoteUrl: 'file://fixture-user:fixture-password@example.test/repo',
+  });
+  expect(result.status).toBe('failed');
+  expect(state.taskStepRow.formValues).toBeNull();
+  expect(
+    JSON.stringify(
+      state.updates.map(({ patch }) => ({
+        formValues: patch.formValues,
+        errorMessage: patch.errorMessage,
+      })),
+    ).includes('fixture-password'),
+  ).toBe(false);
+});
+const legacyGateSchema: FormSchema = {
+  title: 'Push',
+  fields: [
+    { type: 'checkbox', id: 'push', label: 'Push' },
+    {
+      type: 'text',
+      id: 'remoteUrl',
+      label: 'Remote',
+      default: 'https://fixture-user:fixture-password@example.test:443/repo',
+    },
+    { type: 'text', id: 'note', label: 'Note', default: 'keep' },
+  ],
+};
+const copiedForms = (state: MockState) =>
+  JSON.stringify(
+    state.updates.map(({ patch }) => ({
+      formValues: patch.formValues,
+      formSchema: patch.formSchema,
+      output: patch.output,
+    })),
+  );
+it.each(['', null, undefined])(
+  'normalizes the final default-expanded submitted gate answer: case %#',
+  async (remoteUrl) => {
+    const state = freshState();
+    Object.assign(state.taskStepRow, {
+      stepId: '11a-gate-4-push',
+      status: 'running',
+      formSchema: legacyGateSchema,
+    });
+    const def = makeStep({ form: () => legacyGateSchema });
+    def.metadata.id = '11a-gate-4-push';
+    const result = await run(state, def, {
+      push: false,
+      ...(remoteUrl === undefined ? {} : { remoteUrl }),
+    });
+    expect(result.status).toBe('done');
+    expect(copiedForms(state).includes('fixture-password')).toBe(false);
+    expect(state.taskStepRow.formValues).toMatchObject({
+      push: false,
+      remoteUrl: 'https://example.test:443/repo',
+      note: 'keep',
+    });
+  },
+);
+it('normalizes the final default-expanded automatic answer', async () => {
+  const state = freshState();
+  Object.assign(state.taskStepRow, { stepId: '11a-gate-4-push', formSchema: legacyGateSchema });
+  state.taskRow = {
+    id: 'task-1',
+    autoContinue: true,
+    preAnswers: { '11a-gate-4-push': { push: false, remoteUrl: '' } },
+  };
+  const def = makeStep({ form: () => legacyGateSchema });
+  def.metadata.id = '11a-gate-4-push';
+  expect((await run(state, def)).status).toBe('done');
+  expect(copiedForms(state).includes('fixture-password')).toBe(false);
+});
+it('normalizes a legacy schema copied at a Retry park without consuming the stale submit', async () => {
+  const state = freshState();
+  Object.assign(state.taskStepRow, {
+    stepId: '11a-gate-4-push',
+    status: 'running',
+    formSchema: legacyGateSchema,
+    pauseFormOnRetry: true,
+  });
+  const def = makeStep({ form: () => legacyGateSchema });
+  def.metadata.id = '11a-gate-4-push';
+  const result = await run(state, def, { push: true });
+  expect(result.status).toBe('waiting_form');
+  expect(
+    JSON.stringify(result.status === 'waiting_form' ? result.formSchema : {}).includes(
+      'fixture-password',
+    ),
+  ).toBe(false);
+  expect(state.taskStepRow.formValues).toBeNull();
+});
+it('normalizes a saved legacy answer before continuation creates new output', async () => {
+  const state = freshState();
+  Object.assign(state.taskStepRow, {
+    stepId: '11a-gate-4-push',
+    status: 'waiting_cli',
+    formSchema: legacyGateSchema,
+    formValues: {
+      push: false,
+      remoteUrl: 'https://fixture-user:fixture-password@example.test:443/repo',
+    },
+  });
+  const def = makeStep({ form: () => legacyGateSchema });
+  def.metadata.id = '11a-gate-4-push';
+  expect((await run(state, def)).status).toBe('done');
+  expect(copiedForms(state).includes('fixture-password')).toBe(false);
+});
+
+it('normalizes a newly rendered gate schema before its first park', async () => {
+  const state = freshState();
+  state.taskStepRow.stepId = '11a-gate-4-push';
+  state.taskRow = { id: 'task-1', autoContinue: false };
+  const def = makeStep({ form: () => legacyGateSchema });
+  def.metadata.id = '11a-gate-4-push';
+  expect((await run(state, def)).status).toBe('waiting_form');
+  expect(copiedForms(state).includes('fixture-password')).toBe(false);
+});
+it('normalizes the refreshed gate schema before a reopened form is copied', async () => {
+  const state = freshState();
+  state.taskStepRow.stepId = '11a-gate-4-push';
+  const def = makeStep({ form: () => legacyGateSchema });
+  def.metadata.id = '11a-gate-4-push';
+  def.apply = async () => {
+    throw new ReopenStepFormError();
+  };
+  expect((await run(state, def, { push: false })).status).toBe('waiting_form');
+  expect(copiedForms(state).includes('fixture-password')).toBe(false);
+});
+it.each(['', null, undefined])(
+  'preserves blank/no-default gate answers after validation: case %#',
+  async (remoteUrl) => {
+    const state = freshState();
+    state.taskStepRow.stepId = '11a-gate-4-push';
+    const def = makeStep({
+      form: () => ({ title: 'Push', fields: [{ type: 'text', id: 'remoteUrl', label: 'Remote' }] }),
+    });
+    def.metadata.id = '11a-gate-4-push';
+    expect(
+      (await run(state, def, { ...(remoteUrl === undefined ? {} : { remoteUrl }) })).status,
+    ).toBe('done');
+    expect(state.taskStepRow.formValues).toMatchObject({ remoteUrl: null });
+  },
+);
+it('preserves an unrelated form default even when its field is called remoteUrl', async () => {
+  const state = freshState();
+  const def = makeStep({ form: () => legacyGateSchema });
+  expect((await run(state, def, { push: false, remoteUrl: '' })).status).toBe('done');
+  expect(copiedForms(state).includes('fixture-password')).toBe(true);
 });

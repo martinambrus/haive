@@ -18,6 +18,53 @@ The second set of overrides was MEASURED on git 2.43.0 (the dev host's) and 2.54
 
 Measured to run under the hardened argv but not reachable from Haive's own calls, so left alone: `pager.<cmd>` (only under a TTY, and stdout is always a pipe here), `diff.<driver>.textconv` under `blame`, `reflog -p` and `range-diff`, a `%G?` placeholder, an explicit `gc` or `prune`, an explicit `submodule update` with a `!command` (nothing else runs it, `--checkout` stops it, and only `submodule foreach` with a fixed command is used), and `git archive` with a `tar.<format>.command`. A caller that starts to use one of them adds its lever first. Not executed at all: `uploadpack.packObjectsHook` from a repository's own config (git reads it from protected scopes only) and an `alias` named like a builtin. Several classes have no complete lever through `hardenGitArgs`. A `filter.<driver>.clean`, `smudge` or `process`, or a `merge.<driver>.driver`, named in the repository's own config and selected by a tracked `.gitattributes` or by `.git/info/attributes`, runs under `add`, `checkout` and `merge` with the hardened argv (MEASURED, and end to end: an archive that ships such a config comes through `extractArchive` untouched and `gitRun(['add', '-A'])` runs the program); driver names are open-ended, so no `-c` list covers them, and the position that nothing can write `.git` does not hold for an uploaded archive that ships its own `.git/config`. A `remote.<name>.vcs` naming a path (`../x` makes git run `git-remote-../x` relative to the working tree, where the repository can ship an executable) is stopped by a protocol allowlist only until the repository sets `protocol.<that name>.allow=always` itself; only the trusted `GIT_ALLOW_PROTOCOL` environment variable holds (MEASURED), and listing `file` in it also lets a submodule's local-path URL through, which git's default refuses. A partial clone (`extensions.partialclone` with a promisor remote) runs its `remote.origin.uploadpack` when a command needs an object it lacks; `GIT_NO_LAZY_FETCH=1` stops that and also breaks real partial clones. `fetch --all`, `fetch --multiple` and `remote update` start a child per remote that takes none of the per-subcommand flags (no Haive service or script calls them; the two operator scripts fetch `origin` through `originGitRun`, and `origin-exec-guard.test.ts` scans the scripts too). And `-c` does not reach the program git spawns for a LOCAL-PATH remote (MEASURED: no `GIT_CONFIG_PARAMETERS` in the spawned `git-receive-pack`'s environment), so a push to a local-path origin would run the TARGET repository's hooks and `core.alternateRefsCommand` with no hardening. Every network git call on `origin` therefore validates the origin's fetch and push URLs first (`originGitRun`: https, http, ssh or scp-style only, never a `<transport>::<address>` remote-helper spelling) and refuses the file transport, every `clone` checks its stored URL the same way before it touches the old tree (`assertCloneUrl`), and a relink clears every push URL before it replaces every fetch URL, so no Haive call reaches a local-path origin; the host-folder refresh of a local repository fetches by path on purpose ([Repository refresh](repository-refresh.md)).
 
+Git credentials use the stored remote as their binding. Repository and bundle creation both
+check credential ownership and `credentialFitsGitRemote` before persisting or queueing; the
+one-shot helper answers only `get` with the bound protocol and authority. A local-folder import
+without a stored remote uses the sanitized origin persisted in the user's approved push form,
+never a fresh origin read. `getOriginUrl` returns binding identity: userinfo is removed from
+HTTP URLs, SSH keeps its non-secret login, and explicit default ports remain spelled out because
+Git's credential challenge keeps `:443` and `:80`. `gitRemoteIdentity` omits query and fragment
+values from saved approvals while keeping that authority spelling; display labels separately use
+`redactGitUrl`'s display policy. PR origin stamps and legacy poll fallbacks preserve the same
+sanitized identity.
+
+Repository list/detail `remoteUrl` values and the plan snapshot's `originUrl` seed the origin
+editor, so they use `redactEditableGitUrl`: an allowed remote keeps its non-secret SSH login,
+explicit port and original address shape while dropping passwords, HTTP userinfo, query and
+fragment. A malformed or unsupported legacy value uses conservative display redaction instead
+of the transport helper's schemeless passthrough. Strict display redaction still governs labels
+and bundle summaries; the bundle composer creates a new URL rather than editing a summary's URL.
+
+`redactGitText` scans URL authorities once instead of treating each quote or whitespace as a
+reliable cut. Scheme recognition uses a forward character scan at both the next-URL and ambiguous
+authority lookahead sites; retrying an unanchored greedy scheme regex made scheme-free words
+quadratic. Each `@` lookup stays inside its current authority interval, so successive malformed
+authorities without an `@` cannot repeatedly scan the preceding text. A path ends the authority.
+Before a path, an invalid or userinfo-bearing prefix is ambiguous: the scanner looks through
+combined quote/whitespace delimiters to the last `@` before
+the path or another URL, then redacts the whole authority. This deliberately hides intervening
+ambiguous text rather than exposing a credential suffix. A syntactically complete ordinary URL
+without userinfo keeps its normal text boundary, so following prose and email addresses survive.
+This is URL diagnostic redaction, not arbitrary-text secret recognition: it cannot infer a
+credential whose prefix is indistinguishable from a complete ordinary URL followed by prose,
+and it does not recognize schemeless secrets. `scrubSecret` therefore replaces a known intact
+secret before URL scanning. Legacy bundle forms, bundle API diagnostics and refresh queue
+payloads redact their own reads, including failed bundles that never reach sync. Historical rows
+and prior step outputs are not rewritten.
+
+The push gate's `remoteUrl` is normalized before the submit route stores answers or queues them,
+using `normalizeStepFormValues` (shared). Invalid destinations get a static error that never echoes
+the input. The helper recognizes only `11a-gate-4-push` and its named URL field; arbitrary answers
+in other forms retain their meaning. Task creation applies it to the locked definition's pre-answers at the task INSERT, so arbitrary
+preset configuration is never copied raw into a new task's known Git field. The definition itself
+is left intact. The worker normalizes the FINAL validated answer, after default expansion, for
+submitted, auto-submitted and reused candidates. It also normalizes known gate schema defaults
+before fresh, Retry or reopened schema copies, and saved answers before a continuation can copy
+them into new output. These active-step writes retain ownership guards and keep `waiting_cli`
+status through a continuation. Existing ownership, failed-task admission, dead-task and round
+checks still precede the submit write.
+
 `git-exec-guard.test.ts` finds a spawn by its first argument, never by the name of the function that carries it: any `<name>('git', …)` in the worker, api and shared sources, the worker's `scripts/` and every module's sources must pass `hardenGitArgs(…)` as the argv, so an alias such as `promisify(execFile)` hides nothing (the learning and skill-sync steps once spawned git through one). A text scan cannot see a git command held in a variable or run through a shell string, so neither is used, and a new package that runs git needs its sources added to the guard's `scanRoots`. `child-process-ratchet.test.ts` (`@haive/shared`) covers what the scan cannot see: over every package and the root `scripts/` it pins, per file, each `child_process` call whose command is not provably a plain non-git program (a variable, a shell string, a path to git, a shell wrapper, a literal `git`), so a new one lands where a reviewer sees it. The reach of the unhardened form was MEASURED on git 2.43.0, the dev host's (the reproductions pin it on whichever git runs the suite): a registered submodule's own `core.fsmonitor` runs under `git status` only when the status pathspec reaches the submodule (the learning gate's `.haive-data/knowledge_base` does, once one is registered there), `add`, `commit`, `show` and `rev-parse` do not run it, and a repository's hooks run on `commit`. The reproductions in `11-phase-8-learning.test.ts` and `11d-skill-sync.test.ts` are shaped by that: a marker file written by the monitor script or the pre-commit hook must not appear.
 
 Every host git run is also bounded in time: a caller's own `timeout` wins (`0` means none), and otherwise `gitDefaultTimeoutMs` gives 30 min to `clone`, `fetch`, `pull`, `push`, `ls-remote`, `gc`, `repack`, `prune`, `fsck`, `merge`, `rebase`, `cherry-pick`, `submodule` and `lfs`, and 10 min to everything else, so a hung credential helper or a stale mount ends the step instead of holding it. A run killed by the bound returns code 124 from `gitRun` (never git's own 1) with `git <subcommand> timed out after N s` as its last stderr line, and `gitExec` throws with that message. A run that ends with no exit status at all (git could not start, a missing cwd included; a signal other than the bound; an output past the buffer) returns `GIT_NO_EXIT` (-1), never 1, with the cause in `noExit` and `git ended without an exit status in <cwd> (<cause>)` as its last stderr line, so a reader that takes exit 1 for "no" never takes it for an answer. `gitGaveNoAnswer` names both (no exit status, or the bound's 124): a reader that turns a non-zero exit into "no", "absent", "clean" or "not usable" checks it first and throws or holds, never answers; a step that must not fail records the reason and shows it as a note instead. Streaming callers that `spawn` git themselves are not covered; the bundle resync, ingest and daily sync go through `gitRun` and are.

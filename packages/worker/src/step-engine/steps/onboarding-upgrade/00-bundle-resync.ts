@@ -1,10 +1,12 @@
-import { originGitRun } from '../../../repo/git-push.js';
+import { originGitRun, scrubSecret } from '../../../repo/git-push.js';
+import { bundleGitAuth, type BundleGitBinding } from '../../../repo/bundle-git.js';
 import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { schema, type Database } from '@haive/database';
 import type { BundleJobPayload, FormSchema, FormValues } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { gitRevParseHead, handleResyncGit } from '../../../repo/bundle-ingest.js';
 import { gitRun } from '../../../repo/git-exec.js';
+import { safeErrorMessage } from '@haive/shared/logger';
 
 interface BundleResyncCandidate {
   bundleId: string;
@@ -31,12 +33,18 @@ const FIELD_ID = 'bundlesToPull';
 /** `git fetch` plus `git rev-parse origin/<branch>` returning the remote head.
  *  Pure read operation — does NOT update the local working tree, so on its
  *  own it cannot break a parser run. The actual pull happens in apply(). */
-async function fetchRemoteHead(cwd: string, branch: string | null): Promise<string> {
+async function fetchRemoteHead(
+  db: Database,
+  bundle: BundleGitBinding,
+  branch: string | null,
+): Promise<string> {
+  const cwd = bundle.storageRoot;
   const fetchArgs = ['fetch', '--quiet', 'origin'];
   if (branch) fetchArgs.push(branch);
-  const fetched = await originGitRun(cwd, fetchArgs, { GIT_ASKPASS: 'echo' });
+  const auth = await bundleGitAuth(db, bundle);
+  const fetched = await originGitRun(cwd, [...auth.argv, ...fetchArgs], auth.env);
   if (fetched.code !== 0) {
-    const msg = fetched.stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
+    const msg = scrubSecret(fetched.stderr, auth.secret).trim();
     throw new Error(`git fetch failed (exit ${fetched.noExit ?? fetched.code}): ${msg}`);
   }
   const ref = branch ? `origin/${branch}` : 'origin/HEAD';
@@ -61,6 +69,9 @@ async function loadGitBundles(ctx: StepContext): Promise<BundleResyncCandidate[]
   const rows = await ctx.db
     .select({
       id: schema.customBundles.id,
+      userId: schema.customBundles.userId,
+      gitUrl: schema.customBundles.gitUrl,
+      gitCredentialsId: schema.customBundles.gitCredentialsId,
       name: schema.customBundles.name,
       sourceType: schema.customBundles.sourceType,
       gitBranch: schema.customBundles.gitBranch,
@@ -77,9 +88,10 @@ async function loadGitBundles(ctx: StepContext): Promise<BundleResyncCandidate[]
     let remoteCommit: string | null = null;
     let fetchError: string | null = null;
     try {
-      remoteCommit = await fetchRemoteHead(row.storageRoot, row.gitBranch ?? null);
+      remoteCommit = await fetchRemoteHead(ctx.db, row, row.gitBranch ?? null);
     } catch (err) {
-      fetchError = err instanceof Error ? err.message : String(err);
+      fetchError = safeErrorMessage(err);
+      ctx.logger.warn({ err, bundleId: row.id }, 'bundle upstream check failed');
     }
     let localHead: string | null = null;
     try {
@@ -198,7 +210,7 @@ export const bundleResyncStep: StepDefinition<BundleResyncDetect, BundleResyncAp
         await handleResyncGit(payload, ctx.db, bundleStorageRoot);
         resyncedBundleIds.push(target.bundleId);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = safeErrorMessage(err);
         warnings.push(`bundle ${target.name} resync failed: ${msg}`);
         ctx.logger.warn({ err, bundleId: target.bundleId }, 'bundle resync failed');
       }

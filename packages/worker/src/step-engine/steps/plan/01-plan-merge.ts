@@ -339,7 +339,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     const identity = await resolveGitEnv(ctx.db, { userId: ctx.userId, repositoryId });
     const repo = await ctx.db.query.repositories.findFirst({
       where: eq(schema.repositories.id, repositoryId),
-      columns: { credentialsSecretId: true },
+      columns: { credentialsSecretId: true, remoteUrl: true },
     });
     await ensurePlanMergeWorktree(ctx.repoPath);
     let open = await mergeIsOpen(worktreePath);
@@ -352,6 +352,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
         branch,
         db: ctx.db,
         userId: ctx.userId,
+        remoteUrl: repo?.remoteUrl,
         ...(repo?.credentialsSecretId ? { credentialId: repo.credentialsSecretId } : {}),
       });
       const gap = await divergence(ctx.repoPath, branch);
@@ -715,7 +716,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
 
     const repo = await ctx.db.query.repositories.findFirst({
       where: eq(schema.repositories.id, d.repositoryId),
-      columns: { credentialsSecretId: true },
+      columns: { credentialsSecretId: true, remoteUrl: true },
     });
     const upstream = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
     const head = await gitRun(ctx.repoPath, [
@@ -732,6 +733,7 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       cwd: ctx.repoPath,
       branch: d.branch,
       setUpstream: upstream.code !== 0 && !gitGaveNoAnswer(upstream),
+      remoteUrl: repo?.remoteUrl,
       ...(repo?.credentialsSecretId ? { credentialId: repo.credentialsSecretId } : {}),
       db: ctx.db,
       userId: ctx.userId,

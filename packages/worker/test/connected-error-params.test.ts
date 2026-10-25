@@ -5,9 +5,13 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { logger } from '@haive/shared/logger';
+import { logger, safeErrorForTransport } from '@haive/shared/logger';
 
-const h = vi.hoisted(() => ({ error: undefined as unknown, persist: vi.fn() }));
+const h = vi.hoisted(() => ({
+  error: undefined as unknown,
+  persist: vi.fn(),
+  credentialSecret: 'fixture-prefix" fixture-suffix',
+}));
 vi.mock('../src/bundle-parser/index.js', () => ({
   parseBundle: async () => ({ items: [], ambiguous: [], dropped: [] }),
   persistBundleItems: h.persist,
@@ -27,6 +31,7 @@ vi.mock('../src/repo/git-exec.js', async (original) => ({
 vi.mock('../src/repo/git-push.js', async (original) => ({
   ...(await original<object>()),
   originGitRun: async () => ({ code: 0, stdout: '', stderr: '' }),
+  buildCredentialHelper: async () => ({ argv: [], env: {}, secret: h.credentialSecret }),
 }));
 vi.mock('../src/secrets/provider-secrets.js', () => ({ resolveProviderSecrets: async () => ({}) }));
 vi.mock('../src/sandbox/docker-runner.js', () => ({
@@ -138,6 +143,62 @@ for (const handler of [handleIngestZip, handleIngestGit, handleResyncGit]) {
     },
   );
 }
+
+it.each([
+  [true, 'fixture-prefix" fixture-suffix'],
+  [true, 'Database'],
+  [false, 'fixture-prefix" fixture-suffix'],
+] as const)(
+  'credentialed bundle failures keep both error structure and secret scrubbing: case %# (bound: %s)',
+  async (bound, credentialSecret) => {
+    h.credentialSecret = credentialSecret;
+    const fake = createFakeDb({ customBundles: schema.customBundles });
+    fake.insert(schema.customBundles, {
+      id: BUNDLE,
+      userId: USER,
+      repositoryId: REPO,
+      name: 'fixture',
+      sourceType: 'git',
+      status: 'syncing',
+      storageRoot: '',
+      gitUrl: 'https://example.invalid/fixture.git',
+      gitCredentialsId: '00000000-0000-4000-8000-0000000000e1',
+    });
+    const message = `failed https://user:${h.credentialSecret}@example.invalid/r and token=${h.credentialSecret}`;
+    const error = bound
+      ? new DrizzleQueryError(
+          'update fixture set value = $1',
+          [h.credentialSecret],
+          Object.assign(new Error(h.credentialSecret), { code: '23505' }),
+        )
+      : new TypeError(message);
+    h.persist.mockRejectedValueOnce(error);
+    const caught = await handleIngestGit(
+      { bundleId: BUNDLE, userId: USER },
+      fake.db as unknown as Database,
+      root,
+    ).catch((err: unknown) => err);
+    const safeMessage = bound
+      ? 'Database operation failed'
+      : 'failed https://example.invalid/r and token=***';
+    expect(fake.rows(schema.customBundles)[0]?.lastSyncError === safeMessage).toBe(true);
+    if (bound) {
+      // Preserve structure until the queue boundary logs class and SQLSTATE.
+      expect(caught === error).toBe(true);
+      const transported = safeErrorForTransport(caught);
+      expect((transported as Error).message).toBe('Database operation failed (23505)');
+      expect(
+        lines.some((line) => line.includes('DrizzleQueryError') && line.includes('23505')),
+      ).toBe(true);
+    } else {
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message === safeMessage).toBe(true);
+    }
+    expect(
+      lines.some((line) => line.includes('fixture-prefix') || line.includes('fixture-suffix')),
+    ).toBe(false);
+  },
+);
 
 it.each([true, false])(
   'probe job returns a safe image-ensure failure inside its result (bound: %s)',

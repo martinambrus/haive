@@ -1,5 +1,6 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { redactGitText, redactGitUrl } from '@haive/shared/schemas';
 import type {
   BundleComposerCredentialOption,
   BundleComposerInitial,
@@ -89,13 +90,13 @@ async function loadInitialBundles(
     id: b.id,
     name: b.name,
     sourceType: b.sourceType as 'zip' | 'git',
-    gitUrl: b.gitUrl ?? undefined,
+    gitUrl: b.gitUrl ? redactGitUrl(b.gitUrl) : undefined,
     gitBranch: b.gitBranch ?? undefined,
     archiveFilename: b.archiveFilename ?? undefined,
     enabledKinds: b.enabledKinds as ('agent' | 'skill')[],
     itemCount: countByBundle.get(b.id) ?? 0,
     status: b.status as 'active' | 'syncing' | 'failed',
-    lastSyncError: b.lastSyncError ?? undefined,
+    lastSyncError: b.lastSyncError ? redactGitText(b.lastSyncError) : undefined,
   }));
 }
 
@@ -138,7 +139,7 @@ async function summarizeBundle(
     itemCount: items.length,
     agentCount,
     skillCount,
-    lastSyncError: row.lastSyncError ?? null,
+    lastSyncError: row.lastSyncError ? redactGitText(row.lastSyncError) : null,
     lastSyncNote: row.lastSyncNote ?? null,
   };
 }

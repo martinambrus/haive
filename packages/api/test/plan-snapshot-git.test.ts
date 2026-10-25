@@ -137,6 +137,23 @@ async function ran(sub: string): Promise<boolean> {
 }
 
 describe('the plan snapshot git state', () => {
+  it.each([
+    ['git@gitserver:repo', 'git@gitserver:repo'],
+    [
+      'ssh://git:fixture-password@EXAMPLE.test:22/repo?fixture-query#fixture-fragment',
+      'ssh://git@EXAMPLE.test:22/repo',
+    ],
+    [
+      'https://user:fixture-password@EXAMPLE.test:443/repo?fixture-query#fixture-fragment',
+      'https://EXAMPLE.test:443/repo',
+    ],
+  ])('returns safe editable origin identity: case %#', async (stored, expected) => {
+    git('remote', 'set-url', 'origin', stored);
+    const result = await snapshot();
+    expect(result.hasOrigin).toBe(true);
+    expect(result.originUrl === expected).toBe(true);
+  });
+
   it.each(['url', 'pushurl', 'second-url', 'pushInsteadOf'])(
     'reads a refused effective %s as no usable origin',
     async (kind) => {

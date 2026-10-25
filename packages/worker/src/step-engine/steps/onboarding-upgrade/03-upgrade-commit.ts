@@ -10,6 +10,7 @@ import {
 } from '@haive/shared';
 import { RTK_BLOCK_FILES, RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { safeErrorMessage } from '@haive/shared/logger';
 import type { StepDefinition } from '../../step-definition.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { initGitWorkspace } from '../../../repo/git-init.js';
@@ -378,14 +379,17 @@ export const upgradeCommitStep: StepDefinition<UpgradeCommitDetect, UpgradeCommi
       commitSha = stdout.trim();
       commitPerformed = true;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = safeErrorMessage(err);
       ctx.logger.warn({ err }, 'upgrade-commit failed');
       // The user explicitly asked to commit; a git failure must be loud, not a silent
       // `done` with a buried warning. 02-upgrade-apply already wrote the files and the
       // artifact rows, so a Retry re-attempts the stage + commit safely. The two no-op
       // paths above (nothing to stage, nothing staged) stay warnings — they are
       // legitimate outcomes, not failures.
-      throw new Error(`Staging or committing the upgrade changes failed: ${message}`);
+      // Keep the cause so the runner and queue boundary still recognize bound queries.
+      throw new Error(`Staging or committing the upgrade changes failed: ${message}`, {
+        cause: err,
+      });
     }
 
     return { commitPerformed, commitSha, stagedPaths, warnings };

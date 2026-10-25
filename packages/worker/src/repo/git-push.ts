@@ -1,5 +1,13 @@
-import { isAllowedGitRemoteUrl } from '@haive/shared/schemas';
-import type { Database } from '@haive/database';
+import {
+  credentialFitsGitRemote,
+  gitCredentialTarget,
+  gitRemoteIdentity,
+  isAllowedGitRemoteUrl,
+  redactGitUrl,
+  redactGitText,
+} from '@haive/shared/schemas';
+import { schema, type Database } from '@haive/database';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { getDecryptedCredentials } from './credentials.js';
 import { GIT_MAX_BUFFER, type GitRunResult, gitRun } from './git-exec.js';
 
@@ -11,8 +19,7 @@ export type { GitRunResult };
  *  or surfaced to the user. Defensive: git masks credential-helper passwords in
  *  most errors, but a misconfigured remote can echo them. */
 export function scrubSecret(text: string, secret: string | null): string {
-  if (!secret) return text;
-  return text.split(secret).join('***');
+  return redactGitText(secret ? text.split(secret).join('***') : text);
 }
 
 /** True when the repo at cwd has an `origin` remote; throws when git could not say (see getOriginUrl). */
@@ -27,36 +34,7 @@ export class OriginUrlError extends Error {
     direction: 'fetch' | 'push' = 'fetch',
     context: 'step' | 'clone' | 'refresh' | 'bundle' = 'step',
   ) {
-    let safe = url;
-    if (safe.includes('://')) {
-      try {
-        let parsed = new URL(safe);
-        const start = safe.indexOf('://') + 3;
-        const end = safe.indexOf('/', start);
-        const authority = safe.slice(start, end < 0 ? undefined : end);
-        const at = authority.lastIndexOf('@');
-        // Remove userinfo before interpreting a ? or # inside malformed credentials.
-        if (at >= 0) parsed = new URL(safe.slice(0, start) + safe.slice(start + at + 1));
-        parsed.username = '';
-        parsed.password = '';
-        parsed.search = '';
-        parsed.hash = '';
-        if (!parsed.hostname && !parsed.pathname.startsWith('/')) {
-          // Opaque URLs have no authority for URL to separate from userinfo.
-          const start = safe.indexOf('://') + 3;
-          const at = safe.lastIndexOf('@');
-          if (at >= start) safe = safe.slice(0, start) + safe.slice(at + 1);
-          safe = safe.split(/[?#]/)[0]!;
-        } else {
-          safe = parsed.toString();
-        }
-      } catch {
-        // A malformed authority cannot be redacted reliably; keep only its scheme.
-        safe = safe.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/)?.[0] ?? '(unparseable URL)';
-      }
-    } else {
-      safe = safe.slice(safe.lastIndexOf('@') + 1).split(/[?#]/)[0]!;
-    }
+    const safe = redactGitUrl(url);
     const text = safe.replace(/[\r\n]+/g, ' ');
     const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
     const fence = '`'.repeat(longest + 1);
@@ -90,7 +68,9 @@ export async function getOriginUrl(cwd: string): Promise<string | null> {
     ]);
     if (!push && res.code === 2) return null;
     if (res.code !== 0) {
-      const output = (res.stderr || res.stdout).trim().slice(0, 500);
+      const output = redactGitText(res.stderr || res.stdout)
+        .trim()
+        .slice(0, 500);
       throw new Error(`git remote get-url origin failed in ${cwd}: ${output}`);
     }
     const urls = res.stdout.trim().split('\n');
@@ -99,7 +79,7 @@ export async function getOriginUrl(cwd: string): Promise<string | null> {
     }
     first ??= urls[0];
   }
-  return first!;
+  return gitRemoteIdentity(first!);
 }
 
 /** Origin transports always re-read the checkout immediately before git talks to the remote. */
@@ -114,6 +94,7 @@ export async function ensureOrigin(
   cwd: string,
   url: string,
 ): Promise<{ added: boolean; updated: boolean }> {
+  url = redactGitUrl(url, true);
   const add = await gitRun(cwd, ['remote', 'add', 'origin', url]);
   if (add.code === 0) return { added: true, updated: false };
   if (add.code === 3) {
@@ -152,19 +133,85 @@ export async function buildCredentialHelper(
   db: Database,
   credentialId: string,
   userId: string,
+  remoteUrl: string | null | undefined,
 ): Promise<{ argv: string[]; env: Record<string, string>; secret: string }> {
   const creds = await getDecryptedCredentials(db, credentialId, userId);
+  if (!credentialFitsGitRemote(creds, remoteUrl)) {
+    throw new Error(
+      'The Git credential does not fit the bound remote. Link a matching credential and retry.',
+    );
+  }
+  const target = gitCredentialTarget(remoteUrl);
+  if (!target) {
+    // SSH authenticates with a key outside Haive. Its child process needs no token environment.
+    return { argv: [], env: { GIT_ALLOW_PROTOCOL: 'http:https:ssh' }, secret: creds.secret };
+  }
   const env: Record<string, string> = {
     GIT_HAIVE_USER: creds.username,
     GIT_HAIVE_PASS: creds.secret,
+    GIT_HAIVE_HOST: target?.host ?? '',
+    GIT_HAIVE_PROTOCOL: target?.protocol ?? '',
+    // A repository's remote.origin.vcs can name an executable that would inherit this env.
+    GIT_ALLOW_PROTOCOL: 'http:https:ssh',
   };
   const argv = [
     '-c',
     'credential.helper=',
     '-c',
-    `credential.helper=!f() { test "$1" = get && printf 'username=%s\\npassword=%s\\n' "$GIT_HAIVE_USER" "$GIT_HAIVE_PASS"; }; f`,
+    `credential.helper=!f() { test "$1" = get || return 0; protocol=; host=; while IFS= read -r line && test -n "$line"; do case "$line" in protocol=*) protocol=\${line#protocol=} ;; host=*) host=\${line#host=} ;; esac; done; host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]'); if test -n "$GIT_HAIVE_HOST" && test "$host" = "$GIT_HAIVE_HOST" && test "$protocol" = "$GIT_HAIVE_PROTOCOL"; then printf 'username=%s\\npassword=%s\\n' "$GIT_HAIVE_USER" "$GIT_HAIVE_PASS"; fi; }; f`,
   ];
   return { argv, env, secret: creds.secret };
+}
+
+/** The stored repo binding wins. For local_path repos without one, an explicit push approval
+ *  binds to the URL Haive persisted on the form the user saw, never a fresh config read. */
+export async function taskRemoteUrl(ctx: {
+  db: Database;
+  taskId: string;
+  userId: string;
+}): Promise<string | null> {
+  const task = await ctx.db.query.tasks.findFirst({
+    where: and(eq(schema.tasks.id, ctx.taskId), eq(schema.tasks.userId, ctx.userId)),
+    columns: { repositoryId: true },
+  });
+  if (!task?.repositoryId) return null;
+  const repo = await ctx.db.query.repositories.findFirst({
+    where: and(
+      eq(schema.repositories.id, task.repositoryId),
+      eq(schema.repositories.userId, ctx.userId),
+    ),
+    columns: { remoteUrl: true },
+  });
+  if (repo?.remoteUrl) return gitRemoteIdentity(repo.remoteUrl);
+  const steps = await ctx.db.query.taskSteps.findMany({
+    where: and(
+      eq(schema.taskSteps.taskId, ctx.taskId),
+      inArray(schema.taskSteps.stepId, [
+        '11a-gate-4-push',
+        '12-worktree-cleanup',
+        '12-post-onboarding',
+      ]),
+    ),
+    orderBy: [desc(schema.taskSteps.createdAt)],
+    columns: { stepId: true, formValues: true, detectOutput: true },
+  });
+  for (const step of steps) {
+    const values = step.formValues;
+    const approved =
+      step.stepId === '11a-gate-4-push'
+        ? values?.push === true
+        : step.stepId === '12-post-onboarding'
+          ? values?.pushToOrigin === true
+          : values?.pushBase === true || values?.action === 'create_pr';
+    const detected = step.detectOutput as { originUrl?: unknown } | null;
+    if (
+      approved &&
+      typeof detected?.originUrl === 'string' &&
+      isAllowedGitRemoteUrl(detected.originUrl)
+    )
+      return gitRemoteIdentity(detected.originUrl);
+  }
+  return null;
 }
 
 /** Push `branch` to origin, optionally with a stored credential and upstream.
@@ -178,6 +225,7 @@ export async function pushBranch(args: {
   sha?: string;
   setUpstream: boolean;
   credentialId?: string;
+  remoteUrl?: string | null;
   db: Database;
   userId: string;
 }): Promise<{ pushed: true; remote: 'origin'; branch: string; upstreamError?: string }> {
@@ -187,7 +235,7 @@ export async function pushBranch(args: {
   let secret: string | null = null;
 
   if (credentialId) {
-    const helper = await buildCredentialHelper(db, credentialId, userId);
+    const helper = await buildCredentialHelper(db, credentialId, userId, args.remoteUrl);
     secret = helper.secret;
     Object.assign(env, helper.env);
     pushArgs.push(...helper.argv);

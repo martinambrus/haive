@@ -119,6 +119,17 @@ describe('refreshing a repository', () => {
   });
 });
 
+it('does not copy legacy URL userinfo into a refresh job and preserves transport identity', async () => {
+  setup({
+    source: 'git_https',
+    remoteUrl: 'https://fixture-user:fixture-password@example.test:443/repo',
+  });
+  expect((await refresh()).status).toBe(200);
+  const payload = h.add.mock.calls[0]![1] as { remoteUrl: string };
+  expect(payload.remoteUrl === 'https://example.test:443/repo').toBe(true);
+  expect(JSON.stringify(payload).includes('fixture-password')).toBe(false);
+});
+
 const ARCHIVE = `/var/lib/haive/repos/_uploads/${USER}/${REPO}.tar.gz`;
 function upload(overrides: Record<string, unknown> = {}, taskStatus?: string) {
   const fake = setup({ source: 'upload', status: 'error' }, taskStatus);
@@ -138,6 +149,41 @@ function upload(overrides: Record<string, unknown> = {}, taskStatus?: string) {
 }
 
 describe('retrying an upload', () => {
+  it.each([
+    [
+      'https://fixture-user:fixture-password@example.test:443/repo',
+      'https://example.test:443/repo',
+    ],
+    ['ssh://git:fixture-password@example.test:22/repo', 'ssh://git@example.test:22/repo'],
+    ['git@gitserver:repo', 'git@gitserver:repo'],
+  ])('keeps a linked upload refresh scoped and sanitized: %s', async (remoteUrl, expected) => {
+    const credentialsId = '00000000-0000-4000-8000-0000000000c1';
+    const fake = setup({
+      source: 'upload',
+      status: 'error',
+      remoteUrl,
+      branch: 'topic/retry',
+      credentialsSecretId: credentialsId,
+    });
+    expect((await refresh()).status).toBe(200);
+    expect(h.add).toHaveBeenCalledTimes(1);
+    expect(h.add).toHaveBeenCalledWith(
+      REPO_JOB_NAMES.REFRESH,
+      {
+        repositoryId: REPO,
+        userId: USER,
+        source: 'upload',
+        remoteUrl: expected,
+        branch: 'topic/retry',
+        credentialsId,
+      },
+      { attempts: 3, backoff: { type: 'exponential', delay: 5000 } },
+    );
+    expect(h.getJobs).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.add.mock.calls)).not.toContain('fixture-password');
+    expect(status(fake)).toBe('cloning');
+  });
+
   it('queues EXTRACT using only its own completed upload record, once', async () => {
     const fake = upload();
     expect((await refresh()).status).toBe(200);

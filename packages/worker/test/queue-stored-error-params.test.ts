@@ -4,13 +4,15 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import { logger } from '@haive/shared/logger';
 
-const h = vi.hoisted(() => ({ db: undefined as unknown, error: undefined as unknown }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  error: undefined as unknown,
+  resolveForge: vi.fn(),
+}));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/forge/index.js', async (original) => ({
   ...(await original<object>()),
-  resolveForgeContext: async () => {
-    throw h.error;
-  },
+  resolveForgeContext: h.resolveForge,
 }));
 vi.mock('../src/step-engine/steps/workflow/_task-meta.js', async (original) => ({
   ...(await original<object>()),
@@ -91,6 +93,7 @@ function dbFake() {
             prNumber: '1',
             prCredentialId: 'credential',
             prState: 'open',
+            prRemoteUrl: 'https://example.invalid/repo',
           },
         ],
       },
@@ -112,6 +115,9 @@ function dbFake() {
 beforeEach(() => {
   lines.length = 0;
   writes.length = 0;
+  h.resolveForge.mockReset().mockImplementation(async () => {
+    throw h.error;
+  });
   const key = Object.getOwnPropertySymbols(logger).find(
     (key) => key.description === 'pino.stream',
   )!;
@@ -164,6 +170,9 @@ it.each([true, false])('fix6 returns safe ddev failures (bound: %s)', async (bou
 it.each([true, false])('fix6 stores safe PR poll failures (bound: %s)', async (bound) => {
   h.error = failure(bound);
   await runPrPollTick(h.db as never);
+  expect(h.resolveForge).toHaveBeenCalledWith(
+    expect.objectContaining({ remoteUrl: 'https://example.invalid/repo' }),
+  );
   expect(
     writes.some((row) => row.prPollError === (bound ? 'Database operation failed' : ordinary)),
   ).toBe(true);

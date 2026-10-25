@@ -11,7 +11,11 @@ import type { StepContext } from '../src/step-engine/step-definition.js';
 // only needs a {username,secret,host}. The HTTP fixture ignores the creds,
 // so the real `git push` still succeeds while we assert the call happened.
 vi.mock('../src/repo/credentials.js', () => ({
-  getDecryptedCredentials: vi.fn(async () => ({ username: 'u', secret: 's', host: 'github.com' })),
+  getDecryptedCredentials: vi.fn(async () => ({
+    username: 'u',
+    secret: 's',
+    host: new URL(httpOrigin(fixtureBase)).host,
+  })),
 }));
 
 import { gate4PushStep } from '../src/step-engine/steps/workflow/11a-gate-4-push.js';
@@ -71,7 +75,10 @@ function makeCtx(
     query: {
       tasks: { findFirst: async () => ({ repositoryId: 'repo-1' }) },
       repositories: {
-        findFirst: async () => ({ credentialsSecretId: opts.boundCredentialId ?? null }),
+        findFirst: async () => ({
+          credentialsSecretId: opts.boundCredentialId ?? null,
+          remoteUrl: sets.at(-1)?.remoteUrl ?? httpOrigin(fixtureBase),
+        }),
       },
       repoCredentials: { findMany: async () => credentials },
     },

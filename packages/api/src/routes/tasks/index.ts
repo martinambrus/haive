@@ -1,3 +1,4 @@
+import { normalizeStepFormValues } from '@haive/shared/schemas';
 import { Hono } from 'hono';
 import {
   and,
@@ -697,6 +698,13 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
       );
     }
     const { runListSnapshot, customSteps, preAnswers, stepLoopLimits, simplifyCode } = locked;
+    // The locked definition is configuration; this is its copy into new task state.
+    const normalizedPreAnswers = preAnswers ? { ...preAnswers } : preAnswers;
+    for (const [stepId, values] of Object.entries(preAnswers ?? {})) {
+      const normalized = normalizeStepFormValues(stepId, values);
+      if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
+      normalizedPreAnswers![stepId] = normalized.data;
+    }
     return await handle
       .insert(schema.tasks)
       .values({
@@ -729,7 +737,7 @@ taskRoutes.post('/', requireNewWorkAllowed, async (c) => {
         memoryLimitMb: body.resourceLimits?.memoryLimitMb ?? null,
         cpuLimitMilli: body.resourceLimits?.cpuLimitMilli ?? null,
         stepLoopLimits: { ...stepLoopLimits, ...body.stepLoopLimits },
-        preAnswers,
+        preAnswers: normalizedPreAnswers,
         autoContinue: body.autoContinue ?? true,
         ignoreSavedStepClis: body.ignoreSavedStepClis ?? false,
         metadata: Object.keys(metadata).length > 0 ? metadata : null,

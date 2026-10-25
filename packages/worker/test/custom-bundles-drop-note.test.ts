@@ -114,3 +114,44 @@ describe('06_3-custom-bundles: extraction drop report', () => {
     expect(out.degradedNote).not.toContain('boom');
   });
 });
+
+it.each(['active', 'failed', 'syncing'])(
+  'redacts legacy %s bundle URLs in detect and form',
+  async (status) => {
+    const ctx = makeCtx(null, [
+      [{ repositoryId: 'repo-1' }],
+      [
+        {
+          ...baseRow,
+          sourceType: 'git',
+          status,
+          gitUrl: 'https://fixture-user:fixture-password@example.test/repo',
+        },
+      ],
+      [],
+      [],
+    ]);
+    const detected = await customBundlesStep.detect!(ctx);
+    const form = await customBundlesStep.form!(ctx, detected);
+    const text = JSON.stringify({ detected, form });
+    expect(text.includes('fixture-password')).toBe(false);
+    expect(text.includes('fixture-user')).toBe(false);
+    expect(text).toContain('https://example.test/repo');
+  },
+);
+it('redacts legacy credential URLs in saved bundle errors before detect, form and apply', async () => {
+  const row = {
+    ...baseRow,
+    sourceType: 'git',
+    status: 'failed',
+    lastSyncError: 'failed https://fixture-user:fixture-password@example.test/repo',
+  };
+  const ctx = makeCtx(row, [[{ repositoryId: 'repo-1' }], [row], [], []]);
+  const detected = await customBundlesStep.detect!(ctx);
+  const form = await customBundlesStep.form!(ctx, detected);
+  const applied = await customBundlesStep.apply!(makeCtx(row, READS), applyArgs(['bundle-1']));
+  const text = JSON.stringify({ detected, form, applied });
+  expect(text.includes('fixture-password')).toBe(false);
+  expect(text.includes('fixture-user')).toBe(false);
+  expect(text).toContain('failed https://example.test/repo');
+});

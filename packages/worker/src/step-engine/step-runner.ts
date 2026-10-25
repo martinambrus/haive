@@ -1,3 +1,4 @@
+import { normalizeStepFormValues } from '@haive/shared/schemas';
 import { safeErrorMessage } from '@haive/shared/logger';
 import {
   and,
@@ -2967,9 +2968,18 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       columns: { autoContinue: true, preAnswers: true, repositoryId: true, type: true },
     });
     const autoContinue = taskFlags?.autoContinue ?? true;
-    const stepPreAnswer = (taskFlags?.preAnswers ?? {})[meta.id];
+    const rawPreAnswer = (taskFlags?.preAnswers ?? {})[meta.id];
+    const normalizedPreAnswer = rawPreAnswer && normalizeStepFormValues(meta.id, rawPreAnswer);
+    if (normalizedPreAnswer && !normalizedPreAnswer.success)
+      throw new Error(normalizedPreAnswer.issues.join('; '));
+    const stepPreAnswer = normalizedPreAnswer?.data;
 
     let persistedSchema: FormSchema | null = (current.formSchema as FormSchema | null) ?? null;
+    const safeExistingSchema = normalizeStepSchemaDefaults(meta.id, persistedSchema);
+    if (safeExistingSchema !== persistedSchema) {
+      persistedSchema = safeExistingSchema;
+      current = await updateRow(db, current.id, { formSchema: persistedSchema });
+    }
     if (!persistedSchema && stepDef.form) {
       // Post-llm / pre-form seam: let the step produce any artifact the form's
       // web viewer will reference (form() itself is sync). Awaited once, here,
@@ -2983,6 +2993,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       if (persistedSchema && stepPreAnswer) {
         persistedSchema = overlayPreAnswerDefaults(persistedSchema, stepPreAnswer);
       }
+      persistedSchema = normalizeStepSchemaDefaults(meta.id, persistedSchema);
       current = await updateRow(db, current.id, {
         formSchema: persistedSchema ?? null,
         statusMessage: null,
@@ -3003,6 +3014,15 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     }
 
     let formValues = current.formValues as FormValues | null;
+    if (formValues) {
+      const normalized = normalizeStepFormValues(meta.id, formValues);
+      if (!normalized.success) throw new Error(normalized.issues.join('; '));
+      if (normalized.data !== formValues) {
+        formValues = normalized.data;
+        // A saved continuation keeps its waiting_cli status; only its copied answer changes.
+        current = await updateRow(db, current.id, { formValues });
+      }
+    }
     if (persistedSchema && !formValues && !submitted) {
       // Auto mode: (a) a gate-1 pre-answer for this step, else (b) {} for
       // zero-field info forms → try to auto-submit. A validation failure falls
@@ -3065,7 +3085,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               ? extractFormDefaults(persistedSchema)
               : undefined);
         if (candidate !== undefined) {
-          const validation = validateFormValues(persistedSchema, candidate);
+          const expanded = validateFormValues(persistedSchema, candidate);
+          const validation = expanded.success
+            ? normalizeStepFormValues(meta.id, expanded.data)
+            : expanded;
           if (validation.success) {
             formValues = validation.data;
             current = await updateRow(db, current.id, { formValues, status: 'running' });
@@ -3114,7 +3137,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // Values carried by the job can then only be a submit redelivered after it was applied.
     const continuing = row.status === 'waiting_cli' && current.formValues != null;
     if (persistedSchema && submitted && !continuing) {
-      const validation = validateFormValues(persistedSchema, submitted);
+      const expanded = validateFormValues(persistedSchema, submitted);
+      const validation = expanded.success
+        ? normalizeStepFormValues(meta.id, expanded.data)
+        : expanded;
       if (!validation.success) {
         const failed = await updateRow(db, current.id, {
           status: 'failed',
@@ -3318,7 +3344,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           if (stepDef.prepareForm) {
             await stepDef.prepareForm(ctx, refreshedDetected, llmOutput);
           }
-          const refreshedSchema = stepDef.form(ctx, refreshedDetected, llmOutput);
+          const refreshedSchema = normalizeStepSchemaDefaults(
+            meta.id,
+            stepDef.form(ctx, refreshedDetected, llmOutput),
+          );
           if (!refreshedSchema) {
             throw new Error(
               `${meta.id} requested another form, but refreshed detection produced no form`,
@@ -5144,6 +5173,18 @@ function overlayLeafDefault(field: LeafFormField, pre: Record<string, unknown>):
     default:
       return field;
   }
+}
+
+/** A schema default is a source of answers, including a legacy default restored by validation.
+ *  Scope Git semantics to the known gate before any schema copy or Retry/reopen return. */
+function normalizeStepSchemaDefaults(stepId: string, schema: FormSchema | null): FormSchema | null {
+  if (!schema || stepId !== '11a-gate-4-push') return schema;
+  const defaults = extractFormDefaults(schema);
+  const normalized = normalizeStepFormValues(stepId, defaults);
+  if (!normalized.success) throw new Error(normalized.issues.join('; '));
+  return normalized.data === defaults
+    ? schema
+    : overlayPreAnswerDefaults(schema, { remoteUrl: normalized.data.remoteUrl });
 }
 
 function overlayPreAnswerDefaults(schema: FormSchema, pre: Record<string, unknown>): FormSchema {

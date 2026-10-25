@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Hono } from 'hono';
+import { credentialFitsGitRemote, redactGitText, redactGitUrl } from '@haive/shared/schemas';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -195,12 +196,12 @@ function bundleSummaryFromRow(
     status: row.status as BundleSummary['status'],
     archiveFilename: row.archiveFilename,
     archiveFormat: (row.archiveFormat as ArchiveFormat | null) ?? null,
-    gitUrl: row.gitUrl,
+    gitUrl: row.gitUrl ? redactGitUrl(row.gitUrl) : null,
     gitBranch: row.gitBranch,
     gitCredentialsId: row.gitCredentialsId,
     lastSyncAt: row.lastSyncAt ? row.lastSyncAt.toISOString() : null,
     lastSyncCommit: row.lastSyncCommit,
-    lastSyncError: row.lastSyncError,
+    lastSyncError: row.lastSyncError ? redactGitText(row.lastSyncError) : row.lastSyncError,
     itemCounts: { agent: counts?.agent ?? 0, skill: counts?.skill ?? 0 },
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -216,16 +217,22 @@ async function assertRepositoryOwned(userId: string, repositoryId: string): Prom
   if (!repo) throw new HttpError(404, 'repository not found');
 }
 
-async function assertCredentialsOwned(userId: string, credentialsId: string): Promise<void> {
+async function assertCredentialsFit(
+  userId: string,
+  credentialsId: string,
+  remoteUrl: string,
+): Promise<void> {
   const db = getDb();
   const cred = await db.query.repoCredentials.findFirst({
     where: and(
       eq(schema.repoCredentials.id, credentialsId),
       eq(schema.repoCredentials.userId, userId),
     ),
-    columns: { id: true },
+    columns: { id: true, host: true },
   });
   if (!cred) throw new HttpError(404, 'credentials not found');
+  if (!credentialFitsGitRemote(cred, remoteUrl))
+    throw new HttpError(400, 'The Git credential does not fit the bundle remote.');
 }
 
 export const bundleRoutes = new Hono<AppEnv>();
@@ -325,7 +332,7 @@ bundleRoutes.post('/', requireNewWorkAllowed, async (c) => {
   const db = getDb();
 
   await assertRepositoryOwned(userId, body.repositoryId);
-  if (body.gitCredentialsId) await assertCredentialsOwned(userId, body.gitCredentialsId);
+  if (body.gitCredentialsId) await assertCredentialsFit(userId, body.gitCredentialsId, body.gitUrl);
 
   // Chosen before the insert so the row is never visible with an empty storage_root.
   const bundleId = randomUUID();

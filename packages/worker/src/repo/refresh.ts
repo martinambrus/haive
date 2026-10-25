@@ -113,7 +113,12 @@ async function sourceFor(
       let secret: string | null = null;
       if (payload.credentialsId) {
         try {
-          const helper = await buildCredentialHelper(db, payload.credentialsId, payload.userId);
+          const helper = await buildCredentialHelper(
+            db,
+            payload.credentialsId,
+            payload.userId,
+            payload.remoteUrl,
+          );
           secret = helper.secret;
           Object.assign(env, helper.env);
           argv.push(...helper.argv);
@@ -294,7 +299,7 @@ async function rebuild(
   } else {
     await ensureDirNoFollow(repoStorageRoot, payload.userId);
     const auth = payload.credentialsId
-      ? await buildCredentialHelper(db, payload.credentialsId, payload.userId)
+      ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, payload.remoteUrl)
       : undefined;
     await gitClone(fromRemote!, dest, payload.branch, auth);
   }

@@ -265,3 +265,16 @@ describe('git-push helpers', () => {
     }
   });
 });
+
+it.each(["'", '"', '<', '>', '`', '?', '#', ' ', '\t', '\r', '\n'])(
+  'scrubs an intact known secret before URL rewriting: case %#',
+  (delimiter) => {
+    const secret = `fixture-prefix${delimiter}fixture-suffix`;
+    const safe = scrubSecret(
+      `failed https://user:${secret}@example.test/repo and token=${secret}`,
+      secret,
+    );
+    expect(safe.includes('fixture-prefix')).toBe(false);
+    expect(safe.includes('fixture-suffix')).toBe(false);
+  },
+);

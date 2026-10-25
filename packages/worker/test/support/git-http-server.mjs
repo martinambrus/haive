@@ -4,6 +4,11 @@ import path from 'node:path';
 
 const base = process.argv[2];
 if (!base || !path.isAbsolute(base)) throw new Error('fixture base directory required');
+const auth = process.env.HAIVE_FIXTURE_AUTH ? JSON.parse(process.env.HAIVE_FIXTURE_AUTH) : null;
+const expected = auth
+  ? `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`
+  : null;
+let authenticated = 0;
 
 // receive-pack runs auto maintenance after every push, detached on newer git: the likeliest
 // writer still in a bare when a test removes it (ENOTEMPTY). Removals retry as well.
@@ -14,6 +19,16 @@ const BACKEND_ARGS = ['-c', 'http.receivepack=true', '-c', 'receive.autogc=false
 // A separate process lets fixtures that use execFileSync still speak real smart HTTP.
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/__fixture_stats') {
+    res.end(JSON.stringify({ authenticated }));
+    return;
+  }
+  if (req.headers.authorization) authenticated++;
+  if (expected && req.headers.authorization !== expected) {
+    res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="fixture"' });
+    res.end();
+    return;
+  }
   let pathname;
   try {
     pathname = decodeURIComponent(url.pathname);

@@ -114,6 +114,167 @@ export function isAllowedGitRemoteUrl(value: string): boolean {
   return parseScpLikeGitUrl(value) !== null;
 }
 
+/** A Git credential is bound to a host, independently of its optional forge provider. */
+export function credentialFitsGitRemote(
+  credential: { host: string },
+  remote: string | null | undefined,
+): boolean {
+  if (!remote || !isAllowedGitRemoteUrl(remote)) return false;
+  const host = credential.host?.trim().toLowerCase();
+  if (!host) return false;
+  if (!remote.includes('://'))
+    return parseScpLikeGitUrl(remote)?.host.toLowerCase() === host.replace(/:\d+$/, '');
+  try {
+    const url = new URL(remote);
+    return url.protocol === 'ssh:'
+      ? url.hostname.toLowerCase() === host.replace(/:\d+$/, '')
+      : url.host.toLowerCase() === host.replace(url.protocol === 'https:' ? /:443$/ : /:80$/, '');
+  } catch {
+    return false;
+  }
+}
+
+/** Only HTTP transports use username/password helpers. Pin protocol and port as well as hostname. */
+export function gitCredentialTarget(
+  remote: string | null | undefined,
+): { protocol: string; host: string } | null {
+  if (!remote || !isAllowedGitRemoteUrl(remote) || !/^https?:\/\//i.test(remote)) return null;
+  const url = new URL(remote);
+  // Unlike URL.host, Git's credential protocol keeps an explicitly written default port.
+  const authority = remote.slice(remote.indexOf('://') + 3).split(/[/?#]/)[0]!;
+  const host = authority.slice(authority.lastIndexOf('@') + 1).toLowerCase();
+  return { protocol: url.protocol.slice(0, -1), host };
+}
+
+/** Remove URL credentials from display/persistence. Transport keeps a non-secret SSH login
+ *  and the original address shape; diagnostics also omit query/fragment and malformed userinfo. */
+export function redactGitUrl(url: string, forTransport = false): string {
+  if (forTransport) {
+    if (!url.includes('://')) return url;
+    try {
+      const parsed = new URL(url);
+      if (!parsed.password && (parsed.protocol === 'ssh:' || !parsed.username)) return url;
+      const start = url.indexOf('://') + 3;
+      const authority = url.slice(start).split(/[/?#]/)[0]!;
+      const at = authority.lastIndexOf('@');
+      if (at < 0) return url;
+      // Slice the original spelling: URL.toString() drops explicit default ports,
+      // but Git includes them in its credential challenge. SSH's login is identity.
+      const login = parsed.protocol === 'ssh:' ? authority.slice(0, at).split(':')[0] + '@' : '';
+      return url.slice(0, start) + login + url.slice(start + at + 1);
+    } catch {
+      return url.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/)?.[0] ?? '(unparseable URL)';
+    }
+  }
+  let safe = url;
+  if (safe.includes('://')) {
+    try {
+      const start = safe.indexOf('://') + 3;
+      const end = safe.indexOf('/', start);
+      const authority = safe.slice(start, end < 0 ? undefined : end);
+      const at = authority.lastIndexOf('@');
+      // file URLs cannot carry userinfo; retain the scheme-only malformed fallback.
+      if (at >= 0 && /^file:/i.test(safe)) return 'file:';
+      // Remove userinfo before interpreting a ? or # inside malformed credentials.
+      const parsed = new URL(at >= 0 ? safe.slice(0, start) + safe.slice(start + at + 1) : safe);
+      parsed.username = '';
+      parsed.password = '';
+      parsed.search = '';
+      parsed.hash = '';
+      if (!parsed.hostname && !parsed.pathname.startsWith('/')) {
+        // Opaque URLs have no authority for URL to separate from userinfo.
+        const start = safe.indexOf('://') + 3;
+        const at = safe.lastIndexOf('@');
+        if (at >= start) safe = safe.slice(0, start) + safe.slice(at + 1);
+        safe = safe.split(/[?#]/)[0]!;
+      } else {
+        safe = parsed.toString();
+      }
+    } catch {
+      // A malformed authority cannot be redacted reliably; keep only its scheme.
+      safe = safe.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/)?.[0] ?? '(unparseable URL)';
+    }
+  } else {
+    safe = safe.slice(safe.lastIndexOf('@') + 1).split(/[?#]/)[0]!;
+  }
+  return safe;
+}
+
+/** Non-secret identity saved in approvals and PR stamps. Keep Git's authority spelling
+ *  and SSH login without carrying query or fragment values into state. */
+export function gitRemoteIdentity(url: string): string {
+  return redactGitUrl(url, true).split(/[?#]/)[0]!;
+}
+
+/** A response value that may be edited and saved as a Git remote. Valid SSH
+ *  addresses keep their login and spelling; malformed legacy values still use
+ *  conservative display redaction rather than transport's schemeless passthrough. */
+export function redactEditableGitUrl(url: string): string {
+  return isAllowedGitRemoteUrl(url) ? gitRemoteIdentity(url) : redactGitUrl(url);
+}
+
+/** Find the first letter-led scheme in one forward pass. Retrying a greedy
+ *  scheme regex at every letter makes a long scheme-free word quadratic. */
+function findUrlScheme(
+  text: string,
+  from: number,
+): { start: number; authorityStart: number } | null {
+  let start = -1;
+  for (let index = from; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    const letter = (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+    if (letter) {
+      if (start < 0) start = index;
+    } else if ((code >= 48 && code <= 57) || code === 43 || code === 45 || code === 46) {
+      // Digits and +.- may continue a scheme, but cannot start one.
+    } else {
+      if (start >= 0 && text.startsWith('://', index)) {
+        return { start, authorityStart: index + 3 };
+      }
+      start = -1;
+    }
+  }
+  return null;
+}
+
+/** Diagnostic output can contain several URLs; use the same userinfo policy for each one. */
+export function redactGitText(text: string): string {
+  let output = '';
+  let cursor = 0;
+  for (let match = findUrlScheme(text, cursor); match; match = findUrlScheme(text, cursor)) {
+    const { start, authorityStart } = match;
+    const delimiter = text.slice(authorityStart).search(/[\s'"<>`]/);
+    let end = delimiter < 0 ? text.length : authorityStart + delimiter;
+    const first = text.slice(start, end);
+    const slash = text.indexOf('/', authorityStart);
+    // A path establishes the authority's end. Before a path, malformed userinfo
+    // can contain quotes AND whitespace, so a text delimiter alone proves nothing.
+    if (slash < 0 || slash >= end) {
+      let ordinaryAuthority = false;
+      try {
+        const url = new URL(first);
+        ordinaryAuthority = !!url.hostname && !url.username && !url.password;
+      } catch {
+        // An invalid authority is ambiguous: look for its @ before accepting a cut.
+      }
+      if (!ordinaryAuthority) {
+        const next = findUrlScheme(text, authorityStart);
+        const bound = Math.min(slash < 0 ? text.length : slash, next?.start ?? text.length);
+        // Never search earlier authorities again when this interval has no @.
+        const relativeAt = text.slice(authorityStart, bound).lastIndexOf('@');
+        if (relativeAt >= 0) {
+          const at = authorityStart + relativeAt;
+          const suffixEnd = text.slice(at + 1).search(/[\s'"<>`]/);
+          end = suffixEnd < 0 ? text.length : at + 1 + suffixEnd;
+        }
+      }
+    }
+    output += text.slice(cursor, start) + redactGitUrl(text.slice(start, end));
+    cursor = end;
+  }
+  return output + text.slice(cursor);
+}
+
 export const gitRemoteUrlSchema = z
   .string()
   .trim()
@@ -124,7 +285,8 @@ export const gitRemoteUrlSchema = z
       'must be an https, http or ssh URL, or an scp-style address with a user or a ' +
       'dotted host (git@github.com:owner/repo.git). A local file:// path is not a ' +
       'remote; for a single-word host write ssh://host/path.',
-  });
+  })
+  .transform((value) => redactGitUrl(value, true));
 
 /* MEASURED against git 2.54.0, which is what decides whether any of this is
  * right:

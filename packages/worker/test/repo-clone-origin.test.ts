@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { buildAuthenticatedUrl, gitSetOriginUrl } from '../src/repo/clone.js';
+import { gitSetOriginUrl } from '../src/repo/clone.js';
 
 const exec = promisify(execFile);
 const tmpDirs: string[] = [];
@@ -40,13 +40,5 @@ describe('clean-origin clone', () => {
     const after = await exec('git', ['-C', work, 'remote', 'get-url', 'origin']);
     expect(after.stdout.trim()).toBe('https://github.com/owner/repo.git');
     expect(after.stdout).not.toContain('ghp_secrettoken');
-  });
-
-  it('buildAuthenticatedUrl differs from the clean URL (so handleClone resets it)', () => {
-    const clean = 'https://github.com/owner/repo.git';
-    const authed = buildAuthenticatedUrl(clean, 'user', 'ghp_token');
-    expect(authed).not.toBe(clean);
-    expect(authed).toContain('user');
-    expect(authed).toContain('ghp_token');
   });
 });

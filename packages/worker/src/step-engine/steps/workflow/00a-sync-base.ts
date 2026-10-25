@@ -85,13 +85,14 @@ async function fetchOrigin(
   ctx: StepContext,
   base: string,
   credentialId: string | null,
+  remoteUrl: string | null,
 ): Promise<{ ok: boolean; error: string | null }> {
   const env: Record<string, string> = { GIT_TERMINAL_PROMPT: '0' };
   const argv: string[] = [];
   let secret: string | null = null;
   if (credentialId) {
     try {
-      const helper = await buildCredentialHelper(ctx.db, credentialId, ctx.userId);
+      const helper = await buildCredentialHelper(ctx.db, credentialId, ctx.userId, remoteUrl);
       secret = helper.secret;
       Object.assign(env, helper.env);
       argv.push(...helper.argv);
@@ -208,11 +209,16 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     const repo = task?.repositoryId
       ? await ctx.db.query.repositories.findFirst({
           where: eq(schema.repositories.id, task.repositoryId),
-          columns: { credentialsSecretId: true },
+          columns: { credentialsSecretId: true, remoteUrl: true },
         })
       : null;
 
-    const fetch = await fetchOrigin(ctx, base, repo?.credentialsSecretId ?? null);
+    const fetch = await fetchOrigin(
+      ctx,
+      base,
+      repo?.credentialsSecretId ?? null,
+      repo?.remoteUrl ?? null,
+    );
     if (!fetch.ok) {
       return { ...empty, ...baseFields, hasOrigin: true, fetchOk: false, fetchError: fetch.error };
     }

@@ -82,6 +82,9 @@ function ctxFor(fixtures: Fixture[]): StepContext {
     name: f.name,
     sourceType: 'git',
     gitBranch: 'main',
+    gitUrl: git(f.clone, 'remote', 'get-url', 'origin').trim(),
+    gitCredentialsId: null,
+    userId: 'u1',
     storageRoot: f.clone,
     lastSyncCommit: null,
     status: 'active',
@@ -220,11 +223,11 @@ describe('00-bundle-resync git bounds', () => {
     const detected = await step.detect(ctx);
     const err = detected.candidates[0]?.fetchError ?? '';
     expect(err).toMatch(/git fetch failed \(exit 128\)/);
-    expect(err).toContain('https://***@');
+    expect(err).toContain('https://example.com/');
     expect(err).not.toContain('s3cret');
   });
 
-  it('runs the fetch with askpass echo and no prompt', async () => {
+  it('runs the fetch without interactive prompting', async () => {
     const a = await makeBundle('alpha');
     const ctx = ctxFor([a]);
     const seen = path.join(path.dirname(a.bare), 'seen');

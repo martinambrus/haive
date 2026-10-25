@@ -2,6 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
+import { safeErrorMessage } from '@haive/shared/logger';
 import {
   lockRepositoryTasksKey,
   schema,
@@ -21,6 +22,7 @@ import { resolveGitEnv } from '../secrets/user-git-identity.js';
 import {
   originGitRun,
   buildCredentialHelper,
+  taskRemoteUrl,
   gitRun,
   pushBranch,
   scrubSecret,
@@ -449,6 +451,7 @@ async function reachDone(
         sha,
         setUpstream: fv.setUpstream !== false,
         credentialId: fv.credentialId || undefined,
+        remoteUrl: fv.credentialId ? await taskRemoteUrl(ctx) : null,
         db,
         userId: ctx.userId,
       }));
@@ -660,7 +663,12 @@ async function fetchForSync(
   let secret: string | null = null;
   if (credentialId) {
     try {
-      const helper = await buildCredentialHelper(db, credentialId, ctx.userId);
+      const helper = await buildCredentialHelper(
+        db,
+        credentialId,
+        ctx.userId,
+        await taskRemoteUrl(ctx),
+      );
       secret = helper.secret;
       Object.assign(env, helper.env);
       argv.push(...helper.argv);
@@ -1038,7 +1046,11 @@ async function putBackBeforeFeatureMerge(
       baseBranch: state.baseBranch,
     });
   } catch (err) {
-    const message = `Nothing was merged: ${err instanceof Error ? err.message : String(err)}`;
+    ctx.logger.error(
+      { err, taskId: params.taskId, taskStepId: current.id },
+      'failed to put back Haive files before merge',
+    );
+    const message = `Nothing was merged: ${safeErrorMessage(err)}`;
     return {
       halted: await haltFailed(db, current, params, state, message, 'haive files not put back'),
     };

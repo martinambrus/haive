@@ -80,6 +80,7 @@ function makeQueue() {
 function makeFake() {
   return createFakeDb({
     repositories: schema.repositories,
+    repoCredentials: schema.repoCredentials,
     customBundles: schema.customBundles,
     customBundleUploads: schema.customBundleUploads,
     projectStateOutbox: schema.projectStateOutbox,
@@ -555,4 +556,74 @@ describe('zip complete, the normal path', () => {
 
     expect(statusAtAdd).toBe('completing');
   });
+});
+
+const CRED = '00000000-0000-4000-8000-0000000000d1';
+it.each(['other.test', 'example.test:8443'])(
+  'refuses a bundle credential for %s before persisting or queuing',
+  async (host) => {
+    fake.insert(schema.repoCredentials, { id: CRED, userId: USER, host });
+    const res = await post('/', {
+      repositoryId: REPO,
+      name: 'kit',
+      gitUrl: 'https://example.test/repo',
+      gitCredentialsId: CRED,
+      enabledKinds: ['agent'],
+    });
+    expect(res.status).toBe(400);
+    expect(fake.rows(schema.customBundles)).toHaveLength(0);
+    expect(queue.jobs).toHaveLength(0);
+    expect(fake.rows(schema.projectStateOutbox)).toHaveLength(0);
+  },
+);
+it('creates and queues a bundle with an owned matching credential', async () => {
+  fake.insert(schema.repoCredentials, { id: CRED, userId: USER, host: 'example.test' });
+  const res = await post('/', {
+    repositoryId: REPO,
+    name: 'kit',
+    gitUrl: 'https://example.test:443/repo',
+    gitCredentialsId: CRED,
+    enabledKinds: ['agent'],
+  });
+  expect(res.status).toBe(201);
+  expect(fake.rows(schema.customBundles)).toHaveLength(1);
+  expect(queue.jobs).toHaveLength(1);
+});
+it.each([false, true])(
+  'keeps a missing or foreign bundle credential hidden (foreign=%s)',
+  async (foreign) => {
+    if (foreign)
+      fake.insert(schema.repoCredentials, { id: CRED, userId: REPO, host: 'other.test' });
+    const res = await post('/', {
+      repositoryId: REPO,
+      name: 'kit',
+      gitUrl: 'https://example.test/repo',
+      gitCredentialsId: CRED,
+      enabledKinds: ['agent'],
+    });
+    expect(res.status).toBe(404);
+    expect(fake.rows(schema.customBundles)).toHaveLength(0);
+    expect(queue.jobs).toHaveLength(0);
+  },
+);
+it('redacts credential URLs from a legacy failed bundle diagnostic in the summary', async () => {
+  fake.insert(schema.customBundles, {
+    id: BUNDLE,
+    userId: USER,
+    repositoryId: REPO,
+    name: 'kit',
+    sourceType: 'git',
+    enabledKinds: ['agent'],
+    status: 'failed',
+    storageRoot: '/bundles/kit',
+    updatedAt: new Date(),
+    gitUrl: 'https://example.test/repo',
+    lastSyncError: 'failed https://fixture-user:fixture-password@example.test/repo',
+  });
+  const res = await app.request('/');
+  expect(res.status).toBe(200);
+  const text = await res.text();
+  expect(text.includes('fixture-password')).toBe(false);
+  expect(text.includes('fixture-user')).toBe(false);
+  expect(text).toContain('failed https://example.test/repo');
 });

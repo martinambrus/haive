@@ -5,6 +5,7 @@ import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   originGitRun,
   buildCredentialHelper,
+  taskRemoteUrl,
   OriginUrlError,
   getOriginUrl,
   gitRun,
@@ -74,7 +75,12 @@ async function fetchOrigin(
   let secret: string | null = null;
   if (credentialId) {
     try {
-      const helper = await buildCredentialHelper(ctx.db, credentialId, ctx.userId);
+      const helper = await buildCredentialHelper(
+        ctx.db,
+        credentialId,
+        ctx.userId,
+        await taskRemoteUrl(ctx),
+      );
       secret = helper.secret;
       Object.assign(env, helper.env);
       argv.push(...helper.argv);
