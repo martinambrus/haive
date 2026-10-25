@@ -213,7 +213,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(out).toMatchObject({ synced: true, base: 'main', strategy: 'ff' });
       expect(await gitCode(local, ['show', 'main:b.txt'])).toBe(0); // ff brought c2 in
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -251,7 +251,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(atResync).not.toBe(before);
       expect(atResync).toBe(await head());
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -280,7 +280,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
     } finally {
       await shim?.restore();
       claimFake.reset();
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -302,7 +302,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect([...handBack.chowned].sort()).toEqual(['b.txt', 'dir', 'dir/sub', 'dir/sub/c.txt']);
     } finally {
       asRoot.mockRestore();
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -329,7 +329,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
         projections.setAside.mock.invocationCallOrder[0]!,
       );
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -351,7 +351,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(projections.setAside).not.toHaveBeenCalled();
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -372,7 +372,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(typeof projections.setAside.mock.calls[0]?.[3]).toBe('function');
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -392,7 +392,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(out.reason).toContain('working in this checkout');
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -414,7 +414,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
     } finally {
       claimFake.reset();
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -440,7 +440,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(projections.putBack).toHaveBeenCalledTimes(1);
     } finally {
       claimFake.reset();
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -461,7 +461,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       );
     } finally {
       claimFake.reset();
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -479,7 +479,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(claimFake.claims.has(local)).toBe(false);
     } finally {
       claimFake.reset();
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(local, { recursive: true, force: true });
     }
   });
@@ -503,7 +503,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
       expect(projections.resync).not.toHaveBeenCalled();
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -528,7 +528,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(out.reason).toContain('.haive-data/state/project/render.json');
       expect((await git(local, ['rev-parse', 'HEAD'])).trim()).toBe(before);
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -549,7 +549,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(projections.restore).toHaveBeenCalledTimes(2);
       expect(projections.resync).toHaveBeenCalledTimes(1);
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -573,7 +573,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(projections.putBack).toHaveBeenCalledTimes(1);
       expect(projections.resync).not.toHaveBeenCalled();
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -597,7 +597,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(projections.setAside).not.toHaveBeenCalled();
       expect(projections.resync).not.toHaveBeenCalled();
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -615,7 +615,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(out).toMatchObject({ synced: true, strategy: 'noop' });
       expect(d.compareError).toBeNull();
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -639,7 +639,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(out).toMatchObject({ synced: false, base: 'main', strategy: 'skipped' });
       expect(out.reason).toContain('could not compare main with origin/main');
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -661,7 +661,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       const out = await syncBaseStep.apply(ctx, applyArgs(d, { base: 'other' }));
       expect(out.reason ?? '').not.toContain('could not compare');
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -678,7 +678,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
       expect(projections.setAside).not.toHaveBeenCalled();
       expect(projections.resync).toHaveBeenCalledWith(ctx.db, 'repo-1', local);
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -725,7 +725,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
           /git remote get-url origin failed in /,
         );
       } finally {
-        await rm(bare, { recursive: true, force: true });
+        await rm(bare, { recursive: true, force: true, maxRetries: 5 });
         await rm(local, { recursive: true, force: true });
       }
     });
@@ -743,7 +743,7 @@ describe('00a-sync-base detect + apply (real git)', () => {
         const d = await syncBaseStep.detect!(mkCtx(local));
         expect(d.hasOrigin).toBe(true);
       } finally {
-        await rm(bare, { recursive: true, force: true });
+        await rm(bare, { recursive: true, force: true, maxRetries: 5 });
         await rm(local, { recursive: true, force: true });
       }
     });
@@ -845,7 +845,7 @@ async function mergeOverKeptFile(synced: boolean) {
     expect(merge.resolved).toBe(true);
     return h.getState();
   } finally {
-    await rm(bare, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     await rm(seed, { recursive: true, force: true });
     await rm(local, { recursive: true, force: true });
   }
@@ -891,7 +891,7 @@ describe('00a-sync-base divergence (real git + merge phase)', () => {
       expect(projections.seed).toHaveBeenCalledWith(h.db, 'repo-1', local);
       expect(atSeed).toBe(before);
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -943,7 +943,7 @@ describe('00a-sync-base divergence (real git + merge phase)', () => {
       );
       expect(out).toMatchObject({ synced: true, strategy: 'merge' });
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -1050,7 +1050,7 @@ async function clearStaleMergeThenDie(phase: 'pending' | 'resolving') {
     const staleGone = (await gitCode(local, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])) !== 0;
     return { takenWhileOpen, staleGone, state: h.getState() };
   } finally {
-    await rm(bare, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true, maxRetries: 5 });
     await rm(seed, { recursive: true, force: true });
     await rm(local, { recursive: true, force: true });
   }
@@ -1389,7 +1389,7 @@ describe('a same-branch merge while other tasks work in the checkout itself', ()
       expect(await gitCode(local, ['show', 'main:origin.txt'])).toBe(0);
       expect((await git(local, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()).toBe('dev');
     } finally {
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }
@@ -1612,7 +1612,7 @@ it.each(['detect', 'fetch'])(
     } finally {
       originSpy?.mockRestore();
       run.mockRestore();
-      await rm(bare, { recursive: true, force: true });
+      await rm(bare, { recursive: true, force: true, maxRetries: 5 });
       await rm(seed, { recursive: true, force: true });
       await rm(local, { recursive: true, force: true });
     }

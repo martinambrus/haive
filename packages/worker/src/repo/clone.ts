@@ -37,6 +37,7 @@ import {
   type RepoJobPayload,
 } from '@haive/shared';
 import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
+import { isAllowedGitRemoteUrl } from '@haive/shared/schemas';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import {
   ENVIRONMENT_UNIT,
@@ -53,7 +54,7 @@ import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { syncProjectStateFromCheckout } from '../project-state/sync.js';
 import { raiseRtkQuestion } from '../project-state/rtk-conflict.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
-import { buildCredentialHelper } from './git-push.js';
+import { buildCredentialHelper, OriginUrlError } from './git-push.js';
 import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from './tool-spawn.js';
 import { splitUploadPath } from './worktree-paths.js';
 import { hardenGitArgs } from './git-exec.js';
@@ -75,12 +76,13 @@ export function buildAuthenticatedUrl(url: string, username: string, secret: str
  *  helper from buildCredentialHelper), the token rides in env and git resolves
  *  it per-challenge — so credentials survive a protocol-change redirect (e.g. a
  *  Gitea/nginx http->https 301) that would drop URL-embedded userinfo. */
-export function gitClone(
+export async function gitClone(
   url: string,
   dest: string,
   branch?: string,
   auth?: { argv: string[]; env: Record<string, string>; secret: string },
 ): Promise<void> {
+  assertCloneUrl(url);
   return new Promise((resolve, reject) => {
     const args = [...(auth?.argv ?? []), 'clone', '--depth', '1'];
     if (branch) args.push('--branch', branch);
@@ -107,6 +109,14 @@ export function gitClone(
       reject(new Error(`git clone failed (exit ${code}): ${msg}`));
     });
   });
+}
+
+/** Legacy database rows cross the same URL boundary as newly submitted remotes. */
+export function assertCloneUrl(
+  url: string,
+  context: 'clone' | 'refresh' | 'bundle' = 'clone',
+): void {
+  if (!isAllowedGitRemoteUrl(url)) throw new OriginUrlError(url, 'fetch', context);
 }
 
 /** Point origin at a (tokenless) URL. Used after a credentialed clone so the
@@ -785,6 +795,7 @@ export async function handleClone(
 ): Promise<void> {
   if (!payload.remoteUrl) throw new Error('remoteUrl required for clone job');
   const remoteUrl = payload.remoteUrl;
+  assertCloneUrl(remoteUrl);
   return withRootClaim(db, payload.repositoryId, async () => {
     const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
     await mkdir(path.dirname(dest), { recursive: true });

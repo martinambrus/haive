@@ -2485,8 +2485,8 @@ const execGit = promisify(execFile);
  * only route was to delete the repository and re-add it from a URL, which
  * throws away its plan, its tasks and its knowledge base.
  *
- * Runs in the api rather than the worker. `git remote set-url` writes one config
- * key: it moves no HEAD, touches no working tree and rewrites no history, which
+ * Runs in the api rather than the worker. Relinking writes git configuration:
+ * it moves no HEAD, touches no working tree and rewrites no history, which
  * is the line everything else respects — commit, push and the fast-forward pull
  * all remain worker jobs. The api already shells out (docker-cli, and the
  * read-only git probes behind the plan snapshot) against this same checkout.
@@ -2525,6 +2525,7 @@ repoRoutes.post('/:id/remote', async (c) => {
     try {
       const { stdout, stderr } = await execGit('git', hardenGitArgs(args), {
         cwd: root,
+        env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(root) },
         timeout: 10_000,
       });
       return {
@@ -2544,6 +2545,19 @@ repoRoutes.post('/:id/remote', async (c) => {
     }
   };
 
+  // Without its own .git entry, upward discovery would relink a parent checkout.
+  const entry = await lstatNoFollow(root, '.git', { strict: true }).catch((err: unknown) => {
+    throw new HttpError(
+      409,
+      `This repository could not be examined: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
+  if (!entry || entry.kind === 'symlink') {
+    throw new HttpError(
+      409,
+      'This repository has no usable .git entry of its own, so it cannot have a remote',
+    );
+  }
   const inside = await git(['rev-parse', '--is-inside-work-tree']);
   if (!inside.ok || !['true', 'false'].includes(inside.stdout)) {
     const reason = inside.stderr || inside.stdout || 'no answer';
@@ -2556,14 +2570,27 @@ repoRoutes.post('/:id/remote', async (c) => {
     throw new HttpError(409, 'This repository is not a Git checkout, so it cannot have a remote');
   }
 
-  // add-then-set-url rather than a `git remote` listing first: idempotent in one
-  // round trip, and re-pointing an existing origin is a legitimate use of this.
+  // Exit 3 identifies an existing remote. Replace all fetch URLs and clear push URLs
+  // so both directions use the address being persisted to the repository row.
   const added = await git(['remote', 'add', 'origin', body.remoteUrl]);
   if (!added.ok) {
     if (added.code !== 3) {
       throw new HttpError(409, `Could not add the remote: ${added.stderr || added.stdout}`);
     }
-    const updated = await git(['remote', 'set-url', 'origin', body.remoteUrl]);
+    const cleared = await git(['config', '--local', '--unset-all', 'remote.origin.pushurl']);
+    if (!cleared.ok && cleared.code !== 5) {
+      throw new HttpError(
+        409,
+        `Could not clear the remote's push URLs: ${cleared.stderr || cleared.stdout}`,
+      );
+    }
+    const updated = await git([
+      'config',
+      '--local',
+      '--replace-all',
+      'remote.origin.url',
+      body.remoteUrl,
+    ]);
     if (!updated.ok) {
       throw new HttpError(409, `Could not update the remote: ${updated.stderr || updated.stdout}`);
     }

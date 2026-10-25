@@ -121,21 +121,15 @@ From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it
 4. (T388 review) The operator scripts run `fetch --all` with no origin validation (scripts/advance-bundle-items.ts ~:66, reset-bundle-to-commit.ts ~:88); route them through the T388 origin read when they are bounded. Minor.
 5. (T417 review) PRE-EXISTING, minor: scripts/reset-bundle-to-commit.ts ~:156-157 writes repository files by pathname (`mkdir`, `writeFile`) under `repo.storagePath`, outside fs-safe and outside the fs-ratchet's scan (src only). Operator script.
 
-### T414 · FNF[deps-alerts-2] · 9 open Dependabot alerts on main (3 critical: next, dompurify)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-24T17:47Z · last: 2026-10-24T20:52Z (PR #891 merged b1a791b52, main CI green on 4f91759b1; waiting for Dependabot to re-scan: alerts #108-#116 still open although the dependency graph lists only the patched versions)
-Seen 2026-10-24 by fnf-run on a push (alerts #108-#116, opened 2026-10-23). (Session fnf-run mirrors it as task #331.)
-
-1. next → 16.4.1 (2 critical, 1 high): Dependabot PR #857 open since before the alerts; needs CI + review, then `pnpm docker rebuild`.
-2. dompurify → 3.4.17 (1 critical, 1 high, 1 low) and markdown-it → 14.3.3 (1 high, 1 low): check whether group PRs #838/#839 carry them; else a lockfile-only bump (memory: adding a dependency).
-3. zod → 4.6.6 (1 high): Dependabot PR #859.
-   Route: one lockfile PR, a web browser check of markdown rendering (MarkdownView) since dompurify + markdown-it sit under it.
-
 ### T415 · FNF[upload-retry] · Retry on an errored upload repository can never succeed
 
-status: open
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · independent upload review passed; connected Retry capability and decisive source/release tests remain
+
+Codex progress 2026-10-25T16:25Z: Connected Retry capability and meaningful durable upload/release controls implemented; final driver checks/commit pending.
 From the T323 review (2026-10-24). PRE-EXISTING, consequential. The repos page Retry (web repos/page.tsx ~:180-187, shown for any `error` repo) posts to refresh-tree, which answers 409 "Nothing to refresh from: this repository has no remote." for an upload repository without a remote (api repos.ts ~:3165-3167); nothing else re-queues an extract. The copy promises it: repos.ts ~:219-221 "Use Retry to try again", data-migrations.ts ~:361-362 "Use Retry to start again", and clone.ts ~:675-677 keeps the archive "for a retry" (the reaper removes an `error` repository's archive after 24 h).
 Recommended: Retry on an `error` upload repository re-queues EXTRACT while its archive is still on disk; otherwise the copy says to delete and upload again (no Retry).
+
+Connected completion after independent recovery review: errored blank/no-remote repositories still advertise Retry though refresh-tree always refuses; make capability/recovery copy truthful. Add coverage for single-shot upload-source persistence and replace the vacuous mocked root-claim release assertion with a decisive control. Upload metadata retention remains parked with T323 item 4. Evidence: .claude/tmp/board-run/T415/codex-review-recovery.md.
 
 ### T416 · FNF[web-runtime-tests] · proxy(), DOMPurify and markdown-it run only in a browser; CI never boots the production web image (+2)
 
@@ -145,31 +139,6 @@ From the T414 review (2026-10-24). All PRE-EXISTING, consequential for dependenc
 1. No test executes `proxy()` (packages/web/src/proxy.ts: auth redirect ~:22, CSP header ~:36, cookie clearing ~:41-42); proxy-matcher.test.ts imports only `config`. The CSP is the control markdown-rendering.md names for never fetching agent-named images.
 2. No test sanitizes through DOMPurify or parses through markdown-it: packages/web/vitest.config.mts sets no DOM environment; mermaid-loader.test.ts is import-level; markdown-extensions.test.ts never passes a string to tiptap-markdown (`html: true` path).
 3. PR CI builds the production web stage but never starts it (.github/workflows/ci.yml ~:407-430); the first boot is release.yml ~:235-252, after publish, although next.config.mjs ~:8-13 records a standalone MODULE_NOT_FOUND crash loop that shipped once. Fix: boot the built image and curl /login (200 + CSP) and an unauthenticated /dashboard (307 to /login), as the T414 session check did.
-
-### T417 · FNF[origin-url-2] · origin follow-ups after T388: clone URLs, relink push URLs, remote-helper syntax, nested probe (+5)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:55Z · last: 2026-10-25T00:55Z
-From the T388 review (2026-10-24). All PRE-EXISTING.
-
-1. gitClone of DB-stored URLs is not re-checked by isAllowedGitRemoteUrl and gets no file guard (repo/clone.ts ~:798, repo/refresh.ts ~:293, repo/bundle-ingest.ts ~:196); needs a legacy row. Minor.
-2. A relink (`remote set-url origin <url>`, git-push.ts ensureOrigin and api repos.ts link-remote) replaces only the first fetch URL and leaves `remote.origin.pushurl`, so a leftover push URL keeps receiving pushes (with the bound credential, see T340 item 2) while the UI shows the new remote. Consequential, narrow. Fix: clear push URLs on relink.
-3. The rule admits `a.b::x` (shared schemas/git-url.ts ~:44-52, :85), which git reads as remote helper `git-remote-a.b`; inert unless such an executable is on PATH. Minor. Fix: refuse `::` transport syntax.
-4. The link-remote probe uses upward `.git` discovery (api repos.ts ~:2547), so a localPath nested inside another repository would set that repository's origin; repo/git-workspace.ts ~:15-48 checks `.git` first. Minor.
-5. (T388 fix-round reviews) The two operator scripts run `git fetch --all` (scripts/advance-bundle-items.ts ~:66, reset-bundle-to-commit.ts ~:88), which reaches every remote with neither the origin rule nor `protocol.file.allow=never`. PRE-EXISTING, minor (operator-run). Fix: fetch `origin` through the same validation, or refuse a remote the rule refuses.
-6. (T388 third review) Design limit, minor: `protocol.file.allow=never` is added only when the literal token `origin` is in the argv (shared git-args.ts ~:125-128), and the origin exec guard keys on the same token (worker origin-exec-guard.test.ts ~:84), so a future transport written without it (a bare `pull`, `fetch` with no remote, `remote update`) gets neither. Every current call passes `origin`. Fix: harden by verb (fetch, pull, push, ls-remote, remote update) rather than by the remote's name.
-
-### T418 · FNF[git-wording] · "nothing to commit" is still matched by git's English wording
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T01:20Z · last: 2026-10-25T02:45Z · merged PR #915, waiting for main CI
-From the T388 review (2026-10-24). PRE-EXISTING, minor. Same class as T388 item 4 (exit code, not wording), another command: steps/workflow/_kb-commit.ts ~:69, 10-gate-3-commit.ts ~:416, 11d-skill-sync.ts ~:527, run-app/99-run-app-ready.ts ~:335. A localized or reworded git turns "nothing to commit" into a failure. Fix: decide by `git diff --cached --quiet` (exit 1 = staged changes) before committing, or by the commit's exit code plus a staged-paths read.
-
-### T420 · FNF[cli-job-polling-2] · the pricing page ignores its refresh job; other jobs can trim a polled result early (+1)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:45Z · last: 2026-10-25T02:30Z · merged PR #914 (d6b37bac3), browser-checked, waiting for main CI
-From the T380 review (2026-10-24). PRE-EXISTING, minor.
-
-1. packages/web/src/app/(app)/admin/pricing/page.tsx ~:137-140 ignores the `jobId` "Refresh now" returns and re-reads once after a fixed 4 s, while the refresh can queue behind agents for minutes, so the page can show stale numbers. Poll the job (web lib/cli-jobs.ts) instead.
-2. The cli-exec `completed`/`failed` sets are shared by every job and INVOKE jobs trim them by count (worker queues/task-queue.ts ~:1409-1410, also ~:1312, ~:1327), so under load a retained probe, sign-out or refresh result can be reaped before CLI_POLLABLE_JOB_OPTS' 900 s, against its "outlast the poll window" intent.
 
 ### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+7)
 
@@ -337,7 +306,7 @@ A full-repository review in the style of the Codex PR reviews once Track B is me
 ### T300 · live re-checks owed at the next real onboarding + workflow run
 
 status: parked · reason: needs a real onboarding + workflow run (LLM tokens; check running tasks first)
-Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory.
+Items 1-20 (each with its memory file): skills per CLI after 09_5; frontmatter YAML; agent_rules stamp; declared verify commands; invariants-doc lever; prompt guard/fence (07_7); onboarding artifacts; plan breadth refusals; agent isolation 1/2/4; fs-safe live verification; #169 DDEV runner boot-subpath; #241 Terminal cwd; AGENTS.md split citations; parked experiments (Astra vs Sol, container-cleanup race, global KB purge, haive_rag_ddevtest drop); T293; #287 EROFS on state; #800 mounts; #751 set-aside on a real merge; #806 put-back; #815 reindex spot-check; T375 gate 3 on a worktree holding an untracked nested repo, with and without a commit (#909); T395 Stop offered for a running task whose current row is pending, and the "Nothing was running to stop." notice (no such task on the dev install; pressing Stop changes a real task) (#908); T363 New Task with one failed upload, the plan starter and the task page Start, each with confirm yes and no (#913). Full list: task #300 text in the fnf-run ledger / memory. Also owed (T427): replay the raw attach bytes of one real `claude setup-token` run through the OAuth capture and pin its wrap, newline and escape shapes in a fixture.
 
 ### T298 · house rules PR8 · switch similarity on with per-rule floors
 
@@ -463,7 +432,9 @@ Plan I4, part d. Browser check at 1280, 768 and 390.
 
 ### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+4)
 
-status: open · was modular #138
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · recovery round 2 e9d228647 committed (ambiguous diagnostic authority and pre-persistence Git form normalization); validation finishing
+
+Codex progress 2026-10-25T16:25Z: Fresh independent round3 review APPROVE at af28e4c; new task/default/continuation copies covered. Session integration verification pending.
 Items 2-5 merged (#781, #808).
 
 1. PRE-EXISTING, from reading the code (not reproduced). The PR is opened against the origin read from disk (12-worktree-cleanup.ts ~:226, ~:808-813), but pr-poll needs repositories.remote_url (pr-poll-queue.ts ~:136-142), which is NULL for local_path repos. Fix: record the origin on the PR row and poll from it, or backfill remote_url. Reproduce first.
@@ -475,6 +446,8 @@ Items 2-5 merged (#781, #808).
 3. (T388 review) PRE-EXISTING, minor: an accepted origin URL is returned raw, userinfo included, into step output (worker repo/git-push.ts getOriginUrl; 11a-gate-4-push.ts ~:111, 12-worktree-cleanup.ts ~:267), so a token embedded in a remote URL reaches the step's detect output. Fix: redact userinfo wherever a URL is shown or stored.
 4. (T417 review) PRE-EXISTING, consequential: bundle clones keep the credential in `remote.origin.url` (worker repo/bundle-ingest.ts ~:194-197 `buildAuthenticatedUrl`), a plaintext secret at rest beside the envelope-encrypted copy, and stale after a rotation; the resyncs (bundle-ingest.ts ~:53-61, bundle-sync.ts ~:13-18, 00-bundle-resync.ts ~:35-40) depend on it. Fix: move all four to `buildCredentialHelper`.
 5. (T417 review) PRE-EXISTING, consequential: a relink clears `remote.origin.url` and `pushurl` only; `url.<base>.insteadOf`/`pushInsteadOf`, `include.path` and `remote.origin.vcs` in an uploaded repository's `.git/config` survive, and `getOriginUrl` checks only the rewritten URL's shape, never its host, so the bound credential can go to a host the UI does not show. Same fix as item 2 (a host-bound helper).
+
+Recovery review (2026-10-25) confirmed required corrections before shipping: (a) REGRESSION: scrubSecret redacts URLs before the intact known secret, exposing a suffix when userinfo includes a quote; (b) REGRESSION: display redaction drops explicit default ports reused as a local-path credential binding; (c) PRE-EXISTING task gap: bundle creation checks credential ownership without shared host fit; (d) PRE-EXISTING task gap: onboarding bundle form still exposes legacy URL userinfo. Evidence: .claude/tmp/board-run/T340/codex-review-recovery.md and session-review-probe.log. Existing host-git config execution boundary remains T387; unbounded streaming clones remain T412.
 
 ### T341 · FNF[credential-connection-coupling] · deleting a Git credential silently deletes its connection; re-sign-in duplicates the credential (+13)
 
@@ -790,7 +763,9 @@ status: open · was modular #257
 
 ### T382 · FNF[auth-endpoint-hardening] · refresh rotation not CAS; login timing; no admin-authz sweep (+4)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:00Z · last: 2026-10-25T02:00Z · (T377 landed as PR #886) · was modular #261
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · session recovery 582e8d3ee reviewed; required public-page routing, slow refresh and session-writer ordering corrections queued
+
+Codex progress 2026-10-25T16:25Z: PR #918 updated to ee1e0c6e9; fresh review clean; parent browser4/API345 controls passed. Original race thread addressed/resolved; bot review/CI pending.
 
 1. api auth.ts ~:280-295: rotate with `UPDATE … WHERE revoked_at IS NULL RETURNING`, in a transaction.
 2. Login answers 401 before bcrypt for unknown accounts. Compare against a dummy hash; register's 409 too.
@@ -866,14 +841,6 @@ FIRST re-check each item on main: the #322 and #325 series fixed some of them.
 13. (T418 review) PRE-EXISTING, minor: worker repo/clone.ts ~:773-774 blank-repository init ignores the `git add` and `git commit` exit statuses and logs "Blank repo init complete".
 14. (T418 review) PRE-EXISTING, minor: step-engine/dag-executor.ts ~:477-490 `commitIssueWork` ignores the `add -A` status and only warns when the issue commit fails; the level then fails as "produced no branch changes" without the git error.
 
-### T398 · FNF[ide-proxy-hardening] · the IDE proxy replays forwarded headers and transfer-encoding; serves /proxy/<port> on the api origin (+2)
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:00Z · last: 2026-10-25T02:00Z · was modular #280
-
-1. Drop hop-by-hop and forwarded headers (transfer-encoding gives a 502 on chunked bodies, measured).
-2. The editor is on the api origin with code-server's /proxy/<port> enabled (worker ide-runner.ts ~:229-232). Measure, then disable it or move the IDE to its own origin.
-3. withoutSessionCookies splits on `;` inside a quoted value.
-
 ### T399 · FNF[probe-stored-targets] · stored-target probes still reach any address for non-admins (+1)
 
 status: open · kind: design · was modular #281
@@ -941,7 +908,7 @@ From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` r
 
 ### T423 · FNF[terminal-attach] · a failed attach-count write leaves the docker attach stream open; the count is read-then-write (+1)
 
-status: open
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T14:15Z · T427 now merged; integration/conflict fix can proceed
 From the T400 review (2026-10-24). PRE-EXISTING, minor.
 
 1. api routes/terminal.ts ~:106-112: `await incrementAttached(...)` throwing (database down) leaves the docker attach stream opened at ~:106 open; the `.catch` at ~:80 closes only the ws.
@@ -949,7 +916,9 @@ From the T400 review (2026-10-24). PRE-EXISTING, minor.
 
 ### T424 · FNF[nested-repo-worktree] · gate 3 offers a commit that git add will refuse for an unborn nested repo; the review collector calls a nested repo a new file (+1)
 
-status: open
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · fresh review found dependency guard excludes proposed unborn-boundary staging too late; focused fix required
+
+Codex progress 2026-10-25T16:25Z: Focused guard/exclusion correction in progress; preserves full tracked/fork-point checks and upstream-source refusal.
 From the T375 review (2026-10-24). PRE-EXISTING, minor.
 
 1. worker 10-gate-3-commit.ts ~:375, ~:407-410: with an unborn nested repo (`git init`, no commit) in the worktree the whole `git add -A` fails, but the form still defaults the commit on and the failure shows only at Finalise. Since T375 the preview says why. Fix: say so in the form, or stage around it.
@@ -962,17 +931,16 @@ From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. w
 
 ### T426 · FNF[db-error-params] · a failed query's error message carries its bound params (secret fingerprints, ciphertext, container env) into logs and the browser (+1)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:40Z · last: 2026-10-25T02:40Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · recovery e1e9314d1 complete; shared, worker and API suites pass; fresh independent review next
+
+Codex progress 2026-10-25T16:25Z: PR #921 at 54c941ed2; fresh review clean and parent21 warning controls passed. Bot review/CI pending; GitGuardian synthetic-fixture findings under investigation.
 From the T422 review (2026-10-24). PRE-EXISTING, consequential in kind, rare (mechanism read from source, not triggered).
 
 1. drizzle-orm 0.45.2 builds `DrizzleQueryError.message` from every bound param (drizzle-orm errors.js ~:12). Three writers bind a secret's fingerprint (first 8 and last 4 characters, shared crypto/index.ts ~:87-90) and ciphertext: shared cli-providers/provider-secret.ts ~:26-35, shared config/user-secrets.service.ts ~:92-112, worker usage-window/token-source.ts ~:39-56. api middleware/error-handler.ts ~:59 logs `err` for any unhandled failure, so a failed secret write logs up to 12 characters of the secret.
 2. api routes/cli-login-banner.ts ~:328 forwards the worker's Error.message to the browser (worker queues/cli-exec/handlers.ts ~:1040, ~:1088); a failed containers insert binds env_vars (worker sandbox/login-container.ts ~:94-107).
    Fix: one sanitizer for logged and returned database errors (class name and `code` walked through `cause`, never message or params), used by the error handler and every forwarder.
 
-### T427 · FNF[claude-token-extract] · the Claude OAuth capture depends on an exact 95-character token body
-
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:40Z · last: 2026-10-25T02:40Z
-From the T422 review (2026-10-24). PRE-EXISTING, minor, latent. api routes/cli-login-banner.ts ~:199-211 `extractClaudeOauthToken`: run inline, a 100-character body is accepted and cut to 108 characters, and a 90-character body followed by "Store this token securely" is accepted with 5 characters of the prose appended. Today's tokens match; a format change would save a wrong token, which the probe should then reject visibly. Fix: end the token at the first character outside its alphabet, and test the boundary.
+Recovery review (2026-10-25) confirmed connected corrections: mixed aggregates must retain the bound DB member's SQLSTATE; ordinary recovery aggregate strings must retain their existing class prefixes. Four PRE-EXISTING sibling sinks still stringify DB messages before persistence/return: project-state/refresh.ts outbox last_error, repo/bundle-ingest.ts all three failure paths, queues/cli-exec/images.ts probe result and sandbox/ollama-provision.ts status/result. Include these in the current sanitizer fix. Historical-row cleanup stays excluded as previously decided. Evidence: .claude/tmp/board-run/T426/codex-review-recovery.md, session-review-probe.log.
 
 ### T428 · FNF[refresh-result-hidden] · a version or price refresh that fails reports ok:false that no page reads
 
@@ -986,13 +954,56 @@ From the T417 review (2026-10-25), follow-up to T417 item 6. Minor, hardening. V
 
 ### T430 · FNF[unscoped-commits] · the knowledge-base and skill-sync commits take whatever else is staged
 
-status: open
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · fresh review found staged deletion of entire owned root excluded by scope; focused fix required
+
+Codex progress 2026-10-25T16:25Z: Focused owned-root deletion correction11982aa1d2; 113 touched+107related controls pass; fresh review pending.
 From the T418 review (2026-10-25). PRE-EXISTING, minor. steps/workflow/_kb-commit.ts ~:67 and 11d-skill-sync.ts ~:519 commit the whole index (no pathspec), so anything a person staged in the task worktree (for example from the Terminal tab) lands in the "update knowledge base" or skill-sync commit. Fix: commit with the step's own pathspec (`--only`), as plan/snapshot-git.ts does.
+
+### T431 · FNF[ide-container-lifecycle] · a running editor container is reused whatever its launch flags or image; a task editor that never got a socket is never idle-reaped (+1)
+
+status: open
+From the T398 review (2026-10-25). PRE-EXISTING.
+
+1. Consequential: worker sandbox/ide-runner.ts ~:360-371 `ensureIdeRunnerStartedInner` returns the running container when only the workspace-subpath label matches; flags and image are never compared, so a changed launch flag (T398's `--disable-proxy`) or a `CODE_SERVER_IMAGE` bump (shared constants ~:814) never reaches a running editor, which lives as long as its tab is open. Fix: stamp a launch-spec label at create and recreate on mismatch, as `runnerSubpathVerdict` does for the subpath (app-runner.ts ~:353-369), at a moment that does not kill a live session.
+2. Minor: a task editor gets its `ide:session:` hash only when its first WebSocket connects (worker queues/ide-ensure-queue.ts ~:31-51 and the api ensure route write nothing; the repository path does, ~:81-87), and the idle reaper walks existing hashes only (ide-session-reaper.ts ~:70-105), so a task editor that never got a socket lives until the task ends.
+
+### T432 · FNF[ssr-session-refresh] [verify-first] · the server-side session check revokes the refresh token it never hands back
+
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · connected T382 recovery correction; same PR #918; remains unfinished
+
+Codex progress 2026-10-25T16:25Z: Implemented with T382 in PR #918 at ee1e0c6e9; parent real browser recovery/ordering controls passed. Delivery gates pending.
+From the T382 review (2026-10-25). PRE-EXISTING, consequential if it reproduces (verified by reading only). web app/(app)/layout.tsx ~:77-95: (a) a refresh 401, including a redemption that lost T382's new race, ends the session at once (redirect to `/login?session=expired`, then web proxy.ts ~:37-42 deletes both cookies) without the `/auth/me` re-check the browser client does (web lib/api-client.ts ~:66-71); (b) the rotated Set-Cookie is read only to build an internal header (~:86-92) and nothing forwards it to the browser, so the browser keeps the refresh token that call just revoked, and a returning user whose access cookie expired may be bounced to sign-in. A layout cannot set cookies, so the fix likely moves the server-side refresh into the proxy (which can) or skips it. Reproduce first.
+
+### T433 · FNF[cli-login-url-capture] · the login banner sends the auth URL before its chunk completes
+
+status: open
+From the T427 review (2026-10-25), F2. PRE-EXISTING, minor, latent. api routes/cli-login-banner.ts ~:673-699 (authUrlSent set once ~:677; shared auth-banner-parser.ts ~:77-99): the URL is sent as soon as its prefix appears, so a chunk boundary inside it sends the head of the URL (function-level: a 50-character head of a 65-character URL is returned as the URL) and the user gets a broken link with no correction. Wait for a terminator after the URL (whitespace, end of line or a closing escape) before sending, or re-send when the URL grows. Real chunking of the URL frame not observed.
+
+### T434 · FNF[token-save-before-probe] [design] · a captured CLI token overwrites the stored one before the probe verifies it
+
+status: open
+From the T427 review (2026-10-25), F3. PRE-EXISTING design. api routes/cli-login-banner.ts ~:976-982 (`onExisting: 'overwrite'`, then the probe): any wrong capture replaces the user's working CLAUDE_CODE_OAUTH_TOKEN before the probe runs, so a failed probe leaves the user with neither. Keep the old value until the probe passes (probe with the candidate, then write), or restore it on a failed probe. Needs a decision on how the probe gets the candidate (it reads the stored secret today).
+
+### T435 · FNF[web-api-cookie-transport] [design] · different web/API hostnames cannot establish the server-rendered session
+
+status: open · kind: design · scope: queued broader finding, not approved implementation
+
+PRE-EXISTING, verified during T382/T432 recovery review. API cookies are host-only (`packages/api/src/auth/cookies.ts`), while the web proxy/layout require cookies at the web hostname; `packages/web/src/lib/api-origin.ts` accepts a different explicit API hostname. Login against that API cannot establish the SSR web session. CORS does not transfer cookies between hostnames; different sites also face SameSite=Lax. Same hostname/different ports is supported and tested. Decide on web-origin API proxying or an explicit cookie/SSO deployment contract before changing transport. Evidence: `.claude/tmp/board-run/T382/codex-review-session-recovery-fix-2.md` F2 and branch session-recovery.md. Keep single-use refresh rotation; this is separate from the current T382 correction.
 
 ## Done
 
+- T427 — Claude OAuth token capture fails closed across wrapped and split CR boundaries — PR #920 (a04601009), main CI 40198900044 green, 2026-10-25
+
+- T398 — IDE proxy header/cookie hardening and disabled port proxy — PR #917 (b504c18b8), main CI green, 2026-10-25
+
+- T417 — stored clone URL checks, relink push URLs, helper syntax and origin probes — PR #916 (d6efc7923), main CI b504c18b8 green, 2026-10-25
+
+- T414 — patched next, dompurify, markdown-it and zod; alerts #108–#116 now confirmed fixed — PR #891 (b1a791b52), main CI green, 2026-10-25
+
 (One line per finished task: `T<n> — <title> — PR #<n> (<merge sha>), <date>`.)
 
+- T418 — an empty commit is decided by the staged diff's exit code (submodule ignore and open merge handled), never by git's wording (leftovers in T397, T430) — PR #915 (ab398f836), 2026-10-25
+- T420 — the pricing page waits for its refresh job; cli-exec retention is by age so no job trims a pollable result early (browser-checked; leftovers in T428) — PR #914 (d6b37bac3), 2026-10-25
 - T363 — the expected attachment count is recorded at create and Start confirms "N of M attachments are missing" (migration 0211; live flow owed, T300) — PR #913 (f5bbce839), 2026-10-25
 - T400 — one WebSocket upgrade authenticator and refusal; a deactivation, reset or password change closes the user's open and pending sockets (1008); upgrade sockets cannot crash the api (live probe passed) — PR #912 (eb54d0f3a), 2026-10-25
 - T306 — step 12's written runs guarded, 04's rollback runs seeded with the snapshot they need, the revive fake given its table (test-only; fake-db class hazard in T364) — PR #911 (adad1b8d8), 2026-10-25
