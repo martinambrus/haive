@@ -1,4 +1,6 @@
-import { originGitRun } from './git-push.js';
+import { buildCredentialHelper, originGitRun, scrubSecret } from './git-push.js';
+import { bundleGitAuth } from './bundle-git.js';
+import { redactGitUrl } from '@haive/shared/schemas';
 import path from 'node:path';
 import { ensureDirNoFollow, lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
@@ -7,8 +9,7 @@ import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { logger, type ArchiveFormat, type BundleJobPayload } from '@haive/shared';
 import { isBundleRootDir } from '../bundle-parser/classifier.js';
 import { parseBundle, persistBundleItems } from '../bundle-parser/index.js';
-import { assertCloneUrl, buildAuthenticatedUrl, extractArchive, gitClone } from './clone.js';
-import { getDecryptedCredentials } from './credentials.js';
+import { assertCloneUrl, extractArchive, gitClone } from './clone.js';
 import { gitRun } from './git-exec.js';
 
 /** Resolves the per-bundle storage root inside the haive_bundles volume. The
@@ -50,12 +51,16 @@ export async function gitRevParseHead(cwd: string): Promise<string> {
   return res.stdout.trim();
 }
 
-async function gitFetchAndCheckout(cwd: string, branch?: string): Promise<void> {
+async function gitFetchAndCheckout(
+  db: Database,
+  bundle: typeof schema.customBundles.$inferSelect,
+): Promise<void> {
   const args = ['pull', '--ff-only', 'origin'];
-  if (branch) args.push(branch);
-  const res = await originGitRun(cwd, args, { GIT_ASKPASS: 'echo' });
+  if (bundle.gitBranch) args.push(bundle.gitBranch);
+  const auth = await bundleGitAuth(db, bundle);
+  const res = await originGitRun(bundle.storageRoot, [...auth.argv, ...args], auth.env);
   if (res.code !== 0) {
-    const msg = res.stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
+    const msg = scrubSecret(res.stderr, auth.secret).trim();
     throw new Error(`git pull failed (exit ${res.noExit ?? res.code}): ${msg}`);
   }
 }
@@ -181,24 +186,24 @@ export async function handleIngestGit(
   const bundle = await loadBundle(db, payload.bundleId);
   const dest = bundleExtractedDir(bundleStorageRoot, payload.userId, bundle.id);
   const dirRel = bundleDirRel(payload.userId, bundle.id);
+  let secret: string | null = null;
 
   try {
     if (!bundle.gitUrl) throw new Error('git-source bundle missing gitUrl');
     assertCloneUrl(bundle.gitUrl, 'bundle');
+    const cloneUrl = redactGitUrl(bundle.gitUrl, true);
+    const auth = bundle.gitCredentialsId
+      ? await buildCredentialHelper(db, bundle.gitCredentialsId, payload.userId, cloneUrl)
+      : undefined;
+    secret = auth?.secret ?? null;
     await ensureDirNoFollow(bundleStorageRoot, dirRel, { mode: 0o755 });
     await removeNoFollow(bundleStorageRoot, `${dirRel}/extracted`, { recursive: true });
 
-    let cloneUrl = bundle.gitUrl;
-    if (bundle.gitCredentialsId) {
-      const creds = await getDecryptedCredentials(db, bundle.gitCredentialsId, payload.userId);
-      cloneUrl = buildAuthenticatedUrl(bundle.gitUrl, creds.username, creds.secret);
-    }
-
-    await gitClone(cloneUrl, dest, bundle.gitBranch ?? undefined);
+    await gitClone(cloneUrl, dest, bundle.gitBranch ?? undefined, auth);
     const head = await gitRevParseHead(dest);
     await db
       .update(schema.customBundles)
-      .set({ storageRoot: dest, updatedAt: new Date() })
+      .set({ storageRoot: dest, gitUrl: cloneUrl, updatedAt: new Date() })
       .where(eq(schema.customBundles.id, bundle.id));
     const parsed = await parseBundle(bundle.id, db, logger, bundleStorageRoot);
     const counts = await persistBundleItems(db, bundle.id, parsed);
@@ -222,8 +227,9 @@ export async function handleIngestGit(
       'Bundle git ingest complete',
     );
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = scrubSecret(err instanceof Error ? err.message : String(err), secret);
     await setBundleFailed(db, bundle.id, msg);
+    if (msg !== (err instanceof Error ? err.message : String(err))) throw new Error(msg);
     throw err;
   }
 }
@@ -258,7 +264,7 @@ export async function handleResyncGit(
       return;
     }
 
-    await gitFetchAndCheckout(dest, bundle.gitBranch ?? undefined);
+    await gitFetchAndCheckout(db, { ...bundle, storageRoot: dest });
     const head = await gitRevParseHead(dest);
     const parsed = await parseBundle(bundle.id, db, logger, bundleStorageRoot);
     const counts = await persistBundleItems(db, bundle.id, parsed);

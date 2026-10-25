@@ -54,28 +54,14 @@ import { syncPlanFromCheckout } from '../plan/sync-checkout.js';
 import { syncProjectStateFromCheckout } from '../project-state/sync.js';
 import { raiseRtkQuestion } from '../project-state/rtk-conflict.js';
 import { seedBlankScaffold } from './blank-scaffold.js';
-import { buildCredentialHelper, OriginUrlError } from './git-push.js';
+import { buildCredentialHelper, OriginUrlError, scrubSecret } from './git-push.js';
 import { EXTRACT_UID, FIRST_SLOT, childFd, runTool, toolReadable } from './tool-spawn.js';
 import { splitUploadPath } from './worktree-paths.js';
 import { hardenGitArgs } from './git-exec.js';
 
-export function buildAuthenticatedUrl(url: string, username: string, secret: string): string {
-  // Only http(s) carries userinfo. An `ssh://` or scp-style address
-  // (`git@host:path`) authenticates with a key handled outside Haive, and an
-  // scp address is not a URL at all — `new URL` THROWS on it, which would fail
-  // the clone with "Invalid URL" instead of the real problem. Returning it
-  // unchanged is what git then does with it, correctly.
-  if (!/^https?:\/\//i.test(url)) return url;
-  const u = new URL(url);
-  u.username = encodeURIComponent(username);
-  u.password = encodeURIComponent(secret);
-  return u.toString();
-}
-
 /** Clone `url` into `dest`. When `auth` is supplied (an inline git credential
  *  helper from buildCredentialHelper), the token rides in env and git resolves
- *  it per-challenge — so credentials survive a protocol-change redirect (e.g. a
- *  Gitea/nginx http->https 301) that would drop URL-embedded userinfo. */
+ *  it per-challenge, restricted to the stored remote host and protocol. */
 export async function gitClone(
   url: string,
   dest: string,
@@ -86,7 +72,7 @@ export async function gitClone(
   return new Promise((resolve, reject) => {
     const args = [...(auth?.argv ?? []), 'clone', '--depth', '1'];
     if (branch) args.push('--branch', branch);
-    args.push('--', url, dest);
+    args.push('--', redactGitUrl(url, true), dest);
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       GIT_TERMINAL_PROMPT: '0',
@@ -104,8 +90,7 @@ export async function gitClone(
         resolve();
         return;
       }
-      let msg = stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
-      if (auth?.secret) msg = msg.split(auth.secret).join('***');
+      const msg = scrubSecret(stderr, auth?.secret ?? null).trim();
       reject(new Error(`git clone failed (exit ${code}): ${msg}`));
     });
   });
@@ -805,10 +790,8 @@ export async function handleClone(
     await rm(dest, { recursive: true, force: true });
 
     // Authenticate via the inline credential helper (same mechanism as push), NOT
-    // by embedding the token in the URL. URL userinfo is dropped by curl across a
-    // protocol-change redirect (a Gitea/nginx http->https 301 returns "remote:
-    // Unauthorized"); the helper is resolved against the challenge's host, so it
-    // survives the redirect. It also keeps the token out of .git/config, so the
+    // by embedding the token in the URL. Each challenge must match the bound
+    // remote's host and protocol. This keeps the token out of .git/config, so the
     // cloned origin is already the plain URL — no post-clone reset needed.
     const auth = payload.credentialsId
       ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, remoteUrl)

@@ -1,4 +1,5 @@
-import { originGitRun } from './git-push.js';
+import { originGitRun, scrubSecret } from './git-push.js';
+import { bundleGitAuth, type BundleGitBinding } from './bundle-git.js';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -9,12 +10,17 @@ import { gitRun } from './git-exec.js';
  *  the working tree — the explicit upgrade task is the only path that pulls
  *  + re-parses, so the daily tick can run unattended without breaking
  *  anything. */
-async function gitFetch(cwd: string, branch: string | null): Promise<void> {
+async function gitFetch(
+  db: Database,
+  bundle: BundleGitBinding,
+  branch: string | null,
+): Promise<void> {
   const args = ['fetch', '--quiet', 'origin'];
   if (branch) args.push(branch);
-  const res = await originGitRun(cwd, args, { GIT_ASKPASS: 'echo' });
+  const auth = await bundleGitAuth(db, bundle);
+  const res = await originGitRun(bundle.storageRoot, [...auth.argv, ...args], auth.env);
   if (res.code !== 0) {
-    const msg = res.stderr.replace(/https?:\/\/[^@]+@/g, 'https://***@').trim();
+    const msg = scrubSecret(res.stderr, auth.secret).trim();
     throw new Error(`git fetch failed (exit ${res.noExit ?? res.code}): ${msg}`);
   }
 }
@@ -46,6 +52,9 @@ export async function runBundleGitSyncTick(db: Database): Promise<BundleGitSyncT
   const bundles = await db
     .select({
       id: schema.customBundles.id,
+      userId: schema.customBundles.userId,
+      gitUrl: schema.customBundles.gitUrl,
+      gitCredentialsId: schema.customBundles.gitCredentialsId,
       gitBranch: schema.customBundles.gitBranch,
       storageRoot: schema.customBundles.storageRoot,
       sourceType: schema.customBundles.sourceType,
@@ -62,7 +71,7 @@ export async function runBundleGitSyncTick(db: Database): Promise<BundleGitSyncT
     if (b.sourceType !== 'git' || b.status !== 'active') continue;
     scanned += 1;
     try {
-      await gitFetch(b.storageRoot, b.gitBranch ?? null);
+      await gitFetch(db, b, b.gitBranch ?? null);
       const remoteRef = b.gitBranch ? `origin/${b.gitBranch}` : 'origin/HEAD';
       const remoteHead = await gitRevParse(b.storageRoot, remoteRef);
       const localHead = await gitRevParseHead(b.storageRoot).catch(() => null);
