@@ -16,7 +16,9 @@ covers real authentication/cookie recovery. Neither fixture is a production rout
 Run `pnpm exec playwright test -c tests/e2e/harness/web-runtime/web-runtime.config.ts` from the
 repository root. `PLAYWRIGHT_CHROMIUM_EXECUTABLE` can select an installed Chromium, and
 `WEB_RUNTIME_RESULTS` changes the default `/tmp/haive-web-runtime-results` output directory.
-CI runs these browser controls and boots its built production web image with
+CI runs these browser controls in the independent `browser-runtime` job, with its own 20-minute
+budget: installing Chromium's OS dependencies must not exhaust the lint/unit/script job's budget.
+CI also boots its built production web image with
 `node scripts/check-web-image.mjs haive-web-prod-check`. The image check executes the artifact's
 own CMD without mounts or upstream services, requiring `/login` 200 with the actual CSP and auth
 layout, and anonymous `/dashboard` 307 to `/login` without cookie changes. This catches standalone
