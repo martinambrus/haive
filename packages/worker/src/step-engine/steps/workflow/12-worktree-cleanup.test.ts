@@ -324,6 +324,7 @@ function makeDb(
   let warningMessage: string | null = null;
   const events: { eventType: string; payload: unknown }[] = [];
   const stateWrites: MergeResolveState[] = [];
+  const taskWrites: Record<string, unknown>[] = [];
   const invocationInserts: { prompt?: string; truncationRetry?: boolean }[] = [];
   const applyPatch = (patch: Record<string, unknown>) => {
     if ('mergeResolveState' in patch) {
@@ -347,22 +348,25 @@ function makeDb(
       userStepCliPreferences: { findFirst: async () => undefined },
       taskStepCliChoices: { findFirst: async () => undefined },
     },
-    update: () => ({
-      set: (patch: Record<string, unknown>) => ({
-        where: (cond: unknown) => ({
-          returning: async () => {
-            const values = conditionValues(cond);
-            const guarded = values.includes('pending') && values.includes('skipped');
-            if (guarded && (status === 'pending' || status === 'skipped')) return [];
-            applyPatch(patch);
-            return [{ id: 'step1', status, errorMessage, warningMessage }];
-          },
-          then: (resolve: (v: unknown) => void) => {
-            applyPatch(patch);
-            resolve(undefined);
-          },
-        }),
-      }),
+    update: (table?: unknown) => ({
+      set: (patch: Record<string, unknown>) => {
+        if (table === schema.tasks) taskWrites.push(patch);
+        return {
+          where: (cond: unknown) => ({
+            returning: async () => {
+              const values = conditionValues(cond);
+              const guarded = values.includes('pending') && values.includes('skipped');
+              if (guarded && (status === 'pending' || status === 'skipped')) return [];
+              applyPatch(patch);
+              return [{ id: 'step1', status, errorMessage, warningMessage }];
+            },
+            then: (resolve: (v: unknown) => void) => {
+              applyPatch(patch);
+              resolve(undefined);
+            },
+          }),
+        };
+      },
     }),
     insert: (table?: unknown) => ({
       values: (v: { eventType: string; payload: unknown }) => {
@@ -439,6 +443,7 @@ function makeDb(
     db,
     getState: () => mergeState,
     stateWrites,
+    taskWrites,
     getStatus: () => status,
     getWarning: () => warningMessage,
     /** A Retry clears the step's warning. */
@@ -2146,6 +2151,9 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
         }),
       );
       expect(out.prUrl).toBe('https://forge.test/pr/1');
+      expect(h.taskWrites).toContainEqual(
+        expect.objectContaining({ prRemoteUrl: httpOrigin(bare) }),
+      );
       expect(await at(bare, 'feature/x', GLOBS)).toBe(await at(parent, forked, GLOBS));
       expect(await revOf(bare, 'feature/x')).toBe(await revOf(parent, 'feature/x'));
       expect(h.getWarning()).toContain(GLOBS);

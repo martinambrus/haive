@@ -9,6 +9,7 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { schema, type Database } from '@haive/database';
+import { isAllowedGitRemoteUrl, redactGitUrl } from '@haive/shared/schemas';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { ForgeRateLimitError, resolveForgeContext, resolveForgeProvider } from '../forge/index.js';
@@ -94,6 +95,7 @@ interface PrWaitTask {
   prState: string | null;
   prFinalizeMode: string | null;
   prCredentialId: string | null;
+  prRemoteUrl: string | null;
 }
 
 export async function runPrPollTick(db: Database): Promise<void> {
@@ -113,6 +115,7 @@ export async function runPrPollTick(db: Database): Promise<void> {
       prState: true,
       prFinalizeMode: true,
       prCredentialId: true,
+      prRemoteUrl: true,
     },
   })) as PrWaitTask[];
   if (tasks.length === 0) return;
@@ -134,22 +137,20 @@ async function pollTask(db: Database, task: PrWaitTask): Promise<void> {
     await recordPollError(db, task.id, 'missing repository, PR number, or credential for polling');
     return;
   }
-  const repo = await db.query.repositories.findFirst({
-    where: eq(schema.repositories.id, task.repositoryId),
-    columns: { remoteUrl: true },
-  });
-  if (!repo?.remoteUrl) {
-    await recordPollError(db, task.id, 'repository has no remote URL to poll the pull request');
-    return;
-  }
-
   let host = '';
   try {
+    const remoteUrl = task.prRemoteUrl
+      ? redactGitUrl(task.prRemoteUrl)
+      : await legacyPrOrigin(db, task);
+    if (!remoteUrl) {
+      await recordPollError(db, task.id, 'repository has no remote URL to poll the pull request');
+      return;
+    }
     const forgeCtx = await resolveForgeContext({
       db,
       userId: task.userId,
       credentialId: task.prCredentialId,
-      remoteUrl: repo.remoteUrl,
+      remoteUrl,
     });
     host = forgeCtx.host;
     if (isBackingOff(host)) return;
@@ -162,7 +163,7 @@ async function pollTask(db: Database, task: PrWaitTask): Promise<void> {
     if (state.state === 'open') {
       await db
         .update(schema.tasks)
-        .set({ prPollError: null, updatedAt: new Date() })
+        .set({ prRemoteUrl: remoteUrl, prPollError: null, updatedAt: new Date() })
         .where(eq(schema.tasks.id, task.id));
       return;
     }
@@ -173,6 +174,7 @@ async function pollTask(db: Database, task: PrWaitTask): Promise<void> {
           prState: 'merged',
           prMergedAt: state.mergedAt ?? new Date(),
           prPollError: null,
+          prRemoteUrl: remoteUrl,
           updatedAt: new Date(),
         })
         .where(eq(schema.tasks.id, task.id));
@@ -183,13 +185,42 @@ async function pollTask(db: Database, task: PrWaitTask): Promise<void> {
     // closed without merging
     await db
       .update(schema.tasks)
-      .set({ prState: 'closed', prPollError: null, updatedAt: new Date() })
+      .set({ prState: 'closed', prRemoteUrl: remoteUrl, prPollError: null, updatedAt: new Date() })
       .where(eq(schema.tasks.id, task.id));
     log.info({ taskId: task.id, prUrl: task.prUrl }, 'pull request closed without merging');
   } catch (err) {
     if (err instanceof ForgeRateLimitError && host) noteRateLimit(host, err.retryAfterMs);
     await recordPollError(db, task.id, err instanceof Error ? err.message : String(err));
   }
+}
+
+/** Old PRs did not stamp their origin on the task. A completed cleanup row that opened
+ *  this exact PR retains it in detect_output; prefer that to a repo since relinked. */
+async function legacyPrOrigin(db: Database, task: PrWaitTask): Promise<string | null> {
+  const step = await db.query.taskSteps.findFirst({
+    where: and(
+      eq(schema.taskSteps.taskId, task.id),
+      eq(schema.taskSteps.stepId, '12-worktree-cleanup'),
+      eq(schema.taskSteps.status, 'done'),
+    ),
+    orderBy: [desc(schema.taskSteps.round)],
+    columns: { detectOutput: true, output: true },
+  });
+  const output = step?.output as { action?: unknown; prUrl?: unknown } | null;
+  const detected = step?.detectOutput as { originUrl?: unknown } | null;
+  if (
+    output?.action === 'create_pr' &&
+    output.prUrl === task.prUrl &&
+    typeof detected?.originUrl === 'string' &&
+    isAllowedGitRemoteUrl(detected.originUrl)
+  ) {
+    return redactGitUrl(detected.originUrl);
+  }
+  const repo = await db.query.repositories.findFirst({
+    where: eq(schema.repositories.id, task.repositoryId!),
+    columns: { remoteUrl: true },
+  });
+  return repo?.remoteUrl ? redactGitUrl(repo.remoteUrl) : null;
 }
 
 async function recordPollError(db: Database, taskId: string, message: string): Promise<void> {

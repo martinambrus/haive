@@ -453,6 +453,9 @@ export const tasks = pgTable(
     /** Original uploads picked for a deferred start; NULL means the count was not recorded.
      *  Migration 0211. */
     expectedAttachmentCount: integer('expected_attachment_count'),
+    /** Origin used to open this task's PR. Independent of a local_path repo's nullable
+     *  remote_url and of later relinks; survives step resets. Migration 0212. */
+    prRemoteUrl: text('pr_remote_url'),
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),

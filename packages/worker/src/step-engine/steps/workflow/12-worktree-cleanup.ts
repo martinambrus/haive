@@ -8,6 +8,7 @@ import {
   type FormSchema,
 } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
+import { redactGitUrl } from '@haive/shared/schemas';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import { buildMergeFixPrompt } from '../../git-merge.js';
 import { gitRun } from '../../../repo/git-exec.js';
@@ -920,6 +921,7 @@ async function openPullRequestForCleanup(
       prState: 'open',
       prFinalizeMode: finalizeMode,
       prCredentialId: credentialId,
+      prRemoteUrl: redactGitUrl(d.originUrl),
       prPollError: null,
       updatedAt: new Date(),
     })
