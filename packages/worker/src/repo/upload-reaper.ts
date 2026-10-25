@@ -195,34 +195,40 @@ async function finishReaping(
       if (rel === null) {
         log.warn({ stored: row.stored }, 'reaping upload names a path that is not its own file');
       }
-      if (table === schema.customBundleUploads && partialRel !== null) {
-        const upload = await db.query.customBundleUploads.findFirst({
-          where: eq(table.id, row.id),
-        });
-        if (upload?.bundleId && upload.bundleId !== upload.id) {
-          const bundle = await db.query.customBundles.findFirst({
-            where: eq(schema.customBundles.id, upload.bundleId),
-          });
-          const final = replacementArchiveRel(
-            row.userId,
-            upload.bundleId,
-            row.id,
-            upload.archiveFormat,
-          );
-          if (bundle?.archivePath !== path.join(kind.root(), final)) {
-            await discardReplacementArchive(
-              kind.root(),
-              partialRel,
-              final,
-              Number(upload.totalSize),
-            );
-          }
-        }
-      }
       const files = rel === null ? [] : [rel];
       if (partialRel !== null && kind.finalBesidePartial) files.push(finalRelOf(partialRel));
       let gone = true;
       let lastErr: unknown;
+      try {
+        if (table === schema.customBundleUploads && partialRel !== null) {
+          const upload = await db.query.customBundleUploads.findFirst({
+            where: eq(table.id, row.id),
+          });
+          if (upload?.bundleId && upload.bundleId !== upload.id) {
+            const bundle = await db.query.customBundles.findFirst({
+              where: eq(schema.customBundles.id, upload.bundleId),
+            });
+            const final = replacementArchiveRel(
+              row.userId,
+              upload.bundleId,
+              row.id,
+              upload.archiveFormat,
+            );
+            if (bundle?.archivePath !== path.join(kind.root(), final)) {
+              await discardReplacementArchive(
+                kind.root(),
+                partialRel,
+                final,
+                Number(upload.totalSize),
+              );
+            }
+          }
+        }
+      } catch (err) {
+        gone = false;
+        lastErr = err;
+        log.warn({ err, id: row.id }, 'reaping replacement archive was not removed');
+      }
       for (const file of files) {
         try {
           await removeFile(kind.root(), file);

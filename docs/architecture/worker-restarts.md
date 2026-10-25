@@ -139,14 +139,20 @@ Cancel takes only `uploading`, moves it to `reaping`, removes its partial and th
 cancel also remove their own finished file. A replacement cancel and the reaper share
 `discardReplacementArchive`: an unpromoted final is removed only by its recorded inode identity,
 while any final the bundle currently names stays. Neither cleanup can follow a link or delete a
-different inode at that name. Bundle deletion already removes its whole directory, including
+different inode at that name. A refused replacement cleanup contributes to the same retry/error
+accounting as a refused partial removal: the harmless partial can still go, while the unremoved
+archive and intent stay, and the session parks as `reap_failed` after the existing 24-hour window.
+Bundle deletion already removes its whole directory, including
 retained older archives and move intents.
 
 Git bundle Resync atomically changes a non-syncing row to `syncing` in its new-work admission
 transaction. Concurrent requests return 409 and leave the admitted request's job and error alone.
 The winning update holds the bundle row while a bounded queue read checks live jobs, including
 older anonymous ingest and sync jobs: an enqueue whose acknowledgement was lost can leave a
-failed row with a real job. A live job refuses admission, and a failed or capped queue read holds
+failed row with a real job. Completeness comes from the public BullMQ range API's atomic ID
+snapshot, before hydration: a removed hash must not shrink a capped page into an apparently
+complete one. A small snapshot with a missing hash is unknown too, and the five-second deadline
+covers the snapshot and hydration together. A live job refuses admission, and a failed or capped queue read holds
 with 503 rather than assuming absence. Replacement admission uses the same check, so it cannot
 remove a tree an earlier ingest still owns.
 A refused enqueue marks only that admission's stamp failed; a lost enqueue that cannot be marked

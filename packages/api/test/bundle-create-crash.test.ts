@@ -65,6 +65,7 @@ function makeQueue() {
     refuse: null as Error | null,
     ackLost: false,
     readError: null as Error | null,
+    missingHydration: false,
     onAdd: null as null | (() => void),
   };
   return {
@@ -89,7 +90,12 @@ function makeQueue() {
       if (state.ackLost) throw new Error('enqueue acknowledgement lost');
       return job;
     },
-    getJob: async (id: string) => jobs.find((j) => j.id === id),
+    getJob: async (id: string) =>
+      state.missingHydration ? undefined : jobs.find((j) => j.id === id),
+    getRanges: async () => {
+      if (state.readError) throw state.readError;
+      return jobs.map((job) => job.id);
+    },
     getJobs: async () => {
       if (state.readError) throw state.readError;
       return jobs;
@@ -680,6 +686,16 @@ describe('replacement continuation', () => {
     expect((await post(`/${BUNDLE}/sync`)).status).toBe(503);
     expect(fake.rows(schema.customBundles)).toEqual(before);
     expect(queue.jobs).toHaveLength(0);
+  });
+
+  it('holds admission when a small atomic ID snapshot loses a hash during hydration', async () => {
+    seedGitBundle();
+    await queue.add(BUNDLE_JOB_NAMES.INGEST_GIT, { bundleId: SESSION });
+    const before = structuredClone(fake.rows(schema.customBundles));
+    queue.state.missingHydration = true;
+    expect((await post(`/${BUNDLE}/sync`)).status).toBe(503);
+    expect(fake.rows(schema.customBundles)).toEqual(before);
+    expect(queue.jobs).toHaveLength(1);
   });
 
   it('refuses a different replacement while a failed row still owes an ingest job', async () => {

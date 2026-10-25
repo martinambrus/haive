@@ -2,7 +2,7 @@
  * --serve keeps the real API and seeded onboarding form available for a browser check. */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { serve } from '@hono/node-server';
@@ -291,6 +291,165 @@ try {
   console.info(
     'PASS actual init/chunk/complete routes: concurrent completion and duplicate response retain one ingest job',
   );
+
+  async function exerciseCappedSnapshot(
+    bundleId: string,
+    url: string,
+    zipSource?: string,
+  ): Promise<void> {
+    await db
+      .update(schema.customBundles)
+      .set({ status: 'failed' })
+      .where(eq(schema.customBundles.id, bundleId));
+    const before = await db.query.customBundles.findFirst({
+      where: eq(schema.customBundles.id, bundleId),
+    });
+    const marker = zipSource
+      ? path.join(path.dirname(zipSource), 'extracted', 'keep.md')
+      : undefined;
+    if (marker) {
+      await mkdir(path.dirname(marker), { recursive: true });
+      await writeFile(marker, 'a live ingest still owns this tree');
+    }
+    const sourceBytes = zipSource ? await readFile(zipSource) : undefined;
+    // FIFO insertion puts the target outside the newest1000 waiting jobs. All jobs are owned
+    // fixture jobs and no consumer runs on this isolated Redis database.
+    const target = await queue.add('fixture-old-anonymous-ingest', { bundleId, userId });
+    await queue.addBulk(
+      Array.from({ length: 1000 }, () => ({
+        name: 'fixture-unrelated',
+        data: { bundleId: randomUUID(), userId },
+      })),
+    );
+    const states = ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children'] as const;
+    const initialIds = await queue.getRanges([...states], 0, 999);
+    assert.equal(initialIds.length, 1000);
+    assert(!initialIds.includes(target.id!));
+    const originalGetJob = queue.getJob.bind(queue);
+    const originalGetJobs = queue.getJobs.bind(queue);
+    const originalGetRanges = queue.getRanges.bind(queue);
+    let removedId: string | undefined;
+    let capturedIds: string[] = [];
+    let hydratedCount: number | null = null;
+    const deleteSelected = async (id: string): Promise<void> => {
+      if (removedId) return;
+      removedId = id;
+      const victim = await originalGetJob(id);
+      assert(victim && victim.id !== target.id);
+      await victim.remove();
+    };
+    // On1641 this is the gate between the real Lua snapshot and getJobs' re-hydration.
+    queue.getJob = async (id) => {
+      if (!initialIds.includes(id)) return originalGetJob(id);
+      capturedIds.push(id);
+      await deleteSelected(id);
+      return originalGetJob(id);
+    };
+    queue.getJobs = async (...args) => {
+      const jobs = await originalGetJobs(...args);
+      hydratedCount = jobs.length;
+      return jobs;
+    };
+    // The corrected reader uses the public unhydrated range API. Delete after its same atomic
+    // snapshot too: the retained ID count must remain capped even when a selected hash vanishes.
+    queue.getRanges = async (...args) => {
+      const ids = await originalGetRanges(...args);
+      capturedIds = ids;
+      await deleteSelected(ids[0]!);
+      return ids;
+    };
+    try {
+      const response = await post(url);
+      const after = await db.query.customBundles.findFirst({
+        where: eq(schema.customBundles.id, bundleId),
+      });
+      const treePreserved = marker
+        ? await readFile(marker, 'utf8').then(
+            (body) => body === 'a live ingest still owns this tree',
+            () => false,
+          )
+        : null;
+      console.info(
+        JSON.stringify({
+          check: zipSource ? 'replace capped snapshot' : 'sync capped snapshot',
+          status: response.status,
+          capturedIds: capturedIds.length,
+          hydratedCount,
+          removedSelectedJob: Boolean(removedId),
+          targetStillLive: await target.getState(),
+          sourceUnchanged: after?.archivePath === before?.archivePath,
+          treePreserved,
+        }),
+      );
+      assert(
+        removedId,
+        'the selected unrelated job must actually be removed at the snapshot/hydration boundary',
+      );
+      assert.equal(
+        response.status,
+        503,
+        'a capped snapshot cannot become complete when hydration drops a job',
+      );
+      assert.deepEqual(
+        await db.query.customBundles.findFirst({ where: eq(schema.customBundles.id, bundleId) }),
+        before,
+      );
+      assert.equal(await target.getState(), 'waiting');
+      if (zipSource && marker) {
+        assert.deepEqual(await readFile(zipSource), sourceBytes);
+        assert.equal(await readFile(marker, 'utf8'), 'a live ingest still owns this tree');
+      }
+    } finally {
+      queue.getJob = originalGetJob;
+      queue.getJobs = originalGetJobs;
+      queue.getRanges = originalGetRanges;
+      const owned = (await queue.getJobs(['waiting'])).filter((job) => job.data.userId === userId);
+      for (const job of owned) await job.remove();
+      assert.equal(
+        (await queue.getJobs(['waiting'])).filter((job) => job.data.userId === userId).length,
+        0,
+      );
+      console.info(
+        `CLEANED capped-snapshot fixture: target plus1000 unrelated jobs; removed selected job=${Boolean(removedId)}`,
+      );
+    }
+  }
+  if (process.env.HAIVE_TEST_CAP_CASE !== 'replace') {
+    await exerciseCappedSnapshot(git.id, `/bundles/${git.id}/sync`);
+  }
+  if (process.env.HAIVE_TEST_CAP_CASE !== 'sync') {
+    const replacementInit = await post(`/bundles/${zip.id}/replace/init`, {
+      filename: 'later.zip',
+      totalSize: 7,
+      chunkSize: 7,
+    });
+    const replacementSession = ((await replacementInit.json()) as { session: { id: string } })
+      .session;
+    assert.equal(replacementInit.status, 201);
+    assert.equal(
+      (
+        await app.request(`/bundles/uploads/${replacementSession.id}/chunk`, {
+          method: 'PUT',
+          headers: {
+            cookie: `haive_access=${token}`,
+            origin: webOrigin,
+            'content-range': 'bytes 0-6/7',
+          },
+          body: 'LATER!!',
+        })
+      ).status,
+      200,
+    );
+    const currentZip = await db.query.customBundles.findFirst({
+      where: eq(schema.customBundles.id, zip.id),
+    });
+    assert(currentZip?.archivePath);
+    await exerciseCappedSnapshot(
+      zip.id,
+      `/bundles/${zip.id}/replace/${replacementSession.id}/complete`,
+      currentZip.archivePath,
+    );
+  }
 
   if (process.argv.includes('--serve')) {
     await db

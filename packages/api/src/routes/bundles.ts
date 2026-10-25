@@ -310,14 +310,21 @@ async function refuseLiveBundleJob(
 ): Promise<void> {
   const limit = 1000;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let jobs: Awaited<ReturnType<typeof queue.getJobs>>;
+  let snapshot: { ids: string[]; jobs: Array<Awaited<ReturnType<typeof queue.getJob>>> };
   try {
-    jobs = await Promise.race([
-      queue.getJobs(
-        ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children'],
-        0,
-        limit - 1,
-      ),
+    snapshot = await Promise.race([
+      (async () => {
+        // getJobs re-hydrates and filters missing hashes after its Lua snapshot. Its returned
+        // length cannot prove completeness. Keep the public range API's atomic IDs instead.
+        const ids = await queue.getRanges(
+          ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children'],
+          0,
+          limit - 1,
+        );
+        const jobs =
+          ids.length >= limit ? [] : await Promise.all(ids.map((id) => queue.getJob(id)));
+        return { ids, jobs };
+      })(),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => reject(new Error('bundle queue lookup timed out')), 5000);
         timer.unref();
@@ -331,14 +338,20 @@ async function refuseLiveBundleJob(
   } finally {
     clearTimeout(timer);
   }
-  if (jobs.some((job) => job?.data?.bundleId === bundleId)) {
-    throw new HttpError(409, 'an import of this bundle is already queued or running');
-  }
-  if (jobs.length >= limit) {
+  if (snapshot.ids.length >= limit) {
     throw new HttpError(
       503,
       'The bundle queue is too busy to verify another import safely. Try again shortly.',
     );
+  }
+  if (snapshot.jobs.some((job) => !job)) {
+    throw new HttpError(
+      503,
+      'The bundle queue changed while checking its import jobs. Try again shortly.',
+    );
+  }
+  if (snapshot.jobs.some((job) => job?.data?.bundleId === bundleId)) {
+    throw new HttpError(409, 'an import of this bundle is already queued or running');
   }
 }
 

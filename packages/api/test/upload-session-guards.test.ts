@@ -168,6 +168,7 @@ function makeQueue() {
       jobs.push(job);
       return job;
     },
+    getRanges: async () => jobs.map((job) => job.id),
     getJobs: async () => jobs,
     getJob: async (id: string) => jobs.find((j) => j.id === id),
   };
