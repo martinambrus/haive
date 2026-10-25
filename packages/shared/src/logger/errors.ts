@@ -5,10 +5,17 @@ const sanitizedErrors = new WeakSet<object>();
 /** Walk wrappers without trusting their messages, and stop on cycles. */
 function* errorChain(err: unknown): Generator<Record<string, unknown>> {
   const seen = new Set<object>();
-  while (err !== null && typeof err === 'object' && !seen.has(err)) {
-    seen.add(err);
-    yield err as Record<string, unknown>;
-    err = (err as { cause?: unknown }).cause;
+  const pending: unknown[] = [err];
+  while (pending.length) {
+    const current = pending.pop();
+    if (current === null || typeof current !== 'object' || seen.has(current)) continue;
+    seen.add(current);
+    const node = current as Record<string, unknown>;
+    yield node;
+    if (Array.isArray(node.errors)) {
+      for (let i = node.errors.length - 1; i >= 0; i--) pending.push(node.errors[i]);
+    }
+    pending.push(node.cause);
   }
 }
 

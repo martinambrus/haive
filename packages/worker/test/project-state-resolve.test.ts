@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
@@ -1061,4 +1063,19 @@ describe('a claim question', () => {
     });
     expect(s.dump()).toEqual(before);
   });
+});
+
+it('fix4 sanitizes both failures when resolving and putting back fail', async () => {
+  const s = await setup();
+  const secret = randomBytes(24).toString('base64url');
+  s.fake.hooks.beforeCommit = () => {
+    throw new DrizzleQueryError('select $1', [secret], new Error(secret));
+  };
+  const err = await s.answer('keep_mine').catch((err: unknown) => err);
+  expect(err instanceof AggregateError).toBe(true);
+  expect(
+    Array.from({ length: secret.length - 5 }, (_, i) => secret.slice(i, i + 6)).some((part) =>
+      (err as Error).message.includes(part),
+    ),
+  ).toBe(false);
 });

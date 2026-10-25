@@ -168,3 +168,31 @@ it('fix3 logs original diagnostics with job identity before transport replacemen
   ).toBe(true);
   assertSafe([...lines, transported.message, transported.stack]);
 });
+
+it.each(['member', 'member-cause', 'nested', 'cycle'] as const)(
+  'fix4 sanitizes an aggregate with a bound %s',
+  (kind) => {
+    const member = kind === 'member-cause' ? new Error(secret, { cause: failure() }) : failure();
+    const aggregate = new AggregateError([new Error('ordinary'), member], secret);
+    if (kind === 'nested') aggregate.errors = [new AggregateError(aggregate.errors, secret)];
+    if (kind === 'cycle') {
+      aggregate.errors.unshift(aggregate);
+      member.cause = aggregate;
+    }
+    const lines = capture();
+    logger.error({ err: aggregate });
+    logger.error({ error: aggregate });
+    logger.error(aggregate);
+    assertSafe(lines);
+    expect(JSON.parse(lines[0]!).err.type === 'AggregateError').toBe(true);
+    expect(safeErrorMessage(aggregate)).toBe('Database operation failed');
+    assertSafe((safeErrorForTransport(aggregate) as Error).message);
+  },
+);
+
+it('fix4 keeps ordinary aggregate messages and stacks', () => {
+  const err = new AggregateError([new TypeError('ordinary')], 'move failed; put back failed');
+  expect(safeErrorMessage(err)).toBe(err.message);
+  expect(safeErrorForTransport(err)).toBe(err);
+  expect(serializeError(err)).toEqual(pino.stdSerializers.err(err));
+});
