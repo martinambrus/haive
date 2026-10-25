@@ -218,7 +218,9 @@ status: parked · reason: needs a fresh onboarding run (see T300)
 
 ### T303 · FNF[bundles-2] · bundle follow-ups from #284
 
-status: open
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:44Z · last: 2026-10-25T20:44Z
+
+Codex continuation: validate archive replacement recovery, bundle/repository stranded work, sync admission and visible failure diagnostics on current shipped base. Separate worktree and isolated queue/database; no live providers.
 All PRE-EXISTING.
 
 1. Replace complete not resumable after its move (bundles.ts ~722-727); set 'syncing' before the move or key on the upload.
