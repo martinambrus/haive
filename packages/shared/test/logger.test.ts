@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import pino from 'pino';
+import postgres from 'postgres';
 import { afterEach, expect, it, vi } from 'vitest';
 import {
   logger,
@@ -108,3 +109,23 @@ it('terminates cyclic cause chains and preserves the driver code', () => {
   cycle.cause = cycle;
   expect(safeErrorDetails(cycle)).toEqual({ name: 'Error' });
 });
+
+it.each(['err', 'error', 'bare'] as const)(
+  'fix1 preserves the class through %s logging',
+  (shape) => {
+    const lines = capture();
+    // The runtime takes server fields; postgres.js types inherit Error's string constructor.
+    const driver = Object.assign(new postgres.PostgresError({ message: secret } as never), {
+      code: '23505',
+      query,
+      parameters: [secret],
+    });
+    for (const err of [failure(), driver, new TypeError(secret, { cause: failure() })]) {
+      if (shape === 'bare') logger.error(err);
+      else logger.error({ [shape]: err });
+      const entry = JSON.parse(lines.at(-1)!);
+      expect((entry.err ?? entry.error).type === err.constructor.name).toBe(true);
+    }
+    assertSafe(lines);
+  },
+);

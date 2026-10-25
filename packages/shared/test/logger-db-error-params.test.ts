@@ -39,6 +39,7 @@ it.skipIf(!url)('never logs a bound secret from a real failed insert', async () 
       ),
     ).toBe(false);
     const entry = JSON.parse(lines[0]!);
+    expect(entry.err.type === 'DrizzleQueryError').toBe(true);
     expect(entry.err.code === '23514').toBe(true);
     expect(entry.err.query === 'insert into "logger_secret_control" ("value") values ($1)').toBe(
       true,

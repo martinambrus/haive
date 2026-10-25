@@ -1,6 +1,8 @@
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import pino from 'pino';
 
+const sanitizedErrors = new WeakSet<object>();
+
 /** Walk wrappers without trusting their messages, and stop on cycles. */
 function* errorChain(err: unknown): Generator<Record<string, unknown>> {
   const seen = new Set<object>();
@@ -37,14 +39,17 @@ export function safeErrorDetails(err: unknown): { name: string; code?: string | 
 
 /** Allow-list DB diagnostics: even the driver's detail/stack can quote a failing row. */
 export function serializeError(err: unknown): unknown {
+  if (err !== null && typeof err === 'object' && sanitizedErrors.has(err)) return err;
   const queryError = boundQueryError(err);
   if (!queryError) return pino.stdSerializers.err(err as Error);
   const { name, code } = safeErrorDetails(err);
-  return {
+  const sanitized = {
     type: name,
     ...(code === undefined ? {} : { code }),
     ...(typeof queryError.query === 'string' ? { query: queryError.query } : {}),
   };
+  sanitizedErrors.add(sanitized);
+  return sanitized;
 }
 
 /** Response text must not expose query text, bound values or driver diagnostics. */
