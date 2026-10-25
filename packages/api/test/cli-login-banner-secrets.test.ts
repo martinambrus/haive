@@ -196,6 +196,33 @@ describe('Claude OAuth token capture controls', () => {
     assertNoCredentialText(TOKEN, CODE);
   });
 
+  const styled =
+    `\x1b]0;synthetic\x1b\\\x1b[?25l\x1b7\x1b[32m${TOKEN.slice(0, 80)}\x1b[0m\r\n` +
+    `\x1b[2C\x1b[1m${TOKEN.slice(80)}\x1b[0m\n\n`;
+  it.each(Array.from({ length: styled.length - 1 }, (_, i) => i + 1))(
+    'fix-round1 F1 captures a styled wrapped token split at offset %i',
+    async (offset) => {
+      await ready();
+      stream.emit('data', Buffer.from(styled.slice(0, offset)));
+      stream.emit('data', Buffer.from(styled.slice(offset)));
+      await settle();
+      expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(
+        true,
+      );
+      assertNoCredentialText(TOKEN, CODE);
+    },
+  );
+
+  it('fix-round1 F1 clears an incomplete escape when the user pastes again', async () => {
+    await ready();
+    stream.emit('data', Buffer.from('\x1b]unfinished'));
+    paste();
+    stream.emit('data', Buffer.from(`${TOKEN}\n\n`));
+    await settle();
+    expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(true);
+    assertNoCredentialText(TOKEN, CODE);
+  });
+
   it.each([95, 100, 90])('saves the complete %i-character body', async (length) => {
     const expected = token(length);
     await ready();

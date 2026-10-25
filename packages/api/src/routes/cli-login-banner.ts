@@ -55,6 +55,8 @@ function safeErrorDetails(err: unknown): { name: string; code?: string | number 
 const WS_PATH_PREFIX = '/cli-login-banner/';
 const RAW_BUFFER_MAX = 64 * 1024;
 const CLEAN_BUFFER_MAX = 32 * 1024;
+const ANSI_TAIL_MAX = 4096;
+const INCOMPLETE_ANSI_ESCAPE = /\x1b(?:\[[\x20-\x3f]*|\][^\x07\x1b]*\x1b?)?$/;
 const HEARTBEAT_MS = 15_000;
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 // How often the queued dialog is told what it is waiting for. Two queue reads per tick, both
@@ -177,6 +179,7 @@ interface BannerSession {
   pending: { job: Job | null };
   rawBuffer: string;
   cleanBuffer: string;
+  ansiTail: string;
   authUrlSent: boolean;
   authSuccessSent: boolean;
   tokenSubmitted: boolean;
@@ -416,6 +419,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     pending,
     rawBuffer: '',
     cleanBuffer: '',
+    ansiTail: '',
     authUrlSent: false,
     authSuccessSent: false,
     tokenSubmitted: false,
@@ -549,6 +553,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       session.authSuccessSent = false;
       session.rawBuffer = '';
       session.cleanBuffer = '';
+      session.ansiTail = '';
       try {
         // Write the token first, then send Enter as a SEPARATE write on the
         // next tick so claude-code's Ink input registers the paste before it
@@ -664,7 +669,10 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
   }
 
   session.rawBuffer = appendCapped(session.rawBuffer, text, RAW_BUFFER_MAX);
-  const clean = stripAnsi(text);
+  const ansiInput = session.ansiTail + text;
+  const incomplete = ansiInput.match(INCOMPLETE_ANSI_ESCAPE)?.[0] ?? '';
+  session.ansiTail = incomplete.slice(0, ANSI_TAIL_MAX);
+  const clean = stripAnsi(incomplete ? ansiInput.slice(0, -incomplete.length) : ansiInput);
   session.cleanBuffer = appendCapped(session.cleanBuffer, clean, CLEAN_BUFFER_MAX);
 
   // Login stdout can echo pasted codes and print complete or partial tokens.
