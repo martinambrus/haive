@@ -651,7 +651,10 @@ row clean and a mutation that lands during a write stays dirty. The 10 s plan-mi
 sweep in its own try): it skips a checkout with `MERGE_HEAD` or `REBASE_HEAD`, and looks again once it
 holds the project-state lock, for the sync and for the write (`refuseDuringGitOperation`), since a
 merge can open while it waits there: the sync then answers `held`, imports nothing it read and leaves
-`last_error` alone, as the first check does, and the write refuses. Every sync producer also reads the checkout
+`last_error` alone, as the first check does, and the write refuses. Admission refused by the
+earlier recovery fence also reports the live onboarding/upgrade/reset hold on a dirty row, without
+changing its revisions, journal, files or semantic state; a clean row stays untouched. The error
+distinguishes that admission hold from an open git operation, whose prior diagnostic stays alone. Every sync producer also reads the checkout
 again under the lock and answers `superseded` when the two reads differ, including a clone scan
 and the re-sync after a moved answer, which do not request the optional git-operation guard. A
 merge that opened and was given up while it waited cannot pass its intermediate record in. It runs the sync first, writes

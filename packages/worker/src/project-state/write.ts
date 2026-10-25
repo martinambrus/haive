@@ -117,6 +117,10 @@ export class ProjectStateMovedError extends Error {
   }
 }
 
+/** A moved-checkout refusal caused by admission, so refresh can report the hold separately from
+ *  an open git operation. It retains ProjectStateMovedError's public name and refusal semantics. */
+export class ProjectStateCheckoutHeldError extends ProjectStateMovedError {}
+
 /** An interrupted attempt is preserved until a person repairs a path the undo journal cannot own. */
 export class ProjectStateRecoveryHeldError extends ProjectStateMovedError {
   constructor(path: string) {
@@ -945,7 +949,7 @@ export async function refuseHeldCheckout(tx: Tx, repositoryId: string): Promise<
     )
     .limit(1);
   if (!repo || live.length > 0 || (repo.kind === 'reset' && isRootClaimLive(repo.claimedAt))) {
-    throw new ProjectStateMovedError();
+    throw new ProjectStateCheckoutHeldError();
   }
 }
 

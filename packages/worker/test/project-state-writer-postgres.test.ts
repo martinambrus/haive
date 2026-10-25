@@ -13,6 +13,7 @@ import {
   projectStateHash,
   renderProjectState,
 } from '@haive/shared/project-state';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
@@ -358,6 +359,56 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       ).toEqual(before.repo!.renderContext);
     }
   });
+
+  it.each([false, true])(
+    'reports a dirty held checkout without changing its intent or semantic state (journal=%s)',
+    async (journal) => {
+      const s = await fixture();
+      await s.write();
+      if (journal) {
+        seam.afterWrite = async () => {
+          throw new Error('interrupted foreground');
+        };
+        await expect(s.write('attempted')).rejects.toThrow('interrupted foreground');
+        seam.afterWrite = null;
+      } else await markProjectStateDirty(db!, s.repo.id);
+      await db!.insert(schema.tasks).values({
+        userId: s.userId,
+        repositoryId: s.repo.id,
+        type: 'onboarding',
+        status: 'running',
+        title: 'holder',
+      });
+      const disk = await s.render();
+      const [repo] = await db!
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, s.repo.id));
+      const sync = await db!
+        .select()
+        .from(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, s.repo.id));
+      const before = (await s.outbox())!;
+      expect(await sweepDirtyProjectStates(db!)).toBe(0);
+      const after = (await s.outbox())!;
+      expect.soft(after.lastError).toContain('holds the checkout');
+      expect({ ...after, lastError: before.lastError, updatedAt: before.updatedAt }).toEqual(
+        before,
+      );
+      expect(await s.render()).toEqual(disk);
+      expect(
+        await db!
+          .select()
+          .from(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
+      ).toEqual(sync);
+      expect(
+        (
+          await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
+        )[0],
+      ).toEqual(repo);
+    },
+  );
 
   it('a completed holder is a negative control: refresh still writes', async () => {
     const s = await fixture();

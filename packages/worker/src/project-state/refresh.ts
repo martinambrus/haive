@@ -6,6 +6,7 @@ import { readRenderContextColumn } from '@haive/shared/project-state';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { syncProjectStateFromCheckout } from './sync.js';
 import {
+  ProjectStateCheckoutHeldError,
   ProjectStateMovedError,
   ProjectStateRecoveryHeldError,
   recoverProjectStateWrite,
@@ -19,13 +20,21 @@ const NOT_WRITTEN = {
   superseded: 'the repository changed while its record was being read',
 } as const;
 
-async function setOutboxError(db: Database, repositoryId: string, message: string): Promise<void> {
+async function setOutboxError(
+  db: Database,
+  repositoryId: string,
+  message: string,
+  onlyIfDirty = false,
+): Promise<void> {
   await db
     .update(schema.projectStateOutbox)
     .set({ lastError: message.slice(0, 500), updatedAt: new Date() })
     .where(
       and(
         eq(schema.projectStateOutbox.repositoryId, repositoryId),
+        onlyIfDirty
+          ? lt(schema.projectStateOutbox.writtenRevision, schema.projectStateOutbox.revision)
+          : undefined,
         sql`${schema.projectStateOutbox.lastError} IS DISTINCT FROM ${message.slice(0, 500)}`,
       ),
     );
@@ -69,6 +78,11 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
   } catch (err) {
     if (err instanceof ProjectStateRecoveryHeldError) {
       await setOutboxError(db, repositoryId, err.message);
+      return false;
+    }
+    if (err instanceof ProjectStateCheckoutHeldError) {
+      // Operational metadata only: a refused writer must not change revisions, intent or state.
+      await setOutboxError(db, repositoryId, NOT_WRITTEN.deferred, true);
       return false;
     }
     if (err instanceof ProjectStateMovedError) return false;
@@ -119,6 +133,11 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
       refuseWhileHeld: true,
     });
   } catch (err) {
+    if (err instanceof ProjectStateCheckoutHeldError) {
+      // Operational metadata only: a refused writer must not change revisions, intent or state.
+      await setOutboxError(db, repositoryId, NOT_WRITTEN.deferred, true);
+      return false;
+    }
     if (err instanceof ProjectStateMovedError) return false;
     throw err;
   }

@@ -824,13 +824,14 @@ async function main(): Promise<void> {
     );
     const keys = 'rows' in constraints ? constraints.rows : [];
     check(
-      'migration 0171 gives repositories a nullable render_context and creates project_state_sync as specified',
+      'migrations 0171 and 0213 give repositories a nullable render_context and the current project_state_sync shape',
       shapeOf(renderColumn, 'render_context') === 'jsonb YES' &&
         'rows' in syncColumns &&
-        syncColumns.rows.length === 4 &&
+        syncColumns.rows.length === 5 &&
         shapeOf(syncColumns, 'repository_id') === 'uuid NO' &&
         shapeOf(syncColumns, 'base_snapshot') === 'jsonb NO' &&
         shapeOf(syncColumns, 'last_error') === 'text YES' &&
+        shapeOf(syncColumns, 'synced_hash') === 'text YES' &&
         shapeOf(syncColumns, 'updated_at') === 'timestamp without time zone NO' &&
         /now\(\)/.test(
           String(syncColumns.rows.find((c) => c.column_name === 'updated_at')?.column_default),
@@ -1376,7 +1377,27 @@ async function main(): Promise<void> {
       upgradeA.error ?? { changedOnA, unplannedOnA },
     );
 
-    await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep));
+    // A Retry reclaims its task before apply; a completed task must never own a record write.
+    const rerunPostOnboarding = async () => {
+      await a.db
+        .update(schema.tasks)
+        .set({ status: 'running', completedAt: null })
+        .where(eq(schema.tasks.id, taskA));
+      try {
+        return await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep));
+      } finally {
+        await a.db
+          .update(schema.tasks)
+          .set({ status: 'completed', completedAt: new Date() })
+          .where(eq(schema.tasks.id, taskA));
+      }
+    };
+    const rerun = await rerunPostOnboarding();
+    check(
+      'a live Retry of 12 writes its record before retiring mirrors',
+      rerun.output.recordWrite === 'written',
+      rerun.output,
+    );
     const dirty = git(a.repoPath, 'status', '--porcelain');
     check("a second 12 run leaves A's checkout clean", dirty === '', dirty.split('\n'));
 
@@ -1438,7 +1459,12 @@ async function main(): Promise<void> {
 
     await markProjectStateDirty(a.db, a.repositoryId);
     check('a mark leaves the outbox dirty', !(await clean()), await outboxA());
-    await runStep(a, postOnboardingStep, taskA, rowOf(postOnboardingStep));
+    const rerunDirty = await rerunPostOnboarding();
+    check(
+      'a live Retry of 12 drains the dirty record',
+      rerunDirty.output.recordWrite === 'written',
+      rerunDirty.output,
+    );
     check("12's record write leaves the outbox clean", await clean(), await outboxA());
     check(
       'and the next sweep tick writes nothing',
