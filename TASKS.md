@@ -99,9 +99,9 @@ All PRE-EXISTING.
 
 ### T288 · FNF[sync-reader] · project-state sync reader defects (+6)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:36Z · last: 2026-10-25T18:36Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:36Z · last: 2026-10-25T18:43Z
 
-Codex continuation: recover the reader fixes with fixtures; validate deferred overlap against current main and preserve pending design decisions. Prior attempt record: (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Previous brief, reusable: .claude/tmp/fnf-run/p288/drive.md on ACTIVIT21 — it scoped items 2,3,5,6,7 and deferred 1/4 for the fnf/278 overlap)
+Codex progress 2026-10-25T18:43Z: Focused sync fixes in validation: stale checkout lock reread, truly empty directory handling, transactional RTK question lifecycle. Three inherited items obsolete/intended by verified current contracts. Unrecorded malformed RTK file repair remains pending on explicit ownership policy; T317 unchanged.
 All PRE-EXISTING.
 
 1. DEFERRED (overlaps fnf/278): gitOperationInProgress (repo/git-operation.ts) reads an out-of-tree git dir as "merge open"; every caller holds forever for such repos.
@@ -144,9 +144,9 @@ From the T414 review (2026-10-24). All PRE-EXISTING, consequential for dependenc
 
 ### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+7)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:26Z · last: 2026-10-25T18:26Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:26Z · last: 2026-10-25T18:43Z
 
-Codex continuation: validate the eight inherited chunker diagnoses with meaningful fixtures, then focused implementation and fresh paired review. No provider runs.
+Codex progress 2026-10-25T18:43Z: Inherited chunker failures reproduced; targeted corrected run363pass/4unchanged expectedfails, expanded51controls. 764worker sources and60LF splitter variants byte-identical to base. Full worker suite running under lock; final review pending.
 From the #311 driver (2026-10-24). PRE-EXISTING unless noted. (Session fnf-run mirrors it as task #330.) Evidence/harness (ruler, lexer-diff, oracle-cross, mutants): .claude/tmp/fnf-run/p311/ on ACTIVIT21.
 
 1. Go/Rust readers count braces in strings/comments (goRanges/rustRanges read raw content); verify with a ruler first.
@@ -436,9 +436,9 @@ Plan I4, part d. Browser check at 1280, 768 and 390.
 
 ### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+4)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:34Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:43Z
 
-Codex progress 2026-10-25T18:34Z: PR #922 at local75f667c23. Corrected onboarding/upgrade cause-losing wrappers and the same identity producer through projection restoration to merge-resolver returned failure. 405 affected tests/typecheck/format pass, parent eight decisive controls pass; fresh xhigh review running. Evidence: .claude/tmp/board-run/T340/onboarding-forwarder-fix/report.md. Original params on this path are IDs; no password exposure established.
+Codex progress 2026-10-25T18:43Z: 75f667 forwarding correction fresh xhigh review clean and parent8controls pass. Normal integration with shipped Retry/nested main9df65b116 now resolving two API overlaps; combined redaction+capability mutation controls pass, parent realPG run active.
 Items 2-5 merged (#781, #808).
 
 1. PRE-EXISTING, from reading the code (not reproduced). The PR is opened against the origin read from disk (12-worktree-cleanup.ts ~:226, ~:808-813), but pr-poll needs repositories.remote_url (pr-poll-queue.ts ~:136-142), which is NULL for local_path repos. Fix: record the origin on the PR row and poll from it, or backfill remote_url. Reproduce first.
@@ -910,9 +910,9 @@ From the T400 review (2026-10-24). PRE-EXISTING, minor.
 
 ### T424 · FNF[nested-repo-worktree] · gate 3 offers a commit that git add will refuse for an unborn nested repo; the review collector calls a nested repo a new file (+1)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:26Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:43Z
 
-Codex progress 2026-10-25T18:26Z: PR #926 head7b4c842 fixes stale prompt assertion; full targeted20 tests and fresh high review pass. New exact-head review requested once after not-started window; CI running.
+Codex progress 2026-10-25T18:43Z: PR #926 merged9df65b116 after exact7b4c842 clean bot/11checksSUCCESS/CLEAN/0threads. MainCI40222131082 running. Dev checkout loaded9df, fixture services stopped and owned nested/globalKB scratch DBs dropped.
 From the T375 review (2026-10-24). PRE-EXISTING, minor.
 
 1. worker 10-gate-3-commit.ts ~:375, ~:407-410: with an unborn nested repo (`git init`, no commit) in the worktree the whole `git add -A` fails, but the form still defaults the commit on and the failure shows only at Finalise. Since T375 the preview says why. Fix: say so in the form, or stage around it.
