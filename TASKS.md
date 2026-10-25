@@ -97,23 +97,6 @@ All PRE-EXISTING.
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
-### T288 · FNF[sync-reader] · project-state sync reader defects (+6)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:36Z · last: 2026-10-25T20:26Z
-
-Codex progress 2026-10-25T20:26Z: PR927 merged 0dbad8dc6 after exact 21c3d79f all 11 checks, clean bot review and no unresolved threads. Main CI40230306594 pending. Real-PG two-install146 checks and pending-guard counterfactual passed; production full13,518 passed before fixture-only corrections. Accepted manual RTK repair/warnings; T317 separate.
-All PRE-EXISTING.
-
-1. DEFERRED (overlaps fnf/278): gitOperationInProgress (repo/git-operation.ts) reads an out-of-tree git dir as "merge open"; every caller holds forever for such repos.
-2. persistDetection's sync (clone.ts ~299) and resolve.ts ~140 re-sync import without the under-lock re-read compare (#751). [in brief as B]
-3. An empty `.haive-data/state/` reads as a broken record and stalls the sweep (sync.ts ~185). [A]
-4. DEFERRED (overlaps fnf/278): onboarding-upgrades.md names `rebaseProjectStateOnCheckout`, which nothing calls.
-5. Invalid settings/rtk-enabled.json warns on every sync (sync.ts ~790) and never repairs. [C]
-6. Import markers record a synthesized rtkEnabled:false (import-marker.ts ~44). [D, may be harmless]
-7. A sync outside persistDetection that adopts a teammate's rtk-enabled.json leaves the RTK question pending until boot; call raiseRtkQuestion after it. [E]
-
-User decision 2026-10-25: item 5 unowned malformed RTK settings remain for manual repair; existing repeated warnings are accepted. Preserve the writer ownership rule. No change to the separate T317 first-import decision. Items 1/4/6 validated as intended/obsolete/harmless under current readers; actionable 2/3/7 implemented at7713e3ca with strengthened rollback control9a1b2961e; fresh source review clean, final test review/full suite/PR gates pending.
-
 ### T412 · FNF[git-noexit-low-3] · gitClone and a few scripts still spawn git unbounded (+4)
 
 status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T19:56Z · last: 2026-10-25T20:26Z
@@ -929,6 +912,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T288 — locked stale-import checks, empty state directories and atomic RTK question convergence — PR #927 (0dbad8dc6), 2026-10-25; main CI40230306594 green. Unowned malformed RTK settings remain for manual repair with accepted warnings; T317 separate.
 
 - T340 — Git destination-bound credentials, retained PR remote, safe URL state and diagnostic forwarding — PR #922 (e487dfee5), 2026-10-25; main CI40226900960 green; migration0212 applied and shared libraries rebuilt.
 
