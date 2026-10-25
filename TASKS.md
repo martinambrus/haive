@@ -99,9 +99,9 @@ All PRE-EXISTING.
 
 ### T412 · FNF[git-noexit-low-3] · gitClone and a few scripts still spawn git unbounded (+4)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T19:56Z · last: 2026-10-25T20:42Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T19:56Z · last: 2026-10-25T20:56Z
 
-Codex progress 2026-10-25T20:42Z: PR929 exact898b60713 has clean fresh xhigh and automated reviews; parent80 decisive controls and final207 affected checks passed. CI40231105192 still running. Full worker13,653 passed before documented telemetry-only line; T397 separate.
+Codex progress 2026-10-25T20:56Z: PR929 merged89752556c after exact898 all11SUCCESS/CLEAN/botclean/0threads. Main CI40232785502 pending; task remains taken. Parent80/final207 controls and earlier frozen full13,653 passed with disclosed telemetry-only delta; T397 separate. Dev loaded/healthy.
 From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it as its task #329.)
 
 1. Unbounded git spawns remain at repo/clone.ts:94,116,687 (gitClone: runs before its dir exists; carries the credential-helper argv, env and secret scrub — needs its own review), steps/onboarding/_credential-scan.ts:173, scripts/advance-bundle-items.ts:25, scripts/reset-bundle-to-commit.ts:43.
