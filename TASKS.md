@@ -99,9 +99,9 @@ All PRE-EXISTING.
 
 ### T288 · FNF[sync-reader] · project-state sync reader defects (+6)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:36Z · last: 2026-10-25T18:43Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:36Z · last: 2026-10-25T19:34Z
 
-Codex progress 2026-10-25T18:43Z: Focused sync fixes in validation: stale checkout lock reread, truly empty directory handling, transactional RTK question lifecycle. Three inherited items obsolete/intended by verified current contracts. Unrecorded malformed RTK file repair remains pending on explicit ownership policy; T317 unchanged.
+Codex progress 2026-10-25T19:34Z: PR927head9a1b2961e: freshreviews/botclean, localfull13,518pass/4expected/531skip. CI two-install smoke fails stale all-history count after correctRTKconvergence; reproduced on isolatedrealPG, focused fixture correction active. User accepts manualrepair/existingwarnings; T317 separate.
 All PRE-EXISTING.
 
 1. DEFERRED (overlaps fnf/278): gitOperationInProgress (repo/git-operation.ts) reads an out-of-tree git dir as "merge open"; every caller holds forever for such repos.
