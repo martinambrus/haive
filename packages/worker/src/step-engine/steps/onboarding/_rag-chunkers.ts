@@ -1576,6 +1576,7 @@ interface RubyCodeFrame {
   lambda?: { depth: number; locals: Set<string>; headerRead: boolean };
   parameters: boolean;
   statementStart: boolean;
+  argumentlessControl: boolean;
 }
 function rubyCodeFrame(
   locals: Set<string>,
@@ -1591,6 +1592,7 @@ function rubyCodeFrame(
     endings: [],
     parameters,
     statementStart: true,
+    argumentlessControl: false,
   };
 }
 function rubyFrameLocals(frame: RubyCodeFrame): Set<string> {
@@ -1599,6 +1601,7 @@ function rubyFrameLocals(frame: RubyCodeFrame): Set<string> {
 function rubyCodeStart(frame: RubyCodeFrame): void {
   frame.state = { ...rubyCodeState(), depth: frame.state.depth };
   frame.statementStart = true;
+  frame.argumentlessControl = false;
 }
 
 /** One advancing Ruby walk for endless expressions, literals and interpolation.
@@ -1686,6 +1689,17 @@ function rubyExpressionEnd(
       continue;
     }
     const trivia = /\s/.test(c) || c === '#';
+    // Optional control arguments may end before a postfix modifier. A real operand
+    // (including a parenthesis/begin) or a hard newline ends that possibility.
+    const controlModifier =
+      frame.argumentlessControl &&
+      frame.state.nameContext === 'bare' &&
+      /^(?:if|unless|while|until)$/.test(wordAt ?? '');
+    if (
+      (isLineTerminator(c, true) && !frame.state.continues) ||
+      (!trivia && !(c === '\\' && isLineTerminator(content[cursor + 1] ?? '', true)))
+    )
+      frame.argumentlessControl = false;
     const scope = frame.scopes[frame.scopes.length - 1];
     const method = scope?.method;
     if (scope && method && method.header !== 'body') {
@@ -1837,7 +1851,7 @@ function rubyExpressionEnd(
         if (ending?.scope) frame.scopes.splice(frame.scopes.indexOf(ending.scope), 1);
         rubyValue(frame.state);
       } else if (/^(?:if|unless|while|until)$/.test(wordAt)) {
-        if (previousOperand || statementStart)
+        if (!controlModifier && (previousOperand || statementStart))
           frame.endings.push({
             kind: /^(?:while|until)$/.test(wordAt) ? 'loop' : 'keyword',
             depth: previousDepth,
@@ -1868,8 +1882,11 @@ function rubyExpressionEnd(
           header: true,
         });
         rubyCodeStart(frame);
-      } else if (/^(?:then|else|elsif|when|rescue|ensure|in|return|break|next|yield)$/.test(wordAt))
+      } else if (/^(?:return|break|next|yield|redo|retry)$/.test(wordAt)) {
         rubyCodeStart(frame);
+        frame.argumentlessControl = true;
+        frame.statementStart = false;
+      } else if (/^(?:then|else|elsif|when|rescue|ensure|in)$/.test(wordAt)) rubyCodeStart(frame);
     }
     if (isLineTerminator(c, true) && !frame.state.continues) {
       const top = frame.endings[frame.endings.length - 1];
