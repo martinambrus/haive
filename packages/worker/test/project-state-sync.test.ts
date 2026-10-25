@@ -2124,6 +2124,8 @@ describe('syncProjectStateFromCheckout: RTK question lifecycle', () => {
     await s.putRecord(withSettings({ 'rtk-enabled': true }));
     const before = s.dump();
     s.hook.onCommit = async () => {
+      expect((json(s.columnOf()) as Json).rtkChoiceRecorded).toBe(true);
+      expect(s.pending()).toEqual([]);
       throw new Error('commit refused');
     };
 
