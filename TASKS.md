@@ -194,19 +194,6 @@ All PRE-EXISTING.
 status: parked · reason: needs a fresh onboarding run (see T300)
 08-knowledge-acquisition.ts:2058 and its writes pass no owner, so a fresh KB may be root-owned and uid 1000 gets EACCES; 09_3's apply never checks the disk. Dev data disagrees in part. Verify on a fresh onboarding first; then pass the owner in 08, and make 09_3 diff the KB against the agent's claim.
 
-### T303 · FNF[bundles-2] · bundle follow-ups from #284
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:44Z · last: 2026-10-25T22:20Z
-
-Codex progress 2026-10-25T22:20Z: PR932 merged0294c9033 after exactfee12 checks, clean bot/fresh reviews and no unresolved threads. Main CI40238774156 has7/8green; only smoke job remains. Dev shared libraries rebuilt; API200/web200/worker135116ready after triggering byte-unchanged watcher reload. No migration.
-All PRE-EXISTING.
-
-1. Replace complete not resumable after its move (bundles.ts ~722-727); set 'syncing' before the move or key on the upload.
-2. Bundle worker keeps BullMQ's default maxStalledCount (bundle-queue.ts:45-72); match repo-queue (10).
-3. reconcileStrandedCloningRepos runs at boot only; call it from StalledTaskSweeper.sweep().
-4. POST /bundles/:id/sync has no already-syncing check (bundles.ts ~792-816); 409 or key the job.
-5. Web never shows lastSyncError; show it under a failed bundle (bundle-composer.tsx), browser check 375/768/1280.
-
 ### T308 · FNF[worktree-aliases] · hard links planted into .haive/worktrees before #800 survive
 
 status: open
@@ -892,6 +879,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T303 — resumable ZIP replacement, bounded duplicate admission, stall allowance, periodic recovery and visible bundle failures — PR #932 (0294c9033), 2026-10-25; main CI40238774156 all8 green.
 
 - T416 — real proxy/parser/sanitizer/CSP browser checks and same-built production web image boot; independent browser CI budget — PR #928 (15f532bea), 2026-10-25; main CI40232945840 all8 green.
 
