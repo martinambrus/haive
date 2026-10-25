@@ -211,6 +211,7 @@ const CLAUDE_OAUTH_PREFIX = 'sk-ant-oat01-';
 
 // A plausibility floor, not a format length: observed bodies have 95 chars.
 const CLAUDE_OAUTH_MIN_BODY_LEN = 90;
+const CLAUDE_OAUTH_MAX_BODY_LEN = 512;
 
 function extractClaudeOauthToken(text: string): string | null {
   const start = text.indexOf(CLAUDE_OAUTH_PREFIX);
@@ -230,6 +231,7 @@ function extractClaudeOauthToken(text: string): string | null {
     }
     const fragment = line.match(/^[A-Za-z0-9_-]*/)?.[0] ?? '';
     body += fragment;
+    if (body.length > CLAUDE_OAUTH_MAX_BODY_LEN) return null;
     if (fragment.length !== line.length && !/^[ \t]*$/.test(line.slice(fragment.length))) break;
     if (i === lines.length - 1) return null;
   }

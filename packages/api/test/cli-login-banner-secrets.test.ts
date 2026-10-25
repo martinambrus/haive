@@ -155,7 +155,8 @@ function paste() {
 }
 
 describe('Claude OAuth token capture controls', () => {
-  const token = (length: number) => 'sk-ant-oat01-' + 'Az9_xQ7-vR2'.repeat(20).slice(0, length);
+  const token = (length: number) =>
+    'sk-ant-oat01-' + 'Az9_xQ7-vR2'.repeat(Math.ceil(length / 10)).slice(0, length);
 
   async function ready() {
     await start();
@@ -293,6 +294,24 @@ describe('Claude OAuth token capture controls', () => {
     stream.emit('end');
     await settle();
     expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(true);
+  });
+
+  it.each([513, 30000])('fix-round1 D4 refuses an oversized %i-character body', async (length) => {
+    await ready();
+    stream.emit('data', Buffer.from(`${token(length)}\n\n`));
+    await settle();
+    expect(h.save.mock.calls.length === 0).toBe(true);
+  });
+
+  it('fix-round1 D4 accepts the 512-character ceiling exactly', async () => {
+    const expected = token(512);
+    await ready();
+    stream.emit('data', Buffer.from(`${expected}\n\n`));
+    await settle();
+    expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected).toBe(
+      true,
+    );
+    assertNoCredentialText(expected, CODE);
   });
 
   it.each([95, 100, 90])('saves the complete %i-character body', async (length) => {
