@@ -217,20 +217,26 @@ function extractClaudeOauthToken(text: string): string | null {
   const start = text.indexOf(CLAUDE_OAUTH_PREFIX);
   if (start < 0) return null;
   const lines = text.slice(start + CLAUDE_OAUTH_PREFIX.length).split(/\r*\n\r*|\r/);
+  const firstLineStart = Math.max(text.lastIndexOf('\n', start), text.lastIndexOf('\r', start)) + 1;
+  const firstLineWidth =
+    start - firstLineStart + CLAUDE_OAUTH_PREFIX.length + lines[0]!.trimEnd().length;
   let body = '';
   for (let i = 0; i < lines.length; i++) {
     const line = i === 0 ? lines[i]! : lines[i]!.replace(/^[ \t]+/, '');
+    const fragment = line.match(/^[A-Za-z0-9_-]*/)?.[0] ?? '';
     if (i > 0) {
-      // A following one-word line reads as a continuation; the CLI's blank line or the floor and ceiling bound it.
-      // Only token-only lines can be TTY continuations. Blank lines, prose
-      // with word separators and a second prefix terminate the first token.
-      if (line.startsWith(CLAUDE_OAUTH_PREFIX) || /[ \t]\S/.test(line)) break;
+      if (line.startsWith(CLAUDE_OAUTH_PREFIX)) break;
+      // D3: Mixed text is prose only if 2+ token lines precede it and the prior line
+      // is shorter than the first (trim trailing blanks, count leading text); else refuse.
+      if (fragment && !/^[ \t]*$/.test(line.slice(fragment.length))) {
+        if (i > 1 && lines[i - 1]!.trimEnd().length < firstLineWidth) break;
+        return null;
+      }
       // A chunk can end mid-token or just after a wrap. Wait for more output
       // before deciding whether its last line continues the capture.
       if (i === lines.length - 1 && /^[A-Za-z0-9_-]*$/.test(line)) return null;
       if (!line) break;
     }
-    const fragment = line.match(/^[A-Za-z0-9_-]*/)?.[0] ?? '';
     body += fragment;
     if (body.length > CLAUDE_OAUTH_MAX_BODY_LEN) return null;
     if (fragment.length !== line.length && !/^[ \t]*$/.test(line.slice(fragment.length))) break;

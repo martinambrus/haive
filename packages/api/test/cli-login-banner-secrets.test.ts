@@ -165,6 +165,96 @@ describe('Claude OAuth token capture controls', () => {
   }
 
   it.each([
+    ['wide terminal', 95, 103],
+    ['three token lines', 160, 80],
+  ] as const)(
+    'fix-round2 geometry refuses an ambiguous final fragment with %s',
+    async (_label, length, width) => {
+      const expected = token(length);
+      const lines = Array.from({ length: Math.ceil(expected.length / width) }, (_, i) =>
+        expected.slice(i * width, (i + 1) * width),
+      );
+      await ready();
+      stream.emit('data', Buffer.from(`${lines.join('\n')} (valid for 1 year)\n`));
+      stream.emit('end');
+      await settle();
+      expect(h.save.mock.calls.length === 0).toBe(true);
+      assertNoCredentialText(expected, CODE);
+    },
+  );
+
+  it.each(['Store this token securely', 'Done.'])(
+    'fix-round2 geometry saves the exact wrapped token before %s',
+    async (prose) => {
+      await ready();
+      stream.emit('data', Buffer.from(`${TOKEN.slice(0, 80)}\n${TOKEN.slice(80)}\n${prose}\n`));
+      await settle();
+      expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(
+        true,
+      );
+      assertNoCredentialText(TOKEN, CODE);
+    },
+  );
+
+  it('fix-round2 geometry refuses prose immediately after a one-line token', async () => {
+    await ready();
+    stream.emit('data', Buffer.from(`${TOKEN}\nStore this token\n`));
+    stream.emit('end');
+    await settle();
+    expect(h.save.mock.calls.length === 0).toBe(true);
+    assertNoCredentialText(TOKEN, CODE);
+  });
+
+  it.each([
+    ['short previous line', 95, true],
+    ['full previous line', 147, false],
+  ] as const)(
+    'fix-round2 geometry ignores trailing padding on a %s',
+    async (_label, length, saves) => {
+      const expected = token(length);
+      const first = expected.slice(0, 80).padEnd(84, ' ');
+      const previous = expected.slice(80).padEnd(80, ' ');
+      await ready();
+      stream.emit('data', Buffer.from(`${first}\n${previous}\nDone.\n`));
+      stream.emit('end');
+      await settle();
+      expect(
+        saves
+          ? h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected
+          : h.save.mock.calls.length === 0,
+      ).toBe(true);
+      assertNoCredentialText(expected, CODE);
+    },
+  );
+
+  it('fix-round2 geometry counts text before the prefix in the first line width', async () => {
+    const expected = token(137);
+    const before = 'Token: ';
+    await ready();
+    stream.emit(
+      'data',
+      Buffer.from(`${before}${expected.slice(0, 73)}\n${expected.slice(73)}\nDone.\n`),
+    );
+    await settle();
+    expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected).toBe(
+      true,
+    );
+    assertNoCredentialText(expected, CODE);
+  });
+
+  it('fix-round2 geometry counts leading blanks in the previous line width', async () => {
+    await ready();
+    stream.emit(
+      'data',
+      Buffer.from(`${TOKEN.slice(0, 80)}\n${' '.repeat(52)}${TOKEN.slice(80)}\nDone.\n`),
+    );
+    stream.emit('end');
+    await settle();
+    expect(h.save.mock.calls.length === 0).toBe(true);
+    assertNoCredentialText(TOKEN, CODE);
+  });
+
+  it.each([
     ['trailing blanks', ' \t\r\n'],
     ['cursor forward', '\x1b[2C\r\n'],
     ['CR CR LF', '\r\r\n'],
@@ -327,13 +417,11 @@ describe('Claude OAuth token capture controls', () => {
     assertNoCredentialText(TOKEN, CODE);
   });
 
-  it('fix-round1 D3 records the known ambiguity of a following one-word line', async () => {
+  it('fix-round1 D3 refuses an ambiguous punctuated word after a one-line token', async () => {
     await ready();
     stream.emit('data', Buffer.from(`${TOKEN}\nDone.\n`));
     await settle();
-    expect(
-      h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN + 'Done',
-    ).toBe(true);
+    expect(h.save.mock.calls.length === 0).toBe(true);
     assertNoCredentialText(TOKEN, CODE);
   });
 
@@ -349,15 +437,17 @@ describe('Claude OAuth token capture controls', () => {
   });
 
   it.each([' ', '\n', '\n\n'])(
-    'ends a shorter token before prose separated by %j',
+    'captures exactly or refuses a shorter token before prose separated by %j',
     async (separator) => {
       const expected = token(90);
       await ready();
       stream.emit('data', Buffer.from(`${expected}${separator}Store this token securely\n`));
       await settle();
-      expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected).toBe(
-        true,
-      );
+      expect(
+        separator === '\n'
+          ? h.save.mock.calls.length === 0
+          : h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected,
+      ).toBe(true);
       assertNoCredentialText(expected, CODE);
     },
   );
