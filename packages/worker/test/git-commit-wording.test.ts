@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { writeFileNoFollow } from '@haive/shared/fs-safe';
-import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { gitRun, type GitRunResult } from '../src/repo/git-exec.js';
 import { commitKnowledgeTrees } from '../src/step-engine/steps/workflow/_kb-commit.js';
@@ -74,6 +74,7 @@ describe.each(sites)('%s commit decisions', (site) => {
   let repo: string;
   let ctx: StepContext;
   let writes: unknown[];
+  let skillTargetDirs: string[];
 
   const apply = async () => {
     const common = {
@@ -105,7 +106,7 @@ describe.each(sites)('%s commit decisions', (site) => {
             worktreePath: repo,
             targets: [],
             removals: ['already-removed'],
-            skillTargetDirs: ['.claude/skills'],
+            skillTargetDirs,
             framework: 'general',
             language: 'typescript',
             kbFiles: [],
@@ -134,6 +135,7 @@ describe.each(sites)('%s commit decisions', (site) => {
 
   beforeEach(async () => {
     control.result.mockReset();
+    skillTargetDirs = ['.claude/skills'];
     repo = await mkdtemp(path.join(tmpdir(), 'haive-commit-wording-'));
     ({ ctx, writes } = context(repo));
     await command(repo, ['init', '-q', '-b', 'main']);
@@ -156,6 +158,202 @@ describe.each(sites)('%s commit decisions', (site) => {
     control.result.mockReset();
     await rm(repo, { recursive: true, force: true });
   });
+
+  if (site === 'knowledge trees' || site === 'skill sync') {
+    it('scoped control: leaves an outside staged file out of the commit and staged afterwards', async () => {
+      const ownFile =
+        site === 'knowledge trees' ? `${KB_DIR}/entry.md` : '.claude/skills/kept/SKILL.md';
+      await writeFileNoFollow(repo, ownFile, 'changed\n');
+      await writeFileNoFollow(repo, 'README.md', 'personal staged work\n');
+      await command(repo, ['add', '--', 'README.md']);
+      await writeFileNoFollow(repo, 'README.md', 'personal unstaged work\n');
+
+      const out = await apply();
+
+      expect(out).toMatchObject({ committed: true, commitSha: expect.any(String) });
+      expect(await command(repo, ['show', 'HEAD:README.md'])).toBe('base');
+      expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+      expect(await command(repo, ['show', ':README.md'])).toBe('personal staged work');
+      expect(await command(repo, ['diff', '--name-only'])).toBe('README.md');
+      expect(await command(repo, ['show', `HEAD:${ownFile}`])).toBe('changed');
+    });
+
+    it.each([
+      { staged: true, survivingEdit: false },
+      { staged: true, survivingEdit: true },
+      { staged: false, survivingEdit: false },
+      { staged: false, survivingEdit: true },
+    ])(
+      'commits a deleted owned root with staged=$staged and survivingEdit=$survivingEdit',
+      async ({ staged, survivingEdit }) => {
+        const removedRoot = site === 'knowledge trees' ? LEARNINGS_DIR : '.gemini/skills';
+        const removedFile = `${removedRoot}/old/SKILL.md`;
+        const survivingFile =
+          site === 'knowledge trees' ? `${KB_DIR}/entry.md` : '.claude/skills/kept/SKILL.md';
+        await writeFileNoFollow(repo, removedFile, 'old owned content\n', { createParents: true });
+        await command(repo, ['add', '--', removedRoot]);
+        await command(repo, ['commit', '-qm', 'second owned root']);
+        if (site === 'skill sync') skillTargetDirs.push(removedRoot);
+        if (staged) await command(repo, ['rm', '-r', '--', removedRoot]);
+        else await rm(path.join(repo, removedRoot), { recursive: true });
+        if (survivingEdit) await writeFileNoFollow(repo, survivingFile, 'changed\n');
+        await writeFileNoFollow(repo, 'README.md', 'personal staged work\n');
+        await command(repo, ['add', '--', 'README.md']);
+        await writeFileNoFollow(repo, 'README.md', 'personal unstaged work\n');
+
+        expect(await apply()).toMatchObject({ committed: true, commitSha: expect.any(String) });
+
+        expect(
+          await command(repo, ['ls-tree', '-r', '--name-only', 'HEAD', '--', removedRoot]),
+        ).toBe('');
+        expect(await command(repo, ['show', 'HEAD:README.md'])).toBe('base');
+        expect(await command(repo, ['show', ':README.md'])).toBe('personal staged work');
+        expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+        expect(await command(repo, ['diff', '--name-only'])).toBe('README.md');
+        if (survivingEdit)
+          expect(await command(repo, ['show', `HEAD:${survivingFile}`])).toBe('changed');
+        const head = await command(repo, ['rev-parse', 'HEAD']);
+        expect(await apply()).toMatchObject({ committed: false, commitSha: null });
+        expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+        expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+      },
+    );
+
+    it.each([false, true])(
+      'commits when every owned root is deleted (staged: %s)',
+      async (staged) => {
+        const root = site === 'knowledge trees' ? KB_DIR : '.claude/skills';
+        if (staged) await command(repo, ['rm', '-r', '--', root]);
+        else await rm(path.join(repo, root), { recursive: true });
+        await writeFileNoFollow(repo, 'README.md', 'personal staged work\n');
+        await command(repo, ['add', '--', 'README.md']);
+
+        expect(await apply()).toMatchObject({ committed: true, commitSha: expect.any(String) });
+        expect(await command(repo, ['ls-tree', '-r', '--name-only', 'HEAD', '--', root])).toBe('');
+        expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+        const head = await command(repo, ['rev-parse', 'HEAD']);
+        expect(await apply()).toMatchObject({ committed: false, commitSha: null });
+        expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+        expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+      },
+    );
+
+    it.each([1, 128, 2, -1, 124])(
+      'rejects a failed missing-root tracked read: %i',
+      async (code) => {
+        if (site === 'skill sync') skillTargetDirs.push('.gemini/skills');
+        control.result.mockImplementation((_cwd: string, args: string[]) =>
+          args[0] === 'ls-files'
+            ? { code, stdout: 'not a successful read', stderr: 'opaque diagnostic' }
+            : undefined,
+        );
+
+        await expect(apply()).rejects.toThrow(/^git tracked paths read failed:/);
+        expect(
+          vi.mocked(gitRun).mock.calls.some(([, args]) => ['add', 'commit'].includes(args[0]!)),
+        ).toBe(false);
+      },
+    );
+
+    it.each([128, 2, -1, 124])('rejects a failed missing-root staged read: %i', async (code) => {
+      if (site === 'skill sync') skillTargetDirs.push('.gemini/skills');
+      control.result.mockImplementation((_cwd: string, args: string[]) =>
+        args[0] === 'diff' && args.includes('--cached') && args.includes('--quiet')
+          ? { code, stdout: '', stderr: 'opaque diagnostic' }
+          : undefined,
+      );
+
+      await expect(apply()).rejects.toThrow(/^git staged read failed:/);
+      expect(
+        vi.mocked(gitRun).mock.calls.some(([, args]) => ['add', 'commit'].includes(args[0]!)),
+      ).toBe(false);
+    });
+
+    it.each([128, 2, -1, 124])(
+      'rejects a failed merge read even with scoped changes: %i',
+      async (code) => {
+        const ownFile =
+          site === 'knowledge trees' ? `${KB_DIR}/entry.md` : '.claude/skills/kept/SKILL.md';
+        await writeFileNoFollow(repo, ownFile, 'changed\n');
+        control.result.mockImplementation((_cwd: string, args: string[]) =>
+          args[0] === 'rev-parse' && args.includes('MERGE_HEAD')
+            ? { code, stdout: '', stderr: 'opaque diagnostic' }
+            : undefined,
+        );
+        await expect(apply()).rejects.toThrow(/^git merge read failed:/);
+        expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
+      },
+    );
+
+    it('leaves an open merge alone even with no changes in its own paths', async () => {
+      await command(repo, ['checkout', '-q', '-b', 'side']);
+      await command(repo, ['commit', '-q', '--allow-empty', '-m', 'side']);
+      const side = await command(repo, ['rev-parse', 'HEAD']);
+      await command(repo, ['checkout', '-q', 'main']);
+      await command(repo, ['commit', '-q', '--allow-empty', '-m', 'main']);
+      const head = await command(repo, ['rev-parse', 'HEAD']);
+      await command(repo, ['merge', '--no-commit', '--no-ff', 'side']);
+
+      await expect(apply()).rejects.toThrow(/open merge/);
+
+      expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await command(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(side);
+    });
+
+    it('leaves outside staged work alone when its own paths are unchanged', async () => {
+      const head = await command(repo, ['rev-parse', 'HEAD']);
+      await writeFileNoFollow(repo, 'README.md', 'personal staged work\n');
+      await command(repo, ['add', '--', 'README.md']);
+
+      expect(await apply()).toMatchObject({ committed: false, commitSha: null });
+
+      expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+    });
+  } else {
+    it('retains the intentional whole-index commit for session edits', async () => {
+      await writeFileNoFollow(repo, 'README.md', 'session edits\n');
+      await command(repo, ['add', '--', 'README.md']);
+
+      expect(await apply()).toMatchObject({ committed: true, commitSha: expect.any(String) });
+
+      expect(await command(repo, ['show', 'HEAD:README.md'])).toBe('session edits');
+      expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('');
+    });
+  }
+
+  if (site === 'knowledge trees') {
+    it('scoped control: reports nothing to commit when only an outside file is staged', async () => {
+      const head = await command(repo, ['rev-parse', 'HEAD']);
+      await writeFileNoFollow(repo, 'README.md', 'personal staged work\n');
+      await command(repo, ['add', '--', 'README.md']);
+
+      expect(await apply()).toMatchObject({
+        committed: false,
+        commitSha: null,
+        message: 'nothing to commit',
+      });
+      expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+    });
+
+    it('scoped control: refuses an open merge instead of concluding it', async () => {
+      await command(repo, ['checkout', '-q', '-b', 'side']);
+      await command(repo, ['commit', '-q', '--allow-empty', '-m', 'side']);
+      const side = await command(repo, ['rev-parse', 'HEAD']);
+      await command(repo, ['checkout', '-q', 'main']);
+      await command(repo, ['commit', '-q', '--allow-empty', '-m', 'main']);
+      const head = await command(repo, ['rev-parse', 'HEAD']);
+      await command(repo, ['merge', '--no-commit', '--no-ff', 'side']);
+      await writeFileNoFollow(repo, `${KB_DIR}/entry.md`, 'changed\n');
+
+      await expect(apply()).rejects.toThrow(/open merge/);
+
+      expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await command(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(side);
+      expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe(`${KB_DIR}/entry.md`);
+    });
+  }
 
   it.each(['stdout', 'stderr'] as const)(
     'reports an empty index with reworded commit %s (stubbed exit 1)',

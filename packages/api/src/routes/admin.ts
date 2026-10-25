@@ -304,7 +304,7 @@ adminRoutes.post('/users/:id/action', async (c) => {
         .update(schema.users)
         .set({
           status: 'deactivated',
-          tokenVersion: target.tokenVersion + 1,
+          tokenVersion: sql`${schema.users.tokenVersion} + 1`,
           updatedAt: now,
         })
         .where(eq(schema.users.id, targetUserId));
@@ -347,7 +347,7 @@ adminRoutes.post('/users/:id/action', async (c) => {
         .update(schema.users)
         .set({
           passwordHash,
-          tokenVersion: target.tokenVersion + 1,
+          tokenVersion: sql`${schema.users.tokenVersion} + 1`,
           // The admin has seen this password and has to pass it on out of band, so it is a shared
           // secret from the moment it exists. Bumping tokenVersion only ends the old SESSION; this
           // is what ends the password.

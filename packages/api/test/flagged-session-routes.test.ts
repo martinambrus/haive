@@ -1,4 +1,4 @@
-import type { Hono } from 'hono';
+import { Hono } from 'hono';
 import { describe, expect, it, vi } from 'vitest';
 import type { AppEnv } from '../src/context.js';
 
@@ -44,6 +44,8 @@ import { createFakeDb } from '@haive/database/testing';
 import { encryptEmail, secretsService } from '@haive/shared';
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { signAccessToken } from '../src/auth/jwt.js';
+import { requireAdmin, requireAuth } from '../src/middleware/auth.js';
+import { errorHandler } from '../src/middleware/error-handler.js';
 
 const { createApiApp } = await import('../src/index.js');
 const { installModules } = await import('../src/modules/loader.js');
@@ -199,14 +201,14 @@ function judge(rows: Row[]) {
   };
 }
 
-async function build() {
+async function build(role: 'admin' | 'user' = 'admin', mustChangePassword = true) {
   const fake = createFakeDb({ users: schema.users });
   fake.insert(schema.users, {
     id: FLAGGED,
-    role: 'admin',
+    role,
     status: 'active',
     tokenVersion: 0,
-    mustChangePassword: true,
+    mustChangePassword,
     emailEncrypted: encryptEmail('flagged@sweep.test.local', 'ab'.repeat(32)),
   });
   h.db = userLookupOnly(fake.db);
@@ -268,6 +270,116 @@ describe('a session that must change its password, across the api', () => {
     expect(judge([]).staleAllowlistEntries).toEqual([
       ...Object.keys(PUBLIC),
       ...Object.keys(EXEMPT),
+    ]);
+  });
+});
+
+// These policies are independent of the presence of requireAdmin, so removing a gate does not
+// remove its routes from the sweep. Middleware scopes below also discover new admin surfaces.
+const ADMIN_ENDPOINTS = new Set([
+  'POST /global-kb/test-db',
+  'PUT /global-kb/entries/:id/enforcement',
+  'DELETE /global-kb/entries/:id/enforcement',
+  'GET /modules/loaded',
+  'PATCH /modules/:id',
+  'POST /modules/:id/teardown',
+  'POST /modules/:id/purge',
+  'GET /modules/:id/settings/:kind',
+  'PUT /modules/:id/settings/:kind',
+]);
+
+async function adminSweep(app: Hono<AppEnv>, cookie: string, extra: string[] = []) {
+  const policies = new Set([...ADMIN_ENDPOINTS, ...extra]);
+  const scopes = app.routes.filter((r) => r.handler === requireAdmin);
+  const last = new Map(app.routes.map((r) => [`${r.method} ${r.path}`, r]));
+  const endpoints = [...last.values()].filter(
+    ({ method, path }) =>
+      method !== 'ALL' &&
+      (path === '/admin' ||
+        path.startsWith('/admin/') ||
+        path === '/cli-pricing' ||
+        path.startsWith('/cli-pricing/') ||
+        policies.has(`${method} ${path}`) ||
+        scopes.some(
+          (scope) =>
+            (scope.method === 'ALL' || scope.method === method) &&
+            (scope.path === path ||
+              (scope.path.endsWith('/*') &&
+                (path === scope.path.slice(0, -2) || path.startsWith(scope.path.slice(0, -1))))),
+        )),
+  );
+  // Replay the builder's registrations in their original order, recording entry into the final
+  // handler. This catches a handler that does work and then returns 403, even with no DB call.
+  const tracked = new Set(endpoints);
+  const probe = new Hono<AppEnv>().onError(errorHandler);
+  for (const r of app.routes) {
+    probe.on(
+      r.method,
+      r.path,
+      tracked.has(r)
+        ? async (c, next) => {
+            h.reached.push(`handler ${r.method} ${r.path}`);
+            return r.handler(c, next);
+          }
+        : r.handler,
+    );
+  }
+  const rows: Array<Answer & { key: string }> = [];
+  for (const { method, path } of endpoints) {
+    const answer = await ask(probe, method, path.replace(':kind', 'admin'), cookie);
+    rows.push({ key: `${method} ${path}`, ...answer });
+    // Saving global module settings also requires an administrator.
+    if (method === 'PUT' && path.includes(':kind')) {
+      rows.push({
+        key: `${method} ${path} (global)`,
+        ...(await ask(probe, method, path.replace(':kind', 'global'), cookie)),
+      });
+    }
+  }
+  return {
+    notRefusedBeforeHandler: rows
+      .filter((r) => r.status !== 403 || r.reached.length > 0)
+      .map(
+        (r) =>
+          `${r.key} -> ${r.status}${r.reached.length ? ` after reaching ${r.reached.join(', ')}` : ''}`,
+      ),
+    missingPolicies: [...policies].filter((key) => !rows.some((r) => r.key === key)),
+    count: rows.length,
+  };
+}
+
+describe('a signed-in non-admin across the admin api', () => {
+  it('every admin endpoint answers 403 before its handler, database or queues run', async () => {
+    // The signed token claims admin; requireAuth must use the current database role (user).
+    const { app, cookie } = await build('user', false);
+    await installModules(app);
+    const verdict = await adminSweep(app, cookie);
+    expect(verdict.count).toBeGreaterThan(30);
+    expect(verdict).toMatchObject({ notRefusedBeforeHandler: [], missingPolicies: [] });
+  });
+
+  it('the verdict detects an endpoint missing its admin gate', async () => {
+    const { app, cookie } = await build('user', false);
+    app.get('/zz-admin-open', requireAuth, (c) => c.json({ ok: true }));
+    const verdict = await adminSweep(app, cookie, ['GET /zz-admin-open']);
+    expect(verdict.notRefusedBeforeHandler).toContain(
+      'GET /zz-admin-open -> 200 after reaching handler GET /zz-admin-open',
+    );
+  });
+
+  it('the verdict detects a handler that enters before returning 403', async () => {
+    const { app, cookie } = await build('user', false);
+    app.post('/zz-admin-late', requireAuth, (c) => c.json({ error: 'late' }, 403));
+    const verdict = await adminSweep(app, cookie, ['POST /zz-admin-late']);
+    expect(verdict.notRefusedBeforeHandler).toContain(
+      'POST /zz-admin-late -> 403 after reaching handler POST /zz-admin-late',
+    );
+  });
+
+  it('an empty route list fails the coverage policies', async () => {
+    const { cookie } = await build('user', false);
+    expect((await adminSweep(new Hono<AppEnv>(), cookie)).missingPolicies).toEqual([
+      ...ADMIN_ENDPOINTS,
     ]);
   });
 });
