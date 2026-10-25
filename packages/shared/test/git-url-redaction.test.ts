@@ -69,3 +69,10 @@ it('does not mistake a query @ for transport userinfo', () => {
   const raw = 'https://example.test?contact=user@other.test';
   expect(redactGitUrl(raw, true)).toBe(raw);
 });
+it('redacts every URL when quote delimiters separate adjacent diagnostics', () => {
+  const safe = redactGitText(
+    'https://public.test/repo"https://user:fixture-password@example.test/repo',
+  );
+  expect(safe.includes('fixture-password')).toBe(false);
+  expect(safe).toContain('https://public.test/repo"https://example.test/repo');
+});

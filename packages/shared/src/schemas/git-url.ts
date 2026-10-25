@@ -200,17 +200,12 @@ export function redactGitUrl(url: string, forTransport = false): string {
 
 /** Diagnostic output can contain several URLs; use the same userinfo policy for each one. */
 export function redactGitText(text: string): string {
-  return text.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s]+/g, (candidate) => {
-    const start = candidate.indexOf('://') + 3;
-    const slash = candidate.indexOf('/', start);
-    const at = candidate.lastIndexOf('@', slash < 0 ? candidate.length : slash);
-    // Quotes, angle brackets and backticks can occur in legacy userinfo. Do not
-    // cut it before its @ or a suffix would survive. Outside userinfo they delimit
-    // the URL, so quoted URLs still leave the surrounding diagnostic text intact.
-    const boundary = candidate.slice(at < start ? start : at + 1).search(/['"<>`]/);
-    const end = boundary < 0 ? candidate.length : (at < start ? start : at + 1) + boundary;
-    return redactGitUrl(candidate.slice(0, end)) + candidate.slice(end);
-  });
+  // Userinfo may contain legacy quote/angle/backtick delimiters. Consume it whole
+  // through its last @ before the first slash, then honor those delimiters again
+  // so independent adjacent URLs are each visited by replace.
+  return text.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/(?:[^\s/]*@)?[^\s'"<>`]+/g, (url) =>
+    redactGitUrl(url),
+  );
 }
 
 export const gitRemoteUrlSchema = z
