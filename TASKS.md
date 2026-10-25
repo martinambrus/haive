@@ -116,7 +116,9 @@ User decision 2026-10-25: item 5 unowned malformed RTK settings remain for manua
 
 ### T412 · FNF[git-noexit-low-3] · gitClone and a few scripts still spawn git unbounded (+4)
 
-status: open
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T19:56Z · last: 2026-10-25T19:56Z
+
+Codex continuation: validate remaining unbounded Git calls against shipped T340 transport, then bounded execution/operator IO and truthful push/commit reporting controls. No dev-stack lifecycle or live providers.
 From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it as its task #329.)
 
 1. Unbounded git spawns remain at repo/clone.ts:94,116,687 (gitClone: runs before its dir exists; carries the credential-helper argv, env and secret scrub — needs its own review), steps/onboarding/_credential-scan.ts:173, scripts/advance-bundle-items.ts:25, scripts/reset-bundle-to-commit.ts:43.
