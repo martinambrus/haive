@@ -152,3 +152,19 @@ it.each(['127.0.0.1:1', 'haive-connection-control.invalid:1'])(
     expect(safeErrorMessage(err!) === err!.message).toBe(true);
   },
 );
+
+it('fix3 logs original diagnostics with job identity before transport replacement', () => {
+  const lines = capture();
+  const job = { name: 'probe-control', id: 'control-job' };
+  const err = failure();
+  const transported = safeErrorForTransport(err, job) as Error;
+  expect(transported.message.includes('23505')).toBe(true);
+  const entry = JSON.parse(lines[0] ?? '{}');
+  expect(entry.name === job.name && entry.jobId === job.id).toBe(true);
+  expect(
+    entry.err?.type === 'DrizzleQueryError' &&
+      entry.err?.query === query &&
+      entry.err?.code === '23505',
+  ).toBe(true);
+  assertSafe([...lines, transported.message, transported.stack]);
+});

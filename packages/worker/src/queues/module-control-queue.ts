@@ -179,13 +179,13 @@ export async function runModuleTeardown(
 
 export async function processModuleControlJob(
   deps: ModuleControlDeps,
-  job: { name: string; data: ModuleTeardownPayload },
+  job: { name: string; id?: string; data: ModuleTeardownPayload },
 ): Promise<ModuleTeardownResult> {
   if (job.name !== MODULE_CONTROL_JOB_NAMES.TEARDOWN) {
     throw new Error(`Unknown module-control job: ${job.name}`);
   }
   return runModuleTeardown(deps, job.data.moduleId).catch((err) => {
-    throw safeErrorForTransport(err);
+    throw safeErrorForTransport(err, job);
   });
 }
 

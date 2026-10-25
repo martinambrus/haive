@@ -1,13 +1,7 @@
 import pino from 'pino';
-import { boundQueryError, serializeError } from './errors.js';
+import { boundQueryError, serializeError, safeErrorDetails, safeErrorMessage } from './errors.js';
 
-export {
-  boundQueryError,
-  safeErrorDetails,
-  safeErrorMessage,
-  safeErrorForTransport,
-  serializeError,
-} from './errors.js';
+export { boundQueryError, safeErrorDetails, safeErrorMessage, serializeError } from './errors.js';
 
 export const logger = pino({
   level: process.env.LOG_LEVEL ?? 'info',
@@ -34,3 +28,11 @@ export const logger = pino({
     },
   },
 });
+
+/** Log while the error still has structure, before BullMQ reduces it to message/stack. */
+export function safeErrorForTransport(err: unknown, job?: { name: string; id?: string }): unknown {
+  if (!boundQueryError(err)) return err;
+  logger.error({ err, name: job?.name, jobId: job?.id }, 'database job failed');
+  const { code } = safeErrorDetails(err);
+  return new Error(`${safeErrorMessage(err)}${code === undefined ? '' : ` (${code})`}`);
+}

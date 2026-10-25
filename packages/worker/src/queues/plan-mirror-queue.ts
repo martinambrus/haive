@@ -666,11 +666,11 @@ export function startPlanMirrorWorker(): Worker<
           return refresh(data.repositoryId, data.userId);
         case PLAN_MIRROR_JOB_NAMES.SAVE:
           return save(data).catch((err) => {
-            throw safeErrorForTransport(err);
+            throw safeErrorForTransport(err, job);
           });
         case PLAN_MIRROR_JOB_NAMES.PULL:
           return pull(data).catch((err) => {
-            throw safeErrorForTransport(err);
+            throw safeErrorForTransport(err, job);
           });
         case PLAN_MIRROR_JOB_NAMES.SWEEP:
           return sweepAll();

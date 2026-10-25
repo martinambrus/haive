@@ -1516,7 +1516,7 @@ export async function startCliExecWorker(
       }
       if (job.name === CLI_EXEC_JOB_NAMES.PROBE) {
         return handleProbeJob(db, job.data as CliProbeJobPayload).catch((err) => {
-          throw safeErrorForTransport(err);
+          throw safeErrorForTransport(err, job);
         });
       }
       if (job.name === CLI_EXEC_JOB_NAMES.BUILD_SANDBOX_IMAGE) {
@@ -1530,7 +1530,7 @@ export async function startCliExecWorker(
       }
       if (job.name === CLI_EXEC_JOB_NAMES.LOGIN_CREATE) {
         return handleLoginCreateJob(db, job.data as CliLoginCreateJobPayload).catch((err) => {
-          throw safeErrorForTransport(err);
+          throw safeErrorForTransport(err, job);
         });
       }
       if (job.name === CLI_EXEC_JOB_NAMES.SIGN_OUT) {
