@@ -136,9 +136,9 @@ settings/review-watermarks.json, descendant wins via merge-base --is-ancestor; _
 
 ### T266 · FNF[record-writer] · 04's set and record writes run unfenced (+5)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-25T22:51Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-25T23:36Z
 
-Codex progress 2026-10-25T22:51Z: PR #931 HEAD4024b5e16: fresh review and parent10PG controls pass prior diagnostic corrections. New required remote finding: pending journal can be stranded by accepted clean checkout move. High driver validating realPG/git interleaving and shared move/restore fences; current HEAD must not merge until corrected/reviewed. No new task claimed; finish T413/T266 then PAUSE.
+Codex progress 2026-10-25T23:36Z: ONLY remaining in-progress task before user-requested PAUSE. PR #931 HEAD69b512387; earlier entry/byte-cap recovery fix passes49PG/428affected/5sharedlimits and parent8PG. Freshreview requires bounded undo CAS reads; new remote finding needs safe new-empty-directory footprint undo at4096 entries. Highdriver validating actual69 reds and combining both fixes; currentHEAD must not merge. T413 main all8 green and completed; no further claims.
 
 All PRE-EXISTING. Items 4, 7, 8 moved to T310.
 
