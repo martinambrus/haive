@@ -21,14 +21,13 @@
  * Usage (run inside the worker container):
  *   tsx scripts/reset-bundle-to-commit.ts <bundleId> <commitSha>
  */
-import { spawn } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, eq, isNull, like } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { getHaiveVersion, logger } from '@haive/shared';
 import { parseBundle, persistBundleItems } from '../src/bundle-parser/index.js';
-import { hardenGitArgs } from '../src/repo/git-exec.js';
+import { gitRun } from '../src/repo/git-exec.js';
 import { originGitRun } from '../src/repo/git-push.js';
 import {
   expandCustomBundlesFor,
@@ -38,27 +37,20 @@ import {
 import { loadBundlesForExpansion } from '../src/step-engine/_custom-bundle-loader.js';
 import { resolveSkillTargetDirs } from '../src/step-engine/steps/onboarding/_helpers.js';
 
-function runGit(cwd: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-    const proc = spawn('git', hardenGitArgs(args), { cwd, env });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout.on('data', (d: Buffer) => {
-      stdout += d.toString();
-    });
-    proc.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
-      if (code !== 0) {
-        reject(new Error(`git ${args.join(' ')} failed (exit ${code}): ${stderr.trim()}`));
-        return;
-      }
-      resolve(stdout.trim());
-    });
-  });
+export async function runGit(cwd: string, args: string[]): Promise<string> {
+  const result = await gitRun(cwd, args);
+  if (result.code !== 0) {
+    throw new Error(`git ${args.join(' ')} failed (exit ${result.code}): ${result.stderr.trim()}`);
+  }
+  return result.stdout.trim();
+}
+
+export async function writeRenderedBundleFile(
+  repoStoragePath: string,
+  diskPath: string,
+  content: string,
+) {
+  await writeFileNoFollow(repoStoragePath, diskPath, content, { createParents: true });
 }
 
 async function main() {
@@ -152,9 +144,7 @@ async function main() {
   const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
   const haiveVersion = getHaiveVersion();
   for (const r of expanded) {
-    const absPath = path.join(repoStoragePath, r.diskPath);
-    await mkdir(path.dirname(absPath), { recursive: true });
-    await writeFile(absPath, r.content, 'utf8');
+    await writeRenderedBundleFile(repoStoragePath, r.diskPath, r.content);
 
     const itemId = r.templateId.split('.').slice(2).join('.');
     rowsToInsert.push({
@@ -191,10 +181,12 @@ async function main() {
   log.info('done');
 }
 
-main().then(
-  () => process.exit(0),
-  (err) => {
-    console.error(err);
-    process.exit(1);
-  },
-);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().then(
+    () => process.exit(0),
+    (err) => {
+      console.error(err);
+      process.exit(1);
+    },
+  );
+}

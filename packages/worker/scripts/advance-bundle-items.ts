@@ -12,35 +12,20 @@
  *
  * Default target = origin/<bundle.gitBranch>.
  */
-import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { eq } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { parseBundle, persistBundleItems } from '../src/bundle-parser/index.js';
-import { hardenGitArgs } from '../src/repo/git-exec.js';
+import { gitRun } from '../src/repo/git-exec.js';
 import { originGitRun } from '../src/repo/git-push.js';
 
-function runGit(cwd: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-    const proc = spawn('git', hardenGitArgs(args), { cwd, env });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout.on('data', (d: Buffer) => {
-      stdout += d.toString();
-    });
-    proc.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.on('error', reject);
-    proc.on('exit', (code) => {
-      if (code !== 0) {
-        reject(new Error(`git ${args.join(' ')} failed (exit ${code}): ${stderr.trim()}`));
-        return;
-      }
-      resolve(stdout.trim());
-    });
-  });
+export async function runGit(cwd: string, args: string[]): Promise<string> {
+  const result = await gitRun(cwd, args);
+  if (result.code !== 0) {
+    throw new Error(`git ${args.join(' ')} failed (exit ${result.code}): ${result.stderr.trim()}`);
+  }
+  return result.stdout.trim();
 }
 
 async function main() {
@@ -91,10 +76,12 @@ async function main() {
   log.info('done');
 }
 
-main().then(
-  () => process.exit(0),
-  (err) => {
-    console.error(err);
-    process.exit(1);
-  },
-);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().then(
+    () => process.exit(0),
+    (err) => {
+      console.error(err);
+      process.exit(1);
+    },
+  );
+}

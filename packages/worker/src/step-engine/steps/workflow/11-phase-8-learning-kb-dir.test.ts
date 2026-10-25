@@ -6,6 +6,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 const stubs = vi.hoisted(() => ({
   ensureDir: vi.fn(),
   worktreePath: null as string | null,
+  commitOutput: null as Record<string, unknown> | null,
 }));
 
 vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
@@ -28,7 +29,9 @@ vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
   loadPreviousStepOutput: async (_db: unknown, _taskId: string, stepId: string) =>
     stepId === '01-worktree-setup' && stubs.worktreePath
       ? { output: { worktreePath: stubs.worktreePath } }
-      : null,
+      : stepId === '10-gate-3-commit'
+        ? { output: stubs.commitOutput }
+        : null,
   resolveSkillTargetDirs: async () => [],
 }));
 vi.mock('../../../repo/git-workspace.js', () => ({ gitWorkspaceStatus: async () => 'none' }));
@@ -65,6 +68,7 @@ afterAll(async () => {
 beforeEach(async () => {
   stubs.ensureDir.mockClear();
   stubs.worktreePath = null;
+  stubs.commitOutput = null;
   await rm(repo, { recursive: true, force: true });
   await mkdir(worktree, { recursive: true });
 });
@@ -249,4 +253,43 @@ describe('step 11 at the repository root', () => {
     } as never);
     expect(out.kbSyncSkipped).toBeNull();
   });
+});
+
+describe('learning commit outcome', () => {
+  it.each([
+    [
+      { committed: true, commitSha: null },
+      'Commit recorded; SHA unavailable.',
+      'Commit sha: unavailable (commit recorded)',
+    ],
+    [{ committed: false, commitSha: null }, 'No commit recorded.', 'Commit sha: (none)'],
+    [
+      { message: 'committed', commitSha: null },
+      'Commit outcome not recorded.',
+      'Commit sha: unavailable (commit outcome not recorded)',
+    ],
+    [{ committed: true, commitSha: 'abc123' }, 'Commit: abc123', 'Commit sha: abc123'],
+  ])(
+    'carries structural gate output %j to the prompt and deterministic learning',
+    async (commitOutput, body, prompt) => {
+      stubs.commitOutput = commitOutput;
+      const ctx = ctxAt(repo);
+      const detected = await phase8LearningStep.detect!(ctx);
+      expect(promptOf(detected)).toContain(prompt);
+      const out = await phase8LearningStep.apply(ctx, {
+        detected,
+        llmOutput: null,
+        formValues: { writeFiles: false },
+      } as never);
+      expect(out.entries[0]!.body).toContain(body);
+      if (
+        'committed' in commitOutput &&
+        commitOutput.committed === true &&
+        !commitOutput.commitSha
+      ) {
+        expect(out.entries[0]!.body).not.toContain('No commit recorded');
+        expect(promptOf(detected)).not.toContain('Commit sha: (none)');
+      }
+    },
+  );
 });
