@@ -82,7 +82,7 @@ export function installTerminalWebSocket(server: Server, opts: TerminalWsOptions
           if (!auth.session.accept(ws)) return;
           runTerminalSession(ws, container, docker, auth.userId).catch((err) => {
             log.error({ err, containerId: container.id }, 'terminal session crashed');
-            sendFrame(ws, { type: 'error', message: errorMessage(err) });
+            sendFrame(ws, { type: 'error', message: safeErrorMessage(err) });
             ws.close(1011, 'internal_error');
           });
         });
@@ -360,10 +360,6 @@ function sendFrame(ws: WebSocket, frame: TerminalServerFrame): void {
   } catch {
     // ignore
   }
-}
-
-function errorMessage(err: unknown): string {
-  return safeErrorMessage(err);
 }
 
 export async function attachContainerStream(

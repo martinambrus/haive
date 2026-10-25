@@ -13,7 +13,7 @@ const h = vi.hoisted(() => ({
   save: vi.fn(),
   queueError: undefined as Error | undefined,
   createError: undefined as string | undefined,
-  probeError: undefined as Error | undefined,
+  probeError: undefined as Error | string | undefined,
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
@@ -188,16 +188,33 @@ describe('CLI login banner credential logging', () => {
     },
   );
 
-  it('does not forward a failed worker insert message to the browser', async () => {
-    h.createError = `Failed query: insert into containers (env_vars) values ($1)\nparams: ${TOKEN}`;
+  it.each([
+    'provider not found',
+    'no adapter registered for synthetic',
+    'Database operation failed (23505)',
+  ])('fix7 forwards the worker reason: %s', async (message) => {
+    h.createError = message;
     await start('', false);
-    const sent = JSON.stringify(ws.send.mock.calls);
-    expect(ws.send.mock.calls.some(([raw]) => JSON.parse(raw).type === 'error')).toBe(true);
     expect(
-      Array.from({ length: TOKEN.length - 5 }, (_, i) => TOKEN.slice(i, i + 6)).some((part) =>
-        sent.includes(part),
-      ),
-    ).toBe(false);
+      ws.send.mock.calls.some(([raw]) => {
+        const frame = JSON.parse(raw);
+        return frame.type === 'error' && frame.message === message;
+      }),
+    ).toBe(true);
+  });
+
+  it('fix7 preserves the non-Error post-login fallback', async () => {
+    providerName = 'grok';
+    h.probeError = 'synthetic non-Error rejection';
+    await start();
+    stream.emit('data', Buffer.from('https://accounts.x.ai/oauth2/device\n\nSigned in\n'));
+    await settle();
+    expect(
+      ws.send.mock.calls.some(([raw]) => {
+        const frame = JSON.parse(raw);
+        return frame.type === 'error' && frame.message === 'post-login probe failed';
+      }),
+    ).toBe(true);
   });
 
   it('captures a wrapped Claude token without logging any six-character substring', async () => {

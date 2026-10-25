@@ -285,7 +285,7 @@ export function installCliLoginBannerWebSocket(
               return;
             }
             log.error({ error: safeErrorDetails(err), providerId }, 'banner session crashed');
-            wsSend(ws, { type: 'error', message: errorMessage(err) });
+            wsSend(ws, { type: 'error', message: safeErrorMessage(err) });
             try {
               ws.close(1011, 'internal_error');
             } catch {
@@ -331,8 +331,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
   if (!createResult.ok || !createResult.containerRowId || !createResult.dockerContainerId) {
     wsSend(ws, {
       type: 'error',
-      // Worker results are strings: the DB error's class/params have been lost.
-      message: 'Failed to create login container',
+      message: createResult.error ?? 'Failed to create login container',
     });
     try {
       ws.close(1011, 'create_failed');
@@ -1043,7 +1042,7 @@ async function runProbeAndSave(session: BannerSession): Promise<void> {
     );
     wsSend(session.ws, {
       type: 'error',
-      message: safeErrorMessage(err),
+      message: err instanceof Error ? safeErrorMessage(err) : 'post-login probe failed',
     });
   } finally {
     session.probePending = false;
@@ -1256,8 +1255,4 @@ function wsSend(ws: WebSocket, data: Record<string, unknown>): void {
   } catch {
     // ignore
   }
-}
-
-function errorMessage(err: unknown): string {
-  return safeErrorMessage(err);
 }

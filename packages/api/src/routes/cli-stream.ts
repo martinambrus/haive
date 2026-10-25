@@ -59,7 +59,7 @@ export function installCliStreamWebSocket(server: Server, opts: CliStreamWsOptio
           runStreamSession(ws, invocationId, ownership.steerable, ownership.startedAt).catch(
             (err) => {
               log.error({ err, invocationId }, 'cli-stream session crashed');
-              sendFrame(ws, { type: 'error', message: errorMessage(err) });
+              sendFrame(ws, { type: 'error', message: safeErrorMessage(err) });
               try {
                 ws.close(1011, 'internal_error');
               } catch {
@@ -200,7 +200,7 @@ async function runStreamSession(
       } catch (err) {
         if (closed) break;
         log.warn({ err, invocationId }, 'xread failed');
-        sendFrame(ws, { type: 'error', message: errorMessage(err) });
+        sendFrame(ws, { type: 'error', message: safeErrorMessage(err) });
         break;
       }
       if (!entries) continue;
@@ -352,8 +352,4 @@ function sendFrame(ws: WebSocket, frame: StreamFrameOut): void {
   } catch {
     // ignore
   }
-}
-
-function errorMessage(err: unknown): string {
-  return safeErrorMessage(err);
 }
