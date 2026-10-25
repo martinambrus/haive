@@ -18,6 +18,7 @@ import { createDatabase, schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { parseBundle, persistBundleItems } from '../src/bundle-parser/index.js';
 import { hardenGitArgs } from '../src/repo/git-exec.js';
+import { originGitRun } from '../src/repo/git-push.js';
 
 function runGit(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -63,7 +64,10 @@ async function main() {
   const target = targetArg ?? `origin/${bundle.gitBranch ?? 'main'}`;
 
   log.info({ target }, 'fetch + reset to target');
-  await runGit(bundle.storageRoot, ['fetch', '--all']);
+  const fetched = await originGitRun(bundle.storageRoot, ['fetch', 'origin']);
+  if (fetched.code !== 0) {
+    throw new Error(`git fetch origin failed (exit ${fetched.code}): ${fetched.stderr.trim()}`);
+  }
   await runGit(bundle.storageRoot, ['reset', '--hard', target]);
   const localHead = await runGit(bundle.storageRoot, ['rev-parse', 'HEAD']);
   log.info({ localHead }, 'local clone advanced');

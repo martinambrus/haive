@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { isPathContainmentError, lstatNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from './worktree-paths.js';
 import { gitExec, gitRun } from './git-exec.js';
@@ -37,7 +38,10 @@ async function probe(dir: string): Promise<{ status: GitWorkspaceStatus; detail:
     return { status: 'broken', detail: '.git is a symbolic link' };
   }
   try {
-    const { stdout } = await gitExec(['rev-parse', '--is-inside-work-tree'], { cwd: dir });
+    const { stdout } = await gitExec(['rev-parse', '--is-inside-work-tree'], {
+      cwd: dir,
+      env: { GIT_CEILING_DIRECTORIES: path.dirname(dir) },
+    });
     if (stdout.trim() === 'true') return { status: 'ok', detail: '' };
     return { status: 'broken', detail: stdout.trim() };
   } catch (err) {

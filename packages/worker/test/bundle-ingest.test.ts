@@ -26,8 +26,8 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import type { Database } from '@haive/database';
 import type { ClassifiedBundle } from '../src/bundle-parser/classifier.js';
-import { extractArchive, gitClone } from '../src/repo/clone.js';
-import { bundleArchiveRel, gitRevParseHead, handleIngestZip } from '../src/repo/bundle-ingest.js';
+import { extractArchive } from '../src/repo/clone.js';
+import { bundleArchiveRel, handleIngestZip } from '../src/repo/bundle-ingest.js';
 
 function run(cmd: string, args: string[], cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -193,33 +193,5 @@ describe('bundleArchiveRel', () => {
     expect(bundleArchiveRel(root, `${root}/u1/b1/extracted/source.zip`, 'u1', 'b1')).toBeNull();
     expect(bundleArchiveRel(root, `${root}/u1/b1/other.zip`, 'u1', 'b1')).toBeNull();
     expect(bundleArchiveRel(root, '/etc/source.zip', 'u1', 'b1')).toBeNull();
-  });
-});
-
-describe('bundle-ingest: git clone + rev-parse', () => {
-  it('clones a local bare repo and captures HEAD', async () => {
-    const sourceRepo = path.join(tmpRoot, 'origin');
-    const work = path.join(tmpRoot, 'work');
-    const dest = path.join(tmpRoot, 'user-id', 'bundle-id', 'extracted');
-
-    // Build an origin repo with a single commit on `main`.
-    await mkdir(sourceRepo, { recursive: true });
-    await run('git', ['init', '--bare', '-b', 'main'], sourceRepo);
-
-    await mkdir(work, { recursive: true });
-    await run('git', ['init', '-b', 'main'], work);
-    await run('git', ['remote', 'add', 'origin', sourceRepo], work);
-    await writeFile(path.join(work, 'agents', 'README.md'), '# bundle agents\n').catch(async () => {
-      await mkdir(path.join(work, 'agents'), { recursive: true });
-      await writeFile(path.join(work, 'agents', 'README.md'), '# bundle agents\n');
-    });
-    await run('git', ['add', '.'], work);
-    await run('git', ['commit', '-m', 'init'], work);
-    await run('git', ['push', 'origin', 'main'], work);
-
-    await gitClone(`file://${sourceRepo}`, dest, 'main');
-    const head = await gitRevParseHead(dest);
-    expect(head).toMatch(/^[0-9a-f]{40}$/);
-    expect((await readdir(dest)).sort()).toContain('agents');
   });
 });

@@ -1,6 +1,7 @@
+import { fixtureBase, httpOrigin, networkGitArgs } from './support/git-http.js';
+import { hardenGitArgs } from '@haive/shared/git-args';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, afterEach, beforeEach } from 'vitest';
 import { gitClone } from '../src/repo/clone.js';
@@ -8,7 +9,7 @@ import { gitRevParseHead } from '../src/repo/bundle-ingest.js';
 
 function run(cmd: string, args: string[], cwd?: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, {
+    const proc = spawn(cmd, cmd === 'git' ? hardenGitArgs(networkGitArgs(args)) : args, {
       cwd,
       env: {
         ...process.env,
@@ -37,7 +38,7 @@ function run(cmd: string, args: string[], cwd?: string): Promise<string> {
 let tmpRoot: string;
 
 beforeEach(async () => {
-  tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'haive-bundle-sync-'));
+  tmpRoot = await mkdtemp(path.join(fixtureBase, 'haive-bundle-sync-'));
 });
 
 afterEach(async () => {
@@ -67,7 +68,7 @@ async function setupBareWithAdvance(): Promise<{
 
   // Independent bundle clone (this is what bundle-sync.ts operates on).
   const cloneDir = path.join(tmpRoot, 'clone');
-  await gitClone(bare, cloneDir, 'main');
+  await gitClone(httpOrigin(bare), cloneDir, 'main');
 
   // Author advances upstream — bundle clone is now stale.
   await writeFile(path.join(author, 'README.md'), 'second\n');
