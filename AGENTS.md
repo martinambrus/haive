@@ -1,8 +1,8 @@
 # Haive
 
-Deterministic multi-CLI orchestration and AI agentic workflow utility. Reimplements a legacy markdown-driven Claude Code workflow, the autonomous `/workflow` implementation loop, and a sandboxed local environment replication step set as a deterministic web project. Agentic CLI invocations only happen for parts that genuinely need reasoning. Everything else runs as TypeScript step modules with web forms.
+Deterministic multi-CLI workflow orchestration. Ports the legacy markdown-driven Claude Code workflow, autonomous `/workflow` loop and sandboxed environment replication to TypeScript steps and web forms. CLI agents handle only reasoning.
 
-The legacy markdown step content has been ported into TypeScript step modules under `packages/worker/src/step-engine/steps/`. The original source archive is no longer vendored in the repo.
+Ported legacy steps live in `packages/worker/src/step-engine/steps/`; their source archive is no longer vendored.
 
 ## Stack
 
@@ -335,6 +335,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
   pool, the holder reserve, priority decay. `agent-reserve.ts`, `priority-decay.ts`.
 
 ### Web UI
+
+- [Sessions](docs/architecture/session-recovery.md): browser recovery.
 
 - [Diff viewer](docs/architecture/diff-viewer.md): text highlights, change maps and pane scrolling.
   `CommitDiffViewer`, `buildDiffRows`, `buildChangeMarkers`.

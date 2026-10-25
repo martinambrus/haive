@@ -18,6 +18,7 @@ import { type TaskToneFilter } from '@/lib/task-tone';
 import { isNavItemActive, navItemsFor } from '@/components/sidebar/nav-items';
 import { SidebarResizer } from '@/components/sidebar/sidebar-resizer';
 import { SidebarTasks } from '@/components/sidebar/sidebar-tasks';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 
 function subscribePhone(onChange: () => void): () => void {
   const query = window.matchMedia(PHONE_MEDIA_QUERY);
@@ -51,6 +52,8 @@ export function SidebarNav({
   const navItems = useMemo(() => navItemsFor(role, modules), [role, modules]);
   const pathname = usePathname();
   const router = useRouter();
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
 
   const [collapsed, setCollapsed] = useState(initialCollapsed);
   // On a phone the column opens over the page and never touches the saved preference. Leaving
@@ -143,10 +146,15 @@ export function SidebarNav({
   }, [navItems, pathname]);
 
   async function handleLogout() {
+    setLoggingOut(true);
+    setLogoutError(null);
     try {
       await api.post('/auth/logout');
     } catch {
-      // ignore logout errors
+      setLogoutError('Could not sign out. Try again.');
+      return;
+    } finally {
+      setLoggingOut(false);
     }
     router.push('/login');
     router.refresh();
@@ -255,9 +263,18 @@ export function SidebarNav({
               {email}
             </div>
           )}
+          {logoutError && (
+            <div
+              role="alert"
+              className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300"
+            >
+              <MarkdownView body={logoutError} enhanced={false} />
+            </div>
+          )}
           <button
             type="button"
             onClick={handleLogout}
+            disabled={loggingOut}
             aria-label="Sign out"
             title={effectiveCollapsed ? `Sign out (${email})` : undefined}
             className={cn(

@@ -40,6 +40,24 @@ during the handshake, or a malformed frame, was an uncaught error that exited th
 authorized at the handshake only: logout, token expiry and an out-of-band database edit leave open
 sockets open.
 
+**Sessions change by compare-and-set, and an answer does not tell which accounts exist.** A refresh redeems
+its token with one `UPDATE refresh_tokens SET revoked_at = ... WHERE id = ... AND revoked_at IS NULL RETURNING`
+inside the transaction that inserts the successor, so of two redemptions of one cookie exactly one wins; the
+loser answers exactly as a revoked token does (same status, body and headers, no cookie). `PUT
+/user-settings/password` writes with `WHERE token_version = <the value read>` and answers a lost race with 409
+`password_change_conflict`; only the committed winner closes the user's sockets. The admin `deactivate` and
+`reset_password` actions bump `token_version` atomically in the UPDATE (`token_version + 1`), so no concurrent
+bump is reused or undone. Tokens are signed before those transactions open, since signing may read the JWT
+secret from the database. Login spends one bcrypt comparison on every validated attempt, against a constant
+dummy hash of the same cost (`SALT_ROUNDS`) when the account is unknown, and a missing, deactivated or
+wrong-password account gets the same 401; register refuses by registration mode before it looks for the email,
+so a closed or invite-only install answers every email alike, while an open one keeps its 409 for a taken email.
+Two administrators creating one email at once get 201 and 409, as the pre-check answers, not a 500. HTTP and the
+WebSocket handshakes read the session cookie with the same parser. Two sweeps keep authorization structural:
+`flagged-session-routes.test.ts` requests every admin route of the real app (`createApiApp` plus
+`installModules`) with a signed-in non-admin and requires 403 with no handler reached, and a ratchet fails a
+role check in api source outside its allowlist, so an admin route gated some other way cannot escape the sweep.
+
 **Sign-in and registration are rate limited.** `lib/auth-throttle.ts` admits an attempt on
 `POST /auth/login` and `POST /auth/register` only while an account bucket (the email's blind index) holds
 fewer than `AUTH_ACCOUNT_LIMIT` (10) and an address bucket fewer than `AUTH_IP_LIMIT` (30) attempts in the
