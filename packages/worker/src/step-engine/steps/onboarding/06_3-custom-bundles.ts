@@ -1,5 +1,6 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { redactGitUrl } from '@haive/shared/schemas';
 import type {
   BundleComposerCredentialOption,
   BundleComposerInitial,
@@ -89,7 +90,7 @@ async function loadInitialBundles(
     id: b.id,
     name: b.name,
     sourceType: b.sourceType as 'zip' | 'git',
-    gitUrl: b.gitUrl ?? undefined,
+    gitUrl: b.gitUrl ? redactGitUrl(b.gitUrl) : undefined,
     gitBranch: b.gitBranch ?? undefined,
     archiveFilename: b.archiveFilename ?? undefined,
     enabledKinds: b.enabledKinds as ('agent' | 'skill')[],

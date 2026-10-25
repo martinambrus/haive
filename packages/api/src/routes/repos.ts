@@ -3250,7 +3250,7 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
     userId,
     source: repo.source,
     ...(repo.localPath ? { localPath: repo.localPath } : {}),
-    ...(repo.remoteUrl ? { remoteUrl: repo.remoteUrl } : {}),
+    ...(repo.remoteUrl ? { remoteUrl: redactGitUrl(repo.remoteUrl, true) } : {}),
     ...(repo.branch ? { branch: repo.branch } : {}),
     ...(repo.credentialsSecretId ? { credentialsId: repo.credentialsSecretId } : {}),
   };

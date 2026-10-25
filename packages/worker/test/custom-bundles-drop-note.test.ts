@@ -114,3 +114,28 @@ describe('06_3-custom-bundles: extraction drop report', () => {
     expect(out.degradedNote).not.toContain('boom');
   });
 });
+
+it.each(['active', 'failed', 'syncing'])(
+  'redacts legacy %s bundle URLs in detect and form',
+  async (status) => {
+    const ctx = makeCtx(null, [
+      [{ repositoryId: 'repo-1' }],
+      [
+        {
+          ...baseRow,
+          sourceType: 'git',
+          status,
+          gitUrl: 'https://fixture-user:fixture-password@example.test/repo',
+        },
+      ],
+      [],
+      [],
+    ]);
+    const detected = await customBundlesStep.detect!(ctx);
+    const form = await customBundlesStep.form!(ctx, detected);
+    const text = JSON.stringify({ detected, form });
+    expect(text.includes('fixture-password')).toBe(false);
+    expect(text.includes('fixture-user')).toBe(false);
+    expect(text).toContain('https://example.test/repo');
+  },
+);

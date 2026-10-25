@@ -112,3 +112,14 @@ describe('refreshing a repository', () => {
     expect(h.add.mock.calls[0]![0]).toBe(REPO_JOB_NAMES.REFRESH);
   });
 });
+
+it('does not copy legacy URL userinfo into a refresh job and preserves transport identity', async () => {
+  setup({
+    source: 'git_https',
+    remoteUrl: 'https://fixture-user:fixture-password@example.test:443/repo',
+  });
+  expect((await refresh()).status).toBe(200);
+  const payload = h.add.mock.calls[0]![1] as { remoteUrl: string };
+  expect(payload.remoteUrl === 'https://example.test:443/repo').toBe(true);
+  expect(JSON.stringify(payload).includes('fixture-password')).toBe(false);
+});
