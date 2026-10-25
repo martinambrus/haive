@@ -430,9 +430,9 @@ Plan I4, part d. Browser check at 1280, 768 and 390.
 
 ### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+4)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:43Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T19:34Z
 
-Codex progress 2026-10-25T18:43Z: 75f667 forwarding correction fresh xhigh review clean and parent8controls pass. Normal integration with shipped Retry/nested main9df65b116 now resolving two API overlaps; combined redaction+capability mutation controls pass, parent realPG run active.
+Codex progress 2026-10-25T19:34Z: Finald4a60c2b bundle correction freshxhighreviewclean; parent17controls and actualNext/API/Postgres/Redis Retry+redaction acceptance pass. PR922 exact-head botclean, finalCIworker smoke running. Migration0212stillnotmerged.
 Items 2-5 merged (#781, #808).
 
 1. PRE-EXISTING, from reading the code (not reproduced). The PR is opened against the origin read from disk (12-worktree-cleanup.ts ~:226, ~:808-813), but pr-poll needs repositories.remote_url (pr-poll-queue.ts ~:136-142), which is NULL for local_path repos. Fix: record the origin on the PR row and poll from it, or backfill remote_url. Reproduce first.
