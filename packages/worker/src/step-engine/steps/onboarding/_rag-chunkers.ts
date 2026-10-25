@@ -556,16 +556,14 @@ function tsxGenericArrow(text: string, at: number): boolean {
     else if (token.text === '>') angles -= 1;
   }
   const parameters = text.slice(at + cursor, at + cursor + MAX_PARAMS_CHARS);
-  let token = jsxHeadToken(parameters, 0);
-  if (token.text !== '(') return false;
-  let parens = 1;
-  while (parens > 0) {
-    token = jsxHeadToken(parameters, token.end);
-    if (token.text === '') return false;
-    if (token.text === '(') parens += 1;
-    else if (token.text === ')') parens -= 1;
-  }
-  const tail = text.slice(at + cursor + token.end, at + cursor + token.end + MAX_PARAMS_CHARS);
+  const first = jsxHeadToken(parameters, 0);
+  if (first.text !== '(') return false;
+  let name = jsxHeadToken(head, 1);
+  if (name.text === 'const') name = jsxHeadToken(head, name.end);
+  const end = tsxParametersEnd(parameters, first.end, name.text);
+  if (end === null) return false;
+  const tail = text.slice(at + cursor + end, at + cursor + end + MAX_PARAMS_CHARS);
+  let token: ReturnType<typeof jsxHeadToken>;
   token = jsxHeadToken(tail, 0);
   if (token.text === '=>') return true;
   if (token.text !== ':') return false;
@@ -589,12 +587,14 @@ function tsxGenericArrow(text: string, at: number): boolean {
   }
 }
 
-/** Read a bounded opening tag after testing structural generic-arrow evidence. */
-function jsxOpeningAt(text: string, at: number, tsx: boolean): boolean {
+/** The existing bounded ordinary-JSX opening header, shared by both walks. */
+function jsxTagHeader(
+  text: string,
+  at: number,
+): { name: string; end: number; selfClosing: boolean } | null {
   const header = text.slice(at, at + MAX_PARAMS_CHARS);
-  if (tsx && tsxGenericArrow(text, at)) return false;
-  const head = /^<(?:[A-Za-z][\w.:-]*(?=[\s/>])|(?=>))/.exec(header.slice(0, 256));
-  if (!head) return false;
+  const head = /^<(?:([A-Za-z][\w.:-]*)(?=[\s/>])|(?=>))/.exec(header.slice(0, 256));
+  if (!head) return null;
   let braces = 0;
   for (let i = head[0].length; i < header.length; i += 1) {
     const c = header[i];
@@ -604,9 +604,136 @@ function jsxOpeningAt(text: string, at: number, tsx: boolean): boolean {
     } else if (c === '"' || c === "'" || c === '`') i = quotedEnd(header, i) - 1;
     else if (c === '{') braces += 1;
     else if (c === '}') braces -= 1;
-    else if (c === '>' && braces === 0) return true;
+    else if (c === '>' && braces === 0)
+      return { name: head[1] ?? '', end: at + i + 1, selfClosing: header[i - 1] === '/' };
   }
-  return false;
+  return null;
+}
+
+function jsxClosingTag(text: string, at: number): { name: string; end: number } | null {
+  const match = /^<\/(?:([A-Za-z][\w.:-]*))?\s*>/.exec(text.slice(at, at + MAX_PARAMS_CHARS));
+  return match ? { name: match[1] ?? '', end: at + match[0].length } : null;
+}
+
+/** Read a bounded opening tag after testing structural generic-arrow evidence. */
+function jsxOpeningAt(text: string, at: number, tsx: boolean): boolean {
+  return !(tsx && tsxGenericArrow(text, at)) && jsxTagHeader(text, at) !== null;
+}
+
+/** A bounded parameter walk reuses the real JS lexer's opaque literal spans. JSX is
+ *  disabled in that inner pass, so it cannot re-enter this generic-arrow guard. */
+function tsxParametersEnd(text: string, from: number, candidateName: string): number | null {
+  const literals = new Map<number, number>();
+  const readLiterals = (from: number, afterValue = false): void => {
+    for (const start of literals.keys()) if (start >= from) literals.delete(start);
+    // A JSX text apostrophe/backtick must not determine how a later JS child is lexed.
+    // Seed resumed code after a JSX value as an operand, so a slash still divides.
+    const prefix = afterValue ? '0 ' : '';
+    const code = prefix + text.slice(from);
+    for (const [start, end] of jsNonCode(code, false)) {
+      const delimiter = code[start - 1];
+      if (delimiter && '"\'`/'.includes(delimiter) && code[end] === delimiter) {
+        let after = end + 1;
+        if (delimiter === '/') while (/[a-z]/.test(code[after] ?? '')) after += 1;
+        literals.set(from + start - 1 - prefix.length, from + after - prefix.length);
+      }
+    }
+  };
+  readLiterals(0);
+  let cursor = from;
+  let parens = 1;
+  let braces = 0;
+  let prev: string | null = '(';
+  let arrowInCode = false;
+  let jsxText = false;
+  const elements: Array<{ name: string; resumeText: boolean }> = [];
+  const expressionEnds: number[] = [];
+  while (cursor < text.length) {
+    if (jsxText) {
+      if (text[cursor] === '{') {
+        expressionEnds.push(braces);
+        braces += 1;
+        jsxText = false;
+        prev = '{';
+        cursor += 1;
+        readLiterals(cursor);
+      } else if (text[cursor] === '<') {
+        const close = jsxClosingTag(text, cursor);
+        if (close) {
+          const element = elements.pop();
+          if (!element || close.name !== element.name) return null;
+          cursor = close.end;
+          jsxText = element.resumeText;
+          if (!jsxText) readLiterals(cursor, true);
+          prev = '';
+        } else {
+          const open = jsxTagHeader(text, cursor);
+          if (!open) return null;
+          if (!open.selfClosing) elements.push({ name: open.name, resumeText: true });
+          cursor = open.end;
+        }
+      } else cursor += 1;
+      continue;
+    }
+    const token = jsxHeadToken(text, cursor);
+    if (token.text === '') return null;
+    const start = token.end - token.text.length;
+    cursor = token.end;
+    const literalEnd = literals.get(start);
+    if (literalEnd !== undefined) {
+      cursor = literalEnd;
+      prev = '';
+      continue;
+    }
+    if (token.text === '<') {
+      const close = jsxClosingTag(text, start);
+      if (close) {
+        // A candidate's own unmatched close cannot belong to its parameter list.
+        // Function bodies/concise-arrow values can contain their own JSX instead.
+        if (close.name === candidateName && elements.length === 0 && braces === 0 && !arrowInCode)
+          return null;
+        cursor = close.end;
+        prev = '';
+        continue;
+      }
+      const open = jsxTagHeader(text, start);
+      if (
+        open &&
+        regexMayStart(prev) &&
+        !tsxGenericHead(text.slice(start, start + MAX_PARAMS_CHARS))
+      ) {
+        if (!open.selfClosing) {
+          elements.push({ name: open.name, resumeText: false });
+          jsxText = true;
+        }
+        cursor = open.end;
+        if (open.selfClosing) readLiterals(cursor, true);
+        prev = '';
+        continue;
+      }
+    }
+    if (token.text === '(' && elements.length === 0) parens += 1;
+    else if (token.text === ')' && elements.length === 0) {
+      parens -= 1;
+      if (parens === 0) return cursor;
+    } else if (token.text === '{') braces += 1;
+    else if (token.text === '}') {
+      braces -= 1;
+      if (expressionEnds[expressionEnds.length - 1] === braces) {
+        expressionEnds.pop();
+        jsxText = true;
+      }
+    }
+    if (token.text === '=>' && braces === 0 && elements.length === 0) arrowInCode = true;
+    if ((token.text === '+' || token.text === '-') && text[cursor] === token.text) {
+      cursor += 1;
+      prev = regexMayStart(prev) ? token.text : '';
+    } else if (token.text === '!' && text[cursor] !== '=' && !regexMayStart(prev)) prev = '';
+    else if (token.word) prev = prev === '.' ? '' : token.text;
+    else if (/^[0-9"'`]/.test(token.text)) prev = '';
+    else prev = token.text;
+  }
+  return null;
 }
 
 /** The spans of a JS, TS or Java file that are not code: comments, strings, template literals (their
