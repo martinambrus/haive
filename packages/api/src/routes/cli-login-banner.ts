@@ -1,5 +1,6 @@
 import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Job } from 'bullmq';
 import Docker from 'dockerode';
@@ -55,6 +56,8 @@ function safeErrorDetails(err: unknown): { name: string; code?: string | number 
 const WS_PATH_PREFIX = '/cli-login-banner/';
 const RAW_BUFFER_MAX = 64 * 1024;
 const CLEAN_BUFFER_MAX = 32 * 1024;
+const ANSI_TAIL_MAX = 4096;
+const INCOMPLETE_ANSI_ESCAPE = /\x1b(?:\[[\x20-\x3f]*|\][^\x07\x1b]*\x1b?)?$/;
 const HEARTBEAT_MS = 15_000;
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 // How often the queued dialog is told what it is waiting for. Two queue reads per tick, both
@@ -177,6 +180,8 @@ interface BannerSession {
   pending: { job: Job | null };
   rawBuffer: string;
   cleanBuffer: string;
+  ansiTail: string;
+  decoder: StringDecoder;
   authUrlSent: boolean;
   authSuccessSent: boolean;
   tokenSubmitted: boolean;
@@ -204,26 +209,44 @@ interface BannerSession {
 const CAPTURE_TIMEOUT_MS = 60_000;
 const CLAUDE_OAUTH_PREFIX = 'sk-ant-oat01-';
 
-// Observed constant across claude oauth tokens (95 body chars after the
-// prefix, total 108). TTY wrapping inserts whitespace mid-token, so we scan
-// through whitespace but only accept the capture when exactly BODY_LEN
-// token-alphabet chars have been collected. Paragraph text like
-// "Store this token securely" would exceed 95 contiguous non-ws chars only
-// if the token itself didn't already stop us first.
-const CLAUDE_OAUTH_BODY_LEN = 95;
+// A plausibility floor, not a format length: observed bodies have 95 chars.
+const CLAUDE_OAUTH_MIN_BODY_LEN = 90;
+const CLAUDE_OAUTH_MAX_BODY_LEN = 512;
 
 function extractClaudeOauthToken(text: string): string | null {
   const start = text.indexOf(CLAUDE_OAUTH_PREFIX);
   if (start < 0) return null;
+  // A trailing CR run may join a later LF into one wrap, not a blank line.
+  // Keep it in the session buffer until more bytes (or the end flush) resolve it.
+  let end = text.length;
+  while (text[end - 1] === '\r') end--;
+  const lines = text.slice(start + CLAUDE_OAUTH_PREFIX.length, end).split(/\r*\n\r*|\r/);
+  const firstLineStart = Math.max(text.lastIndexOf('\n', start), text.lastIndexOf('\r', start)) + 1;
+  const firstLineWidth =
+    start - firstLineStart + CLAUDE_OAUTH_PREFIX.length + lines[0]!.trimEnd().length;
   let body = '';
-  let i = start + CLAUDE_OAUTH_PREFIX.length;
-  while (i < text.length && body.length < CLAUDE_OAUTH_BODY_LEN) {
-    const c = text[i]!;
-    if (/[A-Za-z0-9_-]/.test(c)) body += c;
-    else if (!/\s/.test(c)) break;
-    i++;
+  for (let i = 0; i < lines.length; i++) {
+    const line = i === 0 ? lines[i]! : lines[i]!.replace(/^[ \t]+/, '');
+    const fragment = line.match(/^[A-Za-z0-9_-]*/)?.[0] ?? '';
+    if (i > 0) {
+      if (line.startsWith(CLAUDE_OAUTH_PREFIX)) break;
+      // D3: Mixed text is prose only if 2+ token lines precede it and the prior line
+      // is shorter than the first (trim trailing blanks, count leading text); else refuse.
+      if (fragment && !/^[ \t]*$/.test(line.slice(fragment.length))) {
+        if (i > 1 && lines[i - 1]!.trimEnd().length < firstLineWidth) break;
+        return null;
+      }
+      // A chunk can end mid-token or just after a wrap. Wait for more output
+      // before deciding whether its last line continues the capture.
+      if (i === lines.length - 1 && /^[A-Za-z0-9_-]*$/.test(line)) return null;
+      if (!line) break;
+    }
+    body += fragment;
+    if (body.length > CLAUDE_OAUTH_MAX_BODY_LEN) return null;
+    if (fragment.length !== line.length && !/^[ \t]*$/.test(line.slice(fragment.length))) break;
+    if (i === lines.length - 1) return null;
   }
-  return body.length === CLAUDE_OAUTH_BODY_LEN ? CLAUDE_OAUTH_PREFIX + body : null;
+  return body.length >= CLAUDE_OAUTH_MIN_BODY_LEN ? CLAUDE_OAUTH_PREFIX + body : null;
 }
 
 export interface CliLoginBannerOpts {
@@ -411,6 +434,8 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     pending,
     rawBuffer: '',
     cleanBuffer: '',
+    ansiTail: '',
+    decoder: new StringDecoder('utf8'),
     authUrlSent: false,
     authSuccessSent: false,
     tokenSubmitted: false,
@@ -476,6 +501,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
 
   stream.on('data', (chunk: Buffer) => onStreamData(session, chunk));
   stream.on('end', () => {
+    captureClaudeOauthToken(session, session.cleanBuffer + '\n\n');
     if (session.probePending) {
       log.info({ providerId }, 'stream ended while probe pending; deferring cleanup');
       return;
@@ -544,6 +570,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       session.authSuccessSent = false;
       session.rawBuffer = '';
       session.cleanBuffer = '';
+      session.ansiTail = '';
       try {
         // Write the token first, then send Enter as a SEPARATE write on the
         // next tick so claude-code's Ink input registers the paste before it
@@ -592,8 +619,37 @@ function usesTokenPaste(session: BannerSession): boolean {
   return TOKEN_PASTE_PROVIDERS.has(session.providerName) || session.ampPasteFlow;
 }
 
+function canDetectAuth(session: BannerSession): boolean {
+  return (
+    session.authUrlSent &&
+    !session.authSuccessSent &&
+    (session.tokenSubmitted || !usesTokenPaste(session))
+  );
+}
+
+function captureClaudeOauthToken(session: BannerSession, text: string): boolean {
+  if (session.cleanedUp || session.providerName !== 'claude-code' || !canDetectAuth(session)) {
+    return false;
+  }
+  const oauthToken = extractClaudeOauthToken(text);
+  if (!oauthToken) return false;
+  session.authSuccessSent = true;
+  session.probePending = true;
+  stopCaptureWatchdog(session);
+  log.info(
+    {
+      providerId: session.providerId,
+      tokenLen: oauthToken.length,
+    },
+    'claude oauth token captured from stdout',
+  );
+  wsSend(session.ws, { type: 'auth-success' });
+  void saveOauthTokenAndProbe(session, oauthToken);
+  return true;
+}
+
 function onStreamData(session: BannerSession, chunk: Buffer): void {
-  const text = chunk.toString('utf8');
+  const text = session.decoder.write(chunk);
 
   if (TERMINAL_LOGIN_PROVIDERS.has(session.providerName)) {
     // Interactive login (agy). DEBUG: raw output is forwarded so the modal can
@@ -659,7 +715,10 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
   }
 
   session.rawBuffer = appendCapped(session.rawBuffer, text, RAW_BUFFER_MAX);
-  const clean = stripAnsi(text);
+  const ansiInput = session.ansiTail + text;
+  const incomplete = ansiInput.match(INCOMPLETE_ANSI_ESCAPE)?.[0] ?? '';
+  session.ansiTail = incomplete.slice(0, ANSI_TAIL_MAX);
+  const clean = stripAnsi(incomplete ? ansiInput.slice(0, -incomplete.length) : ansiInput);
   session.cleanBuffer = appendCapped(session.cleanBuffer, clean, CLEAN_BUFFER_MAX);
 
   // Login stdout can echo pasted codes and print complete or partial tokens.
@@ -693,32 +752,13 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
     }
   }
 
-  const canDetect =
-    session.authUrlSent &&
-    !session.authSuccessSent &&
-    (session.tokenSubmitted || !usesTokenPaste(session));
-  if (!canDetect) return;
+  if (!canDetectAuth(session)) return;
 
   if (session.providerName === 'claude-code') {
     // `claude setup-token` prints the long-lived OAuth token to stdout and
     // does NOT write ~/.claude/.credentials.json. We capture the token from
     // the output stream and persist it to cli_providers.envVars.
-    const oauthToken = extractClaudeOauthToken(session.cleanBuffer);
-    if (oauthToken) {
-      session.authSuccessSent = true;
-      session.probePending = true;
-      stopCaptureWatchdog(session);
-      log.info(
-        {
-          providerId: session.providerId,
-          tokenLen: oauthToken.length,
-        },
-        'claude oauth token captured from stdout',
-      );
-      wsSend(session.ws, { type: 'auth-success' });
-      void saveOauthTokenAndProbe(session, oauthToken);
-      return;
-    }
+    if (captureClaudeOauthToken(session, session.cleanBuffer)) return;
     // Only act on explicit error signals; success for claude-code requires
     // the token pattern above (other 'success' phrasings are misleading here).
     const signal = detectAuthResult(session.cleanBuffer);
