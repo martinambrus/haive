@@ -36,6 +36,9 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
       400,
     );
   }
+  if (isUniqueViolationOf(err, 'users_email_blind_index_idx')) {
+    return c.json({ error: 'Email already registered', code: null }, 409);
+  }
   // Every route that revives a failed task reaches this index, so it answers here once.
   if (isUniqueViolationOf(err, ONE_LIVE_UPGRADE_INDEX)) {
     return c.json(

@@ -118,23 +118,40 @@ test.describe('auth', () => {
     }
   });
 
-  // No invite on the second attempt, and that is the point: the register route checks the email
-  // for an existing account BEFORE it validates any invite or consults the registration mode, so
-  // a duplicate is still a 409 rather than the 403 a closed instance gives everyone else.
-  test('duplicate register returns 409 conflict', async ({ page }) => {
+  // Registration mode is checked before the email: anonymous callers without an invite get
+  // the same refusal for known and unknown emails, avoiding an account-existence oracle.
+  // A valid invite admits the request through the closed gate, so a duplicate then gets 409.
+  test('duplicate registration is hidden unless a valid invite admits the request', async ({
+    page,
+  }) => {
     const sql = getSql();
     let userId = '';
+    let inviteId = '';
     try {
       const user = await registerUser(sql, page.request, { prefix: 'dupe' });
       userId = user.userId;
 
-      const second = await page.request.post(`${API_BASE}/auth/register`, {
+      const known = await page.request.post(`${API_BASE}/auth/register`, {
         data: { email: user.email, password: PASSWORD },
+      });
+      const unknown = await page.request.post(`${API_BASE}/auth/register`, {
+        data: { email: uniqueEmail('dupe-unknown'), password: PASSWORD },
+      });
+      expect(unknown.status()).toBe(403);
+      expect(known.status()).toBe(unknown.status());
+      expect(await known.json()).toEqual(await unknown.json());
+
+      const invite = await seedInvite(sql);
+      inviteId = invite.id;
+      const second = await page.request.post(`${API_BASE}/auth/register`, {
+        data: { email: user.email, password: PASSWORD, inviteToken: invite.token },
       });
       expect(second.status()).toBe(409);
       const body = (await second.json()) as { error?: string };
       expect(body.error).toMatch(/already registered/i);
     } finally {
+      // A duplicate never consumes the invite.
+      if (inviteId) await sql`delete from user_invites where id = ${inviteId}`;
       if (userId) await cleanupUser(sql, userId);
       await sql.end({ timeout: 5 });
     }

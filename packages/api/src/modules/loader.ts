@@ -261,8 +261,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     };
   };
 
-  routes.get('/loaded', async (c) => {
-    if (c.get('userRole') !== 'admin') throw new HttpError(403, 'Admin access required');
+  routes.get('/loaded', requireAdmin, async (c) => {
     return c.json(await loadedReport());
   });
 
@@ -453,32 +452,35 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
     });
   });
 
-  routes.get('/:id/settings/:kind', async (c) => {
-    const id = c.req.param('id');
-    const kind = parseKind(c.req.param('kind'));
-    const settings = await settingsFor(id, kind);
-    if (kind === 'admin' && c.get('userRole') !== 'admin') {
-      throw new HttpError(403, 'Admin access required');
-    }
-    const values: Record<string, unknown> = { ...settings.defaults };
-    for (const field of new Set([
-      ...Object.keys(settings.defaults),
-      ...collectFieldIds(settings.form),
-    ])) {
-      const stored = await configService.getFresh(moduleSettingKey(id, kind, field));
-      if (stored !== null) {
-        try {
-          values[field] = JSON.parse(stored);
-        } catch {
-          // A non-JSON value is treated as absent: the default stays.
+  routes.get(
+    '/:id/settings/:kind',
+    async (c, next) => {
+      if (c.req.param('kind') === 'admin') return requireAdmin(c, next);
+      await next();
+    },
+    async (c) => {
+      const id = c.req.param('id');
+      const kind = parseKind(c.req.param('kind'));
+      const settings = await settingsFor(id, kind);
+      const values: Record<string, unknown> = { ...settings.defaults };
+      for (const field of new Set([
+        ...Object.keys(settings.defaults),
+        ...collectFieldIds(settings.form),
+      ])) {
+        const stored = await configService.getFresh(moduleSettingKey(id, kind, field));
+        if (stored !== null) {
+          try {
+            values[field] = JSON.parse(stored);
+          } catch {
+            // A non-JSON value is treated as absent: the default stays.
+          }
         }
       }
-    }
-    return c.json({ form: settings.form, values });
-  });
+      return c.json({ form: settings.form, values });
+    },
+  );
 
-  routes.put('/:id/settings/:kind', async (c) => {
-    if (c.get('userRole') !== 'admin') throw new HttpError(403, 'Admin access required');
+  routes.put('/:id/settings/:kind', requireAdmin, async (c) => {
     const id = c.req.param('id');
     const kind = parseKind(c.req.param('kind'));
     const settings = await settingsFor(id, kind);

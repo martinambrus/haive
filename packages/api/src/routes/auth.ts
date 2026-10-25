@@ -37,6 +37,10 @@ export const authRoutes = new Hono<AppEnv>();
  *  a value that changed under a running api would make the gate non-deterministic. */
 const setupToken = (process.env.SETUP_TOKEN ?? '').trim();
 
+// Precomputed at the same bcrypt cost as hashPassword. Missing accounts still pay for one
+// comparison; computing a fresh dummy hash per request would instead pay for two bcrypt calls.
+const DUMMY_PASSWORD_HASH = '$2b$12$clVUqMEwkUB8y3yHyeL0ru4nrgQgbyWo51lQ2DOZC58HntkbLzeM6';
+
 /** Compare two secrets without leaking their contents through timing.
  *
  *  Both sides are hashed first so the comparison is over fixed-width buffers — `timingSafeEqual`
@@ -87,12 +91,6 @@ authRoutes.post('/register', async (c) => {
       sql`SELECT pg_advisory_xact_lock(hashtext('haive_bootstrap'), hashtext('first_admin'))`,
     );
 
-    const existing = await tx.query.users.findFirst({
-      where: eq(schema.users.emailBlindIndex, blindIndex),
-      columns: { id: true },
-    });
-    if (existing) throw new HttpError(409, 'Email already registered');
-
     const counted = await tx.select({ n: count() }).from(schema.users);
     const userCount = Number(counted[0]?.n ?? 0);
 
@@ -129,6 +127,12 @@ authRoutes.post('/register', async (c) => {
         setupToken.length > 0 && timingSafeEqualString(setupToken, body.setupToken),
     });
     if (!decision.allow) throw new HttpError(403, decision.message);
+
+    const existing = await tx.query.users.findFirst({
+      where: eq(schema.users.emailBlindIndex, blindIndex),
+      columns: { id: true },
+    });
+    if (existing) throw new HttpError(409, 'Email already registered');
 
     // An invite's role wins over the mode's default: that is the whole point of inviting someone
     // as an administrator. The first-run branch still outranks both — it is already `admin`.
@@ -232,12 +236,10 @@ authRoutes.post('/login', async (c) => {
   const user = await db.query.users.findFirst({
     where: eq(schema.users.emailBlindIndex, blindIndex),
   });
-  if (!user || user.status !== 'active') {
+  const ok = await verifyPassword(body.password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
+  if (!user || user.status !== 'active' || !ok) {
     throw new HttpError(401, 'Invalid credentials');
   }
-
-  const ok = await verifyPassword(body.password, user.passwordHash);
-  if (!ok) throw new HttpError(401, 'Invalid credentials');
 
   const { accessToken, refreshToken, expiresAt } = await issueTokens(
     user.id,
@@ -294,22 +296,24 @@ authRoutes.post('/refresh', async (c) => {
     throw new HttpError(401, 'User not found or token revoked');
   }
 
-  await db
-    .update(schema.refreshTokens)
-    .set({ revokedAt: new Date() })
-    .where(eq(schema.refreshTokens.id, row.id));
+  const tokens = await issueTokens(user.id, user.role, user.tokenVersion);
+  await db.transaction(async (tx) => {
+    // The read above validates the token; only this guarded write claims it. A concurrent
+    // redemption waits for the winner's commit and then matches no row.
+    const claimed = await tx
+      .update(schema.refreshTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(schema.refreshTokens.id, row.id), isNull(schema.refreshTokens.revokedAt)))
+      .returning({ id: schema.refreshTokens.id });
+    if (claimed.length === 0) throw new HttpError(401, 'Refresh token invalid or expired');
 
-  const {
-    accessToken,
-    refreshToken: newRefresh,
-    expiresAt,
-  } = await issueTokens(user.id, user.role, user.tokenVersion);
-  await db.insert(schema.refreshTokens).values({
-    userId: user.id,
-    tokenHash: hashRefreshToken(newRefresh),
-    expiresAt,
+    await tx.insert(schema.refreshTokens).values({
+      userId: user.id,
+      tokenHash: hashRefreshToken(tokens.refreshToken),
+      expiresAt: tokens.expiresAt,
+    });
   });
-  setAuthCookies(c, accessToken, newRefresh);
+  setAuthCookies(c, tokens.accessToken, tokens.refreshToken);
 
   return c.json({ ok: true });
 });
