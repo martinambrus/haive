@@ -919,19 +919,6 @@ From the T375 review (2026-10-24). PRE-EXISTING, minor.
 status: open · kind: design
 From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. worker 10-gate-3-commit.ts ~:407-410: `git add -A` records an untracked nested repo that has a HEAD as a 160000 entry with no `.gitmodules` URL; the viewer labels it "submodule" and gate 3 reads only the exit code. Later `git submodule` commands and recursive clones meet a gitlink with no URL. Decide: refuse, warn, stage its files, or ask the user.
 
-### T426 · FNF[db-error-params] · a failed query's error message carries its bound params (secret fingerprints, ciphertext, container env) into logs and the browser (+1)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
-
-Codex progress 2026-10-25T16:56Z: PR #921: repaired fixture range scanner and bot clean at7fdfc453; auth integration76c733140 passed855 controls/types/format, fresh integration review pending.
-From the T422 review (2026-10-24). PRE-EXISTING, consequential in kind, rare (mechanism read from source, not triggered).
-
-1. drizzle-orm 0.45.2 builds `DrizzleQueryError.message` from every bound param (drizzle-orm errors.js ~:12). Three writers bind a secret's fingerprint (first 8 and last 4 characters, shared crypto/index.ts ~:87-90) and ciphertext: shared cli-providers/provider-secret.ts ~:26-35, shared config/user-secrets.service.ts ~:92-112, worker usage-window/token-source.ts ~:39-56. api middleware/error-handler.ts ~:59 logs `err` for any unhandled failure, so a failed secret write logs up to 12 characters of the secret.
-2. api routes/cli-login-banner.ts ~:328 forwards the worker's Error.message to the browser (worker queues/cli-exec/handlers.ts ~:1040, ~:1088); a failed containers insert binds env_vars (worker sandbox/login-container.ts ~:94-107).
-   Fix: one sanitizer for logged and returned database errors (class name and `code` walked through `cause`, never message or params), used by the error handler and every forwarder.
-
-Recovery review (2026-10-25) confirmed connected corrections: mixed aggregates must retain the bound DB member's SQLSTATE; ordinary recovery aggregate strings must retain their existing class prefixes. Four PRE-EXISTING sibling sinks still stringify DB messages before persistence/return: project-state/refresh.ts outbox last_error, repo/bundle-ingest.ts all three failure paths, queues/cli-exec/images.ts probe result and sandbox/ollama-provision.ts status/result. Include these in the current sanitizer fix. Historical-row cleanup stays excluded as previously decided. Evidence: .claude/tmp/board-run/T426/codex-review-recovery.md, session-review-probe.log.
-
 ### T428 · FNF[refresh-result-hidden] · a version or price refresh that fails reports ok:false that no page reads
 
 status: open
@@ -979,6 +966,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T426 — Safe bound-query diagnostics in logs, replies and new stored failure/warning text — PR #921 (7ac3bfc74), 2026-10-25; main CI40217648438 green.
 
 - T430 — Scope knowledge/skill commits, including deleted roots and refused-path safety — PR #923 (555c138e5), 2026-10-25; main CI40215378653 green.
 
