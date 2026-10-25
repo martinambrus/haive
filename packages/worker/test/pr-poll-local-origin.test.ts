@@ -121,7 +121,8 @@ it('records a legacy lookup failure instead of silently dropping the poll', asyn
 
 it('preserves an explicit default port while sanitizing a legacy polling stamp', async () => {
   const { db, writes } = fixture({
-    prRemoteUrl: 'https://fixture-user:fixture-password@github.com:443/acme/app.git',
+    prRemoteUrl:
+      'https://fixture-user:fixture-password@github.com:443/acme/app.git?fixture-query#fixture-fragment',
   });
   await runPrPollTick(db as never);
   expect(h.resolve).toHaveBeenCalledWith(

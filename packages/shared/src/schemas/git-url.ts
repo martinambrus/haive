@@ -173,6 +173,8 @@ export function redactGitUrl(url: string, forTransport = false): string {
       const end = safe.indexOf('/', start);
       const authority = safe.slice(start, end < 0 ? undefined : end);
       const at = authority.lastIndexOf('@');
+      // file URLs cannot carry userinfo; retain the scheme-only malformed fallback.
+      if (at >= 0 && /^file:/i.test(safe)) return 'file:';
       // Remove userinfo before interpreting a ? or # inside malformed credentials.
       const parsed = new URL(at >= 0 ? safe.slice(0, start) + safe.slice(start + at + 1) : safe);
       parsed.username = '';
@@ -196,6 +198,12 @@ export function redactGitUrl(url: string, forTransport = false): string {
     safe = safe.slice(safe.lastIndexOf('@') + 1).split(/[?#]/)[0]!;
   }
   return safe;
+}
+
+/** Non-secret identity saved in approvals and PR stamps. Keep Git's authority spelling
+ *  and SSH login without carrying query or fragment values into state. */
+export function gitRemoteIdentity(url: string): string {
+  return redactGitUrl(url, true).split(/[?#]/)[0]!;
 }
 
 /** Diagnostic output can contain several URLs; use the same userinfo policy for each one. */

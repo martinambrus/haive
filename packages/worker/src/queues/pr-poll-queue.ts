@@ -9,7 +9,7 @@ import {
   type TaskJobPayload,
 } from '@haive/shared';
 import { schema, type Database } from '@haive/database';
-import { isAllowedGitRemoteUrl, redactGitUrl } from '@haive/shared/schemas';
+import { gitRemoteIdentity, isAllowedGitRemoteUrl } from '@haive/shared/schemas';
 import { getDb } from '../db.js';
 import { getBullRedis } from '../redis.js';
 import { ForgeRateLimitError, resolveForgeContext, resolveForgeProvider } from '../forge/index.js';
@@ -140,7 +140,7 @@ async function pollTask(db: Database, task: PrWaitTask): Promise<void> {
   let host = '';
   try {
     const remoteUrl = task.prRemoteUrl
-      ? redactGitUrl(task.prRemoteUrl, true)
+      ? gitRemoteIdentity(task.prRemoteUrl)
       : await legacyPrOrigin(db, task);
     if (!remoteUrl) {
       await recordPollError(db, task.id, 'repository has no remote URL to poll the pull request');
@@ -214,13 +214,13 @@ async function legacyPrOrigin(db: Database, task: PrWaitTask): Promise<string | 
     typeof detected?.originUrl === 'string' &&
     isAllowedGitRemoteUrl(detected.originUrl)
   ) {
-    return redactGitUrl(detected.originUrl, true);
+    return gitRemoteIdentity(detected.originUrl);
   }
   const repo = await db.query.repositories.findFirst({
     where: eq(schema.repositories.id, task.repositoryId!),
     columns: { remoteUrl: true },
   });
-  return repo?.remoteUrl ? redactGitUrl(repo.remoteUrl, true) : null;
+  return repo?.remoteUrl ? gitRemoteIdentity(repo.remoteUrl) : null;
 }
 
 async function recordPollError(db: Database, taskId: string, message: string): Promise<void> {

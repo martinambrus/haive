@@ -1,6 +1,7 @@
 import {
   credentialFitsGitRemote,
   gitCredentialTarget,
+  gitRemoteIdentity,
   isAllowedGitRemoteUrl,
   redactGitUrl,
   redactGitText,
@@ -78,7 +79,7 @@ export async function getOriginUrl(cwd: string): Promise<string | null> {
     }
     first ??= urls[0];
   }
-  return redactGitUrl(first!, true);
+  return gitRemoteIdentity(first!);
 }
 
 /** Origin transports always re-read the checkout immediately before git talks to the remote. */
@@ -181,7 +182,7 @@ export async function taskRemoteUrl(ctx: {
     ),
     columns: { remoteUrl: true },
   });
-  if (repo?.remoteUrl) return redactGitUrl(repo.remoteUrl, true);
+  if (repo?.remoteUrl) return gitRemoteIdentity(repo.remoteUrl);
   const steps = await ctx.db.query.taskSteps.findMany({
     where: and(
       eq(schema.taskSteps.taskId, ctx.taskId),
@@ -208,7 +209,7 @@ export async function taskRemoteUrl(ctx: {
       typeof detected?.originUrl === 'string' &&
       isAllowedGitRemoteUrl(detected.originUrl)
     )
-      return redactGitUrl(detected.originUrl, true);
+      return gitRemoteIdentity(detected.originUrl);
   }
   return null;
 }

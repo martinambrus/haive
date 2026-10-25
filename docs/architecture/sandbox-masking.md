@@ -22,10 +22,12 @@ Git credentials use the stored remote as their binding. Repository and bundle cr
 check credential ownership and `credentialFitsGitRemote` before persisting or queueing; the
 one-shot helper answers only `get` with the bound protocol and authority. A local-folder import
 without a stored remote uses the sanitized origin persisted in the user's approved push form,
-never a fresh origin read. `getOriginUrl` returns transport identity: userinfo is removed from
+never a fresh origin read. `getOriginUrl` returns binding identity: userinfo is removed from
 HTTP URLs, SSH keeps its non-secret login, and explicit default ports remain spelled out because
-Git's credential challenge keeps `:443` and `:80`. Display labels separately use `redactGitUrl`'s
-display policy. PR origin stamps and legacy poll fallbacks preserve the same sanitized identity.
+Git's credential challenge keeps `:443` and `:80`. `gitRemoteIdentity` omits query and fragment
+values from saved approvals while keeping that authority spelling; display labels separately use
+`redactGitUrl`'s display policy. PR origin stamps and legacy poll fallbacks preserve the same
+sanitized identity.
 
 `redactGitText` removes userinfo even when a legacy diagnostic URL contains quote, angle-bracket
 or backtick characters in its authority; those characters delimit display text only after the
