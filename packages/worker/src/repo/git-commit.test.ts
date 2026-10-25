@@ -30,7 +30,7 @@ describe('gitCommitStaged with real git', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it('commits a staged gitlink move even when submodule config ignores all changes', async () => {
+  it.each([false, true])('commits an ignored staged gitlink move (scoped: %s)', async (scoped) => {
     await ensureDirNoFollow(root, 'sub');
     await ensureDirNoFollow(root, 'sup');
     const sub = path.join(root, 'sub');
@@ -47,7 +47,9 @@ describe('gitCommitStaged with real git', () => {
 
     // The default diff hides the staged pointer; commit itself still accepts it.
     expect((await gitRun(sup, ['diff', '--cached', '--quiet'])).code).toBe(0);
-    expect(await gitCommitStaged(sup, 'bump submodule', identity)).toBe(true);
+    expect(await gitCommitStaged(sup, 'bump submodule', identity, scoped ? ['m'] : undefined)).toBe(
+      true,
+    );
     expect(await command(sup, ['rev-parse', 'HEAD:m'])).toBe(bump);
     expect(
       (await gitRun(sup, ['diff', '--cached', '--quiet', '--ignore-submodules=none'])).code,
@@ -100,5 +102,31 @@ describe('gitCommitStaged with real git', () => {
     await command(root, ['add', 'intent']);
     expect(await gitCommitStaged(root, 'stage contents', identity)).toBe(true);
     expect(await command(root, ['show', 'HEAD:intent'])).toBe('not staged yet');
+  });
+
+  it('commits only its paths on an unborn branch, leaving outside contents staged', async () => {
+    await command(root, ['init', '-q', '-b', 'main']);
+    await writeFileNoFollow(root, 'own', 'owned\n');
+    await writeFileNoFollow(root, 'outside', 'staged outside\n');
+    await command(root, ['add', '--', 'own', 'outside']);
+
+    expect(await gitCommitStaged(root, 'first scoped commit', identity, ['own'])).toBe(true);
+
+    expect(await command(root, ['ls-tree', '--name-only', 'HEAD'])).toBe('own');
+    expect(await command(root, ['diff', '--cached', '--name-only'])).toBe('outside');
+    expect(await command(root, ['show', ':outside'])).toBe('staged outside');
+  });
+
+  it('rejects an empty scope rather than committing outside staged work', async () => {
+    await command(root, ['init', '-q', '-b', 'main']);
+    await writeFileNoFollow(root, 'outside', 'staged outside\n');
+    await command(root, ['add', '--', 'outside']);
+
+    await expect(gitCommitStaged(root, 'empty scope', identity, [])).rejects.toThrow(
+      /requires at least one path/,
+    );
+
+    expect((await gitRun(root, ['rev-parse', '-q', '--verify', 'HEAD'])).code).toBe(1);
+    expect(await command(root, ['diff', '--cached', '--name-only'])).toBe('outside');
   });
 });

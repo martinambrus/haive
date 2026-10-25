@@ -157,6 +157,111 @@ describe.each(sites)('%s commit decisions', (site) => {
     await rm(repo, { recursive: true, force: true });
   });
 
+  if (site === 'knowledge trees' || site === 'skill sync') {
+    it('scoped control: leaves an outside staged file out of the commit and staged afterwards', async () => {
+      const ownFile =
+        site === 'knowledge trees' ? `${KB_DIR}/entry.md` : '.claude/skills/kept/SKILL.md';
+      await writeFileNoFollow(repo, ownFile, 'changed\n');
+      await writeFileNoFollow(repo, 'README.md', 'personal staged work\n');
+      await command(repo, ['add', '--', 'README.md']);
+      await writeFileNoFollow(repo, 'README.md', 'personal unstaged work\n');
+
+      const out = await apply();
+
+      expect(out).toMatchObject({ committed: true, commitSha: expect.any(String) });
+      expect(await command(repo, ['show', 'HEAD:README.md'])).toBe('base');
+      expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+      expect(await command(repo, ['show', ':README.md'])).toBe('personal staged work');
+      expect(await command(repo, ['diff', '--name-only'])).toBe('README.md');
+      expect(await command(repo, ['show', `HEAD:${ownFile}`])).toBe('changed');
+    });
+
+    it.each([128, 2, -1, 124])(
+      'rejects a failed merge read even with scoped changes: %i',
+      async (code) => {
+        const ownFile =
+          site === 'knowledge trees' ? `${KB_DIR}/entry.md` : '.claude/skills/kept/SKILL.md';
+        await writeFileNoFollow(repo, ownFile, 'changed\n');
+        control.result.mockImplementation((_cwd: string, args: string[]) =>
+          args[0] === 'rev-parse' && args.includes('MERGE_HEAD')
+            ? { code, stdout: '', stderr: 'opaque diagnostic' }
+            : undefined,
+        );
+        await expect(apply()).rejects.toThrow(/^git merge read failed:/);
+        expect(vi.mocked(gitRun).mock.calls.some(([, args]) => args[0] === 'commit')).toBe(false);
+      },
+    );
+
+    it('leaves an open merge alone even with no changes in its own paths', async () => {
+      await command(repo, ['checkout', '-q', '-b', 'side']);
+      await command(repo, ['commit', '-q', '--allow-empty', '-m', 'side']);
+      const side = await command(repo, ['rev-parse', 'HEAD']);
+      await command(repo, ['checkout', '-q', 'main']);
+      await command(repo, ['commit', '-q', '--allow-empty', '-m', 'main']);
+      const head = await command(repo, ['rev-parse', 'HEAD']);
+      await command(repo, ['merge', '--no-commit', '--no-ff', 'side']);
+
+      await expect(apply()).rejects.toThrow(/open merge/);
+
+      expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await command(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(side);
+    });
+
+    it('leaves outside staged work alone when its own paths are unchanged', async () => {
+      const head = await command(repo, ['rev-parse', 'HEAD']);
+      await writeFileNoFollow(repo, 'README.md', 'personal staged work\n');
+      await command(repo, ['add', '--', 'README.md']);
+
+      expect(await apply()).toMatchObject({ committed: false, commitSha: null });
+
+      expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+    });
+  } else {
+    it('retains the intentional whole-index commit for session edits', async () => {
+      await writeFileNoFollow(repo, 'README.md', 'session edits\n');
+      await command(repo, ['add', '--', 'README.md']);
+
+      expect(await apply()).toMatchObject({ committed: true, commitSha: expect.any(String) });
+
+      expect(await command(repo, ['show', 'HEAD:README.md'])).toBe('session edits');
+      expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('');
+    });
+  }
+
+  if (site === 'knowledge trees') {
+    it('scoped control: reports nothing to commit when only an outside file is staged', async () => {
+      const head = await command(repo, ['rev-parse', 'HEAD']);
+      await writeFileNoFollow(repo, 'README.md', 'personal staged work\n');
+      await command(repo, ['add', '--', 'README.md']);
+
+      expect(await apply()).toMatchObject({
+        committed: false,
+        commitSha: null,
+        message: 'nothing to commit',
+      });
+      expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+    });
+
+    it('scoped control: refuses an open merge instead of concluding it', async () => {
+      await command(repo, ['checkout', '-q', '-b', 'side']);
+      await command(repo, ['commit', '-q', '--allow-empty', '-m', 'side']);
+      const side = await command(repo, ['rev-parse', 'HEAD']);
+      await command(repo, ['checkout', '-q', 'main']);
+      await command(repo, ['commit', '-q', '--allow-empty', '-m', 'main']);
+      const head = await command(repo, ['rev-parse', 'HEAD']);
+      await command(repo, ['merge', '--no-commit', '--no-ff', 'side']);
+      await writeFileNoFollow(repo, `${KB_DIR}/entry.md`, 'changed\n');
+
+      await expect(apply()).rejects.toThrow(/open merge/);
+
+      expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await command(repo, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(side);
+      expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe(`${KB_DIR}/entry.md`);
+    });
+  }
+
   it.each(['stdout', 'stderr'] as const)(
     'reports an empty index with reworded commit %s (stubbed exit 1)',
     async (stream) => {

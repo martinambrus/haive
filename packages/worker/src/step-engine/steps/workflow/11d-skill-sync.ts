@@ -516,7 +516,12 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
         if (add.code !== 0) throw new Error(`git add failed: ${add.stderr || add.stdout}`);
         const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
         const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-        committed = await gitCommitStaged(worktree, DEFAULT_SKILL_SYNC_COMMIT_MESSAGE, commitEnv);
+        committed = await gitCommitStaged(
+          worktree,
+          DEFAULT_SKILL_SYNC_COMMIT_MESSAGE,
+          commitEnv,
+          present,
+        );
         if (committed) {
           const sha = await gitRun(worktree, ['rev-parse', 'HEAD']);
           commitSha = sha.code === 0 ? sha.stdout.trim() : null;

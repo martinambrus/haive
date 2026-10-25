@@ -64,7 +64,7 @@ export async function commitKnowledgeTrees(opts: {
   }
   const userEnv = await resolveGitEnv(opts.db, { userId: opts.userId, taskId: opts.taskId });
   const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-  if (!(await gitCommitStaged(workspace, message, commitEnv))) {
+  if (!(await gitCommitStaged(workspace, message, commitEnv, present))) {
     return { committed: false, commitSha: null, message: 'nothing to commit' };
   }
   const sha = await gitRun(workspace, ['rev-parse', 'HEAD']);
