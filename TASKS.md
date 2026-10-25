@@ -123,16 +123,6 @@ From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it
 4. (T388 review) The operator scripts run `fetch --all` with no origin validation (scripts/advance-bundle-items.ts ~:66, reset-bundle-to-commit.ts ~:88); route them through the T388 origin read when they are bounded. Minor.
 5. (T417 review) PRE-EXISTING, minor: scripts/reset-bundle-to-commit.ts ~:156-157 writes repository files by pathname (`mkdir`, `writeFile`) under `repo.storagePath`, outside fs-safe and outside the fs-ratchet's scan (src only). Operator script.
 
-### T415 · FNF[upload-retry] · Retry on an errored upload repository can never succeed
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:26Z
-
-Codex progress 2026-10-25T18:26Z: PR #924 merged f96c58cb1 after11 successful checks and clean fresh local reviews. Bot retry timed out (>15min), recorded UNREVIEWED under existing CI-only exception; main CI40221151472 pending.
-From the T323 review (2026-10-24). PRE-EXISTING, consequential. The repos page Retry (web repos/page.tsx ~:180-187, shown for any `error` repo) posts to refresh-tree, which answers 409 "Nothing to refresh from: this repository has no remote." for an upload repository without a remote (api repos.ts ~:3165-3167); nothing else re-queues an extract. The copy promises it: repos.ts ~:219-221 "Use Retry to try again", data-migrations.ts ~:361-362 "Use Retry to start again", and clone.ts ~:675-677 keeps the archive "for a retry" (the reaper removes an `error` repository's archive after 24 h).
-Recommended: Retry on an `error` upload repository re-queues EXTRACT while its archive is still on disk; otherwise the copy says to delete and upload again (no Retry).
-
-Connected completion after independent recovery review: errored blank/no-remote repositories still advertise Retry though refresh-tree always refuses; make capability/recovery copy truthful. Add coverage for single-shot upload-source persistence and replace the vacuous mocked root-claim release assertion with a decisive control. Upload metadata retention remains parked with T323 item 4. Evidence: .claude/tmp/board-run/T415/codex-review-recovery.md.
-
 ### T416 · FNF[web-runtime-tests] · proxy(), DOMPurify and markdown-it run only in a browser; CI never boots the production web image (+2)
 
 status: open
@@ -970,6 +960,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T415 — upload Retry uses durable same-repository archive source; unavailable-source capability and recovery copy stay truthful — PR #924 (f96c58cb1), 2026-10-25; main CI40221151472 green; bot timeout explicitly unreviewed, fresh local reviews clean.
 
 - T426 — Safe bound-query diagnostics in logs, replies and new stored failure/warning text — PR #921 (7ac3bfc74), 2026-10-25; main CI40217648438 green.
 
