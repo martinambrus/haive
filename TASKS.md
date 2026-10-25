@@ -89,6 +89,8 @@ board. At session start, load the board's tasks you own or will work on into the
 
 # Open tasks
 
+Continuation boundary (user, 2026-10-25): finish only the currently taken T412, T413, T416, T266 and T303, including required review, merge and main CI, then PAUSE for weekly allowance. Do not claim further work until the user explicitly resumes. Remaining open tasks stay queued.
+
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
 status: parked · reason: user's retention rule for item 4 · last: 2026-10-24T19:31Z · items 1-3 shipped in PR #892 (42ee32d7c)
