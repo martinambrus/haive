@@ -343,8 +343,6 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 - [Markdown rendering](docs/architecture/markdown-rendering.md): one renderer, images as links,
   the CSP, mermaid, line breaks, option labels. `markdown.ts`, `mermaid-loader.ts`.
 
-- [Web sessions](docs/architecture/web-sessions.md): browser-owned rotation, cross-tab recovery and stale server reads. `SessionRecovery`, `recoverBrowserSession`.
-
 ### Onboarding and repositories
 
 - [Committed secret sweep](docs/architecture/secret-sweep.md): tracked credential discovery,
