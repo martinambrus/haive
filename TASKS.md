@@ -123,9 +123,9 @@ From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it
 
 ### T415 · FNF[upload-retry] · Retry on an errored upload repository can never succeed
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:26Z
 
-Codex progress 2026-10-25T16:56Z: Fresh review clean; actual browser upload->complete source->failed preparation->Retry requeued EXTRACT for same repository. Auth integration843927b19 plus comment-only clarification; final gates pending.
+Codex progress 2026-10-25T18:26Z: PR #924 merged f96c58cb1 after11 successful checks and clean fresh local reviews. Bot retry timed out (>15min), recorded UNREVIEWED under existing CI-only exception; main CI40221151472 pending.
 From the T323 review (2026-10-24). PRE-EXISTING, consequential. The repos page Retry (web repos/page.tsx ~:180-187, shown for any `error` repo) posts to refresh-tree, which answers 409 "Nothing to refresh from: this repository has no remote." for an upload repository without a remote (api repos.ts ~:3165-3167); nothing else re-queues an extract. The copy promises it: repos.ts ~:219-221 "Use Retry to try again", data-migrations.ts ~:361-362 "Use Retry to start again", and clone.ts ~:675-677 keeps the archive "for a retry" (the reaper removes an `error` repository's archive after 24 h).
 Recommended: Retry on an `error` upload repository re-queues EXTRACT while its archive is still on disk; otherwise the copy says to delete and upload again (no Retry).
 
@@ -432,9 +432,9 @@ Plan I4, part d. Browser check at 1280, 768 and 390.
 
 ### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+4)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:26Z
 
-Codex progress 2026-10-25T16:56Z: PR #922: CodeQL quadratic scheme searches corrected; required SSH-editing identity correction in progress; final fresh review pending.
+Codex progress 2026-10-25T18:26Z: PR #922 integration5550 reviewed; connected pre-existing commit wrappers flatten Git-identity DB failures. Focused correction covers onboarding and upgrade commit; IDs visible, no password exposure established. Evidence: .claude/tmp/board-run/T340/fix-onboarding-forwarder.md.
 Items 2-5 merged (#781, #808).
 
 1. PRE-EXISTING, from reading the code (not reproduced). The PR is opened against the origin read from disk (12-worktree-cleanup.ts ~:226, ~:808-813), but pr-poll needs repositories.remote_url (pr-poll-queue.ts ~:136-142), which is NULL for local_path repos. Fix: record the origin on the PR row and poll from it, or backfill remote_url. Reproduce first.
@@ -896,9 +896,9 @@ From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` r
 
 ### T423 · FNF[terminal-attach] · a failed attach-count write leaves the docker attach stream open; the count is read-then-write (+1)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:26Z
 
-Codex progress 2026-10-25T16:56Z: Integrationad7bb1ff6: fresh fulltask review clean,907API/2PG/30fakeDB controls pass; session integration and PR gates pending.
+Codex progress 2026-10-25T18:26Z: PR #925 integratedd6bc246, fresh xhigh review clean; actual browser/PG/TCP failure-safe-frame and success cleanup passed. Exact-head bot/CI pending.
 From the T400 review (2026-10-24). PRE-EXISTING, minor.
 
 1. api routes/terminal.ts ~:106-112: `await incrementAttached(...)` throwing (database down) leaves the docker attach stream opened at ~:106 open; the `.catch` at ~:80 closes only the ws.
@@ -906,9 +906,9 @@ From the T400 review (2026-10-24). PRE-EXISTING, minor.
 
 ### T424 · FNF[nested-repo-worktree] · gate 3 offers a commit that git add will refuse for an unborn nested repo; the review collector calls a nested repo a new file (+1)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:26Z
 
-Codex progress 2026-10-25T16:56Z: Correctioned2fff17 integratedccb6955: fresh review clean,298affected tests pass; session UI and PR gates pending.
+Codex progress 2026-10-25T18:26Z: PR #926 head7b4c842 fixes stale prompt assertion; full targeted20 tests and fresh high review pass. New exact-head review requested once after not-started window; CI running.
 From the T375 review (2026-10-24). PRE-EXISTING, minor.
 
 1. worker 10-gate-3-commit.ts ~:375, ~:407-410: with an unborn nested repo (`git init`, no commit) in the worktree the whole `git add -A` fails, but the form still defaults the commit on and the failure shows only at Finalise. Since T375 the preview says why. Fix: say so in the form, or stage around it.
