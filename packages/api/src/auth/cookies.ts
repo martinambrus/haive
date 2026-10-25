@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
 import { setCookie, deleteCookie, getCookie } from 'hono/cookie';
+import { parse } from 'hono/utils/cookie';
 import { ACCESS_TTL, REFRESH_TTL } from './jwt.js';
 
 export const ACCESS_COOKIE = 'haive_access';
@@ -76,8 +77,20 @@ export function clearAuthCookies(c: Context): void {
   deleteCookie(c, REFRESH_COOKIE, baseOptions);
 }
 
+/** HTTP and upgrades share Hono's cookie spelling and first-value rules. */
+export function accessCookieFromHeader(header: string | undefined): string | undefined {
+  const token = parse(header ?? '', ACCESS_COOKIE)[ACCESS_COOKIE];
+  // Hono preserves malformed escapes. Refuse them without letting URIError escape the auth gate.
+  try {
+    if (token) decodeURIComponent(token);
+    return token;
+  } catch {
+    return undefined;
+  }
+}
+
 export function getAccessCookie(c: Context): string | undefined {
-  return getCookie(c, ACCESS_COOKIE);
+  return accessCookieFromHeader(c.req.header('Cookie'));
 }
 
 export function getRefreshCookie(c: Context): string | undefined {

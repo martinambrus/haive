@@ -160,3 +160,36 @@ describe('errorHandler, a path id that is not a uuid', () => {
     expect((await appThrowingOn('/:id', new Error('boom')).request('/abc')).status).toBe(500);
   });
 });
+
+describe('email index conflicts', () => {
+  it.each([false, true])(
+    'maps an email unique violation (wrapped: %s) like the pre-check',
+    async (wrapped) => {
+      const driver = Object.assign(new Error('synthetic conflict'), {
+        code: '23505',
+        constraint_name: 'users_email_blind_index_idx',
+      });
+      const error = wrapped ? new Error('query failed', { cause: driver }) : driver;
+      const duplicate = await appThrowing(new HttpError(409, 'Email already registered')).request(
+        '/',
+      );
+      const raced = await appThrowing(error).request('/');
+      expect(raced.status).toBe(duplicate.status);
+      expect(await raced.text()).toBe(await duplicate.text());
+      expect([...raced.headers]).toEqual([...duplicate.headers]);
+    },
+  );
+
+  it.each([
+    ['23505', 'unrelated_index'],
+    ['23514', 'users_email_blind_index_idx'],
+  ])('keeps unrelated %s / %s failures as 500', async (code, constraint_name) => {
+    const logged = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    try {
+      const error = Object.assign(new Error('synthetic failure'), { code, constraint_name });
+      expect((await appThrowing(error).request('/')).status).toBe(500);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+});
