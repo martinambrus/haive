@@ -1,3 +1,4 @@
+import { normalizeStepFormValues } from '@haive/shared/schemas';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import {
@@ -739,6 +740,9 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     .limit(1);
   const step = stepRows[0];
   if (!step) throw new HttpError(409, `No step awaiting form submission for id ${stepId}`);
+  const normalized = normalizeStepFormValues(stepId, body.values);
+  if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
+  const values = normalized.data;
 
   const now = new Date();
   // Close the idle (waiting-for-input) period: fold the time since the step
@@ -750,7 +754,7 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     await tx
       .update(schema.taskSteps)
       .set({
-        formValues: body.values,
+        formValues: values,
         idleMs: step.idleMs + closedIdleMs,
         waitingStartedAt: null,
         updatedAt: now,
@@ -759,7 +763,7 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
 
     await appendTaskEvent(tx, id, step.id, 'step.form_submitted', {
       stepId,
-      fieldCount: Object.keys(body.values).length,
+      fieldCount: Object.keys(values).length,
     });
   };
   await db.transaction(async (tx) => {
@@ -775,7 +779,7 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     userId,
     stepId,
     round: step.round,
-    formValues: body.values,
+    formValues: values,
   };
   await queue.add(TASK_JOB_NAMES.ADVANCE_STEP, payload, {
     attempts: 3,

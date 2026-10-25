@@ -1,3 +1,4 @@
+import { normalizeStepFormValues } from '@haive/shared/schemas';
 import {
   and,
   asc,
@@ -2966,7 +2967,11 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
       columns: { autoContinue: true, preAnswers: true, repositoryId: true, type: true },
     });
     const autoContinue = taskFlags?.autoContinue ?? true;
-    const stepPreAnswer = (taskFlags?.preAnswers ?? {})[meta.id];
+    const rawPreAnswer = (taskFlags?.preAnswers ?? {})[meta.id];
+    const normalizedPreAnswer = rawPreAnswer && normalizeStepFormValues(meta.id, rawPreAnswer);
+    if (normalizedPreAnswer && !normalizedPreAnswer.success)
+      throw new Error(normalizedPreAnswer.issues.join('; '));
+    const stepPreAnswer = normalizedPreAnswer?.data;
 
     let persistedSchema: FormSchema | null = (current.formSchema as FormSchema | null) ?? null;
     if (!persistedSchema && stepDef.form) {
@@ -3064,7 +3069,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
               ? extractFormDefaults(persistedSchema)
               : undefined);
         if (candidate !== undefined) {
-          const validation = validateFormValues(persistedSchema, candidate);
+          const normalized = normalizeStepFormValues(meta.id, candidate);
+          const validation = normalized.success
+            ? validateFormValues(persistedSchema, normalized.data)
+            : normalized;
           if (validation.success) {
             formValues = validation.data;
             current = await updateRow(db, current.id, { formValues, status: 'running' });
@@ -3113,7 +3121,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
     // Values carried by the job can then only be a submit redelivered after it was applied.
     const continuing = row.status === 'waiting_cli' && current.formValues != null;
     if (persistedSchema && submitted && !continuing) {
-      const validation = validateFormValues(persistedSchema, submitted);
+      const normalized = normalizeStepFormValues(meta.id, submitted);
+      const validation = normalized.success
+        ? validateFormValues(persistedSchema, normalized.data)
+        : normalized;
       if (!validation.success) {
         const failed = await updateRow(db, current.id, {
           status: 'failed',

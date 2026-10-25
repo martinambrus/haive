@@ -1112,3 +1112,64 @@ describe('advanceStep outcome after a Retry or Skip took the row over', () => {
     expect(doneWrites(state)).toHaveLength(1);
   });
 });
+it.each(['submitted', 'pre_answer'] as const)(
+  'normalizes the known push gate URL before %s answer and schema persistence',
+  async (source) => {
+    const state = freshState();
+    state.taskStepRow.stepId = '11a-gate-4-push';
+    const values = {
+      push: true,
+      remoteUrl: 'https://fixture-user:fixture-password@example.test:443/repo',
+    };
+    state.taskRow = {
+      id: 'task-1',
+      autoContinue: true,
+      preAnswers: source === 'pre_answer' ? { '11a-gate-4-push': values } : null,
+    };
+    const def = makeStep({
+      form: () => ({
+        title: 'Push',
+        fields: [
+          { type: 'checkbox', id: 'push', label: 'Push' },
+          { type: 'text', id: 'remoteUrl', label: 'Remote' },
+        ],
+      }),
+    });
+    def.metadata.id = '11a-gate-4-push';
+    const result = await run(state, def, source === 'submitted' ? values : undefined);
+    expect(result.status).toBe('done');
+    expect(
+      JSON.stringify(
+        state.updates.map(({ patch }) => ({
+          formValues: patch.formValues,
+          formSchema: patch.formSchema,
+          output: patch.output,
+        })),
+      ).includes('fixture-password'),
+    ).toBe(false);
+    expect(state.taskStepRow.formValues).toMatchObject({
+      remoteUrl: 'https://example.test:443/repo',
+    });
+  },
+);
+it('refuses an invalid push gate URL without saving it or echoing credentials', async () => {
+  const state = freshState();
+  state.taskStepRow.stepId = '11a-gate-4-push';
+  const def = makeStep({
+    form: () => ({ title: 'Push', fields: [{ type: 'text', id: 'remoteUrl', label: 'Remote' }] }),
+  });
+  def.metadata.id = '11a-gate-4-push';
+  const result = await run(state, def, {
+    remoteUrl: 'file://fixture-user:fixture-password@example.test/repo',
+  });
+  expect(result.status).toBe('failed');
+  expect(state.taskStepRow.formValues).toBeNull();
+  expect(
+    JSON.stringify(
+      state.updates.map(({ patch }) => ({
+        formValues: patch.formValues,
+        errorMessage: patch.errorMessage,
+      })),
+    ).includes('fixture-password'),
+  ).toBe(false);
+});
