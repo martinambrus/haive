@@ -38,6 +38,15 @@ a known password that happens to match a word in that fixed message must not rew
 errors then replace known secrets before URL scanning, and only a text-changing scrub replaces
 the error with its sanitized message.
 
+The onboarding and upgrade commit wrappers choose `safeErrorMessage` before adding their
+existing staging/commit prefix, and keep the original error as `cause`. Identity resolution
+inside those commit blocks reads the database, so a Git-labelled catch can receive a bound
+query error. The cause lets the runner persist safe text and log structured diagnostics;
+ordinary Git failures retain their prefixed message and fail the step for Retry as before.
+The workflow merge's projection-restoration hook can fail on the same identity lookup. Its
+catch logs the original structured error and sanitizes before persisting the prefixed
+`Nothing was merged` failure through the existing merge halt.
+
 These rules govern new writes and replies. Historical error columns retain their existing
 values; cleaning them requires an explicit data-repair decision. Display messages remain copy,
 not state: the structural banner rules in `web/src/lib/step-banners.ts` still apply.

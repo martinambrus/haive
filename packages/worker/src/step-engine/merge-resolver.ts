@@ -2,6 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
+import { safeErrorMessage } from '@haive/shared/logger';
 import {
   lockRepositoryTasksKey,
   schema,
@@ -1045,7 +1046,11 @@ async function putBackBeforeFeatureMerge(
       baseBranch: state.baseBranch,
     });
   } catch (err) {
-    const message = `Nothing was merged: ${err instanceof Error ? err.message : String(err)}`;
+    ctx.logger.error(
+      { err, taskId: params.taskId, taskStepId: current.id },
+      'failed to put back Haive files before merge',
+    );
+    const message = `Nothing was merged: ${safeErrorMessage(err)}`;
     return {
       halted: await haltFailed(db, current, params, state, message, 'haive files not put back'),
     };

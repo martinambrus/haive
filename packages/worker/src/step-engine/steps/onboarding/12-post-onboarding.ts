@@ -843,12 +843,15 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         pushSetUpstream = values.setUpstream !== false;
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = safeErrorMessage(err);
       ctx.logger.warn({ err }, 'post-onboarding commit failed');
       // The user explicitly asked to commit; a git failure must be loud, not a silent
       // `done` with a buried warning. The artifacts, the .haive-data mirror, and the
       // artifact rows are already written, so a Retry re-attempts safely.
-      throw new Error(`Staging or committing the generated files failed: ${message}`);
+      // Keep the cause so the runner and queue boundary still recognize bound queries.
+      throw new Error(`Staging or committing the generated files failed: ${message}`, {
+        cause: err,
+      });
     }
 
     ctx.logger.info(

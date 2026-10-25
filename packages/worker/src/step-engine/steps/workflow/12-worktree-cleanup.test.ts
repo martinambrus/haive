@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { schema, type MergeResolveState } from '@haive/database';
 import {
@@ -2056,6 +2057,82 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
   }
   const keepPass = (parent: string, wt: string, h = makeDb(), action = 'keep') =>
     worktreeCleanupStep.apply(mkCtx(parent, h.db), applyArgs(det(wt), { action }));
+
+  it.each([true, false])(
+    'T340 stores a safe projection identity failure before merging (bound: %s)',
+    async (bound) => {
+      const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
+      const lines: string[] = [];
+      const boundValue = 'PROJECTION_IDENTITY_BOUND_VALUE_340';
+      const query = 'select git_name, git_email from users where id = $1';
+      const ordinary = 'identity lookup refused\n  exact whitespace';
+      const key = Object.getOwnPropertySymbols(sharedLogger).find(
+        (key) => key.description === 'pino.stream',
+      )!;
+      const stream = (sharedLogger as unknown as Record<symbol, { write: (line: string) => void }>)[
+        key
+      ]!;
+      const logWrite = vi.spyOn(stream, 'write').mockImplementation((line) => {
+        lines.push(line);
+      });
+      try {
+        await commitIn(wt, stateFiles({}, BY_AGENT), 'agent edits a setting');
+        const featureBefore = await revOf(wt);
+        const baseBefore = await revOf(parent);
+        const h = makeDb();
+        const error = bound
+          ? new DrizzleQueryError(
+              query,
+              [boundValue],
+              Object.assign(new Error(boundValue), { code: '08006' }),
+            )
+          : new TypeError(ordinary);
+        // Keep the real cleanup hook, branch restoration and resolveGitEnv; fail
+        // only the identity's DB reader before it can create the restore commit.
+        const lookup = vi
+          .spyOn(h.db.query.users, 'findFirst')
+          .mockResolvedValueOnce(undefined) // the resolver's own preflight identity read
+          .mockRejectedValue(error); // the branch-restoration commit's identity read
+        const out = await resolveMergePhase(
+          h.db as never,
+          step,
+          mkCurrent(det(wt), { action: 'merge_remove' }),
+          {
+            ...mkCtx(parent, h.db),
+            logger: sharedLogger.child({ module: 'merge-identity-control' }),
+          },
+          mkParams(h.db, dispatching),
+        );
+        expect(lookup).toHaveBeenCalledTimes(2);
+        const message = `Nothing was merged: ${bound ? 'Database operation failed' : ordinary}`;
+        expect.soft(out).toMatchObject({
+          resolved: false,
+          result: { status: 'failed', error: message, row: { errorMessage: message } },
+        });
+        expect(h.getStatus()).toBe('failed');
+        const failure = lines
+          .map((line) => JSON.parse(line))
+          .find((line) => line.msg === 'failed to put back Haive files before merge');
+        expect
+          .soft(failure?.err)
+          .toMatchObject(
+            bound
+              ? { type: 'DrizzleQueryError', code: '08006', query }
+              : { type: 'TypeError', message: ordinary },
+          );
+        expect.soft(JSON.stringify([out, lines])).not.toContain(boundValue);
+        expect(await revOf(wt)).toBe(featureBefore);
+        expect(await revOf(parent)).toBe(baseBefore);
+        expect(await gitCode(parent, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])).toBe(1);
+        expect(putBackEvents(h)).toEqual([]);
+        expect(claimFake.claims.has(parent)).toBe(false);
+        expect(claimFake.released).toEqual([{ mergeDir: parent, inSection: true }]);
+      } finally {
+        logWrite.mockRestore();
+        await rm(parent, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('C1 same-branch merge_remove: base holds the fork point, the branch carries the revert, the step warns', async () => {
     const { parent, wt } = await setupWorktree(stateFiles({}, AT_FORK));
