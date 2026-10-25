@@ -99,24 +99,6 @@ All PRE-EXISTING.
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
-### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+7)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:26Z · last: 2026-10-25T22:51Z
-
-Codex progress 2026-10-25T22:51Z: PR #930 HEAD20dd9343d: postfix conditional regression corrected after parent actual Ruby/extractor confirmation. Final879 affected passes+4 accepted JS expected limits,45 new Ruby-valid controls, parent10decisive casesPASS. Five prior botthreads resolved after proof; fresh xhigh review and exactHEADCI/bot pending. Finish this and T266, then PAUSE.
-
-From the #311 driver (2026-10-24). PRE-EXISTING unless noted. (Session fnf-run mirrors it as task #330.) Evidence/harness (ruler, lexer-diff, oracle-cross, mutants): .claude/tmp/fnf-run/p311/ on ACTIVIT21.
-
-1. Go/Rust readers count braces in strings/comments (goRanges/rustRanges read raw content); verify with a ruler first.
-2. Python defRe matches def/class inside triple-quoted strings (verify).
-3. PHP trait/interface/enum owners absent; `new class extends X {` names methods method-extends-*.
-4. LIMIT introduced by #311: JSX text lexed as JS blanks the rest of a line after an apostrophe, `//` or `/` (30 runs in 3 of 2417 TS files, 0 constructs lost).
-   Also: a stray backtick in JSX text that pairs with a LATER real template literal masks the code between them (#889 fixed only the unclosed case; needs a JSX-text signal).
-5. PRE-EXISTING (main too, probed 2026-10-24): a function/class/method named with non-ASCII characters (`function café()`, `class Näme`) yields no section in PHP or JS: JS_NAME and the PHP construct patterns are ASCII `\w`. PHP allows any byte >= 0x80; JS allows ID_Start/ID_Continue.
-6. PRE-EXISTING: section extraction splits and looks back on LF only (`_rag-chunkers.ts` lastIndexOf('\n') ~780-787, split('\n') ~859, ~999), so a CR-only file's sections may be cut imprecisely; #889's CR controls only check the section ids.
-7. Ruby reader: `def self.x` named `self`, `module`, endless def.
-8. Doc: docs/plans/rag-retrieval-improvements.md:22-23 chunkSection split order is stale.
-
 ### T117 · B3.2 · catch checkout moves Haive did not make (+5)
 
 status: open · kind: feature (designed; decisions D13-D16 taken)
@@ -881,6 +863,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T413 — preserve literal/comment, language owner, JSX/TSX, Unicode, line-ending and Ruby section boundaries — PR #930 (01377885f), 2026-10-26; main CI40243774694 all8 green.
 
 - T303 — resumable ZIP replacement, bounded duplicate admission, stall allowance, periodic recovery and visible bundle failures — PR #932 (0294c9033), 2026-10-25; main CI40238774156 all8 green.
 
