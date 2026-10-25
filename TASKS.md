@@ -761,18 +761,6 @@ status: open · was modular #257
 5. (T375 review) _commit-diff.ts checkedOutCommit ~:133-161 is one more gitlink reader with its own failure contract.
    Fix: one shared reader module with an explicit failure contract. Do this after T396.
 
-### T382 · FNF[auth-endpoint-hardening] · refresh rotation not CAS; login timing; no admin-authz sweep (+4)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
-
-Codex progress 2026-10-25T16:56Z: PR #918 merged972ae3d48 after clean bot and11green checks; main CI40213257994 pending. Dev API hot reload confirmed healthy.
-
-1. api auth.ts ~:280-295: rotate with `UPDATE … WHERE revoked_at IS NULL RETURNING`, in a transaction.
-2. Login answers 401 before bcrypt for unknown accounts. Compare against a dummy hash; register's 409 too.
-3. No sweep proves admin routes refuse a signed-in non-admin. Extend anonymous-routes.test.ts.
-4. Export one app builder for the sweep.
-5. PUT /user-settings/password has no CAS on token_version.
-
 ### T385 · FNF[parks] · lost park poll chain never recovered; duplicate poll loops; schema park badge; pre-run park booked as idle (+5)
 
 status: open · was modular #265
@@ -969,13 +957,6 @@ From the T398 review (2026-10-25). PRE-EXISTING.
 1. Consequential: worker sandbox/ide-runner.ts ~:360-371 `ensureIdeRunnerStartedInner` returns the running container when only the workspace-subpath label matches; flags and image are never compared, so a changed launch flag (T398's `--disable-proxy`) or a `CODE_SERVER_IMAGE` bump (shared constants ~:814) never reaches a running editor, which lives as long as its tab is open. Fix: stamp a launch-spec label at create and recreate on mismatch, as `runnerSubpathVerdict` does for the subpath (app-runner.ts ~:353-369), at a moment that does not kill a live session.
 2. Minor: a task editor gets its `ide:session:` hash only when its first WebSocket connects (worker queues/ide-ensure-queue.ts ~:31-51 and the api ensure route write nothing; the repository path does, ~:81-87), and the idle reaper walks existing hashes only (ide-session-reaper.ts ~:70-105), so a task editor that never got a socket lives until the task ends.
 
-### T432 · FNF[ssr-session-refresh] [verify-first] · the server-side session check revokes the refresh token it never hands back
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
-
-Codex progress 2026-10-25T16:56Z: Shipped with T382 in mergedPR #918; main CI40213257994 pending before closure.
-From the T382 review (2026-10-25). PRE-EXISTING, consequential if it reproduces (verified by reading only). web app/(app)/layout.tsx ~:77-95: (a) a refresh 401, including a redemption that lost T382's new race, ends the session at once (redirect to `/login?session=expired`, then web proxy.ts ~:37-42 deletes both cookies) without the `/auth/me` re-check the browser client does (web lib/api-client.ts ~:66-71); (b) the rotated Set-Cookie is read only to build an internal header (~:86-92) and nothing forwards it to the browser, so the browser keeps the refresh token that call just revoked, and a returning user whose access cookie expired may be bounced to sign-in. A layout cannot set cookies, so the fix likely moves the server-side refresh into the proxy (which can) or skips it. Reproduce first.
-
 ### T433 · FNF[cli-login-url-capture] · the login banner sends the auth URL before its chunk completes
 
 status: open
@@ -999,6 +980,9 @@ status: open · kind: design · scope: queued broader finding, not approved impl
 PRE-EXISTING, rechecked during T423 integration review. F1: dormant worker helpers in `packages/worker/src/sandbox/container-manager.ts:194,204` still read then write attachment counts and have no callers. F3: API process death leaves `containers.attached_ws_count` stale, and there is no boot reconciliation or operational consumer (live uses are the API writers plus a web type). Decide whether the count should be retained with a lifecycle contract, or removed with the unused helpers; make dormant helpers atomic before any reuse. This does not undo T423's live API atomic-write and cleanup correction. Evidence: `.claude/tmp/board-run/T423/codex-review-integrated.md` F1/F3. No implementation started; separate design decision.
 
 ## Done
+
+- T382 — Atomic auth writes, uniform refusal and authorization sweeps — PR #918 (972ae3d48), 2026-10-25; main CI40213257994 green.
+- T432 — Browser-owned session recovery and ordered cookie writers — PR #918 (972ae3d48), 2026-10-25; main CI40213257994 green.
 
 - T427 — Claude OAuth token capture fails closed across wrapped and split CR boundaries — PR #920 (a04601009), main CI 40198900044 green, 2026-10-25
 
