@@ -434,9 +434,9 @@ Plan I4, part d. Browser check at 1280, 768 and 390.
 
 ### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+4)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:26Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:34Z
 
-Codex progress 2026-10-25T18:26Z: PR #922 integration5550 reviewed; connected pre-existing commit wrappers flatten Git-identity DB failures. Focused correction covers onboarding and upgrade commit; IDs visible, no password exposure established. Evidence: .claude/tmp/board-run/T340/fix-onboarding-forwarder.md.
+Codex progress 2026-10-25T18:34Z: PR #922 at local75f667c23. Corrected onboarding/upgrade cause-losing wrappers and the same identity producer through projection restoration to merge-resolver returned failure. 405 affected tests/typecheck/format pass, parent eight decisive controls pass; fresh xhigh review running. Evidence: .claude/tmp/board-run/T340/onboarding-forwarder-fix/report.md. Original params on this path are IDs; no password exposure established.
 Items 2-5 merged (#781, #808).
 
 1. PRE-EXISTING, from reading the code (not reproduced). The PR is opened against the origin read from disk (12-worktree-cleanup.ts ~:226, ~:808-813), but pr-poll needs repositories.remote_url (pr-poll-queue.ts ~:136-142), which is NULL for local_path repos. Fix: record the origin on the PR row and poll from it, or backfill remote_url. Reproduce first.
