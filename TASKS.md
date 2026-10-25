@@ -140,9 +140,9 @@ From the T414 review (2026-10-24). All PRE-EXISTING, consequential for dependenc
 
 ### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+7)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:26Z · last: 2026-10-25T19:34Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:26Z · last: 2026-10-25T20:26Z
 
-Codex progress 2026-10-25T19:34Z: 137484193 first reader correction has two confirmed TSX/Ruby regressions; parent validTSX+bang probes reproduce vs8c. Second focused correction reassesses token contracts/matrix, fresh different review required afterward. Earlier frozenfull source remains prior-source evidence.
+Codex progress 2026-10-25T20:26Z: User explicitly authorized extending the targeted correction after the three-round limit. Fresh review of23e found parser-confirmed regexp-default parameter-scan regression; parent reproduced lost declarations against c171. Focused correction active, fresh reviewer required. Other seven criteria retain reviewed evidence; earlier full suite predates corrections.
 From the #311 driver (2026-10-24). PRE-EXISTING unless noted. (Session fnf-run mirrors it as task #330.) Evidence/harness (ruler, lexer-diff, oracle-cross, mutants): .claude/tmp/fnf-run/p311/ on ACTIVIT21.
 
 1. Go/Rust readers count braces in strings/comments (goRanges/rustRanges read raw content); verify with a ruler first.
