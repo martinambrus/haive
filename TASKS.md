@@ -118,7 +118,7 @@ User decision 2026-10-25: item 5 unowned malformed RTK settings remain for manua
 
 status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T19:56Z · last: 2026-10-25T20:26Z
 
-Codex progress 2026-10-25T20:26Z: Implementation898b60713 ready; fresh xhigh review active. Final207 affected controls/types/format passed; parent79 decisive controls passed. Full worker13,653 passed before the documented telemetry-only line. Scanner bound/origin-fetch premises were already resolved at base and validated; remaining clone/operator bounds, fs-safe writes, independent push and truthful learning implemented.
+Codex progress 2026-10-25T20:30Z: PR929 opened at898b60713 after fresh xhigh review found no blocker; parent80 decisive controls and final207 affected checks passed. Full worker13,653 passed before documented telemetry-only line. Exact-head automated review/CI pending; scanner bound and origin-only fetch validated as already implemented.
 From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it as its task #329.)
 
 1. Unbounded git spawns remain at repo/clone.ts:94,116,687 (gitClone: runs before its dir exists; carries the credential-helper argv, env and secret scrub — needs its own review), steps/onboarding/_credential-scan.ts:173, scripts/advance-bundle-items.ts:25, scripts/reset-bundle-to-commit.ts:43.
