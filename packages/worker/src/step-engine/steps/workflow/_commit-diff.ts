@@ -7,13 +7,12 @@ import type {
 } from '@haive/shared/commit-diff-artifact';
 import {
   lstatNoFollow,
-  openDirNoFollow,
   readFileNoFollow,
   readLinkNoFollow,
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { gitGaveNoAnswer } from '../../../repo/git-exec.js';
+import { nestedRepositoryHead } from '../../../repo/nested-repository.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
 /** Runs git in `cwd` and returns stdout/stderr/exit code. Matches the gitRun
@@ -137,24 +136,7 @@ async function checkedOutCommit(
   workspacePath: string,
   rel: string,
 ): Promise<{ commit: string | null } | null> {
-  const wa = workspaceAnchor(workspacePath);
-  const dir = await openDirNoFollow(wa.anchor, `${wa.prefix}${rel}`).catch(() => null);
-  if (dir === null) return null;
-  try {
-    const cwd = `/proc/self/fd/${dir.fd}`;
-    // Inspect the held directory, not its name. A plain directory must never borrow the
-    // superproject's HEAD, even if its .git marker vanishes before git starts.
-    const marker = await lstatNoFollow(cwd, '.git');
-    if (marker?.kind !== 'directory' && marker?.kind !== 'file') return null;
-    const res = await gitRun(cwd, ['--git-dir=.git', 'rev-parse', '--verify', '--quiet', 'HEAD']);
-    if (gitGaveNoAnswer(res)) return null;
-    if (res.code === 1) return { commit: null };
-    if (res.code !== 0) return null;
-    const sha = res.stdout.trim();
-    return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha) ? { commit: sha } : null;
-  } finally {
-    await dir.close().catch(() => undefined);
-  }
+  return nestedRepositoryHead(workspacePath, rel, gitRun).catch(() => null);
 }
 
 /** A link's target, or the commit a submodule or untracked nested repository is at;
