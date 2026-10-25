@@ -519,7 +519,9 @@ function jsxHeadToken(text: string, from: number): { text: string; word: boolean
     i += codePointAt(text, i).length;
     while (i < text.length && WORD_CHAR.test(codePointAt(text, i)))
       i += codePointAt(text, i).length;
-  } else if (i < text.length) i += 1;
+  } else if (text[i] === '"' || text[i] === "'" || text[i] === '`') i = quotedEnd(text, i);
+  else if (text.startsWith('=>', i)) i += 2;
+  else if (i < text.length) i += 1;
   return { text: text.slice(start, i), word, end: i };
 }
 
@@ -527,8 +529,7 @@ function jsxHeadToken(text: string, from: number): { text: string; word: boolean
 const TS_RESERVED_NAME =
   /^(?:break|case|catch|class|const|continue|debugger|default|delete|do|else|enum|export|extends|false|finally|for|function|if|import|in|instanceof|new|null|return|super|switch|this|throw|true|try|typeof|var|void|while|with)$/;
 
-/** Match TypeScript's JSX generic-arrow prefix decision on tokens, not head spelling.
- *  The prefix suffices; nested constraints and parameter/return syntax stay ordinary code. */
+/** A possible generic prefix. Contextual identifiers alone cannot distinguish a tag. */
 function tsxGenericHead(header: string): boolean {
   let name = jsxHeadToken(header, 1);
   if (name.text === 'const') name = jsxHeadToken(header, name.end);
@@ -540,10 +541,58 @@ function tsxGenericHead(header: string): boolean {
   return constraint !== '' && !['=', '>', '/'].includes(constraint);
 }
 
-/** Read a bounded opening tag only after ruling out the token-level generic prefix. */
+/** Require structural arrow evidence instead of guessing await/yield function scope.
+ *  Each type-parameter, parameter and annotation window uses the signature reader's bound. */
+function tsxGenericArrow(text: string, at: number): boolean {
+  const head = text.slice(at, at + MAX_PARAMS_CHARS);
+  if (!tsxGenericHead(head)) return false;
+  let cursor = 1;
+  let angles = 1;
+  while (angles > 0) {
+    const token = jsxHeadToken(head, cursor);
+    if (token.text === '') return false;
+    cursor = token.end;
+    if (token.text === '<') angles += 1;
+    else if (token.text === '>') angles -= 1;
+  }
+  const parameters = text.slice(at + cursor, at + cursor + MAX_PARAMS_CHARS);
+  let token = jsxHeadToken(parameters, 0);
+  if (token.text !== '(') return false;
+  let parens = 1;
+  while (parens > 0) {
+    token = jsxHeadToken(parameters, token.end);
+    if (token.text === '') return false;
+    if (token.text === '(') parens += 1;
+    else if (token.text === ')') parens -= 1;
+  }
+  const tail = text.slice(at + cursor + token.end, at + cursor + token.end + MAX_PARAMS_CHARS);
+  token = jsxHeadToken(tail, 0);
+  if (token.text === '=>') return true;
+  if (token.text !== ':') return false;
+  const closes = new Map([
+    ['(', ')'],
+    ['[', ']'],
+    ['{', '}'],
+    ['<', '>'],
+  ]);
+  const stack: string[] = [];
+  while (true) {
+    token = jsxHeadToken(tail, token.end);
+    if (token.text === '' || (stack.length === 0 && token.text === ';')) return false;
+    if (token.text === '<' && jsxHeadToken(tail, token.end).text === '/') return false;
+    if (token.text === '=>' && stack.length === 0) return true;
+    const close = closes.get(token.text);
+    if (close) stack.push(close);
+    else if ([')', ']', '}', '>'].includes(token.text)) {
+      if (stack.pop() !== token.text) return false;
+    }
+  }
+}
+
+/** Read a bounded opening tag after testing structural generic-arrow evidence. */
 function jsxOpeningAt(text: string, at: number, tsx: boolean): boolean {
   const header = text.slice(at, at + MAX_PARAMS_CHARS);
-  if (tsx && tsxGenericHead(header)) return false;
+  if (tsx && tsxGenericArrow(text, at)) return false;
   const head = /^<(?:[A-Za-z][\w.:-]*(?=[\s/>])|(?=>))/.exec(header.slice(0, 256));
   if (!head) return false;
   let braces = 0;
