@@ -101,9 +101,10 @@ All PRE-EXISTING.
 
 ### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+7)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:26Z · last: 2026-10-25T22:20Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:26Z · last: 2026-10-25T22:51Z
 
-Codex progress 2026-10-25T22:20Z: PR930 current7100f3455 has788 targetedpasses+4acceptedlimits and parent4Rubyprobespass; original2Rubybotthreadsresolved. Freshreview found valid introduced nested-method binding leakage; parentRuby3.4syntax/d598comparisonconfirms followingdefs lost. Narrowmethod-scope correction pending; DO NOTmerge710 evenifCIgreen. No newtask; finishcurrent3thenpause.
+Codex progress 2026-10-25T22:51Z: PR #930 HEAD20dd9343d: postfix conditional regression corrected after parent actual Ruby/extractor confirmation. Final879 affected passes+4 accepted JS expected limits,45 new Ruby-valid controls, parent10decisive casesPASS. Five prior botthreads resolved after proof; fresh xhigh review and exactHEADCI/bot pending. Finish this and T266, then PAUSE.
+
 From the #311 driver (2026-10-24). PRE-EXISTING unless noted. (Session fnf-run mirrors it as task #330.) Evidence/harness (ruler, lexer-diff, oracle-cross, mutants): .claude/tmp/fnf-run/p311/ on ACTIVIT21.
 
 1. Go/Rust readers count braces in strings/comments (goRanges/rustRanges read raw content); verify with a ruler first.
