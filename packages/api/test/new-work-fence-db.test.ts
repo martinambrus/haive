@@ -34,6 +34,7 @@ vi.mock('@haive/database', async (importOriginal) => ({
 }));
 vi.mock('../src/queues.js', () => {
   const queue = () => ({
+    getJobs: async () => [],
     add: async (name: string) => {
       h.queued.push(name);
     },

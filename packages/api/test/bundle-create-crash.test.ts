@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -55,11 +55,18 @@ interface FakeJob {
   id: string;
   name: string;
   data: Record<string, unknown>;
+  getState: () => Promise<string>;
+  remove: () => Promise<void>;
 }
 
 function makeQueue() {
   const jobs: FakeJob[] = [];
-  const state = { refuse: null as Error | null, onAdd: null as null | (() => void) };
+  const state = {
+    refuse: null as Error | null,
+    ackLost: false,
+    readError: null as Error | null,
+    onAdd: null as null | (() => void),
+  };
   return {
     jobs,
     state,
@@ -69,11 +76,24 @@ function makeQueue() {
       const id = opts.jobId ?? `n${jobs.length + 1}`;
       const known = jobs.find((j) => j.id === id);
       if (known) return known;
-      const job = { id, name, data };
+      const job: FakeJob = {
+        id,
+        name,
+        data,
+        getState: async () => 'waiting',
+        remove: async () => {
+          jobs.splice(jobs.indexOf(job), 1);
+        },
+      };
       jobs.push(job);
+      if (state.ackLost) throw new Error('enqueue acknowledgement lost');
       return job;
     },
     getJob: async (id: string) => jobs.find((j) => j.id === id),
+    getJobs: async () => {
+      if (state.readError) throw state.readError;
+      return jobs;
+    },
   };
 }
 
@@ -438,7 +458,7 @@ describe('C6: a fault between the replace move and its deletes', () => {
     const res = await post(`/${BUNDLE}/replace/${REPLACE}/complete`);
 
     expect(res.status).toBe(500);
-    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('NEW-ARCHIVE');
+    expect(await readFile(path.join(dir, `source.${REPLACE}.zip`), 'utf8')).toBe('NEW-ARCHIVE');
   });
 
   it('still swaps the archive, drops the old tree and queues the ingest without a fault', async () => {
@@ -447,7 +467,7 @@ describe('C6: a fault between the replace move and its deletes', () => {
 
     expect2xx(await post(`/${BUNDLE}/replace/${REPLACE}/complete`));
 
-    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('NEW-ARCHIVE');
+    expect(await readFile(path.join(dir, `source.${REPLACE}.zip`), 'utf8')).toBe('NEW-ARCHIVE');
     await expect(stat(path.join(dir, 'extracted'))).rejects.toThrow();
     expect(fake.rows(schema.customBundles)).toMatchObject([{ id: BUNDLE, status: 'syncing' }]);
     expect(fake.rows(schema.customBundleUploads)[0]).toMatchObject({ status: 'complete' });
@@ -477,7 +497,7 @@ describe('I1: a replace complete that fails after the move gives its session bac
     h.beforeRemove = null;
 
     expect(res.status).toBe(500);
-    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('NEW-ARCHIVE');
+    expect(await readFile(path.join(dir, `source.${REPLACE}.zip`), 'utf8')).toBe('NEW-ARCHIVE');
     expect(sessionStatus()).toBe('uploading');
     expect((await cancel()).status).toBe(200);
     expect(sessionStatus()).toBe('cancelled');
@@ -494,22 +514,192 @@ describe('I1: a replace complete that fails after the move gives its session bac
     const res = await post(replaceUrl);
 
     expect(res.status).toBe(500);
-    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('NEW-ARCHIVE');
+    expect(await readFile(path.join(dir, `source.${REPLACE}.zip`), 'utf8')).toBe('NEW-ARCHIVE');
     expect(sessionStatus()).toBe('uploading');
     expect(ingestJobs()).toHaveLength(0);
     expect((await cancel()).status).toBe(200);
     expect(sessionStatus()).toBe('cancelled');
   });
 
-  it('a failed enqueue comes after the final write, so the session stays complete and a cancel answers 409', async () => {
+  it('a failed enqueue leaves the session retryable, and a cancel keeps the promoted source', async () => {
     await stageReplace();
     queue.state.refuse = new Error('redis is down');
 
     const res = await post(replaceUrl);
 
     expect(res.status).toBe(500);
-    expect(sessionStatus()).toBe('complete');
-    expect((await cancel()).status).toBe(409);
+    expect(sessionStatus()).toBe('uploading');
+    expect((await cancel()).status).toBe(200);
+    expect(await readFile(path.join(bundleDir(BUNDLE), `source.${REPLACE}.zip`), 'utf8')).toBe(
+      'NEW-ARCHIVE',
+    );
+  });
+});
+
+describe('replacement continuation', () => {
+  const replace = () => post(`/${BUNDLE}/replace/${REPLACE}/complete`);
+  const replacementFile = () => path.join(bundleDir(BUNDLE), `source.${REPLACE}.zip`);
+
+  it('keeps the active archive, extracted tree and catalog through a failed promotion, then resumes', async () => {
+    const dir = await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    fake.hooks.beforeUpdate = (table) => {
+      if (table === schema.customBundles) throw new Error('promotion unavailable');
+    };
+    expect((await replace()).status).toBe(500);
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('OLD-ARCHIVE');
+    expect(await readFile(path.join(dir, 'extracted', 'old.md'), 'utf8')).toBe('old');
+    expect(fake.rows(schema.customBundles)[0]).toMatchObject({
+      status: 'active',
+      archiveFilename: 'kit.zip',
+    });
+    fake.hooks.beforeUpdate = null;
+    expect2xx(await replace());
+    expect(await readFile(replacementFile(), 'utf8')).toBe('NEW-ARCHIVE');
+  });
+
+  it('does not adopt an equally sized final file when the source vanished without a move record', async () => {
+    await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    await rm(partialOf(REPLACE));
+    await writeFile(replacementFile(), 'NOT-UPLOAD');
+    expect((await replace()).status).toBe(409);
+    expect(fake.rows(schema.customBundles)[0]).toMatchObject({ status: 'active' });
+    expect(await readFile(replacementFile(), 'utf8')).toBe('NOT-UPLOAD');
+    expect(ingestJobs()).toHaveLength(0);
+  });
+
+  it('refuses a different inode at the recorded final path and never deletes it on cancel', async () => {
+    await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    fake.hooks.beforeUpdate = (table) => {
+      if (table === schema.customBundles) throw new Error('promotion unavailable');
+    };
+    expect((await replace()).status).toBe(500);
+    // Keep the moved inode alive so the filesystem cannot reuse it for this counterexample.
+    await rename(replacementFile(), `${replacementFile()}.aside`);
+    await writeFile(replacementFile(), 'NOT-UPLOAD');
+    fake.hooks.beforeUpdate = null;
+    expect((await replace()).status).toBe(409);
+    expect((await app.request(`/uploads/${REPLACE}`, { method: 'DELETE' })).status).toBe(200);
+    expect(await readFile(replacementFile(), 'utf8')).toBe('NOT-UPLOAD');
+  });
+
+  it('cleans only the unpromoted archive of a cancelled replacement', async () => {
+    const dir = await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    fake.hooks.beforeUpdate = (table) => {
+      if (table === schema.customBundles) throw new Error('promotion unavailable');
+    };
+    expect((await replace()).status).toBe(500);
+    fake.hooks.beforeUpdate = null;
+    expect((await app.request(`/uploads/${REPLACE}`, { method: 'DELETE' })).status).toBe(200);
+    await expect(stat(replacementFile())).rejects.toThrow();
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('OLD-ARCHIVE');
+  });
+
+  it('rejects a linked upload and leaves its target untouched', async () => {
+    const dir = await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    await rm(partialOf(REPLACE));
+    await symlink(path.join(dir, 'source.zip'), partialOf(REPLACE));
+    expect((await replace()).status).toBeGreaterThanOrEqual(400);
+    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('OLD-ARCHIVE');
+    expect(ingestJobs()).toHaveLength(0);
+  });
+
+  it('keeps a complete live while a duplicate is refused, and never repeats cleanup after enqueue', async () => {
+    await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    let release!: () => void;
+    let entered!: () => void;
+    const atMove = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.beforeRename = async () => {
+      entered();
+      await gate;
+    };
+    const first = replace();
+    await atMove;
+    try {
+      expect((await replace()).status).toBe(409);
+    } finally {
+      release();
+    }
+    expect2xx(await first);
+    h.beforeRename = null;
+    h.beforeRemove = () => {
+      throw new Error('a duplicate must not clean a worker-owned tree');
+    };
+    expect2xx(await replace());
+    expect(ingestJobs()).toHaveLength(1);
+  });
+
+  it('retries the actual complete after removal failed without losing the upload', async () => {
+    await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    h.beforeRemove = (rel) => {
+      if (rel.endsWith('/extracted')) throw new Error('interrupted removal');
+    };
+    expect((await post(`/${BUNDLE}/replace/${REPLACE}/complete`)).status).toBe(500);
+    h.beforeRemove = null;
+    expect2xx(await post(`/${BUNDLE}/replace/${REPLACE}/complete`));
+    expect(ingestJobs()).toHaveLength(1);
+  });
+
+  it('retries the actual complete after enqueue failed, and repeated completion queues once', async () => {
+    await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    queue.state.refuse = new Error('queue unavailable');
+    expect((await post(`/${BUNDLE}/replace/${REPLACE}/complete`)).status).toBe(500);
+    queue.state.refuse = null;
+    expect2xx(await post(`/${BUNDLE}/replace/${REPLACE}/complete`));
+    expect2xx(await post(`/${BUNDLE}/replace/${REPLACE}/complete`));
+    expect(ingestJobs()).toHaveLength(1);
+  });
+
+  it('refuses a retry when Redis accepted an anonymous sync job but its acknowledgement was lost', async () => {
+    seedGitBundle();
+    queue.state.ackLost = true;
+    expect((await post(`/${BUNDLE}/sync`)).status).toBe(500);
+    queue.state.ackLost = false;
+    const before = structuredClone(fake.rows(schema.customBundles));
+    expect((await post(`/${BUNDLE}/sync`)).status).toBe(409);
+    expect(fake.rows(schema.customBundles)).toEqual(before);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it('holds sync admission when the queue cannot establish whether a job is live', async () => {
+    seedGitBundle();
+    const before = structuredClone(fake.rows(schema.customBundles));
+    queue.state.readError = new Error('queue read unavailable');
+    expect((await post(`/${BUNDLE}/sync`)).status).toBe(503);
+    expect(fake.rows(schema.customBundles)).toEqual(before);
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  it('refuses a different replacement while a failed row still owes an ingest job', async () => {
+    await seedZipBundle();
+    await stage(REPLACE, 'NEW-ARCHIVE', { bundleId: BUNDLE });
+    fake.patch(schema.customBundles, BUNDLE, { status: 'failed' });
+    await queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, { bundleId: BUNDLE, userId: USER });
+    const before = structuredClone(fake.rows(schema.customBundles));
+    expect((await replace()).status).toBe(409);
+    expect(fake.rows(schema.customBundles)).toEqual(before);
+    expect(queue.jobs).toHaveLength(1);
+  });
+
+  it('refuses a duplicate sync without changing the active request', async () => {
+    seedGitBundle();
+    expect2xx(await post(`/${BUNDLE}/sync`));
+    const before = structuredClone(fake.rows(schema.customBundles));
+    expect((await post(`/${BUNDLE}/sync`)).status).toBe(409);
+    expect(fake.rows(schema.customBundles)).toEqual(before);
+    expect(queue.jobs).toHaveLength(1);
   });
 });
 

@@ -22,13 +22,22 @@ const reply = (body: unknown) => ({
 });
 
 let filesBody: unknown = { files: [], truncated: false, cap: 37 };
+let bundleState: 'active' | 'failed' = 'active';
+let syncError: string | null = null;
 
 async function fakeFetch(input: unknown) {
   const url = new URL(String(input), 'http://localhost');
   if (url.pathname.endsWith('/bundles')) {
     return reply({
       bundles: [
-        { id: 'b1', name: 'docs', sourceType: 'zip', status: 'active', itemCounts: { agent: 1 } },
+        {
+          id: 'b1',
+          name: 'docs',
+          sourceType: 'zip',
+          status: bundleState,
+          lastSyncError: syncError,
+          itemCounts: { agent: 1 },
+        },
       ],
     });
   }
@@ -39,7 +48,31 @@ async function fakeFetch(input: unknown) {
 beforeAll(() => vi.stubGlobal('fetch', fakeFetch));
 afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
+  bundleState = 'active';
+  syncError = null;
   filesBody = { files: [{ path: 'a.md', size: 1 }], truncated: true, cap: 37 };
+});
+
+it('carries a fetched failed bundle diagnosis into the visible row', async () => {
+  bundleState = 'failed';
+  syncError = 'Archive import failed. Replace ZIP to retry.';
+  let entries: Parameters<typeof BundleComposer>[0]['value'] = [];
+  const view = createRenderer(() => (
+    <BundleComposer
+      initialBundles={[]}
+      allowAddZip={false}
+      allowAddGit={false}
+      credentialOptions={[]}
+      repositoryId="r1"
+      value={entries}
+      onChange={(next) => {
+        entries = next;
+      }}
+    />
+  ));
+  for (let i = 0; i < 3; i += 1) await view.flush();
+  expect(entries[0]).toMatchObject({ status: 'failed', lastSyncError: syncError });
+  expect(textOf(view.tree())).toContain(syncError);
 });
 
 async function mountExpanded(): Promise<{ view: Renderer; root: () => Host }> {

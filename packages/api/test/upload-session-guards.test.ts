@@ -168,6 +168,7 @@ function makeQueue() {
       jobs.push(job);
       return job;
     },
+    getJobs: async () => jobs,
     getJob: async (id: string) => jobs.find((j) => j.id === id),
   };
 }
@@ -405,7 +406,7 @@ describe('U3: a complete whose claim is already in when a reaper pass runs', () 
     expect(res.status).toBe(200);
     expect(taken).toBe(0);
     expect(rowOf(family).status).toBe('complete');
-    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+    expect(await readFile(path.join(dir, `source.${SESSION}.zip`), 'utf8')).toBe(CONTENT);
   });
 });
 
@@ -755,7 +756,7 @@ describe('A1: a bundle complete holds its session against a cancel', () => {
     expect(res.status).toBe(200);
     expect(rowOf(bundles).status).toBe('complete');
     expect(fake.rows(schema.customBundles).map((r) => r.id)).toEqual([BUNDLE]);
-    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+    expect(await readFile(path.join(dir, `source.${SESSION}.zip`), 'utf8')).toBe(CONTENT);
     expect(queue.jobs).toHaveLength(1);
   });
 
@@ -772,15 +773,15 @@ describe('A1: a bundle complete holds its session against a cancel', () => {
     expect(queue.jobs).toHaveLength(0);
   });
 
-  it('replace: a repeat after success keeps answering 409 session already completed, and queues nothing more', async () => {
+  it('replace: a repeat after success returns the same bundle and queues nothing more', async () => {
     const dir = await stageReplace();
 
     const first = await request(bundles.app, 'POST', replaceUrl);
     const second = await request(bundles.app, 'POST', replaceUrl);
 
-    expect([first.status, second.status]).toEqual([200, 409]);
-    expect(await errorOf(second)).toBe('session already completed');
-    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+    expect([first.status, second.status]).toEqual([200, 200]);
+    expect(((await second.json()) as { bundle: { id: string } }).bundle.id).toBe(BUNDLE);
+    expect(await readFile(path.join(dir, `source.${SESSION}.zip`), 'utf8')).toBe(CONTENT);
     expect(fake.rows(schema.customBundles)).toHaveLength(1);
     expect(queue.jobs).toHaveLength(1);
   });
@@ -872,7 +873,7 @@ describe('A1: a bundle complete that fails before it changes anything gives its 
     expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe('OLD-ARCHIVE');
     expect(await readFile(staged.partial, 'utf8')).toBe(CONTENT);
     expect((await request(bundles.app, 'POST', replaceUrl)).status).toBe(200);
-    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+    expect(await readFile(path.join(dir, `source.${SESSION}.zip`), 'utf8')).toBe(CONTENT);
   });
 });
 
@@ -1015,7 +1016,7 @@ describe('F2: one complete holds a session at a time', () => {
     expect(await errorOf(seen.second!)).toBe('a complete of this session is already running');
     expect(seen.at).toEqual({ source: 'OLD-ARCHIVE', partial: true, jobs: 0 });
     expect(first.status).toBe(200);
-    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+    expect(await readFile(path.join(dir, `source.${SESSION}.zip`), 'utf8')).toBe(CONTENT);
     expect(queue.jobs).toHaveLength(1);
   });
 
@@ -1196,7 +1197,7 @@ describe('L: a complete holds its claim by renewing it while it works', () => {
 
     expect(res.status).toBe(200);
     expect(rowOf(family).status).toBe('complete');
-    expect(await readFile(path.join(dir, 'source.zip'), 'utf8')).toBe(CONTENT);
+    expect(await readFile(path.join(dir, `source.${SESSION}.zip`), 'utf8')).toBe(CONTENT);
     expect(queue.jobs).toHaveLength(1);
   });
 

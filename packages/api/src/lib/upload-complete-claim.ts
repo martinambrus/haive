@@ -134,6 +134,7 @@ export async function cancelUploadSession(
   id: string,
   anchor: string,
   rels: (string | null)[],
+  finish?: () => Promise<void>,
 ): Promise<void> {
   const [taken] = await db
     .update(table)
@@ -149,6 +150,14 @@ export async function cancelUploadSession(
     } catch (err) {
       gone = false;
       logger.warn({ err, rel }, 'upload cancel left a file for the upload reaper');
+    }
+  }
+  if (finish) {
+    try {
+      await finish();
+    } catch (err) {
+      gone = false;
+      logger.warn({ err, id }, 'upload cancel left cleanup for the upload reaper');
     }
   }
   if (!gone) return;

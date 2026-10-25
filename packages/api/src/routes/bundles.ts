@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Hono } from 'hono';
 import { credentialFitsGitRemote, redactGitText, redactGitUrl } from '@haive/shared/schemas';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, ne, or, sql, type SQL } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   BUNDLE_JOB_NAMES,
@@ -48,6 +48,12 @@ import {
   uploadsRel,
 } from '../lib/uploads.js';
 import { isUuid } from '../lib/uuid.js';
+import {
+  placeReplacementArchive,
+  discardReplacementArchive,
+  replacementArchiveRel,
+  BundleReplacementError,
+} from '@haive/shared/bundle-replacement';
 
 const ARCHIVE_FORMATS = new Set<ArchiveFormat>(['zip', 'tar', 'tar.gz']);
 
@@ -295,10 +301,52 @@ async function deleteBundleRow(bundleId: string, repositoryId: string): Promise<
   });
 }
 
+/** A failed row may still owe a job whose enqueue acknowledgement was lost. This read runs
+ * under the winning row update's lock; a duplicate admission rolls back without changing copy.
+ * A capped or unavailable queue read is unknown, never evidence that the bundle has no job. */
+async function refuseLiveBundleJob(
+  queue: ReturnType<typeof getBundleQueue>,
+  bundleId: string,
+): Promise<void> {
+  const limit = 1000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let jobs: Awaited<ReturnType<typeof queue.getJobs>>;
+  try {
+    jobs = await Promise.race([
+      queue.getJobs(
+        ['waiting', 'active', 'delayed', 'prioritized', 'waiting-children'],
+        0,
+        limit - 1,
+      ),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('bundle queue lookup timed out')), 5000);
+        timer.unref();
+      }),
+    ]);
+  } catch {
+    throw new HttpError(
+      503,
+      'Could not check whether this bundle already has an import job. Try again shortly.',
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+  if (jobs.some((job) => job?.data?.bundleId === bundleId)) {
+    throw new HttpError(409, 'an import of this bundle is already queued or running');
+  }
+  if (jobs.length >= limit) {
+    throw new HttpError(
+      503,
+      'The bundle queue is too busy to verify another import safely. Try again shortly.',
+    );
+  }
+}
+
 async function addBundleJobOrMarkFailed(
   db: ReturnType<typeof getDb>,
   bundleId: string,
   add: () => Promise<unknown>,
+  fence?: SQL,
 ): Promise<void> {
   try {
     await add();
@@ -311,7 +359,13 @@ async function addBundleJobOrMarkFailed(
           'Could not queue the job that imports this bundle. Use Resync (git) or Replace ZIP to try again, or remove the bundle.',
         updatedAt: new Date(),
       })
-      .where(and(eq(schema.customBundles.id, bundleId), eq(schema.customBundles.status, 'syncing')))
+      .where(
+        and(
+          eq(schema.customBundles.id, bundleId),
+          eq(schema.customBundles.status, 'syncing'),
+          fence,
+        ),
+      )
       .catch(() => undefined);
     throw err;
   }
@@ -653,7 +707,24 @@ bundleRoutes.delete('/uploads/:id', async (c) => {
   // unlink: the session is still cancelled, and the upload reaper removes a leftover partial.
   const anchor = bundleStorageRoot();
   const archiveRel = uploadFileRel(userId, row.archivePath, anchor);
-  await cancelUploadSession(db, schema.customBundleUploads, row.id, anchor, [archiveRel]);
+  await cancelUploadSession(
+    db,
+    schema.customBundleUploads,
+    row.id,
+    anchor,
+    [archiveRel],
+    async () => {
+      if (archiveRel && row.bundleId && row.bundleId !== row.id) {
+        const finalRel = replacementArchiveRel(userId, row.bundleId, row.id, row.archiveFormat);
+        const current = await db.query.customBundles.findFirst({
+          where: eq(schema.customBundles.id, row.bundleId),
+        });
+        if (current?.archivePath !== path.join(anchor, finalRel)) {
+          await discardReplacementArchive(anchor, archiveRel, finalRel, Number(row.totalSize));
+        }
+      }
+    },
+  );
 
   return c.json({ ok: true });
 });
@@ -740,7 +811,11 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
     throw new HttpError(400, 'upload session is not bound to this bundle');
   }
   if (row.status === 'complete') {
-    throw new HttpError(409, 'session already completed');
+    const counts = await loadItemCounts([bundleId]);
+    return c.json({
+      bundle: bundleSummaryFromRow(bundle, counts.get(bundleId)),
+      session: { id: row.id, status: 'complete' as const },
+    });
   }
   if (isSessionOver(row.status)) {
     throw new HttpError(409, 'session cancelled');
@@ -750,38 +825,34 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
   }
   const anchor = bundleStorageRoot();
   const archiveRel = uploadFileRelOrThrow(userId, row.archivePath, 'Bundle archive', anchor);
-  const dir = bundleDirFor(userId, bundleId);
-  const finalRel = bundleRel(
-    userId,
-    bundleId,
-    `source.${archiveExt(row.archiveFormat as ArchiveFormat)}`,
-  );
-  const extractedRel = bundleRel(userId, bundleId, 'extracted');
+  const finalRel = replacementArchiveRel(userId, bundleId, row.id, row.archiveFormat);
   const finalArchive = path.join(anchor, finalRel);
-  const newExtracted = path.join(dir, 'extracted');
-
-  // Overwrite source.<ext> before wiping the prior extracted/ tree, so a death between the two
-  // leaves a complete archive. Keeping the bundle row + items table intact during the swap means
-  // the UI can keep displaying the previous state until the worker re-parses.
-  // The claim is a write, so a drain that began after the early check refuses before it.
+  const newExtracted = path.join(bundleDirFor(userId, bundleId), 'extracted');
   await assertNewWorkAllowed();
   await withCompleteClaim(db, schema.customBundleUploads, row.id, async (claim) => {
-    const onDisk = await lstatNoFollow(anchor, archiveRel);
-    if (!onDisk || onDisk.kind !== 'file' || onDisk.stats.size !== Number(row.totalSize)) {
-      throw new HttpError(409, 'archive size mismatch on disk');
+    try {
+      await placeReplacementArchive(anchor, archiveRel, finalRel, Number(row.totalSize));
+    } catch (err) {
+      if (err instanceof BundleReplacementError) throw new HttpError(409, err.message);
+      throw err;
     }
-    // The bundle row moves only with the claim, so a complete that lost it leaves the row alone.
-    await db.transaction(async (tx) => {
-      await admitNewWork(tx);
-      await renameNoFollow(anchor, archiveRel, finalRel, { createParents: true });
-      // A replace cannot resume past its rename, so a failure from here on gives the session back.
-      await removeNoFollow(anchor, extractedRel, { recursive: true });
-      await claim.write(tx, {
+    const queue = getBundleQueue();
+    const jobId = `ingest-zip-${row.id}`;
+    const existing = await queue.getJob(jobId);
+    const state = existing ? await existing.getState() : null;
+    if (state !== null && state !== 'failed' && state !== 'unknown') {
+      // A prior attempt enqueued before losing its response. Its worker owns the extracted tree.
+      await claim.write(db, {
         status: 'complete',
         archivePath: finalArchive,
         updatedAt: new Date(),
       });
-      await tx
+      return;
+    }
+    await db.transaction(async (tx) => {
+      await admitNewWork(tx);
+      // A different replace may have won since the pre-read. Only this source can resume syncing.
+      const [promoted] = await tx
         .update(schema.customBundles)
         .set({
           archiveFilename: row.filename,
@@ -792,31 +863,59 @@ bundleRoutes.post('/:id/replace/:uploadId/complete', requireNewWorkAllowed, asyn
           lastSyncError: null,
           updatedAt: new Date(),
         })
-        .where(eq(schema.customBundles.id, bundleId));
+        .where(
+          and(
+            eq(schema.customBundles.id, bundleId),
+            or(
+              ne(schema.customBundles.status, 'syncing'),
+              eq(schema.customBundles.archivePath, finalArchive),
+            ),
+          ),
+        )
+        .returning({ id: schema.customBundles.id });
+      if (!promoted) throw new HttpError(409, 'another import of this bundle is already running');
+      await refuseLiveBundleJob(queue, bundleId);
+      // Fence promotion to the held upload; a takeover rolls the transaction back.
+      await claim.write(tx, { bundleId });
     });
-
-    const queue = getBundleQueue();
+    await db.transaction(async (tx) => {
+      // Keep the same lock order as promotion: bundle, then upload. A stale complete cannot
+      // remove a tree that a takeover's worker is now parsing.
+      const [current] = await tx
+        .select({ archivePath: schema.customBundles.archivePath })
+        .from(schema.customBundles)
+        .where(eq(schema.customBundles.id, bundleId))
+        .for('update');
+      if (current?.archivePath !== finalArchive)
+        throw new HttpError(409, 'bundle source changed during completion');
+      await claim.write(tx, { bundleId });
+      await removeNoFollow(anchor, bundleRel(userId, bundleId, 'extracted'), { recursive: true });
+    });
+    if (existing) await existing.remove();
     const payload: BundleJobPayload = {
       bundleId,
       userId,
       archivePath: finalArchive,
       archiveFormat: row.archiveFormat as ArchiveFormat,
     };
-    await addBundleJobOrMarkFailed(db, bundleId, () =>
-      queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
-        attempts: 1,
-        removeOnComplete: 100,
-        removeOnFail: 100,
-      }),
+    await addBundleJobOrMarkFailed(
+      db,
+      bundleId,
+      () =>
+        queue.add(BUNDLE_JOB_NAMES.INGEST_ZIP, payload, {
+          jobId,
+          attempts: 1,
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        }),
+      eq(schema.customBundles.archivePath, finalArchive),
     );
+    await claim.write(db, { status: 'complete', archivePath: finalArchive, updatedAt: new Date() });
   });
-
+  const current = await loadBundle(userId, bundleId);
   const counts = await loadItemCounts([bundleId]);
   return c.json({
-    bundle: bundleSummaryFromRow(
-      { ...bundle, archivePath: finalArchive, storageRoot: newExtracted, status: 'syncing' },
-      counts.get(bundleId),
-    ),
+    bundle: bundleSummaryFromRow(current, counts.get(bundleId)),
     session: { id: row.id, status: 'complete' as const },
   });
 });
@@ -830,22 +929,30 @@ bundleRoutes.post('/:id/sync', requireNewWorkAllowed, async (c) => {
   }
 
   const db = getDb();
+  const queue = getBundleQueue();
+  const syncingAt = new Date();
   await db.transaction(async (tx) => {
     await admitNewWork(tx);
-    await tx
+    const [taken] = await tx
       .update(schema.customBundles)
-      .set({ status: 'syncing', lastSyncError: null, updatedAt: new Date() })
-      .where(eq(schema.customBundles.id, bundleId));
+      .set({ status: 'syncing', lastSyncError: null, updatedAt: syncingAt })
+      .where(and(eq(schema.customBundles.id, bundleId), ne(schema.customBundles.status, 'syncing')))
+      .returning({ id: schema.customBundles.id });
+    if (!taken) throw new HttpError(409, 'an import of this bundle is already running');
+    await refuseLiveBundleJob(queue, bundleId);
   });
 
-  const queue = getBundleQueue();
   const payload: BundleJobPayload = { bundleId, userId };
-  await addBundleJobOrMarkFailed(db, bundleId, () =>
-    queue.add(BUNDLE_JOB_NAMES.RESYNC_GIT, payload, {
-      attempts: 1,
-      removeOnComplete: 100,
-      removeOnFail: 100,
-    }),
+  await addBundleJobOrMarkFailed(
+    db,
+    bundleId,
+    () =>
+      queue.add(BUNDLE_JOB_NAMES.RESYNC_GIT, payload, {
+        attempts: 1,
+        removeOnComplete: 100,
+        removeOnFail: 100,
+      }),
+    eq(schema.customBundles.updatedAt, syncingAt),
   );
   return c.json({ ok: true, bundleId });
 });

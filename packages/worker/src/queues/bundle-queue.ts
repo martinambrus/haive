@@ -71,6 +71,7 @@ export function startBundleWorker(bundleStorageRoot: string): Worker {
     {
       connection: getBullRedis(),
       concurrency: 2,
+      maxStalledCount: 10,
     },
   );
 

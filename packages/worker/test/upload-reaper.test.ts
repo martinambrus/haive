@@ -17,6 +17,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeRow } from '@haive/database/testing';
+import { placeReplacementArchive, replacementArchiveRel } from '@haive/shared/bundle-replacement';
 import { reapAbandonedUploads, startUploadReaper } from '../src/repo/upload-reaper.js';
 
 const guard = vi.hoisted(() => ({
@@ -156,6 +157,7 @@ function makeFake() {
     repoUploads: schema.repoUploads,
     dbUploads: schema.dbUploads,
     customBundleUploads: schema.customBundleUploads,
+    customBundles: schema.customBundles,
     tasks: schema.tasks,
     repositories: schema.repositories,
   });
@@ -252,6 +254,36 @@ async function session(
   });
   return { id, file };
 }
+
+describe('replacement archive ownership during reaping', () => {
+  it.each([false, true])(
+    'removes an unpromoted replacement and preserves an active source (active=%s)',
+    async (active) => {
+      const kind = KINDS[2]!;
+      const upload = await session(kind, { idleMs: TTL + HOUR });
+      const bundleId = randomUUID();
+      const partial = `_uploads/${USER}/${path.basename(upload.file)}`;
+      const final = replacementArchiveRel(USER, bundleId, upload.id, 'tar.gz');
+      await placeReplacementArchive(roots.bundles, partial, final, 13);
+      fake.patch(schema.customBundleUploads, upload.id, {
+        bundleId,
+        totalSize: 13,
+        bytesReceived: 13,
+      });
+      fake.insert(schema.customBundles, {
+        id: bundleId,
+        userId: USER,
+        archivePath: path.join(roots.bundles, active ? final : `${USER}/${bundleId}/source.zip`),
+      });
+
+      expect((await reapAbandonedUploads(db())).sessions).toBe(1);
+
+      expect(rowOf(kind, upload.id).status).toBe('cancelled');
+      expect(await exists(path.join(roots.bundles, final))).toBe(active);
+      expect(await exists(`${path.join(roots.bundles, final)}.move.json`)).toBe(active);
+    },
+  );
+});
 
 describe('T323: unreadable reaping files', () => {
   describe.each(KINDS)('$name', (kind) => {
