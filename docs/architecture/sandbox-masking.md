@@ -30,8 +30,12 @@ values from saved approvals while keeping that authority spelling; display label
 sanitized identity.
 
 `redactGitText` scans URL authorities once instead of treating each quote or whitespace as a
-reliable cut. A path ends the authority. Before a path, an invalid or userinfo-bearing prefix is
-ambiguous: the scanner looks through combined quote/whitespace delimiters to the last `@` before
+reliable cut. Scheme recognition uses a forward character scan at both the next-URL and ambiguous
+authority lookahead sites; retrying an unanchored greedy scheme regex made scheme-free words
+quadratic. Each `@` lookup stays inside its current authority interval, so successive malformed
+authorities without an `@` cannot repeatedly scan the preceding text. A path ends the authority.
+Before a path, an invalid or userinfo-bearing prefix is ambiguous: the scanner looks through
+combined quote/whitespace delimiters to the last `@` before
 the path or another URL, then redacts the whole authority. This deliberately hides intervening
 ambiguous text rather than exposing a credential suffix. A syntactically complete ordinary URL
 without userinfo keeps its normal text boundary, so following prose and email addresses survive.

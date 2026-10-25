@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { expect, it } from 'vitest';
 import { gitRemoteUrlSchema, redactGitText, redactGitUrl } from '../src/schemas/git-url.js';
 
@@ -109,3 +110,57 @@ it.each([
   expect(redactGitText(text)).toContain('then');
   expect(redactGitText(text)).toContain(text.slice(text.indexOf('then')));
 });
+
+it.each([
+  ['scheme-free text', `'A'.repeat(1_000_000)`, 'input'],
+  [
+    'ambiguous authority followed by scheme-free text',
+    `'https://user:prefix" ' + 'A'.repeat(1_000_000)`,
+    `'https:" ' + 'A'.repeat(1_000_000)`,
+  ],
+  [
+    'successive ambiguous authorities without userinfo terminators',
+    `'https://user:prefix" '.repeat(50_000)`,
+    `'https:" '.repeat(50_000)`,
+  ],
+])(
+  'bounds diagnostic scanning for %s',
+  (_label, input, expected) => {
+    // Run the actual exported helper in a killable child: a quadratic regression
+    // must fail within a generous budget instead of hanging the test runner.
+    const source = new URL('../src/schemas/git-url.ts', import.meta.url).href;
+    const result = execFileSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        `
+    import { redactGitText } from ${JSON.stringify(source)};
+    const input = ${input};
+    const output = redactGitText(input);
+    if (output !== ${expected}) throw new Error('Incorrect diagnostic output');
+    process.stdout.write('complete');
+  `,
+      ],
+      { timeout: 5_000, encoding: 'utf8' },
+    );
+    expect(result).toBe('complete');
+  },
+  10_000,
+);
+
+it.each([
+  ['HTTPS', '', 'https'],
+  ['A1+.-', '', 'a1+.-'],
+  ['https', '123+.-', 'https'],
+  ['https', 'word_', 'https'],
+  ['https', 'word! ', 'https'],
+])('retains scheme spelling rules: case %#', (scheme, prefix, normalized) => {
+  const raw = `${prefix}${scheme}://user:fixture-password@example.test/repo`;
+  expect(redactGitText(raw)).toBe(`${prefix}${normalized}://example.test/repo`);
+});
+
+it.each(['123://example.test/repo', '+.-://example.test/repo'])(
+  'does not treat a letter-free prefix as a scheme: %s',
+  (input) => expect(redactGitText(input)).toBe(input),
+);

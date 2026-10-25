@@ -206,14 +206,36 @@ export function gitRemoteIdentity(url: string): string {
   return redactGitUrl(url, true).split(/[?#]/)[0]!;
 }
 
+/** Find the first letter-led scheme in one forward pass. Retrying a greedy
+ *  scheme regex at every letter makes a long scheme-free word quadratic. */
+function findUrlScheme(
+  text: string,
+  from: number,
+): { start: number; authorityStart: number } | null {
+  let start = -1;
+  for (let index = from; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    const letter = (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+    if (letter) {
+      if (start < 0) start = index;
+    } else if ((code >= 48 && code <= 57) || code === 43 || code === 45 || code === 46) {
+      // Digits and +.- may continue a scheme, but cannot start one.
+    } else {
+      if (start >= 0 && text.startsWith('://', index)) {
+        return { start, authorityStart: index + 3 };
+      }
+      start = -1;
+    }
+  }
+  return null;
+}
+
 /** Diagnostic output can contain several URLs; use the same userinfo policy for each one. */
 export function redactGitText(text: string): string {
-  const starts = /[a-zA-Z][a-zA-Z0-9+.-]*:\/\//g;
   let output = '';
   let cursor = 0;
-  for (let match = starts.exec(text); match; match = starts.exec(text)) {
-    const start = match.index;
-    const authorityStart = starts.lastIndex;
+  for (let match = findUrlScheme(text, cursor); match; match = findUrlScheme(text, cursor)) {
+    const { start, authorityStart } = match;
     const delimiter = text.slice(authorityStart).search(/[\s'"<>`]/);
     let end = delimiter < 0 ? text.length : authorityStart + delimiter;
     const first = text.slice(start, end);
@@ -229,13 +251,12 @@ export function redactGitText(text: string): string {
         // An invalid authority is ambiguous: look for its @ before accepting a cut.
       }
       if (!ordinaryAuthority) {
-        const next = text.slice(authorityStart).search(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\//);
-        const bound = Math.min(
-          slash < 0 ? text.length : slash,
-          next < 0 ? text.length : authorityStart + next,
-        );
-        const at = text.lastIndexOf('@', bound - 1);
-        if (at >= authorityStart) {
+        const next = findUrlScheme(text, authorityStart);
+        const bound = Math.min(slash < 0 ? text.length : slash, next?.start ?? text.length);
+        // Never search earlier authorities again when this interval has no @.
+        const relativeAt = text.slice(authorityStart, bound).lastIndexOf('@');
+        if (relativeAt >= 0) {
+          const at = authorityStart + relativeAt;
           const suffixEnd = text.slice(at + 1).search(/[\s'"<>`]/);
           end = suffixEnd < 0 ? text.length : at + 1 + suffixEnd;
         }
@@ -243,7 +264,6 @@ export function redactGitText(text: string): string {
     }
     output += text.slice(cursor, start) + redactGitUrl(text.slice(start, end));
     cursor = end;
-    starts.lastIndex = end;
   }
   return output + text.slice(cursor);
 }
