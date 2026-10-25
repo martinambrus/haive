@@ -1922,7 +1922,9 @@ async function main(): Promise<void> {
 
       await refresh(b, 'storage-b');
 
-      const unitsOf = (install: Install) =>
+      const renderUnit = 'project/render.json#acceptedAgentIds';
+      // Keep closed rows: the answer checks below inspect history as well as the pending question.
+      const renderQuestionsOf = (install: Install) =>
         rowsOf<{
           id: string;
           unit: string;
@@ -1930,11 +1932,45 @@ async function main(): Promise<void> {
           local: { v: unknown } | null;
           incoming: { v: unknown } | null;
           resolved_at: Date | null;
+          resolution: string | null;
         }>(
           install.db,
-          sql`select id, unit, base, local, incoming, resolved_at from project_state_conflicts where repository_id = ${install.repositoryId} order by unit`,
+          sql`select id, unit, base, local, incoming, resolved_at, resolution from project_state_conflicts where repository_id = ${install.repositoryId} and unit = ${renderUnit} order by detected_at, id`,
         );
-      const pendingB = await unitsOf(b);
+      const rtkHistory = await rowsOf<{
+        id: string;
+        base: { v: unknown } | null;
+        local: { v: unknown } | null;
+        incoming: { v: unknown } | null;
+        resolved_at: Date | null;
+        resolution: string | null;
+      }>(
+        b.db,
+        sql`select id, base, local, incoming, resolved_at, resolution from project_state_conflicts
+          where repository_id = ${b.repositoryId} and unit = 'settings/rtk-enabled.json'`,
+      );
+      check(
+        'B retains the RTK question converged by its imported choice as closed history',
+        'rows' in rtkHistory &&
+          rtkHistory.rows.length === 1 &&
+          rtkHistory.rows[0]!.resolution === 'converged' &&
+          rtkHistory.rows[0]!.resolved_at !== null &&
+          isDeepStrictEqual(rtkHistory.rows[0]!.base, { v: true }) &&
+          isDeepStrictEqual(rtkHistory.rows[0]!.local, { v: true }) &&
+          isDeepStrictEqual(rtkHistory.rows[0]!.incoming, { v: false }),
+        rtkHistory,
+      );
+      const otherPending = await rowsOf<{ unit: string }>(
+        b.db,
+        sql`select unit from project_state_conflicts where repository_id = ${b.repositoryId}
+          and unit <> ${renderUnit} and resolved_at is null`,
+      );
+      check(
+        'B holds no pending question outside the render setting both changed',
+        'rows' in otherPending && otherPending.rows.length === 0,
+        otherPending,
+      );
+      const pendingB = await renderQuestionsOf(b);
       const row = 'rows' in pendingB && pendingB.rows.length === 1 ? pendingB.rows[0]! : null;
       check(
         'B holds one pending conflict for the setting both changed, with the base, its value and A’s',
@@ -2014,10 +2050,14 @@ async function main(): Promise<void> {
         repositoryId: b.repositoryId,
         repoPath: b.repoPath,
       });
-      const stillPending = await unitsOf(b);
+      const stillPending = await renderQuestionsOf(b);
       check(
         'and the next sync meets the same conflict, with no second row',
-        again.outcome === 'conflict' && 'rows' in stillPending && stillPending.rows.length === 1,
+        again.outcome === 'conflict' &&
+          'rows' in stillPending &&
+          stillPending.rows.length === 1 &&
+          stillPending.rows[0]!.id === row?.id &&
+          stillPending.rows[0]!.resolved_at === null,
         { again, stillPending },
       );
 
@@ -2043,7 +2083,7 @@ async function main(): Promise<void> {
           isDeepStrictEqual(admission.units, ['project/render.json#acceptedAgentIds']),
         admission,
       );
-      const noConflictOnA = await unitsOf(a);
+      const noConflictOnA = await renderQuestionsOf(a);
       check(
         'and A, whose value stands, holds none',
         'rows' in noConflictOnA && noConflictOnA.rows.length === 0,
@@ -2088,7 +2128,7 @@ async function main(): Promise<void> {
         conflictId: takeId,
         answer: 'take_theirs',
       });
-      const afterTake = await unitsOf(b);
+      const afterTake = await renderQuestionsOf(b);
       const columnTaken = await repoStateOf(b);
       const admittedAfterTake = await admissionOf();
       const syncAfterTake = await syncProjectStateFromCheckout(b.db, {
@@ -2101,7 +2141,9 @@ async function main(): Promise<void> {
           taken.written.length === 0 &&
           'rows' in afterTake &&
           afterTake.rows.length === 1 &&
+          afterTake.rows[0]!.id === takeId &&
           afterTake.rows[0]!.resolved_at !== null &&
+          afterTake.rows[0]!.resolution === 'take_theirs' &&
           'rows' in columnTaken &&
           isDeepStrictEqual(
             sorted(columnTaken.rows[0]?.render_context?.acceptedAgentIds),
@@ -2165,11 +2207,17 @@ async function main(): Promise<void> {
           sql`update repositories set render_context = jsonb_set(render_context, '{acceptedAgentIds}', ${JSON.stringify(idsB2)}::jsonb) where id = ${b.repositoryId}`,
         );
         await refresh(b, 'storage-b');
-        const second = await unitsOf(b);
+        const second = await renderQuestionsOf(b);
         const open = 'rows' in second ? second.rows.find((r) => r.resolved_at === null) : undefined;
         check(
           'the same setting changed again on both sides opens a new question',
-          open !== undefined &&
+          'rows' in second &&
+            second.rows.length === 2 &&
+            second.rows.some(
+              (r) => r.id === takeId && r.resolution === 'take_theirs' && r.resolved_at !== null,
+            ) &&
+            open !== undefined &&
+            open.id !== takeId &&
             isDeepStrictEqual(sorted(open.base?.v), sorted(idsA)) &&
             isDeepStrictEqual(sorted(open.local?.v), sorted(idsB2)) &&
             isDeepStrictEqual(sorted(open.incoming?.v), sorted(idsA2)),
@@ -2205,7 +2253,7 @@ async function main(): Promise<void> {
         git(b.repoPath, 'push', '-q', 'origin', 'HEAD:main');
         await refresh(a, 'storage-a');
         const columnA = await repoStateOf(a);
-        const afterA = await unitsOf(a);
+        const afterA = await renderQuestionsOf(a);
         const noneOnA = 'rows' in afterA && afterA.rows.length === 0;
         check(
           "A takes B's pushed answer on its next refresh and holds no conflict",
