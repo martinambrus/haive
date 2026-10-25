@@ -221,6 +221,7 @@ function extractClaudeOauthToken(text: string): string | null {
   for (let i = 0; i < lines.length; i++) {
     const line = i === 0 ? lines[i]! : lines[i]!.replace(/^[ \t]+/, '');
     if (i > 0) {
+      // A following one-word line reads as a continuation; the CLI's blank line or the floor and ceiling bound it.
       // Only token-only lines can be TTY continuations. Blank lines, prose
       // with word separators and a second prefix terminate the first token.
       if (line.startsWith(CLAUDE_OAUTH_PREFIX) || /[ \t]\S/.test(line)) break;

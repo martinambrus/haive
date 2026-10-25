@@ -327,6 +327,16 @@ describe('Claude OAuth token capture controls', () => {
     assertNoCredentialText(TOKEN, CODE);
   });
 
+  it('fix-round1 D3 records the known ambiguity of a following one-word line', async () => {
+    await ready();
+    stream.emit('data', Buffer.from(`${TOKEN}\nDone.\n`));
+    await settle();
+    expect(
+      h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN + 'Done',
+    ).toBe(true);
+    assertNoCredentialText(TOKEN, CODE);
+  });
+
   it.each([95, 100, 90])('saves the complete %i-character body', async (length) => {
     const expected = token(length);
     await ready();
