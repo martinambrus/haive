@@ -855,7 +855,7 @@ FIRST re-check each item on main: the #322 and #325 series fixed some of them.
 
 ### T398 · FNF[ide-proxy-hardening] · the IDE proxy replays forwarded headers and transfer-encoding; serves /proxy/<port> on the api origin (+2)
 
-status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:00Z · last: 2026-10-25T02:00Z · was modular #280
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T02:00Z · last: 2026-10-25T00:33Z · was modular #280 · merged PR #917, waiting for main CI
 
 1. Drop hop-by-hop and forwarded headers (transfer-encoding gives a 502 on chunked bodies, measured).
 2. The editor is on the api origin with code-server's /proxy/<port> enabled (worker ide-runner.ts ~:229-232). Measure, then disable it or move the IDE to its own origin.
