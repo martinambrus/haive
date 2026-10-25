@@ -341,7 +341,7 @@ export interface Repository {
   statusMessage: string | null;
   /** List-only retry capability. Absent means unknown; the API still checks admission. */
   canRetry?: boolean;
-  /** List-only: recorded reason an errored upload cannot be retried. Absent means unknown. */
+  /** List-only: recorded reason an errored repository cannot be retried. Absent means unknown. */
   retryUnavailableReason?: string | null;
   detectedFramework: string | null;
   detectedLanguages: Record<string, number> | null;
