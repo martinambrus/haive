@@ -196,3 +196,52 @@ it('fix4 keeps ordinary aggregate messages and stacks', () => {
   expect(safeErrorForTransport(err)).toBe(err);
   expect(serializeError(err)).toEqual(pino.stdSerializers.err(err));
 });
+
+it.each(['ordinary-first', 'bound-first', 'wrapper-cause', 'aggregate-cause'] as const)(
+  'recovery keeps the bound query code through mixed %s errors',
+  (shape) => {
+    const ordinary = Object.assign(new TypeError('filesystem failed'), { code: 'EACCES' });
+    const bound = failure();
+    const mixed = new AggregateError(
+      shape === 'bound-first' ? [bound, ordinary] : [ordinary, bound],
+      secret,
+    );
+    const err =
+      shape === 'wrapper-cause'
+        ? Object.assign(new TypeError(secret, { cause: mixed }), { code: 'EIO' })
+        : shape === 'aggregate-cause'
+          ? new AggregateError([ordinary], secret, { cause: bound })
+          : mixed;
+    const lines = capture();
+    logger.error({ err });
+    logger.error({ error: err });
+    const transported = safeErrorForTransport(err, { name: 'recover', id: 'mixed' }) as Error;
+    for (const line of lines) {
+      const entry = JSON.parse(line);
+      expect(entry.err ?? entry.error).toEqual({
+        type: err.constructor.name,
+        query,
+        code: '23505',
+      });
+    }
+    expect(safeErrorDetails(err)).toEqual({ name: err.constructor.name, code: '23505' });
+    expect(transported.message).toBe('Database operation failed (23505)');
+    assertSafe([lines, transported.message, transported.stack]);
+    expect(safeErrorDetails(ordinary)).toEqual({ name: 'TypeError', code: 'EACCES' });
+    expect(safeErrorForTransport(ordinary)).toBe(ordinary);
+  },
+);
+
+it('does not associate an unrelated aggregate code with a bound query lacking a driver code', () => {
+  const bound = new DrizzleQueryError(query, [secret], new Error(secret));
+  const err = new AggregateError(
+    [Object.assign(new Error('filesystem failed'), { code: 'EACCES' }), bound],
+    secret,
+  );
+  const lines = capture();
+  const transported = safeErrorForTransport(err) as Error;
+  expect(safeErrorDetails(err)).toEqual({ name: 'AggregateError' });
+  expect(JSON.parse(lines[0]!).err).toEqual({ type: 'AggregateError', query });
+  expect(transported.message).toBe('Database operation failed');
+  assertSafe([lines, transported.message, transported.stack]);
+});

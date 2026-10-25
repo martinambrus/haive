@@ -1,4 +1,4 @@
-import { safeErrorMessage } from '@haive/shared/logger';
+import { boundQueryError, safeErrorMessage } from '@haive/shared/logger';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
@@ -129,7 +129,7 @@ export async function resolveProjectStateConflict(
           (putBackErr: unknown) => {
             throw new AggregateError(
               [err, putBackErr],
-              `${safeErrorMessage(err)}; putting the render file's bytes back failed too: ${safeErrorMessage(putBackErr)}`,
+              `${boundQueryError(err) ? safeErrorMessage(err) : String(err)}; putting the render file's bytes back failed too: ${boundQueryError(putBackErr) ? safeErrorMessage(putBackErr) : String(putBackErr)}`,
             );
           },
         );

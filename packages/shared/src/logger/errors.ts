@@ -35,7 +35,9 @@ export function boundQueryError(err: unknown): Record<string, unknown> | undefin
 /** Keep diagnostics without serializing query messages, bound params or stacks. */
 export function safeErrorDetails(err: unknown): { name: string; code?: string | number } {
   const name = err instanceof Error ? err.constructor.name : 'UnknownError';
-  for (const { code } of errorChain(err)) {
+  // A wrapper or another aggregate member can carry an unrelated filesystem code.
+  // Attribute diagnostics to the same bound query we serialize and its driver cause.
+  for (const { code } of errorChain(boundQueryError(err) ?? err)) {
     if (typeof code === 'string' || typeof code === 'number') return { name, code };
   }
   return { name };
