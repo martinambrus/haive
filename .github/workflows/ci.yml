@@ -108,6 +108,36 @@ jobs:
       - name: Installer boot-failure paths
         run: sh install/test/boot-failures.sh
 
+  # Chromium's OS dependency install took ten minutes in CI. Give the isolated browser checks
+  # their own budget so they cannot starve unit, script, shellcheck or installer gates.
+  # No dev stack or providers: Vite bundles actual editor/mermaid code and serves loopback fixtures.
+  browser-runtime:
+    name: Browser markdown runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.34.5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium for the isolated markdown runtime checks
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser markdown parser, sanitizer and CSP
+        run: pnpm exec playwright test -c tests/e2e/harness/web-runtime/web-runtime.config.ts
+
   smokes:
     name: End-to-end smokes
     runs-on: ubuntu-latest
@@ -436,6 +466,10 @@ jobs:
 
       - name: Build the production stage
         run: scripts/ci-retry.sh docker build --target production -f packages/${{ matrix.service }}/Dockerfile -t haive-${{ matrix.service }}-prod-check .
+
+      - name: The built production web image boots and enforces anonymous routing
+        if: matrix.service == 'web'
+        run: node scripts/check-web-image.mjs haive-web-prod-check
 
       # A channel build proves which modules an image carries from this file before it pushes anything.
       - name: The web image names the modules compiled into it
