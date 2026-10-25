@@ -1,3 +1,4 @@
+import { safeProcessor } from './safe-processor.js';
 import { Worker, type Job } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -16,7 +17,7 @@ import { handleRefresh } from '../repo/refresh.js';
 export function startRepoWorker(repoStorageRoot: string): Worker {
   const worker = new Worker<RepoJobPayload>(
     QUEUE_NAMES.REPO,
-    async (job: Job<RepoJobPayload>) => {
+    safeProcessor(async (job: Job<RepoJobPayload>) => {
       const db = getDb();
       const payload = job.data;
       try {
@@ -51,7 +52,7 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           .where(eq(schema.repositories.id, payload.repositoryId));
         throw err;
       }
-    },
+    }),
     {
       connection: getBullRedis(),
       concurrency: 5,

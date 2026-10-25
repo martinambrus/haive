@@ -1,3 +1,4 @@
+import { safeProcessor } from './safe-processor.js';
 import { removeNoFollow } from '@haive/shared/fs-safe';
 import { DelayedError, Queue, Worker, type Job, type JobsOptions } from 'bullmq';
 import Docker from 'dockerode';
@@ -4140,7 +4141,7 @@ async function runTaskJob(job: Job<TaskWorkerPayload>): Promise<void> {
 
 export function startTaskWorker(): Worker<TaskWorkerPayload> {
   registerStepsOnce();
-  const worker = new Worker<TaskWorkerPayload>(QUEUE_NAMES.TASK, processTaskJob, {
+  const worker = new Worker<TaskWorkerPayload>(QUEUE_NAMES.TASK, safeProcessor(processTaskJob), {
     connection: getBullRedis(),
     concurrency: 5,
     // Task jobs orchestrate step runs which can wait minutes on CLI execs.

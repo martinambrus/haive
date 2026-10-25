@@ -1,3 +1,4 @@
+import { safeProcessor } from '../safe-processor.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -1486,7 +1487,7 @@ export async function startCliExecWorker(
     | void
   >(
     QUEUE_NAMES.CLI_EXEC,
-    async (job: Job<CliExecQueuePayload>, token?: string) => {
+    safeProcessor(async (job: Job<CliExecQueuePayload>, token?: string) => {
       const db = getDb();
       if (job.name === CLI_EXEC_JOB_NAMES.INVOKE) {
         const payload = job.data as CliExecJobPayload;
@@ -1540,7 +1541,7 @@ export async function startCliExecWorker(
         return handleProvisionOllamaModelJob(db, job.data as OllamaProvisionJobPayload);
       }
       throw new Error(`unknown cli-exec job ${job.name}`);
-    },
+    }),
     {
       connection: getBullRedis(),
       concurrency,

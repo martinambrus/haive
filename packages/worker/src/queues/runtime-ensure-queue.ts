@@ -1,3 +1,4 @@
+import { safeProcessor } from './safe-processor.js';
 import { Worker, type Job } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -159,7 +160,7 @@ async function navigateDesktopToMailpit(taskId: string): Promise<RuntimeEnsureRe
 export function startRuntimeEnsureWorker(): Worker<RuntimeEnsurePayload, RuntimeEnsureResult> {
   const worker = new Worker<RuntimeEnsurePayload, RuntimeEnsureResult>(
     QUEUE_NAMES.RUNTIME_ENSURE,
-    async (job: Job<RuntimeEnsurePayload>) => {
+    safeProcessor(async (job: Job<RuntimeEnsurePayload>) => {
       if (job.name === RUNTIME_ENSURE_JOB_NAMES.NAVIGATE_MAILPIT) {
         return navigateDesktopToMailpit(job.data.taskId);
       }
@@ -167,7 +168,7 @@ export function startRuntimeEnsureWorker(): Worker<RuntimeEnsurePayload, Runtime
         throw new Error(`Unknown runtime-ensure job: ${job.name}`);
       }
       return ensureRuntimeForTask(job.data.taskId);
-    },
+    }),
     { connection: getBullRedis(), concurrency: 3 },
   );
   worker.on('failed', (job, err) => {

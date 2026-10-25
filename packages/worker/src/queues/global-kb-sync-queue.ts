@@ -1,3 +1,4 @@
+import { safeProcessor } from './safe-processor.js';
 import { createHash } from 'node:crypto';
 import { Queue, Worker, type Job } from 'bullmq';
 import { and, eq, isNull, lt } from 'drizzle-orm';
@@ -600,7 +601,7 @@ export async function scheduleGlobalKbReconcile(): Promise<void> {
 export function startGlobalKbSyncWorker(): Worker {
   const worker = new Worker<GlobalKbSyncJobPayload>(
     QUEUE_NAMES.GLOBAL_KB_SYNC,
-    async (job: Job<GlobalKbSyncJobPayload>) => {
+    safeProcessor(async (job: Job<GlobalKbSyncJobPayload>) => {
       switch (job.name) {
         case GLOBAL_KB_JOB_NAMES.SYNC_ENTRY:
           await syncGlobalKbEntry(job.data);
@@ -614,7 +615,7 @@ export function startGlobalKbSyncWorker(): Worker {
         default:
           throw new Error(`Unknown global-kb job: ${job.name}`);
       }
-    },
+    }),
     { connection: getBullRedis(), concurrency: 2 },
   );
 

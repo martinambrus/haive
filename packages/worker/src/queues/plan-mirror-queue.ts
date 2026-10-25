@@ -1,3 +1,4 @@
+import { safeProcessor } from './safe-processor.js';
 import { Queue, Worker, type Job } from 'bullmq';
 import { and, asc, eq, inArray, isNull, lt } from 'drizzle-orm';
 import { lockRepositoryTasksKey, schema } from '@haive/database';
@@ -655,7 +656,7 @@ export function startPlanMirrorWorker(): Worker<
     PlanMirrorJobResult | ProjectStateResolveResult | number
   >(
     QUEUE_NAMES.PLAN_MIRROR,
-    async (job: Job<PlanMirrorJobPayload | ProjectStateResolvePayload>) => {
+    safeProcessor(async (job: Job<PlanMirrorJobPayload | ProjectStateResolvePayload>) => {
       if (job.name === PLAN_MIRROR_JOB_NAMES.RESOLVE_PROJECT_STATE) {
         return resolveProjectStateConflict(getDb(), job.data as ProjectStateResolvePayload);
       }
@@ -677,7 +678,7 @@ export function startPlanMirrorWorker(): Worker<
         default:
           throw new Error(`unknown plan-mirror job: ${job.name}`);
       }
-    },
+    }),
     { connection: getBullRedis(), concurrency: 2 },
   );
   worker.on('failed', (job, err) => {
