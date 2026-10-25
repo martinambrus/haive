@@ -123,9 +123,9 @@ From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it
 
 ### T415 · FNF[upload-retry] · Retry on an errored upload repository can never succeed
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · independent upload review passed; connected Retry capability and decisive source/release tests remain
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
 
-Codex progress 2026-10-25T16:25Z: Connected Retry capability and meaningful durable upload/release controls implemented; final driver checks/commit pending.
+Codex progress 2026-10-25T16:56Z: Fresh review clean; actual browser upload->complete source->failed preparation->Retry requeued EXTRACT for same repository. Auth integration843927b19 plus comment-only clarification; final gates pending.
 From the T323 review (2026-10-24). PRE-EXISTING, consequential. The repos page Retry (web repos/page.tsx ~:180-187, shown for any `error` repo) posts to refresh-tree, which answers 409 "Nothing to refresh from: this repository has no remote." for an upload repository without a remote (api repos.ts ~:3165-3167); nothing else re-queues an extract. The copy promises it: repos.ts ~:219-221 "Use Retry to try again", data-migrations.ts ~:361-362 "Use Retry to start again", and clone.ts ~:675-677 keeps the archive "for a retry" (the reaper removes an `error` repository's archive after 24 h).
 Recommended: Retry on an `error` upload repository re-queues EXTRACT while its archive is still on disk; otherwise the copy says to delete and upload again (no Retry).
 
@@ -432,9 +432,9 @@ Plan I4, part d. Browser check at 1280, 768 and 390.
 
 ### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+4)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · recovery round 2 e9d228647 committed (ambiguous diagnostic authority and pre-persistence Git form normalization); validation finishing
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
 
-Codex progress 2026-10-25T16:25Z: Fresh independent round3 review APPROVE at af28e4c; new task/default/continuation copies covered. Session integration verification pending.
+Codex progress 2026-10-25T16:56Z: PR #922: CodeQL quadratic scheme searches corrected; required SSH-editing identity correction in progress; final fresh review pending.
 Items 2-5 merged (#781, #808).
 
 1. PRE-EXISTING, from reading the code (not reproduced). The PR is opened against the origin read from disk (12-worktree-cleanup.ts ~:226, ~:808-813), but pr-poll needs repositories.remote_url (pr-poll-queue.ts ~:136-142), which is NULL for local_path repos. Fix: record the origin on the PR row and poll from it, or backfill remote_url. Reproduce first.
@@ -761,18 +761,6 @@ status: open · was modular #257
 5. (T375 review) _commit-diff.ts checkedOutCommit ~:133-161 is one more gitlink reader with its own failure contract.
    Fix: one shared reader module with an explicit failure contract. Do this after T396.
 
-### T382 · FNF[auth-endpoint-hardening] · refresh rotation not CAS; login timing; no admin-authz sweep (+4)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · session recovery 582e8d3ee reviewed; required public-page routing, slow refresh and session-writer ordering corrections queued
-
-Codex progress 2026-10-25T16:25Z: PR #918 updated to ee1e0c6e9; fresh review clean; parent browser4/API345 controls passed. Original race thread addressed/resolved; bot review/CI pending.
-
-1. api auth.ts ~:280-295: rotate with `UPDATE … WHERE revoked_at IS NULL RETURNING`, in a transaction.
-2. Login answers 401 before bcrypt for unknown accounts. Compare against a dummy hash; register's 409 too.
-3. No sweep proves admin routes refuse a signed-in non-admin. Extend anonymous-routes.test.ts.
-4. Export one app builder for the sweep.
-5. PUT /user-settings/password has no CAS on token_version.
-
 ### T385 · FNF[parks] · lost park poll chain never recovered; duplicate poll loops; schema park badge; pre-run park booked as idle (+5)
 
 status: open · was modular #265
@@ -908,7 +896,9 @@ From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` r
 
 ### T423 · FNF[terminal-attach] · a failed attach-count write leaves the docker attach stream open; the count is read-then-write (+1)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T14:15Z · T427 now merged; integration/conflict fix can proceed
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
+
+Codex progress 2026-10-25T16:56Z: Integrationad7bb1ff6: fresh fulltask review clean,907API/2PG/30fakeDB controls pass; session integration and PR gates pending.
 From the T400 review (2026-10-24). PRE-EXISTING, minor.
 
 1. api routes/terminal.ts ~:106-112: `await incrementAttached(...)` throwing (database down) leaves the docker attach stream opened at ~:106 open; the `.catch` at ~:80 closes only the ws.
@@ -916,9 +906,9 @@ From the T400 review (2026-10-24). PRE-EXISTING, minor.
 
 ### T424 · FNF[nested-repo-worktree] · gate 3 offers a commit that git add will refuse for an unborn nested repo; the review collector calls a nested repo a new file (+1)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · fresh review found dependency guard excludes proposed unborn-boundary staging too late; focused fix required
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
 
-Codex progress 2026-10-25T16:25Z: Focused guard/exclusion correction in progress; preserves full tracked/fork-point checks and upstream-source refusal.
+Codex progress 2026-10-25T16:56Z: Correctioned2fff17 integratedccb6955: fresh review clean,298affected tests pass; session UI and PR gates pending.
 From the T375 review (2026-10-24). PRE-EXISTING, minor.
 
 1. worker 10-gate-3-commit.ts ~:375, ~:407-410: with an unborn nested repo (`git init`, no commit) in the worktree the whole `git add -A` fails, but the form still defaults the commit on and the failure shows only at Finalise. Since T375 the preview says why. Fix: say so in the form, or stage around it.
@@ -931,9 +921,9 @@ From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. w
 
 ### T426 · FNF[db-error-params] · a failed query's error message carries its bound params (secret fingerprints, ciphertext, container env) into logs and the browser (+1)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · recovery e1e9314d1 complete; shared, worker and API suites pass; fresh independent review next
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
 
-Codex progress 2026-10-25T16:25Z: PR #921 at 54c941ed2; fresh review clean and parent21 warning controls passed. Bot review/CI pending; GitGuardian synthetic-fixture findings under investigation.
+Codex progress 2026-10-25T16:56Z: PR #921: repaired fixture range scanner and bot clean at7fdfc453; auth integration76c733140 passed855 controls/types/format, fresh integration review pending.
 From the T422 review (2026-10-24). PRE-EXISTING, consequential in kind, rare (mechanism read from source, not triggered).
 
 1. drizzle-orm 0.45.2 builds `DrizzleQueryError.message` from every bound param (drizzle-orm errors.js ~:12). Three writers bind a secret's fingerprint (first 8 and last 4 characters, shared crypto/index.ts ~:87-90) and ciphertext: shared cli-providers/provider-secret.ts ~:26-35, shared config/user-secrets.service.ts ~:92-112, worker usage-window/token-source.ts ~:39-56. api middleware/error-handler.ts ~:59 logs `err` for any unhandled failure, so a failed secret write logs up to 12 characters of the secret.
@@ -954,9 +944,9 @@ From the T417 review (2026-10-25), follow-up to T417 item 6. Minor, hardening. V
 
 ### T430 · FNF[unscoped-commits] · the knowledge-base and skill-sync commits take whatever else is staged
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · fresh review found staged deletion of entire owned root excluded by scope; focused fix required
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
 
-Codex progress 2026-10-25T16:25Z: Focused owned-root deletion correction11982aa1d2; 113 touched+107related controls pass; fresh review pending.
+Codex progress 2026-10-25T16:56Z: PR #923 atcf2b225f7: fresh reviewer and automatedbot clean, parent92actual Git controls pass; CI pending.
 From the T418 review (2026-10-25). PRE-EXISTING, minor. steps/workflow/_kb-commit.ts ~:67 and 11d-skill-sync.ts ~:519 commit the whole index (no pathspec), so anything a person staged in the task worktree (for example from the Terminal tab) lands in the "update knowledge base" or skill-sync commit. Fix: commit with the step's own pathspec (`--only`), as plan/snapshot-git.ts does.
 
 ### T431 · FNF[ide-container-lifecycle] · a running editor container is reused whatever its launch flags or image; a task editor that never got a socket is never idle-reaped (+1)
@@ -966,13 +956,6 @@ From the T398 review (2026-10-25). PRE-EXISTING.
 
 1. Consequential: worker sandbox/ide-runner.ts ~:360-371 `ensureIdeRunnerStartedInner` returns the running container when only the workspace-subpath label matches; flags and image are never compared, so a changed launch flag (T398's `--disable-proxy`) or a `CODE_SERVER_IMAGE` bump (shared constants ~:814) never reaches a running editor, which lives as long as its tab is open. Fix: stamp a launch-spec label at create and recreate on mismatch, as `runnerSubpathVerdict` does for the subpath (app-runner.ts ~:353-369), at a moment that does not kill a live session.
 2. Minor: a task editor gets its `ide:session:` hash only when its first WebSocket connects (worker queues/ide-ensure-queue.ts ~:31-51 and the api ensure route write nothing; the repository path does, ~:81-87), and the idle reaper walks existing hashes only (ide-session-reaper.ts ~:70-105), so a task editor that never got a socket lives until the task ends.
-
-### T432 · FNF[ssr-session-refresh] [verify-first] · the server-side session check revokes the refresh token it never hands back
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:25Z · connected T382 recovery correction; same PR #918; remains unfinished
-
-Codex progress 2026-10-25T16:25Z: Implemented with T382 in PR #918 at ee1e0c6e9; parent real browser recovery/ordering controls passed. Delivery gates pending.
-From the T382 review (2026-10-25). PRE-EXISTING, consequential if it reproduces (verified by reading only). web app/(app)/layout.tsx ~:77-95: (a) a refresh 401, including a redemption that lost T382's new race, ends the session at once (redirect to `/login?session=expired`, then web proxy.ts ~:37-42 deletes both cookies) without the `/auth/me` re-check the browser client does (web lib/api-client.ts ~:66-71); (b) the rotated Set-Cookie is read only to build an internal header (~:86-92) and nothing forwards it to the browser, so the browser keeps the refresh token that call just revoked, and a returning user whose access cookie expired may be bounced to sign-in. A layout cannot set cookies, so the fix likely moves the server-side refresh into the proxy (which can) or skips it. Reproduce first.
 
 ### T433 · FNF[cli-login-url-capture] · the login banner sends the auth URL before its chunk completes
 
@@ -990,7 +973,16 @@ status: open · kind: design · scope: queued broader finding, not approved impl
 
 PRE-EXISTING, verified during T382/T432 recovery review. API cookies are host-only (`packages/api/src/auth/cookies.ts`), while the web proxy/layout require cookies at the web hostname; `packages/web/src/lib/api-origin.ts` accepts a different explicit API hostname. Login against that API cannot establish the SSR web session. CORS does not transfer cookies between hostnames; different sites also face SameSite=Lax. Same hostname/different ports is supported and tested. Decide on web-origin API proxying or an explicit cookie/SSO deployment contract before changing transport. Evidence: `.claude/tmp/board-run/T382/codex-review-session-recovery-fix-2.md` F2 and branch session-recovery.md. Keep single-use refresh rotation; this is separate from the current T382 correction.
 
+### T436 · FNF[attachment-count-lifecycle] [design] · persisted attachment counts have no live reader or restart reconciliation
+
+status: open · kind: design · scope: queued broader finding, not approved implementation
+
+PRE-EXISTING, rechecked during T423 integration review. F1: dormant worker helpers in `packages/worker/src/sandbox/container-manager.ts:194,204` still read then write attachment counts and have no callers. F3: API process death leaves `containers.attached_ws_count` stale, and there is no boot reconciliation or operational consumer (live uses are the API writers plus a web type). Decide whether the count should be retained with a lifecycle contract, or removed with the unused helpers; make dormant helpers atomic before any reuse. This does not undo T423's live API atomic-write and cleanup correction. Evidence: `.claude/tmp/board-run/T423/codex-review-integrated.md` F1/F3. No implementation started; separate design decision.
+
 ## Done
+
+- T382 — Atomic auth writes, uniform refusal and authorization sweeps — PR #918 (972ae3d48), 2026-10-25; main CI40213257994 green.
+- T432 — Browser-owned session recovery and ordered cookie writers — PR #918 (972ae3d48), 2026-10-25; main CI40213257994 green.
 
 - T427 — Claude OAuth token capture fails closed across wrapped and split CR boundaries — PR #920 (a04601009), main CI 40198900044 green, 2026-10-25
 

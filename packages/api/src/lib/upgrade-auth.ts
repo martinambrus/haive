@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { getDb } from '../db.js';
 import { verifyAccessToken } from '../auth/jwt.js';
-import { ACCESS_COOKIE } from '../auth/cookies.js';
+import { accessCookieFromHeader } from '../auth/cookies.js';
 import { trackUserUpgrade, type UpgradeSession } from './user-sockets.js';
 
 /** Session policy for every WebSocket surface. Ownership and origin stay with the caller. */
@@ -13,7 +13,7 @@ export async function authenticateUpgrade(
 ): Promise<{ userId: string; session: UpgradeSession } | null> {
   let session: UpgradeSession | undefined;
   try {
-    const token = accessCookie(req.headers.cookie);
+    const token = accessCookieFromHeader(req.headers.cookie);
     if (!token) return null;
     const payload = await verifyAccessToken(token);
     session = trackUserUpgrade(payload.sub, req.socket);
@@ -37,17 +37,6 @@ export async function authenticateUpgrade(
     // Malformed cookie escapes, invalid JWTs and unavailable storage all fail closed.
     return null;
   }
-}
-
-function accessCookie(header: string | undefined): string | null {
-  for (const pair of header?.split(';') ?? []) {
-    const part = pair.trim();
-    const eq = part.indexOf('=');
-    if (eq !== -1 && part.slice(0, eq) === ACCESS_COOKIE) {
-      return decodeURIComponent(part.slice(eq + 1));
-    }
-  }
-  return null;
 }
 
 /** Refuse once: a revocation may already have ended the pending handshake. */
