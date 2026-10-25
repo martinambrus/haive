@@ -125,6 +125,15 @@ because their built-in types cannot be deleted) and the module rows the type
 uses `FOR KEY SHARE` (a deactivation's `FOR UPDATE` waits and then counts the new task, while the boot's
 non-key updates of the same rows do not conflict — `FOR SHARE` blocked the boot's intent sync).
 
+Preset configuration and its copy into a task are separate boundaries. The generic task INSERT
+normalizes the locked definition's known push-gate `remoteUrl` preset with the shared
+`normalizeStepFormValues` rule before writing `tasks.pre_answers`. It preserves every unrelated
+step/key and leaves `task_type_definitions.pre_answer_defaults` untouched. Invalid known Git
+values refuse task creation with a static error, no task/event/job and no echoed credentials.
+The other `definitionForCreate` callers copy snapshots and prompt steps only; they do not copy
+pre-answers. Worker default expansion is guarded separately at the final answer and schema-copy
+boundaries ([Secret and git-data masking](sandbox-masking.md)).
+
 **Availability** (`resolveTaskTypeAvailability`, pure, shared by create and every list), first match
 wins: `disabled` → `not-selectable` (generic route only) → `custom-types-off` → `module-types-off` →
 `module-missing` → `module-deactivated` → `missing-step` → `invalid-composition`. `module-missing` comes

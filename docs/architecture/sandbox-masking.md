@@ -45,9 +45,14 @@ and prior step outputs are not rewritten.
 The push gate's `remoteUrl` is normalized before the submit route stores answers or queues them,
 using `normalizeStepFormValues` (shared). Invalid destinations get a static error that never echoes
 the input. The helper recognizes only `11a-gate-4-push` and its named URL field; arbitrary answers
-in other forms retain their meaning. The worker applies the same rule before persisting submitted,
-auto-submitted or reused answers, and before copying pre-answers into form defaults. Existing
-ownership, failed-task admission, dead-task and round checks still precede the submit write.
+in other forms retain their meaning. Task creation applies it to the locked definition's pre-answers at the task INSERT, so arbitrary
+preset configuration is never copied raw into a new task's known Git field. The definition itself
+is left intact. The worker normalizes the FINAL validated answer, after default expansion, for
+submitted, auto-submitted and reused candidates. It also normalizes known gate schema defaults
+before fresh, Retry or reopened schema copies, and saved answers before a continuation can copy
+them into new output. These active-step writes retain ownership guards and keep `waiting_cli`
+status through a continuation. Existing ownership, failed-task admission, dead-task and round
+checks still precede the submit write.
 
 `git-exec-guard.test.ts` finds a spawn by its first argument, never by the name of the function that carries it: any `<name>('git', …)` in the worker, api and shared sources, the worker's `scripts/` and every module's sources must pass `hardenGitArgs(…)` as the argv, so an alias such as `promisify(execFile)` hides nothing (the learning and skill-sync steps once spawned git through one). A text scan cannot see a git command held in a variable or run through a shell string, so neither is used, and a new package that runs git needs its sources added to the guard's `scanRoots`. `child-process-ratchet.test.ts` (`@haive/shared`) covers what the scan cannot see: over every package and the root `scripts/` it pins, per file, each `child_process` call whose command is not provably a plain non-git program (a variable, a shell string, a path to git, a shell wrapper, a literal `git`), so a new one lands where a reviewer sees it. The reach of the unhardened form was MEASURED on git 2.43.0, the dev host's (the reproductions pin it on whichever git runs the suite): a registered submodule's own `core.fsmonitor` runs under `git status` only when the status pathspec reaches the submodule (the learning gate's `.haive-data/knowledge_base` does, once one is registered there), `add`, `commit`, `show` and `rev-parse` do not run it, and a repository's hooks run on `commit`. The reproductions in `11-phase-8-learning.test.ts` and `11d-skill-sync.test.ts` are shaped by that: a marker file written by the monitor script or the pre-commit hook must not appear.
 
