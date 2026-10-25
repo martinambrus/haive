@@ -142,7 +142,9 @@ From the T414 review (2026-10-24). All PRE-EXISTING, consequential for dependenc
 
 ### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+7)
 
-status: open
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:26Z · last: 2026-10-25T18:26Z
+
+Codex continuation: validate the eight inherited chunker diagnoses with meaningful fixtures, then focused implementation and fresh paired review. No provider runs.
 From the #311 driver (2026-10-24). PRE-EXISTING unless noted. (Session fnf-run mirrors it as task #330.) Evidence/harness (ruler, lexer-diff, oracle-cross, mutants): .claude/tmp/fnf-run/p311/ on ACTIVIT21.
 
 1. Go/Rust readers count braces in strings/comments (goRanges/rustRanges read raw content); verify with a ruler first.
