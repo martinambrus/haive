@@ -223,6 +223,28 @@ describe('Claude OAuth token capture controls', () => {
     assertNoCredentialText(TOKEN, CODE);
   });
 
+  it.each([
+    ['two-byte', 'é', 1],
+    ['four-byte', '🧪', 1],
+    ['four-byte', '🧪', 2],
+    ['four-byte', '🧪', 3],
+  ] as const)(
+    'fix-round1 F4 preserves %s UTF-8 (%s) split at byte %i',
+    async (_label, char, split) => {
+      providerName = 'antigravity';
+      await start();
+      const bytes = Buffer.from(char);
+      stream.emit('data', bytes.subarray(0, split));
+      stream.emit('data', bytes.subarray(split));
+      const output = ws.send.mock.calls
+        .map(([raw]) => JSON.parse(raw))
+        .filter((frame) => frame.type === 'output')
+        .map((frame) => frame.data)
+        .join('');
+      expect(output === char).toBe(true);
+    },
+  );
+
   it.each([95, 100, 90])('saves the complete %i-character body', async (length) => {
     const expected = token(length);
     await ready();

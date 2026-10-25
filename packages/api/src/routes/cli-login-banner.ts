@@ -1,5 +1,6 @@
 import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Job } from 'bullmq';
 import Docker from 'dockerode';
@@ -180,6 +181,7 @@ interface BannerSession {
   rawBuffer: string;
   cleanBuffer: string;
   ansiTail: string;
+  decoder: StringDecoder;
   authUrlSent: boolean;
   authSuccessSent: boolean;
   tokenSubmitted: boolean;
@@ -420,6 +422,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
     rawBuffer: '',
     cleanBuffer: '',
     ansiTail: '',
+    decoder: new StringDecoder('utf8'),
     authUrlSent: false,
     authSuccessSent: false,
     tokenSubmitted: false,
@@ -603,7 +606,7 @@ function usesTokenPaste(session: BannerSession): boolean {
 }
 
 function onStreamData(session: BannerSession, chunk: Buffer): void {
-  const text = chunk.toString('utf8');
+  const text = session.decoder.write(chunk);
 
   if (TERMINAL_LOGIN_PROVIDERS.has(session.providerName)) {
     // Interactive login (agy). DEBUG: raw output is forwarded so the modal can
