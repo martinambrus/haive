@@ -67,6 +67,14 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
+      # No dev stack or providers: Vite bundles the actual editor/mermaid entry points for a
+      # real DOM, and a loopback image fixture proves CSP enforcement and image non-fetching.
+      - name: Install Chromium for the isolated markdown runtime checks
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser markdown parser, sanitizer and CSP
+        run: pnpm exec playwright test -c tests/e2e/harness/web-runtime/web-runtime.config.ts
+
       # gen-modules.mjs and module.mjs belong to no package, so `pnpm test` never reaches them.
       - name: Module scripts
         run: pnpm test:scripts
@@ -436,6 +444,10 @@ jobs:
 
       - name: Build the production stage
         run: scripts/ci-retry.sh docker build --target production -f packages/${{ matrix.service }}/Dockerfile -t haive-${{ matrix.service }}-prod-check .
+
+      - name: The built production web image boots and enforces anonymous routing
+        if: matrix.service == 'web'
+        run: node scripts/check-web-image.mjs haive-web-prod-check
 
       # A channel build proves which modules an image carries from this file before it pushes anything.
       - name: The web image names the modules compiled into it
