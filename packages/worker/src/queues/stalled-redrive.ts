@@ -21,7 +21,10 @@ import {
   type RepoRagCleanupPayload,
   type RepoResourceCleanupPayload,
 } from '@haive/shared';
-import { reconcileStrandedSyncingBundles } from '../data-migrations.js';
+import {
+  reconcileStrandedCloningRepos,
+  reconcileStrandedSyncingBundles,
+} from '../data-migrations.js';
 import { resyncAfterTaskEnd } from '../project-state/set-aside.js';
 import { supersedeTaskRuns } from '../sandbox/cli-sandbox-fence.js';
 import { killCliSandboxesForTask, listCliSandboxesForTask } from '../sandbox/sandbox-kill.js';
@@ -828,6 +831,7 @@ export class StalledTaskSweeper {
     redriven += await redriveCancelledTasks(this.db, defaultCancelDeps, { staleMs: this.staleMs });
     this.startAbandonPass();
     redriven += await redriveRepoCleanups(this.db);
+    await reconcileStrandedCloningRepos(this.db);
     await reconcileStrandedSyncingBundles(this.db);
     return { redriven };
   }

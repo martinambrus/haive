@@ -2,8 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 
 const reconcile = vi.fn<(db: Database) => Promise<void>>(async () => undefined);
+const reconcileRepos = vi.fn<(db: Database) => Promise<void>>(async () => undefined);
 
-vi.mock('../src/data-migrations.js', () => ({ reconcileStrandedSyncingBundles: reconcile }));
+vi.mock('../src/data-migrations.js', () => ({
+  reconcileStrandedSyncingBundles: reconcile,
+  reconcileStrandedCloningRepos: reconcileRepos,
+}));
 
 const { StalledTaskSweeper } = await import('../src/queues/stalled-redrive.js');
 
@@ -23,5 +27,6 @@ describe('StalledTaskSweeper', () => {
     await new StalledTaskSweeper({ db }).sweep();
 
     expect(reconcile.mock.calls.map(([arg]) => arg === db)).toEqual([true]);
+    expect(reconcileRepos.mock.calls.map(([arg]) => arg === db)).toEqual([true]);
   });
 });

@@ -11,6 +11,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./bundle-replacement": {
+      "types": "./dist/bundle-replacement.d.ts",
+      "import": "./dist/bundle-replacement.js"
+    },
     "./types": {
       "types": "./dist/types/index.d.ts",
       "import": "./dist/types/index.js"

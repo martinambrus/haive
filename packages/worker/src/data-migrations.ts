@@ -1,7 +1,24 @@
 import { isDeepStrictEqual } from 'node:util';
-import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, notInArray, sql } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  ne,
+  notInArray,
+  or,
+  sql,
+} from 'drizzle-orm';
 import { Queue } from 'bullmq';
-import { CLEAR_STEP_USAGE_STAMP, schema, type Database } from '@haive/database';
+import {
+  CLEAR_STEP_USAGE_STAMP,
+  ROOT_CLAIM_STALE_MS,
+  schema,
+  type Database,
+} from '@haive/database';
 import {
   CLI_RULES_TEMPLATE_KIND,
   configService,
@@ -47,6 +64,7 @@ const STRANDED_CLONING_MIN_AGE_MS = 5 * 60 * 1000;
 
 const STRANDED_SYNCING_MIN_AGE_MS = 5 * 60 * 1000;
 
+let repoQueue: Queue<RepoJobPayload> | null = null;
 let bundleQueue: Queue<BundleJobPayload> | null = null;
 
 /** What a data migration does to data that cannot be got back.
@@ -210,11 +228,9 @@ export async function runDestructiveDataMigrations(db: Database): Promise<void> 
  *  it a run". The row is therefore pending forever, and `cleanupTaskScratchWorkspace` defers to
  *  exactly that predicate — so a repo-less task's workspace is never reaped either.
  *
- *  Only the QUEUE can tell "never enqueued" from "still queued", which is why this runs here
- *  rather than beside the other boot reaps in `index.ts`: `runDataMigrations` is called before any
- *  worker starts, so nothing can consume or add a job underneath the scan. The `started_at` guard
- *  on the UPDATE is the second half of that — it makes the write a compare-and-swap, so even a
- *  job that somehow began between the scan and the write keeps its row.
+ *  The queue is checked at boot and on every stalled-task sweep. A live queue job or root
+ *  claim keeps the repository alone. The final update re-checks status, age and claim so a
+ *  preparation restarted while the queue was read cannot be marked stranded by this pass.
  *
  *  Costs nothing in the common case: with no pending recap rows it never touches Redis at all. */
 async function reconcileUnenqueuedStepSummaries(db: Database): Promise<void> {
@@ -314,15 +330,23 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
   //
   // The window being excluded is the gap between one SELECT and one queue read, so any margin
   // over a few seconds is enormous. Five minutes buys that margin at the cost of deferring a
-  // genuinely stranded row to a later boot when the worker died and restarted within five
-  // minutes of starting the clone — which is the safe direction to be wrong in, and convergent:
-  // the row is still there next time.
+  // genuinely stranded row to a later sweep when the worker died within five minutes of starting
+  // the clone. The final update keeps the same age check for a preparation restarted mid-scan.
   const cutoff = new Date(Date.now() - STRANDED_CLONING_MIN_AGE_MS);
+  const claimCutoff = new Date(Date.now() - ROOT_CLAIM_STALE_MS);
+  const unclaimed = or(
+    isNull(schema.repositories.rootClaimedAt),
+    lt(schema.repositories.rootClaimedAt, claimCutoff),
+  );
   const cloning = await db
     .select({ id: schema.repositories.id })
     .from(schema.repositories)
     .where(
-      and(eq(schema.repositories.status, 'cloning'), lt(schema.repositories.updatedAt, cutoff)),
+      and(
+        eq(schema.repositories.status, 'cloning'),
+        lt(schema.repositories.updatedAt, cutoff),
+        unclaimed,
+      ),
     );
   if (cloning.length === 0) return;
 
@@ -334,8 +358,8 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
   // `RedisConnection.close`'s `if (!this.extraOptions.shared)` branch and calls `quit()` on it.
   // Closing here therefore tears down the worker's Redis for every queue that comes after,
   // at boot, on any install that happens to have a `cloning` row.
-  const queue = new Queue<RepoJobPayload>(QUEUE_NAMES.REPO, { connection: getBullRedis() });
-  const jobs = await queue.getJobs([
+  repoQueue ??= new Queue<RepoJobPayload>(QUEUE_NAMES.REPO, { connection: getBullRedis() });
+  const jobs = await repoQueue.getJobs([
     'waiting',
     'delayed',
     'prioritized',
@@ -363,7 +387,12 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
       updatedAt: new Date(),
     })
     .where(
-      and(inArray(schema.repositories.id, stranded), eq(schema.repositories.status, 'cloning')),
+      and(
+        inArray(schema.repositories.id, stranded),
+        eq(schema.repositories.status, 'cloning'),
+        lt(schema.repositories.updatedAt, cutoff),
+        unclaimed,
+      ),
     );
   log.warn({ count: stranded.length }, 'released repositories stranded at cloning');
 }

@@ -17,6 +17,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb, type FakeRow } from '@haive/database/testing';
+import { placeReplacementArchive, replacementArchiveRel } from '@haive/shared/bundle-replacement';
 import { reapAbandonedUploads, startUploadReaper } from '../src/repo/upload-reaper.js';
 
 const guard = vi.hoisted(() => ({
@@ -29,6 +30,7 @@ const guard = vi.hoisted(() => ({
   removalCode: 'EACCES' as string | undefined,
   statFailure: null as string | null,
   ignoreParkedProtection: false,
+  replacementRemovalFailure: false,
 }));
 vi.mock('@haive/shared', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared')>();
@@ -49,6 +51,13 @@ vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
   return {
     ...real,
+    removeFileIfIdentityNoFollow: async (
+      ...args: Parameters<typeof real.removeFileIfIdentityNoFollow>
+    ) => {
+      if (guard.replacementRemovalFailure)
+        throw Object.assign(new Error('replacement unlink refused'), { code: 'EACCES' });
+      return real.removeFileIfIdentityNoFollow(...args);
+    },
     lstatNoFollow: async (...args: Parameters<typeof real.lstatNoFollow>) => {
       if (guard.statFailure && args[1].endsWith('.partial')) {
         const err =
@@ -156,6 +165,7 @@ function makeFake() {
     repoUploads: schema.repoUploads,
     dbUploads: schema.dbUploads,
     customBundleUploads: schema.customBundleUploads,
+    customBundles: schema.customBundles,
     tasks: schema.tasks,
     repositories: schema.repositories,
   });
@@ -187,6 +197,7 @@ beforeEach(async () => {
   guard.removal = null;
   guard.statFailure = null;
   guard.ignoreParkedProtection = false;
+  guard.replacementRemovalFailure = false;
 });
 
 afterEach(async () => {
@@ -252,6 +263,86 @@ async function session(
   });
   return { id, file };
 }
+
+describe('replacement archive ownership during reaping', () => {
+  describe.each(['malformed intent', 'linked intent', 'conditional unlink refusal'])(
+    '%s',
+    (failure) => {
+      it.each([TTL - HOUR, TTL + HOUR])(
+        'accounts for cleanup failure at age %s without losing the archive or intent',
+        async (idleMs) => {
+          const kind = KINDS[2]!;
+          const upload = await session(kind, { idleMs, status: 'reaping' });
+          const bundleId = randomUUID();
+          const partial = `_uploads/${USER}/${path.basename(upload.file)}`;
+          const final = replacementArchiveRel(USER, bundleId, upload.id, 'tar.gz');
+          await placeReplacementArchive(roots.bundles, partial, final, 13);
+          fake.patch(schema.customBundleUploads, upload.id, {
+            bundleId,
+            totalSize: 13,
+            bytesReceived: 13,
+          });
+          fake.insert(schema.customBundles, {
+            id: bundleId,
+            userId: USER,
+            archivePath: path.join(roots.bundles, USER, bundleId, 'source.zip'),
+          });
+          const archive = path.join(roots.bundles, final);
+          const intent = `${archive}.move.json`;
+          if (failure === 'malformed intent') await writeFile(intent, '{invalid JSON');
+          else if (failure === 'linked intent') {
+            await rename(intent, `${intent}.original`);
+            await symlink(`${intent}.original`, intent);
+          } else guard.replacementRemovalFailure = true;
+          const intentBytes = await readFile(intent);
+          // The final archive is unknown/undeletable; its harmless partial can still be removed.
+          await writeFile(upload.file, 'partial remains from the interrupted attempt');
+
+          const result = await reapAbandonedUploads(db());
+
+          expect(rowOf(kind, upload.id).status).toBe(idleMs > TTL ? 'reap_failed' : 'reaping');
+          expect(result.sessions).toBe(0);
+          expect(await readFile(archive, 'utf8')).toBe('partial bytes');
+          expect(await readFile(intent)).toEqual(intentBytes);
+          expect(await exists(upload.file)).toBe(false);
+          expect(guard.errors).toHaveLength(idleMs > TTL ? 1 : 0);
+          if (idleMs > TTL) {
+            await reapAbandonedUploads(db());
+            expect(rowOf(kind, upload.id).status).toBe('reap_failed');
+            expect(guard.errors).toHaveLength(1);
+          }
+        },
+      );
+    },
+  );
+  it.each([false, true])(
+    'removes an unpromoted replacement and preserves an active source (active=%s)',
+    async (active) => {
+      const kind = KINDS[2]!;
+      const upload = await session(kind, { idleMs: TTL + HOUR });
+      const bundleId = randomUUID();
+      const partial = `_uploads/${USER}/${path.basename(upload.file)}`;
+      const final = replacementArchiveRel(USER, bundleId, upload.id, 'tar.gz');
+      await placeReplacementArchive(roots.bundles, partial, final, 13);
+      fake.patch(schema.customBundleUploads, upload.id, {
+        bundleId,
+        totalSize: 13,
+        bytesReceived: 13,
+      });
+      fake.insert(schema.customBundles, {
+        id: bundleId,
+        userId: USER,
+        archivePath: path.join(roots.bundles, active ? final : `${USER}/${bundleId}/source.zip`),
+      });
+
+      expect((await reapAbandonedUploads(db())).sessions).toBe(1);
+
+      expect(rowOf(kind, upload.id).status).toBe('cancelled');
+      expect(await exists(path.join(roots.bundles, final))).toBe(active);
+      expect(await exists(`${path.join(roots.bundles, final)}.move.json`)).toBe(active);
+    },
+  );
+});
 
 describe('T323: unreadable reaping files', () => {
   describe.each(KINDS)('$name', (kind) => {

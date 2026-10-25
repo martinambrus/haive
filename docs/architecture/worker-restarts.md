@@ -111,7 +111,60 @@ runs at boot and every 15 minutes. It has these passes:
 - **Dumps.** A completed dump is removed 24 hours after the last task that links it ended (completed, failed or cancelled), or 24 hours after its own last update when no task links it. The claim locks the dump row `FOR UPDATE` first, which waits for a task insert still in flight (its foreign key holds the row), then re-checks the task links in a statement that sees that task once it commits, and moves the row to `reaping`. The file goes only after that claim commits, and the row turns `cancelled` once it is gone; a removal that fails, or a death after the claim, leaves it `reaping`, which every pass finishes until the same 24-hour cap parks it as `reap_failed`, and which no task creation or Retry accepts. A cancelled dump row is deleted 24 hours later unless a task still names it, since its foreign key would otherwise null the task's link and a Retry would skip the restore silently. Task creation reads the dump `FOR SHARE` in the transaction that inserts the task, so whichever commits first decides, and a create that loses answers 409. A failed or cancelled task can still be retried within the 24 hours. A Retry after the dump was removed, or parked as `reap_failed`, fails `01c1-restore-database` with a message saying so; it is never skipped silently. A completed dump whose stored path is not its own file is skipped with one warning per row. After `01c1-restore-database` imports a dump it removes the file and marks the row `consumed`; a removal that fails is logged at warn and the file stays, since a `consumed` row keeps its file and no retention rule deletes `consumed` or `complete` rows yet (board T323).
 - **Orphan files.** Under `_uploads/<user>/` it removes an exact session partial name older than 24 hours whose session has no row updated in the last 24 hours (a row stamped at the cutoff itself counts as recent, and a parked `reap_failed` session's partial is left alone), so a complete that has just claimed its session keeps its file. It also removes a finished repository archive older than 24 hours unless its repository is still `cloning` (an archive left beside a `ready` repository is the leftover of an unlink that failed after its extract, which `handleExtract` logs; an id no repository carries stays while its owner has a repository cloning), a finished dump file older than 24 hours that no `db_uploads` row names in any status, and an `_uploads/<user>` directory that is empty and older than 24 hours. One sweep computes its cutoff once and every pass uses it. A file that exists but cannot be read counts as present, so a `reaping` row whose file is unreadable stays `reaping`. A removal that keeps failing warns once per path, and again when its error code changes, from a bounded in-process memory; later repeats and every removed file log at debug.
 
-Every complete (repository, dump, bundle create and replace) claims its session before it touches the file: one UPDATE moves it from `uploading` to `completing`, stamped with the request's own time (`withCompleteClaim`, `api/src/lib/upload-complete-claim.ts`), or takes over a `completing` claim older than ten minutes. While the complete works it renews that stamp every minute (`COMPLETE_CLAIM_RENEW_MS`), so only a complete whose process died, or that could not reach the database for ten minutes, is taken over. A second complete meanwhile answers 409, and so does a cancel, which takes only an `uploading` session. The row keeps its partial path while `completing`, and every later write of the request matches its own stamp and must land, so a request that lost its claim to a takeover answers 409 and writes nothing more. A write that misses because a renewal moved the stamp meanwhile goes again on the new one. A bundle replace moves its bundle row in the transaction of its last write, so a replace that lost its claim leaves the bundle as it was. The file check accepts the partial at its size, or the final file at its size when an earlier complete died after its rename, which is then not repeated. The last write sets `complete` and the final path; a repository complete inserts its repository, under the session's id, in the same transaction, so a resumed complete never creates a second one, and queues the extraction after it commits. A failure before that write hands the session back to `uploading` unless another complete has taken it over. A complete that loses to the reaper answers 409. Cancel answers 409 for a session that is not uploading and deletes nothing. One it accepts moves to `reaping`, loses the partial and, for a repository or dump, the finished file a complete that failed after its rename left beside it, then turns `cancelled`; a removal that fails leaves it `reaping` for the reaper to finish, and the cancel still answers 200.
+Every complete (repository, dump, bundle create and replace) claims its session before touching
+its file (`withCompleteClaim`, `api/src/lib/upload-complete-claim.ts`). One UPDATE takes an
+`uploading` session or a `completing` claim older than ten minutes, and a live request renews its
+stamp every minute. Each later write matches its held stamp, so a takeover refuses the old
+request. A failure hands the session back to `uploading`; the partial path stays recorded until
+completion. Repository and dump completes may recover their own final file at its expected size.
+Repository complete inserts its repository under the session id in the same transaction as its
+last write, then queues extraction, so retry creates no second repository.
+
+A bundle replacement uses a unique `source.<uploadId>.<ext>` beside the old archive. Before
+renaming, `placeReplacementArchive` (`@haive/shared/bundle-replacement`, Node-only) atomically
+writes a durable move intent containing the partial and final relative paths, size, and the held
+source descriptor's device and inode as lossless decimal strings. Retry accepts the final only
+when its held identity and size match that intent. A vanished partial alone proves nothing, and
+another upload's archive is never adopted or overwritten. Promotion takes the bundle row to
+`syncing` and points it at that source in a transaction fenced by the held upload. A different
+replacement already syncing refuses it. The old archive and item rows stay; the extracted tree
+is removed afterward under the same bundle-then-upload lock order, before enqueue. A retry that
+finds its `ingest-zip-<uploadId>` job live or completed finishes the upload without repeating
+cleanup; a failed job can be replaced. The upload becomes `complete` only after enqueue, and a
+repeated completed request returns the current bundle. The response re-reads the row, including
+an ingest failure that arrived before serialization.
+
+Cancel takes only `uploading`, moves it to `reaping`, removes its partial and then marks it
+`cancelled`; any refused removal leaves `reaping` for the upload reaper. Repository and dump
+cancel also remove their own finished file. A replacement cancel and the reaper share
+`discardReplacementArchive`: an unpromoted final is removed only by its recorded inode identity,
+while any final the bundle currently names stays. Neither cleanup can follow a link or delete a
+different inode at that name. A refused replacement cleanup contributes to the same retry/error
+accounting as a refused partial removal: the harmless partial can still go, while the unremoved
+archive and intent stay, and the session parks as `reap_failed` after the existing 24-hour window.
+Bundle deletion already removes its whole directory, including
+retained older archives and move intents.
+
+Git bundle Resync atomically changes a non-syncing row to `syncing` in its new-work admission
+transaction. Concurrent requests return 409 and leave the admitted request's job and error alone.
+The winning update holds the bundle row while a bounded queue read checks live jobs, including
+older anonymous ingest and sync jobs: an enqueue whose acknowledgement was lost can leave a
+failed row with a real job. Completeness comes from the public BullMQ range API's atomic ID
+snapshot, before hydration: a removed hash must not shrink a capped page into an apparently
+complete one. A small snapshot with a missing hash is unknown too, and the five-second deadline
+covers the snapshot and hydration together. A live job refuses admission, and a failed or capped queue read holds
+with 503 rather than assuming absence. Replacement admission uses the same check, so it cannot
+remove a tree an earlier ingest still owns.
+A refused enqueue marks only that admission's stamp failed; a lost enqueue that cannot be marked
+is covered by the stranded-bundle sweep. The composer carries the API's redacted `lastSyncError`
+from both initial and polled summaries and renders it through `MarkdownView` only for `failed`.
+The controls wrap on narrow screens, and a stale error on an active or syncing row stays hidden.
+
+The same stalled-task sweep calls `reconcileStrandedCloningRepos` as boot does: only a repository
+older than five minutes, with neither a live repo job nor a live root claim, moves from `cloning`
+to `error`. The final update repeats status, age and claim checks. It starts no work and changes
+no task or runtime state. Both repository and bundle Workers tolerate ten stalls; this policy
+belongs to those two queues alone.
 
 **START claims the task, or does nothing.** `claimTaskStart` moves a `created` or `queued` task to
 `running`, pointed at its first step, in one statement fenced on the epoch START read. A START that

@@ -18,6 +18,8 @@ vi.mock('../src/db.js', () => ({
 }));
 vi.mock('../src/queues.js', () => {
   const jobQueue = () => ({
+    getRanges: async () => [],
+    getJobs: async () => [],
     add: async (name: string) => {
       h.jobs.push(name);
     },

@@ -8,6 +8,7 @@ import type {
   InitBundleUploadRequest,
 } from '@haive/shared';
 import { Button, FormError, Input, Label } from '@/components/ui';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 import { API_BASE_URL } from '@/lib/api-client';
 
 /** Bundle row threaded through the form's value array. Mirrors what
@@ -19,6 +20,7 @@ export interface BundleComposerEntry {
   sourceType: 'zip' | 'git';
   status: 'active' | 'syncing' | 'failed';
   itemCount: number;
+  lastSyncError?: string | null;
 }
 
 interface BundleComposerProps {
@@ -51,6 +53,7 @@ function summaryFromInitial(b: BundleComposerInitial): BundleComposerEntry {
     sourceType: b.sourceType,
     status: b.status,
     itemCount: b.itemCount,
+    lastSyncError: b.lastSyncError,
   };
 }
 
@@ -238,6 +241,7 @@ export function BundleComposer({
             sourceType: 'zip' | 'git';
             status: 'active' | 'syncing' | 'failed';
             itemCounts?: { agent?: number; skill?: number };
+            lastSyncError?: string | null;
           }>;
         };
         if (cancelled) return;
@@ -247,6 +251,7 @@ export function BundleComposer({
           name: b.name,
           sourceType: b.sourceType,
           status: b.status,
+          lastSyncError: b.lastSyncError,
           itemCount: (b.itemCounts?.agent ?? 0) + (b.itemCounts?.skill ?? 0),
         }));
         const current = valueRef.current;
@@ -259,7 +264,8 @@ export function BundleComposer({
               v.id === n.id &&
               v.status === n.status &&
               v.itemCount === n.itemCount &&
-              v.name === n.name
+              v.name === n.name &&
+              v.lastSyncError === n.lastSyncError
             );
           });
         if (!same) onChangeRef.current(next);
@@ -498,11 +504,11 @@ export function BundleComposer({
                 key={entry.id}
                 className="flex flex-col rounded-md border border-neutral-800 bg-neutral-950"
               >
-                <div className="flex items-center justify-between gap-2 px-3 py-2 text-sm">
+                <div className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm">
                   <button
                     type="button"
                     onClick={() => toggleExpanded(entry.id)}
-                    className="flex flex-1 items-center gap-2 text-left"
+                    className="flex min-w-0 flex-1 basis-full flex-wrap items-center gap-2 text-left sm:basis-auto"
                   >
                     <span
                       className="inline-block w-3 select-none text-neutral-500"
@@ -513,7 +519,7 @@ export function BundleComposer({
                     <span className="rounded bg-indigo-900/60 px-1.5 py-0.5 text-[10px] uppercase text-indigo-300">
                       {entry.sourceType}
                     </span>
-                    <span className="text-neutral-100">{entry.name}</span>
+                    <span className="break-all text-neutral-100">{entry.name}</span>
                     <span className="text-neutral-500">— {entry.itemCount} item(s)</span>
                     {entry.status !== 'active' && (
                       <span className="rounded bg-amber-900/60 px-1.5 py-0.5 text-[10px] text-amber-300">
@@ -560,6 +566,14 @@ export function BundleComposer({
                     Remove
                   </Button>
                 </div>
+                {entry.status === 'failed' && entry.lastSyncError && (
+                  <div
+                    role="alert"
+                    className="min-w-0 border-t border-red-900/50 px-3 py-2 text-sm text-red-300 [&_.haive-md]:break-words"
+                  >
+                    <MarkdownView body={entry.lastSyncError} />
+                  </div>
+                )}
                 {isExpanded && (
                   <div className="border-t border-neutral-800 px-3 py-2">
                     {fileState?.loading && (
