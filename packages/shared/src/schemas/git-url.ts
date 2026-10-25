@@ -208,6 +208,19 @@ export function gitRemoteIdentity(url: string): string {
 
 /** Diagnostic output can contain several URLs; use the same userinfo policy for each one. */
 export function redactGitText(text: string): string {
+  // Git quotes malformed URLs too. A whitespace character inside quoted
+  // userinfo belongs to that URL, while whitespace outside quotes separates prose.
+  text = text.replace(
+    /(['"`])([a-zA-Z][a-zA-Z0-9+.-]*:\/\/(?:(?!\1)[\s\S])*?)\1(?=$|[\s.,:;)\]}<>])/g,
+    (quoted, quote: string, url: string) => {
+      const start = url.indexOf('://') + 3;
+      const slash = url.indexOf('/', start);
+      const authority = url.slice(start, slash < 0 ? undefined : slash);
+      return /\s/.test(authority) && authority.includes('@')
+        ? quote + redactGitUrl(url) + quote
+        : quoted;
+    },
+  );
   // Userinfo may contain legacy quote/angle/backtick delimiters. Consume it whole
   // through its last @ before the first slash, then honor those delimiters again
   // so independent adjacent URLs are each visited by replace.

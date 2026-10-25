@@ -266,7 +266,7 @@ describe('git-push helpers', () => {
   });
 });
 
-it.each(["'", '"', '<', '>', '`', '?', '#'])(
+it.each(["'", '"', '<', '>', '`', '?', '#', ' ', '\t', '\r', '\n'])(
   'scrubs an intact known secret before URL rewriting: case %#',
   (delimiter) => {
     const secret = `fixture-prefix${delimiter}fixture-suffix`;

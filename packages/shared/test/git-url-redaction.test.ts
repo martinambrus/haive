@@ -76,3 +76,17 @@ it('redacts every URL when quote delimiters separate adjacent diagnostics', () =
   expect(safe.includes('fixture-password')).toBe(false);
   expect(safe).toContain('https://public.test/repo"https://example.test/repo');
 });
+it.each([' ', '\t', '\r', '\n'])(
+  'redacts whitespace inside quoted legacy userinfo: case %#',
+  (delimiter) => {
+    const secret = `fixture-prefix${delimiter}fixture-suffix`;
+    const safe = redactGitText(`failed 'https://user:${secret}@example.test/repo' then retry`);
+    expect(safe.includes('fixture-prefix')).toBe(false);
+    expect(safe.includes('fixture-suffix')).toBe(false);
+    expect(safe).toContain('then retry');
+  },
+);
+it('does not read later prose or email addresses as userinfo', () => {
+  const input = 'see "https://example.test:443/repo" then contact support@example.test';
+  expect(redactGitText(input)).toContain('then contact support@example.test');
+});
