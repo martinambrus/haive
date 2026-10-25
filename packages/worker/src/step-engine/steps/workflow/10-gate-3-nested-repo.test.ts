@@ -8,6 +8,7 @@ import {
 } from '@haive/shared/fs-safe';
 import { gate3CommitStep } from './10-gate-3-commit.js';
 import { gateContext, git, repoFixture } from '../../../../test/support/nested-repo.js';
+import { failGit } from '../../../../test/support/fake-git.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -74,6 +75,169 @@ describe('gate 3 nested repository controls', () => {
       `160000 commit ${nestedHead}\tnested\n`,
     );
   });
+
+  it.each(['scratch', 'scratch [x]', ':scratch', 'scratch\nline'])(
+    'excludes only the unborn dependency checkout %s and commits the owned edit',
+    async (name) => {
+      const nested = `modules/contrib/${name}`;
+      const repo = await fixture(false, nested);
+      expect(await commit(repo)).toMatchObject({
+        committed: true,
+        excludedRepositories: [`${nested}/`],
+      });
+      expect(await git(repo, ['diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'])).toBe(
+        'a.txt\n',
+      );
+      expect(await git(repo, ['show', 'HEAD:a.txt'])).toBe('after\n');
+      expect(await git(repo, ['ls-tree', 'HEAD', '--', `:(literal)${nested}`])).toBe('');
+      expect(await readTextNoFollow(repo, `${nested}/inside.txt`)).toBe('nested contents\n');
+      expect(await git(repo, ['status', '--porcelain', '-z', '-uall'])).toBe(`?? ${nested}/\0`);
+    },
+  );
+
+  it.each(['modified', 'new'])(
+    'still refuses %s third-party source beside an excluded unborn checkout',
+    async (state) => {
+      const repo = await fixture(false, 'modules/contrib/scratch');
+      const upstream = 'modules/contrib/scratch-sibling/source.php';
+      await writeFileNoFollow(repo, upstream, 'upstream baseline\n', { createParents: true });
+      if (state === 'modified') {
+        await git(repo, ['add', '--', upstream]);
+        await git(repo, ['commit', '-q', '-m', 'upstream baseline']);
+        await writeFileNoFollow(repo, upstream, 'upstream edit\n');
+      }
+      const head = await git(repo, ['rev-parse', 'HEAD']);
+      await expect(commit(repo)).rejects.toThrow(`changed upstream source: ${upstream}.`);
+      expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(head);
+      expect(await git(repo, ['diff', '--cached', '--name-only'])).toBe('');
+    },
+  );
+
+  it.each([false, true])(
+    'keeps the baseline ownership decision for a committed dependency checkout (owned: %s)',
+    async (owned) => {
+      const nested = 'modules/contrib/scratch';
+      const repo = await fixture(true, nested);
+      if (owned) {
+        await writeFileNoFollow(
+          repo,
+          '.haive-data/dependency-ownership.json',
+          JSON.stringify({ ownedPaths: [nested] }),
+          { createParents: true },
+        );
+        await git(repo, ['add', '--', '.haive-data/dependency-ownership.json']);
+        await git(repo, ['commit', '-q', '-m', 'operator ownership']);
+      }
+      if (owned) {
+        expect((await commit(repo)).committed).toBe(true);
+        expect(await git(repo, ['ls-tree', 'HEAD', '--', nested])).toMatch(/^160000 commit /);
+      } else {
+        await expect(commit(repo)).rejects.toThrow(`changed upstream source: ${nested}/.`);
+      }
+    },
+  );
+
+  it.each(['lost first commit', 'gained first commit', 'became ordinary directory', 'legacy'])(
+    'proves current dependency exclusions for a stale gate payload: %s',
+    async (transition) => {
+      const nested = 'modules/contrib/scratch';
+      const repo = await fixture(transition === 'lost first commit', nested);
+      const ctx = gateContext(repo);
+      const detected = await gate3CommitStep.detect!(ctx);
+      if (transition === 'lost first commit') {
+        await git(path.join(repo, nested), ['update-ref', '-d', 'refs/heads/main']);
+      } else if (transition === 'gained first commit') {
+        await git(path.join(repo, nested), ['add', '-A']);
+        await git(path.join(repo, nested), ['commit', '-q', '-m', 'first commit']);
+      } else if (transition === 'became ordinary directory') {
+        await removeNoFollow(repo, `${nested}/.git`, { recursive: true });
+      } else {
+        delete detected.excludedRepositories;
+      }
+      const apply = gate3CommitStep.apply(ctx, {
+        detected,
+        formValues: { commit: true, commitMessage: 'fix: stale gate' },
+        iteration: 0,
+        previousIterations: [],
+      });
+      if (transition === 'gained first commit' || transition === 'became ordinary directory') {
+        await expect(apply).rejects.toThrow('changed upstream source');
+      } else {
+        expect(await apply).toMatchObject({
+          committed: true,
+          excludedRepositories: [`${nested}/`],
+        });
+        expect(await git(repo, ['show', 'HEAD:a.txt'])).toBe('after\n');
+      }
+    },
+  );
+
+  it('still refuses earlier committed upstream changes against the fork point', async () => {
+    const repo = await fixture(false, 'modules/contrib/scratch');
+    const upstream = 'modules/contrib/existing/source.php';
+    await writeFileNoFollow(repo, upstream, 'baseline\n', { createParents: true });
+    await git(repo, ['add', '--', upstream]);
+    await git(repo, ['commit', '-q', '-m', 'upstream baseline']);
+    await git(repo, ['branch', 'task-base']);
+    await writeFileNoFollow(repo, upstream, 'earlier issue edit\n');
+    await git(repo, ['add', '--', upstream]);
+    await git(repo, ['commit', '-q', '-m', 'earlier issue']);
+    const ctx = gateContext(repo);
+    const detected = await gate3CommitStep.detect!(ctx);
+    const chain: Record<string, unknown> = {};
+    Object.assign(chain, {
+      from: () => chain,
+      where: () => chain,
+      orderBy: () => chain,
+      limit: async () => [{ output: { baseBranch: 'task-base' } }],
+    });
+    ctx.db.select = (() => chain) as unknown as typeof ctx.db.select;
+    await expect(
+      gate3CommitStep.apply(ctx, {
+        detected,
+        formValues: { commit: true, commitMessage: 'fix: finalize' },
+        iteration: 0,
+        previousIterations: [],
+      }),
+    ).rejects.toThrow(`changed upstream source: ${upstream}.`);
+  });
+
+  it.each(['submission status', 'guard status', 'nested HEAD'])(
+    'fails closed before staging when the %s read fails',
+    async (read) => {
+      const repo = await fixture(false, 'modules/contrib/scratch');
+      const ctx = gateContext(repo);
+      const detected = await gate3CommitStep.detect!(ctx);
+      const before = await git(repo, ['rev-parse', 'HEAD']);
+      const shim = await failGit(
+        read === 'nested HEAD' ? ['--git-dir=.git'] : ['--no-optional-locks', 'status'],
+        { from: read === 'guard status' ? 2 : 1 },
+      );
+      try {
+        await expect(
+          gate3CommitStep.apply(ctx, {
+            detected,
+            formValues: { commit: true, commitMessage: 'fix: finalize' },
+            iteration: 0,
+            previousIterations: [],
+          }),
+        ).rejects.toThrow(
+          read === 'nested HEAD'
+            ? 'HEAD could not be read'
+            : read === 'guard status'
+              ? 'Cannot check dependency changes'
+              : 'git status failed',
+        );
+      } finally {
+        await shim.restore();
+      }
+      expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(before);
+      expect(await git(repo, ['diff', '--cached', '--name-only'])).toBe('');
+      expect(await readTextNoFollow(repo, 'modules/contrib/scratch/inside.txt')).toBe(
+        'nested contents\n',
+      );
+    },
+  );
 
   it('defaults off and skips generation when only an unborn repository is dirty', async () => {
     const repo = await fixture();

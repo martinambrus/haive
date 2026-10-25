@@ -442,7 +442,6 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const workspace = args.detected.workspacePath;
     const message = (values.commitMessage ?? generatedCommitMessage(args.llmOutput) ?? '').trim();
     if (!message) throw new Error('Enter a commit message before committing.');
-    await assertDependencyCommitSafe(ctx, workspace);
     // Re-read at submission: a checkout may have gained or lost its first commit
     // while the form was parked, and persisted detection may predate this field.
     const status = await gitRun(workspace, [
@@ -454,6 +453,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     ]);
     if (status.code !== 0) throw new Error(`git status failed: ${status.stderr || status.stdout}`);
     const excludedRepositories = await unbornRepositories(workspace, status.stdout);
+    await assertDependencyCommitSafe(ctx, workspace, excludedRepositories);
     const add = await gitRun(workspace, [
       'add',
       '-A',
