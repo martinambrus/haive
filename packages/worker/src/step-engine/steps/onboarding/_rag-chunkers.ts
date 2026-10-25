@@ -1473,7 +1473,7 @@ function rubyCodeToken(
           !/[0-9]/.test(content[at - 1] ?? '') &&
           !/^\p{Lu}/u.test(word) &&
           (state.nameContext === 'constant' || !locals.has(word)) &&
-          !/^(?:true|false|nil|self|__FILE__|__LINE__|__ENCODING__)$/.test(word)));
+          !/^(?:true|false|nil|self|__FILE__|__LINE__|__ENCODING__|_[1-9])$/.test(word)));
     state.operandExpected = state.continues;
     state.nameContext = 'bare';
     return end;
@@ -1502,7 +1502,7 @@ function rubyCodeToken(
     state.operandExpected = c !== '.';
   } else if (!/\s/.test(c)) {
     if (parameters && state.depth === 0) {
-      if (c === ',') state.parameterBinding = true;
+      if (c === ',' || c === ';') state.parameterBinding = true;
       else if (c === '=') state.parameterBinding = false;
     }
     state.continues = /[-+*/%&|^,?=<>!~\\]/.test(c);
@@ -1524,9 +1524,10 @@ interface RubyLiteralFrame {
   depth: number;
   inClass: boolean;
   body: number;
+  locals: Set<string>;
 }
 
-function rubyPercentAt(content: string, at: number): RubyLiteralFrame | null {
+function rubyPercentAt(content: string, at: number, locals: Set<string>): RubyLiteralFrame | null {
   let open = at + 1;
   const type = /[qQwWiIrxs]/.test(content[open] ?? '') ? content[open++]! : '';
   const delimiter = content[open];
@@ -1545,15 +1546,59 @@ function rubyPercentAt(content: string, at: number): RubyLiteralFrame | null {
     depth: 1,
     inClass: false,
     body: open + 1,
+    locals,
   };
 }
 
-/** Ruby literals and their interpolation code use explicit frames: nested percent,
- *  quote and regexp bodies stay opaque without recursive scanner calls. */
+interface RubyBlockScope {
+  close: '}' | 'end';
+  depth: number;
+  locals: Set<string>;
+  awaitingParameters: boolean;
+}
+interface RubyCodeFrame {
+  mode: 'code';
+  end: '}' | ')' | '|' | 'lambda-body';
+  state: RubyCodeState;
+  locals: Set<string>;
+  scopes: RubyBlockScope[];
+  endings: Array<{
+    kind: 'block' | 'loop' | 'keyword';
+    depth: number;
+    scope?: RubyBlockScope;
+    header?: boolean;
+  }>;
+  lambda?: { depth: number; locals: Set<string>; headerRead: boolean };
+  parameters: boolean;
+  statementStart: boolean;
+}
+function rubyCodeFrame(locals: Set<string>, end: RubyCodeFrame['end'] = '}'): RubyCodeFrame {
+  const parameters = end !== '}';
+  return {
+    mode: 'code',
+    end,
+    state: rubyCodeState(parameters),
+    locals,
+    scopes: [],
+    endings: [],
+    parameters,
+    statementStart: true,
+  };
+}
+function rubyFrameLocals(frame: RubyCodeFrame): Set<string> {
+  return frame.scopes[frame.scopes.length - 1]?.locals ?? frame.locals;
+}
+function rubyCodeStart(frame: RubyCodeFrame): void {
+  frame.state = { ...rubyCodeState(), depth: frame.state.depth };
+  frame.statementStart = true;
+}
+
+/** Ruby literals, interpolation and parameter headers use explicit frames.
+ *  Scope copies retain captured locals without leaking block or lambda bindings. */
 function rubyPercentEnd(content: string, at: number, locals: Set<string>): number | null {
-  const first = rubyPercentAt(content, at);
+  const first = rubyPercentAt(content, at, locals);
   if (!first) return null;
-  const frames: Array<RubyLiteralFrame | { mode: 'code'; state: RubyCodeState }> = [first];
+  const frames: Array<RubyLiteralFrame | RubyCodeFrame> = [first];
   let cursor = first.body;
   while (cursor < content.length) {
     const frame = frames[frames.length - 1]!;
@@ -1561,7 +1606,7 @@ function rubyPercentEnd(content: string, at: number, locals: Set<string>): numbe
     if (frame.mode === 'literal') {
       if (c === '\\') cursor = Math.min(content.length, cursor + 2);
       else if (frame.interpolates && content.startsWith('#{', cursor)) {
-        frames.push({ mode: 'code', state: rubyCodeState() });
+        frames.push(rubyCodeFrame(frame.locals));
         cursor += 2;
       } else {
         if (frame.regexp && c === '[') frame.inClass = true;
@@ -1580,14 +1625,68 @@ function rubyPercentEnd(content: string, at: number, locals: Set<string>): numbe
       }
       continue;
     }
-    if (c === '}' && frame.state.depth === 0) {
+    const wordAt = RUBY_NAME_START.test(c)
+      ? /^[\w\u0080-\uFFFF]+[!?]?/.exec(content.slice(cursor))?.[0]
+      : undefined;
+    const lambdaBody =
+      frame.end === 'lambda-body' &&
+      frame.state.depth === 0 &&
+      !frame.state.operandExpected &&
+      (c === '{' || wordAt === 'do');
+    if ((frame.state.depth === 0 && c === frame.end) || lambdaBody) {
       frames.pop();
-      cursor += 1;
+      if (!lambdaBody) cursor += 1;
+      const parent = frames[frames.length - 1]!;
+      if (parent.mode === 'code' && frame.parameters) {
+        parent.state.operandExpected = true;
+        parent.state.continues = false;
+        parent.state.commandName = false;
+      }
       continue;
     }
+    const trivia = /\s/.test(c) || c === '#';
+    const scope = frame.scopes[frame.scopes.length - 1];
+    if (scope?.awaitingParameters && !trivia) {
+      scope.awaitingParameters = false;
+      if (c === '|') {
+        cursor += 1;
+        if (content[cursor] === '|') {
+          cursor += 1;
+          rubyCodeStart(frame);
+        } else frames.push(rubyCodeFrame(scope.locals, '|'));
+        continue;
+      }
+    }
+    if (frame.lambda && !frame.lambda.headerRead && !trivia) {
+      frame.lambda.headerRead = true;
+      if (c === '(') {
+        frames.push(rubyCodeFrame(frame.lambda.locals, ')'));
+        cursor += 1;
+        continue;
+      }
+      if (c !== '{' && wordAt !== 'do') {
+        frames.push(rubyCodeFrame(frame.lambda.locals, 'lambda-body'));
+        continue;
+      }
+    }
+    if (content.startsWith('->', cursor)) {
+      frame.lambda = {
+        depth: frame.state.depth,
+        locals: new Set(rubyFrameLocals(frame)),
+        headerRead: false,
+      };
+      cursor += 2;
+      frame.state.operandExpected = true;
+      frame.state.continues = true;
+      frame.state.commandName = false;
+      frame.statementStart = false;
+      continue;
+    }
+    const currentLocals = rubyFrameLocals(frame);
     const valueExpected =
       frame.state.operandExpected || rubyCommandArgument(content, cursor, frame.state);
-    const percent = c === '%' && valueExpected ? rubyPercentAt(content, cursor) : null;
+    const percent =
+      c === '%' && valueExpected ? rubyPercentAt(content, cursor, currentLocals) : null;
     const regexp = c === '/' && valueExpected && regexClose(content, cursor, true, true) >= 0;
     if (percent || c === "'" || c === '"' || c === '`' || regexp) {
       const literal: RubyLiteralFrame = percent ?? {
@@ -1601,14 +1700,83 @@ function rubyPercentEnd(content: string, at: number, locals: Set<string>): numbe
         depth: 1,
         inClass: false,
         body: cursor + 1,
+        locals: currentLocals,
       };
       frames.push(literal);
       cursor = literal.body;
-    } else {
-      if (isLineTerminator(c, true) && frame.state.depth === 0 && !frame.state.continues)
-        frame.state = rubyCodeState();
-      cursor = rubyCodeToken(content, cursor, frame.state, locals);
+      frame.statementStart = false;
+      continue;
     }
+    const pending = frame.lambda?.depth === frame.state.depth ? frame.lambda : undefined;
+    if (c === '{' && (pending || !frame.state.operandExpected)) {
+      frame.scopes.push({
+        close: '}',
+        depth: frame.state.depth + 1,
+        locals: pending?.locals ?? new Set(currentLocals),
+        awaitingParameters: !pending,
+      });
+      if (pending) frame.lambda = undefined;
+    }
+    const previousDepth = frame.state.depth;
+    const previousOperand = frame.state.operandExpected;
+    const previousContext = frame.state.nameContext;
+    const statementStart = frame.statementStart;
+    cursor = rubyCodeToken(content, cursor, frame.state, rubyFrameLocals(frame), frame.parameters);
+    if (c === '}' && scope?.close === '}' && scope.depth === previousDepth) frame.scopes.pop();
+    const label = content[cursor] === ':' && content[cursor + 1] !== ':';
+    if (wordAt && previousContext === 'bare' && !label) {
+      const top = frame.endings[frame.endings.length - 1];
+      if (wordAt === 'do') {
+        if (top?.kind === 'loop' && top.header && top.depth === previousDepth) top.header = false;
+        else {
+          const block: RubyBlockScope = {
+            close: 'end',
+            depth: previousDepth,
+            locals: pending?.locals ?? new Set(rubyFrameLocals(frame)),
+            awaitingParameters: !pending,
+          };
+          frame.scopes.push(block);
+          frame.endings.push({ kind: 'block', depth: previousDepth, scope: block });
+          if (pending) frame.lambda = undefined;
+        }
+        rubyCodeStart(frame);
+      } else if (wordAt === 'end') {
+        const ending = frame.endings.pop();
+        if (ending?.scope) frame.scopes.splice(frame.scopes.indexOf(ending.scope), 1);
+        rubyValue(frame.state);
+      } else if (/^(?:if|unless|while|until)$/.test(wordAt)) {
+        if (previousOperand || statementStart)
+          frame.endings.push({
+            kind: /^(?:while|until)$/.test(wordAt) ? 'loop' : 'keyword',
+            depth: previousDepth,
+            header: true,
+          });
+        frame.state.operandExpected = true;
+        frame.state.continues = true;
+        frame.state.commandName = false;
+      } else if (/^(?:case|begin|for|class|module|def)$/.test(wordAt)) {
+        frame.endings.push({
+          kind: wordAt === 'for' ? 'loop' : 'keyword',
+          depth: previousDepth,
+          header: true,
+        });
+        rubyCodeStart(frame);
+      } else if (/^(?:then|else|elsif|when|rescue|ensure|in|return|break|next|yield)$/.test(wordAt))
+        rubyCodeStart(frame);
+    }
+    if (isLineTerminator(c, true) && !frame.state.continues) {
+      const top = frame.endings[frame.endings.length - 1];
+      if (top?.header && top.depth === frame.state.depth) top.header = false;
+      const statementDepth = frame.scopes[frame.scopes.length - 1]?.depth ?? 0;
+      if (!frame.parameters && frame.state.depth === statementDepth) rubyCodeStart(frame);
+    } else if (c === ';' && !frame.parameters) rubyCodeStart(frame);
+    else if (
+      !trivia &&
+      !/^(?:do|begin|then|else|elsif|when|rescue|ensure|in|return|break|next|yield)$/.test(
+        wordAt ?? '',
+      )
+    )
+      frame.statementStart = false;
   }
   return content.length;
 }
