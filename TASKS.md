@@ -196,9 +196,9 @@ status: parked · reason: needs a fresh onboarding run (see T300)
 
 ### T303 · FNF[bundles-2] · bundle follow-ups from #284
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:44Z · last: 2026-10-25T20:56Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:44Z · last: 2026-10-25T22:20Z
 
-Codex progress 2026-10-25T20:56Z: Current-base five premises validated. Actual-route baseline exposes retry after removal/enqueue and duplicate sync; sweep and missing-error controls also fail unchanged code. Unique per-upload archive plus durable lossless move identity implementation in targeted validation; isolated realPG/Redis races and actual browser path still required.
+Codex progress 2026-10-25T22:20Z: PR932 merged0294c9033 after exactfee12 checks, clean bot/fresh reviews and no unresolved threads. Main CI40238774156 has7/8green; only smoke job remains. Dev shared libraries rebuilt; API200/web200/worker135116ready after triggering byte-unchanged watcher reload. No migration.
 All PRE-EXISTING.
 
 1. Replace complete not resumable after its move (bundles.ts ~722-727); set 'syncing' before the move or key on the upload.
