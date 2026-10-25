@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import http from 'node:http';
 import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
@@ -81,7 +82,7 @@ export function installTerminalWebSocket(server: Server, opts: TerminalWsOptions
           if (!auth.session.accept(ws)) return;
           runTerminalSession(ws, container, docker, auth.userId).catch((err) => {
             log.error({ err, containerId: container.id }, 'terminal session crashed');
-            sendFrame(ws, { type: 'error', message: errorMessage(err) });
+            sendFrame(ws, { type: 'error', message: safeErrorMessage(err) });
             ws.close(1011, 'internal_error');
           });
         });
@@ -144,7 +145,7 @@ async function runTerminalSession(
   const onStreamError = (err: Error) => {
     log.warn({ err, sessionId }, 'docker stream error');
     if (ws.readyState === WebSocket.OPEN) {
-      sendFrame(ws, { type: 'error', message: err.message });
+      sendFrame(ws, { type: 'error', message: safeErrorMessage(err) });
       ws.close(1011, 'stream_error');
     }
   };
@@ -359,11 +360,6 @@ function sendFrame(ws: WebSocket, frame: TerminalServerFrame): void {
   } catch {
     // ignore
   }
-}
-
-function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
 }
 
 export async function attachContainerStream(

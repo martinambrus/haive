@@ -2,6 +2,7 @@ import { asc, eq, inArray, ne, or } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { getCliProviderMetadata, type CliProviderName } from '@haive/shared';
 import type { CliProbePathResult } from '@haive/shared';
+import { safeErrorMessage } from '@haive/shared/logger';
 import { defaultDockerRunner, type DockerRunner } from '../../sandbox/docker-runner.js';
 import { resolveImageTag } from '../../sandbox/image-cache.js';
 import { ensureComposedImage } from '../../sandbox/composed-image-cache.js';
@@ -178,7 +179,7 @@ export async function probeCliPath(
   } catch (err) {
     return {
       ok: false,
-      error: err instanceof Error ? err.message : String(err),
+      error: safeErrorMessage(err),
       durationMs: Date.now() - startedAt,
     };
   }

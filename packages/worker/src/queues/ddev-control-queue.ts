@@ -1,3 +1,5 @@
+import { safeErrorMessage } from '@haive/shared/logger';
+import { safeProcessor } from './safe-processor.js';
 import { Worker, type Job } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
@@ -92,11 +94,8 @@ export async function runDdevControl(payload: DdevControlPayload): Promise<DdevC
     }
     return { ok: false, output: '', error: `unknown action: ${String(payload.action)}` };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log.warn(
-      { taskId: payload.taskId, action: payload.action, err: message },
-      'ddev-control failed',
-    );
+    const message = safeErrorMessage(err);
+    log.warn({ taskId: payload.taskId, action: payload.action, err }, 'ddev-control failed');
     return { ok: false, output: '', error: message };
   }
 }
@@ -104,12 +103,12 @@ export async function runDdevControl(payload: DdevControlPayload): Promise<DdevC
 export function startDdevControlWorker(): Worker<DdevControlPayload, DdevControlResult> {
   const worker = new Worker<DdevControlPayload, DdevControlResult>(
     QUEUE_NAMES.DDEV_CONTROL,
-    async (job: Job<DdevControlPayload>) => {
+    safeProcessor(async (job: Job<DdevControlPayload>) => {
       if (job.name !== DDEV_CONTROL_JOB_NAMES.RUN) {
         throw new Error(`Unknown ddev-control job: ${job.name}`);
       }
       return runDdevControl(job.data);
-    },
+    }),
     { connection: getBullRedis(), concurrency: 3 },
   );
   worker.on('failed', (job, err) => {

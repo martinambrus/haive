@@ -7,6 +7,7 @@ import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { logger, type ArchiveFormat, type BundleJobPayload } from '@haive/shared';
+import { boundQueryError, safeErrorMessage } from '@haive/shared/logger';
 import { isBundleRootDir } from '../bundle-parser/classifier.js';
 import { parseBundle, persistBundleItems } from '../bundle-parser/index.js';
 import { assertCloneUrl, extractArchive, gitClone } from './clone.js';
@@ -170,7 +171,7 @@ export async function handleIngestZip(
       'Bundle zip ingest complete',
     );
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = safeErrorMessage(err);
     await setBundleFailed(db, bundle.id, msg);
     throw err;
   }
@@ -227,9 +228,12 @@ export async function handleIngestGit(
       'Bundle git ingest complete',
     );
   } catch (err) {
-    const msg = scrubSecret(err instanceof Error ? err.message : String(err), secret);
+    // Inspect the original error before textual redaction loses bound-query structure.
+    const safeMessage = safeErrorMessage(err);
+    const msg = boundQueryError(err) ? safeMessage : scrubSecret(safeMessage, secret);
     await setBundleFailed(db, bundle.id, msg);
-    if (msg !== (err instanceof Error ? err.message : String(err))) throw new Error(msg);
+    // Bound errors keep their structure for the queue's safe SQLSTATE/class logging.
+    if (msg !== safeMessage) throw new Error(msg);
     throw err;
   }
 }
@@ -286,7 +290,7 @@ export async function handleResyncGit(
       'Bundle git resync complete',
     );
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = safeErrorMessage(err);
     await setBundleFailed(db, bundle.id, msg);
     throw err;
   }

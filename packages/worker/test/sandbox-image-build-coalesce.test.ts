@@ -1,3 +1,4 @@
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 
@@ -33,7 +34,7 @@ import {
 } from '../src/queues/cli-exec/handlers.js';
 
 /** Two claude-family providers resolving to one shared tag. */
-function fakeDb(): Database {
+function fakeDb(writes: Record<string, unknown>[] = []): Database {
   const providers: Record<string, object> = {
     p1: { id: 'p1', name: 'claude-code', cliVersion: '1.0.0', sandboxImageTag: null },
     p2: { id: 'p2', name: 'zai', cliVersion: '1.0.0', sandboxImageTag: null },
@@ -45,11 +46,21 @@ function fakeDb(): Database {
         findFirst: async () => providers[asked++ % 2 === 0 ? 'p1' : 'p2'],
       },
     },
-    update: () => ({ set: () => ({ where: async () => {} }) }),
+    update: () => ({
+      set: (patch: Record<string, unknown>) => {
+        writes.push(patch);
+        return { where: async () => {} };
+      },
+    }),
     transaction: async (fn: (tx: unknown) => Promise<unknown>) =>
       fn({
         select: () => ({ from: () => ({ where: () => ({ for: async () => [providers.p1] }) }) }),
-        update: () => ({ set: () => ({ where: async () => {} }) }),
+        update: () => ({
+          set: (patch: Record<string, unknown>) => {
+            writes.push(patch);
+            return { where: async () => {} };
+          },
+        }),
       }),
   } as unknown as Database;
 }
@@ -136,3 +147,28 @@ describe("removing a deleted provider's image", () => {
     expect(images.removeOrphanedPreviousImage).toHaveBeenCalledWith(...removalCall);
   });
 });
+
+it.each([true, false])(
+  'fix6 stores safe sandbox image build failures (bound: %s)',
+  async (bound) => {
+    const message = 'ordinary build failure\n  exact whitespace';
+    const err = bound
+      ? new DrizzleQueryError(
+          'select $1',
+          ['H8jK2lZ9xC3vB7nM4qW6eR1tY5uI0oP'],
+          new Error('synthetic driver'),
+        )
+      : new Error(message);
+    docker.build.mockRejectedValueOnce(err);
+    const writes: Record<string, unknown>[] = [];
+    const result = await handleBuildSandboxImageJob(fakeDb(writes), {
+      providerId: 'p1',
+      userId: 'u',
+      force: true,
+    });
+    expect(result.ok).toBe(false);
+    const expected = bound ? 'Database operation failed' : message;
+    expect(result.error === expected).toBe(true);
+    expect(writes.some((patch) => patch.sandboxImageBuildError === expected)).toBe(true);
+  },
+);

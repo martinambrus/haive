@@ -1,6 +1,7 @@
 import { and, asc, eq, isNotNull, lt, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
+import { safeErrorMessage } from '@haive/shared/logger';
 import { readRenderContextColumn } from '@haive/shared/project-state';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { syncProjectStateFromCheckout } from './sync.js';
@@ -130,11 +131,7 @@ export async function sweepDirtyProjectStates(db: Database): Promise<number> {
       else await touchOutbox(db, repositoryId);
     } catch (err) {
       logger.warn({ err, repositoryId }, 'dirty project state refresh failed');
-      await setOutboxError(
-        db,
-        repositoryId,
-        err instanceof Error ? err.message : String(err),
-      ).catch(() => undefined);
+      await setOutboxError(db, repositoryId, safeErrorMessage(err)).catch(() => undefined);
       await touchOutbox(db, repositoryId).catch(() => undefined);
     }
   }

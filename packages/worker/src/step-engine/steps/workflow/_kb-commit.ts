@@ -1,9 +1,10 @@
 import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { Database } from '@haive/database';
-import { hasWorkspaceEntry } from '../../workspace-probe.js';
+import { lstatNoFollow } from '@haive/shared/fs-safe';
+import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import { gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
-import { gitCommitStaged } from '../../../repo/git-commit.js';
+import { gitCommitStaged, gitStageScopedPaths } from '../../../repo/git-commit.js';
 
 export const FALLBACK_GIT_IDENTITY = {
   GIT_AUTHOR_NAME: 'Haive',
@@ -39,9 +40,10 @@ export { gitRun } from '../../../repo/git-exec.js';
  * open on exactly the file the agent forgot to mention.
  *
  * `git add` fatals on a pathspec that matches nothing (unlike `git status`), so only the
- * trees that exist are staged — a run may write knowledge_base without learnings, or the
- * reverse. An already-clean tree is reported, never thrown: a retry that re-commits
- * nothing is a no-op, not a failure.
+ * trees on disk or still in the index are staged. Already-staged whole-tree deletions
+ * stay in the commit scope without being added again; never-tracked missing roots are omitted.
+ * An already-clean tree is reported, never thrown: a retry that re-commits nothing is a
+ * no-op, not a failure.
  */
 export async function commitKnowledgeTrees(opts: {
   workspace: string;
@@ -52,19 +54,21 @@ export async function commitKnowledgeTrees(opts: {
 }): Promise<KbCommitResult> {
   const { workspace, message } = opts;
   const present: string[] = [];
+  const absent: string[] = [];
+  const wa = workspaceAnchor(workspace);
   for (const spec of KB_PATHSPECS) {
-    if (await hasWorkspaceEntry(workspace, spec)) present.push(spec);
+    // Only genuine absence may fall back to Git; a refused probe must stop before staging.
+    const entry = await lstatNoFollow(wa.anchor, `${wa.prefix}${spec}`, { strict: true });
+    if (!entry) absent.push(spec);
+    else if (entry.kind !== 'symlink') present.push(spec);
   }
-  if (present.length === 0) {
+  const scope = await gitStageScopedPaths(workspace, present, absent);
+  if (scope.length === 0) {
     return { committed: false, commitSha: null, message: 'nothing to commit' };
-  }
-  const add = await gitRun(workspace, ['add', '--', ...present]);
-  if (add.code !== 0) {
-    throw new Error(`git add failed: ${add.stderr || add.stdout}`);
   }
   const userEnv = await resolveGitEnv(opts.db, { userId: opts.userId, taskId: opts.taskId });
   const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
-  if (!(await gitCommitStaged(workspace, message, commitEnv))) {
+  if (!(await gitCommitStaged(workspace, message, commitEnv, scope))) {
     return { committed: false, commitSha: null, message: 'nothing to commit' };
   }
   const sha = await gitRun(workspace, ['rev-parse', 'HEAD']);

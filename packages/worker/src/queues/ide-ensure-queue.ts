@@ -1,3 +1,4 @@
+import { safeProcessor } from './safe-processor.js';
 import { Worker, type Job } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -53,13 +54,13 @@ export async function ensureIdeForTask(taskId: string, userId: string): Promise<
 export function startIdeEnsureWorker(): Worker<IdeEnsurePayload, IdeEnsureResult> {
   const worker = new Worker<IdeEnsurePayload, IdeEnsureResult>(
     QUEUE_NAMES.IDE_ENSURE,
-    async (job: Job<IdeEnsurePayload>) => {
+    safeProcessor(async (job: Job<IdeEnsurePayload>) => {
       if (job.name !== IDE_ENSURE_JOB_NAMES.ENSURE) {
         throw new Error(`Unknown ide-ensure job: ${job.name}`);
       }
       if (job.data.repositoryId) return ensureIdeForRepo(job.data.repositoryId, job.data.userId);
       return ensureIdeForTask(job.data.taskId!, job.data.userId);
-    },
+    }),
     { connection: getBullRedis(), concurrency: 3 },
   );
   worker.on('failed', (job, err) => {

@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { schema, type Database } from '@haive/database';
 import { logger, type RefreshCliVersionsJobResult } from '@haive/shared';
 
@@ -120,7 +121,7 @@ async function refreshOne(
       errors: [],
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = safeErrorMessage(err);
     log.warn({ err, browser }, 'browser version refresh failed; picker degrades to system default');
     // Record the failure WITHOUT touching `versions`: a stale catalog still lets a user pick
     // something that built yesterday, which beats collapsing the picker because a host blipped.

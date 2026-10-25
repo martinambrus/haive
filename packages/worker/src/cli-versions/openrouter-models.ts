@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { schema, type Database } from '@haive/database';
 import {
   logger,
@@ -62,8 +63,8 @@ export async function refreshOpenRouterModels(db: Database): Promise<RefreshCliV
       errors: [],
     };
   } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    log.warn({ error }, 'failed to refresh openrouter model catalog');
+    const error = safeErrorMessage(err);
+    log.warn({ err, error }, 'failed to refresh openrouter model catalog');
     await db
       .insert(schema.openrouterModelCache)
       .values({

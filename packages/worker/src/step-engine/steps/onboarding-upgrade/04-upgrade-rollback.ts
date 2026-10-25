@@ -8,6 +8,7 @@ import {
 } from '@haive/shared/fs-safe';
 import { and, desc, eq, inArray, isNotNull, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
+import { safeErrorMessage } from '@haive/shared/logger';
 import {
   CLI_RULES_END,
   CLI_RULES_START,
@@ -987,7 +988,7 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     } catch (err) {
       failIfColumnStale(err);
       recordWrite = 'failed';
-      const message = err instanceof Error ? err.message : String(err);
+      const message = safeErrorMessage(err);
       warnings.push(`project state record write failed: ${message}`);
       ctx.logger.warn({ err }, 'project state record write failed');
     }

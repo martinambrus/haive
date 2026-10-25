@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -353,7 +354,7 @@ export function moduleRoutes(loaded: readonly LoadedApiModule[]): Hono<AppEnv> {
       if (state !== 'failed') return c.json({ status: 'running' }, 202);
       return c.json(
         {
-          error: err instanceof Error ? err.message : String(err),
+          error: safeErrorMessage(err),
           code: 'module_teardown_failed',
         },
         502,

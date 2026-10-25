@@ -1,3 +1,4 @@
+import { safeErrorMessage } from '@haive/shared/logger';
 import { and, eq, isNull, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
@@ -101,8 +102,8 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
       desired.push({ ...row, source: 'litellm' });
     }
   } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    log.warn({ error }, 'failed to refresh litellm model prices');
+    const error = safeErrorMessage(err);
+    log.warn({ err, error }, 'failed to refresh litellm model prices');
     for (const provider of litellmProviders) errors.push({ name: `price:${provider}`, error });
     await recordSyncError(db, litellmProviders, error);
   }
@@ -136,8 +137,8 @@ export async function refreshModelPrices(db: Database): Promise<RefreshCliVersio
         desired.push({ provider: 'openrouter', modelKey, source: 'openrouter', rates });
       }
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      log.warn({ error }, 'failed to read openrouter catalog for pricing');
+      const error = safeErrorMessage(err);
+      log.warn({ err, error }, 'failed to read openrouter catalog for pricing');
       errors.push({ name: 'price:openrouter', error });
       await recordSyncError(db, ['openrouter'], error);
     }
@@ -326,8 +327,8 @@ export async function refreshFxRates(db: Database): Promise<RefreshCliVersionsJo
     log.info({ date, count: rates.length }, 'refreshed fx rates');
     return { ok: true, refreshed: [{ name: 'fx', count: rates.length, latest: date }], errors: [] };
   } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    log.warn({ error }, 'failed to refresh fx rates');
+    const error = safeErrorMessage(err);
+    log.warn({ err, error }, 'failed to refresh fx rates');
     return { ok: false, refreshed: [], errors: [{ name: 'fx', error }] };
   }
 }

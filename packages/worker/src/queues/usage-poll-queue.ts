@@ -1,3 +1,4 @@
+import { safeProcessor } from './safe-processor.js';
 import { Queue, Worker, type Job } from 'bullmq';
 import { and, eq, inArray, isNull, isNotNull } from 'drizzle-orm';
 import {
@@ -672,7 +673,7 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
 export function startUsagePollWorker(): Worker {
   const worker = new Worker(
     QUEUE_NAMES.USAGE_POLL,
-    async (_job: Job) => {
+    safeProcessor(async (_job: Job) => {
       const db = getDb();
       // Ahead of the refresher, because a harvest can only make the user volume FRESHER, and
       // the refresher's yield rule (some task holds a copy -> do not rotate) is exactly the
@@ -693,7 +694,7 @@ export function startUsagePollWorker(): Worker {
         log.warn({ err }, 'cli credential refresh sweep failed');
       });
       await runUsagePollTick(db);
-    },
+    }),
     { connection: getBullRedis(), concurrency: 1 },
   );
   worker.on('failed', (job, err) => {
