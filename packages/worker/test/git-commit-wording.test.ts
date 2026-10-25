@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { writeFileNoFollow } from '@haive/shared/fs-safe';
-import { KB_DIR } from '@haive/shared/knowledge-paths';
+import { KB_DIR, LEARNINGS_DIR } from '@haive/shared/knowledge-paths';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { gitRun, type GitRunResult } from '../src/repo/git-exec.js';
 import { commitKnowledgeTrees } from '../src/step-engine/steps/workflow/_kb-commit.js';
@@ -74,6 +74,7 @@ describe.each(sites)('%s commit decisions', (site) => {
   let repo: string;
   let ctx: StepContext;
   let writes: unknown[];
+  let skillTargetDirs: string[];
 
   const apply = async () => {
     const common = {
@@ -105,7 +106,7 @@ describe.each(sites)('%s commit decisions', (site) => {
             worktreePath: repo,
             targets: [],
             removals: ['already-removed'],
-            skillTargetDirs: ['.claude/skills'],
+            skillTargetDirs,
             framework: 'general',
             language: 'typescript',
             kbFiles: [],
@@ -134,6 +135,7 @@ describe.each(sites)('%s commit decisions', (site) => {
 
   beforeEach(async () => {
     control.result.mockReset();
+    skillTargetDirs = ['.claude/skills'];
     repo = await mkdtemp(path.join(tmpdir(), 'haive-commit-wording-'));
     ({ ctx, writes } = context(repo));
     await command(repo, ['init', '-q', '-b', 'main']);
@@ -174,6 +176,97 @@ describe.each(sites)('%s commit decisions', (site) => {
       expect(await command(repo, ['show', ':README.md'])).toBe('personal staged work');
       expect(await command(repo, ['diff', '--name-only'])).toBe('README.md');
       expect(await command(repo, ['show', `HEAD:${ownFile}`])).toBe('changed');
+    });
+
+    it.each([
+      { staged: true, survivingEdit: false },
+      { staged: true, survivingEdit: true },
+      { staged: false, survivingEdit: false },
+      { staged: false, survivingEdit: true },
+    ])(
+      'commits a deleted owned root with staged=$staged and survivingEdit=$survivingEdit',
+      async ({ staged, survivingEdit }) => {
+        const removedRoot = site === 'knowledge trees' ? LEARNINGS_DIR : '.gemini/skills';
+        const removedFile = `${removedRoot}/old/SKILL.md`;
+        const survivingFile =
+          site === 'knowledge trees' ? `${KB_DIR}/entry.md` : '.claude/skills/kept/SKILL.md';
+        await writeFileNoFollow(repo, removedFile, 'old owned content\n', { createParents: true });
+        await command(repo, ['add', '--', removedRoot]);
+        await command(repo, ['commit', '-qm', 'second owned root']);
+        if (site === 'skill sync') skillTargetDirs.push(removedRoot);
+        if (staged) await command(repo, ['rm', '-r', '--', removedRoot]);
+        else await rm(path.join(repo, removedRoot), { recursive: true });
+        if (survivingEdit) await writeFileNoFollow(repo, survivingFile, 'changed\n');
+        await writeFileNoFollow(repo, 'README.md', 'personal staged work\n');
+        await command(repo, ['add', '--', 'README.md']);
+        await writeFileNoFollow(repo, 'README.md', 'personal unstaged work\n');
+
+        expect(await apply()).toMatchObject({ committed: true, commitSha: expect.any(String) });
+
+        expect(
+          await command(repo, ['ls-tree', '-r', '--name-only', 'HEAD', '--', removedRoot]),
+        ).toBe('');
+        expect(await command(repo, ['show', 'HEAD:README.md'])).toBe('base');
+        expect(await command(repo, ['show', ':README.md'])).toBe('personal staged work');
+        expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+        expect(await command(repo, ['diff', '--name-only'])).toBe('README.md');
+        if (survivingEdit)
+          expect(await command(repo, ['show', `HEAD:${survivingFile}`])).toBe('changed');
+        const head = await command(repo, ['rev-parse', 'HEAD']);
+        expect(await apply()).toMatchObject({ committed: false, commitSha: null });
+        expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+        expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+      },
+    );
+
+    it.each([false, true])(
+      'commits when every owned root is deleted (staged: %s)',
+      async (staged) => {
+        const root = site === 'knowledge trees' ? KB_DIR : '.claude/skills';
+        if (staged) await command(repo, ['rm', '-r', '--', root]);
+        else await rm(path.join(repo, root), { recursive: true });
+        await writeFileNoFollow(repo, 'README.md', 'personal staged work\n');
+        await command(repo, ['add', '--', 'README.md']);
+
+        expect(await apply()).toMatchObject({ committed: true, commitSha: expect.any(String) });
+        expect(await command(repo, ['ls-tree', '-r', '--name-only', 'HEAD', '--', root])).toBe('');
+        expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+        const head = await command(repo, ['rev-parse', 'HEAD']);
+        expect(await apply()).toMatchObject({ committed: false, commitSha: null });
+        expect(await command(repo, ['rev-parse', 'HEAD'])).toBe(head);
+        expect(await command(repo, ['diff', '--cached', '--name-only'])).toBe('README.md');
+      },
+    );
+
+    it.each([1, 128, 2, -1, 124])(
+      'rejects a failed missing-root tracked read: %i',
+      async (code) => {
+        if (site === 'skill sync') skillTargetDirs.push('.gemini/skills');
+        control.result.mockImplementation((_cwd: string, args: string[]) =>
+          args[0] === 'ls-files'
+            ? { code, stdout: 'not a successful read', stderr: 'opaque diagnostic' }
+            : undefined,
+        );
+
+        await expect(apply()).rejects.toThrow(/^git tracked paths read failed:/);
+        expect(
+          vi.mocked(gitRun).mock.calls.some(([, args]) => ['add', 'commit'].includes(args[0]!)),
+        ).toBe(false);
+      },
+    );
+
+    it.each([128, 2, -1, 124])('rejects a failed missing-root staged read: %i', async (code) => {
+      if (site === 'skill sync') skillTargetDirs.push('.gemini/skills');
+      control.result.mockImplementation((_cwd: string, args: string[]) =>
+        args[0] === 'diff' && args.includes('--cached') && args.includes('--quiet')
+          ? { code, stdout: '', stderr: 'opaque diagnostic' }
+          : undefined,
+      );
+
+      await expect(apply()).rejects.toThrow(/^git staged read failed:/);
+      expect(
+        vi.mocked(gitRun).mock.calls.some(([, args]) => ['add', 'commit'].includes(args[0]!)),
+      ).toBe(false);
     });
 
     it.each([128, 2, -1, 124])(

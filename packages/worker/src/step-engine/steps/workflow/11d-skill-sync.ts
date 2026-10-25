@@ -39,7 +39,7 @@ import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import type { SkillSyncOp } from './11-phase-8-learning.js';
 import { requireUsableGit } from '../../../repo/git-workspace.js';
 import { gitRun } from '../../../repo/git-exec.js';
-import { gitCommitStaged } from '../../../repo/git-commit.js';
+import { gitCommitStaged, gitStageScopedPaths } from '../../../repo/git-commit.js';
 
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
 const STEP_ID = '11d-skill-sync';
@@ -503,24 +503,24 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     const hasGit = changed && (await requireUsableGit(worktree));
     if (hasGit) {
       const present: string[] = [];
+      const absent: string[] = [];
       const wa = workspaceAnchor(worktree);
       for (const dir of targetDirs) {
         // A DIRECTORY check, and a link is not one: `git add` on a linked skills dir would stage
         // whatever it points at, or fail, depending on where that lands.
-        if ((await lstatNoFollow(wa.anchor, `${wa.prefix}${dir}`))?.kind === 'directory') {
-          present.push(dir);
-        }
+        const entry = await lstatNoFollow(wa.anchor, `${wa.prefix}${dir}`);
+        if (!entry) absent.push(dir);
+        else if (entry.kind === 'directory') present.push(dir);
       }
-      if (present.length > 0) {
-        const add = await gitRun(worktree, ['add', '--', ...present]);
-        if (add.code !== 0) throw new Error(`git add failed: ${add.stderr || add.stdout}`);
+      const scope = await gitStageScopedPaths(worktree, present, absent);
+      if (scope.length > 0) {
         const userEnv = await resolveGitEnv(ctx.db, { userId: ctx.userId, taskId: ctx.taskId });
         const commitEnv = Object.keys(userEnv).length > 0 ? userEnv : FALLBACK_GIT_IDENTITY;
         committed = await gitCommitStaged(
           worktree,
           DEFAULT_SKILL_SYNC_COMMIT_MESSAGE,
           commitEnv,
-          present,
+          scope,
         );
         if (committed) {
           const sha = await gitRun(worktree, ['rev-parse', 'HEAD']);
