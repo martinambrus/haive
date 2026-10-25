@@ -216,7 +216,11 @@ const CLAUDE_OAUTH_MAX_BODY_LEN = 512;
 function extractClaudeOauthToken(text: string): string | null {
   const start = text.indexOf(CLAUDE_OAUTH_PREFIX);
   if (start < 0) return null;
-  const lines = text.slice(start + CLAUDE_OAUTH_PREFIX.length).split(/\r*\n\r*|\r/);
+  // A trailing CR run may join a later LF into one wrap, not a blank line.
+  // Keep it in the session buffer until more bytes (or the end flush) resolve it.
+  let end = text.length;
+  while (text[end - 1] === '\r') end--;
+  const lines = text.slice(start + CLAUDE_OAUTH_PREFIX.length, end).split(/\r*\n\r*|\r/);
   const firstLineStart = Math.max(text.lastIndexOf('\n', start), text.lastIndexOf('\r', start)) + 1;
   const firstLineWidth =
     start - firstLineStart + CLAUDE_OAUTH_PREFIX.length + lines[0]!.trimEnd().length;

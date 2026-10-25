@@ -10,6 +10,7 @@ const h = vi.hoisted(() => ({
   stream: undefined as unknown,
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
   save: vi.fn(),
+  probe: vi.fn(),
   queueError: undefined as Error | undefined,
   probeError: undefined as Error | undefined,
 }));
@@ -36,6 +37,7 @@ vi.mock('../src/queues.js', () => ({
   getCliExecQueue: () => ({
     add: async (name: string) => {
       if (h.queueError) throw h.queueError;
+      if (name !== 'cli-login-create') h.probe();
       return {
         getState: async () => 'active',
         waitUntilFinished: async () => {
@@ -163,6 +165,103 @@ describe('Claude OAuth token capture controls', () => {
     stream.emit('data', Buffer.from('https://claude.ai/oauth/authorize\n\n'));
     paste();
   }
+
+  const crWrapCases = [
+    ['CR', '\r'],
+    ['CR LF', '\r\n'],
+    ['CR CR LF', '\r\r\n'],
+    ['LF', '\n'],
+  ] as const;
+  const wrapSplits = crWrapCases.flatMap(([label, wrap]) =>
+    [90, 100].flatMap((bodyBeforeWrap) => {
+      const wrapStart = 'sk-ant-oat01-'.length + bodyBeforeWrap;
+      const splits = [
+        ...Array.from({ length: wrap.length + 3 }, (_, i) => ({
+          label: `split ${i - 1}`,
+          offsets: [wrapStart + i - 1],
+        })),
+        {
+          label: 'separate every wrap byte',
+          offsets: Array.from({ length: wrap.length + 1 }, (_, i) => wrapStart + i),
+        },
+        { label: 'whole stream', offsets: [] },
+      ];
+      return splits.flatMap((split) =>
+        ['data', 'end'].map((completion) => ({
+          label: `${label}, ${bodyBeforeWrap} body chars, ${split.label}, ${completion}`,
+          wrap,
+          bodyBeforeWrap,
+          offsets: split.offsets,
+          completion,
+        })),
+      );
+    }),
+  );
+
+  it.each(wrapSplits)(
+    'fix-round3 CR boundary captures exactly once: $label',
+    async ({ wrap, bodyBeforeWrap, offsets, completion }) => {
+      const expected = token(bodyBeforeWrap + 5);
+      const wrapStart = 'sk-ant-oat01-'.length + bodyBeforeWrap;
+      const output =
+        expected.slice(0, wrapStart) +
+        wrap +
+        expected.slice(wrapStart) +
+        (completion === 'data' ? '\n\n' : '');
+      await ready();
+      let previous = 0;
+      for (const offset of offsets) {
+        stream.emit('data', Buffer.from(output.slice(previous, offset)));
+        await settle();
+        // Incomplete wraps must not save a plausible prefix or start its probe.
+        expect(h.save.mock.calls.length === 0 && h.probe.mock.calls.length === 0).toBe(true);
+        previous = offset;
+      }
+      stream.emit('data', Buffer.from(output.slice(previous)));
+      await settle();
+      if (completion === 'end') {
+        expect(h.save.mock.calls.length === 0 && h.probe.mock.calls.length === 0).toBe(true);
+      } else {
+        expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected).toBe(
+          true,
+        );
+        expect(h.probe.mock.calls.length === 1).toBe(true);
+      }
+      stream.emit('end');
+      stream.emit('end');
+      await settle();
+      expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === expected).toBe(
+        true,
+      );
+      expect(h.probe.mock.calls.length === 1).toBe(true);
+      for (const type of ['auth-success', 'saved']) {
+        expect(
+          ws.send.mock.calls.filter(([raw]) => JSON.parse(raw).type === type).length === 1,
+        ).toBe(true);
+      }
+      assertNoCredentialText(expected, CODE);
+    },
+  );
+
+  it.each(['\r', '\r\r', '\r\r\r'])(
+    'fix-round3 CR boundary leaves a trailing %j pending until actual end',
+    async (ending) => {
+      await ready();
+      for (const chunk of [TOKEN, ...ending]) {
+        stream.emit('data', Buffer.from(chunk));
+        await settle();
+        expect(h.save.mock.calls.length === 0 && h.probe.mock.calls.length === 0).toBe(true);
+      }
+      stream.emit('end');
+      stream.emit('end');
+      await settle();
+      expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(
+        true,
+      );
+      expect(h.probe.mock.calls.length === 1).toBe(true);
+      assertNoCredentialText(TOKEN, CODE);
+    },
+  );
 
   it.each([
     ['wide terminal', 95, 103],
