@@ -1842,7 +1842,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     }
     // `changedFilesBlock`'s three arms, none of which a bare proxy reaches.
     expect(all).toContain('- src/app/handler.ts — lines 12-18, 45');
-    expect(all).toContain('LINES: the note after a file is the part of it THIS change wrote');
+    expect(all).toContain('LINES: line notes after files name the part THIS change wrote');
     expect(all).toContain('COVERAGE: the list above is 2 of 3 changed files.');
   });
 
