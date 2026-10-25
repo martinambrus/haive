@@ -8,7 +8,7 @@ import { logger, type ArchiveFormat, type BundleJobPayload } from '@haive/shared
 import { safeErrorMessage } from '@haive/shared/logger';
 import { isBundleRootDir } from '../bundle-parser/classifier.js';
 import { parseBundle, persistBundleItems } from '../bundle-parser/index.js';
-import { buildAuthenticatedUrl, extractArchive, gitClone } from './clone.js';
+import { assertCloneUrl, buildAuthenticatedUrl, extractArchive, gitClone } from './clone.js';
 import { getDecryptedCredentials } from './credentials.js';
 import { gitRun } from './git-exec.js';
 
@@ -185,6 +185,7 @@ export async function handleIngestGit(
 
   try {
     if (!bundle.gitUrl) throw new Error('git-source bundle missing gitUrl');
+    assertCloneUrl(bundle.gitUrl, 'bundle');
     await ensureDirNoFollow(bundleStorageRoot, dirRel, { mode: 0o755 });
     await removeNoFollow(bundleStorageRoot, `${dirRel}/extracted`, { recursive: true });
 

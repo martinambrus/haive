@@ -2,7 +2,7 @@ import { safeErrorMessage } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { execFile } from 'node:child_process';
 import { access } from 'node:fs/promises';
-import { removeNoFollow } from '@haive/shared/fs-safe';
+import { lstatNoFollow, removeNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { isAllowedGitRemoteUrl } from '@haive/shared/schemas';
@@ -151,7 +151,11 @@ async function gitRead(
   args: string[],
 ): Promise<{ ok: boolean; stdout: string; code: number | null }> {
   try {
-    const { stdout } = await exec('git', hardenGitArgs(args), { cwd, timeout: 5_000 });
+    const { stdout } = await exec('git', hardenGitArgs(args), {
+      cwd,
+      timeout: 5_000,
+      env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(cwd) },
+    });
     return { ok: true, stdout: stdout.toString().trim(), code: 0 };
   } catch (err) {
     const e = err as { stdout?: string; code?: unknown };
@@ -366,8 +370,12 @@ planRoutes.get('/:id/plan/snapshot', async (c) => {
   let originUrl: string | null = null;
   let hasOrigin: boolean | null = false;
   if (repoRoot) {
-    const inside = await gitRead(repoRoot, ['rev-parse', '--is-inside-work-tree']);
-    gitAvailable = inside.ok ? inside.stdout === 'true' : null;
+    const entry = await lstatNoFollow(repoRoot, '.git', { strict: true }).catch(() => undefined);
+    if (entry === undefined || entry?.kind === 'symlink') gitAvailable = null;
+    else if (entry !== null) {
+      const inside = await gitRead(repoRoot, ['rev-parse', '--is-inside-work-tree']);
+      gitAvailable = inside.ok ? inside.stdout === 'true' : null;
+    }
     if (gitAvailable === null) {
       tracked = null;
       uncommitted = null;

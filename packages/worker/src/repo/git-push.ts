@@ -22,7 +22,11 @@ export async function detectOrigin(cwd: string): Promise<boolean> {
 
 /** An origin address refused by the same rule as a typed remote URL. */
 export class OriginUrlError extends Error {
-  constructor(url: string, direction: 'fetch' | 'push' = 'fetch') {
+  constructor(
+    url: string,
+    direction: 'fetch' | 'push' = 'fetch',
+    context: 'step' | 'clone' | 'refresh' | 'bundle' = 'step',
+  ) {
     let safe = url;
     if (safe.includes('://')) {
       try {
@@ -57,8 +61,16 @@ export class OriginUrlError extends Error {
     const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
     const fence = '`'.repeat(longest + 1);
     const span = longest > 0 ? `${fence} ${text} ${fence}` : `${fence}${text}${fence}`;
+    const guidance = {
+      step: 'Fix the git configuration and Retry this step.',
+      clone: 'Update the repository remote URL and retry cloning.',
+      refresh: 'Update the repository remote URL and retry refreshing.',
+      bundle: 'Update the bundle Git URL and retry syncing.',
+    }[context];
+    const label =
+      context === 'step' ? 'origin URL' : context === 'bundle' ? 'bundle Git URL' : 'clone URL';
     super(
-      `origin URL is not allowed (${direction} URL; expected https, http, ssh or an scp-style address): ${span}. Fix the git configuration and Retry this step.`,
+      `${label} is not allowed (${direction} URL; expected https, http, ssh or an scp-style address): ${span}. ${guidance}`,
     );
     this.name = 'OriginUrlError';
   }
@@ -96,7 +108,7 @@ export async function originGitRun(...args: Parameters<typeof gitRun>): Promise<
   return gitRun(...args);
 }
 
-/** Add `origin` pointing at url, or set-url when it already exists. Idempotent.
+/** Add `origin` pointing at url, or replace all its URLs when it already exists. Idempotent.
  *  Does NOT persist to the repositories row — that stays in the caller. */
 export async function ensureOrigin(
   cwd: string,
@@ -105,9 +117,27 @@ export async function ensureOrigin(
   const add = await gitRun(cwd, ['remote', 'add', 'origin', url]);
   if (add.code === 0) return { added: true, updated: false };
   if (add.code === 3) {
-    const updated = await gitRun(cwd, ['remote', 'set-url', 'origin', url]);
+    const cleared = await gitRun(cwd, [
+      'config',
+      '--local',
+      '--unset-all',
+      'remote.origin.pushurl',
+    ]);
+    // Exit 5 means the key did not exist. Every other failure leaves the relink incomplete.
+    if (cleared.code !== 0 && cleared.code !== 5) {
+      throw new Error(
+        `git config clear origin push URLs failed: ${cleared.stderr || cleared.stdout}`,
+      );
+    }
+    const updated = await gitRun(cwd, [
+      'config',
+      '--local',
+      '--replace-all',
+      'remote.origin.url',
+      url,
+    ]);
     if (updated.code !== 0) {
-      throw new Error(`git remote set-url origin failed: ${updated.stderr || updated.stdout}`);
+      throw new Error(`git config origin URL failed: ${updated.stderr || updated.stdout}`);
     }
     return { added: false, updated: true };
   }
