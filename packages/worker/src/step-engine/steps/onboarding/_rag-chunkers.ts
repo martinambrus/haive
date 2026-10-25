@@ -1551,19 +1551,24 @@ function rubyPercentAt(content: string, at: number, locals: Set<string>): RubyLi
 }
 
 interface RubyBlockScope {
-  close: '}' | 'end';
+  close: '}' | 'end' | 'statement';
   depth: number;
   locals: Set<string>;
   awaitingParameters: boolean;
+  method?: {
+    header: 'name' | 'receiver-name' | 'signature' | 'signature-done' | 'body';
+    receiverLocals: Set<string>;
+    endingBase: number;
+  };
 }
 interface RubyCodeFrame {
   mode: 'code';
-  end: '}' | ')' | '|' | 'lambda-body';
+  end: '}' | ')' | '|' | 'lambda-body' | 'method-body' | 'expression';
   state: RubyCodeState;
   locals: Set<string>;
   scopes: RubyBlockScope[];
   endings: Array<{
-    kind: 'block' | 'loop' | 'keyword';
+    kind: 'block' | 'loop' | 'keyword' | 'method';
     depth: number;
     scope?: RubyBlockScope;
     header?: boolean;
@@ -1572,8 +1577,11 @@ interface RubyCodeFrame {
   parameters: boolean;
   statementStart: boolean;
 }
-function rubyCodeFrame(locals: Set<string>, end: RubyCodeFrame['end'] = '}'): RubyCodeFrame {
-  const parameters = end !== '}';
+function rubyCodeFrame(
+  locals: Set<string>,
+  end: RubyCodeFrame['end'] = '}',
+  parameters = end !== '}' && end !== 'expression',
+): RubyCodeFrame {
   return {
     mode: 'code',
     end,
@@ -1593,13 +1601,18 @@ function rubyCodeStart(frame: RubyCodeFrame): void {
   frame.statementStart = true;
 }
 
-/** Ruby literals, interpolation and parameter headers use explicit frames.
- *  Scope copies retain captured locals without leaking block or lambda bindings. */
-function rubyPercentEnd(content: string, at: number, locals: Set<string>): number | null {
-  const first = rubyPercentAt(content, at, locals);
-  if (!first) return null;
-  const frames: Array<RubyLiteralFrame | RubyCodeFrame> = [first];
-  let cursor = first.body;
+/** One advancing Ruby walk for endless expressions, literals and interpolation.
+ *  Closures capture local names; method frames start with their own binding set. */
+function rubyExpressionEnd(
+  content: string,
+  at: number,
+  locals: Set<string>,
+  parameters = false,
+): number {
+  const frames: Array<RubyLiteralFrame | RubyCodeFrame> = [
+    rubyCodeFrame(locals, 'expression', parameters),
+  ];
+  let cursor = at;
   while (cursor < content.length) {
     const frame = frames[frames.length - 1]!;
     const c = content[cursor]!;
@@ -1628,14 +1641,42 @@ function rubyPercentEnd(content: string, at: number, locals: Set<string>): numbe
     const wordAt = RUBY_NAME_START.test(c)
       ? /^[\w\u0080-\uFFFF]+[!?]?/.exec(content.slice(cursor))?.[0]
       : undefined;
+    let activeScope = frame.scopes[frame.scopes.length - 1];
+    const statementBoundary =
+      isLineTerminator(c, true) ||
+      ';)]}'.includes(c) ||
+      (wordAt === 'end' && frame.state.nameContext === 'bare');
+    while (
+      activeScope?.close === 'statement' &&
+      activeScope.depth === frame.state.depth &&
+      !frame.state.continues &&
+      frame.endings.length === activeScope.method!.endingBase &&
+      statementBoundary
+    ) {
+      frame.scopes.pop();
+      activeScope = frame.scopes[frame.scopes.length - 1];
+    }
+    if (
+      frame.end === 'expression' &&
+      frame.state.depth === 0 &&
+      !frame.state.continues &&
+      frame.endings.length === 0 &&
+      !frame.lambda &&
+      isLineTerminator(c, true)
+    )
+      return cursor + (c === '\r' && content[cursor + 1] === '\n' ? 2 : 1);
+    const methodBody =
+      frame.end === 'method-body' &&
+      frame.state.depth === 0 &&
+      (c === ';' || (isLineTerminator(c, true) && !frame.state.continues));
     const lambdaBody =
       frame.end === 'lambda-body' &&
       frame.state.depth === 0 &&
       !frame.state.operandExpected &&
       (c === '{' || wordAt === 'do');
-    if ((frame.state.depth === 0 && c === frame.end) || lambdaBody) {
+    if ((frame.state.depth === 0 && c === frame.end) || lambdaBody || methodBody) {
       frames.pop();
-      if (!lambdaBody) cursor += 1;
+      if (!lambdaBody && !methodBody) cursor += 1;
       const parent = frames[frames.length - 1]!;
       if (parent.mode === 'code' && frame.parameters) {
         parent.state.operandExpected = true;
@@ -1646,6 +1687,57 @@ function rubyPercentEnd(content: string, at: number, locals: Set<string>): numbe
     }
     const trivia = /\s/.test(c) || c === '#';
     const scope = frame.scopes[frame.scopes.length - 1];
+    const method = scope?.method;
+    if (scope && method && method.header !== 'body') {
+      if ((method.header === 'name' || method.header === 'receiver-name') && !trivia) {
+        if (method.header === 'name' && c === '(') {
+          method.header = 'receiver-name';
+          frames.push(rubyCodeFrame(method.receiverLocals, ')', false));
+          cursor += 1;
+          continue;
+        }
+        if (method.header === 'receiver-name' && c === '.') {
+          cursor += 1;
+          continue;
+        }
+        const head =
+          /^(?:(?:self|[A-Za-z_\u0080-\uFFFF][\w\u0080-\uFFFF]*)[ \t]*(?:\.|::)[ \t]*)*(?:[A-Za-z_\u0080-\uFFFF][\w\u0080-\uFFFF]*[!?=]?|\[\]=?|<=>|===|==|!=|=~|!~|<=|>=|<<|>>|\*\*|[+\-*/%&|^~<>!]@?)/.exec(
+            content.slice(cursor, cursor + MAX_PARAMS_CHARS),
+          );
+        method.header = 'signature';
+        if (head) {
+          cursor += head[0].length;
+          rubyCodeStart(frame);
+          continue;
+        }
+      } else if (method.header === 'signature' || method.header === 'signature-done') {
+        if (isLineTerminator(c, true) || c === ';') method.header = 'body';
+        else if (!trivia) {
+          if (c === '(' && method.header === 'signature') {
+            method.header = 'signature-done';
+            frames.push(rubyCodeFrame(scope.locals, ')'));
+            cursor += 1;
+            continue;
+          }
+          const parenthesized = method.header === 'signature-done';
+          method.header = 'body';
+          if (c === '=' && !['=', '>'].includes(content[cursor + 1] ?? '')) {
+            scope.close = 'statement';
+            const ending = frame.endings.findIndex((ending) => ending.scope === scope);
+            if (ending >= 0) frame.endings.splice(ending, 1);
+            method.endingBase = frame.endings.length;
+            cursor += 1;
+            rubyCodeStart(frame);
+            frame.state.continues = true;
+            continue;
+          }
+          if (!parenthesized && c !== ';' && c !== '{' && wordAt !== 'end') {
+            frames.push(rubyCodeFrame(scope.locals, 'method-body'));
+            continue;
+          }
+        }
+      }
+    }
     if (scope?.awaitingParameters && !trivia) {
       scope.awaitingParameters = false;
       if (c === '|') {
@@ -1754,7 +1846,22 @@ function rubyPercentEnd(content: string, at: number, locals: Set<string>): numbe
         frame.state.operandExpected = true;
         frame.state.continues = true;
         frame.state.commandName = false;
-      } else if (/^(?:case|begin|for|class|module|def)$/.test(wordAt)) {
+      } else if (wordAt === 'def') {
+        const method: RubyBlockScope = {
+          close: 'end',
+          depth: previousDepth,
+          locals: new Set(),
+          awaitingParameters: false,
+          method: {
+            header: 'name',
+            endingBase: frame.endings.length,
+            receiverLocals: rubyFrameLocals(frame),
+          },
+        };
+        frame.scopes.push(method);
+        frame.endings.push({ kind: 'method', depth: previousDepth, scope: method, header: true });
+        rubyCodeStart(frame);
+      } else if (/^(?:case|begin|for|class|module)$/.test(wordAt)) {
         frame.endings.push({
           kind: wordAt === 'for' ? 'loop' : 'keyword',
           depth: previousDepth,
@@ -1777,37 +1884,6 @@ function rubyPercentEnd(content: string, at: number, locals: Set<string>): numbe
       )
     )
       frame.statementStart = false;
-  }
-  return content.length;
-}
-
-/** End of an endless expression: completed tokens stop at a top-level newline,
- *  while operators require another value. Literal bodies cannot change depth. */
-function rubyExpressionEnd(
-  content: string,
-  from: number,
-  locals: Set<string>,
-  parameters = false,
-): number {
-  const state = rubyCodeState(parameters);
-  for (let cursor = from; cursor < content.length;) {
-    const c = content[cursor]!;
-    const valueExpected = state.operandExpected || rubyCommandArgument(content, cursor, state);
-    const percentEnd = c === '%' && valueExpected ? rubyPercentEnd(content, cursor, locals) : null;
-    const regexpEnd = c === '/' && valueExpected ? regexClose(content, cursor, true, true) : -1;
-    if (percentEnd !== null) {
-      cursor = percentEnd;
-      rubyValue(state);
-    } else if (c === '"' || c === "'") {
-      cursor = quotedEnd(content, cursor);
-      rubyValue(state);
-    } else if (regexpEnd >= 0) {
-      cursor = regexpEnd + 1;
-      while (/[imoxnesu]/.test(content[cursor] ?? '')) cursor += 1;
-      rubyValue(state);
-    } else if (isLineTerminator(c, true) && state.depth === 0 && !state.continues) {
-      return cursor + (c === '\r' && content[cursor + 1] === '\n' ? 2 : 1);
-    } else cursor = rubyCodeToken(content, cursor, state, locals, parameters);
   }
   return content.length;
 }
