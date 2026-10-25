@@ -34,13 +34,6 @@ export function proxy(request: NextRequest) {
     buildTime: process.env.NEXT_PUBLIC_API_URL,
   });
   response.headers.set('Content-Security-Policy', contentSecurityPolicy(apiOrigin));
-  if (decision.action === 'continue-and-clear') {
-    // Deleted HERE rather than by the layout that discovered the problem: a Server Component
-    // cannot set cookies, and leaving them in place is what closes the loop — the next request
-    // would arrive holding the same dead cookie and be bounced to /dashboard again.
-    response.cookies.delete(ACCESS_COOKIE);
-    response.cookies.delete(REFRESH_COOKIE);
-  }
   return response;
 }
 

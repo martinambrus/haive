@@ -336,6 +336,8 @@ listed here, and keep this file under 32 KiB: Codex CLI reads no more of it than
 
 ### Web UI
 
+- [Sessions](docs/architecture/session-recovery.md): browser recovery.
+
 - [Diff viewer](docs/architecture/diff-viewer.md): text highlights, change maps and pane scrolling.
   `CommitDiffViewer`, `buildDiffRows`, `buildChangeMarkers`.
 - [Markdown rendering](docs/architecture/markdown-rendering.md): one renderer, images as links,

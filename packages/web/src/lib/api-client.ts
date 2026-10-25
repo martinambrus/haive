@@ -23,6 +23,7 @@ import type { HostApi, HostApiError as ApiError } from '@haive/web-kit/host';
 import { resolveApiOrigin, type RuntimeApiConfig } from './api-origin';
 // Runtime too, and for the same reason: `route-access` has no imports of its own.
 import { decideSessionEnd } from './route-access';
+import { recoverBrowserSession } from './browser-session';
 
 declare global {
   interface Window {
@@ -56,23 +57,9 @@ let sessionEnded = false;
 const SESSION_RELOAD_STAMP_KEY = 'haive:session-reload-at';
 
 async function tryRefresh(): Promise<boolean> {
-  try {
-    const res = await fetch(`${API_BASE}/auth/refresh`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-    });
-    if (res.ok) return true;
-    if (res.status !== 401) return false;
-    // Refused, but another tab may have just rotated the shared refresh cookie, and then the jar
-    // already holds a working pair. Only a refused access cookie as well means the session is over.
-    const me = await fetch(`${API_BASE}/auth/me`, { credentials: 'include' });
-    if (me.ok) return true;
-    if (me.status === 401) endSession();
-    return false;
-  } catch {
-    return false;
-  }
+  const result = await recoverBrowserSession(API_BASE, true);
+  if (result === 'rejected') endSession();
+  return result === 'authenticated';
 }
 
 function readReloadStamp(): number | null {
@@ -84,8 +71,8 @@ function readReloadStamp(): number | null {
   }
 }
 
-/** Stop refreshing and hand the verdict to `(app)/layout.tsx`, which sends a dead session to the
- *  login page and renders a live one again. */
+/** Stop this page's refresh loop and reload through the layout's browser recovery shell.
+ * It rechecks the shared jar before deciding whether to show login. */
 function endSession(): void {
   if (typeof window === 'undefined') return;
   const action = decideSessionEnd({
@@ -108,8 +95,8 @@ function endSession(): void {
 /**
  * Rotate the access cookie via /auth/refresh, deduped so concurrent callers share
  * ONE in-flight request. The server rotates (and revokes) the refresh token on
- * each call, so two overlapping refreshes would invalidate each other; the shared
- * promise guarantees the 401-retry path and the keepalive timer never collide.
+ * each call. The shared promise deduplicates this tab's retry and keepalive;
+ * recoverBrowserSession also coordinates with recovery shells and other tabs.
  */
 export function refreshSession(): Promise<boolean> {
   if (sessionEnded) return Promise.resolve(false);

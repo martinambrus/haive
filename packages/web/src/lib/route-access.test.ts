@@ -25,11 +25,11 @@ describe('the redirect loop this exists to prevent', () => {
   // A cookie that EXISTS but no longer authenticates satisfies both redirects at once: the
   // middleware sends /login to /dashboard, and the app layout sends /dashboard back to /login.
   // `reset_password` bumps tokenVersion, so an admin could put a user in this state.
-  it('renders the login form, and clears the cookies, once the layout says the session is dead', () => {
+  it('renders the login form without clearing shared cookies when recovery is refused', () => {
     const d = decideRouteAccess(
       req({ path: '/login', hasAccessCookie: true, hasRefreshCookie: true, sessionRejected: true }),
     );
-    expect(d).toEqual({ action: 'continue-and-clear' });
+    expect(d).toEqual({ action: 'continue' });
   });
 
   // The marker must be checked BEFORE the has-cookie branch, or that branch bounces the visitor
@@ -37,11 +37,11 @@ describe('the redirect loop this exists to prevent', () => {
   it('the marker outranks the has-cookie redirect', () => {
     for (const path of ['/login', '/register', '/setup']) {
       const d = decideRouteAccess(req({ path, hasAccessCookie: true, sessionRejected: true }));
-      expect(d, path).toEqual({ action: 'continue-and-clear' });
+      expect(d, path).toEqual({ action: 'continue' });
     }
   });
 
-  // Clearing must not become the normal path: an ordinary visitor to /login keeps their cookies.
+  // An ordinary visitor to /login still follows the cookie-presence routing hint.
   it('does not clear cookies without the marker', () => {
     expect(decideRouteAccess(req({ path: '/login', hasAccessCookie: true }))).toEqual({
       action: 'redirect',
