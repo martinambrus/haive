@@ -253,6 +253,7 @@ jobs:
           api test/module-purge-db.test.ts MODULE_PURGE_API_TEST_URL module_purge_api_test pg
           api test/task-create-path.test.ts TASK_CREATE_PATH_TEST_URL task_create_path_test pg
           api test/task-start-attachments-db.test.ts TASK_START_ATTACHMENTS_TEST_URL task_start_attachments_test pg
+          api test/repo-upload-retry-db.test.ts UPLOAD_RETRY_TEST_URL upload_retry_test_ci pg
           api test/task-list-dead.test.ts TASK_LIST_DEAD_TEST_URL task_list_dead_test pg
           api test/integrations-broker.test.ts INTEGRATIONS_BROKER_TEST_URL integrations_broker_test pg
           api test/custom-mcp-db.test.ts CUSTOM_MCP_TEST_URL custom_mcp_test pg

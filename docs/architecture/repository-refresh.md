@@ -24,3 +24,13 @@ clears. Before the checkout moves, a plan row stamped before migration 0196 take
 stood there is renamed to a `<repoId>.aside-<time>` sibling first, never removed. A read-only folder
 import is re-scanned as before, and a repository with no remote and no folder answers 409 without
 touching its row.
+
+The list's `canRetry` / `retryUnavailableReason` describe the durable source the retry
+route can use: a local folder, a remote URL, or a completed upload record belonging to the
+repository's owner whose archive has not been recorded as unavailable. A blank project or a
+clone without a remote cannot be refreshed; the card replaces stale Retry copy with instructions
+to delete and create the repository again from a URL or folder. Root claims, holding tasks and
+live queue jobs remain temporary route refusals and do not hide Retry. An older list response
+without capability fields keeps the Retry action for compatibility. Single-shot `POST /upload`
+persists its completed `repo_uploads` source before enqueuing extraction, so a failed preparation
+can use the same retry path as a completed chunked upload. Archive retention is unchanged.

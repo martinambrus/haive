@@ -359,7 +359,7 @@ export async function reconcileStrandedCloningRepos(db: Database): Promise<void>
     .set({
       status: 'error',
       statusMessage:
-        'Preparing this repository did not finish — the worker stopped while it was running. Use Retry to start again.',
+        'Preparing this repository did not finish — the worker stopped while it was running. Retry if available; otherwise delete the repository and add it again.',
       updatedAt: new Date(),
     })
     .where(
