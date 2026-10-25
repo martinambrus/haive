@@ -618,15 +618,17 @@ export async function writeProjectStateColumn(
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
         .for('update');
-      if (!repo || (repo.kind === 'reset' && isRootClaimLive(repo.claimedAt)))
+      if (!repo) throw new ProjectStateMovedError();
+      // An open git operation preserves its diagnostic even when a live reset also holds the row.
+      if (refuseDuringGitOperation && (await gitOperationInProgress(repoPath))) {
         throw new ProjectStateMovedError();
+      }
+      if (repo.kind === 'reset' && isRootClaimLive(repo.claimedAt))
+        throw new ProjectStateCheckoutHeldError();
       if (
         expectedResetAt !== undefined &&
         (repo.resetAt?.getTime() ?? null) !== (expectedResetAt?.getTime() ?? null)
       ) {
-        throw new ProjectStateMovedError();
-      }
-      if (refuseDuringGitOperation && (await gitOperationInProgress(repoPath))) {
         throw new ProjectStateMovedError();
       }
       if (expectedColumns) await refuseMovedColumn(tx, repositoryId, expectedColumns);
@@ -893,8 +895,7 @@ export async function recoverProjectStateWrite(
   await db.transaction(async (tx) => {
     await lockRepositoryTasksKey(tx, repositoryId);
     await lockProjectState(tx, repositoryId);
-    await refuseHeldCheckout(tx, repositoryId);
-    if (await gitOperationInProgress(repoPath)) throw new ProjectStateMovedError();
+    await refuseHeldCheckout(tx, repositoryId, repoPath);
     await recoverWriteLocked(tx, repositoryId, repoPath);
   });
 }
@@ -925,8 +926,14 @@ async function stampOutbox(tx: Tx, repositoryId: string, revision: number): Prom
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
 }
 
-/** Call after the task-creation key and project-state lock, before any semantic or file write. */
-export async function refuseHeldCheckout(tx: Tx, repositoryId: string): Promise<void> {
+/** Call after the task-creation key and project-state lock, before any semantic or file write.
+ *  Recovery supplies gitGuardPath so operation priority is checked after acquiring the repository
+ *  row, including an operation opened while that acquisition was waiting. Writer gates do it there. */
+export async function refuseHeldCheckout(
+  tx: Tx,
+  repositoryId: string,
+  gitGuardPath?: string,
+): Promise<void> {
   const [repo] = await tx
     .select({
       claimedAt: schema.repositories.rootClaimedAt,
@@ -936,6 +943,7 @@ export async function refuseHeldCheckout(tx: Tx, repositoryId: string): Promise<
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1)
     .for('update');
+  if (!repo) throw new ProjectStateMovedError();
   const live = await tx
     .select({ id: schema.tasks.id })
     .from(schema.tasks)
@@ -948,7 +956,9 @@ export async function refuseHeldCheckout(tx: Tx, repositoryId: string): Promise<
       ),
     )
     .limit(1);
-  if (!repo || live.length > 0 || (repo.kind === 'reset' && isRootClaimLive(repo.claimedAt))) {
+  if (gitGuardPath && (await gitOperationInProgress(gitGuardPath)))
+    throw new ProjectStateMovedError();
+  if (live.length > 0 || (repo.kind === 'reset' && isRootClaimLive(repo.claimedAt))) {
     throw new ProjectStateCheckoutHeldError();
   }
 }

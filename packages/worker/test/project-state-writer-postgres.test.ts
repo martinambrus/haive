@@ -20,7 +20,7 @@ import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-
 import { REFERENCE_CONTEXT, expandManifestFor } from '../src/step-engine/template-manifest.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { resolveProjectStateConflict } from '../src/project-state/resolve.js';
-import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
+import { readStateFiles, syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import {
   lockProjectState,
   recoverProjectStateWrite,
@@ -407,6 +407,125 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
           await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
         )[0],
       ).toEqual(repo);
+    },
+  );
+
+  const admissionSnapshot = async (s: Awaited<ReturnType<typeof fixture>>) => ({
+    files: await readStateFiles(s.root),
+    repo: await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id)),
+    sync: await db!
+      .select()
+      .from(schema.projectStateSync)
+      .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
+    outbox: await s.outbox(),
+  });
+  const priorDiagnostic = 'distinct prior record diagnostic';
+  const initializeAdmissionFixture = async () => {
+    const s = await fixture();
+    execFileSync('git', ['init', '-q'], { cwd: s.root });
+    await s.write();
+    await db!
+      .update(schema.repositories)
+      .set({ scopeExcludeGlobs: ['new/**'] })
+      .where(eq(schema.repositories.id, s.repo.id));
+    await markProjectStateDirty(db!, s.repo.id);
+    await db!
+      .update(schema.projectStateOutbox)
+      .set({ lastError: priorDiagnostic })
+      .where(eq(schema.projectStateOutbox.repositoryId, s.repo.id));
+    return s;
+  };
+  it.each(['onboarding', 'reset'] as const)(
+    'preserves the prior diagnostic when git opens with a %s holder after the outer recovery check',
+    async (holder) => {
+      const s = await initializeAdmissionFixture();
+      let before: Awaited<ReturnType<typeof admissionSnapshot>> | undefined;
+      let injected = false;
+      const wrapped = new Proxy(db!, {
+        get(target, prop) {
+          if (prop !== 'transaction') return Reflect.get(target, prop);
+          return async (fn: Parameters<Database['transaction']>[0]) => {
+            // Refresh has passed its outer git check before entering this recovery transaction.
+            if (!injected) {
+              injected = true;
+              if (holder === 'reset')
+                expect(await claimRepositoryRoot(db!, s.repo.id, 'reset')).toBeTruthy();
+              else
+                await db!.insert(schema.tasks).values({
+                  userId: s.userId,
+                  repositoryId: s.repo.id,
+                  type: 'onboarding',
+                  status: 'running',
+                  title: 'new holder',
+                });
+              await writeFile(join(s.root, '.git/MERGE_HEAD'), 'a'.repeat(40) + '\n');
+              before = await admissionSnapshot(s);
+            }
+            return target.transaction(fn);
+          };
+        },
+      }) as Database;
+      expect(await refreshProjectState(wrapped, s.repo.id)).toBe(false);
+      expect(injected).toBe(true);
+      expect.soft((await s.outbox())!.lastError).toBe(priorDiagnostic);
+      expect.soft(await admissionSnapshot(s)).toEqual(before);
+    },
+  );
+  it.each([
+    ['preparation', false],
+    ['preparation', true],
+    ['mutation', false],
+    ['mutation', true],
+  ] as const)(
+    'classifies a live reset before writer %s with gitOpen=%s without changing the attempted state',
+    async (phase, gitOpen) => {
+      const s = await initializeAdmissionFixture();
+      let before: Awaited<ReturnType<typeof admissionSnapshot>> | undefined;
+      let injected = false;
+      const wrapped = new Proxy(db!, {
+        get(target, prop) {
+          if (prop !== 'transaction') return Reflect.get(target, prop);
+          return async (fn: Parameters<Database['transaction']>[0]) => {
+            const result = await target.transaction(fn);
+            const atBoundary =
+              result &&
+              typeof result === 'object' &&
+              (phase === 'preparation' ? 'outcome' in result : 'intentId' in result);
+            if (!injected && atBoundary) {
+              injected = true;
+              expect(await claimRepositoryRoot(db!, s.repo.id, 'reset')).toBeTruthy();
+              if (gitOpen) await writeFile(join(s.root, '.git/MERGE_HEAD'), 'b'.repeat(40) + '\n');
+              // Sync may legitimately clear an older error; this is the diagnostic at this gate.
+              await db!
+                .update(schema.projectStateOutbox)
+                .set({ lastError: priorDiagnostic })
+                .where(eq(schema.projectStateOutbox.repositoryId, s.repo.id));
+              before = await admissionSnapshot(s);
+            }
+            return result;
+          };
+        },
+      }) as Database;
+      expect(await refreshProjectState(wrapped, s.repo.id)).toBe(false);
+      expect(injected).toBe(true);
+      expect(Boolean(before!.outbox!.writeIntent)).toBe(phase === 'mutation');
+      const after = await admissionSnapshot(s);
+      if (gitOpen) {
+        expect.soft(after.outbox!.lastError).toBe(priorDiagnostic);
+        expect.soft(after).toEqual(before);
+      } else {
+        expect.soft(after.outbox!.lastError).toContain('holds the checkout');
+        expect
+          .soft({
+            ...after,
+            outbox: {
+              ...after.outbox!,
+              lastError: before!.outbox!.lastError,
+              updatedAt: before!.outbox!.updatedAt,
+            },
+          })
+          .toEqual(before);
+      }
     },
   );
 
