@@ -43,6 +43,12 @@ file over the worktree's `.git` for every cli-exec invocation, so inside the san
 no `git status` and no `git diff`, and everything an agent knows about the change has to
 arrive in its prompt.
 
+An untracked nested repository is a checkout boundary, marked `unborn` or `with commits`,
+never a new file whose contents the parent task wrote. Review its integration; its interior
+needs separately listed changes or demonstrated blast radius to enter scope. The lint line
+map omits the boundary itself: a measured set containing only nested repositories has an
+empty scope, rather than a failed read that would run lint over the whole repository.
+
 A read that fails is never "no change". The committed half is read only against a real fork point: a
 base branch that is unrecorded or gone, or a `merge-base` that fails or outlives its bound, would
 otherwise diff against HEAD and, on a DAG task's clean tree, list nothing. Such a read, like a
