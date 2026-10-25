@@ -129,6 +129,49 @@ it.each(['list', 'detail'])(
     }
   },
 );
+
+it.each([
+  [
+    'https://user:fixture-password@EXAMPLE.test:443/repo?fixture-query#fixture-fragment',
+    'https://EXAMPLE.test:443/repo',
+  ],
+  [
+    'ssh://git:fixture-password@EXAMPLE.test:22/repo?fixture-query#fixture-fragment',
+    'ssh://git@EXAMPLE.test:22/repo',
+  ],
+  ['git@gitserver:repo', 'git@gitserver:repo'],
+])(
+  'keeps Retry capability and editable remote identity together for a linked upload: %s',
+  async (stored, expected) => {
+    const { fake, app } = await setup();
+    fake.patch(schema.repositories, REPO, {
+      source: 'upload',
+      status: 'error',
+      remoteUrl: stored,
+      rootClaimedAt: new Date(),
+      rootClaimKind: 'reset',
+    });
+    const response = await app.request('/');
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      repositories: {
+        remoteUrl: string;
+        canRetry: boolean;
+        retryUnavailableReason: string | null;
+      }[];
+    };
+    expect(body.repositories[0]).toMatchObject({
+      remoteUrl: expected,
+      canRetry: true,
+      retryUnavailableReason: null,
+    });
+    const text = JSON.stringify(body);
+    for (const value of ['fixture-password', 'fixture-query', 'fixture-fragment'])
+      expect(text).not.toContain(value);
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(stored);
+  },
+);
+
 it('relink clears planted push URLs and extra fetch URLs in real git', async () => {
   const { root, link, fake } = await setup();
   await git(root, ['config', '--add', 'remote.origin.url', 'https://extra.test/r']);

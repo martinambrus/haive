@@ -99,7 +99,9 @@ All PRE-EXISTING.
 
 ### T288 · FNF[sync-reader] · project-state sync reader defects (+6)
 
-status: open (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Previous brief, reusable: .claude/tmp/fnf-run/p288/drive.md on ACTIVIT21 — it scoped items 2,3,5,6,7 and deferred 1/4 for the fnf/278 overlap)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:36Z · last: 2026-10-25T18:36Z
+
+Codex continuation: recover the reader fixes with fixtures; validate deferred overlap against current main and preserve pending design decisions. Prior attempt record: (a Codex attempt was discarded after the 2026-10-24 WSL crash; nothing kept. Previous brief, reusable: .claude/tmp/fnf-run/p288/drive.md on ACTIVIT21 — it scoped items 2,3,5,6,7 and deferred 1/4 for the fnf/278 overlap)
 All PRE-EXISTING.
 
 1. DEFERRED (overlaps fnf/278): gitOperationInProgress (repo/git-operation.ts) reads an out-of-tree git dir as "merge open"; every caller holds forever for such repos.
@@ -123,9 +125,9 @@ From the #328 driver (2026-10-24). All PRE-EXISTING. (Session fnf-run mirrors it
 
 ### T415 · FNF[upload-retry] · Retry on an errored upload repository can never succeed
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:26Z
 
-Codex progress 2026-10-25T16:56Z: Fresh review clean; actual browser upload->complete source->failed preparation->Retry requeued EXTRACT for same repository. Auth integration843927b19 plus comment-only clarification; final gates pending.
+Codex progress 2026-10-25T18:26Z: PR #924 merged f96c58cb1 after11 successful checks and clean fresh local reviews. Bot retry timed out (>15min), recorded UNREVIEWED under existing CI-only exception; main CI40221151472 pending.
 From the T323 review (2026-10-24). PRE-EXISTING, consequential. The repos page Retry (web repos/page.tsx ~:180-187, shown for any `error` repo) posts to refresh-tree, which answers 409 "Nothing to refresh from: this repository has no remote." for an upload repository without a remote (api repos.ts ~:3165-3167); nothing else re-queues an extract. The copy promises it: repos.ts ~:219-221 "Use Retry to try again", data-migrations.ts ~:361-362 "Use Retry to start again", and clone.ts ~:675-677 keeps the archive "for a retry" (the reaper removes an `error` repository's archive after 24 h).
 Recommended: Retry on an `error` upload repository re-queues EXTRACT while its archive is still on disk; otherwise the copy says to delete and upload again (no Retry).
 
@@ -142,7 +144,9 @@ From the T414 review (2026-10-24). All PRE-EXISTING, consequential for dependenc
 
 ### T413 · FNF[rag-chunker-3] · Go/Rust/Python readers still read code in strings/comments (+7)
 
-status: open
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T18:26Z · last: 2026-10-25T18:26Z
+
+Codex continuation: validate the eight inherited chunker diagnoses with meaningful fixtures, then focused implementation and fresh paired review. No provider runs.
 From the #311 driver (2026-10-24). PRE-EXISTING unless noted. (Session fnf-run mirrors it as task #330.) Evidence/harness (ruler, lexer-diff, oracle-cross, mutants): .claude/tmp/fnf-run/p311/ on ACTIVIT21.
 
 1. Go/Rust readers count braces in strings/comments (goRanges/rustRanges read raw content); verify with a ruler first.
@@ -432,9 +436,9 @@ Plan I4, part d. Browser check at 1280, 768 and 390.
 
 ### T340 · FNF[pr-poll] · a local_path repository can open a PR its poller can never read (+4)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:34Z
 
-Codex progress 2026-10-25T16:56Z: PR #922: CodeQL quadratic scheme searches corrected; required SSH-editing identity correction in progress; final fresh review pending.
+Codex progress 2026-10-25T18:34Z: PR #922 at local75f667c23. Corrected onboarding/upgrade cause-losing wrappers and the same identity producer through projection restoration to merge-resolver returned failure. 405 affected tests/typecheck/format pass, parent eight decisive controls pass; fresh xhigh review running. Evidence: .claude/tmp/board-run/T340/onboarding-forwarder-fix/report.md. Original params on this path are IDs; no password exposure established.
 Items 2-5 merged (#781, #808).
 
 1. PRE-EXISTING, from reading the code (not reproduced). The PR is opened against the origin read from disk (12-worktree-cleanup.ts ~:226, ~:808-813), but pr-poll needs repositories.remote_url (pr-poll-queue.ts ~:136-142), which is NULL for local_path repos. Fix: record the origin on the PR row and poll from it, or backfill remote_url. Reproduce first.
@@ -896,9 +900,9 @@ From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` r
 
 ### T423 · FNF[terminal-attach] · a failed attach-count write leaves the docker attach stream open; the count is read-then-write (+1)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:26Z
 
-Codex progress 2026-10-25T16:56Z: Integrationad7bb1ff6: fresh fulltask review clean,907API/2PG/30fakeDB controls pass; session integration and PR gates pending.
+Codex progress 2026-10-25T18:26Z: PR #925 integratedd6bc246, fresh xhigh review clean; actual browser/PG/TCP failure-safe-frame and success cleanup passed. Exact-head bot/CI pending.
 From the T400 review (2026-10-24). PRE-EXISTING, minor.
 
 1. api routes/terminal.ts ~:106-112: `await incrementAttached(...)` throwing (database down) leaves the docker attach stream opened at ~:106 open; the `.catch` at ~:80 closes only the ws.
@@ -906,9 +910,9 @@ From the T400 review (2026-10-24). PRE-EXISTING, minor.
 
 ### T424 · FNF[nested-repo-worktree] · gate 3 offers a commit that git add will refuse for an unborn nested repo; the review collector calls a nested repo a new file (+1)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T18:26Z
 
-Codex progress 2026-10-25T16:56Z: Correctioned2fff17 integratedccb6955: fresh review clean,298affected tests pass; session UI and PR gates pending.
+Codex progress 2026-10-25T18:26Z: PR #926 head7b4c842 fixes stale prompt assertion; full targeted20 tests and fresh high review pass. New exact-head review requested once after not-started window; CI running.
 From the T375 review (2026-10-24). PRE-EXISTING, minor.
 
 1. worker 10-gate-3-commit.ts ~:375, ~:407-410: with an unborn nested repo (`git init`, no commit) in the worktree the whole `git add -A` fails, but the form still defaults the commit on and the failure shows only at Finalise. Since T375 the preview says why. Fix: say so in the form, or stage around it.
@@ -918,19 +922,6 @@ From the T375 review (2026-10-24). PRE-EXISTING, minor.
 
 status: open · kind: design
 From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. worker 10-gate-3-commit.ts ~:407-410: `git add -A` records an untracked nested repo that has a HEAD as a 160000 entry with no `.gitmodules` URL; the viewer labels it "submodule" and gate 3 reads only the exit code. Later `git submodule` commands and recursive clones meet a gitlink with no URL. Decide: refuse, warn, stage its files, or ask the user.
-
-### T426 · FNF[db-error-params] · a failed query's error message carries its bound params (secret fingerprints, ciphertext, container env) into logs and the browser (+1)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T13:11Z · last: 2026-10-25T16:56Z
-
-Codex progress 2026-10-25T16:56Z: PR #921: repaired fixture range scanner and bot clean at7fdfc453; auth integration76c733140 passed855 controls/types/format, fresh integration review pending.
-From the T422 review (2026-10-24). PRE-EXISTING, consequential in kind, rare (mechanism read from source, not triggered).
-
-1. drizzle-orm 0.45.2 builds `DrizzleQueryError.message` from every bound param (drizzle-orm errors.js ~:12). Three writers bind a secret's fingerprint (first 8 and last 4 characters, shared crypto/index.ts ~:87-90) and ciphertext: shared cli-providers/provider-secret.ts ~:26-35, shared config/user-secrets.service.ts ~:92-112, worker usage-window/token-source.ts ~:39-56. api middleware/error-handler.ts ~:59 logs `err` for any unhandled failure, so a failed secret write logs up to 12 characters of the secret.
-2. api routes/cli-login-banner.ts ~:328 forwards the worker's Error.message to the browser (worker queues/cli-exec/handlers.ts ~:1040, ~:1088); a failed containers insert binds env_vars (worker sandbox/login-container.ts ~:94-107).
-   Fix: one sanitizer for logged and returned database errors (class name and `code` walked through `cause`, never message or params), used by the error handler and every forwarder.
-
-Recovery review (2026-10-25) confirmed connected corrections: mixed aggregates must retain the bound DB member's SQLSTATE; ordinary recovery aggregate strings must retain their existing class prefixes. Four PRE-EXISTING sibling sinks still stringify DB messages before persistence/return: project-state/refresh.ts outbox last_error, repo/bundle-ingest.ts all three failure paths, queues/cli-exec/images.ts probe result and sandbox/ollama-provision.ts status/result. Include these in the current sanitizer fix. Historical-row cleanup stays excluded as previously decided. Evidence: .claude/tmp/board-run/T426/codex-review-recovery.md, session-review-probe.log.
 
 ### T428 · FNF[refresh-result-hidden] · a version or price refresh that fails reports ok:false that no page reads
 
@@ -979,6 +970,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T426 — Safe bound-query diagnostics in logs, replies and new stored failure/warning text — PR #921 (7ac3bfc74), 2026-10-25; main CI40217648438 green.
 
 - T430 — Scope knowledge/skill commits, including deleted roots and refused-path safety — PR #923 (555c138e5), 2026-10-25; main CI40215378653 green.
 

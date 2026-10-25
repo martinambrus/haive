@@ -110,7 +110,8 @@ describe('POST /upload when the archive stream fails', () => {
   let fake: ReturnType<typeof createRepoDb>;
   let storedRoot: string | undefined;
 
-  const createRepoDb = () => createFakeDb({ repositories: schema.repositories });
+  const createRepoDb = () =>
+    createFakeDb({ repositories: schema.repositories, repoUploads: schema.repoUploads });
 
   beforeEach(async () => {
     vi.spyOn(logger, 'error').mockImplementation(() => undefined);

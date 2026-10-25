@@ -27,6 +27,7 @@ import { ProjectStateConflictsBanner } from '@/components/project-state-conflict
 import { ToolingUpgradeBanner } from '@/components/tooling-upgrade-banner';
 import { LinkOriginDialog } from '@/components/repos/link-origin-dialog';
 import { ActionMenu } from '@/components/action-menu';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 import { usePageTitle } from '@/lib/use-page-title';
 import { rememberTaskOrigin } from '@/lib/task-origin';
 import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
@@ -174,15 +175,13 @@ export default function ReposPage() {
     }
   }
 
-  // Re-run the clone/copy/scan for a repo whose import failed (status 'error'),
-  // e.g. after fixing invalid credentials. refresh-tree resets the repo to
-  // 'cloning' and re-enqueues the job, which re-reads the credential fresh.
+  // Retry extraction for a failed upload, or refresh from a folder/remote source.
   async function handleRetry(id: string) {
     try {
       await api.post(`/repos/${id}/refresh-tree`, {});
       await reload();
     } catch (err) {
-      setError((err as Error).message ?? 'Failed to retry clone');
+      setError((err as Error).message ?? 'Failed to retry repository');
     }
   }
 
@@ -249,7 +248,7 @@ export default function ReposPage() {
 
       {error && (
         <div className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300">
-          {error}
+          <InlineMarkdown body={error} />
         </div>
       )}
 
@@ -323,6 +322,9 @@ function RepoCard(props: RepoCardProps) {
   // The exclusions editor is available once onboarding has produced a scope deny
   // list (scopeExcludeGlobs !== null). Before that there is nothing to edit.
   const canEditScope = repo.status === 'ready' && repo.scopeExcludeGlobs !== null;
+  const retryUnavailableReason =
+    repo.status === 'error' && repo.canRetry === false ? repo.retryUnavailableReason : null;
+  const statusMessage = retryUnavailableReason ?? repo.statusMessage;
   // A ready repo with onboarding markers still absent. Show a yellow badge and
   // route its primary CTA to onboarding — the new-task page auto-selects the
   // onboarding flow for a non-onboarded repo. (undefined = unknown → treat as
@@ -438,7 +440,9 @@ function RepoCard(props: RepoCardProps) {
           <p className="mt-1 break-all text-xs text-neutral-500">
             {repo.localPath ?? repo.remoteUrl ?? '(no path)'}
           </p>
-          {repo.statusMessage && <p className="mt-1 text-xs text-red-400">{repo.statusMessage}</p>}
+          {statusMessage && (
+            <InlineMarkdown body={statusMessage} className="mt-1 text-xs text-red-400" />
+          )}
         </div>
         {/* One control, so the right edge is the same width on every card whatever the
             repository's state — and every action's wording is readable in the popup
@@ -529,14 +533,15 @@ function RepoCard(props: RepoCardProps) {
               icon: expanded ? X : FolderMinus,
               onClick: onExpand,
             },
-            repo.status === 'error' && {
-              key: 'retry',
-              label: retrying ? 'Retrying...' : 'Retry',
-              icon: RefreshCw,
-              spin: retrying,
-              onClick: handleRetryClick,
-              disabled: retrying,
-            },
+            repo.status === 'error' &&
+              repo.canRetry !== false && {
+                key: 'retry',
+                label: retrying ? 'Retrying...' : 'Retry',
+                icon: RefreshCw,
+                spin: retrying,
+                onClick: handleRetryClick,
+                disabled: retrying,
+              },
             { key: 'delete', label: 'Delete', icon: Trash2, danger: true, onClick: onDelete },
           ]}
         />

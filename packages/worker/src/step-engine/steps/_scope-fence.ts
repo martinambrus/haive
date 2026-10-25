@@ -51,6 +51,9 @@ const SCOPE_BOUNDARY = [
   'is in scope for review, subject to the ownership boundary above. Being newly reachable',
   'does not authorize upstream repairs. If causality is uncertain, investigate and report the',
   'uncertainty; do not broaden the editing scope to make it disappear.',
+  'A nested repository entry describes a checkout boundary, not changed file contents.',
+  'Its contents are not all new or wholly in scope: review its integration, and only review',
+  'files inside it when separately listed as changed or reached by demonstrated blast radius.',
 ] as const;
 
 /** Disposition A — a reviewer with a `findings` list and a `## INSIGHTS` sink.

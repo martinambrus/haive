@@ -15,7 +15,7 @@ import {
   renameNoFollow,
   type EntryInfo,
 } from '@haive/shared/fs-safe';
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import {
   acquireRootClaim,
   readLiveRootClaim,
@@ -25,6 +25,7 @@ import {
 } from '@haive/database';
 import {
   logger,
+  CHECKOUT_HOLDING_TASK_STATUSES,
   HAIVE_DATA_FILES,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
   ONBOARDING_EXCLUSIONS_SCHEMA_VERSION,
@@ -518,6 +519,12 @@ async function validateStagedTree(
   return dropped;
 }
 
+class MissingArchiveError extends Error {
+  constructor() {
+    super('Archive is missing on disk');
+  }
+}
+
 /**
  * Extract an archive into `dest`, via a private stage, dropping what must not land in a repository
  * tree and reporting it.
@@ -562,7 +569,8 @@ export async function extractArchive(
   // restore header owners. An entry owned by anything else did not come from the extraction.
   const expectedUid = asRoot ? EXTRACT_UID : selfUid;
 
-  const held = (await openFileNoFollow(archive.anchor, archive.rel, 'read', { strict: true }))!;
+  const held = await openFileNoFollow(archive.anchor, archive.rel, 'read', { strict: true });
+  if (!held) throw new MissingArchiveError();
   try {
     if (parentRel !== '') await ensureDirNoFollow(anchor, parentRel);
     const stageRel = within(`.haive-extract-${process.pid}-${randomUUID()}`);
@@ -662,9 +670,37 @@ export async function handleExtract(
   // "replaces the repository root", not which call does it.
   return withRootClaim(db, payload.repositoryId, async () => {
     const dest = path.join(repoStorageRoot, payload.userId, payload.repositoryId);
+    const holding = await db.query.tasks.findMany({
+      where: and(
+        eq(schema.tasks.repositoryId, payload.repositoryId),
+        inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+        isNull(schema.tasks.deadAt),
+      ),
+      columns: { id: true },
+    });
+    if (holding.length > 0)
+      throw new Error('A task is using this repository. Retry once it finishes.');
     const report = await extractArchive(archive, archiveFormat, {
       anchor: repoStorageRoot,
       rel: `${payload.userId}/${payload.repositoryId}`,
+    }).catch(async (err: unknown) => {
+      if (!(err instanceof MissingArchiveError)) throw err;
+      // Cancel only this completed source, never an in-progress upload or another user's row.
+      // The list can then hide Retry without interpreting status_message or probing the disk.
+      await db
+        .update(schema.repoUploads)
+        .set({ status: 'cancelled', updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.repoUploads.id, payload.repositoryId),
+            eq(schema.repoUploads.userId, payload.userId),
+            eq(schema.repoUploads.archivePath, payload.archivePath!),
+            eq(schema.repoUploads.status, 'complete'),
+          ),
+        );
+      throw new Error(
+        'The uploaded archive is no longer available. Delete this repository and upload it again.',
+      );
     });
     if (report.note) {
       logger.warn({ repositoryId: payload.repositoryId, dropped: report.dropped }, report.note);

@@ -222,13 +222,32 @@ export async function addRepoJobOrMarkError(
       .set({
         status: 'error',
         statusMessage:
-          'Could not queue the job that prepares this repository. Use Retry to try again.',
+          'Could not queue the job that prepares this repository. Retry if available; otherwise delete the repository and add it again.',
         updatedAt: new Date(),
       })
       .where(eq(schema.repositories.id, repositoryId))
       .catch(() => undefined);
     throw err;
   }
+}
+
+const NO_REFRESH_SOURCE =
+  'This repository has no remote. Delete this repository and create it again from a repository URL or local folder.';
+
+const UPLOAD_UNAVAILABLE =
+  'The uploaded archive is no longer available. Delete this repository and upload it again.';
+
+// This is recorded availability only. The worker opens the archive safely at extraction time;
+// the API must never probe a stored upload path to guess whether it is still on disk.
+function retryableUpload(
+  row: Pick<typeof schema.repoUploads.$inferSelect, 'status' | 'archivePath' | 'archiveFormat'>,
+  userId: string,
+): boolean {
+  return (
+    row.status === 'complete' &&
+    uploadFileRel(userId, row.archivePath) !== null &&
+    (row.archiveFormat === 'zip' || row.archiveFormat === 'tar' || row.archiveFormat === 'tar.gz')
+  );
 }
 
 export const repoRoutes = new Hono<AppEnv>();
@@ -244,6 +263,26 @@ repoRoutes.get('/', async (c) => {
     // Large, and this list is polled every 5s.
     columns: { renderContext: false },
   });
+
+  const erroredUploads = rows.filter(
+    (repo) => repo.status === 'error' && repo.source === 'upload' && !repo.remoteUrl,
+  );
+  const uploads =
+    erroredUploads.length === 0
+      ? []
+      : await db.query.repoUploads.findMany({
+          where: and(
+            eq(schema.repoUploads.userId, userId),
+            inArray(
+              schema.repoUploads.id,
+              erroredUploads.map((repo) => repo.id),
+            ),
+          ),
+          columns: { id: true, status: true, archivePath: true, archiveFormat: true },
+        });
+  const retrySources = new Set(
+    uploads.filter((row) => retryableUpload(row, userId)).map((row) => row.id),
+  );
 
   // Per-repo task counts for the list badges. "Open" = non-terminal, matching
   // cancelOpenTasksForRepo. "Active" = open tasks not blocked on the user
@@ -333,9 +372,21 @@ repoRoutes.get('/', async (c) => {
       // (which is what `onboarded: false` does) blocks the user outright.
       const nothingToOnboard =
         markers !== null && !onboarded && root ? !(await hasOnboardableSource(root)) : false;
+      // Capability describes a durable source, not transient root/task/queue fences: the
+      // Retry action remains available while those clear, with the route explaining a refusal.
+      const retryUnavailableReason =
+        repo.status !== 'error' || repo.remoteUrl || repo.source === 'local_path'
+          ? null
+          : repo.source === 'upload'
+            ? retrySources.has(repo.id)
+              ? null
+              : UPLOAD_UNAVAILABLE
+            : NO_REFRESH_SOURCE;
       return {
         ...rest,
         remoteUrl: repo.remoteUrl ? redactEditableGitUrl(repo.remoteUrl) : null,
+        canRetry: repo.status === 'error' && retryUnavailableReason === null,
+        retryUnavailableReason,
         topLevelPaths: deriveTopLevelPaths(fileTree),
         openTaskCount: counts.open,
         activeTaskCount: counts.active,
@@ -574,13 +625,25 @@ repoRoutes.post('/upload', requireNewWorkAllowed, async (c) => {
   // One attempt only: a bad archive will fail the same way on retry, and the
   // worker deletes the archive on success, so retrying would run against a
   // missing file and mask the real error.
-  await addRepoJobOrMarkError(db, repo.id, () =>
-    queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
+  await addRepoJobOrMarkError(db, repo.id, async () => {
+    await db.insert(schema.repoUploads).values({
+      id: repo.id,
+      userId,
+      filename: archiveField.name,
+      archiveFormat: format,
+      totalSize: archiveField.size,
+      bytesReceived: archiveField.size,
+      chunkSize: Math.min(archiveField.size, 100 * 1024 * 1024),
+      archivePath,
+      status: 'complete',
+    });
+
+    return queue.add(REPO_JOB_NAMES.EXTRACT, payload, {
       attempts: 1,
       removeOnComplete: 100,
       removeOnFail: 100,
-    }),
-  );
+    });
+  });
 
   return c.json({ repository: repo }, 201);
 });
@@ -3226,8 +3289,19 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
   // either can change between this read and its pickup.
   const held = await readLiveRootClaim(db, id);
   if (held) throw new HttpError(409, rootClaimRefusal(held.kind));
-  if (repo.source !== 'local_path' && !repo.remoteUrl) {
-    throw new HttpError(409, 'Nothing to refresh from: this repository has no remote.');
+  const retryUpload = repo.source === 'upload' && !repo.remoteUrl;
+  let upload: typeof schema.repoUploads.$inferSelect | undefined;
+  if (retryUpload) {
+    if (repo.status !== 'error') {
+      throw new HttpError(409, 'Repository preparation is already queued or running.');
+    }
+    upload = await db.query.repoUploads.findFirst({
+      where: and(eq(schema.repoUploads.id, id), eq(schema.repoUploads.userId, userId)),
+    });
+    if (!upload || !retryableUpload(upload, userId)) throw new HttpError(409, UPLOAD_UNAVAILABLE);
+  }
+  if (!retryUpload && repo.source !== 'local_path' && !repo.remoteUrl) {
+    throw new HttpError(409, NO_REFRESH_SOURCE);
   }
   const holding = await db.query.tasks.findMany({
     where: and(
@@ -3244,31 +3318,70 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
     );
   }
 
+  const queue = getRepoQueue();
+  if (retryUpload) {
+    const live = await queue.getJobs([
+      'waiting',
+      'delayed',
+      'prioritized',
+      'active',
+      'waiting-children',
+    ]);
+    if (live.some((job) => job?.data.repositoryId === id)) {
+      throw new HttpError(409, 'Repository preparation is already queued or running.');
+    }
+  }
   await db.transaction(async (tx) => {
     await admitNewWork(tx);
-    await tx
+    const changed = await tx
       .update(schema.repositories)
       .set({ status: 'cloning', statusMessage: null, updatedAt: new Date() })
-      .where(eq(schema.repositories.id, id));
+      .where(
+        and(
+          eq(schema.repositories.id, id),
+          retryUpload ? eq(schema.repositories.status, 'error') : undefined,
+        ),
+      )
+      .returning({ id: schema.repositories.id });
+    // The live-job read alone cannot fence two simultaneous requests. Only one can move error
+    // to cloning, and a second click before pickup cannot queue a second destructive extraction.
+    if (retryUpload && changed.length === 0) {
+      throw new HttpError(409, 'Repository preparation is already queued or running.');
+    }
   });
 
-  const queue = getRepoQueue();
   const payload: RepoJobPayload = {
     repositoryId: repo.id,
     userId,
     source: repo.source,
+    ...(upload
+      ? { archivePath: upload.archivePath, archiveFormat: upload.archiveFormat as ArchiveFormat }
+      : {}),
     ...(repo.localPath ? { localPath: repo.localPath } : {}),
     ...(repo.remoteUrl ? { remoteUrl: redactGitUrl(repo.remoteUrl, true) } : {}),
     ...(repo.branch ? { branch: repo.branch } : {}),
     ...(repo.credentialsSecretId ? { credentialsId: repo.credentialsSecretId } : {}),
   };
-  const jobName =
-    repo.source === 'local_path' && !repo.writable ? REPO_JOB_NAMES.SCAN : REPO_JOB_NAMES.REFRESH;
+  const jobName = retryUpload
+    ? REPO_JOB_NAMES.EXTRACT
+    : repo.source === 'local_path' && !repo.writable
+      ? REPO_JOB_NAMES.SCAN
+      : REPO_JOB_NAMES.REFRESH;
   await addRepoJobOrMarkError(db, repo.id, () =>
-    queue.add(jobName, payload, {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 5000 },
-    }),
+    queue.add(
+      jobName,
+      payload,
+      retryUpload
+        ? {
+            attempts: 1,
+            removeOnComplete: 100,
+            removeOnFail: 100,
+          }
+        : {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+          },
+    ),
   );
 
   return c.json({ ok: true });

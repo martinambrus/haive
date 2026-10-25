@@ -27,6 +27,8 @@ import { eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { gitGaveNoAnswer, gitRun, type GitRunResult } from '../../../repo/git-exec.js';
 import { gitCommitStaged } from '../../../repo/git-commit.js';
+import { nestedRepositoryHead } from '../../../repo/nested-repository.js';
+import { asPlainText } from './_similar-sites.js';
 import { warnStep } from '../../../project-state/branch-revert.js';
 
 /** Cap on how many changed paths we persist to tasks.changed_paths. The estimator's
@@ -46,6 +48,8 @@ interface CommitGateDetect {
   workspacePath: string;
   diffSummary: string;
   dirtyFiles: number;
+  /** Untracked nested checkouts with no commit: git cannot stage them. Optional on old rows. */
+  excludedRepositories?: string[];
   // Absolute path to the worker-written commit-diff artifact, fetched lazily by
   // the web viewer via the existing /files/raw route. null when there is no git
   // repo, no pending changes, or the build failed (viewer is then hidden).
@@ -68,6 +72,7 @@ interface CommitGateApply {
   committed: boolean;
   commitSha: string | null;
   message: string;
+  excludedRepositories?: string[];
 }
 
 const COMMIT_CONTEXT_LIMIT = 24000;
@@ -91,7 +96,11 @@ function changedExcerpt(before: string, after: string): { before: string; after:
   return { before: excerpt(before), after: excerpt(after) };
 }
 
-function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPolicy): string {
+function commitMessageContext(
+  artifact: CommitDiffArtifact,
+  policy: SecretMaskPolicy,
+  excludedRepositories: string[],
+): string {
   // A protected path in the change under any status (git can report a move as AD + ??) may have moved its bytes; a capped list can hide it.
   const protectedChanged =
     artifact.truncated ||
@@ -100,30 +109,35 @@ function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPo
         secretMaskDeniesPath(policy, file.path) ||
         (file.oldPath !== undefined && secretMaskDeniesPath(policy, file.oldPath)),
     );
-  const files = artifact.files.map((file) => {
-    const metadata = {
-      path: file.path,
-      oldPath: file.oldPath,
-      status: file.status,
-      link: file.link,
-    };
-    // Do not relay a masked file through the host-built diff, even when masking is off.
-    // Conservatively omit tracked secret paths too; generation needs no credential bytes.
-    if (
-      secretMaskDeniesPath(policy, file.path) ||
-      (file.oldPath && secretMaskDeniesPath(policy, file.oldPath))
-    ) {
-      return { ...metadata, note: 'secret content omitted' };
-    }
-    if (protectedChanged && file.status !== 'deleted') {
-      return { ...metadata, note: 'content withheld: a protected file was removed in this change' };
-    }
-    if (file.binary || file.truncated || file.unreadable)
-      return { ...metadata, note: 'content unavailable' };
-    return { ...metadata, ...changedExcerpt(file.oldContent, file.newContent) };
-  });
+  const files = artifact.files
+    .filter((file) => !excludedRepositories.includes(file.path))
+    .map((file) => {
+      const metadata = {
+        path: file.path,
+        oldPath: file.oldPath,
+        status: file.status,
+        link: file.link,
+      };
+      // Do not relay a masked file through the host-built diff, even when masking is off.
+      // Conservatively omit tracked secret paths too; generation needs no credential bytes.
+      if (
+        secretMaskDeniesPath(policy, file.path) ||
+        (file.oldPath && secretMaskDeniesPath(policy, file.oldPath))
+      ) {
+        return { ...metadata, note: 'secret content omitted' };
+      }
+      if (protectedChanged && file.status !== 'deleted') {
+        return {
+          ...metadata,
+          note: 'content withheld: a protected file was removed in this change',
+        };
+      }
+      if (file.binary || file.truncated || file.unreadable)
+        return { ...metadata, note: 'content unavailable' };
+      return { ...metadata, ...changedExcerpt(file.oldContent, file.newContent) };
+    });
   const text = JSON.stringify({
-    fileCount: artifact.fileCount,
+    fileCount: artifact.fileCount - excludedRepositories.length,
     truncated: artifact.truncated,
     files,
   });
@@ -131,6 +145,17 @@ function commitMessageContext(artifact: CommitDiffArtifact, policy: SecretMaskPo
   return text.length > COMMIT_CONTEXT_LIMIT
     ? `${text.slice(0, COMMIT_CONTEXT_LIMIT - notice.length)}${notice}`
     : text;
+}
+
+/** -uall expands ordinary directories but keeps embedded repositories as dir/. */
+async function unbornRepositories(workspace: string, status: string): Promise<string[]> {
+  const excluded: string[] = [];
+  for (const entry of parsePorcelainZ(status)) {
+    if (entry.x !== '?' || entry.y !== '?' || !entry.path.endsWith('/')) continue;
+    const head = await nestedRepositoryHead(workspace, entry.path);
+    if (head?.commit === null) excluded.push(entry.path);
+  }
+  return excluded;
 }
 
 function generatedCommitMessage(output: unknown): string | null {
@@ -253,6 +278,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       );
     }
     const dirtyFiles = parsePorcelainZ(status.stdout).length;
+    const excludedRepositories = await unbornRepositories(workspacePath, status.stdout);
     const diffStat = await gitRun(workspacePath, ['diff', '--stat', 'HEAD']);
     const summary =
       diffStat.stdout.trim().length > 0
@@ -275,7 +301,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         diffArtifactTruncated = res.truncated;
         try {
           const policy = (await taskSecretMaskPolicy(ctx.db, ctx.taskId)) ?? secretMaskPolicy({});
-          messageContext = commitMessageContext(res.artifact, policy);
+          messageContext = commitMessageContext(res.artifact, policy, excludedRepositories);
         } catch (err) {
           ctx.logger.warn({ err }, 'failed to build safe commit message context');
         }
@@ -289,6 +315,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       workspacePath,
       diffSummary: summary,
       dirtyFiles,
+      excludedRepositories,
       diffArtifactPath,
       changedFileCount,
       diffArtifactTruncated,
@@ -309,7 +336,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     toolProfile: 'none',
     skipIf: ({ detected }) => {
       const d = detected as CommitGateDetect;
-      return !d.hasGit || d.dirtyFiles === 0;
+      return !d.hasGit || d.dirtyFiles <= (d.excludedRepositories?.length ?? 0);
     },
     buildPrompt: ({ detected }) => {
       const d = detected as CommitGateDetect;
@@ -363,6 +390,14 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       description: [
         `Workspace: ${detected.workspacePath}`,
         `Dirty files: ${detected.dirtyFiles}`,
+        ...(detected.excludedRepositories?.length
+          ? [
+              '',
+              'These nested repositories have no checked-out commit and will be left out of this commit:',
+              ...detected.excludedRepositories.map((p) => `- ${asPlainText(JSON.stringify(p))}`),
+              'For each path, commit inside it, remove it, or leave it out. All other changes will be staged and committed.',
+            ]
+          : []),
         '',
         'Diff summary:',
         detected.diffSummary,
@@ -372,8 +407,11 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         {
           type: 'checkbox',
           id: 'commit',
-          label: 'Stage all changes and commit now',
-          default: detected.hasGit && detected.dirtyFiles > 0,
+          label: detected.excludedRepositories?.length
+            ? 'Stage remaining changes and commit now'
+            : 'Stage all changes and commit now',
+          default:
+            detected.hasGit && detected.dirtyFiles > (detected.excludedRepositories?.length ?? 0),
         },
         {
           type: 'textarea',
@@ -404,8 +442,25 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
     const workspace = args.detected.workspacePath;
     const message = (values.commitMessage ?? generatedCommitMessage(args.llmOutput) ?? '').trim();
     if (!message) throw new Error('Enter a commit message before committing.');
-    await assertDependencyCommitSafe(ctx, workspace);
-    const add = await gitRun(workspace, ['add', '-A']);
+    // Re-read at submission: a checkout may have gained or lost its first commit
+    // while the form was parked, and persisted detection may predate this field.
+    const status = await gitRun(workspace, [
+      '--no-optional-locks',
+      'status',
+      '--porcelain',
+      '-z',
+      '-uall',
+    ]);
+    if (status.code !== 0) throw new Error(`git status failed: ${status.stderr || status.stdout}`);
+    const excludedRepositories = await unbornRepositories(workspace, status.stdout);
+    await assertDependencyCommitSafe(ctx, workspace, excludedRepositories);
+    const add = await gitRun(workspace, [
+      'add',
+      '-A',
+      ...(excludedRepositories.length
+        ? ['--', '.', ...excludedRepositories.map((p) => `:(top,exclude,literal)${p.slice(0, -1)}`)]
+        : []),
+    ]);
     if (add.code !== 0) {
       throw new Error(`git add failed: ${add.stderr || add.stdout}`);
     }
@@ -416,6 +471,7 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
         committed: false,
         commitSha: null,
         message: 'nothing to commit',
+        ...(excludedRepositories.length ? { excludedRepositories } : {}),
       };
     }
     const sha = await readLanded(workspace, ['rev-parse', 'HEAD']);
@@ -428,6 +484,11 @@ export const gate3CommitStep: StepDefinition<CommitGateDetect, CommitGateApply> 
       );
     }
     await warnStep(ctx, notes);
-    return { committed: true, commitSha, message };
+    return {
+      committed: true,
+      commitSha,
+      message,
+      ...(excludedRepositories.length ? { excludedRepositories } : {}),
+    };
   },
 };
