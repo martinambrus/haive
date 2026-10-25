@@ -46,7 +46,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
     ...real,
     logger: log,
     configService: {
-      get: async () => null,
+      get: async (key: string) => (key === real.CONFIG_KEYS.REGISTRATION_MODE ? reg.mode : null),
       getFresh: async () => null,
       getBoolean: async (_key: string, fallback: boolean) => fallback,
       getEncryptionKey: async () => FIELD_KEY,
@@ -76,7 +76,7 @@ const mail = (tag: string | number) => `user-${tag}@throttle.test`;
 let app: ReturnType<typeof createApiApp>;
 let passwordHash: string;
 let fake: ReturnType<typeof makeFake>;
-const reg = { userCount: 1, existing: false };
+const reg = { userCount: 1, existing: false, mode: 'closed' as 'closed' | 'open' };
 
 function makeFake() {
   return createFakeDb({ users: schema.users, refreshTokens: schema.refreshTokens });
@@ -190,6 +190,7 @@ beforeEach(() => {
   vi.spyOn(secretsService, 'getEmailBlindIndexPepper').mockResolvedValue(PEPPER);
   reg.userCount = 1;
   reg.existing = false;
+  reg.mode = 'closed';
   installDb();
   h.warn.mockClear();
 });
@@ -356,9 +357,16 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
     it('keeps a separate budget from login, and counts 403 and 409 refusals', async () => {
       const email = mail('reg');
       reg.userCount = 1;
-      for (let i = 0; i < 5; i++)
+      for (let i = 0; i < 3; i++)
         expect((await register(email, { peer: peer(i) })).status).toBe(403);
       reg.existing = true;
+      // A known email is also refused by the closed gate, and those attempts still count.
+      for (let i = 3; i < 5; i++)
+        expect((await register(email, { peer: peer(i) })).status).toBe(403);
+      expect(await client.zcard(acctKey('register', email))).toBe(5);
+      expect(await client.zcard(ipKey('register', peer(3)))).toBe(1);
+      // Only an admitted request reaches the duplicate-email check.
+      reg.mode = 'open';
       for (let i = 5; i < 10; i++)
         expect((await register(email, { peer: peer(i) })).status).toBe(409);
       reg.existing = false;

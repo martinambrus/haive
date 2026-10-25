@@ -1,5 +1,4 @@
 import { cookies } from 'next/headers';
-import { redirect } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { KeyRound } from 'lucide-react';
 import { AdminGuard } from '@/components/admin-guard';
@@ -20,6 +19,7 @@ import { StaleBuildBanner } from '@/components/stale-build-banner';
 import { CliLoginProvider } from '@/components/cli-login-provider';
 import { NotificationProvider } from '@/components/notifications/notification-provider';
 import { SessionKeepAlive } from '@/components/session-keepalive';
+import { SessionRecovery } from '@/components/session-recovery';
 
 /** Only the keys this layout reads. The blob is schemaless on the server and web owns the
  *  keys, so the rest is passed through untouched by anything here. */
@@ -46,50 +46,21 @@ function apiBaseUrl(): string {
   return process.env.API_URL_INTERNAL ?? process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
 }
 
-/** The session, plus the cookie header it actually WORKED with — which is not always the one
- *  the browser sent, because an expired access token is refreshed here and the replacement
- *  only exists in this function. Anything else this layout wants to read server-side has to
- *  be asked for with that header or it gets a 401 the visitor cannot see. */
+/** Server rendering only reads the session. Rotating here consumes the browser's refresh
+ * token without any way for a Server Component to return the replacement cookies. */
 async function fetchMe(): Promise<{ data: MeResponse; cookie: string } | null> {
-  const apiBase = apiBaseUrl();
   const cookieStore = await cookies();
-  const cookieHeader = cookieStore
+  const cookie = cookieStore
     .getAll()
     .map((c) => `${c.name}=${c.value}`)
     .join('; ');
-
-  const doFetch = async (cookie: string) => {
-    const res = await fetch(`${apiBase}/auth/me`, {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/auth/me`, {
       headers: { Cookie: cookie },
       cache: 'no-store',
+      signal: AbortSignal.timeout(5_000),
     });
-    if (!res.ok) return null;
-    return (await res.json()) as MeResponse;
-  };
-
-  try {
-    const result = await doFetch(cookieHeader);
-    if (result) return { data: result, cookie: cookieHeader };
-
-    // Access token may be expired — try server-side refresh
-    const hasRefresh = cookieStore.get('haive_refresh');
-    if (!hasRefresh) return null;
-
-    const refreshRes = await fetch(`${apiBase}/auth/refresh`, {
-      method: 'POST',
-      headers: { Cookie: cookieHeader, 'Content-Type': 'application/json' },
-      cache: 'no-store',
-    });
-    if (!refreshRes.ok) return null;
-
-    // Extract new cookies from refresh response and retry /auth/me
-    const setCookies = refreshRes.headers.getSetCookie();
-    const newCookieHeader = setCookies
-      .map((sc) => sc.split(';')[0]!)
-      .concat(cookieHeader.split('; ').filter((c) => !c.startsWith('haive_')))
-      .join('; ');
-    const retried = await doFetch(newCookieHeader);
-    return retried ? { data: retried, cookie: newCookieHeader } : null;
+    return response.ok ? { data: (await response.json()) as MeResponse, cookie } : null;
   } catch {
     return null;
   }
@@ -133,11 +104,9 @@ async function fetchModules(cookie: string): Promise<ModuleSummary[]> {
 
 export default async function AppLayout({ children }: { children: ReactNode }) {
   const session = await fetchMe();
-  // `?session=expired`, not a bare `/login`: this layout has just asked the api and been refused,
-  // but the browser still HOLDS the cookies. Without the marker the middleware reads their presence
-  // as a session and sends the visitor back to /dashboard, which lands here again — an infinite
-  // redirect on exactly the state a user cannot fix themselves. The marker tells it to clear them.
-  if (!session) redirect('/login?session=expired');
+  // A failed read can be stale or transient. The browser owns recovery and the verdict;
+  // withhold the authenticated shell until a new server render can read its installed cookies.
+  if (!session) return <SessionRecovery />;
   const data = session.data;
 
   const [prefs, modules] = await Promise.all([
