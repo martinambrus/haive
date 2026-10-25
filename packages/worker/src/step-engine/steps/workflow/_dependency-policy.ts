@@ -233,6 +233,9 @@ export async function loadReviewDependencyPolicy(
 export async function assertDependencyCommitSafe(
   ctx: StepContext,
   workspace: string,
+  // Caller must independently prove these unborn checkout boundaries at submission
+  // and exclude the same paths from staging. Never exempt tracked baseline changes.
+  excludedUntrackedRepositories: readonly string[] = [],
 ): Promise<void> {
   const policy = await loadDependencyPolicy(ctx, workspace);
   const status = await gitRun(workspace, [
@@ -258,6 +261,12 @@ export async function assertDependencyCommitSafe(
   const denied = [
     ...parsePorcelainZ(status.stdout)
       .filter((entry) => entry.x === '?')
+      .filter(
+        (entry) =>
+          entry.y !== '?' ||
+          !entry.path.endsWith('/') ||
+          !excludedUntrackedRepositories.includes(entry.path),
+      )
       .map((entry) => entry.path),
     ...changes.stdout.split('\0'),
   ].filter((file): file is string => !!file && upstreamKind(file, policy) !== null);

@@ -25,6 +25,15 @@ so a file turned into a link does not read as a content change.
 The snapshot is against HEAD, because this message describes the pending commit rather than
 the whole task's changes already committed by DAG execution or prior fix rounds.
 
+An untracked nested repository without a checked-out commit is listed separately at gate 3.
+The form explains that it can be committed inside, removed, or left out; the outer commit
+stages the remaining changes and excludes that checkout. Apply rechecks its HEAD when the
+form is submitted, since it may have gained a commit while the gate was waiting. This proof
+precedes the dependency guard: only those exact untracked checkout boundaries are omitted
+from its proposed deliverables, with tracked changes against the fork point still checked
+in full. A nested repository with a commit keeps Git's existing gitlink behavior and ownership
+decision.
+
 The invocation asks for a JSON `commitMessage` containing a subject and optional body and
 instructs the agent to answer from the supplied changes without using tools. `disableTools`
 is a best-effort optimization: adapters that support it disable built-in tools; the others
