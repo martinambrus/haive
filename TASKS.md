@@ -973,7 +973,7 @@ From the T417 review (2026-10-25), follow-up to T417 item 6. Minor, hardening. V
 
 ### T430 · FNF[unscoped-commits] · the knowledge-base and skill-sync commits take whatever else is staged
 
-status: open
+status: taken · owner: codex-run@DESKTOP-IUBG9OP · since: 2026-10-25T00:23Z · last: 2026-10-25T00:23Z
 From the T418 review (2026-10-25). PRE-EXISTING, minor. steps/workflow/_kb-commit.ts ~:67 and 11d-skill-sync.ts ~:519 commit the whole index (no pathspec), so anything a person staged in the task worktree (for example from the Terminal tab) lands in the "update knowledge base" or skill-sync commit. Fix: commit with the step's own pathspec (`--only`), as plan/snapshot-git.ts does.
 
 ### T431 · FNF[ide-container-lifecycle] · a running editor container is reused whatever its launch flags or image; a task editor that never got a socket is never idle-reaped (+1)
