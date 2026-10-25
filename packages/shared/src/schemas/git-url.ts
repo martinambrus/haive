@@ -206,6 +206,13 @@ export function gitRemoteIdentity(url: string): string {
   return redactGitUrl(url, true).split(/[?#]/)[0]!;
 }
 
+/** A response value that may be edited and saved as a Git remote. Valid SSH
+ *  addresses keep their login and spelling; malformed legacy values still use
+ *  conservative display redaction rather than transport's schemeless passthrough. */
+export function redactEditableGitUrl(url: string): string {
+  return isAllowedGitRemoteUrl(url) ? gitRemoteIdentity(url) : redactGitUrl(url);
+}
+
 /** Find the first letter-led scheme in one forward pass. Retrying a greedy
  *  scheme regex at every letter makes a long scheme-free word quadratic. */
 function findUrlScheme(

@@ -86,7 +86,12 @@ import {
   settingFileName,
 } from '@haive/shared/project-state';
 import { buildScopeTree } from '@haive/shared/scope-tree';
-import { credentialFitsGitRemote, parseScpLikeGitUrl, redactGitUrl } from '@haive/shared/schemas';
+import {
+  credentialFitsGitRemote,
+  parseScpLikeGitUrl,
+  redactEditableGitUrl,
+  redactGitUrl,
+} from '@haive/shared/schemas';
 import {
   KB_DIR,
   LEARNINGS_DIR,
@@ -330,7 +335,7 @@ repoRoutes.get('/', async (c) => {
         markers !== null && !onboarded && root ? !(await hasOnboardableSource(root)) : false;
       return {
         ...rest,
-        remoteUrl: repo.remoteUrl ? redactGitUrl(repo.remoteUrl) : null,
+        remoteUrl: repo.remoteUrl ? redactEditableGitUrl(repo.remoteUrl) : null,
         topLevelPaths: deriveTopLevelPaths(fileTree),
         openTaskCount: counts.open,
         activeTaskCount: counts.active,
@@ -870,7 +875,10 @@ repoRoutes.get('/:id', async (c) => {
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
   return c.json({
-    repository: { ...repo, remoteUrl: repo.remoteUrl ? redactGitUrl(repo.remoteUrl) : null },
+    repository: {
+      ...repo,
+      remoteUrl: repo.remoteUrl ? redactEditableGitUrl(repo.remoteUrl) : null,
+    },
   });
 });
 

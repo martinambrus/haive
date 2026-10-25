@@ -1,6 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { expect, it } from 'vitest';
-import { gitRemoteUrlSchema, redactGitText, redactGitUrl } from '../src/schemas/git-url.js';
+import {
+  gitRemoteUrlSchema,
+  redactEditableGitUrl,
+  redactGitText,
+  redactGitUrl,
+} from '../src/schemas/git-url.js';
 
 it.each([
   'https://fixture-user:fixture-password@example.test/repo.git',
@@ -164,3 +169,13 @@ it.each(['123://example.test/repo', '+.-://example.test/repo'])(
   'does not treat a letter-free prefix as a scheme: %s',
   (input) => expect(redactGitText(input)).toBe(input),
 );
+
+it.each([
+  ['git@gitserver:repo?fixture-query#fixture-fragment', 'git@gitserver:repo'],
+  ['git@[::1]:repo', '[::1]:repo'],
+  ['git:fixture-password@example.test:repo', 'example.test:repo'],
+  ['https://user:fixture-password@bad[host/repo', 'https:'],
+  ['file://user:fixture-password@example.test/repo', 'file:'],
+])('keeps editable response policy safe for legacy remote case %#', (raw, expected) => {
+  expect(redactEditableGitUrl(raw) === expected).toBe(true);
+});

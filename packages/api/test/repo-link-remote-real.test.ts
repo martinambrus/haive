@@ -43,7 +43,16 @@ async function setup(nested = false) {
     localPath: nested ? `${root}/nested` : root,
     remoteUrl: null,
   });
-  h.db = fake.db;
+  // The list's unrelated aggregate reads have no task/artifact rows in this fixture.
+  const noRows = () => {
+    const query: Record<string, unknown> = {};
+    for (const method of ['from', 'where', 'groupBy', 'orderBy', 'limit'])
+      query[method] = () => query;
+    query.then = (ok: (rows: unknown[]) => unknown, bad: (err: unknown) => unknown) =>
+      Promise.resolve([]).then(ok, bad);
+    return query;
+  };
+  h.db = { ...fake.db, select: noRows };
   const app = new Hono<AppEnv>();
   app.route('/', repoRoutes);
   app.onError(errorHandler);
@@ -53,8 +62,73 @@ async function setup(nested = false) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ remoteUrl: 'https://new.test/r' }),
     });
-  return { root, fake, link };
+  return { root, fake, link, app };
 }
+
+it.each(['list', 'detail'])(
+  'preserves editable remote identity through the %s response and an unchanged save',
+  async (source) => {
+    const { root, fake, app } = await setup();
+    for (const [stored, expected] of [
+      ['git@github.com:owner/repo', 'git@github.com:owner/repo'],
+      ['git@gitserver:repo', 'git@gitserver:repo'],
+      ['ssh://git@gitserver:22/repo', 'ssh://git@gitserver:22/repo'],
+      [
+        'ssh://git:fixture-password@EXAMPLE.test:22/repo?fixture-query#fixture-fragment',
+        'ssh://git@EXAMPLE.test:22/repo',
+      ],
+      [
+        'https://user:fixture-password@EXAMPLE.test:443/repo?fixture-query#fixture-fragment',
+        'https://EXAMPLE.test:443/repo',
+      ],
+      ['http://user:fixture-password@EXAMPLE.test:80/repo', 'http://EXAMPLE.test:80/repo'],
+    ]) {
+      fake.patch(schema.repositories, REPO, { remoteUrl: stored });
+      const res = await app.request(source === 'list' ? '/' : `/${REPO}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        repositories?: { remoteUrl: string }[];
+        repository?: { remoteUrl: string };
+      };
+      const currentUrl =
+        source === 'list' ? body.repositories?.[0]?.remoteUrl : body.repository?.remoteUrl;
+      expect(currentUrl === expected).toBe(true);
+      if (typeof currentUrl !== 'string') throw new Error('Missing editable remote URL');
+      // LinkOriginDialog seeds its controlled input from currentUrl and posts the
+      // trimmed value. Exercise that unchanged save through the real route and Git.
+      const saved = await app.request(`/${REPO}/remote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ remoteUrl: currentUrl.trim() }),
+      });
+      expect(saved.status).toBe(200);
+      expect(fake.rows(schema.repositories)[0]!.remoteUrl === expected).toBe(true);
+      expect((await git(root, ['remote', 'get-url', 'origin'])) === expected).toBe(true);
+    }
+  },
+);
+
+it.each(['list', 'detail'])(
+  'keeps malformed legacy userinfo out of the %s response',
+  async (source) => {
+    const { fake, app } = await setup();
+    for (const stored of [
+      'git:fixture-password@example.test:repo',
+      'ftp://user:fixture-password@example.test/repo?fixture-query#fixture-fragment',
+      'https://user:fixture-password@bad[host/repo?fixture-query#fixture-fragment',
+      'file://user:fixture-password@example.test/repo',
+    ]) {
+      fake.patch(schema.repositories, REPO, { remoteUrl: stored });
+      const res = await app.request(source === 'list' ? '/' : `/${REPO}`);
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      for (const secret of ['fixture-password', 'fixture-query', 'fixture-fragment'])
+        expect(text.includes(secret)).toBe(false);
+      // Reads sanitize the response, not the original stored configuration.
+      expect(fake.rows(schema.repositories)[0]!.remoteUrl === stored).toBe(true);
+    }
+  },
+);
 it('relink clears planted push URLs and extra fetch URLs in real git', async () => {
   const { root, link, fake } = await setup();
   await git(root, ['config', '--add', 'remote.origin.url', 'https://extra.test/r']);

@@ -29,6 +29,13 @@ values from saved approvals while keeping that authority spelling; display label
 `redactGitUrl`'s display policy. PR origin stamps and legacy poll fallbacks preserve the same
 sanitized identity.
 
+Repository list/detail `remoteUrl` values and the plan snapshot's `originUrl` seed the origin
+editor, so they use `redactEditableGitUrl`: an allowed remote keeps its non-secret SSH login,
+explicit port and original address shape while dropping passwords, HTTP userinfo, query and
+fragment. A malformed or unsupported legacy value uses conservative display redaction instead
+of the transport helper's schemeless passthrough. Strict display redaction still governs labels
+and bundle summaries; the bundle composer creates a new URL rather than editing a summary's URL.
+
 `redactGitText` scans URL authorities once instead of treating each quote or whitespace as a
 reliable cut. Scheme recognition uses a forward character scan at both the next-URL and ambiguous
 authority lookahead sites; retrying an unanchored greedy scheme regex made scheme-free words
