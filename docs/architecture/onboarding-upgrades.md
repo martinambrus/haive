@@ -484,7 +484,11 @@ tooling (the test `holdImportedMcpServerLists` uses) and no row of the unit exis
 an answered question is never asked again. The legacy `tooling.json` import takes the blob's
 `rtkEnabled` only under the same condition. `persistDetection` calls it after the project-state sync and the fallback mirror import, which supply
 the tooling and the choice it weighs, and
-the boot entry `raiseRtkQuestions` (convergent) calls it for every repository; each writes one
+the boot entry `raiseRtkQuestions` (convergent) calls it for every repository. Every successful
+project-state sync runs the same lifecycle through `raiseRtkQuestionLocked` inside its import
+transaction, after the tooling, choice and conflict rows have moved: adopting an RTK-on choice
+closes a pending question immediately, as adopting RTK-off already does, and imported tooling
+without a recorded choice can raise one without waiting for a boot. Each writes one
 pending row of unit `settings/rtk-enabled.json` (`RTK_ENABLED_UNIT`; base and local `{"v": true}`,
 incoming `{"v": false}`) under `lockProjectState`, `ON CONFLICT DO NOTHING` on the pending index, and
 there is no migration. The unit is no render unit: the writer overlay, the sync's converge pass and
@@ -579,9 +583,10 @@ row clean and a mutation that lands during a write stays dirty. The 10 s plan-mi
 sweep in its own try): it skips a checkout with `MERGE_HEAD` or `REBASE_HEAD`, and looks again once it
 holds the project-state lock, for the sync and for the write (`refuseDuringGitOperation`), since a
 merge can open while it waits there: the sync then answers `held`, imports nothing it read and leaves
-`last_error` alone, as the first check does, and the write refuses. The sync also reads the checkout
-again under the lock and answers `superseded` when the two reads differ, so a merge that opened and
-was given up while it waited cannot pass its intermediate record in. It runs the sync first, writes
+`last_error` alone, as the first check does, and the write refuses. Every sync producer also reads the checkout
+again under the lock and answers `superseded` when the two reads differ, including a clone scan
+and the re-sync after a moved answer, which do not request the optional git-operation guard. A
+merge that opened and was given up while it waited cannot pass its intermediate record in. It runs the sync first, writes
 nothing and keeps the row dirty with `last_error` when the sync was refused (a record in a
 newer format included), deferred (a live onboarding task) or superseded, and otherwise writes with
 `expectedColumns` set to the column it read, a column that moved waiting for the next tick. It
@@ -612,7 +617,9 @@ instead of being overwritten. Because git matches hunk context only, the entry t
 compared with HEAD's and undone unless it is exactly that; an intent-to-add entry, which a diff cannot
 show, refuses the move by name. Anything that moved sends the set-aside round again, and a path still
 moving after `MOVE_ATTEMPTS` refuses it. Any directory the removals leave empty under
-`.haive-data/state` goes too, since an empty one reads as a record with no format file. A removed
+`.haive-data/state` goes too. The reader treats a tree holding no files (empty subdirectories
+included) as absent, so the sweep can rebuild it; any file still requires a valid format file
+and the usual complete, bounded record. A link or refused read is never treated as an empty tree. A removed
 file and each directory its removal empties keep the owner and mode captured with them, which
 whatever re-creates them, the put-back or the writer during the re-sync after a move, gets back while
 the writer still owns it (`restoreKeptMetadata`, best-effort, as fs-safe's inherited owner is); a group
@@ -731,7 +738,11 @@ A value is normalised before it merges, by the rules of the routes that store it
 set, `normalizeReviewDimensionIds`, trimmed non-empty versions; the environment loses the `__`
 prompt-only fields and gets `ONBOARDING_ENVIRONMENT_SCHEMA_VERSION` back in the column). A value the
 column could not hold is refused for that setting alone: this install's value stands, the base keeps
-the old one, the sync logs it and the next write replaces the file. A column the merge left as it was
+the old one, the sync logs it and the next write replaces the file where this install owns
+the setting. An invalid `rtk-enabled.json` on an install that recorded no choice is left alone:
+its writer owns no RTK file and cannot replace it with a default nobody chose. The repeated
+warning and dirty mark remain until a valid file or a recorded choice supplies an owned value;
+automatically repairing that case still needs a user decision about ownership. A column the merge left as it was
 is not rewritten, so a legacy list in another order stays as it is. The checkout is read as _absent_
 for a setting that is never unset (`rtk-enabled`, a NOT NULL column, and `scope-exclude-globs`, NULL
 meaning "never chosen") and for the environment, so a missing file leaves the column alone and marks

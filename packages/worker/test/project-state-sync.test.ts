@@ -35,6 +35,8 @@ import {
   type ProjectRender,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
+import { refreshProjectState } from '../src/project-state/refresh.js';
+import { resolveRenderContext } from '../src/step-engine/_upgrade-render.js';
 import { writeProjectStateColumn, writeProjectStateRecord } from '../src/project-state/write.js';
 import {
   rebaseProjectStateOnCheckout,
@@ -893,7 +895,8 @@ describe('syncProjectStateFromCheckout: a conflict is kept as a row until somebo
   });
 
   it('leaves a row of another repository, and a pending row of another unit kind, as they are', async () => {
-    const s = await setup({ column: column(ours), sync: { base: baseOf(BASE) } });
+    const s = await setup({ column: column(ours, false), sync: { base: baseOf(BASE) } });
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
     const other = s.fake.insert(schema.projectStateConflicts, {
       repositoryId: OTHER,
       unit: FRAMEWORK,
@@ -1325,6 +1328,22 @@ describe('syncProjectStateFromCheckout: a repository with a live onboarding or u
 });
 
 describe('syncProjectStateFromCheckout: a base that moved since the files were read', () => {
+  it('refuses a checkout that moved while waiting, even without a git-operation guard', async () => {
+    const s = await setup(synced(BASE));
+    await s.putRecord(record(TEAM));
+    s.hook.onLock = () => s.putRecord(record(LATER));
+
+    const { outcome, trace } = await s.run();
+
+    expect(outcome).toBe('superseded');
+    expect(trace.filter(isWrite)).toEqual([]);
+    expect(json(s.columnOf())).toEqual(column(BASE));
+    expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseOf(BASE));
+    expect(
+      JSON.parse(await readFile(join(s.root, STATE_DIR, 'project/render.json'), 'utf8')),
+    ).toEqual(LATER);
+  });
+
   it('reports superseded and writes nothing when a writer recorded a newer base', async () => {
     const s = await setup(synced(BASE));
     await s.putRecord(record(TEAM));
@@ -1441,6 +1460,19 @@ describe('syncProjectStateFromCheckout: nothing to import', () => {
   const NOTHING: [string, (s: Setup) => Promise<void>][] = [
     ['no state directory and no .haive-data', async () => {}],
     [
+      'an empty state directory',
+      async (s) => {
+        await mkdir(join(s.root, STATE_DIR), { recursive: true });
+      },
+    ],
+    [
+      'only empty state subdirectories',
+      async (s) => {
+        await mkdir(join(s.root, STATE_DIR, 'project'), { recursive: true });
+        await mkdir(join(s.root, STATE_DIR, 'settings'), { recursive: true });
+      },
+    ],
+    [
       'only the legacy mirror files',
       async (s) => {
         for (const name of ['environment', 'tooling', 'exclusions', 'plan']) {
@@ -1489,6 +1521,32 @@ describe('syncProjectStateFromCheckout: nothing to import', () => {
       expect(trace.filter(isWrite)).toEqual([]);
       expect(s.dump()).toEqual(before);
     });
+  });
+});
+
+describe('refreshProjectState: an empty state tree', () => {
+  it('rebuilds the record instead of leaving a read error on the dirty outbox row', async () => {
+    const s = await setup(synced(BASE));
+    s.fake.patch(schema.repositories, REPO, { storagePath: s.root });
+    s.fake.insert(schema.projectStateOutbox, {
+      repositoryId: REPO,
+      revision: 1,
+      writtenRevision: 0,
+    });
+    await mkdir(join(s.root, STATE_DIR, 'settings'), { recursive: true });
+
+    expect(await refreshProjectState(s.fake.db as unknown as Database, REPO)).toBe(true);
+
+    expect(
+      JSON.parse(await readFile(join(s.root, STATE_DIR, 'project/render.json'), 'utf8')),
+    ).toEqual(BASE);
+    expect(JSON.parse(await readFile(join(s.root, STATE_DIR, 'format.json'), 'utf8'))).toEqual(
+      JSON.parse(formatText()),
+    );
+    expect(s.fake.rows(schema.projectStateOutbox)).toMatchObject([
+      { revision: 1, lastError: null },
+    ]);
+    expect(s.pending()).toEqual([]);
   });
 });
 
@@ -1965,7 +2023,7 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
     expect(s.conflictRows().map((r) => r.resolution)).toEqual(['converged']);
   });
 
-  it('never converges the RTK question itself: a sync that finds RTK on leaves it pending', async () => {
+  it('converges an RTK question once the install has recorded a choice', async () => {
     const base = syncBase({ 'rtk-enabled': true });
     const s = await setup({ column: column(BASE), sync: { base } });
     s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
@@ -1980,7 +2038,8 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
 
     await s.run();
 
-    expect(s.pending().map((r) => r.unit)).toEqual(['settings/rtk-enabled.json']);
+    expect(s.pending()).toEqual([]);
+    expect(s.conflictRows().map((r) => r.resolution)).toEqual(['converged']);
   });
 
   it('keeps a settings file of a name this release does not know out of the base', async () => {
@@ -1990,6 +2049,112 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
     await s.run();
 
     expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({ 'rtk-version': '0.1.0' });
+  });
+});
+
+describe('syncProjectStateFromCheckout: invalid RTK ownership', () => {
+  it.each([false, true])(
+    'repairs invalid RTK from the recorded choice %s through the writer',
+    async (chosen) => {
+      const s = await setup({
+        column: column(BASE, true),
+        sync: { base: syncBase({ 'rtk-enabled': chosen }) },
+      });
+      s.fake.patch(schema.repositories, REPO, { rtkEnabled: chosen });
+      await s.putRecord(withSettings({ 'rtk-enabled': 'yes' }));
+      await s.run();
+      expect(dirtyMarks(s)).toHaveLength(1);
+      await s.write({ ...contextA(), rtkEnabled: chosen }, true);
+      expect(
+        JSON.parse(await readFile(join(s.root, STATE_DIR, 'settings/rtk-enabled.json'), 'utf8')),
+      ).toBe(chosen);
+      expect(repoRow(s).rtkEnabled).toBe(chosen);
+      expect(s.pending()).toEqual([]);
+    },
+  );
+
+  it('owns no RTK file to repair before a choice was recorded', async () => {
+    const s = await setup({ column: column(BASE, false), sync: { base: baseOf(BASE) } });
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+    await s.putRecord(withSettings({ 'rtk-enabled': 'yes' }));
+    await s.run();
+    await s.write(contextA(), false);
+    expect(
+      JSON.parse(await readFile(join(s.root, STATE_DIR, 'settings/rtk-enabled.json'), 'utf8')),
+    ).toBe('yes');
+    expect((json(s.columnOf()) as Json).rtkChoiceRecorded).toBe(false);
+    expect(repoRow(s).rtkEnabled).toBe(true);
+    expect(s.pending()).toEqual([]);
+    await s.run();
+    expect(dirtyMarks(s)).toHaveLength(1);
+  });
+});
+
+describe('syncProjectStateFromCheckout: RTK question lifecycle', () => {
+  it('closes a pending question when it adopts the teammate’s RTK-on choice', async () => {
+    const s = await setup({ column: column(BASE, false), sync: { base: baseOf(BASE) } });
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+    s.fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit: 'settings/rtk-enabled.json',
+      base: { v: true },
+      local: { v: true },
+      incoming: { v: false },
+    });
+    await s.putRecord(withSettings({ 'rtk-enabled': true }));
+
+    await s.run();
+
+    expect((json(s.columnOf()) as Json).rtkChoiceRecorded).toBe(true);
+    expect(repoRow(s).rtkEnabled).toBe(true);
+    expect(s.pending()).toEqual([]);
+    expect(s.conflictRows().map((r) => r.resolution)).toEqual(['converged']);
+  });
+
+  it('rolls back choice adoption and question convergence when the transaction cannot commit', async () => {
+    const s = await setup({ column: column(BASE, false), sync: { base: baseOf(BASE) } });
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+    s.fake.insert(schema.projectStateConflicts, {
+      repositoryId: REPO,
+      unit: 'settings/rtk-enabled.json',
+      base: { v: true },
+      local: { v: true },
+      incoming: { v: false },
+    });
+    await s.putRecord(withSettings({ 'rtk-enabled': true }));
+    const before = s.dump();
+    s.hook.onCommit = async () => {
+      expect((json(s.columnOf()) as Json).rtkChoiceRecorded).toBe(true);
+      expect(s.pending()).toEqual([]);
+      throw new Error('commit refused');
+    };
+
+    await expect(s.run()).rejects.toThrow('commit refused');
+
+    expect(s.dump()).toEqual(before);
+    expect(s.pending()).toHaveLength(1);
+  });
+
+  it('raises the existing question after importing tooling that carries an unchosen RTK-off', async () => {
+    const s = await setup({ column: column(BASE, false), sync: { base: baseOf(BASE) } });
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+    await s.putRecord(withSettings({ 'onboarding-tooling': { rtkEnabled: false } }));
+
+    await s.run();
+
+    expect((json(s.columnOf()) as Json).rtkChoiceRecorded).toBe(false);
+    expect(repoRow(s).rtkEnabled).toBe(true);
+    expect(s.pending()).toMatchObject([
+      {
+        unit: 'settings/rtk-enabled.json',
+        base: { v: true },
+        local: { v: true },
+        incoming: { v: false },
+      },
+    ]);
+    const [row] = s.pending();
+    await s.run();
+    expect(s.pending().map((r) => r.id)).toEqual([row!.id]);
   });
 });
 
@@ -2435,7 +2600,7 @@ describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
     },
   );
 
-  it('reads the files before the transaction opens and does not read them again inside it', async () => {
+  it('rejects a checkout changed synchronously while it waited for the transaction lock', async () => {
     const s = await setup(synced(BASE));
     await s.putRecord(record(TEAM));
     // The checkout changes while the sync waits for the lock.
@@ -2445,8 +2610,8 @@ describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
 
     const { outcome } = await s.run();
 
-    expect(outcome).toBe('applied');
-    expect(json(s.columnOf())).toEqual({ ...TEAM, ...PER_INSTALL, rtkChoiceRecorded: true });
+    expect(outcome).toBe('superseded');
+    expect(json(s.columnOf())).toEqual(column(BASE));
   });
 
   it('reads the column under the lock: a per-install field a writer changed after the files were read survives', async () => {
@@ -2771,6 +2936,27 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
 
     const [row] = live(s);
     expect(Object.hasOwn(row!.formValuesSnapshot as object, 'rtkEnabled')).toBe(recorded);
+  });
+
+  it('uses the live RTK choice even when an import marker’s portable column synthesized off', async () => {
+    const s = await setup({ column: { ...BASE, rtkChoiceRecorded: true } });
+    s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+    await s.putRecord(withClaims(claim(AGENT, H('4'))));
+    await s.run();
+    const [marker] = live(s);
+    expect((marker!.formValuesSnapshot as Json).rtkEnabled).toBe(false);
+    // A failed record writer can clear the column; the marker then becomes the snapshot fallback.
+    s.patchColumn(null);
+
+    const resolved = await resolveRenderContext(s.fake.db as unknown as Database, {
+      repositoryId: REPO,
+      userId: USER,
+      liveRows: live(s) as never,
+      logger: { warn: () => undefined },
+    });
+
+    expect(resolved?.rtkLive).toBe(true);
+    expect(resolved?.renderCtx.rtkEnabled).toBe(true);
   });
 
   it('keeps no bytes for a marker whose path holds other bytes', async () => {

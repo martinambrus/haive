@@ -60,6 +60,7 @@ import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js
 import { claimDiskHash } from './claim-disk.js';
 import { insertImportMarker, loadMarkerContext } from './import-marker.js';
 import { toolingColumnFromUnit } from './tooling-import.js';
+import { raiseRtkQuestionLocked } from './rtk-conflict.js';
 import {
   loadPendingRenderConflicts,
   loadRecordClaims,
@@ -182,7 +183,7 @@ async function readCheckout(repoPath: string): Promise<Checkout> {
 }
 
 function checkoutOf(files: Map<string, string> | null): Checkout {
-  if (files === null) return { kind: 'absent' };
+  if (files === null || files.size === 0) return { kind: 'absent' };
   const parsed = parseProjectState(files);
   if (!parsed.ok) return notRead(listed(parsed.problems));
   const { render, claims, bundles, settings, environment } = parsed.record;
@@ -588,7 +589,7 @@ export async function syncProjectStateFromCheckout(
   }: {
     repositoryId: string;
     repoPath: string;
-    /** An open merge or rebase holds the read, and so does a checkout that changed since it was read. */
+    /** An open merge or rebase holds the read. A checkout that changed since its first read always holds it. */
     refuseDuringGitOperation?: boolean;
   },
 ): Promise<ProjectStateSyncResult> {
@@ -606,7 +607,11 @@ export async function syncProjectStateFromCheckout(
     await lockProjectState(tx, repositoryId);
     if (refuseDuringGitOperation) {
       if (await gitOperationInProgress(repoPath)) return { outcome: 'held' };
-      if (!sameValue(checkout, await readCheckout(repoPath))) return { outcome: 'superseded' };
+    }
+    // Every producer must reject an intermediate checkout, including clone scans and moved answers
+    // that do not request the git-operation guard. The database base alone cannot see a file move.
+    if (checkout.kind === 'record' && !sameValue(checkout, await readCheckout(repoPath))) {
+      return { outcome: 'superseded' };
     }
     // The row lock first: an upgrade's insert holds it, so the live-task read below sees that task.
     const [repo] = await tx
@@ -796,6 +801,9 @@ export async function syncProjectStateFromCheckout(
     }
 
     await recordConflicts(tx, repositoryId, [...merge.conflicts, ...portable.conflicts]);
+    // The imported tooling and choice are now visible in this transaction. Keep the question's
+    // lifecycle identical to clone scans and boot, without nesting another lock/transaction.
+    await raiseRtkQuestionLocked(tx, repositoryId);
 
     const lastError =
       renderConflicts.length === 0
