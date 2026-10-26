@@ -89,7 +89,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 # Open tasks
 
-Continuation boundary (user, 2026-10-25): finish only the currently taken T412, T413, T416, T266 and T303, including required review, merge and main CI, then PAUSE for weekly allowance. Do not claim further work until the user explicitly resumes. Remaining open tasks stay queued.
+PAUSED 2026-10-26T06:54Z per user: T412, T413, T416, T266 and T303 all finished, merged and verified on green main CI. This conversation completed 18 tasks; its synced checklist is 140 total, 40 done, 0 in progress and 100 open. Do not claim further work until the user explicitly resumes; remaining open tasks stay queued.
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
@@ -133,21 +133,6 @@ chore(haive) commit of dirty projections before the cleanup base push, 13, plan 
 
 status: open · kind: feature
 settings/review-watermarks.json, descendant wins via merge-base --is-ancestor; _external-drift drops .haive-data/state/** and plan files. Control: B re-reviews A's KB-reviewed commits today; empty after.
-
-### T266 · FNF[record-writer] · 04's set and record writes run unfenced (+5)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-26T06:37Z
-
-Codex progress 2026-10-26T06:37Z: ONLY remaining task before user-requested PAUSE; 39 done, 1 in progress, 100 open. PR #931 merged e25d26193 after exact-head 12 passing checks, clean automated and fresh independent reviews, and six resolved review threads. Main CI 40280294006 is running (5/8 passed); task completion waits for all eight. Migration 0213 applied and checksum verified; library rebuild and new exports verified; API/web 200 and worker ready. Merged worktree/local branch cleaned, evidence retained. T412/T416/T303/T413 completed; no further claims.
-
-All PRE-EXISTING. Items 4, 7, 8 moved to T310.
-
-1. 04's set and record writes run with no lock and no column fence.
-2. refreshProjectState (project-state/refresh.ts:87-93) does not re-check live onboarding/upgrade between sync and write; re-read the holding check under the same lock.
-3. Low: a crash mid-write leaves files ahead of the rolled-back DB; mark dirty before writing.
-4. Dead code: rebaseProjectStateOnCheckout + rebaseLocked (sync.ts ~797-841) have no caller; mention in the PR, delete only if the user asks.
-5. The state writer overwrites an on-disk record it never imported (write.ts:532-545); fix with B3.2's synced_hash (land with or before T117).
-6. Low: 12-post-onboarding.ts:345 stores the applicable set from 07's rtkEnabled; a toggle between 07 and 12 leaves it stale.
 
 ### T286 · FNF[root-work] · a task at the root after 01 was skipped escapes the fences (+3)
 
@@ -863,6 +848,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T266 — fence record writers and raw checkout imports; recover interrupted file mutations through durable bounded journals; live RTK applicability — PR #931 (e25d26193), 2026-10-26; main CI40280294006 all8 green. Migration0213 and libraries applied, runtime verified. Private recovery artifacts retained; automatic GC remains outside this change.
 
 - T413 — preserve literal/comment, language owner, JSX/TSX, Unicode, line-ending and Ruby section boundaries — PR #930 (01377885f), 2026-10-26; main CI40243774694 all8 green.
 
