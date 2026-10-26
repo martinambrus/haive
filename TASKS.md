@@ -89,7 +89,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 # Open tasks
 
-RESUMED 2026-10-26T08:34Z per user after allowance reset, using the updated codex-codex skill. The prior five-task batch is complete (18 tasks completed during this conversation before resuming). Continue eligible queued work with one implementation driver at a time; T117 is next now that T266 has landed. Preserve parked decisions and dependencies. Synced checklist: 140 total, 40 done, 1 in progress, 99 open.
+RESUMED 2026-10-26T08:34Z per user after allowance reset, using the updated codex-codex skill. The prior five-task batch and T117 are complete: 19 tasks completed during this conversation. Continue eligible queued work with one implementation driver at a time; T118 is active; T119 is being scoped. Preserve parked decisions and dependencies. Synced checklist: 140 total, 41 done, 2 in progress, 97 open.
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
@@ -99,25 +99,19 @@ All PRE-EXISTING.
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
-### T117 · B3.2 · catch checkout moves Haive did not make (+5)
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T08:34Z · last: 2026-10-26T08:34Z · kind: feature (designed; decisions D13-D16 taken)
-Full design: .claude/tmp/track-b/b3/b32/analysis/{detect,backstops}.md and the B3 ledger (2026-10-15).
-
-- D13 detached HEAD holds (no import, no stamp). D14 import a record on a branch other than repositories.branch. D15 host-folder pulls stay a Refresh. D16 kill switch PROJECT_STATE_SYNC_ENABLED default ON.
-- Detect: nullable project_state_sync.synced_hash (next free migration number) = projectStateHash over what readCheckout reads (helpers in shared project-state/hash.ts); watchCheckout per repo from a 60 s scheduler on the plan-mirror queue; deduplicated SYNC_CHECKOUT job fired from GET upgrade-status, GET tooling-config, GET plan overview.
-- Six watermark rules and backstop items 1-6, controls W1-W8: see the analysis files.
-- Order: T266 item 6 lands with it or before.
-
 ### T118 · B4.1 · repository CLI set is a union
 
-status: open · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T11:32Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
+
+Codex progress 2026-10-26T11:32Z: full workspace tests pass all12 tasks, including worker14253 passed/4 expected failures/630 opt-in skips; types12/12, actual two-install156/156 and recovery/writer99/99 also pass on the recorded frozen source. Required blank INIT record commit, foreground snapshot fences and validated-base CLI deletion controls are included. Two confirmed legacy cases remain before the checked commit: preserve actually recorded zero-provider Claude fallback separately from an explicit empty membership, and skip snapshot membership absence while honoring recorded[]. Driver is adding bounded internal context/snapshot compatibility support; portable record format unchanged, no new provider membership or migration0215. Parent docs, fresh independent review, actual tooling browser acceptance and PR gates still pending. One implementation driver, serial test lock, no T118 dev changes.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
-status: open · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T12:04Z · last: 2026-10-26T12:04Z · kind: feature (user decision taken)
 repositories.agent_rules_override + settings/agent-rules.md + tooling editor; buildRepoCliRulesBlock for 07/12/01/api. Control: two users with different personal rules are quiet and byte-identical after.
+
+Codex progress 2026-10-26T12:04Z: parent scoping and preparing a bounded brief while T118 completes its frozen full run. One implementation driver remains T118; T119 implementation waits for that slot and a checked predecessor. Preserve existing mandatory dispatch rules and repository-data guards; target only the approved repository-level rules block, portable override and tooling editor.
 
 ### T120 · B5.1 · the Haive data panel
 
@@ -848,6 +842,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T117 — observe external named checkout and record changes safely — PR #933 (46fe58b2), 2026-10-26; exact-head review/all12 CI clean, main CI40310628973 all8 + CodeQL green, dev0214/libs/API/web/worker/60s observer verified.
 
 - T266 — fence record writers and raw checkout imports; recover interrupted file mutations through durable bounded journals; live RTK applicability — PR #931 (e25d26193), 2026-10-26; main CI40280294006 all8 green. Migration0213 and libraries applied, runtime verified. Private recovery artifacts retained; automatic GC remains outside this change.
 
