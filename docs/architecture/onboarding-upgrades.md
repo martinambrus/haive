@@ -447,6 +447,9 @@ onboarding/upgrade holders or a journal, and marks a real change dirty in that t
 no schema migration. Ordinary planning, writer admission and sync also complete recorded legacy
 membership under their existing exact column/task/reset guards, so a held boot repair does not
 require another worker restart after the task completes.
+When neither the maintained context nor valid snapshot history records membership, a validated
+caller snapshot can complete it from its recorded metadata. Current/history precedence, including
+explicit empty sets, remains authoritative; the writer does not query today's enabled providers.
 
 Old onboarding also wrote a Claude-format agent fallback when no provider had an agent directory,
 including Amp-only and zero-provider contexts. The internal `legacyAgentFallback` context/snapshot
