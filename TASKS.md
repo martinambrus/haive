@@ -101,10 +101,10 @@ All PRE-EXISTING.
 
 ### T117 · B3.2 · catch checkout moves Haive did not make (+5)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T08:34Z · last: 2026-10-26T08:55Z · kind: feature (designed; decisions D13-D16 taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T08:34Z · last: 2026-10-26T10:05Z · kind: feature (designed; decisions D13-D16 taken)
 Full design: .claude/tmp/track-b/b3/b32/analysis/{detect,backstops}.md and the B3 ledger (2026-10-15).
 
-Codex progress 2026-10-26T08:55Z: active implementation in `feat/t117-checkout-watch`; 15 actual PostgreSQL/Git controls pass, remaining checks and reviews pending. Original detailed notes exist only on ACTIVIT21; reconstructed acceptance uses committed `docs/plans/two-install-project-sync.md`, D13-D16 and current contracts. T266 already supplied raw synced_hash and recovery; new guarded 0214 adds nullable synced_head. Current GET-must-not-start-work rule supersedes the old GET enqueue detail: authenticated origin-checked POST supplies page hints. Independent actual parent-checkout borrowing probe found a gap; own-root guard added, final proof pending. Dedicated PG/Redis fixtures; no dev data or provider calls.
+Codex progress 2026-10-26T10:05Z: PR #933 HEAD6cd64db; fresh independent review PASS after two late-check corrections, 99 real PG/Redis controls, 336 affected unit tests, types/format pass. Parent reproduced six original failures, passed all seven corrected races, and verified real Next tooling/list-banner/plan page -> authenticated POST -> worker -> PostgreSQL with stable completed jobs and GET/auth/origin/detached/off controls. Remote review and exact-head CI running; merge/main CI pending. Detailed original notes remain unavailable; committed plan+D13-D16/current contracts were used. No dev data/provider calls.
 
 - D13 detached HEAD holds (no import, no stamp). D14 import a record on a branch other than repositories.branch. D15 host-folder pulls stay a Refresh. D16 kill switch PROJECT_STATE_SYNC_ENABLED default ON.
 - Detect: nullable project_state_sync.synced_hash (next free migration number) = projectStateHash over what readCheckout reads (helpers in shared project-state/hash.ts); watchCheckout per repo from a 60 s scheduler on the plan-mirror queue; deduplicated SYNC_CHECKOUT job fired from GET upgrade-status, GET tooling-config, GET plan overview.
