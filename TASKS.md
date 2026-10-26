@@ -89,7 +89,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 # Open tasks
 
-RESUMED 2026-10-26T08:34Z per user after allowance reset, using the updated codex-codex skill. The prior five-task batch and T117 are complete: 19 tasks completed during this conversation. Continue eligible queued work with one implementation driver at a time; T118 is active. Preserve parked decisions and dependencies. Synced checklist: 140 total, 41 done, 1 in progress, 98 open.
+RESUMED 2026-10-26T08:34Z per user after allowance reset, using the updated codex-codex skill. The prior five-task batch and T117 are complete: 19 tasks completed during this conversation. Continue eligible queued work with one implementation driver at a time; T118 is active; T119 is being scoped. Preserve parked decisions and dependencies. Synced checklist: 140 total, 41 done, 2 in progress, 97 open.
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
@@ -108,8 +108,10 @@ Codex progress 2026-10-26T11:32Z: full workspace tests pass all12 tasks, includi
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
-status: open · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T12:04Z · last: 2026-10-26T12:04Z · kind: feature (user decision taken)
 repositories.agent_rules_override + settings/agent-rules.md + tooling editor; buildRepoCliRulesBlock for 07/12/01/api. Control: two users with different personal rules are quiet and byte-identical after.
+
+Codex progress 2026-10-26T12:04Z: parent scoping and preparing a bounded brief while T118 completes its frozen full run. One implementation driver remains T118; T119 implementation waits for that slot and a checked predecessor. Preserve existing mandatory dispatch rules and repository-data guards; target only the approved repository-level rules block, portable override and tooling editor.
 
 ### T120 · B5.1 · the Haive data panel
 
