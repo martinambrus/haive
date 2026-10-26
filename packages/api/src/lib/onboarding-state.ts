@@ -15,6 +15,7 @@ export { LIVE_TASK_STATUSES };
 
 export {
   checkOnboardingMarkers,
+  checkRepositoryOnboardingMarkers,
   hasArtifactsSinceReset,
   hasCompletedSinceReset,
   importedSinceReset,

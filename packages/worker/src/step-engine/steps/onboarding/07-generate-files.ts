@@ -869,11 +869,9 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
 
     await writeIfAllowed('.claude/workflow-config.json', workflowConfigJson(detected.framework));
 
-    // Write agents + index to every enabled CLI's native dir, using the
-    // format each CLI expects (markdown for claude/gemini/zai, TOML for
-    // codex). Fallback to a single `.claude/agents` markdown write when
-    // no enabled provider has a file-based agent directory (only Amp
-    // enabled) so the user still gets files — warn so they know why.
+    // Write agents + index to each maintained native destination. An explicit agent-less set
+    // (such as fresh Amp-only) writes none. Only older payloads without recorded membership
+    // retain the legacy Claude fallback.
     const targets =
       detected.cliTargets !== undefined
         ? detected.agentTargets

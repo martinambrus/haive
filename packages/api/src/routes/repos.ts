@@ -121,7 +121,7 @@ import {
 } from '../lib/cancel-task.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
 import {
-  checkOnboardingMarkers,
+  checkRepositoryOnboardingMarkers,
   LIVE_TASK_STATUSES,
   loadOnboardingTaskFacts,
   NO_ONBOARDING_TASKS,
@@ -351,6 +351,16 @@ repoRoutes.get('/', async (c) => {
     countsByRepo.set(row.repositoryId, entry);
   }
 
+  const markersByRepo = await checkRepositoryOnboardingMarkers(
+    db,
+    userId,
+    rows.flatMap((repo) => {
+      const root = repo.storagePath ?? repo.localPath;
+      return repo.status === 'ready' && root ? [{ id: repo.id, root }] : [];
+    }),
+    { verdictOnly: true },
+  );
+
   const repositories = await Promise.all(
     rows.map(async (repo) => {
       const counts = countsByRepo.get(repo.id) ?? { open: 0, active: 0 };
@@ -361,7 +371,7 @@ repoRoutes.get('/', async (c) => {
       // repos page. Only meaningful for ready repos (cloning/error have no tree);
       // the check is a few parallel stats per repo.
       const root = repo.storagePath ?? repo.localPath;
-      const markers = repo.status === 'ready' && root ? await checkOnboardingMarkers(root) : null;
+      const markers = markersByRepo.get(repo.id) ?? null;
       const verdict = markers
         ? resolveOnboardingVerdict({
             source: repo.source,
@@ -2744,7 +2754,9 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   const root = repo.storagePath ?? repo.localPath;
   if (!root) throw new HttpError(409, 'Repository has no resolvable path');
 
-  const { present, missing } = await checkOnboardingMarkers(root);
+  const { present, missing } = (
+    await checkRepositoryOnboardingMarkers(db, userId, [{ id, root }])
+  ).get(id)!;
   const facts =
     (await loadOnboardingTaskFacts(db, userId, [id], repo.source === 'blank' ? [id] : [])).get(
       id,
@@ -2815,7 +2827,7 @@ async function markRepositoryOnboarded(
   id: string,
   root: string,
 ): Promise<Response> {
-  const { missing } = await checkOnboardingMarkers(root);
+  const { missing } = (await checkRepositoryOnboardingMarkers(db, userId, [{ id, root }])).get(id)!;
   if (missing.length > 0) {
     throw new HttpError(
       409,
