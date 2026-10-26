@@ -225,9 +225,9 @@ function seed(cell: Cell, repoDir: string, column: unknown): void {
     [
       schema.taskSteps,
       cell.history === 'recorded'
-        ? [{ recorded: true }]
+        ? [{ detected: true, recorded: true }]
         : cell.history === 'unrecorded'
-          ? [{ recorded: false }]
+          ? [{ detected: true, recorded: false }]
           : [],
     ],
   ]);
@@ -546,7 +546,7 @@ describe('a switch a person made on this install counts as the team’s choice',
       seed(cellOf('none', recorded ? 'recorded' : 'unrecorded', true), dir, null);
       state.snapshotGroups = [];
       state.rows.set(schema.taskSteps, [
-        { recorded, enabledCliProviders: [{ name: 'claude-code' }] },
+        { detected: true, recorded, enabledCliProviders: [{ name: 'claude-code' }] },
       ]);
       if (switched) {
         state.repo = { ...(state.repo as Record<string, unknown>), rtkChoiceMadeAt: SWITCHED };
@@ -745,7 +745,7 @@ describe('the banner and the plan agree on the paths a template renders to', () 
           },
         ],
       ],
-      [schema.taskSteps, [{ recorded: true }]],
+      [schema.taskSteps, [{ detected: true, recorded: true }]],
     ]);
   }
 
@@ -869,7 +869,9 @@ describe('the banner and the plan agree on the paths a template renders to', () 
       applicable: [agent.templateId],
       rows: agentRows(),
     });
-    state.rows.set(schema.taskSteps, [{ recorded: true, agentTargets: CLAUDE_AGENTS }]);
+    state.rows.set(schema.taskSteps, [
+      { detected: true, recorded: true, agentTargets: CLAUDE_AGENTS },
+    ]);
     const got = await body();
     expect(got.changedTemplateIds).toEqual([agent.templateId]);
     expect(got.obsoleteTemplateIds).toEqual([agent.templateId]);

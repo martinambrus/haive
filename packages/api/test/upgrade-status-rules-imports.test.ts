@@ -651,9 +651,9 @@ describe('upgrade-status and the RTK settings files no row records', () => {
     state.repo = { ...state.repo, source: 'git' };
     state.rows.set(schema.onboardingArtifacts, []);
     state.rows.set(schema.tasks, [{ id: 'onboarding-1', metadata: null }]);
-    state.rows.set(schema.taskSteps, [{ recorded: true }]);
+    state.rows.set(schema.taskSteps, [{ detected: true, recorded: true }]);
     expect((await status()).rtkSettingsLeftovers).toEqual(['.claude/settings.json']);
-    state.rows.set(schema.taskSteps, [{ recorded: false }]);
+    state.rows.set(schema.taskSteps, [{ detected: true, recorded: false }]);
     expect((await status()).rtkSettingsLeftovers).toBeUndefined();
   });
 });

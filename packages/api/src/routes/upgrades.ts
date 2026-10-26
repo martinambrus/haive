@@ -201,6 +201,8 @@ async function loadHistoryDetect(
   if (!onboarding) return null;
   const [generate] = await db
     .select({
+      // A step row with SQL/JSON NULL output supplies no context to the worker resolver.
+      detected: sql<boolean>`coalesce(${schema.taskSteps.detectOutput} <> 'null'::jsonb, false)`,
       recorded: sql<boolean | null>`(${schema.taskSteps.detectOutput} -> 'rtkEnabled') is not null`,
       agentTargets: sql<unknown>`${schema.taskSteps.detectOutput} -> 'agentTargets'`,
       cliTargets: sql<unknown>`${schema.taskSteps.detectOutput} -> 'cliTargets'`,
@@ -216,7 +218,7 @@ async function loadHistoryDetect(
     )
     .limit(1);
   return {
-    detected: generate !== undefined,
+    detected: generate?.detected === true,
     rtkRecorded: generate?.recorded === true,
     agentTargets: generate?.agentTargets ?? null,
     cliTargets: generate?.cliTargets,

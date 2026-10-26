@@ -336,6 +336,41 @@ describe.skipIf(!url)('CLI addition availability through authenticated status', 
     expect(await persisted()).toEqual(before);
   });
 
+  it('offers no additions for a present step-07 row with NULL detect output', async () => {
+    await enableGemini();
+    await db
+      .update(schema.repositories)
+      .set({ renderContext: null })
+      .where(eq(schema.repositories.id, repositoryId));
+    const baseline = await status();
+    expect(baseline).toMatchObject({
+      isOnboarded: true,
+      hasUpgradeAvailable: false,
+      changedTemplateIds: [],
+    });
+    expect(baseline.installedTemplateSetHash).toBe(baseline.currentTemplateSetHash);
+    expect(baseline.cliAdditions).toBeUndefined();
+    await db.insert(schema.taskSteps).values({
+      taskId,
+      stepId: '07-generate-files',
+      stepIndex: 7,
+      title: 'Legacy generation without recorded detect output',
+      status: 'done',
+      detectOutput: null,
+    });
+    const before = await persisted();
+    const body = await status();
+    expect(await persisted()).toEqual(before);
+    expect(body.isOnboarded).toBe(true);
+    expect(body.changedTemplateIds).toEqual([]);
+    expect(body.installedTemplateSetHash).toBe(body.currentTemplateSetHash);
+    expect(body.missingRulesImports).toBeUndefined();
+    expect(body.rtkBlockLeftovers).toBeUndefined();
+    expect(body.rtkSettingsLeftovers).toBeUndefined();
+    expect(body.hasUpgradeAvailable).toBe(false);
+    expect(body.cliAdditions).toBeUndefined();
+  });
+
   it.each(['reset', 'live-onboarding'])(
     'keeps %s admission refusal despite additions',
     async (reason) => {
