@@ -533,11 +533,14 @@ status: open · was modular #195
 status: open · was modular #196
 DECIDED 2026-10-23: delete only that module's rows and show the counts in the confirmation.
 
-### T362 · FNF[new-task-reset-verdict] · after a failed reset the New Task page keeps the pre-reset verdict
+### T362 · FNF[new-task-reset-verdict] · after a failed reset the New Task page keeps the pre-reset verdict (+1)
 
 status: open · kind: design · was modular #203
-PRE-EXISTING. The reset route removes files before its database transaction (api repos.ts ~:2893, then ~:2935).
-Fix direction: after a failed reset, re-ask for the status without clearing the error, and keep Create disabled until the answer lands.
+
+1. PRE-EXISTING. The reset route removes files before its database transaction (api repos.ts ~:2893, then ~:2935).
+   Fix direction: after a failed reset, re-ask for the status without clearing the error, and keep Create disabled until the answer lands.
+
+2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
 ### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+14)
 
