@@ -89,7 +89,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 # Open tasks
 
-RESUMED 2026-10-26T08:34Z per user after allowance reset, using the updated codex-codex skill. The prior five-task batch is complete (18 tasks completed during this conversation before resuming). Continue eligible queued work with one implementation driver at a time; T117 is next now that T266 has landed. Preserve parked decisions and dependencies. Synced checklist: 140 total, 40 done, 1 in progress, 99 open.
+RESUMED 2026-10-26T08:34Z per user after allowance reset, using the updated codex-codex skill. The prior five-task batch is complete (18 tasks completed during this conversation before resuming). Continue eligible queued work with one implementation driver at a time; T117 is next now that T266 has landed. Preserve parked decisions and dependencies. Synced checklist: 140 total, 40 done, 2 in progress, 98 open.
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
@@ -113,8 +113,10 @@ Codex progress 2026-10-26T10:05Z: PR #933 HEAD6cd64db; fresh independent review 
 
 ### T118 · B4.1 · repository CLI set is a union
 
-status: open · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T10:05Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
+
+Codex continuation: one active implementation driver, based on reviewed T117 candidate6cd64db while PR #933 completes remote delivery. Keep its interface/watermark/recovery changes; no T118 PR until T117 is on main. Target the approved repository CLI union and explicit removal; parked unrelated design decisions stay queued.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
