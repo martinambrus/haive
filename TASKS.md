@@ -101,10 +101,10 @@ All PRE-EXISTING.
 
 ### T118 · B4.1 · repository CLI set is a union
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T11:32Z · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T12:49Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
 
-Codex progress 2026-10-26T11:32Z: full workspace tests pass all12 tasks, including worker14253 passed/4 expected failures/630 opt-in skips; types12/12, actual two-install156/156 and recovery/writer99/99 also pass on the recorded frozen source. Required blank INIT record commit, foreground snapshot fences and validated-base CLI deletion controls are included. Two confirmed legacy cases remain before the checked commit: preserve actually recorded zero-provider Claude fallback separately from an explicit empty membership, and skip snapshot membership absence while honoring recorded[]. Driver is adding bounded internal context/snapshot compatibility support; portable record format unchanged, no new provider membership or migration0215. Parent docs, fresh independent review, actual tooling browser acceptance and PR gates still pending. One implementation driver, serial test lock, no T118 dev changes.
+Codex progress 2026-10-26T12:49Z: PR #934 HEAD19104833 contains checked implementation3bce8bb3, main integration and docs. Baseline final workspace/types12/12, worker14258, API4968,99 recovery and156 two-install checks passed; parent independently passed the original helper regressions and156 smoke, with259 compiled JS files unchanged after rebuild. Fresh local review found deferred legacy membership (R1); bot found explicit empty skill targets falling back during dispatch/apply (R2). Parent replayed4 realPG failures and6 unit failures with3 positive controls on unchanged191; focused correction is active, no merge. CI full-export fixtures also need explicit synthetic CLI metadata in full/Drupal7 onboarding; counts and zero-token bypass remain. Browser acceptance waits for correction; fresh different review and new-head gates remain required. No migration0215 or broader scope.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
