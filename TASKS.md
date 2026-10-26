@@ -101,10 +101,10 @@ All PRE-EXISTING.
 
 ### T118 · B4.1 · repository CLI set is a union
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T17:00Z · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T17:35Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
 
-Codex progress 2026-10-26T17:00Z: PR #934 head33e0f36f correction5 passed fullworker14279/claims82/types12/format and parent10-control replay; fresh paired review found no defect in that correction. Exact-head automated review then found R6: intentional Amp-only no-agent output still fails unconditional completion markers. Parent and fresh reviewer independently confirm; original driver now writes unchanged-source regressions for shared/API list/status/manual/clone admission. Preserve live/reset/history/auth/link gates, required KB/config/skills and existing any-catalog category presence; suppress only recorded zero-destination categories, not require every mirror after CLI additions. Browser completion harness prepared, not run. New correction/review/bot/CI/merge/main/runtime still required. Counts unchanged; finish T118 then PAUSE, T119 queued.
+Codex progress 2026-10-26T17:35Z: PR #934 final head dbb00bbbe contains agent-less completion correction820238ab plus topic docs; six tested blobs unchanged. Final checks118shared/469API(6actualJWT-PG)/71worker/types12/formatPASS, stable receipts; parent independent final25/25PASS. Actual Next/card/API/PG browser passes explicitAmp and NULLcolumn/validsnapshotAmp with Create task, unknownlegacynegative still Onboard;375/1280 plus4screenshots inspected, noagentdirs, source stable, cleanup0errors/0runners/portsclosed. Prior33e all8CIgreen and earlier addition/removal/writer/recovery evidence carry only unchanged contracts. R6 replied/resolved after verified push; NEW fresh paired reviewer, exact-head automated review and CIrun40369584563 running. No merge yet. Finish T118 through merge/mainCI/runtime then PAUSE; T119 remains queued.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
