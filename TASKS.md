@@ -89,7 +89,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 # Open tasks
 
-FINISH THEN PAUSE per user 2026-10-26T13:52Z, using the updated codex-codex skill. Finish T118 through required review, merge and verification, update this board, then pause. T119 was scoped only and is returned to the queue with its prepared brief retained; start no new implementation. The prior five-task batch and T117 are complete: 19 tasks completed during this conversation. Preserve parked decisions and dependencies. Synced checklist: 140 total, 41 done, 1 in progress, 98 open.
+PAUSED 2026-10-26T21:56Z per user. T118 finished through PR #934 (110bb4933), green main CI and verified dev runtime; no active implementation remains. T119 was scoped only and stays queued with its prepared brief. Start no new task without a new request. 20 tasks completed during this conversation. Synced checklist: 140 total, 42 done, 0 in progress, 98 open. Preserve parked decisions and dependencies.
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
@@ -99,19 +99,12 @@ All PRE-EXISTING.
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
-### T118 · B4.1 · repository CLI set is a union
-
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T21:30Z · kind: feature (user decision taken)
-render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
-
-Codex progress 2026-10-26T21:30Z: PR934 MERGED with mergecommit110bb4933eb75e24b148b1c0a94af240a102e158 after exact6d759 all12SUCCESS/CLEAN, all8CIgreen, freshpaired+automatedclean and fullypaginated8threads/0unresolved. No reviewer timeout/quota waiver used. Parent final37/browserreset acceptance and prior required fixes verified; final-merge-gates.json/merge-result.json/pr-ci-final.json retained. Main CI40404723704 nowRUNNING on exactmerge; mainCodeQL40404723209 active. Task remains INPROGRESS until main checks/runtime verified; root still previouscode with TASKS-only updates, preserve2userfiles and4parkeddevtasks. After main8green use deliver-runtime.py withfreshactive0check, ffroot, pnpm docker libs, verifyloadedAPI/web/worker/proxy and parked tasks; thenclose-and-pause.py, canonical8completed/count42/20conversation, boardPAUSED/T119queued, ownedcleanup. No newT119/backlog work. Current140/41done/1active/98open;19completedconversation untildeliverydone. T362item2mobileheader pre-existing broader/queued.
-
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
-status: open · last: 2026-10-26T13:52Z · kind: feature (user decision taken)
+status: open · last: 2026-10-26T21:56Z · kind: feature (user decision taken)
 repositories.agent_rules_override + settings/agent-rules.md + tooling editor; buildRepoCliRulesBlock for 07/12/01/api. Control: two users with different personal rules are quiet and byte-identical after.
 
-Codex progress 2026-10-26T13:52Z: released after scoping only, per user instruction to finish T118 and pause. No implementation driver, worktree, migration or product change was started. Prepared bounded brief retained at .claude/tmp/board-run/T119/drive-draft.md; resume from the checked T118 predecessor when work is authorized again. Preserve the approved null/default versus explicit-empty rules semantics, portable Markdown setting and existing dispatch protections.
+Codex progress 2026-10-26T21:56Z: queued after completed T118 PR #934 (110bb4933eb75e24b148b1c0a94af240a102e158); resume from the merged main predecessor only when requested. Scoping brief .claude/tmp/board-run/T119/drive-draft.md retained; no implementation, worktree, migration or product change started. Preserve approved null/default versus explicit-empty rules semantics and dispatch protections. Session PAUSED.
 
 ### T120 · B5.1 · the Haive data panel
 
@@ -845,6 +838,8 @@ status: open · scope: queued broader finding, not approved implementation
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
 ## Done
+
+- T118 — repository CLI set is a union — PR #934 (110bb4933), 2026-10-26; final reviews/gates recorded in T118 evidence, all8 main CI green, dev libs/API/web/worker verified; finish-then-pause boundary complete.
 
 - T117 — observe external named checkout and record changes safely — PR #933 (46fe58b2), 2026-10-26; exact-head review/all12 CI clean, main CI40310628973 all8 + CodeQL green, dev0214/libs/API/web/worker/60s observer verified.
 
