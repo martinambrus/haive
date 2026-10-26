@@ -101,10 +101,10 @@ All PRE-EXISTING.
 
 ### T118 · B4.1 · repository CLI set is a union
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T19:33Z · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T19:50Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
 
-Codex progress 2026-10-26T19:33Z: R7/R8 correction source frozen. Affected worker 1194 PASS and fresh actual PostgreSQL/Redis recovery 99 PASS; two-install 156, final API/shared/web/types/format and checked commit still pending. Reader/writer timing controls cover saved07-to12 publication, rollback proof retirement/refusal and regeneration, import-marker NULL recovery, canonical Tooling observed-set CAS and read-only history display. Original immutable plan/CAS, RTK-origin, auth/holder/journal guards retained. Parent browser acceptance and mandatory fresh correction7 review follow checked handoff; exact-head automated review/CI, merge/main CI/runtime remain required. No merge or timeout waiver claimed. Finish T118 then PAUSE; T119 queued; 140 total / 41 done / 1 active / 98 open / 19 completed this conversation.
+Codex progress 2026-10-26T19:50Z: checked correction cfa6f866f + separate docs658aafbb0 pushed to PR934. Local1194worker/563API/127shared/94web/12types/format, fresh99PG recovery and156two-install PASS. Formatting-only2test edits retain identical syntax/assertions; final34worker/27API reruns PASS. Parent verified18blobs/24boundaries/259compiledJS and24rawreceipt/log hashes; independent finalHEAD64controls PASS. ActualNext/API/PG status375/1280 and Tooling375/768/1280 PASS: recovered[]quiet/noadoption, NULLhistoryreadonly, stalelegacy409, canonicalremoval retainsunknown/files/claims, auth/origin/holder/journal refusals intact; allreaped/cleanup0/portsclosed. Fresh DIFFERENT xhigh correction7 reviewer active; exact658 automatedreview RUNNING, CI40389981952 active. R7/R8 replies4381740775/4381741075 resolved after verified push. No delivery/merge claimed. Finish T118 then PAUSE; T119 queued. Counts140/41done/1active/98open;19 completed this conversation.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
