@@ -44,7 +44,7 @@ import {
   inheritCliMembership,
 } from '../../../project-state/write.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
-import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
+import { loadPreviousStepOutput } from './_helpers.js';
 import {
   collectOnboardingStagePaths,
   commitRecorded,
@@ -298,10 +298,12 @@ async function recordOnboardingArtifacts(
   // this should not happen in practice since Haive paths and bundle paths
   // never overlap by convention, but we log+drop just in case).
   const bundlesForInstall = await loadBundlesForExpansion(ctx.db, repositoryId, ctx.logger);
-  const skillTargets =
-    renderedCtx.cliTargets !== undefined
-      ? skillTargetDirs(renderedCtx.cliTargets)
-      : await resolveSkillTargetDirs(ctx.db, ctx.userId, [], repositoryId);
+  // Claims describe this task's generation, just as staging uses its saved written/mirroredDirs.
+  // Membership can have changed since 09_5 ran. Match that writer's missing-field compatibility
+  // default and preserve an explicit [] rather than expanding into today's maintained targets.
+  const generatedSkills = await loadPreviousStepOutput(ctx.db, ctx.taskId, '09_5-skill-generation');
+  const skillTargets = (generatedSkills?.detect as { skillTargetDirs?: string[] } | null)
+    ?.skillTargetDirs ?? ['.claude/skills'];
   const customExpanded = expandCustomBundlesFor(
     bundlesForInstall,
     detect.agentTargets,

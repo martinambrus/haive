@@ -26,6 +26,8 @@ import { resolveRenderContext } from '../src/step-engine/_upgrade-render.js';
 import { buildUpgradePlan } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeRollbackStep } from '../src/step-engine/steps/onboarding-upgrade/04-upgrade-rollback.js';
 import { generateFilesStep } from '../src/step-engine/steps/onboarding/07-generate-files.js';
+import { skillGenerationStep } from '../src/step-engine/steps/onboarding/09_5-skill-generation.js';
+import { collectOnboardingStagePaths } from '../src/step-engine/steps/onboarding/_stage-paths.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
 import { resolveTaskSkillTargetDirs } from '../src/step-engine/steps/onboarding/_helpers.js';
 import type { StepContext } from '../src/step-engine/step-definition.js';
@@ -947,5 +949,225 @@ describe('recorded membership completion siblings', () => {
       .from(schema.repositories)
       .where(eq(schema.repositories.id, s.repositoryId));
     expect(again!.renderContext).toEqual(before);
+  });
+});
+
+describe.skipIf(!url)('saved bundled skill render scope', () => {
+  const skill = {
+    id: 'saved-bundle-skill',
+    title: 'Saved bundle skill',
+    description: 'Historical bundle scope',
+    overview: 'A bundle installed before repository CLI membership existed.',
+    subSkills: [
+      {
+        slug: 'inspect',
+        name: 'saved-bundle-skill-inspect',
+        title: 'Inspect',
+        description: 'Inspect the saved scope',
+        summary: 'Use the saved destinations.',
+        body: 'Read the generated file without expanding its destination scope.',
+      },
+    ],
+  };
+  const paths = (dirs: string[]) =>
+    dirs
+      .flatMap((dir) => [`${dir}/${skill.id}/SKILL.md`, `${dir}/${skill.id}/sub-skills/inspect.md`])
+      .sort();
+
+  async function savedBundle(dirs: string[] | undefined, modern = false, column: unknown = null) {
+    const s = await world(column, ['claude-code'], true);
+    await s.add(snapshot(['codex', 'future-cli']));
+    const bundleId = randomUUID(),
+      itemId = randomUUID();
+    await s.db.insert(schema.customBundles).values({
+      id: bundleId,
+      userId: s.userId,
+      repositoryId: s.repositoryId,
+      name: 'Saved bundle',
+      sourceType: 'zip',
+      storageRoot: s.root,
+      enabledKinds: ['skill'],
+    });
+    await s.db.insert(schema.customBundleItems).values({
+      id: itemId,
+      bundleId,
+      kind: 'skill',
+      sourceFormat: 'claude-md',
+      sourcePath: 'skills/saved-bundle-skill/SKILL.md',
+      normalizedSpec: skill,
+      contentHash: sha256Hex(JSON.stringify(skill)),
+      schemaVersion: 1,
+    });
+    const current = await s.detect();
+    const {
+      cliTargets: _decision,
+      renderContextColumn: _fence,
+      legacyAgentFallback: _fallback,
+      ...old
+    } = current;
+    const saved07 = modern
+      ? current
+      : {
+          ...old,
+          agentTargets: legacy.agentTargets,
+          enabledCliProviders: legacy.enabledCliProviders,
+        };
+    await s.pending(saved07);
+    const generated07 = await generateFilesStep.apply(s.ctx, {
+      detected: saved07,
+      formValues: { overwrite: false },
+    } as never);
+    await s.db
+      .update(schema.taskSteps)
+      .set({ output: generated07 })
+      .where(
+        and(
+          eq(schema.taskSteps.taskId, s.taskId),
+          eq(schema.taskSteps.stepId, '07-generate-files'),
+        ),
+      );
+    const detectedSkills = {
+      framework: null,
+      language: null,
+      kbFiles: [],
+      requiredDomains: [],
+      bundleSkills: [skill],
+      ...(dirs !== undefined ? { skillTargetDirs: dirs } : {}),
+    };
+    const generatedSkills = await skillGenerationStep.apply(s.ctx, {
+      detected: detectedSkills,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+      isFinalLlmAttempt: true,
+      llmOutput: { skills: [] },
+    } as never);
+    await s.db.insert(schema.taskSteps).values({
+      taskId: s.taskId,
+      stepId: '09_5-skill-generation',
+      stepIndex: 9,
+      title: 'Generate skills',
+      status: 'done',
+      detectOutput: detectedSkills,
+      output: generatedSkills,
+    });
+    const actualDirs = dirs ?? ['.claude/skills'];
+    expect(generatedSkills.written.map((w) => w.mirroredDirs)).toEqual(
+      actualDirs.length ? [actualDirs] : [],
+    );
+    const bytes = new Map(
+      await Promise.all(
+        paths(actualDirs).map(async (p) => [p, await readFile(join(s.root, p), 'utf8')] as const),
+      ),
+    );
+    const apply12 = () =>
+      postOnboardingStep.apply(s.ctx, {
+        detected: {
+          hasGit: false,
+          hasOrigin: false,
+          originUrl: null,
+          credentials: [],
+          boundCredentialId: null,
+        },
+        formValues: { commit: false },
+      } as never);
+    const rows = async () =>
+      (
+        await s.db
+          .select()
+          .from(schema.onboardingArtifacts)
+          .where(eq(schema.onboardingArtifacts.repositoryId, s.repositoryId))
+      ).filter((r) => r.bundleItemId === itemId && r.supersededAt === null);
+    return { ...s, itemId, actualDirs, bytes, apply12, rows };
+  }
+
+  async function assertSavedScope(
+    dirs: string[] | undefined,
+    modern = false,
+    column: unknown = null,
+  ) {
+    const s = await savedBundle(dirs, modern, column);
+    const expectedPaths = paths(s.actualDirs);
+    const expectedMembers = modern
+      ? ['codex', 'future-cli', 'claude-code']
+      : ['codex', 'future-cli'];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const out = await s.apply12();
+      expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
+      expect(out.artifactRowsWritten).toBeGreaterThan(0);
+      const rows = await s.rows();
+      expect.soft(rows.map((r) => r.diskPath).sort()).toEqual(expectedPaths);
+      for (const row of rows)
+        expect.soft(row.formValuesSnapshot).toMatchObject({ cliTargets: expectedMembers });
+      const [repo] = await s.db
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, s.repositoryId));
+      expect((repo!.renderContext as Record<string, unknown>).cliTargets).toEqual(expectedMembers);
+      for (const [rel, bytes] of s.bytes)
+        expect(await readFile(join(s.root, rel), 'utf8')).toBe(bytes);
+      const staged = await collectOnboardingStagePaths(s.root, s.db, s.taskId);
+      expect
+        .soft(staged.add.filter((p) => p.includes(`/${skill.id}/`)).sort())
+        .toEqual(expectedPaths);
+      for (const rel of paths(['.claude/skills', '.agents/skills'])) {
+        const claimed = await readFile(
+          join(s.root, '.haive-data/state', claimFileName(rel)),
+          'utf8',
+        ).catch(() => null);
+        expect
+          .soft(claimed !== null, `portable claim ${rel}, attempt ${attempt}`)
+          .toBe(expectedPaths.includes(rel));
+        if (!expectedPaths.includes(rel))
+          expect(await readFile(join(s.root, rel)).catch(() => null)).toBe(null);
+      }
+    }
+    if (!modern) {
+      const plan = await buildUpgradePlan(s.ctx);
+      for (const rel of paths(['.agents/skills'])) {
+        const entry = plan.entries.find((e) => e.diskPath === rel);
+        expect
+          .soft(entry, `later ordinary01 ${rel}`)
+          .toMatchObject({ bucket: 'new_artifact', liveArtifactId: null });
+      }
+    }
+  }
+
+  it('keeps saved Claude-only main/subskill scope with NULL current through actual09_5→12→retry→01', async () => {
+    await assertSavedScope(['.claude/skills']);
+  });
+  it('keeps saved Claude-only scope with a legacy current column and newer Codex history', async () => {
+    await assertSavedScope(['.claude/skills'], false, legacy);
+  });
+  it('keeps saved explicit empty destinations empty despite recovered Codex membership', async () => {
+    await assertSavedScope([]);
+  });
+  it('retains only the legacy Claude default when the saved destination field is absent', async () => {
+    await assertSavedScope(undefined);
+  });
+  it('retains modern explicit union and actual multiple-destination main/subskill claims', async () => {
+    await assertSavedScope(['.claude/skills', '.agents/skills'], true);
+  });
+  it('does not retire an unrelated existing Codex claim outside saved Claude generation scope', async () => {
+    const s = await savedBundle(['.claude/skills']);
+    const sentinelPath = paths(['.agents/skills'])[1]!;
+    const sentinelId = randomUUID();
+    await s.add(snapshot(['codex', 'future-cli']), 2, {
+      id: sentinelId,
+      templateId: 'custom.unrelated.saved-owner',
+      templateKind: 'custom-skill',
+      diskPath: sentinelPath,
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect((await s.apply12()).recordWrite).toBe('written');
+      const [sentinel] = await s.db
+        .select()
+        .from(schema.onboardingArtifacts)
+        .where(eq(schema.onboardingArtifacts.id, sentinelId));
+      expect.soft(sentinel!.supersededAt).toBe(null);
+      expect
+        .soft((await s.rows()).map((r) => r.diskPath).sort())
+        .toEqual(paths(['.claude/skills']));
+    }
   });
 });
