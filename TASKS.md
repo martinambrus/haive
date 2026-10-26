@@ -101,10 +101,10 @@ All PRE-EXISTING.
 
 ### T118 · B4.1 · repository CLI set is a union
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T13:58Z · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T14:59Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
 
-Codex progress 2026-10-26T13:58Z: correction1 committed19b6f11; integrated checked headfb004d48 adds TASKS-only main and separate docs. Driver passed981 affected checks before the isolated02 lock wrapper,272 final02/applicable checks,5 realPG,98 shared,types12/12,99 recovery,156 two-install,both onboarding export smokes,format and lock ratchet. Parent rebuilt259 JS files byte-identically and independently passed5 realPG plus10 targeted units. Fresh different review confirms two remaining variants of the same legacy retry criterion: NULL original column, and same member names with newer explicit fallback provenance. Focused correction2 brief prepared; no merge or browser claim. PR #934 remote remains191 with knownR2 thread; final corrected-head review/acceptance/remote gates still required. User requested finish T118 then pause; T119 scoped only and released. No broader work or migration0215.
+Codex progress 2026-10-26T14:59Z: correction2 committedacfba1ae on the checkedfb004d48 predecessor. Full writer/own-result identity now handles NULL originals, fallback-only changes and recorded caller provenance only when current/history membership are genuinely unknown; original name refusal and exact caller/lock safeguards remain. Parent independently reproduced3 semantic failures before fixes; an additional real01/02 caller-provenance failure was saved and corrected. Final fresh checks pass15 realPG,35files981 worker,99 recovery,156 two-install,types12/12 and format; leases released and worktree clean. Fresh different source review, parent green/browser acceptance, new PR #934 head/bot/CI/thread gates, merge/main CI/runtime remain. Remote PR is still old191; no delivery claim. Finish T118 then pause, with T119 scoped and queued.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
