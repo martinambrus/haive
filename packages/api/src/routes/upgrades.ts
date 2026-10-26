@@ -32,6 +32,9 @@ import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
   agentTargetSchema,
   bundleItemRenders,
+  completeRecordedCliMembership,
+  recordedCliTargets,
+  recoverCliMembership,
   foreignReason,
   historyOrigin,
   isRenderContextSnapshot,
@@ -471,6 +474,34 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
             ? snapshotProviderNames(history.enabledCliProviders)
             : enabledNames;
   const skillDirs = skillTargetDirs(repositoryNames);
+  // Match 01's render-context completion before comparing enabled providers with repository
+  // membership. Deferred legacy columns may recover newer membership from strict live snapshots;
+  // an authoritative [] must still offer enabled providers as choices, without adopting them.
+  const recoveredMembership = recoverCliMembership(liveArtifacts);
+  const recordedNamesContext = (targets: unknown, providers: unknown) => ({
+    cliTargets: z.array(z.string()).safeParse(targets).success ? (targets as string[]) : undefined,
+    enabledCliProviders: Array.isArray(providers)
+      ? snapshotProviderNames(providers).map((name) => ({ name }))
+      : undefined,
+  });
+  const planningCliNames =
+    origin.from === 'column'
+      ? (recordedCliTargets(completeRecordedCliMembership(origin.column, recoveredMembership)) ??
+        enabledNames)
+      : origin.from === 'snapshot'
+        ? (recordedCliTargets(
+            completeRecordedCliMembership(
+              recordedNamesContext(origin.row.snapshotCliTargets, origin.row.snapshotProviders),
+              recoveredMembership,
+            ),
+          ) ?? [])
+        : historyOrigin({ onboarding: history, source: repo.source }).kind === 'onboarding' &&
+            history
+          ? (recordedCliTargets(
+              recordedNamesContext(history.cliTargets, history.enabledCliProviders),
+            ) ?? [])
+          : enabledNames;
+  const cliAdditions = enabledNames.filter((name) => !planningCliNames.includes(name));
 
   // A row this install does not manage, which no upgrade offers anything for, stays out of every
   // comparison below.
@@ -831,6 +862,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       : [];
 
   const hasUpgradeAvailable =
+    cliAdditions.length > 0 ||
     firstUpgradeOnThisInstall ||
     (installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0) ||
     strandedTemplateIds.size > 0 ||
@@ -882,6 +914,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     ...(obsoleteTemplateIds.length > 0 ? { obsoleteTemplateIds } : {}),
     ...(retiredTemplateIds.length > 0 ? { retiredTemplateIds } : {}),
     ...(customChanges.length > 0 ? { customChanges } : {}),
+    ...(cliAdditions.length > 0 ? { cliAdditions } : {}),
     ...(missingRulesImports.length > 0 ? { missingRulesImports } : {}),
     ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),
     ...(rtkBlockLeftovers.length > 0 ? { rtkBlockLeftovers } : {}),

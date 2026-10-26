@@ -18,6 +18,9 @@ export const upgradeStatusResponseSchema = z.object({
   installedTemplateSetHash: z.string().nullable(),
   currentTemplateSetHash: z.string(),
   changedTemplateIds: z.array(z.string()),
+  /** Enabled CLIs not yet maintained by the repository. An upgrade offers an explicit addition
+   *  choice; status and task creation do not adopt them. Omitted when there are none. */
+  cliAdditions: z.array(z.string()).optional(),
   /** The `changedTemplateIds` an upgrade removes rather than updates: installed, and no release renders
    *  them any more. Absent from older servers, and when there are none. */
   obsoleteTemplateIds: z.array(z.string()).optional(),

@@ -326,6 +326,8 @@ describe('upgrade-status and a repository that switched RTK off', () => {
   });
 
   it('offers an upgrade for an RTK block left in a rules file once RTK is off', async () => {
+    // Codex reads the shared awareness block but has no RTK settings template to add back.
+    state.rows.set(schema.cliProviders, [{ ...claude, name: 'codex' }]);
     state.rows.set(
       schema.onboardingArtifacts,
       state.rows
@@ -335,9 +337,12 @@ describe('upgrade-status and a repository that switched RTK off', () => {
     await writeFile(path.join(repo, 'AGENTS.md'), `# rules\n${block}`, 'utf8');
     state.rows.set(
       schema.onboardingArtifacts,
-      state.rows
-        .get(schema.onboardingArtifacts)!
-        .map((a) => ({ ...(a as object), hasSnapshot: true, rtkRecorded: true })),
+      state.rows.get(schema.onboardingArtifacts)!.map((a) => ({
+        ...(a as object),
+        hasSnapshot: true,
+        rtkRecorded: true,
+        snapshotProviders: [{ name: 'codex' }],
+      })),
     );
     repoRow(true, ['agent.x']);
     const on = await status();
@@ -416,6 +421,15 @@ describe('upgrade-status and a repository that switched RTK back on', () => {
     for (const [label, rtkEnabled, recorded, providers] of cases) {
       state.repo = { ...state.repo, rtkEnabled };
       snapshots(recorded, providers);
+      // The RTK negative has no pending CLI addition: enabled names match the snapshot.
+      state.rows.set(
+        schema.cliProviders,
+        (providers as { name: string }[]).map((p) => ({
+          ...p,
+          enabled: true,
+          rulesContent: '',
+        })),
+      );
       const body = await status();
       expect(body.changedTemplateIds, label).toEqual([]);
       expect(body.hasUpgradeAvailable, label).toBe(false);
@@ -549,6 +563,7 @@ describe('upgrade-status and the RTK settings files no row records', () => {
         diskPath: `.claude/agents/row-${i}.md`,
         hasSnapshot: true,
         rtkRecorded: true,
+        snapshotProviders: [{ name: 'claude-code' }],
       })),
     );
   });

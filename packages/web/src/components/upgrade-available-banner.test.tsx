@@ -154,3 +154,35 @@ describe('UpgradeAvailableBanner start and rollback failures', () => {
     expect(buttons(view.tree(), /./)).toEqual([]);
   });
 });
+
+describe('CLI addition entry', () => {
+  it('explains addition-only availability and starts the existing upgrade task on click', async () => {
+    statusReply = {
+      code: 200,
+      body: status({ changedTemplateIds: [], hasPriorUpgrade: false, cliAdditions: ['gemini'] }),
+    };
+    postReply = { code: 201, body: { task: { id: 'addition-task' } } };
+    const view = await mount();
+    expect(textOf(view.tree())).toContain('Review adding repository CLIs: gemini');
+    expect(textOf(view.tree())).not.toContain('0 to update');
+    expect(textOf(view.tree())).not.toContain('Up to date');
+    expect(posts()).toEqual([]);
+    fire.click(primary(view));
+    await view.flush();
+    expect(posts()).toEqual(['POST /tasks']);
+    expect(nav.pushed).toEqual(['/tasks/addition-task']);
+  });
+
+  it('keeps a useful combined reason and opens a live upgrade without creating another', async () => {
+    statusReply = {
+      code: 200,
+      body: status({ cliAdditions: ['gemini'], inProgressUpgradeTaskId: 'live-task' }),
+    };
+    const view = await mount();
+    expect(textOf(view.tree())).toContain('2 to update; Review adding repository CLIs: gemini');
+    fire.click(primary(view));
+    await view.flush();
+    expect(posts()).toEqual([]);
+    expect(nav.pushed).toEqual(['/tasks/live-task']);
+  });
+});
