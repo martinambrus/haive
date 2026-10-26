@@ -101,10 +101,10 @@ All PRE-EXISTING.
 
 ### T117 · B3.2 · catch checkout moves Haive did not make (+5)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T08:34Z · last: 2026-10-26T10:05Z · kind: feature (designed; decisions D13-D16 taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T08:34Z · last: 2026-10-26T10:28Z · kind: feature (designed; decisions D13-D16 taken)
 Full design: .claude/tmp/track-b/b3/b32/analysis/{detect,backstops}.md and the B3 ledger (2026-10-15).
 
-Codex progress 2026-10-26T10:05Z: PR #933 HEAD6cd64db; fresh independent review PASS after two late-check corrections, 99 real PG/Redis controls, 336 affected unit tests, types/format pass. Parent reproduced six original failures, passed all seven corrected races, and verified real Next tooling/list-banner/plan page -> authenticated POST -> worker -> PostgreSQL with stable completed jobs and GET/auth/origin/detached/off controls. Remote review and exact-head CI running; merge/main CI pending. Detailed original notes remain unavailable; committed plan+D13-D16/current contracts were used. No dev data/provider calls.
+Codex progress 2026-10-26T10:28Z: PR #933 HEAD6092dabc. Product6cd64db passed fresh independent recovery review, 99 PG/Redis controls, 336 affected units and parent seven-race/real-browser acceptance; automated review of6cd completed clean. CI found one obsolete five-column smoke assertion after additive0214. Test-only6092 keeps exact shape/order/default/constraints; real two-install smoke148/148, worker types/format pass. Fresh focused review and exact-new-head automated review/CI pending; no merge or dev change yet. Detailed original notes remain unavailable; committed plan+D13-D16/current contracts were used.
 
 - D13 detached HEAD holds (no import, no stamp). D14 import a record on a branch other than repositories.branch. D15 host-folder pulls stay a Refresh. D16 kill switch PROJECT_STATE_SYNC_ENABLED default ON.
 - Detect: nullable project_state_sync.synced_hash (next free migration number) = projectStateHash over what readCheckout reads (helpers in shared project-state/hash.ts); watchCheckout per repo from a 60 s scheduler on the plan-mirror queue; deduplicated SYNC_CHECKOUT job fired from GET upgrade-status, GET tooling-config, GET plan overview.
