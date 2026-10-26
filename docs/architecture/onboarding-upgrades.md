@@ -494,6 +494,11 @@ and payloads without the old fence compatible. The
 complete raw watermark, journal and final checkout checks are unchanged. 12 and 03 consume the
 writer's reported paths for scoped staging.
 
+For bundled skills, 12 records main and sub-skill claims at the destinations saved by 09_5's
+generation detect, preserving an explicit empty list and the legacy Claude default only when the
+destination field is absent. Completing repository membership does not claim files at additional
+destinations; an ordinary upgrade can offer missing maintained bundle paths later.
+
 **A key both installs changed is held for an answer, never settled for the column's side.** The
 project-state sync merges the checkout's record against the base it last synced from. A render key
 both sides changed since that base, differently, becomes one pending row in `project_state_conflicts`
