@@ -464,12 +464,19 @@ returned paths in the initial commit. 01 offers missing locally enabled CLIs as 
 "Also maintain files for" choice, then recomputes the plan. The repository-card banner offers an
 upgrade when these additions are the only pending change; checking status or starting the task does
 not adopt them. Declining the choice after a removal keeps that
-removal authoritative, even while the CLI is enabled locally. The Tooling page's explicit
-`POST /repositories/:id/cli-targets/remove` action compares the observed membership under bounded
+removal authoritative, even while the CLI is enabled locally.
+The Tooling read completes recorded membership without writing it; a missing, refused or
+unresolved current context displays those names read-only until setup or configuration completion.
+Its explicit `POST /repositories/:id/cli-targets/remove` action still requires a valid current
+context and compares canonical recorded membership against the observed set under bounded
 ordered locks and records the dirty revision atomically; a stale list, active root claim,
 onboarding/upgrade holder or journal holds it. A no-op does not clear legacy fallback or dirty the
 record. This action leaves files and ledger rows in place: the next upgrade offers owned obsolete
 files with its usual Keep choices. 04 restores files while preserving current repository membership.
+Before restoring or retiring snapshots, 04 captures that membership and normalizes only the
+CLI-derived facts of new rollback snapshots; if no explicit current authority or surviving or
+assured replacement proof can preserve it, rollback refuses before any mutation and requires
+configuration completion and a fresh plan.
 
 The sync merges CLI members three ways with the record's base; the writer owns a removed CLI unit
 only when a validated previous base named it. Legacy records with no CLI units preserve recorded
@@ -479,7 +486,11 @@ snapshots inherit an authoritative repository set under the writer's existing ga
 column/task/reset fences remain in force: an explicit list that omits maintained members is refused,
 as is an unfenced differing list. A persisted legacy 02 plan whose original recorded membership
 differs from the newest valid artifact history must be planned again before any product file or
-ledger changes; a newly planned snapshot records the chosen membership for its own retries. The
+ledger changes; a newly planned snapshot records the chosen membership for its own retries.
+Likewise, 12 completes a saved legacy 07 payload before publishing snapshots while retaining its
+actual rendered-file scope; when an immutable saved column fence cannot recognize that completed
+own result, it refuses before mutation and requires generation again, leaving matching retries
+and payloads without the old fence compatible. The
 complete raw watermark, journal and final checkout checks are unchanged. 12 and 03 consume the
 writer's reported paths for scoped staging.
 
