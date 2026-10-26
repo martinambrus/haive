@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
@@ -528,15 +529,63 @@ describe('commit steps stage only the paths their step outputs record', () => {
   it('9: 12 commits the project state files a failed record write left on disk', async () => {
     const repo = await seeded();
     await put(repo, { '.claude/agents/a.md': 'a\n' });
+    stepOutputs.current = {
+      '07-generate-files': {
+        detect: { ...REFERENCE_CONTEXT, cliProviders: [] },
+        output: { wroteFiles: ['.claude/agents/a.md'], skippedFiles: [] },
+      },
+    };
+    const fake = createFakeDb({
+      tasks: schema.tasks,
+      repositories: schema.repositories,
+      onboardingArtifacts: schema.onboardingArtifacts,
+      customBundles: schema.customBundles,
+      customBundleItems: schema.customBundleItems,
+      cliProviders: schema.cliProviders,
+      users: schema.users,
+      projectStateSync: schema.projectStateSync,
+      projectStateOutbox: schema.projectStateOutbox,
+      projectStateConflicts: schema.projectStateConflicts,
+    });
+    fake.insert(schema.repositories, {
+      id: '00000000-0000-4000-8000-0000000000b1',
+      userId: '00000000-0000-4000-8000-0000000000a1',
+      name: 'acme',
+      source: 'upload',
+      rtkEnabled: false,
+    });
+    fake.insert(schema.tasks, {
+      id: '00000000-0000-4000-8000-0000000000c1',
+      userId: '00000000-0000-4000-8000-0000000000a1',
+      repositoryId: '00000000-0000-4000-8000-0000000000b1',
+      type: 'onboarding',
+      status: 'running',
+    });
+    // Refuse the semantic transaction after actual files, never the new committed-intent preparation.
+    let refused = false;
+    fake.hooks.beforeInsert = (table) => {
+      if (table === schema.projectStateSync && !refused) {
+        refused = true;
+        throw new Error('database refused after record files');
+      }
+    };
+    const ctx = {
+      ...ctxFor(repo),
+      db: fake.db,
+      userId: '00000000-0000-4000-8000-0000000000a1',
+      taskId: '00000000-0000-4000-8000-0000000000c1',
+    } as unknown as StepContext;
     const out = await recordWritten(
-      twelve(repo, {
-        '07-generate-files': {
-          detect: { ...(REFERENCE_CONTEXT as unknown as Record<string, unknown>) },
-          output: { wroteFiles: ['.claude/agents/a.md'], skippedFiles: [] },
-        },
+      postOnboardingStep.apply(ctx, {
+        detected: { hasGit: true } as never,
+        formValues: { commit: true, commitMessage: 'chore: onboard' },
+        iteration: 0,
+        previousIterations: [],
       }),
       { recordWriteFails: true },
     );
+    expect(refused).toBe(true);
+    expect(fake.rows(schema.projectStateOutbox)[0]!.writeIntent).toBeTruthy();
     expect(out.warnings.some((w) => w.startsWith('project state record write failed'))).toBe(true);
     expect(out.commitPerformed).toBe(true);
     const files = await tracked(repo);

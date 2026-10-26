@@ -1,8 +1,27 @@
+import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
-import { readFileNoFollow, removeFileIfNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
+import {
+  lstatNoFollow,
+  openDirNoFollow,
+  fileIdentity,
+  readdirNoFollow,
+  removeEmptyDirectoryIfNoFollow,
+  type FileIdentity,
+  prepareJournalFilesNoFollow,
+  inspectJournalFilesNoFollow,
+  restoreJournalFileNoFollow,
+  type JournalPrepared,
+  type JournalFileOperation,
+  type JournalArtifact,
+  readFileNoFollow,
+  removeFileIfNoFollow,
+  rewriteFileIfNoFollow,
+  writeFileNoFollow,
+} from '@haive/shared/fs-safe';
 import {
   PROJECT_STATE_DIR,
+  PROJECT_STATE_LIMITS,
   RENDER_UNIT,
   ENVIRONMENT_UNIT,
   bundleDescriptors,
@@ -21,7 +40,10 @@ import {
   isRtkQuestion,
   isSettingUnit,
   sameValue,
+  projectStateHash,
+  gitBlobId,
   normalizeProjectState,
+  normalizeSetting,
   isRecordName,
   portableBundleSource,
   portableRender,
@@ -42,11 +64,13 @@ import {
 } from '@haive/shared/project-state';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
 import { gitOperationInProgress } from '../repo/git-operation.js';
+import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
+import { readCheckout, readStateFiles, syncProjectStateLocked } from './sync.js';
 import type { TemplateRenderContext } from '../step-engine/template-manifest.js';
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
-/** First in every transaction that writes a repository's render context or its sync row. */
+/** Before project-state reads and writes; when the task-creation key is needed, take it first. */
 export async function lockProjectState(tx: Tx, repositoryId: string): Promise<void> {
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${repositoryId}`}, 0))`,
@@ -64,6 +88,10 @@ interface ProjectStateColumnInput {
   /** The task writing the record. Its write is refused once the task no longer holds the checkout,
    *  since a refresh may then have fast-forwarded the record files under it. */
   holdingTaskId?: string;
+  /** Background refreshes must not write while onboarding, upgrade or reset holds the checkout. */
+  refuseWhileHeld?: boolean;
+  /** Epoch read with the background refresh column; a completed reset must not be resurrected. */
+  expectedResetAt?: Date | null;
 }
 
 export interface ProjectStateRecordInput extends ProjectStateColumnInput {
@@ -95,9 +123,21 @@ const isOwnedFile = (path: string): boolean =>
 
 /** The column moved past what the writer planned against, so its record would undo a newer one. */
 export class ProjectStateMovedError extends Error {
-  constructor() {
-    super("The repository's project settings changed while this write was pending");
+  constructor(message = "The repository's project settings changed while this write was pending") {
+    super(message);
     this.name = 'ProjectStateMovedError';
+  }
+}
+
+/** A moved-checkout refusal caused by admission, so refresh can report the hold separately from
+ *  an open git operation. It retains ProjectStateMovedError's public name and refusal semantics. */
+export class ProjectStateCheckoutHeldError extends ProjectStateMovedError {}
+
+/** An interrupted attempt is preserved until a person repairs a path the undo journal cannot own. */
+export class ProjectStateRecoveryHeldError extends ProjectStateMovedError {
+  constructor(path: string) {
+    super(`an interrupted project state write is held: ${path} changed after the attempted write`);
+    this.name = 'ProjectStateRecoveryHeldError';
   }
 }
 
@@ -447,6 +487,8 @@ export async function writeProjectStateColumn(
     column,
     expectedColumns,
     holdingTaskId,
+    refuseWhileHeld,
+    expectedResetAt,
     keepColumnOnFailure,
     refuseDuringGitOperation,
   }: ProjectStateColumnInput & {
@@ -460,6 +502,7 @@ export async function writeProjectStateColumn(
   const written: string[] = [];
   const removed: string[] = [];
   let attempted: ProjectRender | null = null;
+  let mutatedFiles = false;
   try {
     const portable = portableRender(column);
     attempted = portable;
@@ -522,20 +565,7 @@ export async function writeProjectStateColumn(
         baseFiles: rtkChosen ? base.files : base.files.filter((f) => f !== RTK_SETTING_FILE),
       };
     };
-    // A first look only, so its failure must not clear the column: the files then wait for the locked read.
-    let seen: Look | null = expectedColumns ? null : await lookAt(db).catch(() => null);
-    let plan = planFor(
-      seen ?? {
-        pending: [],
-        pendingClaims: [],
-        pendingSettings: [],
-        claims: [],
-        bundles: [],
-        settings: emptyProjectState().settings,
-        environment: null,
-        baseFiles: [],
-      },
-    );
+    let plan: ReturnType<typeof planFor>;
     const writeFiles = async (baseFiles: readonly string[]): Promise<void> => {
       const files = renderProjectState(plan.record);
       const readable = recordReadable(files);
@@ -545,7 +575,33 @@ export async function writeProjectStateColumn(
         const path = `${PROJECT_STATE_DIR}/${rel}`;
         produced.add(path);
         if (!(await holdsBytes(repoPath, path, text))) {
-          await writeFileNoFollow(repoPath, path, text, { createParents: true });
+          const before = prepared!.previousFiles.get(rel);
+          if (before === undefined) {
+            try {
+              await writeFileNoFollow(repoPath, path, text, {
+                createParents: true,
+                mode: 'create-exclusive',
+                journal: journalOperation(prepared!.intent, rel, 'forward'),
+              });
+              mutatedFiles = true;
+            } catch (err) {
+              if ((err as NodeJS.ErrnoException).code === 'EEXIST')
+                throw new ProjectStateMovedError();
+              throw err;
+            }
+          } else {
+            const result = await rewriteFileIfNoFollow(
+              repoPath,
+              path,
+              (data) => (data.equals(Buffer.from(before)) ? Buffer.from(text) : null),
+              {
+                maxBytes: PROJECT_STATE_LIMITS.maxFileBytes,
+                journal: journalOperation(prepared!.intent, rel, 'forward'),
+              },
+            );
+            if (result !== 'rewritten') throw new ProjectStateMovedError();
+            mutatedFiles = true;
+          }
         }
         if (!written.includes(path)) written.push(path);
         const back = removed.indexOf(path);
@@ -554,33 +610,219 @@ export async function writeProjectStateColumn(
       const owned = new Set([...baseFiles, ...written.filter(isOwnedFile)]);
       for (const path of owned) {
         if (produced.has(path)) continue;
-        const gone = await removeFileIfNoFollow(repoPath, path, () => true);
+        const before = prepared!.previousFiles.get(path.slice(PROJECT_STATE_DIR.length + 1));
+        const gone =
+          before === undefined
+            ? (await lstatNoFollow(repoPath, path, { strict: true })) === null
+              ? 'absent'
+              : 'kept'
+            : await removeFileIfNoFollow(
+                repoPath,
+                path,
+                (data) => data.equals(Buffer.from(before)),
+                {
+                  maxBytes: PROJECT_STATE_LIMITS.maxFileBytes,
+                  journal: journalOperation(
+                    prepared!.intent,
+                    path.slice(PROJECT_STATE_DIR.length + 1),
+                    'forward',
+                  ),
+                },
+              );
+        if (gone === 'kept') throw new ProjectStateMovedError();
+        if (gone === 'removed') mutatedFiles = true;
         const was = written.indexOf(path);
         if (was >= 0) written.splice(was, 1);
-        if (gone !== 'kept' && !removed.includes(path)) removed.push(path);
+        if (!removed.includes(path)) removed.push(path);
       }
     };
-    // A fenced write keeps the lock from its check to its last write, files included, so no sync
-    // lands between them; an unfenced one writes its files first, before any database write.
-    if (!expectedColumns && seen !== null) await writeFiles(seen.baseFiles);
-    await db.transaction(async (tx) => {
+    const gate = async (tx: Tx): Promise<void> => {
+      await lockRepositoryTasksKey(tx, repositoryId);
       await lockProjectState(tx, repositoryId);
+      // Root claims do not take the advisory key. Hold their repository row through the files,
+      // so a reset cannot claim just after the last refusal check and walk this same record.
+      const [repo] = await tx
+        .select({
+          claimedAt: schema.repositories.rootClaimedAt,
+          kind: schema.repositories.rootClaimKind,
+          resetAt: schema.repositories.onboardingResetAt,
+        })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .for('update');
+      if (!repo) throw new ProjectStateMovedError();
+      // An open git operation preserves its diagnostic even when a live reset also holds the row.
       if (refuseDuringGitOperation && (await gitOperationInProgress(repoPath))) {
         throw new ProjectStateMovedError();
       }
-      if (expectedColumns) {
-        await refuseMovedColumn(tx, repositoryId, expectedColumns);
-        if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId);
+      if (repo.kind === 'reset' && isRootClaimLive(repo.claimedAt))
+        throw new ProjectStateCheckoutHeldError();
+      if (
+        expectedResetAt !== undefined &&
+        (repo.resetAt?.getTime() ?? null) !== (expectedResetAt?.getTime() ?? null)
+      ) {
+        throw new ProjectStateMovedError();
       }
+      if (expectedColumns) await refuseMovedColumn(tx, repositoryId, expectedColumns);
+      if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId, repositoryId);
+      if (refuseWhileHeld) await refuseHeldCheckout(tx, repositoryId);
+    };
+    // Commit the retry signal before any filesystem mutation. Recheck admission and the checkout
+    // after reacquiring the locks: a holder admitted between transactions leaves only this intent.
+    const prepared = await db.transaction(async (tx) => {
+      await gate(tx);
+      await recoverWriteLocked(tx, repositoryId, repoPath);
+      const checkout = await readCheckout(repoPath);
+      if (checkout.kind === 'refused') throw new ProjectStateMovedError(checkout.reason);
+      if (checkout.kind === 'absent' && checkout.hash !== 'absent') {
+        throw new ProjectStateMovedError(
+          'the checkout record has files but no render unit; it has not been imported',
+        );
+      }
+      const previousBase = await loadBase(tx, repositoryId);
+      const [sync] = await tx
+        .select()
+        .from(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, repositoryId))
+        .limit(1);
+      const [repo] = await tx
+        .select()
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .limit(1);
+      if (!repo) throw new ProjectStateMovedError();
+      const previousBaseFiles = isRtkChoiceRecorded(column.rtkChoiceRecorded, repo.rtkChoiceMadeAt)
+        ? previousBase.files
+        : previousBase.files.filter((f) => f !== RTK_SETTING_FILE);
+      if (checkout.kind === 'record' && sync?.syncedHash !== checkout.hash) {
+        const imported = await syncProjectStateLocked(tx, {
+          repositoryId,
+          repoPath,
+          checkout,
+          seen: sync ?? null,
+          seenRepo: repo,
+          refuseDuringGitOperation,
+          holdingTaskId,
+        });
+        if (['refused', 'held', 'deferred', 'superseded'].includes(imported.outcome)) {
+          throw new ProjectStateMovedError();
+        }
+        // An imported context is newer than the context this caller supplied. Commit the import,
+        // then ask the caller to plan again rather than undoing it in the record.
+        const [after] = await tx
+          .select({ renderContext: schema.repositories.renderContext })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, repositoryId));
+        if (!sameValue(after?.renderContext, repo.renderContext)) return null;
+      }
+      const unownedMalformedRtk =
+        checkout.kind === 'record' &&
+        Object.hasOwn(checkout.settings, 'rtk-enabled') &&
+        !normalizeSetting('rtk-enabled', checkout.settings['rtk-enabled']).ok &&
+        !isRtkChoiceRecorded(column.rtkChoiceRecorded, repo.rtkChoiceMadeAt);
+      const now = await lookAt(tx);
+      plan = planFor(now);
+      const files = renderProjectState(plan.record);
+      const readable = recordReadable(files);
+      if (!readable.readable) throw new ProjectStateUnreadableError(readable.reason);
+      const before = (await readStateFiles(repoPath)) ?? new Map<string, string>();
+      if (hashFiles(before) !== checkout.hash) throw new ProjectStateMovedError();
+      const changes: WriteIntent['changes'] = [];
+      for (const rel of new Set([
+        ...files.keys(),
+        ...[...now.baseFiles, ...previousBaseFiles].map((p) =>
+          p.slice(PROJECT_STATE_DIR.length + 1),
+        ),
+      ])) {
+        const old = before.get(rel) ?? null;
+        const next = files.get(rel) ?? null;
+        if (old === next) continue;
+        const stat = await lstatNoFollow(repoPath, `${PROJECT_STATE_DIR}/${rel}`, { strict: true });
+        changes.push({
+          rel,
+          before: old,
+          after: next,
+          metadata: stat
+            ? {
+                uid: stat.stats.uid,
+                gid: stat.stats.gid,
+                mode: stat.stats.mode & 0o777,
+              }
+            : null,
+        });
+      }
+      const after = new Map(before);
+      for (const change of changes) {
+        if (change.after === null) after.delete(change.rel);
+        else after.set(change.rel, change.after);
+      }
+      const plannedDirs = new Set<string>();
+      for (const change of changes)
+        if (change.after !== null) {
+          const parts = change.rel.split('/');
+          for (let depth = 0; depth < parts.length; depth++)
+            plannedDirs.add(parts.slice(0, depth).join('/'));
+        }
+      const absentDirs: string[] = [];
+      for (const dir of plannedDirs) {
+        const stat = await lstatNoFollow(repoPath, recoveryDirPath(dir), { strict: true });
+        if (stat === null) absentDirs.push(dir);
+        else if (stat.kind !== 'directory') throw new ProjectStateMovedError();
+      }
+      const intent: WriteIntent = { id: randomUUID(), changes, absentDirs };
+      validateRecoveryIntent(intent);
+      intent.stage = await prepareIntentFiles(repoPath, intent);
+      await markProjectStateDirty(tx, repositoryId);
+      await tx
+        .update(schema.projectStateOutbox)
+        .set({ writeIntent: intent })
+        .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+      return {
+        hash: checkout.hash,
+        resetAt: repo.onboardingResetAt ?? null,
+        intentId: intent.id,
+        intent,
+        look: now,
+        targetHash: hashFiles(after),
+        previousFiles: before,
+        previousBaseFiles,
+        unownedMalformedRtk,
+      };
+    });
+    if (!prepared) throw new ProjectStateMovedError();
+    await db.transaction(async (tx) => {
+      await gate(tx);
+      const [intent] = await tx
+        .select({ value: schema.projectStateOutbox.writeIntent })
+        .from(schema.projectStateOutbox)
+        .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+      if ((intent?.value as WriteIntent | null)?.id !== prepared.intentId)
+        throw new ProjectStateMovedError();
+      const checkout = await readCheckout(repoPath);
+      if (checkout.kind === 'refused' || checkout.hash !== prepared.hash) {
+        throw new ProjectStateMovedError();
+      }
+      const [repo] = await tx
+        .select({ resetAt: schema.repositories.onboardingResetAt })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId));
+      if (!repo || !sameValue(repo.resetAt, prepared.resetAt)) throw new ProjectStateMovedError();
       // Read before the look: a mutation after this read stays above `written_revision`.
       const revision = await readOutboxRevision(tx, repositoryId);
       const now = await lookAt(tx);
-      if (expectedColumns || seen === null || !sameValue(now, seen)) {
-        seen = now;
-        plan = planFor(now);
-        await writeFiles(now.baseFiles);
-      }
-      const synced = { baseSnapshot: plan.baseSnapshot, lastError: null, updatedAt: new Date() };
+      // A mutation between the committed undo journal and this lock needs a fresh journal too.
+      if (!sameValue(now, prepared.look)) throw new ProjectStateMovedError();
+      plan = planFor(now);
+      await writeFiles([...now.baseFiles, ...prepared.previousBaseFiles]);
+      const readBack = await readCheckout(repoPath);
+      if (readBack.kind !== 'record' || readBack.hash !== prepared.targetHash)
+        throw new ProjectStateMovedError();
+      const synced = {
+        baseSnapshot: plan.baseSnapshot,
+        syncedHash: readBack.hash,
+        lastError: null,
+        updatedAt: new Date(),
+      };
       await tx
         .update(schema.repositories)
         .set({ renderContext: column })
@@ -593,10 +835,27 @@ export async function writeProjectStateColumn(
         .insert(schema.projectStateSync)
         .values({ repositoryId, ...synced })
         .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
-      if (revision !== null) await stampOutbox(tx, repositoryId, revision);
+      if (revision !== null && !prepared.unownedMalformedRtk)
+        await stampOutbox(tx, repositoryId, revision);
+      if (prepared.unownedMalformedRtk) {
+        await tx
+          .update(schema.projectStateOutbox)
+          .set({
+            lastError:
+              'settings/rtk-enabled.json is invalid and no recorded RTK choice owns its replacement',
+          })
+          .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+      }
+      await tx
+        .update(schema.projectStateOutbox)
+        .set({ writeIntent: null })
+        .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
     });
   } catch (err) {
-    if (err instanceof ProjectStateMovedError) throw err;
+    // Admission and a CAS refused before our first mutation changed no semantic state. Once a
+    // file did change, a moved checkout is a partial-write failure just like a SQL rollback: retain
+    // its path report and foreground pending-local-side cleanup (background writers keep column).
+    if (err instanceof ProjectStateMovedError && !mutatedFiles) throw err;
     const cleared =
       keepColumnOnFailure === true ||
       (await clearRenderContext(
@@ -608,6 +867,312 @@ export async function writeProjectStateColumn(
     throw new ProjectStateWriteError(err, written, !cleared, removed);
   }
   return { written, removed };
+}
+
+interface WriteIntent {
+  id: string;
+  /** Planned ancestors absent at preparation; omitted by journals from earlier workers. */
+  absentDirs?: string[];
+  stage?: JournalPrepared | null;
+  changes: {
+    rel: string;
+    before: string | null;
+    after: string | null;
+    metadata: { uid: number; gid: number; mode: number } | null;
+  }[];
+}
+
+const hashFiles = (files: ReadonlyMap<string, string>): string =>
+  files.size === 0
+    ? 'absent'
+    : projectStateHash(new Map([...files].map(([rel, text]) => [rel, gitBlobId(text)])));
+
+const JOURNAL_STAGE_PREFIX = '.haive-data/.state-writes/';
+function journalOperation(
+  intent: WriteIntent,
+  rel: string,
+  direction: 'forward' | 'undo',
+): JournalFileOperation {
+  const index = intent.changes.findIndex((change) => change.rel === rel);
+  if (!intent.stage || index < 0)
+    throw new ProjectStateMovedError('the record needs prepared recovery images');
+  return { prepared: intent.stage, index, direction };
+}
+async function prepareIntentFiles(
+  repoPath: string,
+  intent: WriteIntent,
+): Promise<JournalPrepared | null> {
+  if (intent.changes.length === 0) return null;
+  return prepareJournalFilesNoFollow(
+    repoPath,
+    `${JOURNAL_STAGE_PREFIX}${randomUUID()}`,
+    intent.changes,
+    PROJECT_STATE_LIMITS.maxFileBytes,
+  );
+}
+const recoveryDirPath = (dir: string): string =>
+  dir === '' ? PROJECT_STATE_DIR : `${PROJECT_STATE_DIR}/${dir}`;
+
+/** Changed paths are a subset of each bounded complete record; their union can temporarily be
+ *  larger than either record. Validate both sides before reading only these journal-owned paths. */
+function validateRecoveryIntent(intent: WriteIntent): void {
+  if (!Array.isArray(intent.changes) || intent.changes.length > 2 * PROJECT_STATE_LIMITS.maxEntries)
+    throw new ProjectStateUnreadableError('the recovery record has too many changed paths');
+  if (intent.stage !== undefined && intent.stage !== null) {
+    if (
+      !intent.stage.rel.startsWith(JOURNAL_STAGE_PREFIX) ||
+      !/^[0-9a-f-]{36}$/.test(intent.stage.rel.slice(JOURNAL_STAGE_PREFIX.length)) ||
+      !Array.isArray(intent.stage.images) ||
+      intent.stage.images.length !== intent.changes.length
+    )
+      throw new ProjectStateUnreadableError('the recovery image manifest is invalid');
+  } else if (intent.stage === null && intent.changes.length > 0)
+    throw new ProjectStateUnreadableError('the recovery images are missing');
+  const names = new Set<string>();
+  const before = new Map<string, string>();
+  const after = new Map<string, string>();
+  for (const change of intent.changes) {
+    if (
+      !change ||
+      typeof change.rel !== 'string' ||
+      !isCanonicalRepoPath(change.rel) ||
+      names.has(change.rel) ||
+      change.before === change.after ||
+      (change.before !== null && typeof change.before !== 'string') ||
+      (change.after !== null && typeof change.after !== 'string')
+    )
+      throw new ProjectStateUnreadableError('the recovery record has an invalid changed path');
+    names.add(change.rel);
+    if (change.before !== null) before.set(change.rel, change.before);
+    if (change.after !== null) after.set(change.rel, change.after);
+  }
+  if (intent.absentDirs !== undefined) {
+    if (
+      !Array.isArray(intent.absentDirs) ||
+      intent.absentDirs.length > PROJECT_STATE_LIMITS.maxEntries
+    )
+      throw new ProjectStateUnreadableError('the recovery record has too many directories');
+    const plannedDirs = new Set<string>();
+    const beforeDirs = new Set<string>();
+    for (const [files, dirs] of [
+      [after, plannedDirs],
+      [before, beforeDirs],
+    ] as const)
+      for (const rel of files.keys()) {
+        const parts = rel.split('/');
+        for (let depth = 0; depth < parts.length; depth++)
+          dirs.add(parts.slice(0, depth).join('/'));
+      }
+    const seen = new Set<string>();
+    for (const dir of intent.absentDirs) {
+      if (
+        typeof dir !== 'string' ||
+        (dir !== '' && !isCanonicalRepoPath(dir)) ||
+        seen.has(dir) ||
+        !plannedDirs.has(dir) ||
+        beforeDirs.has(dir)
+      )
+        throw new ProjectStateUnreadableError('the recovery record has an invalid directory');
+      seen.add(dir);
+    }
+  }
+  for (const [side, files] of [
+    ['before', before],
+    ['planned', after],
+  ] as const) {
+    const bounds = recordReadable(files);
+    if (!bounds.readable)
+      throw new ProjectStateUnreadableError(`the recovery record's ${side} side: ${bounds.reason}`);
+  }
+}
+
+/** Preflight recognizes every changed path's bytes and private artifacts before undo. Each restore
+ *  then compares bytes and preserves metadata at its own CAS: a later edit or changed mode can hold
+ *  a partially restored journal, which remains replayable. A committed write consumes its journal. */
+async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string): Promise<void> {
+  const [row] = await tx
+    .select({ intent: schema.projectStateOutbox.writeIntent })
+    .from(schema.projectStateOutbox)
+    .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+  const intent = row?.intent as WriteIntent | null;
+  if (!intent) return;
+  validateRecoveryIntent(intent);
+  if (intent.changes.length > 0 && intent.stage === undefined)
+    throw new ProjectStateMovedError('the record is awaiting prepared recovery images');
+  const artifacts = intent.stage
+    ? await inspectJournalFilesNoFollow(
+        repoPath,
+        intent.stage,
+        PROJECT_STATE_LIMITS.maxFileBytes,
+        intent.changes.map((change) =>
+          Math.max(Buffer.byteLength(change.before ?? ''), Buffer.byteLength(change.after ?? '')),
+        ),
+      )
+    : [];
+  const atBefore = new Set<string>();
+  const missing = new Set<string>();
+  const artifactMatches = (file: JournalArtifact, text: string | null) =>
+    text !== null &&
+    file.kind === 'file' &&
+    !file.truncated &&
+    !!file.data?.equals(Buffer.from(text));
+  for (const [index, change] of intent.changes.entries()) {
+    const path = `${PROJECT_STATE_DIR}/${change.rel}`;
+    const read = await readFileNoFollow(repoPath, path, {
+      strict: true,
+      maxBytes: PROJECT_STATE_LIMITS.maxFileBytes,
+    });
+    const matches = (text: string | null) =>
+      text === null
+        ? read === null
+        : read !== null && !read.truncated && read.data.equals(Buffer.from(text));
+    const own = artifacts[index]!;
+    for (const side of ['before', 'after'] as const) {
+      const image = own[side];
+      const identity = intent.stage!.images[index]![side];
+      if (
+        change[side] === null
+          ? image.kind !== 'absent'
+          : image.kind !== 'file' ||
+            image.identity?.dev !== identity?.dev ||
+            image.identity?.ino !== identity?.ino ||
+            (!artifactMatches(image, change.before) && !artifactMatches(image, change.after))
+      )
+        throw new ProjectStateRecoveryHeldError(`${intent.stage!.rel}/${index}.${side}`);
+    }
+    for (const direction of ['forward', 'undo'] as const) {
+      const parked = own[direction];
+      if (
+        parked.kind !== 'absent' &&
+        !artifactMatches(parked, change.before) &&
+        !artifactMatches(parked, change.after)
+      ) {
+        if (read === null)
+          await restoreJournalFileNoFollow(
+            repoPath,
+            path,
+            journalOperation(intent, change.rel, direction),
+          );
+        throw new ProjectStateRecoveryHeldError(path);
+      }
+    }
+    if (read === null) missing.add(change.rel);
+    if (matches(change.before)) atBefore.add(change.rel);
+    else if (
+      !matches(change.after) &&
+      !(read === null && (own.forward.kind !== 'absent' || own.undo.kind !== 'absent'))
+    )
+      throw new ProjectStateRecoveryHeldError(path);
+    if (
+      !atBefore.has(change.rel) &&
+      change.before !== null &&
+      !artifactMatches(own.before, change.before)
+    )
+      throw new ProjectStateRecoveryHeldError(`${intent.stage!.rel}/${index}.before`);
+  }
+  const directories = new Map<string, FileIdentity>();
+  const absentDirs = new Set(intent.absentDirs ?? []);
+  const additions = new Set(
+    intent.changes.filter((change) => change.after !== null).map((change) => change.rel),
+  );
+  for (const dir of absentDirs) {
+    const path = recoveryDirPath(dir);
+    const listing = await readdirNoFollow(repoPath, path, {
+      strict: true,
+      maxEntries: PROJECT_STATE_LIMITS.maxEntries,
+    });
+    if (listing === null) continue;
+    for (const entry of listing) {
+      const child = dir === '' ? entry.name : `${dir}/${entry.name}`;
+      if (!(entry.isDirectory() ? absentDirs.has(child) : entry.isFile() && additions.has(child)))
+        throw new ProjectStateRecoveryHeldError(path);
+    }
+    const held = await openDirNoFollow(repoPath, path);
+    try {
+      directories.set(dir, await fileIdentity(held));
+    } finally {
+      await held.close();
+    }
+  }
+  for (const change of [...intent.changes].reverse()) {
+    const path = `${PROJECT_STATE_DIR}/${change.rel}`;
+    if (atBefore.has(change.rel)) continue;
+    if (change.before === null) {
+      const gone = await removeFileIfNoFollow(
+        repoPath,
+        path,
+        (data) => data.equals(Buffer.from(change.after!)),
+        {
+          maxBytes: PROJECT_STATE_LIMITS.maxFileBytes,
+          journal: journalOperation(intent, change.rel, 'undo'),
+        },
+      );
+      if (gone === 'kept') throw new ProjectStateRecoveryHeldError(path);
+    } else if (change.after === null || missing.has(change.rel)) {
+      await writeFileNoFollow(repoPath, path, change.before, {
+        mode: 'create-exclusive',
+        createParents: true,
+        journal: journalOperation(intent, change.rel, 'undo'),
+        ...(change.metadata
+          ? {
+              owner: { uid: change.metadata.uid, gid: change.metadata.gid },
+              fileMode: change.metadata.mode,
+            }
+          : {}),
+      });
+    } else {
+      const result = await rewriteFileIfNoFollow(
+        repoPath,
+        path,
+        (data) => (data.equals(Buffer.from(change.after!)) ? Buffer.from(change.before!) : null),
+        {
+          maxBytes: PROJECT_STATE_LIMITS.maxFileBytes,
+          journal: journalOperation(intent, change.rel, 'undo'),
+        },
+      );
+      if (result !== 'rewritten') throw new ProjectStateRecoveryHeldError(path);
+    }
+  }
+  for (const [dir, identity] of [...directories].sort(([a], [b]) => b.length - a.length)) {
+    if ((await removeEmptyDirectoryIfNoFollow(repoPath, recoveryDirPath(dir), identity)) === 'kept')
+      throw new ProjectStateRecoveryHeldError(recoveryDirPath(dir));
+  }
+  // Validate the restored footprint, including empty directories, before consuming its intent.
+  await readStateFiles(repoPath, { boundedDirectoryReads: true });
+  await tx
+    .update(schema.projectStateOutbox)
+    .set({ writeIntent: null })
+    .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+}
+
+/** Sweep recovery is fenced like the write, and never rolls target columns or merge bases forward. */
+export async function recoverProjectStateWrite(
+  db: Database,
+  repositoryId: string,
+  repoPath: string,
+): Promise<void> {
+  const upgraded = await db.transaction(async (tx) => {
+    await lockRepositoryTasksKey(tx, repositoryId);
+    await lockProjectState(tx, repositoryId);
+    await refuseHeldCheckout(tx, repositoryId, repoPath);
+    const [row] = await tx
+      .select({ intent: schema.projectStateOutbox.writeIntent })
+      .from(schema.projectStateOutbox)
+      .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+    const intent = row?.intent as WriteIntent | null;
+    if (intent && intent.changes.length > 0 && intent.stage === undefined) {
+      validateRecoveryIntent(intent);
+      intent.stage = await prepareIntentFiles(repoPath, intent);
+      await tx
+        .update(schema.projectStateOutbox)
+        .set({ writeIntent: intent })
+        .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+      return true;
+    }
+    await recoverWriteLocked(tx, repositoryId, repoPath);
+    return false;
+  });
+  if (upgraded) await recoverProjectStateWrite(db, repositoryId, repoPath);
 }
 
 async function holdsBytes(repoPath: string, path: string, text: string): Promise<boolean> {
@@ -636,14 +1201,60 @@ async function stampOutbox(tx: Tx, repositoryId: string, revision: number): Prom
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
 }
 
-async function refuseReleasedCheckout(tx: Tx, taskId: string): Promise<void> {
+/** Call after the task-creation key and project-state lock, before any semantic or file write.
+ *  Recovery supplies gitGuardPath so operation priority is checked after acquiring the repository
+ *  row, including an operation opened while that acquisition was waiting. Writer gates do it there. */
+export async function refuseHeldCheckout(
+  tx: Tx,
+  repositoryId: string,
+  gitGuardPath?: string,
+): Promise<void> {
+  const [repo] = await tx
+    .select({
+      claimedAt: schema.repositories.rootClaimedAt,
+      kind: schema.repositories.rootClaimKind,
+    })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .limit(1)
+    .for('update');
+  if (!repo) throw new ProjectStateMovedError();
+  const live = await tx
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        inArray(schema.tasks.type, ['onboarding', 'onboarding_upgrade']),
+        inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+        isNull(schema.tasks.deadAt),
+      ),
+    )
+    .limit(1);
+  if (gitGuardPath && (await gitOperationInProgress(gitGuardPath)))
+    throw new ProjectStateMovedError();
+  if (live.length > 0 || (repo.kind === 'reset' && isRootClaimLive(repo.claimedAt))) {
+    throw new ProjectStateCheckoutHeldError();
+  }
+}
+
+export async function refuseReleasedCheckout(
+  tx: Tx,
+  taskId: string,
+  repositoryId: string,
+): Promise<void> {
   const [task] = await tx
-    .select({ status: schema.tasks.status, deadAt: schema.tasks.deadAt })
+    .select({
+      status: schema.tasks.status,
+      deadAt: schema.tasks.deadAt,
+      repositoryId: schema.tasks.repositoryId,
+    })
     .from(schema.tasks)
     .where(eq(schema.tasks.id, taskId))
     .limit(1);
   if (
     !task ||
+    task.repositoryId !== repositoryId ||
     task.deadAt !== null ||
     !(CHECKOUT_HOLDING_TASK_STATUSES as readonly string[]).includes(task.status)
   ) {

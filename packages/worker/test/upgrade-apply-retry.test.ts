@@ -216,6 +216,23 @@ async function setup({
   ) as { id: string }[];
   for (const f of conflictFields) formValues[f.id] = 'apply_theirs';
   const noop = () => undefined;
+  // A real apply owns a live task and an existing repository; these fixtures exercise the same fence.
+  if (!fake.rows(schema.repositories).length)
+    fake.insert(schema.repositories, {
+      id: REPO,
+      userId: USER,
+      name: 'acme',
+      source: 'blank',
+      rtkEnabled: false,
+    });
+  fake.insert(schema.tasks, {
+    id: TASK,
+    userId: USER,
+    repositoryId: REPO,
+    type: 'onboarding_upgrade',
+    title: 'upgrade',
+    status: 'running',
+  });
   const ctx = {
     db: fake.db,
     repoPath: root,

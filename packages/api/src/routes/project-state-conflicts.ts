@@ -112,7 +112,7 @@ function refusal(result: Exclude<ProjectStateResolveResult, { kind: 'resolved' }
     case 'busy':
       return new HttpError(
         409,
-        'An onboarding or an upgrade is using this repository. Answer once it has finished.',
+        'This repository is busy with onboarding, an upgrade, or project settings recovery. Try again once it is ready.',
         'project_state_conflict_busy',
       );
     case 'moved':

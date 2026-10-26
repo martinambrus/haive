@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq, getTableColumns, getTableName, is, SQL, StringChunk } from 'drizzle-orm';
@@ -14,10 +14,11 @@ import {
   emptyProjectState,
   normalizeProjectState,
   renderProjectState,
+  projectStateHash,
+  gitBlobId,
 } from '@haive/shared/project-state';
 import {
   ProjectStateMovedError,
-  ProjectStateWriteError,
   writeProjectStateColumn,
   writeProjectStateRecord,
 } from '../src/project-state/write.js';
@@ -31,7 +32,6 @@ const FORMAT = `${STATE_DIR}/format.json`;
 const RENDER = `${STATE_DIR}/project/render.json`;
 // The fake takes a lock only as this prefix, ONE interpolated string key and `, 0))`, and stores an
 // upsert's SQL expressions unevaluated: build the whole key as one string, and set literal values.
-const LOCK = 'execute select pg_advisory_xact_lock(hashtextextended(';
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -304,6 +304,30 @@ async function setup() {
   };
 }
 
+/** A previously read checkout, deliberately stamped independently of its conflict-preserving base. */
+async function knownCheckout(s: Awaited<ReturnType<typeof setup>>): Promise<void> {
+  const files = renderProjectState(recordOf(context()));
+  for (const [rel, text] of files) {
+    const path = join(s.root, STATE_DIR, rel);
+    if (existsSync(path)) continue;
+    await mkdir(join(path, '..'), { recursive: true });
+    await writeFile(path, text);
+  }
+  const entries = await listFiles(join(s.root, STATE_DIR));
+  const hash = projectStateHash(
+    new Map(
+      entries.map((rel) => [rel, gitBlobId(readFileSync(join(s.root, STATE_DIR, rel), 'utf8'))]),
+    ),
+  );
+  const rows = s.syncRows();
+  if (rows.length)
+    await s.fake.db
+      .update(schema.projectStateSync)
+      .set({ syncedHash: hash })
+      .where(eq(schema.projectStateSync.repositoryId, REPO));
+  else s.syncSeed({ syncedHash: hash });
+}
+
 const isWrite = (event: string) => /^(update|insert|delete) /.test(event);
 
 describe('writeProjectStateRecord: a column that moved past the writer', () => {
@@ -327,7 +351,7 @@ describe('writeProjectStateRecord: a column that moved past the writer', () => {
   it('checks and writes under one lock, so no sync can land between the check and the files', async () => {
     const s = await setup();
     await s.write(context(), true, { expectedColumns: [{ planned: 'here' }] });
-    expect(s.lockKeys).toHaveLength(1);
+    expect(s.lockKeys).toHaveLength(4);
 
     const t = await setup();
     t.hook.onLock = () =>
@@ -365,25 +389,18 @@ describe('writeProjectStateRecord: a column that moved past the writer', () => {
     }
   });
 
-  it('clears the column after a failed write, unless a sync moved it before the clear', async () => {
-    for (const syncLands of [false, true]) {
-      const s = await setup();
-      await s.write(context(), true);
-      const planned = s.columnOf(REPO);
-      s.fake.hooks.beforeUpdate = () => {
-        if (s.lockKeys.length === 2) throw new Error('database refused');
-      };
-      s.hook.onLock = () => {
-        if (syncLands && s.lockKeys.length === 3) {
-          s.fake.patch(schema.repositories, REPO, { renderContext: { by: 'sync' } });
-        }
-      };
-
-      await expect(s.write(context(), false, { expectedColumns: [planned] })).rejects.toThrow(
-        'database refused',
-      );
-      expect(s.columnOf(REPO)).toEqual(syncLands ? { by: 'sync' } : null);
-    }
+  it('clears the failed foreground column while keeping its durable undo journal', async () => {
+    const s = await setup();
+    await s.write(context(), true);
+    const planned = s.columnOf(REPO);
+    s.fake.hooks.beforeInsert = (table) => {
+      if (table === schema.projectStateSync) throw new Error('database refused');
+    };
+    await expect(s.write(context(), false, { expectedColumns: [planned] })).rejects.toThrow(
+      'database refused',
+    );
+    expect(s.columnOf(REPO)).toBeNull();
+    expect(s.fake.rows(schema.projectStateOutbox)[0]!.writeIntent).toBeTruthy();
   });
 
   it('writes when the column is one the writer expected, or none', async () => {
@@ -396,21 +413,21 @@ describe('writeProjectStateRecord: a column that moved past the writer', () => {
 });
 
 describe('writeProjectStateRecord: the files', () => {
-  it('writes the record files under the repository, as the codec renders them, and nothing else', async () => {
+  it('writes exactly the codec record files and private prepared images', async () => {
     const s = await setup();
     const written = await s.write(context(), true);
 
     const want = expectedFiles(context());
     expect(s.onDisk()).toEqual(want);
-    expect(await listFiles(s.root)).toEqual([FORMAT, RENDER]);
+    expect(await publicFilesWithPrivateImages(s.root)).toEqual([FORMAT, RENDER]);
     expect([...written].sort()).toEqual([FORMAT, RENDER]);
   });
 
-  it('writes them before any database write', async () => {
+  it('commits its recovery intent before the first file changes', async () => {
     const s = await setup();
     await s.write(context(), true);
-
-    expect(s.atFirstWrite()).toEqual(expectedFiles(context()));
+    expect(s.atFirstWrite()).toEqual({ format: null, render: null });
+    expect(s.fake.rows(schema.projectStateOutbox)[0]!.writeIntent).toBeNull();
   });
 
   it('writes the files again for a second context, replacing the first', async () => {
@@ -421,7 +438,7 @@ describe('writeProjectStateRecord: the files', () => {
 
     await s.write(portableOnly(), false);
     expect(s.onDisk()).toEqual(expectedFiles(portableOnly()));
-    expect(await listFiles(s.root)).toEqual([FORMAT, RENDER]);
+    expect(await publicFilesWithPrivateImages(s.root)).toEqual([FORMAT, RENDER]);
   });
 });
 
@@ -493,23 +510,26 @@ describe('writeProjectStateRecord: the database', () => {
 });
 
 describe('writeProjectStateRecord: the transaction', () => {
-  it('opens one transaction, whose first statement is the advisory lock, and writes both rows in it', async () => {
+  it('commits an undo journal then writes rows and files under the same ordered locks', async () => {
     const s = await setup();
     await s.write(context(), true);
-
     const { events } = s;
-    expect(events.filter((e) => e === 'begin')).toHaveLength(1);
-    expect(events.filter((e) => e === 'end')).toHaveLength(1);
-    const begin = events.indexOf('begin');
-    const end = events.indexOf('end');
-    const inside = events.slice(begin + 1, end);
-    expect(inside[0]).toBe(LOCK);
-    expect(inside.slice(1).filter(isWrite).sort()).toEqual([
-      'insert project_state_sync',
-      'update repositories',
+    expect(events.filter((e) => e === 'begin')).toHaveLength(2);
+    expect(events.filter((e) => e === 'end')).toHaveLength(2);
+    const firstEnd = events.indexOf('end');
+    expect(events.slice(0, firstEnd).filter(isWrite)).toEqual([
+      'insert project_state_outbox',
+      'update project_state_outbox',
     ]);
-    expect([...events.slice(0, begin), ...events.slice(end + 1)].filter(isWrite)).toEqual([]);
-    expect(s.lockKeys).toHaveLength(1);
+    const writes = events.slice(firstEnd + 1).filter(isWrite);
+    expect(writes).toContain('insert project_state_sync');
+    expect(writes).toContain('update repositories');
+    expect(s.lockKeys).toEqual([
+      `onboarding-upgrade:${REPO}`,
+      `project-state:${REPO}`,
+      `onboarding-upgrade:${REPO}`,
+      `project-state:${REPO}`,
+    ]);
   });
 
   it('takes the same lock for one repository every time, and another for another repository', async () => {
@@ -519,51 +539,35 @@ describe('writeProjectStateRecord: the transaction', () => {
     await s.write(context(), true);
     await s.write(portableOnly(), true);
     await s.write(context(), true, { repositoryId: OTHER, repoPath: elsewhere });
-
-    const [first, again, other] = s.lockKeys;
-    expect(s.lockKeys).toHaveLength(3);
-    expect(first).toBe(again);
-    expect(other).not.toBe(first);
-    // Named for the repository without being the bare id, which the plan mirror already locks on.
-    expect(first).toContain(REPO);
-    expect(first).not.toBe(REPO);
+    expect(s.lockKeys.filter((k) => k === `project-state:${REPO}`)).toHaveLength(4);
+    expect(s.lockKeys.filter((k) => k === `project-state:${OTHER}`)).toHaveLength(2);
   });
 
   it('makes a second writer of the repository wait until the first one has finished', async () => {
     const s = await setup();
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let commits = 0;
-    let locks = 0;
-    s.hook.onLock = () => {
-      locks += 1;
-    };
     s.hook.onCommit = async () => {
-      commits += 1;
-      if (commits > 1) return;
-      s.events.push('first writer: before commit');
-      await gate;
-      s.events.push('first writer: released');
+      if (++commits === 1) {
+        s.events.push('intent awaiting commit');
+        await gate;
+      }
     };
-
     const first = s.write(context(), true);
-    await waitFor(() => s.events.includes('first writer: before commit'));
+    await waitFor(() => s.events.includes('intent awaiting commit'));
     const second = s.write(portableOnly(), false);
-    await waitFor(() => locks === 2);
-    await sleep(40);
-    const paused = s.events.indexOf('first writer: before commit');
-    expect(s.events.slice(paused + 1).filter(isWrite)).toEqual([]);
-
+    await sleep(30);
+    expect(s.onDisk()).toEqual({ format: null, render: null });
     release();
-    await Promise.all([first, second]);
-    const released = s.events.indexOf('first writer: released');
-    expect(
-      s.events
-        .slice(released + 1)
-        .filter(isWrite)
-        .sort(),
-    ).toEqual(['insert project_state_sync', 'update repositories']);
-    expect(json(s.columnOf(REPO))).toEqual(json({ ...portableOnly(), rtkChoiceRecorded: false }));
+    const settled = await Promise.allSettled([first, second]);
+    expect(settled.some((r) => r.status === 'fulfilled')).toBe(true);
+    expect(s.syncRows()).toHaveLength(1);
+    // The other preparer either writes in turn or observes a superseding journal and defers.
+    for (const r of settled)
+      if (r.status === 'rejected') expect(r.reason).toBeInstanceOf(ProjectStateMovedError);
   });
 });
 
@@ -573,7 +577,7 @@ describe('writeProjectStateRecord: failures', () => {
     ['sets the column', 'beforeUpdate'],
     ['writes the sync row', 'beforeInsert'],
   ] as const)(
-    'keeps the files, and leaves both rows as they were, when the database %s',
+    'writes no file or semantic row when preparation cannot commit because the database %s',
     async (_what, point) => {
       const s = await setup();
       s.fake.hooks[point] = () => {
@@ -587,20 +591,20 @@ describe('writeProjectStateRecord: failures', () => {
       expect(err).not.toBeNull();
       expect(messages(err).some((m) => m.includes('database refused'))).toBe(true);
 
-      expect(s.onDisk()).toEqual(expectedFiles(context()));
+      expect(s.onDisk()).toEqual({ format: null, render: null });
       expect(s.columnOf(REPO)).toBeNull();
       expect(s.syncRows()).toEqual([]);
     },
   );
 
   // The column it leaves is cleared, since it would otherwise read as newer than the writer's rows.
-  it('writes no sync row, and only clears the column, when the files cannot be written', async () => {
+  it('holds an unreadable checkout before writing a sync row or clearing the column', async () => {
     const s = await setup();
     await writeFile(join(s.root, '.haive-data'), 'a file where the directory should be');
 
     await expect(s.write(context(), true)).rejects.toThrow();
 
-    expect(s.events.filter(isWrite)).toEqual(['update repositories']);
+    expect(s.events.filter(isWrite)).toEqual([]);
     expect(s.columnOf(REPO)).toBeNull();
     expect(s.syncRows()).toEqual([]);
   });
@@ -622,7 +626,7 @@ describe('writeProjectStateRecord: what a rejection names', () => {
     ['sets the column', 'beforeUpdate'],
     ['writes the sync row', 'beforeInsert'],
   ] as const)(
-    'names both record files when the database %s, and still rejects with its reason',
+    'names no record files when preparation fails because the database %s',
     async (_what, point) => {
       const s = await setup();
       s.fake.hooks[point] = () => {
@@ -632,13 +636,17 @@ describe('writeProjectStateRecord: what a rejection names', () => {
       const err = await rejection(s.write(context(), true));
 
       expect(err).toBeInstanceOf(Error);
-      expect([...(written(err) ?? [])].sort()).toEqual([FORMAT, RENDER]);
+      expect([...(written(err) ?? [])].sort()).toEqual([]);
       expect((err as Error).message).toContain('database refused');
-      expect(await listFiles(s.root)).toEqual([FORMAT, RENDER]);
+      if (point === 'beforeLock') expect(await listFiles(s.root)).toEqual([]);
+      else {
+        expect(await publicFilesWithPrivateImages(s.root)).toEqual([]);
+        expect((await listFiles(s.root)).length).toBe(3);
+      }
     },
   );
 
-  it('names the file it wrote and not the one it could not, when a later file cannot be written', async () => {
+  it('names no file when the strict read refuses a non-directory inside the record', async () => {
     const s = await setup();
     await mkdir(join(s.root, STATE_DIR), { recursive: true });
     await writeFile(join(s.root, STATE_DIR, 'project'), 'a file where the directory should be');
@@ -646,8 +654,8 @@ describe('writeProjectStateRecord: what a rejection names', () => {
     const err = await rejection(s.write(context(), true));
 
     expect(err).toBeInstanceOf(Error);
-    expect(written(err)).toEqual([FORMAT]);
-    expect(s.events.filter(isWrite)).toEqual(['update repositories']);
+    expect(written(err) ?? []).toEqual([]);
+    expect(s.events.filter(isWrite)).toEqual([]);
   });
 
   it('names no file when none could be written', async () => {
@@ -657,10 +665,10 @@ describe('writeProjectStateRecord: what a rejection names', () => {
     const err = await rejection(s.write(context(), true));
 
     expect(err).toBeInstanceOf(Error);
-    expect(written(err)).toEqual([]);
+    expect(written(err) ?? []).toEqual([]);
   });
 
-  it('names the paths a write that succeeds returns, so the two cannot disagree', async () => {
+  it('reports only paths actually reached by an attempt', async () => {
     const s = await setup();
     const ok = await s.write(context(), true);
 
@@ -670,7 +678,8 @@ describe('writeProjectStateRecord: what a rejection names', () => {
     };
     const err = await rejection(failing.write(context(), true));
 
-    expect([...(written(err) ?? [])]).toEqual([...ok]);
+    expect(ok).toEqual(expect.arrayContaining([FORMAT, RENDER]));
+    expect(written(err) ?? []).toEqual([]);
   });
 });
 
@@ -693,15 +702,12 @@ describe('writeProjectStateRecord: a key a sync left pending', () => {
     expect(s.fake.rows(schema.projectStateConflicts)).toHaveLength(1);
   });
 
-  it('keeps the column when only the first look at the pending rows fails', async () => {
+  it('fails before files when its first locked recovery read fails', async () => {
     const s = await setup();
     s.pend(UNIT, { base, local: ['security-auditor', 'code-reviewer'], incoming });
     s.hook.failNextSelect = 1;
-
-    await s.write(context(), true);
-
-    expect(json(s.columnOf(REPO))).toEqual(json({ ...context(), rtkChoiceRecorded: true }));
-    expect(s.onDisk().render).toBe(expectedFiles(withIds(incoming)).render);
+    await expect(s.write(context(), true)).rejects.toThrow('read refused');
+    expect(s.onDisk()).toEqual({ format: null, render: null });
   });
 
   it('writes no file from an unknown set of pending rows when the locked read fails too', async () => {
@@ -750,7 +756,7 @@ describe('writeProjectStateRecord: a key a sync left pending', () => {
     expect(row!.resolvedAt ?? null).toBeNull();
   });
 
-  it('reports the column stale when it cannot keep the value it wrote for a pending key', async () => {
+  it('leaves the pending local side intact when intent preparation fails', async () => {
     const s = await setup();
     s.pend(UNIT, { base, local: ['security-auditor', 'code-reviewer'], incoming });
     s.fake.hooks.beforeInsert = () => {
@@ -765,7 +771,8 @@ describe('writeProjectStateRecord: a key a sync left pending', () => {
       (e: unknown) => e,
     );
 
-    expect((err as { columnStale?: boolean }).columnStale).toBe(true);
+    expect((err as { columnStale?: boolean }).columnStale).toBe(false);
+    expect(s.onDisk()).toEqual({ format: null, render: null });
   });
 
   it('records nothing as the local side when the render file itself was never written', async () => {
@@ -819,7 +826,9 @@ describe('writeProjectStateRecord: a key a sync left pending', () => {
 
   it('reads the rows under the lock, so a sync that landed after the files were planned is seen', async () => {
     const s = await setup();
-    s.hook.onLock = () => s.pend(UNIT, { base, incoming });
+    s.hook.onLock = () => {
+      if (!s.fake.rows(schema.projectStateConflicts).length) s.pend(UNIT, { base, incoming });
+    };
 
     await s.write(context(), true);
 
@@ -975,16 +984,21 @@ describe('writeProjectStateRecord: one claim per live ledger row', () => {
     await writeFile(teammateFile, '{"unsynced":true}\n');
     s.fake.patch(schema.onboardingArtifacts, retiring.id as string, { supersededAt: new Date(2) });
 
-    const { written, removed } = await s.writeFull(context(), true);
+    await expect(s.writeFull(context(), true)).rejects.toBeInstanceOf(ProjectStateMovedError);
 
-    expect(removed).toEqual([claimPath('.claude/agents/old.md')]);
-    expect(written).not.toContain(claimPath('.claude/agents/old.md'));
     expect(await claimFiles(s.root)).toEqual(
-      [claimPath('.claude/agents/code-reviewer.md'), claimPath(teammate)].sort(),
+      [
+        claimPath('.claude/agents/code-reviewer.md'),
+        claimPath('.claude/agents/old.md'),
+        claimPath(teammate),
+      ].sort(),
     );
     expect(readFileSync(teammateFile, 'utf8')).toBe('{"unsynced":true}\n');
     const base = s.syncRows()[0]![s.col.baseSnapshot] as { claims: { path: string }[] };
-    expect(base.claims.map((c) => c.path)).toEqual(['.claude/agents/code-reviewer.md']);
+    expect(base.claims.map((c) => c.path)).toEqual([
+      '.claude/agents/code-reviewer.md',
+      '.claude/agents/old.md',
+    ]);
   });
 
   it('reports a claim file already gone from disk as removed, so the commit drops it from git too', async () => {
@@ -1009,7 +1023,19 @@ describe('writeProjectStateRecord: one claim per live ledger row', () => {
       s.syncSeed({ [s.col.baseSnapshot]: { claims: [{ path: diskPath }] } });
       const legacy = claimPath(diskPath);
       await mkdir(join(s.root, STATE_DIR, 'artifacts'), { recursive: true });
-      await writeFile(join(s.root, legacy), JSON.stringify({ path: diskPath }) + '\n');
+      await writeFile(
+        join(s.root, legacy),
+        JSON.stringify({
+          path: diskPath,
+          templateId: 'agent.legacy',
+          kind: 'agent',
+          schemaVersion: 1,
+          templateHash: 'a'.repeat(64),
+          writtenHash: 'b'.repeat(64),
+          haiveVersion: '1.0.0',
+        }) + '\n',
+      );
+      await knownCheckout(s);
 
       const { removed } = await s.writeFull(context(), true);
 
@@ -1025,9 +1051,7 @@ describe('writeProjectStateRecord: one claim per live ledger row', () => {
     await mkdir(join(s.root, STATE_DIR, 'artifacts'), { recursive: true });
     await writeFile(join(s.root, stray), '{"unsynced":true}\n');
 
-    const { removed } = await s.writeFull(context(), true);
-
-    expect(removed).toEqual([]);
+    await expect(s.writeFull(context(), true)).rejects.toBeInstanceOf(ProjectStateMovedError);
     expect(await claimFiles(s.root)).toContain(stray);
   });
 });
@@ -1175,6 +1199,7 @@ describe('writeProjectStateRecord: one descriptor per bundle source', () => {
           normalizeProjectState({ ...emptyProjectState(), bundles: [{ source: SOURCE, name }] }),
         ),
       });
+      await knownCheckout(s);
     }
   };
 
@@ -1233,6 +1258,7 @@ describe('writeProjectStateRecord: one descriptor per bundle source', () => {
     const s = await setup();
     await seedDescriptor(s, true);
     await rm(join(s.root, descriptorPath));
+    await knownCheckout(s);
 
     const { removed } = await s.writeFull(context(), true);
 
@@ -1244,9 +1270,7 @@ describe('writeProjectStateRecord: one descriptor per bundle source', () => {
     const s = await setup();
     await seedDescriptor(s, false);
 
-    const { removed } = await s.writeFull(context(), true);
-
-    expect(removed).toEqual([]);
+    await expect(s.writeFull(context(), true)).rejects.toBeInstanceOf(ProjectStateMovedError);
     expect(descriptorOn(s.root)).toEqual({ source: SOURCE, name: 'theirs' });
   });
 });
@@ -1268,14 +1292,12 @@ describe('writeProjectStateRecord: a file already holding the bytes', () => {
     expect(second.written).toEqual(expect.arrayContaining([FORMAT, RENDER]));
   });
 
-  it('is replaced once its bytes differ', async () => {
+  it('holds a malformed hand edit instead of replacing bytes it never imported', async () => {
     const s = await setup();
     await s.write(context(), true);
     await writeFile(join(s.root, RENDER), 'edited by hand\n');
-
-    await s.write(context(), true);
-
-    expect(s.onDisk().render).toBe(expectedFiles(context()).render);
+    await expect(s.write(context(), true)).rejects.toBeInstanceOf(ProjectStateMovedError);
+    expect(s.onDisk().render).toBe('edited by hand\n');
   });
 });
 
@@ -1302,15 +1324,14 @@ describe('writeProjectStateColumn: a write that fails', () => {
   it('clears the column it could not move, as a writer does', async () => {
     const { s, error } = await failing(false);
 
-    expect(error).toBeInstanceOf(ProjectStateWriteError);
-    expect(s.columnOf(REPO)).toBeNull();
+    expect(error).toBeInstanceOf(ProjectStateMovedError);
+    expect(s.columnOf(REPO)).toEqual(column());
   });
 
   it('leaves the column alone when it asks to, since the sweep moved it nowhere', async () => {
     const { s, error } = await failing(true);
 
-    expect(error).toBeInstanceOf(ProjectStateWriteError);
-    expect((error as ProjectStateWriteError).columnStale).toBe(false);
+    expect(error).toBeInstanceOf(ProjectStateMovedError);
     expect(s.columnOf(REPO)).toEqual(column());
   });
 });
@@ -1493,9 +1514,7 @@ describe('writeProjectStateRecord: the portable settings and the environment', (
       await mkdir(join(s.root, SETTINGS), { recursive: true });
       await writeFile(join(s.root, TOOLING), '{"ragMode":"theirs"}\n');
 
-      const { removed } = await s.writeFull(context(), true);
-
-      expect(removed).toEqual([]);
+      await expect(s.writeFull(context(), true)).rejects.toBeInstanceOf(ProjectStateMovedError);
       expect(read(s.root, TOOLING)).toEqual({ ragMode: 'theirs' });
     });
   });
@@ -1505,9 +1524,7 @@ describe('writeProjectStateRecord: the portable settings and the environment', (
     await mkdir(join(s.root, SETTINGS), { recursive: true });
     await writeFile(join(s.root, `${SETTINGS}/from-a-newer-release.json`), '1\n');
 
-    const { removed } = await s.writeFull(context(), true);
-
-    expect(removed).toEqual([]);
+    await expect(s.writeFull(context(), true)).rejects.toBeInstanceOf(ProjectStateMovedError);
     expect(await settingFiles(s.root)).toEqual([`${SETTINGS}/from-a-newer-release.json`]);
   });
 
@@ -1635,6 +1652,7 @@ describe('writeProjectStateRecord: the portable settings and the environment', (
       await mkdir(join(s.root, SETTINGS), { recursive: true });
       await writeFile(join(s.root, RTK), 'false\n');
       s.syncSeed({ [s.col.baseSnapshot]: { settings: { 'rtk-enabled': false } } });
+      await knownCheckout(s);
 
       const { removed } = await s.writeFull(context(), false);
 
@@ -1684,6 +1702,7 @@ describe('writeProjectStateRecord: the portable settings and the environment', (
         await mkdir(join(s.root, SETTINGS), { recursive: true });
         await writeFile(join(s.root, RTK), 'false\n');
         s.syncSeed({ [s.col.baseSnapshot]: { settings: { 'rtk-enabled': false } } });
+        await knownCheckout(s);
 
         const { removed } = await s.writeFull(context(), false);
 
@@ -1704,3 +1723,17 @@ describe('writeProjectStateRecord: the portable settings and the environment', (
     expect(row).toMatchObject({ unit: 'settings/rtk-enabled.json', resolvedAt: null });
   });
 });
+
+/** Preparation is private, pre-intent IO. It must add no public record or unrelated file. */
+async function publicFilesWithPrivateImages(root: string): Promise<string[]> {
+  const files = await listFiles(root);
+  const prefix = '.haive-data/.state-writes/';
+  const staged = files.filter((rel) => rel.startsWith(prefix));
+  expect(staged.length).toBeGreaterThan(0);
+  for (const rel of staged)
+    expect(rel).toMatch(
+      /^\.haive-data\/\.state-writes\/(?:\.gitignore|[a-f0-9-]{36}\/\d+\.(?:before|after|forward|undo))$/,
+    );
+  expect(await readFile(join(root, prefix, '.gitignore'), 'utf8')).toBe('*\n');
+  return files.filter((rel) => !rel.startsWith(prefix));
+}

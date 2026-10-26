@@ -272,7 +272,7 @@ async function setup(seed: Seed = {}) {
     onLock: null as ((key: string) => void | Promise<void>) | null,
     onCommit: null as (() => Promise<void>) | null,
     /** Awaited before an insert, an update or a delete writes. */
-    onWrite: null as (() => Promise<void>) | null,
+    onWrite: null as ((table: PgTable) => Promise<void>) | null,
     /** Runs once, as the sync row is first read, before the read is made. */
     onFirstSyncRead: null as (() => void) | null,
   };
@@ -287,7 +287,7 @@ async function setup(seed: Seed = {}) {
   };
   const written = (verb: string) => async (table: PgTable) => {
     if (quiet) return;
-    await hook.onWrite?.();
+    await hook.onWrite?.(table);
     events.push(`${verb} ${getTableName(table)}`);
   };
   fake.hooks.beforeUpdate = written('update');
@@ -652,6 +652,7 @@ describe('syncProjectStateFromCheckout: a change made on this install (base equa
   it('is kept, and nothing is written at all', async () => {
     const s = await setup({ column: column(local), sync: { base: baseOf(BASE) } });
     await s.putRecord(record(BASE));
+    await s.run();
     const before = s.dump();
 
     const { outcome, trace } = await s.run();
@@ -1355,7 +1356,7 @@ describe('syncProjectStateFromCheckout: a base that moved since the files were r
     const { outcome, trace } = await s.run();
 
     expect(outcome).toBe('superseded');
-    expect(trace.filter(isWrite)).toEqual([]);
+    expect(trace.filter(isWrite).every((e) => e === 'insert project_state_sync')).toBe(true);
     expect(json(s.columnOf())).toEqual(column(LATER));
     expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseOf(LATER));
     expect(s.syncRow()?.lastError ?? null).toBeNull();
@@ -1406,12 +1407,12 @@ describe('syncProjectStateFromCheckout: a base that moved since the files were r
     const { outcome, trace } = await s.run();
 
     expect(['unchanged', 'superseded']).toContain(outcome);
-    expect(trace.filter(isWrite)).toEqual([]);
+    expect(trace.filter(isWrite).every((e) => e === 'insert project_state_sync')).toBe(true);
     expect(json(s.columnOf())).toEqual(column(LATER));
     expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseOf(LATER));
   });
 
-  it('waits for a writer holding the lock, then reports superseded and does not overwrite it', async () => {
+  it('holds rather than importing a writer’s uncommitted filesystem output', async () => {
     const s = await setup();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
@@ -1422,7 +1423,8 @@ describe('syncProjectStateFromCheckout: a base that moved since the files were r
     };
     // The writer has taken the lock and is about to write; the fake has no isolation, so anything
     // it wrote before this point would already be visible to the sync's first read.
-    s.hook.onWrite = async () => {
+    s.hook.onWrite = async (table) => {
+      if (table !== schema.repositories) return;
       writes += 1;
       if (writes > 1) return;
       s.events.push('writer: holding the lock');
@@ -1441,12 +1443,12 @@ describe('syncProjectStateFromCheckout: a base that moved since the files were r
       await sleep(40);
       const held = s.events.indexOf('writer: holding the lock');
       expect(s.events.slice(held + 1).filter(isWrite)).toEqual([]);
-      expect(settled).toBe(false);
+      expect(settled).toBe(true);
 
       release();
       const [, result] = await Promise.all([writer, syncing]);
 
-      expect(result.outcome).toBe('superseded');
+      expect(result.outcome).toBe('held');
       expect(json(s.columnOf())).toEqual({ ...contextA(), rtkChoiceRecorded: true });
       expect(s.syncRows()).toHaveLength(1);
     } finally {
@@ -1544,7 +1546,7 @@ describe('refreshProjectState: an empty state tree', () => {
       JSON.parse(formatText()),
     );
     expect(s.fake.rows(schema.projectStateOutbox)).toMatchObject([
-      { revision: 1, lastError: null },
+      { revision: 2, lastError: null },
     ]);
     expect(s.pending()).toEqual([]);
   });
@@ -2567,8 +2569,9 @@ describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
     }
     await s.run({ repositoryId: OTHER, repoPath: elsewhere });
 
-    const [fromSync, fromWriter, fromOther] = s.lockKeys;
-    expect(s.lockKeys).toHaveLength(3);
+    const domainKeys = s.lockKeys.filter((k) => k.startsWith('project-state:'));
+    const [fromSync, fromWriter, , fromOther] = domainKeys;
+    expect(domainKeys).toHaveLength(4);
     expect(fromSync).toBe(fromWriter);
     expect(fromOther).not.toBe(fromSync);
     expect(fromOther).toBe(`project-state:${OTHER}`);
@@ -2635,7 +2638,7 @@ describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
   });
 });
 
-describe('syncProjectStateFromCheckout: a writer failed after it rendered a pending conflict into the file', () => {
+describe('syncProjectStateFromCheckout: a writer failed while preparing a pending conflict write', () => {
   const AGENTS = 'project/render.json#acceptedAgentIds';
   const mine = render({ acceptedAgentIds: ['code-reviewer'] });
   const theirs = render({ acceptedAgentIds: ['code-reviewer', 'qa-lead'] });
@@ -2679,15 +2682,16 @@ describe('syncProjectStateFromCheckout: a writer failed after it rendered a pend
     expect(s.syncRow()?.lastError).not.toContain(AGENTS);
   });
 
-  it('keeps the value a failed writer chose for the contested key, not the row’s older one', async () => {
+  it('keeps the committed local side when an attempted choice never reached the file transaction', async () => {
     const chosen = render({ acceptedAgentIds: ['security-auditor'] });
     const s = await failedWriter(chosen);
 
     const { outcome } = await s.run();
 
     expect(outcome).toBe('conflict');
-    expect(json(s.pending()[0]!.local)).toEqual({ v: chosen.acceptedAgentIds });
-    expect(json(s.columnOf())).toMatchObject({ acceptedAgentIds: chosen.acceptedAgentIds });
+    // Failure preceded the files/semantic transaction; it never committed the attempted choice.
+    expect(json(s.pending()[0]!.local)).toEqual({ v: mine.acceptedAgentIds });
+    expect(json(s.columnOf())).toMatchObject({ acceptedAgentIds: mine.acceptedAgentIds });
   });
 
   it('writes nothing on the sync after that', async () => {

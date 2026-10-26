@@ -116,6 +116,14 @@ describe('R1: a rollback and the applicable set', () => {
       warnings: [],
     };
     const noop = () => undefined;
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      repositoryId: REPO,
+      type: 'onboarding_upgrade',
+      status: 'running',
+      title: 'rollback',
+    });
     const ctx = {
       db: fake.db,
       repoPath,

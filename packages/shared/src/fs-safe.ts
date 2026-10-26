@@ -1116,8 +1116,19 @@ export async function removeFileIfNoFollow(
   anchor: string,
   rel: string,
   accept: (data: Buffer, mode: number, owner: Owner) => boolean | Promise<boolean>,
-  opts: { maxBytes?: number; repairPermissions?: boolean } = {},
+  opts: { maxBytes?: number; repairPermissions?: boolean; journal?: JournalFileOperation } = {},
 ): Promise<'removed' | 'absent' | 'kept'> {
+  if (opts.journal) {
+    const result = await journalMutation(
+      anchor,
+      rel,
+      opts.journal,
+      'remove',
+      opts.maxBytes ?? 1024 * 1024,
+      async (data, mode, owner) => ((await accept(data, mode, owner)) ? Buffer.alloc(0) : null),
+    );
+    return result === 'removed' || result === 'absent' ? result : 'kept';
+  }
   const result = await settleParked(
     anchor,
     rel,
@@ -1152,14 +1163,66 @@ export async function removeFileIfIdentityNoFollow(
   return result === 'rewritten' ? 'kept' : result;
 }
 
+/** Remove an eligible empty directory with one atomic, nonrecursive rmdir under a verified parent.
+ *  A different identity already present is kept. An empty replacement racing after that check is
+ *  semantically equivalent; rmdir itself refuses links, files and nonempty directories. No park
+ *  name is created, so a crash leaves either the original path or absence, both replayable. */
+export async function removeEmptyDirectoryIfNoFollow(
+  anchor: string,
+  rel: string,
+  identity: FileIdentity,
+): Promise<'removed' | 'absent' | 'kept'> {
+  const safe = toSafeRel(rel);
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (leaf === undefined) throw new PathContainmentError('invalid-path', anchor, rel, rel);
+  let dir: HeldDir;
+  try {
+    dir = await walkDir(anchor, safe, segs);
+  } catch (err) {
+    if (!isPathContainmentError(err) && ABSENT.has(errno(err) ?? '')) return 'absent';
+    throw err;
+  }
+  try {
+    const st = await lstat(at(dir.fh.fd, leaf), { bigint: true }).catch((err: unknown) => {
+      if (ABSENT.has(errno(err) ?? '')) return null;
+      throw err;
+    });
+    if (st === null) return 'absent';
+    if (!st.isDirectory() || st.dev !== identity.dev || st.ino !== identity.ino) return 'kept';
+    await assertHeldAt(dir.fh, dir.real, anchor, safe, segs.join('/'));
+    try {
+      await rmdir(at(dir.fh.fd, leaf));
+      return 'removed';
+    } catch (err) {
+      if (errno(err) === 'ENOENT') return 'absent';
+      if (['ENOTEMPTY', 'EEXIST', 'ENOTDIR', 'ELOOP'].includes(errno(err) ?? '')) return 'kept';
+      throw err;
+    }
+  } finally {
+    await closeQuietly(dir.fh);
+  }
+}
+
 /** Replace the regular file's bytes with what `edit` returns (null keeps them), on its own inode and
  *  judged on the bytes it replaces: parked like `removeFileIfNoFollow`, so a save meanwhile is kept. */
 export async function rewriteFileIfNoFollow(
   anchor: string,
   rel: string,
   edit: (data: Buffer, mode: number, owner: Owner) => Buffer | null | Promise<Buffer | null>,
-  opts: { maxBytes?: number } = {},
+  opts: { maxBytes?: number; journal?: JournalFileOperation } = {},
 ): Promise<'rewritten' | 'absent' | 'kept'> {
+  if (opts.journal) {
+    const result = await journalMutation(
+      anchor,
+      rel,
+      opts.journal,
+      'rewrite',
+      opts.maxBytes ?? 1024 * 1024,
+      edit,
+    );
+    return result === 'rewritten' || result === 'absent' ? result : 'kept';
+  }
   const result = await settleParked(
     anchor,
     rel,
@@ -1168,6 +1231,429 @@ export async function rewriteFileIfNoFollow(
     true,
   );
   return result === 'removed' ? 'kept' : result;
+}
+
+export interface JournalIdentity {
+  dev: string;
+  ino: string;
+}
+export interface JournalPrepared {
+  rel: string;
+  identity: JournalIdentity;
+  uid: number;
+  images: { before: JournalIdentity | null; after: JournalIdentity | null }[];
+}
+export interface JournalFileOperation {
+  prepared: JournalPrepared;
+  index: number;
+  direction: 'forward' | 'undo';
+}
+export interface JournalArtifact {
+  metadata?: { uid: number; gid: number; mode: number };
+  kind: 'absent' | 'file' | 'other';
+  data?: Buffer;
+  truncated?: boolean;
+  identity?: JournalIdentity;
+}
+export interface JournalArtifacts {
+  before: JournalArtifact;
+  after: JournalArtifact;
+  forward: JournalArtifact;
+  undo: JournalArtifact;
+}
+const journalIdentity = (id: FileIdentity): JournalIdentity => ({
+  dev: String(id.dev),
+  ino: String(id.ino),
+});
+const sameJournalIdentity = (
+  a: JournalIdentity | undefined | null,
+  b: JournalIdentity | undefined | null,
+): boolean => !!a && !!b && a.dev === b.dev && a.ino === b.ino;
+
+/** Private images are complete before the database intent commits. Interrupted preparation leaves
+ *  only an unreferenced private directory outside the public record; no public bytes were touched. */
+export async function prepareJournalFilesNoFollow(
+  anchor: string,
+  rel: string,
+  changes: readonly {
+    before: string | null;
+    after: string | null;
+    metadata: { uid: number; gid: number; mode: number } | null;
+  }[],
+  maxBytes: number,
+): Promise<JournalPrepared> {
+  const safe = toSafeRel(rel);
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (!leaf) throw new PathContainmentError('invalid-path', anchor, rel, rel);
+  const parent = segs.join('/');
+  if (segs.length > 1) await ensureDirNoFollow(anchor, segs.slice(0, -1).join('/'));
+  await ensureDirNoFollow(anchor, parent, { mode: 0o755 });
+  const parentInfo = await lstatNoFollow(anchor, parent, { strict: true });
+  if (
+    parentInfo?.kind !== 'directory' ||
+    parentInfo.stats.uid !== process.getuid?.() ||
+    (parentInfo.stats.mode & 0o777) !== 0o755
+  )
+    throw new Error('journal staging parent is not private-worker controlled');
+  const ignore = `${parent}/.gitignore`;
+  try {
+    await writeFileNoFollow(anchor, ignore, '*\n', { mode: 'create-exclusive', fileMode: 0o644 });
+  } catch (err) {
+    if (errno(err) !== 'EEXIST') throw err;
+  }
+  const ignored = await readFileNoFollow(anchor, ignore, { strict: true, maxBytes: 16 });
+  if (!ignored || ignored.truncated || !ignored.data.equals(Buffer.from('*\n')))
+    throw new Error('journal staging ignore file changed');
+  const dir = await walkDir(anchor, safe, segs);
+  try {
+    await mkdir(at(dir.fh.fd, leaf), 0o700);
+  } finally {
+    await closeQuietly(dir.fh);
+  }
+  const held = await openDirNoFollow(anchor, safe);
+  try {
+    await held.chmod(0o700);
+    const st = await held.stat();
+    const prepared: JournalPrepared = {
+      rel: safe,
+      identity: journalIdentity(await fileIdentity(held)),
+      uid: st.uid,
+      images: [],
+    };
+    for (const [index, change] of changes.entries()) {
+      const image: JournalPrepared['images'][number] = { before: null, after: null };
+      for (const side of ['before', 'after'] as const) {
+        const text = change[side];
+        if (text === null) continue;
+        if (Buffer.byteLength(text) > maxBytes)
+          throw new RangeError('journal image exceeds its byte limit');
+        const name = `${safe}/${index}.${side}`;
+        await writeFileNoFollow(anchor, name, text, {
+          mode: 'create-exclusive',
+          fileMode: change.metadata?.mode ?? 0o644,
+          ...(change.metadata
+            ? { owner: { uid: change.metadata.uid, gid: change.metadata.gid } }
+            : {}),
+        });
+        const file = await openFileNoFollow(anchor, name, 'read', { strict: true });
+        if (!file) throw new Error('prepared journal image disappeared');
+        try {
+          image[side] = journalIdentity(await fileIdentity(file));
+        } finally {
+          await closeQuietly(file);
+        }
+      }
+      prepared.images.push(image);
+    }
+    return prepared;
+  } finally {
+    await closeQuietly(held);
+  }
+}
+async function openJournalDirectory(anchor: string, prepared: JournalPrepared): Promise<HeldDir> {
+  const safe = toSafeRel(prepared.rel);
+  const dir = await walkDir(anchor, safe, segments(safe));
+  try {
+    const st = await dir.fh.stat();
+    if (
+      !sameJournalIdentity(journalIdentity(await fileIdentity(dir.fh)), prepared.identity) ||
+      st.uid !== prepared.uid ||
+      st.uid !== process.getuid?.() ||
+      (st.mode & 0o777) !== 0o700
+    )
+      throw new PathContainmentError('unverifiable', anchor, safe, safe);
+    return dir;
+  } catch (err) {
+    await closeQuietly(dir.fh);
+    throw err;
+  }
+}
+async function journalArtifact(
+  dir: HeldDir,
+  name: string,
+  anchor: string,
+  rel: string,
+  maxBytes: number,
+): Promise<JournalArtifact> {
+  const st = await lstat(at(dir.fh.fd, name)).catch((err: unknown) => {
+    if (ABSENT.has(errno(err) ?? '')) return null;
+    throw err;
+  });
+  if (!st) return { kind: 'absent' };
+  if (!st.isFile()) return { kind: 'other' };
+  const file = await open(at(dir.fh.fd, name), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+  try {
+    await assertHeldAt(file, below(dir.real, name), anchor, rel, name);
+    const actual = await file.stat();
+    if (!actual.isFile()) return { kind: 'other' };
+    const metadata = { uid: actual.uid, gid: actual.gid, mode: actual.mode & 0o7777 };
+    const size = actual.size;
+    const identity = journalIdentity(await fileIdentity(file));
+    if (size > maxBytes) return { kind: 'file', truncated: true, identity, metadata };
+    const data = Buffer.allocUnsafe(size);
+    let offset = 0;
+    while (offset < size) {
+      const read = await file.read(data, offset, size - offset, offset);
+      if (!read.bytesRead) break;
+      offset += read.bytesRead;
+    }
+    return { kind: 'file', data: data.subarray(0, offset), truncated: false, identity, metadata };
+  } finally {
+    await closeQuietly(file);
+  }
+}
+/** Inspect only the bounded, recorded namespace; unknown entries are never treated as owned. */
+export async function inspectJournalFilesNoFollow(
+  anchor: string,
+  prepared: JournalPrepared,
+  maxBytes: number,
+  expectedBytes?: readonly number[],
+): Promise<JournalArtifacts[]> {
+  if (
+    expectedBytes &&
+    (expectedBytes.length !== prepared.images.length ||
+      expectedBytes.some((size) => !Number.isSafeInteger(size) || size < 0 || size > maxBytes))
+  )
+    throw new RangeError('journal inspection lengths are invalid');
+  const dir = await openJournalDirectory(anchor, prepared);
+  try {
+    const allowed = new Set<string>();
+    for (let i = 0; i < prepared.images.length; i++)
+      for (const suffix of ['before', 'after', 'forward', 'undo']) allowed.add(`${i}.${suffix}`);
+    const listing = await opendir(fdPath(dir.fh.fd), { bufferSize: 32 });
+    let entries = 0;
+    for await (const entry of listing)
+      if (++entries > allowed.size || !allowed.has(entry.name))
+        throw new Error('journal private directory contains an unknown entry');
+    const out: JournalArtifacts[] = [];
+    for (let i = 0; i < prepared.images.length; i++) {
+      // Published images are hard links: an editor can grow all of them. Bound every
+      // allocation by that path's recorded sides, not N times the ordinary per-file cap.
+      const limit = expectedBytes?.[i] ?? maxBytes;
+      out.push({
+        before: await journalArtifact(dir, `${i}.before`, anchor, prepared.rel, limit),
+        after: await journalArtifact(dir, `${i}.after`, anchor, prepared.rel, limit),
+        forward: await journalArtifact(dir, `${i}.forward`, anchor, prepared.rel, limit),
+        undo: await journalArtifact(dir, `${i}.undo`, anchor, prepared.rel, limit),
+      });
+    }
+    return out;
+  } finally {
+    await closeQuietly(dir.fh);
+  }
+}
+async function restoreJournalEntry(
+  cap: HeldDir,
+  slot: string,
+  publicDir: HeldDir,
+  leaf: string,
+): Promise<void> {
+  const st = await lstat(at(cap.fh.fd, slot));
+  if (st.isDirectory()) {
+    await mkdir(at(publicDir.fh.fd, leaf), 0o700);
+    try {
+      await rename(at(cap.fh.fd, slot), at(publicDir.fh.fd, leaf));
+    } catch (err) {
+      await rmdir(at(publicDir.fh.fd, leaf)).catch(() => undefined);
+      throw err;
+    }
+  } else {
+    await link(at(cap.fh.fd, slot), at(publicDir.fh.fd, leaf));
+    await unlink(at(cap.fh.fd, slot));
+  }
+}
+/** Restore an entry this operation parked, never replacing a new public entry. */
+export async function restoreJournalFileNoFollow(
+  anchor: string,
+  rel: string,
+  operation: JournalFileOperation,
+): Promise<void> {
+  const safe = toSafeRel(rel);
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (!leaf) throw new PathContainmentError('invalid-path', anchor, rel, rel);
+  const cap = await openJournalDirectory(anchor, operation.prepared);
+  try {
+    const dir = await walkDir(anchor, safe, segs, {});
+    try {
+      await restoreJournalEntry(cap, `${operation.index}.${operation.direction}`, dir, leaf);
+    } finally {
+      await closeQuietly(dir.fh);
+    }
+  } finally {
+    await closeQuietly(cap.fh);
+  }
+}
+async function journalMutation(
+  anchor: string,
+  rel: string,
+  operation: JournalFileOperation,
+  mode: 'create' | 'rewrite' | 'remove',
+  maxBytes: number,
+  decide: (data: Buffer, mode: number, owner: Owner) => Promise<Buffer | null> | Buffer | null,
+  creation?: Buffer,
+): Promise<'created' | 'rewritten' | 'removed' | 'absent' | 'kept'> {
+  const safe = toSafeRel(rel);
+  const segs = segments(safe);
+  const leaf = segs.pop();
+  if (!leaf) throw new PathContainmentError('invalid-path', anchor, rel, rel);
+  const cap = await openJournalDirectory(anchor, operation.prepared);
+  const slot = `${operation.index}.${operation.direction}`;
+  let dir: HeldDir | undefined;
+  let parked = false;
+  const restore = async (earlier?: unknown) => {
+    parked = false;
+    try {
+      await restoreJournalEntry(cap, slot, dir!, leaf);
+    } catch (err) {
+      throw new ParkedFileError(safe, `${operation.prepared.rel}/${slot}`, errno(err), {
+        cause:
+          earlier === undefined
+            ? err
+            : new AggregateError([earlier, err], 'journal mutation and restoration both failed'),
+      });
+    }
+  };
+  try {
+    try {
+      dir = await walkDir(anchor, safe, segs, mode === 'create' ? {} : undefined);
+    } catch (err) {
+      if (mode !== 'create' && !isPathContainmentError(err) && ABSENT.has(errno(err) ?? '')) {
+        await assertHeldAt(
+          cap.fh,
+          cap.real,
+          anchor,
+          operation.prepared.rel,
+          operation.prepared.rel,
+        );
+        return 'absent';
+      }
+      throw err;
+    }
+    const capDev = (await cap.fh.stat({ bigint: true })).dev;
+    if ((await dir.fh.stat({ bigint: true })).dev !== capDev)
+      throw new Error('journal publication requires the same filesystem');
+    let replacement = creation;
+    let replacedMetadata: JournalArtifact['metadata'];
+    if (mode !== 'create') {
+      const existing = await lstat(at(dir.fh.fd, leaf)).catch((err: unknown) => {
+        if (ABSENT.has(errno(err) ?? '')) return null;
+        throw err;
+      });
+      if (!existing) return 'absent';
+      if (!existing.isFile()) return 'kept';
+      const priorPark = await journalArtifact(cap, slot, anchor, operation.prepared.rel, maxBytes);
+      if (priorPark.kind !== 'absent') {
+        if (priorPark.kind !== 'file' || priorPark.truncated || !priorPark.data) return 'kept';
+        const priorMetadata = await lstat(at(cap.fh.fd, slot));
+        if (
+          (await decide(priorPark.data, priorMetadata.mode, {
+            uid: priorMetadata.uid,
+            gid: priorMetadata.gid,
+          })) === null
+        )
+          return 'kept';
+        // A crash during exclusive restoration can leave both hard links. This bounded,
+        // recognized private copy is redundant; clear its stable slot before retrying the CAS.
+        await unlink(at(cap.fh.fd, slot));
+      }
+      await assertHeldAt(cap.fh, cap.real, anchor, operation.prepared.rel, operation.prepared.rel);
+      await assertHeldAt(dir.fh, dir.real, anchor, safe, segs.join('/'));
+      try {
+        await rename(at(dir.fh.fd, leaf), at(cap.fh.fd, slot));
+      } catch (err) {
+        if (!isPathContainmentError(err) && ABSENT.has(errno(err) ?? '')) {
+          // Match ordinary CAS absence, without mistaking a lost private destination for it.
+          await assertHeldAt(
+            cap.fh,
+            cap.real,
+            anchor,
+            operation.prepared.rel,
+            operation.prepared.rel,
+          );
+          return 'absent';
+        }
+        throw err;
+      }
+      parked = true;
+      const now = await journalArtifact(cap, slot, anchor, operation.prepared.rel, maxBytes);
+      if (now.kind !== 'file' || now.truncated || !now.data) {
+        await restore();
+        return 'kept';
+      }
+      const metadata = await lstat(at(cap.fh.fd, slot));
+      replacedMetadata = { uid: metadata.uid, gid: metadata.gid, mode: metadata.mode & 0o7777 };
+      const chosen = await decide(now.data, metadata.mode, {
+        uid: metadata.uid,
+        gid: metadata.gid,
+      });
+      if (chosen === null) {
+        await restore();
+        return 'kept';
+      }
+      if (mode === 'remove') {
+        parked = false;
+        return 'removed';
+      }
+      replacement = chosen;
+    }
+    if (!replacement || replacement.length > maxBytes)
+      throw new RangeError('journal publication exceeds its byte limit');
+    const side = operation.direction === 'forward' ? 'after' : 'before';
+    const image = await journalArtifact(
+      cap,
+      `${operation.index}.${side}`,
+      anchor,
+      operation.prepared.rel,
+      maxBytes,
+    );
+    if (
+      image.kind !== 'file' ||
+      image.truncated ||
+      !image.data?.equals(replacement) ||
+      !sameJournalIdentity(image.identity, operation.prepared.images[operation.index]?.[side])
+    )
+      throw new Error('journal publication image changed');
+    const sameMetadata = (actual: JournalArtifact['metadata']) =>
+      !!actual &&
+      !!image.metadata &&
+      actual.uid === image.metadata.uid &&
+      actual.gid === image.metadata.gid &&
+      actual.mode === image.metadata.mode;
+    // Prepared images must not revert a chmod/chown performed after preparation. A rewrite
+    // restores the actual parked inode on refusal, preserving its current metadata.
+    if (replacedMetadata && !sameMetadata(replacedMetadata)) {
+      await restore();
+      return 'kept';
+    }
+    if (mode === 'create' && operation.direction === 'undo') {
+      for (const direction of ['forward', 'undo']) {
+        const source = await journalArtifact(
+          cap,
+          `${operation.index}.${direction}`,
+          anchor,
+          operation.prepared.rel,
+          maxBytes,
+        );
+        if (source.kind !== 'absent' && !sameMetadata(source.metadata))
+          throw new Error('journal restoration metadata changed');
+      }
+    }
+    await assertHeldAt(cap.fh, cap.real, anchor, operation.prepared.rel, operation.prepared.rel);
+    await assertHeldAt(dir.fh, dir.real, anchor, safe, segs.join('/'));
+    await link(at(cap.fh.fd, `${operation.index}.${side}`), at(dir.fh.fd, leaf));
+    parked = false;
+    // Retain private images and parks. There is no partial public fill, unlink-after-link gap or
+    // post-commit garbage deletion that could discard a concurrent writer's bytes.
+    return mode === 'create' ? 'created' : 'rewritten';
+  } catch (err) {
+    if (parked && dir) await restore(err);
+    throw err;
+  } finally {
+    if (dir) await closeQuietly(dir.fh);
+    await closeQuietly(cap.fh);
+  }
 }
 
 type ParkedVerdict = 'remove' | 'keep' | Buffer;
@@ -1556,6 +2042,7 @@ export type WriteMode = 'create-exclusive' | 'overwrite-in-place' | 'replace-ato
 const OVERWRITE_IN_PLACE_MAX_BYTES = 64 * 1024 * 1024;
 
 export interface WriteFileOptions {
+  journal?: JournalFileOperation;
   /** Default `replace-atomic`. */
   mode?: WriteMode;
   /** Permission bits. `replace-atomic` defaults to the REPLACED file's mode, then 0644. */
@@ -1597,6 +2084,19 @@ export async function writeFileNoFollow(
   opts: WriteFileOptions = {},
 ): Promise<'created' | 'overwritten'> {
   const bytes = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
+  if (opts.journal) {
+    const result = await journalMutation(
+      anchor,
+      rel,
+      opts.journal,
+      'create',
+      1024 * 1024,
+      () => bytes,
+      bytes,
+    );
+    if (result !== 'created') throw new Error('journal file was not created');
+    return 'created';
+  }
   const mode = opts.mode ?? 'replace-atomic';
 
   if (mode === 'create-exclusive') {

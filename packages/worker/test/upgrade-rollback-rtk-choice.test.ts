@@ -41,6 +41,7 @@ type Plan = { rtkFollowsLive?: boolean } | null;
 
 function database(plan: Plan, repository: Record<string, unknown> = {}) {
   const fake = createFakeDb({
+    tasks: schema.tasks,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
     cliProviders: schema.cliProviders,
@@ -70,6 +71,14 @@ function database(plan: Plan, repository: Record<string, unknown> = {}) {
       output: { repositoryId: REPO, entries: [], ...plan },
     });
   }
+  fake.insert(schema.tasks, {
+    id: TASK,
+    userId: USER,
+    repositoryId: REPO,
+    type: 'onboarding_upgrade',
+    status: 'running',
+    title: 'rollback',
+  });
   return fake;
 }
 

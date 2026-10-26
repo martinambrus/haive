@@ -154,6 +154,7 @@ async function setup(seed: Seed = {}) {
   const { repositories, projectStateSync: sync, tasks, onboardingArtifacts } = schema;
   const conflicts = schema.projectStateConflicts;
   const fake = createFakeDb({
+    projectStateOutbox: schema.projectStateOutbox,
     repositories,
     projectStateSync: sync,
     projectStateConflicts: conflicts,
@@ -273,6 +274,53 @@ async function setup(seed: Seed = {}) {
 const sync = (s: Awaited<ReturnType<typeof setup>>) =>
   syncProjectStateFromCheckout(s.db, { repositoryId: REPO, repoPath: s.root });
 
+describe('answering a conflict while record recovery is pending', () => {
+  it.each([
+    'project/render.json',
+    'project/render.json#acceptedAgentIds',
+    'settings/rtk-enabled.json',
+    'settings/rtk-version.json',
+    'project/environment.json#confirmedValues',
+    claimFileName('docs/guide.md'),
+  ])('defers %s without exposing it to another owner or changing any state', async (unit) => {
+    const s = await setup();
+    const row = s.rowOf(s.ids[KEY]!);
+    row.unit = unit;
+    // RTK's special answer is distinguished by identical base/local sides.
+    if (unit === 'settings/rtk-enabled.json') {
+      row.base = conflictSide(true);
+      row.local = conflictSide(true);
+      row.incoming = conflictSide(false);
+    }
+    const intent = {
+      id: randomUUID(),
+      changes: [
+        {
+          rel: 'project/render.json',
+          before: await s.fileText(),
+          after: renderText(MINE),
+          metadata: null,
+        },
+      ],
+    };
+    s.fake.insert(schema.projectStateOutbox, {
+      repositoryId: REPO,
+      revision: 2,
+      writtenRevision: 1,
+      writeIntent: intent,
+    });
+    const before = s.dump();
+    const file = await s.fileText();
+    const outbox = json(s.fake.rows(schema.projectStateOutbox));
+    expect(await s.answer('keep_mine', s.ids[KEY], STRANGER)).toEqual({ kind: 'not_found' });
+    expect(await s.answer('keep_mine')).toEqual({ kind: 'busy' });
+    expect(await s.answer('take_theirs')).toEqual({ kind: 'busy' });
+    expect(s.dump()).toEqual(before);
+    expect(await s.fileText()).toBe(file);
+    expect(json(s.fake.rows(schema.projectStateOutbox))).toEqual(outbox);
+  });
+});
+
 describe('answering a conflict: keep mine', () => {
   it('leaves the column, writes my value to the file and the base, and closes the row', async () => {
     const s = await setup();
@@ -302,6 +350,7 @@ describe('answering a conflict: keep mine', () => {
   it('is met by no conflict and no write on the next sync', async () => {
     const s = await setup();
     await s.answer('keep_mine');
+    await sync(s); // Import the newly answered bytes; later syncs are idempotent.
     const before = s.dump();
 
     const next = await sync(s);
@@ -343,6 +392,7 @@ describe('answering a conflict: take theirs', () => {
   it('is met by no conflict and no write on the next sync', async () => {
     const s = await setup();
     await s.answer('take_theirs');
+    await sync(s); // Stamp the acknowledged checkout independently of the merge base.
     const before = s.dump();
 
     expect((await sync(s)).outcome).toBe('unchanged');
@@ -585,6 +635,7 @@ describe('a column an answer created, which records no RTK choice', () => {
       const s = await make();
       expect((json(s.repoRow().renderContext) as Json).rtkChoiceRecorded).toBe(false);
       s.fake.patch(schema.repositories, REPO, { rtkEnabled: true });
+      await sync(s);
       const before = s.dump();
 
       expect((await sync(s)).outcome).toBe('unchanged');

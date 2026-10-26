@@ -1864,8 +1864,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
         repoPath: ctx.repoPath,
         context: renderCtx,
         rtkChoiceRecorded: plan.rtkFollowsLive === true,
+        holdingTaskId: ctx.taskId,
         ...(plan.renderContextColumn !== undefined
-          ? { expectedColumns: plannedColumns(plan), holdingTaskId: ctx.taskId }
+          ? { expectedColumns: plannedColumns(plan) }
           : {}),
       });
       recordWritten = true;

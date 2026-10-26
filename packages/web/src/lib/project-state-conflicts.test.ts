@@ -210,6 +210,23 @@ describe('submitConflictAnswer', () => {
     });
   });
 
+  it('keeps record recovery busy refusals retryable without reporting an applied answer', async () => {
+    const message =
+      'This repository is busy with onboarding, an upgrade, or project settings recovery. Try again once it is ready.';
+    const post = vi.fn().mockRejectedValue(
+      Object.assign(new Error(message), {
+        status: 409,
+        code: 'project_state_conflict_busy',
+      }),
+    );
+    expect(await submitConflictAnswer(post, REPO, ROW, 'keep_mine')).toEqual({
+      kind: 'error',
+      message,
+      code: 'project_state_conflict_busy',
+      ambiguous: false,
+    });
+  });
+
   it('carries a refusal text through as an error', async () => {
     const refusal = Object.assign(new Error('An onboarding is using this repository.'), {
       status: 409,

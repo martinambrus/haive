@@ -57,7 +57,13 @@ async function setup(failure: 'none' | 'artifact-rows', detect: Record<string, u
     projectStateConflicts: schema.projectStateConflicts,
   });
   fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'upload' });
-  fake.insert(schema.tasks, { id: TASK, userId: USER, repositoryId: REPO, type: 'onboarding' });
+  fake.insert(schema.tasks, {
+    id: TASK,
+    userId: USER,
+    repositoryId: REPO,
+    type: 'onboarding',
+    status: 'running',
+  });
   fake.insert(schema.taskSteps, {
     taskId: TASK,
     stepId: '07-generate-files',
@@ -167,8 +173,9 @@ describe('12 reports what its record write did', () => {
   it('failed, when the write is refused', async () => {
     const s = await setup('none');
     let refused = false;
+    let domainLocks = 0;
     s.fake.hooks.beforeLock = (key) => {
-      if (key.includes('project-state') && !refused) {
+      if (key.includes('project-state') && ++domainLocks > 1 && !refused) {
         refused = true;
         throw new Error('database refused');
       }
@@ -316,8 +323,9 @@ describe('12 retires .haive/install.json', () => {
   it('leaves the file alone when the record write failed', async () => {
     const s = await seededSetup(HAIVE_SHAPED);
     let refused = false;
+    let domainLocks = 0;
     s.fake.hooks.beforeLock = (key) => {
-      if (key.includes('project-state') && !refused) {
+      if (key.includes('project-state') && ++domainLocks > 1 && !refused) {
         refused = true;
         throw new Error('database refused');
       }
@@ -331,8 +339,9 @@ describe('12 retires .haive/install.json', () => {
 
   const refuseRecordWrite = (s: Awaited<ReturnType<typeof seededSetup>>) => {
     let refused = false;
+    let domainLocks = 0;
     s.fake.hooks.beforeLock = (key) => {
-      if (key.includes('project-state') && !refused) {
+      if (key.includes('project-state') && ++domainLocks > 1 && !refused) {
         refused = true;
         throw new Error('database refused');
       }
@@ -532,8 +541,9 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
   it('leaves the mirrors alone when the record write failed', async () => {
     const s = await seeded({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: HAIVE_GLOBS });
     let refused = false;
+    let domainLocks = 0;
     s.fake.hooks.beforeLock = (key) => {
-      if (key.includes('project-state') && !refused) {
+      if (key.includes('project-state') && ++domainLocks > 1 && !refused) {
         refused = true;
         throw new Error('database refused');
       }
@@ -550,8 +560,9 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
     const stale = JSON.stringify({ schemaVersion: 1, scopeExcludeGlobs: ['stale/**'] });
     const s = await seeded({ [ENV_LEGACY]: HAIVE_ENV, [GLOBS_LEGACY]: stale });
     let refused = false;
+    let domainLocks = 0;
     s.fake.hooks.beforeLock = (key) => {
-      if (key.includes('project-state') && !refused) {
+      if (key.includes('project-state') && ++domainLocks > 1 && !refused) {
         refused = true;
         throw new Error('database refused');
       }
@@ -650,8 +661,9 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
       { onboardingTooling: TOOLING_COLUMN },
     );
     let refused = false;
+    let domainLocks = 0;
     s.fake.hooks.beforeLock = (key) => {
-      if (key.includes('project-state') && !refused) {
+      if (key.includes('project-state') && ++domainLocks > 1 && !refused) {
         refused = true;
         throw new Error('database refused');
       }

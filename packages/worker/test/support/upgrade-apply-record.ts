@@ -11,6 +11,7 @@ export const RECORD_WRITE_TABLES = {
 };
 
 export const ROLLBACK_RECORD_WRITE_TABLES = {
+  tasks: schema.tasks,
   taskSteps: schema.taskSteps,
   projectStateConflicts: schema.projectStateConflicts,
   projectStateSync: schema.projectStateSync,

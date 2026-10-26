@@ -103,7 +103,22 @@ async function cycle(agents: string, rtkOnAtApply: boolean) {
       backfilledRows: 0,
       ...over,
     }) as unknown as UpgradePlanOutput;
+  const activate = (taskId: string) => {
+    for (const row of fake.rows(schema.tasks))
+      fake.patch(schema.tasks, row.id as string, { status: 'completed' });
+    if (fake.rows(schema.tasks).some((row) => row.id === taskId))
+      fake.patch(schema.tasks, taskId, { status: 'running' });
+    else
+      fake.insert(schema.tasks, {
+        id: taskId,
+        userId: ctxFor(loose, root).userId,
+        repositoryId: REPO,
+        type: 'onboarding_upgrade',
+        status: 'running',
+      });
+  };
   const apply = async (over: Record<string, unknown>, formValues: Record<string, unknown>) => {
+    activate(ctxFor(loose, root).taskId);
     const out = await recordWritten(
       upgradeApplyStep.apply(ctxFor(loose, root), {
         detected: plan(over),
@@ -116,6 +131,7 @@ async function cycle(agents: string, rtkOnAtApply: boolean) {
     return out;
   };
   const rollBack = async (over: Record<string, unknown>) => {
+    activate(ROLLBACK);
     const out = await recordWritten(
       upgradeRollbackStep.apply({ ...ctxFor(loose, root), taskId: ROLLBACK }, {
         detected: {

@@ -1,11 +1,17 @@
-import { and, asc, eq, isNotNull, lt, sql } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { readRenderContextColumn } from '@haive/shared/project-state';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { syncProjectStateFromCheckout } from './sync.js';
-import { ProjectStateMovedError, writeProjectStateColumn } from './write.js';
+import {
+  ProjectStateCheckoutHeldError,
+  ProjectStateMovedError,
+  ProjectStateRecoveryHeldError,
+  recoverProjectStateWrite,
+  writeProjectStateColumn,
+} from './write.js';
 
 const SWEEP_BATCH = 25;
 
@@ -14,13 +20,21 @@ const NOT_WRITTEN = {
   superseded: 'the repository changed while its record was being read',
 } as const;
 
-async function setOutboxError(db: Database, repositoryId: string, message: string): Promise<void> {
+async function setOutboxError(
+  db: Database,
+  repositoryId: string,
+  message: string,
+  onlyIfDirty = false,
+): Promise<void> {
   await db
     .update(schema.projectStateOutbox)
     .set({ lastError: message.slice(0, 500), updatedAt: new Date() })
     .where(
       and(
         eq(schema.projectStateOutbox.repositoryId, repositoryId),
+        onlyIfDirty
+          ? lt(schema.projectStateOutbox.writtenRevision, schema.projectStateOutbox.revision)
+          : undefined,
         sql`${schema.projectStateOutbox.lastError} IS DISTINCT FROM ${message.slice(0, 500)}`,
       ),
     );
@@ -59,6 +73,21 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
   const repoPath = repo?.storagePath ?? repo?.localPath ?? null;
   if (!repoPath || (await gitOperationInProgress(repoPath))) return false;
 
+  try {
+    await recoverProjectStateWrite(db, repositoryId, repoPath);
+  } catch (err) {
+    if (err instanceof ProjectStateRecoveryHeldError) {
+      await setOutboxError(db, repositoryId, err.message);
+      return false;
+    }
+    if (err instanceof ProjectStateCheckoutHeldError) {
+      // Operational metadata only: a refused writer must not change revisions, intent or state.
+      await setOutboxError(db, repositoryId, NOT_WRITTEN.deferred, true);
+      return false;
+    }
+    if (err instanceof ProjectStateMovedError) return false;
+    throw err;
+  }
   const synced = await syncProjectStateFromCheckout(db, {
     repositoryId,
     repoPath,
@@ -75,7 +104,10 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
   }
 
   const [after] = await db
-    .select({ renderContext: schema.repositories.renderContext })
+    .select({
+      renderContext: schema.repositories.renderContext,
+      onboardingResetAt: schema.repositories.onboardingResetAt,
+    })
     .from(schema.repositories)
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
@@ -95,10 +127,17 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
       repoPath,
       column: read.column,
       expectedColumns: [after!.renderContext],
+      expectedResetAt: after!.onboardingResetAt,
       keepColumnOnFailure: true,
       refuseDuringGitOperation: true,
+      refuseWhileHeld: true,
     });
   } catch (err) {
+    if (err instanceof ProjectStateCheckoutHeldError) {
+      // Operational metadata only: a refused writer must not change revisions, intent or state.
+      await setOutboxError(db, repositoryId, NOT_WRITTEN.deferred, true);
+      return false;
+    }
     if (err instanceof ProjectStateMovedError) return false;
     throw err;
   }
@@ -119,7 +158,10 @@ export async function sweepDirtyProjectStates(db: Database): Promise<number> {
     .where(
       and(
         lt(schema.projectStateOutbox.writtenRevision, schema.projectStateOutbox.revision),
-        isNotNull(schema.repositories.renderContext),
+        or(
+          isNotNull(schema.repositories.renderContext),
+          isNotNull(schema.projectStateOutbox.writeIntent),
+        ),
       ),
     )
     .orderBy(asc(schema.projectStateOutbox.updatedAt))

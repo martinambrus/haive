@@ -80,7 +80,10 @@ describe('12-post-onboarding: a claim file a person deleted by hand', () => {
     await git(repo, ['add', '-A']);
     await git(repo, ['commit', '-q', '-m', 'seed']);
 
-    generated.detect = { ...(REFERENCE_CONTEXT as unknown as Record<string, unknown>) };
+    generated.detect = {
+      ...(REFERENCE_CONTEXT as unknown as Record<string, unknown>),
+      cliProviders: [],
+    };
     const fake = createFakeDb({
       repositories: schema.repositories,
       projectStateSync: schema.projectStateSync,

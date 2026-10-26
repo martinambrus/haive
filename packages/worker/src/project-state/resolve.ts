@@ -374,6 +374,7 @@ async function answerClaimQuestion(
     .returning();
 
   const synced = {
+    syncedHash: null,
     baseSnapshot: normalizeProjectState({
       ...emptyProjectState(),
       ...snapshot,
@@ -598,6 +599,7 @@ async function answerSettingsQuestion(
         ),
       };
   const synced = {
+    syncedHash: null,
     baseSnapshot: normalizeProjectState({ ...emptyProjectState(), ...base }),
     lastError: sync?.lastError ?? null,
     updatedAt: now,
@@ -703,6 +705,16 @@ async function answerInTransaction(
         ? { kind: 'resolved', conflict: conflictBody(row), written: [] }
         : { kind: 'settled', resolution: row.resolution ?? '' };
     }
+
+    // An uncommitted record attempt owns its before/planned file bytes until recovery. Even
+    // answering another render key can rewrite that same file beyond either recognized version.
+    // Check after ownership and conflict authorization, under the lock held through every answer.
+    const [outbox] = await tx
+      .select({ writeIntent: schema.projectStateOutbox.writeIntent })
+      .from(schema.projectStateOutbox)
+      .where(eq(schema.projectStateOutbox.repositoryId, repositoryId))
+      .limit(1);
+    if (outbox?.writeIntent != null) return { kind: 'busy' };
 
     const live = await tx
       .select({ id: schema.tasks.id })
@@ -837,6 +849,7 @@ async function answerInTransaction(
         ? stillConflict
         : sync.lastError;
     const synced = {
+      syncedHash: null,
       baseSnapshot: normalizeProjectState({
         ...emptyProjectState(),
         ...snapshot,

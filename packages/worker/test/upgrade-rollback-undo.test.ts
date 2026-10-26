@@ -94,6 +94,16 @@ async function setup() {
     taskId: '00000000-0000-4000-8000-0000000000c3',
   });
   const noop = () => undefined;
+  if (!fake.rows(schema.repositories).length)
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+  fake.insert(schema.tasks, {
+    id: TASK,
+    userId: USER,
+    repositoryId: REPO,
+    type: 'onboarding_upgrade',
+    status: 'running',
+    title: 'rollback',
+  });
   const ctx = {
     db: fake.db,
     repoPath: root,
@@ -289,6 +299,16 @@ describe('rolling back a file an upgrade rewrote', () => {
       source: 'upgrade',
     });
     const noop = () => undefined;
+    if (!fake.rows(schema.repositories).length)
+      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      repositoryId: REPO,
+      type: 'onboarding_upgrade',
+      status: 'running',
+      title: 'rollback',
+    });
     const ctx = {
       db: fake.db,
       repoPath: root,
@@ -457,6 +477,16 @@ describe('rolling back what an upgrade removed', () => {
       supersededAt: new Date(),
     });
     const noop = () => undefined;
+    if (!fake.rows(schema.repositories).length)
+      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      repositoryId: REPO,
+      type: 'onboarding_upgrade',
+      status: 'running',
+      title: 'rollback',
+    });
     const ctx = {
       db: fake.db,
       repoPath: root,

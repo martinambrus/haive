@@ -150,6 +150,15 @@ describe('02 and a rules file that is not UTF-8', () => {
       renderCtxSnapshot: REFERENCE_CONTEXT as unknown as Record<string, unknown>,
       backfilledRows: 0,
     } as UpgradePlanOutput;
+    if (!fake.rows(schema.repositories).length)
+      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      repositoryId: REPO,
+      type: 'onboarding_upgrade',
+      status: 'running',
+    });
     const ctx = {
       db: fake.db,
       repoPath: root,
@@ -299,6 +308,15 @@ describe('04 and a rules file that is not UTF-8', () => {
           writtenContent: left,
           source: 'upgrade',
         });
+    if (!fake.rows(schema.repositories).length)
+      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'acme', source: 'blank' });
+    fake.insert(schema.tasks, {
+      id: TASK,
+      userId: USER,
+      repositoryId: REPO,
+      type: 'onboarding_upgrade',
+      status: 'running',
+    });
     const ctx = {
       db: fake.db,
       repoPath: root,

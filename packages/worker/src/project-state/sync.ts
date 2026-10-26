@@ -1,5 +1,5 @@
 import { isUtf8 } from 'node:buffer';
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import { isRootClaimLive, schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
@@ -38,6 +38,8 @@ import {
   TOOLING_UNIT_NAME,
   withoutUnchosenRtk,
   portableRender,
+  projectStateHash,
+  gitBlobId,
   renderContextColumnSchema,
   renderProjectState,
   sameValue,
@@ -87,6 +89,7 @@ const {
 } = PROJECT_STATE_LIMITS;
 
 class Refusal extends Error {}
+class CheckoutMoved extends Error {}
 
 const oneLine = (text: string): string =>
   text
@@ -109,13 +112,19 @@ const gone = (rel: string): Refusal =>
 
 /** Every file below the state directory, or null when there is none. The codec reads a record whole,
  *  so the whole tree is read, and the caps stop the walk as it goes: a planted tree is not read on. */
-async function readStateFiles(repoPath: string): Promise<Map<string, string> | null> {
+export async function readStateFiles(
+  repoPath: string,
+  options: { boundedDirectoryReads?: boolean } = {},
+): Promise<Map<string, string> | null> {
   const files = new Map<string, string>();
   const pending = [''];
   let entries = 0;
   let bytes = 0;
   for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
-    const listing = await readdirNoFollow(repoPath, stateRel(dir), { strict: true });
+    const listing = await readdirNoFollow(repoPath, stateRel(dir), {
+      strict: true,
+      ...(options.boundedDirectoryReads ? { maxEntries: MAX_ENTRIES - entries } : {}),
+    });
     if (listing === null) {
       if (dir === '') return null;
       throw gone(dir);
@@ -154,10 +163,11 @@ async function readStateFiles(repoPath: string): Promise<Map<string, string> | n
 }
 
 export type Checkout =
-  | { kind: 'absent' }
+  | { kind: 'absent'; hash: string }
   | { kind: 'refused'; reason: string }
   | {
       kind: 'record';
+      hash: string;
       render: ProjectRender;
       claims: ProjectStateClaim[];
       gitDataClaims: ProjectStateClaim[];
@@ -171,7 +181,7 @@ const notRead = (detail: string): Checkout => ({
   reason: `the checkout's record was not read: ${oneLine(detail)}`,
 });
 
-async function readCheckout(repoPath: string): Promise<Checkout> {
+export async function readCheckout(repoPath: string): Promise<Checkout> {
   let files: Map<string, string> | null;
   try {
     files = await readStateFiles(repoPath);
@@ -183,14 +193,19 @@ async function readCheckout(repoPath: string): Promise<Checkout> {
 }
 
 function checkoutOf(files: Map<string, string> | null): Checkout {
-  if (files === null || files.size === 0) return { kind: 'absent' };
+  const hash =
+    files === null || files.size === 0
+      ? 'absent'
+      : projectStateHash(new Map([...files].map(([name, text]) => [name, gitBlobId(text)])));
+  if (files === null || files.size === 0) return { kind: 'absent', hash };
   const parsed = parseProjectState(files);
   if (!parsed.ok) return notRead(listed(parsed.problems));
   const { render, claims, bundles, settings, environment } = parsed.record;
   return render === null
-    ? { kind: 'absent' }
+    ? { kind: 'absent', hash }
     : {
         kind: 'record',
+        hash,
         render,
         claims,
         gitDataClaims: parsed.gitDataClaims,
@@ -213,6 +228,7 @@ async function readSyncRow(db: Database | Tx, repositoryId: string) {
     .select({
       baseSnapshot: schema.projectStateSync.baseSnapshot,
       lastError: schema.projectStateSync.lastError,
+      syncedHash: schema.projectStateSync.syncedHash,
     })
     .from(schema.projectStateSync)
     .where(eq(schema.projectStateSync.repositoryId, repositoryId))
@@ -593,6 +609,14 @@ export async function syncProjectStateFromCheckout(
     refuseDuringGitOperation?: boolean;
   },
 ): Promise<ProjectStateSyncResult> {
+  // An uncommitted writer's partial files are not an incoming checkout. Only its fenced recovery
+  // may restore them; clone scans and moved-answer re-syncs wait for the sweep rather than import.
+  const [writing] = await db
+    .select({ intent: schema.projectStateOutbox.writeIntent })
+    .from(schema.projectStateOutbox)
+    .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+  if (writing?.intent)
+    return { outcome: 'held', reason: 'an interrupted project state write awaits recovery' };
   // The base goes first: a writer that finishes after it left a newer base for the lock to find.
   const seen = await readSyncRow(db, repositoryId);
   const [seenRepo] = await db
@@ -603,244 +627,296 @@ export async function syncProjectStateFromCheckout(
   const checkout = await readCheckout(repoPath);
   if (checkout.kind === 'absent') return { outcome: 'absent' };
 
-  return db.transaction(async (tx): Promise<ProjectStateSyncResult> => {
-    await lockProjectState(tx, repositoryId);
-    if (refuseDuringGitOperation) {
-      if (await gitOperationInProgress(repoPath)) return { outcome: 'held' };
-    }
-    // Every producer must reject an intermediate checkout, including clone scans and moved answers
-    // that do not request the git-operation guard. The database base alone cannot see a file move.
-    if (checkout.kind === 'record' && !sameValue(checkout, await readCheckout(repoPath))) {
-      return { outcome: 'superseded' };
-    }
-    // The row lock first: an upgrade's insert holds it, so the live-task read below sees that task.
-    const [repo] = await tx
-      .select({
-        renderContext: schema.repositories.renderContext,
-        userId: schema.repositories.userId,
-        onboardingResetAt: schema.repositories.onboardingResetAt,
-        rootClaimedAt: schema.repositories.rootClaimedAt,
-        rootClaimKind: schema.repositories.rootClaimKind,
-        scopeExcludeGlobs: schema.repositories.scopeExcludeGlobs,
-        rtkEnabled: schema.repositories.rtkEnabled,
-        rtkVersion: schema.repositories.rtkVersion,
-        lspServers: schema.repositories.lspServers,
-        lspServerVersions: schema.repositories.lspServerVersions,
-        chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
-        reviewDimensions: schema.repositories.reviewDimensions,
-        onboardingEnvironment: schema.repositories.onboardingEnvironment,
-        onboardingTooling: schema.repositories.onboardingTooling,
-        rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
-      })
-      .from(schema.repositories)
-      .where(eq(schema.repositories.id, repositoryId))
-      .for('update');
-    // Deleted since the files were read: its sync row went with it, and nothing is left to write to.
-    if (!repo) return { outcome: 'superseded' };
-    const live = await tx
-      .select({ id: schema.tasks.id })
-      .from(schema.tasks)
-      .where(
-        and(
-          eq(schema.tasks.repositoryId, repositoryId),
-          inArray(schema.tasks.type, ['onboarding', 'onboarding_upgrade']),
-          inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
-          isNull(schema.tasks.deadAt),
-        ),
-      )
-      .limit(1);
-    // Only a reset: a clone or refresh holds its own claim while it calls the sync.
-    const resetting = isRootClaimLive(repo.rootClaimedAt) && repo.rootClaimKind === 'reset';
-    if (live.length > 0 || resetting) return { outcome: 'deferred' };
-    // A reset since the files were read took back the column, the ledger and the sync row.
-    if (
-      (repo.onboardingResetAt?.getTime() ?? null) !==
-      (seenRepo?.onboardingResetAt?.getTime() ?? null)
-    ) {
-      return { outcome: 'superseded' };
-    }
-
-    const row = await readSyncRow(tx, repositoryId);
-    if (!sameValue(row?.baseSnapshot ?? null, seen?.baseSnapshot ?? null)) {
-      return { outcome: 'superseded' };
-    }
-
-    const refuse = async (reason: string): Promise<ProjectStateSyncResult> => {
-      if (row !== null && row.lastError !== reason) {
-        await tx
-          .update(schema.projectStateSync)
-          .set({ lastError: reason, updatedAt: new Date() })
-          .where(eq(schema.projectStateSync.repositoryId, repositoryId));
-      }
-      return { outcome: 'refused', reason };
-    };
-    if (checkout.kind === 'refused') return refuse(checkout.reason);
-
-    const column = (repo.renderContext ?? null) as Record<string, unknown> | null;
-
-    const rebuilt =
-      column === null ? await rebuildLocalRender(tx, repositoryId, checkout.render) : null;
-    const local = recordOf(
-      column === null ? rebuilt : portableRender(column as Parameters<typeof portableRender>[0]),
-    );
-    try {
-      renderProjectState(local);
-    } catch (err) {
-      if (!(err instanceof ProjectStateError)) throw err;
-      return refuse(`the render context cannot be written as a record: ${listed(err.problems)}`);
-    }
-
-    const baseRender = row === null ? null : renderOf(row.baseSnapshot);
-    const baseClaims = row === null ? [] : claimsOf(row.baseSnapshot);
-    const localClaims = await loadRecordClaims(tx, repositoryId);
-    // A checkout with no claim file is one written before the record carried claims: it retires none.
-    const incomingClaims =
-      checkout.claims.length === 0 && baseClaims.length > 0 ? baseClaims : checkout.claims;
-    const held =
-      row === null
-        ? new Map<string, string | null>()
-        : await heldBytes(repoPath, {
-            base: baseClaims,
-            local: localClaims,
-            incoming: incomingClaims,
-          });
-    const merge = mergeProjectState({
-      base: row === null ? null : { ...recordOf(baseRender), claims: baseClaims },
-      local: { ...local, claims: localClaims },
-      incoming: { ...recordOf(checkout.render), claims: incomingClaims },
-      diskHash: (path) => held.get(path) ?? null,
-    });
-    const claimConflicts = merge.conflicts.filter(({ unit }) => isClaimUnit(unit));
-    const renderConflicts = merge.conflicts.filter(({ unit }) => !isClaimUnit(unit));
-    const portable = mergePortable(repo, checkout, row);
-    const merged = merge.merged.render;
-    let wrote = false;
-    let columnAfter: unknown = column;
-    const flagFlips =
-      column !== null && portable.recordsRtkChoice && column.rtkChoiceRecorded !== true;
-    const renderMoved =
-      merged !== null &&
-      (rebuilt !== null || !sameValue(merged, normalizeProjectState(local).render));
-    if (renderMoved || flagFlips) {
-      const next = renderContextColumnSchema.safeParse({
-        ...column,
-        ...(renderMoved ? merged : {}),
-        rtkChoiceRecorded:
-          column === null ? portable.recordsRtkChoice : flagFlips || column.rtkChoiceRecorded,
-      });
-      if (!next.success) {
-        const issues = next.error.issues.map(
-          (i) => `${i.path.join('.') || 'the column'} ${i.message}`,
-        );
-        return refuse(`the render context would not be valid once written: ${listed(issues)}`);
-      }
-      await tx
-        .update(schema.repositories)
-        .set({ renderContext: next.data })
-        .where(eq(schema.repositories.id, repositoryId));
-      wrote = true;
-      columnAfter = next.data;
-    }
-
-    const imported = await importClaims(tx, {
-      repositoryId,
-      repoPath,
-      repo: {
-        userId: repo.userId,
-        renderContext: columnAfter,
-        rtkChoiceMadeAt: repo.rtkChoiceMadeAt,
-      },
-      local: localClaims,
-      merged: merge.merged.claims,
-    });
-    // Never merged: a column that holds tooling stands, and only an empty one takes the checkout's.
-    const toolingUnit = toolingUnitFrom(checkout.settings[TOOLING_UNIT_NAME]);
-    const toolingImport =
-      repo.onboardingTooling == null && toolingUnit !== null
-        ? toolingColumnFromUnit(toolingUnit)
-        : null;
-    const toolingStale = !sameValue(
-      toolingUnitOf(toolingImport?.column ?? repo.onboardingTooling),
-      toolingUnit,
-    );
-    const updates = {
-      ...portable.updates,
-      ...(toolingImport
-        ? { onboardingTooling: toolingImport.column as unknown as Record<string, unknown> }
-        : {}),
-    };
-    const settingsMoved = Object.keys(updates).length > 0;
-    if (settingsMoved) {
-      await tx
-        .update(schema.repositories)
-        .set({ ...updates, updatedAt: new Date() })
-        .where(eq(schema.repositories.id, repositoryId));
-      if (portable.updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, null);
-    }
-    if (wrote || imported) {
-      await writeApplicableTemplateIds(tx, {
+  return db
+    .transaction(async (tx) => {
+      await lockProjectState(tx, repositoryId);
+      return syncProjectStateLocked(tx, {
         repositoryId,
-        userId: repo.userId,
-        requireResolved: wrote,
+        repoPath,
+        refuseDuringGitOperation,
+        checkout,
+        seen,
+        seenRepo,
       });
-    }
-    if (toolingImport?.heldServers) {
-      logger.warn(
-        { repositoryId, servers: toolingImport.heldServers },
-        'imported MCP servers held until accepted on this install',
-      );
-    }
-    if (portable.stale || toolingStale || checkout.gitDataClaims.length > 0) {
-      await markProjectStateDirty(tx, repositoryId);
-    }
-    if (portable.rejected.length > 0) {
-      logger.warn(
-        { repositoryId, settings: portable.rejected },
-        "project state settings the checkout holds are not valid here; this install's value stands",
-      );
-    }
-
-    await recordConflicts(tx, repositoryId, [...merge.conflicts, ...portable.conflicts]);
-    // The imported tooling and choice are now visible in this transaction. Keep the question's
-    // lifecycle identical to clone scans and boot, without nesting another lock/transaction.
-    await raiseRtkQuestionLocked(tx, repositoryId);
-
-    const lastError =
-      renderConflicts.length === 0
-        ? null
-        : `${CONFLICT_ERROR_PREFIX}${renderConflicts.map(({ unit }) => keyOf(unit)).join(', ')}`;
-    const baseSnapshot = normalizeProjectState({
-      ...recordOf(keptRender(checkout.render, baseRender, renderConflicts)),
-      claims: [
-        ...keptClaims(incomingClaims, baseClaims, claimConflicts),
-        ...checkout.gitDataClaims,
-      ],
-      // Never merged: a conflict row on a descriptor could not be answered, and would block upgrades.
-      bundles: checkout.bundles,
-      settings: {
-        ...portable.baseSettings,
-        ...(toolingUnit ? { [TOOLING_UNIT_NAME]: toolingUnit } : {}),
-      },
-      environment: portable.baseEnvironment,
+    })
+    .catch((err: unknown) => {
+      if (err instanceof CheckoutMoved) return { outcome: 'superseded' as const };
+      throw err;
     });
-    if (row === null || row.lastError !== lastError || !sameValue(row.baseSnapshot, baseSnapshot)) {
-      const synced = { baseSnapshot, lastError, updatedAt: new Date() };
-      await tx
-        .insert(schema.projectStateSync)
-        .values({ repositoryId, ...synced })
-        .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
-    }
+}
 
-    if (lastError !== null) return { outcome: 'conflict', reason: lastError };
-    if (portable.conflicts.length > 0) {
-      const names = portable.conflicts.map(({ unit }) => unit).join(', ');
-      return {
-        outcome: 'conflict',
-        reason: `settings conflict with the checkout's record: ${names}`,
-      };
+/** Import under the project-state lock already held by the writer; no nested pool transaction. */
+export async function syncProjectStateLocked(
+  tx: Tx,
+  {
+    repositoryId,
+    repoPath,
+    refuseDuringGitOperation,
+    holdingTaskId,
+    checkout,
+    seen,
+    seenRepo,
+  }: {
+    repositoryId: string;
+    repoPath: string;
+    refuseDuringGitOperation?: boolean;
+    holdingTaskId?: string;
+    checkout: Checkout;
+    seen: Awaited<ReturnType<typeof readSyncRow>>;
+    seenRepo: { onboardingResetAt: Date | null } | undefined;
+  },
+): Promise<ProjectStateSyncResult> {
+  const [writing] = await tx
+    .select({ intent: schema.projectStateOutbox.writeIntent })
+    .from(schema.projectStateOutbox)
+    .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+  if (writing?.intent)
+    return { outcome: 'held', reason: 'an interrupted project state write awaits recovery' };
+  if (refuseDuringGitOperation) {
+    if (await gitOperationInProgress(repoPath)) return { outcome: 'held' };
+  }
+  // Every producer must reject an intermediate checkout, including clone scans and moved answers
+  // that do not request the git-operation guard. The database base alone cannot see a file move.
+  if (checkout.kind === 'record' && !sameValue(checkout, await readCheckout(repoPath))) {
+    return { outcome: 'superseded' };
+  }
+  // The row lock first: an upgrade's insert holds it, so the live-task read below sees that task.
+  const [repo] = await tx
+    .select({
+      renderContext: schema.repositories.renderContext,
+      userId: schema.repositories.userId,
+      onboardingResetAt: schema.repositories.onboardingResetAt,
+      rootClaimedAt: schema.repositories.rootClaimedAt,
+      rootClaimKind: schema.repositories.rootClaimKind,
+      scopeExcludeGlobs: schema.repositories.scopeExcludeGlobs,
+      rtkEnabled: schema.repositories.rtkEnabled,
+      rtkVersion: schema.repositories.rtkVersion,
+      lspServers: schema.repositories.lspServers,
+      lspServerVersions: schema.repositories.lspServerVersions,
+      chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
+      reviewDimensions: schema.repositories.reviewDimensions,
+      onboardingEnvironment: schema.repositories.onboardingEnvironment,
+      onboardingTooling: schema.repositories.onboardingTooling,
+      rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
+    })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .for('update');
+  // Deleted since the files were read: its sync row went with it, and nothing is left to write to.
+  if (!repo) return { outcome: 'superseded' };
+  const live = await tx
+    .select({ id: schema.tasks.id })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.repositoryId, repositoryId),
+        inArray(schema.tasks.type, ['onboarding', 'onboarding_upgrade']),
+        inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+        isNull(schema.tasks.deadAt),
+        ...(holdingTaskId ? [ne(schema.tasks.id, holdingTaskId)] : []),
+      ),
+    )
+    .limit(1);
+  // Only a reset: a clone or refresh holds its own claim while it calls the sync.
+  const resetting = isRootClaimLive(repo.rootClaimedAt) && repo.rootClaimKind === 'reset';
+  if (live.length > 0 || resetting) return { outcome: 'deferred' };
+  // A reset since the files were read took back the column, the ledger and the sync row.
+  if (
+    (repo.onboardingResetAt?.getTime() ?? null) !== (seenRepo?.onboardingResetAt?.getTime() ?? null)
+  ) {
+    return { outcome: 'superseded' };
+  }
+
+  const row = await readSyncRow(tx, repositoryId);
+  if (!sameValue(row?.baseSnapshot ?? null, seen?.baseSnapshot ?? null)) {
+    return { outcome: 'superseded' };
+  }
+
+  const refuse = async (reason: string): Promise<ProjectStateSyncResult> => {
+    if (row !== null && row.lastError !== reason) {
+      await tx
+        .update(schema.projectStateSync)
+        .set({ lastError: reason, updatedAt: new Date() })
+        .where(eq(schema.projectStateSync.repositoryId, repositoryId));
     }
-    return { outcome: wrote || imported || settingsMoved ? 'applied' : 'unchanged' };
+    return { outcome: 'refused', reason };
+  };
+  if (checkout.kind === 'refused') return refuse(checkout.reason);
+  if (checkout.kind === 'absent') return { outcome: 'absent' };
+
+  const column = (repo.renderContext ?? null) as Record<string, unknown> | null;
+
+  const rebuilt =
+    column === null ? await rebuildLocalRender(tx, repositoryId, checkout.render) : null;
+  const local = recordOf(
+    column === null ? rebuilt : portableRender(column as Parameters<typeof portableRender>[0]),
+  );
+  try {
+    renderProjectState(local);
+  } catch (err) {
+    if (!(err instanceof ProjectStateError)) throw err;
+    return refuse(`the render context cannot be written as a record: ${listed(err.problems)}`);
+  }
+
+  const baseRender = row === null ? null : renderOf(row.baseSnapshot);
+  const baseClaims = row === null ? [] : claimsOf(row.baseSnapshot);
+  const localClaims = await loadRecordClaims(tx, repositoryId);
+  // A checkout with no claim file is one written before the record carried claims: it retires none.
+  const incomingClaims =
+    checkout.claims.length === 0 && baseClaims.length > 0 ? baseClaims : checkout.claims;
+  const held =
+    row === null
+      ? new Map<string, string | null>()
+      : await heldBytes(repoPath, {
+          base: baseClaims,
+          local: localClaims,
+          incoming: incomingClaims,
+        });
+  const merge = mergeProjectState({
+    base: row === null ? null : { ...recordOf(baseRender), claims: baseClaims },
+    local: { ...local, claims: localClaims },
+    incoming: { ...recordOf(checkout.render), claims: incomingClaims },
+    diskHash: (path) => held.get(path) ?? null,
   });
+  const claimConflicts = merge.conflicts.filter(({ unit }) => isClaimUnit(unit));
+  const renderConflicts = merge.conflicts.filter(({ unit }) => !isClaimUnit(unit));
+  const portable = mergePortable(repo, checkout, row);
+  const merged = merge.merged.render;
+  let wrote = false;
+  let columnAfter: unknown = column;
+  const flagFlips =
+    column !== null && portable.recordsRtkChoice && column.rtkChoiceRecorded !== true;
+  const renderMoved =
+    merged !== null &&
+    (rebuilt !== null || !sameValue(merged, normalizeProjectState(local).render));
+  if (renderMoved || flagFlips) {
+    const next = renderContextColumnSchema.safeParse({
+      ...column,
+      ...(renderMoved ? merged : {}),
+      rtkChoiceRecorded:
+        column === null ? portable.recordsRtkChoice : flagFlips || column.rtkChoiceRecorded,
+    });
+    if (!next.success) {
+      const issues = next.error.issues.map(
+        (i) => `${i.path.join('.') || 'the column'} ${i.message}`,
+      );
+      return refuse(`the render context would not be valid once written: ${listed(issues)}`);
+    }
+    await tx
+      .update(schema.repositories)
+      .set({ renderContext: next.data })
+      .where(eq(schema.repositories.id, repositoryId));
+    wrote = true;
+    columnAfter = next.data;
+  }
+
+  const imported = await importClaims(tx, {
+    repositoryId,
+    repoPath,
+    repo: {
+      userId: repo.userId,
+      renderContext: columnAfter,
+      rtkChoiceMadeAt: repo.rtkChoiceMadeAt,
+    },
+    local: localClaims,
+    merged: merge.merged.claims,
+  });
+  // Never merged: a column that holds tooling stands, and only an empty one takes the checkout's.
+  const toolingUnit = toolingUnitFrom(checkout.settings[TOOLING_UNIT_NAME]);
+  const toolingImport =
+    repo.onboardingTooling == null && toolingUnit !== null
+      ? toolingColumnFromUnit(toolingUnit)
+      : null;
+  const toolingStale = !sameValue(
+    toolingUnitOf(toolingImport?.column ?? repo.onboardingTooling),
+    toolingUnit,
+  );
+  const updates = {
+    ...portable.updates,
+    ...(toolingImport
+      ? { onboardingTooling: toolingImport.column as unknown as Record<string, unknown> }
+      : {}),
+  };
+  const settingsMoved = Object.keys(updates).length > 0;
+  if (settingsMoved) {
+    await tx
+      .update(schema.repositories)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(schema.repositories.id, repositoryId));
+    if (portable.updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, null);
+  }
+  if (wrote || imported) {
+    await writeApplicableTemplateIds(tx, {
+      repositoryId,
+      userId: repo.userId,
+      requireResolved: wrote,
+    });
+  }
+  if (toolingImport?.heldServers) {
+    logger.warn(
+      { repositoryId, servers: toolingImport.heldServers },
+      'imported MCP servers held until accepted on this install',
+    );
+  }
+  if (portable.stale || toolingStale || checkout.gitDataClaims.length > 0) {
+    await markProjectStateDirty(tx, repositoryId);
+  }
+  if (portable.rejected.length > 0) {
+    logger.warn(
+      { repositoryId, settings: portable.rejected },
+      "project state settings the checkout holds are not valid here; this install's value stands",
+    );
+  }
+
+  await recordConflicts(tx, repositoryId, [...merge.conflicts, ...portable.conflicts]);
+  // The imported tooling and choice are now visible in this transaction. Keep the question's
+  // lifecycle identical to clone scans and boot, without nesting another lock/transaction.
+  await raiseRtkQuestionLocked(tx, repositoryId);
+
+  const lastError =
+    renderConflicts.length === 0
+      ? null
+      : `${CONFLICT_ERROR_PREFIX}${renderConflicts.map(({ unit }) => keyOf(unit)).join(', ')}`;
+  const baseSnapshot = normalizeProjectState({
+    ...recordOf(keptRender(checkout.render, baseRender, renderConflicts)),
+    claims: [...keptClaims(incomingClaims, baseClaims, claimConflicts), ...checkout.gitDataClaims],
+    // Never merged: a conflict row on a descriptor could not be answered, and would block upgrades.
+    bundles: checkout.bundles,
+    settings: {
+      ...portable.baseSettings,
+      ...(toolingUnit ? { [TOOLING_UNIT_NAME]: toolingUnit } : {}),
+    },
+    environment: portable.baseEnvironment,
+  });
+  // Import work can await many reads. Never acknowledge bytes that moved during it: throw so
+  // its column/ledger/conflict mutations roll back as well as its watermark.
+  if (
+    !sameValue(checkout, await readCheckout(repoPath)) ||
+    (refuseDuringGitOperation && (await gitOperationInProgress(repoPath)))
+  )
+    throw new CheckoutMoved();
+  if (
+    row === null ||
+    row.syncedHash !== checkout.hash ||
+    row.lastError !== lastError ||
+    !sameValue(row.baseSnapshot, baseSnapshot)
+  ) {
+    const synced = { baseSnapshot, syncedHash: checkout.hash, lastError, updatedAt: new Date() };
+    await tx
+      .insert(schema.projectStateSync)
+      .values({ repositoryId, ...synced })
+      .onConflictDoUpdate({ target: schema.projectStateSync.repositoryId, set: synced });
+  }
+
+  if (lastError !== null) return { outcome: 'conflict', reason: lastError };
+  if (portable.conflicts.length > 0) {
+    const names = portable.conflicts.map(({ unit }) => unit).join(', ');
+    return {
+      outcome: 'conflict',
+      reason: `settings conflict with the checkout's record: ${names}`,
+    };
+  }
+  return { outcome: wrote || imported || settingsMoved ? 'applied' : 'unchanged' };
 }
 
 /** Points the sync base at the record the checkout holds now, so a sync after the checkout moves merges
@@ -926,6 +1002,7 @@ async function applyRebase(
   }
   if (checkout.kind === 'absent') {
     const synced = {
+      syncedHash: null,
       baseSnapshot: normalizeProjectState(emptyProjectState()),
       lastError: null,
       updatedAt: new Date(),
@@ -941,6 +1018,7 @@ async function applyRebase(
   const tooling = toolingUnitFrom(checkout.settings[TOOLING_UNIT_NAME]);
   if (tooling) settings[TOOLING_UNIT_NAME] = tooling;
   const synced = {
+    syncedHash: null,
     baseSnapshot: normalizeProjectState({
       ...recordOf(checkout.render),
       claims: checkout.claims,

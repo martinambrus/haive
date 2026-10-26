@@ -400,7 +400,7 @@ describe('POST /repos/:id/project-state/conflicts/:conflictId', () => {
   const refusals: [string, unknown, number, string][] = [
     ['a different answer', { kind: 'settled', resolution: 'keep_mine' }, 409, 'already answered'],
     ['a converged row', { kind: 'settled', resolution: 'converged' }, 409, 'now match'],
-    ['a live upgrade', { kind: 'busy' }, 409, 'using this repository'],
+    ['a busy record or checkout', { kind: 'busy' }, 409, 'project settings recovery'],
     ['a moved record', { kind: 'moved' }, 409, "checkout's record moved"],
     ['no value of mine', { kind: 'no_local' }, 409, 'no value of its own'],
     ['an unusable answer', { kind: 'invalid' }, 409, 'nothing was changed'],

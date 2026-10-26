@@ -179,6 +179,7 @@ describe('answering a settings question: keep mine', () => {
   it('is met by no conflict and no write on the next sync', async () => {
     const s = await setup(lspSeed());
     await s.answer('keep_mine');
+    await syncProjectStateFromCheckout(s.db, { repositoryId: REPO, repoPath: s.root });
     const before = json({
       r: s.fake.rows(schema.repositories),
       s: s.fake.rows(schema.projectStateSync),

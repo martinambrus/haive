@@ -7,7 +7,7 @@ import {
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
 import { and, desc, eq, inArray, isNotNull, isNull, lte, ne, or, sql } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { lockRepositoryTasksKey, schema } from '@haive/database';
 import { safeErrorMessage } from '@haive/shared/logger';
 import {
   CLI_RULES_END,
@@ -38,7 +38,13 @@ import {
 import { extractBundleItemId } from '../../_custom-bundle-loader.js';
 import { retireInstallManifest } from '../../_retire-install-manifest.js';
 import { resolveRenderContext, unionExpandedFor } from '../../_upgrade-render.js';
-import { failIfColumnStale, writeProjectStateRecord } from '../../../project-state/write.js';
+import {
+  failIfColumnStale,
+  lockProjectState,
+  refuseMovedColumn,
+  refuseReleasedCheckout,
+  writeProjectStateRecord,
+} from '../../../project-state/write.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
   restoreRtkBlocks,
@@ -460,6 +466,11 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
 
   async apply(ctx, args): Promise<RollbackOutput> {
     const detected = args.detected;
+    const [columnBefore] = await ctx.db
+      .select({ renderContext: schema.repositories.renderContext })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, detected.repositoryId));
+    const expectedColumns = [columnBefore?.renderContext ?? null];
     const warnings = [...detected.warnings];
     const manifest = getTemplateManifest();
     let revertedCount = 0;
@@ -961,17 +972,30 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       )?.output as Pick<UpgradePlanOutput, 'rtkFollowsLive'> | null | undefined;
       chosen = plan?.rtkFollowsLive === true && typeof recorded.rtkEnabled === 'boolean';
       const restored = recorded as unknown as TemplateRenderContext;
-      const applicableExpanded = await unionExpandedFor(ctx.db, {
-        repositoryId: detected.repositoryId,
-        userId: ctx.userId,
-        // Every reader renders a person's RTK switch over the context's own value.
-        renderCtx:
-          repo && isRtkChoiceRecorded(chosen, repo.rtkChoiceMadeAt)
-            ? { ...restored, rtkEnabled: repo.rtkEnabled }
-            : restored,
-        logger: ctx.logger,
+      await ctx.db.transaction(async (tx) => {
+        await lockRepositoryTasksKey(tx, detected.repositoryId);
+        await lockProjectState(tx, detected.repositoryId);
+        await refuseReleasedCheckout(tx, ctx.taskId, detected.repositoryId);
+        await refuseMovedColumn(tx, detected.repositoryId, expectedColumns);
+        const [live] = await tx
+          .select({
+            rtkEnabled: schema.repositories.rtkEnabled,
+            rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
+          })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, detected.repositoryId))
+          .for('update');
+        const applicableExpanded = await unionExpandedFor(tx, {
+          repositoryId: detected.repositoryId,
+          userId: ctx.userId,
+          renderCtx:
+            live && isRtkChoiceRecorded(chosen, live.rtkChoiceMadeAt)
+              ? { ...restored, rtkEnabled: live.rtkEnabled }
+              : restored,
+          logger: ctx.logger,
+        });
+        await updateApplicableTemplateIds(tx, detected.repositoryId, applicableExpanded);
       });
-      await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
     }
 
     let recordWrite: RollbackOutput['recordWrite'] = recorded ? 'written' : 'skipped';
@@ -982,6 +1006,8 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
           repoPath: ctx.repoPath,
           context: recorded as unknown as TemplateRenderContext,
           rtkChoiceRecorded: chosen,
+          expectedColumns,
+          holdingTaskId: ctx.taskId,
         });
         await retireInstallManifest(ctx, warnings);
       }

@@ -64,6 +64,7 @@ async function rollback(
   }
 
   const fake = createFakeDb({
+    tasks: schema.tasks,
     repositories: schema.repositories,
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateSync: schema.projectStateSync,
@@ -119,6 +120,14 @@ async function rollback(
   });
 
   const noop = () => undefined;
+  fake.insert(schema.tasks, {
+    id: TASK,
+    userId: USER,
+    repositoryId: REPO,
+    type: 'onboarding_upgrade',
+    status: 'running',
+    title: 'rollback',
+  });
   const ctx = {
     db: fake.db,
     repoPath: root,
@@ -142,8 +151,9 @@ async function rollback(
   };
   if (refuseRecordWrite) {
     let refused = false;
+    let domainLocks = 0;
     fake.hooks.beforeLock = (key) => {
-      if (key.includes('project-state') && !refused) {
+      if (key.includes('project-state') && ++domainLocks > 1 && !refused) {
         refused = true;
         throw new Error('database refused');
       }
