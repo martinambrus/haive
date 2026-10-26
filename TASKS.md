@@ -113,10 +113,10 @@ Codex progress 2026-10-26T10:52Z: PR #933 merged with merge commit46fe58b2893a06
 
 ### T118 · B4.1 · repository CLI set is a union
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T10:29Z · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T10:53Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
 
-Codex progress 2026-10-26T10:29Z: implementation resumed after a safe checkpoint for T117's required test-only CI correction. Shared repository-target derivation, portable CLI member merge, decoder-based snapshot seeding, upgrade addition choice and explicit tooling removal are wired; compatibility, actual two-install controls and full gates remain. Latest worker typecheck passed; source uncommitted in feat/t118-cli-union. Dedicated scratch DB/Redis1; parent browser DB/Redis2 separate. One active implementation driver, updated codex-codex; no T118 PR until T117 lands. Preserve T117 fences, legacy Amp fallback, unknown membership and ordinary ownership/Keep rules. No new migration is needed;0215 remains unused.
+Codex progress 2026-10-26T10:53Z: all12 workspace typecheck tasks pass. Root unit run passed other packages but found the new API removal lock must use boundedLockWait; corrected API and full worker checks remain. Independent parent existing-helper controls reproduce the original union/empty failures. Mixed-snapshot backfill regression reproduced and corrected while preserving existing RTK context selection. Driver is closing real blank INIT record staging and legacy foreground snapshot omission paths; these are required CLI portability/compatibility controls. Source remains uncommitted, no final review or T118 PR yet. One implementation driver, serial test lock, dedicated primary DB/Redis1 and separate parent browser DB/Redis2. T117 merged46fe58b2, main verification pending; integrate main only after checks finish. No schema migration0215 or unrelated design work.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
