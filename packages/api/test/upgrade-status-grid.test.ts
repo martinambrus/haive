@@ -152,6 +152,26 @@ const artifact = (id: string, at: number, snapshot: 'none' | 'recorded' | 'unrec
   generatedAt: new Date(at),
   hasSnapshot: snapshot === 'none' ? null : true,
   rtkRecorded: snapshot === 'recorded' ? true : null,
+  // Match the complete raw snapshot selected by the real route, so canonical membership recovery
+  // can distinguish newest target provenance from the older RTK-recorded context.
+  formValuesSnapshot:
+    snapshot === 'none'
+      ? null
+      : {
+          projectInfo: {},
+          framework: null,
+          acceptedAgentIds: ['x'],
+          customAgentSpecs: [],
+          lspLanguages: [],
+          enabledCliProviders: [
+            {
+              name: snapshot === 'recorded' ? 'gemini' : 'claude-code',
+              rulesFile: snapshot === 'recorded' ? 'GEMINI.md' : 'CLAUDE.md',
+              rulesFileMode: 'import',
+            },
+          ],
+          ...(snapshot === 'recorded' ? { rtkEnabled: true } : {}),
+        },
   snapshotProviders:
     snapshot === 'recorded'
       ? [{ name: 'gemini' }]
@@ -318,37 +338,37 @@ const EXPECTED: Record<string, string> = {
   'rows=no-snapshot 07=none source=blank live=off':
     'onboarded=true available=true changed=cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
   'rows=recorded 07=recorded source=git_https live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
   'rows=recorded 07=recorded source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
   'rows=recorded 07=recorded source=blank live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
   'rows=recorded 07=recorded source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
   'rows=recorded 07=unrecorded source=git_https live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
   'rows=recorded 07=unrecorded source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
   'rows=recorded 07=unrecorded source=blank live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
   'rows=recorded 07=unrecorded source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
   'rows=recorded 07=missing-row source=git_https live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
   'rows=recorded 07=missing-row source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
   'rows=recorded 07=missing-row source=blank live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
   'rows=recorded 07=missing-row source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
   'rows=recorded 07=none source=git_https live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
   'rows=recorded 07=none source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
   'rows=recorded 07=none source=blank live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
   'rows=recorded 07=none source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
   'rows=unrecorded 07=recorded source=git_https live=on':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=unrecorded 07=recorded source=git_https live=off':
@@ -382,37 +402,37 @@ const EXPECTED: Record<string, string> = {
   'rows=unrecorded 07=none source=blank live=off':
     'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=-',
   'rows=mixed 07=recorded source=git_https live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.claude-settings rtkSettings=- rtkBlocks=-',
   'rows=mixed 07=recorded source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
   'rows=mixed 07=recorded source=blank live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.claude-settings rtkSettings=- rtkBlocks=-',
   'rows=mixed 07=recorded source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
   'rows=mixed 07=unrecorded source=git_https live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.claude-settings rtkSettings=- rtkBlocks=-',
   'rows=mixed 07=unrecorded source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
   'rows=mixed 07=unrecorded source=blank live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.claude-settings rtkSettings=- rtkBlocks=-',
   'rows=mixed 07=unrecorded source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
   'rows=mixed 07=missing-row source=git_https live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.claude-settings rtkSettings=- rtkBlocks=-',
   'rows=mixed 07=missing-row source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
   'rows=mixed 07=missing-row source=blank live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.claude-settings rtkSettings=- rtkBlocks=-',
   'rows=mixed 07=missing-row source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
   'rows=mixed 07=none source=git_https live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.claude-settings rtkSettings=- rtkBlocks=-',
   'rows=mixed 07=none source=git_https live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=- rtkBlocks=AGENTS.md',
   'rows=mixed 07=none source=blank live=on':
-    'onboarded=true available=true changed=cli-rules,rtk.gemini-settings rtkSettings=- rtkBlocks=-',
+    'onboarded=true available=true changed=agent.x,cli-rules,rtk.claude-settings rtkSettings=- rtkBlocks=-',
   'rows=mixed 07=none source=blank live=off':
-    'onboarded=true available=true changed=cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
+    'onboarded=true available=true changed=agent.x,cli-rules rtkSettings=.claude/settings.json,.gemini/settings.json rtkBlocks=AGENTS.md',
 };
 
 describe('GRID: upgrade-status resolves RTK: the characterization grid', () => {

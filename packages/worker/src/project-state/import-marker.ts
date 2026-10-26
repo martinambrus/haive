@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   FOREIGN_TEMPLATE,
@@ -6,6 +6,12 @@ import {
   isRtkChoiceRecorded,
   localTemplateId,
   readRenderContextColumn,
+  completeRecordedCliMembership,
+  recoverCliMembership,
+  isRenderContextSnapshot,
+  pickSnapshotRow,
+  deriveRenderTargets,
+  type RenderContextColumn,
   type LocalBundle,
   type ProjectStateClaim,
 } from '@haive/shared/project-state';
@@ -31,23 +37,82 @@ export async function loadMarkerContext(
   repo: { userId: string; renderContext: unknown; rtkChoiceMadeAt: Date | null },
 ): Promise<MarkerContext> {
   const column = readRenderContextColumn(repo.renderContext);
-  const providers =
-    column.kind === 'column'
+  const snapshots =
+    column.kind !== 'column' || column.column.cliTargets === undefined
       ? await tx
-          .select({ name: schema.cliProviders.name, enabled: schema.cliProviders.enabled })
-          .from(schema.cliProviders)
-          .where(eq(schema.cliProviders.userId, repo.userId))
+          .select({
+            id: schema.onboardingArtifacts.id,
+            generatedAt: schema.onboardingArtifacts.generatedAt,
+            formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+          })
+          .from(schema.onboardingArtifacts)
+          .where(
+            and(
+              eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+              eq(schema.onboardingArtifacts.userId, repo.userId),
+              isNull(schema.onboardingArtifacts.supersededAt),
+            ),
+          )
       : [];
+  const recovered = recoverCliMembership(snapshots);
+  let snapshot: Record<string, unknown> | null = null;
+  if (column.kind === 'column') {
+    const providers = await tx
+      .select({ name: schema.cliProviders.name, enabled: schema.cliProviders.enabled })
+      .from(schema.cliProviders)
+      .where(eq(schema.cliProviders.userId, repo.userId));
+    snapshot = recordableContext(
+      renderContextFromColumn(completeRecordedCliMembership(column.column, recovered), providers),
+      isRtkChoiceRecorded(column.column.rtkChoiceRecorded, repo.rtkChoiceMadeAt),
+    ) as unknown as Record<string, unknown>;
+  } else {
+    // A failed writer can leave NULL beside the only usable context snapshot. A claim answer
+    // must carry that actual context forward before retiring its row, without filling the column
+    // or deriving missing membership from today's local providers.
+    const origin = pickSnapshotRow(
+      snapshots.map((row) => {
+        const valid = isRenderContextSnapshot(row.formValuesSnapshot);
+        return {
+          ...row,
+          hasSnapshot: valid,
+          rtkRecorded:
+            valid &&
+            typeof (row.formValuesSnapshot as { rtkEnabled?: unknown })?.rtkEnabled === 'boolean',
+        };
+      }),
+      repo.rtkChoiceMadeAt,
+    );
+    if (origin) {
+      const basis = {
+        ...(origin.formValuesSnapshot as Omit<RenderContextColumn, 'rtkChoiceRecorded'>),
+      };
+      delete basis.cliTargets;
+      const completed = completeRecordedCliMembership(basis, recovered);
+      const targets =
+        completed.cliTargets === undefined
+          ? undefined
+          : deriveRenderTargets(
+              completed.cliTargets,
+              completed.lspLanguages,
+              completed.agentTargets,
+              completed.legacyAgentFallback,
+            );
+      snapshot = recordableContext(
+        targets
+          ? {
+              ...completed,
+              agentTargets: targets.agentTargets,
+              enabledCliProviders: targets.enabledCliProviders,
+            }
+          : completed,
+        isRtkChoiceRecorded(origin.rtkRecorded, repo.rtkChoiceMadeAt),
+      );
+    }
+  }
   return {
     userId: repo.userId,
     bundles: await loadLocalBundles(tx, repositoryId),
-    snapshot:
-      column.kind === 'column'
-        ? (recordableContext(
-            renderContextFromColumn(column.column, providers),
-            isRtkChoiceRecorded(column.column.rtkChoiceRecorded, repo.rtkChoiceMadeAt),
-          ) as unknown as Record<string, unknown>)
-        : null,
+    snapshot,
   };
 }
 

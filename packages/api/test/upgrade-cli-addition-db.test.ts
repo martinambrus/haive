@@ -13,6 +13,7 @@ import {
   normalizeContent,
   secretsService,
   sha256Hex,
+  userSecretsService,
 } from '@haive/shared';
 
 const url = process.env.T118_DATABASE_URL;
@@ -28,8 +29,16 @@ vi.mock('../src/queues.js', () => ({ getTaskQueue: () => ({}) }));
 import { ACCESS_COOKIE } from '../src/auth/cookies.js';
 import { signAccessToken } from '../src/auth/jwt.js';
 import { upgradeRoutes } from '../src/routes/upgrades.js';
+import { toolingUpgradeRoutes } from '../src/routes/tooling-upgrades.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
+
+// Cross-package integration is test-only: runtime loading keeps API production/types independent
+// of the worker. Both consumers run against this test's actual owned PostgreSQL repository.
+const plannerModule = new URL(
+  '../../worker/src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.ts',
+  import.meta.url,
+).pathname;
 
 describe.skipIf(!url)('CLI addition availability through authenticated status', () => {
   let db: Database;
@@ -58,6 +67,7 @@ describe.skipIf(!url)('CLI addition availability through authenticated status', 
   });
   const app = new Hono<AppEnv>();
   app.route('/repositories', upgradeRoutes);
+  app.route('/repositories', toolingUpgradeRoutes);
   app.onError(errorHandler);
   const send = (session = cookie) =>
     app.request(`/repositories/${repositoryId}/upgrade-status`, {
@@ -121,6 +131,7 @@ describe.skipIf(!url)('CLI addition availability through authenticated status', 
   });
   beforeEach(async () => {
     vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('cd'.repeat(32));
+    vi.spyOn(userSecretsService, 'listForUser').mockResolvedValue([]);
     userId = randomUUID();
     repositoryId = randomUUID();
     taskId = randomUUID();
@@ -291,6 +302,7 @@ describe.skipIf(!url)('CLI addition availability through authenticated status', 
       .update(schema.onboardingArtifacts)
       .set({ formValuesSnapshot: snapshot })
       .where(eq(schema.onboardingArtifacts.repositoryId, repositoryId));
+    await writeFile(path.join(root, 'GEMINI.md'), '@AGENTS.md\n');
     const before = await persisted();
     const body = await status();
     expect(body.hasUpgradeAvailable).toBe(false);
@@ -369,6 +381,415 @@ describe.skipIf(!url)('CLI addition availability through authenticated status', 
     expect(body.rtkSettingsLeftovers).toBeUndefined();
     expect(body.hasUpgradeAvailable).toBe(false);
     expect(body.cliAdditions).toBeUndefined();
+  });
+
+  describe('status and actual01 agree on completed recorded target membership', () => {
+    const providers = (names: string[]) =>
+      names.map((name) => ({
+        name,
+        rulesFile: name === 'claude-code' ? 'CLAUDE.md' : 'AGENTS.md',
+        rulesFileMode: name === 'claude-code' ? 'import' : 'native',
+      }));
+    const legacyContext = (names: string[]) => {
+      const { cliTargets: _targets, ...portable } = context(names);
+      return {
+        ...portable,
+        enabledCliProviders: providers(names),
+        agentTargets: names.includes('claude-code')
+          ? [{ dir: '.claude/agents', format: 'markdown', supportsLsp: false }]
+          : [],
+      };
+    };
+    const snapshot = (names: string[]) => {
+      const { rtkChoiceRecorded: _choice, ...value } = context(names);
+      return value;
+    };
+    const prepare = async (column: unknown, value: unknown) => {
+      await db
+        .update(schema.cliProviders)
+        .set({ enabled: false })
+        .where(eq(schema.cliProviders.userId, userId));
+      await db
+        .delete(schema.onboardingArtifacts)
+        .where(eq(schema.onboardingArtifacts.repositoryId, repositoryId));
+      await db
+        .update(schema.repositories)
+        .set({ renderContext: column, applicableTemplateIds: [] })
+        .where(eq(schema.repositories.id, repositoryId));
+      // A real live row supplies strict snapshot provenance. Its non-applicable proof path holds
+      // a person's changed bytes, so it is not an obsolete removal or template drift reason.
+      await mkdir(path.join(root, '.haive'), { recursive: true });
+      await writeFile(
+        path.join(root, '.haive/historical-proof.json'),
+        'person keeps this edited proof\n',
+      );
+      await db.insert(schema.onboardingArtifacts).values({
+        userId,
+        repositoryId,
+        taskId,
+        templateId: 'historical.proof',
+        templateKind: 'workflow-config',
+        diskPath: '.haive/historical-proof.json',
+        templateSchemaVersion: 1,
+        templateContentHash: hash,
+        writtenHash: hash,
+        source: 'onboarding',
+        sourceStepId: '12-post-onboarding',
+        generatedAt: new Date(1),
+        formValuesSnapshot: value as Record<string, unknown>,
+      });
+    };
+    const plan = async () => {
+      const { buildUpgradePlan } = await import(plannerModule);
+      const noop = () => undefined;
+      return buildUpgradePlan({
+        db,
+        userId,
+        taskId,
+        repoPath: root,
+        logger: { info: noop, warn: noop, error: noop, debug: noop },
+      });
+    };
+
+    it.each(['agent', 'skill'] as const)(
+      'uses completed membership for %s destinations and stranded-file comparisons',
+      async (kind) => {
+        await prepare(legacyContext(['claude-code']), snapshot(['codex', 'future-cli']));
+        const bundleId = randomUUID(),
+          itemId = randomUUID();
+        const spec =
+          kind === 'skill'
+            ? { id: 'shared-skill', title: 'Shared skill', description: 'Recorded target control' }
+            : {
+                id: 'shared-agent',
+                title: 'Shared agent',
+                description: 'Recorded target control',
+                color: 'blue',
+                field: 'Testing',
+                tools: [],
+                coreMission: 'Check targets',
+                responsibilities: [],
+                whenInvoked: [],
+                executionSteps: [],
+                outputFormat: 'Report',
+                qualityCriteria: [],
+                antiPatterns: [],
+              };
+        await db.insert(schema.customBundles).values({
+          id: bundleId,
+          userId,
+          repositoryId,
+          name: 'Recorded target control',
+          sourceType: 'zip',
+          storageRoot: root,
+        });
+        await db.insert(schema.customBundleItems).values({
+          id: itemId,
+          bundleId,
+          kind,
+          sourceFormat: 'claude-md',
+          sourcePath: `${kind}.md`,
+          normalizedSpec: spec,
+          contentHash: sha256Hex(JSON.stringify(spec)),
+        });
+        const templateId = `custom.${bundleId}.${itemId}`;
+        const first = await plan();
+        const entry = first.entries.find(
+          (e: { templateId: string }) => e.templateId === templateId,
+        )!;
+        expect(entry.diskPath).toBe(
+          kind === 'skill'
+            ? '.agents/skills/shared-skill/SKILL.md'
+            : '.codex/agents/shared-agent.toml',
+        );
+        await mkdir(path.dirname(path.join(root, entry.diskPath)), { recursive: true });
+        await writeFile(path.join(root, entry.diskPath), entry.newContent);
+        await db.insert(schema.onboardingArtifacts).values({
+          userId,
+          repositoryId,
+          taskId,
+          templateId,
+          templateKind: kind === 'skill' ? 'custom-skill' : 'custom-agent',
+          bundleItemId: itemId,
+          diskPath: entry.diskPath,
+          templateSchemaVersion: 1,
+          templateContentHash: entry.currentTemplateContentHash,
+          writtenHash: sha256Hex(normalizeContent(entry.newContent)),
+          writtenContent: entry.newContent,
+          source: 'onboarding',
+          sourceStepId: '06_3-custom-bundles',
+          formValuesSnapshot: snapshot(['codex', 'future-cli']),
+        });
+        const planned = await plan();
+        expect(
+          planned.entries.find((e: { templateId: string }) => e.templateId === templateId).bucket,
+        ).toBe('unchanged');
+        const before = await persisted();
+        const body = await status();
+        expect(await persisted()).toEqual(before);
+        expect(body).toMatchObject({ hasUpgradeAvailable: false, changedTemplateIds: [] });
+        expect(body.obsoleteTemplateIds).toBeUndefined();
+        expect(body.missingRulesImports).toBeUndefined();
+      },
+    );
+
+    describe('canonical removal retains the observed-set fence', () => {
+      const config = async () => {
+        const res = await app.request(`/repositories/${repositoryId}/tooling-config`, {
+          headers: { cookie },
+        });
+        expect(res.status).toBe(200);
+        return (await res.json()) as { cliTargets: string[]; cliTargetsEditable: boolean };
+      };
+      const remove = (expectedTargets: string[], providers: string[]) =>
+        app.request(`/repositories/${repositoryId}/cli-targets/remove`, {
+          method: 'POST',
+          headers: { cookie, 'content-type': 'application/json' },
+          body: JSON.stringify({ expectedTargets, providers }),
+        });
+      it('refuses an old column-only client without silently discarding unobserved snapshot members', async () => {
+        await prepare(legacyContext(['claude-code']), snapshot(['gemini', 'future-cli']));
+        const before = await persisted();
+        const response = await remove(['claude-code'], ['claude-code']);
+        expect.soft(response.status).toBe(409);
+        expect.soft(await persisted()).toEqual(before);
+      });
+      it('lets a canonical observed client remove only Gemini, preserving unknown membership and column origin', async () => {
+        const column = legacyContext(['claude-code']);
+        await prepare(column, snapshot(['gemini', 'future-cli']));
+        const observed = await config();
+        expect
+          .soft(observed)
+          .toMatchObject({ cliTargets: ['gemini', 'future-cli'], cliTargetsEditable: true });
+        const before = await persisted();
+        const response = await remove(['gemini', 'future-cli'], ['gemini']);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ cliTargets: ['future-cli'] });
+        const after = await persisted();
+        expect(after.files).toEqual(before.files);
+        expect(after.artifacts).toEqual(before.artifacts);
+        expect(after.repository!.renderContext).toMatchObject({
+          projectInfo: column.projectInfo,
+          framework: column.framework,
+          rtkChoiceRecorded: column.rtkChoiceRecorded,
+          cliTargets: ['future-cli'],
+          agentTargets: [],
+          enabledCliProviders: [],
+        });
+        const moved = await persisted();
+        expect((await remove(['gemini', 'future-cli'], ['future-cli'])).status).toBe(409);
+        expect(await persisted()).toEqual(moved);
+      });
+      it('shows NULL-column recovered membership read-only and retains valid-column mutation admission', async () => {
+        await prepare(null, snapshot(['gemini', 'future-cli']));
+        const before = await persisted();
+        const observed = await config();
+        expect
+          .soft(observed)
+          .toMatchObject({ cliTargets: ['gemini', 'future-cli'], cliTargetsEditable: false });
+        expect((await remove(['gemini', 'future-cli'], ['gemini'])).status).toBe(409);
+        expect(await persisted()).toEqual(before);
+      });
+      it('keeps current explicit [] authoritative and editable even with a different live snapshot', async () => {
+        await prepare(context([]), snapshot(['gemini']));
+        expect(await config()).toMatchObject({ cliTargets: [], cliTargetsEditable: true });
+      });
+
+      it.each(['holder', 'journal', 'root-claim'])(
+        'keeps %s refusal without changing recovered membership',
+        async (guard) => {
+          await prepare(legacyContext(['claude-code']), snapshot(['gemini', 'future-cli']));
+          if (guard === 'holder')
+            await db.insert(schema.tasks).values({
+              userId,
+              repositoryId,
+              type: 'onboarding_upgrade',
+              title: 'Holding checkout',
+              status: 'running',
+            });
+          if (guard === 'journal')
+            await db
+              .insert(schema.projectStateOutbox)
+              .values({ repositoryId, writeIntent: { fixture: 'held' } });
+          if (guard === 'root-claim')
+            await db
+              .update(schema.repositories)
+              .set({ rootClaimedAt: new Date(), rootClaimKind: 'reset' })
+              .where(eq(schema.repositories.id, repositoryId));
+          const before = await persisted();
+          expect((await remove(['gemini', 'future-cli'], ['gemini'])).status).toBe(409);
+          expect(await persisted()).toEqual(before);
+        },
+      );
+
+      it('keeps unauthenticated and other-owner clients out of the canonical removal transaction', async () => {
+        await prepare(legacyContext(['claude-code']), snapshot(['gemini', 'future-cli']));
+        const request = (session: string) =>
+          app.request(`/repositories/${repositoryId}/cli-targets/remove`, {
+            method: 'POST',
+            headers: { cookie: session, 'content-type': 'application/json' },
+            body: JSON.stringify({
+              expectedTargets: ['gemini', 'future-cli'],
+              providers: ['gemini'],
+            }),
+          });
+        const before = await persisted();
+        expect((await request('')).status).toBe(401);
+        const otherId = randomUUID();
+        await db.insert(schema.users).values({
+          id: otherId,
+          emailEncrypted: 'synthetic',
+          emailBlindIndex: otherId,
+          passwordHash: 'fixture',
+          role: 'user',
+          status: 'active',
+        });
+        try {
+          const session = `${ACCESS_COOKIE}=${await signAccessToken({ sub: otherId, role: 'user', tv: 0 })}`;
+          expect((await request(session)).status).toBe(404);
+        } finally {
+          await db.delete(schema.users).where(eq(schema.users.id, otherId));
+        }
+        expect(await persisted()).toEqual(before);
+      });
+    });
+
+    it('does not restore Claude imports suppressed by newer strict explicit []', async () => {
+      await prepare(context([]), snapshot([]));
+      await rm(path.join(root, 'CLAUDE.md'));
+      const baseline = await status();
+      expect(baseline).toMatchObject({
+        isOnboarded: true,
+        hasUpgradeAvailable: false,
+        changedTemplateIds: [],
+      });
+      expect(baseline.missingRulesImports).toBeUndefined();
+      await db
+        .update(schema.repositories)
+        .set({ renderContext: legacyContext(['claude-code']) })
+        .where(eq(schema.repositories.id, repositoryId));
+      const before = await persisted();
+      const planned = await plan();
+      expect(planned.repositoryCliTargets).toEqual([]);
+      expect(planned.renderCtxSnapshot.agentTargets).toEqual([]);
+      expect(planned.missingRulesImports ?? []).toEqual([]);
+      const body = await status();
+      expect(await persisted()).toEqual(before);
+      expect(body.changedTemplateIds).toEqual([]);
+      expect(body.cliAdditions).toBeUndefined();
+      expect.soft(body.missingRulesImports).toBeUndefined();
+      expect.soft(body.hasUpgradeAvailable).toBe(false);
+    });
+
+    it('offers actual01 Claude restoration recovered ahead of legacy recorded empty providers', async () => {
+      await prepare(legacyContext([]), snapshot(['claude-code', 'future-cli']));
+      await rm(path.join(root, 'CLAUDE.md'));
+      const before = await persisted();
+      const planned = await plan();
+      expect(planned.repositoryCliTargets).toEqual(['claude-code', 'future-cli']);
+      expect(planned.missingRulesImports).toEqual(['CLAUDE.md']);
+      const body = await status();
+      expect(await persisted()).toEqual(before);
+      expect(body.changedTemplateIds).toEqual([]);
+      expect.soft(body.missingRulesImports).toEqual(['CLAUDE.md']);
+      expect.soft(body.hasUpgradeAvailable).toBe(true);
+    });
+
+    it('uses recovered mixed membership without reviving the legacy Claude import', async () => {
+      await prepare(legacyContext(['claude-code']), snapshot(['gemini', 'future-cli']));
+      await rm(path.join(root, 'CLAUDE.md'));
+      const before = await persisted();
+      const planned = await plan();
+      expect(planned.repositoryCliTargets).toEqual(['gemini', 'future-cli']);
+      expect(planned.missingRulesImports).toEqual(['GEMINI.md']);
+      const body = await status();
+      expect(await persisted()).toEqual(before);
+      expect(body.changedTemplateIds).toEqual([]);
+      expect(body.missingRulesImports).toEqual(['GEMINI.md']);
+    });
+
+    it('keeps authoritative current [] before a different strict snapshot for both consumers', async () => {
+      await prepare(context([]), snapshot(['claude-code']));
+      await rm(path.join(root, 'CLAUDE.md'));
+      const before = await persisted();
+      expect((await plan()).repositoryCliTargets).toEqual([]);
+      const body = await status();
+      expect(await persisted()).toEqual(before);
+      expect(body).toMatchObject({ hasUpgradeAvailable: false, changedTemplateIds: [] });
+      expect(body.missingRulesImports).toBeUndefined();
+    });
+
+    it('skips a malformed newer snapshot rather than treating it as explicit removal', async () => {
+      await prepare(legacyContext(['claude-code']), snapshot(['gemini']));
+      await writeFile(
+        path.join(root, '.haive/malformed-proof.json'),
+        'person keeps this edited proof\n',
+      );
+      await db.insert(schema.onboardingArtifacts).values({
+        userId,
+        repositoryId,
+        taskId,
+        templateId: 'historical.malformed',
+        templateKind: 'workflow-config',
+        diskPath: '.haive/malformed-proof.json',
+        templateSchemaVersion: 1,
+        templateContentHash: hash,
+        writtenHash: hash,
+        source: 'onboarding',
+        sourceStepId: '12-post-onboarding',
+        generatedAt: new Date(2),
+        formValuesSnapshot: { ...snapshot([]), unrecognized: true },
+      });
+      expect((await plan()).repositoryCliTargets).toEqual(['gemini']);
+      expect((await status()).missingRulesImports).toEqual(['GEMINI.md']);
+    });
+
+    it('recovers newest membership without replacing the older RTK-recorded context origin', async () => {
+      await prepare(null, {
+        ...snapshot(['claude-code']),
+        framework: 'drupal',
+        projectInfo: { name: 'Older chosen context' },
+        rtkEnabled: true,
+      });
+      const { rtkEnabled: _rtk, ...newer } = snapshot(['gemini', 'future-cli']);
+      await writeFile(
+        path.join(root, '.haive/newer-proof.json'),
+        'person keeps this edited proof\n',
+      );
+      await db.insert(schema.onboardingArtifacts).values({
+        userId,
+        repositoryId,
+        taskId,
+        templateId: 'historical.newer',
+        templateKind: 'workflow-config',
+        diskPath: '.haive/newer-proof.json',
+        templateSchemaVersion: 1,
+        templateContentHash: hash,
+        writtenHash: hash,
+        source: 'onboarding',
+        sourceStepId: '12-post-onboarding',
+        generatedAt: new Date(2),
+        formValuesSnapshot: {
+          ...newer,
+          framework: 'generic',
+          projectInfo: { name: 'Newest membership only' },
+        },
+      });
+      const before = await persisted();
+      const planned = await plan();
+      expect(planned.repositoryCliTargets).toEqual(['gemini', 'future-cli']);
+      expect(planned.renderCtxSnapshot).toMatchObject({
+        framework: 'drupal',
+        projectInfo: { name: 'Older chosen context' },
+        rtkEnabled: false,
+      });
+      expect(planned.rtkFollowsLive).toBe(true);
+      expect(planned.missingRulesImports).toEqual(['GEMINI.md']);
+      const body = await status();
+      expect(await persisted()).toEqual(before);
+      expect(body.changedTemplateIds).toEqual([]);
+      expect(body.missingRulesImports).toEqual(['GEMINI.md']);
+    });
   });
 
   it.each(['reset', 'live-onboarding'])(

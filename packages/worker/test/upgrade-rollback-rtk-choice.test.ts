@@ -141,7 +141,11 @@ async function viaRestoredSnapshot(
 async function viaLiveRows(
   liveRtk: boolean | undefined,
   plan: Plan,
-  more: { repository?: Record<string, unknown>; rows?: Record<string, unknown>[] } = {},
+  more: {
+    repository?: Record<string, unknown>;
+    rows?: Record<string, unknown>[];
+    maintainedClaude?: boolean;
+  } = {},
 ) {
   const repoPath = await root();
   await mkdir(join(repoPath, '.claude/agents'), { recursive: true });
@@ -162,7 +166,9 @@ async function viaLiveRows(
     diskPath: CREATED,
     templateId: 'agent.new',
     source: 'upgrade',
-    formValuesSnapshot: UPGRADED,
+    formValuesSnapshot: more.maintainedClaude
+      ? { ...UPGRADED, enabledCliProviders: rowSnapshot('newer-unrecorded').enabledCliProviders }
+      : UPGRADED,
     generatedAt: new Date('2026-02-01T00:00:00Z'),
   });
   row({
@@ -314,7 +320,10 @@ describe('a rollback whose plan followed the live RTK switch, though nobody stam
     const { fake, out } = await viaRestoredSnapshot(
       restored,
       plan,
-      { rtkEnabled: live },
+      {
+        rtkEnabled: live,
+        renderContext: { ...UPGRADED, cliTargets: ['claude-code'], rtkChoiceRecorded: true },
+      },
       snapshotWith(restored),
     );
     expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
@@ -362,7 +371,15 @@ describe('a rollback that takes the live rows’ context beside an older row tha
     const { fake, out } = await viaLiveRows(
       false,
       { rtkFollowsLive: false },
-      { repository: { rtkEnabled: true, rtkChoiceMadeAt: new Date(1000) }, rows: [newerRow] },
+      {
+        repository: {
+          rtkEnabled: true,
+          rtkChoiceMadeAt: new Date(1000),
+          renderContext: null,
+        },
+        rows: [newerRow],
+        maintainedClaude: true,
+      },
     );
 
     expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
@@ -372,7 +389,15 @@ describe('a rollback that takes the live rows’ context beside an older row tha
   });
 
   it('records the newest that recorded RTK while nobody switched it', async () => {
-    const { fake, out } = await viaLiveRows(false, { rtkFollowsLive: false }, { rows: [newerRow] });
+    const { fake, out } = await viaLiveRows(
+      false,
+      { rtkFollowsLive: false },
+      {
+        repository: { renderContext: null },
+        rows: [newerRow],
+        maintainedClaude: true,
+      },
+    );
 
     expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
     expect(fake.rows(schema.repositories)[0]!.renderContext).toMatchObject({ framework: null });

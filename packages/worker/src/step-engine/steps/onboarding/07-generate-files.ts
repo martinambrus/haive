@@ -5,6 +5,8 @@ import {
   sameValue,
   readRenderContextColumn,
   recordedCliTargets,
+  completeRecordedCliMembership,
+  recoverCliMembership,
 } from '@haive/shared/project-state';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -635,10 +637,32 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         rtkEnabled = repoRow[0].rtkEnabled;
         renderContextColumn = repoRow[0].renderContext ?? null;
         const read = readRenderContextColumn(repoRow[0].renderContext);
-        if (read.kind === 'column') {
-          priorCli = recordedCliTargets(read.column) ?? [];
-          priorTargets = read.column.agentTargets;
-          inheritedFallback = hasLegacyAgentFallback(read.column);
+        const snapshots =
+          read.kind !== 'column' || read.column.cliTargets === undefined
+            ? await ctx.db
+                .select({
+                  id: schema.onboardingArtifacts.id,
+                  generatedAt: schema.onboardingArtifacts.generatedAt,
+                  formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+                })
+                .from(schema.onboardingArtifacts)
+                .where(
+                  and(
+                    eq(schema.onboardingArtifacts.repositoryId, rtkRepoId),
+                    eq(schema.onboardingArtifacts.userId, ctx.userId),
+                    isNull(schema.onboardingArtifacts.supersededAt),
+                  ),
+                )
+            : [];
+        const recovered = recoverCliMembership(snapshots);
+        const context = read.kind === 'column' ? read.column : recovered?.snapshot;
+        if (context) {
+          // Only membership/fallback is inherited. This onboarding keeps its own detected project
+          // and the live repository RTK choice; the raw column above remains 12's CAS fence.
+          const completed = completeRecordedCliMembership(context, recovered);
+          priorCli = recordedCliTargets(completed) ?? [];
+          priorTargets = completed.agentTargets;
+          inheritedFallback = hasLegacyAgentFallback(completed);
         }
       }
     }

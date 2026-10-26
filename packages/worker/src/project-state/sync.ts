@@ -449,6 +449,9 @@ async function importClaims(
   for (const path of [...new Set([...l.keys(), ...m.keys()])].sort()) {
     const claim = m.get(path);
     if (sameValue(l.get(path), claim)) continue;
+    // A replaced row can be the only strict membership proof. Capture its provenance before
+    // retiring it, while the same transaction still holds the project-state lock.
+    if (claim !== undefined) context ??= await loadMarkerContext(tx, repositoryId, repo);
     await tx
       .update(schema.onboardingArtifacts)
       .set({ supersededAt: now, importedAt: now })
@@ -461,8 +464,7 @@ async function importClaims(
       );
     moved = true;
     if (claim === undefined) continue;
-    context ??= await loadMarkerContext(tx, repositoryId, repo);
-    await insertImportMarker(tx, { repositoryId, repoPath, claim, now, context });
+    await insertImportMarker(tx, { repositoryId, repoPath, claim, now, context: context! });
   }
   return moved;
 }

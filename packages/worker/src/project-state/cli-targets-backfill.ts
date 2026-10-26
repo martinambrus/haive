@@ -5,10 +5,9 @@ import {
   readRenderContextColumn,
   recordedCliTargets,
   pickSnapshotRow,
-  hasLegacyAgentFallback,
+  completeRecordedCliMembership,
   recoverCliTargets,
   recoverCliMembership,
-  deriveRenderTargets,
   type RenderContextColumn,
 } from '@haive/shared/project-state';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
@@ -91,28 +90,16 @@ export async function seedRepositoryCliTargets(db: Database): Promise<void> {
         Omit<RenderContextColumn, 'rtkChoiceRecorded'> | undefined;
       const context = read.kind === 'column' ? read.column : snapshot;
       if (!context) return;
-      const basis = context.agentTargets !== undefined ? context : (recovered?.snapshot ?? context);
-      const explicitClearsFallback =
-        recovered?.snapshot.cliTargets !== undefined &&
-        recovered.snapshot.legacyAgentFallback !== true;
-      const keepFallback = !explicitClearsFallback && hasLegacyAgentFallback(basis);
+      const completed = completeRecordedCliMembership(
+        read.kind === 'column' ? context : { ...context, cliTargets: undefined },
+        recovered,
+      );
       await tx
         .update(schema.repositories)
         .set({
           renderContext: {
-            ...context,
+            ...completed,
             cliTargets,
-            ...(keepFallback
-              ? {
-                  legacyAgentFallback: true,
-                  ...(context.agentTargets === undefined
-                    ? {
-                        agentTargets: deriveRenderTargets([], [], basis.agentTargets, true)
-                          .agentTargets,
-                      }
-                    : {}),
-                }
-              : {}),
             rtkChoiceRecorded:
               read.kind === 'column'
                 ? read.column.rtkChoiceRecorded

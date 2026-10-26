@@ -199,10 +199,13 @@ async function resolveFromRepository(
     );
   }
   if (origin.from === 'snapshot') {
-    const snapshot = completeRecordedCliMembership(
-      origin.row.formValuesSnapshot as unknown as TemplateRenderContext,
-      recoverCliMembership(liveRows),
-    );
+    const membershipBasis = {
+      ...(origin.row.formValuesSnapshot as unknown as TemplateRenderContext),
+    };
+    // An older RTK-recorded snapshot supplies portable context, not current-column authority.
+    // Membership still comes from the newest strict recorded snapshot, including explicit [].
+    delete membershipBasis.cliTargets;
+    const snapshot = completeRecordedCliMembership(membershipBasis, recoverCliMembership(liveRows));
     const cliTargets = snapshot.cliTargets;
     if (cliTargets !== undefined)
       return withLiveRtk(
@@ -309,6 +312,14 @@ async function resolveFromRepository(
       target.supportsLsp ??
       (target.dir === '.claude/agents' && hasCapableProvider && lspLanguages.length > 0),
   }));
+  const cliTargets = recordedCliTargets(detect);
+  const legacyAgentFallback = hasLegacyAgentFallback(detect);
+  // Direct consumers (applicable sets, backfill and rollback) need the same completed targets
+  // as 01's final plan. Only genuinely absent membership retains the legacy fallback above.
+  const derived =
+    cliTargets === undefined
+      ? undefined
+      : deriveRenderTargets(cliTargets, lspLanguages, agentTargets, legacyAgentFallback);
 
   const recorded: TemplateRenderContext = {
     projectInfo: detect.projectInfo ?? {
@@ -331,13 +342,13 @@ async function resolveFromRepository(
     framework: detect.framework ?? null,
     acceptedAgentIds: detect.acceptedAgentIds ?? [],
     customAgentSpecs: detect.customAgentSpecs ?? [],
-    agentTargets,
+    agentTargets: derived?.agentTargets ?? agentTargets,
     lspLanguages,
     // A detect output from before rtk shipped recorded no choice: off, not the column's default.
     rtkEnabled: detect.rtkEnabled ?? false,
-    enabledCliProviders: detect.enabledCliProviders ?? [],
-    ...(hasLegacyAgentFallback(detect) ? { legacyAgentFallback: true } : {}),
-    ...(recordedCliTargets(detect) !== undefined ? { cliTargets: recordedCliTargets(detect) } : {}),
+    enabledCliProviders: derived?.enabledCliProviders ?? detect.enabledCliProviders ?? [],
+    ...(legacyAgentFallback ? { legacyAgentFallback: true } : {}),
+    ...(cliTargets !== undefined ? { cliTargets } : {}),
   };
   return withLiveRtk(repo, recorded, history.rtkRecorded);
 }

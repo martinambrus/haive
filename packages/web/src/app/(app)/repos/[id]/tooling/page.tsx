@@ -36,6 +36,7 @@ interface ReviewDimensionOption {
 interface ToolingConfig {
   repositoryId: string;
   cliTargets?: string[];
+  cliTargetsEditable?: boolean;
   rtkEnabled: boolean;
   rtkVersion: string | null;
   rtkVersions: string[];
@@ -163,7 +164,7 @@ export default function RepoToolingPage() {
   const [mcpDecisionBusy, setMcpDecisionBusy] = useState<'accept' | 'discard' | null>(null);
 
   async function removeRepositoryCli(name: string) {
-    if (!config?.cliTargets || cliRemovalBusy) return;
+    if (!config?.cliTargets || config.cliTargetsEditable !== true || cliRemovalBusy) return;
     setCliRemovalBusy(name);
     setError(null);
     try {
@@ -487,18 +488,26 @@ export default function RepoToolingPage() {
                     className="flex items-center gap-2 rounded border border-neutral-700 p-2"
                   >
                     <span>{name}</span>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      disabled={cliRemovalBusy !== null}
-                      onClick={() => void removeRepositoryCli(name)}
-                    >
-                      Remove {name}
-                    </Button>
+                    {config.cliTargetsEditable === true && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        disabled={cliRemovalBusy !== null}
+                        onClick={() => void removeRepositoryCli(name)}
+                      >
+                        Remove {name}
+                      </Button>
+                    )}
                   </div>
                 ))}
               </div>
+              {config.cliTargetsEditable !== true && (
+                <InlineMarkdown
+                  className="mt-2 text-sm text-neutral-400"
+                  body="Complete repository setup or an upgrade before changing these CLIs."
+                />
+              )}
             </Card>
           )}
 

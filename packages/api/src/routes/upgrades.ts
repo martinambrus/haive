@@ -33,7 +33,6 @@ import {
   agentTargetSchema,
   bundleItemRenders,
   completeRecordedCliMembership,
-  recordedCliTargets,
   recoverCliMembership,
   foreignReason,
   historyOrigin,
@@ -167,7 +166,9 @@ function rtkProviderNames(
   }
   const verdict = historyOrigin({ onboarding: history, source, rtkChoiceMadeAt });
   return verdict.kind === 'onboarding' && verdict.rtkRecorded
-    ? snapshotProviderNames(history?.enabledCliProviders)
+    ? Array.isArray(history?.cliTargets)
+      ? (history.cliTargets as string[])
+      : snapshotProviderNames(history?.enabledCliProviders)
     : null;
 }
 
@@ -455,7 +456,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     );
 
   const refusedSnapshots = await undecodableSnapshotRows(db, repositoryId);
-  const origin = renderContextOrigin({
+  let origin = renderContextOrigin({
     column: readRenderContextColumn(repo.renderContext),
     rows: liveArtifacts.map((a) =>
       refusedSnapshots.has(a.id) ? { ...a, hasSnapshot: false, rtkRecorded: false } : a,
@@ -463,7 +464,67 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     rtkChoiceMadeAt: repo.rtkChoiceMadeAt,
   });
   const enabledNames = ruleProviderRows.filter((p) => p.enabled).map((p) => p.name);
-  const history = origin.from === 'history' ? await loadHistoryDetect(db, repositoryId) : null;
+  let history = origin.from === 'history' ? await loadHistoryDetect(db, repositoryId) : null;
+  // Complete only target facts, once. Membership can come from a newer strict snapshot than the
+  // separately selected portable context/RTK origin; every comparison below must see the same set.
+  const recoveredMembership = recoverCliMembership(liveArtifacts);
+  const targetFacts = (
+    targets: unknown,
+    providers: unknown,
+    agents: unknown,
+    fallback: unknown,
+  ) => {
+    const parsedAgents = storedAgentTargetsSchema.safeParse(agents);
+    return {
+      cliTargets: z.array(z.string()).safeParse(targets).success
+        ? (targets as string[])
+        : undefined,
+      enabledCliProviders: Array.isArray(providers)
+        ? snapshotProviderNames(providers).map((name) => ({ name }))
+        : undefined,
+      agentTargets: parsedAgents.success ? parsedAgents.data : undefined,
+      legacyAgentFallback: typeof fallback === 'boolean' ? fallback : undefined,
+    };
+  };
+  if (origin.from === 'column') {
+    origin = {
+      ...origin,
+      column: completeRecordedCliMembership(origin.column, recoveredMembership),
+    };
+  } else if (origin.from === 'snapshot') {
+    const completed = completeRecordedCliMembership(
+      targetFacts(
+        // This row may be older because it recorded RTK; only a current column has authority
+        // over the newest strict membership snapshot.
+        undefined,
+        origin.row.snapshotProviders,
+        origin.row.snapshotAgentTargets,
+        origin.row.snapshotLegacyAgentFallback,
+      ),
+      recoveredMembership,
+    );
+    origin = {
+      ...origin,
+      row: {
+        ...origin.row,
+        snapshotCliTargets: completed.cliTargets,
+        snapshotProviders: completed.enabledCliProviders,
+        snapshotAgentTargets: completed.agentTargets,
+        snapshotLegacyAgentFallback: completed.legacyAgentFallback,
+      },
+    };
+  } else if (history) {
+    const completed = completeRecordedCliMembership(
+      targetFacts(
+        history.cliTargets,
+        history.enabledCliProviders,
+        history.agentTargets,
+        history.legacyAgentFallback,
+      ),
+      recoveredMembership,
+    );
+    history = { ...history, ...completed };
+  }
   const agentTargets = renderedAgentTargets(origin, history, repo.source, ruleProviderRows);
   const repositoryNames =
     origin.from === 'column'
@@ -472,37 +533,19 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
         ? (origin.row.snapshotCliTargets as string[])
         : origin.from === 'snapshot'
           ? snapshotProviderNames(origin.row.snapshotProviders)
-          : history
-            ? snapshotProviderNames(history.enabledCliProviders)
-            : enabledNames;
+          : history && Array.isArray(history.cliTargets)
+            ? (history.cliTargets as string[])
+            : history
+              ? snapshotProviderNames(history.enabledCliProviders)
+              : enabledNames;
   const skillDirs = skillTargetDirs(repositoryNames);
-  // Match 01's render-context completion before comparing enabled providers with repository
-  // membership. Deferred legacy columns may recover newer membership from strict live snapshots;
-  // an authoritative [] must still offer enabled providers as choices, without adopting them.
-  const recoveredMembership = recoverCliMembership(liveArtifacts);
-  const recordedNamesContext = (targets: unknown, providers: unknown) => ({
-    cliTargets: z.array(z.string()).safeParse(targets).success ? (targets as string[]) : undefined,
-    enabledCliProviders: Array.isArray(providers)
-      ? snapshotProviderNames(providers).map((name) => ({ name }))
-      : undefined,
-  });
+  // An unresolved history still plans nothing. In every resolvable context, additions and all
+  // artifact/import/RTK comparisons use the same completed target facts without adopting them.
   const planningCliNames =
-    origin.from === 'column'
-      ? (recordedCliTargets(completeRecordedCliMembership(origin.column, recoveredMembership)) ??
-        enabledNames)
-      : origin.from === 'snapshot'
-        ? (recordedCliTargets(
-            completeRecordedCliMembership(
-              recordedNamesContext(origin.row.snapshotCliTargets, origin.row.snapshotProviders),
-              recoveredMembership,
-            ),
-          ) ?? [])
-        : historyOrigin({ onboarding: history, source: repo.source }).kind === 'onboarding' &&
-            history
-          ? (recordedCliTargets(
-              recordedNamesContext(history.cliTargets, history.enabledCliProviders),
-            ) ?? [])
-          : enabledNames;
+    origin.from === 'history' &&
+    historyOrigin({ onboarding: history, source: repo.source }).kind === 'none'
+      ? enabledNames
+      : repositoryNames;
   const cliAdditions = enabledNames.filter((name) => !planningCliNames.includes(name));
 
   // A row this install does not manage, which no upgrade offers anything for, stays out of every

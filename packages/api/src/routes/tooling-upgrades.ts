@@ -7,6 +7,8 @@ import {
   readRenderContextColumn,
   recordedCliTargets,
   sameValue,
+  completeRecordedCliMembership,
+  recoverCliMembership,
 } from '@haive/shared/project-state';
 import {
   CHECKOUT_HOLDING_TASK_STATUSES,
@@ -52,6 +54,39 @@ import { HttpError, type AppEnv } from '../context.js';
 
 export const toolingUpgradeRoutes = new Hono<AppEnv>();
 toolingUpgradeRoutes.use('*', requireAuth);
+
+/** Display and observed-set mutation share canonical recorded membership. The raw column still
+ * controls admission: historical names alone never materialize a portable render context. */
+async function loadRepositoryCliMembership(
+  db: Pick<ReturnType<typeof getDb>, 'select'>,
+  repositoryId: string,
+  userId: string,
+  context: unknown,
+) {
+  const read = readRenderContextColumn(context);
+  const rows =
+    read.kind !== 'column' || read.column.cliTargets === undefined
+      ? await db
+          .select({
+            id: schema.onboardingArtifacts.id,
+            generatedAt: schema.onboardingArtifacts.generatedAt,
+            formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+          })
+          .from(schema.onboardingArtifacts)
+          .where(
+            and(
+              eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+              eq(schema.onboardingArtifacts.userId, userId),
+              isNull(schema.onboardingArtifacts.supersededAt),
+            ),
+          )
+      : [];
+  const recovered = recoverCliMembership(rows);
+  const completed =
+    read.kind === 'column' ? completeRecordedCliMembership(read.column, recovered) : undefined;
+  const names = completed ? recordedCliTargets(completed) : recovered?.cliTargets;
+  return { completed, names };
+}
 
 /** Per-repo tooling component (RTK, chrome-devtools-mcp, an LSP server). */
 interface ToolingComponentStatus {
@@ -495,12 +530,17 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     };
   });
 
+  const membership = await loadRepositoryCliMembership(
+    db,
+    repositoryId,
+    userId,
+    repo.renderContext,
+  );
+
   return c.json({
     repositoryId,
-    cliTargets: (() => {
-      const read = readRenderContextColumn(repo.renderContext);
-      return read.kind === 'column' ? (recordedCliTargets(read.column) ?? []) : [];
-    })(),
+    cliTargets: membership.names ?? [],
+    cliTargetsEditable: membership.completed !== undefined && membership.names !== undefined,
     rtkEnabled: repo.rtkEnabled,
     rtkVersion: repo.rtkVersion,
     rtkVersions: versionsFor('rtk'),
@@ -989,7 +1029,13 @@ toolingUpgradeRoutes.post('/:id/cli-targets/remove', async (c) => {
     const read = readRenderContextColumn(repo.renderContext);
     if (read.kind !== 'column')
       throw new HttpError(409, 'Upgrade this repository before changing its maintained CLIs.');
-    const before = recordedCliTargets(read.column);
+    const membership = await loadRepositoryCliMembership(
+      tx,
+      repositoryId,
+      c.get('userId'),
+      repo.renderContext,
+    );
+    const before = membership.names;
     if (
       before === undefined ||
       !sameValue([...new Set(before)].sort(), [...new Set(body.data.expectedTargets)].sort())
@@ -1008,7 +1054,7 @@ toolingUpgradeRoutes.post('/:id/cli-targets/remove', async (c) => {
       .update(schema.repositories)
       .set({
         renderContext: {
-          ...read.column,
+          ...membership.completed!,
           cliTargets: next,
           legacyAgentFallback: false,
           agentTargets: targets.agentTargets,
