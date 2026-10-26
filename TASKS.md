@@ -101,10 +101,10 @@ All PRE-EXISTING.
 
 ### T118 · B4.1 · repository CLI set is a union
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T17:35Z · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T17:52Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
 
-Codex progress 2026-10-26T17:35Z: PR #934 final head dbb00bbbe contains agent-less completion correction820238ab plus topic docs; six tested blobs unchanged. Final checks118shared/469API(6actualJWT-PG)/71worker/types12/formatPASS, stable receipts; parent independent final25/25PASS. Actual Next/card/API/PG browser passes explicitAmp and NULLcolumn/validsnapshotAmp with Create task, unknownlegacynegative still Onboard;375/1280 plus4screenshots inspected, noagentdirs, source stable, cleanup0errors/0runners/portsclosed. Prior33e all8CIgreen and earlier addition/removal/writer/recovery evidence carry only unchanged contracts. R6 replied/resolved after verified push; NEW fresh paired reviewer, exact-head automated review and CIrun40369584563 running. No merge yet. Finish T118 through merge/mainCI/runtime then PAUSE; T119 remains queued.
+Codex progress 2026-10-26T17:52Z: PR #934 exact final head dbb00bbbe has all8CI jobs SUCCESS (full-root unit/smokes/Playwright), clean fresh paired source review and parent25-control/browser acceptance. Marker correction118shared/469API/71worker/types12/formatPASS; all receipts/source hashes checked, owned browser processes closed. Automated review stayed Running beyond15min; one policy-authorized retry posted6423304150 at~17:48:45, conservative retry deadline18:04:30UTC if no result. No new findings posted, but automated review is pending, not clean. Final thread/check audit and merge/mainCI/runtime still required; no merge yet. Finish T118 then PAUSE; T119 queued, counts unchanged.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
