@@ -101,10 +101,10 @@ All PRE-EXISTING.
 
 ### T118 · B4.1 · repository CLI set is a union
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T16:02Z · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T16:14Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
 
-Codex progress 2026-10-26T16:02Z: PR #934 final checked head36b43668 contains legacy retry/caller completion, empty skill destinations and reachable CLI additions with NULL-history guard. All fresh local source reviews are clean at this head/bounded unchanged scopes. Parent independently passed15 retryPG+10units and final11 JWT/PG status controls; source hashes stable. Actual browser removal passed375/768/1280 with auth/origin/CAS/holder/journal guards; final real-catalog browser proved current baseline→Gemini-only addition reason→existing POST/tasks→worker01 default-on choice→decline, preserving membership/files/ledger. All browser/queue/service fixtures exited and cleaned. Driver scopes:981worker/99recovery/156two-install;383API/39web/108shared/187planner;types12/format. Old bot findings resolved after verified push; final-head automated review and CI still running (5/8 CI jobs green at15:59), no merge claim. Finish T118 through merge/mainCI/runtime then pause; T119 remains scoped/queued.
+Codex progress 2026-10-26T16:14Z: final automated review of PR #934 head36b43668 found R5: NULL current context must recover recorded CLI skill destinations from validated live snapshots before local-provider fallback. Final full-worker CI also reported19 failures across5 files; saved full logs and assigned original driver a bounded correction/fixture triage with red controls and final full worker suite. Preserve4096-entry cap, transaction/base assertions and prompt containment/coverage. Earlier browser removal/addition and focused passes remain evidence only at unchanged scopes, not a delivery claim. New fresh independent review and exact-head bot/CI remain required; no merge yet. Finish T118 through merge/mainCI/runtime then pause; T119 stays queued.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
