@@ -101,10 +101,10 @@ All PRE-EXISTING.
 
 ### T118 · B4.1 · repository CLI set is a union
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T10:53Z · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T11:32Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
 
-Codex progress 2026-10-26T10:53Z: all12 workspace typecheck tasks pass. Root unit run passed other packages but found the new API removal lock must use boundedLockWait; corrected API and full worker checks remain. Independent parent existing-helper controls reproduce the original union/empty failures. Mixed-snapshot backfill regression reproduced and corrected while preserving existing RTK context selection. Driver is closing real blank INIT record staging and legacy foreground snapshot omission paths; these are required CLI portability/compatibility controls. Source remains uncommitted, no final review or T118 PR yet. One implementation driver, serial test lock, dedicated primary DB/Redis1 and separate parent browser DB/Redis2. T117 merged46fe58b2, main verification pending; integrate main only after checks finish. No schema migration0215 or unrelated design work.
+Codex progress 2026-10-26T11:32Z: full workspace tests pass all12 tasks, including worker14253 passed/4 expected failures/630 opt-in skips; types12/12, actual two-install156/156 and recovery/writer99/99 also pass on the recorded frozen source. Required blank INIT record commit, foreground snapshot fences and validated-base CLI deletion controls are included. Two confirmed legacy cases remain before the checked commit: preserve actually recorded zero-provider Claude fallback separately from an explicit empty membership, and skip snapshot membership absence while honoring recorded[]. Driver is adding bounded internal context/snapshot compatibility support; portable record format unchanged, no new provider membership or migration0215. Parent docs, fresh independent review, actual tooling browser acceptance and PR gates still pending. One implementation driver, serial test lock, no T118 dev changes.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
