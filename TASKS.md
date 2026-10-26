@@ -136,9 +136,9 @@ settings/review-watermarks.json, descendant wins via merge-base --is-ancestor; _
 
 ### T266 · FNF[record-writer] · 04's set and record writes run unfenced (+5)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-25T23:36Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-26T00:02Z
 
-Codex progress 2026-10-25T23:36Z: ONLY remaining in-progress task before user-requested PAUSE. PR #931 HEAD69b512387; earlier entry/byte-cap recovery fix passes49PG/428affected/5sharedlimits and parent8PG. Freshreview requires bounded undo CAS reads; new remote finding needs safe new-empty-directory footprint undo at4096 entries. Highdriver validating actual69 reds and combining both fixes; currentHEAD must not merge. T413 main all8 green and completed; no further claims.
+Codex progress 2026-10-26T00:02Z: ONLY remaining task before user-requested PAUSE; 39 done, 1 in progress, 100 open. PR #931 HEADa199 must not merge: fresh review found interruption inside directory parking; remote review also reproduced file-CAS parking crash and uncapped foreground CAS read. High driver is fixing one journal-owned interruption protocol across the six forward/undo file mutation paths plus atomic empty-directory cleanup. Original cases pass; new internal-kill cases need final proof, fresh review and exact-head CI/bot gates. T412/T416/T303/T413 completed; no further claims.
 
 All PRE-EXISTING. Items 4, 7, 8 moved to T310.
 
