@@ -841,6 +841,8 @@ function buildSkillPrompt(
   truncationRetries = 0,
   targetCapability?: string,
 ): string {
+  if (detected.skillTargetDirs?.length === 0)
+    return 'The repository maintains no skill destinations. Do not generate or write skills.';
   const values = formValues as { maxSkills?: number; domainHints?: string };
   const maxSkills = clampMaxSkills(values.maxSkills);
   const hints = typeof values.domainHints === 'string' ? values.domainHints.trim() : '';
@@ -1150,10 +1152,12 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     // loop's gap-fill for any capability the parallel batch missed — let llm run then.
     // Discovery mode (no fixed list to parallelize) always runs llm.
     skipIf: ({ detected, formValues, iteration }) =>
-      computeDomainPlan(
+      (detected as SkillGenDetect).skillTargetDirs?.length === 0 ||
+      (computeDomainPlan(
         detected as SkillGenDetect,
         clampMaxSkills((formValues as { maxSkills?: number }).maxSkills),
-      ).mode === 'deterministic' && (iteration ?? 0) === 0,
+      ).mode === 'deterministic' &&
+        (iteration ?? 0) === 0),
     // Iteration 0 prompt; iterations > 0 use loop.buildIterationPrompt below. Each
     // pass asks for ONE skill so a single CLI invocation never blows the model's
     // output-token ceiling (the Amp max_tokens failure this step is chunked to fix).
@@ -1221,6 +1225,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     async selectAgents({ detected, formValues }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillGenDetect;
+      if (det.skillTargetDirs?.length === 0) return [];
       const fv = formValues as Record<string, unknown>;
       const maxSkills = clampMaxSkills((fv as { maxSkills?: number }).maxSkills);
       const plan = computeDomainPlan(det, maxSkills);
@@ -1272,10 +1277,22 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const maxSkills = clampMaxSkills(values.maxSkills);
 
     const detected = args.detected as SkillGenDetect;
-    const targetDirs =
-      detected.skillTargetDirs && detected.skillTargetDirs.length > 0
-        ? detected.skillTargetDirs
-        : [DEFAULT_PROJECT_SKILLS_DIR];
+    const targetDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    if (targetDirs.length === 0)
+      return {
+        summary: 'The repository maintains no skill destinations.',
+        written: [],
+        totalSubSkills: 0,
+        droppedFromCap: 0,
+        rejectedIds: [],
+        droppedForSubSkills: [],
+        maxSkills,
+        mode: 'deterministic',
+        targetCount: 0,
+        lastBatchCount: 0,
+        llmSkillCount: 0,
+        consecutiveEmpty: 0,
+      };
 
     // Deduped by id, keeping the LAST occurrence. `loadBundleSkills` does not deduplicate and
     // `custom_bundle_items` enforces uniqueness only per (bundle, source path), so two items can

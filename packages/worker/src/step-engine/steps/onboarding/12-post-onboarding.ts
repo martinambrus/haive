@@ -357,7 +357,11 @@ async function recordOnboardingArtifacts(
       !sameValue(live?.renderContext ?? null, detect.renderContextColumn) &&
       !sameValue(
         live?.renderContext ?? null,
-        renderContextColumnFor(renderCtx, detect.rtkEnabled !== undefined),
+        renderContextColumnFor(
+          renderCtx,
+          detect.rtkEnabled !== undefined,
+          detect.renderContextColumn,
+        ),
       )
     )
       throw new Error(
@@ -679,7 +683,11 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
         detect?.renderContextColumn !== undefined && renderContext
           ? [
               detect.renderContextColumn,
-              renderContextColumnFor(renderContext, detect.rtkEnabled !== undefined),
+              renderContextColumnFor(
+                renderContext,
+                detect.rtkEnabled !== undefined,
+                detect.renderContextColumn,
+              ),
             ]
           : undefined;
       // A 07 output from before RTK shipped made no choice; buildRenderContext defaults it off.

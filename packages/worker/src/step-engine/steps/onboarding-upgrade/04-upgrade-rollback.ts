@@ -23,6 +23,8 @@ import { ledgerImportedSince } from '@haive/shared/onboarding-admission';
 import {
   deriveRenderTargets,
   readRenderContextColumn,
+  completeRecordedCliMembership,
+  recoverCliMembership,
   isImportMarker,
   isRenderContextSnapshot,
   isRtkChoiceRecorded,
@@ -962,17 +964,22 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       );
 
     const currentColumn = readRenderContextColumn(columnBefore?.renderContext);
-    if (
-      recorded &&
-      currentColumn.kind === 'column' &&
-      currentColumn.column.cliTargets !== undefined
-    ) {
-      const cliTargets = currentColumn.column.cliTargets;
+    const maintained =
+      currentColumn.kind === 'column'
+        ? completeRecordedCliMembership(
+            currentColumn.column,
+            currentColumn.column.cliTargets === undefined
+              ? recoverCliMembership(await loadLiveArtifacts(ctx.db, detected.repositoryId))
+              : undefined,
+          )
+        : null;
+    if (recorded && maintained?.cliTargets !== undefined) {
+      const cliTargets = maintained.cliTargets;
       const targets = deriveRenderTargets(
         cliTargets,
         recorded.lspLanguages as string[],
-        currentColumn.column.agentTargets,
-        currentColumn.column.legacyAgentFallback,
+        maintained.agentTargets,
+        maintained.legacyAgentFallback,
       );
       recorded = {
         ...recorded,
@@ -980,8 +987,8 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         agentTargets: targets.agentTargets,
         enabledCliProviders: targets.enabledCliProviders,
       };
-      if (currentColumn.column.legacyAgentFallback !== undefined)
-        recorded.legacyAgentFallback = currentColumn.column.legacyAgentFallback;
+      if (maintained.legacyAgentFallback !== undefined)
+        recorded.legacyAgentFallback = maintained.legacyAgentFallback;
       else delete recorded.legacyAgentFallback;
     }
 

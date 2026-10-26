@@ -125,6 +125,15 @@ async function main(): Promise<void> {
       updatedAt: now,
     });
 
+    // This full-export fixture needs the recorded Claude destination for its persona/RAG checks.
+    // HAIVE_TEST_BYPASS_LLM keeps this metadata-only provider entirely synthetic.
+    await db.insert(schema.cliProviders).values({
+      userId,
+      name: 'claude-code',
+      label: 'drupal7-smoke synthetic Claude',
+      enabled: true,
+    });
+
     const [repo] = await db
       .insert(schema.repositories)
       .values({

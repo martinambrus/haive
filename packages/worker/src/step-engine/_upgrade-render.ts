@@ -12,6 +12,8 @@ import {
 } from '@haive/shared';
 import {
   deriveRenderTargets,
+  completeRecordedCliMembership,
+  recoverCliMembership,
   hasLegacyAgentFallback,
   recordedCliTargets,
   skillTargetDirs,
@@ -189,12 +191,18 @@ async function resolveFromRepository(
   if (origin.from === 'column') {
     return withLiveRtk(
       repo,
-      renderContextFromColumn(origin.column, await loadProviderRows()),
+      renderContextFromColumn(
+        completeRecordedCliMembership(origin.column, recoverCliMembership(liveRows)),
+        await loadProviderRows(),
+      ),
       origin.rtkRecorded,
     );
   }
   if (origin.from === 'snapshot') {
-    const snapshot = origin.row.formValuesSnapshot as unknown as TemplateRenderContext;
+    const snapshot = completeRecordedCliMembership(
+      origin.row.formValuesSnapshot as unknown as TemplateRenderContext,
+      recoverCliMembership(liveRows),
+    );
     const cliTargets = snapshot.cliTargets;
     if (cliTargets !== undefined)
       return withLiveRtk(

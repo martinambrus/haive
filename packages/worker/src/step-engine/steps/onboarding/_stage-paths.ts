@@ -191,7 +191,9 @@ export async function collectOnboardingStagePaths(
   let repairDirs: string[] = [];
   if (repaired.length > 0) {
     const targets = rels(field(repair?.detect, 'skillTargetDirs'));
-    repairDirs = targets.length > 0 ? targets : [DEFAULT_SKILLS_DIR];
+    repairDirs = Array.isArray(field(repair?.detect, 'skillTargetDirs'))
+      ? targets
+      : [DEFAULT_SKILLS_DIR];
     for (const dir of repairDirs) {
       add.add(`${dir}/README.md`);
       for (const id of repaired) {

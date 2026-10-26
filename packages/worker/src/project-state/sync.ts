@@ -787,17 +787,17 @@ export async function syncProjectStateLocked(
       ? undefined
       : recordedCliTargets(column as Parameters<typeof recordedCliTargets>[0]);
   const rowsForMembership =
-    columnCli === undefined ? await loadLiveArtifacts(tx, repositoryId) : [];
+    column?.cliTargets === undefined ? await loadLiveArtifacts(tx, repositoryId) : [];
   const historical = column === null ? pickRenderSnapshot(rowsForMembership) : null;
   const recovered = recoverCliMembership(rowsForMembership);
   const recoveredCli = recovered?.cliTargets;
-  const storedCli = columnCli ?? recoveredCli;
+  const storedCli = column?.cliTargets !== undefined ? columnCli : (recoveredCli ?? columnCli);
   const localCli = storedCli ?? [];
   // No member files in a pre-CLI record are absence, not a request to remove the repository set.
   // Once the base held members, their deletion is an explicit per-member repository change.
   const incomingCli = checkout.cli.length === 0 && baseCli.length === 0 ? localCli : checkout.cli;
   const hasCli =
-    column?.cliTargets !== undefined ||
+    columnCli !== undefined ||
     historical?.cliTargets !== undefined ||
     recoveredCli !== undefined ||
     checkout.cli.length > 0 ||

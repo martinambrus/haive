@@ -124,6 +124,8 @@ const column = (r: ProjectRender, rtkChoiceRecorded = true): Json => ({
   rtkChoiceRecorded,
 });
 
+const promoted = (c: Json): Json => ({ ...c, cliTargets: ['claude-code'] });
+
 const record = (r: ProjectRender | null): ProjectStateRecord => ({
   ...emptyProjectState(),
   render: r,
@@ -567,7 +569,9 @@ describe('syncProjectStateFromCheckout: a first import', () => {
     const { outcome } = await s.run();
 
     expect(outcome).toBe('applied');
-    expect(json(s.columnOf())).toEqual({ ...BASE, ...PER_INSTALL, rtkChoiceRecorded: false });
+    expect(json(s.columnOf())).toEqual(
+      promoted({ ...BASE, ...PER_INSTALL, rtkChoiceRecorded: false }),
+    );
     expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseOf(BASE));
   });
 });
@@ -607,10 +611,10 @@ describe('syncProjectStateFromCheckout: a second sync of the same files', () => 
 
     const { outcome, trace } = await s.run();
 
-    expect(outcome).toBe('unchanged');
+    expect(outcome).toBe('applied');
     expect(s.syncRow()?.lastError ?? null).toBeNull();
     expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseOf(BASE));
-    expect(writesTo(trace, 'repositories')).toEqual([]);
+    expect(writesTo(trace, 'repositories')).toEqual(['update repositories']);
     expect(writesTo(trace, 'project_state_sync')).toHaveLength(1);
     expectWritesUnderTheLock(trace);
   });
@@ -624,7 +628,9 @@ describe('syncProjectStateFromCheckout: a teammate changed the record (base equa
     const { outcome, trace } = await s.run();
 
     expect(outcome).toBe('applied');
-    expect(json(s.columnOf())).toEqual({ ...TEAM, ...PER_INSTALL, rtkChoiceRecorded: false });
+    expect(json(s.columnOf())).toEqual(
+      promoted({ ...TEAM, ...PER_INSTALL, rtkChoiceRecorded: false }),
+    );
     expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseOf(TEAM));
     expect(s.syncRow()?.lastError ?? null).toBeNull();
     expect(writesTo(trace, 'repositories')).toHaveLength(1);
@@ -638,7 +644,9 @@ describe('syncProjectStateFromCheckout: a teammate changed the record (base equa
 
     await s.run();
 
-    expect(json(s.columnOf())).toEqual({ ...TEAM, ...PER_INSTALL, rtkChoiceRecorded: true });
+    expect(json(s.columnOf())).toEqual(
+      promoted({ ...TEAM, ...PER_INSTALL, rtkChoiceRecorded: true }),
+    );
   });
 });
 
@@ -696,8 +704,8 @@ describe('syncProjectStateFromCheckout: both sides changed a key, differently', 
     const { outcome, trace } = await s.run();
 
     expect(outcome).toBe('conflict');
-    expect(json(s.columnOf())).toEqual(columnBefore);
-    expect(writesTo(trace, 'repositories')).toEqual([]);
+    expect(json(s.columnOf())).toEqual(promoted(columnBefore as Json));
+    expect(writesTo(trace, 'repositories')).toEqual(['update repositories']);
     expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseOf(BASE));
     const error = s.syncRow()?.lastError;
     expect(typeof error).toBe('string');
@@ -734,6 +742,7 @@ describe('syncProjectStateFromCheckout: both sides changed a key, differently', 
 
     expect(outcome).toBe('conflict');
     expect(json(s.columnOf())).toEqual({
+      cliTargets: ['claude-code'],
       ...local,
       lspLanguages: ['css', 'php-extended', 'twig'],
       ...PER_INSTALL,
@@ -1038,6 +1047,7 @@ describe('syncProjectStateFromCheckout: a local record the codec would refuse', 
 
       expect(outcome).toBe('applied');
       expect(json(s.columnOf())).toEqual({
+        cliTargets: ['claude-code'],
         ...shape(limit),
         framework: 'drupal10',
         ...PER_INSTALL,
@@ -1401,17 +1411,19 @@ describe('syncProjectStateFromCheckout: a base that moved since the files were r
     await s.putRecord(record(BASE));
     // The writer commits its record the moment the sync first asks for the base.
     s.hook.onFirstSyncRead = () => {
-      s.putRecordSync(record(LATER));
-      s.patchColumn(column(LATER));
-      s.patchBase(baseOf(LATER));
+      s.putRecordSync({ ...record(LATER), cli: ['claude-code'] });
+      s.patchColumn(promoted(column(LATER)));
+      s.patchBase({ ...record(LATER), cli: ['claude-code'] });
     };
 
     const { outcome, trace } = await s.run();
 
     expect(['unchanged', 'superseded']).toContain(outcome);
     expect(trace.filter(isWrite).every((e) => e === 'insert project_state_sync')).toBe(true);
-    expect(json(s.columnOf())).toEqual(column(LATER));
-    expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseOf(LATER));
+    expect(json(s.columnOf())).toEqual(promoted(column(LATER)));
+    expect(json(s.syncRow()?.baseSnapshot)).toEqual(
+      json(normalizeProjectState({ ...record(LATER), cli: ['claude-code'] })),
+    );
   });
 
   it('holds rather than importing a writer’s uncommitted filesystem output', async () => {
@@ -1451,7 +1463,7 @@ describe('syncProjectStateFromCheckout: a base that moved since the files were r
       const [, result] = await Promise.all([writer, syncing]);
 
       expect(result.outcome).toBe('held');
-      expect(json(s.columnOf())).toEqual({ ...contextA(), rtkChoiceRecorded: true });
+      expect(json(s.columnOf())).toEqual(promoted({ ...contextA(), rtkChoiceRecorded: true }));
       expect(s.syncRows()).toHaveLength(1);
     } finally {
       release();
@@ -1688,8 +1700,8 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
     });
     expect(json(s.syncRow()?.baseSnapshot)).toEqual(base);
     expect(s.syncRow()?.lastError ?? null).toBeNull();
-    expect(dirtyMarks(s)).toEqual([]);
-    expect(writesTo(trace, 'repositories')).toEqual([]);
+    expect(dirtyMarks(s)).toMatchObject([{ repositoryId: REPO, revision: 1, writtenRevision: 0 }]);
+    expect(writesTo(trace, 'repositories')).toEqual(['update repositories']);
 
     const again = await s.run();
     expect(again.outcome).toBe('conflict');
@@ -1828,7 +1840,9 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
       expect((json(s.columnOf()) as Json).rtkChoiceRecorded).toBe(true);
       expect(s.pending()).toEqual([]);
       expect((json(s.syncRow()?.baseSnapshot) as Json).settings).toEqual({ 'rtk-enabled': false });
-      expect(dirtyMarks(s)).toEqual([]);
+      expect(dirtyMarks(s)).toMatchObject([
+        { repositoryId: REPO, revision: 1, writtenRevision: 0 },
+      ]);
     });
 
     it('then the next writer, the install now recorded, leaves the other install’s file as it is', async () => {
@@ -1865,8 +1879,10 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
       const { trace } = await s.run();
 
       expect(repoRow(s).rtkEnabled).toBe(true);
-      expect(writesTo(trace, 'repositories')).toEqual([]);
-      expect(dirtyMarks(s)).toEqual([]);
+      expect(writesTo(trace, 'repositories')).toEqual(['update repositories']);
+      expect(dirtyMarks(s)).toMatchObject([
+        { repositoryId: REPO, revision: 1, writtenRevision: 0 },
+      ]);
     });
 
     it('a recorded choice is written as before: the file and the base hold it', async () => {
@@ -1903,7 +1919,7 @@ describe('syncProjectStateFromCheckout: the portable settings and the environmen
 
           const { outcome } = await s.run();
 
-          expect(outcome).toBe('unchanged');
+          expect(outcome).toBe('applied');
           expect(repoRow(s).rtkEnabled).toBe(true);
           expect(s.pending()).toEqual([]);
           expect(dirtyMarks(s)).toHaveLength(1);
@@ -2284,11 +2300,13 @@ describe('syncProjectStateFromCheckout: an RTK choice comes only from a record t
         const first = await s.run();
 
         expect(first.outcome).toBe('applied');
-        expect(json(s.columnOf())).toEqual({ ...before, rtkChoiceRecorded: true });
+        expect(json(s.columnOf())).toEqual(promoted({ ...before, rtkChoiceRecorded: true }));
         expect(repoRow(s).rtkEnabled).toBe(file);
         expect(json(s.syncRow()?.baseSnapshot)).toEqual(syncBase({ 'rtk-enabled': file }));
         expect(s.pending()).toEqual([]);
-        expect(dirtyMarks(s)).toEqual([]);
+        expect(dirtyMarks(s)).toMatchObject([
+          { repositoryId: REPO, revision: 1, writtenRevision: 0 },
+        ]);
         expectWritesUnderTheLock(first.trace);
 
         const second = await s.run();
@@ -2309,7 +2327,7 @@ describe('syncProjectStateFromCheckout: an RTK choice comes only from a record t
         const first = await s.run();
 
         expect(first.outcome).toBe('applied');
-        expect(json(s.columnOf())).toEqual({ ...before, rtkChoiceRecorded: true });
+        expect(json(s.columnOf())).toEqual(promoted({ ...before, rtkChoiceRecorded: true }));
         expect(repoRow(s).rtkEnabled).toBe(file);
         expect(json(s.syncRow()?.baseSnapshot)).toEqual(syncBase({ 'rtk-enabled': file }));
         expect(s.pending()).toEqual([]);
@@ -2330,11 +2348,13 @@ describe('syncProjectStateFromCheckout: an RTK choice comes only from a record t
 
       const { trace } = await s.run();
 
-      expect(json(s.columnOf())).toEqual(before);
+      expect(json(s.columnOf())).toEqual(promoted(before as Json));
       expect(flagOf(s)).toBe(false);
       expect(repoRow(s).rtkEnabled).toBe(true);
-      expect(writesTo(trace, 'repositories')).toEqual([]);
-      expect(dirtyMarks(s)).toEqual([]);
+      expect(writesTo(trace, 'repositories')).toEqual(['update repositories']);
+      expect(dirtyMarks(s)).toMatchObject([
+        { repositoryId: REPO, revision: 1, writtenRevision: 0 },
+      ]);
     });
 
     it('does not adopt a file that holds an invalid value', async () => {
@@ -2347,7 +2367,7 @@ describe('syncProjectStateFromCheckout: an RTK choice comes only from a record t
 
       expect(flagOf(s)).toBe(false);
       expect(repoRow(s).rtkEnabled).toBe(true);
-      expect(writesTo(trace, 'repositories')).toEqual([]);
+      expect(writesTo(trace, 'repositories')).toEqual(['update repositories']);
     });
 
     it('leaves a switch a person made here as it is: no flag move, this install’s value wins', async () => {
@@ -2633,6 +2653,7 @@ describe('syncProjectStateFromCheckout: the lock and the transaction', () => {
 
     expect(outcome).toBe('applied');
     expect(json(s.columnOf())).toEqual({
+      cliTargets: ['claude-code'],
       ...TEAM,
       ...PER_INSTALL,
       agentTargets: codexTargets,
@@ -3014,7 +3035,7 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
 
     const { outcome } = await s.run();
 
-    expect(outcome).toBe('unchanged');
+    expect(outcome).toBe('applied');
     expect(
       live(s)
         .map((r) => r.diskPath)
@@ -3096,7 +3117,7 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
 
     const { outcome } = await s.run();
 
-    expect(outcome).toBe('unchanged');
+    expect(outcome).toBe('applied');
     const rows = s.pending();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ unit: claimFileName(GUIDE) });
@@ -3148,7 +3169,7 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
 
     const { outcome } = await s.run();
 
-    expect(outcome).toBe('unchanged');
+    expect(outcome).toBe('applied');
     expect(live(s)).toHaveLength(2);
     expect(baseClaims(s)).toEqual([a, g].sort((x, y) => (x.path < y.path ? -1 : 1)));
   });
@@ -3235,7 +3256,7 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
 
         const { outcome } = await s.run();
 
-        expect(outcome).toBe('unchanged');
+        expect(outcome).toBe('applied');
         expect(ledger(s)).toEqual([]);
         expect(baseClaims(s)).toEqual([legacyClaim()]);
         expect(dirtyMarks(s)).toHaveLength(1);
@@ -3248,7 +3269,7 @@ describe('syncProjectStateFromCheckout: the record carries artifact claims', () 
 
         const { outcome } = await s.run();
 
-        expect(outcome).toBe('unchanged');
+        expect(outcome).toBe('applied');
         expect(live(s)).toHaveLength(2);
         expect(baseClaims(s).map((c) => c.path)).toEqual([AGENT, LEGACY, GUIDE]);
       });

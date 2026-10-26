@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
-import { createFakeDb } from '@haive/database/testing';
+import { createFakeDb, type FakeDbHandle } from '@haive/database/testing';
+import type { SQL } from 'drizzle-orm';
+import { PgDialect } from 'drizzle-orm/pg-core';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import type { UpgradePlanOutput } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
 import { upgradeApplyStep } from '../src/step-engine/steps/onboarding-upgrade/02-upgrade-apply.js';
@@ -111,8 +113,35 @@ async function run(withColumn: boolean) {
     backfilledRows: 0,
   } as UpgradePlanOutput;
   const noop = () => undefined;
+  // Model only the new transaction-local setting statements. The shared fake continues to own
+  // locks/writes; the PostgreSQL suite separately proves actual timeout and restoration behavior.
+  const withLockSetting = (handle: FakeDbHandle): FakeDbHandle => {
+    let wait = '0';
+    return new Proxy(handle, {
+      get(target, prop) {
+        if (prop === 'transaction')
+          return (fn: (tx: FakeDbHandle) => Promise<unknown>) =>
+            target.transaction((tx) => fn(withLockSetting(tx)));
+        if (prop === 'execute')
+          return async (query: unknown) => {
+            const parsed = new PgDialect().sqlToQuery(query as SQL);
+            if (parsed.sql === "select current_setting('lock_timeout') as value")
+              return [{ value: wait }];
+            if (
+              parsed.sql === "select set_config('lock_timeout', $1, true)" &&
+              typeof parsed.params[0] === 'string'
+            ) {
+              wait = parsed.params[0];
+              return [{ set_config: wait }];
+            }
+            return target.execute(query);
+          };
+        return Reflect.get(target, prop);
+      },
+    });
+  };
   const ctx = {
-    db: fake.db,
+    db: withLockSetting(fake.db as unknown as FakeDbHandle),
     repoPath: root,
     taskId: TASK,
     userId: USER,

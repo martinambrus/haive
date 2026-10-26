@@ -39,6 +39,44 @@ const legacy = {
 };
 const column = (names: string[]) => ({ ...legacy, cliTargets: names, rtkChoiceRecorded: false });
 
+describe('deferred legacy membership planning', () => {
+  it.each([
+    { label: 'Claude', names: ['claude-code'], fallback: false },
+    { label: 'Amp fallback', names: ['amp'], fallback: true },
+    { label: 'zero-provider fallback', names: [], fallback: true },
+  ])('records $label membership without a new local CLI addition', async ({ names, fallback }) => {
+    const fake = newDb();
+    seedProviders(fake, []);
+    const original = {
+      ...legacy,
+      enabledCliProviders: names.map((name) => ({
+        name,
+        rulesFile: name === 'amp' ? 'AGENTS.md' : 'CLAUDE.md',
+        rulesFileMode: name === 'amp' ? 'native' : 'import',
+      })),
+      rtkChoiceRecorded: false,
+    };
+    seedRepository(fake, { source: 'git_https', rtkEnabled: false, renderContext: original });
+    const dir = await mkdtemp(join(tmpdir(), 'deferred-cli-plan-'));
+    dirs.push(dir);
+    const ctx = ctxFor(fake, dir);
+    const detected = await upgradePlanStep.detect!(ctx);
+    expect(detected.cliAdditions).toEqual([]);
+    expect(detected.repositoryCliTargets).toEqual(names);
+    expect(detected.renderContextColumn).toEqual(original);
+    expect.soft(detected.renderCtxSnapshot.cliTargets).toEqual(names);
+    expect.soft(detected.renderCtxSnapshot.legacyAgentFallback === true).toBe(fallback);
+    const output = await upgradePlanStep.apply(ctx, {
+      detected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    expect.soft(output.renderCtxSnapshot.cliTargets).toEqual(names);
+    expect.soft(output.renderCtxSnapshot.legacyAgentFallback === true).toBe(fallback);
+  });
+});
+
 describe('repository CLI rendering across installations', () => {
   it('a Codex-only install maintains recorded Claude and Codex, even with stale derived fields', () => {
     const rendered = renderContextFromColumn(column(['claude-code', 'codex', 'future-cli']), [

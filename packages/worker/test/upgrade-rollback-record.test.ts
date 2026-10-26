@@ -178,7 +178,7 @@ describe('the context a rollback records when the upgrade only created files', (
     const { root, out, column, sync } = await rollback(BEFORE);
 
     expect(out.warnings).toEqual([]);
-    expect(column).toEqual({ ...BEFORE, rtkChoiceRecorded: true });
+    expect(column).toEqual({ ...BEFORE, cliTargets: ['claude-code'], rtkChoiceRecorded: true });
     const record = JSON.parse(await readFile(join(root, RECORD_RENDER), 'utf8')) as {
       framework: string;
       acceptedAgentIds: string[];
@@ -197,7 +197,7 @@ describe('the context a rollback records when the upgrade only created files', (
 
     const { column } = await rollback(older);
 
-    expect(column).toEqual({ ...older, rtkChoiceRecorded: false });
+    expect(column).toEqual({ ...older, cliTargets: ['claude-code'], rtkChoiceRecorded: false });
   });
 
   it('writes nothing when no row still live carries a context', async () => {

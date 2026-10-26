@@ -120,6 +120,33 @@ export function hasLegacyAgentFallback(context: {
   );
 }
 
+type RecordedCliContext = {
+  cliTargets?: readonly string[];
+  legacyAgentFallback?: boolean;
+  enabledCliProviders?: ReadonlyArray<{ name: string }>;
+  agentTargets?: readonly AgentRenderTarget[];
+};
+
+/** Promote recorded legacy membership without consulting local providers or replacing context/RTK
+ * origin. Callers supply only snapshots accepted by recoverCliMembership's strict decoder. */
+export function completeRecordedCliMembership<T extends RecordedCliContext>(
+  context: T,
+  recovered?: { cliTargets: string[]; snapshot: RecordedCliContext },
+): T {
+  if (context.cliTargets !== undefined) return context;
+  const cliTargets = recovered?.cliTargets ?? recordedCliTargets(context);
+  if (cliTargets === undefined) return context;
+  const basis = context.agentTargets !== undefined ? context : (recovered?.snapshot ?? context);
+  const explicitClearsFallback =
+    recovered?.snapshot.cliTargets !== undefined && recovered.snapshot.legacyAgentFallback !== true;
+  const next = { ...context, cliTargets };
+  if (!explicitClearsFallback && hasLegacyAgentFallback(basis)) {
+    next.legacyAgentFallback = true;
+    next.agentTargets ??= deriveRenderTargets([], [], basis.agentTargets, true).agentTargets;
+  } else delete next.legacyAgentFallback;
+  return next;
+}
+
 /** Repo-relative skills directories to write to: one per unique `projectSkillsDir` across the
  *  enabled providers, else `fallback`. Bundle expansion takes the empty default, so it renders
  *  nothing rather than writing to a directory no CLI asked for. */

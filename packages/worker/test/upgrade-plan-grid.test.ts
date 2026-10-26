@@ -258,6 +258,7 @@ describe('GRID: the contexts 01 renders from, in full', () => {
       const detected = await contextOf(cell, column);
       expect(detected.renderCtxSnapshot).toEqual({
         projectInfo: { name: 'rows-recorded' },
+        cliTargets: ['claude-code'],
         framework: 'rows-recorded',
         acceptedAgentIds: ['code-reviewer'],
         customAgentSpecs: [],
@@ -276,6 +277,7 @@ describe('GRID: the contexts 01 renders from, in full', () => {
       const detected = await contextOf(cell, column);
       expect(detected.renderCtxSnapshot).toEqual({
         projectInfo: { name: 'rows-unrecorded' },
+        cliTargets: ['claude-code'],
         framework: 'rows-unrecorded',
         acceptedAgentIds: ['code-reviewer'],
         customAgentSpecs: [],

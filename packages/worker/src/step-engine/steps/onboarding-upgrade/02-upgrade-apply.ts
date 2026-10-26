@@ -16,8 +16,14 @@ import {
   RULES_FILE_READ_CAP,
   type UnreadReason,
 } from '@haive/shared/rules-files';
-import { and, asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
-import { schema, type Database, type DbTx } from '@haive/database';
+import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import {
+  lockRepositoryTasksKey,
+  REPOSITORY_TASKS_LOCK_TIMEOUT_MS,
+  schema,
+  type Database,
+  type DbTx,
+} from '@haive/database';
 import { safeErrorMessage } from '@haive/shared/logger';
 import {
   CLI_RULES_END,
@@ -36,6 +42,9 @@ import {
   namesGitData,
   rtkLeftoversToRemove,
   sameValue,
+  readRenderContextColumn,
+  recordedCliTargets,
+  recoverCliMembership,
 } from '@haive/shared/project-state';
 import type { StepDefinition } from '../../step-definition.js';
 import {
@@ -49,12 +58,13 @@ import {
   retireLegacyMirrors,
   toolingOutsideRecord,
 } from '../../_retire-install-manifest.js';
-import { unionExpandedFor } from '../../_upgrade-render.js';
+import { loadLiveArtifacts, unionExpandedFor } from '../../_upgrade-render.js';
 import {
   failIfColumnStale,
   lockProjectState,
   ProjectStateMovedError,
   refuseMovedColumn,
+  refuseReleasedCheckout,
   ProjectStateWriteError,
   renderContextColumnFor,
   writeProjectStateRecord,
@@ -134,6 +144,7 @@ function ownRecordColumn(plan: UpgradePlanOutput): unknown {
     return renderContextColumnFor(
       plan.renderCtxSnapshot as unknown as TemplateRenderContext,
       plan.rtkFollowsLive === true,
+      plan.renderContextColumn,
     );
   } catch {
     return undefined;
@@ -802,6 +813,52 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
   async apply(ctx, args): Promise<UpgradeApplyOutput> {
     const plan = args.detected;
+    const original = readRenderContextColumn(plan.renderContextColumn);
+    if (
+      plan.renderCtxSnapshot.cliTargets === undefined &&
+      original.kind === 'column' &&
+      original.column.cliTargets === undefined
+    ) {
+      // A pre-membership plan cannot identify its own eventual result if newer recorded members
+      // differ from the targets it planned. Refuse before ANY product or ledger writes and let01
+      // capture that membership explicitly; never widen the old plan's exact column allowlist.
+      await ctx.db
+        .transaction(async (tx) => {
+          const [previousWait] = await tx.execute<{ value: string }>(
+            sql`select current_setting('lock_timeout') as value`,
+          );
+          await tx.execute(
+            sql`select set_config('lock_timeout', ${`${REPOSITORY_TASKS_LOCK_TIMEOUT_MS}ms`}, true)`,
+          );
+          await lockRepositoryTasksKey(tx, plan.repositoryId);
+          await lockProjectState(tx, plan.repositoryId);
+          await tx
+            .select({ id: schema.repositories.id })
+            .from(schema.repositories)
+            .where(eq(schema.repositories.id, plan.repositoryId))
+            .for('update');
+          await tx.execute(sql`select set_config('lock_timeout', ${previousWait!.value}, true)`);
+          await refuseReleasedCheckout(tx, ctx.taskId, plan.repositoryId);
+          await refuseMovedColumn(tx, plan.repositoryId, plannedColumns(plan));
+          const recovered = recoverCliMembership(await loadLiveArtifacts(tx, plan.repositoryId));
+          const maintained = recovered?.cliTargets ?? recordedCliTargets(original.column);
+          const planned =
+            recordedCliTargets(
+              plan.renderCtxSnapshot as Parameters<typeof recordedCliTargets>[0],
+            ) ?? recordedCliTargets(original.column);
+          if (
+            maintained !== undefined &&
+            !sameValue(
+              [...new Set(maintained)].sort(),
+              planned === undefined ? null : [...new Set(planned)].sort(),
+            )
+          )
+            throw new Error(PLAN_NO_LONGER_HOLDS);
+        })
+        .catch((err: unknown) => {
+          throw err instanceof ProjectStateMovedError ? new Error(PLAN_NO_LONGER_HOLDS) : err;
+        });
+    }
     const values = args.formValues;
     const warnings: string[] = [];
     const rowContext = recordableContext(plan.renderCtxSnapshot, plan.rtkFollowsLive === true);

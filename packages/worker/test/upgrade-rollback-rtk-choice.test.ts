@@ -213,31 +213,56 @@ describe.each(paths)('the RTK choice of a rollback that %s', (_name, run) => {
   it('is recorded when the plan of the upgrade found a choice and the context holds a value', async () => {
     const column = await recordedAs(false, { rtkFollowsLive: true });
 
-    expect(column).toEqual({ ...context(false), rtkChoiceRecorded: true });
+    expect(column).toEqual({
+      ...context(false),
+      cliTargets: [],
+      legacyAgentFallback: true,
+      rtkChoiceRecorded: true,
+    });
   });
 
   it('is not, when the plan found none, though the context holds a value', async () => {
     const column = await recordedAs(false, { rtkFollowsLive: false });
 
-    expect(column).toEqual({ ...context(false), rtkChoiceRecorded: false });
+    expect(column).toEqual({
+      ...context(false),
+      cliTargets: [],
+      legacyAgentFallback: true,
+      rtkChoiceRecorded: false,
+    });
   });
 
   it('is not, when the plan was stored before it recorded the question', async () => {
     const column = await recordedAs(true, {});
 
-    expect(column).toEqual({ ...context(true), rtkChoiceRecorded: false });
+    expect(column).toEqual({
+      ...context(true),
+      cliTargets: [],
+      legacyAgentFallback: true,
+      rtkChoiceRecorded: false,
+    });
   });
 
   it('is not, when the upgrade has no plan stored', async () => {
     const column = await recordedAs(true, null);
 
-    expect(column).toEqual({ ...context(true), rtkChoiceRecorded: false });
+    expect(column).toEqual({
+      ...context(true),
+      cliTargets: [],
+      legacyAgentFallback: true,
+      rtkChoiceRecorded: false,
+    });
   });
 
   it('is not, when the plan found a choice but the context holds no value', async () => {
     const column = await recordedAs(undefined, { rtkFollowsLive: true });
 
-    expect(column).toEqual({ ...context(undefined), rtkChoiceRecorded: false });
+    expect(column).toEqual({
+      ...context(undefined),
+      cliTargets: [],
+      legacyAgentFallback: true,
+      rtkChoiceRecorded: false,
+    });
   });
 });
 
@@ -256,6 +281,8 @@ describe('a rollback on an install where a person switched RTK', () => {
     expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
     expect(fake.rows(schema.repositories)[0]!.renderContext).toEqual({
       ...context(false),
+      cliTargets: [],
+      legacyAgentFallback: true,
       rtkChoiceRecorded: false,
     });
     expect(settingsOfBase(fake)).toEqual({ 'rtk-enabled': true });

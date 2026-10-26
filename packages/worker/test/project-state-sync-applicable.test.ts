@@ -794,9 +794,12 @@ describe('D2e: 02 refuses a plan whose column moved after it was planned', () =>
   it('records the column its render context came from, even when a sync commits between reads', async () => {
     const s = await setup({ column: column(BASE), base: BASE, set: P, claims: BASE_CLAIMS });
     const select = s.fake.db.select.bind(s.fake.db);
-    let reads = 0;
+    let moved = false;
     s.fake.db.select = ((fields?: Record<string, unknown>) => {
-      if (fields && 'renderContext' in fields && ++reads === 2) {
+      // Resolution has captured its column before loading provider metadata. Repository members
+      // now avoid the old second column read, so mutate at this real post-read boundary instead.
+      if (fields && 'name' in fields && 'enabled' in fields && !moved) {
+        moved = true;
         s.fake.patch(schema.repositories, REPO, { renderContext: jsonb(column(TEAM)) });
       }
       return select(fields as never);
@@ -804,6 +807,8 @@ describe('D2e: 02 refuses a plan whose column moved after it was planned', () =>
 
     const detected = await s.plan(false);
 
+    expect(moved).toBe(true);
+    expect(s.rowOf().renderContext).toEqual(json(jsonb(column(TEAM))));
     const recorded = detected.renderContextColumn as { acceptedAgentIds?: unknown };
     expect(recorded.acceptedAgentIds).toEqual(detected.renderCtxSnapshot.acceptedAgentIds);
     await expect(s.applyPlan(detected)).rejects.toThrow(/changed after this upgrade was planned/);
@@ -886,14 +891,24 @@ describe('D3c: a record that carries the RTK switch moves the set with the switc
     expect(s.rowOf().rtkEnabled).toBe(false);
   });
 
-  it('leaves the set alone, and writes nothing to it, when the record holds no switch', async () => {
+  it('preserves the RTK value and set while completing legacy membership when the record holds no switch', async () => {
     const s = await unrecorded();
     await s.putRecord(BASE);
 
     const { trace } = await s.run();
 
     expect(s.setOf()).toEqual(P);
-    expect(writesTo(trace, 'repositories')).toEqual([]);
+    expect(s.columnOf()).toEqual(
+      json(
+        jsonb({
+          ...column(BASE, { rtkEnabled: false, rtkChoiceRecorded: false }),
+          cliTargets: ['claude-code', 'codex'],
+        }),
+      ),
+    );
+    expect(s.rowOf().rtkEnabled).toBe(true);
+    // Membership promotion and the corresponding truthful set recompute, with no RTK movement.
+    expect(writesTo(trace, 'repositories')).toEqual(['update repositories', 'update repositories']);
   });
 });
 
@@ -993,7 +1008,14 @@ describe('D6: a repository with no claim keeps its set', () => {
 
 describe('D7: a sync that does not write the column leaves the set alone', () => {
   // The column accepts test-writer and the set, deliberately stale, does not.
-  const seed = (over: Seed): Seed => ({ claims: BASE_CLAIMS, set: P, ...over });
+  const seed = (over: Seed): Seed => ({
+    claims: BASE_CLAIMS,
+    set: P,
+    ...over,
+    // These are specifically no-column-write controls: the recorded Claude/Codex membership is
+    // already authoritative. The separate legacy-promotion case below must recompute the set.
+    column: { ...(over.column as Json), cliTargets: ['claude-code', 'codex'] },
+  });
   const CASES: [string, Seed, (s: Setup) => Promise<void>, string][] = [
     [
       'unchanged',
@@ -1042,6 +1064,17 @@ describe('D7: a sync that does not write the column leaves the set alone', () =>
     ],
     ['absent', seed({ column: column(TEAM), base: TEAM }), async () => {}, 'absent'],
   ];
+
+  it('completes a genuinely legacy column and recomputes its stale set without changing its RTK choice', async () => {
+    const before = column(TEAM);
+    const s = await setup({ column: before, base: TEAM, claims: BASE_CLAIMS, set: P });
+    await s.putRecord(TEAM);
+    const { outcome, trace } = await s.run();
+    expect(outcome).toBe('applied');
+    expect(s.columnOf()).toEqual(json(jsonb({ ...before, cliTargets: ['claude-code', 'codex'] })));
+    expect(s.setOf()).toEqual(D1_SET);
+    expect(writesTo(trace, 'repositories')).toEqual(['update repositories', 'update repositories']);
+  });
 
   it.each(CASES)('%s', async (_what, seeded, arrange, outcome) => {
     const s = await setup(seeded);
@@ -1135,7 +1168,9 @@ describe('D8e: an import that moves the ledger and not the column writes the set
 
     expect(outcome).toBe('applied');
     expect(s.setOf()).toEqual(P);
-    expect(json(s.columnOf())).toEqual(json(column(BASE)));
+    expect(json(s.columnOf())).toEqual(
+      json({ ...column(BASE), cliTargets: ['claude-code', 'codex'] }),
+    );
   });
 });
 

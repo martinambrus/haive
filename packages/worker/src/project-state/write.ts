@@ -59,12 +59,15 @@ import {
   renderContextColumnSchema,
   readRenderContextColumn,
   deriveRenderTargets,
+  completeRecordedCliMembership,
+  recoverCliMembership,
   renderProjectState,
   type NamedLocalBundle,
   type ProjectEnvironment,
   type ProjectRender,
   type ProjectStateBundle,
   type ProjectStateClaim,
+  type RenderContextColumn,
 } from '@haive/shared/project-state';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
 import { gitOperationInProgress } from '../repo/git-operation.js';
@@ -80,8 +83,6 @@ export async function lockProjectState(tx: Tx, repositoryId: string): Promise<vo
     sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${repositoryId}`}, 0))`,
   );
 }
-
-type RenderContextColumn = ReturnType<typeof renderContextColumnFor>;
 
 interface ProjectStateColumnInput {
   repositoryId: string;
@@ -186,9 +187,48 @@ export function failIfColumnStale(err: unknown): void {
   if (err instanceof ProjectStateWriteError && err.columnStale) throw err;
 }
 
-/** The render context column a record write stores for this context. Throws when it would not read back. */
-export function renderContextColumnFor(context: TemplateRenderContext, rtkChoiceRecorded: boolean) {
-  return renderContextColumnSchema.parse({ ...context, rtkChoiceRecorded });
+/** The membership part of the admitted write, including recorded legacy fallback provenance. */
+function inheritCliMembership(
+  column: RenderContextColumn,
+  maintained: RenderContextColumn,
+): RenderContextColumn {
+  const cliTargets = column.cliTargets ?? maintained.cliTargets;
+  if (cliTargets === undefined) return column;
+  const sameMembership = sameValue(
+    [...new Set(maintained.cliTargets ?? [])].sort(),
+    [...new Set(cliTargets)].sort(),
+  );
+  const keepFallback = sameMembership && maintained.legacyAgentFallback === true;
+  const targets = deriveRenderTargets(
+    cliTargets,
+    column.lspLanguages,
+    maintained.agentTargets,
+    keepFallback,
+  );
+  const next = { ...column, cliTargets, ...targets };
+  // skillDirs is a derived convenience, not part of the column schema.
+  const { skillDirs: _skillDirs, ...result } = next;
+  if (keepFallback) result.legacyAgentFallback = true;
+  else delete result.legacyAgentFallback;
+  return result;
+}
+
+/** The exact column a record write stores. An original column also identifies a caller's own retry. */
+export function renderContextColumnFor(
+  context: TemplateRenderContext,
+  rtkChoiceRecorded: boolean,
+  repositoryColumn?: unknown,
+): RenderContextColumn {
+  const column = renderContextColumnSchema.parse({ ...context, rtkChoiceRecorded });
+  const prior = readRenderContextColumn(repositoryColumn);
+  // A caller's exact own-result retry proof uses the original admitted column, never a fresh read.
+  // Ordinary writer input keeps absence intact until the locked admission gate below.
+  if (column.cliTargets !== undefined) return column;
+  if (prior.kind === 'column')
+    return inheritCliMembership(column, completeRecordedCliMembership(prior.column));
+  return repositoryColumn === null
+    ? inheritCliMembership(column, completeRecordedCliMembership(column))
+    : column;
 }
 
 /** A pending conflict of the render unit, its sides as values (`undefined` where a side has none). */
@@ -694,24 +734,30 @@ export async function writeProjectStateColumn(
       if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId, repositoryId);
       if (refuseWhileHeld) await refuseHeldCheckout(tx, repositoryId);
       const current = readRenderContextColumn(repo.renderContext);
-      if (current.kind === 'column' && current.column.cliTargets !== undefined) {
-        const maintained = current.column.cliTargets;
-        if (column.cliTargets === undefined) {
-          // An old persisted plan/snapshot carries no membership decision. Complete it from
-          // the authoritative column under this same lock, with its exact column/epoch fence.
-          const targets = deriveRenderTargets(
-            maintained,
-            column.lspLanguages,
-            current.column.agentTargets,
-            current.column.legacyAgentFallback,
-          );
-          column = {
-            ...column,
-            cliTargets: maintained,
-            agentTargets: targets.agentTargets,
-            enabledCliProviders: targets.enabledCliProviders,
-          };
-        } else {
+      {
+        const rows =
+          current.kind !== 'column' || current.column.cliTargets === undefined
+            ? await tx
+                .select({
+                  id: schema.onboardingArtifacts.id,
+                  generatedAt: schema.onboardingArtifacts.generatedAt,
+                  formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+                })
+                .from(schema.onboardingArtifacts)
+                .where(
+                  and(
+                    eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+                    isNull(schema.onboardingArtifacts.supersededAt),
+                  ),
+                )
+            : [];
+        const completed = completeRecordedCliMembership(
+          current.kind === 'column' ? current.column : column,
+          recoverCliMembership(rows),
+        );
+        const maintained = completed.cliTargets;
+        if (maintained === undefined) return;
+        if (column.cliTargets !== undefined) {
           if (
             maintained.some((name) => !column.cliTargets!.includes(name)) ||
             (expectedColumns === undefined &&
@@ -721,26 +767,7 @@ export async function writeProjectStateColumn(
               'Repository CLI membership changed; plan this write again',
             );
         }
-        const sameMembership = sameValue(
-          [...new Set(maintained)].sort(),
-          [...new Set(column.cliTargets ?? [])].sort(),
-        );
-        if (sameMembership && current.column.legacyAgentFallback === true) {
-          column.legacyAgentFallback = true;
-          const targets = deriveRenderTargets(
-            column.cliTargets ?? [],
-            column.lspLanguages,
-            current.column.agentTargets,
-            true,
-          );
-          column.agentTargets = targets.agentTargets;
-        } else {
-          delete column.legacyAgentFallback;
-          column.agentTargets = deriveRenderTargets(
-            column.cliTargets ?? [],
-            column.lspLanguages,
-          ).agentTargets;
-        }
+        column = inheritCliMembership(column, completed);
         // A caller's narrower admission set is never widened to whatever this read found.
         expectedColumns ??= [repo.renderContext];
         expectedResetAt ??= repo.resetAt ?? null;
