@@ -62,6 +62,81 @@ afterEach(async () => {
 });
 const change = (data: Buffer) => (data.equals(Buffer.from('before')) ? Buffer.from('after') : null);
 describe('prepared journal filesystem operations', () => {
+  it('does not classify disappearance of the private rename destination as public absence', async () => {
+    const prepared = await prepare();
+    hooks.beforeRename = () => rm(join(root, prepared.rel), { recursive: true });
+    await expect(
+      rewriteFileIfNoFollow(root, 'record', change, {
+        journal: { prepared, index: 0, direction: 'forward' },
+      }),
+    ).rejects.toMatchObject({ code: 'EPATHCONTAINMENT' });
+    expect(await readFile(join(root, 'record'), 'utf8')).toBe('before');
+  });
+
+  it.each(['rewrite', 'remove'] as const)(
+    'matches generic %s absence when the source vanishes at the actual rename',
+    async (mode) => {
+      const prepared = await prepare();
+      await writeFile(join(root, 'control'), 'before');
+      hooks.beforeRename = () => rm(join(root, 'control'));
+      const generic =
+        mode === 'rewrite'
+          ? await rewriteFileIfNoFollow(root, 'control', change, { maxBytes: 1024 * 1024 })
+          : await removeFileIfNoFollow(root, 'control', () => true, { maxBytes: 1024 * 1024 });
+      expect(generic).toBe('absent');
+      hooks.beforeRename = () => rm(join(root, 'record'));
+      const options = {
+        maxBytes: 1024 * 1024,
+        journal: { prepared, index: 0, direction: 'forward' as const },
+      };
+      const result =
+        mode === 'rewrite'
+          ? await rewriteFileIfNoFollow(root, 'record', change, options)
+          : await removeFileIfNoFollow(root, 'record', () => true, options);
+      expect(result).toBe('absent');
+      expect(
+        (await inspectJournalFilesNoFollow(root, prepared, 1024 * 1024))[0]!.forward.kind,
+      ).toBe('absent');
+    },
+  );
+  it.each(['rewrite', 'remove'] as const)(
+    'matches generic %s absence for a missing public parent',
+    async (mode) => {
+      const prepared = await prepare();
+      const options = {
+        maxBytes: 1024 * 1024,
+        journal: { prepared, index: 0, direction: 'forward' as const },
+      };
+      const generic =
+        mode === 'rewrite'
+          ? await rewriteFileIfNoFollow(root, 'gone/control', change)
+          : await removeFileIfNoFollow(root, 'gone/control', () => true);
+      expect(generic).toBe('absent');
+      const result =
+        mode === 'rewrite'
+          ? await rewriteFileIfNoFollow(root, 'gone/record', change, options)
+          : await removeFileIfNoFollow(root, 'gone/record', () => true, options);
+      expect(result).toBe('absent');
+    },
+  );
+  it('keeps changed bytes and still rejects a corrupt private capability on an absent public path', async () => {
+    const prepared = await prepare();
+    await writeFile(join(root, 'record'), 'editor');
+    expect(
+      await rewriteFileIfNoFollow(root, 'record', change, {
+        journal: { prepared, index: 0, direction: 'forward' },
+      }),
+    ).toBe('kept');
+    expect(await readFile(join(root, 'record'), 'utf8')).toBe('editor');
+    await rename(join(root, prepared.rel), join(root, 'saved-capability'));
+    await mkdir(join(root, prepared.rel), { mode: 0o700 });
+    await expect(
+      rewriteFileIfNoFollow(root, 'gone/record', change, {
+        journal: { prepared, index: 0, direction: 'forward' },
+      }),
+    ).rejects.toThrow();
+  });
+
   it('bounds aggregate inspection by recorded lengths when all published image aliases grow', async () => {
     const count = 32;
     const prepared = await prepareJournalFilesNoFollow(

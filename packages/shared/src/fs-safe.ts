@@ -1516,7 +1516,21 @@ async function journalMutation(
     }
   };
   try {
-    dir = await walkDir(anchor, safe, segs, mode === 'create' ? {} : undefined);
+    try {
+      dir = await walkDir(anchor, safe, segs, mode === 'create' ? {} : undefined);
+    } catch (err) {
+      if (mode !== 'create' && !isPathContainmentError(err) && ABSENT.has(errno(err) ?? '')) {
+        await assertHeldAt(
+          cap.fh,
+          cap.real,
+          anchor,
+          operation.prepared.rel,
+          operation.prepared.rel,
+        );
+        return 'absent';
+      }
+      throw err;
+    }
     const capDev = (await cap.fh.stat({ bigint: true })).dev;
     if ((await dir.fh.stat({ bigint: true })).dev !== capDev)
       throw new Error('journal publication requires the same filesystem');
@@ -1546,7 +1560,22 @@ async function journalMutation(
       }
       await assertHeldAt(cap.fh, cap.real, anchor, operation.prepared.rel, operation.prepared.rel);
       await assertHeldAt(dir.fh, dir.real, anchor, safe, segs.join('/'));
-      await rename(at(dir.fh.fd, leaf), at(cap.fh.fd, slot));
+      try {
+        await rename(at(dir.fh.fd, leaf), at(cap.fh.fd, slot));
+      } catch (err) {
+        if (!isPathContainmentError(err) && ABSENT.has(errno(err) ?? '')) {
+          // Match ordinary CAS absence, without mistaking a lost private destination for it.
+          await assertHeldAt(
+            cap.fh,
+            cap.real,
+            anchor,
+            operation.prepared.rel,
+            operation.prepared.rel,
+          );
+          return 'absent';
+        }
+        throw err;
+      }
       parked = true;
       const now = await journalArtifact(cap, slot, anchor, operation.prepared.rel, maxBytes);
       if (now.kind !== 'file' || now.truncated || !now.data) {

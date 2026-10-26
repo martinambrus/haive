@@ -625,8 +625,9 @@ Private before/after images and forward/undo parks remain addressable across a k
 after publication, or between the link and unlink of exclusive restoration. Every public CAS read
 is capped before allocation. Rewrites refuse an actual parked owner/mode that differs from the
 prepared replacement, restoring the actual inode without reverting a concurrent chmod/chown.
-An undo recreation likewise refuses changed source metadata. A hand edit holds the journal with a
-named error; exclusive restoration never overwrites a new public entry. A primary failure and a
+An undo recreation likewise refuses changed source metadata. Unrecognized bytes hold all paths
+during preflight; metadata changes or edits after preflight can hold an already partially restored
+journal at the individual CAS, and retry repeats that undo. A held journal retains a named error; exclusive restoration never overwrites a new public entry. A primary failure and a
 failed restoration are both retained. Private capability/image substitution, links and unknown
 artifacts are refused. Image bytes may alias a published public file, so recovery verifies their
 raw contents and requires the exact before image whenever restoration needs it. Inspection bounds

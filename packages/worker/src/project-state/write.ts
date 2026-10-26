@@ -986,9 +986,9 @@ function validateRecoveryIntent(intent: WriteIntent): void {
   }
 }
 
-/** Undo only recognized bytes from an uncommitted writer. A hand edit holds the entire journal,
- *  so neither it nor its siblings are touched. Each restoration is itself a compare-and-swap and
- *  idempotent across another crash. The transaction that commits a write consumes its journal. */
+/** Preflight recognizes every changed path's bytes and private artifacts before undo. Each restore
+ *  then compares bytes and preserves metadata at its own CAS: a later edit or changed mode can hold
+ *  a partially restored journal, which remains replayable. A committed write consumes its journal. */
 async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string): Promise<void> {
   const [row] = await tx
     .select({ intent: schema.projectStateOutbox.writeIntent })

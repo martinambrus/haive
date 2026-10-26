@@ -1,4 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import {
@@ -110,9 +112,12 @@ if (url && ['', '5432', '6379'].includes(new URL(url).port))
   throw new Error('T266 requires its assigned PostgreSQL port');
 const connection = url ? createDatabase(url) : null;
 const db = connection;
+const originalFsRename = fsPromises.rename;
 const dirs: string[] = [];
 const users: string[] = [];
 afterEach(async () => {
+  fsPromises.rename = originalFsRename;
+  syncBuiltinESMExports();
   seam.afterWrite = null;
   seam.beforeRewrite = null;
   seam.afterRemove = null;
@@ -2443,6 +2448,81 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       )[0]!.renderContext,
     ).toBeNull();
   });
+
+  it.each(['leaf', 'parent'] as const)(
+    'preserves semantic state when first CAS %s disappears inside the helper',
+    async (kind) => {
+      const s = await fixture();
+      await s.write();
+      await db!
+        .update(schema.repositories)
+        .set({ renderContext: { ...context('mine'), rtkChoiceRecorded: false } })
+        .where(eq(schema.repositories.id, s.repo.id));
+      const renderPath = join(s.root, '.haive-data/state/project/render.json');
+      await writeFile(renderPath, JSON.stringify(context('theirs'), null, 4) + '\n');
+      expect(
+        (await syncProjectStateFromCheckout(db!, { repositoryId: s.repo.id, repoPath: s.root }))
+          .outcome,
+      ).toBe('conflict');
+      const repository = (
+        await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
+      )[0]!;
+      const sync = await db!
+        .select()
+        .from(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, s.repo.id));
+      const pending = await db!
+        .select()
+        .from(schema.projectStateConflicts)
+        .where(eq(schema.projectStateConflicts.repositoryId, s.repo.id));
+      const files = new Map((await readStateFiles(s.root))!);
+      files.delete('project/render.json');
+      let reached = false;
+      if (kind === 'leaf') {
+        fsPromises.rename = async (...args: Parameters<typeof originalFsRename>) => {
+          if (String(args[0]).endsWith('/render.json')) {
+            reached = true;
+            await rm(renderPath);
+          }
+          return originalFsRename(...args);
+        };
+        syncBuiltinESMExports();
+      } else
+        seam.beforeRewrite = async () => {
+          seam.beforeRewrite = null;
+          reached = true;
+          await originalFsRename(
+            join(s.root, '.haive-data/state/project'),
+            join(s.root, 'editor-saved-project'),
+          );
+        };
+      const error = await s.write('unwritten attempted choice').catch((e: unknown) => e);
+      fsPromises.rename = originalFsRename;
+      syncBuiltinESMExports();
+      seam.beforeRewrite = null;
+      expect(reached).toBe(true);
+      const actualRepository = (
+        await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
+      )[0]!;
+      const actualPending = await db!
+        .select()
+        .from(schema.projectStateConflicts)
+        .where(eq(schema.projectStateConflicts.repositoryId, s.repo.id));
+      expect({
+        error: (error as Error).name,
+        repository: actualRepository,
+        pending: actualPending,
+      }).toEqual({ error: 'ProjectStateMovedError', repository, pending });
+      expect(
+        await db!
+          .select()
+          .from(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
+      ).toEqual(sync);
+      expect(await readStateFiles(s.root)).toEqual(files);
+      expect((await s.outbox())!.writeIntent).toBeTruthy();
+    },
+  );
 
   it('leaves committed pending semantics alone when the first actual file CAS loses', async () => {
     const s = await fixture();
