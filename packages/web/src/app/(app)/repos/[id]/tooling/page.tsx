@@ -35,6 +35,7 @@ interface ReviewDimensionOption {
 
 interface ToolingConfig {
   repositoryId: string;
+  cliTargets?: string[];
   rtkEnabled: boolean;
   rtkVersion: string | null;
   rtkVersions: string[];
@@ -120,6 +121,7 @@ export default function RepoToolingPage() {
   const params = useParams();
   const repositoryId = String(params.id);
 
+  const [cliRemovalBusy, setCliRemovalBusy] = useState<string | null>(null);
   const [config, setConfig] = useState<ToolingConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -159,6 +161,26 @@ export default function RepoToolingPage() {
   const [ragEmbedBusy, setRagEmbedBusy] = useState<string | null>(null);
   const [ragEmbedNote, setRagEmbedNote] = useState<string | null>(null);
   const [mcpDecisionBusy, setMcpDecisionBusy] = useState<'accept' | 'discard' | null>(null);
+
+  async function removeRepositoryCli(name: string) {
+    if (!config?.cliTargets || cliRemovalBusy) return;
+    setCliRemovalBusy(name);
+    setError(null);
+    try {
+      const result = await api.post<{ cliTargets: string[] }>(
+        `/repositories/${repositoryId}/cli-targets/remove`,
+        {
+          providers: [name],
+          expectedTargets: config.cliTargets,
+        },
+      );
+      setConfig((current) => (current ? { ...current, cliTargets: result.cliTargets } : current));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCliRemovalBusy(null);
+    }
+  }
 
   async function decideRepoMcpServers(action: 'accept' | 'discard') {
     setMcpDecisionBusy(action);
@@ -447,6 +469,35 @@ export default function RepoToolingPage() {
                 >
                   {mcpDecisionBusy === 'discard' ? 'Working...' : 'Discard'}
                 </Button>
+              </div>
+            </Card>
+          )}
+
+          {(config.cliTargets?.length ?? 0) > 0 && (
+            <Card>
+              <h2 className="text-lg font-semibold text-neutral-100">Repository CLIs</h2>
+              <InlineMarkdown
+                className="mt-2 text-sm text-neutral-400"
+                body="These CLIs are maintained for everyone using this repository. Removing one lets the next upgrade offer its files for removal or keeping."
+              />
+              <div className="mt-3 flex flex-wrap gap-3">
+                {config.cliTargets?.map((name) => (
+                  <div
+                    key={name}
+                    className="flex items-center gap-2 rounded border border-neutral-700 p-2"
+                  >
+                    <span>{name}</span>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={cliRemovalBusy !== null}
+                      onClick={() => void removeRepositoryCli(name)}
+                    >
+                      Remove {name}
+                    </Button>
+                  </div>
+                ))}
               </div>
             </Card>
           )}

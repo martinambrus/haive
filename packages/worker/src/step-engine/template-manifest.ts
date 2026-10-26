@@ -52,6 +52,8 @@ export interface TemplateRenderContext {
   framework: string | null;
   acceptedAgentIds: string[];
   customAgentSpecs: AgentSpec[];
+  cliTargets?: string[];
+  legacyAgentFallback?: boolean;
   agentTargets: AgentRenderTarget[];
   lspLanguages: string[];
   /** Per-repo opt-in for the RTK token-saving proxy. Read from

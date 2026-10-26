@@ -21,6 +21,8 @@ import {
 } from '@haive/shared';
 import { ledgerImportedSince } from '@haive/shared/onboarding-admission';
 import {
+  deriveRenderTargets,
+  readRenderContextColumn,
   isImportMarker,
   isRenderContextSnapshot,
   isRtkChoiceRecorded,
@@ -952,12 +954,36 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       .from(schema.repositories)
       .where(eq(schema.repositories.id, detected.repositoryId))
       .limit(1);
-    const recorded =
+    let recorded =
       snapshot ??
       pickRenderSnapshot(
         await loadLiveArtifacts(ctx.db, detected.repositoryId),
         repo?.rtkChoiceMadeAt,
       );
+
+    const currentColumn = readRenderContextColumn(columnBefore?.renderContext);
+    if (
+      recorded &&
+      currentColumn.kind === 'column' &&
+      currentColumn.column.cliTargets !== undefined
+    ) {
+      const cliTargets = currentColumn.column.cliTargets;
+      const targets = deriveRenderTargets(
+        cliTargets,
+        recorded.lspLanguages as string[],
+        currentColumn.column.agentTargets,
+        currentColumn.column.legacyAgentFallback,
+      );
+      recorded = {
+        ...recorded,
+        cliTargets,
+        agentTargets: targets.agentTargets,
+        enabledCliProviders: targets.enabledCliProviders,
+      };
+      if (currentColumn.column.legacyAgentFallback !== undefined)
+        recorded.legacyAgentFallback = currentColumn.column.legacyAgentFallback;
+      else delete recorded.legacyAgentFallback;
+    }
 
     // Refresh applicable_template_ids from a fresh expansion against the
     // restored render context. After a rollback the repo's gating may differ

@@ -1,3 +1,5 @@
+import { sameValue } from '@haive/shared/project-state';
+import { skillTargetDirs } from '@haive/shared/project-state';
 import { isRtkChoiceRecorded } from '@haive/shared/project-state';
 import { redactGitUrl } from '@haive/shared/schemas';
 import { lstatNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
@@ -31,6 +33,7 @@ import { writePlanMirror } from '../../../plan/mirror.js';
 import {
   failIfColumnStale,
   ProjectStateWriteError,
+  renderContextColumnFor,
   writeProjectStateRecord,
   lockProjectState,
 } from '../../../project-state/write.js';
@@ -176,6 +179,10 @@ function buildRenderContext(detect: GenerateFilesDetect): TemplateRenderContext 
     framework: detect.framework,
     acceptedAgentIds: detect.acceptedAgentIds,
     customAgentSpecs: detect.customAgentSpecs,
+    ...(detect.cliTargets !== undefined ? { cliTargets: detect.cliTargets } : {}),
+    ...(detect.legacyAgentFallback !== undefined
+      ? { legacyAgentFallback: detect.legacyAgentFallback }
+      : {}),
     agentTargets: detect.agentTargets,
     lspLanguages: detect.lspLanguages,
     rtkEnabled: detect.rtkEnabled ?? false,
@@ -224,7 +231,10 @@ async function recordOnboardingArtifacts(
   // this should not happen in practice since Haive paths and bundle paths
   // never overlap by convention, but we log+drop just in case).
   const bundlesForInstall = await loadBundlesForExpansion(ctx.db, repositoryId, ctx.logger);
-  const skillTargets = await resolveSkillTargetDirs(ctx.db, ctx.userId);
+  const skillTargets =
+    renderCtx.cliTargets !== undefined
+      ? skillTargetDirs(renderCtx.cliTargets)
+      : await resolveSkillTargetDirs(ctx.db, ctx.userId, [], repositoryId);
   const customExpanded = expandCustomBundlesFor(
     bundlesForInstall,
     detect.agentTargets,
@@ -335,12 +345,24 @@ async function recordOnboardingArtifacts(
     await lockProjectState(tx, repositoryId);
     const [live] = await tx
       .select({
+        renderContext: schema.repositories.renderContext,
         rtkEnabled: schema.repositories.rtkEnabled,
         rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
       .for('update');
+    if (
+      detect.renderContextColumn !== undefined &&
+      !sameValue(live?.renderContext ?? null, detect.renderContextColumn) &&
+      !sameValue(
+        live?.renderContext ?? null,
+        renderContextColumnFor(renderCtx, detect.rtkEnabled !== undefined),
+      )
+    )
+      throw new Error(
+        'Repository context changed after onboarding files were planned. Retry generation.',
+      );
     if (supersedePaths.length > 0) {
       await tx
         .update(schema.onboardingArtifacts)
@@ -647,11 +669,19 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     let artifactRowsWritten = 0;
     let renderContext: TemplateRenderContext | null = null;
     let rtkChoiceRecorded = false;
+    let expectedColumns: unknown[] | undefined;
     try {
       const genPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-generate-files');
       const detect = genPrev?.detect ? (genPrev.detect as GenerateFilesDetect) : null;
       // Derived ahead of the recording, which the project state record below must not depend on.
       renderContext = detect ? buildRenderContext(detect) : null;
+      expectedColumns =
+        detect?.renderContextColumn !== undefined && renderContext
+          ? [
+              detect.renderContextColumn,
+              renderContextColumnFor(renderContext, detect.rtkEnabled !== undefined),
+            ]
+          : undefined;
       // A 07 output from before RTK shipped made no choice; buildRenderContext defaults it off.
       rtkChoiceRecorded = detect?.rtkEnabled !== undefined;
       const res = await recordOnboardingArtifacts(ctx, detect, renderContext);
@@ -698,6 +728,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             repoPath: ctx.repoPath,
             context: renderContext,
             rtkChoiceRecorded,
+            expectedColumns,
             holdingTaskId: ctx.taskId,
           });
           recorded = true;

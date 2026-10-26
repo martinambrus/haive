@@ -1,3 +1,11 @@
+import { importRulesFilesFor } from '@haive/shared/rules-files';
+import {
+  deriveRenderTargets,
+  hasLegacyAgentFallback,
+  sameValue,
+  readRenderContextColumn,
+  recordedCliTargets,
+} from '@haive/shared/project-state';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, FormSchema } from '@haive/shared';
@@ -25,7 +33,7 @@ import { agentFilePath } from '@haive/shared/project-state';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
 import type { CliProviderName } from '../../../cli-adapters/types.js';
 import { mcpSettingsFileContent } from '../../../sandbox/mcp-config.js';
-import { FALLBACK_AGENT_TARGET, renderTargetsFor } from '../../_render-targets.js';
+import { FALLBACK_AGENT_TARGET } from '../../_render-targets.js';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import {
   type AgentSpec,
@@ -89,6 +97,9 @@ export interface GenerateFilesDetect {
    *  directory (only Amp enabled) — apply() falls back to a single
    *  markdown write under `.claude/agents` so the user still gets files,
    *  and logs a warning. */
+  cliTargets?: string[];
+  legacyAgentFallback?: boolean;
+  renderContextColumn?: unknown;
   agentTargets: AgentRenderTarget[];
   plannedAgents: string[];
   existingFiles: string[];
@@ -606,19 +617,44 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       .where(eq(schema.tasks.id, ctx.taskId))
       .limit(1);
     let rtkEnabled = false;
+    let priorCli: string[] = [];
+    let priorTargets: AgentRenderTarget[] | undefined;
+    let inheritedFallback = false;
+    let renderContextColumn: unknown = undefined;
     const rtkRepoId = rtkTaskRow[0]?.repositoryId ?? null;
     if (rtkRepoId) {
       const repoRow = await ctx.db
-        .select({ rtkEnabled: schema.repositories.rtkEnabled })
+        .select({
+          rtkEnabled: schema.repositories.rtkEnabled,
+          renderContext: schema.repositories.renderContext,
+        })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, rtkRepoId))
         .limit(1);
-      if (repoRow[0]) rtkEnabled = repoRow[0].rtkEnabled;
+      if (repoRow[0]) {
+        rtkEnabled = repoRow[0].rtkEnabled;
+        renderContextColumn = repoRow[0].renderContext ?? null;
+        const read = readRenderContextColumn(repoRow[0].renderContext);
+        if (read.kind === 'column') {
+          priorCli = recordedCliTargets(read.column) ?? [];
+          priorTargets = read.column.agentTargets;
+          inheritedFallback = hasLegacyAgentFallback(read.column);
+        }
+      }
     }
 
-    const { enabledCliProviders, agentTargets } = renderTargetsFor(providerRows, lspLanguages, {
-      agentsFallback: true,
-    });
+    const cliTargets = [
+      ...new Set([...priorCli, ...providerRows.filter((p) => p.enabled).map((p) => p.name)]),
+    ];
+    const keepFallback =
+      inheritedFallback &&
+      sameValue([...new Set(priorCli)].sort(), [...new Set(cliTargets)].sort());
+    const { enabledCliProviders, agentTargets } = deriveRenderTargets(
+      cliTargets,
+      lspLanguages,
+      priorTargets,
+      keepFallback,
+    );
 
     const candidates = [
       '.claude/workflow-config.json',
@@ -688,6 +724,9 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       unmanagedAgentFiles,
       rtkEnabled,
       enabledCliProviders,
+      cliTargets,
+      ...(keepFallback ? { legacyAgentFallback: true } : {}),
+      renderContextColumn,
     };
   },
 
@@ -836,10 +875,16 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     // no enabled provider has a file-based agent directory (only Amp
     // enabled) so the user still gets files — warn so they know why.
     const targets =
-      detected.agentTargets && detected.agentTargets.length > 0
+      detected.cliTargets !== undefined
         ? detected.agentTargets
-        : [FALLBACK_AGENT_TARGET];
-    if (detected.agentTargets && detected.agentTargets.length === 0) {
+        : detected.agentTargets && detected.agentTargets.length > 0
+          ? detected.agentTargets
+          : [FALLBACK_AGENT_TARGET];
+    if (
+      detected.cliTargets === undefined &&
+      detected.agentTargets &&
+      detected.agentTargets.length === 0
+    ) {
       ctx.logger.warn(
         'no enabled CLI provider has a file-based agents directory; writing to .claude/agents as fallback',
       );
@@ -940,7 +985,10 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     if (rulesPlan.agentsRulesBlock) {
       await appendOrCreate('AGENTS.md', rulesPlan.agentsRulesBlock, CLI_RULES_START, CLI_RULES_END);
     }
-    for (const rf of rulesPlan.importFiles) {
+    for (const rf of new Set([
+      ...rulesPlan.importFiles,
+      ...importRulesFilesFor(detected.cliTargets ?? []),
+    ])) {
       const stub = await ensureRulesImportStub(ctx.repoPath, rf).catch(refuseNotUtf8(rf));
       if (stub === 'refused') continue;
       if (stub === 'created') wroteFiles.push(rf);

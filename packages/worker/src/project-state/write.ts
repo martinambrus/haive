@@ -57,6 +57,8 @@ import {
   portableTemplateId,
   recordReadable,
   renderContextColumnSchema,
+  readRenderContextColumn,
+  deriveRenderTargets,
   renderProjectState,
   type NamedLocalBundle,
   type ProjectEnvironment,
@@ -117,6 +119,7 @@ interface Look {
 const RTK_SETTING_FILE = `${PROJECT_STATE_DIR}/${settingFileName('rtk-enabled')}`;
 const ENVIRONMENT_FILE = `${PROJECT_STATE_DIR}/project/environment.json`;
 const OWNED_FILE_PREFIXES = [
+  `${PROJECT_STATE_DIR}/cli/`,
   `${PROJECT_STATE_DIR}/artifacts/`,
   `${PROJECT_STATE_DIR}/bundles/`,
   `${PROJECT_STATE_DIR}/settings/`,
@@ -424,10 +427,22 @@ async function loadBase(
     .where(eq(schema.projectStateSync.repositoryId, repositoryId))
     .limit(1);
   const snapshot = row?.baseSnapshot as
-    | { claims?: unknown; bundles?: unknown; settings?: unknown; environment?: unknown }
+    | {
+        cli?: unknown;
+        claims?: unknown;
+        bundles?: unknown;
+        settings?: unknown;
+        environment?: unknown;
+      }
     | null
     | undefined;
   const files: string[] = [];
+  if (Array.isArray(snapshot?.cli)) {
+    for (const name of snapshot.cli) {
+      if (typeof name === 'string' && isRecordName(name))
+        files.push(`${PROJECT_STATE_DIR}/cli/${name}.json`);
+    }
+  }
   const settings = snapshot?.settings;
   if (settings !== null && typeof settings === 'object' && !Array.isArray(settings)) {
     for (const name of Object.keys(settings)) {
@@ -513,6 +528,7 @@ export async function writeProjectStateColumn(
     const planFor = (look: Look) => ({
       record: {
         ...emptyProjectState(),
+        cli: column.cliTargets ?? [],
         render: overlayRender(portable, look.pending, 'incoming'),
         claims: overlayClaims(look.claims, look.pendingClaims, 'incoming'),
         bundles: look.bundles,
@@ -521,6 +537,7 @@ export async function writeProjectStateColumn(
       },
       baseSnapshot: normalizeProjectState({
         ...emptyProjectState(),
+        cli: column.cliTargets ?? [],
         render: overlayRender(portable, look.pending, 'base'),
         claims: overlayClaims(look.claims, look.pendingClaims, 'base'),
         bundles: look.bundles,
@@ -647,6 +664,7 @@ export async function writeProjectStateColumn(
       // so a reset cannot claim just after the last refusal check and walk this same record.
       const [repo] = await tx
         .select({
+          renderContext: schema.repositories.renderContext,
           claimedAt: schema.repositories.rootClaimedAt,
           kind: schema.repositories.rootClaimKind,
           resetAt: schema.repositories.onboardingResetAt,
@@ -675,6 +693,58 @@ export async function writeProjectStateColumn(
       if (expectedColumns) await refuseMovedColumn(tx, repositoryId, expectedColumns);
       if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId, repositoryId);
       if (refuseWhileHeld) await refuseHeldCheckout(tx, repositoryId);
+      const current = readRenderContextColumn(repo.renderContext);
+      if (current.kind === 'column' && current.column.cliTargets !== undefined) {
+        const maintained = current.column.cliTargets;
+        if (column.cliTargets === undefined) {
+          // An old persisted plan/snapshot carries no membership decision. Complete it from
+          // the authoritative column under this same lock, with its exact column/epoch fence.
+          const targets = deriveRenderTargets(
+            maintained,
+            column.lspLanguages,
+            current.column.agentTargets,
+            current.column.legacyAgentFallback,
+          );
+          column = {
+            ...column,
+            cliTargets: maintained,
+            agentTargets: targets.agentTargets,
+            enabledCliProviders: targets.enabledCliProviders,
+          };
+        } else {
+          if (
+            maintained.some((name) => !column.cliTargets!.includes(name)) ||
+            (expectedColumns === undefined &&
+              !sameValue([...new Set(maintained)].sort(), [...new Set(column.cliTargets)].sort()))
+          )
+            throw new ProjectStateMovedError(
+              'Repository CLI membership changed; plan this write again',
+            );
+        }
+        const sameMembership = sameValue(
+          [...new Set(maintained)].sort(),
+          [...new Set(column.cliTargets ?? [])].sort(),
+        );
+        if (sameMembership && current.column.legacyAgentFallback === true) {
+          column.legacyAgentFallback = true;
+          const targets = deriveRenderTargets(
+            column.cliTargets ?? [],
+            column.lspLanguages,
+            current.column.agentTargets,
+            true,
+          );
+          column.agentTargets = targets.agentTargets;
+        } else {
+          delete column.legacyAgentFallback;
+          column.agentTargets = deriveRenderTargets(
+            column.cliTargets ?? [],
+            column.lspLanguages,
+          ).agentTargets;
+        }
+        // A caller's narrower admission set is never widened to whatever this read found.
+        expectedColumns ??= [repo.renderContext];
+        expectedResetAt ??= repo.resetAt ?? null;
+      }
     };
     // Commit the retry signal before any filesystem mutation. Recheck admission and the checkout
     // after reacquiring the locks: a holder admitted between transactions leaves only this intent.

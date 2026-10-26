@@ -11,6 +11,10 @@ import {
   sha256Hex,
 } from '@haive/shared';
 import {
+  deriveRenderTargets,
+  hasLegacyAgentFallback,
+  recordedCliTargets,
+  skillTargetDirs,
   historyOrigin,
   isRenderContextSnapshot,
   originAgentTargets,
@@ -191,6 +195,28 @@ async function resolveFromRepository(
   }
   if (origin.from === 'snapshot') {
     const snapshot = origin.row.formValuesSnapshot as unknown as TemplateRenderContext;
+    const cliTargets = snapshot.cliTargets;
+    if (cliTargets !== undefined)
+      return withLiveRtk(
+        repo,
+        {
+          ...snapshot,
+          cliTargets,
+          agentTargets: deriveRenderTargets(
+            cliTargets,
+            snapshot.lspLanguages,
+            snapshot.agentTargets,
+            snapshot.legacyAgentFallback,
+          ).agentTargets,
+          enabledCliProviders: deriveRenderTargets(
+            cliTargets,
+            snapshot.lspLanguages,
+            snapshot.agentTargets,
+            snapshot.legacyAgentFallback,
+          ).enabledCliProviders,
+        },
+        origin.rtkRecorded,
+      );
     const recorded = snapshot.agentTargets
       ? snapshot
       : {
@@ -302,6 +328,8 @@ async function resolveFromRepository(
     // A detect output from before rtk shipped recorded no choice: off, not the column's default.
     rtkEnabled: detect.rtkEnabled ?? false,
     enabledCliProviders: detect.enabledCliProviders ?? [],
+    ...(hasLegacyAgentFallback(detect) ? { legacyAgentFallback: true } : {}),
+    ...(recordedCliTargets(detect) !== undefined ? { cliTargets: recordedCliTargets(detect) } : {}),
   };
   return withLiveRtk(repo, recorded, history.rtkRecorded);
 }
@@ -346,7 +374,10 @@ export async function unionExpandedFor(
   const haiveExpanded = expandManifestFor(renderCtx, manifest);
 
   const bundles: BundleWithMeta[] = await loadBundlesForExpansion(db, repositoryId, logger);
-  const skillTargets = await resolveSkillTargetDirs(db, userId);
+  const skillTargets =
+    renderCtx.cliTargets !== undefined
+      ? skillTargetDirs(renderCtx.cliTargets)
+      : await resolveSkillTargetDirs(db, userId, [], repositoryId);
   const customExpanded = expandCustomBundlesFor(bundles, renderCtx.agentTargets, skillTargets);
 
   const out: ExpandedRendering[] = [];

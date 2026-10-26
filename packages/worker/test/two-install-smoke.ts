@@ -32,7 +32,7 @@ import { applyPlanPatch, lockPlanMerge } from '@haive/shared/plan';
 import { upgradeAdmission } from '@haive/shared/onboarding-admission';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { initDatabase } from '../src/db.js';
-import { handleClone, handleScan } from '../src/repo/clone.js';
+import { handleClone, handleScan, handleInit } from '../src/repo/clone.js';
 import { landPlanMerge } from '../src/plan/merge.js';
 import { reconcilePlanFromCheckout, writePlanMirror } from '../src/plan/mirror.js';
 import { pull, save } from '../src/queues/plan-mirror-queue.js';
@@ -275,6 +275,7 @@ const RECORD_RENDER = '.haive-data/state/project/render.json';
 /** The record that holds a render context: its five portable fields, and no other. */
 const recordOf = (context: Record<string, unknown>) => ({
   ...emptyProjectState(),
+  cli: Array.isArray(context.cliTargets) ? (context.cliTargets as string[]) : [],
   render: {
     projectInfo: context.projectInfo,
     framework: context.framework,
@@ -353,13 +354,14 @@ async function upgradePlan(install: Install): Promise<{
 async function upgradeApplied(
   install: Install,
   pick: (plan: UpgradePlanDetect) => Record<string, unknown>,
+  planChoices: Record<string, unknown> = {},
 ): Promise<{ error: string | null }> {
   const planned = await upgradePlan(install);
   if (planned.plan === null) return { error: planned.error };
   const planCtx = ctxFor(install, planned.taskId, planned.stepId);
   const output = await upgradePlanStep.apply(planCtx, {
     detected: planned.plan,
-    formValues: {},
+    formValues: { ...defaultValues(upgradePlanStep.form!(planCtx, planned.plan)), ...planChoices },
     iteration: 0,
     previousIterations: [],
   });
@@ -398,6 +400,7 @@ async function upgradeApplied(
 }
 
 const CONTEXT_KEYS = [
+  'cliTargets',
   'projectInfo',
   'framework',
   'acceptedAgentIds',
@@ -459,7 +462,7 @@ interface ColumnRow {
 const columnsOf = (db: Database, table: string, only?: string) =>
   rowsOf<ColumnRow>(
     db,
-    sql`select column_name, data_type, is_nullable, column_default from information_schema.columns where table_schema = current_schema() and table_name = ${table} and (${only ?? null}::text is null or column_name = ${only ?? null})`,
+    sql`select column_name, data_type, is_nullable, column_default from information_schema.columns where table_schema = current_schema() and table_name = ${table} and (${only ?? null}::text is null or column_name = ${only ?? null}) order by ordinal_position`,
   );
 /** `<type> <YES|NO>` for one column, or null where the query failed or the column is not there. */
 function shapeOf(cols: Awaited<ReturnType<typeof columnsOf>>, name: string): string | null {
@@ -824,14 +827,27 @@ async function main(): Promise<void> {
     );
     const keys = 'rows' in constraints ? constraints.rows : [];
     check(
-      'migrations 0171 and 0213 give repositories a nullable render_context and the current project_state_sync shape',
+      'migrations 0171, 0213 and 0214 give repositories a nullable render_context and the current project_state_sync shape',
       shapeOf(renderColumn, 'render_context') === 'jsonb YES' &&
         'rows' in syncColumns &&
-        syncColumns.rows.length === 5 &&
+        syncColumns.rows.length === 6 &&
+        isDeepStrictEqual(
+          syncColumns.rows.map((c) => c.column_name),
+          [
+            'repository_id',
+            'base_snapshot',
+            'last_error',
+            'updated_at',
+            'synced_hash',
+            'synced_head',
+          ],
+        ) &&
         shapeOf(syncColumns, 'repository_id') === 'uuid NO' &&
         shapeOf(syncColumns, 'base_snapshot') === 'jsonb NO' &&
         shapeOf(syncColumns, 'last_error') === 'text YES' &&
         shapeOf(syncColumns, 'synced_hash') === 'text YES' &&
+        shapeOf(syncColumns, 'synced_head') === 'text YES' &&
+        syncColumns.rows.find((c) => c.column_name === 'synced_head')?.column_default === null &&
         shapeOf(syncColumns, 'updated_at') === 'timestamp without time zone NO' &&
         /now\(\)/.test(
           String(syncColumns.rows.find((c) => c.column_name === 'updated_at')?.column_default),
@@ -1022,7 +1038,7 @@ async function main(): Promise<void> {
       wantRender !== null &&
         isDeepStrictEqual(
           asJson(renderContextB),
-          asJson({ ...wantRender, rtkChoiceRecorded: true }),
+          asJson({ ...wantRender, cliTargets: wantRecord!.cli, rtkChoiceRecorded: true }),
         ),
       { want: wantRender, got: renderContextB, columnB },
     );
@@ -3211,6 +3227,208 @@ async function main(): Promise<void> {
         'S3: and an unrecorded one writes none',
         (await fileOf(clone, rtkRel)) === '',
         await fileOf(clone, rtkRel),
+      );
+    }
+
+    // B4.1: actual two-install union, then an explicit repository removal and Keep.
+    {
+      const unionOrigin = path.join(tmp!, 'union.git');
+      git(tmp!, 'init', '-q', '--bare', '-b', 'main', unionOrigin);
+      const unionSeed = path.join(tmp!, 'union-seed');
+      git(tmp!, 'clone', '-q', remoteUrl, unionSeed);
+      git(unionSeed, 'checkout', '-q', posted.output.commitSha!);
+      git(unionSeed, 'remote', 'set-url', 'origin', httpOrigin(unionOrigin));
+      git(unionSeed, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
+      const unionUserA = randomUUID();
+      landUsers.push(unionUserA);
+      const ua = await cloneInstall(
+        'A',
+        dbA!,
+        path.join(tmp!, 'union-a'),
+        httpOrigin(unionOrigin),
+        unionUserA,
+      );
+      const ub = await cloneInstall('B', dbB!, path.join(tmp!, 'union-b'), httpOrigin(unionOrigin));
+      const namesOf = async (install: Install): Promise<string[]> => {
+        const [repo] = await install.db
+          .select({ context: schema.repositories.renderContext })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, install.repositoryId));
+        return (repo?.context as { cliTargets?: string[] } | null)?.cliTargets ?? [];
+      };
+      const claudeBefore = new Map(
+        await Promise.all(
+          (await livePaths(ub))
+            .filter((p) => p.startsWith('.claude/agents/'))
+            .map(async (p) => [p, await fileOf(ub, p)] as const),
+        ),
+      );
+      await ub.db.execute(
+        sql`update repositories set render_context = jsonb_set(render_context, '{cliTargets}', '["claude-code","future-cli"]') where id = ${ub.repositoryId}`,
+      );
+      await ub.db
+        .insert(schema.cliProviders)
+        .values({ userId: ub.userId, name: 'codex', label: 'B Codex', enabled: true });
+      await upgradeApplied(ub, () => ({}));
+      check(
+        'B4.1: B adds Codex through the default-on upgrade choice and keeps A Claude files byte-identical',
+        isDeepStrictEqual((await namesOf(ub)).sort(), ['claude-code', 'codex', 'future-cli']) &&
+          (await livePaths(ub)).some((p) => p.startsWith('.codex/agents/')) &&
+          (
+            await Promise.all(
+              [...claudeBefore].map(async ([p, bytes]) => (await fileOf(ub, p)) === bytes),
+            )
+          ).every(Boolean),
+      );
+      pushFrom(
+        ub,
+        'B: maintain Codex too',
+        '.haive-data/state',
+        '.codex/agents',
+        'CLAUDE.md',
+        'AGENTS.md',
+      );
+      git(ua.repoPath, 'pull', '-q', '--ff-only', 'origin', 'main');
+      await syncProjectStateFromCheckout(ua.db, {
+        repositoryId: ua.repositoryId,
+        repoPath: ua.repoPath,
+      });
+      await ua.db
+        .update(schema.cliProviders)
+        .set({ enabled: false })
+        .where(eq(schema.cliProviders.userId, ua.userId));
+      const quiet = await upgradePlan(ua);
+      check(
+        'B4.1: A imports the union without a Codex provider; disabling its local providers offers no teammate folder removal',
+        isDeepStrictEqual((await namesOf(ua)).sort(), ['claude-code', 'codex', 'future-cli']) &&
+          quiet.plan !== null &&
+          quiet.plan.entries
+            .filter(
+              (e) =>
+                e.diskPath.startsWith('.claude/agents/') || e.diskPath.startsWith('.codex/agents/'),
+            )
+            .every((e) => e.bucket === 'unchanged'),
+      );
+      await ua.db
+        .update(schema.tasks)
+        .set({ status: 'completed', completedAt: new Date() })
+        .where(eq(schema.tasks.id, quiet.taskId));
+      const codexPaths = (await livePaths(ua)).filter((p) => p.startsWith('.codex/agents/'));
+      // Same authoritative column action as Tooling; public route/CAS/auth are covered in api tests.
+      await ua.db.transaction(async (tx) => {
+        await tx.execute(
+          sql`update repositories set render_context = jsonb_set(render_context, '{cliTargets}', '["claude-code","future-cli"]') where id = ${ua.repositoryId}`,
+        );
+        await markProjectStateDirty(tx, ua.repositoryId);
+      });
+      check(
+        'B4.1: repository membership removal alone deletes no files',
+        codexPaths.length > 1 &&
+          (await Promise.all(codexPaths.map(async (p) => (await fileOf(ua, p)).length > 0))).every(
+            Boolean,
+          ),
+      );
+      const keep = codexPaths[0]!;
+      await upgradeApplied(ua, (plan) => ({
+        selectedObsoleteRemovals: plan.entries
+          .filter((e) => e.bucket === 'obsolete' && e.diskPath !== keep)
+          .map((e) => e.entryId),
+        selectedObsoleteUntracks: plan.entries
+          .filter((e) => e.bucket === 'obsolete' && e.diskPath === keep)
+          .map((e) => e.entryId),
+      }));
+      check(
+        'B4.1: upgrade removes the explicitly dropped imported targets while Keep leaves its chosen file untracked',
+        (await fileOf(ua, keep)).length > 0 &&
+          !(await livePaths(ua)).includes(keep) &&
+          (
+            await Promise.all(
+              codexPaths.filter((p) => p !== keep).map(async (p) => (await fileOf(ua, p)) === ''),
+            )
+          ).every(Boolean) &&
+          (
+            await Promise.all(
+              [...claudeBefore].map(async ([p, bytes]) => (await fileOf(ua, p)) === bytes),
+            )
+          ).every(Boolean) &&
+          isDeepStrictEqual(await namesOf(ua), ['claude-code', 'future-cli']),
+      );
+      pushFrom(
+        ua,
+        'A: explicitly stop Codex maintenance',
+        '.haive-data/state',
+        '.codex/agents',
+        'AGENTS.md',
+      );
+      git(ub.repoPath, 'pull', '-q', '--ff-only', 'origin', 'main');
+      await syncProjectStateFromCheckout(ub.db, {
+        repositoryId: ub.repositoryId,
+        repoPath: ub.repoPath,
+      });
+      check(
+        'B4.1: per-member deletion travels back to B despite Codex staying enabled there',
+        isDeepStrictEqual(await namesOf(ub), ['claude-code', 'future-cli']),
+      );
+      const offeredAgain = await upgradePlan(ub);
+      const cliChoice = offeredAgain.plan
+        ? upgradePlanStep.form!(
+            ctxFor(ub, offeredAgain.taskId, offeredAgain.stepId),
+            offeredAgain.plan,
+          )
+        : null;
+      check(
+        'B4.1: a still-enabled removed CLI is a visible default-on addition choice',
+        cliChoice?.fields.some(
+          (f) => f.id === 'addCliTargets' && 'defaults' in f && f.defaults?.includes('codex'),
+        ) === true,
+      );
+      await ub.db
+        .update(schema.tasks)
+        .set({ status: 'completed', completedAt: new Date() })
+        .where(eq(schema.tasks.id, offeredAgain.taskId));
+      await upgradeApplied(ub, () => ({}), { addCliTargets: [] });
+      check(
+        'B4.1: declining that addition keeps the repository removal authoritative',
+        isDeepStrictEqual(await namesOf(ub), ['claude-code', 'future-cli']),
+      );
+      const blankId = randomUUID();
+      await ua.db
+        .update(schema.cliProviders)
+        .set({ enabled: false })
+        .where(eq(schema.cliProviders.userId, ua.userId));
+      await ua.db
+        .insert(schema.cliProviders)
+        .values({ userId: ua.userId, name: 'codex', label: 'blank Codex', enabled: true });
+      await ua.db.insert(schema.repositories).values({
+        id: blankId,
+        userId: ua.userId,
+        name: 'blank-cli-portability',
+        source: 'blank',
+        branch: 'main',
+      });
+      await handleInit(
+        { repositoryId: blankId, userId: ua.userId, source: 'blank', branch: 'main' },
+        ua.db,
+        path.join(tmp!, 'blank-cli'),
+      );
+      const [blankRepo] = await ua.db
+        .select({
+          path: schema.repositories.storagePath,
+          context: schema.repositories.renderContext,
+          claim: schema.repositories.rootClaimedAt,
+        })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, blankId));
+      const initialCli = blankRepo?.path
+        ? git(blankRepo.path, 'show', 'HEAD:.haive-data/state/cli/codex.json')
+        : '';
+      check(
+        'B4.1: real blank INIT commits its own CLI unit through the ordinary rebuild-root claim and releases that claim',
+        initialCli.includes('"provider": "codex"') &&
+          blankRepo?.claim === null &&
+          isDeepStrictEqual((blankRepo?.context as { cliTargets?: string[] })?.cliTargets, [
+            'codex',
+          ]),
       );
     }
 

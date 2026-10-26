@@ -450,7 +450,7 @@ async function setup(seed: Seed = {}) {
   };
 
   /** 01's detect and apply for the upgrade task of this repository, run as its owner. */
-  const plan = async (): Promise<UpgradePlanDetect> => {
+  const plan = async (apply = true): Promise<UpgradePlanDetect> => {
     fake.insert(tasks, {
       id: UPGRADE,
       userId: OWNER,
@@ -461,12 +461,13 @@ async function setup(seed: Seed = {}) {
     });
     const ctx = upgradeCtx();
     const detected = await upgradePlanStep.detect!(ctx);
-    await upgradePlanStep.apply(ctx, {
-      detected,
-      formValues: {},
-      iteration: 0,
-      previousIterations: [],
-    });
+    if (apply)
+      await upgradePlanStep.apply(ctx, {
+        detected,
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      });
     return detected;
   };
 
@@ -801,10 +802,11 @@ describe('D2e: 02 refuses a plan whose column moved after it was planned', () =>
       return select(fields as never);
     }) as typeof s.fake.db.select;
 
-    const detected = await s.plan();
+    const detected = await s.plan(false);
 
     const recorded = detected.renderContextColumn as { acceptedAgentIds?: unknown };
     expect(recorded.acceptedAgentIds).toEqual(detected.renderCtxSnapshot.acceptedAgentIds);
+    await expect(s.applyPlan(detected)).rejects.toThrow(/changed after this upgrade was planned/);
   });
 
   it('lets a retry through once its own record write filled the per-install fields', async () => {

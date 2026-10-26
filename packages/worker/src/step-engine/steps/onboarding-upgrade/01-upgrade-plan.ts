@@ -1,6 +1,9 @@
+import { lockProjectState } from '../../../project-state/write.js';
+import { resolveSkillTargetDirs } from '../onboarding/_helpers.js';
+import { importRulesFilesFor } from '@haive/shared/rules-files';
 import { readUpgradeFile, rtkBlockFiles, type UnreadReason } from '@haive/shared/rules-files';
 import { eq } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { lockRepositoryTasksKey, schema, type DbTx } from '@haive/database';
 import {
   CLI_RULES_END,
   CLI_RULES_START,
@@ -13,11 +16,16 @@ import {
   sha256Hex,
 } from '@haive/shared';
 import {
+  deriveRenderTargets,
+  hasLegacyAgentFallback,
+  recordedCliTargets,
+  skillTargetDirs,
   foreignReason,
   isClaimablePath,
   isImportMarker,
   rtkBlockToRestore,
   rtkLeftoversToRemove,
+  sameValue,
   type ForeignContext,
 } from '@haive/shared/project-state';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
@@ -45,7 +53,6 @@ import {
   readAgentsRulesRegion,
   restorableRtkBlockFiles,
 } from '../onboarding/_rules-files.js';
-import { resolveSkillTargetDirs } from '../onboarding/_helpers.js';
 import { computeLineDelta } from './_diff.js';
 
 export { loadLiveArtifacts, pickRenderSnapshot, type LiveArtifactRow };
@@ -98,6 +105,8 @@ export const UNREAD_HASH = 'unread';
 
 export interface UpgradePlanDetect {
   repositoryId: string;
+  cliAdditions?: string[];
+  repositoryCliTargets?: string[];
   ranBackfill: boolean;
   entries: UpgradePlanEntry[];
   counts: Record<UpgradePlanBucket, number>;
@@ -268,202 +277,52 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
     return shouldRunUpgrade(ctx);
   },
 
-  async detect(ctx): Promise<UpgradePlanDetect> {
-    const repositoryId = await requireRepositoryId(ctx);
-    const manifest = getTemplateManifest();
-    const liveRows = await loadLiveArtifacts(ctx.db, repositoryId);
-    const resolved = await resolveRenderContext(ctx.db, {
-      repositoryId,
-      userId: ctx.userId,
-      liveRows,
-      logger: ctx.logger,
-    });
-    if (!resolved) {
-      throw new RenderContextUnresolvedError(
-        'upgrade-plan: cannot resolve render context — no prior onboarding snapshot or step 07 output found',
-      );
-    }
-    const { renderCtx } = resolved;
+  detect: buildUpgradePlan,
 
-    const expanded = await unionExpandedFor(ctx.db, {
-      repositoryId,
-      userId: ctx.userId,
-      renderCtx,
-      logger: ctx.logger,
-    });
-    const foreignContext: ForeignContext = {
-      haiveVersion: getHaiveVersion(),
-      agentTargets: renderCtx.agentTargets,
-      skillDirs: await resolveSkillTargetDirs(ctx.db, ctx.userId),
-    };
-    const ownRows = liveRows.filter((r) => foreignReason(r, foreignContext) === null);
-    const installedTemplateSetHash =
-      ownRows.length > 0 ? computeInstalledSetHashFromRows(ownRows) : null;
-
-    const byPath = new Map<string, ExpandedRendering>();
-    for (const r of expanded) byPath.set(r.diskPath, r);
-    const liveByPath = new Map<string, LiveArtifactRow>();
-    for (const r of liveRows) liveByPath.set(r.diskPath, r);
-
-    const allPaths = new Set<string>([...byPath.keys(), ...liveByPath.keys()]);
-    const entries: UpgradePlanEntry[] = [];
-    let counterByBucket = 0;
-    const cliRulesRenderHashes = await loadCliRulesRenderHashes(ctx.db, repositoryId);
-
-    for (const diskPath of allPaths) {
-      // A row imported before claims naming git data (aliases included) were refused: never list it or read its bytes.
-      if (!isClaimablePath(diskPath)) continue;
-      const current = byPath.get(diskPath) ?? null;
-      const live = liveByPath.get(diskPath) ?? null;
-      const disk = await readDiskContent(ctx.repoPath, diskPath);
-      // The cli-rules artifact owns only the marker-delimited region inside
-      // AGENTS.md, not the whole file. Compare and diff against just that region
-      // so the project-info + RTK regions and any user content stay out of scope.
-      const isCliRules = (current?.templateKind ?? live?.templateKind) === CLI_RULES_TEMPLATE_KIND;
-      let diskContent = disk.content;
-      let diskHash = disk.hash;
-      if (isCliRules && disk.unread === undefined) {
-        const region = disk.content
-          ? extractRegion(disk.content, CLI_RULES_START, CLI_RULES_END)
-          : null;
-        // Normalize so the on-disk region (extractRegion drops the trailing
-        // newline) and the rendered block (buildCliRulesBlock keeps one) compare
-        // and diff cleanly — otherwise the end marker churns in the UI diff.
-        diskContent = region ? normalizeContent(region) : null;
-        diskHash = diskContent ? sha256Hex(diskContent) : null;
-      }
-
-      const bucket = classifyEntry({
-        live,
-        current,
-        diskHash,
-        recordedRenderHashes: isCliRules ? cliRulesRenderHashes : undefined,
-        foreignContext,
-      });
-      let newContent = current?.content ?? null;
-      if (isCliRules && newContent) newContent = normalizeContent(newContent);
-      const baselineContent = live && current && diskHash === live.writtenHash ? diskContent : null;
-      const delta =
-        newContent && !disk.unread ? computeLineDelta(diskContent ?? '', newContent) : null;
-
-      entries.push({
-        entryId: `e${counterByBucket++}:${diskPath}`,
-        bucket,
-        templateId: current?.templateId ?? live?.templateId ?? 'unknown',
-        templateKind: current?.templateKind ?? live?.templateKind ?? 'unknown',
-        diskPath,
-        liveArtifactId: live?.id ?? null,
-        currentContent: diskContent,
-        newContent,
-        baselineContent,
-        currentHash: diskHash,
-        baselineWrittenHash: live?.writtenHash ?? null,
-        newContentHash: current?.writtenHash ?? null,
-        baselineTemplateContentHash: live?.templateContentHash ?? null,
-        currentTemplateContentHash: current?.templateContentHash ?? null,
-        templateSchemaVersion:
-          current?.templateSchemaVersion ?? live?.templateSchemaVersion ?? null,
-        delta,
-        ...(disk.unread ? { unread: disk.unread } : {}),
-      });
-    }
-
-    // Nothing records the RTK settings files a blank scaffold seeds, or the ones of a repository with
-    // no rows at all, so with RTK now off they are found by rendering them as if it were on, for every
-    // CLI: the scaffold seeded them for the ones enabled then, which may not be the ones enabled now.
-    let unrecordedRtk: ExpandedRendering[] = [];
-    if (rtkLeftoversToRemove(resolved.rtkLive, renderCtx.rtkEnabled)) {
-      const [repo] = await ctx.db
-        .select({ source: schema.repositories.source })
-        .from(schema.repositories)
-        .where(eq(schema.repositories.id, repositoryId))
-        .limit(1);
-      if (liveRows.length === 0 || repo?.source === 'blank') {
-        const everyCli = CLI_PROVIDER_LIST.map((p) => ({
-          name: p.name,
-          rulesFile: p.rulesFile,
-          rulesFileMode: p.rulesFileMode,
-        }));
-        unrecordedRtk = expandManifestFor(
-          { ...renderCtx, rtkEnabled: true, enabledCliProviders: everyCli },
-          manifest,
-        ).filter(
-          (r) =>
-            r.templateKind === 'rtk-config' &&
-            !byPath.has(r.diskPath) &&
-            !liveByPath.has(r.diskPath),
-        );
-      }
-    }
-    for (const r of unrecordedRtk) {
-      const disk = await readDiskContent(ctx.repoPath, r.diskPath);
-      if (disk.content === null || disk.hash === null) continue;
-      if (!holdsRtkSettings(r.templateId, disk.content)) continue;
-      const holdsRender = disk.hash === r.writtenHash;
-      entries.push({
-        entryId: `e${counterByBucket++}:${r.diskPath}`,
-        bucket: 'obsolete',
-        templateId: r.templateId,
-        templateKind: r.templateKind,
-        diskPath: r.diskPath,
-        liveArtifactId: null,
-        currentContent: disk.content,
-        newContent: null,
-        baselineContent: holdsRender ? disk.content : null,
-        currentHash: disk.hash,
-        baselineWrittenHash: r.writtenHash,
-        newContentHash: null,
-        baselineTemplateContentHash: r.templateContentHash,
-        currentTemplateContentHash: null,
-        templateSchemaVersion: r.templateSchemaVersion,
-        delta: null,
-      });
-    }
-
-    const counts: Record<UpgradePlanBucket, number> = {
-      unchanged: 0,
-      clean_update: 0,
-      adopt: 0,
-      conflict: 0,
-      new_artifact: 0,
-      user_deleted: 0,
-      obsolete: 0,
-      foreign: 0,
-    };
-    for (const e of entries) counts[e.bucket] += 1;
-
-    const ranBackfill = liveRows.length === 0;
-    const missingRulesImports = await missingRulesImportStubs(
-      ctx.repoPath,
-      await enabledImportRulesFiles(ctx.db, ctx.userId),
-    );
-    const rtkBlockLeftovers = rtkLeftoversToRemove(resolved.rtkLive, renderCtx.rtkEnabled)
-      ? await rtkBlockFiles(ctx.repoPath)
-      : [];
-    const rtkBlockRestorable =
-      rtkBlockToRestore(resolved.rtkLive, renderCtx.rtkEnabled) &&
-      renderCtx.enabledCliProviders.length > 0
-        ? await restorableRtkBlockFiles(ctx.db, ctx.repoPath, repositoryId)
-        : [];
-
+  form(_ctx, detected) {
+    if (!detected.cliAdditions?.length) return null;
     return {
-      repositoryId,
-      ranBackfill,
-      entries,
-      counts,
-      installedTemplateSetHash,
-      currentTemplateSetHash: manifest.setHash,
-      renderCtxSnapshot: renderCtx as unknown as Record<string, unknown>,
-      rtkFollowsLive: resolved.rtkLive,
-      missingRulesImports,
-      rtkBlockLeftovers,
-      rtkBlockRestorable,
-      renderContextColumn: resolved.column,
+      title: 'Repository CLIs',
+      fields: [
+        {
+          type: 'multi-select',
+          id: 'addCliTargets',
+          label: 'Also maintain files for',
+          options: detected.cliAdditions.map((name) => ({ value: name, label: name })),
+          defaults: detected.cliAdditions,
+          description:
+            'Add your CLIs to this repository. Existing repository CLIs stay maintained.',
+        },
+      ],
     };
   },
 
   async apply(ctx, args): Promise<UpgradePlanOutput> {
-    const detected = args.detected;
+    let detected = args.detected;
+    const expectedColumn = detected.renderContextColumn;
+    const refuseMoved = async (tx: DbTx) => {
+      await lockRepositoryTasksKey(tx, detected.repositoryId);
+      await lockProjectState(tx, detected.repositoryId);
+      if (
+        expectedColumn !== undefined &&
+        !sameValue(await readRenderContextColumnRaw(tx, detected.repositoryId), expectedColumn)
+      )
+        throw new Error(
+          'Repository context changed after this upgrade was planned. Retry the plan step.',
+        );
+    };
+    if (detected.cliAdditions?.length) {
+      await ctx.db.transaction(refuseMoved);
+      const selected = Array.isArray(args.formValues.addCliTargets)
+        ? args.formValues.addCliTargets
+        : [];
+      detected = await buildUpgradePlan(ctx, [
+        ...new Set([
+          ...(detected.repositoryCliTargets ?? []),
+          ...detected.cliAdditions.filter((name) => selected.includes(name)),
+        ]),
+      ]);
+    }
     let backfilledRows = 0;
 
     if (detected.ranBackfill) {
@@ -537,6 +396,7 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       }
       if (rowsToInsert.length > 0) {
         await ctx.db.transaction(async (tx) => {
+          await refuseMoved(tx);
           await tx.insert(schema.onboardingArtifacts).values(rowsToInsert);
           await markProjectStateDirty(tx, detected.repositoryId);
         });
@@ -558,11 +418,245 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       renderCtx: detected.renderCtxSnapshot as unknown as TemplateRenderContext,
       logger: ctx.logger,
     });
-    await updateApplicableTemplateIds(ctx.db, detected.repositoryId, applicableExpanded);
+    await ctx.db.transaction(async (tx) => {
+      await refuseMoved(tx);
+      await updateApplicableTemplateIds(tx, detected.repositoryId, applicableExpanded);
+    });
 
     return { ...detected, backfilledRows };
   },
 };
+
+export async function buildUpgradePlan(
+  ctx: StepContext,
+  chosenCli?: string[],
+): Promise<UpgradePlanDetect> {
+  const repositoryId = await requireRepositoryId(ctx);
+  const manifest = getTemplateManifest();
+  const liveRows = await loadLiveArtifacts(ctx.db, repositoryId);
+  const resolved = await resolveRenderContext(ctx.db, {
+    repositoryId,
+    userId: ctx.userId,
+    liveRows,
+    logger: ctx.logger,
+  });
+  if (!resolved) {
+    throw new RenderContextUnresolvedError(
+      'upgrade-plan: cannot resolve render context — no prior onboarding snapshot or step 07 output found',
+    );
+  }
+  let { renderCtx } = resolved;
+  const repositoryCliTargets = recordedCliTargets(renderCtx) ?? [];
+  const providerRows = await ctx.db
+    .select({ name: schema.cliProviders.name, enabled: schema.cliProviders.enabled })
+    .from(schema.cliProviders)
+    .where(eq(schema.cliProviders.userId, ctx.userId));
+  const cliAdditions = providerRows
+    .filter((p) => p.enabled && !repositoryCliTargets.includes(p.name))
+    .map((p) => p.name);
+  const cliTargets = chosenCli ?? renderCtx.cliTargets;
+  if (cliTargets !== undefined) {
+    const sameMembership = sameValue(
+      [...new Set(cliTargets)].sort(),
+      [...new Set(repositoryCliTargets)].sort(),
+    );
+    const keepFallback = sameMembership && hasLegacyAgentFallback(renderCtx);
+    const derived = deriveRenderTargets(
+      cliTargets,
+      renderCtx.lspLanguages,
+      renderCtx.agentTargets,
+      keepFallback,
+    );
+    renderCtx = {
+      ...renderCtx,
+      cliTargets,
+      agentTargets: derived.agentTargets,
+      enabledCliProviders: derived.enabledCliProviders,
+    };
+    if (keepFallback) renderCtx.legacyAgentFallback = true;
+    else delete renderCtx.legacyAgentFallback;
+  }
+
+  const expanded = await unionExpandedFor(ctx.db, {
+    repositoryId,
+    userId: ctx.userId,
+    renderCtx,
+    logger: ctx.logger,
+  });
+  const foreignContext: ForeignContext = {
+    haiveVersion: getHaiveVersion(),
+    agentTargets: renderCtx.agentTargets,
+    skillDirs:
+      cliTargets !== undefined
+        ? skillTargetDirs(cliTargets)
+        : await resolveSkillTargetDirs(ctx.db, ctx.userId, [], repositoryId),
+  };
+  const ownRows = liveRows.filter((r) => foreignReason(r, foreignContext) === null);
+  const installedTemplateSetHash =
+    ownRows.length > 0 ? computeInstalledSetHashFromRows(ownRows) : null;
+
+  const byPath = new Map<string, ExpandedRendering>();
+  for (const r of expanded) byPath.set(r.diskPath, r);
+  const liveByPath = new Map<string, LiveArtifactRow>();
+  for (const r of liveRows) liveByPath.set(r.diskPath, r);
+
+  const allPaths = new Set<string>([...byPath.keys(), ...liveByPath.keys()]);
+  const entries: UpgradePlanEntry[] = [];
+  let counterByBucket = 0;
+  const cliRulesRenderHashes = await loadCliRulesRenderHashes(ctx.db, repositoryId);
+
+  for (const diskPath of allPaths) {
+    // A row imported before claims naming git data (aliases included) were refused: never list it or read its bytes.
+    if (!isClaimablePath(diskPath)) continue;
+    const current = byPath.get(diskPath) ?? null;
+    const live = liveByPath.get(diskPath) ?? null;
+    const disk = await readDiskContent(ctx.repoPath, diskPath);
+    // The cli-rules artifact owns only the marker-delimited region inside
+    // AGENTS.md, not the whole file. Compare and diff against just that region
+    // so the project-info + RTK regions and any user content stay out of scope.
+    const isCliRules = (current?.templateKind ?? live?.templateKind) === CLI_RULES_TEMPLATE_KIND;
+    let diskContent = disk.content;
+    let diskHash = disk.hash;
+    if (isCliRules && disk.unread === undefined) {
+      const region = disk.content
+        ? extractRegion(disk.content, CLI_RULES_START, CLI_RULES_END)
+        : null;
+      // Normalize so the on-disk region (extractRegion drops the trailing
+      // newline) and the rendered block (buildCliRulesBlock keeps one) compare
+      // and diff cleanly — otherwise the end marker churns in the UI diff.
+      diskContent = region ? normalizeContent(region) : null;
+      diskHash = diskContent ? sha256Hex(diskContent) : null;
+    }
+
+    const bucket = classifyEntry({
+      live,
+      current,
+      diskHash,
+      recordedRenderHashes: isCliRules ? cliRulesRenderHashes : undefined,
+      foreignContext,
+    });
+    let newContent = current?.content ?? null;
+    if (isCliRules && newContent) newContent = normalizeContent(newContent);
+    const baselineContent = live && current && diskHash === live.writtenHash ? diskContent : null;
+    const delta =
+      newContent && !disk.unread ? computeLineDelta(diskContent ?? '', newContent) : null;
+
+    entries.push({
+      entryId: `e${counterByBucket++}:${diskPath}`,
+      bucket,
+      templateId: current?.templateId ?? live?.templateId ?? 'unknown',
+      templateKind: current?.templateKind ?? live?.templateKind ?? 'unknown',
+      diskPath,
+      liveArtifactId: live?.id ?? null,
+      currentContent: diskContent,
+      newContent,
+      baselineContent,
+      currentHash: diskHash,
+      baselineWrittenHash: live?.writtenHash ?? null,
+      newContentHash: current?.writtenHash ?? null,
+      baselineTemplateContentHash: live?.templateContentHash ?? null,
+      currentTemplateContentHash: current?.templateContentHash ?? null,
+      templateSchemaVersion: current?.templateSchemaVersion ?? live?.templateSchemaVersion ?? null,
+      delta,
+      ...(disk.unread ? { unread: disk.unread } : {}),
+    });
+  }
+
+  // Nothing records the RTK settings files a blank scaffold seeds, or the ones of a repository with
+  // no rows at all, so with RTK now off they are found by rendering them as if it were on, for every
+  // CLI: the scaffold seeded them for the ones enabled then, which may not be the ones enabled now.
+  let unrecordedRtk: ExpandedRendering[] = [];
+  if (rtkLeftoversToRemove(resolved.rtkLive, renderCtx.rtkEnabled)) {
+    const [repo] = await ctx.db
+      .select({ source: schema.repositories.source })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .limit(1);
+    if (liveRows.length === 0 || repo?.source === 'blank') {
+      const everyCli = CLI_PROVIDER_LIST.map((p) => ({
+        name: p.name,
+        rulesFile: p.rulesFile,
+        rulesFileMode: p.rulesFileMode,
+      }));
+      unrecordedRtk = expandManifestFor(
+        { ...renderCtx, rtkEnabled: true, enabledCliProviders: everyCli },
+        manifest,
+      ).filter(
+        (r) =>
+          r.templateKind === 'rtk-config' && !byPath.has(r.diskPath) && !liveByPath.has(r.diskPath),
+      );
+    }
+  }
+  for (const r of unrecordedRtk) {
+    const disk = await readDiskContent(ctx.repoPath, r.diskPath);
+    if (disk.content === null || disk.hash === null) continue;
+    if (!holdsRtkSettings(r.templateId, disk.content)) continue;
+    const holdsRender = disk.hash === r.writtenHash;
+    entries.push({
+      entryId: `e${counterByBucket++}:${r.diskPath}`,
+      bucket: 'obsolete',
+      templateId: r.templateId,
+      templateKind: r.templateKind,
+      diskPath: r.diskPath,
+      liveArtifactId: null,
+      currentContent: disk.content,
+      newContent: null,
+      baselineContent: holdsRender ? disk.content : null,
+      currentHash: disk.hash,
+      baselineWrittenHash: r.writtenHash,
+      newContentHash: null,
+      baselineTemplateContentHash: r.templateContentHash,
+      currentTemplateContentHash: null,
+      templateSchemaVersion: r.templateSchemaVersion,
+      delta: null,
+    });
+  }
+
+  const counts: Record<UpgradePlanBucket, number> = {
+    unchanged: 0,
+    clean_update: 0,
+    adopt: 0,
+    conflict: 0,
+    new_artifact: 0,
+    user_deleted: 0,
+    obsolete: 0,
+    foreign: 0,
+  };
+  for (const e of entries) counts[e.bucket] += 1;
+
+  const ranBackfill = liveRows.length === 0;
+  const missingRulesImports = await missingRulesImportStubs(
+    ctx.repoPath,
+    cliTargets !== undefined
+      ? importRulesFilesFor(cliTargets)
+      : await enabledImportRulesFiles(ctx.db, ctx.userId),
+  );
+  const rtkBlockLeftovers = rtkLeftoversToRemove(resolved.rtkLive, renderCtx.rtkEnabled)
+    ? await rtkBlockFiles(ctx.repoPath)
+    : [];
+  const rtkBlockRestorable =
+    rtkBlockToRestore(resolved.rtkLive, renderCtx.rtkEnabled) &&
+    renderCtx.enabledCliProviders.length > 0
+      ? await restorableRtkBlockFiles(ctx.db, ctx.repoPath, repositoryId)
+      : [];
+
+  return {
+    repositoryId,
+    cliAdditions,
+    repositoryCliTargets,
+    ranBackfill,
+    entries,
+    counts,
+    installedTemplateSetHash,
+    currentTemplateSetHash: manifest.setHash,
+    renderCtxSnapshot: renderCtx as unknown as Record<string, unknown>,
+    rtkFollowsLive: resolved.rtkLive,
+    missingRulesImports,
+    rtkBlockLeftovers,
+    rtkBlockRestorable,
+    renderContextColumn: resolved.column,
+  };
+}
 
 function computeInstalledSetHashFromRows(rows: LiveArtifactRow[]): string {
   const parts = rows

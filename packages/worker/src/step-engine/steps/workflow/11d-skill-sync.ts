@@ -16,7 +16,7 @@ import {
 } from '../../mining-failure.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import type { KbFileSummary } from '../onboarding/09-qa.js';
-import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput, resolveTaskSkillTargetDirs } from '../onboarding/_helpers.js';
 import { buildSkillContractBlocks } from '../onboarding/_skill-prompt.js';
 import {
   loadMiningScopeExcludeGlobs,
@@ -292,9 +292,7 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
   async detect(ctx: StepContext): Promise<SkillSyncDetect> {
     const { newUpdate, remove } = await loadLearningSkillSync(ctx);
     const worktreePath = await resolveWorktree(ctx);
-    const skillTargetDirs = await resolveSkillTargetDirs(ctx.db, ctx.userId, [
-      DEFAULT_PROJECT_SKILLS_DIR,
-    ]);
+    const skillTargetDirs = await resolveTaskSkillTargetDirs(ctx, [DEFAULT_PROJECT_SKILLS_DIR]);
     const bundleSkillIds = await loadBundleSkillIds(ctx);
     const cap = await resolveParallelCap();
 

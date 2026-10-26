@@ -92,6 +92,7 @@ const CONTEXT_KEYS = [
   'rtkEnabled',
 ];
 const DETECT_KEYS = [
+  'cliAdditions',
   'counts',
   'currentTemplateSetHash',
   'entries',
@@ -100,6 +101,7 @@ const DETECT_KEYS = [
   'ranBackfill',
   'renderContextColumn',
   'renderCtxSnapshot',
+  'repositoryCliTargets',
   'repositoryId',
   'rtkBlockLeftovers',
   'rtkBlockRestorable',

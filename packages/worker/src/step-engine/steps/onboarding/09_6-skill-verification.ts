@@ -7,11 +7,11 @@ import { mapWithConcurrency, orderByDefaultPriority } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { readFrontmatterFields } from '../_yaml-scalar.js';
-import { resolveSkillTargetDirs } from './_helpers.js';
+import { resolveTaskSkillTargetDirs } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
 /** Fallback skills dir when no enabled CLI declares one — passed explicitly to
- *  resolveSkillTargetDirs so verification always has somewhere to look. */
+ *  resolveTaskSkillTargetDirs so verification always has somewhere to look. */
 const DEFAULT_PROJECT_SKILLS_DIR = '.claude/skills';
 
 /** Generator step this verification re-runs when the user opts to regenerate
@@ -304,9 +304,7 @@ export const skillVerificationStep: StepDefinition<
   },
 
   async detect(ctx: StepContext): Promise<SkillVerificationDetect> {
-    const skillTargetDirs = await resolveSkillTargetDirs(ctx.db, ctx.userId, [
-      DEFAULT_PROJECT_SKILLS_DIR,
-    ]);
+    const skillTargetDirs = await resolveTaskSkillTargetDirs(ctx, [DEFAULT_PROJECT_SKILLS_DIR]);
     const bundleSkillIds = await loadBundleSkillIds(ctx);
     const cap = await resolveParallelCap();
 

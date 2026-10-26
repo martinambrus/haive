@@ -495,8 +495,10 @@ describe('syncProjectStateFromCheckout: a first import', () => {
 
     expect(outcome).toBe('applied');
     const filled = json(s.columnOf()) as Json;
-    expect(filled).toEqual({ ...BASE, rtkChoiceRecorded: false });
-    expect(Object.keys(filled).sort()).toEqual([...PORTABLE_KEYS, 'rtkChoiceRecorded']);
+    expect(filled).toEqual({ ...BASE, cliTargets: [], rtkChoiceRecorded: false });
+    expect(Object.keys(filled).sort()).toEqual(
+      [...PORTABLE_KEYS, 'cliTargets', 'rtkChoiceRecorded'].sort(),
+    );
     for (const key of PER_INSTALL_KEYS) expect(filled).not.toHaveProperty(key);
     expect(renderContextColumnSchema.safeParse(filled).success).toBe(true);
   });
@@ -542,7 +544,7 @@ describe('syncProjectStateFromCheckout: a first import', () => {
     const { outcome } = await s.run();
 
     expect(outcome).toBe('applied');
-    expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: false });
+    expect(json(s.columnOf())).toEqual({ ...BASE, cliTargets: [], rtkChoiceRecorded: false });
   });
 
   it('reads a checkout whose root is reached through a link', async () => {
@@ -555,7 +557,7 @@ describe('syncProjectStateFromCheckout: a first import', () => {
     const { outcome } = await s.run({ repoPath: via });
 
     expect(outcome).toBe('applied');
-    expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: false });
+    expect(json(s.columnOf())).toEqual({ ...BASE, cliTargets: [], rtkChoiceRecorded: false });
   });
 
   it('takes the record over a different column that has no sync row, keeping the per-install fields and the RTK flag', async () => {
@@ -1251,7 +1253,7 @@ describe('syncProjectStateFromCheckout: a repository with a live onboarding or u
         const { outcome } = await s.run();
 
         expect(outcome).toBe('applied');
-        expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: false });
+        expect(json(s.columnOf())).toEqual({ ...BASE, cliTargets: [], rtkChoiceRecorded: false });
       },
     );
   });
@@ -1305,7 +1307,7 @@ describe('syncProjectStateFromCheckout: a repository with a live onboarding or u
     s.fake.patch(schema.tasks, taskId, { status: 'completed' });
 
     expect((await s.run()).outcome).toBe('applied');
-    expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: false });
+    expect(json(s.columnOf())).toEqual({ ...BASE, cliTargets: [], rtkChoiceRecorded: false });
   });
 
   it.each(['workflow', 'run_app', 'kb_author', 'plan_build'])(
@@ -1552,8 +1554,8 @@ describe('refreshProjectState: an empty state tree', () => {
   });
 });
 
-describe('syncProjectStateFromCheckout: units this release does not map', () => {
-  it('leaves the CLI set and keeps the bundle descriptors of the checkout in the base', async () => {
+describe('syncProjectStateFromCheckout: CLI members and bundle descriptors', () => {
+  it('imports the CLI set and keeps unmerged bundle descriptors in the base', async () => {
     const s = await setup();
     const bundles = [{ source: 'git:https://example.com/bundle.git', name: 'bundle' }];
     await s.putRecord({ ...record(BASE), cli: ['claude-code', 'codex'], bundles });
@@ -1562,7 +1564,8 @@ describe('syncProjectStateFromCheckout: units this release does not map', () => 
 
     expect(outcome).toBe('applied');
     const base = json(s.syncRow()?.baseSnapshot) as Json;
-    expect(base.cli).toEqual([]);
+    expect(base.cli).toEqual(['claude-code', 'codex']);
+    expect(s.columnOf()).toMatchObject({ cliTargets: ['claude-code', 'codex'] });
     expect(base.bundles).toEqual(bundles);
   });
 });
@@ -2181,7 +2184,7 @@ describe('syncProjectStateFromCheckout: an RTK choice comes only from a record t
       const { outcome } = await s.run();
 
       expect(outcome).toBe('applied');
-      expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: false });
+      expect(json(s.columnOf())).toEqual({ ...BASE, cliTargets: [], rtkChoiceRecorded: false });
       expect(repoRow(s).rtkEnabled).toBe(true);
       expect(await treeHasRtkFile(s)).toBe(false);
 
@@ -2203,7 +2206,7 @@ describe('syncProjectStateFromCheckout: an RTK choice comes only from a record t
         const first = await s.run();
 
         expect(first.outcome).toBe('applied');
-        expect(json(s.columnOf())).toEqual({ ...BASE, rtkChoiceRecorded: true });
+        expect(json(s.columnOf())).toEqual({ ...BASE, cliTargets: [], rtkChoiceRecorded: true });
         expect(repoRow(s).rtkEnabled).toBe(file);
         expect(json(s.syncRow()?.baseSnapshot)).toEqual(syncBase({ 'rtk-enabled': file }));
         expect(dirtyMarks(s)).toEqual([]);
@@ -3372,4 +3375,164 @@ describe('syncProjectStateFromCheckout: bundle descriptors', () => {
     expect(s.syncRow()?.lastError ?? null).toBeNull();
     expect(json(s.syncRow()?.baseSnapshot)).toEqual(baseWith('their-kit'));
   });
+});
+
+describe('repository CLI membership import', () => {
+  it('joins installs and preserves unknown portable members without local provider metadata', async () => {
+    const s = await setup({
+      column: { ...column(BASE), cliTargets: ['claude-code', 'future-cli'] },
+    });
+    await s.putRecord({ ...record(BASE), cli: ['codex'] });
+    await s.run();
+    expect(s.columnOf()).toMatchObject({ cliTargets: ['claude-code', 'codex', 'future-cli'] });
+    expect(s.syncRow()?.baseSnapshot).toMatchObject({ cli: ['codex'] });
+  });
+  it('legacy absence cannot erase recorded membership, but deletion from a nonempty base can', async () => {
+    const local = { ...column(BASE), cliTargets: ['claude-code', 'codex', 'future-cli'] };
+    const legacy = await setup({ column: local, sync: { base: record(BASE) } });
+    await legacy.putRecord(record(BASE));
+    await legacy.run();
+    expect(legacy.columnOf()).toMatchObject({ cliTargets: local.cliTargets });
+    const removed = await setup({
+      column: local,
+      sync: { base: { ...record(BASE), cli: local.cliTargets } },
+    });
+    await removed.putRecord({ ...record(BASE), cli: ['codex', 'future-cli'] });
+    await removed.run();
+    expect(removed.columnOf()).toMatchObject({ cliTargets: ['codex', 'future-cli'] });
+  });
+  it('an explicit local empty set is not replaced by an unchanged incoming base', async () => {
+    const s = await setup({
+      column: { ...column(BASE), cliTargets: [] },
+      sync: { base: { ...record(BASE), cli: ['claude-code'] } },
+    });
+    await s.putRecord({ ...record(BASE), cli: ['claude-code'] });
+    await s.run();
+    expect(s.columnOf()).toMatchObject({ cliTargets: [] });
+  });
+  it('a fresh clone of an empty record does not invent membership from its enabled providers', async () => {
+    const s = await setup();
+    s.fake.insert(schema.cliProviders, {
+      userId: USER,
+      name: 'codex',
+      enabled: true,
+      rulesContent: '',
+    });
+    await s.putRecord(record(BASE));
+    await s.run();
+    expect(s.columnOf()).toMatchObject({ cliTargets: [] });
+    const resolved = await resolveRenderContext(s.fake.db as unknown as Database, {
+      repositoryId: REPO,
+      userId: USER,
+      liveRows: [],
+      logger: { warn() {} },
+    });
+    expect(resolved?.renderCtx.agentTargets).toEqual([]);
+  });
+  it('a NULL column recovers existing snapshot membership before classifying it as unknown', async () => {
+    const s = await setup();
+    s.fake.insert(schema.onboardingArtifacts, {
+      repositoryId: REPO,
+      diskPath: '.claude/agents/code-reviewer.md',
+      templateId: 'agent.code-reviewer',
+      templateKind: 'agent',
+      writtenHash: 'x',
+      templateContentHash: 'x',
+      templateSchemaVersion: 1,
+      source: 'onboarding',
+      sourceStepId: '12-post-onboarding',
+      supersededAt: null,
+      generatedAt: new Date(),
+      formValuesSnapshot: { ...contextA(), cliTargets: ['claude-code', 'future-cli'] },
+    });
+    await s.putRecord(record(BASE));
+    await s.run();
+    expect(s.columnOf()).toMatchObject({ cliTargets: ['claude-code', 'future-cli'] });
+  });
+});
+
+it('a legacy foreground snapshot cannot erase authoritative CLI membership or bypass its late column fence', async () => {
+  const current = { ...column(BASE), cliTargets: ['claude-code', 'codex', 'future-cli'] };
+  const s = await setup({ column: current });
+  await s.write(contextA(), true);
+  expect(s.columnOf()).toMatchObject({ cliTargets: current.cliTargets });
+  expect(await readFile(join(s.root, STATE_DIR, 'cli/future-cli.json'), 'utf8')).toContain(
+    'future-cli',
+  );
+  const stale = await setup({ column: current });
+  let projectLocks = 0;
+  stale.hook.onLock = (key) => {
+    if (key === LOCK_KEY && ++projectLocks === 2) stale.patchColumn({ ...current, cliTargets: [] });
+  };
+  await expect(stale.write(contextA(), true)).rejects.toThrow();
+  expect(stale.columnOf()).toMatchObject({ cliTargets: [] });
+  expect(
+    Object.keys(await treeOf(stale.root)).filter((path) => path.startsWith(`${STATE_DIR}/`)),
+  ).toEqual([]);
+  const explicit = await setup({ column: { ...current, cliTargets: [] } });
+  await expect(explicit.write({ ...contextA(), cliTargets: ['codex'] }, true)).rejects.toThrow(
+    'membership changed',
+  );
+  expect(explicit.columnOf()).toMatchObject({ cliTargets: [] });
+});
+
+it('a successful writer retires removed CLI unit files only from its prior base and preserves foreign units', async () => {
+  const before = { ...record(BASE), cli: ['claude-code', 'codex', 'future-cli'] };
+  const current = { ...column(BASE), cliTargets: ['claude-code', 'future-cli'] };
+  const s = await setup({ column: current, sync: { base: before } });
+  await s.putRecord(before);
+  await s.put(`${STATE_DIR}/future/untouched.json`, '{"kept":true}\n');
+  await s.write({ ...contextA(), cliTargets: current.cliTargets }, true);
+  await expect(readFile(join(s.root, STATE_DIR, 'cli/codex.json'))).rejects.toMatchObject({
+    code: 'ENOENT',
+  });
+  expect(await readFile(join(s.root, STATE_DIR, 'cli/future-cli.json'), 'utf8')).toContain(
+    'future-cli',
+  );
+  expect(await readFile(join(s.root, STATE_DIR, 'future/untouched.json'), 'utf8')).toBe(
+    '{"kept":true}\n',
+  );
+});
+
+it('a later membership-less snapshot cannot erase older recorded zero-provider fallback ownership during sync', async () => {
+  const s = await setup();
+  const old = {
+    ...BASE,
+    enabledCliProviders: [],
+    agentTargets: [{ dir: '.claude/agents', format: 'markdown', supportsLsp: false }],
+  };
+  for (const [at, ctx, path] of [
+    [1, old, '.claude/agents/code-reviewer.md'],
+    [2, BASE, '.claude/workflow-config.json'],
+  ] as const)
+    s.fake.insert(schema.onboardingArtifacts, {
+      repositoryId: REPO,
+      diskPath: path,
+      templateId: at === 1 ? 'agent.code-reviewer' : 'workflow-config',
+      templateKind: at === 1 ? 'agent' : 'workflow-config',
+      templateSchemaVersion: 1,
+      templateContentHash: 'x',
+      writtenHash: 'x',
+      source: 'onboarding',
+      sourceStepId: '12-post-onboarding',
+      supersededAt: null,
+      generatedAt: new Date(at),
+      formValuesSnapshot: ctx,
+    });
+  s.fake.insert(schema.cliProviders, {
+    userId: USER,
+    name: 'codex',
+    enabled: true,
+    rulesContent: '',
+  });
+  await s.putRecord(record(BASE));
+  await s.run();
+  expect(s.columnOf()).toMatchObject({
+    cliTargets: [],
+    legacyAgentFallback: true,
+    agentTargets: old.agentTargets,
+  });
+  const before = s.columnOf();
+  expect((await s.run()).outcome).toBe('unchanged');
+  expect(s.columnOf()).toEqual(before);
 });

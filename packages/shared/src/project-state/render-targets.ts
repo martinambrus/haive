@@ -65,16 +65,73 @@ export function renderTargetsFor(
   return { enabledCliProviders, agentTargets };
 }
 
+/** Repository membership, independent of this install's configured or enabled providers. Unknown
+ * record names remain portable but never acquire filesystem destinations on an older install. */
+export function deriveRenderTargets(
+  cliTargets: readonly string[],
+  lspLanguages: readonly string[],
+  legacyAgentTargets?: readonly AgentRenderTarget[],
+  legacyAgentFallback = false,
+): RenderTargets & { skillDirs: string[] } {
+  const names = [...new Set(cliTargets)].filter((name): name is CliProviderName =>
+    Object.hasOwn(CLI_PROVIDER_CATALOG, name),
+  );
+  const derived = renderTargetsFor(
+    names.map((name) => ({ name, enabled: true })),
+    lspLanguages,
+  );
+  const fallback = legacyAgentTargets?.find(
+    (t) => t.dir === FALLBACK_AGENT_TARGET.dir && t.format === FALLBACK_AGENT_TARGET.format,
+  );
+  if (legacyAgentFallback && fallback && !derived.agentTargets.some((t) => t.dir === fallback.dir))
+    derived.agentTargets.push({ ...fallback });
+  return {
+    ...derived,
+    skillDirs: skillTargetDirs(names),
+  };
+}
+
+/** Explicit [] is authoritative. Legacy metadata contributes only names actually recorded,
+ * never names guessed from agent directories (several providers share those directories). */
+export function recordedCliTargets(context: {
+  cliTargets?: readonly string[];
+  enabledCliProviders?: ReadonlyArray<{ name: string }>;
+}): string[] | undefined {
+  const names = context.cliTargets ?? context.enabledCliProviders?.map((p) => p.name);
+  return names === undefined ? undefined : [...new Set(names)];
+}
+
+/** A compatibility fact, not provider membership: old 07 wrote an actual Claude-format fallback
+ * for Amp alone OR zero enabled providers. New explicit lists need the recorded marker. */
+export function hasLegacyAgentFallback(context: {
+  cliTargets?: readonly string[];
+  legacyAgentFallback?: boolean;
+  enabledCliProviders?: ReadonlyArray<{ name: string }>;
+  agentTargets?: readonly AgentRenderTarget[];
+}): boolean {
+  if (context.legacyAgentFallback !== undefined) return context.legacyAgentFallback;
+  if (context.cliTargets !== undefined) return false;
+  const actual = context.agentTargets?.some(
+    (t) => t.dir === FALLBACK_AGENT_TARGET.dir && t.format === FALLBACK_AGENT_TARGET.format,
+  );
+  return (
+    actual === true &&
+    deriveRenderTargets(recordedCliTargets(context) ?? [], []).agentTargets.length === 0
+  );
+}
+
 /** Repo-relative skills directories to write to: one per unique `projectSkillsDir` across the
  *  enabled providers, else `fallback`. Bundle expansion takes the empty default, so it renders
  *  nothing rather than writing to a directory no CLI asked for. */
 export function skillTargetDirs(
-  enabledNames: readonly CliProviderName[],
+  enabledNames: readonly string[],
   fallback: string[] = [],
 ): string[] {
   const dirs = new Set<string>();
   for (const name of enabledNames) {
-    const dir = CLI_PROVIDER_CATALOG[name]?.projectSkillsDir;
+    const dir = Object.hasOwn(CLI_PROVIDER_CATALOG, name)
+      ? CLI_PROVIDER_CATALOG[name as CliProviderName].projectSkillsDir
+      : undefined;
     if (dir) dirs.add(dir);
   }
   return dirs.size > 0 ? Array.from(dirs) : fallback;
@@ -96,14 +153,27 @@ export function shouldEmitAgentsReadme(target: { dir: string }): boolean {
 }
 
 export type AgentTargetsOrigin =
-  | { from: 'column'; agentTargets?: readonly AgentRenderTarget[]; lspLanguages: readonly string[] }
+  | {
+      from: 'column';
+      cliTargets?: readonly string[];
+      legacyAgentFallback?: boolean;
+      agentTargets?: readonly AgentRenderTarget[];
+      lspLanguages: readonly string[];
+    }
   | {
       from: 'snapshot';
+      cliTargets?: readonly string[];
+      legacyAgentFallback?: boolean;
       agentTargets?: readonly AgentRenderTarget[];
       lspLanguages: readonly string[];
     }
   | { from: 'blank' }
-  | { from: 'onboarding'; agentTargets?: readonly AgentRenderTarget[] };
+  | {
+      from: 'onboarding';
+      cliTargets?: readonly string[];
+      legacyAgentFallback?: boolean;
+      agentTargets?: readonly AgentRenderTarget[];
+    };
 
 /** The agent targets 01 renders with, by where its render context comes from. A column holds its
  *  stored targets, [] included, else the user's enabled CLIs complete it; a snapshot that holds
@@ -113,6 +183,13 @@ export function originAgentTargets(
   origin: AgentTargetsOrigin,
   providerRows: ReadonlyArray<{ name: CliProviderName; enabled: boolean }>,
 ): AgentRenderTarget[] {
+  if ('cliTargets' in origin && origin.cliTargets !== undefined)
+    return deriveRenderTargets(
+      origin.cliTargets,
+      'lspLanguages' in origin ? origin.lspLanguages : [],
+      origin.agentTargets,
+      origin.legacyAgentFallback,
+    ).agentTargets;
   switch (origin.from) {
     case 'blank':
       return renderTargetsFor(providerRows, []).agentTargets;

@@ -6,7 +6,11 @@ import type { DetectResult, FormSchema } from '@haive/shared';
 import { KB_DIR } from '@haive/shared/knowledge-paths';
 import { normalizeContent, sha256Hex, skillEntrySchema } from '@haive/shared';
 import type { AgentMiningDispatch, StepContext, StepDefinition } from '../../step-definition.js';
-import { listFilesMatching, loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
+import {
+  listFilesMatching,
+  loadPreviousStepOutput,
+  resolveTaskSkillTargetDirs,
+} from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
 import { yamlScalar } from '../_yaml-scalar.js';
@@ -1060,9 +1064,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const framework = envData?.project?.framework ?? null;
     const language = envData?.project?.primaryLanguage ?? null;
 
-    const skillTargetDirs = await resolveSkillTargetDirs(ctx.db, ctx.userId, [
-      DEFAULT_PROJECT_SKILLS_DIR,
-    ]);
+    const skillTargetDirs = await resolveTaskSkillTargetDirs(ctx, [DEFAULT_PROJECT_SKILLS_DIR]);
 
     await ctx.emitProgress('Listing existing knowledge base...');
     const kbFiles = await listKbFiles(ctx.repoPath);

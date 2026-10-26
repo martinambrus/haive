@@ -1,3 +1,4 @@
+import { seedRepositoryCliTargets } from './project-state/cli-targets-backfill.js';
 import { isDeepStrictEqual } from 'node:util';
 import {
   and,
@@ -139,6 +140,7 @@ const DATA_MIGRATIONS: DataMigration[] = [
   // boot for the whole rewrite; every examined row is written (an unobservable one as
   // `coverage: 'none'`), which is what makes the selection shrink to nothing.
   { id: 'backfillToolUsage', kind: 'convergent', run: backfillToolUsageAtBoot },
+  { id: 'seedRepositoryCliTargets', kind: 'convergent', run: seedRepositoryCliTargets },
   { id: 'recomputeSyncedApplicableSets', kind: 'convergent', run: recomputeSyncedApplicableSets },
   { id: 'copySecretLikeProviderEnv', kind: 'convergent', run: copySecretLikeProviderEnv },
   // After the schema ensure that adds `embed_kind`, which `withGlobalKb` runs at first use.

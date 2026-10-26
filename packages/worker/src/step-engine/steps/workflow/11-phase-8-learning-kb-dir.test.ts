@@ -32,7 +32,7 @@ vi.mock('../onboarding/_helpers.js', async (importOriginal) => ({
       : stepId === '10-gate-3-commit'
         ? { output: stubs.commitOutput }
         : null,
-  resolveSkillTargetDirs: async () => [],
+  resolveTaskSkillTargetDirs: async () => [],
 }));
 vi.mock('../../../repo/git-workspace.js', () => ({ gitWorkspaceStatus: async () => 'none' }));
 vi.mock('./_task-history-digest.js', () => ({

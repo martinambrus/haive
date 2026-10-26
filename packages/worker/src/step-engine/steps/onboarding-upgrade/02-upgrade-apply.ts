@@ -1,3 +1,4 @@
+import { importRulesFilesFor } from '@haive/shared/rules-files';
 import {
   decodeUtf8Strict,
   errno,
@@ -1546,7 +1547,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // Not an artifact, but without its `@AGENTS.md` line a claude-family CLI never loads AGENTS.md.
     const rulesImportStubs = await restoreRulesImportStubs(
       ctx.repoPath,
-      await enabledImportRulesFiles(ctx.db, ctx.userId),
+      plan.renderCtxSnapshot.cliTargets !== undefined
+        ? importRulesFilesFor(plan.renderCtxSnapshot.cliTargets as string[])
+        : await enabledImportRulesFiles(ctx.db, ctx.userId),
     );
     for (const stub of rulesImportStubs) {
       if (stub.result === 'created' || stub.result === 'appended') writtenPaths.push(stub.file);

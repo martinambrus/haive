@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { cliProviderNameSchema } from '../schemas/cli-providers.js';
 import { newestArtifactsFirst } from '../templates/manifest.js';
+import { recordedCliTargets } from './render-targets.js';
 import { renderSchema, type ProjectRender } from './record.js';
 
 export const agentTargetSchema = z.strictObject({
@@ -19,6 +20,8 @@ const enabledCliProviderSchema = z.strictObject({
  *  (absent when filled from a record alone) and whether `rtkEnabled` was chosen, not defaulted. */
 export const renderContextColumnSchema = z.strictObject({
   ...renderSchema.shape,
+  cliTargets: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*$/)).optional(),
+  legacyAgentFallback: z.boolean().optional(),
   agentTargets: z.array(agentTargetSchema).optional(),
   enabledCliProviders: z.array(enabledCliProviderSchema).optional(),
   rtkEnabled: z.boolean().optional(),
@@ -166,7 +169,31 @@ export function renderContextProviderNames(
   column: RenderContextColumn,
   enabledNames: readonly string[],
 ): string[] {
+  if (column.cliTargets !== undefined) return [...column.cliTargets];
   return column.enabledCliProviders
     ? column.enabledCliProviders.map((p) => p.name)
     : [...enabledNames];
+}
+
+/** Newer snapshots may omit membership without removing it. Stop on a recorded [] and never
+ * consult this install's providers; context/RTK origin is selected separately by pickSnapshotRow. */
+export interface RecoveredCliMembership {
+  cliTargets: string[];
+  snapshot: Omit<RenderContextColumn, 'rtkChoiceRecorded'>;
+}
+export function recoverCliMembership(
+  rows: ReadonlyArray<{ id: string; generatedAt: Date | null; formValuesSnapshot: unknown }>,
+): RecoveredCliMembership | undefined {
+  for (const row of newestArtifactsFirst(rows)) {
+    const parsed = renderContextSnapshotSchema.safeParse(row.formValuesSnapshot);
+    if (!parsed.success) continue;
+    const names = recordedCliTargets(parsed.data);
+    if (names !== undefined) return { cliTargets: names, snapshot: parsed.data };
+  }
+  return undefined;
+}
+export function recoverCliTargets(
+  rows: ReadonlyArray<{ id: string; generatedAt: Date | null; formValuesSnapshot: unknown }>,
+): string[] | undefined {
+  return recoverCliMembership(rows)?.cliTargets;
 }

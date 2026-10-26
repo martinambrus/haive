@@ -1,4 +1,6 @@
 import { isImportMarker } from './import-marker.js';
+import { isRenderContextSnapshot } from './render-context.js';
+import { deriveRenderTargets } from './render-targets.js';
 import { rendersAt, type AgentRenderTarget } from './render-targets.js';
 
 const RELEASE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -35,6 +37,7 @@ export interface ForeignCandidate {
   haiveVersion: string | null;
   /** A custom item's own id, which names its file or directory; read off the path when absent. */
   specId?: string;
+  formValuesSnapshot?: unknown;
 }
 
 export interface ForeignContext {
@@ -76,7 +79,34 @@ export function foreignReason(
   if (context.agentTargets !== null && TARGETED_KINDS.has(row.templateKind)) {
     const specId = row.specId ?? specIdFromPath(row, context.skillDirs);
     const targets = { agentTargets: context.agentTargets, skillDirs: context.skillDirs };
-    if (!rendersAt({ ...row, specId }, targets)) return 'not-rendered';
+    if (!rendersAt({ ...row, specId }, targets)) {
+      const snapshot = row.formValuesSnapshot;
+      if (isRenderContextSnapshot(snapshot)) {
+        const prior = snapshot as {
+          cliTargets?: string[];
+          lspLanguages: string[];
+          agentTargets?: AgentRenderTarget[];
+          legacyAgentFallback?: boolean;
+        };
+        // Only the new explicit repository contract can authorize retiring imported targets.
+        if (prior.cliTargets !== undefined) {
+          const before = deriveRenderTargets(
+            prior.cliTargets,
+            prior.lspLanguages,
+            prior.agentTargets,
+            prior.legacyAgentFallback,
+          );
+          if (
+            rendersAt(
+              { ...row, specId: row.specId ?? specIdFromPath(row, before.skillDirs) },
+              before,
+            )
+          )
+            return null;
+        }
+      }
+      return 'not-rendered';
+    }
   }
   return null;
 }

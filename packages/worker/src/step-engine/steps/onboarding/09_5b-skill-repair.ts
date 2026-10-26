@@ -11,7 +11,7 @@ import {
   shouldRetryMiningTerminalFailure,
   type MinedAgentOutcome,
 } from '../../mining-failure.js';
-import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
+import { loadPreviousStepOutput, resolveTaskSkillTargetDirs } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
 import {
@@ -319,9 +319,7 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
   },
 
   async detect(ctx: StepContext): Promise<SkillRepairDetect> {
-    const skillTargetDirs = await resolveSkillTargetDirs(ctx.db, ctx.userId, [
-      DEFAULT_PROJECT_SKILLS_DIR,
-    ]);
+    const skillTargetDirs = await resolveTaskSkillTargetDirs(ctx, [DEFAULT_PROJECT_SKILLS_DIR]);
     const bundleSkillIds = await loadBundleSkillIds(ctx);
     const cap = await resolveParallelCap();
 

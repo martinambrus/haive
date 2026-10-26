@@ -1,7 +1,15 @@
 import { Hono } from 'hono';
-import { and, desc, eq, isNull, or } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { and, desc, eq, isNull, or, sql, inArray } from 'drizzle-orm';
+import { isRootClaimLive, lockRepositoryTasksKey, schema } from '@haive/database';
+import { z } from 'zod';
 import {
+  deriveRenderTargets,
+  readRenderContextColumn,
+  recordedCliTargets,
+  sameValue,
+} from '@haive/shared/project-state';
+import {
+  CHECKOUT_HOLDING_TASK_STATUSES,
   LSP_KEY_SET,
   LSP_SERVER_OPTIONS,
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
@@ -36,6 +44,7 @@ import {
   normalizeReviewDimensionIds,
 } from '@haive/shared/review';
 import { getDb } from '../db.js';
+import { boundedLockWait } from '../lib/repository-busy.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -432,6 +441,7 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
     columns: {
       id: true,
+      renderContext: true,
       rtkEnabled: true,
       rtkVersion: true,
       lspServers: true,
@@ -487,6 +497,10 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
 
   return c.json({
     repositoryId,
+    cliTargets: (() => {
+      const read = readRenderContextColumn(repo.renderContext);
+      return read.kind === 'column' ? (recordedCliTargets(read.column) ?? []) : [];
+    })(),
     rtkEnabled: repo.rtkEnabled,
     rtkVersion: repo.rtkVersion,
     rtkVersions: versionsFor('rtk'),
@@ -918,4 +932,93 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   } finally {
     await lock?.release();
   }
+});
+
+/** A repository action, never inferred from a user's enabled providers or a partial tooling save.
+ * Files remain in place; the next upgrade previews obsolete files and the usual Keep choices. */
+toolingUpgradeRoutes.post('/:id/cli-targets/remove', async (c) => {
+  const body = z
+    .strictObject({
+      providers: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*$/)).min(1),
+      expectedTargets: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*$/)),
+    })
+    .safeParse(await c.req.json().catch(() => null));
+  if (!body.success) throw new HttpError(400, 'Choose repository CLIs to remove.');
+  const db = getDb();
+  const repositoryId = c.req.param('id');
+  const cliTargets = await db.transaction(async (tx) => {
+    const [repo] = await boundedLockWait(tx, async () => {
+      await lockRepositoryTasksKey(tx, repositoryId);
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${repositoryId}`}, 0))`,
+      );
+      return tx
+        .select({
+          renderContext: schema.repositories.renderContext,
+          claimedAt: schema.repositories.rootClaimedAt,
+        })
+        .from(schema.repositories)
+        .where(
+          and(
+            eq(schema.repositories.id, repositoryId),
+            eq(schema.repositories.userId, c.get('userId')),
+          ),
+        )
+        .for('update');
+    });
+    if (!repo) throw new HttpError(404, 'Repository not found');
+    if (isRootClaimLive(repo.claimedAt))
+      throw new HttpError(409, 'Repository checkout is busy. Try again after it finishes.');
+    const [holder] = await tx
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(
+        and(
+          eq(schema.tasks.repositoryId, repositoryId),
+          inArray(schema.tasks.type, ['onboarding', 'onboarding_upgrade']),
+          inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
+          isNull(schema.tasks.deadAt),
+        ),
+      )
+      .limit(1);
+    if (holder)
+      throw new HttpError(
+        409,
+        'Finish the current onboarding or upgrade before removing a repository CLI.',
+      );
+    const read = readRenderContextColumn(repo.renderContext);
+    if (read.kind !== 'column')
+      throw new HttpError(409, 'Upgrade this repository before changing its maintained CLIs.');
+    const before = recordedCliTargets(read.column);
+    if (
+      before === undefined ||
+      !sameValue([...new Set(before)].sort(), [...new Set(body.data.expectedTargets)].sort())
+    )
+      throw new HttpError(409, 'Repository CLIs changed. Reload before removing one.');
+    const [outbox] = await tx
+      .select({ intent: schema.projectStateOutbox.writeIntent })
+      .from(schema.projectStateOutbox)
+      .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+    if (outbox?.intent)
+      throw new HttpError(409, 'Repository state is being saved. Try again after it finishes.');
+    const next = before.filter((name) => !body.data.providers.includes(name));
+    if (next.length === before.length) return before;
+    const targets = deriveRenderTargets(next, read.column.lspLanguages);
+    await tx
+      .update(schema.repositories)
+      .set({
+        renderContext: {
+          ...read.column,
+          cliTargets: next,
+          legacyAgentFallback: false,
+          agentTargets: targets.agentTargets,
+          enabledCliProviders: targets.enabledCliProviders,
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.repositories.id, repositoryId));
+    await markProjectStateDirty(tx, repositoryId);
+    return next;
+  });
+  return c.json({ cliTargets });
 });

@@ -296,6 +296,7 @@ describe('GRID: the contexts 01 renders from, in full', () => {
       live: false,
     });
     expect(recorded.renderCtxSnapshot).toEqual({
+      cliTargets: ['claude-code'],
       projectInfo: { name: 'history-recorded' },
       framework: 'history-recorded',
       acceptedAgentIds: ['code-reviewer', 'security-auditor'],
@@ -332,6 +333,7 @@ describe('GRID: the contexts 01 renders from, in full', () => {
     for (const live of [true, false]) {
       const detected = await contextOf({ rows: 'none', history: 'none', source: 'blank', live });
       expect(detected.renderCtxSnapshot).toEqual({
+        cliTargets: ['claude-code', 'codex'],
         projectInfo: {
           name: 'acme',
           framework: null,
@@ -372,6 +374,7 @@ describe('GRID: the contexts 01 renders from, in full', () => {
       live: true,
     });
     expect(Object.keys(detected).sort()).toEqual([
+      'cliAdditions',
       'counts',
       'currentTemplateSetHash',
       'entries',
@@ -380,6 +383,7 @@ describe('GRID: the contexts 01 renders from, in full', () => {
       'ranBackfill',
       'renderContextColumn',
       'renderCtxSnapshot',
+      'repositoryCliTargets',
       'repositoryId',
       'rtkBlockLeftovers',
       'rtkBlockRestorable',
