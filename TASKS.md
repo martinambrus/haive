@@ -136,9 +136,9 @@ settings/review-watermarks.json, descendant wins via merge-base --is-ancestor; _
 
 ### T266 · FNF[record-writer] · 04's set and record writes run unfenced (+5)
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-26T06:08Z
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-25T20:30Z · last: 2026-10-26T06:37Z
 
-Codex progress 2026-10-26T06:08Z: ONLY remaining task before user-requested PAUSE; 39 done, 1 in progress, 100 open. Recovered after machine reboot; edits preserved. PR #931 HEAD a3904d44c fixes the final public-source disappearance classification after the six-path crash-recovery protocol. Recovered PostgreSQL log completed 19 targeted tests; fresh types, 31 helper tests, formatting, compiled equality and independent actual-rename probe pass. Fresh independent review and exact-head CI/bot gates running; merge and main CI remain required. T412/T416/T303/T413 completed; no further claims.
+Codex progress 2026-10-26T06:37Z: ONLY remaining task before user-requested PAUSE; 39 done, 1 in progress, 100 open. PR #931 merged e25d26193 after exact-head 12 passing checks, clean automated and fresh independent reviews, and six resolved review threads. Main CI 40280294006 is running (5/8 passed); task completion waits for all eight. Migration 0213 applied and checksum verified; library rebuild and new exports verified; API/web 200 and worker ready. Merged worktree/local branch cleaned, evidence retained. T412/T416/T303/T413 completed; no further claims.
 
 All PRE-EXISTING. Items 4, 7, 8 moved to T310.
 
