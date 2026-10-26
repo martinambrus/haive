@@ -13,10 +13,16 @@ import {
   isLockNotAvailable,
   type Database,
 } from '@haive/database';
-import { emptyProjectState, portableRender, renderProjectState } from '@haive/shared/project-state';
+import {
+  emptyProjectState,
+  portableRender,
+  renderProjectState,
+  readRenderContextColumn,
+} from '@haive/shared/project-state';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { seedRepositoryCliTargets } from '../src/project-state/cli-targets-backfill.js';
 import { refreshProjectState } from '../src/project-state/refresh.js';
+import { writeProjectStateRecord, renderContextColumnFor } from '../src/project-state/write.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import {
   buildUpgradePlan,
@@ -120,6 +126,415 @@ async function fixture(column: Column | null = { ...legacy(), rtkChoiceRecorded:
     readFile(join(root, `.haive-data/state/cli/${name}.json`), 'utf8').catch(() => null);
   return { userId, repo: repo!, root, row, outbox, base, sync, refresh, cliBytes };
 }
+
+async function captureLegacyState(s: Awaited<ReturnType<typeof fixture>>) {
+  const files: Record<string, string> = {};
+  const walk = async (dir = ''): Promise<void> => {
+    for (const entry of await readdir(join(s.root, dir), { withFileTypes: true })) {
+      if (entry.name === '.git') continue;
+      const rel = dir ? `${dir}/${entry.name}` : entry.name;
+      files[rel] = entry.isDirectory() ? 'directory' : await readFile(join(s.root, rel), 'utf8');
+      if (entry.isDirectory()) await walk(rel);
+    }
+  };
+  await walk();
+  return {
+    files,
+    repo: await s.row(),
+    base: await s.base(),
+    outbox: await s.outbox(),
+    ledger: await db!
+      .select()
+      .from(schema.onboardingArtifacts)
+      .where(eq(schema.onboardingArtifacts.repositoryId, s.repo.id)),
+    head: git(s.root, 'rev-parse', 'HEAD'),
+    index: git(s.root, 'status', '--porcelain'),
+  };
+}
+
+describe.skipIf(!url)('legacy own-result admission', () => {
+  it('keeps genuinely unknown writer provenance unchanged without inferring membership', async () => {
+    const original = {
+      projectInfo: { name: 'deferred-legacy' },
+      framework: null,
+      acceptedAgentIds: [],
+      customAgentSpecs: [],
+      lspLanguages: [],
+      rtkChoiceRecorded: false,
+    };
+    const { rtkChoiceRecorded: _flag, ...portable } = original;
+    const caller = { ...portable, agentTargets: [] };
+    const s = await fixture(original as Column);
+    const expectedColumns = [original, renderContextColumnFor(caller as never, false, original)];
+    const write = () =>
+      writeProjectStateRecord(db!, {
+        repositoryId: s.repo.id,
+        repoPath: s.root,
+        context: caller as never,
+        rtkChoiceRecorded: false,
+        expectedColumns,
+      });
+    await write();
+    const own = (await s.row()).renderContext;
+    expect(own).toEqual({ ...caller, rtkChoiceRecorded: false });
+    expect(own).not.toHaveProperty('cliTargets');
+    expect(own).not.toHaveProperty('enabledCliProviders');
+    expect(await s.cliBytes('claude-code')).toBeNull();
+    await write();
+    expect((await s.row()).renderContext).toEqual(own);
+  }, 60_000);
+
+  it('completes recorded caller membership when current and history are unresolved, then retries', async () => {
+    const original = {
+      projectInfo: { name: 'deferred-legacy' },
+      framework: null,
+      acceptedAgentIds: [],
+      customAgentSpecs: [],
+      lspLanguages: [],
+      rtkChoiceRecorded: false,
+    };
+    expect(readRenderContextColumn(original).kind).toBe('column');
+    const s = await fixture(original as Column);
+    await db!.insert(schema.cliProviders).values({
+      userId: s.userId,
+      name: 'claude-code',
+      label: 'synthetic legacy resolver metadata',
+      enabled: true,
+      rulesContent: '',
+    });
+    const [task] = await db!
+      .insert(schema.tasks)
+      .values({
+        userId: s.userId,
+        repositoryId: s.repo.id,
+        type: 'onboarding_upgrade',
+        title: 'recorded caller completion',
+        status: 'waiting_user',
+      })
+      .returning();
+    const [planStep] = await db!
+      .insert(schema.taskSteps)
+      .values({
+        taskId: task!.id,
+        stepId: '01-upgrade-plan',
+        stepIndex: 1,
+        title: 'Plan',
+        status: 'running',
+      })
+      .returning();
+    const [step] = await db!
+      .insert(schema.taskSteps)
+      .values({
+        taskId: task!.id,
+        stepId: '02-upgrade-apply',
+        stepIndex: 2,
+        title: 'Apply',
+        status: 'waiting_form',
+      })
+      .returning();
+    const ctx = {
+      db: db!,
+      userId: s.userId,
+      taskId: task!.id,
+      taskStepId: step!.id,
+      repoPath: s.root,
+      workspacePath: s.root,
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+      throwIfCancelled() {},
+    } as unknown as StepContext;
+    const planCtx = { ...ctx, taskStepId: planStep!.id };
+    const detected = await upgradePlanStep.detect!(planCtx);
+    const planned = await upgradePlanStep.apply(planCtx, {
+      detected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    // This is the real approved legacy resolver completion, not an injected snapshot.
+    expect(planned.renderContextColumn).toEqual(original);
+    expect(planned.renderCtxSnapshot.cliTargets).toBeUndefined();
+    expect(
+      (planned.renderCtxSnapshot.enabledCliProviders as Array<{ name: string }>).map((p) => p.name),
+    ).toEqual(['claude-code']);
+    expect(
+      await db!
+        .select()
+        .from(schema.onboardingArtifacts)
+        .where(eq(schema.onboardingArtifacts.repositoryId, s.repo.id)),
+    ).toEqual([]);
+    await db!
+      .update(schema.taskSteps)
+      .set({ output: { ...planned }, status: 'done' })
+      .where(eq(schema.taskSteps.id, planStep!.id));
+    const persisted = await upgradeApplyStep.detect!(ctx);
+    const apply = () =>
+      upgradeApplyStep.apply(ctx, {
+        detected: persisted,
+        formValues: {},
+        iteration: 0,
+        previousIterations: [],
+      });
+    expect((await apply()).recordWrite).toBe('written');
+    const own = (await s.row()).renderContext;
+    expect.soft(own).toMatchObject({ cliTargets: ['claude-code'] });
+    expect.soft(await s.base()).toMatchObject({ cli: ['claude-code'] });
+    expect.soft(await s.cliBytes('claude-code')).not.toBeNull();
+    expect(
+      await db!
+        .select()
+        .from(schema.onboardingArtifacts)
+        .where(eq(schema.onboardingArtifacts.repositoryId, s.repo.id)),
+    ).toEqual([]);
+    expect((await apply()).recordWrite).toBe('written');
+    expect((await s.row()).renderContext).toEqual(own);
+  }, 60_000);
+
+  it.each([
+    { label: 'NULL-original Claude', originalNull: true, names: ['claude-code'], fallback: false },
+    { label: 'recorded Amp fallback', originalNull: false, names: ['amp'], fallback: true },
+    { label: 'recorded zero-provider fallback', originalNull: false, names: [], fallback: true },
+  ])(
+    'permits matching $label and its exact retry without a replan',
+    async (variant) => {
+      const original = variant.originalNull
+        ? null
+        : { ...legacy(variant.names), rtkChoiceRecorded: false };
+      const s = await fixture(original);
+      const [task] = await db!
+        .insert(schema.tasks)
+        .values({
+          userId: s.userId,
+          repositoryId: s.repo.id,
+          type: 'onboarding_upgrade',
+          title: 'matching legacy retry',
+          status: 'waiting_user',
+        })
+        .returning();
+      const [step] = await db!
+        .insert(schema.taskSteps)
+        .values({
+          taskId: task!.id,
+          stepId: '02-upgrade-apply',
+          stepIndex: 2,
+          title: 'Apply',
+          status: 'waiting_form',
+        })
+        .returning();
+      await db!.insert(schema.onboardingArtifacts).values({
+        userId: s.userId,
+        repositoryId: s.repo.id,
+        taskId: task!.id,
+        diskPath: '.claude/workflow-config.json',
+        templateId: 'workflow-config',
+        templateKind: 'workflow-config',
+        templateSchemaVersion: 1,
+        templateContentHash: '0'.repeat(64),
+        writtenHash: '0'.repeat(64),
+        source: 'onboarding',
+        sourceStepId: '12-post-onboarding',
+        formValuesSnapshot: legacy(variant.names),
+      });
+      const ctx = {
+        db: db!,
+        userId: s.userId,
+        taskId: task!.id,
+        taskStepId: step!.id,
+        repoPath: s.root,
+        workspacePath: s.root,
+        logger: { info() {}, warn() {}, error() {}, debug() {} },
+        throwIfCancelled() {},
+      } as unknown as StepContext;
+      const generated = await buildUpgradePlan(ctx);
+      await db!.insert(schema.taskSteps).values({
+        taskId: task!.id,
+        stepId: '01-upgrade-plan',
+        stepIndex: 1,
+        title: 'Matching legacy plan',
+        status: 'done',
+        output: {
+          ...generated,
+          renderCtxSnapshot: legacy(variant.names),
+          renderContextColumn: original,
+          backfilledRows: 0,
+        },
+      });
+      const persisted = await upgradeApplyStep.detect!(ctx);
+      const apply = () =>
+        upgradeApplyStep.apply(ctx, {
+          detected: persisted,
+          formValues: {},
+          iteration: 0,
+          previousIterations: [],
+        });
+      expect((await apply()).recordWrite).toBe('written');
+      const own = (await s.row()).renderContext;
+      expect(own).toEqual({
+        ...legacy(variant.names),
+        cliTargets: variant.names,
+        rtkChoiceRecorded: false,
+        ...(variant.fallback ? { legacyAgentFallback: true } : {}),
+      });
+      expect((await apply()).recordWrite).toBe('written');
+      expect((await s.row()).renderContext).toEqual(own);
+    },
+    60_000,
+  );
+
+  it.each([
+    {
+      label: 'legacy caller metadata differs from its original column',
+      originalNull: false,
+      originalNames: ['claude-code'],
+      planned: ['amp'],
+      recovered: ['claude-code'],
+    },
+    {
+      label: 'NULL original with newer members',
+      originalNull: true,
+      planned: ['claude-code'],
+      recovered: ['codex', 'future-cli'],
+    },
+    {
+      label: 'NULL original with authoritative empty history',
+      originalNull: true,
+      planned: ['claude-code'],
+      recovered: [],
+    },
+    {
+      label: 'Amp with same-name explicit fallback clearing',
+      originalNull: false,
+      planned: ['amp'],
+      recovered: ['amp'],
+    },
+    {
+      label: 'zero providers with explicit fallback clearing',
+      originalNull: false,
+      planned: [],
+      recovered: [],
+    },
+  ])(
+    'refuses $label before writes, then replan and exact retry converge',
+    async (variant) => {
+      const original = variant.originalNull
+        ? null
+        : { ...legacy(variant.originalNames ?? variant.planned), rtkChoiceRecorded: false };
+      const s = await fixture(original);
+      await writeFile(join(s.root, 'AGENTS.md'), '# Personal rules\n');
+      const [task] = await db!
+        .insert(schema.tasks)
+        .values({
+          userId: s.userId,
+          repositoryId: s.repo.id,
+          type: 'onboarding_upgrade',
+          title: 'legacy own-result admission',
+          status: 'waiting_user',
+        })
+        .returning();
+      const [step] = await db!
+        .insert(schema.taskSteps)
+        .values({
+          taskId: task!.id,
+          stepId: '02-upgrade-apply',
+          stepIndex: 2,
+          title: 'Apply',
+          status: 'waiting_form',
+        })
+        .returning();
+      await db!.insert(schema.onboardingArtifacts).values({
+        userId: s.userId,
+        repositoryId: s.repo.id,
+        taskId: task!.id,
+        diskPath: '.claude/workflow-config.json',
+        templateId: 'workflow-config',
+        templateKind: 'workflow-config',
+        templateSchemaVersion: 1,
+        templateContentHash: '0'.repeat(64),
+        writtenHash: '0'.repeat(64),
+        source: 'onboarding',
+        sourceStepId: '12-post-onboarding',
+        formValuesSnapshot: {
+          ...legacy(variant.planned),
+          cliTargets: variant.recovered,
+          agentTargets: [],
+        },
+      });
+      const ctx = {
+        db: db!,
+        userId: s.userId,
+        taskId: task!.id,
+        taskStepId: step!.id,
+        repoPath: s.root,
+        workspacePath: s.root,
+        logger: { info() {}, warn() {}, error() {}, debug() {} },
+        throwIfCancelled() {},
+      } as unknown as StepContext;
+      const generated = await buildUpgradePlan(ctx);
+      const [planStep] = await db!
+        .insert(schema.taskSteps)
+        .values({
+          taskId: task!.id,
+          stepId: '01-upgrade-plan',
+          stepIndex: 1,
+          title: 'Persisted legacy plan',
+          status: 'done',
+          output: {
+            ...generated,
+            renderCtxSnapshot: legacy(variant.planned),
+            renderContextColumn: original,
+            backfilledRows: 0,
+          },
+        })
+        .returning();
+      const persisted = await upgradeApplyStep.detect!(ctx);
+      expect(persisted.renderCtxSnapshot.cliTargets).toBeUndefined();
+      expect(persisted.renderContextColumn).toEqual(original);
+      const before = await captureLegacyState(s);
+      await expect
+        .soft(
+          upgradeApplyStep.apply(ctx, {
+            detected: persisted,
+            formValues: {},
+            iteration: 0,
+            previousIterations: [],
+          }),
+        )
+        .rejects.toThrow('plan no longer holds');
+      expect.soft(await captureLegacyState(s)).toEqual(before);
+
+      const detected = await upgradePlanStep.detect!(ctx);
+      const replanned = await upgradePlanStep.apply(ctx, {
+        detected,
+        formValues: { addCliTargets: [] },
+        iteration: 0,
+        previousIterations: [],
+      });
+      expect(replanned.renderCtxSnapshot.cliTargets).toEqual(variant.recovered);
+      expect(replanned.renderCtxSnapshot.legacyAgentFallback).toBeUndefined();
+      if (variant.recovered.every((name) => name === 'amp'))
+        expect(replanned.renderCtxSnapshot.agentTargets).toEqual([]);
+      await db!
+        .update(schema.taskSteps)
+        .set({ output: { ...replanned } })
+        .where(eq(schema.taskSteps.id, planStep!.id));
+      const resolved = await upgradeApplyStep.detect!(ctx);
+      const apply = () =>
+        upgradeApplyStep.apply(ctx, {
+          detected: resolved,
+          formValues: {},
+          iteration: 0,
+          previousIterations: [],
+        });
+      expect((await apply()).recordWrite).toBe('written');
+      const own = (await s.row()).renderContext;
+      expect(own).toMatchObject({ cliTargets: variant.recovered });
+      expect((own as Column).legacyAgentFallback).toBeUndefined();
+      expect((await apply()).recordWrite).toBe('written');
+      expect((await s.row()).renderContext).toEqual(own);
+      expect((await s.row()).rtkEnabled).toBe(false);
+    },
+    60_000,
+  );
+});
 
 describe.skipIf(!url)('deferred legacy membership PostgreSQL', () => {
   it('refuses a mixed-provenance legacy 02 before writes, then a real replan and exact retry converge', async () => {

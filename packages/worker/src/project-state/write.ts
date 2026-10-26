@@ -187,8 +187,19 @@ export function failIfColumnStale(err: unknown): void {
   if (err instanceof ProjectStateWriteError && err.columnStale) throw err;
 }
 
+/** Current explicit membership, then strict history/current legacy metadata, then recorded caller
+ * provenance only while both are genuinely unknown. Never consult local provider configuration. */
+export function completeWriterCliMembership(
+  caller: RenderContextColumn,
+  maintained: RenderContextColumn,
+  recovered?: ReturnType<typeof recoverCliMembership>,
+): RenderContextColumn {
+  const completed = completeRecordedCliMembership(maintained, recovered);
+  return completed.cliTargets === undefined ? completeRecordedCliMembership(caller) : completed;
+}
+
 /** The membership part of the admitted write, including recorded legacy fallback provenance. */
-function inheritCliMembership(
+export function inheritCliMembership(
   column: RenderContextColumn,
   maintained: RenderContextColumn,
 ): RenderContextColumn {
@@ -225,9 +236,9 @@ export function renderContextColumnFor(
   // Ordinary writer input keeps absence intact until the locked admission gate below.
   if (column.cliTargets !== undefined) return column;
   if (prior.kind === 'column')
-    return inheritCliMembership(column, completeRecordedCliMembership(prior.column));
+    return inheritCliMembership(column, completeWriterCliMembership(column, prior.column));
   return repositoryColumn === null
-    ? inheritCliMembership(column, completeRecordedCliMembership(column))
+    ? inheritCliMembership(column, completeWriterCliMembership(column, column))
     : column;
 }
 
@@ -751,7 +762,8 @@ export async function writeProjectStateColumn(
                   ),
                 )
             : [];
-        const completed = completeRecordedCliMembership(
+        const completed = completeWriterCliMembership(
+          column,
           current.kind === 'column' ? current.column : column,
           recoverCliMembership(rows),
         );

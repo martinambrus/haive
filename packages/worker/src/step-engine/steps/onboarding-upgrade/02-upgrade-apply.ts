@@ -67,6 +67,8 @@ import {
   refuseReleasedCheckout,
   ProjectStateWriteError,
   renderContextColumnFor,
+  inheritCliMembership,
+  completeWriterCliMembership,
   writeProjectStateRecord,
 } from '../../../project-state/write.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -815,13 +817,13 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     const plan = args.detected;
     const original = readRenderContextColumn(plan.renderContextColumn);
     if (
+      plan.renderContextColumn !== undefined &&
       plan.renderCtxSnapshot.cliTargets === undefined &&
-      original.kind === 'column' &&
-      original.column.cliTargets === undefined
+      (original.kind !== 'column' || original.column.cliTargets === undefined)
     ) {
-      // A pre-membership plan cannot identify its own eventual result if newer recorded members
-      // differ from the targets it planned. Refuse before ANY product or ledger writes and let01
-      // capture that membership explicitly; never widen the old plan's exact column allowlist.
+      // Compare the writer's complete result (membership, fallback and derived metadata) with the
+      // old plan's immutable own-result proof. NULL originals and same-name fallback changes can
+      // differ too. Refuse before product/ledger writes; never extend the original allowlist.
       await ctx.db
         .transaction(async (tx) => {
           const [previousWait] = await tx.execute<{ value: string }>(
@@ -832,28 +834,44 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
           );
           await lockRepositoryTasksKey(tx, plan.repositoryId);
           await lockProjectState(tx, plan.repositoryId);
-          await tx
-            .select({ id: schema.repositories.id })
+          const [locked] = await tx
+            .select({ renderContext: schema.repositories.renderContext })
             .from(schema.repositories)
             .where(eq(schema.repositories.id, plan.repositoryId))
             .for('update');
           await tx.execute(sql`select set_config('lock_timeout', ${previousWait!.value}, true)`);
           await refuseReleasedCheckout(tx, ctx.taskId, plan.repositoryId);
           await refuseMovedColumn(tx, plan.repositoryId, plannedColumns(plan));
-          const recovered = recoverCliMembership(await loadLiveArtifacts(tx, plan.repositoryId));
-          const maintained = recovered?.cliTargets ?? recordedCliTargets(original.column);
-          const planned =
-            recordedCliTargets(
-              plan.renderCtxSnapshot as Parameters<typeof recordedCliTargets>[0],
-            ) ?? recordedCliTargets(original.column);
+          const current = readRenderContextColumn(locked?.renderContext);
+          const caller = renderContextColumnFor(
+            plan.renderCtxSnapshot as unknown as TemplateRenderContext,
+            plan.rtkFollowsLive === true,
+          );
+          const recovered =
+            current.kind === 'column' && current.column.cliTargets !== undefined
+              ? undefined
+              : recoverCliMembership(await loadLiveArtifacts(tx, plan.repositoryId));
+          const completed = completeWriterCliMembership(
+            caller,
+            current.kind === 'column' ? current.column : caller,
+            recovered,
+          );
+          // Preserve the original stale-render refusal too: inheritance can normalize a caller's
+          // different recorded names into the predicted column, but its planned files still differ.
+          const plannedNames =
+            recordedCliTargets(caller) ??
+            (original.kind === 'column' ? recordedCliTargets(original.column) : undefined);
           if (
-            maintained !== undefined &&
+            completed.cliTargets !== undefined &&
             !sameValue(
-              [...new Set(maintained)].sort(),
-              planned === undefined ? null : [...new Set(planned)].sort(),
+              [...new Set(completed.cliTargets)].sort(),
+              plannedNames === undefined ? null : [...new Set(plannedNames)].sort(),
             )
           )
             throw new Error(PLAN_NO_LONGER_HOLDS);
+          const admitted =
+            completed.cliTargets === undefined ? caller : inheritCliMembership(caller, completed);
+          if (!sameValue(admitted, ownRecordColumn(plan))) throw new Error(PLAN_NO_LONGER_HOLDS);
         })
         .catch((err: unknown) => {
           throw err instanceof ProjectStateMovedError ? new Error(PLAN_NO_LONGER_HOLDS) : err;
