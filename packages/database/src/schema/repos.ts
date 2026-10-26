@@ -295,6 +295,7 @@ export const projectStateSync = pgTable('project_state_sync', {
   lastError: text('last_error'),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
   syncedHash: text('synced_hash'),
+  syncedHead: text('synced_head'),
 });
 
 /** One unit of the project state record that this install and the checkout both changed, differently,

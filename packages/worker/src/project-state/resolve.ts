@@ -375,6 +375,7 @@ async function answerClaimQuestion(
 
   const synced = {
     syncedHash: null,
+    syncedHead: null,
     baseSnapshot: normalizeProjectState({
       ...emptyProjectState(),
       ...snapshot,
@@ -600,6 +601,7 @@ async function answerSettingsQuestion(
       };
   const synced = {
     syncedHash: null,
+    syncedHead: null,
     baseSnapshot: normalizeProjectState({ ...emptyProjectState(), ...base }),
     lastError: sync?.lastError ?? null,
     updatedAt: now,
@@ -850,6 +852,7 @@ async function answerInTransaction(
         : sync.lastError;
     const synced = {
       syncedHash: null,
+      syncedHead: null,
       baseSnapshot: normalizeProjectState({
         ...emptyProjectState(),
         ...snapshot,

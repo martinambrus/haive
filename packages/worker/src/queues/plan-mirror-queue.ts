@@ -20,6 +20,11 @@ import type {
 import { resolveProjectStateConflict } from '../project-state/resolve.js';
 import { markProjectStatesDirtyAtBoot, sweepDirtyProjectStates } from '../project-state/refresh.js';
 import {
+  sweepCheckoutRepositories,
+  watchCheckout,
+  type CheckoutWatchResult,
+} from '../project-state/watch.js';
+import {
   MOVE_ATTEMPTS,
   putBackProjections,
   recoverAfterMoveFailure,
@@ -65,6 +70,22 @@ import { pruneJobSchedulers } from './job-scheduler-prune.js';
 
 const SWEEP_EVERY_MS = 10_000;
 const SWEEP_JOB_ID = 'plan-mirror-dirty-sweep';
+const CHECKOUT_SWEEP_JOB_ID = 'project-state-checkout-sweep';
+
+export async function sweepCheckouts(): Promise<number> {
+  const queue = new Queue(QUEUE_NAMES.PLAN_MIRROR, { connection: getBullRedis() });
+  try {
+    return await sweepCheckoutRepositories(getDb(), (repositoryId) =>
+      queue.add(
+        PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT,
+        { repositoryId } satisfies PlanMirrorJobPayload,
+        { jobId: `checkout-sync-${repositoryId}`, removeOnComplete: true, removeOnFail: true },
+      ),
+    );
+  } finally {
+    await queue.close();
+  }
+}
 const FALLBACK_GIT_IDENTITY = {
   GIT_AUTHOR_NAME: 'Haive',
   GIT_AUTHOR_EMAIL: 'worker@haive.local',
@@ -646,7 +667,16 @@ export async function schedulePlanMirrorSweep(): Promise<void> {
         opts: { removeOnComplete: true, removeOnFail: 10 },
       },
     );
-    await pruneJobSchedulers(queue, [SWEEP_JOB_ID]);
+    await queue.upsertJobScheduler(
+      CHECKOUT_SWEEP_JOB_ID,
+      { every: 60_000 },
+      {
+        name: PLAN_MIRROR_JOB_NAMES.SWEEP_CHECKOUTS,
+        data: {},
+        opts: { removeOnComplete: true, removeOnFail: 10 },
+      },
+    );
+    await pruneJobSchedulers(queue, [SWEEP_JOB_ID, CHECKOUT_SWEEP_JOB_ID]);
   } finally {
     await queue.close().catch(() => {});
   }
@@ -654,11 +684,11 @@ export async function schedulePlanMirrorSweep(): Promise<void> {
 
 export function startPlanMirrorWorker(): Worker<
   PlanMirrorJobPayload | ProjectStateResolvePayload,
-  PlanMirrorJobResult | ProjectStateResolveResult | number
+  PlanMirrorJobResult | ProjectStateResolveResult | CheckoutWatchResult | number
 > {
   const worker = new Worker<
     PlanMirrorJobPayload | ProjectStateResolvePayload,
-    PlanMirrorJobResult | ProjectStateResolveResult | number
+    PlanMirrorJobResult | ProjectStateResolveResult | CheckoutWatchResult | number
   >(
     QUEUE_NAMES.PLAN_MIRROR,
     safeProcessor(async (job: Job<PlanMirrorJobPayload | ProjectStateResolvePayload>) => {
@@ -680,6 +710,11 @@ export function startPlanMirrorWorker(): Worker<
           });
         case PLAN_MIRROR_JOB_NAMES.SWEEP:
           return sweepAll();
+        case PLAN_MIRROR_JOB_NAMES.SWEEP_CHECKOUTS:
+          return sweepCheckouts();
+        case PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT:
+          if (!data.repositoryId) throw new Error('repositoryId required');
+          return watchCheckout(getDb(), data.repositoryId);
         default:
           throw new Error(`unknown plan-mirror job: ${job.name}`);
       }

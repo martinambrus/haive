@@ -1,3 +1,4 @@
+import type { NamedCheckout } from '../repo/checkout-head.js';
 import { and, asc, eq, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -61,7 +62,11 @@ export async function markProjectStatesDirtyAtBoot(db: Database): Promise<void> 
   `);
 }
 
-export async function refreshProjectState(db: Database, repositoryId: string): Promise<boolean> {
+export async function refreshProjectState(
+  db: Database,
+  repositoryId: string,
+  expectedCheckout?: NamedCheckout,
+): Promise<boolean> {
   const [repo] = await db
     .select({
       storagePath: schema.repositories.storagePath,
@@ -74,7 +79,7 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
   if (!repoPath || (await gitOperationInProgress(repoPath))) return false;
 
   try {
-    await recoverProjectStateWrite(db, repositoryId, repoPath);
+    await recoverProjectStateWrite(db, repositoryId, repoPath, expectedCheckout);
   } catch (err) {
     if (err instanceof ProjectStateRecoveryHeldError) {
       await setOutboxError(db, repositoryId, err.message);
@@ -92,6 +97,7 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
     repositoryId,
     repoPath,
     refuseDuringGitOperation: true,
+    expectedCheckout,
   });
   if (synced.outcome === 'held') return false;
   if (synced.outcome === 'refused') {
@@ -130,6 +136,7 @@ export async function refreshProjectState(db: Database, repositoryId: string): P
       expectedResetAt: after!.onboardingResetAt,
       keepColumnOnFailure: true,
       refuseDuringGitOperation: true,
+      expectedCheckout,
       refuseWhileHeld: true,
     });
   } catch (err) {

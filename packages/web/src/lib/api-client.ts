@@ -1990,7 +1990,13 @@ export interface PlanImpact {
 
 const planBase = (repositoryId: string) => `/repositories/${encodeURIComponent(repositoryId)}/plan`;
 
+/** Page hint only. Reads remain useful while the queue is unavailable. */
+export async function requestCheckoutSync(repositoryId: string): Promise<void> {
+  await api.post(`/repos/${repositoryId}/sync-checkout`, {}).catch(() => undefined);
+}
+
 export function getPlanOverview(repositoryId: string): Promise<PlanOverview> {
+  void requestCheckoutSync(repositoryId);
   return api.get<PlanOverview>(planBase(repositoryId));
 }
 

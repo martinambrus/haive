@@ -1,3 +1,5 @@
+import type { NamedCheckout } from '../repo/checkout-head.js';
+import { admitWatchedCheckout } from './watch-admission.js';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
@@ -92,6 +94,7 @@ interface ProjectStateColumnInput {
   refuseWhileHeld?: boolean;
   /** Epoch read with the background refresh column; a completed reset must not be resurrected. */
   expectedResetAt?: Date | null;
+  expectedCheckout?: NamedCheckout;
 }
 
 export interface ProjectStateRecordInput extends ProjectStateColumnInput {
@@ -489,6 +492,7 @@ export async function writeProjectStateColumn(
     holdingTaskId,
     refuseWhileHeld,
     expectedResetAt,
+    expectedCheckout,
     keepColumnOnFailure,
     refuseDuringGitOperation,
   }: ProjectStateColumnInput & {
@@ -651,6 +655,11 @@ export async function writeProjectStateColumn(
         .where(eq(schema.repositories.id, repositoryId))
         .for('update');
       if (!repo) throw new ProjectStateMovedError();
+      if (
+        expectedCheckout &&
+        !(await admitWatchedCheckout(tx, repositoryId, repoPath, expectedCheckout))
+      )
+        throw new ProjectStateMovedError();
       // An open git operation preserves its diagnostic even when a live reset also holds the row.
       if (refuseDuringGitOperation && (await gitOperationInProgress(repoPath))) {
         throw new ProjectStateMovedError();
@@ -703,6 +712,7 @@ export async function writeProjectStateColumn(
           seenRepo: repo,
           refuseDuringGitOperation,
           holdingTaskId,
+          expectedCheckout,
         });
         if (['refused', 'held', 'deferred', 'superseded'].includes(imported.outcome)) {
           throw new ProjectStateMovedError();
@@ -817,7 +827,13 @@ export async function writeProjectStateColumn(
       const readBack = await readCheckout(repoPath);
       if (readBack.kind !== 'record' || readBack.hash !== prepared.targetHash)
         throw new ProjectStateMovedError();
+      if (
+        expectedCheckout &&
+        !(await admitWatchedCheckout(tx, repositoryId, repoPath, expectedCheckout))
+      )
+        throw new ProjectStateMovedError();
       const synced = {
+        syncedHead: null,
         baseSnapshot: plan.baseSnapshot,
         syncedHash: readBack.hash,
         lastError: null,
@@ -1150,11 +1166,17 @@ export async function recoverProjectStateWrite(
   db: Database,
   repositoryId: string,
   repoPath: string,
+  expectedCheckout?: NamedCheckout,
 ): Promise<void> {
   const upgraded = await db.transaction(async (tx) => {
     await lockRepositoryTasksKey(tx, repositoryId);
     await lockProjectState(tx, repositoryId);
     await refuseHeldCheckout(tx, repositoryId, repoPath);
+    if (
+      expectedCheckout &&
+      !(await admitWatchedCheckout(tx, repositoryId, repoPath, expectedCheckout))
+    )
+      throw new ProjectStateMovedError();
     const [row] = await tx
       .select({ intent: schema.projectStateOutbox.writeIntent })
       .from(schema.projectStateOutbox)
@@ -1172,7 +1194,7 @@ export async function recoverProjectStateWrite(
     await recoverWriteLocked(tx, repositoryId, repoPath);
     return false;
   });
-  if (upgraded) await recoverProjectStateWrite(db, repositoryId, repoPath);
+  if (upgraded) await recoverProjectStateWrite(db, repositoryId, repoPath, expectedCheckout);
 }
 
 async function holdsBytes(repoPath: string, path: string, text: string): Promise<boolean> {

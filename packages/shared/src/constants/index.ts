@@ -112,9 +112,10 @@ export const PLAN_MIRROR_JOB_NAMES = {
   REFRESH: 'refresh-plan-mirror',
   SAVE: 'save-plan-mirror',
   SWEEP: 'sweep-plan-mirrors',
-  /** The only job that reads the repository INTO the database. Fast-forwards the
-   *  checkout from origin, then reconciles the committed plan mirror onto the
-   *  local plan. Everything else here writes DB -> files -> commit -> remote. */
+  SYNC_CHECKOUT: 'sync-checkout',
+  SWEEP_CHECKOUTS: 'sweep-checkouts',
+  /** Explicitly fast-forwards the checkout from origin, then reconciles the committed plan
+   *  mirror onto the local plan. Checkout observation never contacts origin. */
   PULL: 'pull-plan-mirror',
   /** Answers one project-state conflict. It shares this queue because it writes the checkout's
    *  record files, like the rest of the jobs here, and the worker owns every write to them. */

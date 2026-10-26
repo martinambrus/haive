@@ -34,6 +34,7 @@ vi.mock('@/lib/use-page-title', () => ({ usePageTitle: () => {} }));
 vi.mock('@/lib/api-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api-client')>()),
   api,
+  requestCheckoutSync: vi.fn().mockResolvedValue(undefined),
 }));
 
 type El = ReactElement<{
