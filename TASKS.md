@@ -89,7 +89,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 # Open tasks
 
-RESUMED 2026-10-26T08:34Z per user after allowance reset, using the updated codex-codex skill. The prior five-task batch and T117 are complete: 19 tasks completed during this conversation. Continue eligible queued work with one implementation driver at a time; T118 is active; T119 is being scoped. Preserve parked decisions and dependencies. Synced checklist: 140 total, 41 done, 2 in progress, 97 open.
+FINISH THEN PAUSE per user 2026-10-26T13:52Z, using the updated codex-codex skill. Finish T118 through required review, merge and verification, update this board, then pause. T119 was scoped only and is returned to the queue with its prepared brief retained; start no new implementation. The prior five-task batch and T117 are complete: 19 tasks completed during this conversation. Preserve parked decisions and dependencies. Synced checklist: 140 total, 41 done, 1 in progress, 98 open.
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
@@ -108,10 +108,10 @@ Codex progress 2026-10-26T13:09Z: PR #934 HEAD19104833 remains unmerged pending 
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T12:04Z · last: 2026-10-26T12:04Z · kind: feature (user decision taken)
+status: open · last: 2026-10-26T13:52Z · kind: feature (user decision taken)
 repositories.agent_rules_override + settings/agent-rules.md + tooling editor; buildRepoCliRulesBlock for 07/12/01/api. Control: two users with different personal rules are quiet and byte-identical after.
 
-Codex progress 2026-10-26T12:04Z: parent scoping and preparing a bounded brief while T118 completes its frozen full run. One implementation driver remains T118; T119 implementation waits for that slot and a checked predecessor. Preserve existing mandatory dispatch rules and repository-data guards; target only the approved repository-level rules block, portable override and tooling editor.
+Codex progress 2026-10-26T13:52Z: released after scoping only, per user instruction to finish T118 and pause. No implementation driver, worktree, migration or product change was started. Prepared bounded brief retained at .claude/tmp/board-run/T119/drive-draft.md; resume from the checked T118 predecessor when work is authorized again. Preserve the approved null/default versus explicit-empty rules semantics, portable Markdown setting and existing dispatch protections.
 
 ### T120 · B5.1 · the Haive data panel
 
