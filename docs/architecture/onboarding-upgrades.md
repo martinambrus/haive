@@ -461,7 +461,9 @@ explicit empty selections have no fallback merely because stale target metadata 
 07 adds the onboarding user's enabled CLIs to the repository set and carries its original-column
 fence through 12. Blank INIT writes the record through the same journaled writer and includes its
 returned paths in the initial commit. 01 offers missing locally enabled CLIs as a default-on
-"Also maintain files for" choice, then recomputes the plan. Declining it after a removal keeps that
+"Also maintain files for" choice, then recomputes the plan. The repository-card banner offers an
+upgrade when these additions are the only pending change; checking status or starting the task does
+not adopt them. Declining the choice after a removal keeps that
 removal authoritative, even while the CLI is enabled locally. The Tooling page's explicit
 `POST /repositories/:id/cli-targets/remove` action compares the observed membership under bounded
 ordered locks and records the dirty revision atomically; a stale list, active root claim,
