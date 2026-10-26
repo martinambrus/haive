@@ -83,6 +83,7 @@ import {
   isRecordName,
   parsePlanConflictUnit,
   portableBundleSource,
+  readRenderContextColumn,
   settingFileName,
 } from '@haive/shared/project-state';
 import { buildScopeTree } from '@haive/shared/scope-tree';
@@ -1726,6 +1727,7 @@ const ONBOARDING_RESET_EMPTY_DIRS = [
   `${PROJECT_STATE_DIR}/artifacts`,
   `${PROJECT_STATE_DIR}/bundles`,
   `${PROJECT_STATE_DIR}/settings`,
+  `${PROJECT_STATE_DIR}/cli`,
   PROJECT_STATE_DIR,
 ];
 
@@ -2063,6 +2065,8 @@ export interface OnboardingResetProvenance {
   bundleSources?: readonly string[];
   /** The names of the settings files the sync base holds, beside the ones this release writes. */
   settingNames?: readonly string[];
+  /** CLI member files named by the valid current explicit context or the recorded sync base. */
+  cliNames?: readonly string[];
 }
 
 /**
@@ -2546,6 +2550,10 @@ export async function resetOnboardingArtifacts(
   ])) {
     await remove(`${PROJECT_STATE_DIR}/${settingFileName(name)}`, false);
   }
+  for (const name of new Set(provenance.cliNames ?? [])) {
+    if (typeof name === 'string' && isRecordName(name))
+      await remove(`${PROJECT_STATE_DIR}/cli/${name}.json`, false);
+  }
   for (const rel of ONBOARDING_RESET_EMPTY_DIRS) await removeIfEmpty(rel);
 
   for (const rel of ONBOARDING_RULES_FILES) {
@@ -3003,7 +3011,7 @@ async function runOnboardingArtifactReset(
   const resetStartedAt = new Date();
   const repoRow = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
-    columns: { onboardingResetAt: true },
+    columns: { onboardingResetAt: true, renderContext: true },
   });
   const root = await resolveRepoRoot(db, userId, id);
 
@@ -3040,13 +3048,24 @@ async function runOnboardingArtifactReset(
     .where(eq(schema.projectStateSync.repositoryId, id))
     .limit(1);
   const baseRecord = syncRow?.baseSnapshot as
-    { bundles?: unknown; settings?: unknown } | null | undefined;
+    { bundles?: unknown; settings?: unknown; cli?: unknown } | null | undefined;
   const baseBundles = baseRecord?.bundles;
   const baseSettings = baseRecord?.settings;
   const settingNames =
     baseSettings !== null && typeof baseSettings === 'object' && !Array.isArray(baseSettings)
       ? Object.keys(baseSettings).filter(isRecordName)
       : [];
+  const currentContext = readRenderContextColumn(repoRow?.renderContext);
+  // Ownership is a union: a membership removal may be pending while the base still names the
+  // old unit files. A refused/legacy context and today's enabled providers prove no CLI units.
+  const cliNames = new Set([
+    ...(currentContext.kind === 'column' ? (currentContext.column.cliTargets ?? []) : []),
+    ...(Array.isArray(baseRecord?.cli)
+      ? baseRecord.cli.filter(
+          (name): name is string => typeof name === 'string' && isRecordName(name),
+        )
+      : []),
+  ]);
   const localBundles = await db
     .select({
       name: schema.customBundles.name,
@@ -3070,6 +3089,7 @@ async function runOnboardingArtifactReset(
       haiveEntries: written.entries,
       bundleSources: [...bundleSources],
       settingNames,
+      cliNames: [...cliNames],
     },
   );
 

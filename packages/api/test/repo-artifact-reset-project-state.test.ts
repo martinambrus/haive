@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -465,5 +465,89 @@ describe('resetting a repository with project state conflicts', () => {
       [OTHER, 'project/render.json#framework'],
       [REPO, unit],
     ]);
+  });
+});
+
+describe('reset recorded CLI member units', () => {
+  const CLI_DIR = `${STATE_DIR}/cli`;
+  const cli = (name: string) => `${CLI_DIR}/${name}.json`;
+  it('removes known and future recorded members by name and sweeps the empty CLI/state directories', async () => {
+    const names = ['claude-code', 'codex', 'future-cli'];
+    const root = await repoRoot(
+      Object.fromEntries(names.map((name) => [cli(name), JSON.stringify({ provider: name })])),
+    );
+    const evidence = { ...noProvenance, cliNames: names };
+    const { removed } = await resetOnboardingArtifacts(root, evidence);
+    for (const rel of [...names.map(cli), CLI_DIR, STATE_DIR]) {
+      expect.soft(await exists(root, rel), rel).toBe(false);
+      expect.soft(removed, rel).toContain(rel);
+    }
+    expect(await readFile(path.join(root, '.haive-data/plan.json'), 'utf8')).toBe('{}\n');
+  });
+  it('sweeps an empty CLI directory even when the authoritative member list is empty', async () => {
+    const root = await repoRoot();
+    await mkdir(path.join(root, CLI_DIR));
+    const evidence = { ...noProvenance, cliNames: [] };
+    const { removed } = await resetOnboardingArtifacts(root, evidence);
+    expect.soft(await exists(root, CLI_DIR)).toBe(false);
+    expect.soft(removed).toContain(CLI_DIR);
+    expect.soft(await exists(root, STATE_DIR)).toBe(false);
+  });
+  it('leaves unproven member files and unrelated CLI contents, preserving the directory around them', async () => {
+    const root = await repoRoot({
+      [cli('mine')]: 'my record\n',
+      [`${CLI_DIR}/notes.txt`]: 'notes\n',
+    });
+    await resetOnboardingArtifacts(root, noProvenance);
+    expect(await readFile(path.join(root, cli('mine')), 'utf8')).toBe('my record\n');
+    expect(await readFile(path.join(root, CLI_DIR, 'notes.txt'), 'utf8')).toBe('notes\n');
+    expect(await exists(root, CLI_DIR)).toBe(true);
+  });
+  it('removes only named leaves when a recorded member shares cli/ with unproven contents', async () => {
+    const root = await repoRoot({
+      [cli('future-cli')]: '{"provider":"future-cli"}\n',
+      [cli('mine')]: 'user metadata\n',
+      [`${CLI_DIR}/notes.txt`]: 'notes\n',
+    });
+    const evidence = { ...noProvenance, cliNames: ['future-cli'] };
+    await resetOnboardingArtifacts(root, evidence);
+    expect(await exists(root, cli('future-cli'))).toBe(false);
+    expect(await readFile(path.join(root, cli('mine')), 'utf8')).toBe('user metadata\n');
+    expect(await readFile(path.join(root, CLI_DIR, 'notes.txt'), 'utf8')).toBe('notes\n');
+    expect(await exists(root, CLI_DIR)).toBe(true);
+  });
+  it('rejects invalid provider names instead of interpreting them as paths', async () => {
+    const root = await repoRoot({
+      [`${STATE_DIR}/escape.json`]: 'outside cli\n',
+      [cli('mine')]: 'unproven\n',
+    });
+    const evidence = {
+      ...noProvenance,
+      cliNames: ['../escape', 'mine/../../escape', 'bad_name', '', '.git'],
+    };
+    await resetOnboardingArtifacts(root, evidence);
+    expect(await readFile(path.join(root, STATE_DIR, 'escape.json'), 'utf8')).toBe('outside cli\n');
+    expect(await readFile(path.join(root, cli('mine')), 'utf8')).toBe('unproven\n');
+  });
+  it('never traverses a linked CLI directory or removes its outside member', async () => {
+    const root = await repoRoot(),
+      outside = await repoRoot();
+    await writeFile(path.join(outside, 'future-cli.json'), 'outside\n');
+    await symlink(outside, path.join(root, CLI_DIR));
+    const evidence = { ...noProvenance, cliNames: ['future-cli'] };
+    await resetOnboardingArtifacts(root, evidence);
+    expect(await readFile(path.join(outside, 'future-cli.json'), 'utf8')).toBe('outside\n');
+    expect(await exists(root, CLI_DIR)).toBe(true);
+  });
+  it('unlinks a proven member leaf link without following it to an outside file', async () => {
+    const root = await repoRoot(),
+      outside = await repoRoot();
+    await writeFile(path.join(outside, 'member.json'), 'outside\n');
+    await mkdir(path.join(root, CLI_DIR));
+    await symlink(path.join(outside, 'member.json'), path.join(root, cli('future-cli')));
+    const evidence = { ...noProvenance, cliNames: ['future-cli'] };
+    await resetOnboardingArtifacts(root, evidence);
+    expect.soft(await exists(root, cli('future-cli'))).toBe(false);
+    expect(await readFile(path.join(outside, 'member.json'), 'utf8')).toBe('outside\n');
   });
 });
