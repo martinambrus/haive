@@ -89,7 +89,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 # Open tasks
 
-PAUSED 2026-10-26T06:54Z per user: T412, T413, T416, T266 and T303 all finished, merged and verified on green main CI. This conversation completed 18 tasks; its synced checklist is 140 total, 40 done, 0 in progress and 100 open. Do not claim further work until the user explicitly resumes; remaining open tasks stay queued.
+RESUMED 2026-10-26T08:34Z per user after allowance reset, using the updated codex-codex skill. The prior five-task batch is complete (18 tasks completed during this conversation before resuming). Continue eligible queued work with one implementation driver at a time; T117 is next now that T266 has landed. Preserve parked decisions and dependencies. Synced checklist: 140 total, 40 done, 1 in progress, 99 open.
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
@@ -101,7 +101,7 @@ All PRE-EXISTING.
 
 ### T117 · B3.2 · catch checkout moves Haive did not make (+5)
 
-status: open · kind: feature (designed; decisions D13-D16 taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T08:34Z · last: 2026-10-26T08:34Z · kind: feature (designed; decisions D13-D16 taken)
 Full design: .claude/tmp/track-b/b3/b32/analysis/{detect,backstops}.md and the B3 ledger (2026-10-15).
 
 - D13 detached HEAD holds (no import, no stamp). D14 import a record on a branch other than repositories.branch. D15 host-folder pulls stay a Refresh. D16 kill switch PROJECT_STATE_SYNC_ENABLED default ON.
