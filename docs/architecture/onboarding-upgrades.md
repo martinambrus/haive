@@ -594,6 +594,35 @@ invalidate the watermark rather than acknowledge sibling files they did not impo
 `rebaseProjectStateOnCheckout` and its `rebaseLocked` wrapper still have only test callers; they are
 retained deliberately, and the set-aside production path uses `rebaseProjectStateOnHeadLocked`.
 
+**A separate observer learns checkout changes Haive did not make.** The plan-mirror queue keeps
+its 10-second dirty-projection sweep and adds a 60-second checkout sweep. It keyset-pages every
+ready repository with a checkout, including repositories with no outbox row, and queues one
+`sync-checkout` job per repository. A Stop without a worker hook, a dead task, a capped cancel
+re-drive or a failed first import therefore does not remove the repository from later checks.
+The tooling page, upgrade banner and plan overview also send a best-effort authenticated
+`POST /repos/:id/sync-checkout` hint through the same deduplicated queue path. GETs stay read-only;
+the hint is asynchronous and does not promise that the first GET already contains imported data.
+
+The observer reads the actual named checkout and hashes the complete bounded raw record on every
+pass. It never uses timestamps or the configured repository branch as proof: a different named
+branch may import, while a detached or unborn HEAD, unreadable Git state, no usable Git root of
+its own, an open Git operation, a live root claim or a checkout holder defers observation. It does
+not fetch, switch branches or copy from a folder import's source; those still require Refresh.
+Recovery precedes record import. The observer passes the expected ref and HEAD through the
+existing admission, recovery, sync and writer transactions, which recheck them before committing.
+Plan import/reconciliation uses its separate lock and admission checks, even when HEAD and the
+state hash have not changed, since a person can edit plan.json at the same HEAD.
+
+Migration 0214 appends nullable `project_state_sync.synced_head`. A checked observer records only
+a still-named HEAD whose complete raw record has been accepted; NULL means no such observation.
+Writers, conflict answers and rebases invalidate that HEAD rather than acknowledge a checkout they
+did not inspect. The HEAD is neither a file-ownership proof nor a replacement for `synced_hash` or
+the normalized three-way base. A record with a prior diagnosis passes through refresh again even
+when its bytes match the accepted hash, so restoring the exact valid bytes can clear a stale
+refusal through the normal sync rules. `PROJECT_STATE_SYNC_ENABLED` defaults on and gates the
+observer's scan, page hints and queued execution. Turning it off leaves existing sync-before-write,
+recovery and dirty-projection flushing enabled, preserving their overwrite and crash protections.
+
 **A filesystem attempt has a committed undo journal before changing the public record.** The writer takes
 `lockRepositoryTasksKey` then `lockProjectState`, checks the column and its own task (or, for a
 background refresh, opposing live onboarding/upgrade tasks and a reset claim), and commits a dirty
