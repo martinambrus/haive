@@ -1,3 +1,5 @@
+import type { NamedCheckout } from '../repo/checkout-head.js';
+import { admitWatchedCheckout } from './watch-admission.js';
 import { randomUUID } from 'node:crypto';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
@@ -92,6 +94,7 @@ interface ProjectStateColumnInput {
   refuseWhileHeld?: boolean;
   /** Epoch read with the background refresh column; a completed reset must not be resurrected. */
   expectedResetAt?: Date | null;
+  expectedCheckout?: NamedCheckout;
 }
 
 export interface ProjectStateRecordInput extends ProjectStateColumnInput {
@@ -489,6 +492,7 @@ export async function writeProjectStateColumn(
     holdingTaskId,
     refuseWhileHeld,
     expectedResetAt,
+    expectedCheckout,
     keepColumnOnFailure,
     refuseDuringGitOperation,
   }: ProjectStateColumnInput & {
@@ -651,6 +655,11 @@ export async function writeProjectStateColumn(
         .where(eq(schema.repositories.id, repositoryId))
         .for('update');
       if (!repo) throw new ProjectStateMovedError();
+      if (
+        expectedCheckout &&
+        !(await admitWatchedCheckout(tx, repositoryId, repoPath, expectedCheckout))
+      )
+        throw new ProjectStateMovedError();
       // An open git operation preserves its diagnostic even when a live reset also holds the row.
       if (refuseDuringGitOperation && (await gitOperationInProgress(repoPath))) {
         throw new ProjectStateMovedError();
@@ -671,7 +680,7 @@ export async function writeProjectStateColumn(
     // after reacquiring the locks: a holder admitted between transactions leaves only this intent.
     const prepared = await db.transaction(async (tx) => {
       await gate(tx);
-      await recoverWriteLocked(tx, repositoryId, repoPath);
+      await recoverWriteLocked(tx, repositoryId, repoPath, expectedCheckout);
       const checkout = await readCheckout(repoPath);
       if (checkout.kind === 'refused') throw new ProjectStateMovedError(checkout.reason);
       if (checkout.kind === 'absent' && checkout.hash !== 'absent') {
@@ -703,6 +712,7 @@ export async function writeProjectStateColumn(
           seenRepo: repo,
           refuseDuringGitOperation,
           holdingTaskId,
+          expectedCheckout,
         });
         if (['refused', 'held', 'deferred', 'superseded'].includes(imported.outcome)) {
           throw new ProjectStateMovedError();
@@ -817,7 +827,13 @@ export async function writeProjectStateColumn(
       const readBack = await readCheckout(repoPath);
       if (readBack.kind !== 'record' || readBack.hash !== prepared.targetHash)
         throw new ProjectStateMovedError();
+      if (
+        expectedCheckout &&
+        !(await admitWatchedCheckout(tx, repositoryId, repoPath, expectedCheckout))
+      )
+        throw new ProjectStateMovedError();
       const synced = {
+        syncedHead: null,
         baseSnapshot: plan.baseSnapshot,
         syncedHash: readBack.hash,
         lastError: null,
@@ -850,6 +866,12 @@ export async function writeProjectStateColumn(
         .update(schema.projectStateOutbox)
         .set({ writeIntent: null })
         .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+      // SQL can yield to an external checkout or editor after the earlier output check. Refuse
+      // the entire semantic tail while retaining the already committed undo intent on rollback.
+      const finalOutput = await readCheckout(repoPath);
+      if (finalOutput.kind !== 'record' || finalOutput.hash !== prepared.targetHash)
+        throw new ProjectStateMovedError();
+      await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
     });
   } catch (err) {
     // Admission and a CAS refused before our first mutation changed no semantic state. Once a
@@ -986,15 +1008,34 @@ function validateRecoveryIntent(intent: WriteIntent): void {
   }
 }
 
+async function requireExpectedCheckout(
+  tx: Tx,
+  repositoryId: string,
+  repoPath: string,
+  expectedCheckout?: NamedCheckout,
+): Promise<void> {
+  if (
+    expectedCheckout &&
+    !(await admitWatchedCheckout(tx, repositoryId, repoPath, expectedCheckout))
+  )
+    throw new ProjectStateMovedError();
+}
+
 /** Preflight recognizes every changed path's bytes and private artifacts before undo. Each restore
  *  then compares bytes and preserves metadata at its own CAS: a later edit or changed mode can hold
  *  a partially restored journal, which remains replayable. A committed write consumes its journal. */
-async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string): Promise<void> {
+async function recoverWriteLocked(
+  tx: Tx,
+  repositoryId: string,
+  repoPath: string,
+  expectedCheckout?: NamedCheckout,
+): Promise<void> {
   const [row] = await tx
     .select({ intent: schema.projectStateOutbox.writeIntent })
     .from(schema.projectStateOutbox)
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
   const intent = row?.intent as WriteIntent | null;
+  await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
   if (!intent) return;
   validateRecoveryIntent(intent);
   if (intent.changes.length > 0 && intent.stage === undefined)
@@ -1047,12 +1088,14 @@ async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string
         !artifactMatches(parked, change.before) &&
         !artifactMatches(parked, change.after)
       ) {
-        if (read === null)
+        if (read === null) {
+          await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
           await restoreJournalFileNoFollow(
             repoPath,
             path,
             journalOperation(intent, change.rel, direction),
           );
+        }
         throw new ProjectStateRecoveryHeldError(path);
       }
     }
@@ -1094,9 +1137,13 @@ async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string
       await held.close();
     }
   }
+  // Git ignores the database locks. Preflight may have awaited many reads, so re-admit before
+  // undo and around each public mutation; movement leaves a recognizable, replayable journal.
+  await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
   for (const change of [...intent.changes].reverse()) {
     const path = `${PROJECT_STATE_DIR}/${change.rel}`;
     if (atBefore.has(change.rel)) continue;
+    await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
     if (change.before === null) {
       const gone = await removeFileIfNoFollow(
         repoPath,
@@ -1132,17 +1179,22 @@ async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string
       );
       if (result !== 'rewritten') throw new ProjectStateRecoveryHeldError(path);
     }
+    await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
   }
   for (const [dir, identity] of [...directories].sort(([a], [b]) => b.length - a.length)) {
+    await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
     if ((await removeEmptyDirectoryIfNoFollow(repoPath, recoveryDirPath(dir), identity)) === 'kept')
       throw new ProjectStateRecoveryHeldError(recoveryDirPath(dir));
+    await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
   }
   // Validate the restored footprint, including empty directories, before consuming its intent.
   await readStateFiles(repoPath, { boundedDirectoryReads: true });
+  await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
   await tx
     .update(schema.projectStateOutbox)
     .set({ writeIntent: null })
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+  await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
 }
 
 /** Sweep recovery is fenced like the write, and never rolls target columns or merge bases forward. */
@@ -1150,11 +1202,17 @@ export async function recoverProjectStateWrite(
   db: Database,
   repositoryId: string,
   repoPath: string,
+  expectedCheckout?: NamedCheckout,
 ): Promise<void> {
   const upgraded = await db.transaction(async (tx) => {
     await lockRepositoryTasksKey(tx, repositoryId);
     await lockProjectState(tx, repositoryId);
     await refuseHeldCheckout(tx, repositoryId, repoPath);
+    if (
+      expectedCheckout &&
+      !(await admitWatchedCheckout(tx, repositoryId, repoPath, expectedCheckout))
+    )
+      throw new ProjectStateMovedError();
     const [row] = await tx
       .select({ intent: schema.projectStateOutbox.writeIntent })
       .from(schema.projectStateOutbox)
@@ -1163,16 +1221,19 @@ export async function recoverProjectStateWrite(
     if (intent && intent.changes.length > 0 && intent.stage === undefined) {
       validateRecoveryIntent(intent);
       intent.stage = await prepareIntentFiles(repoPath, intent);
+      await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
       await tx
         .update(schema.projectStateOutbox)
         .set({ writeIntent: intent })
         .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+      await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
       return true;
     }
-    await recoverWriteLocked(tx, repositoryId, repoPath);
+    await recoverWriteLocked(tx, repositoryId, repoPath, expectedCheckout);
+    await requireExpectedCheckout(tx, repositoryId, repoPath, expectedCheckout);
     return false;
   });
-  if (upgraded) await recoverProjectStateWrite(db, repositoryId, repoPath);
+  if (upgraded) await recoverProjectStateWrite(db, repositoryId, repoPath, expectedCheckout);
 }
 
 async function holdsBytes(repoPath: string, path: string, text: string): Promise<boolean> {

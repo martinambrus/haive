@@ -12,7 +12,7 @@ const CALL_SITES: Record<string, number> = {
   'packages/worker/src/queues/bundle-queue.ts': 1,
   'packages/worker/src/queues/cli-exec/handlers.ts': 1,
   'packages/worker/src/queues/global-kb-sync-queue.ts': 2,
-  'packages/worker/src/queues/plan-mirror-queue.ts': 1,
+  'packages/worker/src/queues/plan-mirror-queue.ts': 2,
   'packages/worker/src/queues/pr-poll-queue.ts': 1,
   'packages/worker/src/queues/usage-poll-queue.ts': 1,
 };

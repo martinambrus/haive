@@ -459,7 +459,7 @@ interface ColumnRow {
 const columnsOf = (db: Database, table: string, only?: string) =>
   rowsOf<ColumnRow>(
     db,
-    sql`select column_name, data_type, is_nullable, column_default from information_schema.columns where table_schema = current_schema() and table_name = ${table} and (${only ?? null}::text is null or column_name = ${only ?? null})`,
+    sql`select column_name, data_type, is_nullable, column_default from information_schema.columns where table_schema = current_schema() and table_name = ${table} and (${only ?? null}::text is null or column_name = ${only ?? null}) order by ordinal_position`,
   );
 /** `<type> <YES|NO>` for one column, or null where the query failed or the column is not there. */
 function shapeOf(cols: Awaited<ReturnType<typeof columnsOf>>, name: string): string | null {
@@ -824,14 +824,27 @@ async function main(): Promise<void> {
     );
     const keys = 'rows' in constraints ? constraints.rows : [];
     check(
-      'migrations 0171 and 0213 give repositories a nullable render_context and the current project_state_sync shape',
+      'migrations 0171, 0213 and 0214 give repositories a nullable render_context and the current project_state_sync shape',
       shapeOf(renderColumn, 'render_context') === 'jsonb YES' &&
         'rows' in syncColumns &&
-        syncColumns.rows.length === 5 &&
+        syncColumns.rows.length === 6 &&
+        isDeepStrictEqual(
+          syncColumns.rows.map((c) => c.column_name),
+          [
+            'repository_id',
+            'base_snapshot',
+            'last_error',
+            'updated_at',
+            'synced_hash',
+            'synced_head',
+          ],
+        ) &&
         shapeOf(syncColumns, 'repository_id') === 'uuid NO' &&
         shapeOf(syncColumns, 'base_snapshot') === 'jsonb NO' &&
         shapeOf(syncColumns, 'last_error') === 'text YES' &&
         shapeOf(syncColumns, 'synced_hash') === 'text YES' &&
+        shapeOf(syncColumns, 'synced_head') === 'text YES' &&
+        syncColumns.rows.find((c) => c.column_name === 'synced_head')?.column_default === null &&
         shapeOf(syncColumns, 'updated_at') === 'timestamp without time zone NO' &&
         /now\(\)/.test(
           String(syncColumns.rows.find((c) => c.column_name === 'updated_at')?.column_default),

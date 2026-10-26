@@ -1,3 +1,4 @@
+import type { NamedCheckout } from '../repo/checkout-head.js';
 import { eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -16,6 +17,7 @@ export async function syncPlanFromCheckout(
   db: Database,
   repositoryId: string,
   repoPath: string,
+  expectedCheckout?: NamedCheckout,
 ): Promise<void> {
   const [ownPlan] = await db
     .select({ id: schema.planNodes.id })
@@ -25,13 +27,14 @@ export async function syncPlanFromCheckout(
   if (ownPlan) {
     await reconcilePlanFromCheckout(db, repositoryId, repoPath, {
       requireStamp: true,
+      expectedCheckout,
     }).catch(async (err: unknown) => {
       await recordPlanReconcileFailure(db, repositoryId, err);
       throw err;
     });
     return;
   }
-  const res = await importPlanMirror(db, repositoryId, repoPath);
+  const res = await importPlanMirror(db, repositoryId, repoPath, expectedCheckout);
   if (!res.imported && res.code === 'refused') {
     await recordPlanMirrorError(db, repositoryId, `Plan snapshot not imported: ${res.reason}`);
     logger.info({ repositoryId, reason: res.reason }, 'plan mirror not imported');

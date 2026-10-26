@@ -104,6 +104,7 @@ import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } f
 import { getDb } from '../db.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
+import { enqueueCheckoutSync } from '../lib/plan-mirror.js';
 import {
   admitNewWork,
   assertNewWorkAllowed,
@@ -253,6 +254,19 @@ function retryableUpload(
 export const repoRoutes = new Hono<AppEnv>();
 
 repoRoutes.use('*', requireAuth);
+
+// GETs stay read-only: page mounts send this hint through the app's origin-checked POST path.
+repoRoutes.post('/:id/sync-checkout', async (c) => {
+  const repositoryId = c.req.param('id');
+  const userId = c.get('userId');
+  const repo = await getDb().query.repositories.findFirst({
+    where: and(eq(schema.repositories.id, repositoryId), eq(schema.repositories.userId, userId)),
+    columns: { id: true },
+  });
+  if (!repo) throw new HttpError(404, 'Repository not found');
+  await enqueueCheckoutSync(repositoryId, userId);
+  return c.json({ accepted: true }, 202);
+});
 
 repoRoutes.get('/', async (c) => {
   const userId = c.get('userId');

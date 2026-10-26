@@ -1,6 +1,6 @@
 import { isUtf8 } from 'node:buffer';
 import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
-import { isRootClaimLive, schema, type Database } from '@haive/database';
+import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
 import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { convergeRtkQuestion } from '@haive/shared/rtk-enabled';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
@@ -57,6 +57,8 @@ import {
 } from '../step-engine/_upgrade-render.js';
 import { readStateTree } from '../plan/projection-merge.js';
 import { gitRun } from '../repo/git-exec.js';
+import type { NamedCheckout } from '../repo/checkout-head.js';
+import { admitWatchedCheckout } from './watch-admission.js';
 import { gitOperationInProgress } from '../repo/git-operation.js';
 import { updateApplicableTemplateIds } from '../step-engine/template-manifest.js';
 import { claimDiskHash } from './claim-disk.js';
@@ -229,6 +231,7 @@ async function readSyncRow(db: Database | Tx, repositoryId: string) {
       baseSnapshot: schema.projectStateSync.baseSnapshot,
       lastError: schema.projectStateSync.lastError,
       syncedHash: schema.projectStateSync.syncedHash,
+      syncedHead: schema.projectStateSync.syncedHead,
     })
     .from(schema.projectStateSync)
     .where(eq(schema.projectStateSync.repositoryId, repositoryId))
@@ -602,11 +605,13 @@ export async function syncProjectStateFromCheckout(
     repositoryId,
     repoPath,
     refuseDuringGitOperation,
+    expectedCheckout,
   }: {
     repositoryId: string;
     repoPath: string;
     /** An open merge or rebase holds the read. A checkout that changed since its first read always holds it. */
     refuseDuringGitOperation?: boolean;
+    expectedCheckout?: NamedCheckout;
   },
 ): Promise<ProjectStateSyncResult> {
   // An uncommitted writer's partial files are not an incoming checkout. Only its fenced recovery
@@ -629,11 +634,13 @@ export async function syncProjectStateFromCheckout(
 
   return db
     .transaction(async (tx) => {
+      if (expectedCheckout) await lockRepositoryTasksKey(tx, repositoryId);
       await lockProjectState(tx, repositoryId);
       return syncProjectStateLocked(tx, {
         repositoryId,
         repoPath,
         refuseDuringGitOperation,
+        expectedCheckout,
         checkout,
         seen,
         seenRepo,
@@ -652,6 +659,7 @@ export async function syncProjectStateLocked(
     repositoryId,
     repoPath,
     refuseDuringGitOperation,
+    expectedCheckout,
     holdingTaskId,
     checkout,
     seen,
@@ -660,6 +668,7 @@ export async function syncProjectStateLocked(
     repositoryId: string;
     repoPath: string;
     refuseDuringGitOperation?: boolean;
+    expectedCheckout?: NamedCheckout;
     holdingTaskId?: string;
     checkout: Checkout;
     seen: Awaited<ReturnType<typeof readSyncRow>>;
@@ -672,6 +681,11 @@ export async function syncProjectStateLocked(
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
   if (writing?.intent)
     return { outcome: 'held', reason: 'an interrupted project state write awaits recovery' };
+  if (
+    expectedCheckout &&
+    !(await admitWatchedCheckout(tx, repositoryId, repoPath, expectedCheckout))
+  )
+    return { outcome: 'superseded' };
   if (refuseDuringGitOperation) {
     if (await gitOperationInProgress(repoPath)) return { outcome: 'held' };
   }
@@ -892,16 +906,25 @@ export async function syncProjectStateLocked(
   // its column/ledger/conflict mutations roll back as well as its watermark.
   if (
     !sameValue(checkout, await readCheckout(repoPath)) ||
-    (refuseDuringGitOperation && (await gitOperationInProgress(repoPath)))
+    (refuseDuringGitOperation && (await gitOperationInProgress(repoPath))) ||
+    (expectedCheckout &&
+      !(await admitWatchedCheckout(tx, repositoryId, repoPath, expectedCheckout)))
   )
     throw new CheckoutMoved();
   if (
     row === null ||
     row.syncedHash !== checkout.hash ||
+    row.syncedHead !== (expectedCheckout?.sha ?? null) ||
     row.lastError !== lastError ||
     !sameValue(row.baseSnapshot, baseSnapshot)
   ) {
-    const synced = { baseSnapshot, syncedHash: checkout.hash, lastError, updatedAt: new Date() };
+    const synced = {
+      baseSnapshot,
+      syncedHash: checkout.hash,
+      syncedHead: expectedCheckout?.sha ?? null,
+      lastError,
+      updatedAt: new Date(),
+    };
     await tx
       .insert(schema.projectStateSync)
       .values({ repositoryId, ...synced })
@@ -1003,6 +1026,7 @@ async function applyRebase(
   if (checkout.kind === 'absent') {
     const synced = {
       syncedHash: null,
+      syncedHead: null,
       baseSnapshot: normalizeProjectState(emptyProjectState()),
       lastError: null,
       updatedAt: new Date(),
@@ -1019,6 +1043,7 @@ async function applyRebase(
   if (tooling) settings[TOOLING_UNIT_NAME] = tooling;
   const synced = {
     syncedHash: null,
+    syncedHead: null,
     baseSnapshot: normalizeProjectState({
       ...recordOf(checkout.render),
       claims: checkout.claims,

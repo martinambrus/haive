@@ -1,3 +1,6 @@
+import { lockRepositoryTasksKey } from '@haive/database';
+import { checkoutMatches, type NamedCheckout } from '../repo/checkout-head.js';
+import { admitWatchedCheckout } from '../project-state/watch-admission.js';
 import { safeErrorMessage } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import {
@@ -492,6 +495,7 @@ export async function importPlanMirror(
   db: Database,
   repositoryId: string,
   storagePath: string,
+  expectedCheckout?: NamedCheckout,
 ): Promise<PlanMirrorImport> {
   let rawPayload: unknown;
   let rawBytes: Buffer;
@@ -618,6 +622,12 @@ export async function importPlanMirror(
   }
 
   await db.transaction(async (tx) => {
+    if (expectedCheckout) {
+      await lockRepositoryTasksKey(tx, repositoryId);
+      await lockPlanMirror(tx, repositoryId);
+      if (!(await admitWatchedCheckout(tx, repositoryId, storagePath, expectedCheckout)))
+        throw new PlanMirrorHeldError(HELD_MOVED);
+    }
     await tx.insert(schema.planNodes).values(
       ordered.map((n) => ({
         id: n.id,
@@ -691,7 +701,7 @@ export async function importPlanMirror(
           syncedSnapshot: mirror,
         },
       });
-    await assertCheckoutStillHolds(storagePath, rawBytes);
+    await assertCheckoutStillHolds(storagePath, rawBytes, expectedCheckout);
   });
 
   logger.info(
@@ -735,11 +745,17 @@ export async function reconcilePlanFromCheckout(
   db: Database,
   repositoryId: string,
   repoPath: string,
-  opts: { requireStamp?: boolean } = {},
+  opts: { requireStamp?: boolean; expectedCheckout?: NamedCheckout } = {},
 ): Promise<PlanPullOutcome> {
   if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
   return db.transaction(async (tx) => {
+    if (opts.expectedCheckout) await lockRepositoryTasksKey(tx, repositoryId);
     await lockPlanMirror(tx, repositoryId);
+    if (
+      opts.expectedCheckout &&
+      !(await admitWatchedCheckout(tx, repositoryId, repoPath, opts.expectedCheckout))
+    )
+      throw new PlanMirrorHeldError(HELD_MOVED);
     let bytes: Buffer | null;
     try {
       const read = await readPlanJson(repoPath);
@@ -750,17 +766,25 @@ export async function reconcilePlanFromCheckout(
     }
     if (bytes === null) return noOutcome(NO_SNAPSHOT);
     const outcome = await reconcilePlanLocked(tx, repositoryId, bytes, opts);
-    await assertCheckoutStillHolds(repoPath, bytes);
+    await assertCheckoutStillHolds(repoPath, bytes, opts.expectedCheckout);
     return outcome;
   });
 }
 
 /** The lock does not hold git off the checkout: what was read must still be there, and no merge or
  *  rebase may have opened since, or the bytes read in may be ones an abort takes back. */
-async function assertCheckoutStillHolds(repoPath: string, bytes: Buffer): Promise<void> {
+async function assertCheckoutStillHolds(
+  repoPath: string,
+  bytes: Buffer,
+  expectedCheckout?: NamedCheckout,
+): Promise<void> {
+  if (expectedCheckout && !(await checkoutMatches(repoPath, expectedCheckout)))
+    throw new PlanMirrorHeldError(HELD_MOVED);
   if (await gitOperationInProgress(repoPath)) throw new PlanMirrorHeldError(HELD_GIT_OPERATION);
   const now = await readPlanJson(repoPath);
   if (!Buffer.isBuffer(now) || !now.equals(bytes)) throw new PlanMirrorHeldError(HELD_MOVED);
+  if (expectedCheckout && !(await checkoutMatches(repoPath, expectedCheckout)))
+    throw new PlanMirrorHeldError(HELD_MOVED);
 }
 
 const UNRELATED_ROOT =

@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { api } from '@/lib/api-client';
+import { api, requestCheckoutSync } from '@/lib/api-client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { Button, Card, FormError, Label } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
@@ -201,6 +201,7 @@ export default function RepoToolingPage() {
   }
 
   useEffect(() => {
+    void requestCheckoutSync(repositoryId);
     let cancelled = false;
     (async () => {
       try {

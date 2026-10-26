@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { api } from '@/lib/api-client';
+import { api, requestCheckoutSync } from '@/lib/api-client';
 import { Badge, Button } from '@/components/ui';
 import { DEV_VERSION } from '@haive/shared/constants';
 import type { UpgradeStatusResponse } from '@haive/shared/schemas';
@@ -24,6 +24,7 @@ export function UpgradeAvailableBanner({
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
+    void requestCheckoutSync(repositoryId);
     let cancelled = false;
     async function load() {
       try {

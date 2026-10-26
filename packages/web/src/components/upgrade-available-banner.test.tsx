@@ -90,11 +90,17 @@ async function mount(): Promise<Renderer> {
   return view;
 }
 
-const posts = () => sent.filter((call) => call.startsWith('POST '));
+const posts = () =>
+  sent.filter((call) => call.startsWith('POST ') && !call.endsWith('/sync-checkout'));
 const primary = (view: Renderer) => buttons(view.tree(), /^(review & apply|starting\.\.\.)$/)[0]!;
 const rollback = (view: Renderer) => buttons(view.tree(), 'roll back last upgrade')[0]!;
 
 describe('UpgradeAvailableBanner start and rollback failures', () => {
+  it('sends the checkout hint as POST while loading upgrade status with GET', async () => {
+    await mount();
+    expect(sent).toContain('POST /repos/repo-1/sync-checkout');
+    expect(sent).toContain('GET /repositories/repo-1/upgrade-status');
+  });
   it('keeps the banner and shows the refusal when the upgrade start answers 409', async () => {
     const view = await mount();
     fire.click(primary(view));
