@@ -249,6 +249,7 @@ describe('authoritative empty skill targets', () => {
       tasks: schema.tasks,
       taskSteps: schema.taskSteps,
       repositories: schema.repositories,
+      onboardingArtifacts: schema.onboardingArtifacts,
       cliProviders: schema.cliProviders,
       customBundles: schema.customBundles,
       customBundleItems: schema.customBundleItems,

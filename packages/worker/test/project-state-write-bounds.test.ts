@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import {
   ProjectStateUnreadableError,
@@ -28,8 +29,9 @@ const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const TASK = '00000000-0000-4000-8000-0000000000c1';
 const STATE = '.haive-data/state';
-// format.json, project/, project/render.json and artifacts/ stand besides the claim files.
-const AT_LIMIT = 4096 - 4;
+// format.json, project/, project/render.json, artifacts/, cli/ and cli/claude-code.json
+// stand beside the claims. The real reader limit remains exactly4096 entries.
+const AT_LIMIT = 4096 - 6;
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -79,9 +81,37 @@ async function setup(claims: number) {
       supersededAt: null,
     });
   }
+  const c = context();
+  const candidate = renderProjectState({
+    ...emptyProjectState(),
+    render: {
+      projectInfo: c.projectInfo,
+      framework: c.framework,
+      acceptedAgentIds: c.acceptedAgentIds,
+      customAgentSpecs: c.customAgentSpecs,
+      lspLanguages: c.lspLanguages,
+    },
+    cli: ['claude-code'],
+    claims: fake.rows(schema.onboardingArtifacts).map((row) => ({
+      path: row.diskPath,
+      templateId: row.templateId,
+      kind: row.templateKind,
+      schemaVersion: row.templateSchemaVersion,
+      templateHash: row.templateContentHash,
+      writtenHash: row.writtenHash,
+      haiveVersion: row.haiveVersion,
+    })),
+  } as never);
+  const candidateDirs = new Set<string>();
+  for (const rel of candidate.keys()) {
+    const parts = rel.split('/');
+    for (let i = 1; i < parts.length; i++) candidateDirs.add(parts.slice(0, i).join('/'));
+  }
+  const candidateEntries = candidate.size + candidateDirs.size;
   const db = fake.db as unknown as Database;
   return {
     root,
+    candidateEntries,
     fake,
     db,
     write: () =>
@@ -97,9 +127,10 @@ async function setup(claims: number) {
 const LONG = { timeout: 120_000 };
 
 describe('writeProjectStateRecord: a record the reader would refuse', () => {
-  it('refuses a ledger of 4,093 claims and writes no file', LONG, async () => {
+  it('refuses a ledger of 4,091 claims and writes no file', LONG, async () => {
     const s = await setup(AT_LIMIT + 1);
 
+    expect(s.candidateEntries).toBe(4097);
     const err = await s.write().catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(ProjectStateWriteError);
@@ -111,12 +142,13 @@ describe('writeProjectStateRecord: a record the reader would refuse', () => {
     expect(s.fake.rows(schema.projectStateSync)).toEqual([]);
   });
 
-  it('writes a ledger of 4,092 claims, which the reader takes in whole', LONG, async () => {
+  it('writes a ledger of 4,090 claims, which the reader takes in whole', LONG, async () => {
     const s = await setup(AT_LIMIT);
 
+    expect(s.candidateEntries).toBe(4096);
     const { written } = await s.write();
 
-    expect(written).toHaveLength(AT_LIMIT + 2);
+    expect(written).toHaveLength(AT_LIMIT + 3);
     expect((await readdir(join(s.root, STATE), { recursive: true })).length).toBe(4096);
     const synced = await syncProjectStateFromCheckout(s.db, {
       repositoryId: REPO,

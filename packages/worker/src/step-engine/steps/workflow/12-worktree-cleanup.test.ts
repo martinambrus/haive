@@ -2461,7 +2461,17 @@ describe('12 puts back the Haive files a task branch changed, before it lands or
       try {
         const { fake } = syncFixture({ render: BASE_RENDER, settings: AT_FORK });
         const repoArgs = { repositoryId: SYNC_REPO, repoPath: parent };
-        // The fixture is coherent: the fork point's files are what the sync last saw.
+        // The legacy fork records providers but no portable membership: first sync promotes it
+        // once, without changing any non-CLI context field or scope. Then establish the no-op base.
+        const initial = fake.rows(schema.repositories).find((r) => r.id === SYNC_REPO)!;
+        const originalContext = structuredClone(initial.renderContext) as Record<string, unknown>;
+        const originalScope = structuredClone(initial.scopeExcludeGlobs);
+        expect((await syncProjectStateFromCheckout(fake.db as never, repoArgs)).outcome).toBe(
+          'applied',
+        );
+        const promoted = fake.rows(schema.repositories).find((r) => r.id === SYNC_REPO)!;
+        expect(promoted.renderContext).toEqual({ ...originalContext, cliTargets: ['claude-code'] });
+        expect(promoted.scopeExcludeGlobs).toEqual(originalScope);
         expect((await syncProjectStateFromCheckout(fake.db as never, repoArgs)).outcome).toBe(
           'unchanged',
         );

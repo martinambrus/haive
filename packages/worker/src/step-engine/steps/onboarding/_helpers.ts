@@ -12,6 +12,7 @@ import {
   readRenderContextColumn,
   renderContextColumnSchema,
   recordedCliTargets,
+  recoverCliMembership,
   skillTargetDirs,
 } from '@haive/shared/project-state';
 
@@ -68,7 +69,8 @@ export async function loadCliProviderMetadata(
 }
 
 /** Repo-relative skills directories to write to and verify. Recorded repository membership is
- *  authoritative, [] included; a legacy context without membership falls back to ENABLED providers (claude/zai/amp
+ *  authoritative, [] included; missing membership recovers from strict live snapshots before legacy
+ *  metadata. Only genuinely unknown membership falls back to ENABLED providers (claude/zai/amp
  *  collapse to .claude/skills; gemini -> .gemini/skills; codex -> .agents/skills).
  *  Returns `fallback` (default []) when no enabled provider declares a skills dir.
  *  Bundle-expansion callers take the empty default so expansion no-ops rather than
@@ -87,10 +89,28 @@ export async function resolveSkillTargetDirs(
       .where(eq(schema.repositories.id, repositoryId))
       .limit(1);
     const read = readRenderContextColumn(repo?.renderContext);
-    if (read.kind === 'column') {
-      const cli = recordedCliTargets(read.column);
-      if (cli !== undefined) return skillTargetDirs(cli);
-    }
+    if (read.kind === 'column' && read.column.cliTargets !== undefined)
+      return skillTargetDirs(read.column.cliTargets);
+    // A foreground write can leave a NULL/legacy column while live snapshots still record the
+    // repository set. Use the same strict newest-recorded membership recovery as the planner.
+    const snapshots = await db
+      .select({
+        id: schema.onboardingArtifacts.id,
+        generatedAt: schema.onboardingArtifacts.generatedAt,
+        formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+      })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    const recovered = recoverCliMembership(snapshots);
+    const cli =
+      recovered?.cliTargets ??
+      (read.kind === 'column' ? recordedCliTargets(read.column) : undefined);
+    if (cli !== undefined) return skillTargetDirs(cli);
   }
   const rows = await db.query.cliProviders.findMany({
     where: eq(schema.cliProviders.userId, userId),

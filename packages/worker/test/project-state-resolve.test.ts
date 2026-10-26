@@ -143,6 +143,8 @@ interface Seed {
   /** Pending rows, by key: base, local and incoming values (undefined = absent side). */
   rows?: Record<string, { base?: unknown; local?: unknown; incoming?: unknown }>;
   claims?: boolean;
+  /** Modern coherent membership for controls that isolate render movement. */
+  cliTargets?: string[];
 }
 
 const KEY = 'acceptedAgentIds';
@@ -174,7 +176,10 @@ async function setup(seed: Seed = {}) {
     storagePath: root,
     // Holds no value, so the render-only checkouts below are coherent with it.
     rtkEnabled: null,
-    renderContext: seed.column === undefined ? column(MINE) : seed.column,
+    renderContext:
+      seed.column === undefined
+        ? column(MINE, seed.cliTargets ? { cliTargets: seed.cliTargets } : {})
+        : seed.column,
     applicableTemplateIds: seed.claims ? WITH_DOCS : null,
     updatedAt: new Date(1000),
   });
@@ -221,7 +226,14 @@ async function setup(seed: Seed = {}) {
   }
   fake.insert(sync, {
     repositoryId: REPO,
-    baseSnapshot: baseOf(seed.base ?? BASE),
+    baseSnapshot: seed.cliTargets
+      ? json(
+          normalizeProjectState({
+            ...record(seed.base ?? BASE),
+            cli: seed.cliTargets,
+          }),
+        )
+      : baseOf(seed.base ?? BASE),
     lastError: null,
     updatedAt: new Date(0),
   });
@@ -244,7 +256,10 @@ async function setup(seed: Seed = {}) {
   }
   const file = seed.file ?? THEIRS;
   await mkdir(dirname(join(root, RENDER_REL)), { recursive: true });
-  for (const [rel, text] of renderProjectState(record(file))) {
+  for (const [rel, text] of renderProjectState({
+    ...record(file),
+    ...(seed.cliTargets ? { cli: seed.cliTargets } : {}),
+  })) {
     await mkdir(dirname(join(root, STATE_DIR, rel)), { recursive: true });
     await writeFile(join(root, STATE_DIR, rel), text);
   }
@@ -479,7 +494,7 @@ describe('answering twice', () => {
 
 describe('a checkout whose record moved', () => {
   it('is refused and the file, column and base stay, then the row is re-synced to the new value', async () => {
-    const s = await setup();
+    const s = await setup({ cliTargets: ['claude-code', 'codex'] });
     const NEWER = render({ acceptedAgentIds: ['code-reviewer', 'qa-lead', 'security-auditor'] });
     await writeFile(join(s.root, RENDER_REL), renderText(NEWER));
     const columnBefore = json(s.repoRow().renderContext);
@@ -850,7 +865,16 @@ describe('a failure after the file would be rewritten', () => {
 
     expect((await s.answer('keep_mine')).kind).toBe('resolved');
     expect(await s.fileText()).toBe(renderText(MINE));
+    const beforePromotion = json(s.repoRow().renderContext) as Json;
+    expect((await sync(s)).outcome).toBe('applied');
+    expect(json(s.repoRow().renderContext)).toEqual({
+      ...beforePromotion,
+      cliTargets: ['claude-code', 'codex'],
+    });
+    expect(await s.fileText()).toBe(renderText(MINE));
+    const settled = s.dump();
     expect((await sync(s)).outcome).toBe('unchanged');
+    expect(s.dump()).toEqual(settled);
   });
 });
 

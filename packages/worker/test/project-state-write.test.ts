@@ -16,6 +16,7 @@ import {
   renderProjectState,
   projectStateHash,
   gitBlobId,
+  recordedCliTargets,
 } from '@haive/shared/project-state';
 import {
   ProjectStateMovedError,
@@ -30,6 +31,7 @@ const OTHER = '00000000-0000-4000-8000-0000000000b2';
 const STATE_DIR = '.haive-data/state';
 const FORMAT = `${STATE_DIR}/format.json`;
 const RENDER = `${STATE_DIR}/project/render.json`;
+const CLI = `${STATE_DIR}/cli/claude-code.json`;
 // The fake takes a lock only as this prefix, ONE interpolated string key and `, 0))`, and stores an
 // upsert's SQL expressions unevaluated: build the whole key as one string, and set literal values.
 
@@ -114,9 +116,12 @@ const portableOnly = (): Context => ({
   lspLanguages: [],
 });
 
-/** What the record holds for a context: its portable fields and nothing else. */
+/** The record holds portable render fields plus recorded CLI membership, never derived paths. */
 const recordOf = (c: Context) => ({
   ...emptyProjectState(),
+  cli:
+    recordedCliTargets(c as { cliTargets?: string[]; enabledCliProviders?: { name: string }[] }) ??
+    [],
   render: {
     projectInfo: c.projectInfo,
     framework: c.framework,
@@ -419,8 +424,8 @@ describe('writeProjectStateRecord: the files', () => {
 
     const want = expectedFiles(context());
     expect(s.onDisk()).toEqual(want);
-    expect(await publicFilesWithPrivateImages(s.root)).toEqual([FORMAT, RENDER]);
-    expect([...written].sort()).toEqual([FORMAT, RENDER]);
+    expect(await publicFilesWithPrivateImages(s.root)).toEqual([CLI, FORMAT, RENDER]);
+    expect([...written].sort()).toEqual([CLI, FORMAT, RENDER]);
   });
 
   it('commits its recovery intent before the first file changes', async () => {
@@ -438,7 +443,7 @@ describe('writeProjectStateRecord: the files', () => {
 
     await s.write(portableOnly(), false);
     expect(s.onDisk()).toEqual(expectedFiles(portableOnly()));
-    expect(await publicFilesWithPrivateImages(s.root)).toEqual([FORMAT, RENDER]);
+    expect(await publicFilesWithPrivateImages(s.root)).toEqual([CLI, FORMAT, RENDER]);
   });
 });
 
@@ -447,7 +452,9 @@ describe('writeProjectStateRecord: the database', () => {
     const s = await setup();
     await s.write(context(), true);
 
-    expect(json(s.columnOf(REPO))).toEqual(json({ ...context(), rtkChoiceRecorded: true }));
+    expect(json(s.columnOf(REPO))).toEqual(
+      json({ ...context(), cliTargets: ['claude-code'], rtkChoiceRecorded: true }),
+    );
     expect(s.columnOf(OTHER)).toBeNull();
   });
 
@@ -457,7 +464,9 @@ describe('writeProjectStateRecord: the database', () => {
 
     const column = s.columnOf(REPO) as Record<string, unknown>;
     expect(column.rtkChoiceRecorded).toBe(false);
-    expect(json(column)).toEqual(json({ ...context(), rtkChoiceRecorded: false }));
+    expect(json(column)).toEqual(
+      json({ ...context(), cliTargets: ['claude-code'], rtkChoiceRecorded: false }),
+    );
   });
 
   it('keeps a portable-only context as it is, inventing no per-install field', async () => {
@@ -493,18 +502,26 @@ describe('writeProjectStateRecord: the database', () => {
     expect(row[s.col.updatedAt]).not.toEqual(new Date(0));
   });
 
-  it('replaces the column and the base on a second write rather than adding to them', async () => {
+  it('replaces portable fields and the RTK choice while preserving recorded CLI membership', async () => {
     const s = await setup();
     await s.write(context(), true);
     await s.write(context(), true);
     expect(s.syncRows()).toHaveLength(1);
 
     await s.write(portableOnly(), false);
-    expect(json(s.columnOf(REPO))).toEqual(json({ ...portableOnly(), rtkChoiceRecorded: false }));
+    expect(json(s.columnOf(REPO))).toEqual(
+      json({
+        ...portableOnly(),
+        cliTargets: ['claude-code'],
+        agentTargets: [{ dir: '.claude/agents', format: 'markdown', supportsLsp: false }],
+        enabledCliProviders: context().enabledCliProviders,
+        rtkChoiceRecorded: false,
+      }),
+    );
     const rows = s.syncRows();
     expect(rows).toHaveLength(1);
     expect(json(rows[0]![s.col.baseSnapshot])).toEqual(
-      json(normalizeProjectState(recordOf(portableOnly()))),
+      json(normalizeProjectState(recordOf({ ...portableOnly(), cliTargets: ['claude-code'] }))),
     );
   });
 });
@@ -641,7 +658,7 @@ describe('writeProjectStateRecord: what a rejection names', () => {
       if (point === 'beforeLock') expect(await listFiles(s.root)).toEqual([]);
       else {
         expect(await publicFilesWithPrivateImages(s.root)).toEqual([]);
-        expect((await listFiles(s.root)).length).toBe(3);
+        expect((await listFiles(s.root)).length).toBe(4);
       }
     },
   );
@@ -698,7 +715,9 @@ describe('writeProjectStateRecord: a key a sync left pending', () => {
     expect(s.onDisk().render).toBe(expectedFiles(withIds(incoming)).render);
     const baseSnapshot = s.syncRows()[0]![s.col.baseSnapshot];
     expect(json(baseSnapshot)).toEqual(json(normalizeProjectState(recordOf(withIds(base)))));
-    expect(json(s.columnOf(REPO))).toEqual(json({ ...context(), rtkChoiceRecorded: true }));
+    expect(json(s.columnOf(REPO))).toEqual(
+      json({ ...context(), cliTargets: ['claude-code'], rtkChoiceRecorded: true }),
+    );
     expect(s.fake.rows(schema.projectStateConflicts)).toHaveLength(1);
   });
 
