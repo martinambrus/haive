@@ -50,6 +50,9 @@ picker offers. Two feeds reach back past Haive's command line, so `minRunnableVe
 `resolveSkillTargetDirs` writes one mirror per unique `projectSkillsDir` in the repository's
 recorded CLI set; the current onboarding task supplies its pending union before 12 records it.
 Only legacy contexts without recorded membership use the user's enabled providers as a fallback.
+An explicit empty destination list stays empty through agent selection, generation/repair/sync
+apply and scoped staging: these steps create, rewrite, remove and commit no skill tree there.
+Only an older detected payload with no destination field retains its legacy default directory.
 Adding a maintained CLI does not rewrite existing generated skills until the next generation,
 repair or sync; those generated files remain outside onboarding-upgrade scope. Every lever above
 is version-bound vendor behaviour: re-capture after a CLI bump before trusting it.

@@ -174,15 +174,15 @@ is invisible there once a sibling rendering has one; the next upgrade still offe
 
 **The banner and 01 derive the render targets from one module.** Which agent directories and skills
 directories a repository renders to is `project-state/render-targets.ts` in `@haive/shared`
-(`originAgentTargets`, `skillTargetDirs`, `agentFilePath`, `bundleItemRenders`, `rendersAt`), and
-the worker's 07, 01 and bundle expansion call the same functions, so the two cannot drift
-(`render-targets-drift.test.ts`). The banner resolves the targets from the origin 01 renders from: a
-column's stored targets, else the enabled CLIs; a snapshot's, else the same completion (01 would
-throw on one with none); the blank scaffold's, which has no fallback; an onboarding's recorded, else
-the `.claude/agents` fallback. A live row whose template no longer renders to its path (the
-directory of a CLI since disabled) reads as changed even when the hashes match, and as obsolete
-when 02 would delete the file; a row 02 would keep stays quiet. No agent kind is judged where no
-context resolves.
+(`deriveRenderTargets`, `originAgentTargets`, `skillTargetDirs`, `agentFilePath`, `bundleItemRenders`,
+`rendersAt`), and the worker's 07, 01 and bundle expansion use the same repository membership and
+legacy completion, so the two cannot drift (`render-targets-drift.test.ts`). A recorded CLI set,
+including an empty one, is authoritative. Legacy contexts recover recorded membership and preserve
+an actually recorded agent fallback separately; only unresolved legacy membership uses the old
+local-provider completion. Disabling a person's provider does not remove a repository target.
+An explicit repository target change can make a live path obsolete, subject to ownership and the
+normal Keep choice. A row 02 would keep stays quiet, and no agent kind is judged where no context
+resolves.
 
 **A file already holding the new render is recorded, never asked about.** A live row whose
 template moved while its path already holds the current render (one another install upgraded and
@@ -444,7 +444,9 @@ valid snapshot that records it; an existing authoritative column stays as it is.
 rest of a missing context retains the RTK-aware `pickSnapshotRow` policy described above. The repair
 holds the ordered repository/project-state locks and repository row, defers for live root claims,
 onboarding/upgrade holders or a journal, and marks a real change dirty in that transaction. It adds
-no schema migration.
+no schema migration. Ordinary planning, writer admission and sync also complete recorded legacy
+membership under their existing exact column/task/reset guards, so a held boot repair does not
+require another worker restart after the task completes.
 
 Old onboarding also wrote a Claude-format agent fallback when no provider had an agent directory,
 including Amp-only and zero-provider contexts. The internal `legacyAgentFallback` context/snapshot
@@ -468,10 +470,13 @@ The sync merges CLI members three ways with the record's base; the writer owns a
 only when a validated previous base named it. Legacy records with no CLI units preserve recorded
 local/snapshot membership unless a populated prior base proves removal. A fresh NULL context with
 no recorded membership starts with `[]`, rather than today's local providers. Legacy foreground
-snapshots inherit an authoritative repository set under the writer's existing gates; exact caller
-column/task/reset fences remain in force, and an unfenced differing list or implicit omission is
-refused. The complete raw watermark, journal and final checkout checks are unchanged. 12 and 03
-consume the writer's reported paths for scoped staging.
+snapshots inherit an authoritative repository set under the writer's existing gates. Exact caller
+column/task/reset fences remain in force: an explicit list that omits maintained members is refused,
+as is an unfenced differing list. A persisted legacy 02 plan whose original recorded membership
+differs from the newest valid artifact history must be planned again before any product file or
+ledger changes; a newly planned snapshot records the chosen membership for its own retries. The
+complete raw watermark, journal and final checkout checks are unchanged. 12 and 03 consume the
+writer's reported paths for scoped staging.
 
 **A key both installs changed is held for an answer, never settled for the column's side.** The
 project-state sync merges the checkout's record against the base it last synced from. A render key
