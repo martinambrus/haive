@@ -101,10 +101,10 @@ All PRE-EXISTING.
 
 ### T118 · B4.1 · repository CLI set is a union
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T17:52Z · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T18:28Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
 
-Codex progress 2026-10-26T17:52Z: PR #934 exact final head dbb00bbbe has all8CI jobs SUCCESS (full-root unit/smokes/Playwright), clean fresh paired source review and parent25-control/browser acceptance. Marker correction118shared/469API/71worker/types12/formatPASS; all receipts/source hashes checked, owned browser processes closed. Automated review stayed Running beyond15min; one policy-authorized retry posted6423304150 at~17:48:45, conservative retry deadline18:04:30UTC if no result. No new findings posted, but automated review is pending, not clean. Final thread/check audit and merge/mainCI/runtime still required; no merge yet. Finish T118 then PAUSE; T119 queued, counts unchanged.
+Codex progress 2026-10-26T18:28Z: exactdbb automated review completed with R7/R8 despite all8CI green:07 lost snapshot-backed membership before union; status reasons used stale targets. Parent reproduced worker8FAIL3PASS/status5FAIL1PASS/tooling2FAIL1PASS before release. Bounded reader map also verified import-marker sole-proof retirement loss, boot stalefallback and Tooling stale-client removal erasing hidden members; all same-feature corrections active, no unrelated backlog. Preserve current explicit authority, newest strict snapshot membership separate from older RTK/portable origin, original NULL CAS, existing locks/auth/holder/journal. New Tooling canonical observed-set CAS remains valid-column-only; NULL/refused read-only. New API24PASS and refined156PASS; affected worker/recovery99/twoinstall156/types/format final checks still ahead. Parent status/removal browser harnesses prepared. Previousdbb greens carry only unchanged scopes; no merge/timeoutwaiver. Finish T118 then PAUSE; T119 queued, counts unchanged.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
