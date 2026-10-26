@@ -231,6 +231,47 @@ describe.skipIf(!url)('CLI addition availability through authenticated status', 
     expect(offered.cliAdditions).toEqual(['gemini']);
   });
 
+  it('offers cleanup for a reduced imported Codex claim with no local Codex addition or other pending reason', async () => {
+    expect(await status()).toMatchObject({ hasUpgradeAvailable: false, changedTemplateIds: [] });
+    const reduced = ['claude-code', 'future-cli'];
+    await db
+      .update(schema.repositories)
+      .set({ renderContext: context(reduced) })
+      .where(eq(schema.repositories.id, repositoryId));
+    expect(await status()).toMatchObject({ hasUpgradeAvailable: false, changedTemplateIds: [] });
+    const removedPath = `.codex/agents/${templateId.slice('agent.'.length)}.toml`;
+    const removedBytes = 'name = "removed-agent"\n';
+    await mkdir(path.dirname(path.join(root, removedPath)), { recursive: true });
+    await writeFile(path.join(root, removedPath), removedBytes);
+    const { rtkChoiceRecorded: _recorded, ...snapshot } = context(reduced);
+    await db.insert(schema.onboardingArtifacts).values({
+      userId,
+      repositoryId,
+      taskId: null,
+      templateId,
+      templateKind: 'agent',
+      diskPath: removedPath,
+      templateSchemaVersion: 1,
+      templateContentHash: hash,
+      writtenHash: sha256Hex(removedBytes),
+      writtenContent: removedBytes,
+      source: 'backfill',
+      sourceStepId: 'project-state-import',
+      haiveVersion: '0.0.0',
+      importedAt: new Date(),
+      lastObservedDiskHash: sha256Hex(removedBytes),
+      formValuesSnapshot: snapshot,
+    });
+    const before = await persisted();
+    const body = await status();
+    expect(await persisted()).toEqual(before);
+    expect(body.cliAdditions ?? []).toEqual([]);
+    expect(body.changedTemplateIds).toEqual([templateId]);
+    expect(body.obsoleteTemplateIds).toEqual([templateId]);
+    expect(body.missingRulesImports).toBeUndefined();
+    expect(body.hasUpgradeAvailable).toBe(true);
+  });
+
   it('does not offer disabled or already maintained CLIs', async () => {
     await enableGemini();
     await db

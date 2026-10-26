@@ -2,6 +2,7 @@ import { isImportMarker } from './import-marker.js';
 import { isRenderContextSnapshot } from './render-context.js';
 import { deriveRenderTargets } from './render-targets.js';
 import { rendersAt, type AgentRenderTarget } from './render-targets.js';
+import { CLI_PROVIDER_CATALOG } from '../cli-providers/catalog.js';
 
 const RELEASE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
@@ -49,6 +50,7 @@ export interface ForeignContext {
 }
 
 const TARGETED_KINDS = new Set(['agent', 'custom-agent', 'agents-index', 'custom-skill']);
+const CATALOG_TARGETS = deriveRenderTargets(Object.keys(CLI_PROVIDER_CATALOG), []);
 
 function specIdFromPath(
   row: Pick<ForeignCandidate, 'templateKind' | 'diskPath'>,
@@ -89,6 +91,8 @@ export function foreignReason(
           legacyAgentFallback?: boolean;
         };
         // Only the new explicit repository contract can authorize retiring imported targets.
+        // An import after membership removal already carries the reduced list, while the portable
+        // claim still owns its file. Recognize known catalog paths without inventing old members.
         if (prior.cliTargets !== undefined) {
           const before = deriveRenderTargets(
             prior.cliTargets,
@@ -100,6 +104,13 @@ export function foreignReason(
             rendersAt(
               { ...row, specId: row.specId ?? specIdFromPath(row, before.skillDirs) },
               before,
+            )
+          )
+            return null;
+          if (
+            rendersAt(
+              { ...row, specId: row.specId ?? specIdFromPath(row, CATALOG_TARGETS.skillDirs) },
+              CATALOG_TARGETS,
             )
           )
             return null;

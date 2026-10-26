@@ -3328,6 +3328,105 @@ async function main(): Promise<void> {
             Boolean,
           ),
       );
+      // R9: commit membership removal BEFORE cleanup, then clone its retained claims elsewhere.
+      const [reducedRepo] = await ua.db
+        .select({ context: schema.repositories.renderContext })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, ua.repositoryId));
+      await writeProjectStateColumn(ua.db, {
+        repositoryId: ua.repositoryId,
+        repoPath: ua.repoPath,
+        column: reducedRepo!.context as Parameters<typeof writeProjectStateColumn>[1]['column'],
+      });
+      pushFrom(ua, 'A: stop Codex maintenance before file cleanup', '.haive-data/state');
+      const uc = await cloneInstall(
+        'B',
+        dbB!,
+        path.join(tmp!, 'union-deferred-cleanup-clone'),
+        httpOrigin(unionOrigin),
+      );
+      await uc.db
+        .insert(schema.cliProviders)
+        .values({ userId: uc.userId, name: 'codex', label: 'Clone enabled Codex', enabled: true });
+      const reducedMarkers = await uc.db
+        .select()
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, uc.repositoryId),
+            isNull(schema.onboardingArtifacts.supersededAt),
+          ),
+        );
+      check(
+        'R9: a fresh clone keeps removed Codex files and claims with only the reduced membership in every marker',
+        isDeepStrictEqual(await namesOf(uc), ['claude-code', 'future-cli']) &&
+          codexPaths.every((p) =>
+            reducedMarkers.some(
+              (r) =>
+                r.diskPath === p &&
+                r.sourceStepId === PROJECT_STATE_IMPORT_STEP_ID &&
+                isDeepStrictEqual(
+                  (r.formValuesSnapshot as { cliTargets?: string[] } | null)?.cliTargets,
+                  ['claude-code', 'future-cli'],
+                ),
+            ),
+          ) &&
+          (
+            await Promise.all(
+              codexPaths.map(async (p) => (await fileOf(uc, p)) === (await fileOf(ua, p))),
+            )
+          ).every(Boolean),
+      );
+      const deferred = await upgradePlan(uc);
+      check(
+        'R9: after declining the still-enabled Codex addition, imported removed catalog paths are ordinary obsolete choices',
+        deferred.plan !== null &&
+          deferred.plan.cliAdditions?.includes('codex') === true &&
+          codexPaths.every((p) =>
+            deferred.plan!.entries.some((e) => e.diskPath === p && e.bucket === 'obsolete'),
+          ),
+      );
+      await uc.db
+        .update(schema.tasks)
+        .set({ status: 'completed', completedAt: new Date() })
+        .where(eq(schema.tasks.id, deferred.taskId));
+      const cloneKeep = codexPaths[0]!;
+      await upgradeApplied(
+        uc,
+        (plan) => ({
+          selectedObsoleteRemovals: plan.entries
+            .filter(
+              (e) =>
+                codexPaths.includes(e.diskPath) &&
+                e.diskPath !== cloneKeep &&
+                e.bucket === 'obsolete',
+            )
+            .map((e) => e.entryId),
+          selectedObsoleteUntracks: plan.entries
+            .filter((e) => e.diskPath === cloneKeep && e.bucket === 'obsolete')
+            .map((e) => e.entryId),
+        }),
+        { addCliTargets: [] },
+      );
+      check(
+        'R9: clone cleanup honors Remove and Keep without re-adding Codex or changing maintained Claude bytes',
+        isDeepStrictEqual(await namesOf(uc), ['claude-code', 'future-cli']) &&
+          !(await livePaths(uc)).some((p) => codexPaths.includes(p)) &&
+          (await fileOf(uc, cloneKeep)).length > 0 &&
+          (
+            await Promise.all(
+              codexPaths
+                .filter((p) => p !== cloneKeep)
+                .map(async (p) => (await fileOf(uc, p)) === ''),
+            )
+          ).every(Boolean) &&
+          (
+            await Promise.all(
+              [...claudeBefore].map(async ([p, bytes]) => (await fileOf(uc, p)) === bytes),
+            )
+          ).every(Boolean),
+      );
+
       const keep = codexPaths[0]!;
       await upgradeApplied(ua, (plan) => ({
         selectedObsoleteRemovals: plan.entries
