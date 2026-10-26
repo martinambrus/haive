@@ -573,6 +573,68 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
       expect(recordReadable(before)).toEqual({ readable: true });
       expect(recordReadable(planned)).toEqual({ readable: true });
       expect((await readdir(state, { recursive: true })).length).toBe(4098);
+      const killRecovery = async (phase: 'before' | 'after') => {
+        const child = spawn(
+          process.execPath,
+          [
+            '--import',
+            'tsx',
+            fileURLToPath(
+              new URL('./support/project-state-directory-crash-child.ts', import.meta.url),
+            ),
+          ],
+          {
+            cwd: fileURLToPath(new URL('..', import.meta.url)),
+            env: {
+              ...process.env,
+              T266_CRASH_REPOSITORY_ID: s.repo.id,
+              T266_CRASH_REPO_PATH: s.root,
+              T266_DIRECTORY_CRASH_PHASE: phase,
+            },
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        let error = '';
+        child.stderr.on('data', (chunk) => {
+          error = (error + chunk.toString()).slice(-2000);
+        });
+        const closed = new Promise<NodeJS.Signals | null>((resolve) =>
+          child.once('close', (_code, signal) => resolve(signal)),
+        );
+        try {
+          const boundary = await new Promise<string>((resolve, reject) => {
+            const timer = setTimeout(
+              () => reject(new Error(`directory crash boundary missing: ${error}`)),
+              15000,
+            );
+            let output = '';
+            child.stdout.on('data', (chunk) => {
+              output += chunk.toString();
+              const match = /T266_DIRECTORY_(PARKED|BEFORE_RMDIR|AFTER_RMDIR)/.exec(output);
+              if (match) {
+                clearTimeout(timer);
+                resolve(match[1]!);
+              }
+            });
+            child.once('error', (err) => {
+              clearTimeout(timer);
+              reject(err);
+            });
+            void closed.then((signal) => {
+              clearTimeout(timer);
+              reject(new Error(`directory child exited early (${signal}): ${error}`));
+            });
+          });
+          process.stdout.write(`T266_ACTUAL_DIRECTORY_CRASH ${phase}: ${boundary}\n`);
+          expect((await s.outbox())!.writeIntent).toBeTruthy();
+          child.kill('SIGKILL');
+          expect(await closed).toBe('SIGKILL');
+        } finally {
+          child.kill('SIGKILL');
+          await closed;
+        }
+      };
+      await killRecovery('before');
       await recoverProjectStateWrite(db!, s.repo.id, s.root);
       expect.soft((await readdir(state, { recursive: true })).length).toBe(4096);
       await expect(readStateFiles(s.root)).resolves.toEqual(before);
@@ -583,6 +645,23 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
           .from(schema.projectStateSync)
           .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
       ).toEqual(sync);
+      // The same before record is reused for a real kill immediately after the directory syscall.
+      seam.afterWrite = async () => {
+        throw new Error('second bundle partial');
+      };
+      await expect(
+        writeProjectStateColumn(db!, {
+          repositoryId: s.repo.id,
+          repoPath: s.root,
+          column: { ...context(), rtkChoiceRecorded: false } as never,
+          keepColumnOnFailure: true,
+        }),
+      ).rejects.toThrow('second bundle partial');
+      seam.afterWrite = null;
+      await killRecovery('after');
+      await recoverProjectStateWrite(db!, s.repo.id, s.root);
+      expect((await s.outbox())!.writeIntent).toBeNull();
+      expect(await readStateFiles(s.root)).toEqual(before);
       await s.write();
       expect((await readdir(state, { recursive: true })).length).toBe(4096);
       expect(recordReadable((await readStateFiles(s.root))!)).toEqual({ readable: true });
@@ -1641,6 +1720,280 @@ describe.skipIf(!url)('T266 real PostgreSQL record writer', () => {
         await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
       )[0]!.rtkChoiceMadeAt,
     ).toBeNull();
+  });
+
+  const killFileOperation = async (
+    s: Awaited<ReturnType<typeof fixture>>,
+    action: 'write' | 'recover',
+    boundary: 'park' | 'publish' | 'prepare' | 'restore',
+    leaf: string,
+    name = 'file crash target',
+  ) => {
+    const child = spawn(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        fileURLToPath(new URL('./support/project-state-file-crash-child.ts', import.meta.url)),
+      ],
+      {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        env: {
+          ...process.env,
+          T266_CRASH_REPOSITORY_ID: s.repo.id,
+          T266_CRASH_REPO_PATH: s.root,
+          T266_FILE_ACTION: action,
+          T266_FILE_BOUNDARY: boundary,
+          T266_FILE_LEAF: leaf,
+          T266_FILE_NAME: name,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let error = '';
+    child.stderr.on('data', (chunk) => {
+      error = (error + chunk.toString()).slice(-2000);
+    });
+    const closed = new Promise<NodeJS.Signals | null>((resolve) =>
+      child.once('close', (_code, signal) => resolve(signal)),
+    );
+    try {
+      const phase = await new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error(`file crash boundary ${boundary} missing: ${error}`)),
+          15000,
+        );
+        let output = '';
+        child.stdout.on('data', (chunk) => {
+          output += chunk.toString();
+          const found = /T266_FILE_([A-Z_]+)/.exec(output);
+          if (found) {
+            clearTimeout(timer);
+            resolve(found[1]!);
+          }
+        });
+        child.once('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        void closed.then(() => {
+          clearTimeout(timer);
+          reject(new Error(`file crash child exited: ${error}`));
+        });
+      });
+      child.kill('SIGKILL');
+      expect(await closed).toBe('SIGKILL');
+      return phase;
+    } finally {
+      child.kill('SIGKILL');
+      await closed;
+    }
+  };
+  it.each([
+    'forward-create',
+    'forward-rewrite',
+    'forward-remove',
+    'undo-create',
+    'undo-rewrite-park',
+    'undo-rewrite-publish',
+    'undo-remove',
+    'undo-restore-link',
+  ] as const)(
+    'replays actual SIGKILL during %s through the same prepared-image protocol',
+    async (kind) => {
+      const first = kind === 'forward-create' || kind === 'undo-remove';
+      const s = await fixture(first ? null : context());
+      const setting = kind === 'forward-remove' || kind === 'undo-create';
+      if (setting)
+        await db!
+          .update(schema.repositories)
+          .set({ rtkVersion: '1.0.0' })
+          .where(eq(schema.repositories.id, s.repo.id));
+      if (!first) await s.write();
+      const before = await readStateFiles(s.root);
+      const sync = await db!
+        .select()
+        .from(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, s.repo.id));
+      if (setting)
+        await db!
+          .update(schema.repositories)
+          .set({ rtkVersion: null })
+          .where(eq(schema.repositories.id, s.repo.id));
+      const undo = kind.startsWith('undo-');
+      if (undo) {
+        if (kind === 'undo-create')
+          seam.afterRemove = async () => {
+            throw new Error('forward remove completed');
+          };
+        else
+          seam.afterWrite = async () => {
+            throw new Error('forward image completed');
+          };
+        await expect(
+          writeProjectStateColumn(db!, {
+            repositoryId: s.repo.id,
+            repoPath: s.root,
+            column: {
+              ...context(setting ? 'local' : 'file crash target'),
+              rtkChoiceRecorded: false,
+            } as never,
+            keepColumnOnFailure: true,
+          }),
+        ).rejects.toThrow('completed');
+        seam.afterRemove = null;
+        seam.afterWrite = null;
+      }
+      const leaf = setting ? 'rtk-version.json' : first ? 'format.json' : 'render.json';
+      const boundary =
+        kind === 'forward-remove' || kind === 'undo-remove' || kind === 'undo-rewrite-park'
+          ? 'park'
+          : kind === 'undo-restore-link'
+            ? 'restore'
+            : 'publish';
+      await killFileOperation(
+        s,
+        undo ? 'recover' : 'write',
+        boundary,
+        leaf,
+        setting ? 'local' : 'file crash target',
+      );
+      expect((await s.outbox())!.writeIntent).toBeTruthy();
+      await recoverProjectStateWrite(db!, s.repo.id, s.root);
+      expect(await readStateFiles(s.root)).toEqual(before);
+      expect((await s.outbox())!.writeIntent).toBeNull();
+      expect(
+        await db!
+          .select()
+          .from(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
+      ).toEqual(sync);
+      const column = (
+        await db!.select().from(schema.repositories).where(eq(schema.repositories.id, s.repo.id))
+      )[0]!.renderContext;
+      if (first) expect(column).toBeNull();
+      else expect(column).toMatchObject(context());
+    },
+    30000,
+  );
+  it('a kill during private image preparation publishes no record or intent and retry succeeds', async () => {
+    const s = await fixture(null);
+    expect(await killFileOperation(s, 'write', 'prepare', 'format.json')).toBe('PREPARE_PARTIAL');
+    expect(await readStateFiles(s.root)).toBeNull();
+    expect(await s.outbox()).toBeUndefined();
+    expect(
+      await db!
+        .select()
+        .from(schema.projectStateSync)
+        .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
+    ).toEqual([]);
+    execFileSync('git', ['init', '-q'], { cwd: s.root });
+    expect(
+      execFileSync('git', ['status', '--porcelain', '--untracked-files=all', '--', '.haive-data'], {
+        cwd: s.root,
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('');
+    await s.write();
+    expect((await s.render()).projectInfo.name).toBe('local');
+    expect((await s.outbox())!.writeIntent).toBeNull();
+  }, 30000);
+
+  it('recovers an actual SIGKILL after the foreground render is parked', async () => {
+    const s = await fixture();
+    await s.write();
+    const before = await s.render();
+    const sync = await db!
+      .select()
+      .from(schema.projectStateSync)
+      .where(eq(schema.projectStateSync.repositoryId, s.repo.id));
+    const child = spawn(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        fileURLToPath(new URL('./support/project-state-file-crash-child.ts', import.meta.url)),
+      ],
+      {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        env: { ...process.env, T266_CRASH_REPOSITORY_ID: s.repo.id, T266_CRASH_REPO_PATH: s.root },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let error = '';
+    child.stderr.on('data', (chunk) => {
+      error = (error + chunk.toString()).slice(-2000);
+    });
+    const closed = new Promise<NodeJS.Signals | null>((resolve) =>
+      child.once('close', (_code, signal) => resolve(signal)),
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error(`render park boundary missing: ${error}`)),
+          15000,
+        );
+        let output = '';
+        child.stdout.on('data', (chunk) => {
+          output += chunk.toString();
+          if (output.includes('T266_RENDER_PARKED')) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+        child.once('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        void closed.then(() => {
+          clearTimeout(timer);
+          reject(new Error(`render child exited before park: ${error}`));
+        });
+      });
+      await expect(
+        readFile(join(s.root, '.haive-data/state/project/render.json')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      child.kill('SIGKILL');
+      expect(await closed).toBe('SIGKILL');
+      expect((await s.outbox())!.writeIntent).toBeTruthy();
+      await recoverProjectStateWrite(db!, s.repo.id, s.root);
+      expect(await s.render()).toEqual(before);
+      expect((await s.outbox())!.writeIntent).toBeNull();
+      expect(
+        await db!
+          .select()
+          .from(schema.projectStateSync)
+          .where(eq(schema.projectStateSync.repositoryId, s.repo.id)),
+      ).toEqual(sync);
+    } finally {
+      child.kill('SIGKILL');
+      await closed;
+    }
+  }, 30000);
+  it('foreground rewrite refuses an 8 MiB editor file before allocating it', async () => {
+    const s = await fixture();
+    await s.write();
+    const editor = Buffer.alloc(8 * PROJECT_STATE_LIMITS.maxFileBytes, 120);
+    const path = join(s.root, '.haive-data/state/project/render.json');
+    let allocations = 0;
+    let spy: { mockRestore(): void } | undefined;
+    seam.beforeRewrite = async () => {
+      seam.beforeRewrite = null;
+      await writeFile(path, editor);
+      const original = Buffer.allocUnsafe;
+      spy = vi.spyOn(Buffer, 'allocUnsafe').mockImplementation((size: number) => {
+        if (size > PROJECT_STATE_LIMITS.maxFileBytes) allocations++;
+        return original(size);
+      });
+    };
+    try {
+      await expect(s.write('foreground target')).rejects.toThrow('settings changed');
+    } finally {
+      spy?.mockRestore();
+    }
+    expect.soft(allocations).toBe(0);
+    expect(await readFile(path)).toEqual(editor);
+    expect((await s.outbox())!.writeIntent).toBeTruthy();
   });
 
   it('recovers after the writer process is killed before COMMIT, without adopting its rolled-back context', async () => {

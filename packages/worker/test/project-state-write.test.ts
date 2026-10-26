@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { eq, getTableColumns, getTableName, is, SQL, StringChunk } from 'drizzle-orm';
@@ -413,13 +413,13 @@ describe('writeProjectStateRecord: a column that moved past the writer', () => {
 });
 
 describe('writeProjectStateRecord: the files', () => {
-  it('writes the record files under the repository, as the codec renders them, and nothing else', async () => {
+  it('writes exactly the codec record files and private prepared images', async () => {
     const s = await setup();
     const written = await s.write(context(), true);
 
     const want = expectedFiles(context());
     expect(s.onDisk()).toEqual(want);
-    expect(await listFiles(s.root)).toEqual([FORMAT, RENDER]);
+    expect(await publicFilesWithPrivateImages(s.root)).toEqual([FORMAT, RENDER]);
     expect([...written].sort()).toEqual([FORMAT, RENDER]);
   });
 
@@ -438,7 +438,7 @@ describe('writeProjectStateRecord: the files', () => {
 
     await s.write(portableOnly(), false);
     expect(s.onDisk()).toEqual(expectedFiles(portableOnly()));
-    expect(await listFiles(s.root)).toEqual([FORMAT, RENDER]);
+    expect(await publicFilesWithPrivateImages(s.root)).toEqual([FORMAT, RENDER]);
   });
 });
 
@@ -638,7 +638,11 @@ describe('writeProjectStateRecord: what a rejection names', () => {
       expect(err).toBeInstanceOf(Error);
       expect([...(written(err) ?? [])].sort()).toEqual([]);
       expect((err as Error).message).toContain('database refused');
-      expect(await listFiles(s.root)).toEqual([]);
+      if (point === 'beforeLock') expect(await listFiles(s.root)).toEqual([]);
+      else {
+        expect(await publicFilesWithPrivateImages(s.root)).toEqual([]);
+        expect((await listFiles(s.root)).length).toBe(3);
+      }
     },
   );
 
@@ -1719,3 +1723,17 @@ describe('writeProjectStateRecord: the portable settings and the environment', (
     expect(row).toMatchObject({ unit: 'settings/rtk-enabled.json', resolvedAt: null });
   });
 });
+
+/** Preparation is private, pre-intent IO. It must add no public record or unrelated file. */
+async function publicFilesWithPrivateImages(root: string): Promise<string[]> {
+  const files = await listFiles(root);
+  const prefix = '.haive-data/.state-writes/';
+  const staged = files.filter((rel) => rel.startsWith(prefix));
+  expect(staged.length).toBeGreaterThan(0);
+  for (const rel of staged)
+    expect(rel).toMatch(
+      /^\.haive-data\/\.state-writes\/(?:\.gitignore|[a-f0-9-]{36}\/\d+\.(?:before|after|forward|undo))$/,
+    );
+  expect(await readFile(join(root, prefix, '.gitignore'), 'utf8')).toBe('*\n');
+  return files.filter((rel) => !rel.startsWith(prefix));
+}

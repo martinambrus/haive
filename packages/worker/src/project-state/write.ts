@@ -8,6 +8,12 @@ import {
   readdirNoFollow,
   removeEmptyDirectoryIfNoFollow,
   type FileIdentity,
+  prepareJournalFilesNoFollow,
+  inspectJournalFilesNoFollow,
+  restoreJournalFileNoFollow,
+  type JournalPrepared,
+  type JournalFileOperation,
+  type JournalArtifact,
   readFileNoFollow,
   removeFileIfNoFollow,
   rewriteFileIfNoFollow,
@@ -575,6 +581,7 @@ export async function writeProjectStateColumn(
               await writeFileNoFollow(repoPath, path, text, {
                 createParents: true,
                 mode: 'create-exclusive',
+                journal: journalOperation(prepared!.intent, rel, 'forward'),
               });
               mutatedFiles = true;
             } catch (err) {
@@ -583,8 +590,14 @@ export async function writeProjectStateColumn(
               throw err;
             }
           } else {
-            const result = await rewriteFileIfNoFollow(repoPath, path, (data) =>
-              data.equals(Buffer.from(before)) ? Buffer.from(text) : null,
+            const result = await rewriteFileIfNoFollow(
+              repoPath,
+              path,
+              (data) => (data.equals(Buffer.from(before)) ? Buffer.from(text) : null),
+              {
+                maxBytes: PROJECT_STATE_LIMITS.maxFileBytes,
+                journal: journalOperation(prepared!.intent, rel, 'forward'),
+              },
             );
             if (result !== 'rewritten') throw new ProjectStateMovedError();
             mutatedFiles = true;
@@ -598,11 +611,24 @@ export async function writeProjectStateColumn(
       for (const path of owned) {
         if (produced.has(path)) continue;
         const before = prepared!.previousFiles.get(path.slice(PROJECT_STATE_DIR.length + 1));
-        const gone = await removeFileIfNoFollow(
-          repoPath,
-          path,
-          (data) => before !== undefined && data.equals(Buffer.from(before)),
-        );
+        const gone =
+          before === undefined
+            ? (await lstatNoFollow(repoPath, path, { strict: true })) === null
+              ? 'absent'
+              : 'kept'
+            : await removeFileIfNoFollow(
+                repoPath,
+                path,
+                (data) => data.equals(Buffer.from(before)),
+                {
+                  maxBytes: PROJECT_STATE_LIMITS.maxFileBytes,
+                  journal: journalOperation(
+                    prepared!.intent,
+                    path.slice(PROJECT_STATE_DIR.length + 1),
+                    'forward',
+                  ),
+                },
+              );
         if (gone === 'kept') throw new ProjectStateMovedError();
         if (gone === 'removed') mutatedFiles = true;
         const was = written.indexOf(path);
@@ -744,6 +770,8 @@ export async function writeProjectStateColumn(
         else if (stat.kind !== 'directory') throw new ProjectStateMovedError();
       }
       const intent: WriteIntent = { id: randomUUID(), changes, absentDirs };
+      validateRecoveryIntent(intent);
+      intent.stage = await prepareIntentFiles(repoPath, intent);
       await markProjectStateDirty(tx, repositoryId);
       await tx
         .update(schema.projectStateOutbox)
@@ -753,6 +781,7 @@ export async function writeProjectStateColumn(
         hash: checkout.hash,
         resetAt: repo.onboardingResetAt ?? null,
         intentId: intent.id,
+        intent,
         look: now,
         targetHash: hashFiles(after),
         previousFiles: before,
@@ -844,6 +873,7 @@ interface WriteIntent {
   id: string;
   /** Planned ancestors absent at preparation; omitted by journals from earlier workers. */
   absentDirs?: string[];
+  stage?: JournalPrepared | null;
   changes: {
     rel: string;
     before: string | null;
@@ -857,6 +887,29 @@ const hashFiles = (files: ReadonlyMap<string, string>): string =>
     ? 'absent'
     : projectStateHash(new Map([...files].map(([rel, text]) => [rel, gitBlobId(text)])));
 
+const JOURNAL_STAGE_PREFIX = '.haive-data/.state-writes/';
+function journalOperation(
+  intent: WriteIntent,
+  rel: string,
+  direction: 'forward' | 'undo',
+): JournalFileOperation {
+  const index = intent.changes.findIndex((change) => change.rel === rel);
+  if (!intent.stage || index < 0)
+    throw new ProjectStateMovedError('the record needs prepared recovery images');
+  return { prepared: intent.stage, index, direction };
+}
+async function prepareIntentFiles(
+  repoPath: string,
+  intent: WriteIntent,
+): Promise<JournalPrepared | null> {
+  if (intent.changes.length === 0) return null;
+  return prepareJournalFilesNoFollow(
+    repoPath,
+    `${JOURNAL_STAGE_PREFIX}${randomUUID()}`,
+    intent.changes,
+    PROJECT_STATE_LIMITS.maxFileBytes,
+  );
+}
 const recoveryDirPath = (dir: string): string =>
   dir === '' ? PROJECT_STATE_DIR : `${PROJECT_STATE_DIR}/${dir}`;
 
@@ -865,6 +918,16 @@ const recoveryDirPath = (dir: string): string =>
 function validateRecoveryIntent(intent: WriteIntent): void {
   if (!Array.isArray(intent.changes) || intent.changes.length > 2 * PROJECT_STATE_LIMITS.maxEntries)
     throw new ProjectStateUnreadableError('the recovery record has too many changed paths');
+  if (intent.stage !== undefined && intent.stage !== null) {
+    if (
+      !intent.stage.rel.startsWith(JOURNAL_STAGE_PREFIX) ||
+      !/^[0-9a-f-]{36}$/.test(intent.stage.rel.slice(JOURNAL_STAGE_PREFIX.length)) ||
+      !Array.isArray(intent.stage.images) ||
+      intent.stage.images.length !== intent.changes.length
+    )
+      throw new ProjectStateUnreadableError('the recovery image manifest is invalid');
+  } else if (intent.stage === null && intent.changes.length > 0)
+    throw new ProjectStateUnreadableError('the recovery images are missing');
   const names = new Set<string>();
   const before = new Map<string, string>();
   const after = new Map<string, string>();
@@ -934,8 +997,26 @@ async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string
   const intent = row?.intent as WriteIntent | null;
   if (!intent) return;
   validateRecoveryIntent(intent);
+  if (intent.changes.length > 0 && intent.stage === undefined)
+    throw new ProjectStateMovedError('the record is awaiting prepared recovery images');
+  const artifacts = intent.stage
+    ? await inspectJournalFilesNoFollow(
+        repoPath,
+        intent.stage,
+        PROJECT_STATE_LIMITS.maxFileBytes,
+        intent.changes.map((change) =>
+          Math.max(Buffer.byteLength(change.before ?? ''), Buffer.byteLength(change.after ?? '')),
+        ),
+      )
+    : [];
   const atBefore = new Set<string>();
-  for (const change of intent.changes) {
+  const missing = new Set<string>();
+  const artifactMatches = (file: JournalArtifact, text: string | null) =>
+    text !== null &&
+    file.kind === 'file' &&
+    !file.truncated &&
+    !!file.data?.equals(Buffer.from(text));
+  for (const [index, change] of intent.changes.entries()) {
     const path = `${PROJECT_STATE_DIR}/${change.rel}`;
     const read = await readFileNoFollow(repoPath, path, {
       strict: true,
@@ -945,8 +1026,49 @@ async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string
       text === null
         ? read === null
         : read !== null && !read.truncated && read.data.equals(Buffer.from(text));
+    const own = artifacts[index]!;
+    for (const side of ['before', 'after'] as const) {
+      const image = own[side];
+      const identity = intent.stage!.images[index]![side];
+      if (
+        change[side] === null
+          ? image.kind !== 'absent'
+          : image.kind !== 'file' ||
+            image.identity?.dev !== identity?.dev ||
+            image.identity?.ino !== identity?.ino ||
+            (!artifactMatches(image, change.before) && !artifactMatches(image, change.after))
+      )
+        throw new ProjectStateRecoveryHeldError(`${intent.stage!.rel}/${index}.${side}`);
+    }
+    for (const direction of ['forward', 'undo'] as const) {
+      const parked = own[direction];
+      if (
+        parked.kind !== 'absent' &&
+        !artifactMatches(parked, change.before) &&
+        !artifactMatches(parked, change.after)
+      ) {
+        if (read === null)
+          await restoreJournalFileNoFollow(
+            repoPath,
+            path,
+            journalOperation(intent, change.rel, direction),
+          );
+        throw new ProjectStateRecoveryHeldError(path);
+      }
+    }
+    if (read === null) missing.add(change.rel);
     if (matches(change.before)) atBefore.add(change.rel);
-    else if (!matches(change.after)) throw new ProjectStateRecoveryHeldError(path);
+    else if (
+      !matches(change.after) &&
+      !(read === null && (own.forward.kind !== 'absent' || own.undo.kind !== 'absent'))
+    )
+      throw new ProjectStateRecoveryHeldError(path);
+    if (
+      !atBefore.has(change.rel) &&
+      change.before !== null &&
+      !artifactMatches(own.before, change.before)
+    )
+      throw new ProjectStateRecoveryHeldError(`${intent.stage!.rel}/${index}.before`);
   }
   const directories = new Map<string, FileIdentity>();
   const absentDirs = new Set(intent.absentDirs ?? []);
@@ -980,13 +1102,17 @@ async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string
         repoPath,
         path,
         (data) => data.equals(Buffer.from(change.after!)),
-        { maxBytes: PROJECT_STATE_LIMITS.maxFileBytes },
+        {
+          maxBytes: PROJECT_STATE_LIMITS.maxFileBytes,
+          journal: journalOperation(intent, change.rel, 'undo'),
+        },
       );
       if (gone === 'kept') throw new ProjectStateRecoveryHeldError(path);
-    } else if (change.after === null) {
+    } else if (change.after === null || missing.has(change.rel)) {
       await writeFileNoFollow(repoPath, path, change.before, {
         mode: 'create-exclusive',
         createParents: true,
+        journal: journalOperation(intent, change.rel, 'undo'),
         ...(change.metadata
           ? {
               owner: { uid: change.metadata.uid, gid: change.metadata.gid },
@@ -999,7 +1125,10 @@ async function recoverWriteLocked(tx: Tx, repositoryId: string, repoPath: string
         repoPath,
         path,
         (data) => (data.equals(Buffer.from(change.after!)) ? Buffer.from(change.before!) : null),
-        { maxBytes: PROJECT_STATE_LIMITS.maxFileBytes },
+        {
+          maxBytes: PROJECT_STATE_LIMITS.maxFileBytes,
+          journal: journalOperation(intent, change.rel, 'undo'),
+        },
       );
       if (result !== 'rewritten') throw new ProjectStateRecoveryHeldError(path);
     }
@@ -1022,12 +1151,28 @@ export async function recoverProjectStateWrite(
   repositoryId: string,
   repoPath: string,
 ): Promise<void> {
-  await db.transaction(async (tx) => {
+  const upgraded = await db.transaction(async (tx) => {
     await lockRepositoryTasksKey(tx, repositoryId);
     await lockProjectState(tx, repositoryId);
     await refuseHeldCheckout(tx, repositoryId, repoPath);
+    const [row] = await tx
+      .select({ intent: schema.projectStateOutbox.writeIntent })
+      .from(schema.projectStateOutbox)
+      .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+    const intent = row?.intent as WriteIntent | null;
+    if (intent && intent.changes.length > 0 && intent.stage === undefined) {
+      validateRecoveryIntent(intent);
+      intent.stage = await prepareIntentFiles(repoPath, intent);
+      await tx
+        .update(schema.projectStateOutbox)
+        .set({ writeIntent: intent })
+        .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+      return true;
+    }
     await recoverWriteLocked(tx, repositoryId, repoPath);
+    return false;
   });
+  if (upgraded) await recoverProjectStateWrite(db, repositoryId, repoPath);
 }
 
 async function holdsBytes(repoPath: string, path: string, text: string): Promise<boolean> {

@@ -1,18 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const hooks = vi.hoisted(() => ({
-  rename: null as null | (() => Promise<void>),
   rmdir: null as null | ((path: string) => Promise<void>),
 }));
 vi.mock('node:fs/promises', async (original) => {
   const real = await original<typeof import('node:fs/promises')>();
   return {
     ...real,
-    rename: async (from: string, to: string) => {
-      const hook = hooks.rename;
-      hooks.rename = null;
-      await hook?.();
-      return real.rename(from, to);
-    },
     rmdir: async (path: string) => {
       const hook = hooks.rmdir;
       hooks.rmdir = null;
@@ -42,7 +35,6 @@ beforeEach(async () => {
   await mkdir(join(root, 'dir'));
 });
 afterEach(async () => {
-  hooks.rename = null;
   hooks.rmdir = null;
   await rm(root, { recursive: true, force: true });
 });
@@ -54,7 +46,7 @@ const identity = async () => {
     await fh.close();
   }
 };
-describe('empty-directory identity removal', () => {
+describe('atomic empty-directory recovery', () => {
   it('removes an empty held identity and repeats absence', async () => {
     const id = await identity();
     expect(await removeEmptyDirectoryIfNoFollow(root, 'dir', id)).toBe('removed');
@@ -69,22 +61,20 @@ describe('empty-directory identity removal', () => {
     expect(await readFile(join(root, 'dir/foreign'), 'utf8')).toBe('person');
     expect((await stat(join(root, 'dir'))).ino).toBe(before.ino);
   });
-  it('refuses a different empty directory installed before parking', async () => {
+  it('keeps a different identity already installed before the attempt', async () => {
     const id = await identity();
-    hooks.rename = async () => {
-      await real.rename(join(root, 'dir'), join(root, 'saved'));
-      await mkdir(join(root, 'dir'));
-    };
+    await real.rename(join(root, 'dir'), join(root, 'saved'));
+    await mkdir(join(root, 'dir'));
     expect(await removeEmptyDirectoryIfNoFollow(root, 'dir', id)).toBe('kept');
     expect((await stat(join(root, 'dir'))).ino).not.toBe(Number(id.ino));
     expect((await stat(join(root, 'saved'))).ino).toBe(Number(id.ino));
     expect((await readdir(root)).sort()).toEqual(['dir', 'saved']);
   });
-  it('keeps a leaf link swapped in before parking without following it', async () => {
+  it('keeps a leaf link racing at the rmdir syscall without following it', async () => {
     const id = await identity();
     await mkdir(join(root, 'outside'));
     await writeFile(join(root, 'outside/foreign'), 'person');
-    hooks.rename = async () => {
+    hooks.rmdir = async () => {
       await real.rename(join(root, 'dir'), join(root, 'saved'));
       await symlink(join(root, 'outside'), join(root, 'dir'));
     };
@@ -92,7 +82,7 @@ describe('empty-directory identity removal', () => {
     expect(await readFile(join(root, 'outside/foreign'), 'utf8')).toBe('person');
     expect((await readdir(root)).sort()).toEqual(['dir', 'outside', 'saved']);
   });
-  it('puts the directory back if a foreign child arrives after the empty check', async () => {
+  it('keeps a foreign child arriving at the atomic empty check', async () => {
     const id = await identity();
     hooks.rmdir = async (path) => {
       await writeFile(`${path}/foreign`, 'late person');
@@ -101,6 +91,42 @@ describe('empty-directory identity removal', () => {
     expect(await readFile(join(root, 'dir/foreign'), 'utf8')).toBe('late person');
     expect((await stat(join(root, 'dir'))).ino).toBe(Number(id.ino));
     expect(await readdir(root)).toEqual(['dir']);
+  });
+  it('allows a same-value empty replacement racing after the identity check', async () => {
+    const id = await identity();
+    hooks.rmdir = async () => {
+      await real.rename(join(root, 'dir'), join(root, 'saved'));
+      await mkdir(join(root, 'dir'));
+    };
+    expect(await removeEmptyDirectoryIfNoFollow(root, 'dir', id)).toBe('removed');
+    expect((await stat(join(root, 'saved'))).ino).toBe(Number(id.ino));
+    expect(await readdir(root)).toEqual(['saved']);
+  });
+  it('keeps a regular file replacing the directory at the syscall', async () => {
+    const id = await identity();
+    hooks.rmdir = async () => {
+      await real.rename(join(root, 'dir'), join(root, 'saved'));
+      await writeFile(join(root, 'dir'), 'person');
+    };
+    expect(await removeEmptyDirectoryIfNoFollow(root, 'dir', id)).toBe('kept');
+    expect(await readFile(join(root, 'dir'), 'utf8')).toBe('person');
+    expect((await stat(join(root, 'saved'))).ino).toBe(Number(id.ino));
+  });
+  it('retains the original rmdir error when another entry takes the original name', async () => {
+    const id = await identity();
+    const primary = Object.assign(new Error('primary directory EIO'), { code: 'EIO' });
+    hooks.rmdir = async () => {
+      if (await real.lstat(join(root, 'dir')).catch(() => null))
+        await real.rename(join(root, 'dir'), join(root, 'saved'));
+      await writeFile(join(root, 'dir'), 'person replacement');
+      throw primary;
+    };
+    const failure = await removeEmptyDirectoryIfNoFollow(root, 'dir', id).catch(
+      (err: unknown) => err,
+    );
+    expect(failure).toBe(primary);
+    expect(await readFile(join(root, 'dir'), 'utf8')).toBe('person replacement');
+    expect((await readdir(root)).some((name) => name.includes('.haive-park-'))).toBe(false);
   });
   it('refuses a linked ancestor', async () => {
     await mkdir(join(root, 'parent'));

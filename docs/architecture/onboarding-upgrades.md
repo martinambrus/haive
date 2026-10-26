@@ -594,14 +594,20 @@ invalidate the watermark rather than acknowledge sibling files they did not impo
 `rebaseProjectStateOnCheckout` and its `rebaseLocked` wrapper still have only test callers; they are
 retained deliberately, and the set-aside production path uses `rebaseProjectStateOnHeadLocked`.
 
-**A filesystem attempt has a committed undo journal before its first mutation.** The writer takes
+**A filesystem attempt has a committed undo journal before changing the public record.** The writer takes
 `lockRepositoryTasksKey` then `lockProjectState`, checks the column and its own task (or, for a
 background refresh, opposing live onboarding/upgrade tasks and a reset claim), and commits a dirty
 outbox revision with `write_intent` (0213). Both phases hold the repository row too: root claims
 update that row without taking either advisory lock, so a reset claiming just after the last check
 must wait until the writer's files and transaction finish. This bounded journal contains only changed record paths,
-their before/planned bytes and the mode and owner needed to restore a removal; both sides obey the
-record reader's entry and byte limits. It then reacquires the same ordered locks, checks the checkout,
+their before/planned bytes and original mode and owner; both sides obey the record reader's entry
+and byte limits. Before that intent commits, fs-safe prepares complete before/after images in a
+unique worker-owned 0700 capability directory under `.haive-data/.state-writes/`, outside the public
+state tree. The intent records the directory and image identities. Preparation never publishes
+record bytes: a crash or failed intent transaction may leave an unreferenced private directory,
+while the public record and database remain unchanged. The worker-controlled staging parent has
+its own exact `*` ignore file so these artifacts are excluded from ordinary Git status and staging.
+An existing different parent/ignore file is refused rather than replaced. It then reacquires the same ordered locks, checks the checkout,
 reset epoch (including the epoch refresh read with its column, so a completed reset cannot be
 resurrected through the otherwise-compatible NULL column fence), column, holder, journal identity and database inputs again, and holds them through the
 last file and database write. A refusal before preparation creates no intent. A new holder or changed
@@ -612,7 +618,29 @@ stamp, so a crash after COMMIT cannot undo committed output.
 
 The sweep first undoes an uncommitted journal, then runs its normal sync/write. Every path must
 still hold either its before or planned bytes before any undo begins, and every individual restore
-is a parked compare-and-swap or exclusive creation; a hand edit holds the journal with a named error.
+uses a stable intent-private park and exclusive hard-link publication of a complete prepared image.
+Forward create/rewrite/remove and undo recreate/rewrite/remove all use this protocol: no post-intent
+public fill can be partial, and no random sibling park can become an unrecognized record entry.
+Private before/after images and forward/undo parks remain addressable across a kill after rename,
+after publication, or between the link and unlink of exclusive restoration. Every public CAS read
+is capped before allocation. Rewrites refuse an actual parked owner/mode that differs from the
+prepared replacement, restoring the actual inode without reverting a concurrent chmod/chown.
+An undo recreation likewise refuses changed source metadata. A hand edit holds the journal with a
+named error; exclusive restoration never overwrites a new public entry. A primary failure and a
+failed restoration are both retained. Private capability/image substitution, links and unknown
+artifacts are refused. Image bytes may alias a published public file, so recovery verifies their
+raw contents and requires the exact before image whenever restoration needs it. Inspection bounds
+each private artifact by the larger recorded before/planned length for that path, before allocation;
+growing many published hard links cannot multiply the 1 MiB cap into unbounded aggregate reads.
+
+Each preparation is bounded by the two ordinary record sides (at most 32 MiB of image content),
+plus at most two stable parked entries per changed path, each read with the 1 MiB cap. Private
+artifacts are conservatively retained after success and failed preparation; there is currently no
+automatic garbage collector, so repeated writes can accumulate private disk usage. They never count
+against the public record's limits. This retention avoids deleting bytes still reachable by a
+concurrent editor. An older intent without prepared images first commits an image manifest under
+the same admission locks, then reacquires those locks for undo; it never mutates public files using
+an uncommitted staging capability.
 Recovery reads only journal-owned paths through strict fs-safe reads after validating each recorded
 before/planned side against the unchanged record entry, per-file and aggregate byte limits. A valid
 claim rename can temporarily hold 4,097 entries (or more than 16 MiB) when the new file lands before
@@ -623,17 +651,19 @@ again in each removal/rewrite CAS; unrelated files are never read or rewritten b
 ordinary reader and final writer output still enforce 4,096 entries, 1 MiB per file and 16 MiB total. Both parked undo CAS reads carry the same 1 MiB cap before allocation, including a larger editor
 file installed after recognition. New journals also record planned ancestor directories that were
 absent before preparation. Recovery checks those paths and their bounded known-child listings before
-any undo, then removes only still-empty matching directory identities through a parked, nonrecursive
-fs-safe operation. Preexisting directories are never eligible; links and foreign children hold the
+any undo, then removes eligible directories with atomic, nonrecursive `rmdir` under a held, verified parent.
+There is no directory rename/park artifact to strand when the process dies. Preexisting directories are never eligible; links and foreign children hold the
 intent, including children arriving during removal. An identical empty replacement is the same
-semantic planned footprint, as identical file bytes are under file CAS, but an inode replacement
-during an attempt refuses that attempt. Directory cleanup repeats after a crash, and a bounded
+semantic planned footprint, as identical file bytes are under file CAS. An identity mismatch present at the attempt's check refuses it; an identical empty replacement
+racing after that check is semantically equivalent and may be removed. The atomic syscall never
+follows a leaf link or removes a file/nonempty directory. Failures propagate their original errors,
+with no secondary restore path that could hide the first cause. Directory cleanup repeats after a crash, and a bounded
 ordinary footprint read must succeed before the journal is consumed. Older journals without directory
 history still undo their files; unknown directories are preserved, and an unreadable leftover footprint
 keeps that older intent for explicit repair rather than claiming recovery succeeded.
 Another crash during the undo can repeat it. A live holder, reset or open git operation holds recovery
-as it holds a write. Removed files regain their recorded mode and owner; rewritten files keep their
-held metadata. Direct sync producers defer while a journal exists, including one that appeared while
+as it holds a write. Removed files regain their recorded mode and owner; rewritten files preserve the actual CAS
+metadata or defer when it changed after preparation. Direct sync producers defer while a journal exists, including one that appeared while
 they waited for the lock, so they cannot import partial writer output. Pending conflict answers for
 render, claims, settings/environment and RTK also return the existing busy/defer result while a
 journal exists. They check only after owner/conflict authorization and hold the same project-state

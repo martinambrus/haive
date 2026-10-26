@@ -777,10 +777,14 @@ describe('02 and the legacy environment and exclusions mirrors', () => {
     const out = await s.apply();
 
     expect((await readdir(join(s.root, '.haive-data'))).sort()).toEqual([
+      '.state-writes',
       'environment.json',
       'exclusions.json',
       'state',
     ]);
+    expect(await readFile(join(s.root, '.haive-data/.state-writes/.gitignore'), 'utf8')).toBe(
+      '*\n',
+    );
     for (const [rel, content] of Object.entries(files)) {
       expect(await readFile(join(s.root, rel), 'utf8'), rel).toBe(content);
       expect(out.deletedPaths ?? [], rel).not.toContain(rel);
