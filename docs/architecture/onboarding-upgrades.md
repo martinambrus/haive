@@ -1076,9 +1076,12 @@ hold (`holdImportedMcpServerLists`). The reset removes the file with the other s
 bundle item this install holds no bundle for, stored verbatim, never as `foreign`), a marker from a
 release strictly newer than this one (only plain `major.minor.patch` strings are ordered; a dev
 build is never newer), and a marker of an agent or skill kind at a directory this install renders
-no CLI for. A removed known CLI target can enter ordinary obsolete/Keep handling when a valid
-prior snapshot carries explicit repository membership and proves the catalog target (including a
-recorded legacy fallback). Unknown paths, newer releases and unavailable custom bundles stay
+no CLI for. A known removed CLI target can enter ordinary obsolete/Keep handling when its import
+marker carries a valid explicit repository membership snapshot and its owned path matches this
+install's catalog. The snapshot may already hold the reduced list, including `[]`: the portable
+claim retains ownership, so cleanup does not reconstruct or re-add old members. Existing proof of
+prior targets, including a recorded legacy fallback, remains valid. Unknown paths, newer releases
+and unavailable custom bundles stay
 foreign. 01 classifies it first, 02 skips a foreign row whatever the form sent, the form names such paths in
 one note, and upgrade-status leaves them out of every comparison. An imported cli-rules row whose
 template moved reads `conflict`. A marker is no upgrade's output, so an upgrade completed before an
