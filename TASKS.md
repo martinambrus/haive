@@ -101,10 +101,10 @@ All PRE-EXISTING.
 
 ### T118 · B4.1 · repository CLI set is a union
 
-status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T16:46Z · kind: feature (user decision taken)
+status: taken · owner: codex-codex@DESKTOP-IUBG9OP · since: 2026-10-26T10:05Z · last: 2026-10-26T17:00Z · kind: feature (user decision taken)
 render_context.cliTargets union; deriveRenderTargets in shared; 07, 12/03 stage paths, 01, 02 stubs, blank scaffold, api rulesImportGaps, resolveSkillTargetDirs callers; seed existing repos from the newest snapshot; upgrade offers adding the upgrader's CLI; removal explicit. Control (smoke): claude vs claude+codex.
 
-Codex progress 2026-10-26T16:46Z: PR #934 head33e0f36f fixes snapshot-backed skill targeting and the reproduced19 unit/4 smoke fixture failures. Final full worker:14279PASS/4expected/645skip,751files; strengthened actualPGclaims82PASS; types12/formatPASS. Exact4096/4097 cap and transaction/base controls retained; prompt coverage201→219. Parent independently replayed10/10 snapshot controls on final clean source; all9 committed blobs/12 unchanged boundaries and final receipts verified. Prior browser addition/removal and15PG/99/156 carry only unchanged contracts. R5 replied/resolved after verified push; NEW fresh paired reviewer and exact-head automated review/CI running. No merge yet. Finish T118 through merge/mainCI/runtime then PAUSE; T119 stays queued.
+Codex progress 2026-10-26T17:00Z: PR #934 head33e0f36f correction5 passed fullworker14279/claims82/types12/format and parent10-control replay; fresh paired review found no defect in that correction. Exact-head automated review then found R6: intentional Amp-only no-agent output still fails unconditional completion markers. Parent and fresh reviewer independently confirm; original driver now writes unchanged-source regressions for shared/API list/status/manual/clone admission. Preserve live/reset/history/auth/link gates, required KB/config/skills and existing any-catalog category presence; suppress only recorded zero-destination categories, not require every mirror after CLI additions. Browser completion harness prepared, not run. New correction/review/bot/CI/merge/main/runtime still required. Counts unchanged; finish T118 then PAUSE, T119 queued.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
