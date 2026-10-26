@@ -21,7 +21,7 @@ import type { FormSchema, InfoSection } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { RetryableParseError } from '../../step-definition.js';
 import { hasFileLineEvidence } from './_review-findings.js';
-import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput, resolveTaskSkillTargetDirs } from '../onboarding/_helpers.js';
 import { readDiskSkillSummaries } from '../onboarding/09_5b-skill-repair.js';
 import { loadTaskMeta } from './_task-meta.js';
 import { parseJsonLoose } from '../_fenced-json.js';
@@ -990,7 +990,7 @@ export const phase8LearningStep: StepDefinition<LearningDetect, LearningApply> =
       .map((e) => ({ id: e.id, title: e.title, excerpt: learningExcerpt(e.body) }));
     // Installed skills (from the primary skills dir) so the agent can pick a real
     // skillId for an update/removal. Reads the worktree (feature branch), like learnings.
-    const skillDirs = await resolveSkillTargetDirs(ctx.db, ctx.userId, ['.claude/skills']);
+    const skillDirs = await resolveTaskSkillTargetDirs(ctx, ['.claude/skills']);
     const existingSkills =
       skillDirs.length > 0
         ? (await readDiskSkillSummaries(worktreePath, skillDirs[0]!)).slice(0, 60)

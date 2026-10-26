@@ -8,7 +8,13 @@ import {
   type CliProviderMetadata,
   type CliProviderName,
 } from '@haive/shared';
-import { skillTargetDirs } from '@haive/shared/project-state';
+import {
+  readRenderContextColumn,
+  renderContextColumnSchema,
+  recordedCliTargets,
+  recoverCliMembership,
+  skillTargetDirs,
+} from '@haive/shared/project-state';
 
 /** When the run that produced this step's agent output started.
  *
@@ -62,8 +68,9 @@ export async function loadCliProviderMetadata(
   return CLI_PROVIDER_CATALOG[name] ?? null;
 }
 
-/** Repo-relative skills directories to write to and verify, one per unique
- *  projectSkillsDir across all ENABLED CLI providers for this user (claude/zai/amp
+/** Repo-relative skills directories to write to and verify. Recorded repository membership is
+ *  authoritative, [] included; missing membership recovers from strict live snapshots before legacy
+ *  metadata. Only genuinely unknown membership falls back to ENABLED providers (claude/zai/amp
  *  collapse to .claude/skills; gemini -> .gemini/skills; codex -> .agents/skills).
  *  Returns `fallback` (default []) when no enabled provider declares a skills dir.
  *  Bundle-expansion callers take the empty default so expansion no-ops rather than
@@ -73,7 +80,38 @@ export async function resolveSkillTargetDirs(
   db: Database | DbTx,
   userId: string,
   fallback: string[] = [],
+  repositoryId?: string | null,
 ): Promise<string[]> {
+  if (repositoryId) {
+    const [repo] = await db
+      .select({ renderContext: schema.repositories.renderContext })
+      .from(schema.repositories)
+      .where(eq(schema.repositories.id, repositoryId))
+      .limit(1);
+    const read = readRenderContextColumn(repo?.renderContext);
+    if (read.kind === 'column' && read.column.cliTargets !== undefined)
+      return skillTargetDirs(read.column.cliTargets);
+    // A foreground write can leave a NULL/legacy column while live snapshots still record the
+    // repository set. Use the same strict newest-recorded membership recovery as the planner.
+    const snapshots = await db
+      .select({
+        id: schema.onboardingArtifacts.id,
+        generatedAt: schema.onboardingArtifacts.generatedAt,
+        formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+      })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+          isNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      );
+    const recovered = recoverCliMembership(snapshots);
+    const cli =
+      recovered?.cliTargets ??
+      (read.kind === 'column' ? recordedCliTargets(read.column) : undefined);
+    if (cli !== undefined) return skillTargetDirs(cli);
+  }
   const rows = await db.query.cliProviders.findMany({
     where: eq(schema.cliProviders.userId, userId),
     columns: { name: true, enabled: true },
@@ -82,6 +120,35 @@ export async function resolveSkillTargetDirs(
     rows.filter((row) => row.enabled).map((row) => row.name as CliProviderName),
     fallback,
   );
+}
+
+export async function resolveTaskSkillTargetDirs(
+  ctx: { db: Database; userId: string; taskId: string },
+  fallback: string[] = [],
+): Promise<string[]> {
+  const [task] = await ctx.db
+    .select({ repositoryId: schema.tasks.repositoryId, type: schema.tasks.type })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, ctx.taskId))
+    .limit(1);
+  if (task?.type === 'onboarding') {
+    const [generated] = await ctx.db
+      .select({ detected: schema.taskSteps.detectOutput })
+      .from(schema.taskSteps)
+      .where(
+        and(
+          eq(schema.taskSteps.taskId, ctx.taskId),
+          eq(schema.taskSteps.stepId, '07-generate-files'),
+        ),
+      )
+      .orderBy(desc(schema.taskSteps.round))
+      .limit(1);
+    const names = renderContextColumnSchema.shape.cliTargets.safeParse(
+      (generated?.detected as { cliTargets?: unknown } | null)?.cliTargets,
+    );
+    if (names.success && names.data !== undefined) return skillTargetDirs(names.data);
+  }
+  return resolveSkillTargetDirs(ctx.db, ctx.userId, fallback, task?.repositoryId);
 }
 
 export async function loadPreviousStepOutput(

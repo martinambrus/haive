@@ -47,10 +47,15 @@ picker offers. Two feeds reach back past Haive's command line, so `minRunnableVe
 (install-metadata) keeps those builds out of the picker and refuses a save naming one: grok
 0.2.116 (`streaming-messages-json`) and gemini 0.6.0 (`--output-format`).
 
-`resolveSkillTargetDirs` writes one mirror per ENABLED provider's `projectSkillsDir`, so a provider
-enabled after onboarding has no generated skills until something rewrites them — generated skills
-are outside onboarding-upgrade scope. Every lever above is version-bound vendor behaviour:
-re-capture after a CLI bump before trusting it.
+`resolveSkillTargetDirs` writes one mirror per unique `projectSkillsDir` in the repository's
+recorded CLI set; the current onboarding task supplies its pending union before 12 records it.
+Only legacy contexts without recorded membership use the user's enabled providers as a fallback.
+An explicit empty destination list stays empty through agent selection, generation/repair/sync
+apply and scoped staging: these steps create, rewrite, remove and commit no skill tree there.
+Only an older detected payload with no destination field retains its legacy default directory.
+Adding a maintained CLI does not rewrite existing generated skills until the next generation,
+repair or sync; those generated files remain outside onboarding-upgrade scope. Every lever above
+is version-bound vendor behaviour: re-capture after a CLI bump before trusting it.
 
 **Agent and skill frontmatter has to parse in every CLI's YAML, not just claude's.** Every value
 goes through `yamlScalar` (`steps/_yaml-scalar.ts`): plain when it reads back as itself under

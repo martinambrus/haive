@@ -92,6 +92,7 @@ const CONTEXT_KEYS = [
   'rtkEnabled',
 ];
 const DETECT_KEYS = [
+  'cliAdditions',
   'counts',
   'currentTemplateSetHash',
   'entries',
@@ -100,6 +101,7 @@ const DETECT_KEYS = [
   'ranBackfill',
   'renderContextColumn',
   'renderCtxSnapshot',
+  'repositoryCliTargets',
   'repositoryId',
   'rtkBlockLeftovers',
   'rtkBlockRestorable',
@@ -241,6 +243,7 @@ describe('01 reads the column ahead of every other source', () => {
   const ROW_DJANGO = { ...rowSnapshot('django', true), acceptedAgentIds: ['security-auditor'] };
   const FULL = () => fullColumn({ acceptedAgentIds: ['code-reviewer'] });
   const WANT = () => ({
+    cliTargets: ['claude-code'],
     projectInfo: PORTABLE().projectInfo,
     framework: 'drupal',
     acceptedAgentIds: ['code-reviewer'],
@@ -353,7 +356,8 @@ describe('01 completes only what the column does not hold', () => {
       column: column('agentTargets'),
       providers: USER_CLAUDE,
     }).detect();
-    expect(targetsLacking.renderCtxSnapshot.agentTargets).toEqual([DERIVED_TARGETS[0]]);
+    expect(targetsLacking.renderCtxSnapshot.cliTargets).toEqual(['codex']);
+    expect(targetsLacking.renderCtxSnapshot.agentTargets).toEqual([CODEX_TARGET]);
     expect(targetsLacking.renderCtxSnapshot.enabledCliProviders).toEqual([CODEX_NATIVE]);
 
     const providersLacking = await planOf({

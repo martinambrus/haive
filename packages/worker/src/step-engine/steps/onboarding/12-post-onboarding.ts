@@ -1,3 +1,9 @@
+import {
+  sameValue,
+  readRenderContextColumn,
+  recoverCliMembership,
+} from '@haive/shared/project-state';
+import { skillTargetDirs } from '@haive/shared/project-state';
 import { isRtkChoiceRecorded } from '@haive/shared/project-state';
 import { redactGitUrl } from '@haive/shared/schemas';
 import { lstatNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
@@ -31,11 +37,14 @@ import { writePlanMirror } from '../../../plan/mirror.js';
 import {
   failIfColumnStale,
   ProjectStateWriteError,
+  renderContextColumnFor,
   writeProjectStateRecord,
   lockProjectState,
+  completeWriterCliMembership,
+  inheritCliMembership,
 } from '../../../project-state/write.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
-import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
+import { loadPreviousStepOutput } from './_helpers.js';
 import {
   collectOnboardingStagePaths,
   commitRecorded,
@@ -176,11 +185,75 @@ function buildRenderContext(detect: GenerateFilesDetect): TemplateRenderContext 
     framework: detect.framework,
     acceptedAgentIds: detect.acceptedAgentIds,
     customAgentSpecs: detect.customAgentSpecs,
+    ...(detect.cliTargets !== undefined ? { cliTargets: detect.cliTargets } : {}),
+    ...(detect.legacyAgentFallback !== undefined
+      ? { legacyAgentFallback: detect.legacyAgentFallback }
+      : {}),
     agentTargets: detect.agentTargets,
     lspLanguages: detect.lspLanguages,
     rtkEnabled: detect.rtkEnabled ?? false,
     enabledCliProviders: detect.enabledCliProviders ?? [],
   };
+}
+
+/** A saved pre-feature07 omitted its membership decision. Complete its metadata before publishing
+ * newer snapshots, using the writer's recorded-current/history/caller precedence. Its actual
+ * rendered file scope and original column admission remain separate and unchanged. */
+class OnboardingMembershipReplanError extends Error {
+  constructor() {
+    super('Repository context changed after onboarding files were planned. Retry generation.');
+  }
+}
+
+async function completeLegacyOnboardingContext(
+  ctx: StepContext,
+  context: TemplateRenderContext,
+  chosen: boolean,
+  originalColumn: unknown,
+): Promise<TemplateRenderContext> {
+  if (context.cliTargets !== undefined) return context;
+  const [task] = await ctx.db
+    .select({ repositoryId: schema.tasks.repositoryId })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, ctx.taskId));
+  if (!task?.repositoryId) return context;
+  const [repo] = await ctx.db
+    .select({ renderContext: schema.repositories.renderContext })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, task.repositoryId));
+  const current = readRenderContextColumn(repo?.renderContext);
+  const rows =
+    current.kind === 'column' && current.column.cliTargets !== undefined
+      ? []
+      : await ctx.db
+          .select({
+            id: schema.onboardingArtifacts.id,
+            generatedAt: schema.onboardingArtifacts.generatedAt,
+            formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+          })
+          .from(schema.onboardingArtifacts)
+          .where(
+            and(
+              eq(schema.onboardingArtifacts.repositoryId, task.repositoryId),
+              isNull(schema.onboardingArtifacts.supersededAt),
+            ),
+          );
+  const caller = renderContextColumnFor(context, chosen);
+  const completed = completeWriterCliMembership(
+    caller,
+    current.kind === 'column' ? current.column : caller,
+    recoverCliMembership(rows),
+  );
+  const { rtkChoiceRecorded: _choice, ...result } = inheritCliMembership(caller, completed);
+  if (
+    originalColumn !== undefined &&
+    !sameValue(
+      renderContextColumnFor(context, chosen, originalColumn),
+      renderContextColumnFor(result as unknown as TemplateRenderContext, chosen, originalColumn),
+    )
+  )
+    throw new OnboardingMembershipReplanError();
+  return result as unknown as TemplateRenderContext;
 }
 
 /** Record onboarding_artifacts rows. Runs
@@ -192,13 +265,14 @@ async function recordOnboardingArtifacts(
   ctx: StepContext,
   detect: GenerateFilesDetect | null,
   renderCtx: TemplateRenderContext | null,
+  renderedCtx: TemplateRenderContext | null = renderCtx,
 ): Promise<{
   rowsWritten: number;
   warnings: string[];
 }> {
   const warnings: string[] = [];
 
-  if (!detect || !renderCtx) {
+  if (!detect || !renderCtx || !renderedCtx) {
     warnings.push('onboarding-artifacts: 07-generate-files detect output missing, skipping');
     ctx.logger.warn('onboarding-artifacts: cannot record — step 07 detect output missing');
     return { rowsWritten: 0, warnings };
@@ -217,14 +291,19 @@ async function recordOnboardingArtifacts(
   }
 
   const manifest = getTemplateManifest();
-  const haiveExpanded = expandManifestFor(renderCtx, manifest);
+  const haiveExpanded = expandManifestFor(renderedCtx, manifest);
 
   // Custom-bundle expansion runs in parallel with manifest expansion; the two
   // are concatenated and de-duped on diskPath (Haive items win on collision —
   // this should not happen in practice since Haive paths and bundle paths
   // never overlap by convention, but we log+drop just in case).
   const bundlesForInstall = await loadBundlesForExpansion(ctx.db, repositoryId, ctx.logger);
-  const skillTargets = await resolveSkillTargetDirs(ctx.db, ctx.userId);
+  // Claims describe this task's generation, just as staging uses its saved written/mirroredDirs.
+  // Membership can have changed since 09_5 ran. Match that writer's missing-field compatibility
+  // default and preserve an explicit [] rather than expanding into today's maintained targets.
+  const generatedSkills = await loadPreviousStepOutput(ctx.db, ctx.taskId, '09_5-skill-generation');
+  const skillTargets = (generatedSkills?.detect as { skillTargetDirs?: string[] } | null)
+    ?.skillTargetDirs ?? ['.claude/skills'];
   const customExpanded = expandCustomBundlesFor(
     bundlesForInstall,
     detect.agentTargets,
@@ -335,12 +414,28 @@ async function recordOnboardingArtifacts(
     await lockProjectState(tx, repositoryId);
     const [live] = await tx
       .select({
+        renderContext: schema.repositories.renderContext,
         rtkEnabled: schema.repositories.rtkEnabled,
         rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
       })
       .from(schema.repositories)
       .where(eq(schema.repositories.id, repositoryId))
       .for('update');
+    if (
+      detect.renderContextColumn !== undefined &&
+      !sameValue(live?.renderContext ?? null, detect.renderContextColumn) &&
+      !sameValue(
+        live?.renderContext ?? null,
+        renderContextColumnFor(
+          renderedCtx,
+          detect.rtkEnabled !== undefined,
+          detect.renderContextColumn,
+        ),
+      )
+    )
+      throw new Error(
+        'Repository context changed after onboarding files were planned. Retry generation.',
+      );
     if (supersedePaths.length > 0) {
       await tx
         .update(schema.onboardingArtifacts)
@@ -360,8 +455,20 @@ async function recordOnboardingArtifacts(
       live && isRtkChoiceRecorded(detect.rtkEnabled !== undefined, live.rtkChoiceMadeAt)
         ? { ...renderCtx, rtkEnabled: live.rtkEnabled }
         : renderCtx;
+    const currentExpanded =
+      renderCtx === renderedCtx
+        ? expanded
+        : [
+            ...expandManifestFor(current, manifest),
+            ...expandCustomBundlesFor(
+              bundlesForInstall,
+              current.agentTargets,
+              current.cliTargets !== undefined ? skillTargetDirs(current.cliTargets) : skillTargets,
+            ),
+            ...expanded.filter((r) => r.templateKind === CLI_RULES_TEMPLATE_KIND),
+          ];
     const applicable = [
-      ...expanded.filter((r) => r.templateKind !== 'rtk-config'),
+      ...currentExpanded.filter((r) => r.templateKind !== 'rtk-config'),
       ...expandManifestFor(current, manifest).filter((r) => r.templateKind === 'rtk-config'),
     ];
     await updateApplicableTemplateIds(tx, repositoryId, applicable);
@@ -647,17 +754,38 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     let artifactRowsWritten = 0;
     let renderContext: TemplateRenderContext | null = null;
     let rtkChoiceRecorded = false;
+    let expectedColumns: unknown[] | undefined;
     try {
       const genPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-generate-files');
       const detect = genPrev?.detect ? (genPrev.detect as GenerateFilesDetect) : null;
       // Derived ahead of the recording, which the project state record below must not depend on.
       renderContext = detect ? buildRenderContext(detect) : null;
+      const renderedContext = renderContext;
+      expectedColumns =
+        detect?.renderContextColumn !== undefined && renderContext
+          ? [
+              detect.renderContextColumn,
+              renderContextColumnFor(
+                renderContext,
+                detect.rtkEnabled !== undefined,
+                detect.renderContextColumn,
+              ),
+            ]
+          : undefined;
       // A 07 output from before RTK shipped made no choice; buildRenderContext defaults it off.
       rtkChoiceRecorded = detect?.rtkEnabled !== undefined;
-      const res = await recordOnboardingArtifacts(ctx, detect, renderContext);
+      if (renderContext)
+        renderContext = await completeLegacyOnboardingContext(
+          ctx,
+          renderContext,
+          rtkChoiceRecorded,
+          detect?.renderContextColumn,
+        );
+      const res = await recordOnboardingArtifacts(ctx, detect, renderContext, renderedContext);
       artifactRowsWritten = res.rowsWritten;
       warnings.push(...res.warnings);
     } catch (err) {
+      if (err instanceof OnboardingMembershipReplanError) throw err;
       const message = safeErrorMessage(err);
       warnings.push(`onboarding-artifacts recording failed: ${message}`);
       ctx.logger.warn({ err }, 'onboarding-artifacts recording failed');
@@ -698,6 +826,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
             repoPath: ctx.repoPath,
             context: renderContext,
             rtkChoiceRecorded,
+            expectedColumns,
             holdingTaskId: ctx.taskId,
           });
           recorded = true;

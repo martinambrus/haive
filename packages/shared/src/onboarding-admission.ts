@@ -17,6 +17,11 @@ import {
   isImportMarker,
   PROJECT_STATE_IMPORT_STEP_ID,
   readRenderContextColumn,
+  recordedCliTargets,
+  recoverCliMembership,
+  completeRecordedCliMembership,
+  deriveRenderTargets,
+  hasLegacyAgentFallback,
 } from './project-state/index.js';
 
 /**
@@ -286,16 +291,36 @@ const MARKER_CANDIDATES: Readonly<Record<string, readonly string[]>> = {
   '.claude/skills': [...new Set(CLI_PROVIDER_LIST.map((p) => p.projectSkillsDir))],
 };
 
-/** Which ONBOARDING_MARKERS exist on disk. NOT the onboarded verdict on its own — every
+/** Physical ONBOARDING_MARKERS present and applicable categories missing. A recorded zero-target
+ *  category does not block completion; a retained directory still appears in present. NOT the
+ *  onboarded verdict on its own — every
  *  one of them is written by 07-generate-files, the 8th of 27 onboarding steps, so a
  *  cancelled run and a live one leave exactly the same files; `resolveOnboardingVerdict`
  *  combines this with the repo's onboarding task history. Marker checks run in parallel;
  *  results keep marker order so the detail endpoint's present/missing lists stay stable. */
 export async function checkOnboardingMarkers(
   root: string,
+  recordedContext?: unknown,
 ): Promise<{ present: string[]; missing: string[] }> {
+  const read = readRenderContextColumn(recordedContext);
+  const names = read.kind === 'column' ? recordedCliTargets(read.column) : undefined;
+  const targets =
+    names !== undefined && read.kind === 'column'
+      ? deriveRenderTargets(
+          names,
+          read.column.lspLanguages,
+          read.column.agentTargets,
+          hasLegacyAgentFallback(read.column),
+        )
+      : undefined;
   const results = await Promise.all(
     ONBOARDING_MARKERS.map(async (rel) => {
+      // Only applicability follows membership. A required category still accepts any catalog
+      // directory: adding a CLI deliberately defers generated skill mirrors until a later step.
+      const required = !(
+        (rel === '.claude/agents' && targets?.agentTargets.length === 0) ||
+        (rel === '.claude/skills' && targets?.skillDirs.length === 0)
+      );
       // `pathExists` is `stat`-based: it followed a link and read a dangling one as absent, so a
       // linked `.claude/agents` counted as installed while the definitions it named lived outside
       // the tree — and these counts are what the onboarded verdict and `mark-onboarded` rest on.
@@ -305,13 +330,98 @@ export async function checkOnboardingMarkers(
           return info !== null && (info.kind === 'file' || info.kind === 'directory');
         }),
       );
-      return [rel, found.includes(true)] as const;
+      return [rel, found.includes(true), required] as const;
     }),
   );
   return {
-    present: results.filter(([, ok]) => ok).map(([rel]) => rel),
-    missing: results.filter(([, ok]) => !ok).map(([rel]) => rel),
+    present: results.filter(([, found]) => found).map(([rel]) => rel),
+    missing: results.filter(([, found, required]) => !found && required).map(([rel]) => rel),
   };
+}
+
+/** Marker facts for a page or one repository. Read strict provenance in at most two batches, only
+ * when a missing CLI category could be inapplicable. List callers need no provenance when KB or
+ * config already forces their verdict false; detail callers still get accurate missing labels. */
+export async function checkRepositoryOnboardingMarkers(
+  db: Database | DbTx,
+  userId: string,
+  repositories: ReadonlyArray<{ id: string; root: string }>,
+  options: { verdictOnly?: boolean } = {},
+): Promise<Map<string, { present: string[]; missing: string[] }>> {
+  const checks = new Map(
+    await Promise.all(
+      repositories.map(async (repo) => [repo.id, await checkOnboardingMarkers(repo.root)] as const),
+    ),
+  );
+  const candidates = repositories.filter(({ id }) => {
+    const missing = checks.get(id)!.missing;
+    return (
+      missing.some((rel) => rel === '.claude/agents' || rel === '.claude/skills') &&
+      (!options.verdictOnly ||
+        (!missing.includes(KB_DIR) && !missing.includes('.claude/workflow-config.json')))
+    );
+  });
+  if (candidates.length === 0) return checks;
+  const columns = await db
+    .select({ id: schema.repositories.id, context: schema.repositories.renderContext })
+    .from(schema.repositories)
+    .where(
+      and(
+        eq(schema.repositories.userId, userId),
+        inArray(
+          schema.repositories.id,
+          candidates.map((r) => r.id),
+        ),
+      ),
+    );
+  const parsed = new Map(columns.map((row) => [row.id, readRenderContextColumn(row.context)]));
+  const needHistory = columns
+    .filter((row) => {
+      const read = parsed.get(row.id)!;
+      return read.kind !== 'column' || read.column.cliTargets === undefined;
+    })
+    .map((row) => row.id);
+  const rows = needHistory.length
+    ? await db
+        .select({
+          id: schema.onboardingArtifacts.id,
+          repositoryId: schema.onboardingArtifacts.repositoryId,
+          generatedAt: schema.onboardingArtifacts.generatedAt,
+          formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+        })
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.userId, userId),
+            inArray(schema.onboardingArtifacts.repositoryId, needHistory),
+            isNull(schema.onboardingArtifacts.supersededAt),
+          ),
+        )
+    : [];
+  const snapshots = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const grouped = snapshots.get(row.repositoryId) ?? [];
+    grouped.push(row);
+    snapshots.set(row.repositoryId, grouped);
+  }
+  await Promise.all(
+    candidates.map(async (repo) => {
+      const read = parsed.get(repo.id);
+      if (!read) return;
+      const recovered = recoverCliMembership(snapshots.get(repo.id) ?? []);
+      const context =
+        read.kind === 'column'
+          ? read.column
+          : recovered
+            ? { ...recovered.snapshot, rtkChoiceRecorded: false }
+            : undefined;
+      if (!context) return;
+      const completed = completeRecordedCliMembership(context, recovered);
+      if (recordedCliTargets(completed) === undefined) return;
+      checks.set(repo.id, await checkOnboardingMarkers(repo.root, completed));
+    }),
+  );
+  return checks;
 }
 
 export interface OnboardingVerdict {
@@ -370,7 +480,7 @@ export function hasCompletedSinceReset(
 export function resolveOnboardingVerdict(input: {
   /** Only repositories created blank can complete onboarding through their first workflow. */
   source?: string;
-  /** Markers absent from disk; empty means all four are present. */
+  /** Applicable marker categories absent from disk; empty means the marker gate is satisfied. */
   missing: string[];
   onboardedAt: Date | null;
   /** `repositories.onboarding_reset_at`. Null on every repo nobody has reset. */
@@ -456,7 +566,11 @@ export async function renderContextAdmitsUpgrade(
   if (readRenderContextColumn(repo.renderContext).kind !== 'column') return false;
   const root = repo.storagePath ?? repo.localPath;
   if (repo.status !== 'ready' || !root) return false;
-  const { missing } = await checkOnboardingMarkers(root);
+  const { missing } = (
+    await checkRepositoryOnboardingMarkers(db, userId, [{ id: repo.id, root }], {
+      verdictOnly: true,
+    })
+  ).get(repo.id)!;
   const facts =
     (
       await loadOnboardingTaskFacts(db, userId, [repo.id], repo.source === 'blank' ? [repo.id] : [])

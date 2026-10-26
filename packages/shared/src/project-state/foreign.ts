@@ -1,5 +1,8 @@
 import { isImportMarker } from './import-marker.js';
+import { isRenderContextSnapshot } from './render-context.js';
+import { deriveRenderTargets } from './render-targets.js';
 import { rendersAt, type AgentRenderTarget } from './render-targets.js';
+import { CLI_PROVIDER_CATALOG } from '../cli-providers/catalog.js';
 
 const RELEASE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
@@ -35,6 +38,7 @@ export interface ForeignCandidate {
   haiveVersion: string | null;
   /** A custom item's own id, which names its file or directory; read off the path when absent. */
   specId?: string;
+  formValuesSnapshot?: unknown;
 }
 
 export interface ForeignContext {
@@ -46,6 +50,7 @@ export interface ForeignContext {
 }
 
 const TARGETED_KINDS = new Set(['agent', 'custom-agent', 'agents-index', 'custom-skill']);
+const CATALOG_TARGETS = deriveRenderTargets(Object.keys(CLI_PROVIDER_CATALOG), []);
 
 function specIdFromPath(
   row: Pick<ForeignCandidate, 'templateKind' | 'diskPath'>,
@@ -76,7 +81,43 @@ export function foreignReason(
   if (context.agentTargets !== null && TARGETED_KINDS.has(row.templateKind)) {
     const specId = row.specId ?? specIdFromPath(row, context.skillDirs);
     const targets = { agentTargets: context.agentTargets, skillDirs: context.skillDirs };
-    if (!rendersAt({ ...row, specId }, targets)) return 'not-rendered';
+    if (!rendersAt({ ...row, specId }, targets)) {
+      const snapshot = row.formValuesSnapshot;
+      if (isRenderContextSnapshot(snapshot)) {
+        const prior = snapshot as {
+          cliTargets?: string[];
+          lspLanguages: string[];
+          agentTargets?: AgentRenderTarget[];
+          legacyAgentFallback?: boolean;
+        };
+        // Only the new explicit repository contract can authorize retiring imported targets.
+        // An import after membership removal already carries the reduced list, while the portable
+        // claim still owns its file. Recognize known catalog paths without inventing old members.
+        if (prior.cliTargets !== undefined) {
+          const before = deriveRenderTargets(
+            prior.cliTargets,
+            prior.lspLanguages,
+            prior.agentTargets,
+            prior.legacyAgentFallback,
+          );
+          if (
+            rendersAt(
+              { ...row, specId: row.specId ?? specIdFromPath(row, before.skillDirs) },
+              before,
+            )
+          )
+            return null;
+          if (
+            rendersAt(
+              { ...row, specId: row.specId ?? specIdFromPath(row, CATALOG_TARGETS.skillDirs) },
+              CATALOG_TARGETS,
+            )
+          )
+            return null;
+        }
+      }
+      return 'not-rendered';
+    }
   }
   return null;
 }

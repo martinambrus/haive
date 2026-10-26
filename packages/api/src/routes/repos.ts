@@ -83,6 +83,7 @@ import {
   isRecordName,
   parsePlanConflictUnit,
   portableBundleSource,
+  readRenderContextColumn,
   settingFileName,
 } from '@haive/shared/project-state';
 import { buildScopeTree } from '@haive/shared/scope-tree';
@@ -121,7 +122,7 @@ import {
 } from '../lib/cancel-task.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
 import {
-  checkOnboardingMarkers,
+  checkRepositoryOnboardingMarkers,
   LIVE_TASK_STATUSES,
   loadOnboardingTaskFacts,
   NO_ONBOARDING_TASKS,
@@ -351,6 +352,16 @@ repoRoutes.get('/', async (c) => {
     countsByRepo.set(row.repositoryId, entry);
   }
 
+  const markersByRepo = await checkRepositoryOnboardingMarkers(
+    db,
+    userId,
+    rows.flatMap((repo) => {
+      const root = repo.storagePath ?? repo.localPath;
+      return repo.status === 'ready' && root ? [{ id: repo.id, root }] : [];
+    }),
+    { verdictOnly: true },
+  );
+
   const repositories = await Promise.all(
     rows.map(async (repo) => {
       const counts = countsByRepo.get(repo.id) ?? { open: 0, active: 0 };
@@ -361,7 +372,7 @@ repoRoutes.get('/', async (c) => {
       // repos page. Only meaningful for ready repos (cloning/error have no tree);
       // the check is a few parallel stats per repo.
       const root = repo.storagePath ?? repo.localPath;
-      const markers = repo.status === 'ready' && root ? await checkOnboardingMarkers(root) : null;
+      const markers = markersByRepo.get(repo.id) ?? null;
       const verdict = markers
         ? resolveOnboardingVerdict({
             source: repo.source,
@@ -1716,6 +1727,7 @@ const ONBOARDING_RESET_EMPTY_DIRS = [
   `${PROJECT_STATE_DIR}/artifacts`,
   `${PROJECT_STATE_DIR}/bundles`,
   `${PROJECT_STATE_DIR}/settings`,
+  `${PROJECT_STATE_DIR}/cli`,
   PROJECT_STATE_DIR,
 ];
 
@@ -2053,6 +2065,8 @@ export interface OnboardingResetProvenance {
   bundleSources?: readonly string[];
   /** The names of the settings files the sync base holds, beside the ones this release writes. */
   settingNames?: readonly string[];
+  /** CLI member files named by the valid current explicit context or the recorded sync base. */
+  cliNames?: readonly string[];
 }
 
 /**
@@ -2536,6 +2550,10 @@ export async function resetOnboardingArtifacts(
   ])) {
     await remove(`${PROJECT_STATE_DIR}/${settingFileName(name)}`, false);
   }
+  for (const name of new Set(provenance.cliNames ?? [])) {
+    if (typeof name === 'string' && isRecordName(name))
+      await remove(`${PROJECT_STATE_DIR}/cli/${name}.json`, false);
+  }
   for (const rel of ONBOARDING_RESET_EMPTY_DIRS) await removeIfEmpty(rel);
 
   for (const rel of ONBOARDING_RULES_FILES) {
@@ -2744,7 +2762,9 @@ repoRoutes.get('/:id/onboarding-status', async (c) => {
   const root = repo.storagePath ?? repo.localPath;
   if (!root) throw new HttpError(409, 'Repository has no resolvable path');
 
-  const { present, missing } = await checkOnboardingMarkers(root);
+  const { present, missing } = (
+    await checkRepositoryOnboardingMarkers(db, userId, [{ id, root }])
+  ).get(id)!;
   const facts =
     (await loadOnboardingTaskFacts(db, userId, [id], repo.source === 'blank' ? [id] : [])).get(
       id,
@@ -2815,7 +2835,7 @@ async function markRepositoryOnboarded(
   id: string,
   root: string,
 ): Promise<Response> {
-  const { missing } = await checkOnboardingMarkers(root);
+  const { missing } = (await checkRepositoryOnboardingMarkers(db, userId, [{ id, root }])).get(id)!;
   if (missing.length > 0) {
     throw new HttpError(
       409,
@@ -2991,7 +3011,7 @@ async function runOnboardingArtifactReset(
   const resetStartedAt = new Date();
   const repoRow = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
-    columns: { onboardingResetAt: true },
+    columns: { onboardingResetAt: true, renderContext: true },
   });
   const root = await resolveRepoRoot(db, userId, id);
 
@@ -3028,13 +3048,24 @@ async function runOnboardingArtifactReset(
     .where(eq(schema.projectStateSync.repositoryId, id))
     .limit(1);
   const baseRecord = syncRow?.baseSnapshot as
-    { bundles?: unknown; settings?: unknown } | null | undefined;
+    { bundles?: unknown; settings?: unknown; cli?: unknown } | null | undefined;
   const baseBundles = baseRecord?.bundles;
   const baseSettings = baseRecord?.settings;
   const settingNames =
     baseSettings !== null && typeof baseSettings === 'object' && !Array.isArray(baseSettings)
       ? Object.keys(baseSettings).filter(isRecordName)
       : [];
+  const currentContext = readRenderContextColumn(repoRow?.renderContext);
+  // Ownership is a union: a membership removal may be pending while the base still names the
+  // old unit files. A refused/legacy context and today's enabled providers prove no CLI units.
+  const cliNames = new Set([
+    ...(currentContext.kind === 'column' ? (currentContext.column.cliTargets ?? []) : []),
+    ...(Array.isArray(baseRecord?.cli)
+      ? baseRecord.cli.filter(
+          (name): name is string => typeof name === 'string' && isRecordName(name),
+        )
+      : []),
+  ]);
   const localBundles = await db
     .select({
       name: schema.customBundles.name,
@@ -3058,6 +3089,7 @@ async function runOnboardingArtifactReset(
       haiveEntries: written.entries,
       bundleSources: [...bundleSources],
       settingNames,
+      cliNames: [...cliNames],
     },
   );
 

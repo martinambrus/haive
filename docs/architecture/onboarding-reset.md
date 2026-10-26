@@ -20,6 +20,12 @@ name the sync base holds, with `settings/` swept before `state/`: a settings fil
 (`superseded`, by `onboarding_reset_at`) and one that meets a reset holding the root claim defers,
 so neither writes the column, the ledger or a base back.
 
+It also removes `cli/<provider>.json` for validated names recorded in the valid current explicit CLI
+contract or the sync base, read before either is cleared; prior base names still prove ownership
+while a member removal is pending. Unknown recorded names follow the codec's stable-name validation,
+and `cli/` is swept only when empty. Unproven neighboring entries remain untouched under the same
+accepted residue policy.
+
 **The catalog is the CANDIDATE set, never the removal set.** 07 writes agents to the ENABLED
 providers' dirs alone (`agentTargetsByDir`, from `providerRows.filter(p => p.enabled)`) and
 `resolveSkillTargetDirs` does the same for skills, so on a repo where only claude is enabled a

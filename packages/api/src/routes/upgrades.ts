@@ -32,6 +32,8 @@ import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
   agentTargetSchema,
   bundleItemRenders,
+  completeRecordedCliMembership,
+  recoverCliMembership,
   foreignReason,
   historyOrigin,
   isRenderContextSnapshot,
@@ -144,7 +146,9 @@ function snapshotProviderNames(providers: unknown): string[] {
  *  RTK choice: the column's own, else the caller's enabled ones, or the picked snapshot's, or those
  *  the last onboarding's step 07 recorded. */
 function rtkProviderNames(
-  origin: RenderContextOrigin<SnapshotRowFacts & { snapshotProviders: unknown }>,
+  origin: RenderContextOrigin<
+    SnapshotRowFacts & { snapshotProviders: unknown; snapshotCliTargets?: unknown }
+  >,
   enabledNames: readonly string[],
   history: HistoryDetect | null,
   source: string,
@@ -154,11 +158,17 @@ function rtkProviderNames(
     return origin.rtkRecorded ? renderContextProviderNames(origin.column, enabledNames) : null;
   }
   if (origin.from === 'snapshot') {
-    return origin.rtkRecorded ? snapshotProviderNames(origin.row.snapshotProviders) : null;
+    return origin.rtkRecorded
+      ? Array.isArray(origin.row.snapshotCliTargets)
+        ? (origin.row.snapshotCliTargets as string[])
+        : snapshotProviderNames(origin.row.snapshotProviders)
+      : null;
   }
   const verdict = historyOrigin({ onboarding: history, source, rtkChoiceMadeAt });
   return verdict.kind === 'onboarding' && verdict.rtkRecorded
-    ? snapshotProviderNames(history?.enabledCliProviders)
+    ? Array.isArray(history?.cliTargets)
+      ? (history.cliTargets as string[])
+      : snapshotProviderNames(history?.enabledCliProviders)
     : null;
 }
 
@@ -168,6 +178,8 @@ interface HistoryDetect {
   detected: boolean;
   rtkRecorded: boolean;
   agentTargets: unknown;
+  cliTargets?: unknown;
+  legacyAgentFallback?: unknown;
   enabledCliProviders: unknown;
 }
 
@@ -190,8 +202,12 @@ async function loadHistoryDetect(
   if (!onboarding) return null;
   const [generate] = await db
     .select({
+      // A step row with SQL/JSON NULL output supplies no context to the worker resolver.
+      detected: sql<boolean>`coalesce(${schema.taskSteps.detectOutput} <> 'null'::jsonb, false)`,
       recorded: sql<boolean | null>`(${schema.taskSteps.detectOutput} -> 'rtkEnabled') is not null`,
       agentTargets: sql<unknown>`${schema.taskSteps.detectOutput} -> 'agentTargets'`,
+      cliTargets: sql<unknown>`${schema.taskSteps.detectOutput} -> 'cliTargets'`,
+      legacyAgentFallback: sql<unknown>`${schema.taskSteps.detectOutput} -> 'legacyAgentFallback'`,
       enabledCliProviders: sql<unknown>`${schema.taskSteps.detectOutput} -> 'enabledCliProviders'`,
     })
     .from(schema.taskSteps)
@@ -203,9 +219,11 @@ async function loadHistoryDetect(
     )
     .limit(1);
   return {
-    detected: generate !== undefined,
+    detected: generate?.detected === true,
     rtkRecorded: generate?.recorded === true,
     agentTargets: generate?.agentTargets ?? null,
+    cliTargets: generate?.cliTargets,
+    legacyAgentFallback: generate?.legacyAgentFallback,
     enabledCliProviders: generate?.enabledCliProviders ?? null,
   };
 }
@@ -230,7 +248,12 @@ const storedAgentTargetsSchema = z.array(z.object(agentTargetSchema.shape));
 /** The agent targets 01 renders with from the context it resolves, or null when it resolves none. */
 function renderedAgentTargets(
   origin: RenderContextOrigin<
-    SnapshotRowFacts & { snapshotAgentTargets: unknown; snapshotLspLanguages: unknown }
+    SnapshotRowFacts & {
+      snapshotAgentTargets: unknown;
+      snapshotLspLanguages: unknown;
+      snapshotCliTargets?: unknown;
+      snapshotLegacyAgentFallback?: unknown;
+    }
   >,
   history: HistoryDetect | null,
   source: string,
@@ -245,6 +268,8 @@ function renderedAgentTargets(
       {
         from: 'column',
         agentTargets: origin.column.agentTargets,
+        cliTargets: origin.column.cliTargets,
+        legacyAgentFallback: origin.column.legacyAgentFallback,
         lspLanguages: origin.column.lspLanguages,
       },
       providerRows,
@@ -256,6 +281,10 @@ function renderedAgentTargets(
       {
         from: 'snapshot',
         agentTargets: stored(origin.row.snapshotAgentTargets),
+        legacyAgentFallback: origin.row.snapshotLegacyAgentFallback === true,
+        cliTargets: z.array(z.string()).safeParse(origin.row.snapshotCliTargets).success
+          ? (origin.row.snapshotCliTargets as string[])
+          : undefined,
         lspLanguages: languages.success ? languages.data : [],
       },
       providerRows,
@@ -265,7 +294,14 @@ function renderedAgentTargets(
   if (verdict.kind === 'blank') return originAgentTargets({ from: 'blank' }, providerRows);
   if (verdict.kind === 'onboarding') {
     return originAgentTargets(
-      { from: 'onboarding', agentTargets: stored(history?.agentTargets) },
+      {
+        from: 'onboarding',
+        agentTargets: stored(history?.agentTargets),
+        cliTargets: z.array(z.string()).safeParse(history?.cliTargets).success
+          ? (history!.cliTargets as string[])
+          : undefined,
+        legacyAgentFallback: history?.legacyAgentFallback === true,
+      },
       providerRows,
     );
   }
@@ -404,6 +440,9 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       rtkRecorded: sql<
         boolean | null
       >`jsonb_typeof(${schema.onboardingArtifacts.formValuesSnapshot} -> 'rtkEnabled') = 'boolean'`,
+      formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+      snapshotCliTargets: sql<unknown>`${schema.onboardingArtifacts.formValuesSnapshot} -> 'cliTargets'`,
+      snapshotLegacyAgentFallback: sql<unknown>`${schema.onboardingArtifacts.formValuesSnapshot} -> 'legacyAgentFallback'`,
       snapshotProviders: sql<unknown>`${schema.onboardingArtifacts.formValuesSnapshot} -> 'enabledCliProviders'`,
       snapshotAgentTargets: sql<unknown>`${schema.onboardingArtifacts.formValuesSnapshot} -> 'agentTargets'`,
       snapshotLspLanguages: sql<unknown>`${schema.onboardingArtifacts.formValuesSnapshot} -> 'lspLanguages'`,
@@ -417,7 +456,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     );
 
   const refusedSnapshots = await undecodableSnapshotRows(db, repositoryId);
-  const origin = renderContextOrigin({
+  let origin = renderContextOrigin({
     column: readRenderContextColumn(repo.renderContext),
     rows: liveArtifacts.map((a) =>
       refusedSnapshots.has(a.id) ? { ...a, hasSnapshot: false, rtkRecorded: false } : a,
@@ -425,9 +464,89 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     rtkChoiceMadeAt: repo.rtkChoiceMadeAt,
   });
   const enabledNames = ruleProviderRows.filter((p) => p.enabled).map((p) => p.name);
-  const history = origin.from === 'history' ? await loadHistoryDetect(db, repositoryId) : null;
+  let history = origin.from === 'history' ? await loadHistoryDetect(db, repositoryId) : null;
+  // Complete only target facts, once. Membership can come from a newer strict snapshot than the
+  // separately selected portable context/RTK origin; every comparison below must see the same set.
+  const recoveredMembership = recoverCliMembership(liveArtifacts);
+  const targetFacts = (
+    targets: unknown,
+    providers: unknown,
+    agents: unknown,
+    fallback: unknown,
+  ) => {
+    const parsedAgents = storedAgentTargetsSchema.safeParse(agents);
+    return {
+      cliTargets: z.array(z.string()).safeParse(targets).success
+        ? (targets as string[])
+        : undefined,
+      enabledCliProviders: Array.isArray(providers)
+        ? snapshotProviderNames(providers).map((name) => ({ name }))
+        : undefined,
+      agentTargets: parsedAgents.success ? parsedAgents.data : undefined,
+      legacyAgentFallback: typeof fallback === 'boolean' ? fallback : undefined,
+    };
+  };
+  if (origin.from === 'column') {
+    origin = {
+      ...origin,
+      column: completeRecordedCliMembership(origin.column, recoveredMembership),
+    };
+  } else if (origin.from === 'snapshot') {
+    const completed = completeRecordedCliMembership(
+      targetFacts(
+        // This row may be older because it recorded RTK; only a current column has authority
+        // over the newest strict membership snapshot.
+        undefined,
+        origin.row.snapshotProviders,
+        origin.row.snapshotAgentTargets,
+        origin.row.snapshotLegacyAgentFallback,
+      ),
+      recoveredMembership,
+    );
+    origin = {
+      ...origin,
+      row: {
+        ...origin.row,
+        snapshotCliTargets: completed.cliTargets,
+        snapshotProviders: completed.enabledCliProviders,
+        snapshotAgentTargets: completed.agentTargets,
+        snapshotLegacyAgentFallback: completed.legacyAgentFallback,
+      },
+    };
+  } else if (history) {
+    const completed = completeRecordedCliMembership(
+      targetFacts(
+        history.cliTargets,
+        history.enabledCliProviders,
+        history.agentTargets,
+        history.legacyAgentFallback,
+      ),
+      recoveredMembership,
+    );
+    history = { ...history, ...completed };
+  }
   const agentTargets = renderedAgentTargets(origin, history, repo.source, ruleProviderRows);
-  const skillDirs = skillTargetDirs(enabledNames);
+  const repositoryNames =
+    origin.from === 'column'
+      ? renderContextProviderNames(origin.column, enabledNames)
+      : origin.from === 'snapshot' && Array.isArray(origin.row.snapshotCliTargets)
+        ? (origin.row.snapshotCliTargets as string[])
+        : origin.from === 'snapshot'
+          ? snapshotProviderNames(origin.row.snapshotProviders)
+          : history && Array.isArray(history.cliTargets)
+            ? (history.cliTargets as string[])
+            : history
+              ? snapshotProviderNames(history.enabledCliProviders)
+              : enabledNames;
+  const skillDirs = skillTargetDirs(repositoryNames);
+  // An unresolved history still plans nothing. In every resolvable context, additions and all
+  // artifact/import/RTK comparisons use the same completed target facts without adopting them.
+  const planningCliNames =
+    origin.from === 'history' &&
+    historyOrigin({ onboarding: history, source: repo.source }).kind === 'none'
+      ? enabledNames
+      : repositoryNames;
+  const cliAdditions = enabledNames.filter((name) => !planningCliNames.includes(name));
 
   // A row this install does not manage, which no upgrade offers anything for, stays out of every
   // comparison below.
@@ -770,7 +889,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
   }
 
   // An upgrade restores a missing import (02-upgrade-apply), so the banner offers one for it too.
-  const rulesImports = await rulesImportGaps(repo.storagePath ?? repo.localPath, enabledNames);
+  const rulesImports = await rulesImportGaps(repo.storagePath ?? repo.localPath, repositoryNames);
   const missingRulesImports = rulesImports?.missing ?? [];
   const linkedRulesFiles = rulesImports?.linked ?? [];
   // An upgrade also takes out the RTK block (02-upgrade-apply) once RTK is switched off.
@@ -788,6 +907,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       : [];
 
   const hasUpgradeAvailable =
+    cliAdditions.length > 0 ||
     firstUpgradeOnThisInstall ||
     (installedTemplateSetHash !== currentSetHash && changedTemplateIds.length > 0) ||
     strandedTemplateIds.size > 0 ||
@@ -839,6 +959,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     ...(obsoleteTemplateIds.length > 0 ? { obsoleteTemplateIds } : {}),
     ...(retiredTemplateIds.length > 0 ? { retiredTemplateIds } : {}),
     ...(customChanges.length > 0 ? { customChanges } : {}),
+    ...(cliAdditions.length > 0 ? { cliAdditions } : {}),
     ...(missingRulesImports.length > 0 ? { missingRulesImports } : {}),
     ...(linkedRulesFiles.length > 0 ? { linkedRulesFiles } : {}),
     ...(rtkBlockLeftovers.length > 0 ? { rtkBlockLeftovers } : {}),

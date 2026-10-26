@@ -38,6 +38,10 @@ import {
   TOOLING_UNIT_NAME,
   withoutUnchosenRtk,
   portableRender,
+  recordedCliTargets,
+  recoverCliMembership,
+  deriveRenderTargets,
+  hasLegacyAgentFallback,
   projectStateHash,
   gitBlobId,
   renderContextColumnSchema,
@@ -52,6 +56,7 @@ import {
 } from '@haive/shared/project-state';
 import {
   loadLiveArtifacts,
+  pickRenderSnapshot,
   resolveRenderContext,
   unionExpandedFor,
 } from '../step-engine/_upgrade-render.js';
@@ -171,6 +176,7 @@ export type Checkout =
       kind: 'record';
       hash: string;
       render: ProjectRender;
+      cli: string[];
       claims: ProjectStateClaim[];
       gitDataClaims: ProjectStateClaim[];
       bundles: ProjectStateBundle[];
@@ -202,13 +208,14 @@ function checkoutOf(files: Map<string, string> | null): Checkout {
   if (files === null || files.size === 0) return { kind: 'absent', hash };
   const parsed = parseProjectState(files);
   if (!parsed.ok) return notRead(listed(parsed.problems));
-  const { render, claims, bundles, settings, environment } = parsed.record;
+  const { render, cli, claims, bundles, settings, environment } = parsed.record;
   return render === null
     ? { kind: 'absent', hash }
     : {
         kind: 'record',
         hash,
         render,
+        cli,
         claims,
         gitDataClaims: parsed.gitDataClaims,
         bundles,
@@ -442,6 +449,9 @@ async function importClaims(
   for (const path of [...new Set([...l.keys(), ...m.keys()])].sort()) {
     const claim = m.get(path);
     if (sameValue(l.get(path), claim)) continue;
+    // A replaced row can be the only strict membership proof. Capture its provenance before
+    // retiring it, while the same transaction still holds the project-state lock.
+    if (claim !== undefined) context ??= await loadMarkerContext(tx, repositoryId, repo);
     await tx
       .update(schema.onboardingArtifacts)
       .set({ supersededAt: now, importedAt: now })
@@ -454,8 +464,7 @@ async function importClaims(
       );
     moved = true;
     if (claim === undefined) continue;
-    context ??= await loadMarkerContext(tx, repositoryId, repo);
-    await insertImportMarker(tx, { repositoryId, repoPath, claim, now, context });
+    await insertImportMarker(tx, { repositoryId, repoPath, claim, now, context: context! });
   }
   return moved;
 }
@@ -773,6 +782,29 @@ export async function syncProjectStateLocked(
   }
 
   const baseRender = row === null ? null : renderOf(row.baseSnapshot);
+  const baseCli =
+    row === null ? [] : ((row.baseSnapshot as Partial<ProjectStateRecord>)?.cli ?? []);
+  const columnCli =
+    column === null
+      ? undefined
+      : recordedCliTargets(column as Parameters<typeof recordedCliTargets>[0]);
+  const rowsForMembership =
+    column?.cliTargets === undefined ? await loadLiveArtifacts(tx, repositoryId) : [];
+  const historical = column === null ? pickRenderSnapshot(rowsForMembership) : null;
+  const recovered = recoverCliMembership(rowsForMembership);
+  const recoveredCli = recovered?.cliTargets;
+  const storedCli = column?.cliTargets !== undefined ? columnCli : (recoveredCli ?? columnCli);
+  const localCli = storedCli ?? [];
+  // No member files in a pre-CLI record are absence, not a request to remove the repository set.
+  // Once the base held members, their deletion is an explicit per-member repository change.
+  const incomingCli = checkout.cli.length === 0 && baseCli.length === 0 ? localCli : checkout.cli;
+  const hasCli =
+    columnCli !== undefined ||
+    historical?.cliTargets !== undefined ||
+    recoveredCli !== undefined ||
+    checkout.cli.length > 0 ||
+    baseCli.length > 0 ||
+    (column === null && historical === null);
   const baseClaims = row === null ? [] : claimsOf(row.baseSnapshot);
   const localClaims = await loadRecordClaims(tx, repositoryId);
   // A checkout with no claim file is one written before the record carried claims: it retires none.
@@ -787,9 +819,9 @@ export async function syncProjectStateLocked(
           incoming: incomingClaims,
         });
   const merge = mergeProjectState({
-    base: row === null ? null : { ...recordOf(baseRender), claims: baseClaims },
-    local: { ...local, claims: localClaims },
-    incoming: { ...recordOf(checkout.render), claims: incomingClaims },
+    base: row === null ? null : { ...recordOf(baseRender), cli: baseCli, claims: baseClaims },
+    local: { ...local, cli: localCli, claims: localClaims },
+    incoming: { ...recordOf(checkout.render), cli: incomingCli, claims: incomingClaims },
     diskHash: (path) => held.get(path) ?? null,
   });
   const claimConflicts = merge.conflicts.filter(({ unit }) => isClaimUnit(unit));
@@ -803,13 +835,36 @@ export async function syncProjectStateLocked(
   const renderMoved =
     merged !== null &&
     (rebuilt !== null || !sameValue(merged, normalizeProjectState(local).render));
-  if (renderMoved || flagFlips) {
-    const next = renderContextColumnSchema.safeParse({
-      ...column,
+  const cliMoved = merged !== null && hasCli && !sameValue(column?.cliTargets, merge.merged.cli);
+  if (renderMoved || flagFlips || cliMoved) {
+    const candidate: Record<string, unknown> = {
+      ...(column ?? (historical?.agentTargets ? { agentTargets: historical.agentTargets } : {})),
       ...(renderMoved ? merged : {}),
+      ...(hasCli ? { cliTargets: merge.merged.cli } : {}),
       rtkChoiceRecorded:
         column === null ? portable.recordsRtkChoice : flagFlips || column.rtkChoiceRecorded,
-    });
+    };
+    const context = column ?? historical ?? {};
+    const basis = context.agentTargets !== undefined ? context : (recovered?.snapshot ?? context);
+    const explicitClearsFallback =
+      recovered?.snapshot.cliTargets !== undefined &&
+      recovered.snapshot.legacyAgentFallback !== true;
+    if (
+      hasCli &&
+      !explicitClearsFallback &&
+      sameValue([...new Set(localCli)].sort(), [...new Set(merge.merged.cli)].sort()) &&
+      hasLegacyAgentFallback(basis as Parameters<typeof hasLegacyAgentFallback>[0])
+    ) {
+      Object.assign(candidate, { legacyAgentFallback: true });
+      if (candidate.agentTargets === undefined)
+        candidate.agentTargets = deriveRenderTargets(
+          [],
+          [],
+          basis.agentTargets as Parameters<typeof deriveRenderTargets>[2],
+          true,
+        ).agentTargets;
+    } else if (hasCli) delete candidate.legacyAgentFallback;
+    const next = renderContextColumnSchema.safeParse(candidate);
     if (!next.success) {
       const issues = next.error.issues.map(
         (i) => `${i.path.join('.') || 'the column'} ${i.message}`,
@@ -872,6 +927,17 @@ export async function syncProjectStateLocked(
       'imported MCP servers held until accepted on this install',
     );
   }
+  if (hasCli && !sameValue(merge.merged.cli, checkout.cli)) {
+    const [outbox] = await tx
+      .select({
+        revision: schema.projectStateOutbox.revision,
+        writtenRevision: schema.projectStateOutbox.writtenRevision,
+      })
+      .from(schema.projectStateOutbox)
+      .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+    if (!outbox || outbox.writtenRevision >= outbox.revision)
+      await markProjectStateDirty(tx, repositoryId);
+  }
   if (portable.stale || toolingStale || checkout.gitDataClaims.length > 0) {
     await markProjectStateDirty(tx, repositoryId);
   }
@@ -893,6 +959,7 @@ export async function syncProjectStateLocked(
       : `${CONFLICT_ERROR_PREFIX}${renderConflicts.map(({ unit }) => keyOf(unit)).join(', ')}`;
   const baseSnapshot = normalizeProjectState({
     ...recordOf(keptRender(checkout.render, baseRender, renderConflicts)),
+    cli: checkout.cli,
     claims: [...keptClaims(incomingClaims, baseClaims, claimConflicts), ...checkout.gitDataClaims],
     // Never merged: a conflict row on a descriptor could not be answered, and would block upgrades.
     bundles: checkout.bundles,
@@ -1046,6 +1113,7 @@ async function applyRebase(
     syncedHead: null,
     baseSnapshot: normalizeProjectState({
       ...recordOf(checkout.render),
+      cli: checkout.cli,
       claims: checkout.claims,
       bundles: checkout.bundles,
       settings,

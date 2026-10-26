@@ -131,6 +131,7 @@ export function UpgradeAvailableBanner({
     const toRemove = retired.filter((id) => status.obsoleteTemplateIds?.includes(id)).length;
     const toKeep = retired.length - toRemove;
     const toUpdate = haiveChangedCount - retired.length;
+    const cliAdditions = status.cliAdditions ?? [];
     const missingImports = status.missingRulesImports ?? [];
     const rtkBlocks = status.rtkBlockLeftovers ?? [];
     const rtkHooks = status.rtkSettingsLeftovers ?? [];
@@ -147,7 +148,10 @@ export function UpgradeAvailableBanner({
     const showTemplateCount =
       haiveChangedCount > 0 ||
       bundleChanges.length > 0 ||
-      (missingImports.length === 0 && rtkBlocks.length === 0 && rtkHooks.length === 0);
+      (cliAdditions.length === 0 &&
+        missingImports.length === 0 &&
+        rtkBlocks.length === 0 &&
+        rtkHooks.length === 0);
     return (
       <div className="flex flex-col gap-1 rounded border border-indigo-900 bg-indigo-950/40 px-3 py-2 text-sm">
         <div className="flex flex-wrap items-center gap-2">
@@ -167,23 +171,35 @@ export function UpgradeAvailableBanner({
                 )}
               </>
             )}
-            {missingImports.length > 0 && (
+            {cliAdditions.length > 0 && (
               <>
                 {showTemplateCount && '; '}
+                Review adding repository CLIs:{' '}
+                <span className="font-mono text-neutral-200">{cliAdditions.join(', ')}</span>
+              </>
+            )}
+            {missingImports.length > 0 && (
+              <>
+                {(showTemplateCount || cliAdditions.length > 0) && '; '}
                 AGENTS.md import missing from{' '}
                 <span className="font-mono text-neutral-200">{missingImports.join(', ')}</span>
               </>
             )}
             {rtkBlocks.length > 0 && (
               <>
-                {(showTemplateCount || missingImports.length > 0) && '; '}
+                {(showTemplateCount || cliAdditions.length > 0 || missingImports.length > 0) &&
+                  '; '}
                 RTK is off, but its block is still in{' '}
                 <span className="font-mono text-neutral-200">{rtkBlocks.join(', ')}</span>
               </>
             )}
             {rtkHooks.length > 0 && (
               <>
-                {(showTemplateCount || missingImports.length > 0 || rtkBlocks.length > 0) && '; '}
+                {(showTemplateCount ||
+                  cliAdditions.length > 0 ||
+                  missingImports.length > 0 ||
+                  rtkBlocks.length > 0) &&
+                  '; '}
                 RTK is off, but its hook is still in{' '}
                 <span className="font-mono text-neutral-200">{rtkHooks.join(', ')}</span>
               </>

@@ -155,6 +155,15 @@ async function main(): Promise<void> {
       updatedAt: now,
     });
 
+    // This full-export fixture deliberately maintains Claude files; an unconfigured user's
+    // authoritative empty target set correctly exports no agents or skills.
+    await db.insert(schema.cliProviders).values({
+      userId,
+      name: 'claude-code',
+      label: 'full-smoke synthetic Claude',
+      enabled: true,
+    });
+
     const [repo] = await db
       .insert(schema.repositories)
       .values({

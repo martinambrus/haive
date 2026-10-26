@@ -11,7 +11,7 @@ import {
   shouldRetryMiningTerminalFailure,
   type MinedAgentOutcome,
 } from '../../mining-failure.js';
-import { loadPreviousStepOutput, resolveSkillTargetDirs } from './_helpers.js';
+import { loadPreviousStepOutput, resolveTaskSkillTargetDirs } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
 import {
@@ -319,9 +319,7 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
   },
 
   async detect(ctx: StepContext): Promise<SkillRepairDetect> {
-    const skillTargetDirs = await resolveSkillTargetDirs(ctx.db, ctx.userId, [
-      DEFAULT_PROJECT_SKILLS_DIR,
-    ]);
+    const skillTargetDirs = await resolveTaskSkillTargetDirs(ctx, [DEFAULT_PROJECT_SKILLS_DIR]);
     const bundleSkillIds = await loadBundleSkillIds(ctx);
     const cap = await resolveParallelCap();
 
@@ -414,7 +412,8 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillRepairDetect;
-      const primary = det.skillTargetDirs[0] ?? DEFAULT_PROJECT_SKILLS_DIR;
+      const primary = (det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR])[0];
+      if (primary === undefined) return [];
       const fileTree = det.__fileTree ?? '';
       return det.failingSkills.map((f) => ({
         agentId: f.skillId.slice(0, 120),
@@ -439,10 +438,14 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
 
   async apply(ctx, args): Promise<SkillRepairApply> {
     const detected = args.detected as SkillRepairDetect;
-    const targetDirs =
-      detected.skillTargetDirs && detected.skillTargetDirs.length > 0
-        ? detected.skillTargetDirs
-        : [DEFAULT_PROJECT_SKILLS_DIR];
+    const targetDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    if (targetDirs.length === 0)
+      return {
+        summary: 'The repository maintains no skill destinations.',
+        repaired: [],
+        stillFailing: [],
+        attempted: 0,
+      };
     const results = args.agentMiningResults ?? [];
 
     const repaired: string[] = [];

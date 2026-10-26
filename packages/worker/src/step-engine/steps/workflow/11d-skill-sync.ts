@@ -16,7 +16,7 @@ import {
 } from '../../mining-failure.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import type { KbFileSummary } from '../onboarding/09-qa.js';
-import { loadPreviousStepOutput, resolveSkillTargetDirs } from '../onboarding/_helpers.js';
+import { loadPreviousStepOutput, resolveTaskSkillTargetDirs } from '../onboarding/_helpers.js';
 import { buildSkillContractBlocks } from '../onboarding/_skill-prompt.js';
 import {
   loadMiningScopeExcludeGlobs,
@@ -292,9 +292,7 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
   async detect(ctx: StepContext): Promise<SkillSyncDetect> {
     const { newUpdate, remove } = await loadLearningSkillSync(ctx);
     const worktreePath = await resolveWorktree(ctx);
-    const skillTargetDirs = await resolveSkillTargetDirs(ctx.db, ctx.userId, [
-      DEFAULT_PROJECT_SKILLS_DIR,
-    ]);
+    const skillTargetDirs = await resolveTaskSkillTargetDirs(ctx, [DEFAULT_PROJECT_SKILLS_DIR]);
     const bundleSkillIds = await loadBundleSkillIds(ctx);
     const cap = await resolveParallelCap();
 
@@ -399,7 +397,8 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillSyncDetect;
-      const primary = det.skillTargetDirs[0] ?? DEFAULT_PROJECT_SKILLS_DIR;
+      const primary = (det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR])[0];
+      if (primary === undefined) return [];
       const fileTree = det.__fileTree ?? '';
       return det.targets.map((target) => ({
         agentId: target.skillId.slice(0, 120),
@@ -420,8 +419,16 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
   async apply(ctx, args): Promise<SkillSyncApply> {
     const detected = args.detected as SkillSyncDetect;
     const worktree = detected.worktreePath;
-    const targetDirs =
-      detected.skillTargetDirs.length > 0 ? detected.skillTargetDirs : [DEFAULT_PROJECT_SKILLS_DIR];
+    const targetDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    if (targetDirs.length === 0)
+      return {
+        generated: [],
+        removed: [],
+        indexRemovedDirs: [],
+        skipped: [],
+        committed: false,
+        commitSha: null,
+      };
     const results = args.agentMiningResults ?? [];
 
     const generated: string[] = [];

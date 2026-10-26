@@ -141,7 +141,11 @@ async function viaRestoredSnapshot(
 async function viaLiveRows(
   liveRtk: boolean | undefined,
   plan: Plan,
-  more: { repository?: Record<string, unknown>; rows?: Record<string, unknown>[] } = {},
+  more: {
+    repository?: Record<string, unknown>;
+    rows?: Record<string, unknown>[];
+    maintainedClaude?: boolean;
+  } = {},
 ) {
   const repoPath = await root();
   await mkdir(join(repoPath, '.claude/agents'), { recursive: true });
@@ -162,7 +166,9 @@ async function viaLiveRows(
     diskPath: CREATED,
     templateId: 'agent.new',
     source: 'upgrade',
-    formValuesSnapshot: UPGRADED,
+    formValuesSnapshot: more.maintainedClaude
+      ? { ...UPGRADED, enabledCliProviders: rowSnapshot('newer-unrecorded').enabledCliProviders }
+      : UPGRADED,
     generatedAt: new Date('2026-02-01T00:00:00Z'),
   });
   row({
@@ -213,31 +219,56 @@ describe.each(paths)('the RTK choice of a rollback that %s', (_name, run) => {
   it('is recorded when the plan of the upgrade found a choice and the context holds a value', async () => {
     const column = await recordedAs(false, { rtkFollowsLive: true });
 
-    expect(column).toEqual({ ...context(false), rtkChoiceRecorded: true });
+    expect(column).toEqual({
+      ...context(false),
+      cliTargets: [],
+      legacyAgentFallback: true,
+      rtkChoiceRecorded: true,
+    });
   });
 
   it('is not, when the plan found none, though the context holds a value', async () => {
     const column = await recordedAs(false, { rtkFollowsLive: false });
 
-    expect(column).toEqual({ ...context(false), rtkChoiceRecorded: false });
+    expect(column).toEqual({
+      ...context(false),
+      cliTargets: [],
+      legacyAgentFallback: true,
+      rtkChoiceRecorded: false,
+    });
   });
 
   it('is not, when the plan was stored before it recorded the question', async () => {
     const column = await recordedAs(true, {});
 
-    expect(column).toEqual({ ...context(true), rtkChoiceRecorded: false });
+    expect(column).toEqual({
+      ...context(true),
+      cliTargets: [],
+      legacyAgentFallback: true,
+      rtkChoiceRecorded: false,
+    });
   });
 
   it('is not, when the upgrade has no plan stored', async () => {
     const column = await recordedAs(true, null);
 
-    expect(column).toEqual({ ...context(true), rtkChoiceRecorded: false });
+    expect(column).toEqual({
+      ...context(true),
+      cliTargets: [],
+      legacyAgentFallback: true,
+      rtkChoiceRecorded: false,
+    });
   });
 
   it('is not, when the plan found a choice but the context holds no value', async () => {
     const column = await recordedAs(undefined, { rtkFollowsLive: true });
 
-    expect(column).toEqual({ ...context(undefined), rtkChoiceRecorded: false });
+    expect(column).toEqual({
+      ...context(undefined),
+      cliTargets: [],
+      legacyAgentFallback: true,
+      rtkChoiceRecorded: false,
+    });
   });
 });
 
@@ -256,6 +287,8 @@ describe('a rollback on an install where a person switched RTK', () => {
     expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
     expect(fake.rows(schema.repositories)[0]!.renderContext).toEqual({
       ...context(false),
+      cliTargets: [],
+      legacyAgentFallback: true,
       rtkChoiceRecorded: false,
     });
     expect(settingsOfBase(fake)).toEqual({ 'rtk-enabled': true });
@@ -287,7 +320,10 @@ describe('a rollback whose plan followed the live RTK switch, though nobody stam
     const { fake, out } = await viaRestoredSnapshot(
       restored,
       plan,
-      { rtkEnabled: live },
+      {
+        rtkEnabled: live,
+        renderContext: { ...UPGRADED, cliTargets: ['claude-code'], rtkChoiceRecorded: true },
+      },
       snapshotWith(restored),
     );
     expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
@@ -335,7 +371,15 @@ describe('a rollback that takes the live rows’ context beside an older row tha
     const { fake, out } = await viaLiveRows(
       false,
       { rtkFollowsLive: false },
-      { repository: { rtkEnabled: true, rtkChoiceMadeAt: new Date(1000) }, rows: [newerRow] },
+      {
+        repository: {
+          rtkEnabled: true,
+          rtkChoiceMadeAt: new Date(1000),
+          renderContext: null,
+        },
+        rows: [newerRow],
+        maintainedClaude: true,
+      },
     );
 
     expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
@@ -345,7 +389,15 @@ describe('a rollback that takes the live rows’ context beside an older row tha
   });
 
   it('records the newest that recorded RTK while nobody switched it', async () => {
-    const { fake, out } = await viaLiveRows(false, { rtkFollowsLive: false }, { rows: [newerRow] });
+    const { fake, out } = await viaLiveRows(
+      false,
+      { rtkFollowsLive: false },
+      {
+        repository: { renderContext: null },
+        rows: [newerRow],
+        maintainedClaude: true,
+      },
+    );
 
     expect(out.recordWrite, out.warnings.join('\n')).toBe('written');
     expect(fake.rows(schema.repositories)[0]!.renderContext).toMatchObject({ framework: null });

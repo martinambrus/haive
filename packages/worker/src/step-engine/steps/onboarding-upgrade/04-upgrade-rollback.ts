@@ -21,11 +21,17 @@ import {
 } from '@haive/shared';
 import { ledgerImportedSince } from '@haive/shared/onboarding-admission';
 import {
+  deriveRenderTargets,
+  readRenderContextColumn,
+  completeRecordedCliMembership,
+  recoverCliMembership,
   isImportMarker,
   isRenderContextSnapshot,
   isRtkChoiceRecorded,
   namesGitData,
   PROJECT_STATE_IMPORT_STEP_ID,
+  hasLegacyAgentFallback,
+  sameValue,
 } from '@haive/shared/project-state';
 import { readUpgradeFile, RTK_BLOCK_FILES, RULES_FILE_READ_CAP } from '@haive/shared/rules-files';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
@@ -471,6 +477,19 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       .from(schema.repositories)
       .where(eq(schema.repositories.id, detected.repositoryId));
     const expectedColumns = [columnBefore?.renderContext ?? null];
+    // Capture membership before restoring any older snapshot into the live ledger. A failed
+    // foreground writer may have left NULL while strict live rows still carry the repository set.
+    const currentColumn = readRenderContextColumn(columnBefore?.renderContext);
+    const liveBefore =
+      currentColumn.kind === 'column' && currentColumn.column.cliTargets !== undefined
+        ? []
+        : await loadLiveArtifacts(ctx.db, detected.repositoryId);
+    const recovered = recoverCliMembership(liveBefore);
+    const membershipBasis =
+      currentColumn.kind === 'column' ? currentColumn.column : recovered?.snapshot;
+    const maintained = membershipBasis
+      ? completeRecordedCliMembership(membershipBasis, recovered)
+      : null;
     const warnings = [...detected.warnings];
     const manifest = getTemplateManifest();
     let revertedCount = 0;
@@ -501,6 +520,57 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     const byTemplateAndPath = new Map<string, (typeof expanded)[number]>();
     for (const r of expanded) {
       byTemplateAndPath.set(`${r.templateId}:${r.diskPath}`, r);
+    }
+
+    if (
+      maintained?.cliTargets !== undefined &&
+      !(currentColumn.kind === 'column' && currentColumn.column.cliTargets !== undefined)
+    ) {
+      const plannedTargets = detected.targets.filter(
+        (target) =>
+          safeDiskRel(target.diskPath) !== null &&
+          !(
+            'skip' in
+            resolveRollbackRestore(
+              target,
+              byTemplateAndPath.get(`${target.templateId}:${target.diskPath}`),
+            )
+          ),
+      );
+      const retiring = new Set([
+        ...plannedTargets.flatMap((target) =>
+          target.upgradeArtifactId ? [target.upgradeArtifactId] : [],
+        ),
+        ...detected.newArtifactsToUndo
+          .filter((item) => safeDiskRel(item.diskPath) !== null)
+          .map((item) => item.upgradeArtifactId),
+        ...(detected.unrecordedRewrites ?? []).map((item) => item.upgradeArtifactId),
+      ]);
+      const replacing = new Set(plannedTargets.map((target) => target.diskPath));
+      const surviving = recoverCliMembership(
+        liveBefore.filter((row) => !retiring.has(row.id) && !replacing.has(row.diskPath)),
+      );
+      const afterBasis =
+        currentColumn.kind === 'column' ? currentColumn.column : surviving?.snapshot;
+      const after = afterBasis ? completeRecordedCliMembership(afterBasis, surviving) : null;
+      const facts = (value: typeof maintained | typeof after) =>
+        value?.cliTargets === undefined
+          ? null
+          : {
+              names: [...new Set(value.cliTargets)].sort(),
+              fallback: hasLegacyAgentFallback(value)
+                ? deriveRenderTargets([], [], value.agentTargets, true).agentTargets
+                : [],
+            };
+      // A normal restore always records its valid normalized snapshot, even when edited bytes
+      // are kept. Removed-file restores can be refused, so they are not an assured proof.
+      const replacementProvesMembership =
+        snapshot !== null && plannedTargets.some((target) => !target.removed);
+      if (!replacementProvesMembership && !sameValue(facts(maintained), facts(after))) {
+        throw new Error(
+          'Repository CLI settings need refreshing before this rollback. Refresh the repository configuration and plan the rollback again.',
+        );
+      }
     }
 
     const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
@@ -909,6 +979,27 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
     revertedCount += rewriteIds.length;
 
     const insertPaths = Array.from(new Set(rowsToInsert.map((r) => r.diskPath)));
+    if (maintained?.cliTargets !== undefined) {
+      for (const row of rowsToInsert) {
+        if (!isRenderContextSnapshot(row.formValuesSnapshot)) continue;
+        const prior = row.formValuesSnapshot as unknown as TemplateRenderContext;
+        const targets = deriveRenderTargets(
+          maintained.cliTargets,
+          prior.lspLanguages,
+          maintained.agentTargets,
+          maintained.legacyAgentFallback,
+        );
+        const snapshot = {
+          ...prior,
+          cliTargets: maintained.cliTargets,
+          agentTargets: targets.agentTargets,
+          enabledCliProviders: targets.enabledCliProviders,
+        };
+        if (maintained.legacyAgentFallback === true) snapshot.legacyAgentFallback = true;
+        else delete snapshot.legacyAgentFallback;
+        row.formValuesSnapshot = snapshot as unknown as Record<string, unknown>;
+      }
+    }
     const allRowsToSupersede = [...upgradeRowIds, ...undoneNewArtifactIds, ...rewriteIds];
     if (allRowsToSupersede.length > 0 || insertPaths.length > 0) {
       await ctx.db.transaction(async (tx) => {
@@ -952,12 +1043,31 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
       .from(schema.repositories)
       .where(eq(schema.repositories.id, detected.repositoryId))
       .limit(1);
-    const recorded =
+    let recorded =
       snapshot ??
       pickRenderSnapshot(
         await loadLiveArtifacts(ctx.db, detected.repositoryId),
         repo?.rtkChoiceMadeAt,
       );
+
+    if (recorded && maintained?.cliTargets !== undefined) {
+      const cliTargets = maintained.cliTargets;
+      const targets = deriveRenderTargets(
+        cliTargets,
+        recorded.lspLanguages as string[],
+        maintained.agentTargets,
+        maintained.legacyAgentFallback,
+      );
+      recorded = {
+        ...recorded,
+        cliTargets,
+        agentTargets: targets.agentTargets,
+        enabledCliProviders: targets.enabledCliProviders,
+      };
+      if (maintained.legacyAgentFallback !== undefined)
+        recorded.legacyAgentFallback = maintained.legacyAgentFallback;
+      else delete recorded.legacyAgentFallback;
+    }
 
     // Refresh applicable_template_ids from a fresh expansion against the
     // restored render context. After a rollback the repo's gating may differ

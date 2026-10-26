@@ -1,21 +1,36 @@
 # Onboarding completion
 
-**"Onboarded" is the RUN's verdict, not the artifacts'.** The four markers the API checks —
-`.claude/agents`, `.claude/skills`, `.claude/workflow-config.json`, `KB_DIR` — are all written
-during the run. The first two stand for the agents and skills directory of any CLI in the
-catalog, since a run writes only its enabled CLIs' own directories, and a Codex-only run has no
-`.claude/agents`. They are written by `07-generate-files`, the 8th of 27 registered onboarding
-steps, with the KB following at 08
-and skills at 09_5. So from a third of the way in, a cancelled run and a run executing RIGHT
-NOW leave a tree indistinguishable from a finished one: a task created against such a repo was
-typed `workflow` and aimed at a knowledge base nobody finished building, and the repos list
-offered "Create task" for a repository mid-onboarding.
+**"Onboarded" is the RUN's verdict, not the artifacts'.** The API checks four logical marker
+categories: agents, skills, `.claude/workflow-config.json` and `KB_DIR`. A required agent or skill
+category accepts its directory from any CLI in the catalog; a Codex-only run needs no
+`.claude/agents`. A category with no destination in the repository's recorded CLI set is
+inapplicable: fresh Amp-only needs skills but no agent directory, while explicit empty or
+unknown-only maintained sets without a legacy fallback export neither. A genuinely recorded legacy agent fallback keeps
+the agent category applicable. Unknown or decoder-refused provenance keeps the legacy four-marker
+requirement. KB and workflow configuration remain required.
+
+`checkRepositoryOnboardingMarkers` (`shared/src/onboarding-admission.ts`) uses the current
+explicit membership, then newest strictly valid live snapshot membership, then recorded legacy
+metadata. It never infers membership from local providers or directories. Required categories
+keep their existing any-catalog presence check: adding a CLI deliberately defers generated skill
+mirrors until later generation, repair or sync, so completion does not require every mirror.
+Marker labels stay stable: existing directories remain `present`, while an absent inapplicable
+category is left out of `missing`.
+Provenance is read in batches only when a missing CLI category could change the result. The
+repository list also skips that read when missing KB or configuration already forces its verdict
+false, and keeps large context columns out of its primary query and response.
+
+The run writes these artifacts from `07-generate-files`, the 8th of 27 registered onboarding
+steps, with the KB following at 08 and skills at 09_5. From a third of the way in, a cancelled run
+and a run executing RIGHT NOW can leave a tree indistinguishable from a finished one: a task
+created against such a repo was typed `workflow` and aimed at a knowledge base nobody finished
+building, and the repos list offered "Create task" for a repository mid-onboarding.
 
 `resolveOnboardingVerdict` (`api/src/lib/onboarding-state.ts`) is the one reader, shared by
 `GET /repos` and `GET /repos/:id/onboarding-status`:
 
 ```
-onboarded = markers present
+onboarded = applicable markers present
             AND no live onboarding task (created|queued|running|paused|waiting_user|waiting_pr)
             AND (repositories.onboarded_at IS NOT NULL
                  OR a completed onboarding task exists
@@ -52,7 +67,7 @@ cancel and fail write through their own functions, so an abandoned run can never
 Cleared by `DELETE /repos/:id/onboarding-artifacts`, since the stamp must not outlive the files
 it vouches for. `POST /repos/:id/mark-onboarded` is the manual route, for a run that did all
 the work and then failed at a late step (13-onboarding-push against a repo with no remote); it
-refuses when a marker is missing or a run is live.
+refuses when an applicable marker is missing or a run is live.
 
 **One rule admits an upgrade, and a rollback.** `upgradeAdmission`
 (`api/src/lib/onboarding-state.ts`) is what POST /tasks, upgrade-status's banner and

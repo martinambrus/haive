@@ -1,3 +1,4 @@
+import { importRulesFilesFor } from '@haive/shared/rules-files';
 import {
   decodeUtf8Strict,
   errno,
@@ -15,8 +16,14 @@ import {
   RULES_FILE_READ_CAP,
   type UnreadReason,
 } from '@haive/shared/rules-files';
-import { and, asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
-import { schema, type Database, type DbTx } from '@haive/database';
+import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import {
+  lockRepositoryTasksKey,
+  REPOSITORY_TASKS_LOCK_TIMEOUT_MS,
+  schema,
+  type Database,
+  type DbTx,
+} from '@haive/database';
 import { safeErrorMessage } from '@haive/shared/logger';
 import {
   CLI_RULES_END,
@@ -35,6 +42,9 @@ import {
   namesGitData,
   rtkLeftoversToRemove,
   sameValue,
+  readRenderContextColumn,
+  recordedCliTargets,
+  recoverCliMembership,
 } from '@haive/shared/project-state';
 import type { StepDefinition } from '../../step-definition.js';
 import {
@@ -48,14 +58,17 @@ import {
   retireLegacyMirrors,
   toolingOutsideRecord,
 } from '../../_retire-install-manifest.js';
-import { unionExpandedFor } from '../../_upgrade-render.js';
+import { loadLiveArtifacts, unionExpandedFor } from '../../_upgrade-render.js';
 import {
   failIfColumnStale,
   lockProjectState,
   ProjectStateMovedError,
   refuseMovedColumn,
+  refuseReleasedCheckout,
   ProjectStateWriteError,
   renderContextColumnFor,
+  inheritCliMembership,
+  completeWriterCliMembership,
   writeProjectStateRecord,
 } from '../../../project-state/write.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
@@ -133,6 +146,7 @@ function ownRecordColumn(plan: UpgradePlanOutput): unknown {
     return renderContextColumnFor(
       plan.renderCtxSnapshot as unknown as TemplateRenderContext,
       plan.rtkFollowsLive === true,
+      plan.renderContextColumn,
     );
   } catch {
     return undefined;
@@ -801,6 +815,68 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
 
   async apply(ctx, args): Promise<UpgradeApplyOutput> {
     const plan = args.detected;
+    const original = readRenderContextColumn(plan.renderContextColumn);
+    if (
+      plan.renderContextColumn !== undefined &&
+      plan.renderCtxSnapshot.cliTargets === undefined &&
+      (original.kind !== 'column' || original.column.cliTargets === undefined)
+    ) {
+      // Compare the writer's complete result (membership, fallback and derived metadata) with the
+      // old plan's immutable own-result proof. NULL originals and same-name fallback changes can
+      // differ too. Refuse before product/ledger writes; never extend the original allowlist.
+      await ctx.db
+        .transaction(async (tx) => {
+          const [previousWait] = await tx.execute<{ value: string }>(
+            sql`select current_setting('lock_timeout') as value`,
+          );
+          await tx.execute(
+            sql`select set_config('lock_timeout', ${`${REPOSITORY_TASKS_LOCK_TIMEOUT_MS}ms`}, true)`,
+          );
+          await lockRepositoryTasksKey(tx, plan.repositoryId);
+          await lockProjectState(tx, plan.repositoryId);
+          const [locked] = await tx
+            .select({ renderContext: schema.repositories.renderContext })
+            .from(schema.repositories)
+            .where(eq(schema.repositories.id, plan.repositoryId))
+            .for('update');
+          await tx.execute(sql`select set_config('lock_timeout', ${previousWait!.value}, true)`);
+          await refuseReleasedCheckout(tx, ctx.taskId, plan.repositoryId);
+          await refuseMovedColumn(tx, plan.repositoryId, plannedColumns(plan));
+          const current = readRenderContextColumn(locked?.renderContext);
+          const caller = renderContextColumnFor(
+            plan.renderCtxSnapshot as unknown as TemplateRenderContext,
+            plan.rtkFollowsLive === true,
+          );
+          const recovered =
+            current.kind === 'column' && current.column.cliTargets !== undefined
+              ? undefined
+              : recoverCliMembership(await loadLiveArtifacts(tx, plan.repositoryId));
+          const completed = completeWriterCliMembership(
+            caller,
+            current.kind === 'column' ? current.column : caller,
+            recovered,
+          );
+          // Preserve the original stale-render refusal too: inheritance can normalize a caller's
+          // different recorded names into the predicted column, but its planned files still differ.
+          const plannedNames =
+            recordedCliTargets(caller) ??
+            (original.kind === 'column' ? recordedCliTargets(original.column) : undefined);
+          if (
+            completed.cliTargets !== undefined &&
+            !sameValue(
+              [...new Set(completed.cliTargets)].sort(),
+              plannedNames === undefined ? null : [...new Set(plannedNames)].sort(),
+            )
+          )
+            throw new Error(PLAN_NO_LONGER_HOLDS);
+          const admitted =
+            completed.cliTargets === undefined ? caller : inheritCliMembership(caller, completed);
+          if (!sameValue(admitted, ownRecordColumn(plan))) throw new Error(PLAN_NO_LONGER_HOLDS);
+        })
+        .catch((err: unknown) => {
+          throw err instanceof ProjectStateMovedError ? new Error(PLAN_NO_LONGER_HOLDS) : err;
+        });
+    }
     const values = args.formValues;
     const warnings: string[] = [];
     const rowContext = recordableContext(plan.renderCtxSnapshot, plan.rtkFollowsLive === true);
@@ -1546,7 +1622,9 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
     // Not an artifact, but without its `@AGENTS.md` line a claude-family CLI never loads AGENTS.md.
     const rulesImportStubs = await restoreRulesImportStubs(
       ctx.repoPath,
-      await enabledImportRulesFiles(ctx.db, ctx.userId),
+      plan.renderCtxSnapshot.cliTargets !== undefined
+        ? importRulesFilesFor(plan.renderCtxSnapshot.cliTargets as string[])
+        : await enabledImportRulesFiles(ctx.db, ctx.userId),
     );
     for (const stub of rulesImportStubs) {
       if (stub.result === 'created' || stub.result === 'appended') writtenPaths.push(stub.file);

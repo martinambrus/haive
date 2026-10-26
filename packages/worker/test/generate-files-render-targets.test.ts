@@ -127,9 +127,9 @@ describe('07 detect: agent targets and enabled providers', () => {
     expect(mixed.enabledCliProviders).toEqual(listed('amp', 'codex'));
   });
 
-  it('falls back to the .claude/agents markdown target when no enabled provider has a directory', async () => {
+  it('gives a new explicit Amp-only set no invented agent fallback', async () => {
     const alone = await derive(on('amp'), LANGUAGES);
-    expect(alone.agentTargets).toEqual([CLAUDE(false)]);
+    expect(alone.agentTargets).toEqual([]);
     expect(alone.enabledCliProviders).toEqual(listed('amp'));
   });
 
@@ -146,7 +146,7 @@ describe('07 detect: agent targets and enabled providers', () => {
     expect(first.enabledCliProviders).toEqual(listed('claude-code'));
 
     const none = await derive(off('claude-code', 'gemini', 'amp'), LANGUAGES);
-    expect(none.agentTargets).toEqual([CLAUDE(false)]);
+    expect(none.agentTargets).toEqual([]);
     expect(none.enabledCliProviders).toEqual([]);
   });
 
@@ -204,10 +204,10 @@ describe('07 detect: agent targets and enabled providers', () => {
     ]);
   });
 
-  it('lists one entry per enabled row, duplicates included, and one target for their directory', async () => {
+  it('deduplicates repository members and their shared target directory', async () => {
     const out = await derive(on('claude-code', 'claude-code'), LANGUAGES);
     expect(out.agentTargets).toEqual([CLAUDE(true)]);
-    expect(out.enabledCliProviders).toEqual(listed('claude-code', 'claude-code'));
+    expect(out.enabledCliProviders).toEqual(listed('claude-code'));
   });
 
   // Every provider that shares a directory supports LSP alike today, so the rule that one that does

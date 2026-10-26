@@ -174,15 +174,15 @@ is invisible there once a sibling rendering has one; the next upgrade still offe
 
 **The banner and 01 derive the render targets from one module.** Which agent directories and skills
 directories a repository renders to is `project-state/render-targets.ts` in `@haive/shared`
-(`originAgentTargets`, `skillTargetDirs`, `agentFilePath`, `bundleItemRenders`, `rendersAt`), and
-the worker's 07, 01 and bundle expansion call the same functions, so the two cannot drift
-(`render-targets-drift.test.ts`). The banner resolves the targets from the origin 01 renders from: a
-column's stored targets, else the enabled CLIs; a snapshot's, else the same completion (01 would
-throw on one with none); the blank scaffold's, which has no fallback; an onboarding's recorded, else
-the `.claude/agents` fallback. A live row whose template no longer renders to its path (the
-directory of a CLI since disabled) reads as changed even when the hashes match, and as obsolete
-when 02 would delete the file; a row 02 would keep stays quiet. No agent kind is judged where no
-context resolves.
+(`deriveRenderTargets`, `originAgentTargets`, `skillTargetDirs`, `agentFilePath`, `bundleItemRenders`,
+`rendersAt`), and the worker's 07, 01 and bundle expansion use the same repository membership and
+legacy completion, so the two cannot drift (`render-targets-drift.test.ts`). A recorded CLI set,
+including an empty one, is authoritative. Legacy contexts recover recorded membership and preserve
+an actually recorded agent fallback separately; only unresolved legacy membership uses the old
+local-provider completion. Disabling a person's provider does not remove a repository target.
+An explicit repository target change can make a live path obsolete, subject to ownership and the
+normal Keep choice. A row 02 would keep stays quiet, and no agent kind is judged where no context
+resolves.
 
 **A file already holding the new render is recorded, never asked about.** A live row whose
 template moved while its path already holds the current render (one another install upgraded and
@@ -417,8 +417,9 @@ A fenced write (02's) clears it only while it still holds a context 02 planned a
 that took the lock after the failed write and before the clear is newer than both, and stays.
 First comes the repository's render context column, whose RTK choice is its stored
 `rtkChoiceRecorded` or a person's switch (`rtk_choice_made_at`), as everywhere the choice is read,
-and whose providers are its own or, for a column the project-state sync filled
-with the portable fields alone, the owner's enabled ones. Then comes the newest snapshot that
+and whose providers derive from the repository's recorded `cliTargets`, including an empty list.
+A legacy context without membership uses its recorded provider metadata, then the owner's enabled
+providers only while membership is still unresolved. Then comes the newest snapshot that
 recorded the choice, ahead of one from before RTK (`pickSnapshotRow`, by `newestArtifactsFirst`),
 since an upgrade replaces only the paths it writes and rows from several runs stay live side by
 side. Once a person has switched RTK, the switch is the choice, so the newest snapshot is read
@@ -428,6 +429,75 @@ applicable set with the live switch wherever the choice is recorded, as every re
 flag it writes, which is the plan of the upgrade being undone having followed the switch (read
 before the expansion), or a person's switch. So the banner and the plan read the
 same context, and a repository whose snapshots all predate RTK stays quiet.
+
+**Maintained CLIs belong to the repository.** `render_context.cliTargets` is the union of stable
+provider names, carried by the existing `cli/<provider>.json` member units. It never changes a
+person's enabled providers or carries their provider ids or credentials. Shared
+`deriveRenderTargets` drives agent targets/formats, rule readers, LSP, RTK fan-out and skill
+directories from that set; shared directories are deduplicated. Unknown names remain in the record
+without acquiring destinations an older install does not know. An explicit `[]` is authoritative.
+
+The convergent boot repair `seedRepositoryCliTargets` runs before applicable sets are recomputed.
+It uses the actual context/snapshot decoder, skipping malformed rows and snapshots with no
+membership information, but stopping at a recorded empty list. Membership comes from the newest
+valid snapshot that records it; an existing authoritative column stays as it is. Recovering the
+rest of a missing context retains the RTK-aware `pickSnapshotRow` policy described above. The repair
+holds the ordered repository/project-state locks and repository row, defers for live root claims,
+onboarding/upgrade holders or a journal, and marks a real change dirty in that transaction. It adds
+no schema migration. Ordinary planning, writer admission and sync also complete recorded legacy
+membership under their existing exact column/task/reset guards, so a held boot repair does not
+require another worker restart after the task completes.
+When neither the maintained context nor valid snapshot history records membership, a validated
+caller snapshot can complete it from its recorded metadata. Current/history precedence, including
+explicit empty sets, remains authoritative; the writer does not query today's enabled providers.
+
+Old onboarding also wrote a Claude-format agent fallback when no provider had an agent directory,
+including Amp-only and zero-provider contexts. The internal `legacyAgentFallback` context/snapshot
+flag preserves that actually recorded target without inventing Claude membership. It does not
+travel in the portable render unit. Unchanged target choices and unrelated tooling saves retain
+it; a real target change clears it for the normal upgrade preview. New contexts and genuine
+explicit empty selections have no fallback merely because stale target metadata exists.
+
+07 adds the onboarding user's enabled CLIs to the repository set and carries its original-column
+fence through 12. Blank INIT writes the record through the same journaled writer and includes its
+returned paths in the initial commit. 01 offers missing locally enabled CLIs as a default-on
+"Also maintain files for" choice, then recomputes the plan. The repository-card banner offers an
+upgrade when these additions are the only pending change; checking status or starting the task does
+not adopt them. Declining the choice after a removal keeps that
+removal authoritative, even while the CLI is enabled locally.
+The Tooling read completes recorded membership without writing it; a missing, refused or
+unresolved current context displays those names read-only until setup or configuration completion.
+Its explicit `POST /repositories/:id/cli-targets/remove` action still requires a valid current
+context and compares canonical recorded membership against the observed set under bounded
+ordered locks and records the dirty revision atomically; a stale list, active root claim,
+onboarding/upgrade holder or journal holds it. A no-op does not clear legacy fallback or dirty the
+record. This action leaves files and ledger rows in place: the next upgrade offers owned obsolete
+files with its usual Keep choices. 04 restores files while preserving current repository membership.
+Before restoring or retiring snapshots, 04 captures that membership and normalizes only the
+CLI-derived facts of new rollback snapshots; if no explicit current authority or surviving or
+assured replacement proof can preserve it, rollback refuses before any mutation and requires
+configuration completion and a fresh plan.
+
+The sync merges CLI members three ways with the record's base; the writer owns a removed CLI unit
+only when a validated previous base named it. Legacy records with no CLI units preserve recorded
+local/snapshot membership unless a populated prior base proves removal. A fresh NULL context with
+no recorded membership starts with `[]`, rather than today's local providers. Legacy foreground
+snapshots inherit an authoritative repository set under the writer's existing gates. Exact caller
+column/task/reset fences remain in force: an explicit list that omits maintained members is refused,
+as is an unfenced differing list. A persisted legacy 02 plan whose original recorded membership
+differs from the newest valid artifact history must be planned again before any product file or
+ledger changes; a newly planned snapshot records the chosen membership for its own retries.
+Likewise, 12 completes a saved legacy 07 payload before publishing snapshots while retaining its
+actual rendered-file scope; when an immutable saved column fence cannot recognize that completed
+own result, it refuses before mutation and requires generation again, leaving matching retries
+and payloads without the old fence compatible. The
+complete raw watermark, journal and final checkout checks are unchanged. 12 and 03 consume the
+writer's reported paths for scoped staging.
+
+For bundled skills, 12 records main and sub-skill claims at the destinations saved by 09_5's
+generation detect, preserving an explicit empty list and the legacy Claude default only when the
+destination field is absent. Completing repository membership does not claim files at additional
+destinations; an ordinary upgrade can offer missing maintained bundle paths later.
 
 **A key both installs changed is held for an answer, never settled for the column's side.** The
 project-state sync merges the checkout's record against the base it last synced from. A render key
@@ -930,7 +1000,7 @@ see; a plan question (`plan/<nodeId>#<field>`, [plan canvas](plan-canvas.md)) is
 theirs applies the row's value to the column through `settingColumnUpdate` and the base and rewrites
 no file, and an answer reads as moved when the file no longer holds the row's `incoming`. A setting
 this install has no value for cannot be kept (`no_local`), and one that is never unset cannot be taken
-as absent (`invalid`). The CLI set and the bundle descriptors are still not imported.
+as absent (`invalid`). Bundle descriptors still do not install a local bundle.
 
 **`.haive/install.json` is retired, not written.** Nothing read it, and a second 12 run changed it
 (`appliedAt`, `lastTaskId`) so an identical re-run dirtied a clean checkout. 12, 02 and 04 now delete
@@ -1006,7 +1076,13 @@ hold (`holdImportedMcpServerLists`). The reset removes the file with the other s
 bundle item this install holds no bundle for, stored verbatim, never as `foreign`), a marker from a
 release strictly newer than this one (only plain `major.minor.patch` strings are ordered; a dev
 build is never newer), and a marker of an agent or skill kind at a directory this install renders
-no CLI for. 01 classifies it first, 02 skips it whatever the form sent, the form names such paths in
+no CLI for. A known removed CLI target can enter ordinary obsolete/Keep handling when its import
+marker carries a valid explicit repository membership snapshot and its owned path matches this
+install's catalog. The snapshot may already hold the reduced list, including `[]`: the portable
+claim retains ownership, so cleanup does not reconstruct or re-add old members. Existing proof of
+prior targets, including a recorded legacy fallback, remains valid. Unknown paths, newer releases
+and unavailable custom bundles stay
+foreign. 01 classifies it first, 02 skips a foreign row whatever the form sent, the form names such paths in
 one note, and upgrade-status leaves them out of every comparison. An imported cli-rules row whose
 template moved reads `conflict`. A marker is no upgrade's output, so an upgrade completed before an
 import cannot be rolled back (`ledgerImportedSince`): the banner offers none, the route answers 409

@@ -334,6 +334,8 @@ async function answerClaimQuestion(
   const now = new Date();
 
   if (answer === 'take_theirs') {
+    // The row about to retire may be the only strict snapshot carrying repository membership.
+    const context = incoming === undefined ? null : await loadMarkerContext(tx, repositoryId, repo);
     const [live] = await tx
       .select({ id: schema.onboardingArtifacts.id })
       .from(schema.onboardingArtifacts)
@@ -357,7 +359,7 @@ async function answerClaimQuestion(
         repoPath,
         claim: incoming,
         now,
-        context: await loadMarkerContext(tx, repositoryId, repo),
+        context: context!,
       });
     }
     await writeApplicableTemplateIds(tx, {

@@ -1,3 +1,6 @@
+import { writeProjectStateRecord } from '../project-state/write.js';
+import { readRenderContextColumn } from '@haive/shared/project-state';
+import { renderContextFromColumn } from '../step-engine/_render-targets.js';
 import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { eq } from 'drizzle-orm';
 import type { Database, DbTx } from '@haive/database';
@@ -59,10 +62,17 @@ export async function buildBlankRenderContext(
     .where(eq(schema.cliProviders.userId, args.userId));
 
   const [repoRow] = await db
-    .select({ rtkEnabled: schema.repositories.rtkEnabled })
+    .select({
+      rtkEnabled: schema.repositories.rtkEnabled,
+      renderContext: schema.repositories.renderContext,
+    })
     .from(schema.repositories)
     .where(eq(schema.repositories.id, args.repositoryId))
     .limit(1);
+
+  const stored = readRenderContextColumn(repoRow?.renderContext);
+  if (stored.kind === 'column' && stored.column.cliTargets !== undefined)
+    return renderContextFromColumn(stored.column, []);
 
   // A blank repository seeds no agent, so an Amp-only user records no agent target.
   const { enabledCliProviders, agentTargets } = renderTargetsFor(providerRows, []);
@@ -76,6 +86,7 @@ export async function buildBlankRenderContext(
     lspLanguages: [],
     rtkEnabled: repoRow?.rtkEnabled ?? false,
     enabledCliProviders,
+    cliTargets: enabledCliProviders.map((p) => p.name),
   };
 }
 
@@ -87,7 +98,7 @@ export async function buildBlankRenderContext(
  * what a repository gets and a seeded repo cannot drift from an onboarded one.
  *
  * Deliberately does NOT write `onboarding_artifacts` rows: that table's
- * `task_id` is NOT NULL and repo INIT has no task. The upgrade planner already
+ * INIT has no task to own an onboarding artifact. The upgrade planner already
  * adopts on-disk template files when a repo has no rows (`ranBackfill`), which
  * is precisely this state.
  *
@@ -113,5 +124,13 @@ export async function seedBlankScaffold(
     // the caller bug `invalid-path` names, and repo INIT already degrades on one.
     await writeFileNoFollow(dest, r.diskPath, r.content, { createParents: true, fileMode: 0o644 });
   }
-  return expanded.map((r) => r.diskPath);
+  // INIT holds its normal rebuild claim. The existing writer permits that own-root workflow
+  // while still refusing a reset, a moved column/checkout and pending journal divergence.
+  const state = await writeProjectStateRecord(db, {
+    repositoryId: args.repositoryId,
+    repoPath: dest,
+    context: renderCtx,
+    rtkChoiceRecorded: true,
+  });
+  return [...expanded.map((r) => r.diskPath), ...state.written];
 }

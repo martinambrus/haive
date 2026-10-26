@@ -57,12 +57,17 @@ import {
   portableTemplateId,
   recordReadable,
   renderContextColumnSchema,
+  readRenderContextColumn,
+  deriveRenderTargets,
+  completeRecordedCliMembership,
+  recoverCliMembership,
   renderProjectState,
   type NamedLocalBundle,
   type ProjectEnvironment,
   type ProjectRender,
   type ProjectStateBundle,
   type ProjectStateClaim,
+  type RenderContextColumn,
 } from '@haive/shared/project-state';
 import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
 import { gitOperationInProgress } from '../repo/git-operation.js';
@@ -78,8 +83,6 @@ export async function lockProjectState(tx: Tx, repositoryId: string): Promise<vo
     sql`select pg_advisory_xact_lock(hashtextextended(${`project-state:${repositoryId}`}, 0))`,
   );
 }
-
-type RenderContextColumn = ReturnType<typeof renderContextColumnFor>;
 
 interface ProjectStateColumnInput {
   repositoryId: string;
@@ -117,6 +120,7 @@ interface Look {
 const RTK_SETTING_FILE = `${PROJECT_STATE_DIR}/${settingFileName('rtk-enabled')}`;
 const ENVIRONMENT_FILE = `${PROJECT_STATE_DIR}/project/environment.json`;
 const OWNED_FILE_PREFIXES = [
+  `${PROJECT_STATE_DIR}/cli/`,
   `${PROJECT_STATE_DIR}/artifacts/`,
   `${PROJECT_STATE_DIR}/bundles/`,
   `${PROJECT_STATE_DIR}/settings/`,
@@ -183,9 +187,59 @@ export function failIfColumnStale(err: unknown): void {
   if (err instanceof ProjectStateWriteError && err.columnStale) throw err;
 }
 
-/** The render context column a record write stores for this context. Throws when it would not read back. */
-export function renderContextColumnFor(context: TemplateRenderContext, rtkChoiceRecorded: boolean) {
-  return renderContextColumnSchema.parse({ ...context, rtkChoiceRecorded });
+/** Current explicit membership, then strict history/current legacy metadata, then recorded caller
+ * provenance only while both are genuinely unknown. Never consult local provider configuration. */
+export function completeWriterCliMembership(
+  caller: RenderContextColumn,
+  maintained: RenderContextColumn,
+  recovered?: ReturnType<typeof recoverCliMembership>,
+): RenderContextColumn {
+  const completed = completeRecordedCliMembership(maintained, recovered);
+  return completed.cliTargets === undefined ? completeRecordedCliMembership(caller) : completed;
+}
+
+/** The membership part of the admitted write, including recorded legacy fallback provenance. */
+export function inheritCliMembership(
+  column: RenderContextColumn,
+  maintained: RenderContextColumn,
+): RenderContextColumn {
+  const cliTargets = column.cliTargets ?? maintained.cliTargets;
+  if (cliTargets === undefined) return column;
+  const sameMembership = sameValue(
+    [...new Set(maintained.cliTargets ?? [])].sort(),
+    [...new Set(cliTargets)].sort(),
+  );
+  const keepFallback = sameMembership && maintained.legacyAgentFallback === true;
+  const targets = deriveRenderTargets(
+    cliTargets,
+    column.lspLanguages,
+    maintained.agentTargets,
+    keepFallback,
+  );
+  const next = { ...column, cliTargets, ...targets };
+  // skillDirs is a derived convenience, not part of the column schema.
+  const { skillDirs: _skillDirs, ...result } = next;
+  if (keepFallback) result.legacyAgentFallback = true;
+  else delete result.legacyAgentFallback;
+  return result;
+}
+
+/** The exact column a record write stores. An original column also identifies a caller's own retry. */
+export function renderContextColumnFor(
+  context: TemplateRenderContext,
+  rtkChoiceRecorded: boolean,
+  repositoryColumn?: unknown,
+): RenderContextColumn {
+  const column = renderContextColumnSchema.parse({ ...context, rtkChoiceRecorded });
+  const prior = readRenderContextColumn(repositoryColumn);
+  // A caller's exact own-result retry proof uses the original admitted column, never a fresh read.
+  // Ordinary writer input keeps absence intact until the locked admission gate below.
+  if (column.cliTargets !== undefined) return column;
+  if (prior.kind === 'column')
+    return inheritCliMembership(column, completeWriterCliMembership(column, prior.column));
+  return repositoryColumn === null
+    ? inheritCliMembership(column, completeWriterCliMembership(column, column))
+    : column;
 }
 
 /** A pending conflict of the render unit, its sides as values (`undefined` where a side has none). */
@@ -424,10 +478,22 @@ async function loadBase(
     .where(eq(schema.projectStateSync.repositoryId, repositoryId))
     .limit(1);
   const snapshot = row?.baseSnapshot as
-    | { claims?: unknown; bundles?: unknown; settings?: unknown; environment?: unknown }
+    | {
+        cli?: unknown;
+        claims?: unknown;
+        bundles?: unknown;
+        settings?: unknown;
+        environment?: unknown;
+      }
     | null
     | undefined;
   const files: string[] = [];
+  if (Array.isArray(snapshot?.cli)) {
+    for (const name of snapshot.cli) {
+      if (typeof name === 'string' && isRecordName(name))
+        files.push(`${PROJECT_STATE_DIR}/cli/${name}.json`);
+    }
+  }
   const settings = snapshot?.settings;
   if (settings !== null && typeof settings === 'object' && !Array.isArray(settings)) {
     for (const name of Object.keys(settings)) {
@@ -513,6 +579,7 @@ export async function writeProjectStateColumn(
     const planFor = (look: Look) => ({
       record: {
         ...emptyProjectState(),
+        cli: column.cliTargets ?? [],
         render: overlayRender(portable, look.pending, 'incoming'),
         claims: overlayClaims(look.claims, look.pendingClaims, 'incoming'),
         bundles: look.bundles,
@@ -521,6 +588,7 @@ export async function writeProjectStateColumn(
       },
       baseSnapshot: normalizeProjectState({
         ...emptyProjectState(),
+        cli: column.cliTargets ?? [],
         render: overlayRender(portable, look.pending, 'base'),
         claims: overlayClaims(look.claims, look.pendingClaims, 'base'),
         bundles: look.bundles,
@@ -647,6 +715,7 @@ export async function writeProjectStateColumn(
       // so a reset cannot claim just after the last refusal check and walk this same record.
       const [repo] = await tx
         .select({
+          renderContext: schema.repositories.renderContext,
           claimedAt: schema.repositories.rootClaimedAt,
           kind: schema.repositories.rootClaimKind,
           resetAt: schema.repositories.onboardingResetAt,
@@ -675,6 +744,46 @@ export async function writeProjectStateColumn(
       if (expectedColumns) await refuseMovedColumn(tx, repositoryId, expectedColumns);
       if (holdingTaskId) await refuseReleasedCheckout(tx, holdingTaskId, repositoryId);
       if (refuseWhileHeld) await refuseHeldCheckout(tx, repositoryId);
+      const current = readRenderContextColumn(repo.renderContext);
+      {
+        const rows =
+          current.kind !== 'column' || current.column.cliTargets === undefined
+            ? await tx
+                .select({
+                  id: schema.onboardingArtifacts.id,
+                  generatedAt: schema.onboardingArtifacts.generatedAt,
+                  formValuesSnapshot: schema.onboardingArtifacts.formValuesSnapshot,
+                })
+                .from(schema.onboardingArtifacts)
+                .where(
+                  and(
+                    eq(schema.onboardingArtifacts.repositoryId, repositoryId),
+                    isNull(schema.onboardingArtifacts.supersededAt),
+                  ),
+                )
+            : [];
+        const completed = completeWriterCliMembership(
+          column,
+          current.kind === 'column' ? current.column : column,
+          recoverCliMembership(rows),
+        );
+        const maintained = completed.cliTargets;
+        if (maintained === undefined) return;
+        if (column.cliTargets !== undefined) {
+          if (
+            maintained.some((name) => !column.cliTargets!.includes(name)) ||
+            (expectedColumns === undefined &&
+              !sameValue([...new Set(maintained)].sort(), [...new Set(column.cliTargets)].sort()))
+          )
+            throw new ProjectStateMovedError(
+              'Repository CLI membership changed; plan this write again',
+            );
+        }
+        column = inheritCliMembership(column, completed);
+        // A caller's narrower admission set is never widened to whatever this read found.
+        expectedColumns ??= [repo.renderContext];
+        expectedResetAt ??= repo.resetAt ?? null;
+      }
     };
     // Commit the retry signal before any filesystem mutation. Recheck admission and the checkout
     // after reacquiring the locks: a holder admitted between transactions leaves only this intent.

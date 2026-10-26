@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   foreignReason,
   isNewerRelease,
+  isRenderContextSnapshot,
   PROJECT_STATE_IMPORT_STEP_ID,
   type ForeignCandidate,
 } from '../src/project-state/index.js';
@@ -105,5 +106,105 @@ describe('foreignReason', () => {
         CONTEXT,
       ),
     ).toBeNull();
+  });
+});
+
+describe('removed imported targets with reduced explicit membership', () => {
+  const snapshot = (cliTargets: string[]) => ({
+    projectInfo: {},
+    framework: null,
+    acceptedAgentIds: ['code-reviewer'],
+    customAgentSpecs: [],
+    lspLanguages: [],
+    rtkEnabled: false,
+    cliTargets,
+  });
+  const removed = [
+    {
+      templateId: 'agent.code-reviewer',
+      templateKind: 'agent',
+      diskPath: '.codex/agents/code-reviewer.toml',
+    },
+    {
+      templateId: 'agents-index',
+      templateKind: 'agents-index',
+      diskPath: '.codex/agents/README.md',
+    },
+    {
+      templateId: 'custom.b.i',
+      templateKind: 'custom-agent',
+      diskPath: '.codex/agents/reviewer.toml',
+      specId: 'reviewer',
+    },
+    {
+      templateId: 'custom.b.i',
+      templateKind: 'custom-skill',
+      diskPath: '.agents/skills/reviewing/SKILL.md',
+      specId: 'reviewing',
+    },
+    {
+      templateId: 'custom.b.i',
+      templateKind: 'custom-skill',
+      diskPath: '.agents/skills/reviewing/sub-skills/inspect.md',
+      specId: 'reviewing',
+    },
+  ];
+  for (const names of [['claude-code', 'future-cli'], []]) {
+    it.each(removed)(
+      'allows ordinary cleanup of $diskPath with reduced members ' + JSON.stringify(names),
+      (row) => {
+        const formValuesSnapshot = snapshot(names);
+        expect(isRenderContextSnapshot(formValuesSnapshot)).toBe(true);
+        expect(formValuesSnapshot.cliTargets).not.toContain('codex');
+        expect(
+          foreignReason(marker({ ...row, formValuesSnapshot }), {
+            haiveVersion: '1.4.0',
+            agentTargets: names.length ? [CLAUDE] : [],
+            skillDirs: names.length ? ['.claude/skills'] : [],
+          }),
+        ).toBeNull();
+      },
+    );
+  }
+  it('keeps legacy, malformed and genuinely unknown destination claims foreign', () => {
+    const { cliTargets: _missing, ...legacy } = snapshot([]);
+    const codex = removed[0]!;
+    for (const formValuesSnapshot of [null, legacy, { ...snapshot([]), unexpected: true }])
+      expect(foreignReason(marker({ ...codex, formValuesSnapshot }), CONTEXT)).toBe('not-rendered');
+    for (const diskPath of [
+      '.future/agents/code-reviewer.toml',
+      '.codex/agents/elsewhere/code-reviewer.toml',
+    ])
+      expect(
+        foreignReason(marker({ ...codex, diskPath, formValuesSnapshot: snapshot([]) }), CONTEXT),
+      ).toBe('not-rendered');
+    expect(
+      foreignReason(
+        marker({
+          ...removed[3],
+          diskPath: '.future/skills/reviewing/SKILL.md',
+          formValuesSnapshot: snapshot([]),
+        }),
+        CONTEXT,
+      ),
+    ).toBe('not-rendered');
+  });
+  it('keeps newer releases and unavailable custom bundles foreign under an explicit empty contract', () => {
+    expect(
+      foreignReason(
+        marker({ ...removed[0], haiveVersion: '1.4.1', formValuesSnapshot: snapshot([]) }),
+        CONTEXT,
+      ),
+    ).toBe('newer-release');
+    expect(
+      foreignReason(
+        marker({
+          ...removed[3],
+          templateId: 'custom:unavailable:item',
+          formValuesSnapshot: snapshot([]),
+        }),
+        CONTEXT,
+      ),
+    ).toBe('custom-bundle');
   });
 });

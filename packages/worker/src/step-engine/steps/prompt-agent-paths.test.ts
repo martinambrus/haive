@@ -1127,6 +1127,16 @@ const DETECT_VARIANTS: Record<
   string,
   Array<{ suffix: string; fields: Record<string, unknown> }>
 > = {
+  // A nonempty real destination is required to dispatch generation. Cover every primary directory
+  // plus the mirror-list arm; explicit[] suppression has separate consumer/no-dispatch controls.
+  '09_5-skill-generation': [
+    {
+      suffix: '',
+      fields: { skillTargetDirs: ['.claude/skills', '.gemini/skills', '.agents/skills'] },
+    },
+    { suffix: ', gemini targets', fields: { skillTargetDirs: ['.gemini/skills'] } },
+    { suffix: ', codex targets', fields: { skillTargetDirs: ['.agents/skills'] } },
+  ],
   // The fix-pass framing has TWO arms and the difference is exactly what the fence keys on:
   // a developer's gate-2 rejection is an AUTHORITATIVE DIRECTIVE and must NOT be fenced, a
   // machine diagnosis is agent prose and must be. `fixIsHuman` is truthy through the proxy,
@@ -1443,6 +1453,7 @@ const DETECT_OVERRIDES: Record<string, Record<string, unknown>> = {
   // dispatches one agent per domain; below three it returns `discovery` with an empty list and selects
   // nothing. So this fixture also picks the arm, not just the count.
   '09_5-skill-generation': {
+    skillTargetDirs: ['.claude/skills', '.gemini/skills', '.agents/skills'],
     requiredDomains: ['entity-api', 'routing', 'testing', 'theming'],
   },
   '09_5b-skill-repair': {
@@ -1544,21 +1555,26 @@ function promptSources(): PromptSource[] {
     }
     const mining = def.agentMining;
     if (mining) {
-      out.push({
-        label: `${id} (mining)`,
-        build: async () => {
-          const dispatches = await mining.selectAgents({
-            ctx: permissive(),
-            detected: permissive(DETECT_OVERRIDES[id] ?? {}),
-            formValues: permissive(),
-            llmOutput: permissive(),
-          });
-          return dispatches.map((d, i) => ({
-            key: `${i}:${String(d.agentId ?? '')}`,
-            prompt: d.prompt,
-          }));
-        },
-      });
+      const variants =
+        id === '09_5-skill-generation'
+          ? detectVariants(id)
+          : [{ suffix: '', fields: DETECT_OVERRIDES[id] ?? {} }];
+      for (const variant of variants)
+        out.push({
+          label: `${id} (mining${variant.suffix})`,
+          build: async () => {
+            const dispatches = await mining.selectAgents({
+              ctx: permissive(),
+              detected: permissive(variant.fields),
+              formValues: permissive(),
+              llmOutput: permissive(),
+            });
+            return dispatches.map((d, i) => ({
+              key: `${i}:${String(d.agentId ?? '')}`,
+              prompt: d.prompt,
+            }));
+          },
+        });
     }
   }
   return out;
@@ -1677,38 +1693,36 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     // which this scan built while it sampled `iteration: 1` — are all CLEAN. No step joined this list.
     //
     // An explicit list rather than a snapshot: `vitest -u` rewrites a snapshot silently.
-    expect(named).toEqual([
-      '06_5-agent-discovery',
-      '09_5-skill-generation',
-      '09_5-skill-generation (loop iteration 0/first)',
-      // The truncation-retry variant of each role. Only 09_5 appears here, which is the useful half of
-      // that axis: every other step's retry prompt is CLEAN.
-      '09_5-skill-generation (loop iteration 0/first, truncation retry 2)',
-      '09_5-skill-generation (loop iteration 1/later)',
-      '09_5-skill-generation (loop iteration 1/later, truncation retry 2)',
-      // One per `requiredDomains` entry in the fixture: the fan-out is per DOMAIN, and each agent's
-      // prompt carries the same pointer. Keyed by agent id, so the four are four invocations rather
-      // than one source-level verdict.
-      '09_5-skill-generation (mining) [0:cap-0-entity-api]',
-      '09_5-skill-generation (mining) [1:cap-1-routing]',
-      '09_5-skill-generation (mining) [2:cap-2-testing]',
-      '09_5-skill-generation (mining) [3:cap-3-theming]',
-      // A repository-controlled MCP server NAME shaped like an agent path. It belongs here: the rendered
-      // block does name one. What it also exposes is a dispatcher asymmetry — that block is appended
-      // AFTER `agentIsolationApplies` has decided — pinned in its own case and recorded as an open item
-      // rather than fixed in this test-only change.
-      // A path carried in DATA: this step serialises its findings, and the no-agents finding names the
-      // agent directory it is reporting as empty. Read-only (`requiredCapabilities: ['tool_use']`), so
-      // the path scan really does decide its isolation. Correct rather than a defect — a reviewer told
-      // that a directory produced nothing should not have that directory masked — and it arises ONLY
-      // when onboarding produced no agent files, which is why the other variant is clean.
-      '11-final-review, no agents produced',
-      // Both post-decision appends that carry NON-HAIVE text and can therefore hold a path a repository
-      // or a KB author wrote. Sorted, so the digest entries precede the MCP one.
-      'globalKbDigestPrompt (agent-path-shaped description)',
-      'globalKbDigestPrompt (agent-path-shaped title)',
-      'mcpSurfacePrompt (agent-path-shaped server name)',
-    ]);
+    expect(named).toEqual(
+      [
+        '06_5-agent-discovery',
+        ...['', ', gemini targets', ', codex targets'].flatMap((suffix) => [
+          `09_5-skill-generation${suffix}`,
+          `09_5-skill-generation (loop iteration 0/first${suffix})`,
+          `09_5-skill-generation (loop iteration 0/first, truncation retry 2${suffix})`,
+          `09_5-skill-generation (loop iteration 1/later${suffix})`,
+          `09_5-skill-generation (loop iteration 1/later, truncation retry 2${suffix})`,
+          ...['entity-api', 'routing', 'testing', 'theming'].map(
+            (domain, i) => `09_5-skill-generation (mining${suffix}) [${i}:cap-${i}-${domain}]`,
+          ),
+        ]),
+        // A repository-controlled MCP server NAME shaped like an agent path. It belongs here: the rendered
+        // block does name one. What it also exposes is a dispatcher asymmetry — that block is appended
+        // AFTER `agentIsolationApplies` has decided — pinned in its own case and recorded as an open item
+        // rather than fixed in this test-only change.
+        // A path carried in DATA: this step serialises its findings, and the no-agents finding names the
+        // agent directory it is reporting as empty. Read-only (`requiredCapabilities: ['tool_use']`), so
+        // the path scan really does decide its isolation. Correct rather than a defect — a reviewer told
+        // that a directory produced nothing should not have that directory masked — and it arises ONLY
+        // when onboarding produced no agent files, which is why the other variant is clean.
+        '11-final-review, no agents produced',
+        // Both post-decision appends that carry NON-HAIVE text and can therefore hold a path a repository
+        // or a KB author wrote. Sorted, so the digest entries precede the MCP one.
+        'globalKbDigestPrompt (agent-path-shaped description)',
+        'globalKbDigestPrompt (agent-path-shaped title)',
+        'mcpSurfacePrompt (agent-path-shaped server name)',
+      ].sort(),
+    );
     // And the answer to the finding that added these fixtures: `03-phase-0a-discovery` is NOT here.
     // Its mining prompt is clean, which is the one thing scanning it could establish.
     expect(named.filter((l) => l.startsWith('03-phase-0a-discovery'))).toEqual([]);
@@ -1780,7 +1794,7 @@ describe('built-in prompt builders vs agentIsolationApplies', () => {
     expect(
       clean.length + named.length,
       'built prompt count changed: update the expected count when sources are added or removed',
-    ).toBe(201);
+    ).toBe(219);
     // What remains unreachable is listed rather than hidden — a mining step that selects nothing under
     // empty inputs, or a builder that rejects them outright.
 

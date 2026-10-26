@@ -11,6 +11,12 @@ import {
   sha256Hex,
 } from '@haive/shared';
 import {
+  deriveRenderTargets,
+  completeRecordedCliMembership,
+  recoverCliMembership,
+  hasLegacyAgentFallback,
+  recordedCliTargets,
+  skillTargetDirs,
   historyOrigin,
   isRenderContextSnapshot,
   originAgentTargets,
@@ -185,12 +191,43 @@ async function resolveFromRepository(
   if (origin.from === 'column') {
     return withLiveRtk(
       repo,
-      renderContextFromColumn(origin.column, await loadProviderRows()),
+      renderContextFromColumn(
+        completeRecordedCliMembership(origin.column, recoverCliMembership(liveRows)),
+        await loadProviderRows(),
+      ),
       origin.rtkRecorded,
     );
   }
   if (origin.from === 'snapshot') {
-    const snapshot = origin.row.formValuesSnapshot as unknown as TemplateRenderContext;
+    const membershipBasis = {
+      ...(origin.row.formValuesSnapshot as unknown as TemplateRenderContext),
+    };
+    // An older RTK-recorded snapshot supplies portable context, not current-column authority.
+    // Membership still comes from the newest strict recorded snapshot, including explicit [].
+    delete membershipBasis.cliTargets;
+    const snapshot = completeRecordedCliMembership(membershipBasis, recoverCliMembership(liveRows));
+    const cliTargets = snapshot.cliTargets;
+    if (cliTargets !== undefined)
+      return withLiveRtk(
+        repo,
+        {
+          ...snapshot,
+          cliTargets,
+          agentTargets: deriveRenderTargets(
+            cliTargets,
+            snapshot.lspLanguages,
+            snapshot.agentTargets,
+            snapshot.legacyAgentFallback,
+          ).agentTargets,
+          enabledCliProviders: deriveRenderTargets(
+            cliTargets,
+            snapshot.lspLanguages,
+            snapshot.agentTargets,
+            snapshot.legacyAgentFallback,
+          ).enabledCliProviders,
+        },
+        origin.rtkRecorded,
+      );
     const recorded = snapshot.agentTargets
       ? snapshot
       : {
@@ -275,6 +312,14 @@ async function resolveFromRepository(
       target.supportsLsp ??
       (target.dir === '.claude/agents' && hasCapableProvider && lspLanguages.length > 0),
   }));
+  const cliTargets = recordedCliTargets(detect);
+  const legacyAgentFallback = hasLegacyAgentFallback(detect);
+  // Direct consumers (applicable sets, backfill and rollback) need the same completed targets
+  // as 01's final plan. Only genuinely absent membership retains the legacy fallback above.
+  const derived =
+    cliTargets === undefined
+      ? undefined
+      : deriveRenderTargets(cliTargets, lspLanguages, agentTargets, legacyAgentFallback);
 
   const recorded: TemplateRenderContext = {
     projectInfo: detect.projectInfo ?? {
@@ -297,11 +342,13 @@ async function resolveFromRepository(
     framework: detect.framework ?? null,
     acceptedAgentIds: detect.acceptedAgentIds ?? [],
     customAgentSpecs: detect.customAgentSpecs ?? [],
-    agentTargets,
+    agentTargets: derived?.agentTargets ?? agentTargets,
     lspLanguages,
     // A detect output from before rtk shipped recorded no choice: off, not the column's default.
     rtkEnabled: detect.rtkEnabled ?? false,
-    enabledCliProviders: detect.enabledCliProviders ?? [],
+    enabledCliProviders: derived?.enabledCliProviders ?? detect.enabledCliProviders ?? [],
+    ...(legacyAgentFallback ? { legacyAgentFallback: true } : {}),
+    ...(cliTargets !== undefined ? { cliTargets } : {}),
   };
   return withLiveRtk(repo, recorded, history.rtkRecorded);
 }
@@ -346,7 +393,10 @@ export async function unionExpandedFor(
   const haiveExpanded = expandManifestFor(renderCtx, manifest);
 
   const bundles: BundleWithMeta[] = await loadBundlesForExpansion(db, repositoryId, logger);
-  const skillTargets = await resolveSkillTargetDirs(db, userId);
+  const skillTargets =
+    renderCtx.cliTargets !== undefined
+      ? skillTargetDirs(renderCtx.cliTargets)
+      : await resolveSkillTargetDirs(db, userId, [], repositoryId);
   const customExpanded = expandCustomBundlesFor(bundles, renderCtx.agentTargets, skillTargets);
 
   const out: ExpandedRendering[] = [];

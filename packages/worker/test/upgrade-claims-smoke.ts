@@ -25,6 +25,7 @@ import {
   normalizeProjectState,
   PROJECT_STATE_IMPORT_STEP_ID,
   renderProjectState,
+  recordedCliTargets,
 } from '@haive/shared/project-state';
 import { initDatabase, getDb } from '../src/db.js';
 import { unclaimBackfilledEdits } from '../src/data-migrations.js';
@@ -73,9 +74,13 @@ const RECORD_FORMAT = '.haive-data/state/format.json';
 const RECORD_RENDER = '.haive-data/state/project/render.json';
 const RECORD_PATHS = [RECORD_FORMAT, RECORD_RENDER];
 
-/** The record that holds a render context: its five portable fields, and no other. */
+/** The record holds portable render fields plus recorded CLI membership, never derived paths. */
 const recordOf = (context: Record<string, unknown>) => ({
   ...emptyProjectState(),
+  cli:
+    recordedCliTargets(
+      context as { cliTargets?: string[]; enabledCliProviders?: { name: string }[] },
+    ) ?? [],
   render: {
     projectInfo: context.projectInfo,
     framework: context.framework,
@@ -246,6 +251,13 @@ async function main(): Promise<void> {
       const onDisk = {
         format: await readOrNull(RECORD_FORMAT, root),
         render: await readOrNull(RECORD_RENDER, root),
+        cli: Object.fromEntries(
+          await Promise.all(
+            [...files]
+              .filter(([rel]) => rel.startsWith('cli/'))
+              .map(async ([rel]) => [rel, await readOrNull(`.haive-data/state/${rel}`, root)]),
+          ),
+        ),
       };
       const readable = !('error' in state);
       const liveClaims = (
@@ -275,7 +287,10 @@ async function main(): Promise<void> {
           ),
         files:
           onDisk.format === files.get('format.json') &&
-          onDisk.render === files.get('project/render.json'),
+          onDisk.render === files.get('project/render.json') &&
+          [...files]
+            .filter(([rel]) => rel.startsWith('cli/'))
+            .every(([rel, text]) => onDisk.cli[rel] === text),
         sync:
           readable &&
           state.sync.length === 1 &&
@@ -1600,6 +1615,7 @@ async function main(): Promise<void> {
     }
     await rm(repoPath, { recursive: true, force: true });
     await rm(createdRepoPath, { recursive: true, force: true });
+    await getDb().$client.end({ timeout: 5 });
     process.exit(process.exitCode ?? 0);
   }
 }
