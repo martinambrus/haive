@@ -63,7 +63,7 @@
     "@haive/database": "workspace:*",
     "@haive/module-statistics": "workspace:*",
     "@haive/shared": "workspace:*",
-    "bullmq": "^6.3.11",
+    "bullmq": "^6.4.1",
     "dockerode": "^5.0.1",
     "drizzle-orm": "0.45.2",
     "ioredis": "^6.0.0",
