@@ -37,8 +37,18 @@ app.route('/', cliProviderRoutes);
 app.onError(errorHandler);
 
 beforeEach(() => {
-  const fake = createFakeDb({ cliProviders: schema.cliProviders });
+  const fake = createFakeDb({
+    cliProviders: schema.cliProviders,
+    cliPackageVersions: schema.cliPackageVersions,
+  });
   fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER });
+  fake.insert(schema.cliPackageVersions, {
+    name: 'claude-code',
+    versions: ['1.2.3', '1.2.2'],
+    latestVersion: '1.2.3',
+    fetchedAt: new Date('2026-10-30T10:00:00.000Z'),
+    fetchError: null,
+  });
   h.db = fake.db;
   h.getJob.mockReset();
 });
@@ -113,5 +123,35 @@ describe.each(routes.slice(1))('ownership on $path', ({ path, name }) => {
     const res = await app.request(`${path}/123`);
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ code: 'job_expired' });
+  });
+});
+
+describe('catalog refresh result', () => {
+  const entry = {
+    name: 'claude-code',
+    versions: ['1.2.3', '1.2.2'],
+    latestVersion: '1.2.3',
+    fetchedAt: '2026-10-30T10:00:00.000Z',
+    fetchError: null,
+  };
+  const refreshed = [{ name: 'claude-code', count: 3, latest: '1.2.3' }];
+
+  it.each([
+    [
+      'a failed source',
+      { ok: false, refreshed, errors: [{ name: 'fx', error: 'fx feed HTTP 503' }] },
+    ],
+    ['every source ok', { ok: true, refreshed, errors: [] }],
+  ])('answers this CLI entry together with the job result: %s', async (_label, result) => {
+    h.getJob.mockResolvedValue({
+      name: CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
+      data: {},
+      getState: vi.fn(async () => 'completed'),
+      returnvalue: result,
+    });
+    const res = await app.request(`${routes[0]!.path}/123`);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'done', entry, result });
   });
 });
