@@ -52,4 +52,12 @@ describe.each(RENDERS)('AuthForm $name, as the server renders it', ({ props, ins
     expect(attrs).toContain('method="post"');
     expect(attrs).not.toMatch(/enctype/i);
   });
+
+  it('leaves its fields uncontrolled: no value attribute for React to reset them to', () => {
+    const html = renderToStaticMarkup(<AuthForm {...props} />);
+    const body = /<form\b[^>]*>([\s\S]*?)<\/form>/.exec(html)?.[1] ?? '';
+
+    expect(body).toContain('<input');
+    expect(body).not.toMatch(/\svalue=/);
+  });
 });

@@ -1,15 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement, type ComponentProps } from 'react';
 import { AuthForm } from './auth-form';
-import {
-  controls,
-  createRenderer,
-  findAll,
-  fire,
-  isDisabled,
-  textOf,
-  type Renderer,
-} from '../../test/render-tree';
+import { createRenderer, findAll, isDisabled, textOf, type Renderer } from '../../test/render-tree';
 
 // AuthForm once React has attached handleSubmit: it cancels the native submit, posts the
 // credentials to the api as JSON, then enters the app, or shows the api's message and enables the
@@ -36,6 +28,21 @@ vi.mock('@/lib/api-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api-client')>()),
   api: { get: h.get, post: h.post },
 }));
+// Node's FormData rejects a form argument, so the browser's `new FormData(form)` is stood in for by a
+// subclass that takes the fields of the fake form `submit()` hands over.
+const RealFormData = FormData;
+vi.stubGlobal(
+  'FormData',
+  class extends RealFormData {
+    constructor(form?: { fields: Record<string, string> }) {
+      super();
+      for (const [k, v] of Object.entries(form?.fields ?? {})) this.append(k, v);
+    }
+  },
+);
+afterAll(() => {
+  vi.unstubAllGlobals();
+});
 
 const EMAIL = 'person@example.test';
 const PASSWORD = 'a-long-enough-password';
@@ -44,17 +51,13 @@ const LIMITED = 'Too many sign-in attempts. Try again in 12 seconds.';
 const mount = (props: ComponentProps<typeof AuthForm>) =>
   createRenderer(() => createElement(AuthForm, props));
 
-function type(view: Renderer, values: Record<string, string>) {
-  for (const [label, value] of Object.entries(values)) {
-    fire.type(controls(view.tree(), label)[0]!, value);
-  }
-  view.draw();
-}
-
-async function submit(view: Renderer, preventDefault = vi.fn()) {
+async function submit(view: Renderer, fields: Record<string, string>, preventDefault = vi.fn()) {
   const form = findAll(view.tree(), (host) => host.tag === 'form')[0]!;
-  const onSubmit = form.props.onSubmit as (event: { preventDefault: () => void }) => Promise<void>;
-  await onSubmit({ preventDefault });
+  const onSubmit = form.props.onSubmit as (event: {
+    preventDefault: () => void;
+    currentTarget: { fields: Record<string, string> };
+  }) => Promise<void>;
+  await onSubmit({ preventDefault, currentTarget: { fields } });
   view.draw();
 }
 
@@ -73,8 +76,7 @@ describe('AuthForm after React has attached handleSubmit', () => {
       initialStatus: { setupNeeded: false, setupTokenRequired: false, mode: 'open' },
     });
     const preventDefault = vi.fn();
-    type(view, { email: EMAIL, password: PASSWORD });
-    await submit(view, preventDefault);
+    await submit(view, { email: EMAIL, password: PASSWORD }, preventDefault);
 
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(h.post).toHaveBeenCalledExactlyOnceWith('/auth/login', {
@@ -91,8 +93,7 @@ describe('AuthForm after React has attached handleSubmit', () => {
       mode: 'login',
       initialStatus: { setupNeeded: false, setupTokenRequired: false, mode: 'open' },
     });
-    type(view, { email: EMAIL, password: PASSWORD });
-    await submit(view);
+    await submit(view, { email: EMAIL, password: PASSWORD });
 
     const alerts = findAll(view.tree(), (host) => host.props.role === 'alert');
     expect(alerts.map((alert) => textOf(alert))).toEqual([LIMITED]);
@@ -104,8 +105,7 @@ describe('AuthForm after React has attached handleSubmit', () => {
       mode: 'setup',
       initialStatus: { setupNeeded: true, setupTokenRequired: true, mode: 'closed' },
     });
-    type(view, { email: EMAIL, password: PASSWORD, 'setup token': 'setup-secret' });
-    await submit(view);
+    await submit(view, { email: EMAIL, password: PASSWORD, setupToken: 'setup-secret' });
 
     expect(h.post).toHaveBeenCalledExactlyOnceWith('/auth/register', {
       email: EMAIL,
@@ -120,8 +120,7 @@ describe('AuthForm after React has attached handleSubmit', () => {
       initialStatus: { setupNeeded: false, setupTokenRequired: false, mode: 'closed' },
       initialInviteToken: 'tok',
     });
-    type(view, { email: EMAIL, password: PASSWORD });
-    await submit(view);
+    await submit(view, { email: EMAIL, password: PASSWORD });
 
     expect(h.post).toHaveBeenCalledExactlyOnceWith('/auth/register', {
       email: EMAIL,
