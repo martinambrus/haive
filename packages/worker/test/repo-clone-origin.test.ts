@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { gitSetOriginUrl } from '../src/repo/clone.js';
+import { ensureOrigin } from '../src/repo/git-push.js';
 
 const exec = promisify(execFile);
 const tmpDirs: string[] = [];
@@ -21,8 +21,8 @@ afterEach(async () => {
   }
 });
 
-describe('clean-origin clone', () => {
-  it('gitSetOriginUrl strips an embedded token from origin', async () => {
+describe('clean-origin relink', () => {
+  it('ensureOrigin strips an embedded token from origin', async () => {
     const work = await mkTmp('clone-origin-');
     await exec('git', ['init', work]);
     // What a credentialed clone leaves behind: the token baked into origin.
@@ -35,7 +35,7 @@ describe('clean-origin clone', () => {
       'https://user:ghp_secrettoken@github.com/owner/repo.git',
     ]);
 
-    await gitSetOriginUrl(work, 'https://github.com/owner/repo.git');
+    await ensureOrigin(work, 'https://github.com/owner/repo.git');
 
     const after = await exec('git', ['-C', work, 'remote', 'get-url', 'origin']);
     expect(after.stdout.trim()).toBe('https://github.com/owner/repo.git');

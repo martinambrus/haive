@@ -535,7 +535,7 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+19)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+21)
 
 status: open · was modular #211
 
@@ -559,6 +559,8 @@ status: open · was modular #211
 18. (T119 review, 2026-10-30) PRE-EXISTING, minor: the two-install smoke fixture's shared record names agents nobody wrote, so a fresh clone's plan offers 3 unrelated entries; make the fixture's record match what its installs wrote.
 19. (T401 review, 2026-10-30) PRE-EXISTING, minor: tests/e2e/helpers/auth.ts ~:46 `recordRegisteredUser` is module-private, so a user minted by `POST /admin/users` (as in forced-password.spec.ts) is unknown to the global teardown and the `users` fixture; a timed-out run leaks it until the CI database is dropped. Export it (or a registration helper for admin-minted users) and record such users.
 20. (T429 review, 2026-10-30) PRE-EXISTING, minor: nothing enforces that `allowFileTransport` is the one opt-in of the default `protocol.file.allow=never`: a caller's own later `-c protocol.file.allow=always`, or a `GIT_ALLOW_PROTOCOL` that lists `file` in a production source, lifts it silently (shared git-args.ts ~:130-132 passes the caller's argv verbatim; the env takes precedence, MEASURED). Production has none (only git-push.ts ~:147,155 set `http:https:ssh`). Pin it with a source-scan guard like git-exec-guard.test.ts.
+21. (T119 fix review, 2026-10-30) PRE-EXISTING, minor: api test/repo-artifact-reset.test.ts ~:1829,1849 create temp dirs under `os.tmpdir()` and never remove them; clean them up in an `afterEach`.
+22. (T448 review, 2026-10-30) PRE-EXISTING, minor: the UI-login e2e specs click submit right after `fill` with no hydration signal (tests/e2e/auth/forms.spec.ts ~:32,69,99,124 and harness/session-recovery/session-ordering.spec.ts); a click that beats hydration is a native navigation (a POST since T448), so the race remains. Wait for a hydration marker before submitting.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -736,13 +738,6 @@ Decide which stored targets a non-admin may point at private addresses.
 
 1. The Ollama pull stream relays 200 chars of the remote error and has no size or time cap.
 
-### T401 · FNF[flagged-user-web-polish] · a forced-password user sees pollers 403 every 5 s; no e2e for the forced flow or the 429
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T19:03Z · last: 2026-10-30T19:03Z
-
-1. REGRESSION (cosmetic): sidebar-tasks.tsx ~:57 and notification-provider.tsx ~:28 keep polling. They should stop on the 403 must_change_password code.
-2. Add Playwright specs.
-
 ### T402 · FNF[context-backfill] · 237 stored steps keep the old 200k-window badge (143 read 0%)
 
 status: parked: user decision (numbered migration vs idempotent deploy script) · DEADLINE ~2026-11-30 (stream_log 90-day expiry) · was modular #284
@@ -828,7 +823,7 @@ PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/
 
 ### T438 · FNF[cli-login-url-capture-2] · login URL follow-ups: device code read at send time, terminal scanner sends a URL head, wrapped tail, `ESC ( B`, resize timers (+4)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T20:56Z · last: 2026-10-30T20:56Z
 From the T433 review (2026-10-30). Line numbers as of the T433 branch (fnf/433-cli-login-url-capture).
 
 1. PRE-EXISTING, minor, latent, connected: the device code in the same `auth-url` frame is read at send time (api routes/cli-login-banner.ts `offerAuthUrl` ~:730; shared auth-banner-parser.ts `extractDeviceCode` ~:121), so a chunk boundary between the URL and the code line (codex prints the code after a blank line) sends the frame without the code (70 of 77 URL-sending first-chunk splits of the codex banner) or with a truncated one (`ABCD-1234` of `ABCD-12345`). Fix: for device-code providers hold the frame for the code within the same deadline and require a terminator after it.
@@ -849,7 +844,7 @@ From the T428 review (2026-10-30). PRE-EXISTING, moderate. T428 shows the `ok: f
 
 ### T441 · FNF[ide-container-lifecycle-2] · a failed inspect recreates an in-use editor or app runner; an editor's debug lookup fails its ensure; editors from before T431 stay unregistered (+2)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T20:45Z · last: 2026-10-30T20:45Z
 From the T431 review (2026-10-30). PRE-EXISTING, minor. Line numbers as of the T431 branch (fnf/431-ide-container-lifecycle).
 
 1. worker sandbox/ide-runner.ts ~:401 and app-runner.ts ~:327 reuse a running container only when `runnerSubpathVerdict` is `'match'`; its `'absent'` means `docker inspect` failed (app-runner.ts ~:358-369; a missing label reads as `'other'`), so a transient inspect failure recreates an editor or app runner that is in use. ddev-runner.ts ~:2205 recreates only on `'other'`. Keep the container on `'absent'`.
@@ -887,21 +882,31 @@ From the T119 review (2026-10-30). PRE-EXISTING, minor. Cross-reference: T317 [d
 status: open
 From the T119 review (2026-10-30). PRE-EXISTING, consequential if real, unverified. In the two-install smoke, install A's `custom_bundles` row (worker scripts two-install-smoke.ts ~:648) is followed by install B's 'B keeps its agents' commit (~:2478) that deletes the descriptor A committed, because B's database holds no such bundle. B's checkout then carries a tracked deletion it can commit and push, removing a teammate's bundle. Verify first whether that is intended (descriptors are per-install) or a defect; if a defect, B's sweep must leave descriptors it did not write.
 
-### T447 · FNF[tooling-api-edges] · PATCH tooling answers 500 for a JSON null body and 200 for a malformed one; refresh-tree reads the whole row (+1)
+### T447 · FNF[tooling-api-edges] · PATCH tooling answers 500 for a JSON null body and 200 for a malformed one; refresh-tree reads the whole row; an override's first-line indent is trimmed (+2)
 
 status: open
 From the T119 review (2026-10-30). PRE-EXISTING, minor.
 
 1. api routes/tooling-upgrades.ts ~:743: PATCH `/repositories/:id/tooling` answers 500 for a JSON `null` body, and a malformed body is a silent 200 no-op (~:714). Answer 400 for both.
 2. api routes/repos.ts ~:3334: the `refresh-tree` handler reads the whole repository row, including the up-to-64 KiB `agent_rules_override` it never uses; select the columns it needs.
+3. (T119 fix review, 2026-10-30) Minor: an override that opens with an indented line (an indented code block) loses that first line's indent, because the rules block shaping trims the whole text (shared templates/cli-rules.ts `shapeRulesText`; check whether `normalizeAgentRulesOverride` also trims it at write). The old provider path did the same. Trim leading newlines only, for overrides, keeping the default path byte-identical.
 
 ### T448 · FNF[auth-form-prehydration-submit] · a sign-in submitted before the page hydrates sends the password in the URL
 
 status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T20:16Z · last: 2026-10-30T20:16Z
 From the T401 review (2026-10-30). PRE-EXISTING, moderate (security). web components/auth-form.tsx ~:144 renders `<form onSubmit={handleSubmit}>` with no `method`, so a submit before React attaches the handler is a native GET: with JavaScript disabled the URL became `/login?email=...&password=...` (verified by the T401 driver), which puts the password in browser history, proxy and access logs. The same component serves login, register and setup. It is also why every UI-login e2e spec can race hydration. Fix direction: `method="post"` (check what Next answers to a POST on a page route first) or keep the submit disabled until hydrated; add a control that a pre-hydration submit never puts the password in the URL.
 
+### T449 · FNF[auth-form-prehydration-values] · values typed into the sign-in form before it hydrates are not submitted; a pre-hydration click looks live (+1)
+
+status: open
+From the T448 review (2026-10-30). PRE-EXISTING (identical before T448).
+
+1. Moderate: web components/auth-form.tsx ~:159,172,187 use controlled `value=` inputs and `handleSubmit` (~:86-104) posts React state, so text typed before hydration stays visible but is not submitted: with the scripts held back, a fill then a submit posts `{"email":"","password":""}` and the user sees "Validation failed" on a filled form (T448 evidence judge/slow-hydration-base.txt). Read the values with `new FormData(event.currentTarget)` at submit, or copy the DOM values into state on hydration. Browser autofill timing was not measured.
+2. Minor: a click on Sign in before hydration looks live but only re-renders the page (now by POST) and drops what was typed (~:197).
+
 ## Done
 
+- T401 — the app shell holds its recurring requests back while the password must change (gated on the layout's flag, no refused request at all) and resumes them after the change without a reload; e2e specs for the forced flow and the sign-in throttle's 429 — PR #939 (d240c9e4a), 2026-10-30; main CI green; follow-ups T448 (shipped as #943), T364 item 19
 - T431 — a running editor launched with another image or flags is replaced once idle (image on the host first, removed right before the launch); a socketless task editor is registered and reaped; an api restart ages no held editor or terminal session — PR #938 (82bf479fa), 2026-10-30; main CI green (rerun after the known upload-reaper flake, #941); live check passed (ensure registers, launch label stamped, reaped after the grace); follow-ups T441, T442
 - T428 — a version or price refresh lists the sources it could not update (catalog poll result admin-only) — PR #937 (1207521d4), 2026-10-30; main CI green; follow-up T440; browser acceptance owed (dev stack)
 - T433 — the login banner sends the auth URL only once it has ended (1 s deadline from first sight, stream-end flush, nothing after sign-in) — PR #936 (d7b4c605a), 2026-10-30; main CI green at 1207521d4; follow-ups T438, T439; browser acceptance per provider owed (dev stack)
