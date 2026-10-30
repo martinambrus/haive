@@ -19,7 +19,10 @@ transaction, 04 from the context it restored. The `cli-rules` entry is the repos
 one helper, `buildRepoCliRulesBlock` (`@haive/shared`), renders it from the repository's rules
 override (`agent_rules_override`, read by the worker through `readAgentRulesOverrideRaw`) or else
 Haive's default rules, never from a user's providers, and the api's upgrade-status recomputes it
-the same way. An empty override renders no block, which reads as obsolete. 12 keeps its own rule
+the same way. An override is rendered as written, only shaped (runs of blank lines collapsed,
+trimmed, inside the markers), never deduplicated the way provider rules once were, so a repeated
+instruction or command survives; the default rules go through the old merge, which drops nothing
+from them. An empty override renders no block, which reads as obsolete. 12 keeps its own rule
 for the `cli-rules` region on disk. Its artifact snapshots describe what 07
 rendered, while its applicable set reads the live RTK switch at the actual write, under the
 project-state lock and a repository row lock: a switch between 07 and 12 leaves the snapshots as

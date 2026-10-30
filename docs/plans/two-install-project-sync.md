@@ -556,8 +556,9 @@ Phase 4 (repository-level content):
   **As built, in six parts** (see onboarding-upgrades.md): (a) migration 0215 adds
   `repositories.agent_rules_override text`, declared last (undo: `DROP COLUMN IF EXISTS`) and seeded
   from nothing: NULL follows the live default and any text, `''` included, is an override.
-  `buildRepoCliRulesBlock(override)` is `buildCliRulesBlock([override ?? DEFAULT_AGENT_RULES])`, so
-  an empty override renders no block; `buildCliRulesBlockFromProviders` and 07's provider
+  `buildRepoCliRulesBlock(override)` renders NULL as `buildCliRulesBlock([DEFAULT_AGENT_RULES])` and
+  an override as written, shaped but never deduplicated, so a repeated line survives and an empty
+  override renders no block; `buildCliRulesBlockFromProviders` and 07's provider
   `rulesContent` payload field are gone, while dispatch, `DEFAULT_AGENT_RULES` and its hash set are
   untouched. (b) `agent-rules` is the eighth portable setting and the only raw-text one,
   `settings/agent-rules.md`, tidied by `normalizeAgentRulesOverride` and capped at 64 KiB; the
