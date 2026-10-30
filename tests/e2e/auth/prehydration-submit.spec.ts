@@ -1,6 +1,6 @@
-import { expect, test } from '@playwright/test';
-import { getSql } from '../helpers/db.js';
-import { PASSWORD, seedInvite, uniqueEmail } from '../helpers/auth.js';
+import { expect, test, type Locator, type Page } from '@playwright/test';
+import { cleanupUser, getSql } from '../helpers/db.js';
+import { API_BASE, PASSWORD, registerUser, seedInvite, uniqueEmail } from '../helpers/auth.js';
 
 /**
  * A submit before React attaches AuthForm's handler is the browser's own. Without `method="post"`
@@ -78,4 +78,170 @@ test.describe('auth forms submitted before React attaches its handler', () => {
       });
     }
   }
+});
+
+const API_ORIGIN = new URL(API_BASE).origin;
+
+// VOLATILE: React stores a node's props under a key that starts with this. It is internal, not an
+// API, so a React upgrade may rename it; `waitForReact` names it when its poll times out.
+const REACT_PROPS_KEY_PREFIX = '__reactProps$';
+
+async function holdScripts(page: Page): Promise<() => void> {
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(/\/_next\/static\/.*\.js(\?.*)?$/, async (route) => {
+    await gate;
+    await route.continue();
+  });
+  return release;
+}
+
+const reactAttached = (page: Page): Promise<boolean> =>
+  page.evaluate((prefix) => {
+    const form = document.querySelector('form');
+    return form !== null && Object.keys(form).some((key) => key.startsWith(prefix));
+  }, REACT_PROPS_KEY_PREFIX);
+
+async function waitForReact(page: Page): Promise<void> {
+  await expect
+    .poll(() => reactAttached(page), {
+      message: `the form never got a ${REACT_PROPS_KEY_PREFIX}* key: React did not attach, or renamed it`,
+      timeout: 15_000,
+    })
+    .toBe(true);
+}
+
+function capturePosts(page: Page, path: string): unknown[] {
+  const bodies: unknown[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (request.method() === 'POST' && url.origin === API_ORIGIN && url.pathname === path) {
+      bodies.push(request.postDataJSON());
+    }
+  });
+  return bodies;
+}
+
+const fillAs = (how: 'typed' | 'autofilled', field: Locator, value: string) =>
+  how === 'typed'
+    ? field.fill(value)
+    : field.evaluate((el, v) => {
+        (el as HTMLInputElement).value = v;
+      }, value);
+
+/**
+ * The same window with JavaScript on. The page's script chunks are held back, so the form is still
+ * the server's HTML when it is filled, by typing or by autofill (which assigns the value and fires
+ * no event), and React attaches only afterwards. What the submit posts must then be what the fields
+ * hold, and a submit the api refuses must leave them holding it.
+ */
+test.describe('auth forms filled before React attaches its handler', () => {
+  for (const how of ['typed', 'autofilled'] as const) {
+    test(`/login: a value ${how} before React attaches is what the submit posts`, async ({
+      page,
+      playwright,
+    }) => {
+      const sql = getSql();
+      const ctx = await playwright.request.newContext();
+      let release = () => {};
+      let userId = '';
+      try {
+        const user = await registerUser(sql, ctx, { prefix: 'prehydrate-login' });
+        userId = user.userId;
+        release = await holdScripts(page);
+        const posted = capturePosts(page, '/auth/login');
+
+        await page.goto('/login', { waitUntil: 'domcontentloaded' });
+        expect(await reactAttached(page), 'the scripts were not held back').toBe(false);
+        await fillAs(how, page.getByLabel('Email'), user.email);
+        await fillAs(how, page.getByLabel('Password'), PASSWORD);
+        release();
+        await waitForReact(page);
+        await page.getByRole('button', { name: 'Sign in' }).click();
+
+        await expect.poll(() => posted).toEqual([{ email: user.email, password: PASSWORD }]);
+        await page.waitForURL(/\/dashboard$/, { timeout: 10_000 });
+      } finally {
+        release();
+        if (userId) await cleanupUser(sql, userId);
+        await sql.end({ timeout: 5 });
+        await ctx.dispose();
+      }
+    });
+  }
+
+  test('/register: values typed before React attaches are posted with the invite token', async ({
+    page,
+  }) => {
+    const sql = getSql();
+    let release = () => {};
+    let inviteId = '';
+    let userId = '';
+    try {
+      const invite = await seedInvite(sql);
+      inviteId = invite.id;
+      const email = uniqueEmail('prehydrate-reg');
+      release = await holdScripts(page);
+      const posted = capturePosts(page, '/auth/register');
+
+      await page.goto(`/register?invite=${invite.token}`, { waitUntil: 'domcontentloaded' });
+      expect(await reactAttached(page), 'the scripts were not held back').toBe(false);
+      await page.getByLabel('Email').fill(email);
+      await page.getByLabel('Password').fill(PASSWORD);
+      release();
+      await waitForReact(page);
+      await page.getByRole('button', { name: 'Create account' }).click();
+
+      await expect
+        .poll(() => posted)
+        .toEqual([{ email, password: PASSWORD, inviteToken: invite.token }]);
+      await page.waitForURL(/\/dashboard$/, { timeout: 10_000 });
+
+      const meRes = await page.request.get(`${API_BASE}/auth/me`);
+      expect(meRes.status()).toBe(200);
+      userId = ((await meRes.json()) as { user: { id: string } }).user.id;
+    } finally {
+      release();
+      if (userId) await cleanupUser(sql, userId);
+      if (inviteId) await sql`delete from user_invites where id = ${inviteId}`;
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  test('/login: a submit the api refuses leaves the fields as they were filled', async ({
+    page,
+    playwright,
+  }) => {
+    const sql = getSql();
+    const ctx = await playwright.request.newContext();
+    let release = () => {};
+    let userId = '';
+    try {
+      const user = await registerUser(sql, ctx, { prefix: 'prehydrate-refused' });
+      userId = user.userId;
+      const wrong = `${PASSWORD}-wrong`;
+      release = await holdScripts(page);
+      const posted = capturePosts(page, '/auth/login');
+
+      await page.goto('/login', { waitUntil: 'domcontentloaded' });
+      expect(await reactAttached(page), 'the scripts were not held back').toBe(false);
+      await page.getByLabel('Email').fill(user.email);
+      await page.getByLabel('Password').fill(wrong);
+      release();
+      await waitForReact(page);
+      await page.getByLabel('Password').press('Enter');
+
+      await expect(page.getByRole('main').getByRole('alert')).toContainText(/invalid credentials/i);
+      expect(posted).toEqual([{ email: user.email, password: wrong }]);
+      await expect(page.getByLabel('Email')).toHaveValue(user.email);
+      await expect(page.getByLabel('Password')).toHaveValue(wrong);
+    } finally {
+      release();
+      if (userId) await cleanupUser(sql, userId);
+      await sql.end({ timeout: 5 });
+      await ctx.dispose();
+    }
+  });
 });
