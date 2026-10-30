@@ -140,14 +140,15 @@ export async function runCliSignOut(
 }
 
 /** Neither refresh runner throws when `result.ok` is false: the sources that did refresh were
- *  applied, and a throw would make the caller skip using them. The caller shows `result`. */
+ *  applied, and a throw would make the caller skip using them. The caller shows `result`. The
+ *  catalog poll answers it to an admin only, so for anyone else it is undefined. */
 export async function runCatalogVersionRefresh(
   name: string,
   onPhase?: (phase: QueuedJobPhase) => void,
-): Promise<{ entry: CliPackageVersionsEntry; result: RefreshCliVersionsJobResult }> {
+): Promise<{ entry: CliPackageVersionsEntry; result: RefreshCliVersionsJobResult | undefined }> {
   const { entry, result } = await runQueuedJob<{
     entry: CliPackageVersionsEntry;
-    result: RefreshCliVersionsJobResult;
+    result?: RefreshCliVersionsJobResult;
   }>(
     `/cli-providers/catalog/${name}/refresh-versions`,
     (jobId) => `/cli-providers/catalog/${name}/refresh-versions/${jobId}`,

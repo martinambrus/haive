@@ -120,6 +120,15 @@ describe('CLI version refresh in the provider form', () => {
     expect(alertsIn(view)).toHaveLength(0);
   });
 
+  it('shows no notice when the answer carries no job result, and applies the versions', async () => {
+    answer = { status: 'done', entry };
+    const view = mount();
+    await clickRefresh(view);
+
+    expect(offeredVersions(view)).toEqual(['2.0.1', '2.0.0']);
+    expect(alertsIn(view)).toHaveLength(0);
+  });
+
   it('removes the earlier notice while another refresh is queued', async () => {
     answer = { status: 'done', entry, result: OPENROUTER_FAILED };
     const view = mount();

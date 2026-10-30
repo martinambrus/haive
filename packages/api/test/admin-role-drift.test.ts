@@ -10,6 +10,8 @@ const EXEMPT: Record<string, string> = {
   'middleware/maintenance.ts': 'lets administrators through maintenance, never grants route access',
   'modules/loader.ts': 'module admin gates use requireAdmin; module settings paths are swept',
   'routes/admin.ts': 'self-demotion protection inside the swept admin router',
+  'routes/cli-providers.ts':
+    'refresh poll hands the job result to an admin only; cli-providers-job-poll covers both roles',
   'routes/global-kb.ts':
     'conditional enforcement controls; admin-only routes use requireAdmin and are swept',
   'routes/tasks/index.ts': 'allUsers policy is named in the sweep; pause controls are conditional',

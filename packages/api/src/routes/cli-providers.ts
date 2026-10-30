@@ -280,6 +280,8 @@ cliProviderRoutes.get('/catalog/:name/refresh-versions/:jobId', async (c) => {
         fetchError: row.fetchError,
       }
     : { name, versions: [], latestVersion: null, fetchedAt: null, fetchError: null };
+  // Only an admin gets the summary: /cli-pricing keeps its price and FX errors admin-only.
+  if (c.get('userRole') !== 'admin') return c.json({ status: 'done', entry });
   // The summary rides along: the entry alone cannot say which other sources failed.
   return c.json({ status: 'done', entry, result: job.returnvalue as RefreshCliVersionsJobResult });
 });

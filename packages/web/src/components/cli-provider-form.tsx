@@ -440,7 +440,7 @@ export function CliProviderForm({
       setVersionCache(entry);
       const newest = entry.versions[0] ?? entry.latestVersion;
       setState((prev) => (prev.cliVersion || !newest ? prev : { ...prev, cliVersion: newest }));
-      setRefreshResult(result);
+      setRefreshResult(result ?? null);
     } catch (err) {
       captureError(err, 'Failed to refresh versions');
     } finally {
