@@ -119,6 +119,15 @@ const closesFence = (line: string, opener: string): boolean => {
  *  trailing newline. */
 const shapeRulesText = (text: string): string => text.replace(/\n{3,}/g, '\n\n').trim() + '\n';
 
+/** An override's shape: `shapeRulesText`, except that only the blank lines before its first line
+ *  go. That line keeps the indent it was written with: without it an indented code block opens as
+ *  a paragraph, and the first item of an indented list becomes the parent of the next. */
+const shapeOverrideText = (text: string): string =>
+  text
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\s*\n/, '')
+    .trimEnd() + '\n';
+
 /** Wrap shaped rules in the cli-rules region markers. */
 const wrapRulesBlock = (shaped: string): string =>
   `${CLI_RULES_START}\n${shaped}${CLI_RULES_END}\n`;
@@ -202,12 +211,13 @@ export function inheritsDefaultRules(rulesContent: string): boolean {
  *  An override is never deduplicated: it is the repository's own text, so a line it repeats is an
  *  instruction written twice (the same command under two headings), and dropping it would make the
  *  rules the agents read differ from the override that was saved. It only gets the shape of every
- *  block. The default keeps the merge, which drops nothing from it, so the regions already written
- *  from it stay byte-identical. */
+ *  block, its first line keeping its indent (`shapeOverrideText`). The default keeps the merge,
+ *  which drops nothing from it and trims as it always did, so the regions already written from it
+ *  stay byte-identical. */
 export function buildRepoCliRulesBlock(override: string | null | undefined): string | null {
   if (override === null || override === undefined) return buildCliRulesBlock([DEFAULT_AGENT_RULES]);
   if (override.trim().length === 0) return null;
-  return wrapRulesBlock(shapeRulesText(override));
+  return wrapRulesBlock(shapeOverrideText(override));
 }
 
 /** Return the marker-inclusive span between `startMarker` and `endMarker`

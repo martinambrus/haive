@@ -119,6 +119,65 @@ describe('refreshing a repository', () => {
   });
 });
 
+describe('the repository row a refresh reads', () => {
+  /** Hands the route a db whose repository reads also land in `fetched`, as the fake returns them:
+   *  the columns the query names, as Postgres sends them. */
+  function recordReads(fake: ReturnType<typeof setup>) {
+    const fetched: Record<string, unknown>[] = [];
+    const repositories = fake.db.query.repositories;
+    h.db = {
+      ...fake.db,
+      query: {
+        ...fake.db.query,
+        repositories: {
+          findMany: repositories.findMany,
+          findFirst: async (opts?: Record<string, unknown>) => {
+            const row = await repositories.findFirst(opts);
+            if (row) fetched.push(row);
+            return row;
+          },
+        },
+      },
+    };
+    return fetched;
+  }
+
+  it('holds only the columns the refresh uses, not the rules override, the file tree or the render context', async () => {
+    const fake = setup({
+      source: 'git_https',
+      remoteUrl: 'https://example.com/r.git',
+      branch: 'main',
+      localPath: '/host-fs/r',
+      writable: true,
+      credentialsSecretId: '00000000-0000-4000-8000-0000000000c1',
+      agentRulesOverride: 'rules-override-marker-5d1a\n',
+      fileTree: ['src/a.ts'],
+      renderContext: { framework: 'drupal' },
+    });
+    const fetched = recordReads(fake);
+
+    expect((await refresh()).status).toBe(200);
+
+    expect(fetched.length).toBeGreaterThan(0);
+    for (const row of fetched) {
+      expect(row).not.toHaveProperty('agentRulesOverride');
+      expect(row).not.toHaveProperty('fileTree');
+      expect(row).not.toHaveProperty('renderContext');
+    }
+    expect(Object.keys(fetched[0]!).sort()).toEqual([
+      'branch',
+      'credentialsSecretId',
+      'id',
+      'localPath',
+      'remoteUrl',
+      'source',
+      'status',
+      'writable',
+    ]);
+    expect(h.add.mock.calls[0]![1]).toMatchObject({ repositoryId: REPO, branch: 'main' });
+  });
+});
+
 it('does not copy legacy URL userinfo into a refresh job and preserves transport identity', async () => {
   setup({
     source: 'git_https',

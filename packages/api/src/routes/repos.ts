@@ -3337,6 +3337,18 @@ repoRoutes.post('/:id/refresh-tree', requireNewWorkAllowed, async (c) => {
   const db = getDb();
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
+    // What the job payload and the refusals below read: the rest of the row, the rules override
+    // (up to 64 KiB) among it, is not this route's to fetch.
+    columns: {
+      id: true,
+      status: true,
+      source: true,
+      remoteUrl: true,
+      localPath: true,
+      branch: true,
+      credentialsSecretId: true,
+      writable: true,
+    },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
   // The cheap half of each refusal: the job claims the root and checks the tasks again, since

@@ -711,7 +711,13 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
 
-  const body = (await c.req.json().catch(() => ({}))) as {
+  // Not caught: a body that is not JSON is answered 400 by `jsonBodyErrors`, where `{}` would be a
+  // save of nothing that reports success.
+  const raw: unknown = await c.req.json();
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new HttpError(400, 'The request body must be a JSON object', 'invalid_body');
+  }
+  const body = raw as {
     rtkEnabled?: boolean;
     rtkVersion?: string | null;
     lspServers?: string[];

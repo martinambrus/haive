@@ -13,6 +13,7 @@ import {
   LEGACY_RTK_MD_SHA256,
 } from '../src/templates/cli-rules.js';
 import { promptNamesAgentPath } from '../src/cli-providers/catalog.js';
+import { normalizeAgentRulesOverride } from '../src/project-state/settings.js';
 import { normalizeContent, sha256Hex } from '../src/templates/manifest.js';
 import {
   DEFAULT_AGENT_RULES,
@@ -182,6 +183,37 @@ describe('buildRepoCliRulesBlock', () => {
       inRegion('# Rules\n\n- one\n- two\n\n```sh\npnpm test\n```\n\nlast\n'),
     );
   });
+
+  // The indent of an override's first line is part of what it says: without it an indented code
+  // block opens as a paragraph, and the first item of an indented list becomes the parent of the next.
+  it.each([
+    ['an indented code block', '    cd packages/api\n    pnpm test\n'],
+    ['an indented list', '  - rule one\n  - rule two\n'],
+    ['a tab-indented block', '\tpnpm test\n'],
+  ])('keeps the indent of a first line that opens %s', (_what, override) => {
+    expect(buildRepoCliRulesBlock(override)).toBe(inRegion(override));
+  });
+
+  it('drops the blank lines before an indented first line, and only those', () => {
+    expect(buildRepoCliRulesBlock('\n\n    pnpm test\n')).toBe(inRegion('    pnpm test\n'));
+    expect(buildRepoCliRulesBlock('  \n\t\n\n\n    pnpm test\n')).toBe(inRegion('    pnpm test\n'));
+  });
+
+  it('still ends an indented override on exactly one newline', () => {
+    expect(buildRepoCliRulesBlock('    pnpm test')).toBe(inRegion('    pnpm test\n'));
+    expect(buildRepoCliRulesBlock('    pnpm test  \n\n\n  \n')).toBe(inRegion('    pnpm test\n'));
+  });
+
+  it('keeps whatever whitespace opens the first line, as it keeps it on every other line', () => {
+    expect(buildRepoCliRulesBlock('\n\u3000\u3000first\n\u3000\u3000second\n')).toBe(
+      inRegion('\u3000\u3000first\n\u3000\u3000second\n'),
+    );
+  });
+
+  it('leaves the default and the merge of provider rules trimmed as they were', () => {
+    expect(buildRepoCliRulesBlock(null)).toBe(inRegion(`${DEFAULT_AGENT_RULES.trim()}\n`));
+    expect(buildCliRulesBlock(['    pnpm test\n- b'])).toBe(inRegion('pnpm test\n- b\n'));
+  });
 });
 
 describe('extractRegion', () => {
@@ -205,6 +237,18 @@ describe('upsertRegion + round-trip hash invariant', () => {
     const written = upsertRegion(HOST_NO_RULES, block, CLI_RULES_START, CLI_RULES_END);
     const extracted = extractRegion(written, CLI_RULES_START, CLI_RULES_END)!;
     // The drift comparison hashes normalizeContent(block) vs normalizeContent(disk region).
+    expect(hash(extracted)).toBe(hash(block));
+  });
+
+  it("keeps the indent of an override's first line from the stored text to the file and its hash", () => {
+    const stored = normalizeAgentRulesOverride('\r\n    cd packages/api\r\n    pnpm test  \r\n');
+    expect(stored).toEqual({ ok: true, value: '\n    cd packages/api\n    pnpm test\n' });
+    const block = buildRepoCliRulesBlock(stored.ok ? stored.value : null)!;
+    const written = upsertRegion(HOST_NO_RULES, block, CLI_RULES_START, CLI_RULES_END);
+    const extracted = extractRegion(written, CLI_RULES_START, CLI_RULES_END)!;
+    expect(extracted).toBe(
+      `${CLI_RULES_START}\n    cd packages/api\n    pnpm test\n${CLI_RULES_END}`,
+    );
     expect(hash(extracted)).toBe(hash(block));
   });
 
