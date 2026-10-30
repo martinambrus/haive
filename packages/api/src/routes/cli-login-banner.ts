@@ -43,9 +43,10 @@ const WS_PATH_PREFIX = '/cli-login-banner/';
 const RAW_BUFFER_MAX = 64 * 1024;
 const CLEAN_BUFFER_MAX = 32 * 1024;
 const ANSI_TAIL_MAX = 4096;
-// Quiet time after which an auth URL that has not visibly ended is taken as complete. The CLIs
-// measured so far end it with a blank line, so this is the fallback for one that prints the URL
-// and waits; a chunk boundary inside the URL is over within the same burst of output.
+// Longest an auth URL may stay open, counted from when it first showed, before the end of the
+// output is taken as its end. The CLIs measured so far end it with a blank line, so this is the
+// fallback for one that prints the URL and waits, or repaints under it; a chunk boundary inside the
+// URL is over within the same burst of output.
 const AUTH_URL_SETTLE_MS = 1_000;
 const HEARTBEAT_MS = 15_000;
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
@@ -172,7 +173,7 @@ interface BannerSession {
   ansiTail: string;
   decoder: StringDecoder;
   authUrlSent: boolean;
-  /** Armed while the output stops inside the auth URL: see offerAuthUrl. */
+  /** Armed from when the auth URL first shows without having visibly ended: see offerAuthUrl. */
   urlSettleTimer: NodeJS.Timeout | null;
   authSuccessSent: boolean;
   tokenSubmitted: boolean;
@@ -682,25 +683,27 @@ function captureClaudeOauthToken(session: BannerSession, text: string): boolean 
 
 /** Sends the auth URL once its end is known. The output arrives in chunks that can stop anywhere
  *  inside the URL, so a URL that merely reaches the end of the buffer is not sent: its head would
- *  go out as the link, with no correction (see extractWrappedUrl). Output that stops inside the URL
- *  gets AUTH_URL_SETTLE_MS of quiet to continue. `final` (the stream ended, or that quiet passed)
- *  takes the end of the output as the end of the URL. Returns whether a frame was sent. */
+ *  go out as the link, with no correction (see extractWrappedUrl). A URL that is open gets
+ *  AUTH_URL_SETTLE_MS from when it first showed to end. `final` (that time passed, or the stream
+ *  ended) takes the end of the output as the end of the URL. Returns whether a frame was sent. */
 function offerAuthUrl(session: BannerSession, final: boolean): boolean {
-  if (session.urlSettleTimer) {
-    clearTimeout(session.urlSettleTimer);
-    session.urlSettleTimer = null;
-  }
   if (session.authUrlSent || session.cleanedUp) return false;
   const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
   const url = extractWrappedUrl(session.rawBuffer, prefixes, final);
   if (!url) {
-    if (!final && extractWrappedUrl(session.rawBuffer, prefixes, true)) {
+    // Counted from the first sight, not from the last chunk: output that never goes quiet, such
+    // as a TUI repainting under the URL, must not hold the URL back for good.
+    if (!final && !session.urlSettleTimer && extractWrappedUrl(session.rawBuffer, prefixes, true)) {
       session.urlSettleTimer = setTimeout(() => {
         session.urlSettleTimer = null;
         offerAuthUrl(session, true);
       }, AUTH_URL_SETTLE_MS);
     }
     return false;
+  }
+  if (session.urlSettleTimer) {
+    clearTimeout(session.urlSettleTimer);
+    session.urlSettleTimer = null;
   }
   if (TERMINAL_LOGIN_PROVIDERS.has(session.providerName)) {
     if (url.length <= (prefixes[0]?.length ?? 0) + 8) return false;

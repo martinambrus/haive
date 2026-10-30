@@ -80,13 +80,15 @@ export const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliPr
 
 /** The auth URL in `raw`, which is output read in chunks and so may stop at any byte. A URL can be
  *  hard-wrapped over several lines, so it is returned only once something after it shows that it
- *  has ended: whitespace after it on its line, a blank line, or a line that holds whitespace
- *  (prose; a wrapped URL continues on whitespace-free lines). Output that stops inside it gives
- *  null, because the next chunk may continue it.
+ *  has ended: more text after it on its line, a blank line, or a line that holds whitespace
+ *  (prose; a wrapped URL continues on whitespace-free lines). Blanks alone do not end it, because
+ *  a wrapped line can be padded. Output that stops inside it gives null, because the next chunk
+ *  may continue it.
  *
  *  `atEnd` takes the end of the text as the end of the URL, for a stream that ended or went quiet.
  *  A whitespace-free last line is then kept, since it may be the tail of a wrapped URL as well as
- *  the first word of a line of prose. */
+ *  the first word of a line of prose. The same ambiguity joins a whitespace-free line directly
+ *  under the URL, and text on the same line as the last piece of a wrapped URL cuts that piece off. */
 export function extractWrappedUrl(raw: string, prefixes: string[], atEnd = false): string | null {
   const lines = stripAnsi(raw.replace(INCOMPLETE_ANSI_ESCAPE, '')).split(/\r?\n/);
   let url = '';

@@ -1102,7 +1102,7 @@ describe('CLI login banner auth URL chunking', () => {
   const firstChunk = CLAUDE.head + CLAUDE.body.slice(0, firstLineEnd);
   const laterLines = CLAUDE.body.slice(firstLineEnd);
 
-  it('sends a URL that has not visibly ended after one second of quiet', async () => {
+  it('sends a URL that has not visibly ended one second after it first appeared', async () => {
     providerName = 'grok';
     await start();
     stream.emit('data', Buffer.from(`${GROK.head}${GROK.url}\r\n`));
@@ -1112,21 +1112,34 @@ describe('CLI login banner auth URL chunking', () => {
     expectOneAuthUrl(GROK);
   });
 
-  it('restarts the quiet period with each chunk', async () => {
+  it('counts the second from when the URL first appeared, not from the last chunk', async () => {
     providerName = 'claude-code';
     await start();
+    const idle = vi.getTimerCount();
     stream.emit('data', Buffer.from(firstChunk));
     await vi.advanceTimersByTimeAsync(600);
     stream.emit('data', Buffer.from(laterLines));
-    await vi.advanceTimersByTimeAsync(600);
-    expect(authUrlFrames().length).toBe(0);
+    expect(vi.getTimerCount()).toBe(idle + 1);
     await vi.advanceTimersByTimeAsync(399);
     expect(authUrlFrames().length).toBe(0);
     await vi.advanceTimersByTimeAsync(1);
     expectOneAuthUrl(CLAUDE);
   });
 
-  it('cancels the quiet period when the URL ends in time', async () => {
+  it('is not held back by whitespace-free output that keeps arriving under the URL', async () => {
+    providerName = 'grok';
+    await start();
+    stream.emit('data', Buffer.from(`${GROK.head}${GROK.url}\r\n`));
+    for (let i = 0; i < 30; i++) {
+      await vi.advanceTimersByTimeAsync(100);
+      stream.emit('data', Buffer.from('⠋\r\n'));
+    }
+    const sent = authUrlFrames();
+    expect(sent.length).toBe(1);
+    expect(sent[0]?.url?.startsWith(GROK.url)).toBe(true);
+  });
+
+  it('cancels the wait when the URL ends in time', async () => {
     providerName = 'claude-code';
     await start();
     const idle = vi.getTimerCount();
