@@ -898,7 +898,7 @@ From the T401 review (2026-10-30). PRE-EXISTING, moderate (security). web compon
 
 ### T449 · FNF[auth-form-prehydration-values] · values typed into the sign-in form before it hydrates are not submitted; a pre-hydration click looks live (+1)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T21:28Z · last: 2026-10-30T21:28Z
 From the T448 review (2026-10-30). PRE-EXISTING (identical before T448).
 
 1. Moderate: web components/auth-form.tsx ~:159,172,187 use controlled `value=` inputs and `handleSubmit` (~:86-104) posts React state, so text typed before hydration stays visible but is not submitted: with the scripts held back, a fill then a submit posts `{"email":"","password":""}` and the user sees "Validation failed" on a filled form (T448 evidence judge/slow-hydration-base.txt). Read the values with `new FormData(event.currentTarget)` at submit, or copy the DOM values into state on hydration. Browser autofill timing was not measured.
