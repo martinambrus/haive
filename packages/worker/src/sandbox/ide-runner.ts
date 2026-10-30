@@ -56,6 +56,8 @@ const IDE_UID = '1000:1000';
 // coreutils), exactly as task-auth-volume does.
 const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
 const HELPER_TIMEOUT_MS = 60_000;
+// The bound `startIdeRunner`'s `docker run` already gives a first boot, which pulls the image.
+const IDE_IMAGE_PULL_TIMEOUT_MS = 120_000;
 // What follows the image in `docker run`. With the image it is the launch spec stamped on the
 // container: an editor started with another spec is replaced once it is idle.
 const IDE_SERVER_ARGS = [
@@ -114,6 +116,18 @@ async function launchIsStale(name: string): Promise<boolean> {
     return stdout.trim() !== IDE_LAUNCH_SPEC;
   } catch {
     return false;
+  }
+}
+
+// The image a replacement launches: on the host already, else pulled within a bound. Throws when it
+// cannot be had. A failed inspect, whatever its cause, falls through to the pull, which decides.
+async function ensureCodeServerImage(): Promise<void> {
+  try {
+    await exec('docker', ['image', 'inspect', CODE_SERVER_IMAGE], { timeout: 15_000 });
+  } catch {
+    await exec('docker', ['pull', '--quiet', CODE_SERVER_IMAGE], {
+      timeout: IDE_IMAGE_PULL_TIMEOUT_MS,
+    });
   }
 }
 
@@ -400,6 +414,24 @@ async function ensureIdeRunnerStartedInner(
     // running container is the one for this workspace; its `.git` mount is that workspace's too.
     if ((await runnerSubpathVerdict(name, workspaceSubpath)) === 'match') {
       if (!(await launchIsStale(name)) || (await editorHeld(taskId))) return { container: name };
+      // Replacing removes this editor before the new one is launched, so make sure the image is
+      // there first: a host that cannot pull (offline after a CODE_SERVER_IMAGE bump) keeps the
+      // editor it has. Only this path may keep it: one holding another workspace is recreated
+      // whatever the image, and a fresh launch is left to `docker run`, which pulls.
+      try {
+        await ensureCodeServerImage();
+      } catch (err) {
+        log.warn(
+          {
+            taskId,
+            container: name,
+            image: CODE_SERVER_IMAGE,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'ide runner was launched with another image or flags and is idle, but the image to replace it with cannot be had; keeping it',
+        );
+        return { container: name };
+      }
       log.info(
         { taskId, container: name },
         'ide runner was launched with another image or flags and is idle; recreating',

@@ -17,20 +17,36 @@ interface FakeContainer {
 
 // A stateful fake docker and a Map-backed fake Redis write ONE ordered call log, so a test can say
 // what happened in which order. An `rm` is logged only when it removes a container that exists
-// (`rm -f` of a missing name does nothing); every Redis call is logged.
+// (`rm -f` of a missing name does nothing); every Redis call is logged, and so is every `pull`. The
+// image is on the host unless a test says it is not: `docker run` then pulls it itself, and fails
+// when `pullFails` says the host cannot.
 const h = vi.hoisted(() => {
   const state = {
     containers: new Map<string, FakeContainer>(),
     registry: new Map<string, Record<string, string>>(),
     calls: [] as string[],
     runs: [] as string[][],
+    pullTimeouts: [] as (number | undefined)[],
     registryRejects: false,
     runFails: false,
+    imagePresent: true,
+    pullFails: false,
     unreadableLabel: null as string | null,
   };
   const out = (stdout: string) => ({ stdout, stderr: '' });
-  const docker = async (_command: string, args: string[]) => {
+  const docker = async (_command: string, args: string[], options?: { timeout?: number }) => {
     const [verb, ...rest] = args;
+    if (verb === 'image' && rest[0] === 'inspect') {
+      if (!state.imagePresent) throw new Error(`Error: No such image: ${rest[rest.length - 1]}`);
+      return out('[{}]');
+    }
+    if (verb === 'pull') {
+      state.calls.push(`pull ${rest[rest.length - 1]}`);
+      state.pullTimeouts.push(options?.timeout);
+      if (state.pullFails) throw new Error('docker pull failed: the registry is unreachable');
+      state.imagePresent = true;
+      return out('');
+    }
     if (verb === 'inspect') {
       const name = rest[rest.length - 1]!;
       const container = state.containers.get(name);
@@ -50,6 +66,10 @@ const h = vi.hoisted(() => {
       return out('');
     }
     if (verb === 'run' && rest[0] === '-d') {
+      if (!state.imagePresent) {
+        if (state.pullFails) throw new Error('docker run failed: the image cannot be pulled');
+        state.imagePresent = true;
+      }
       const labels: Record<string, string> = {};
       let name = '';
       rest.forEach((arg, index) => {
@@ -159,8 +179,11 @@ beforeEach(() => {
   h.state.registry.clear();
   h.state.calls.length = 0;
   h.state.runs.length = 0;
+  h.state.pullTimeouts.length = 0;
   h.state.registryRejects = false;
   h.state.runFails = false;
+  h.state.imagePresent = true;
+  h.state.pullFails = false;
   h.state.unreadableLabel = null;
 });
 
@@ -242,6 +265,101 @@ describe.each(staleLaunches)('a running editor with %s', (_launch, labels) => {
       [RUNNER_SUBPATH_LABEL]: SUBPATH,
       ...launched,
     });
+  });
+});
+
+// A replacement removes the running editor before it launches the new one, so the image it launches
+// has to be on the host first: a host that cannot pull (offline after a CODE_SERVER_IMAGE bump)
+// keeps the editor it has instead of losing it to a launch that cannot start.
+describe('an idle editor launched with an older image', () => {
+  const { session, ensure } = repositoryEditor;
+  const key = ideSessionKey(session);
+  const name = ideRunnerName(session);
+  const pull = `pull ${CODE_SERVER_IMAGE}`;
+  const olderSpec = () => SPEC.replace(CODE_SERVER_IMAGE, OLDER_IMAGE);
+  const arrange = (registry: Record<string, string>) => {
+    seed(repositoryEditor, differing(olderSpec()));
+    h.state.registry.set(key, registry);
+  };
+  const idle = () => arrange({ refcount: '0', lastSeenAt: pastGrace() });
+  const expectBoundedPull = () => {
+    expect(h.state.pullTimeouts).toHaveLength(1);
+    expect(h.state.pullTimeouts[0]).toBeGreaterThan(0);
+    expect(h.state.pullTimeouts[0]).toBeLessThan(Infinity);
+  };
+
+  it('is kept and returned when the new image is absent and cannot be pulled', async () => {
+    idle();
+    h.state.imagePresent = false;
+    h.state.pullFails = true;
+
+    expect(await ensure()).toEqual({ container: name });
+
+    // The pull was tried, within a bound; nothing was removed, launched or registered.
+    expect(mutations()).toEqual([pull]);
+    expectBoundedPull();
+    expect(h.state.containers.get(name)?.labels[SPEC_LABEL]).toBe(olderSpec());
+  });
+
+  it('is replaced once the absent new image is pulled, the pull coming first', async () => {
+    idle();
+    h.state.imagePresent = false;
+
+    expect(await ensure()).toEqual({ container: name });
+
+    expect(mutations()).toEqual([pull, `rm ${name}`, `hset ${key}`, `run ${name}`]);
+    expectBoundedPull();
+    expect(h.state.containers.get(name)?.labels[SPEC_LABEL]).toBe(SPEC);
+  });
+
+  it('is replaced without a pull when the host already has the new image', async () => {
+    idle();
+    h.state.imagePresent = true;
+
+    expect(await ensure()).toEqual({ container: name });
+
+    expect(mutations()).toEqual([`rm ${name}`, `hset ${key}`, `run ${name}`]);
+    expect(h.state.pullTimeouts).toEqual([]);
+  });
+
+  it('is kept without looking at any image while it is in use', async () => {
+    arrange({ refcount: '1', lastSeenAt: pastGrace() });
+    h.state.imagePresent = false;
+    h.state.pullFails = true;
+
+    expect(await ensure()).toEqual({ container: name });
+
+    expect(mutations()).toEqual([]);
+  });
+});
+
+// Only a stale idle editor has its image checked. The two launches below are decided as before.
+describe('an editor that is not a stale idle one', () => {
+  const { session, ensure } = repositoryEditor;
+  const key = ideSessionKey(session);
+  const name = ideRunnerName(session);
+
+  it('holding another workspace is removed even when no image can be had', async () => {
+    seed(repositoryEditor, {
+      [SPEC_LABEL]: SPEC,
+      [RUNNER_SUBPATH_LABEL]: `${USER}/another-repository`,
+    });
+    h.state.imagePresent = false;
+    h.state.pullFails = true;
+
+    // The launch fails for want of the image, but the editor on the wrong workspace is gone.
+    await expect(ensure()).rejects.toThrow();
+
+    expect(mutations()).toEqual([`rm ${name}`, `hset ${key}`]);
+    expect(h.state.containers.has(name)).toBe(false);
+  });
+
+  it('missing altogether is launched by docker run, which pulls the image itself', async () => {
+    h.state.imagePresent = false;
+
+    expect(await ensure()).toEqual({ container: name });
+
+    expect(mutations()).toEqual([`hset ${key}`, `run ${name}`]);
   });
 });
 
