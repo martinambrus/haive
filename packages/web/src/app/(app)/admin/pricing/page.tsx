@@ -1,9 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { api } from '@/lib/api-client';
 import { runPricingRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { Button, Badge, Input, FormError } from '@/components/ui';
+import { RefreshFailures } from '@/components/refresh-failures';
 import { usePageTitle } from '@/lib/use-page-title';
 
 const selectClass =
@@ -86,6 +88,7 @@ export default function PricingPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [refreshPhase, setRefreshPhase] = useState<QueuedJobPhase | null>(null);
+  const [refreshResult, setRefreshResult] = useState<RefreshCliVersionsJobResult | null>(null);
   const refreshAbort = useRef<AbortController | null>(null);
   useEffect(() => () => refreshAbort.current?.abort(), []);
   const [filter, setFilter] = useState('');
@@ -140,9 +143,13 @@ export default function PricingPage() {
     refreshAbort.current = controller;
     setRefreshPhase('queued');
     setError(null);
+    setRefreshResult(null);
     try {
-      await runPricingRefresh(setRefreshPhase, controller.signal);
-      if (!controller.signal.aborted) await load();
+      const result = await runPricingRefresh(setRefreshPhase, controller.signal);
+      if (!controller.signal.aborted) {
+        setRefreshResult(result);
+        await load();
+      }
     } catch (err) {
       if (!controller.signal.aborted) {
         setError(err instanceof Error ? err.message : 'Failed to refresh pricing');
@@ -235,6 +242,7 @@ export default function PricingPage() {
       </div>
 
       <FormError message={error} />
+      <RefreshFailures result={refreshResult} />
 
       <section className="space-y-2">
         <h3 className="text-base font-semibold text-neutral-100">Auto-update per CLI</h3>

@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
+import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import PricingPage from './page';
 import {
   buttons,
   controls,
   createRenderer,
+  findAll,
   fire,
   isDisabled,
   textOf,
@@ -134,5 +136,67 @@ describe('pricing refresh job', () => {
     const view = await start();
     expect(textOf(view.tree())).toContain('job expired');
     expect(isDisabled(buttons(view.tree(), /^refresh now$/i)[0]!)).toBe(false);
+  });
+});
+
+const alerts = (view: ReturnType<typeof createRenderer>) =>
+  findAll(view.tree(), (host) => host.props.role === 'alert');
+
+const PARTIAL: RefreshCliVersionsJobResult = {
+  ok: false,
+  refreshed: [{ name: 'claude-code', count: 3, latest: '1.2.3' }],
+  errors: [
+    { name: 'fx', error: 'fx feed unreachable' },
+    { name: 'price:codex', error: 'litellm HTTP 503' },
+    { name: 'price:gemini', error: 'litellm HTTP 503' },
+  ],
+};
+
+describe('pricing refresh result', () => {
+  it('names each failed source with its reason once, and still reloads the table', async () => {
+    const view = await start();
+    status = { status: 'done', result: PARTIAL };
+    await vi.advanceTimersByTimeAsync(2000);
+    view.draw();
+
+    const shown = alerts(view);
+    expect(shown).toHaveLength(1);
+    const text = textOf(shown[0]!);
+    const reasons = ['fx feed unreachable', 'litellm HTTP 503'];
+    // A name must be shown on its own: "fx" alone would also match inside its reason.
+    const withoutReasons = reasons.reduce((rest, reason) => rest.replaceAll(reason, ''), text);
+    for (const name of ['fx', 'price:codex', 'price:gemini'])
+      expect(withoutReasons).toContain(name);
+    for (const reason of reasons) expect(text).toContain(reason);
+    expect(text.split('litellm HTTP 503')).toHaveLength(2);
+    expect(findAll(shown[0]!, (host) => host.tag === 'li')).toHaveLength(2);
+
+    expect(loads).toBe(2);
+    expect(isDisabled(buttons(view.tree(), /^refresh now$/i)[0]!)).toBe(false);
+  });
+
+  it('shows no notice when every source refreshed', async () => {
+    const view = await start();
+    status = { status: 'done', result: { ok: true, refreshed: PARTIAL.refreshed, errors: [] } };
+    await vi.advanceTimersByTimeAsync(2000);
+    view.draw();
+
+    expect(loads).toBe(2);
+    expect(alerts(view)).toHaveLength(0);
+  });
+
+  it('removes the earlier notice while another refresh is queued', async () => {
+    const view = await start();
+    status = { status: 'done', result: PARTIAL };
+    await vi.advanceTimersByTimeAsync(2000);
+    view.draw();
+    expect(alerts(view)).toHaveLength(1);
+
+    status = { status: 'pending', state: 'waiting' };
+    fire.click(buttons(view.tree(), /^refresh now$/i)[0]!);
+    await settle(view);
+
+    expect(buttons(view.tree(), /queued/i)).toHaveLength(1);
+    expect(alerts(view)).toHaveLength(0);
   });
 });
