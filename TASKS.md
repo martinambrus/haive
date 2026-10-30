@@ -99,13 +99,6 @@ All PRE-EXISTING.
 4. PARKED (user): `complete` rows in repo_uploads/custom_bundle_uploads and `consumed` db_uploads rows are never deleted — needs a retention rule.
 5. Latent, minor: the reaper removes a path without checking it is still the file it lstat'ed (upload-reaper.ts removeFile); fs-safe's lstatNoFollow returns numeric Stats, so dev/ino cannot be compared losslessly. Cannot bite today (upload names are fresh UUIDs). Fix: a bigint lstat identity export in fs-safe, compared before the unlink.
 
-### T119 · B4.2 · AGENTS.md rules block is repository-level
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T16:26Z · last: 2026-10-30T16:26Z · kind: feature (user decision taken)
-repositories.agent_rules_override + settings/agent-rules.md + tooling editor; buildRepoCliRulesBlock for 07/12/01/api. Control: two users with different personal rules are quiet and byte-identical after.
-
-Codex progress 2026-10-26T21:56Z: queued after completed T118 PR #934 (110bb4933eb75e24b148b1c0a94af240a102e158); resume from the merged main predecessor only when requested. Scoping brief .claude/tmp/board-run/T119/drive-draft.md retained; no implementation, worktree, migration or product change started. Preserve approved null/default versus explicit-empty rules semantics and dispatch protections. Session PAUSED.
-
 ### T120 · B5.1 · the Haive data panel
 
 status: open · kind: feature
@@ -817,17 +810,6 @@ status: open · scope: queued broader finding, not approved implementation
 
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
-### T438 · FNF[cli-login-url-capture-2] · login URL follow-ups: device code read at send time, terminal scanner sends a URL head, wrapped tail, `ESC ( B`, resize timers (+4)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T20:56Z · last: 2026-10-30T20:56Z
-From the T433 review (2026-10-30). Line numbers as of the T433 branch (fnf/433-cli-login-url-capture).
-
-1. PRE-EXISTING, minor, latent, connected: the device code in the same `auth-url` frame is read at send time (api routes/cli-login-banner.ts `offerAuthUrl` ~:730; shared auth-banner-parser.ts `extractDeviceCode` ~:121), so a chunk boundary between the URL and the code line (codex prints the code after a blank line) sends the frame without the code (70 of 77 URL-sending first-chunk splits of the codex banner) or with a truncated one (`ABCD-1234` of `ABCD-12345`). Fix: for device-code providers hold the frame for the code within the same deadline and require a terminator after it.
-2. PRE-EXISTING, minor: `scanOauthPrompts` (api routes/terminal.ts ~:411-441) emits an `oauth_prompt` frame with the head of a URL when a chunk ends inside it, then resets its buffer, so the full URL is never emitted (probe: 50 of 102 characters). Nothing consumes `oauth_prompt` (only the route, terminal-parser.test.ts and shared sandbox/types.ts): remove the scanner and the frame type, or reuse `extractWrappedUrl`.
-3. PRE-EXISTING, minor: a hard-wrapped URL whose last piece shares its line with text loses that piece (auth-banner-parser.ts ~:101; the old code joined the text into the URL, also unusable). No measured banner does it.
-4. PRE-EXISTING, minor: `stripAnsi` removes ESC plus one character (`ANSI_SHORT`, auth-banner-parser.ts ~:5), so `ESC ( B` (what ncurses `sgr0` emits) right after a URL leaves a `B` on it. No measured provider emits it. Strip the whole charset-designation sequence.
-5. PRE-EXISTING, minor: antigravity's two `setTimeout(sizeTerminalPty, 250 | 1200)` (cli-login-banner.ts ~:532-533) are untracked, so they survive `cleanupSession` and a late resize on a removed container logs a warning. Track them and clear them in cleanup.
-
 ### T439 · FNF[auth-url-resend] [design] · a pause of 1 s or more inside the login URL still sends its head
 
 status: open
@@ -878,14 +860,6 @@ From the T119 review (2026-10-30). PRE-EXISTING, minor.
 2. api routes/repos.ts ~:3334: the `refresh-tree` handler reads the whole repository row, including the up-to-64 KiB `agent_rules_override` it never uses; select the columns it needs.
 3. (T119 fix review, 2026-10-30) Minor: an override that opens with an indented line (an indented code block) loses that first line's indent, because the rules block shaping trims the whole text (shared templates/cli-rules.ts `shapeRulesText`; check whether `normalizeAgentRulesOverride` also trims it at write). The old provider path did the same. Trim leading newlines only, for overrides, keeping the default path byte-identical.
 
-### T449 · FNF[auth-form-prehydration-values] · values typed into the sign-in form before it hydrates are not submitted; a pre-hydration click looks live (+1)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T21:28Z · last: 2026-10-30T21:28Z
-From the T448 review (2026-10-30). PRE-EXISTING (identical before T448).
-
-1. Moderate: web components/auth-form.tsx ~:159,172,187 use controlled `value=` inputs and `handleSubmit` (~:86-104) posts React state, so text typed before hydration stays visible but is not submitted: with the scripts held back, a fill then a submit posts `{"email":"","password":""}` and the user sees "Validation failed" on a filled form (T448 evidence judge/slow-hydration-base.txt). Read the values with `new FormData(event.currentTarget)` at submit, or copy the DOM values into state on hydration. Browser autofill timing was not measured.
-2. Minor: a click on Sign in before hydration looks live but only re-renders the page (now by POST) and drops what was typed (~:197).
-
 ### T450 · FNF[install-ownership-of-runners] · the runtime-runner reaper removes runners this install's database does not know, volumes included
 
 status: open
@@ -898,7 +872,7 @@ From the T441 review (2026-10-30). PRE-EXISTING, minor. `isRunning` and `contain
 
 ### T452 · FNF[cli-login-banner-timers] · the token-submit Enter timer is untracked; the menu-advance timer is armed after cleanup (+1)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T22:59Z · last: 2026-10-30T22:59Z
 From the T438 review (2026-10-30). Minor. api routes/cli-login-banner.ts.
 
 1. PRE-EXISTING: the 150 ms `setTimeout` that sends Enter after a token paste (~:615-621) is not tracked, so it can write to a stream that has already ended; track it with the session's other timers and clear it in `cleanupSession`.
@@ -936,6 +910,9 @@ Where a route reads an optional body with `.json().catch(() => ({}))` or a try/c
 
 ## Done
 
+- T119 — the AGENTS.md rules block is the repository's: repositories.agent_rules_override (migration 0215), settings/agent-rules.md in the project-state record, a Tooling page card with its own save, and buildRepoCliRulesBlock for 07, 12, 01 and the api's upgrade-status — PR #940 (5b6467e9c) and the editor fix PR #947 (1989f1f2a), 2026-10-30; main CI green; browser-checked at 1280, 768 and 375; follow-ups T443, T444, T445, T446, T447
+- T449 — values typed or autofilled into the sign-in form (login, register, setup) before React attaches are what gets submitted: the inputs are uncontrolled and read with FormData before the first await — PR #946 (6d9f6daf3), 2026-10-30; main CI green; item 2 moved to T453 [design]; follow-ups T454, T364 item 22 note
+- T438 — the login frame of a device-code provider waits, within the one settle deadline, for its code and what ends it; an escape with intermediate bytes such as ESC ( B is stripped whole; the dead terminal oauth_prompt scanner is removed; cleanupSession clears antigravity's two resize timers; item 3 (a wrapped URL's last piece sharing its line with text) is left as is, since no rule tells it from prose without reopening T433's terminator rules and no measured banner prints it — PR #945 (02a25e357), 2026-10-30; main CI green after one rerun of the T364 item 23 flake; follow-ups T452, T439 note
 - T441 — a running editor or app runner is recreated only when docker inspect proves a mismatch (a failed inspect keeps it), the editor's debug lookup no longer fails a booted editor's ensure, and editors from before T431 are registered for the idle reaper — PR #944 (b4a901a37), 2026-10-30; main CI green; follow-ups T450, T451
 - T448 — the sign-in form (login, register, setup) submits by POST before React attaches its handler, so no field value reaches the URL (measured: urlencoded POST answered 200 with the page, multipart 409, never set encType) — PR #943 (28e5c840b), 2026-10-30; main CI green; follow-ups T449, T364 item 22
 - T429 — every hardened git argv refuses the file transport by default (protocol.file.allow=never; allowFileTransport the one opt-in, used by the host-folder refresh); the unused gitSetOriginUrl removed — PR #942 (b8025f92e), 2026-10-30; main CI green; follow-up T364 item 20, T387 cross-reference
