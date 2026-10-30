@@ -535,7 +535,7 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+18)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+19)
 
 status: open · was modular #211
 
@@ -558,6 +558,7 @@ status: open · was modular #211
 17. (T119 review, 2026-10-30) PRE-EXISTING, minor: worker scripts upgrade-claims-smoke.ts ~:382,387,392,781 find the conflict radio by its human label, because `conflictFieldId` (02-upgrade-apply.ts ~:402) is not exported; export it and key the smoke on the id. Item 16's upload-reaper timeout also showed in T119's full worker run.
 18. (T119 review, 2026-10-30) PRE-EXISTING, minor: the two-install smoke fixture's shared record names agents nobody wrote, so a fresh clone's plan offers 3 unrelated entries; make the fixture's record match what its installs wrote.
 19. (T401 review, 2026-10-30) PRE-EXISTING, minor: tests/e2e/helpers/auth.ts ~:46 `recordRegisteredUser` is module-private, so a user minted by `POST /admin/users` (as in forced-password.spec.ts) is unknown to the global teardown and the `users` fixture; a timed-out run leaks it until the CI database is dropped. Export it (or a registration helper for admin-minted users) and record such users.
+20. (T429 review, 2026-10-30) PRE-EXISTING, minor: nothing enforces that `allowFileTransport` is the one opt-in of the default `protocol.file.allow=never`: a caller's own later `-c protocol.file.allow=always`, or a `GIT_ALLOW_PROTOCOL` that lists `file` in a production source, lifts it silently (shared git-args.ts ~:130-132 passes the caller's argv verbatim; the env takes precedence, MEASURED). Production has none (only git-push.ts ~:147,155 set `http:https:ssh`). Pin it with a source-scan guard like git-exec-guard.test.ts.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -681,6 +682,8 @@ PRE-EXISTING, consequential. An upload keeps its whole .git (worker repo/clone.t
 Decide: sanitise .git/config at import (allow-list keys), or refuse archives that carry .git.
 
 1. Env-only levers (GIT_ALLOW_PROTOCOL, GIT_NO_LAZY_FETCH) reach only gitRun and gitExec.
+
+Cross-reference (T429, 2026-10-30): the default `protocol.file.allow=never` on every hardened argv now refuses a promisor remote's lazy fetch from a local path or `file://` URL (row `file-transport-promisor-lazy-fetch`); an http or ssh promisor, the shipped filter/merge/vcs keys and the env-only levers stay open here, and an env `GIT_ALLOW_PROTOCOL` overrides the flag.
 
 ### T389 · FNF[repo-loose-objects] · Haive's git no longer triggers auto-maintenance (#256), so busy repos accumulate loose objects
 
