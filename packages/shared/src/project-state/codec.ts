@@ -10,6 +10,13 @@ import {
   namesGitData,
 } from './names.js';
 import {
+  TEXT_SETTINGS,
+  hasConflictMarker,
+  rawTextProblem,
+  settingFileName,
+  settingNameOfFile,
+} from './raw-text.js';
+import {
   PROJECT_STATE_FORMAT,
   SET_SETTINGS,
   bundleSchema,
@@ -44,8 +51,6 @@ export type ProjectStateParse =
     }
   | { ok: false; reason: 'newer-format' | 'invalid'; problems: string[] };
 
-const CONFLICT_MARKER = /^(?:<{7}|>{7}|\|{7})(?: |$)|^={7}$/m;
-
 const quote = (value: string): string => JSON.stringify(value);
 
 /** What no record may hold, written or read. */
@@ -72,7 +77,7 @@ export function projectStateProblems(record: ProjectStateRecord): string[] {
     }
   }
   for (const [name, value] of Object.entries(record.settings)) {
-    const rel = `settings/${name}.json`;
+    const rel = settingFileName(name);
     const found = value === null || value === undefined ? null : notJson(value);
     if (!isRecordName(name)) {
       problems.push(`settings: ${quote(name)} is not a record name`);
@@ -80,6 +85,9 @@ export function projectStateProblems(record: ProjectStateRecord): string[] {
       problems.push(`${rel}: holds no value`);
     } else if (found) {
       problems.push(notJsonProblem(rel, found));
+    } else if (TEXT_SETTINGS.has(name)) {
+      const problem = rawTextProblem(value);
+      if (problem !== null) problems.push(`${rel}: ${problem}`);
     } else if (SET_SETTINGS.has(name) && !isStringList(value)) {
       problems.push(`${rel}: is not a list of strings`);
     }
@@ -245,7 +253,11 @@ export function renderProjectState(record: ProjectStateRecord): Map<string, stri
   if (r.render) files.set('project/render.json', canonicalJson(r.render));
   for (const provider of r.cli) files.set(`cli/${provider}.json`, canonicalJson({ provider }));
   for (const [name, value] of Object.entries(r.settings)) {
-    files.set(`settings/${name}.json`, canonicalJson(value));
+    // A text setting is a string by now: the problems above refuse anything else.
+    files.set(
+      settingFileName(name),
+      TEXT_SETTINGS.has(name) ? (value as string) : canonicalJson(value),
+    );
   }
   for (const claim of r.claims) files.set(claimFileName(claim.path), canonicalJson(claim));
   for (const bundle of r.bundles) files.set(bundleFileName(bundle.source), canonicalJson(bundle));
@@ -259,8 +271,10 @@ type FileKind =
 function kindOf(rel: string): FileKind | null {
   if (rel === 'project/environment.json') return { type: 'environment' };
   if (rel === 'project/render.json') return { type: 'render' };
-  const named = /^(cli|settings)\/([^/]+)\.json$/.exec(rel);
-  if (named) return { type: named[1] as 'cli' | 'settings', name: named[2]! };
+  const setting = settingNameOfFile(rel);
+  if (setting !== null) return { type: 'settings', name: setting };
+  const cli = /^cli\/([^/]+)\.json$/.exec(rel);
+  if (cli) return { type: 'cli', name: cli[1]! };
   if (/^artifacts\/[^/]+\.json$/.test(rel)) return { type: 'claim' };
   if (/^bundles\/[^/]+\.json$/.test(rel)) return { type: 'bundle' };
   return null;
@@ -284,7 +298,7 @@ function issues(rel: string, error: z.ZodError): string[] {
  *  no kind claims are left out and listed, so a newer release's additions are not refused. */
 export function parseProjectState(files: ReadonlyMap<string, string>): ProjectStateParse {
   const marked = [...files]
-    .filter(([, text]) => CONFLICT_MARKER.test(text))
+    .filter(([, text]) => hasConflictMarker(text))
     .map(([rel]) => `${rel}: holds merge conflict markers`)
     .sort();
   if (marked.length > 0) return { ok: false, reason: 'invalid', problems: marked };
@@ -315,6 +329,11 @@ export function parseProjectState(files: ReadonlyMap<string, string>): ProjectSt
     const kind = kindOf(rel);
     if (kind === null) {
       ignored.push(rel);
+      continue;
+    }
+    if (kind.type === 'settings' && TEXT_SETTINGS.has(kind.name)) {
+      // The file is the value: no JSON in it, and the problems below judge the text.
+      record.settings[kind.name] = files.get(rel)!;
       continue;
     }
     const value = readJson(files.get(rel)!);

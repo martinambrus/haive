@@ -1,5 +1,6 @@
 import { sameValue } from './canonical.js';
-import { isPortableSettingName } from './settings.js';
+import { settingNameOfFile } from './raw-text.js';
+import { isPortableSettingName, type PortableSettingName } from './settings.js';
 import { PLAN_MIRROR_ASKED_FIELDS } from '../plan/merge-mirror.js';
 
 /** The unit of the whole render file; a key of it is `<RENDER_UNIT>#<key>`. */
@@ -24,8 +25,8 @@ export const isEnvironmentUnit = (unit: string): boolean =>
 
 /** The unit of one portable setting: its file in the record. */
 export const isSettingUnit = (unit: string): boolean => {
-  const named = /^settings\/([^/]+)\.json$/.exec(unit);
-  return named !== null && isPortableSettingName(named[1]!);
+  const name = settingNameOfFile(unit);
+  return name !== null && isPortableSettingName(name);
 };
 
 /** The unit of one plan question: a field of one node, `plan/<nodeId>#<field>`. */
@@ -70,7 +71,7 @@ export const isRtkQuestion = (row: { unit: string; base: unknown; local: unknown
 
 /** A conflict side as the `project_state_conflicts` columns hold it: `{ v }`, so a JSON null is a
  *  value, and NULL for a side that has no such unit. */
-const SETTING_LABELS: Readonly<Record<string, string>> = {
+const SETTING_LABELS = {
   'scope-exclude-globs': 'Paths left out of the project scope',
   'rtk-enabled': 'RTK command compression',
   'rtk-version': 'RTK version',
@@ -78,7 +79,8 @@ const SETTING_LABELS: Readonly<Record<string, string>> = {
   'lsp-server-versions': 'Language server versions',
   'chrome-devtools-mcp-version': 'Chrome DevTools MCP version',
   'review-dimensions': 'Review dimensions',
-};
+  'agent-rules': 'AGENTS.md rules',
+} as const satisfies Record<PortableSettingName, string>;
 
 const ENVIRONMENT_KEY_LABELS: Readonly<Record<string, string>> = {
   envDetectData: 'Detected environment',
@@ -97,7 +99,7 @@ export const CONFLICT_KEY_LABELS: Readonly<Record<string, string>> = {
 export function conflictUnitLabel(unit: string, claimPath?: string | null): string {
   const plan = parsePlanConflictUnit(unit);
   if (plan && isPlanUnit(unit)) return `Plan: ${plan.field} of a node`;
-  if (isSettingUnit(unit)) return SETTING_LABELS[unit.slice('settings/'.length, -'.json'.length)]!;
+  if (isSettingUnit(unit)) return SETTING_LABELS[settingNameOfFile(unit) as PortableSettingName];
   if (unit === ENVIRONMENT_UNIT) return 'The project environment';
   if (unit.startsWith(`${ENVIRONMENT_UNIT}#`)) {
     const key = unit.slice(ENVIRONMENT_UNIT.length + 1);

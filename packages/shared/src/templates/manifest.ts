@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { normalizeContent } from './normalize-content.js';
 
 /**
  * Categories of Haive-managed template output written by onboarding. Each
@@ -104,20 +105,8 @@ export function bundleAgentTemplateHash(irContentHash: string): string {
   return sha256Hex(`${irContentHash}\nhaive-agent-renderer:${AGENT_RENDERER_VERSION}`);
 }
 
-/** Canonicalize content for hashing/comparison. Normalizes CRLF to LF, strips
- *  trailing whitespace per line, collapses runs of 3+ blank lines to 2, and
- *  ensures exactly one trailing newline. Mirrors the semantics the existing
- *  file writers expect so disk/hash comparisons stay stable across platforms. */
-export function normalizeContent(input: string): string {
-  const unixified = input.replace(/\r\n/g, '\n');
-  const trimmedLines = unixified
-    .split('\n')
-    .map((line) => line.replace(/[ \t]+$/, ''))
-    .join('\n');
-  const collapsed = trimmedLines.replace(/\n{3,}/g, '\n\n');
-  const trimmed = collapsed.replace(/\n+$/, '');
-  return `${trimmed}\n`;
-}
+// A leaf of its own so that modules a browser bundle reads can use it without this file's node:crypto.
+export { normalizeContent } from './normalize-content.js';
 
 export function hashRenderings(renderings: TemplateRendering[]): string {
   const parts = renderings
