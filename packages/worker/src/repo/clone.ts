@@ -93,22 +93,6 @@ export function assertCloneUrl(
   if (!isAllowedGitRemoteUrl(url)) throw new OriginUrlError(url, 'fetch', context);
 }
 
-/** Point origin at a (tokenless) URL. Used after a credentialed clone so the
- *  embedded token does not persist in .git/config. */
-export async function gitSetOriginUrl(dest: string, url: string): Promise<void> {
-  const result = await boundedGitRun(dest, [
-    'remote',
-    'set-url',
-    'origin',
-    redactGitUrl(url, true),
-  ]);
-  if (result.code !== 0) {
-    throw new Error(
-      `git remote set-url failed (exit ${result.code}): ${scrubSecret(result.stderr, null).trim()}`,
-    );
-  }
-}
-
 const MIRROR_READ_CAP = 1024 * 1024;
 
 /** Restore onboarding-derived DB state from a repo's committed `.haive-data/`
