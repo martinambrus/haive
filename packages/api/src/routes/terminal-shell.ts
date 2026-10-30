@@ -604,6 +604,11 @@ function sendJson(ws: WebSocket, frame: Record<string, unknown>): void {
   }
 }
 
+/** On api boot, zero every terminal session refcount: the sockets that held them died with the
+ *  previous process. A session nobody held keeps its lastSeenAt, so a genuinely idle one still
+ *  reaps on schedule. One that was held gets lastSeenAt = now: its tab is about to reconnect, and
+ *  the time its last socket attached would read as idle for hours, so the worker's reaper could
+ *  remove its container in the first sweep. Mirrors the editor registry's `resetStaleIdeRefcounts`. */
 export async function resetStaleRefcounts(redis: Redis = getRedis()): Promise<void> {
   let cursor = '0';
   let cleared = 0;
@@ -619,7 +624,10 @@ export async function resetStaleRefcounts(redis: Redis = getRedis()): Promise<vo
     for (const key of keys) {
       const current = await redis.hget(key, 'refcount').catch(() => null);
       if (current && current !== '0') {
-        await redis.hset(key, 'refcount', '0').catch(() => undefined);
+        const held = Number.parseInt(current, 10) > 0;
+        await redis
+          .hset(key, 'refcount', '0', ...(held ? ['lastSeenAt', String(Date.now())] : []))
+          .catch(() => undefined);
         cleared += 1;
       }
     }

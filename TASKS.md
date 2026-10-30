@@ -535,7 +535,7 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+15)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+18)
 
 status: open · was modular #211
 
@@ -555,6 +555,9 @@ status: open · was modular #211
 14. (T363 review) PRE-EXISTING, consequential: scripts/test/ci-gated-list.test.mjs ~:12 recognises a Postgres-gated test only by `pathname.startsWith(` or `CREATE|DROP DATABASE`, so a gated file with another guard idiom is invisible to the "every gated file has a GATED row" check and skips green in CI for ever (T363's DB file was the live case, fixed there). Fix: detect by `skipIf` plus a `*_URL` env var.
 15. (T363 review) PRE-EXISTING, minor: no e2e spec creates a task with attachments or presses Start on a created task (the only Start click is Run app, tests/e2e/tasks/new-task-type.spec.ts ~:232), so the attachments confirm flow is checked by hand only.
 16. (T431 review, 2026-10-30) PRE-EXISTING, moderate: worker test/upload-reaper.test.ts ~:1412 (T323 "keeps remembered failures at capacity across repeated passes", 1001 sequential orphan files) times out at the 20 s test timeout in a full worker-package run, and its leftover fails the next test (~:1444, expected 2, got 3). Red at base 0a7b8d405 in 3 of 3 local full runs; passes alone (238/238); CI's unit job is green. Give it its own timeout or a smaller fixture, and isolate its state from the next test.
+17. (T119 review, 2026-10-30) PRE-EXISTING, minor: worker scripts upgrade-claims-smoke.ts ~:382,387,392,781 find the conflict radio by its human label, because `conflictFieldId` (02-upgrade-apply.ts ~:402) is not exported; export it and key the smoke on the id. Item 16's upload-reaper timeout also showed in T119's full worker run.
+18. (T119 review, 2026-10-30) PRE-EXISTING, minor: the two-install smoke fixture's shared record names agents nobody wrote, so a fresh clone's plan offers 3 unrelated entries; make the fixture's record match what its installs wrote.
+19. (T401 review, 2026-10-30) PRE-EXISTING, minor: tests/e2e/helpers/auth.ts ~:46 `recordRegisteredUser` is module-private, so a user minted by `POST /admin/users` (as in forced-password.spec.ts) is unknown to the global teardown and the `users` fixture; a timed-out run leaks it until the CI database is dropped. Export it (or a registration helper for admin-minted users) and record such users.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -794,7 +797,7 @@ From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. w
 
 ### T429 · FNF[file-transport-default] · refuse the file transport on every git call by default, not by verb
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T19:58Z · last: 2026-10-30T19:58Z
 From the T417 review (2026-10-25), follow-up to T417 item 6. Minor, hardening. Verb-based hardening (shared git-args.ts) still misses `remote show|prune|set-head`, `remote add -f`, `submodule update|add`, `archive --remote` and a promisor lazy fetch; none is called today. Production needs the file transport only for the host-folder refresh (worker repo/refresh.ts ~:96-102, which opts in), so `protocol.file.allow=never` in `GIT_CONFIG_SAFETY_ARGS` with `allowFileTransport` as the one opt-in would cover every verb, future ones included. Check every test that seeds with hardened git. Also: `gitSetOriginUrl` (worker repo/clone.ts ~:121-138) is exported, called only by a test, and uses the single-URL `remote set-url` form T417 replaced (dead code; remove or route through `ensureOrigin`).
 
 ### T431 · FNF[ide-container-lifecycle] · a running editor container is reused whatever its launch flags or image; a task editor that never got a socket is never idle-reaped (+1)
@@ -864,6 +867,43 @@ Cross-reference (not appended): T371 [design] FNF[docker-spawn-dedup]; T431's `l
 
 status: open
 From the T431 review (2026-10-30). PRE-EXISTING, minor, consequence unmeasured. worker sandbox/app-runner.ts ~:326-333 reuses a running app runner when its workspace subpath matches and compares nothing else, so the image tag, resource caps, publish args and debug env chosen at create never reach a running runner (the class T431 fixed for the editor). Unlike an editor, recreating a runner stops the running app, so decide when a changed launch may replace it (idle only, on the next explicit start, or never with a notice) before stamping a spec label as T431 did (`haive.ide.spec`).
+
+### T443 · FNF[rules-override-retry] [design] · a 02 retry after the record write moved the repository rules override refuses and the region stays at the old override until the next upgrade
+
+status: open
+From the T119 review (2026-10-30). Introduced by T119, fails closed. worker onboarding-upgrade 02-upgrade-apply.ts ~:924-932 refuses the plan (`PLAN_NO_LONGER_HOLDS`) when `repositories.agent_rules_override` differs from the value 01 stamped; it has no counterpart of the render-context `ownRecordColumn` exemption (~:915-921). The writer-embedded import at 02's own record write (worker project-state write.ts ~:818) can import another install's override after 02 wrote the region, so the committed AGENTS.md block keeps the old override until the next upgrade heals it as `clean_update`, and a 02 retry needs a re-plan. Decide: defer the settings import while an upgrade is live, re-render the region on retry, or accept and document (the docs record it as a residual).
+
+### T444 · FNF[agent-rules-size-cap] [design] · the repository rules override may be 64 KiB, but codex reads only the first 32 KiB of AGENTS.md
+
+status: open
+From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `MAX_AGENT_RULES_BYTES` is 64 KiB, while codex reads only the first 32 KiB of AGENTS.md (the reason AGENTS.md itself is kept under 32 KiB), so a large override silently truncates what codex sees, and the rest of the file after the block with it. Decide: a 24-32 KiB cap, or a size hint on the Tooling editor.
+
+### T445 · FNF[first-import-visibility] · a first sync silently replaces a locally typed setting; a refused checkout value is only logged (+2)
+
+status: open
+From the T119 review (2026-10-30). PRE-EXISTING, minor. Cross-reference: T317 [design] (an RTK choice loses to the first record import).
+
+1. shared project-state merge.ts ~:29,46,58 computes `overwritten` (a local value an incoming one replaced) and nothing outside merge.ts reads it, so a first sync with no base replaces a locally typed value of every portable setting without a word. Surface it in the sync's answers or log it at warn with the unit names.
+2. worker project-state sync.ts ~:948: a checkout value that is refused (over its cap, holding a region marker) is only logged; the repository page never says the committed value was ignored.
+3. Nits: the doc comment about `{ v }` sides sits above `SETTING_LABELS` (shared project-state conflicts.ts ~:72) instead of above what it describes; the node-free guard test checks import specifiers only, so `Buffer.byteLength` in settings.ts ~:127 and limits.ts ~:23 goes unchecked (harmless unless the web calls them).
+
+### T446 · FNF[bundle-descriptor-removal] [verify-first] · a custom-bundle descriptor committed by one install may be deleted by another install's sweep
+
+status: open
+From the T119 review (2026-10-30). PRE-EXISTING, consequential if real, unverified. In the two-install smoke, install A's `custom_bundles` row (worker scripts two-install-smoke.ts ~:648) is followed by install B's 'B keeps its agents' commit (~:2478) that deletes the descriptor A committed, because B's database holds no such bundle. B's checkout then carries a tracked deletion it can commit and push, removing a teammate's bundle. Verify first whether that is intended (descriptors are per-install) or a defect; if a defect, B's sweep must leave descriptors it did not write.
+
+### T447 · FNF[tooling-api-edges] · PATCH tooling answers 500 for a JSON null body and 200 for a malformed one; refresh-tree reads the whole row (+1)
+
+status: open
+From the T119 review (2026-10-30). PRE-EXISTING, minor.
+
+1. api routes/tooling-upgrades.ts ~:743: PATCH `/repositories/:id/tooling` answers 500 for a JSON `null` body, and a malformed body is a silent 200 no-op (~:714). Answer 400 for both.
+2. api routes/repos.ts ~:3334: the `refresh-tree` handler reads the whole repository row, including the up-to-64 KiB `agent_rules_override` it never uses; select the columns it needs.
+
+### T448 · FNF[auth-form-prehydration-submit] · a sign-in submitted before the page hydrates sends the password in the URL
+
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T20:16Z · last: 2026-10-30T20:16Z
+From the T401 review (2026-10-30). PRE-EXISTING, moderate (security). web components/auth-form.tsx ~:144 renders `<form onSubmit={handleSubmit}>` with no `method`, so a submit before React attaches the handler is a native GET: with JavaScript disabled the URL became `/login?email=...&password=...` (verified by the T401 driver), which puts the password in browser history, proxy and access logs. The same component serves login, register and setup. It is also why every UI-login e2e spec can race hydration. Fix direction: `method="post"` (check what Next answers to a POST on a page route first) or keep the submit disabled until hydrated; add a control that a pre-hydration submit never puts the password in the URL.
 
 ## Done
 

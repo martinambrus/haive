@@ -310,7 +310,9 @@ fallback when the editor is unavailable).
   which VS Code layers on top.
 - Lifecycle: lazy-started when you open the tab; never reaped while the tab is open;
   gracefully stopped 30 minutes after it closes. Unsaved (hot-exit) buffers live on
-  a per-task volume that survives the reap, so reopening restores them.
+  a per-task volume that survives the reap, so reopening restores them. An editor
+  started with an older image or flags is replaced the first time it is opened after
+  being idle for those 30 minutes.
 - Image: pinned `codercom/code-server` (see `CODE_SERVER_IMAGE`). The first open
   pulls it (the tab shows a downloading state); optionally pre-pull with
   `docker pull codercom/code-server:<tag>` to avoid that wait.

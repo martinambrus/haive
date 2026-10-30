@@ -6,6 +6,7 @@ import { and, eq } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
   CODE_SERVER_IMAGE,
+  IDE_IDLE_GRACE_MS,
   IDE_INTERNAL_PORT,
   IDE_RUNNER_LABEL,
   RUNNER_SUBPATH_LABEL,
@@ -14,6 +15,7 @@ import {
   ddevRunnerName,
   ideExtensionsVolumeName,
   ideRunnerName,
+  ideSessionKey,
   ideUserDataVolumeName,
   logger,
   repoIdeSessionId,
@@ -27,7 +29,9 @@ import {
 import { resolveDdevWorkspace } from '../step-engine/steps/workflow/_task-meta.js';
 import { buildMountArgs, defaultDockerRunner, type DockerVolumeMount } from './docker-runner.js';
 import { repoGitDataBoundary } from '../queues/cli-exec/gitfile-mask.js';
+import { getRedis } from '../redis.js';
 import { runnerSubpathVerdict } from './app-runner.js';
+import { ideSessionHeld } from './ide-session.js';
 import { ensureSandboxCoreImage } from './sandbox-core-image.js';
 import { isReadOnlyLocalRepo } from '@haive/shared/schemas';
 
@@ -52,6 +56,28 @@ const IDE_UID = '1000:1000';
 // coreutils), exactly as task-auth-volume does.
 const HELPER_IMAGE = process.env.SANDBOX_IMAGE ?? SANDBOX_CORE_IMAGE;
 const HELPER_TIMEOUT_MS = 60_000;
+// The bound `startIdeRunner`'s `docker run` already gives a first boot, which pulls the image.
+const IDE_IMAGE_PULL_TIMEOUT_MS = 120_000;
+// What follows the image in `docker run`. With the image it is the launch spec stamped on the
+// container: an editor started with another spec is replaced once it is idle.
+const IDE_SERVER_ARGS = [
+  '--auth',
+  'none',
+  '--bind-addr',
+  `0.0.0.0:${IDE_INTERNAL_PORT}`,
+  '--extensions-dir',
+  '/ext',
+  '--user-data-dir',
+  '/udata',
+  '--disable-telemetry',
+  '--disable-update-check',
+  // Preview apps run in their runtime runner. Never expose arbitrary IDE
+  // container ports as active content on the authenticated api origin.
+  '--disable-proxy',
+  '/workspace',
+];
+const IDE_LAUNCH_SPEC_LABEL = 'haive.ide.spec';
+const IDE_LAUNCH_SPEC = [CODE_SERVER_IMAGE, ...IDE_SERVER_ARGS].join(' ');
 
 export interface IdeRunnerHandle {
   /** The IDE container name. */
@@ -75,6 +101,42 @@ async function isRunning(name: string): Promise<boolean> {
     return stdout.trim() === 'true';
   } catch {
     return false;
+  }
+}
+
+// A container from before the label existed reads as empty, and so as stale; one docker cannot
+// inspect is kept rather than called stale.
+async function launchIsStale(name: string): Promise<boolean> {
+  try {
+    const { stdout } = await exec(
+      'docker',
+      ['inspect', '-f', `{{index .Config.Labels "${IDE_LAUNCH_SPEC_LABEL}"}}`, name],
+      { timeout: 15_000 },
+    );
+    return stdout.trim() !== IDE_LAUNCH_SPEC;
+  } catch {
+    return false;
+  }
+}
+
+// The image a replacement launches: on the host already, else pulled within a bound. Throws when it
+// cannot be had. A failed inspect, whatever its cause, falls through to the pull, which decides.
+async function ensureCodeServerImage(): Promise<void> {
+  try {
+    await exec('docker', ['image', 'inspect', CODE_SERVER_IMAGE], { timeout: 15_000 });
+  } catch {
+    await exec('docker', ['pull', '--quiet', CODE_SERVER_IMAGE], {
+      timeout: IDE_IMAGE_PULL_TIMEOUT_MS,
+    });
+  }
+}
+
+// A registry that cannot be read counts as held: nothing is replaced on a guess.
+async function editorHeld(sessionId: string): Promise<boolean> {
+  try {
+    return ideSessionHeld(await getRedis().hgetall(ideSessionKey(sessionId)), IDE_IDLE_GRACE_MS);
+  } catch {
+    return true;
   }
 }
 
@@ -211,6 +273,8 @@ export async function startIdeRunner(params: {
       `${IDE_RUNNER_LABEL}=1`,
       '--label',
       `${RUNNER_SUBPATH_LABEL}=${params.workspaceSubpath}`,
+      '--label',
+      `${IDE_LAUNCH_SPEC_LABEL}=${IDE_LAUNCH_SPEC}`,
       // Built by `buildMountArgs`, not spelled out here. This is the THIRD site to need
       // `volume-nocopy` on a subpath mount and the third to have been written without it — the
       // sandbox had it, the terminal did not, and neither did this. Docker seeds an empty subpath
@@ -227,20 +291,7 @@ export async function startIdeRunner(params: {
       '-v',
       `${params.udataVolume}:/udata`,
       CODE_SERVER_IMAGE,
-      '--auth',
-      'none',
-      '--bind-addr',
-      `0.0.0.0:${IDE_INTERNAL_PORT}`,
-      '--extensions-dir',
-      '/ext',
-      '--user-data-dir',
-      '/udata',
-      '--disable-telemetry',
-      '--disable-update-check',
-      // Preview apps run in their runtime runner. Never expose arbitrary IDE
-      // container ports as active content on the authenticated api origin.
-      '--disable-proxy',
-      '/workspace',
+      ...IDE_SERVER_ARGS,
     ],
     { timeout: 120_000 },
   );
@@ -357,19 +408,46 @@ async function ensureIdeRunnerStartedInner(
   if (!workspaceSubpath) return null;
 
   const name = ideRunnerName(taskId);
+  // An editor replaced for its launch is removed by startIdeRunner, right before the new one is
+  // launched: a failure while the volumes and mounts are prepared then leaves it running.
+  let replacingStale = false;
   if (await isRunning(name)) {
     // The editor mounts ONE workspace, and the resolved subpath can change under it (a Retry that
     // clears 01-worktree-setup's output re-resolves to the repository root). Reuse only while the
     // running container is the one for this workspace; its `.git` mount is that workspace's too.
     if ((await runnerSubpathVerdict(name, workspaceSubpath)) === 'match') {
-      return { container: name };
+      if (!(await launchIsStale(name)) || (await editorHeld(taskId))) return { container: name };
+      // Replacing removes this editor before the new one is launched, so make sure the image is
+      // there first: a host that cannot pull (offline after a CODE_SERVER_IMAGE bump) keeps the
+      // editor it has. Only this path may keep it: one holding another workspace is recreated
+      // whatever the image, and a fresh launch is left to `docker run`, which pulls.
+      try {
+        await ensureCodeServerImage();
+      } catch (err) {
+        log.warn(
+          {
+            taskId,
+            container: name,
+            image: CODE_SERVER_IMAGE,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'ide runner was launched with another image or flags and is idle, but the image to replace it with cannot be had; keeping it',
+        );
+        return { container: name };
+      }
+      log.info(
+        { taskId, container: name },
+        'ide runner was launched with another image or flags and is idle; recreating',
+      );
+      replacingStale = true;
+    } else {
+      log.info(
+        { taskId, container: name, workspaceSubpath },
+        'ide runner holds another workspace; recreating',
+      );
     }
-    log.info(
-      { taskId, container: name, workspaceSubpath },
-      'ide runner holds another workspace; recreating',
-    );
   }
-  if (await containerExists(name)) {
+  if (!replacingStale && (await containerExists(name))) {
     await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
   }
 
@@ -390,6 +468,10 @@ async function ensureIdeRunnerStartedInner(
       { hasWorktree: false, hasRepo: repositoryId != null || task?.repositoryId != null },
     )
   ).mounts;
+  // Registered before the container exists: an entry an earlier container left idle would let the
+  // idle reaper stop this one while it boots, and a boot that fails part way would leave a container
+  // the reaper never hears of.
+  await getRedis().hset(ideSessionKey(taskId), 'lastSeenAt', String(Date.now()));
   const handle = await startIdeRunner({
     taskId,
     repositoryId,
