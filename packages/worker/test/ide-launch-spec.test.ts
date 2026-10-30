@@ -26,6 +26,7 @@ const h = vi.hoisted(() => {
     registry: new Map<string, Record<string, string>>(),
     calls: [] as string[],
     runs: [] as string[][],
+    execs: [] as string[][],
     pullTimeouts: [] as (number | undefined)[],
     registryRejects: false,
     runFails: false,
@@ -86,6 +87,8 @@ const h = vi.hoisted(() => {
       if (state.runFails) throw new Error('docker run timed out');
       return out('container-id\n');
     }
+    // A readiness probe or an install: kept apart from `calls`, which `mutations()` reads.
+    if (verb === 'exec') state.execs.push(args);
     return out('{"status":"alive"}');
   };
   const redis = {
@@ -133,6 +136,7 @@ import { ensureIdeRunnerStarted, ensureRepoIdeRunnerStarted } from '../src/sandb
 const USER = '00000000-0000-4000-8000-0000000000a1';
 const REPO = '00000000-0000-4000-8000-0000000000b1';
 const TASK = '00000000-0000-4000-8000-0000000000c1';
+const DEBUG_TASK = '00000001-0000-4000-8000-0000000000c2';
 const SUBPATH = `${USER}/${REPO}`;
 const SPEC_LABEL = 'haive.ide.spec';
 const OLDER_IMAGE = 'codercom/code-server:4.0.0';
@@ -150,6 +154,13 @@ fake.insert(schema.repositories, {
   storagePath: `/var/lib/haive/repos/${SUBPATH}`,
 });
 fake.insert(schema.tasks, { id: TASK, userId: USER, repositoryId: REPO, type: 'workflow' });
+fake.insert(schema.tasks, {
+  id: DEBUG_TASK,
+  userId: USER,
+  repositoryId: REPO,
+  type: 'workflow',
+  debugMode: true,
+});
 const db = fake.db as unknown as Database;
 
 interface Editor {
@@ -184,6 +195,7 @@ beforeEach(() => {
   h.state.registry.clear();
   h.state.calls.length = 0;
   h.state.runs.length = 0;
+  h.state.execs.length = 0;
   h.state.pullTimeouts.length = 0;
   h.state.registryRejects = false;
   h.state.runFails = false;
@@ -404,6 +416,95 @@ describe('a running editor whose launch spec cannot be read', () => {
     expect(await ensure()).toEqual({ container: ideRunnerName(session) });
 
     expect(mutations()).toEqual([]);
+  });
+});
+
+// What docker cannot be asked is neither another workspace nor a stale launch, so the editor is
+// kept whatever its registry says.
+describe('a running editor whose workspace label cannot be read', () => {
+  const { session, ensure } = repositoryEditor;
+  const key = ideSessionKey(session);
+  const name = ideRunnerName(session);
+
+  describe.each([
+    ['the current spec', () => ({ [SPEC_LABEL]: SPEC })],
+    ['no spec label', () => ({})],
+  ])('launched with %s', (_launch, labels) => {
+    it.each([...idleRegistries, ...heldRegistries])(
+      'is kept and returned: %s',
+      async (_registry, arrange) => {
+        const launched = labels();
+        seed(repositoryEditor, launched);
+        arrange(key);
+        h.state.unreadableLabel = RUNNER_SUBPATH_LABEL;
+
+        expect(await ensure()).toEqual({ container: name });
+
+        expect(mutations()).toEqual([]);
+        expect(h.state.containers.get(name)?.labels).toEqual({
+          [RUNNER_SUBPATH_LABEL]: SUBPATH,
+          ...launched,
+        });
+      },
+    );
+  });
+});
+
+describe('a running editor whose workspace label is empty', () => {
+  it('is recreated: a container from before the label existed mounts the whole volume', async () => {
+    const { session, ensure } = repositoryEditor;
+    const key = ideSessionKey(session);
+    const name = ideRunnerName(session);
+    seed(repositoryEditor, { [SPEC_LABEL]: SPEC, [RUNNER_SUBPATH_LABEL]: '' });
+
+    expect(await ensure()).toEqual({ container: name });
+
+    expect(mutations()).toEqual([`rm ${name}`, `hset ${key}`, `run ${name}`]);
+  });
+});
+
+/** `db`, except that the task lookup reading the debug flag fails. Told apart by the columns it asks
+ *  for: every other lookup the ensure makes is `db`'s own. */
+const dbFailingDebugLookup = (): Database => {
+  const { tasks } = fake.db.query;
+  return {
+    ...fake.db,
+    query: {
+      ...fake.db.query,
+      tasks: {
+        ...tasks,
+        findFirst: (opts?: { columns?: { debugMode?: boolean } }) =>
+          opts?.columns?.debugMode === true
+            ? Promise.reject(new Error('connection terminated'))
+            : tasks.findFirst(opts),
+      },
+    },
+  } as unknown as Database;
+};
+const installs = () => h.state.execs.filter((argv) => argv.includes('--install-extension'));
+
+// The debug setup runs once the editor is up, so a database error in it must not fail the ensure.
+describe('a task editor whose debug flag cannot be looked up', () => {
+  it('is up and returned, without the debug setup', async () => {
+    const { session } = taskEditor;
+    const name = ideRunnerName(session);
+    const ensured = ensureIdeRunnerStarted(dbFailingDebugLookup(), session, USER, '{}');
+
+    await expect(ensured).resolves.toEqual({ container: name });
+
+    expect(h.state.containers.has(name)).toBe(true);
+    expect(installs()).toEqual([]);
+  });
+});
+
+describe('a debug-mode task editor', () => {
+  it('has the PHP debugger installed in it', async () => {
+    const name = ideRunnerName(DEBUG_TASK);
+
+    expect(await ensureIdeRunnerStarted(db, DEBUG_TASK, USER, '{}')).toEqual({ container: name });
+
+    expect(installs()).toHaveLength(1);
+    expect(installs()[0]![1]).toBe(name);
   });
 });
 

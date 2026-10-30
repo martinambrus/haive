@@ -38,6 +38,7 @@ vi.mock('../src/redis.js', () => ({ getRedis: () => h.redis, getBullRedis: vi.fn
 vi.mock('../src/sandbox/ide-runner.js', () => ({
   ensureIdeRunnerStarted: h.runner,
   ensureRepoIdeRunnerStarted: vi.fn(),
+  listIdeRunnerSessions: async () => [],
   stopIdeRunner: h.stop,
 }));
 vi.mock('../src/sandbox/ide-settings.js', () => ({ resolveIdeSettingsJson: h.settings }));

@@ -323,10 +323,16 @@ async function ensureAppRunnerStartedInner(
 ): Promise<AppRunnerHandle> {
   const name = appRunnerName(taskId);
   if (await isRunning(name)) {
-    // A runner mounts one subpath, so reuse is only safe while that is the subpath asked for.
-    if ((await runnerSubpathVerdict(name, repoSubpath)) === 'match') {
-      return { container: name, projectDir: `/repos/${repoSubpath}` };
+    // A runner mounts one subpath, so reuse is only safe while that is the subpath asked for. A
+    // label docker could not be asked for is not another one: recreating would stop a running app.
+    const verdict = await runnerSubpathVerdict(name, repoSubpath);
+    if (verdict === 'absent') {
+      log.warn(
+        { taskId, container: name, repoSubpath },
+        'app runner subpath could not be read; keeping it',
+      );
     }
+    if (verdict !== 'other') return { container: name, projectDir: `/repos/${repoSubpath}` };
     log.info(
       { taskId, container: name, repoSubpath },
       'app runner mounts another subpath; recreating',
