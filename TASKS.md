@@ -898,7 +898,7 @@ From the T441 review (2026-10-30). PRE-EXISTING, minor. `isRunning` and `contain
 
 ### T452 · FNF[cli-login-banner-timers] · the token-submit Enter timer is untracked; the menu-advance timer is armed after cleanup (+1)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T22:59Z · last: 2026-10-30T22:59Z
 From the T438 review (2026-10-30). Minor. api routes/cli-login-banner.ts.
 
 1. PRE-EXISTING: the 150 ms `setTimeout` that sends Enter after a token paste (~:615-621) is not tracked, so it can write to a stream that has already ended; track it with the session's other timers and clear it in `cleanupSession`.
