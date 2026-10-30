@@ -886,11 +886,6 @@ From the T119 review (2026-10-30). PRE-EXISTING, minor.
 2. api routes/repos.ts ~:3334: the `refresh-tree` handler reads the whole repository row, including the up-to-64 KiB `agent_rules_override` it never uses; select the columns it needs.
 3. (T119 fix review, 2026-10-30) Minor: an override that opens with an indented line (an indented code block) loses that first line's indent, because the rules block shaping trims the whole text (shared templates/cli-rules.ts `shapeRulesText`; check whether `normalizeAgentRulesOverride` also trims it at write). The old provider path did the same. Trim leading newlines only, for overrides, keeping the default path byte-identical.
 
-### T448 · FNF[auth-form-prehydration-submit] · a sign-in submitted before the page hydrates sends the password in the URL
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T20:16Z · last: 2026-10-30T20:16Z
-From the T401 review (2026-10-30). PRE-EXISTING, moderate (security). web components/auth-form.tsx ~:144 renders `<form onSubmit={handleSubmit}>` with no `method`, so a submit before React attaches the handler is a native GET: with JavaScript disabled the URL became `/login?email=...&password=...` (verified by the T401 driver), which puts the password in browser history, proxy and access logs. The same component serves login, register and setup. It is also why every UI-login e2e spec can race hydration. Fix direction: `method="post"` (check what Next answers to a POST on a page route first) or keep the submit disabled until hydrated; add a control that a pre-hydration submit never puts the password in the URL.
-
 ### T449 · FNF[auth-form-prehydration-values] · values typed into the sign-in form before it hydrates are not submitted; a pre-hydration click looks live (+1)
 
 status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T21:28Z · last: 2026-10-30T21:28Z
@@ -911,6 +906,7 @@ From the T441 review (2026-10-30). PRE-EXISTING, minor. `isRunning` and `contain
 
 ## Done
 
+- T448 — the sign-in form (login, register, setup) submits by POST before React attaches its handler, so no field value reaches the URL (measured: urlencoded POST answered 200 with the page, multipart 409, never set encType) — PR #943 (28e5c840b), 2026-10-30; main CI green; follow-ups T449, T364 item 22
 - T429 — every hardened git argv refuses the file transport by default (protocol.file.allow=never; allowFileTransport the one opt-in, used by the host-folder refresh); the unused gitSetOriginUrl removed — PR #942 (b8025f92e), 2026-10-30; main CI green; follow-up T364 item 20, T387 cross-reference
 - T401 — the app shell holds its recurring requests back while the password must change (gated on the layout's flag, no refused request at all) and resumes them after the change without a reload; e2e specs for the forced flow and the sign-in throttle's 429 — PR #939 (d240c9e4a), 2026-10-30; main CI green; follow-ups T448 (shipped as #943), T364 item 19
 - T431 — a running editor launched with another image or flags is replaced once idle (image on the host first, removed right before the launch); a socketless task editor is registered and reaped; an api restart ages no held editor or terminal session — PR #938 (82bf479fa), 2026-10-30; main CI green (rerun after the known upload-reaper flake, #941); live check passed (ensure registers, launch label stamped, reaped after the grace); follow-ups T441, T442
