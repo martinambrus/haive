@@ -617,6 +617,30 @@ export async function stopIdeRunner(taskId: string): Promise<boolean> {
   return true;
 }
 
+/** Session ids of this install's running editors, from the labels `startIdeRunner` stamps (a name
+ *  keeps 8 characters of a task id). Editors carry no install label, so a row counts only when its
+ *  session's `ideRunnerName` is its own name. Throws when docker fails. */
+export async function listIdeRunnerSessions(): Promise<string[]> {
+  const { stdout } = await exec(
+    'docker',
+    [
+      'ps',
+      '--filter',
+      `label=${IDE_RUNNER_LABEL}`,
+      '--format',
+      '{{.Names}}\t{{.Label "haive.task.id"}}\t{{.Label "haive.repo.id"}}',
+    ],
+    { timeout: 15_000 },
+  );
+  const sessions: string[] = [];
+  for (const line of stdout.split('\n')) {
+    const [name, taskId, repositoryId] = line.split('\t');
+    const sessionId = repositoryId ? repoIdeSessionId(repositoryId) : taskId;
+    if (sessionId && ideRunnerName(sessionId) === name) sessions.push(sessionId);
+  }
+  return sessions;
+}
+
 /** Repository deletion also discards its editor state. Wait out a boot already in progress
  *  so it cannot create a container after cleanup has finished. */
 export async function killRepoIdeRunner(repositoryId: string): Promise<void> {

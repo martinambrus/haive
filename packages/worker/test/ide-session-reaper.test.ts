@@ -3,7 +3,10 @@ import type { Redis } from 'ioredis';
 import { IDE_IDLE_GRACE_MS, ideSessionKey, repoIdeSessionId } from '@haive/shared';
 
 const stop = vi.hoisted(() => vi.fn(async () => true));
-vi.mock('../src/sandbox/ide-runner.js', () => ({ stopIdeRunner: stop }));
+vi.mock('../src/sandbox/ide-runner.js', () => ({
+  stopIdeRunner: stop,
+  listIdeRunnerSessions: async () => [],
+}));
 import { IdeSessionReaper } from '../src/sandbox/ide-session-reaper.js';
 
 describe('repository editor idle cleanup', () => {

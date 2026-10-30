@@ -1,6 +1,6 @@
-import { IDE_IDLE_GRACE_MS, IDE_SESSION_PREFIX, logger } from '@haive/shared';
+import { IDE_IDLE_GRACE_MS, IDE_SESSION_PREFIX, ideSessionKey, logger } from '@haive/shared';
 import type { Redis } from 'ioredis';
-import { stopIdeRunner } from './ide-runner.js';
+import { listIdeRunnerSessions, stopIdeRunner } from './ide-runner.js';
 import { ideSessionHeld } from './ide-session.js';
 
 const log = logger.child({ module: 'ide-session-reaper' });
@@ -85,8 +85,26 @@ export class IdeSessionReaper {
         if (dropped) reaped += 1;
       }
     } while (cursor !== '0');
+    // After the scan: an editor it just reaped is gone from the listing, not registered again.
+    await this.registerRunningEditors();
     if (reaped > 0) log.info({ scanned, reaped }, 'ide reaper sweep complete');
     return { scanned, reaped };
+  }
+
+  /** The scan only sees editors with an entry, so a running one without would never be stopped:
+   *  start its grace here, and stop nothing for the absence. HSETNX writes only where no
+   *  `lastSeenAt` is recorded, so a racing attach is kept. A failure never fails the sweep. */
+  private async registerRunningEditors(): Promise<void> {
+    let registered = 0;
+    try {
+      for (const sessionId of await listIdeRunnerSessions()) {
+        const key = ideSessionKey(sessionId);
+        if ((await this.redis.hsetnx(key, 'lastSeenAt', String(Date.now()))) === 1) registered += 1;
+      }
+    } catch (err) {
+      log.warn({ err }, 'ide session registration failed');
+    }
+    if (registered > 0) log.info({ registered }, 'registered running ide sessions with no entry');
   }
 
   private async maybeReap(key: string): Promise<boolean> {
