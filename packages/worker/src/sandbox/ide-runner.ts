@@ -408,6 +408,9 @@ async function ensureIdeRunnerStartedInner(
   if (!workspaceSubpath) return null;
 
   const name = ideRunnerName(taskId);
+  // An editor replaced for its launch is removed by startIdeRunner, right before the new one is
+  // launched: a failure while the volumes and mounts are prepared then leaves it running.
+  let replacingStale = false;
   if (await isRunning(name)) {
     // The editor mounts ONE workspace, and the resolved subpath can change under it (a Retry that
     // clears 01-worktree-setup's output re-resolves to the repository root). Reuse only while the
@@ -436,6 +439,7 @@ async function ensureIdeRunnerStartedInner(
         { taskId, container: name },
         'ide runner was launched with another image or flags and is idle; recreating',
       );
+      replacingStale = true;
     } else {
       log.info(
         { taskId, container: name, workspaceSubpath },
@@ -443,7 +447,7 @@ async function ensureIdeRunnerStartedInner(
       );
     }
   }
-  if (await containerExists(name)) {
+  if (!replacingStale && (await containerExists(name))) {
     await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
   }
 

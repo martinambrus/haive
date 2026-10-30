@@ -31,6 +31,7 @@ const h = vi.hoisted(() => {
     runFails: false,
     imagePresent: true,
     pullFails: false,
+    prepFails: false,
     unreadableLabel: null as string | null,
   };
   const out = (stdout: string) => ({ stdout, stderr: '' });
@@ -119,7 +120,11 @@ vi.mock('../src/sandbox/docker-runner.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/sandbox/docker-runner.js')>()),
   defaultDockerRunner: {
     volumeExists: async () => true,
-    run: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+    // The volume prep helper run.
+    run: async () =>
+      h.state.prepFails
+        ? { exitCode: 1, stdout: '', stderr: 'volume prep failed' }
+        : { exitCode: 0, stdout: '', stderr: '' },
   },
 }));
 
@@ -184,6 +189,7 @@ beforeEach(() => {
   h.state.runFails = false;
   h.state.imagePresent = true;
   h.state.pullFails = false;
+  h.state.prepFails = false;
   h.state.unreadableLabel = null;
 });
 
@@ -247,8 +253,8 @@ describe.each(staleLaunches)('a running editor with %s', (_launch, labels) => {
 
     expect(await ensure()).toEqual({ container: name });
 
-    // One removal, then one launch, with the session registered (never deleted) before the launch.
-    expect(mutations()).toEqual([`rm ${name}`, `hset ${key}`, `run ${name}`]);
+    // The session registered (never deleted), then one removal right before the one launch.
+    expect(mutations()).toEqual([`hset ${key}`, `rm ${name}`, `run ${name}`]);
     expect(h.state.containers.get(name)?.labels[SPEC_LABEL]).toBe(SPEC);
     expect(Number(h.state.registry.get(key)?.lastSeenAt)).toBeGreaterThanOrEqual(before);
   });
@@ -301,13 +307,24 @@ describe('an idle editor launched with an older image', () => {
     expect(h.state.containers.get(name)?.labels[SPEC_LABEL]).toBe(olderSpec());
   });
 
+  it('is kept when the volumes for its replacement cannot be prepared', async () => {
+    idle();
+    h.state.prepFails = true;
+
+    await expect(ensure()).rejects.toThrow('IDE volume prep failed');
+
+    // Removed only right before the launch, so a failure before it leaves the editor running.
+    expect(mutations()).toEqual([]);
+    expect(h.state.containers.get(name)?.labels[SPEC_LABEL]).toBe(olderSpec());
+  });
+
   it('is replaced once the absent new image is pulled, the pull coming first', async () => {
     idle();
     h.state.imagePresent = false;
 
     expect(await ensure()).toEqual({ container: name });
 
-    expect(mutations()).toEqual([pull, `rm ${name}`, `hset ${key}`, `run ${name}`]);
+    expect(mutations()).toEqual([pull, `hset ${key}`, `rm ${name}`, `run ${name}`]);
     expectBoundedPull();
     expect(h.state.containers.get(name)?.labels[SPEC_LABEL]).toBe(SPEC);
   });
@@ -318,7 +335,7 @@ describe('an idle editor launched with an older image', () => {
 
     expect(await ensure()).toEqual({ container: name });
 
-    expect(mutations()).toEqual([`rm ${name}`, `hset ${key}`, `run ${name}`]);
+    expect(mutations()).toEqual([`hset ${key}`, `rm ${name}`, `run ${name}`]);
     expect(h.state.pullTimeouts).toEqual([]);
   });
 
@@ -449,7 +466,7 @@ describe('a task editor', () => {
 
     expect(await ensure()).toEqual({ container: name });
 
-    expect(mutations()).toEqual([`rm ${name}`, `hset ${key}`, `run ${name}`]);
+    expect(mutations()).toEqual([`hset ${key}`, `rm ${name}`, `run ${name}`]);
     expect(h.state.containers.get(name)?.labels).toMatchObject({
       [SPEC_LABEL]: SPEC,
       'haive.task.id': TASK,
