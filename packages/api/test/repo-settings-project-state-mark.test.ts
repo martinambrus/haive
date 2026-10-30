@@ -25,6 +25,7 @@ import type { AppEnv } from '../src/context.js';
 
 const REPO = '00000000-0000-4000-8000-0000000000c1';
 const OTHER = '00000000-0000-4000-8000-0000000000c2';
+const RULES = 'Rules that stay out of the generic repository payloads.\n';
 
 const app = new Hono<AppEnv>();
 app.route('/repos', repoRoutes);
@@ -52,6 +53,7 @@ beforeEach(() => {
       rtkVersion: '0.1.0',
       fileTree: { files: ['a.ts'] },
       renderContext: { rtkEnabled: true },
+      agentRulesOverride: RULES,
     });
   }
   h.db = fake.db;
@@ -76,6 +78,7 @@ describe('a settings edit marks the project state record dirty', () => {
     const { repository } = (await res.json()) as { repository: Record<string, unknown> };
     expect(repository).not.toHaveProperty('fileTree');
     expect(repository).not.toHaveProperty('renderContext');
+    expect(repository).not.toHaveProperty('agentRulesOverride');
     expect(fake.rows(schema.repositories).find((r) => r.id === REPO)?.scopeExcludeGlobs).toEqual([
       'node_modules',
       'vendor',
@@ -95,6 +98,9 @@ describe('a settings edit marks the project state record dirty', () => {
       { lspServerVersions: { vtsls: '1.0.0' } },
       { chromeDevtoolsMcpVersion: '0.9.0' },
       { reviewDimensions: ['security'] },
+      { agentRulesOverride: 'Keep answers short.\n' },
+      { agentRulesOverride: '' },
+      { agentRulesOverride: null },
     ]) {
       const before = (outbox(REPO)?.revision as number | undefined) ?? 0;
       expect((await send(`/tooling/${REPO}/tooling`, 'PATCH', body)).status).toBe(200);

@@ -40,7 +40,8 @@ moving a project between installs "must work and be synced correctly and fully".
   files never conflict): `format.json` (schemaVersion), `project/environment.json`,
   `project/render.json` (projectInfo, framework, acceptedAgentIds, customAgentSpecs,
   lspLanguages), `cli/<provider>.json` (the repo-level CLI union), `settings/<name>.json` (one per
-  portable setting), `artifacts/<slug>~<h32>.json` (one claim per disk path: path, template, kind,
+  portable setting; **as built (B4.2):** `settings/agent-rules.md` is raw Markdown, not JSON),
+  `artifacts/<slug>~<h32>.json` (one claim per disk path: path, template, kind,
   schemaVersion, templateHash, writtenHash, haiveVersion — never the bytes, which are in git),
   `bundles/<slug>~<h32>.json` (portable bundle descriptors). Canonical form: UTF-8, LF, 2-space,
   sorted keys and sets, trailing newline, no timestamps, no install ids. Portable bundle template
@@ -60,8 +61,10 @@ moving a project between installs "must work and be synced correctly and fully".
   per-repo advisory lock: watermark (`synced_head`, `synced_hash` over the state files' blob ids);
   defer while an onboarding/upgrade task is live; read through fs-safe and refuse the whole record
   on conflict markers, schema errors, a newer `format.json`, an unsafe path or a name/path
-  mismatch; three-way merge with base = the record at `synced_head` from git (fallback
-  `base_snapshot`), local = the DB rendered by the writer's loader, incoming = disk; per key /
+  mismatch; three-way merge with base = the DB's `base_snapshot` (**as built:** the record the
+  last sync read from the checkout or the last writer wrote, or the record HEAD commits when a
+  checkout move sets Haive's files aside; never the record at `synced_head`, which is only the
+  watermark), local = the DB rendered by the writer's loader, incoming = disk; per key /
   set member / claim: one side changed → that side; both identically → either; **both differently
   → a pending conflict (user decision)**, except a claim whose `writtenHash` equals the bytes on
   disk (the ledger follows the bytes); ledger adoption in one transaction (import rows superseding
@@ -550,6 +553,40 @@ Phase 4 (repository-level content):
   `settings/agent-rules.md` + a tooling-page editor; one `buildRepoCliRulesBlock` for 07/12/01/api.
   Control: two users with different personal rules each see the other's block as drift today;
   quiet and byte-identical after.
+  **As built, in six parts** (see onboarding-upgrades.md): (a) migration 0215 adds
+  `repositories.agent_rules_override text`, declared last (undo: `DROP COLUMN IF EXISTS`) and seeded
+  from nothing: NULL follows the live default and any text, `''` included, is an override.
+  `buildRepoCliRulesBlock(override)` renders NULL as `buildCliRulesBlock([DEFAULT_AGENT_RULES])` and
+  an override as written, shaped but never deduplicated, so a repeated line survives and an empty
+  override renders no block; `buildCliRulesBlockFromProviders` and 07's provider
+  `rulesContent` payload field are gone, while dispatch, `DEFAULT_AGENT_RULES` and its hash set are
+  untouched. (b) `agent-rules` is the eighth portable setting and the only raw-text one,
+  `settings/agent-rules.md`, tidied by `normalizeAgentRulesOverride` and capped at 64 KiB; the
+  format is not bumped, since a release that does not know the file lists it as ignored. (c) The
+  sync, the writer, the conflict answers and the stage-level resolver read and write that text, and
+  an open rules question holds no upgrade. (d) 07 reads the override when it writes the region, 12
+  records from 07's output and compares nothing, 01 renders from the column and stamps its plan with
+  it, 02 refuses a plan whose stamp moved, and upgrade-status recomputes the region the same way. A
+  region an earlier release rendered from its owner's providers is judged on its bytes alone, so
+  `classifyEntry` lost its import-marker `conflict` clause. (e) The tooling-config read and the
+  tooling PATCH set, clear and reset the override, and the Tooling page gets a card of its own;
+  "Save tooling" never sends the key. (f) The smoke controls, below. At the first upgrade after the
+  release an owner whose provider rules were customised is offered one pre-selected `clean_update`
+  replacing the personal region, an owner with no enabled provider is offered the region as new, and
+  a default-only owner sees nothing. Residual, open: the record write at the end of 02 can import an
+  override that moved after 02 wrote the region, and a retry of 02 then needs a re-plan. Controls:
+  `smoke:two-install` gains five headline checks for users with different personal rules (B's user
+  holds other rules in another provider row order, with one provider disabled): c1 (A commits the
+  default block), c2 (B renders the same region), c3 (B's first plan offers nothing for it) and c4
+  (applying B's upgrade leaves AGENTS.md as it was) fail on the unchanged source (4 of 164 checks)
+  and pass after, and c5 (the two users' personal rules are still stored and still differ) holds on
+  both. Groups R1-R7 (44 checks) round-trip the override: NULL has no file, tidied text and `''` (a
+  0-byte file whose region then reads obsolete) travel, deleting the file resets the other install,
+  concurrent edits give one question that holds no upgrade and converges under keep mine and take
+  theirs from either side, a line of seven `=` refuses the whole record and recovers, an old
+  personal region plans `clean_update` (an edited one `conflict`), and an override set before the
+  first onboarding reaches 07, 12 and a fresh clone. The run ends `TWO_INSTALL_OK` with 208 checks
+  and no known gap.
 
 Phase 5 (visibility and commit policy):
 - **B5.1 feat(api,web): the Haive data panel** [B1.8] (`GET /repos/:id/haive-data`,
@@ -613,10 +650,11 @@ explicit (the smoke drives two databases), under
    a newer `format.json`, an unsafe claim path (`safeDiskRel`) or a name/path mismatch → DB
    untouched, `last_error` + report in the UI. No record → legacy files, fill-if-absent (+
    `rtkEnabled`, B0.3).
-4. Three-way merge. base = the record at `synced_head` read from git objects (fallback
-   `base_snapshot` after a re-clone or rewritten history, then none); local = the DB rendered by
-   the writer's loader; incoming = disk. Unit = a top-level key of a settings/project file, a
-   member of a declared set (globs, CLI targets), or a claim.
+4. Three-way merge. base = `base_snapshot` (**as built:** what the last sync read from the checkout
+   or the last writer wrote, or the record HEAD commits when a checkout move sets Haive's files
+   aside, none before the first sync; the record at `synced_head` is not read from git); local = the
+   DB rendered by the writer's loader; incoming = disk. Unit = a top-level key of a settings/project
+   file, a member of a declared set (globs, CLI targets), or a claim.
 
    | base→local | base→incoming | result |
    |---|---|---|
@@ -627,8 +665,8 @@ explicit (the smoke drives two databases), under
    | changed | changed differently | PENDING CONFLICT (user decision); claims: the one whose `writtenHash` equals the bytes on disk wins without asking |
    | no base | — | incoming wins; overwritten local values reported (first import) |
 
-   Base = the record at `synced_head` (not "last imported content") is what makes a teammate's
-   revert of your committed change apply correctly.
+   Base = the record as the last sync read it from the checkout or the last writer wrote it (not
+   the merged result) is what makes a teammate's revert of your committed change apply correctly.
 5. Ledger adoption in one transaction: a claim different from the live row → supersede it, insert
    a marker row (`source='backfill'`, `source_step_id='project-state-import'`, `task_id` NULL,
    `userId` = repo owner, `formValuesSnapshot` = the derived render context, `writtenContent`
@@ -686,8 +724,10 @@ Repo-level content (B4): `deriveRenderTargets(cliTargets, lspLanguages)` in shar
 computes the same) drives agent/skill dirs, `supportsLsp`, the RTK fan-out and the import stubs;
 the upgrade form offers "Also maintain files for: <CLI>" (default on); removal on the tooling
 page makes the next upgrade offer that CLI's files as obsolete. The rules region renders from
-`agent_rules_override ?? DEFAULT_AGENT_RULES`; a region rendered from a personal override becomes a
-`clean_update` at the next upgrade because `loadCliRulesRenderHashes` knows it as a prior render.
+`agent_rules_override ?? DEFAULT_AGENT_RULES`; **as built,** a region an earlier release rendered
+from its owner's providers becomes a `clean_update` at the next upgrade while it still holds the
+bytes its row claims (its owner's row or an import marker, judged by `classifyEntry` on the bytes
+alone), and a `conflict` once edited.
 
 Adopted defaults (the owner can override at approval): retire `.haive/install.json`; legacy
 mirror files read as fallback only; settings classification as in the design summary;

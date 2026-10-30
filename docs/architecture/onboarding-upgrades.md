@@ -15,7 +15,15 @@ changes the render context of a repository with a claim writes it in the same tr
 01's own functions (`step-engine/_upgrade-render.ts`); none keeps an id it does not render. 01, 02, 04
 and the sync all expand the context through `unionExpandedFor`, so the set holds the custom bundle
 items (`custom.*`) and `cli-rules` as well as the manifest's templates: 02 writes it inside its fenced
-transaction, 04 from the context it restored. 12 keeps its own rule for the `cli-rules` region on disk. Its artifact snapshots describe what 07
+transaction, 04 from the context it restored. The `cli-rules` entry is the repository's own region:
+one helper, `buildRepoCliRulesBlock` (`@haive/shared`), renders it from the repository's rules
+override (`agent_rules_override`, read by the worker through `readAgentRulesOverrideRaw`) or else
+Haive's default rules, never from a user's providers, and the api's upgrade-status recomputes it
+the same way. An override is rendered as written, only shaped (runs of blank lines collapsed,
+trimmed, inside the markers), never deduplicated the way provider rules once were, so a repeated
+instruction or command survives; the default rules go through the old merge, which drops nothing
+from them. An empty override renders no block, which reads as obsolete. 12 keeps its own rule
+for the `cli-rules` region on disk. Its artifact snapshots describe what 07
 rendered, while its applicable set reads the live RTK switch at the actual write, under the
 project-state lock and a repository row lock: a switch between 07 and 12 leaves the snapshots as
 history and the set truthful. 04 captures the column at apply entry and fences its applicable-set
@@ -142,7 +150,13 @@ alone unless its overwrite flag is on, so `12-post-onboarding` reads the region 
 it through `cliRulesRegionRecord` (`steps/onboarding/_rules-files.ts`): the region's bytes exactly
 as they stand on disk (CRLF, trailing whitespace and blank lines included) as the row's content, and
 the hash of their `normalizeContent` form as `templateContentHash`, so a stale region shows as an
-upgrade and a rollback, or a retried Keep, restores bytes that were really there. Every rules
+upgrade and a rollback, or a retried Keep, restores bytes that were really there. The render is the
+repository's block: 07 reads its rules override live when it writes the region and returns it in its
+output (`agentRulesOverride`; an output from before the field reads as the default rules), and 12
+renders from that value, never from the live column, so the row records what 07 put on disk even if
+the override moved since. 12 compares nothing and refuses nothing here, since an error in recording
+the rows is swallowed together with all of them. An empty override writes no region (07), records no
+row (12) and reads a standing region as obsolete (an upgrade). Every rules
 record is raw for the same reason (`pathContent` in 02 too) and every hash over one is taken of the
 normalized form; a row an earlier version wrote holds the normalized text and keeps restoring it.
 The row claims those bytes as Haive's (`writtenHash` equal to that hash) only when they are a
@@ -383,7 +397,17 @@ which 02 would otherwise write back. 02 reads the column under the sync's own lo
 (`lockProjectState`): a sync still in flight commits first, and one that starts later sees the live
 upgrade and defers. A cleared column is no sync, which always writes one. The same check runs again inside each later write that would undo a newer sync, in the same locked transaction as that write (`refuseMovedColumn`): the applicable-template set 02 writes, and its record write (`expectedColumns`), whose files are then written under the lock as well. A Cancel releases the checkout while 02 is still applying, so a refresh can sync in that window; a write that finds the column moved refuses with the same message and leaves the newer column, set and record as they are. A sync that commits after one of those writes recomputes for itself. The record write also refuses once 02's own task no longer holds the checkout, and a refresh
 re-checks for a holding task and fast-forwards under that same lock (`repo/refresh.ts`), so a Cancel
-cannot let a fast-forward land between 02's check and its files. 02 also stops at a Cancel before its record write. The RTK block is no manifest item, so 02 takes it
+cannot let a fast-forward land between 02's check and its files. 02 also stops at a Cancel before
+its record write. The rules override is stamped the same way: 01 records the one it read
+(`agentRulesOverride`, NULL for the default rules, `''` for an empty override), and 02 reads it
+under that lock before any write and refuses the plan (`PLAN_NO_LONGER_HOLDS`) once it moved, since
+it writes the region from the plan's text and renders nothing again. NULL and `''` are different
+overrides, and a plan from before the stamp is not compared. 07 has no plan to go stale and 12
+compares nothing (above). One residual: the record write at the end of 02 first imports a checkout
+it has not read (`writeProjectStateColumn`), and only an imported render context sends that writer
+back to plan, so an import that moves the override can land after the region was written. The next
+upgrade then offers the region as a `clean_update`, and a retry of 02 refuses its plan and needs a
+re-plan. The RTK block is no manifest item, so 02 takes it
 out of AGENTS.md, CLAUDE.md and GEMINI.md by its markers, as a reset does, with the newline 07 wrote
 after it (`stripRtkBlocks`). A link is refused and reported, as is a file past the 1 MiB cap the
 plan reads with or one that is not valid UTF-8, and a `CLAUDE.md -> AGENTS.md` link is left to
@@ -932,9 +956,16 @@ open puts nothing back, since that merge's tip must not move.
 **The record carries the portable settings and the environment.** `portableSettingsOf`
 (`@haive/shared/project-state`, `settings.ts`) maps the repository row to `settings/<name>.json`:
 `scope-exclude-globs`, `rtk-enabled`, `rtk-version`, `lsp-servers`, `lsp-server-versions`,
-`chrome-devtools-mcp-version` and `review-dimensions`, and nothing else. `app_auth` and
-`verify_commands` stay on the machine, since a committed login URL or command would be typed or run
-on a teammate's. `settings/rtk-enabled.json` is written, named in the base and counted as this install's value only
+`chrome-devtools-mcp-version`, `review-dimensions` and `agent-rules`, and nothing else. `app_auth`
+and `verify_commands` stay on the machine, since a committed login URL or command would be typed or
+run on a teammate's. `agent-rules`, the repository's AGENTS.md rules override
+(`agent_rules_override`), is the one setting whose file is its value: `settings/agent-rules.md`
+holds the Markdown itself, not JSON (`TEXT_SETTINGS` and `settingFileName` in `raw-text.ts`, a leaf
+that imports nothing because the web bundle reads `conflicts.ts`). A file is the canonical file of a
+setting only under that name, so `settings/agent-rules.json` and `settings/<other>.md` belong to no
+setting and are listed as ignored files (`settingNameOfFile`). It needed no format bump: a release
+that does not know the file ignores it as an unknown one. `settings/rtk-enabled.json` is written,
+named in the base and counted as this install's value only
 while the choice is recorded (`withoutUnchosenRtk`, `isRtkChoiceRecorded`): the render column's
 `rtkChoiceRecorded`, or `rtk_choice_made_at`, which a person's switch on the Tooling page and either
 answer to the RTK question stamp, so that choice travels at the next record write. `rtk_enabled` is NOT NULL default true, so a default
@@ -953,13 +984,27 @@ the next sync adopts again while the file stands. The first sync after a switch,
 base never held the setting, keeps this install's value with no question and records the checkout's
 in the base, so later changes merge three-way as any setting does; with no sync row at all, the
 checkout's value still wins, even over a stamped choice (running-list item `FNF[rtk-first-import]`). A column holding nothing has no file (a NULL `scope_exclude_globs` is "never chosen",
-not an empty list), and `environmentUnitOf` gives `project/environment.json` from
+not an empty list; a NULL `agent_rules_override` follows the default rules, while `''` is an
+override that renders no block and travels as a 0-byte file, never as NULL), and
+`environmentUnitOf` gives `project/environment.json` from
 `onboarding_environment` without its schema version. The writer plans them into the record and the
 base, and removes a file the base named that the record no longer holds. `settings/rtk-enabled.json`
 is also the name of the RTK question's conflict unit; the writer takes the value from the column
 and never overlays a pending row there, so the question stays open until it is answered. The marks are in `PATCH /repos/:id/exclusions`, `PATCH
 /repos/:id/tooling` (a portable key only) and `POST .../tooling-upgrade`, 02 and 04, 09_7 (and 01g,
 which runs its apply), `initializeRagSyncPrefs`, the clone import and the RTK answer.
+
+The Tooling page edits the rules in a card of its own, with its own save. `GET .../tooling-config`
+returns `agentRulesOverride` (NULL follows the default), and the card's save sends the key alone to
+the tooling PATCH: text, `''` included, or null to follow the default again, the key absent leaving
+it. The PATCH validates the text before any write (`normalizeAgentRulesOverride`, a 400 with the
+reason otherwise), stores the normalised text, marks the outbox in the same transaction and answers
+with what it stored. "Save tooling" never sends the key, so an unrelated save can neither pin the
+default text as an override nor erase one. Choosing Override starts from the default text rather
+than an empty editor, since an empty override is a choice that writes no block (the card says so),
+and a change reaches AGENTS.md through the next upgrade, which offers it as a `clean_update` while
+the region is unedited. The list, detail, create (the upload routes included) and exclusions
+payloads leave the column out, as they do the render context, since it can be large (up to 64 KiB).
 
 **The sync imports the settings and the environment, and asks when both installs changed one.**
 `mergePortable` (`project-state/sync.ts`) merges the columns (local), the checkout's files (incoming)
@@ -968,11 +1013,20 @@ columns it moved. A set (`scope-exclude-globs`) moves member by member; every ot
 value; the environment merges per key (`project/environment.json#envDetectData`, `#confirmedValues`).
 A value is normalised before it merges, by the rules of the routes that store it
 (`normalizeSetting`, shared: `stripManagedKnowledgeGlobs` and sorting for the scope list, the LSP key
-set, `normalizeReviewDimensionIds`, trimmed non-empty versions; the environment loses the `__`
-prompt-only fields and gets `ONBOARDING_ENVIRONMENT_SCHEMA_VERSION` back in the column). A value the
-column could not hold is refused for that setting alone: this install's value stands, the base keeps
-the old one, the sync logs it and the next write replaces the file where this install owns
-the setting. An invalid `rtk-enabled.json` on an install that recorded no choice is left alone:
+set, `normalizeReviewDimensionIds`, trimmed non-empty versions, `normalizeAgentRulesOverride` for
+the rules text: a leading byte-order mark dropped, CRLF and CR read as LF, trailing whitespace
+stripped per line, blank-line runs collapsed, one final newline, and text of only whitespace read as
+`''`; the environment loses the `__` prompt-only fields and gets
+`ONBOARDING_ENVIRONMENT_SCHEMA_VERSION` back in the column). A value the column could not hold is
+refused for that setting alone: this install's value stands, the base keeps the old one, the sync
+logs it and the next write replaces the file where this install owns the setting. For the rules
+text, that is a Haive region marker comment (`<!-- haive:name -->` or its closing form, which would
+end or start a region early) or more than 64 KiB (`MAX_AGENT_RULES_BYTES`) once normalised; the
+tooling PATCH refuses the same with a 400. The codec refuses the whole record for what would damage
+it, and the PATCH refuses that too, so no save writes a record every reader would refuse: a lone
+surrogate, a NUL (the writer's undo journal keeps file text in a jsonb column, which cannot hold
+one) and a line the record reads as a merge conflict marker, a setext underline of seven `=`
+included. An invalid `rtk-enabled.json` on an install that recorded no choice is left alone:
 its writer owns no RTK file and cannot replace it with a default nobody chose. The repeated
 warning and dirty mark remain until a valid file or a recorded choice supplies an owned value;
 automatically repairing that case still needs a user decision about ownership. A column the merge left as it was
@@ -980,7 +1034,8 @@ is not rewritten, so a legacy list in another order stays as it is. The checkout
 for a setting that is never unset (`rtk-enabled`, a NOT NULL column, and `scope-exclude-globs`, NULL
 meaning "never chosen") and for the environment, so a missing file leaves the column alone and marks
 the record dirty for the writer; any other missing file unsets its column where nobody changed it
-here. **A base that holds no setting and no environment (no sync row, or one written before the record
+here, so deleting `settings/agent-rules.md` resets the override to the default rules. **A base that
+holds no setting and no environment (no sync row, or one written before the record
 carried them) merges them as no base at all**: the checkout's value wins over a column nobody chose
 (`rtk_enabled` is NOT NULL default true, and would otherwise push B's default back over A's choice on
 B's first sync), except a switched `rtk-enabled` on an existing sync row, as above, and a set joins
@@ -989,16 +1044,21 @@ both lists. An RTK-off import closes the RTK question as converged
 side (`isRtkQuestion`), since no merge contests that unit (a boolean cannot differ from base and both
 sides). When the merge leaves a value the checkout's file does not hold, the repository is marked dirty
 (`markProjectStateDirty`), except for a contested unit, whose file is meant to differ. A contested
-setting or environment key is one pending row (`settings/<name>.json`, `project/environment.json#key`):
-the column keeps this install's value, the base keeps the old one, and the writer renders the file at
-the row's `incoming` and the base at its `base` (`overlaySettings`, `overlayEnvironment`), except for
-the RTK question. The writer also settles the rows it passes (`recordLocalSide`): a column that comes
+setting or environment key is one pending row (`settings/<name>.json`, `settings/agent-rules.md` for
+the rules text, `project/environment.json#key`): the column keeps this install's value, the base
+keeps the old one, and the writer renders the file at the row's `incoming` and the base at its
+`base` (`overlaySettings`, `overlayEnvironment`), except for the RTK question. The writer also
+settles the rows it passes (`recordLocalSide`): a column that comes
 to hold the other side's value converges the row. Only an RTK row holds upgrades (`blocksUpgrade`,
-D6); the api and the banner list every unit `isConflictUnit` names, which is every unit admission can
-see; a plan question (`plan/<nodeId>#<field>`, [plan canvas](plan-canvas.md)) is one too and never holds an upgrade. The worker answers one under the same locks as a render key (`answerSettingsQuestion`,
+D6), so an open rules question holds none; the api and the banner list every unit `isConflictUnit`
+names, which is every unit admission can see; a plan question (`plan/<nodeId>#<field>`,
+[plan canvas](plan-canvas.md)) is one too and never holds an upgrade. The banner shows each side of
+a rules question as one fenced Markdown block, never as live Markdown, and an empty side in words.
+The worker answers one under the same locks as a render key (`answerSettingsQuestion`,
 `resolve.ts`): keep mine writes the column's value into the unit's own file and the base, take
 theirs applies the row's value to the column through `settingColumnUpdate` and the base and rewrites
-no file, and an answer reads as moved when the file no longer holds the row's `incoming`. A setting
+no file, and an answer reads as moved when the file no longer holds the row's `incoming` (it reads
+the rules file as text and any other as JSON). A setting
 this install has no value for cannot be kept (`no_local`), and one that is never unset cannot be taken
 as absent (`invalid`). Bundle descriptors still do not install a local bundle.
 
@@ -1083,8 +1143,14 @@ claim retains ownership, so cleanup does not reconstruct or re-add old members. 
 prior targets, including a recorded legacy fallback, remains valid. Unknown paths, newer releases
 and unavailable custom bundles stay
 foreign. 01 classifies it first, 02 skips a foreign row whatever the form sent, the form names such paths in
-one note, and upgrade-status leaves them out of every comparison. An imported cli-rules row whose
-template moved reads `conflict`. A marker is no upgrade's output, so an upgrade completed before an
+one note, and upgrade-status leaves them out of every comparison. A cli-rules row is judged on its
+bytes like any other, whoever recorded it: a region an earlier release rendered from its owner's
+providers, as a row of this install or an imported marker, plans a `clean_update` while it holds the
+bytes its row claims and its template moved, is adopted when it already holds the new render, and
+stays a `conflict` once edited. An imported marker used to read `conflict` here, since the region
+rendered from this user's providers and an imported baseline proved nothing about them; the region
+is the repository's own now, the same for every install, and that clause of `classifyEntry` is gone.
+A marker is no upgrade's output, so an upgrade completed before an
 import cannot be rolled back (`ledgerImportedSince`): the banner offers none, the route answers 409
 and 04's detect refuses; a rollback that puts back a retired marker restores it as a marker.
 

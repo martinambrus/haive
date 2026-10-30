@@ -1,6 +1,7 @@
 /**
  * Pure helpers for the AGENTS.md `haive:cli-rules` region — the marker-delimited
- * block that holds every enabled CLI provider's merged agent rules.
+ * block that holds the repository's agent rules (its override, else Haive's
+ * default rules).
  *
  * These live in @haive/shared (not the worker) so both the worker (which writes
  * the block at onboarding and re-renders it on upgrade) and the API (which
@@ -114,6 +115,14 @@ const closesFence = (line: string, opener: string): boolean => {
   return t.length >= opener.length && [...t].every((c) => c === opener[0]);
 };
 
+/** The shape every rules block ends in: runs of 3+ newlines collapse to 2, trimmed, exactly one
+ *  trailing newline. */
+const shapeRulesText = (text: string): string => text.replace(/\n{3,}/g, '\n\n').trim() + '\n';
+
+/** Wrap shaped rules in the cli-rules region markers. */
+const wrapRulesBlock = (shaped: string): string =>
+  `${CLI_RULES_START}\n${shaped}${CLI_RULES_END}\n`;
+
 /** Merge rule blocks line-by-line, deduplicating on trimmed content so the
  *  first-seen capitalization and leading whitespace win. A block identical to an
  *  earlier one adds nothing. Structure is never deduplicated line by line: a line
@@ -154,28 +163,21 @@ export function dedupLines(blocks: string[]): string {
       out.push(line);
     }
   }
-  return (
-    out
-      .join('\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim() + '\n'
-  );
+  return shapeRulesText(out.join('\n'));
 }
 
-/** Build the full cli-rules block (markers included) from the rule strings of
- *  the enabled providers. Returns null when no provider contributes non-empty
- *  rules — callers treat null as "no region" (omit on write, obsolete on
- *  upgrade). The caller is responsible for passing the rule strings in a
- *  deterministic order (sorted by provider name) so the output is stable. */
+/** Build the full cli-rules block (markers included) from rule strings.
+ *  Returns null when none is non-empty — callers treat null as "no region"
+ *  (omit on write, obsolete on upgrade). The caller is responsible for passing
+ *  the rule strings in a deterministic order so the output is stable. */
 export function buildCliRulesBlock(rulesContents: readonly string[]): string | null {
   const withRules = rulesContents.filter((c) => c.trim().length > 0);
   if (withRules.length === 0) return null;
-  const combined = dedupLines(withRules.slice());
-  return `${CLI_RULES_START}\n${combined}${CLI_RULES_END}\n`;
+  return wrapRulesBlock(dedupLines(withRules.slice()));
 }
 
-/** Resolve a provider's stored rulesContent to the rules that actually go into
- *  the AGENTS.md block. Empty, or a verbatim copy of any shipped default
+/** Resolve a provider's stored rulesContent to the rules that actually reach its
+ *  agents on dispatch. Empty, or a verbatim copy of any shipped default
  *  (KNOWN_DEFAULT_RULES_HASHES), means the provider never overrode the rules, so
  *  it inherits the live DEFAULT_AGENT_RULES — letting template edits propagate.
  *  Anything else is an explicit override and is used as-is. */
@@ -190,21 +192,22 @@ export function inheritsDefaultRules(rulesContent: string): boolean {
   );
 }
 
-/** Convenience over buildCliRulesBlock for the common call shape: take every
- *  enabled provider's effective rules (resolveEffectiveRules), sort by name so
- *  the block is deterministic regardless of DB row order, then build it. Shared
- *  by the onboarding/upgrade worker steps and the upgrade-status API so all
- *  sites compute the same block — and therefore the same drift hash. */
-export function buildCliRulesBlockFromProviders(
-  providers: ReadonlyArray<{ name: string; rulesContent: string; enabled: boolean }>,
-): string | null {
-  return buildCliRulesBlock(
-    providers
-      .filter((p) => p.enabled)
-      .slice()
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((p) => resolveEffectiveRules(p.rulesContent)),
-  );
+/** The repository's own cli-rules block: its override when it has one, else Haive's live default
+ *  rules. `null` (or `undefined`, a column a fake row leaves unset) follows the default; any string,
+ *  the empty one included, is the override and is used as written. It never inherits the default
+ *  through a shipped-default hash the way a provider's rules do (`resolveEffectiveRules`), and an
+ *  empty or whitespace-only override renders no block, as for any empty input. Personal provider
+ *  rules do not enter: they reach Haive's own agents through dispatch alone.
+ *
+ *  An override is never deduplicated: it is the repository's own text, so a line it repeats is an
+ *  instruction written twice (the same command under two headings), and dropping it would make the
+ *  rules the agents read differ from the override that was saved. It only gets the shape of every
+ *  block. The default keeps the merge, which drops nothing from it, so the regions already written
+ *  from it stay byte-identical. */
+export function buildRepoCliRulesBlock(override: string | null | undefined): string | null {
+  if (override === null || override === undefined) return buildCliRulesBlock([DEFAULT_AGENT_RULES]);
+  if (override.trim().length === 0) return null;
+  return wrapRulesBlock(shapeRulesText(override));
 }
 
 /** Return the marker-inclusive span between `startMarker` and `endMarker`

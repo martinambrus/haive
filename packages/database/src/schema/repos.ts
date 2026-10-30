@@ -279,6 +279,10 @@ export const repositories = pgTable(
     /** When a person last switched RTK here, on the Tooling page or in the RTK question. NULL: never.
      *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
     rtkChoiceMadeAt: timestamp('rtk_choice_made_at'),
+    /** The repository's own AGENTS.md rules block, synced as `settings/agent-rules.md`. NULL follows
+     *  Haive's live default rules; any text, the empty string included, is an explicit override.
+     *  Declared LAST so `ALTER TABLE ADD COLUMN` and `drizzle-kit push` agree on column order. */
+    agentRulesOverride: text('agent_rules_override'),
   },
   (table) => [
     index('repositories_user_id_idx').on(table.userId),

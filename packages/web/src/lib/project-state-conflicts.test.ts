@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { claimFileName } from '@haive/shared/project-state';
+import { scanFences } from '@haive/shared/markdown-fences';
+import { claimFileName, settingFileName } from '@haive/shared/project-state';
+import { fencedCode } from '../components/markdown/fenced-code';
 import {
   answerAndConfirm,
   answerConfirmation,
@@ -402,6 +404,55 @@ describe('a setting or environment question', () => {
     expect(resolutionNotice([], [], [], ['take_theirs'])).toBe(
       "This install now uses your teammate's value.",
     );
+  });
+});
+
+describe('the AGENTS.md rules question', () => {
+  const UNIT = 'settings/agent-rules.md';
+  const present = (value: unknown) => ({ present: true as const, value });
+  const TEXT = '# Rules\n\nKeep it small.\n\n```ts\nconst x = 1;\n```\n\n- Last rule\n';
+
+  it('is the unit the record names for the setting, labelled AGENTS.md rules', () => {
+    expect(UNIT).toBe(settingFileName('agent-rules'));
+    expect(conflictKeyLabel(null, UNIT)).toBe('AGENTS.md rules');
+    expect(isSettingConflict(bare(UNIT))).toBe(true);
+  });
+
+  it('shows a text as one fenced markdown block that its own backtick run cannot leave', () => {
+    const md = conflictSideMarkdown(present(TEXT), UNIT);
+    expect(md).toBe(fencedCode(TEXT, 'markdown'));
+    const lines = md.split('\n');
+    const fences = scanFences(lines);
+    expect(fences).toHaveLength(1);
+    expect(fences[0]).toMatchObject({ lang: 'markdown', open: 0, close: lines.length - 1 });
+    expect(fences[0]!.content.join('\n')).toBe(TEXT);
+  });
+
+  it('keeps the line breaks of the text, which inline code would collapse', () => {
+    expect(conflictSideMarkdown(present('Line one\nLine two'), UNIT)).toBe(
+      '```markdown\nLine one\nLine two\n```',
+    );
+  });
+
+  it('says an empty override in words, apart from a side that holds nothing', () => {
+    expect(conflictSideMarkdown(present(''), UNIT)).toBe(
+      'An empty override: no rules block is written.',
+    );
+    expect(conflictSideMarkdown({ present: false }, UNIT)).toBe('Not set.');
+  });
+
+  it('keeps a value that is no text in the json fence', () => {
+    expect(conflictSideMarkdown(present(['a']), UNIT)).toBe('```json\n[\n  "a"\n]\n```');
+  });
+
+  it('is confirmed by its label and its own record file', () => {
+    const keep = answerConfirmation('keep_mine', null, UNIT);
+    expect(keep.body).toContain('AGENTS.md rules');
+    expect(keep.body).toContain('.haive-data/state/settings/agent-rules.md');
+    expect(keep.body).toContain('Commit and push');
+    const take = answerConfirmation('take_theirs', null, UNIT);
+    expect(take.body).toContain('AGENTS.md rules');
+    expect(take.body).toContain('No repository file is written');
   });
 });
 

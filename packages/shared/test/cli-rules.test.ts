@@ -4,7 +4,7 @@ import {
   CLI_RULES_END,
   dedupLines,
   buildCliRulesBlock,
-  buildCliRulesBlockFromProviders,
+  buildRepoCliRulesBlock,
   resolveEffectiveRules,
   inheritsDefaultRules,
   extractRegion,
@@ -129,40 +129,58 @@ describe('inheritsDefaultRules', () => {
   });
 });
 
-describe('buildCliRulesBlockFromProviders', () => {
-  const p = (name: string, rulesContent: string, enabled = true) => ({
-    name,
-    rulesContent,
-    enabled,
+describe('buildRepoCliRulesBlock', () => {
+  it('follows the live default while the repository holds no override', () => {
+    expect(buildRepoCliRulesBlock(null)).toBe(buildCliRulesBlock([DEFAULT_AGENT_RULES]));
+    expect(buildRepoCliRulesBlock(undefined)).toBe(buildRepoCliRulesBlock(null));
   });
 
-  it('an enabled provider with empty rules inherits the template', () => {
-    expect(buildCliRulesBlockFromProviders([p('codex', '')])).toBe(
-      buildCliRulesBlock([DEFAULT_AGENT_RULES]),
+  it('renders an override as written and nothing of the default', () => {
+    const block = buildRepoCliRulesBlock('- only this rule\n');
+    expect(block).toBe(buildCliRulesBlock(['- only this rule\n']));
+    expect(block).not.toContain(DEFAULT_AGENT_RULES.split('\n')[0]!);
+  });
+
+  it('reads an empty or whitespace-only override as no block, where a provider would inherit', () => {
+    expect(buildRepoCliRulesBlock('')).toBeNull();
+    expect(buildRepoCliRulesBlock('  \n')).toBeNull();
+    expect(buildRepoCliRulesBlock('  \n\t')).toBeNull();
+    expect(resolveEffectiveRules('')).toBe(DEFAULT_AGENT_RULES);
+  });
+
+  it('keeps the override on the default when it is a copy of the default', () => {
+    expect(buildRepoCliRulesBlock(DEFAULT_AGENT_RULES)).toBe(buildRepoCliRulesBlock(null));
+  });
+
+  // The override is the repository's own text, and the region is what its agents read: a line it
+  // repeats is an instruction written twice (under two headings, in two command lists), never a
+  // duplicate to drop.
+  const inRegion = (text: string) => `${CLI_RULES_START}\n${text}${CLI_RULES_END}\n`;
+
+  it('keeps a prose line the override repeats', () => {
+    const override =
+      '# Rules\n\nRun the tests before you finish.\n\n## Web\n\nRun the tests before you finish.\n';
+    expect(buildRepoCliRulesBlock(override)).toBe(inRegion(override));
+  });
+
+  it('keeps the commands of an indented code block that repeat', () => {
+    const override =
+      '# Testing\n\n    cd packages/api\n    pnpm test\n    cd ../web\n    pnpm test\n';
+    expect(buildRepoCliRulesBlock(override)).toBe(inRegion(override));
+  });
+
+  it('keeps a fenced block the override repeats', () => {
+    const fence = '```sh\npnpm test\n```';
+    const override = `# API\n\n${fence}\n\n# Web\n\n${fence}\n`;
+    expect(buildRepoCliRulesBlock(override)).toBe(inRegion(override));
+  });
+
+  it('shapes an override that repeats nothing exactly as the merge shapes it', () => {
+    const override = '\n\n# Rules\n\n- one\n- two\n\n\n\n```sh\npnpm test\n```\n\n\n\nlast\n\n\n';
+    expect(buildRepoCliRulesBlock(override)).toBe(buildCliRulesBlock([override]));
+    expect(buildRepoCliRulesBlock(override)).toBe(
+      inRegion('# Rules\n\n- one\n- two\n\n```sh\npnpm test\n```\n\nlast\n'),
     );
-  });
-
-  it('excludes disabled providers; merges overrides with inherited defaults', () => {
-    const block = buildCliRulesBlockFromProviders([
-      p('claude-code', '- override'),
-      p('codex', '- ignored', false),
-      p('gemini', ''),
-    ]);
-    expect(block).toBe(buildCliRulesBlock(['- override', DEFAULT_AGENT_RULES]));
-  });
-
-  it('is deterministic regardless of provider row order (sorted by name)', () => {
-    const forward = buildCliRulesBlockFromProviders([p('claude-code', '- a'), p('codex', '- b')]);
-    const reversed = buildCliRulesBlockFromProviders([p('codex', '- b'), p('claude-code', '- a')]);
-    expect(forward).toBe(reversed);
-    // drift hash is taken over this block, so equal block => no false drift.
-    expect(hash(forward!)).toBe(hash(reversed!));
-  });
-
-  it('returns null only when every provider is disabled', () => {
-    expect(
-      buildCliRulesBlockFromProviders([p('claude-code', '- a', false), p('codex', '', false)]),
-    ).toBeNull();
   });
 });
 

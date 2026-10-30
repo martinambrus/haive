@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { logger } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import type { AgentRenderTarget } from '../src/step-engine/steps/onboarding/_agent-templates.js';
+import { RULES_TASK, RULES_USER, rulesOverrideDb } from './support/rules-override-db.js';
 import {
   generateFilesStep,
   type GenerateFilesDetect,
@@ -57,7 +58,7 @@ function detect(): GenerateFilesDetect {
     customAgentSpecs: [],
     lspLanguages: [],
     mcpSettingsJson: '',
-    cliProviders: [{ name: 'claude-code', rulesContent: '- rule one' }],
+    cliProviders: [{ name: 'claude-code' }],
     agentTargets: [CLAUDE],
     plannedAgents: [],
     existingFiles: [],
@@ -67,11 +68,13 @@ function detect(): GenerateFilesDetect {
   };
 }
 
+/** The repository these tests onboard holds `- rule one` as its rules override, which 07 reads live. */
 function ctx(): StepContext {
   return {
-    taskId: 't1',
+    db: rulesOverrideDb('- rule one').db,
+    taskId: RULES_TASK,
     taskStepId: 'ts1',
-    userId: 'u1',
+    userId: RULES_USER,
     repoPath: repo,
     workspacePath: repo,
     cliProviderId: null,

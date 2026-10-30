@@ -1181,7 +1181,7 @@ export function CliProviderForm({
       </div>
 
       <div>
-        <Label htmlFor="rulesContent">AGENTS.md rules</Label>
+        <Label htmlFor="rulesContent">Agent rules</Label>
         <textarea
           id="rulesContent"
           rows={10}
@@ -1196,10 +1196,9 @@ export function CliProviderForm({
             : 'Custom rules: they replace the Haive default for this CLI and no longer follow its updates. Clear the field to inherit the default again.'}
         </p>
         <p className="mt-1 text-xs text-neutral-500">
-          Onboarding writes the rules of every enabled CLI into one merged block in the
-          repository&apos;s <code className="font-mono text-neutral-300">AGENTS.md</code>. CLIs that
-          read <code className="font-mono text-neutral-300">CLAUDE.md</code> or{' '}
-          <code className="font-mono text-neutral-300">GEMINI.md</code> import it from there.
+          These rules go to this CLI&apos;s agents on every Haive dispatch. The rules block in a
+          repository&apos;s <code className="font-mono text-neutral-300">AGENTS.md</code> is set per
+          repository, on its Tooling page.
         </p>
       </div>
 

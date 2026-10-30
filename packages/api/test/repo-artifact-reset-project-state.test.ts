@@ -40,6 +40,7 @@ const BUNDLES_DIR = '.haive-data/state/bundles';
 const SETTINGS_DIR = '.haive-data/state/settings';
 const ENVIRONMENT = '.haive-data/state/project/environment.json';
 const setting = (name: string) => `${SETTINGS_DIR}/${name}.json`;
+const RULES_FILE = `${SETTINGS_DIR}/agent-rules.md`;
 const AGENT = '.claude/agents/code-reviewer.md';
 const claimFile = (diskPath: string) => `${STATE_DIR}/${claimFileName(diskPath)}`;
 const bundleFile = (source: string) => `${STATE_DIR}/${bundleFileName(source)}`;
@@ -228,6 +229,20 @@ describe('the reset takes back the settings and the environment of the record', 
     }
   });
 
+  it('removes the AGENTS.md rules file, which is Markdown, and leaves an agent-rules.json that is no setting file', async () => {
+    const root = await repoRoot({
+      [RULES_FILE]: 'Rule.\n',
+      [setting('agent-rules')]: '"planted"\n',
+    });
+
+    const { removed } = await resetOnboardingArtifacts(root, noProvenance);
+
+    expect(await exists(root, RULES_FILE)).toBe(false);
+    expect(removed).toContain(RULES_FILE);
+    expect(await readFile(path.join(root, setting('agent-rules')), 'utf8')).toBe('"planted"\n');
+    expect(removed).not.toContain(SETTINGS_DIR);
+  });
+
   it('removes a settings file only the sync base names', async () => {
     const root = await repoRoot({ [setting('from-a-newer-release')]: '1\n' });
 
@@ -406,6 +421,30 @@ describe('resetting a repository through the route', () => {
     expect(await exists(root, setting('from-a-newer-release'))).toBe(false);
     expect(await exists(root, STATE_DIR)).toBe(false);
   });
+
+  it.each([
+    ['text', 'Rule.\n'],
+    ['an explicit empty override', ''],
+  ])(
+    'takes the rules file off the checkout and keeps the override column (%s): the next 12 re-renders the file',
+    async (_name, rules) => {
+      const root = await repoRoot({
+        [RULES_FILE]: 'Rule.\n',
+        [setting('agent-rules')]: '"planted"\n',
+      });
+      const fake = await setup(root);
+      fake.patch(schema.repositories, REPO, { agentRulesOverride: rules });
+      fake.patch(schema.repositories, OTHER, { agentRulesOverride: 'Other.\n' });
+
+      expect((await reset()).status).toBe(200);
+
+      expect(await exists(root, RULES_FILE)).toBe(false);
+      expect(await readFile(path.join(root, setting('agent-rules')), 'utf8')).toBe('"planted"\n');
+      const stored = fake.rows(schema.repositories);
+      expect(stored.find((r) => r.id === REPO)!.agentRulesOverride).toBe(rules);
+      expect(stored.find((r) => r.id === OTHER)!.agentRulesOverride).toBe('Other.\n');
+    },
+  );
 
   it('clears the render context it recorded, beside the onboarded stamp, and only on that repository', async () => {
     const fake = await setup(await repoRoot());

@@ -32,6 +32,7 @@ import { applyKbWrites } from '../src/step-engine/steps/onboarding/_kb-write.js'
 import { restoreRulesImportStubs } from '../src/step-engine/steps/onboarding/_rules-files.js';
 import { ensureGitExcludeEntry } from '../src/repo/git-init.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
+import { RULES_TASK, RULES_USER, rulesOverrideDb } from './support/rules-override-db.js';
 import {
   RECORD_WRITE_TABLES,
   recordWritten,
@@ -406,7 +407,7 @@ describe('the callers of updateFileNoFollow and a file that is not UTF-8', () =>
       customAgentSpecs: [],
       lspLanguages: [],
       mcpSettingsJson: '',
-      cliProviders: [{ name: 'claude-code', rulesContent: '- rule one' }],
+      cliProviders: [{ name: 'claude-code' }],
       agentTargets: [{ dir: '.claude/agents', format: 'markdown', supportsLsp: true }],
       plannedAgents: [],
       existingFiles: [],
@@ -416,9 +417,10 @@ describe('the callers of updateFileNoFollow and a file that is not UTF-8', () =>
     };
     const out = await generateFilesStep.apply(
       {
-        taskId: 't1',
+        db: rulesOverrideDb('- rule one').db,
+        taskId: RULES_TASK,
         taskStepId: 'ts1',
-        userId: 'u1',
+        userId: RULES_USER,
         repoPath: root,
         workspacePath: root,
         cliProviderId: null,

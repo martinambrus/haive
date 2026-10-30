@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
 import {
   buildClaudeSettingsJson,
-  buildCliRulesBlockFromProviders,
+  buildRepoCliRulesBlock,
   bundleAgentTemplateHash,
   CLI_RULES_END,
   CLI_RULES_SCHEMA_VERSION,
@@ -74,9 +74,12 @@ app.route('/', upgradeRoutes);
 app.onError(errorHandler);
 
 /** A repository whose templates all match the current set, so only its rules files can make an
- *  upgrade available. */
+ *  upgrade available. Its rules row records the region its override renders: the repository's alone,
+ *  whatever rules the providers hold. */
 function inSync(providers: { name: string; rulesContent: string; enabled: boolean }[]) {
-  const block = buildCliRulesBlockFromProviders(providers);
+  const block = buildRepoCliRulesBlock(
+    (state.repo as { agentRulesOverride?: string | null } | null)?.agentRulesOverride,
+  );
   const agent = { templateId: 'agent.x', schemaVersion: 1, contentHash: 'h1' };
   const artifact = (templateId: string, templateSchemaVersion: number, hash: string) => ({
     templateId,
@@ -145,6 +148,51 @@ describe('upgrade-status and the rules import', () => {
     expect(body.hasUpgradeAvailable).toBe(false);
     expect(body.missingRulesImports).toBeUndefined();
     expect(body.linkedRulesFiles).toBeUndefined();
+  });
+
+  describe("the cli-rules region, which is the repository's and no provider's", () => {
+    beforeEach(async () => {
+      await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
+    });
+
+    it('reports nothing for a provider with rules of its own', async () => {
+      inSync([{ ...claude, rulesContent: '- my personal rule' }]);
+      const body = await status();
+      expect(body.changedTemplateIds).toEqual([]);
+      expect(body.hasUpgradeAvailable).toBe(false);
+    });
+
+    it('reports drift when the override differs from the rules the row records', async () => {
+      state.repo = { ...state.repo, agentRulesOverride: '- the repository rule' };
+      const body = await status();
+      expect(body.changedTemplateIds).toEqual([CLI_RULES_TEMPLATE_ID]);
+      expect(body.retiredTemplateIds).toBeUndefined();
+      expect(body.hasUpgradeAvailable).toBe(true);
+    });
+
+    it('reports nothing once the row records the override', async () => {
+      state.repo = { ...state.repo, agentRulesOverride: '- the repository rule' };
+      inSync([claude]);
+      const body = await status();
+      expect(body.changedTemplateIds).toEqual([]);
+      expect(body.hasUpgradeAvailable).toBe(false);
+    });
+
+    it('reports the region retired for an empty override while a row records one', async () => {
+      state.repo = { ...state.repo, agentRulesOverride: '' };
+      const body = await status();
+      expect(body.changedTemplateIds).toEqual([CLI_RULES_TEMPLATE_ID]);
+      expect(body.retiredTemplateIds).toEqual([CLI_RULES_TEMPLATE_ID]);
+      expect(body.hasUpgradeAvailable).toBe(true);
+    });
+
+    it('reports nothing for an empty override and no row', async () => {
+      state.repo = { ...state.repo, agentRulesOverride: '' };
+      inSync([claude]);
+      const body = await status();
+      expect(body.changedTemplateIds).toEqual([]);
+      expect(body.hasUpgradeAvailable).toBe(false);
+    });
   });
 
   it.each(['.git/config', '.git./config', 'a/git~1/x', '.g\u200cit/config'])(
@@ -1019,7 +1067,7 @@ describe('D10: upgrade-status and the set a project-state sync wrote', () => {
     repo = await mkdtemp(path.join(tmpdir(), 'upgrade-status-applicable-'));
     await writeFile(path.join(repo, 'AGENTS.md'), '# rules\n', 'utf8');
     await writeFile(path.join(repo, 'CLAUDE.md'), '@AGENTS.md\n', 'utf8');
-    const block = buildCliRulesBlockFromProviders(owner)!;
+    const block = buildRepoCliRulesBlock(null)!;
     const artifact = (diskPath: string, templateId: string) => ({
       id: `claim-${diskPath}`,
       diskPath,
@@ -1256,8 +1304,10 @@ describe('upgrade-status and a claim outside the applicable set', () => {
   describe('and the files 02 deletes', () => {
     const REGION = `${CLI_RULES_START}\nthe rules\n${CLI_RULES_END}`;
     const obsolete = async () => (await status()).obsoleteTemplateIds;
+    // An empty override leaves no region current, which retires the one the row records.
     const rulesRow = (file: string) => {
-      inSync([{ ...claude, enabled: false }]);
+      repoRow({ agentRulesOverride: '' });
+      inSync([claude]);
       return claim({
         templateId: CLI_RULES_TEMPLATE_ID,
         diskPath: 'AGENTS.md',

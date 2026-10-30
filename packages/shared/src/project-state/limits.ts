@@ -7,6 +7,10 @@ export const PROJECT_STATE_LIMITS = {
   maxTotalBytes: 16 * MIB,
 } as const;
 
+/** The most the repository's AGENTS.md rules override may hold once normalised, in UTF-8 bytes. The
+ *  setting's own cap, not one a reader of the directory enforces, so it is no entry above. */
+export const MAX_AGENT_RULES_BYTES = 64 * 1024;
+
 export type RecordReadable = { readable: true } | { readable: false; reason: string };
 
 /** Whether a reader's walk of these files (relative to the state directory) would accept them. */

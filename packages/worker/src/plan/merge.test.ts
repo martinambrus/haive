@@ -971,6 +971,46 @@ describe('mergeOriginInto: the project state record merges three-way', () => {
     expect(record.claims.map((c) => c.writtenHash)).toEqual(['h-theirs']);
   });
 
+  it.each([
+    ['text', '# Rules\n\n- Keep it small.\n- theirs\n'],
+    ['empty text', ''],
+  ])(
+    'keeps theirs for an agent-rules %s both sides edited on the same lines, and merges the rest of the record',
+    async (_what, theirText) => {
+      const RULES_FILE = `${STATE_PREFIX}settings/agent-rules.md`;
+      const withRules = (
+        text: string,
+        over: Partial<ProjectStateRecord> = {},
+      ): ProjectStateRecord =>
+        recordOf({
+          settings: Object.assign(Object.create(null), { 'agent-rules': text }) as Record<
+            string,
+            unknown
+          >,
+          ...over,
+        });
+      const { local, wt } = await relatedFilesPair(
+        stateFiles(withRules('# Rules\n\n- Keep it small.\n- base\n')),
+        stateFiles(
+          withRules('# Rules\n\n- Keep it small.\n- ours\n', {
+            render: baseRender({ framework: 'drupal' }),
+          }),
+        ),
+        stateFiles(withRules(theirText, { render: baseRender({ customAgentSpecs: theirsSpec }) })),
+      );
+      const { attempt, committed } = await mergeAndCommit(local, wt);
+
+      expect(attempt.clean).toBe(true);
+      expect(attempt.warnings).toEqual([]);
+      expect(await unmergedUnderState(wt)).toBe('');
+      expect(await committed(RULES_FILE)).toBe(theirText);
+      const record = await committedRecord(wt);
+      expect(record.settings['agent-rules']).toBe(theirText);
+      expect(record.render?.framework).toBe('drupal');
+      expect(record.render?.customAgentSpecs).toEqual(theirsSpec);
+    },
+  );
+
   it.each(['ours', 'theirs'])(
     'merges a record whose %s side holds a claim file at a git-data path, and drops the file',
     async (side) => {
