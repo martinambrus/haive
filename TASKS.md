@@ -830,7 +830,7 @@ PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/
 
 ### T438 · FNF[cli-login-url-capture-2] · login URL follow-ups: device code read at send time, terminal scanner sends a URL head, wrapped tail, `ESC ( B`, resize timers (+4)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T20:56Z · last: 2026-10-30T20:56Z
 From the T433 review (2026-10-30). Line numbers as of the T433 branch (fnf/433-cli-login-url-capture).
 
 1. PRE-EXISTING, minor, latent, connected: the device code in the same `auth-url` frame is read at send time (api routes/cli-login-banner.ts `offerAuthUrl` ~:730; shared auth-banner-parser.ts `extractDeviceCode` ~:121), so a chunk boundary between the URL and the code line (codex prints the code after a blank line) sends the frame without the code (70 of 77 URL-sending first-chunk splits of the codex banner) or with a truncated one (`ABCD-1234` of `ABCD-12345`). Fix: for device-code providers hold the frame for the code within the same deadline and require a terminator after it.
