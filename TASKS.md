@@ -560,7 +560,7 @@ status: open · was modular #211
 19. (T401 review, 2026-10-30) PRE-EXISTING, minor: tests/e2e/helpers/auth.ts ~:46 `recordRegisteredUser` is module-private, so a user minted by `POST /admin/users` (as in forced-password.spec.ts) is unknown to the global teardown and the `users` fixture; a timed-out run leaks it until the CI database is dropped. Export it (or a registration helper for admin-minted users) and record such users.
 20. (T429 review, 2026-10-30) PRE-EXISTING, minor: nothing enforces that `allowFileTransport` is the one opt-in of the default `protocol.file.allow=never`: a caller's own later `-c protocol.file.allow=always`, or a `GIT_ALLOW_PROTOCOL` that lists `file` in a production source, lifts it silently (shared git-args.ts ~:130-132 passes the caller's argv verbatim; the env takes precedence, MEASURED). Production has none (only git-push.ts ~:147,155 set `http:https:ssh`). Pin it with a source-scan guard like git-exec-guard.test.ts.
 21. (T119 fix review, 2026-10-30) PRE-EXISTING, minor: api test/repo-artifact-reset.test.ts ~:1829,1849 create temp dirs under `os.tmpdir()` and never remove them; clean them up in an `afterEach`.
-22. (T448 review, 2026-10-30) PRE-EXISTING, minor: the UI-login e2e specs click submit right after `fill` with no hydration signal (tests/e2e/auth/forms.spec.ts ~:32,69,99,124 and harness/session-recovery/session-ordering.spec.ts); a click that beats hydration is a native navigation (a POST since T448), so the race remains. Wait for a hydration marker before submitting.
+22. (T448 review, 2026-10-30) PRE-EXISTING, minor: the UI-login e2e specs click submit right after `fill` with no hydration signal (tests/e2e/auth/forms.spec.ts ~:32,69,99,124 and harness/session-recovery/session-ordering.spec.ts); a click that beats hydration is a native navigation (a POST since T448), so the race remains. Wait for a hydration marker before submitting. Since T449 (PR #946) only a click that beats hydration remains, and its helpers `holdScripts`, `reactAttached` and `waitForReact` (tests/e2e/auth/prehydration-submit.spec.ts ~:89-107) can move to tests/e2e/helpers for this fix.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -839,17 +839,6 @@ Cross-reference (T438, 2026-10-30): the device code now waits within the same de
 status: open
 From the T428 review (2026-10-30). PRE-EXISTING, moderate. T428 shows the `ok: false` sources only on the page that started a refresh and only while its poll is open. A scheduled tick or boot refresh, and a manual refresh whose 10-minute poll window ends, surface nowhere; the poll-timeout copy even promises "reopen this page later to see the result" (web lib/cli-jobs.ts ~:33-38), which no page can show. FX has no durable trace at all: `fx_rates` has no error column (database schema/pricing.ts ~:126-135), a failure is only `log.warn` plus `ok: false` (worker cli-versions/model-prices.ts ~:329-332), and dispatch just returns the result (worker queues/cli-exec/handlers.ts ~:1529-1531). Decide between a last-result row per source, an FX fetch-state table, or one last refresh-run record the pages read; fix the timeout copy with it.
 
-### T441 · FNF[ide-container-lifecycle-2] · a failed inspect recreates an in-use editor or app runner; an editor's debug lookup fails its ensure; editors from before T431 stay unregistered (+2)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T20:45Z · last: 2026-10-30T20:45Z
-From the T431 review (2026-10-30). PRE-EXISTING, minor. Line numbers as of the T431 branch (fnf/431-ide-container-lifecycle).
-
-1. worker sandbox/ide-runner.ts ~:401 and app-runner.ts ~:327 reuse a running container only when `runnerSubpathVerdict` is `'match'`; its `'absent'` means `docker inspect` failed (app-runner.ts ~:358-369; a missing label reads as `'other'`), so a transient inspect failure recreates an editor or app runner that is in use. ddev-runner.ts ~:2205 recreates only on `'other'`. Keep the container on `'absent'`.
-2. ide-runner.ts ~:464-469 `setupIdeDebugging`: the task lookup is unguarded, so a DB error after the editor booted fails the ensure job although the editor is up (`isTaskDebugMode`, app-runner.ts ~:373, swallows the same error).
-3. Editors running with no `ide:session:` entry from before T431 stay unregistered until their next ensure or the task's end, because the idle reaper walks `ide:session:*` keys only (ide-session-reaper.ts ~:70-78). Also list `label=haive.ide` containers that have no entry.
-
-Cross-reference (not appended): T371 [design] FNF[docker-spawn-dedup]; T431's `launchIsStale` (ide-runner.ts ~:107) is one more hand-rolled `docker inspect` helper.
-
 ### T442 · FNF[runner-launch-spec] [design] · a running app runner is reused whatever image, caps, ports or debug env it was created with
 
 status: open
@@ -914,8 +903,24 @@ From the T438 review (2026-10-30). Minor. api routes/cli-login-banner.ts.
 1. PRE-EXISTING: the 150 ms `setTimeout` that sends Enter after a token paste (~:615-621) is not tracked, so it can write to a stream that has already ended; track it with the session's other timers and clear it in `cleanupSession`.
 2. T433 regression, harmless: a chunk that arrives after cleanup still arms antigravity's 1.5 s menu-advance timer (~:811), whose callback only returns; skip arming it once the session is cleaned up.
 
+### T453 · FNF[auth-prehydration-click] [design] · a click or Enter on the sign-in form before React attaches drops what was typed
+
+status: open
+From the T449 review (2026-10-30; was T449 item 2). PRE-EXISTING, minor.
+
+Before React attaches `handleSubmit`, a click on Sign in (web components/auth-form.tsx ~:189) or Enter is the browser's native POST to the same page (`method="post"`, ~:154, from T448), answered with a fresh server render: the form comes back empty and what was typed is gone. Options measured or weighed by the T449 driver: React's own replay (a function `action`) keeps it but emits no `method`, which T448's JavaScript-off fallback needs; an inline script that queues the submit and replays it with `requestSubmit()` after attach is possible (the CSP has no `script-src`) but is a new hydration handshake; echoing the POST body back into the page would put the password into HTML. A button disabled until hydration breaks the JavaScript-off fallback. Decide whether it is worth a mechanism (for example only if autosubmitting password managers on cold loads are observed).
+
+### T454 · FNF[ssr-form-prehydration-values] · server-rendered controlled forms lose text typed before hydration
+
+status: open
+From the T449 review (2026-10-30). PRE-EXISTING, minor (signed-in pages; only a hard load exposes it).
+
+1. web components/new-repo-form.tsx ~:116 keeps the repository name in a controlled `useState('')` and ~:239 renders `<form onSubmit>` with no `method`: text typed into `/repos/new` before hydration is reset to '' by the first re-render, and a submit before hydration is a GET reload of the same page (the input has no `name`, so nothing reaches the URL). The fix class is T449's: uncontrolled inputs read with `new FormData(event.currentTarget)` at submit.
+2. The other server-rendered forms were not surveyed: list each controlled form a page renders on the server and say which lose pre-hydration input or put a value in the URL on a native submit.
+
 ## Done
 
+- T441 — a running editor or app runner is recreated only when docker inspect proves a mismatch (a failed inspect keeps it), the editor's debug lookup no longer fails a booted editor's ensure, and editors from before T431 are registered for the idle reaper — PR #944 (b4a901a37), 2026-10-30; main CI green; follow-ups T450, T451
 - T448 — the sign-in form (login, register, setup) submits by POST before React attaches its handler, so no field value reaches the URL (measured: urlencoded POST answered 200 with the page, multipart 409, never set encType) — PR #943 (28e5c840b), 2026-10-30; main CI green; follow-ups T449, T364 item 22
 - T429 — every hardened git argv refuses the file transport by default (protocol.file.allow=never; allowFileTransport the one opt-in, used by the host-folder refresh); the unused gitSetOriginUrl removed — PR #942 (b8025f92e), 2026-10-30; main CI green; follow-up T364 item 20, T387 cross-reference
 - T401 — the app shell holds its recurring requests back while the password must change (gated on the layout's flag, no refused request at all) and resumes them after the change without a reload; e2e specs for the forced flow and the sign-in throttle's 429 — PR #939 (d240c9e4a), 2026-10-30; main CI green; follow-ups T448 (shipped as #943), T364 item 19
