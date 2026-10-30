@@ -38,6 +38,7 @@ interface SidebarNavProps {
   initialTree: SidebarTree;
   initialFilters: TaskToneFilter[];
   modules: ModuleSummary[];
+  mustChangePassword?: boolean;
 }
 
 export function SidebarNav({
@@ -48,6 +49,7 @@ export function SidebarNav({
   initialTree,
   initialFilters,
   modules,
+  mustChangePassword = false,
 }: SidebarNavProps) {
   const navItems = useMemo(() => navItemsFor(role, modules), [role, modules]);
   const pathname = usePathname();
@@ -239,7 +241,7 @@ export function SidebarNav({
           })}
         </nav>
 
-        {!effectiveCollapsed && (
+        {!effectiveCollapsed && !mustChangePassword && (
           <div className="haive-expanded-only contents">
             <div className="mt-3 border-t border-neutral-800" />
             <SidebarTasks

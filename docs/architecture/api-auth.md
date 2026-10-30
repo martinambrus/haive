@@ -22,7 +22,16 @@ no-op; an ordinary user still can, and it still signs their other devices out. T
 the web (`ForcedPasswordGuard`) is now the UX and the api is the boundary, so the account page treats
 the 403 as the expected state and shows only its Password card. Nothing in the app clears the flag for
 someone else; an administrator who set it by mistake runs
-`UPDATE users SET must_change_password = false WHERE id = ...`.
+`UPDATE users SET must_change_password = false WHERE id = ...`. While the flag is set the `(app)`
+layout does not start the shell's recurring requests, since the api refuses every one of them: it
+mounts no `NotificationProvider` or `GlobalPauseBanner`, `SidebarNav` leaves out its active-task list,
+and `MaintenanceNotice` stops watching (`useMaintenanceState(watch)`). The layout's own flag is
+current for the whole session, because the flag is set only for a new account or by a password reset,
+and a reset bumps `token_version`, which ends the session first. The account page's `router.refresh()`
+after the change re-renders the layout, so the polls start again without a reload. A new recurring
+request in the shell is gated on the same flag, not by catching the 403.
+`tests/e2e/auth/forced-password.spec.ts` covers the flow, and `login-throttle.spec.ts` the sign-in
+throttle's 429.
 
 **A revoked session closes its open sockets.** A handshake registers its socket under the user as soon
 as the token verifies, before the user row is read (`trackUserUpgrade`, `lib/user-sockets.ts`), so a

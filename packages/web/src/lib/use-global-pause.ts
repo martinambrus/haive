@@ -70,11 +70,13 @@ export function useGlobalPause(): boolean {
   return paused;
 }
 
-/** The system-wide maintenance state. Shares the poller above, so it costs no extra request. */
-export function useMaintenanceState(): MaintenanceState {
+/** The system-wide maintenance state. Shares the poller above, so it costs no extra request.
+ *  `watch` false subscribes to nothing and starts no timer; flipping it back starts the poll. */
+export function useMaintenanceState(watch = true): MaintenanceState {
   const [state, setState] = useState(currentMaintenance);
 
   useEffect(() => {
+    if (!watch) return;
     maintenanceSubscribers.add(setState);
     setState(currentMaintenance);
     if (timer === null) {
@@ -88,7 +90,7 @@ export function useMaintenanceState(): MaintenanceState {
         timer = null;
       }
     };
-  }, []);
+  }, [watch]);
 
   return state;
 }

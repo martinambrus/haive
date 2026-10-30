@@ -118,6 +118,9 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   // the /auth/me call above, so the guard below costs no extra request.
   const mustChangePassword = data.user.mustChangePassword ?? false;
 
+  // While it is set the api refuses every poll the shell makes, so those components are not
+  // mounted. The refresh after the password change re-renders this layout and they mount again
+  // without a reload.
   return (
     <CliLoginProvider>
       {/* Carries the sidebar's live width to the `position: fixed` bars inside <main>,
@@ -145,6 +148,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
             Array.isArray(prefs.sidebarFilters) ? prefs.sidebarFilters.filter(isTaskToneFilter) : []
           }
           modules={modules}
+          mustChangePassword={mustChangePassword}
         />
         <main className="flex-1 overflow-y-auto p-4 md:p-8">
           {/* Renders nothing unless the admin global pause switch is on. Role comes from the
@@ -170,11 +174,11 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
               </span>
             </div>
           )}
-          <GlobalPauseBanner role={data.user.role} />
+          {!mustChangePassword && <GlobalPauseBanner role={data.user.role} />}
           {/* Wraps rather than sits beside the others: under full maintenance a non-admin's
               requests are being refused, so their page is REPLACED with an explanation instead
               of left to fail every fetch behind a banner. Draining renders as a banner. */}
-          <MaintenanceNotice role={data.user.role}>
+          <MaintenanceNotice role={data.user.role} watch={!mustChangePassword}>
             <ForcedPasswordGuard mustChangePassword={mustChangePassword}>
               {/* Inside the password guard, not beside it: someone holding an administrator's
                   minted password is sent to replace it wherever they were headed, admin
@@ -184,7 +188,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           </MaintenanceNotice>
         </main>
       </div>
-      <NotificationProvider />
+      {!mustChangePassword && <NotificationProvider />}
       <SessionKeepAlive />
     </CliLoginProvider>
   );
