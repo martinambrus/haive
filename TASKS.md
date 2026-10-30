@@ -535,7 +535,7 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+14)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+15)
 
 status: open · was modular #211
 
@@ -554,6 +554,7 @@ status: open · was modular #211
 13. (T306 review) PRE-EXISTING, minor to moderate (class hazard): database testing/fake-db.ts ~:169 throws a plain Error for a table the fake was not given, which a route turns into a 500 or a caught failure, so a test that expects a throw or a 500 can pass on the miss (proven for revive-beside-live, fixed in T306; not scanned for others). Fix: a sentinel error class and an afterEach check of misses.
 14. (T363 review) PRE-EXISTING, consequential: scripts/test/ci-gated-list.test.mjs ~:12 recognises a Postgres-gated test only by `pathname.startsWith(` or `CREATE|DROP DATABASE`, so a gated file with another guard idiom is invisible to the "every gated file has a GATED row" check and skips green in CI for ever (T363's DB file was the live case, fixed there). Fix: detect by `skipIf` plus a `*_URL` env var.
 15. (T363 review) PRE-EXISTING, minor: no e2e spec creates a task with attachments or presses Start on a created task (the only Start click is Run app, tests/e2e/tasks/new-task-type.spec.ts ~:232), so the attachments confirm flow is checked by hand only.
+16. (T431 review, 2026-10-30) PRE-EXISTING, moderate: worker test/upload-reaper.test.ts ~:1412 (T323 "keeps remembered failures at capacity across repeated passes", 1001 sequential orphan files) times out at the 20 s test timeout in a full worker-package run, and its leftover fails the next test (~:1444, expected 2, got 3). Red at base 0a7b8d405 in 3 of 3 local full runs; passes alone (238/238); CI's unit job is green. Give it its own timeout or a smaller fixture, and isolate its state from the next test.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -857,6 +858,22 @@ From the T433 review (2026-10-30). Residual of T433's fallback: api routes/cli-l
 
 status: open
 From the T428 review (2026-10-30). PRE-EXISTING, moderate. T428 shows the `ok: false` sources only on the page that started a refresh and only while its poll is open. A scheduled tick or boot refresh, and a manual refresh whose 10-minute poll window ends, surface nowhere; the poll-timeout copy even promises "reopen this page later to see the result" (web lib/cli-jobs.ts ~:33-38), which no page can show. FX has no durable trace at all: `fx_rates` has no error column (database schema/pricing.ts ~:126-135), a failure is only `log.warn` plus `ok: false` (worker cli-versions/model-prices.ts ~:329-332), and dispatch just returns the result (worker queues/cli-exec/handlers.ts ~:1529-1531). Decide between a last-result row per source, an FX fetch-state table, or one last refresh-run record the pages read; fix the timeout copy with it.
+
+### T441 · FNF[ide-container-lifecycle-2] · a failed inspect recreates an in-use editor or app runner; an editor's debug lookup fails its ensure; editors from before T431 stay unregistered (+2)
+
+status: open
+From the T431 review (2026-10-30). PRE-EXISTING, minor. Line numbers as of the T431 branch (fnf/431-ide-container-lifecycle).
+
+1. worker sandbox/ide-runner.ts ~:401 and app-runner.ts ~:327 reuse a running container only when `runnerSubpathVerdict` is `'match'`; its `'absent'` means `docker inspect` failed (app-runner.ts ~:358-369; a missing label reads as `'other'`), so a transient inspect failure recreates an editor or app runner that is in use. ddev-runner.ts ~:2205 recreates only on `'other'`. Keep the container on `'absent'`.
+2. ide-runner.ts ~:464-469 `setupIdeDebugging`: the task lookup is unguarded, so a DB error after the editor booted fails the ensure job although the editor is up (`isTaskDebugMode`, app-runner.ts ~:373, swallows the same error).
+3. Editors running with no `ide:session:` entry from before T431 stay unregistered until their next ensure or the task's end, because the idle reaper walks `ide:session:*` keys only (ide-session-reaper.ts ~:70-78). Also list `label=haive.ide` containers that have no entry.
+
+Cross-reference (not appended): T371 [design] FNF[docker-spawn-dedup]; T431's `launchIsStale` (ide-runner.ts ~:107) is one more hand-rolled `docker inspect` helper.
+
+### T442 · FNF[runner-launch-spec] [design] · a running app runner is reused whatever image, caps, ports or debug env it was created with
+
+status: open
+From the T431 review (2026-10-30). PRE-EXISTING, minor, consequence unmeasured. worker sandbox/app-runner.ts ~:326-333 reuses a running app runner when its workspace subpath matches and compares nothing else, so the image tag, resource caps, publish args and debug env chosen at create never reach a running runner (the class T431 fixed for the editor). Unlike an editor, recreating a runner stops the running app, so decide when a changed launch may replace it (idle only, on the next explicit start, or never with a notice) before stamping a spec label as T431 did (`haive.ide.spec`).
 
 ## Done
 
