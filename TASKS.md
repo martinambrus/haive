@@ -792,11 +792,6 @@ From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` r
 status: open · kind: design
 From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. worker 10-gate-3-commit.ts ~:407-410: `git add -A` records an untracked nested repo that has a HEAD as a 160000 entry with no `.gitmodules` URL; the viewer labels it "submodule" and gate 3 reads only the exit code. Later `git submodule` commands and recursive clones meet a gitlink with no URL. Decide: refuse, warn, stage its files, or ask the user.
 
-### T428 · FNF[refresh-result-hidden] · a version or price refresh that fails reports ok:false that no page reads
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T17:53Z · last: 2026-10-30T17:53Z
-From the T420 review (2026-10-25). PRE-EXISTING design, minor. worker queues/cli-exec/handlers.ts ~:967-1010 records a refresh's source failures and completes the job with `ok: false` ("cannot fail the job"); web lib/cli-jobs.ts `runPricingRefresh` (since T420) and the catalog refresh discard the result, so a price-feed failure shows only as a per-CLI fetchError badge after the reload, and FX and catalog failures show nowhere. Fix: return the result and show the failed sources on the page.
-
 ### T429 · FNF[file-transport-default] · refuse the file transport on every git call by default, not by verb
 
 status: open
@@ -809,11 +804,6 @@ From the T398 review (2026-10-25). PRE-EXISTING.
 
 1. Consequential: worker sandbox/ide-runner.ts ~:360-371 `ensureIdeRunnerStartedInner` returns the running container when only the workspace-subpath label matches; flags and image are never compared, so a changed launch flag (T398's `--disable-proxy`) or a `CODE_SERVER_IMAGE` bump (shared constants ~:814) never reaches a running editor, which lives as long as its tab is open. Fix: stamp a launch-spec label at create and recreate on mismatch, as `runnerSubpathVerdict` does for the subpath (app-runner.ts ~:353-369), at a moment that does not kill a live session.
 2. Minor: a task editor gets its `ide:session:` hash only when its first WebSocket connects (worker queues/ide-ensure-queue.ts ~:31-51 and the api ensure route write nothing; the repository path does, ~:81-87), and the idle reaper walks existing hashes only (ide-session-reaper.ts ~:70-105), so a task editor that never got a socket lives until the task ends.
-
-### T433 · FNF[cli-login-url-capture] · the login banner sends the auth URL before its chunk completes
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T16:26Z · last: 2026-10-30T16:26Z
-From the T427 review (2026-10-25), F2. PRE-EXISTING, minor, latent. api routes/cli-login-banner.ts ~:673-699 (authUrlSent set once ~:677; shared auth-banner-parser.ts ~:77-99): the URL is sent as soon as its prefix appears, so a chunk boundary inside it sends the head of the URL (function-level: a 50-character head of a 65-character URL is returned as the URL) and the user gets a broken link with no correction. Wait for a terminator after the URL (whitespace, end of line or a closing escape) before sending, or re-send when the URL grows. Real chunking of the URL frame not observed.
 
 ### T434 · FNF[token-save-before-probe] [design] · a captured CLI token overwrites the stored one before the probe verifies it
 
@@ -877,6 +867,8 @@ From the T431 review (2026-10-30). PRE-EXISTING, minor, consequence unmeasured. 
 
 ## Done
 
+- T428 — a version or price refresh lists the sources it could not update (catalog poll result admin-only) — PR #937 (1207521d4), 2026-10-30; main CI green; follow-up T440; browser acceptance owed (dev stack)
+- T433 — the login banner sends the auth URL only once it has ended (1 s deadline from first sight, stream-end flush, nothing after sign-in) — PR #936 (d7b4c605a), 2026-10-30; main CI green at 1207521d4; follow-ups T438, T439; browser acceptance per provider owed (dev stack)
 - T118 — repository CLI set is a union — PR #934 (110bb4933), 2026-10-26; final reviews/gates recorded in T118 evidence, all8 main CI green, dev libs/API/web/worker verified; finish-then-pause boundary complete.
 
 - T117 — observe external named checkout and record changes safely — PR #933 (46fe58b2), 2026-10-26; exact-head review/all12 CI clean, main CI40310628973 all8 + CodeQL green, dev0214/libs/API/web/worker/60s observer verified.
