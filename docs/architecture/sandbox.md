@@ -180,6 +180,15 @@ Terminal output listeners follow the count/session setup so buffered output stil
 connected frame. The login banner finishes EOF token capture before deciding whether an active
 probe defers cleanup.
 
+The login banner sends the sign-in link only once `extractWrappedUrl` (`@haive/shared`) sees the
+URL end: more text after it on its line, a blank line, or a line of prose, since a hard-wrapped
+URL continues on whitespace-free lines. Output arrives in chunks that can stop anywhere inside the
+URL, and a head sent as the link is never corrected. A URL still open gets `AUTH_URL_SETTLE_MS`
+(1 s), counted once from its first sight, after which the end of the output is taken as its end;
+the stream's end sends it first, ahead of the EOF token capture and the `exit` frame. Nothing is
+sent once the sign-in has succeeded (`authSuccessSent`), because the modal resets its phase on an
+`auth-url` frame.
+
 The terminal route increments `containers.attached_ws_count` only after acquiring the stream,
 and cleanup decrements only when that increment completed. Both updates are atomic
 `greatest(attached_ws_count + delta, 0)` operations; a failed increment must not decrement
