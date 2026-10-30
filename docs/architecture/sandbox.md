@@ -215,7 +215,13 @@ URL, and a head sent as the link is never corrected. A URL still open gets `AUTH
 (1 s), counted once from its first sight, after which the end of the output is taken as its end;
 the stream's end sends it first, ahead of the EOF token capture and the `exit` frame. Nothing is
 sent once the sign-in has succeeded (`authSuccessSent`), because the modal resets its phase on an
-`auth-url` frame.
+`auth-url` frame. For codex, whose device code follows the URL after a blank line, the frame also waits
+for the code to end (`extractDeviceCode`, the same terminator rule), within the same deadline; at
+the deadline or the stream's end the end of the output is taken as the end of the code too. grok
+and amp device carry the code in the URL and send at once. `stripAnsi` strips a charset designation
+(`ESC ( B`, what ncurses' `sgr0` emits) whole, and `INCOMPLETE_ANSI_ESCAPE` holds a cut one back, so
+neither a URL nor a captured token gains a stray `B`. `cleanupSession` clears every timer the session
+armed, the two antigravity PTY resize timers included.
 
 The terminal route increments `containers.attached_ws_count` only after acquiring the stream,
 and cleanup decrements only when that increment completed. Both updates are atomic

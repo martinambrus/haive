@@ -363,11 +363,7 @@ Masking is on by default and covers **untracked files only** (committed secrets 
 
 ### Terminal control characters
 
-`Ctrl+C` (0x03) and `Ctrl+D` (0x04) bytes are stripped from WebSocket input before being forwarded to the PTY so an accidental keystroke cannot tear down a long-running CLI session. To forward them explicitly the client sends a `set_control_passthrough` frame with `allow: true`; sending `allow: false` restores the default block. Pure helpers `scanOauthPrompts` and `stripControlBytes` are exported from `packages/api/src/routes/terminal.ts` and unit-tested in `packages/api/test/terminal-parser.test.ts`.
-
-### OAuth prompt detection
-
-The terminal server parses CLI OAuth verification URLs out of PTY output (ANSI sequences stripped, trailing punctuation trimmed, rolling buffer capped) and emits an `oauth_prompt` frame with the URL and an inferred service (`claude`, `codex`, `gemini`, `grok`, `amp`). Clients can render this as a clickable link instead of forcing the user to copy the URL out of the raw terminal view.
+`Ctrl+C` (0x03) and `Ctrl+D` (0x04) bytes are stripped from WebSocket input before being forwarded to the PTY so an accidental keystroke cannot tear down a long-running CLI session. To forward them explicitly the client sends a `set_control_passthrough` frame with `allow: true`; sending `allow: false` restores the default block. The pure helper `stripControlBytes` is exported from `packages/api/src/routes/terminal.ts` and unit-tested in `packages/api/test/terminal-parser.test.ts`.
 
 ### Container cleanup
 
