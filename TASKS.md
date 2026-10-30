@@ -794,7 +794,7 @@ From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. w
 
 ### T429 · FNF[file-transport-default] · refuse the file transport on every git call by default, not by verb
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T19:58Z · last: 2026-10-30T19:58Z
 From the T417 review (2026-10-25), follow-up to T417 item 6. Minor, hardening. Verb-based hardening (shared git-args.ts) still misses `remote show|prune|set-head`, `remote add -f`, `submodule update|add`, `archive --remote` and a promisor lazy fetch; none is called today. Production needs the file transport only for the host-folder refresh (worker repo/refresh.ts ~:96-102, which opts in), so `protocol.file.allow=never` in `GIT_CONFIG_SAFETY_ARGS` with `allowFileTransport` as the one opt-in would cover every verb, future ones included. Check every test that seeds with hardened git. Also: `gitSetOriginUrl` (worker repo/clone.ts ~:121-138) is exported, called only by a test, and uses the single-URL `remote set-url` form T417 replaced (dead code; remove or route through `ensureOrigin`).
 
 ### T431 · FNF[ide-container-lifecycle] · a running editor container is reused whatever its launch flags or image; a task editor that never got a socket is never idle-reaped (+1)
