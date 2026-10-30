@@ -48,6 +48,26 @@ function getMarkdown(editor: Editor): string {
   return (editor.storage as unknown as { markdown: MarkdownStorage }).markdown.getMarkdown();
 }
 
+/** What the toolbar shows of the editor's selection. */
+function toolbarState(e: Editor) {
+  return {
+    bold: e.isActive('bold'),
+    italic: e.isActive('italic'),
+    strike: e.isActive('strike'),
+    code: e.isActive('code'),
+    h2: e.isActive('heading', { level: 2 }),
+    h3: e.isActive('heading', { level: 3 }),
+    bulletList: e.isActive('bulletList'),
+    orderedList: e.isActive('orderedList'),
+    taskList: e.isActive('taskList'),
+    blockquote: e.isActive('blockquote'),
+    link: e.isActive('link'),
+    table: e.isActive('table'),
+    canUndo: e.can().undo(),
+    canRedo: e.can().redo(),
+  };
+}
+
 interface TBtnProps {
   label: string;
   onClick: () => void;
@@ -139,30 +159,16 @@ export function MarkdownEditor({
     editor?.setEditable(!disabled, false);
   }, [disabled, editor]);
 
-  const state = useEditorState({
+  const selected = useEditorState({
     editor,
-    selector: ({ editor: e }) =>
-      e
-        ? {
-            bold: e.isActive('bold'),
-            italic: e.isActive('italic'),
-            strike: e.isActive('strike'),
-            code: e.isActive('code'),
-            h2: e.isActive('heading', { level: 2 }),
-            h3: e.isActive('heading', { level: 3 }),
-            bulletList: e.isActive('bulletList'),
-            orderedList: e.isActive('orderedList'),
-            taskList: e.isActive('taskList'),
-            blockquote: e.isActive('blockquote'),
-            link: e.isActive('link'),
-            table: e.isActive('table'),
-            canUndo: e.can().undo(),
-            canRedo: e.can().redo(),
-          }
-        : null,
+    selector: ({ editor: e }) => (e ? toolbarState(e) : null),
   });
 
-  if (!editor || !state) return null;
+  if (!editor) return null;
+
+  // The hook keeps its snapshot from before the editor existed until the editor's first
+  // transaction, and an editor that skips autofocus dispatches none: read the editor meanwhile.
+  const state = selected ?? toolbarState(editor);
 
   const chain = () => editor.chain().focus();
 
