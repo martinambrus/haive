@@ -1,7 +1,7 @@
 import { and, desc, eq, gt, inArray } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import {
-  buildCliRulesBlock,
+  buildRepoCliRulesBlock,
   CLI_RULES_DISK_PATH,
   CLI_RULES_END,
   CLI_RULES_START,
@@ -33,8 +33,8 @@ import { gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
 export { isLinkToAgentsMd, RULES_IMPORT_LINE };
 
 export interface RulesPlan {
-  /** Merged `haive:cli-rules` block for AGENTS.md, or null when no enabled
-   *  provider has rules content. */
+  /** The repository's `haive:cli-rules` block for AGENTS.md: its rules override, else Haive's
+   *  default rules; null when the override is empty. */
   agentsRulesBlock: string | null;
   /** Files (CLAUDE.md, GEMINI.md) that receive only an `@AGENTS.md` import. */
   importFiles: string[];
@@ -44,19 +44,20 @@ export interface RulesPlan {
   copyFiles: string[];
 }
 
-/** Decide what each CLI's rules file gets, given the enabled providers joined
- *  with their adapter rules-file metadata. AGENTS.md is the single source of
- *  truth (every provider's rules merged + trim-equal deduped); import-mode
- *  files (CLAUDE.md, GEMINI.md) just point at it via `@AGENTS.md`; native-mode
- *  files (rulesFile === 'AGENTS.md') need nothing extra. */
+/** Decide what each CLI's rules file gets, given the enabled providers' adapter
+ *  rules-file metadata and the repository's rules override (`null` follows the
+ *  default rules). AGENTS.md is the single source of truth, and its rules are the
+ *  repository's, never a provider's; import-mode files (CLAUDE.md, GEMINI.md) just
+ *  point at it via `@AGENTS.md`; native-mode files (rulesFile === 'AGENTS.md') need
+ *  nothing extra. */
 export function planRulesFiles(
   providers: ReadonlyArray<{
-    rulesContent: string;
     rulesFile: string;
     rulesFileMode: 'native' | 'import' | 'copy';
   }>,
+  agentRulesOverride: string | null | undefined,
 ): RulesPlan {
-  const agentsRulesBlock = buildCliRulesBlock(providers.map((p) => p.rulesContent));
+  const agentsRulesBlock = buildRepoCliRulesBlock(agentRulesOverride);
   const copyFiles = new Set<string>();
   for (const p of providers) {
     if (p.rulesFile !== 'AGENTS.md' && p.rulesFileMode === 'copy') copyFiles.add(p.rulesFile);

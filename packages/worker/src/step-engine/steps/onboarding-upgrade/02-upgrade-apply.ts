@@ -71,6 +71,7 @@ import {
   completeWriterCliMembership,
   writeProjectStateRecord,
 } from '../../../project-state/write.js';
+import { readAgentRulesOverrideRaw } from '../../_agent-rules-override.js';
 import { loadPreviousStepOutput } from '../onboarding/_helpers.js';
 import {
   appendRtkBlock,
@@ -919,6 +920,16 @@ export const upgradeApplyStep: StepDefinition<UpgradePlanOutput, UpgradeApplyOut
       ) {
         throw new Error(PLAN_NO_LONGER_HOLDS);
       }
+    }
+    // The region is written from the plan's `newContent`, never rendered again, so a form parked across
+    // a change of the repository's rules override would write a region nobody approved. Read under the
+    // same lock, before any write; NULL (the default rules) and '' (no region) are different overrides.
+    if (plan.agentRulesOverride !== undefined) {
+      const now = await ctx.db.transaction(async (tx) => {
+        await lockProjectState(tx, plan.repositoryId);
+        return readAgentRulesOverrideRaw(tx, plan.repositoryId);
+      });
+      if (!sameValue(now, plan.agentRulesOverride)) throw new Error(PLAN_NO_LONGER_HOLDS);
     }
     const haiveVersion = getHaiveVersion();
 

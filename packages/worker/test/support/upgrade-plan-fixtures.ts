@@ -58,7 +58,13 @@ export function seedProviders(fake: Fake, providers: ProviderSeed[] = PROVIDERS)
  *  every other column a reader selects is named here. */
 export function seedRepository(
   fake: Fake,
-  args: { source: string; rtkEnabled: boolean; renderContext?: unknown },
+  args: {
+    source: string;
+    rtkEnabled: boolean;
+    renderContext?: unknown;
+    /** `repositories.agent_rules_override`: NULL unless given. */
+    agentRulesOverride?: string | null;
+  },
 ): void {
   fake.insert(schema.repositories, {
     id: REPO,
@@ -69,6 +75,7 @@ export function seedRepository(
     rtkEnabled: args.rtkEnabled,
     renderContext: args.renderContext ?? null,
     applicableTemplateIds: null,
+    agentRulesOverride: args.agentRulesOverride ?? null,
   });
   fake.insert(schema.tasks, {
     id: TASK,

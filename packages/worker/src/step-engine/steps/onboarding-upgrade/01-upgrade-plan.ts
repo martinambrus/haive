@@ -22,7 +22,6 @@ import {
   skillTargetDirs,
   foreignReason,
   isClaimablePath,
-  isImportMarker,
   rtkBlockToRestore,
   rtkLeftoversToRemove,
   sameValue,
@@ -132,6 +131,10 @@ export interface UpgradePlanDetect {
   /** The repository's render context column as this plan read it, before resolving from it. 02
    *  refuses the plan once the column moved. Optional: persisted plans predate it. */
   renderContextColumn?: unknown;
+  /** The repository's rules override as this plan read it: null for none, '' for an empty one. 02
+   *  writes the region from the plan and never renders it again, so it refuses the plan once the
+   *  override moved. Optional: persisted plans predate it. */
+  agentRulesOverride?: string | null;
 }
 
 /** The render context column exactly as stored, null when the repository holds none. */
@@ -241,13 +244,7 @@ export function classifyEntry(args: {
     (live.templateId.startsWith('custom.') || current.templateId.startsWith('custom.'));
 
   if (templateUnchanged && !customTemplateIdShifted) return 'unchanged';
-  if (diskMatchesBaseline) {
-    // The region renders from this user's providers, so an imported baseline is no proof that its
-    // bytes are this install's to replace.
-    return isImportMarker(live) && live.templateKind === CLI_RULES_TEMPLATE_KIND
-      ? 'conflict'
-      : 'clean_update';
-  }
+  if (diskMatchesBaseline) return 'clean_update';
   // The file already holds what this upgrade would write, such as one another install upgraded.
   if (diskHash === current.writtenHash) return 'adopt';
   return 'conflict';
@@ -655,6 +652,7 @@ export async function buildUpgradePlan(
     rtkBlockLeftovers,
     rtkBlockRestorable,
     renderContextColumn: resolved.column,
+    agentRulesOverride: resolved.agentRulesOverride,
   };
 }
 

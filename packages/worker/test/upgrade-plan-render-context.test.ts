@@ -92,6 +92,7 @@ const CONTEXT_KEYS = [
   'rtkEnabled',
 ];
 const DETECT_KEYS = [
+  'agentRulesOverride',
   'cliAdditions',
   'counts',
   'currentTemplateSetHash',

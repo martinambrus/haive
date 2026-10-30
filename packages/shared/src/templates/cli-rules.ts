@@ -1,6 +1,7 @@
 /**
  * Pure helpers for the AGENTS.md `haive:cli-rules` region — the marker-delimited
- * block that holds every enabled CLI provider's merged agent rules.
+ * block that holds the repository's agent rules (its override, else Haive's
+ * default rules).
  *
  * These live in @haive/shared (not the worker) so both the worker (which writes
  * the block at onboarding and re-renders it on upgrade) and the API (which
@@ -162,11 +163,10 @@ export function dedupLines(blocks: string[]): string {
   );
 }
 
-/** Build the full cli-rules block (markers included) from the rule strings of
- *  the enabled providers. Returns null when no provider contributes non-empty
- *  rules — callers treat null as "no region" (omit on write, obsolete on
- *  upgrade). The caller is responsible for passing the rule strings in a
- *  deterministic order (sorted by provider name) so the output is stable. */
+/** Build the full cli-rules block (markers included) from rule strings.
+ *  Returns null when none is non-empty — callers treat null as "no region"
+ *  (omit on write, obsolete on upgrade). The caller is responsible for passing
+ *  the rule strings in a deterministic order so the output is stable. */
 export function buildCliRulesBlock(rulesContents: readonly string[]): string | null {
   const withRules = rulesContents.filter((c) => c.trim().length > 0);
   if (withRules.length === 0) return null;
@@ -174,8 +174,8 @@ export function buildCliRulesBlock(rulesContents: readonly string[]): string | n
   return `${CLI_RULES_START}\n${combined}${CLI_RULES_END}\n`;
 }
 
-/** Resolve a provider's stored rulesContent to the rules that actually go into
- *  the AGENTS.md block. Empty, or a verbatim copy of any shipped default
+/** Resolve a provider's stored rulesContent to the rules that actually reach its
+ *  agents on dispatch. Empty, or a verbatim copy of any shipped default
  *  (KNOWN_DEFAULT_RULES_HASHES), means the provider never overrode the rules, so
  *  it inherits the live DEFAULT_AGENT_RULES — letting template edits propagate.
  *  Anything else is an explicit override and is used as-is. */
@@ -187,23 +187,6 @@ export function resolveEffectiveRules(rulesContent: string): string {
 export function inheritsDefaultRules(rulesContent: string): boolean {
   return (
     rulesContent.trim().length === 0 || KNOWN_DEFAULT_RULES_HASHES.has(sha256Hex(rulesContent))
-  );
-}
-
-/** Convenience over buildCliRulesBlock for the common call shape: take every
- *  enabled provider's effective rules (resolveEffectiveRules), sort by name so
- *  the block is deterministic regardless of DB row order, then build it. Shared
- *  by the onboarding/upgrade worker steps and the upgrade-status API so all
- *  sites compute the same block — and therefore the same drift hash. */
-export function buildCliRulesBlockFromProviders(
-  providers: ReadonlyArray<{ name: string; rulesContent: string; enabled: boolean }>,
-): string | null {
-  return buildCliRulesBlock(
-    providers
-      .filter((p) => p.enabled)
-      .slice()
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((p) => resolveEffectiveRules(p.rulesContent)),
   );
 }
 

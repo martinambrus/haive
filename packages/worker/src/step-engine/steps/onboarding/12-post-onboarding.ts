@@ -19,7 +19,7 @@ import type {
 import { HAIVE_DATA_DIR, RTK_SETTINGS_PATHS } from '@haive/shared';
 import { safeErrorMessage } from '@haive/shared/logger';
 import {
-  buildCliRulesBlock,
+  buildRepoCliRulesBlock,
   CLI_RULES_DISK_PATH,
   CLI_RULES_SCHEMA_VERSION,
   CLI_RULES_TEMPLATE_ID,
@@ -260,12 +260,15 @@ async function completeLegacyOnboardingContext(
  *  always (not gated by the commit checkbox) so versioning is in place even
  *  when the user defers committing. Idempotent on re-runs: upstream step
  *  machine guarantees 12-post-onboarding.apply runs once per task. `renderCtx` is
- *  built from `detect`, step 07's output; both are null where 07 left none. */
+ *  built from `detect`, step 07's output; both are null where 07 left none.
+ *  `agentRulesOverride` is the override 07 wrote the AGENTS.md region from (its
+ *  apply output; absent reads as the default rules). */
 async function recordOnboardingArtifacts(
   ctx: StepContext,
   detect: GenerateFilesDetect | null,
   renderCtx: TemplateRenderContext | null,
   renderedCtx: TemplateRenderContext | null = renderCtx,
+  agentRulesOverride?: string | null,
 ): Promise<{
   rowsWritten: number;
   warnings: string[];
@@ -328,14 +331,16 @@ async function recordOnboardingArtifacts(
     expanded.push(r);
   }
 
-  // The AGENTS.md cli-rules region is per-repo (depends on the user's enabled
-  // providers' rules), so it is tracked as a region-scoped artifact rather than
-  // a manifest template. detect.cliProviders is already enabled+non-empty and
-  // sorted by name, so the render is deterministic and matches the API's drift
-  // recompute. diskPath 'AGENTS.md' carries no other live artifact row, so the
+  // The AGENTS.md cli-rules region is per-repo (the repository's rules override, else the
+  // default rules), so it is tracked as a region-scoped artifact rather than a manifest
+  // template. It renders from the override 07 wrote it from (its apply output), never from the
+  // live column: the row records what 07 put on disk, and a later change of the override is
+  // offered by the next upgrade as a clean update. Nothing here compares the two or refuses,
+  // since the caller swallows an error from this transaction together with every other
+  // artifact row. diskPath 'AGENTS.md' carries no other live artifact row, so the
   // (repository_id, disk_path) unique index stays satisfied. The row records the
   // region on disk, which 07 leaves alone when it exists and overwrite is off.
-  const cliRulesBlock = buildCliRulesBlock(detect.cliProviders.map((p) => p.rulesContent));
+  const cliRulesBlock = buildRepoCliRulesBlock(agentRulesOverride);
   let retireCliRulesRow = false;
   if (cliRulesBlock) {
     const read = await readAgentsRulesRegion(ctx.repoPath);
@@ -758,6 +763,7 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
     try {
       const genPrev = await loadPreviousStepOutput(ctx.db, ctx.taskId, '07-generate-files');
       const detect = genPrev?.detect ? (genPrev.detect as GenerateFilesDetect) : null;
+      const generatedOverride = (genPrev?.output as GenerateFilesApply | null)?.agentRulesOverride;
       // Derived ahead of the recording, which the project state record below must not depend on.
       renderContext = detect ? buildRenderContext(detect) : null;
       const renderedContext = renderContext;
@@ -781,7 +787,13 @@ export const postOnboardingStep: StepDefinition<PostOnboardingDetect, PostOnboar
           rtkChoiceRecorded,
           detect?.renderContextColumn,
         );
-      const res = await recordOnboardingArtifacts(ctx, detect, renderContext, renderedContext);
+      const res = await recordOnboardingArtifacts(
+        ctx,
+        detect,
+        renderContext,
+        renderedContext,
+        generatedOverride,
+      );
       artifactRowsWritten = res.rowsWritten;
       warnings.push(...res.warnings);
     } catch (err) {

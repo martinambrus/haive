@@ -8,8 +8,8 @@ import {
   RTK_REF_MARKER_END,
   RTK_REF_MARKER_START,
   buildClaudeSettingsJson,
-  buildCliRulesBlockFromProviders,
   buildGeminiSettingsJson,
+  buildRepoCliRulesBlock,
   bundleAgentTemplateHash,
   normalizeContent,
   sha256Hex,
@@ -720,15 +720,17 @@ describe('the banner and the plan agree on the paths a template renders to', () 
   });
 
   /** A repository in sync apart from what the cell puts in: its rules row is current, so the
-   *  banner's answer is down to the custom or agent rows it adds. */
+   *  banner's answer is down to the custom or agent rows it adds. The row records the region the
+   *  repository's rules override renders (the default rules for none), whatever CLIs are enabled. */
   function world(args: {
     providers: { name: string; rulesContent: string; enabled: boolean }[];
     column: unknown;
+    override?: string | null;
     applicable?: string[];
     items?: ReturnType<typeof item>[];
     rows: Record<string, unknown>[];
   }): void {
-    const block = buildCliRulesBlockFromProviders(args.providers);
+    const block = buildRepoCliRulesBlock(args.override);
     const rules = block
       ? [row(CLI_RULES_TEMPLATE_ID, 'cli-rules', 'AGENTS.md', sha256Hex(normalizeContent(block)))]
       : [];
@@ -745,6 +747,7 @@ describe('the banner and the plan agree on the paths a template renders to', () 
       onboardedAt: null,
       onboardingResetAt: null,
       renderContext: args.column,
+      agentRulesOverride: args.override ?? null,
     };
     state.rows = new Map<unknown, unknown[]>([
       [schema.templateManifestCache, [{ ...agent, templateKind: 'agent', setHash: 's' }]],
@@ -774,6 +777,21 @@ describe('the banner and the plan agree on the paths a template renders to', () 
     expect(res.status).toBe(200);
     return (await res.json()) as Record<string, unknown>;
   }
+
+  it.each([
+    ['no CLI enabled', NO_CLI, null],
+    ['an Amp-only CLI set', AMP_ONLY, null],
+    ['an empty rules override', CLAUDE_ONLY, ''],
+    ['a rules override with text', CLAUDE_ONLY, '- the repository rule'],
+  ])(
+    'R1: offers no upgrade for the rules region of a repository with %s',
+    async (_n, providers, override) => {
+      world({ providers, column: { ...portable, agentTargets: [] }, override, rows: [] });
+      const got = await body();
+      expect(got.changedTemplateIds).toEqual([]);
+      expect(got.hasUpgradeAvailable).toBe(false);
+    },
+  );
 
   it('A1: offers no upgrade for a bundle agent a repository with no agent target cannot render', async () => {
     world({

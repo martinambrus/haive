@@ -505,7 +505,9 @@ describe('rows imported from another install', () => {
     ).toBe('obsolete');
   });
 
-  it('reads an imported cli-rules row whose template moved as a conflict, not a clean update', () => {
+  // The region renders from the repository's rules, the same for every install, so an imported
+  // baseline is as good a proof of unedited bytes as one this install recorded.
+  it('reads an imported cli-rules row whose template moved like a recorded one: a clean update while unedited, a conflict once edited', () => {
     const rules = {
       diskPath: CLI_RULES_DISK_PATH,
       templateId: CLI_RULES_TEMPLATE_ID,
@@ -514,8 +516,11 @@ describe('rows imported from another install', () => {
     const moved = current({ ...rules, templateContentHash: 'hash-B', writtenHash: 'wh-B' });
     const args = { current: moved, diskHash: 'wh-A', foreignContext: claudeOnly };
     expect(classifyEntry({ live: live(rules), ...args })).toBe('clean_update');
-    expect(classifyEntry({ live: marker(rules), ...args })).toBe('conflict');
+    expect(classifyEntry({ live: marker(rules), ...args })).toBe('clean_update');
     expect(classifyEntry({ live: marker(rules), ...args, diskHash: 'wh-B' })).toBe('adopt');
+    for (const row of [live(rules), marker(rules)]) {
+      expect(classifyEntry({ live: row, ...args, diskHash: 'wh-edited' })).toBe('conflict');
+    }
     expect(
       classifyEntry({
         live: marker({ ...rules, templateContentHash: 'hash-B', templateSchemaVersion: 1 }),

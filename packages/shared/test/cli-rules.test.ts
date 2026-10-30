@@ -4,7 +4,6 @@ import {
   CLI_RULES_END,
   dedupLines,
   buildCliRulesBlock,
-  buildCliRulesBlockFromProviders,
   buildRepoCliRulesBlock,
   resolveEffectiveRules,
   inheritsDefaultRules,
@@ -127,43 +126,6 @@ describe('inheritsDefaultRules', () => {
   it('reads anything else as an override, a one-character edit of the default included', () => {
     expect(inheritsDefaultRules('- my custom rule')).toBe(false);
     expect(inheritsDefaultRules(`${DEFAULT_AGENT_RULES}x`)).toBe(false);
-  });
-});
-
-describe('buildCliRulesBlockFromProviders', () => {
-  const p = (name: string, rulesContent: string, enabled = true) => ({
-    name,
-    rulesContent,
-    enabled,
-  });
-
-  it('an enabled provider with empty rules inherits the template', () => {
-    expect(buildCliRulesBlockFromProviders([p('codex', '')])).toBe(
-      buildCliRulesBlock([DEFAULT_AGENT_RULES]),
-    );
-  });
-
-  it('excludes disabled providers; merges overrides with inherited defaults', () => {
-    const block = buildCliRulesBlockFromProviders([
-      p('claude-code', '- override'),
-      p('codex', '- ignored', false),
-      p('gemini', ''),
-    ]);
-    expect(block).toBe(buildCliRulesBlock(['- override', DEFAULT_AGENT_RULES]));
-  });
-
-  it('is deterministic regardless of provider row order (sorted by name)', () => {
-    const forward = buildCliRulesBlockFromProviders([p('claude-code', '- a'), p('codex', '- b')]);
-    const reversed = buildCliRulesBlockFromProviders([p('codex', '- b'), p('claude-code', '- a')]);
-    expect(forward).toBe(reversed);
-    // drift hash is taken over this block, so equal block => no false drift.
-    expect(hash(forward!)).toBe(hash(reversed!));
-  });
-
-  it('returns null only when every provider is disabled', () => {
-    expect(
-      buildCliRulesBlockFromProviders([p('claude-code', '- a', false), p('codex', '', false)]),
-    ).toBeNull();
   });
 });
 

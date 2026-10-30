@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { logger } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
+import { RULES_TASK, RULES_USER, rulesOverrideDb } from './support/rules-override-db.js';
 import {
   stubCustomAgent,
   type AgentRenderTarget,
@@ -120,9 +121,10 @@ function detectWith(unmanaged: { dir: string; files: string[] }[]): GenerateFile
 
 function ctx(): StepContext {
   return {
-    taskId: 't1',
+    db: rulesOverrideDb().db,
+    taskId: RULES_TASK,
     taskStepId: 'ts1',
-    userId: 'u1',
+    userId: RULES_USER,
     repoPath: repo,
     workspacePath: repo,
     cliProviderId: null,
