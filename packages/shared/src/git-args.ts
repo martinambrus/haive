@@ -119,23 +119,16 @@ const DIFF_SUBCOMMANDS: ReadonlySet<string> = new Set([
  * with the per-subcommand flags `-c` cannot express inserted right after the subcommand.
  *
  * A flag already present is left alone, so a caller that names its own `--upload-pack` keeps it.
- * Transport verbs refuse the file protocol regardless of the remote's spelling or omission.
- * The explicit host-folder refresh opts in to file transport through the second argument.
+ * Every verb refuses the file transport (a local path, a `file://` URL, a bundle file), because
+ * git starts a transport under commands that are not transport verbs. The host-folder refresh
+ * opts in through the second argument.
  */
 export function hardenGitArgs(
   args: readonly string[],
   options: { allowFileTransport?: boolean } = {},
 ): string[] {
   const at = gitSubcommandIndex(args);
-  const transportSafety =
-    at !== -1 &&
-    !options.allowFileTransport &&
-    (args[at] === 'clone' ||
-      PACK_COMMAND_FLAG[args[at]!] ||
-      (args[at] === 'remote' &&
-        args.slice(at + 1).find((arg) => !arg.startsWith('-')) === 'update'))
-      ? ['-c', 'protocol.file.allow=never']
-      : [];
+  const transportSafety = options.allowFileTransport ? [] : ['-c', 'protocol.file.allow=never'];
   const out = [...GIT_CONFIG_SAFETY_ARGS, ...transportSafety, ...args];
   if (at === -1) return out;
   const name = args[at]!;

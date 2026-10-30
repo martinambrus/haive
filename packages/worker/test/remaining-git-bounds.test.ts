@@ -2,7 +2,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { gitClone, gitSetOriginUrl, handleInit } from '../src/repo/clone.js';
+import { gitClone, handleInit } from '../src/repo/clone.js';
 import { gitTimeoutLimits } from '../src/repo/git-exec.js';
 import { scanForCredentials } from '../src/step-engine/steps/onboarding/_credential-scan.js';
 import { runGit as advanceGit } from '../scripts/advance-bundle-items.js';
@@ -70,7 +70,6 @@ else { process.stdout.write('ordinary output\\n'); process.stderr.write(process.
       'clone before destination exists',
       () => gitClone('https://example.test/repo', path.join(dir, 'absent')),
     ],
-    ['set origin', () => gitSetOriginUrl(dir, 'https://example.test/repo')],
     [
       'blank init',
       () =>
@@ -151,7 +150,6 @@ else { process.stdout.write('ordinary output\\n'); process.stderr.write(process.
   );
   it.each([
     ['clone', () => gitClone('https://example.test/repo', path.join(dir, 'absent'))],
-    ['set origin', () => gitSetOriginUrl(dir, 'https://example.test/repo')],
     ['advance operator', () => advanceGit(dir, ['rev-parse', 'HEAD'])],
     ['reset operator', () => resetGit(dir, ['rev-parse', 'HEAD'])],
   ] as const)(

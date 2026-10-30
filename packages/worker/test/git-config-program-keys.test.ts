@@ -307,6 +307,17 @@ async function gcTrap(): Promise<Ctx> {
   return c;
 }
 
+/** A repository whose local-path `origin` is served by a program its own config names. */
+async function uploadpackRepo(): Promise<Ctx> {
+  const c = await fresh();
+  await c.g('remote', 'add', 'origin', c.bare);
+  await c.cfg(
+    'remote.origin.uploadpack',
+    await c.script('uploadpack', 'exec git-upload-pack "$@"'),
+  );
+  return c;
+}
+
 /** A superproject with one registered submodule, whose gitlink origin has moved on. */
 async function submoduleScenario(): Promise<{
   c: Ctx;
@@ -543,6 +554,56 @@ const CASES: { id: string; setup: () => Promise<Fixture> }[] = [
       await sub('config', 'remote.origin.receivepack', hook);
       await c.cfg('push.recurseSubmodules', 'on-demand');
       return fx(c, ['push', 'origin', 'main'], 'sub-receivepack');
+    },
+  },
+  {
+    id: 'file-transport-remote-show',
+    setup: async () => fx(await uploadpackRepo(), ['remote', 'show', 'origin'], 'uploadpack'),
+  },
+  {
+    id: 'file-transport-remote-prune',
+    setup: async () => fx(await uploadpackRepo(), ['remote', 'prune', 'origin'], 'uploadpack'),
+  },
+  {
+    id: 'file-transport-remote-set-head',
+    setup: async () =>
+      fx(await uploadpackRepo(), ['remote', 'set-head', 'origin', '-a'], 'uploadpack'),
+  },
+  {
+    id: 'file-transport-archive-remote',
+    setup: async () => {
+      const c = await fresh();
+      const serve = await c.script('archive', 'exec git-upload-archive "$@"');
+      return fx(
+        c,
+        ['archive', `--remote=${c.bare}`, `--exec=${serve}`, '-o', '/dev/null', 'HEAD'],
+        'archive',
+      );
+    },
+  },
+  {
+    id: 'file-transport-promisor-lazy-fetch',
+    setup: async () => {
+      const c = await fresh();
+      const upstream = gitAt(c.bare);
+      await upstream('config', 'uploadpack.allowFilter', 'true');
+      await upstream('config', 'uploadpack.allowAnySHA1InWant', 'true');
+      const partial = path.join(c.dir, 'partial');
+      await run(
+        'git',
+        ['clone', '-q', '--filter=blob:none', '--no-checkout', `file://${c.bare}`, partial],
+        { env: { ...process.env, ...hermetic } },
+      );
+      const g = gitAt(partial);
+      await g(
+        'config',
+        '--local',
+        '--add',
+        'remote.origin.uploadpack',
+        await c.script('uploadpack', 'exec git-upload-pack "$@"'),
+      );
+      const blob = (await g('rev-parse', 'origin/main:a.txt')).trim();
+      return { ...fx(c, ['cat-file', '-p', blob], 'uploadpack'), cwd: partial };
     },
   },
 ];
