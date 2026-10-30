@@ -53,6 +53,13 @@ the public page and never deletes cookies. Private-page and CSP routing remain u
 and forced-password guards read the API's authenticated data and API middleware enforces
 authorization.
 
+The sign-in form (`AuthForm`: `/login`, `/register`, `/setup`) declares `method="post"`. A submit
+before React attaches `handleSubmit` is the browser's own, and as a GET it put the email, password
+and setup token in the URL, the history and the access logs, and dropped `?invite=`. MEASURED on
+Next 16.4.3 (dev and standalone build): a urlencoded POST on those routes is answered with the page
+itself (200), while a multipart one gets 409, so the form must never set `encType`. A form that
+carries a secret and is rendered on the server declares `method="post"` too.
+
 ## Cookie transport boundary
 
 The current session transport requires the browser-facing web and API URLs to use **the same
