@@ -15,13 +15,28 @@ import { isDeepStrictEqual } from 'node:util';
 import postgres from 'postgres';
 import { and, asc, eq, isNull, sql, type SQL } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
-import { logger, normalizeContent, sha256Hex, type FormSchema } from '@haive/shared';
+import {
+  buildCliRulesBlock,
+  buildRepoCliRulesBlock,
+  CLI_RULES_DISK_PATH,
+  CLI_RULES_END,
+  CLI_RULES_START,
+  CLI_RULES_TEMPLATE_KIND,
+  DEFAULT_AGENT_RULES,
+  extractRegion,
+  logger,
+  normalizeContent,
+  resolveEffectiveRules,
+  sha256Hex,
+  type FormSchema,
+} from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
   bundleFileName,
   claimFileName,
   emptyProjectState,
   environmentUnitOf,
+  normalizeAgentRulesOverride,
   normalizeProjectState,
   portableSettingsOf,
   toolingUnitOf,
@@ -46,6 +61,11 @@ import { restoreFaults } from '../src/project-state/set-aside.js';
 import { syncProjectStateFromCheckout } from '../src/project-state/sync.js';
 import { writeProjectStateColumn, writeProjectStateRecord } from '../src/project-state/write.js';
 import { stampRepositoryOnboarded } from '../src/repo/onboarded.js';
+import {
+  loadLiveArtifacts,
+  resolveRenderContext,
+  unionExpandedFor,
+} from '../src/step-engine/_upgrade-render.js';
 import {
   TaskCancelledError,
   type StepContext,
@@ -138,6 +158,21 @@ interface Install {
   repoPath: string;
 }
 
+interface ProviderSeed {
+  name: 'claude-code' | 'gemini';
+  enabled: boolean;
+  rulesContent: string;
+}
+
+const RULES_A = '# Personal rules\n\n- Rule held only by install A.\n';
+const RULES_B = '# Personal rules\n\n- Rule held only by install B.\n';
+const RULES_B_OFF = '# Personal rules\n\n- Rule held only by a provider B disabled.\n';
+const A_PROVIDERS: ProviderSeed[] = [{ name: 'claude-code', enabled: true, rulesContent: RULES_A }];
+const B_PROVIDERS: ProviderSeed[] = [
+  { name: 'gemini', enabled: false, rulesContent: RULES_B_OFF },
+  { name: 'claude-code', enabled: true, rulesContent: RULES_B },
+];
+
 /** One install's user, CLI and repository, cloned from the shared remote as the repo queue would. */
 async function cloneInstall(
   name: Install['name'],
@@ -145,6 +180,7 @@ async function cloneInstall(
   storage: string,
   remoteUrl: string,
   userId: string = randomUUID(),
+  providers: ProviderSeed[] = [{ name: 'claude-code', enabled: true, rulesContent: '' }],
 ): Promise<Install> {
   const repositoryId = randomUUID();
   const now = new Date();
@@ -159,10 +195,14 @@ async function cloneInstall(
     createdAt: now,
     updatedAt: now,
   });
-  const [provider] = await db
-    .insert(schema.cliProviders)
-    .values({ userId, name: 'claude-code', label: `two-install-smoke ${name}` })
-    .returning({ id: schema.cliProviders.id });
+  let providerId = '';
+  for (const seed of providers) {
+    const [provider] = await db
+      .insert(schema.cliProviders)
+      .values({ userId, label: `two-install-smoke ${name}`, ...seed })
+      .returning({ id: schema.cliProviders.id });
+    if (seed.name === 'claude-code') providerId = provider!.id;
+  }
   await db.insert(schema.repositories).values({
     id: repositoryId,
     userId,
@@ -182,7 +222,7 @@ async function cloneInstall(
     name,
     db,
     userId,
-    providerId: provider!.id,
+    providerId,
     repositoryId,
     repoPath: path.join(storage, userId, repositoryId),
   };
@@ -353,7 +393,7 @@ async function upgradePlan(install: Install): Promise<{
  *  values over them, each step's output stored where the next reads it, the task completed. */
 async function upgradeApplied(
   install: Install,
-  pick: (plan: UpgradePlanDetect) => Record<string, unknown>,
+  pick: (plan: UpgradePlanDetect, form: FormSchema | null) => Record<string, unknown>,
   planChoices: Record<string, unknown> = {},
 ): Promise<{ error: string | null }> {
   const planned = await upgradePlan(install);
@@ -384,7 +424,7 @@ async function upgradeApplied(
   const form = (await upgradeApplyStep.form!(applyCtx, detected)) as FormSchema | null;
   const applied = await upgradeApplyStep.apply(applyCtx, {
     detected,
-    formValues: { ...defaultValues(form), ...pick(planned.plan) },
+    formValues: { ...defaultValues(form), ...pick(planned.plan, form) },
     iteration: 0,
     previousIterations: [],
   });
@@ -513,7 +553,14 @@ async function main(): Promise<void> {
     // ---- A onboards ----------------------------------------------------------------------
     // Known before the clone runs, so a clone that fails still has its rows removed.
     userA = randomUUID();
-    const a = await cloneInstall('A', dbA, path.join(tmp, 'storage-a'), remoteUrl, userA);
+    const a = await cloneInstall(
+      'A',
+      dbA,
+      path.join(tmp, 'storage-a'),
+      remoteUrl,
+      userA,
+      A_PROVIDERS,
+    );
     const globs = ['vendor/**', 'build/**'];
     await a.db
       .update(schema.repositories)
@@ -1012,7 +1059,14 @@ async function main(): Promise<void> {
     );
 
     // ---- B clones --------------------------------------------------------------------------
-    const b = await cloneInstall('B', dbB, path.join(tmp, 'storage-b'), remoteUrl);
+    const b = await cloneInstall(
+      'B',
+      dbB,
+      path.join(tmp, 'storage-b'),
+      remoteUrl,
+      undefined,
+      A_PROVIDERS,
+    );
     const [repoB] = await b.db
       .select({
         status: schema.repositories.status,
@@ -1365,6 +1419,107 @@ async function main(): Promise<void> {
       "and writes no backfill rows under B's task",
       upgradeB.plan !== null && upgradeB.plan.ranBackfill === false,
       upgradeB.plan?.ranBackfill ?? planError,
+    );
+
+    // ---- T119: the AGENTS.md rules region is the repository's, not its writer's personal rules ----
+    // B above holds A's personal rules, so its checks stay as they are; this B's user holds different ones.
+    const bT = await cloneInstall(
+      'B',
+      dbB,
+      path.join(tmp, 'storage-t119'),
+      remoteUrl,
+      undefined,
+      B_PROVIDERS,
+    );
+    const planT = await upgradePlan(bT);
+    await bT.db
+      .update(schema.tasks)
+      .set({ status: 'cancelled' })
+      .where(eq(schema.tasks.id, planT.taskId));
+    const regionOf = (text: string | null): string | null => {
+      const region = text === null ? null : extractRegion(text, CLI_RULES_START, CLI_RULES_END);
+      return region === null ? null : normalizeContent(region);
+    };
+    const departure = (got: string | null, want: string) => {
+      const held = got ?? '';
+      let at = 0;
+      while (at < held.length && at < want.length && held[at] === want[at]) at += 1;
+      const from = Math.max(0, at - 40);
+      return { at, got: held.slice(from, at + 120), want: want.slice(from, at + 120) };
+    };
+    const defaultRegion = normalizeContent(buildCliRulesBlock([DEFAULT_AGENT_RULES])!);
+    const regionA = regionOf(git(a.repoPath, 'show', `${headA}:AGENTS.md`));
+    // c1: the region A's onboarding committed is the default block, whatever rules A's user holds.
+    check(
+      "T119 c1: A's committed AGENTS.md rules region is the default block, not A's personal rules",
+      regionA === defaultRegion,
+      departure(regionA, defaultRegion),
+    );
+    const resolvedT = await resolveRenderContext(bT.db, {
+      repositoryId: bT.repositoryId,
+      userId: bT.userId,
+      liveRows: await loadLiveArtifacts(bT.db, bT.repositoryId),
+      logger: log,
+    });
+    const expandedT = resolvedT
+      ? await unionExpandedFor(bT.db, {
+          repositoryId: bT.repositoryId,
+          userId: bT.userId,
+          renderCtx: resolvedT.renderCtx,
+          logger: log,
+        })
+      : null;
+    const renderedT = expandedT?.find((e) => e.templateKind === CLI_RULES_TEMPLATE_KIND);
+    const regionT = renderedT ? normalizeContent(renderedT.content) : null;
+    // c2: what B would write for the region is the region A committed, byte for byte.
+    check(
+      "T119 c2: B's own render of the AGENTS.md rules region is A's committed region",
+      regionA !== null && regionT === regionA,
+      departure(regionT, regionA ?? ''),
+    );
+    const rulesEntriesT = (planT.plan?.entries ?? []).filter(
+      (e) => e.diskPath === CLI_RULES_DISK_PATH && e.templateKind === CLI_RULES_TEMPLATE_KIND,
+    );
+    // c3: B's first upgrade plan offers nothing for the region (an absent entry is quiet too).
+    check(
+      "T119 c3: B's first upgrade plan offers nothing for the AGENTS.md rules region",
+      planT.plan !== null && rulesEntriesT.every((e) => e.bucket === 'unchanged'),
+      planT.error ?? rulesEntriesT.map((e) => `${e.diskPath}: ${e.bucket}`),
+    );
+    const regionBeforeT = regionOf(await readFile(path.join(bT.repoPath, 'AGENTS.md'), 'utf8'));
+    const appliedT = await upgradeApplied(bT, (_plan, form) =>
+      Object.fromEntries(
+        (form?.fields ?? []).filter((f) => f.type === 'radio').map((f) => [f.id, 'apply_theirs']),
+      ),
+    );
+    const regionAfterT = regionOf(await readFile(path.join(bT.repoPath, 'AGENTS.md'), 'utf8'));
+    const statusT = git(bT.repoPath, 'status', '--porcelain', '--', 'AGENTS.md');
+    // c4: applying B's upgrade, every conflict overwritten (the form's radios), leaves AGENTS.md as it was.
+    check(
+      "T119 c4: applying B's upgrade leaves AGENTS.md unmodified and its rules region as it was",
+      appliedT.error === null && statusT === '' && regionAfterT === regionBeforeT,
+      {
+        error: appliedT.error,
+        status: statusT,
+        ...departure(regionAfterT, regionBeforeT ?? ''),
+      },
+    );
+    const effectiveRules = async (install: Install): Promise<string> =>
+      resolveEffectiveRules(
+        (
+          await install.db
+            .select({ rulesContent: schema.cliProviders.rulesContent })
+            .from(schema.cliProviders)
+            .where(eq(schema.cliProviders.id, install.providerId))
+        )[0]?.rulesContent ?? '',
+      );
+    const effectiveA = await effectiveRules(a);
+    const effectiveT = await effectiveRules(bT);
+    // c5: the two users' stored personal rules, which dispatch reads, are as seeded and still differ.
+    check(
+      "T119 c5: the two users' personal rules are still stored and still differ",
+      effectiveA !== effectiveT && effectiveA === RULES_A && effectiveT === RULES_B,
+      { effectiveA, effectiveT },
     );
 
     // A reads its own record again, and its own plan must still call every path it claims unchanged.
@@ -2640,6 +2795,992 @@ async function main(): Promise<void> {
       await holder;
       return { blocked, rewritten, result: await running };
     };
+
+    // ---- T119: the repository's AGENTS.md rules override rides settings/agent-rules.md (R1-R7) ----
+    // An independent acceptance check of the override's round trips. A and B are in sync here, as D19
+    // left them, and nothing since has touched either. A write is made the way the api makes it (the
+    // column and the outbox mark in one transaction, the file written by the sweep), git carries it
+    // between the installs, and the receiving side syncs through handleRefresh and answers through
+    // resolveProjectStateConflict.
+    {
+      const RULES_REL = '.haive-data/state/settings/agent-rules.md';
+      const RULES_UNIT = 'settings/agent-rules.md';
+      const MARK = '<<rules region>>';
+      /** What the api does for a save: the column and the outbox mark in one transaction. */
+      const setRules = async (install: Install, value: string | null): Promise<void> => {
+        await install.db.transaction(async (tx) => {
+          await tx
+            .update(schema.repositories)
+            .set({ agentRulesOverride: value, updatedAt: new Date() })
+            .where(eq(schema.repositories.id, install.repositoryId));
+          await markProjectStateDirty(tx, install.repositoryId);
+        });
+      };
+      const ruleCol = async (install: Install): Promise<string | null> =>
+        (
+          await install.db
+            .select({ value: schema.repositories.agentRulesOverride })
+            .from(schema.repositories)
+            .where(eq(schema.repositories.id, install.repositoryId))
+        )[0]?.value ?? null;
+      const ruleFile = (install: Install): Promise<string | null> =>
+        readFile(path.join(install.repoPath, RULES_REL), 'utf8').then(
+          (text) => text,
+          () => null,
+        );
+      const agentsOf = (install: Install): Promise<string> =>
+        readFile(path.join(install.repoPath, 'AGENTS.md'), 'utf8');
+      const regionIn = async (install: Install): Promise<string | null> =>
+        regionOf(await agentsOf(install));
+      /** AGENTS.md with its rules region replaced by a placeholder: what a rules change must leave alone. */
+      const outsideRegion = (text: string): string => {
+        const region = extractRegion(text, CLI_RULES_START, CLI_RULES_END);
+        return region === null ? text : text.replace(region, MARK);
+      };
+      const isRulesEntry = (e: { diskPath: string; templateKind: string }): boolean =>
+        e.diskPath === CLI_RULES_DISK_PATH && e.templateKind === CLI_RULES_TEMPLATE_KIND;
+      const bucketsOf = (plan: UpgradePlanDetect | null): string[] =>
+        (plan?.entries ?? []).filter(isRulesEntry).map((e) => e.bucket);
+      const idsOf = (plan: UpgradePlanDetect, bucket: string): string[] =>
+        plan.entries.filter((e) => isRulesEntry(e) && e.bucket === bucket).map((e) => e.entryId);
+      /** Applies the rules region’s entry alone: every plan here also holds entries of the checks above
+       *  this block (agents the shared record names that nobody has written), which are not its own. */
+      const applyRegion = (install: Install) =>
+        upgradeApplied(install, (plan) => ({
+          selectedUpdates: idsOf(plan, 'clean_update'),
+          selectedNew: idsOf(plan, 'new_artifact'),
+          selectedObsoleteRemovals: idsOf(plan, 'obsolete'),
+        }));
+      /** The entries of a plan that are not the rules region’s and are not quiet. */
+      const noiseOf = (plan: UpgradePlanDetect | null): string[] =>
+        (plan?.entries ?? [])
+          .filter((e) => !isRulesEntry(e) && e.bucket !== 'unchanged')
+          .map((e) => `${e.diskPath}: ${e.bucket}`)
+          .sort();
+      /** A plan that leaves no live upgrade task behind, since a live one makes the sync defer. */
+      const planOnly = async (install: Install) => {
+        const planned = await upgradePlan(install);
+        await install.db
+          .update(schema.tasks)
+          .set({ status: 'cancelled' })
+          .where(eq(schema.tasks.id, planned.taskId));
+        return planned;
+      };
+      /** Every file of the record in a checkout, by path below `.haive-data/state`. */
+      const treeOf = async (install: Install): Promise<Map<string, string>> => {
+        const root = path.join(install.repoPath, '.haive-data/state');
+        const files = new Map<string, string>();
+        for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
+          if (!entry.isFile()) continue;
+          const abs = path.join(entry.parentPath, entry.name);
+          files.set(path.relative(root, abs), await readFile(abs, 'utf8'));
+        }
+        return files;
+      };
+      /** The record files the two checkouts do not hold identically, by path. The bundles directory is
+       *  left out: A alone holds the custom bundle of its onboarding, whose descriptor its sweep writes
+       *  and nobody commits, which has nothing to do with the rules. */
+      const treesDiffer = async (x: Install, y: Install): Promise<string[]> => {
+        const [left, right] = [await treeOf(x), await treeOf(y)];
+        return [...new Set([...left.keys(), ...right.keys()])]
+          .filter((rel) => !rel.startsWith('bundles/') && left.get(rel) !== right.get(rel))
+          .sort();
+      };
+      interface Question {
+        id: string;
+        local: { v: unknown } | null;
+        incoming: { v: unknown } | null;
+        resolved_at: Date | null;
+        resolution: string | null;
+      }
+      /** The questions asked about the rules, all of them and the ones still open. */
+      const questionsOf = async (
+        install: Install,
+      ): Promise<{ all: Question[]; open: Question[] } | null> => {
+        const got = await rowsOf<Question>(
+          install.db,
+          sql`select id, local, incoming, resolved_at, resolution from project_state_conflicts
+            where repository_id = ${install.repositoryId} and unit = ${RULES_UNIT}
+            order by detected_at, id`,
+        );
+        return 'rows' in got
+          ? { all: got.rows, open: got.rows.filter((r) => r.resolved_at === null) }
+          : null;
+      };
+      /** Every unit the install has an open question about. */
+      const openUnitsOf = async (install: Install): Promise<string[] | null> => {
+        const got = await rowsOf<{ unit: string }>(
+          install.db,
+          sql`select unit from project_state_conflicts where repository_id = ${install.repositoryId}
+            and resolved_at is null order by unit`,
+        );
+        return 'rows' in got ? got.rows.map((r) => r.unit) : null;
+      };
+      /** `last_error` of the install's sync row; undefined where there is no row. */
+      const syncErrorOf = async (install: Install): Promise<string | null | undefined> => {
+        const got = await rowsOf<{ last_error: string | null }>(
+          install.db,
+          sql`select last_error from project_state_sync where repository_id = ${install.repositoryId}`,
+        );
+        return 'rows' in got && got.rows.length === 1 ? got.rows[0]!.last_error : undefined;
+      };
+      const statusOn = (install: Install, ...paths: string[]): string =>
+        git(install.repoPath, 'status', '--porcelain', '--', ...paths);
+      const syncOnce = (install: Install) =>
+        syncProjectStateFromCheckout(install.db, {
+          repositoryId: install.repositoryId,
+          repoPath: install.repoPath,
+        });
+      /** A mark and one sweep tick: what writes the record files after any trigger. */
+      const sweepOnce = async (install: Install): Promise<void> => {
+        await markProjectStateDirty(install.db, install.repositoryId);
+        await sweepDirtyProjectStates(install.db);
+      };
+      const answerOn = (
+        install: Install,
+        conflictId: string,
+        answer: 'keep_mine' | 'take_theirs',
+      ) =>
+        resolveProjectStateConflict(install.db, {
+          repositoryId: install.repositoryId,
+          userId: install.userId,
+          conflictId,
+          answer,
+        });
+      const admissionOn = async (install: Install) => {
+        const [repo] = await install.db
+          .select({
+            id: schema.repositories.id,
+            source: schema.repositories.source,
+            renderContext: schema.repositories.renderContext,
+            status: schema.repositories.status,
+            storagePath: schema.repositories.storagePath,
+            localPath: schema.repositories.localPath,
+            onboardedAt: schema.repositories.onboardedAt,
+            onboardingResetAt: schema.repositories.onboardingResetAt,
+          })
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, install.repositoryId));
+        return repo ? upgradeAdmission(install.db, install.userId, repo) : null;
+      };
+      /** The first line of Haive’s default rules: a region that carries it follows the default. */
+      const defaultFirstLine =
+        DEFAULT_AGENT_RULES.split('\n').find((line) => line.trim() !== '') ?? '';
+      const regionOfBlock = (value: string | null): string | null => {
+        const block = buildRepoCliRulesBlock(value);
+        return block === null ? null : normalizeContent(block);
+      };
+
+      // A fresh clone of the remote as it stands offers what every plan here offers beyond the region.
+      const baselineClone = await cloneInstall(
+        'B',
+        dbB!,
+        path.join(tmp!, 'storage-t119-baseline'),
+        remoteUrl,
+        undefined,
+        B_PROVIDERS,
+      );
+      const baselineNoise = noiseOf((await planOnly(baselineClone)).plan);
+
+      // R1: with the override NULL there is no file, both columns are NULL and both regions are the default.
+      const startTrees = await treesDiffer(a, b);
+      check(
+        'T119 R1: with the override NULL neither checkout holds settings/agent-rules.md, both columns are NULL and both rules regions are the default block',
+        (await ruleCol(a)) === null &&
+          (await ruleCol(b)) === null &&
+          (await lstatNoFollow(a.repoPath, RULES_REL)) === null &&
+          (await lstatNoFollow(b.repoPath, RULES_REL)) === null &&
+          (await regionIn(a)) === defaultRegion &&
+          (await regionIn(b)) === defaultRegion &&
+          git(a.repoPath, 'rev-parse', 'HEAD') === git(b.repoPath, 'rev-parse', 'HEAD'),
+        {
+          a: await ruleCol(a),
+          b: await ruleCol(b),
+          fileA: await ruleFile(a),
+          fileB: await ruleFile(b),
+        },
+      );
+      // R1: the two record directories start byte-identical (bundles/ aside, see treesDiffer), so a later difference is the rules'.
+      check(
+        'T119 R1: .haive-data/state/ is byte-identical in both checkouts before any rules change',
+        startTrees.length === 0,
+        startTrees,
+      );
+
+      // R2: CRLF and trailing spaces are normalised, and the sweep writes exactly the normalised text.
+      const RAW_X =
+        '# Rules set on A\r\n\r\n- Keep changes small.   \r\n- Run the linter first.  \r\n';
+      const TEXT_X = '# Rules set on A\n\n- Keep changes small.\n- Run the linter first.\n';
+      const normalizedX = normalizeAgentRulesOverride(RAW_X);
+      await setRules(a, normalizedX.ok ? normalizedX.value : null);
+      await sweepDirtyProjectStates(a.db);
+      check(
+        'T119 R2: a multi-line override with CRLF and trailing spaces is stored normalised, and after A’s sweep the file holds that text byte for byte',
+        normalizedX.ok &&
+          normalizedX.value === TEXT_X &&
+          (await ruleCol(a)) === TEXT_X &&
+          (await ruleFile(a)) === TEXT_X &&
+          (await clean()),
+        { normalizedX, column: await ruleCol(a), file: await ruleFile(a) },
+      );
+      const agentsBeforeX = await agentsOf(a);
+      const planAX = await planOnly(a);
+      // R2: A’s 01 plan offers the region as a clean update, since only its render changed.
+      check(
+        'T119 R2: A’s 01 plan offers the rules region as a clean update',
+        planAX.plan !== null && isDeepStrictEqual(bucketsOf(planAX.plan), ['clean_update']),
+        planAX.error ?? bucketsOf(planAX.plan),
+      );
+      const upgradedX = await applyRegion(a);
+      const agentsAfterX = await agentsOf(a);
+      const wantX = regionOfBlock(TEXT_X);
+      // R2: 01+02 rewrite the region to buildRepoCliRulesBlock(value) and nothing around it.
+      check(
+        'T119 R2: A’s 01+02 upgrade rewrites the region to buildRepoCliRulesBlock(value) and leaves the text around it unchanged',
+        upgradedX.error === null &&
+          wantX !== null &&
+          regionOf(agentsAfterX) === wantX &&
+          (regionOf(agentsAfterX) ?? '').includes('- Run the linter first.\n') &&
+          !(regionOf(agentsAfterX) ?? '').includes(defaultFirstLine) &&
+          outsideRegion(agentsAfterX) === outsideRegion(agentsBeforeX),
+        {
+          error: upgradedX.error,
+          ...departure(regionOf(agentsAfterX), wantX ?? ''),
+          outsideKept: outsideRegion(agentsAfterX) === outsideRegion(agentsBeforeX),
+        },
+      );
+      pushFrom(a, 'A: the AGENTS.md rules override', 'AGENTS.md', '.haive-data/state');
+      await refresh(b, 'storage-b');
+      const planBX = await planOnly(b);
+      // R2: B imports A’s value from the pushed file.
+      check(
+        'T119 R2: B refreshes and syncs: its column is A’s value and its file holds it',
+        (await ruleCol(b)) === TEXT_X && (await ruleFile(b)) === TEXT_X,
+        { column: await ruleCol(b), file: await ruleFile(b) },
+      );
+      // R2: B has nothing to offer for the region, since A’s claim travelled with the value.
+      check(
+        'T119 R2: B’s 01 plan is quiet for AGENTS.md: the rules region reads unchanged',
+        planBX.plan !== null && isDeepStrictEqual(bucketsOf(planBX.plan), ['unchanged']),
+        planBX.error ?? bucketsOf(planBX.plan),
+      );
+      // R2: the region reads the same in both checkouts, and is the repository-level block.
+      check(
+        'T119 R2: the region bytes in both checkouts are identical and are buildRepoCliRulesBlock(value)',
+        wantX !== null &&
+          (await regionIn(a)) === wantX &&
+          (await regionIn(b)) === wantX &&
+          (await agentsOf(a)) === (await agentsOf(b)),
+        { a: await regionIn(a), b: await regionIn(b), want: wantX },
+      );
+
+      // R3: an explicit empty override is a 0-byte file, which is not an absent one.
+      await setRules(a, '');
+      await sweepDirtyProjectStates(a.db);
+      const emptyOnA = await stat(path.join(a.repoPath, RULES_REL)).catch(() => null);
+      check(
+        'T119 R3: A sets the empty override: a 0-byte settings/agent-rules.md exists and the column is the empty string, not NULL',
+        emptyOnA !== null &&
+          emptyOnA.isFile() &&
+          emptyOnA.size === 0 &&
+          (await ruleCol(a)) === '' &&
+          (await clean()),
+        { size: emptyOnA?.size, column: await ruleCol(a) },
+      );
+      pushFrom(a, 'A: an explicit empty rules override', '.haive-data/state');
+      await refresh(b, 'storage-b');
+      const emptyOnB = await stat(path.join(b.repoPath, RULES_REL)).catch(() => null);
+      const planBE = await planOnly(b);
+      // R3: the empty text travels as a 0-byte file and is imported as '' (which is not NULL).
+      check(
+        'T119 R3: B imports the empty override: its column is the empty string and not NULL, and its file is 0 bytes',
+        (await ruleCol(b)) === '' && emptyOnB !== null && emptyOnB.size === 0,
+        { column: await ruleCol(b), size: emptyOnB?.size },
+      );
+      // R3: an empty override renders no block at all, so the region B holds is obsolete.
+      check(
+        'T119 R3: B’s plan offers the rules region as obsolete',
+        planBE.plan !== null && isDeepStrictEqual(bucketsOf(planBE.plan), ['obsolete']),
+        planBE.error ?? bucketsOf(planBE.plan),
+      );
+      const agentsBeforeE = await agentsOf(b);
+      const removedOnB = await applyRegion(b);
+      const agentsAfterE = await agentsOf(b);
+      const linesOf = (text: string): string[] =>
+        text.split('\n').filter((line) => line.trim() !== '');
+      // R3: applying the removal takes the region out of B and keeps every other line.
+      check(
+        'T119 R3: applying it removes the region in B and keeps the lines around it',
+        removedOnB.error === null &&
+          extractRegion(agentsAfterE, CLI_RULES_START, CLI_RULES_END) === null &&
+          isDeepStrictEqual(
+            linesOf(agentsAfterE),
+            linesOf(outsideRegion(agentsBeforeE)).filter((line) => line !== MARK),
+          ),
+        { error: removedOnB.error, after: linesOf(agentsAfterE) },
+      );
+      pushFrom(b, 'B: the rules region removed', 'AGENTS.md', '.haive-data/state');
+      await refresh(a, 'storage-a');
+      const planAE = await planOnly(a);
+      const removedOnA = await applyRegion(a);
+      // R3: B’s removal reaches A through git, and A applying its own plan leaves the region removed.
+      check(
+        'T119 R3: the region stays removed in A after A applies too, and AGENTS.md is the same file in both checkouts',
+        removedOnA.error === null &&
+          bucketsOf(planAE.plan).every((bucket) => bucket === 'obsolete') &&
+          (await regionIn(a)) === null &&
+          (await agentsOf(a)) === (await agentsOf(b)) &&
+          statusOn(a, 'AGENTS.md') === '',
+        {
+          error: removedOnA.error,
+          planned: bucketsOf(planAE.plan),
+          status: statusOn(a, 'AGENTS.md'),
+        },
+      );
+
+      await setRules(a, null);
+      await sweepDirtyProjectStates(a.db);
+      // R3: NULL is no file at all: the sweep deletes the one it had written.
+      check(
+        'T119 R3: A sets NULL: the file is removed from the checkout and the column is NULL',
+        (await ruleFile(a)) === null &&
+          (await ruleCol(a)) === null &&
+          statusOn(a, RULES_REL) === `D ${RULES_REL}`,
+        { file: await ruleFile(a), status: statusOn(a, RULES_REL) },
+      );
+      pushFrom(a, 'A: the rules override reset to the default', '.haive-data/state');
+      await refresh(b, 'storage-b');
+      const planBN = await planOnly(b);
+      // R3: deleting the file on one install resets the other to the default, which is NULL, not ''.
+      check(
+        'T119 R3: B imports the reset: its column is NULL and not the empty string, and it holds no file',
+        (await ruleCol(b)) === null && (await ruleFile(b)) === null,
+        { column: await ruleCol(b), file: await ruleFile(b) },
+      );
+      const defaultEntry = planBN.plan?.entries.find(isRulesEntry);
+      // R3: the default block is then offered back as a new artifact.
+      check(
+        'T119 R3: B’s next plan offers the default region back as new_artifact',
+        planBN.plan !== null &&
+          isDeepStrictEqual(bucketsOf(planBN.plan), ['new_artifact']) &&
+          defaultEntry?.newContent != null &&
+          normalizeContent(defaultEntry.newContent) === defaultRegion,
+        planBN.error ?? { buckets: bucketsOf(planBN.plan), new: defaultEntry?.newContent },
+      );
+      const restoredOnB = await applyRegion(b);
+      pushFrom(b, 'B: the default rules region back', 'AGENTS.md', '.haive-data/state');
+      await refresh(a, 'storage-a');
+      // R3: applying the offer restores the region, which reaches A: both are on the default again.
+      check(
+        'T119 R3: applying the offer puts the default region back in B and it reaches A, whose column is NULL as well',
+        restoredOnB.error === null &&
+          (await regionIn(b)) === defaultRegion &&
+          (await regionIn(a)) === defaultRegion &&
+          (await ruleCol(a)) === null &&
+          (await agentsOf(a)) === (await agentsOf(b)) &&
+          (await treesDiffer(a, b)).length === 0,
+        { error: restoredOnB.error, trees: await treesDiffer(a, b) },
+      );
+
+      // R4: two installs set different texts from the common base both are on now.
+      const X1 = '# Rules set on A, round one\n\n- Only A holds this rule.\n';
+      const Y1 = '# Rules set on B, round one\n\n- Only B holds this rule.\n';
+      await setRules(a, X1);
+      await sweepDirtyProjectStates(a.db);
+      pushFrom(a, 'A: concurrent rules, round one', '.haive-data/state');
+      await setRules(b, Y1);
+      await refresh(b, 'storage-b');
+      const askedB1 = await questionsOf(b);
+      const openUnitsB1 = await openUnitsOf(b);
+      // R4: the refresh meets A’s value over B’s own: one question about the rules and no other.
+      check(
+        'T119 R4: B refreshes onto A’s different value: exactly one open question about settings/agent-rules.md, and no other',
+        askedB1 !== null &&
+          askedB1.all.length === 1 &&
+          askedB1.open.length === 1 &&
+          isDeepStrictEqual(openUnitsB1, [RULES_UNIT]),
+        { askedB1, openUnitsB1 },
+      );
+      // R4: B’s own value stays in the column and the file shows the incoming side until it is answered.
+      check(
+        'T119 R4: B’s column still holds B’s value while its file shows A’s (the incoming side)',
+        (await ruleCol(b)) === Y1 && (await ruleFile(b)) === X1,
+        { column: await ruleCol(b), file: await ruleFile(b) },
+      );
+      const admissionB1 = await admissionOn(b);
+      const planB1 = await planOnly(b);
+      const regionEntryB1 = planB1.plan?.entries.find(isRulesEntry);
+      // R4: unlike a claim or the render context, a rules question holds no upgrade, and the plan renders from B’s own column.
+      check(
+        'T119 R4: the question does not hold an upgrade: B is still admitted to one and plans the region from its own column, not from the incoming file',
+        admissionB1 !== null &&
+          admissionB1.admitted &&
+          planB1.plan !== null &&
+          isDeepStrictEqual(bucketsOf(planB1.plan), ['clean_update']) &&
+          regionEntryB1?.newContent != null &&
+          normalizeContent(regionEntryB1.newContent) === regionOfBlock(Y1),
+        { admissionB1, error: planB1.error, buckets: bucketsOf(planB1.plan) },
+      );
+      const kept1 = await answerOn(b, askedB1?.open[0]?.id ?? '', 'keep_mine');
+      const afterKeep1 = await questionsOf(b);
+      // R4: keep mine closes the row, keeps the column and writes B’s value into the file.
+      check(
+        'T119 R4: B answers keep_mine: the row closes as keep_mine, the column stays B’s and B’s value goes to the file',
+        kept1.kind === 'resolved' &&
+          afterKeep1 !== null &&
+          afterKeep1.open.length === 0 &&
+          afterKeep1.all.length === 1 &&
+          afterKeep1.all[0]!.resolution === 'keep_mine' &&
+          (await ruleCol(b)) === Y1 &&
+          (await ruleFile(b)) === Y1,
+        { kept1, afterKeep1, column: await ruleCol(b), file: await ruleFile(b) },
+      );
+      pushFrom(b, 'B: keeps its rules, round one', '.haive-data/state');
+      await refresh(a, 'storage-a');
+      const askedA1 = await questionsOf(a);
+      const openUnitsA1 = await openUnitsOf(a);
+      // R4: A held no change of its own since it pushed, so B’s kept value is a one-sided change to A, as for the render setting (B1.5b): A takes it and is asked nothing.
+      check(
+        'T119 R4: A refreshes onto B’s pushed answer: A is asked nothing and its column and file take B’s kept value',
+        askedA1 !== null &&
+          askedA1.all.length === 0 &&
+          isDeepStrictEqual(openUnitsA1, []) &&
+          (await ruleCol(a)) === Y1 &&
+          (await ruleFile(a)) === Y1,
+        { askedA1, openUnitsA1, column: await ruleCol(a), file: await ruleFile(a) },
+      );
+      const [syncA1, syncB1] = [await syncOnce(a), await syncOnce(b)];
+      const [repeatA1, repeatB1] = [await questionsOf(a), await questionsOf(b)];
+      const differing1 = await treesDiffer(a, b);
+      // R4: repeating the sync on both changes nothing: no new question and the record files agree byte for byte.
+      check(
+        'T119 R4: repeating the sync on both finds nothing to ask: no new question on either install and .haive-data/state/ is byte-identical in both checkouts',
+        syncA1.outcome === 'unchanged' &&
+          syncB1.outcome === 'unchanged' &&
+          repeatA1 !== null &&
+          repeatA1.all.length === 0 &&
+          repeatB1 !== null &&
+          repeatB1.all.length === 1 &&
+          repeatB1.open.length === 0 &&
+          differing1.length === 0,
+        { syncA1, syncB1, repeatA1, repeatB1, differing1 },
+      );
+
+      // R4 mirror: from the common base both hold now, B answers take_theirs instead and converges on A’s value.
+      const X2 = '# Rules set on A, round two\n\n- A rule only A holds in round two.\n';
+      const Y2 = '# Rules set on B, round two\n\n- A rule only B holds in round two.\n';
+      await setRules(a, X2);
+      await sweepDirtyProjectStates(a.db);
+      pushFrom(a, 'A: concurrent rules, round two', '.haive-data/state');
+      await setRules(b, Y2);
+      await refresh(b, 'storage-b');
+      const askedB2 = await questionsOf(b);
+      // R4 mirror: the same unit is asked again, with the first answer kept as closed history.
+      check(
+        'T119 R4 mirror: the second concurrent change opens a new question on B beside the closed one, B’s column stays B’s and its file shows A’s',
+        askedB2 !== null &&
+          askedB2.all.length === 2 &&
+          askedB2.open.length === 1 &&
+          askedB2.all.some((q) => q.resolution === 'keep_mine') &&
+          (await ruleCol(b)) === Y2 &&
+          (await ruleFile(b)) === X2,
+        { askedB2, column: await ruleCol(b), file: await ruleFile(b) },
+      );
+      const took2 = await answerOn(b, askedB2?.open[0]?.id ?? '', 'take_theirs');
+      const afterTake2 = await questionsOf(b);
+      const syncB2 = await syncOnce(b);
+      // R4 mirror: take theirs applies A’s value to B’s column; the file already holds it, so B has nothing to push.
+      check(
+        'T119 R4 mirror: B answers take_theirs and converges on A’s value: the column and the file agree, the row closes, nothing is left to push',
+        took2.kind === 'resolved' &&
+          afterTake2 !== null &&
+          afterTake2.open.length === 0 &&
+          afterTake2.all.some((q) => q.resolution === 'take_theirs') &&
+          (await ruleCol(b)) === X2 &&
+          (await ruleFile(b)) === X2 &&
+          syncB2.outcome === 'unchanged' &&
+          statusOn(b, RULES_REL) === '',
+        { took2, afterTake2, syncB2, status: statusOn(b, RULES_REL) },
+      );
+      await refresh(a, 'storage-a');
+      const [syncA2, repeatA2] = [await syncOnce(a), await questionsOf(a)];
+      // R4 mirror: A, which was never asked, holds its own value and the record directories are identical.
+      check(
+        'T119 R4 mirror: A holds its value and no question, and .haive-data/state/ is byte-identical in both checkouts',
+        (await ruleCol(a)) === X2 &&
+          syncA2.outcome === 'unchanged' &&
+          repeatA2 !== null &&
+          repeatA2.all.length === 0 &&
+          (await treesDiffer(a, b)).length === 0,
+        { column: await ruleCol(a), syncA2, repeatA2, trees: await treesDiffer(a, b) },
+      );
+
+      // R4 role swap: B pushes first and A holds an unswept change of its own, so A is the install asked.
+      const X3 = '# Rules set on A, round three\n\n- A rule only A holds in round three.\n';
+      const Y3 = '# Rules set on B, round three\n\n- A rule only B holds in round three.\n';
+      await setRules(b, Y3);
+      await sweepDirtyProjectStates(b.db);
+      pushFrom(b, 'B: concurrent rules, round three', '.haive-data/state');
+      await setRules(a, X3);
+      await refresh(a, 'storage-a');
+      const askedA3 = await questionsOf(a);
+      // R4 role swap: the install that refreshes second with a change of its own is the one asked.
+      check(
+        'T119 R4 role swap: A refreshes onto B’s different value with a change of its own: one open question, A’s column stays A’s and its file shows B’s',
+        askedA3 !== null &&
+          askedA3.all.length === 1 &&
+          askedA3.open.length === 1 &&
+          (await ruleCol(a)) === X3 &&
+          (await ruleFile(a)) === Y3,
+        { askedA3, column: await ruleCol(a), file: await ruleFile(a) },
+      );
+      const took3 = await answerOn(a, askedA3?.open[0]?.id ?? '', 'take_theirs');
+      const afterTake3 = await questionsOf(a);
+      await sweepDirtyProjectStates(a.db);
+      const [syncA3, syncB3] = [await syncOnce(a), await syncOnce(b)];
+      // R4 role swap: A answers take_theirs and its column becomes B’s value; a repeated sync asks nothing new.
+      check(
+        'T119 R4 role swap: A answers take_theirs: its column becomes B’s value, nothing new is asked on either install and .haive-data/state/ is byte-identical',
+        took3.kind === 'resolved' &&
+          afterTake3 !== null &&
+          afterTake3.open.length === 0 &&
+          afterTake3.all[0]!.resolution === 'take_theirs' &&
+          (await ruleCol(a)) === Y3 &&
+          (await ruleFile(a)) === Y3 &&
+          syncA3.outcome === 'unchanged' &&
+          syncB3.outcome === 'unchanged' &&
+          (await questionsOf(b))?.open.length === 0 &&
+          (await treesDiffer(a, b)).length === 0,
+        { took3, afterTake3, syncA3, syncB3, trees: await treesDiffer(a, b) },
+      );
+      await applyRegion(a);
+      pushFrom(a, 'A: the rules region for the value both hold', 'AGENTS.md', '.haive-data/state');
+      await refresh(b, 'storage-b');
+      const planB3 = await planOnly(b);
+      const wantY3 = regionOfBlock(Y3);
+      // R4: after the answers, the value both hold renders into both regions, and B has nothing to offer.
+      check(
+        'T119 R4: after the answers and A’s upgrade, both regions carry the value both hold and B’s plan is quiet for AGENTS.md',
+        wantY3 !== null &&
+          (await regionIn(a)) === wantY3 &&
+          (await regionIn(b)) === wantY3 &&
+          planB3.plan !== null &&
+          isDeepStrictEqual(bucketsOf(planB3.plan), ['unchanged']),
+        { a: await regionIn(a), b: await regionIn(b), buckets: bucketsOf(planB3.plan) },
+      );
+
+      // R5a: a checkout file with the same value, CRLF and no trailing newline, is tidied and never asked about.
+      const crlfY3 = Y3.replace(/\n+$/, '').replace(/\n/g, '\r\n');
+      const asked5a = (await questionsOf(b))?.all.length;
+      await writeFile(path.join(b.repoPath, RULES_REL), crlfY3);
+      const synced5a = await syncOnce(b);
+      await sweepOnce(b);
+      check(
+        'T119 R5a: a checkout .md with the same value in CRLF and with no trailing newline is canonicalised by one sync and sweep, with no conflict',
+        ['unchanged', 'applied'].includes(synced5a.outcome) &&
+          (await ruleFile(b)) === Y3 &&
+          (await ruleCol(b)) === Y3 &&
+          (await questionsOf(b))?.all.length === asked5a &&
+          (await openUnitsOf(b))?.length === 0 &&
+          statusOn(b, RULES_REL) === '',
+        { synced5a, file: await ruleFile(b), asked: await questionsOf(b), asked5a },
+      );
+
+      // R5b: one line of seven = in the .md refuses the whole record, whatever else it holds, until it is fixed.
+      const SCOPE_REL = '.haive-data/state/settings/scope-exclude-globs.json';
+      const portableColumns = (install: Install) =>
+        rowsOf<Record<string, unknown>>(
+          install.db,
+          sql`select scope_exclude_globs, rtk_enabled, rtk_version, lsp_servers, lsp_server_versions, chrome_devtools_mcp_version, review_dimensions, agent_rules_override, render_context, onboarding_tooling, onboarding_environment from repositories where id = ${install.repositoryId}`,
+        );
+      const columnsBefore5b = await portableColumns(b);
+      await writeFile(path.join(b.repoPath, RULES_REL), 'Rules heading\n=======\n- a rule\n');
+      await writeFile(path.join(b.repoPath, SCOPE_REL), '[\n  "only-in-a-refused-record"\n]\n');
+      const refused5b = await syncOnce(b);
+      const error5b = await syncErrorOf(b);
+      const columnsDuring5b = await portableColumns(b);
+      // R5b: the refusal is of the whole record: the valid exclusion change beside the bad .md stays out of the columns, and the sync row says why.
+      check(
+        'T119 R5b: a checkout .md with a line of exactly seven = refuses the whole record: the sync row holds an open last_error and no column moves, not even for the valid exclusion change in the same record',
+        refused5b.outcome === 'refused' &&
+          typeof error5b === 'string' &&
+          error5b !== '' &&
+          'rows' in columnsBefore5b &&
+          'rows' in columnsDuring5b &&
+          columnsBefore5b.rows.length === 1 &&
+          isDeepStrictEqual(columnsDuring5b.rows, columnsBefore5b.rows),
+        { refused5b, error5b, columnsBefore5b, columnsDuring5b },
+      );
+      git(b.repoPath, 'checkout', '--', RULES_REL);
+      const recovered5b = await syncOnce(b);
+      const scopeAfterFix = await rowsOf<{ scope_exclude_globs: string[] | null }>(
+        b.db,
+        sql`select scope_exclude_globs from repositories where id = ${b.repositoryId}`,
+      );
+      // R5b: with only the .md fixed, the record is accepted whole and the exclusion change it held back imports, so it was importable all along.
+      check(
+        'T119 R5b: once the .md is fixed the next sync accepts the whole record again: last_error clears and the exclusion change held back before now imports',
+        recovered5b.outcome === 'applied' &&
+          (await syncErrorOf(b)) === null &&
+          'rows' in scopeAfterFix &&
+          isDeepStrictEqual(scopeAfterFix.rows[0]?.scope_exclude_globs, [
+            'only-in-a-refused-record',
+          ]) &&
+          (await ruleCol(b)) === Y3 &&
+          (await ruleFile(b)) === Y3,
+        { recovered5b, error: await syncErrorOf(b), scopeAfterFix },
+      );
+      git(b.repoPath, 'checkout', '--', SCOPE_REL);
+      const restored5b = await syncOnce(b);
+      const columnsAfter5b = await portableColumns(b);
+      // R5b: putting the exclusion file back puts the column back, so every column is as it was before the hazard.
+      check(
+        'T119 R5b: and putting the exclusion file back as committed puts every column back as it was before the hazard',
+        restored5b.outcome === 'applied' &&
+          'rows' in columnsBefore5b &&
+          'rows' in columnsAfter5b &&
+          isDeepStrictEqual(columnsAfter5b.rows, columnsBefore5b.rows) &&
+          statusOn(b, RULES_REL, SCOPE_REL) === '',
+        { restored5b, columnsBefore5b, columnsAfter5b, status: statusOn(b, RULES_REL, SCOPE_REL) },
+      );
+
+      // R5c: only settings/agent-rules.md is the setting’s file; a JSON file beside it is not read and not touched.
+      const PLANTED_REL = '.haive-data/state/settings/agent-rules.json';
+      const PLANTED = '"rules planted in a JSON file\\n"\n';
+      await writeFile(path.join(b.repoPath, PLANTED_REL), PLANTED);
+      const synced5c = await syncOnce(b);
+      await sweepOnce(b);
+      check(
+        'T119 R5c: a planted settings/agent-rules.json beside the .md never wins and is left byte-identical',
+        synced5c.outcome !== 'refused' &&
+          (await ruleCol(b)) === Y3 &&
+          (await ruleFile(b)) === Y3 &&
+          (await readFile(path.join(b.repoPath, PLANTED_REL), 'utf8').catch(() => null)) ===
+            PLANTED &&
+          (await openUnitsOf(b))?.length === 0,
+        { synced5c, column: await ruleCol(b), planted: await ruleFile(b) },
+      );
+      await rm(path.join(b.repoPath, PLANTED_REL));
+
+      // R5d: extends the existing exclusion-list round trip (B1.8b, "B's exclusion list equals the one A edited"): the same JSON setting still travels, now beside the raw-text one.
+      const scopeR5 = [...scopeEdited, 't119-r5d/**'].sort();
+      await setScope(scopeR5);
+      await sweepDirtyProjectStates(a.db);
+      pushFrom(a, 'A: the exclusion list beside the rules file', '.haive-data/state');
+      await refresh(b, 'storage-b');
+      const scopeOnB5 = await rowsOf<{ scope_exclude_globs: string[] | null }>(
+        b.db,
+        sql`select scope_exclude_globs from repositories where id = ${b.repositoryId}`,
+      );
+      check(
+        'T119 R5d: the generic JSON settings still round trip: A’s exclusion list reaches B through git beside the rules file, which is undisturbed',
+        'rows' in scopeOnB5 &&
+          isDeepStrictEqual(scopeOnB5.rows[0]?.scope_exclude_globs, scopeR5) &&
+          (await ruleCol(b)) === Y3 &&
+          (await ruleFile(b)) === Y3 &&
+          (await treesDiffer(a, b)).length === 0,
+        { scopeOnB5, column: await ruleCol(b), trees: await treesDiffer(a, b) },
+      );
+
+      // R6: a region an older release rendered from a user’s personal rules is Haive’s to replace, unless it was edited since.
+      await setRules(b, null);
+      await sweepDirtyProjectStates(b.db);
+      const personal = buildCliRulesBlock(['- a personal rule\n'])!;
+      const agentsNow = await agentsOf(b);
+      const regionNow = extractRegion(agentsNow, CLI_RULES_START, CLI_RULES_END);
+      const personalFile = `Unrelated line before the region.\n\n${agentsNow.replace(regionNow ?? '', personal.trimEnd())}Unrelated line after the region.\n`;
+      await writeFile(path.join(b.repoPath, 'AGENTS.md'), personalFile);
+      const [r6Task] = await b.db
+        .insert(schema.tasks)
+        .values({
+          userId: b.userId,
+          repositoryId: b.repositoryId,
+          type: 'onboarding_upgrade',
+          title: 'two-install-smoke R6',
+          status: 'completed',
+          completedAt: new Date(),
+        })
+        .returning({ id: schema.tasks.id });
+      /** The live ledger row of the region, as an earlier release wrote it from `block`. */
+      const recordRegionAs = (block: string) => {
+        const hash = sha256Hex(normalizeContent(block));
+        return b.db
+          .update(schema.onboardingArtifacts)
+          .set({
+            taskId: r6Task!.id,
+            source: 'upgrade',
+            sourceStepId: '02-upgrade-apply',
+            importedAt: null,
+            templateContentHash: hash,
+            writtenHash: hash,
+            writtenContent: block,
+            lastObservedDiskHash: hash,
+            userModified: false,
+          })
+          .where(
+            and(
+              eq(schema.onboardingArtifacts.repositoryId, b.repositoryId),
+              eq(schema.onboardingArtifacts.diskPath, CLI_RULES_DISK_PATH),
+              eq(schema.onboardingArtifacts.templateKind, CLI_RULES_TEMPLATE_KIND),
+              isNull(schema.onboardingArtifacts.supersededAt),
+            ),
+          )
+          .returning({ id: schema.onboardingArtifacts.id });
+      };
+      const recorded6 = await recordRegionAs(personal);
+      const planB6 = await planOnly(b);
+      // R6: the fixture is what an old release left (a live row whose hash is the region, text around it), and the plan calls it a clean update.
+      check(
+        'T119 R6: B’s plan classifies a region rendered from personal rules, with a live ledger row whose written hash is that region, as a clean update',
+        regionNow !== null &&
+          recorded6.length === 1 &&
+          (await regionIn(b)) === normalizeContent(personal) &&
+          planB6.plan !== null &&
+          isDeepStrictEqual(bucketsOf(planB6.plan), ['clean_update']),
+        planB6.error ?? { recorded6, buckets: bucketsOf(planB6.plan), region: await regionIn(b) },
+      );
+      const agentsBefore6 = await agentsOf(b);
+      const applied6 = await applyRegion(b);
+      const agentsAfter6 = await agentsOf(b);
+      // R6: applying it writes the repository-level block and leaves the lines around the region.
+      check(
+        'T119 R6: applying it writes buildRepoCliRulesBlock(null) and leaves the surrounding lines',
+        applied6.error === null &&
+          regionOf(agentsAfter6) === regionOfBlock(null) &&
+          (regionOf(agentsAfter6) ?? '').includes(defaultFirstLine) &&
+          !(regionOf(agentsAfter6) ?? '').includes('- a personal rule') &&
+          outsideRegion(agentsAfter6) === outsideRegion(agentsBefore6) &&
+          agentsAfter6.startsWith('Unrelated line before the region.\n') &&
+          agentsAfter6.endsWith('Unrelated line after the region.\n'),
+        {
+          error: applied6.error,
+          ...departure(regionOf(agentsAfter6), regionOfBlock(null) ?? ''),
+          outsideKept: outsideRegion(agentsAfter6) === outsideRegion(agentsBefore6),
+        },
+      );
+      const edited = buildCliRulesBlock(['- a personal rule\n', '- edited by hand\n'])!;
+      await writeFile(
+        path.join(b.repoPath, 'AGENTS.md'),
+        agentsAfter6.replace(
+          extractRegion(agentsAfter6, CLI_RULES_START, CLI_RULES_END) ?? '',
+          edited.trimEnd(),
+        ),
+      );
+      const recordedEdited = await recordRegionAs(personal);
+      const planB6c = await planOnly(b);
+      const agentsBefore6c = await readFile(path.join(b.repoPath, 'AGENTS.md'), 'utf8');
+      const applied6c = await applyRegion(b);
+      const agentsAfter6c = await readFile(path.join(b.repoPath, 'AGENTS.md'), 'utf8');
+      // R6: the same fixture with the region edited after its row was written is a conflict, and the defaults leave the file alone.
+      check(
+        'T119 R6: the same with the region hand-edited after the row was written is a conflict, and applying with the defaults leaves AGENTS.md byte-identical',
+        recordedEdited.length === 1 &&
+          planB6c.plan !== null &&
+          isDeepStrictEqual(bucketsOf(planB6c.plan), ['conflict']) &&
+          applied6c.error === null &&
+          agentsAfter6c === agentsBefore6c &&
+          regionOf(agentsAfter6c) === normalizeContent(edited),
+        planB6c.error ?? { buckets: bucketsOf(planB6c.plan), error: applied6c.error },
+      );
+
+      // R7a: a repository whose override is set before its first onboarding runs: 07 writes the region from it, 12 records it, the commit carries the file.
+      const origin7 = path.join(tmp!, 'r7-origin.git');
+      git(tmp!, 'init', '-q', '--bare', '-b', 'main', origin7);
+      const seed7 = path.join(tmp!, 'r7-seed');
+      git(tmp!, 'clone', '-q', httpOrigin(origin7), seed7);
+      await writeFile(path.join(seed7, 'README.md'), '# two-install smoke, first onboarding\n');
+      await writeFile(
+        path.join(seed7, 'composer.json'),
+        `${JSON.stringify({ name: 'acme/two-install', require: { 'drupal/core-recommended': '^10.3' } }, null, 2)}\n`,
+      );
+      git(seed7, 'add', 'README.md', 'composer.json');
+      git(seed7, 'commit', '-q', '-m', 'seed');
+      git(seed7, 'push', '-q', 'origin', 'HEAD:main');
+      const userC = randomUUID();
+      landUsers.push(userC);
+      const c = await cloneInstall(
+        'A',
+        dbA!,
+        path.join(tmp!, 'storage-r7'),
+        httpOrigin(origin7),
+        userC,
+        A_PROVIDERS,
+      );
+      const OVERRIDE_C =
+        '# Rules set before the first onboarding\n\n- Held by the repository from the start.\n';
+      await setRules(c, OVERRIDE_C);
+      const [onboardingC] = await c.db
+        .insert(schema.tasks)
+        .values({
+          userId: c.userId,
+          repositoryId: c.repositoryId,
+          type: 'onboarding',
+          title: 'two-install-smoke R7',
+          status: 'running',
+        })
+        .returning({ id: schema.tasks.id });
+      const chainC = [
+        envDetectStep,
+        detectionConfirmationStep,
+        toolingInfrastructureStep,
+        agentDiscoveryStep,
+        generateFilesStep,
+        postOnboardingStep,
+      ] as const;
+      const rowsC = await c.db
+        .insert(schema.taskSteps)
+        .values(
+          chainC.map((step) => ({
+            taskId: onboardingC!.id,
+            stepId: step.metadata.id,
+            stepIndex: step.metadata.index,
+            title: step.metadata.title,
+            status: 'pending' as const,
+          })),
+        )
+        .returning({ id: schema.taskSteps.id, stepId: schema.taskSteps.stepId });
+      const rowOfC = (step: (typeof chainC)[number]) =>
+        rowsC.find((r) => r.stepId === step.metadata.id)!.id;
+      await runStep(c, envDetectStep, onboardingC!.id, rowOfC(envDetectStep));
+      await runStep(
+        c,
+        detectionConfirmationStep,
+        onboardingC!.id,
+        rowOfC(detectionConfirmationStep),
+        {
+          projectDescription: 'Two-install smoke fixture, first onboarding.',
+        },
+      );
+      await runStep(
+        c,
+        toolingInfrastructureStep,
+        onboardingC!.id,
+        rowOfC(toolingInfrastructureStep),
+        {
+          ragMode: 'none',
+          ollamaMode: 'external',
+          ollamaUrl: 'http://only-on-c:11434',
+          rtkEnabled: false,
+        },
+      );
+      await runStep(
+        c,
+        agentDiscoveryStep,
+        onboardingC!.id,
+        rowOfC(agentDiscoveryStep),
+        {},
+        LLM_AGENTS,
+      );
+      await runStep(c, generateFilesStep, onboardingC!.id, rowOfC(generateFilesStep));
+      const postedC = await runStep(
+        c,
+        postOnboardingStep,
+        onboardingC!.id,
+        rowOfC(postOnboardingStep),
+        {
+          commit: true,
+        },
+      );
+      const regionC = await regionIn(c);
+      const wantC = regionOfBlock(OVERRIDE_C);
+      // R7a: 07 renders the region from the override the repository already held, not from the default or a personal rule.
+      check(
+        'T119 R7a: 07 writes the AGENTS.md rules region from the override the repository already held',
+        wantC !== null &&
+          regionC === wantC &&
+          regionC.includes('- Held by the repository from the start.\n') &&
+          !regionC.includes(defaultFirstLine),
+        departure(regionC, wantC ?? ''),
+      );
+      const rowC = await c.db
+        .select({
+          writtenHash: schema.onboardingArtifacts.writtenHash,
+          templateContentHash: schema.onboardingArtifacts.templateContentHash,
+          source: schema.onboardingArtifacts.source,
+        })
+        .from(schema.onboardingArtifacts)
+        .where(
+          and(
+            eq(schema.onboardingArtifacts.repositoryId, c.repositoryId),
+            eq(schema.onboardingArtifacts.diskPath, CLI_RULES_DISK_PATH),
+            eq(schema.onboardingArtifacts.templateKind, CLI_RULES_TEMPLATE_KIND),
+            isNull(schema.onboardingArtifacts.supersededAt),
+          ),
+        );
+      // R7a: 12 records the row from the region 07 wrote, so the row’s hash is the hash of the bytes on disk.
+      check(
+        'T119 R7a: 12 records the cli-rules row from the written region: its written hash equals that region’s hash',
+        regionC !== null && rowC.length === 1 && rowC[0]!.writtenHash === sha256Hex(regionC),
+        { rowC, region: regionC },
+      );
+      const inCommitC = git(
+        c.repoPath,
+        'diff-tree',
+        '--no-commit-id',
+        '--name-only',
+        '-r',
+        postedC.output.commitSha!,
+      ).split('\n');
+      // R7a: the onboarding commit carries the override as the record’s settings file.
+      check(
+        'T119 R7a: the onboarding commit contains .haive-data/state/settings/agent-rules.md, holding the normalised override',
+        postedC.output.commitPerformed &&
+          inCommitC.includes(RULES_REL) &&
+          (await ruleFile(c)) === OVERRIDE_C &&
+          (await ruleCol(c)) === OVERRIDE_C,
+        { inCommitC, file: await ruleFile(c) },
+      );
+
+      // R7b: a fresh clone of a remote that already carries the file takes it as the column at clone time.
+      const fresh = await cloneInstall(
+        'B',
+        dbB!,
+        path.join(tmp!, 'storage-r7-fresh'),
+        remoteUrl,
+        undefined,
+        B_PROVIDERS,
+      );
+      const freshError = await syncErrorOf(fresh);
+      check(
+        'T119 R7b: a fresh clone of the A and B remote, which carries settings/agent-rules.md, imports it as the column at clone time with no prior base',
+        (await ruleFile(fresh)) === Y3 && (await ruleCol(fresh)) === Y3 && freshError === null,
+        { file: await ruleFile(fresh), column: await ruleCol(fresh), freshError },
+      );
+      const planFresh = await planOnly(fresh);
+      // R7b: the rules region reads unchanged, and the plan offers nothing the same clone did not offer before this block.
+      check(
+        'T119 R7b: and its first plan is quiet for the rules region and offers nothing the same remote did not offer before the rules were set',
+        planFresh.plan !== null &&
+          isDeepStrictEqual(bucketsOf(planFresh.plan), ['unchanged']) &&
+          isDeepStrictEqual(noiseOf(planFresh.plan), baselineNoise),
+        planFresh.error ?? { noise: noiseOf(planFresh.plan), baselineNoise },
+      );
+      // The repository of R7a, whose commit is consistent as a whole, pushed so that it can be cloned.
+      git(c.repoPath, 'push', '-q', 'origin', 'HEAD:main');
+      const freshC = await cloneInstall(
+        'B',
+        dbB!,
+        path.join(tmp!, 'storage-r7-fresh-c'),
+        httpOrigin(origin7),
+        undefined,
+        B_PROVIDERS,
+      );
+      const planFreshC = await planOnly(freshC);
+      const notQuietC = (planFreshC.plan?.entries ?? [])
+        .filter((e) => e.bucket !== 'unchanged')
+        .map((e) => `${e.diskPath}: ${e.bucket}`);
+      // R7b: a clone of a remote that is consistent as a whole imports the override and has nothing at all to be offered.
+      check(
+        'T119 R7b: a fresh clone of a consistent remote imports the override at clone time and its first plan is quiet throughout',
+        (await ruleCol(freshC)) === OVERRIDE_C &&
+          (await syncErrorOf(freshC)) === null &&
+          planFreshC.plan !== null &&
+          planFreshC.plan.entries.length > 0 &&
+          notQuietC.length === 0 &&
+          isDeepStrictEqual(bucketsOf(planFreshC.plan), ['unchanged']),
+        planFreshC.error ?? { column: await ruleCol(freshC), notQuietC },
+      );
+    }
 
     // C3: a Pull lands past the files Haive wrote, and B's pending changes survive.
     {
