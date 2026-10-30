@@ -1,6 +1,7 @@
 import { IDE_IDLE_GRACE_MS, IDE_SESSION_PREFIX, logger } from '@haive/shared';
 import type { Redis } from 'ioredis';
 import { stopIdeRunner } from './ide-runner.js';
+import { ideSessionHeld } from './ide-session.js';
 
 const log = logger.child({ module: 'ide-session-reaper' });
 
@@ -91,10 +92,7 @@ export class IdeSessionReaper {
   private async maybeReap(key: string): Promise<boolean> {
     const entry = await this.redis.hgetall(key);
     if (!entry || Object.keys(entry).length === 0) return false;
-    const refcount = Number.parseInt(entry.refcount ?? '0', 10);
-    const lastSeenAt = Number.parseInt(entry.lastSeenAt ?? '0', 10);
-    if (refcount > 0) return false;
-    if (Date.now() - lastSeenAt < this.graceMs) return false;
+    if (ideSessionHeld(entry, this.graceMs)) return false;
     const taskId = key.slice(IDE_SESSION_PREFIX.length);
     await stopIdeRunner(taskId).catch((err) => {
       log.warn({ err, taskId }, 'ide stop failed during reap');

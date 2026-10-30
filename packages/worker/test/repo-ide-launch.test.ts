@@ -15,6 +15,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   const { promisify } = await import('node:util');
   return { ...actual, execFile: Object.assign(vi.fn(), { [promisify.custom]: h.exec }) };
 });
+vi.mock('../src/redis.js', () => ({ getRedis: () => ({ hset: async () => 1 }) }));
 vi.mock('../src/sandbox/sandbox-core-image.js', () => ({ ensureSandboxCoreImage: async () => {} }));
 vi.mock('../src/queues/cli-exec/gitfile-mask.js', () => ({ repoGitDataBoundary: h.boundary }));
 vi.mock('../src/sandbox/docker-runner.js', async (importOriginal) => ({

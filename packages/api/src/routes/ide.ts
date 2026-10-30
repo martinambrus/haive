@@ -423,8 +423,11 @@ async function releaseIdeSession(taskId: string): Promise<void> {
 /** On api boot, zero every IDE session refcount. A prior api pid that died holding
  *  open editor connections left refcount>0 with no live socket; without this the
  *  reaper's refcount>0 short-circuit would pin those containers forever. Mirrors
- *  the terminal-shell boot reset. lastSeenAt is left as-is so a genuinely idle
- *  session still reaps on schedule. */
+ *  the terminal-shell boot reset. A session nobody held keeps its lastSeenAt, so a
+ *  genuinely idle one still reaps on schedule. One that was held gets lastSeenAt = now:
+ *  its tab is still open and about to reconnect, and the time its last socket attached
+ *  would read as an editor idle for hours, to the reaper and to the worker's ensure
+ *  (which replaces an idle editor started with a stale launch). */
 export async function resetStaleIdeRefcounts(): Promise<void> {
   const redis = getRedis();
   let cursor = '0';
@@ -438,7 +441,8 @@ export async function resetStaleIdeRefcounts(): Promise<void> {
     );
     cursor = next;
     for (const key of keys) {
-      await redis.hset(key, 'refcount', '0');
+      const held = Number.parseInt((await redis.hget(key, 'refcount')) ?? '0', 10) > 0;
+      await redis.hset(key, 'refcount', '0', ...(held ? ['lastSeenAt', String(Date.now())] : []));
     }
   } while (cursor !== '0');
 }

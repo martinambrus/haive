@@ -48,6 +48,7 @@ export async function ensureIdeForTask(taskId: string, userId: string): Promise<
   const settingsJson = await resolveIdeSettingsJson(db, userId, taskId);
   const handle = await ensureIdeRunnerStarted(db, taskId, userId, settingsJson);
   if (!handle) return { ok: false, reason: 'no-editable-repo' };
+  await registerIdeSession(taskId);
   return { ok: true };
 }
 
@@ -79,12 +80,12 @@ export async function ensureIdeForRepo(
   const settingsJson = await resolveIdeSettingsJson(db, userId);
   const handle = await ensureRepoIdeRunnerStarted(db, repositoryId, userId, settingsJson);
   if (!handle) return { ok: false, reason: 'no-editable-repo' };
-  // A cold boot may finish after the page closes, before any editor WebSocket opens.
-  // Register it now so the idle reaper can still reclaim the container in that case.
-  await getRedis().hset(
-    ideSessionKey(repoIdeSessionId(repositoryId)),
-    'lastSeenAt',
-    String(Date.now()),
-  );
+  await registerIdeSession(repoIdeSessionId(repositoryId));
   return { ok: true };
+}
+
+// A cold boot may finish after the page closes, before any editor WebSocket opens.
+// Register it now so the idle reaper can still reclaim the container in that case.
+async function registerIdeSession(sessionId: string): Promise<void> {
+  await getRedis().hset(ideSessionKey(sessionId), 'lastSeenAt', String(Date.now()));
 }

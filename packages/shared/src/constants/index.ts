@@ -851,9 +851,10 @@ export function isIdeVolume(name: string): boolean {
     name.startsWith(volumePrefix(IDE_EXT_FAMILY)) || name.startsWith(volumePrefix(IDE_UDATA_FAMILY))
   );
 }
-/** Redis hash key for a task or repository IDE session. The api owns refcount + lastSeenAt as
- *  proxied connections open/close; the worker's idle reaper reads them to grace-
- *  stop the container. One per workspace session, identified by task id or repoIdeSessionId. */
+/** Redis hash key for a task or repository IDE session. The api owns refcount and writes lastSeenAt
+ *  as proxied connections open/close; the worker also writes lastSeenAt, at every ensure and before
+ *  every launch, and never refcount. The worker's idle reaper reads both to grace-stop the
+ *  container. One per workspace session, identified by task id or repoIdeSessionId. */
 export const IDE_SESSION_PREFIX = 'ide:session:';
 export function ideSessionKey(sessionId: string): string {
   return `${IDE_SESSION_PREFIX}${sessionId}`;
