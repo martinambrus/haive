@@ -57,7 +57,13 @@ The sign-in form (`AuthForm`: `/login`, `/register`, `/setup`) declares `method=
 before React attaches `handleSubmit` is the browser's own, and as a GET it put the email, password
 and setup token in the URL, the history and the access logs, and dropped `?invite=`. MEASURED on
 Next 16.4.3 (dev and standalone build): a urlencoded POST on those routes is answered with the page
-itself (200), while a multipart one gets 409, so the form must never set `encType`. A form that
+itself (200), while a multipart one gets 409, so the form must never set `encType`. Its fields are
+uncontrolled, and `handleSubmit` reads them with `new FormData(event.currentTarget)` before its
+first `await`. React keeps text typed or autofilled before it attached, but a controlled input's
+state stays empty and the next re-render resets the field to it: the form posted empty strings and
+then emptied itself after a refusal (MEASURED with the script chunks held back). A click or Enter
+before React attaches is still the native POST to the same page and drops what was typed; React's
+own replay (a function `action`) would keep it but removes `method`, so it is not used. A form that
 carries a secret and is rendered on the server declares `method="post"` too.
 
 ## Cookie transport boundary
