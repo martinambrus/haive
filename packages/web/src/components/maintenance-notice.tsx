@@ -18,15 +18,20 @@ import { useMaintenanceState } from '@/lib/use-global-pause';
  *
  * The state comes from the shared `/system/state` poller, which stays reachable during
  * maintenance precisely so a locked-out user can be told rather than left guessing.
+ *
+ * `watch` false asks nothing, for a user the api refuses that poll until they replace their
+ * password; the page is still rendered, in the same place.
  */
 export function MaintenanceNotice({
   role,
+  watch = true,
   children,
 }: {
   role: 'admin' | 'user';
+  watch?: boolean;
   children: React.ReactNode;
 }) {
-  const state = useMaintenanceState();
+  const state = useMaintenanceState(watch);
 
   if (state === 'maintenance' && role !== 'admin') {
     return (
