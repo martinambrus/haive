@@ -19,10 +19,14 @@ transaction, 04 from the context it restored. The `cli-rules` entry is the repos
 one helper, `buildRepoCliRulesBlock` (`@haive/shared`), renders it from the repository's rules
 override (`agent_rules_override`, read by the worker through `readAgentRulesOverrideRaw`) or else
 Haive's default rules, never from a user's providers, and the api's upgrade-status recomputes it
-the same way. An override is rendered as written, only shaped (runs of blank lines collapsed,
-trimmed, inside the markers), never deduplicated the way provider rules once were, so a repeated
-instruction or command survives; the default rules go through the old merge, which drops nothing
-from them. An empty override renders no block, which reads as obsolete. 12 keeps its own rule
+the same way. An override is rendered as written, only shaped (runs of blank lines collapsed, the
+blank lines before its first line and the whitespace after its last dropped, so a first line that
+opens an indented code block or list keeps its indent, inside the markers), never deduplicated the
+way provider rules once were, so a repeated instruction or command survives; the default rules go
+through the old merge, which drops nothing from them. An empty override renders no block, which
+reads as obsolete. Changing this shaping needs no manifest bump: the region is no manifest item, so
+upgrade-status offers the new bytes (a `clean_update`) only to repositories whose render moved. 12
+keeps its own rule
 for the `cli-rules` region on disk. Its artifact snapshots describe what 07
 rendered, while its applicable set reads the live RTK switch at the actual write, under the
 project-state lock and a repository row lock: a switch between 07 and 12 leaves the snapshots as
@@ -998,7 +1002,8 @@ The Tooling page edits the rules in a card of its own, with its own save. `GET .
 returns `agentRulesOverride` (NULL follows the default), and the card's save sends the key alone to
 the tooling PATCH: text, `''` included, or null to follow the default again, the key absent leaving
 it. The PATCH validates the text before any write (`normalizeAgentRulesOverride`, a 400 with the
-reason otherwise), stores the normalised text, marks the outbox in the same transaction and answers
+reason otherwise; a body that is not a JSON object is refused 400 `invalid_body`, and one that is
+not JSON `invalid_json`, before any field is read), stores the normalised text, marks the outbox in the same transaction and answers
 with what it stored. "Save tooling" never sends the key, so an unrelated save can neither pin the
 default text as an override nor erase one. Choosing Override starts from the default text rather
 than an empty editor, since an empty override is a choice that writes no block (the card says so),
