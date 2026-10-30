@@ -1004,6 +1004,50 @@ describe('CLI login banner antigravity PTY size', () => {
   });
 });
 
+describe('CLI login banner token paste', () => {
+  // The Enter is its own write 150 ms after the code, so the CLI's input registers the paste first.
+  // A write to a stream that has ended does not throw: it is an 'error' event on that stream.
+  function watchStream() {
+    const errors: unknown[] = [];
+    stream.on('error', (err) => errors.push(err));
+    const write = vi.spyOn(stream, 'write');
+    return {
+      codes: () => write.mock.calls.map(([chunk]) => chunk === CODE),
+      enters: () => write.mock.calls.filter(([chunk]) => chunk === '\r').length,
+      errors: () => errors.length,
+    };
+  }
+
+  it('writes the code, then Enter 150 ms later', async () => {
+    await start();
+    const seen = watchStream();
+    paste();
+    expect(seen.codes()).toEqual([true]);
+    await vi.advanceTimersByTimeAsync(149);
+    expect(seen.enters()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(seen.enters()).toBe(1);
+    expect(seen.errors()).toBe(0);
+  });
+
+  it.each(['the dialog closes', 'the stream ends'])(
+    'writes no Enter to the ended stream when %s before it is due',
+    async (when) => {
+      await start();
+      const seen = watchStream();
+      paste();
+      if (when === 'the stream ends') stream.emit('end');
+      else ws.close();
+      await settle();
+      expect(stream.writableEnded).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(150);
+      expect(seen.enters()).toBe(0);
+      expect(seen.errors()).toBe(0);
+    },
+  );
+});
+
 describe('CLI login banner auth URL chunking', () => {
   // Synthetic, ~200 characters, hard-wrapped at 80 columns the way the CLI's PTY prints it.
   const CLAUDE_URL =
@@ -1465,5 +1509,35 @@ describe('CLI login banner auth URL chunking', () => {
     expect(write).not.toHaveBeenCalledWith('\r');
     release();
     await settle();
+  });
+
+  it('antigravity: output with no URL in it presses Enter once, 1.5 s after it stops', async () => {
+    providerName = 'antigravity';
+    await start();
+    const write = vi.spyOn(stream, 'write');
+    stream.emit('data', Buffer.from('Select a login method\n'));
+    await vi.advanceTimersByTimeAsync(1499);
+    expect(write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(write.mock.calls).toEqual([['\r']]);
+  });
+
+  it('antigravity: output after the session ended arms no menu-advance timer', async () => {
+    providerName = 'antigravity';
+    await start();
+    ws.close();
+    await settle();
+    expect(vi.getTimerCount()).toBe(0);
+    stream.emit('data', Buffer.from('Select a login method\n'));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('antigravity: oauth2 output after the session ended is not logged as not extracted', async () => {
+    providerName = 'antigravity';
+    await start();
+    ws.close();
+    await settle();
+    stream.emit('data', Buffer.from('oauth2 consent screen\n'));
+    expect(notExtracted()).toBe(0);
   });
 });
