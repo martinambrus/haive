@@ -731,7 +731,7 @@ Decide which stored targets a non-admin may point at private addresses.
 
 ### T401 · FNF[flagged-user-web-polish] · a forced-password user sees pollers 403 every 5 s; no e2e for the forced flow or the 429
 
-status: open · (T377 landed as PR #886) · was modular #283
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T19:03Z · last: 2026-10-30T19:03Z
 
 1. REGRESSION (cosmetic): sidebar-tasks.tsx ~:57 and notification-provider.tsx ~:28 keep polling. They should stop on the 403 must_change_password code.
 2. Add Playwright specs.
