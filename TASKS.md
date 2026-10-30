@@ -908,6 +908,13 @@ From the T447 review (2026-10-30). PRE-EXISTING; consequential for the caller.
 
 Where a route reads an optional body with `.json().catch(() => ({}))` or a try/catch, a malformed or truncated body is read as "no options" and the request succeeds with the defaults: api routes/tooling-upgrades.ts ~:250-256 (a truncated `{"components":["rtk"` upgrades ALL components), plan.ts ~:469 (snapshot save), ~:1285 (sequence: the task runs on the default CLI), ~:1311 (merge start: same), ~:1439 (advisory: the question is dropped), ddev-control.ts ~:75 (null-safe, but a malformed body returns the default logs; read-only). Decide the policy (for example: an empty body means the defaults, a malformed one is a 400, which needs the text read rather than the parse error caught) and apply it to every such route.
 
+### T457 · FNF[cli-login-post-cleanup-chunks] [design] · a sign-in line that arrives after the login session ended still starts a probe
+
+status: open
+From the T452 review (2026-10-31). PRE-EXISTING, minor; reachable only when output arrives during teardown.
+
+In api routes/cli-login-banner.ts `onStreamData` (~:876-882), a success or error line in a chunk that arrives after `cleanupSession` still reaches `detectAuthResult` and starts `runProbeAndSave`, which queues a probe job for a session that is gone: `canDetectAuth` (~:666) has no `cleanedUp` check, while `captureClaudeOauthToken` and `offerAuthUrl` do. Codex, grok and amp take this branch (grok measured by the T452 driver with a scratch test: probe jobs 0 -> 1 after `ws.close()` and a "Signed in" chunk). Decide whether a login that completes during teardown should still be verified (the CLI has stored its credentials either way, so a skipped probe leaves Haive's provider state stale until the next check). If not, one `if (session.cleanedUp) return;` at the top of `onStreamData` closes it and makes T452's gate on the antigravity URL step redundant.
+
 ## Done
 
 - T119 — the AGENTS.md rules block is the repository's: repositories.agent_rules_override (migration 0215), settings/agent-rules.md in the project-state record, a Tooling page card with its own save, and buildRepoCliRulesBlock for 07, 12, 01 and the api's upgrade-status — PR #940 (5b6467e9c) and the editor fix PR #947 (1989f1f2a), 2026-10-30; main CI green; browser-checked at 1280, 768 and 375; follow-ups T443, T444, T445, T446, T447
