@@ -5,6 +5,7 @@ import {
   dedupLines,
   buildCliRulesBlock,
   buildCliRulesBlockFromProviders,
+  buildRepoCliRulesBlock,
   resolveEffectiveRules,
   inheritsDefaultRules,
   extractRegion,
@@ -163,6 +164,29 @@ describe('buildCliRulesBlockFromProviders', () => {
     expect(
       buildCliRulesBlockFromProviders([p('claude-code', '- a', false), p('codex', '', false)]),
     ).toBeNull();
+  });
+});
+
+describe('buildRepoCliRulesBlock', () => {
+  it('follows the live default while the repository holds no override', () => {
+    expect(buildRepoCliRulesBlock(null)).toBe(buildCliRulesBlock([DEFAULT_AGENT_RULES]));
+    expect(buildRepoCliRulesBlock(undefined)).toBe(buildRepoCliRulesBlock(null));
+  });
+
+  it('renders an override as written and nothing of the default', () => {
+    const block = buildRepoCliRulesBlock('- only this rule\n');
+    expect(block).toBe(buildCliRulesBlock(['- only this rule\n']));
+    expect(block).not.toContain(DEFAULT_AGENT_RULES.split('\n')[0]!);
+  });
+
+  it('reads an empty or whitespace-only override as no block, where a provider would inherit', () => {
+    expect(buildRepoCliRulesBlock('')).toBeNull();
+    expect(buildRepoCliRulesBlock('  \n\t')).toBeNull();
+    expect(resolveEffectiveRules('')).toBe(DEFAULT_AGENT_RULES);
+  });
+
+  it('keeps the override on the default when it is a copy of the default', () => {
+    expect(buildRepoCliRulesBlock(DEFAULT_AGENT_RULES)).toBe(buildRepoCliRulesBlock(null));
   });
 });
 

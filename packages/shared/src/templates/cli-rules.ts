@@ -207,6 +207,16 @@ export function buildCliRulesBlockFromProviders(
   );
 }
 
+/** The repository's own cli-rules block: its override when it has one, else Haive's live default
+ *  rules. `null` (or `undefined`, a column a fake row leaves unset) follows the default; any string,
+ *  the empty one included, is the override and is used as written. It never inherits the default
+ *  through a shipped-default hash the way a provider's rules do (`resolveEffectiveRules`), and an
+ *  empty or whitespace-only override renders no block, as for any empty input. Personal provider
+ *  rules do not enter: they reach Haive's own agents through dispatch alone. */
+export function buildRepoCliRulesBlock(override: string | null | undefined): string | null {
+  return buildCliRulesBlock([override ?? DEFAULT_AGENT_RULES]);
+}
+
 /** Return the marker-inclusive span between `startMarker` and `endMarker`
  *  (the first end marker at or after the start), or null if either marker is
  *  absent. Mirrors the slice bounds used by the onboarding writer so a written
