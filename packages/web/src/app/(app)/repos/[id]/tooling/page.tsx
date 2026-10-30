@@ -3,14 +3,24 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import { DEFAULT_AGENT_RULES } from '@haive/shared/constants';
 import { api, requestCheckoutSync } from '@/lib/api-client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
 import { Button, Card, FormError, Label } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import { MarkdownEditor } from '@/components/markdown/markdown-editor';
+import { MarkdownView } from '@/components/markdown/markdown-view';
 import { RepositoryIntegrations } from '@/components/integrations/repository-integrations';
 import { ProjectStateConflictsBanner } from '@/components/project-state-conflicts-banner';
 import { usePageTitle } from '@/lib/use-page-title';
 import type { VerifyCommands } from '@haive/shared/schemas';
+import {
+  isRulesDirty,
+  rulesStateFrom,
+  saveAgentRules,
+  startOverride,
+  type RulesState,
+} from '@/lib/agent-rules-override';
 import {
   saveVerifyCommands,
   slotsFromConfig,
@@ -65,6 +75,8 @@ interface ToolingConfig {
   reviewDimensions: string[];
   reviewDimensionOptions: ReviewDimensionOption[];
   verifyCommands?: VerifyCommands;
+  /** null follows Haive's default rules; a string, '' included, is the repository's override. */
+  agentRulesOverride: string | null;
   /** ISO timestamp of the first embed failure, or null when healthy. The
    *  STRUCTURAL flag — gate on this, never on the reason string beside it. */
   ragEmbedDegradedAt: string | null;
@@ -157,6 +169,13 @@ export default function RepoToolingPage() {
   const [verifySaving, setVerifySaving] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const [verifySaved, setVerifySaved] = useState(false);
+  const [rulesLoaded, setRulesLoaded] = useState<RulesState>(rulesStateFrom(null));
+  const [rules, setRules] = useState<RulesState>(rulesStateFrom(null));
+  const [rulesBaseline, setRulesBaseline] = useState<string | null>(null);
+  const [rulesEditorKey, setRulesEditorKey] = useState(0);
+  const [rulesSaving, setRulesSaving] = useState(false);
+  const [rulesError, setRulesError] = useState<string | null>(null);
+  const [rulesSaved, setRulesSaved] = useState(false);
   const [guidance, setGuidance] = useState<GuidanceItem[]>([]);
   const [archiving, setArchiving] = useState<string | null>(null);
   const [ragEmbedBusy, setRagEmbedBusy] = useState<string | null>(null);
@@ -254,6 +273,9 @@ export default function RepoToolingPage() {
         setStepGuidanceEnabled(cfg.stepGuidanceEnabled ?? true);
         setReviewDimensions(new Set(cfg.reviewDimensions ?? []));
         setVerifySlots(slotsFromConfig(cfg.verifyCommands));
+        const storedRules = rulesStateFrom(cfg.agentRulesOverride);
+        setRulesLoaded(storedRules);
+        setRules(storedRules);
         setGuidance(cfg.stepGuidance ?? []);
       } catch (err) {
         if (!cancelled) setError((err as Error).message ?? 'Failed to load tooling config');
@@ -304,6 +326,30 @@ export default function RepoToolingPage() {
   function setVerifySlot(key: keyof VerifySlots, patch: { mode?: VerifyMode; text?: string }) {
     setVerifySlots((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
     setVerifySaved(false);
+  }
+
+  // Own request, never part of "Save tooling": an unrelated save must not pin the default or erase an override.
+  async function handleRulesSave() {
+    if (rulesSaving) return;
+    setRulesSaving(true);
+    setRulesError(null);
+    setRulesSaved(false);
+    const res = await saveAgentRules(api, repositoryId, rules);
+    if (res.ok) {
+      const stored = rulesStateFrom(res.stored);
+      setRulesLoaded(stored);
+      setRules(stored);
+      setRulesEditorKey((key) => key + 1);
+      setRulesSaved(true);
+    } else {
+      setRulesError(res.error);
+    }
+    setRulesSaving(false);
+  }
+
+  function changeRules(update: (prev: RulesState) => RulesState) {
+    setRules(update);
+    setRulesSaved(false);
   }
 
   // The api writes the two secrets with no rollback, so a failed request can leave one changed.
@@ -403,6 +449,8 @@ export default function RepoToolingPage() {
       setClearCredsBusy(false);
     }
   }
+
+  const rulesDirty = isRulesDirty(rulesLoaded, rules, rulesBaseline);
 
   return (
     <div className="flex max-w-3xl flex-col gap-6">
@@ -1060,6 +1108,107 @@ export default function RepoToolingPage() {
                 {verifySaving ? 'Saving...' : 'Save verify commands'}
               </Button>
               {verifySaved && <span className="text-sm text-emerald-400">Saved.</span>}
+            </div>
+          </Card>
+
+          <Card>
+            <h2 className="text-lg font-semibold text-neutral-100">AGENTS.md rules</h2>
+            <InlineMarkdown
+              className="mt-1 text-xs text-neutral-400"
+              body="The change reaches `AGENTS.md` through the next upgrade, and personal CLI rules still reach Haive's own agents but are not written into `AGENTS.md`."
+            />
+            <div
+              role="radiogroup"
+              aria-label="AGENTS.md rules source"
+              className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1"
+            >
+              {(
+                [
+                  ['default', "Follow Haive's default rules"],
+                  ['override', 'Override for this repository'],
+                ] as const
+              ).map(([mode, modeLabel]) => (
+                <label key={mode} className="flex items-center gap-1.5 text-sm text-neutral-300">
+                  <input
+                    id={`agent-rules-mode-${mode}`}
+                    type="radio"
+                    name="agent-rules-mode"
+                    className="h-4 w-4 border-neutral-700 bg-neutral-900 text-indigo-500"
+                    checked={rules.mode === mode}
+                    disabled={rulesSaving}
+                    onChange={() =>
+                      changeRules((prev) =>
+                        mode === 'override' ? startOverride(prev) : { ...prev, mode },
+                      )
+                    }
+                  />
+                  {modeLabel}
+                </label>
+              ))}
+            </div>
+            {rules.mode === 'default' ? (
+              <>
+                <InlineMarkdown
+                  className="mt-3 text-xs text-neutral-400"
+                  body="This repository follows Haive's default rules and picks up their updates."
+                />
+                <MarkdownView
+                  body={DEFAULT_AGENT_RULES}
+                  enhanced={false}
+                  className="mt-2 max-h-96 overflow-auto rounded-md border border-neutral-800 bg-neutral-950"
+                />
+              </>
+            ) : (
+              <>
+                <InlineMarkdown
+                  className="mt-3 text-xs text-neutral-400"
+                  body="This repository no longer follows updates to Haive's default rules."
+                />
+                {rules.text.trim() === '' && (
+                  <InlineMarkdown
+                    className="mt-2 text-xs text-amber-400"
+                    body="An empty override writes no rules block into `AGENTS.md`."
+                  />
+                )}
+                <div className="mt-2">
+                  <MarkdownEditor
+                    key={rulesEditorKey}
+                    value={rules.text}
+                    onChange={(markdown) => changeRules((prev) => ({ ...prev, text: markdown }))}
+                    onBaseline={(markdown) =>
+                      setRulesBaseline(rules.text === rulesLoaded.text ? markdown : null)
+                    }
+                    disabled={rulesSaving}
+                    autoFocus={false}
+                    placeholder="Write the rules..."
+                  />
+                </div>
+              </>
+            )}
+            {rulesError && (
+              <div className="mt-3">
+                <FormError message={rulesError} />
+              </div>
+            )}
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <Button
+                size="sm"
+                onClick={() => void handleRulesSave()}
+                disabled={rulesSaving || !rulesDirty}
+              >
+                {rulesSaving ? 'Saving...' : 'Save AGENTS.md rules'}
+              </Button>
+              {rules.mode === 'override' && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => changeRules(() => rulesStateFrom(null))}
+                  disabled={rulesSaving}
+                >
+                  Reset to default
+                </Button>
+              )}
+              {rulesSaved && <span className="text-sm text-emerald-400">Saved.</span>}
             </div>
           </Card>
 

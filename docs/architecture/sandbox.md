@@ -160,13 +160,23 @@ stale editor keeps its launch while attached and for one grace after, and a repl
 the reaper would not. Before replacing it the ensure makes sure `CODE_SERVER_IMAGE` is on the host
 (inspect, else a pull bounded to 120 s) and keeps the old editor with a warning when it cannot be
 had; the removal itself waits until the volumes and mounts are ready, right before `docker run`. An
-editor holding another workspace is still recreated at once, whatever its use or image. `lastSeenAt`
+editor holding another workspace is still recreated at once, whatever its use or image. A workspace
+label that cannot be read (the `docker inspect` failed, `runnerSubpathVerdict` `'absent'`) is not
+another workspace: the editor is kept, as the app runner is (both reuse on anything but `'other'`, a
+different or empty label), and the next ensure whose inspect succeeds decides. `lastSeenAt`
 is written by the api on attach and detach and by the worker on every ensure (task and repository)
-and before every launch, so a task editor no socket ever reached is reaped as well. On boot the api
+and before every launch, so a task editor no socket ever reached is reaped as well. The reaper's sweep also lists this
+install's running editors (`listIdeRunnerSessions`: `label=haive.ide`, the session id read off the
+`haive.task.id` or `haive.repo.id` label, kept only where `ideRunnerName(session)` is the container's
+own name, since editors carry no install label and the name keeps 8 characters of a task id) and
+writes `lastSeenAt` = now (`HSETNX`) for each without one: an editor with no entry is held one grace
+and then reaped by the same `ideSessionHeld` rule, never read as idle for lacking an entry. One
+launched before the spec label is stale, so it keeps its launch for that grace too. On boot the api
 zeroes every refcount, gives a session that was held `lastSeenAt` = now (its tab is about to
 reconnect) and leaves an idle one's age; the terminal-shell registry is reset the same way. A
 docker-level launch option added later must join the spec: `IDE_SERVER_ARGS` covers only what follows
-the image.
+the image. The debug setup after boot (PHP debugger install, forwards) is best-effort, its task
+lookup included: a lookup that fails is logged and skips it, and the ensure still succeeds.
 
 **The editor proxy never forwards the Haive session.** code-server runs `--auth none` and executes
 repository code, so `routes/ide.ts` removes `haive_access` and `haive_refresh` (every occurrence, by trimmed

@@ -132,6 +132,30 @@ describe('ProjectStateConflictsView', () => {
     expect(html).toContain('Take theirs');
   });
 
+  it('shows a rules text as one code block, never as live markdown, and an empty override in words', () => {
+    const html = view({
+      conflicts: [
+        conflict({
+          unit: 'settings/agent-rules.md',
+          key: null,
+          base: { present: false },
+          local: { present: true, value: '# Mine\n\n```js\nlet a;\n```\n\nAfter the fence.\n' },
+          incoming: { present: true, value: '' },
+        }),
+      ],
+    });
+    expect(html).toContain('AGENTS.md rules');
+    expect(html).toContain('An empty override: no rules block is written.');
+    expect(html).toContain('Not set.');
+    expect(html.match(/<pre[ >]/g)).toHaveLength(1);
+    expect(html).toContain('language-markdown');
+    expect(html).toContain('max-h-96 overflow-auto');
+    expect(html).not.toContain('<h1>');
+    expect(html).not.toContain('<p>After the fence.</p>');
+    expect(html).toContain('Keep mine');
+    expect(html).toContain('Take theirs');
+  });
+
   it('disables Keep mine where this install has no value of its own', () => {
     const html = view({ conflicts: [conflict({ local: { present: false } })] });
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Keep mine/);

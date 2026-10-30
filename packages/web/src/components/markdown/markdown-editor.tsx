@@ -85,6 +85,7 @@ export function MarkdownEditor({
   minHeight = '16rem',
   breaks = false,
   disabled = false,
+  autoFocus = true,
   onBaseline,
 }: {
   value: string;
@@ -97,6 +98,9 @@ export function MarkdownEditor({
    *  like markdown renders soft newlines as <br>, so the editor must serialize
    *  them as hard breaks or one edit would collapse its line structure. */
   breaks?: boolean;
+  /** Focus the end of the text on mount. Off for an editor that mounts with its page, which would
+   *  scroll to it. */
+  autoFocus?: boolean;
   /** Called once with the editor's own serialization of `value`. */
   onBaseline?: (markdown: string) => void;
 }) {
@@ -110,7 +114,7 @@ export function MarkdownEditor({
     content: value,
     editable: !disabled,
     extensions: markdownEditorExtensions({ placeholder, breaks }),
-    autofocus: 'end',
+    autofocus: autoFocus ? 'end' : false,
     immediatelyRender: false,
     editorProps: {
       attributes: { class: 'haive-md', style: `min-height:${minHeight}` },

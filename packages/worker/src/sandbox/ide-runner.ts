@@ -415,7 +415,17 @@ async function ensureIdeRunnerStartedInner(
     // The editor mounts ONE workspace, and the resolved subpath can change under it (a Retry that
     // clears 01-worktree-setup's output re-resolves to the repository root). Reuse only while the
     // running container is the one for this workspace; its `.git` mount is that workspace's too.
-    if ((await runnerSubpathVerdict(name, workspaceSubpath)) === 'match') {
+    const verdict = await runnerSubpathVerdict(name, workspaceSubpath);
+    if (verdict === 'absent') {
+      // What docker cannot be asked is neither another workspace nor stale, as `launchIsStale`
+      // treats an unreadable spec: the editor is kept, not replaced on a guess.
+      log.warn(
+        { taskId, container: name, workspaceSubpath },
+        'ide runner workspace could not be read; keeping it',
+      );
+      return { container: name };
+    }
+    if (verdict === 'match') {
       if (!(await launchIsStale(name)) || (await editorHeld(taskId))) return { container: name };
       // Replacing removes this editor before the new one is launched, so make sure the image is
       // there first: a host that cannot pull (offline after a CODE_SERVER_IMAGE bump) keeps the
@@ -498,10 +508,17 @@ const IDE_NODE_INSPECT_PORT = 9229; // node --inspect (Lane C)
  *  covers the JS/Node lanes), and stand up the IDE-side TCP forwards so the seeded
  *  launch configs can use stable `localhost` addresses. No-op when debug is off. */
 async function setupIdeDebugging(db: Database, taskId: string, name: string): Promise<void> {
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { debugMode: true },
-  });
+  let task: { debugMode: boolean } | undefined;
+  try {
+    task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { debugMode: true },
+    });
+  } catch (err) {
+    // The editor is already up: a lookup failure skips the debug setup, not the ensure.
+    log.warn({ taskId, err }, 'ide debug setup skipped: the task debug flag could not be read');
+    return;
+  }
   if (!task?.debugMode) return;
   await installXdebugExtension(taskId, name);
   await setupIdeDebugForwards(taskId, name);
@@ -598,6 +615,30 @@ export async function stopIdeRunner(taskId: string): Promise<boolean> {
   await exec('docker', ['rm', '-f', '-v', name], { timeout: 30_000 }).catch(() => {});
   log.info({ taskId, container: name }, 'ide runner stopped (idle grace)');
   return true;
+}
+
+/** Session ids of this install's running editors, from the labels `startIdeRunner` stamps (a name
+ *  keeps 8 characters of a task id). Editors carry no install label, so a row counts only when its
+ *  session's `ideRunnerName` is its own name. Throws when docker fails. */
+export async function listIdeRunnerSessions(): Promise<string[]> {
+  const { stdout } = await exec(
+    'docker',
+    [
+      'ps',
+      '--filter',
+      `label=${IDE_RUNNER_LABEL}`,
+      '--format',
+      '{{.Names}}\t{{.Label "haive.task.id"}}\t{{.Label "haive.repo.id"}}',
+    ],
+    { timeout: 15_000 },
+  );
+  const sessions: string[] = [];
+  for (const line of stdout.split('\n')) {
+    const [name, taskId, repositoryId] = line.split('\t');
+    const sessionId = repositoryId ? repoIdeSessionId(repositoryId) : taskId;
+    if (sessionId && ideRunnerName(sessionId) === name) sessions.push(sessionId);
+  }
+  return sessions;
 }
 
 /** Repository deletion also discards its editor state. Wait out a boot already in progress

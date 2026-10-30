@@ -7,7 +7,7 @@ import { Hono } from 'hono';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import {
-  buildCliRulesBlockFromProviders,
+  buildRepoCliRulesBlock,
   CLI_RULES_TEMPLATE_ID,
   CLI_RULES_SCHEMA_VERSION,
   normalizeContent,
@@ -52,9 +52,7 @@ describe.skipIf(!url)('CLI addition availability through authenticated status', 
   const bytes = '# Current agent\n';
   const hash = sha256Hex(bytes);
   const agentPath = `.claude/agents/${templateId.slice('agent.'.length)}.md`;
-  const rules = buildCliRulesBlockFromProviders([
-    { name: 'claude-code', enabled: true, rulesContent: '' },
-  ])!;
+  const rules = buildRepoCliRulesBlock(null)!;
   const context = (cliTargets: string[]) => ({
     projectInfo: { name: 'Current repository' },
     framework: 'generic',

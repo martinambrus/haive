@@ -64,7 +64,7 @@ export const detect07 = (framework: string, recorded: boolean): Record<string, u
   customAgentSpecs: [],
   lspLanguages: ['php-extended'],
   mcpSettingsJson: '',
-  cliProviders: [{ name: 'claude-code', rulesContent: '' }],
+  cliProviders: [{ name: 'claude-code' }],
   plannedAgents: [],
   existingFiles: [],
   unmanagedAgentFiles: [],

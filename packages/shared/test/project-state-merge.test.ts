@@ -326,6 +326,105 @@ describe('mergeProjectState reads only a setting a side holds', () => {
   });
 });
 
+describe('mergeProjectState, the agent rules text', () => {
+  const RULES = 'settings/agent-rules.md';
+  const rules = (text?: string): ProjectStateRecord =>
+    edit((r) => {
+      if (text !== undefined) r.settings['agent-rules'] = text;
+    });
+
+  it('names its unit by the .md file, and holds both sides’ changes as one conflict', () => {
+    const result = mergeProjectState({
+      base: rules('a\n'),
+      local: rules('b\n'),
+      incoming: rules('c\n'),
+    });
+    expect(result.conflicts).toEqual([{ unit: RULES, base: 'a\n', local: 'b\n', incoming: 'c\n' }]);
+    expect(result.merged.settings['agent-rules']).toBe('b\n');
+  });
+
+  it('takes the text only one side changed', () => {
+    const toIncoming = mergeProjectState({
+      base: rules('a\n'),
+      local: rules('a\n'),
+      incoming: rules('c\n'),
+    });
+    expect(toIncoming.merged.settings['agent-rules']).toBe('c\n');
+    expect(toIncoming.conflicts).toEqual([]);
+    const toLocal = mergeProjectState({
+      base: rules('a\n'),
+      local: rules('b\n'),
+      incoming: rules('a\n'),
+    });
+    expect(toLocal.merged.settings['agent-rules']).toBe('b\n');
+    expect(toLocal.conflicts).toEqual([]);
+  });
+
+  it('takes a deletion the other side made to text this one left alone', () => {
+    const result = mergeProjectState({
+      base: rules('a\n'),
+      local: rules('a\n'),
+      incoming: rules(),
+    });
+    expect(Object.hasOwn(result.merged.settings, 'agent-rules')).toBe(false);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it('holds a deletion against a change as a conflict, the change standing', () => {
+    const result = mergeProjectState({
+      base: rules('a\n'),
+      local: rules('b\n'),
+      incoming: rules(),
+    });
+    expect(result.conflicts).toEqual([
+      { unit: RULES, base: 'a\n', local: 'b\n', incoming: undefined },
+    ]);
+    expect(result.merged.settings['agent-rules']).toBe('b\n');
+  });
+
+  it('tells an empty override from none: the empty text is a change, not an absence', () => {
+    const kept = mergeProjectState({ base: rules(), local: rules(''), incoming: rules() });
+    expect(kept.merged.settings['agent-rules']).toBe('');
+    expect(kept.conflicts).toEqual([]);
+    const taken = mergeProjectState({ base: rules(), local: rules(), incoming: rules('') });
+    expect(taken.merged.settings['agent-rules']).toBe('');
+    expect(taken.conflicts).toEqual([]);
+    const reset = mergeProjectState({ base: rules(''), local: rules(), incoming: rules('') });
+    expect(Object.hasOwn(reset.merged.settings, 'agent-rules')).toBe(false);
+    expect(reset.conflicts).toEqual([]);
+    const contested = mergeProjectState({
+      base: rules('a\n'),
+      local: rules(''),
+      incoming: rules(),
+    });
+    expect(contested.conflicts).toEqual([
+      { unit: RULES, base: 'a\n', local: '', incoming: undefined },
+    ]);
+  });
+
+  it('takes the other install’s text on a first import and names the unit it replaced', () => {
+    const replaced = mergeProjectState({ base: null, local: rules('a\n'), incoming: rules('b\n') });
+    expect(replaced.merged.settings['agent-rules']).toBe('b\n');
+    expect(replaced.overwritten).toEqual([RULES]);
+    expect(replaced.conflicts).toEqual([]);
+    const kept = mergeProjectState({ base: null, local: rules('a\n'), incoming: rules() });
+    expect(kept.merged.settings['agent-rules']).toBe('a\n');
+    expect(kept.overwritten).toEqual([]);
+    const added = mergeProjectState({ base: null, local: rules(), incoming: rules('') });
+    expect(added.merged.settings['agent-rules']).toBe('');
+    expect(added.overwritten).toEqual([]);
+  });
+
+  it('renders the merged text as the .md file', () => {
+    const merged = mergeProjectState({
+      base: rules('a\n'),
+      local: rules('a\n'),
+      incoming: rules('c\n'),
+    });
+    expect(renderProjectState(merged.merged).get(RULES)).toBe('c\n');
+  });
+});
+
 describe('the file layout keeps git merges unit by unit', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'project-state-merge-'));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));

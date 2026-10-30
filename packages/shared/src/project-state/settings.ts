@@ -1,5 +1,6 @@
 import { stripManagedKnowledgeGlobs, trimGlobSlashes } from '../knowledge-paths.js';
 import { normalizeReviewDimensionIds } from '../review/dimensions.js';
+import { normalizeContent } from '../templates/normalize-content.js';
 import { LSP_KEY_SET } from '../tooling/lsp-servers.js';
 import {
   ONBOARDING_ENVIRONMENT_SCHEMA_VERSION,
@@ -10,7 +11,8 @@ import {
   type OnboardingEnvironmentMirror,
 } from '../types/index.js';
 import { canonicalJson, sameValue } from './canonical.js';
-import { PROJECT_STATE_LIMITS } from './limits.js';
+import { MAX_AGENT_RULES_BYTES, PROJECT_STATE_LIMITS } from './limits.js';
+import { hasConflictMarker } from './raw-text.js';
 import type { ProjectEnvironment } from './record.js';
 
 /** The record's portable settings, by file name. App login and verify commands are left out on
@@ -23,7 +25,10 @@ export const PORTABLE_SETTING_NAMES = [
   'lsp-server-versions',
   'chrome-devtools-mcp-version',
   'review-dimensions',
+  'agent-rules',
 ] as const;
+
+export type PortableSettingName = (typeof PORTABLE_SETTING_NAMES)[number];
 
 /** The columns of a `repositories` row that hold a portable setting. */
 export interface PortableSettingColumns {
@@ -34,6 +39,7 @@ export interface PortableSettingColumns {
   lspServerVersions: unknown;
   chromeDevtoolsMcpVersion: unknown;
   reviewDimensions: unknown;
+  agentRulesOverride: unknown;
 }
 
 const isStringList = (value: unknown): value is string[] =>
@@ -61,6 +67,8 @@ export function portableSettingsOf(row: PortableSettingColumns): Record<string, 
     settings['chrome-devtools-mcp-version'] = row.chromeDevtoolsMcpVersion;
   }
   if (isStringList(row.reviewDimensions)) settings['review-dimensions'] = row.reviewDimensions;
+  // '' is an explicit override, so a column holds nothing only when it is not text.
+  if (typeof row.agentRulesOverride === 'string') settings['agent-rules'] = row.agentRulesOverride;
   return settings;
 }
 
@@ -85,9 +93,6 @@ export function environmentUnitOf(column: unknown): ProjectEnvironment | null {
   if (!plainObject(envDetectData) || !plainObject(confirmedValues)) return null;
   return { envDetectData, confirmedValues };
 }
-
-/** The `settings/<name>.json` files of the record's settings, relative to the state directory. */
-export const settingFileName = (name: string): string => `settings/${name}.json`;
 
 /** The onboarding tooling's name in the record's settings. It is no portable setting: a whole-value
  *  unit that is never merged, so it has no conflict row and no column mapping of its own. */
@@ -136,6 +141,7 @@ const COLUMN_OF = {
   'lsp-server-versions': 'lspServerVersions',
   'chrome-devtools-mcp-version': 'chromeDevtoolsMcpVersion',
   'review-dimensions': 'reviewDimensions',
+  'agent-rules': 'agentRulesOverride',
 } as const satisfies Record<(typeof PORTABLE_SETTING_NAMES)[number], keyof PortableSettingColumns>;
 
 export const isPortableSettingName = (name: string): boolean =>
@@ -149,10 +155,43 @@ export const isUnsettableSetting = (name: string): boolean => !NEVER_UNSET.has(n
 const nonEmptyText = (value: unknown): string | null =>
   typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
 
-export type SettingCheck = { ok: true; value: unknown } | { ok: false };
+export type SettingCheck = { ok: true; value: unknown } | { ok: false; reason?: string };
+
+export type AgentRulesCheck = { ok: true; value: string } | { ok: false; reason: string };
+
+const refuse = (reason: string): { ok: false; reason: string } => ({ ok: false, reason });
+
+/** The text the repository's AGENTS.md rules override is stored as: tidied the way every managed file
+ *  is, so storing it again changes nothing. '' is kept, an explicit override that renders no block.
+ *  Refused is text that is not well-formed, that would end or start a Haive region early, that the
+ *  record reads as a merge conflict marker (a setext underline of seven `=` is one) or that is over
+ *  `MAX_AGENT_RULES_BYTES`. */
+export function normalizeAgentRulesOverride(value: unknown): AgentRulesCheck {
+  if (typeof value !== 'string') return refuse('is not text');
+  if (!value.isWellFormed()) return refuse('holds a lone surrogate');
+  if (value.includes('\u0000')) return refuse('holds a NUL character');
+  const unix = value.replace(/^\uFEFF+/, '').replace(/\r\n?/g, '\n');
+  if (unix.trim() === '') return { ok: true, value: '' };
+  const text = normalizeContent(unix);
+  // `\s*\/?\s*` reads the same strings but backtracks quadratically on a long run of whitespace.
+  if (/<!--\s*(?:\/\s*)?haive:/.test(text)) {
+    return refuse(
+      'holds a Haive region marker comment (<!-- haive:name -->), which would end or start a region early',
+    );
+  }
+  if (hasConflictMarker(text)) {
+    return refuse(
+      'holds a line of exactly seven =, <, > or | characters, which reads as a merge conflict marker',
+    );
+  }
+  if (new TextEncoder().encode(text).length > MAX_AGENT_RULES_BYTES) {
+    return refuse(`is larger than ${MAX_AGENT_RULES_BYTES / 1024} KiB`);
+  }
+  return { ok: true, value: text };
+}
 
 /** A setting as the column stores it, by the same rules the repository routes apply to what a person
- *  sends; `ok: false` for a value the column could not hold. */
+ *  sends; `ok: false` for a value the column could not hold, with a `reason` where the setting has one. */
 export function normalizeSetting(name: string, value: unknown): SettingCheck {
   const valid = (v: unknown): SettingCheck => ({ ok: true, value: v });
   switch (name) {
@@ -187,6 +226,10 @@ export function normalizeSetting(name: string, value: unknown): SettingCheck {
     case 'review-dimensions': {
       const ids = isStringList(value) ? normalizeReviewDimensionIds(value) : [];
       return ids.length === 0 ? { ok: false } : valid(ids);
+    }
+    case 'agent-rules': {
+      const checked = normalizeAgentRulesOverride(value);
+      return checked.ok ? valid(checked.value) : checked;
     }
     default:
       return { ok: false };

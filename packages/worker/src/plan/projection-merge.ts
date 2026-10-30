@@ -15,6 +15,7 @@ import {
   mergeProjectState,
   parseProjectState,
   renderProjectState,
+  settingNameOfFile,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
 import { gitRun } from '../repo/git-exec.js';
@@ -186,7 +187,7 @@ function takeIncomingUnits(
   for (const unit of units) {
     const hash = unit.indexOf('#');
     const file = hash === -1 ? unit : unit.slice(0, hash);
-    const setting = /^settings\/([^/]+)\.json$/.exec(unit);
+    const setting = settingNameOfFile(unit);
     if (isEnvironmentUnit(unit) || isRenderUnit(unit)) {
       const field = file === 'project/environment.json' ? 'environment' : 'render';
       if (hash === -1) {
@@ -199,10 +200,10 @@ function takeIncomingUnits(
         else copy[key] = value;
         (out as unknown as Record<string, unknown>)[field] = copy;
       }
-    } else if (setting) {
-      const value = incoming.settings[setting[1]!];
-      if (value === undefined) delete out.settings[setting[1]!];
-      else out.settings[setting[1]!] = value;
+    } else if (setting !== null) {
+      const value = incoming.settings[setting];
+      if (value === undefined) delete out.settings[setting];
+      else out.settings[setting] = value;
     } else if (isClaimUnit(unit)) {
       out.claims = [
         ...out.claims.filter((c) => claimFileName(c.path) !== unit),

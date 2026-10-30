@@ -27,23 +27,27 @@ lockfile install. Speculative hardening and optional-feature defects are observa
 Edited upstream source and search-and-replace install hooks are never the deliverable.
 
 **Every dispatch carries its provider's rules, whatever the checkout holds.** Onboarding writes
-the merged `haive:cli-rules` block into AGENTS.md, but a workflow task runs in a worktree checked
-out from HEAD, onboarding's commit defaults off, and an upgrade never re-committed the file —
-MEASURED before this existed, 598 of 3,509 recorded invocations (17%) ran with the rules loaded,
-and none since the last manual regeneration. So `buildCliSidePlan` puts the provider's effective
-rules (`resolveEffectiveRules(provider.rulesContent)`, not the merged block) at the top of every
-`kind: 'prompt'` dispatch through `withAgentRules` (`orchestrator/agent-rules.ts`). It is applied
-LAST in `adaptPrompt`, so no capability or marker rewrite ever touches the operator's text, under
-a framing line: the step's own instructions and output contract win where they differ, and the
-block supersedes a differing AGENTS.md copy. An opted dispatch's house-rules block (the global KB's
-admin-enforced rules, [Global knowledge base](global-kb.md)) sits directly under it, so these rules
-stay outermost.
+the repository's `haive:cli-rules` block into AGENTS.md, but a workflow task runs in a worktree
+checked out from HEAD, onboarding's commit defaults off, and an upgrade never re-committed the
+file — MEASURED before this existed, 598 of 3,509 recorded invocations (17%) ran with the rules
+loaded, and none since the last manual regeneration. So `buildCliSidePlan` puts the provider's
+effective rules (`resolveEffectiveRules(provider.rulesContent)`, not the AGENTS.md block) at the
+top of every `kind: 'prompt'` dispatch through `withAgentRules` (`orchestrator/agent-rules.ts`).
+It is applied LAST in `adaptPrompt`, so no capability or marker rewrite ever touches the
+operator's text, under a framing line: the step's own instructions and output contract win where
+they differ, and the block supersedes a differing AGENTS.md copy. An opted dispatch's house-rules
+block (the global KB's admin-enforced rules, [Global knowledge base](global-kb.md)) sits directly
+under it, so these rules stay outermost. The AGENTS.md block is the repository's own, never a
+merge of its users' providers: its `agent_rules_override` if it has one (an empty one writes no
+block), else `DEFAULT_AGENT_RULES` (`buildRepoCliRulesBlock`, set on the Tooling page, see
+[Onboarding template versioning](onboarding-upgrades.md)). A provider's rules reach Haive's own
+agents through dispatch alone, and a personal rule is never written into the committed file.
 
 It is never skipped because the repository "already delivers" the rules, which was unsafe four
 ways: the block written into every repository was damaged by the dedup bug until #232, codex reads
-only the first 32 KiB of AGENTS.md, antigravity's native loading is unmeasured, and a block merged
-from several providers never equals one provider's rules. The cost is a duplicate where the
-repository copy also loads.
+only the first 32 KiB of AGENTS.md, antigravity's native loading is unmeasured, and the
+repository's block is its own and may differ from every provider's rules. The cost is a duplicate
+where the repository copy also loads.
 
 - **Only a block at position 0 is Haive's.** A stored prompt dispatched again has its block
   REPLACED with today's rules, and null rules strip a leading block, so a switched-off dispatch

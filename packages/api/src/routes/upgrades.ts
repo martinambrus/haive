@@ -12,7 +12,7 @@ import {
 } from '@haive/database';
 import {
   agentSpecSchema,
-  buildCliRulesBlockFromProviders,
+  buildRepoCliRulesBlock,
   bundleAgentTemplateHash,
   CLI_RULES_SCHEMA_VERSION,
   CLI_RULES_TEMPLATE_ID,
@@ -348,6 +348,7 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
       status: true,
       onboardedAt: true,
       onboardingResetAt: true,
+      agentRulesOverride: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -398,20 +399,19 @@ upgradeRoutes.get('/:id/upgrade-status', async (c) => {
     ];
   });
 
-  // The AGENTS.md cli-rules region is per-repo content (the repo owner's merged
-  // provider rules), so it is not in the global manifest cache. Recompute its
-  // current hash here via the shared pure helper — byte-identical to what the
-  // worker writes/records — so a rules change surfaces as drift. Providers are
-  // sorted by name to match the deterministic onboarding/plan ordering.
+  // The AGENTS.md cli-rules region is per-repo content (the repository's rules
+  // override, else Haive's default rules; a provider's personal rules never enter),
+  // so it is not in the global manifest cache. Recompute its current hash here via
+  // the shared pure helper — byte-identical to what the worker writes/records — so a
+  // rules change surfaces as drift.
   const ruleProviderRows = await db
     .select({
       name: schema.cliProviders.name,
-      rulesContent: schema.cliProviders.rulesContent,
       enabled: schema.cliProviders.enabled,
     })
     .from(schema.cliProviders)
     .where(eq(schema.cliProviders.userId, userId));
-  const cliRulesBlock = buildCliRulesBlockFromProviders(ruleProviderRows);
+  const cliRulesBlock = buildRepoCliRulesBlock(repo.agentRulesOverride);
   const cliRulesCurrent = cliRulesBlock
     ? {
         templateId: CLI_RULES_TEMPLATE_ID,

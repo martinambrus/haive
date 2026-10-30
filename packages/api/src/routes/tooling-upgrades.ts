@@ -4,6 +4,7 @@ import { isRootClaimLive, lockRepositoryTasksKey, schema } from '@haive/database
 import { z } from 'zod';
 import {
   deriveRenderTargets,
+  normalizeAgentRulesOverride,
   readRenderContextColumn,
   recordedCliTargets,
   sameValue,
@@ -494,6 +495,7 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
       ragEmbedLexicalOnly: true,
       onboardingTooling: true,
       verifyCommands: true,
+      agentRulesOverride: true,
     },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
@@ -570,6 +572,8 @@ toolingUpgradeRoutes.get('/:id/tooling-config', async (c) => {
     // actually score, so the page shows the effective policy rather than an empty
     // list the user would read as "nothing is reviewed".
     verifyCommands: repo.verifyCommands ?? {},
+    // null follows Haive's live default rules; '' is an explicit override that renders no block.
+    agentRulesOverride: repo.agentRulesOverride ?? null,
     reviewDimensions: repo.reviewDimensions ?? [...ALL_REVIEW_DIMENSION_IDS],
     reviewDimensionOptions: REVIEW_DIMENSIONS.map((d) => ({
       value: d.id,
@@ -688,6 +692,7 @@ const PORTABLE_SETTING_UPDATE_KEYS = [
   'lspServerVersions',
   'chromeDevtoolsMcpVersion',
   'reviewDimensions',
+  'agentRulesOverride',
 ] as const;
 
 /** Update per-repo tooling: enable/disable RTK + LSP servers and pin versions.
@@ -719,6 +724,9 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     stepGuidanceEnabled?: boolean;
     reviewDimensions?: string[];
     verifyCommands?: unknown;
+    /** Absent: leave it. null: follow Haive's default rules again (column NULL). Text, '' included:
+     *  the override. Typed unknown because anything else must be refused, not coerced. */
+    agentRulesOverride?: unknown;
     /** RAG embed-health action. Not a settable field — each one is a decision with
      *  a side effect, so it is expressed as a verb rather than as three booleans a
      *  caller could combine into a meaningless state. */
@@ -803,6 +811,15 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         throw new HttpError(400, `Invalid verify commands: ${parsed.error.issues[0]?.message}`);
       }
       updates.verifyCommands = Object.keys(parsed.data).length > 0 ? parsed.data : null;
+    }
+    if (body.agentRulesOverride !== undefined) {
+      if (body.agentRulesOverride === null) {
+        updates.agentRulesOverride = null;
+      } else {
+        const checked = normalizeAgentRulesOverride(body.agentRulesOverride);
+        if (!checked.ok) throw new HttpError(400, `Invalid AGENTS.md rules: ${checked.reason}`);
+        updates.agentRulesOverride = checked.value;
+      }
     }
     if (typeof body.rtkEnabled === 'boolean')
       Object.assign(updates, rtkEnabledUpdate(body.rtkEnabled));
@@ -968,7 +985,15 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         .where(eq(schema.repositories.id, repositoryId));
       degradationKept = true;
     }
-    return c.json({ repositoryId, ok: true, reembedQueued, degradationKept });
+    return c.json({
+      repositoryId,
+      ok: true,
+      reembedQueued,
+      degradationKept,
+      ...(body.agentRulesOverride !== undefined
+        ? { agentRulesOverride: updates.agentRulesOverride ?? null }
+        : {}),
+    });
   } finally {
     await lock?.release();
   }

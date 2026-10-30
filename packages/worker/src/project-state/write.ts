@@ -51,6 +51,7 @@ import {
   portableRender,
   portableSettingsOf,
   settingFileName,
+  settingNameOfFile,
   toolingUnitOf,
   TOOLING_UNIT_NAME,
   withoutUnchosenRtk,
@@ -323,7 +324,7 @@ export function overlaySettings(
 ): Record<string, unknown> {
   const out = { ...settings };
   for (const row of pending.filter((r) => isSettingUnit(r.unit))) {
-    const name = row.unit.slice('settings/'.length, -'.json'.length);
+    const name = settingNameOfFile(row.unit)!;
     if (row[side] === undefined) delete out[name];
     else out[name] = row[side];
   }
@@ -609,6 +610,7 @@ export async function writeProjectStateColumn(
           lspServerVersions: schema.repositories.lspServerVersions,
           chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
           reviewDimensions: schema.repositories.reviewDimensions,
+          agentRulesOverride: schema.repositories.agentRulesOverride,
           onboardingEnvironment: schema.repositories.onboardingEnvironment,
           onboardingTooling: schema.repositories.onboardingTooling,
           rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,
@@ -1493,7 +1495,7 @@ async function recordLocalSide(
       await settle(
         row,
         isSettingUnit(row.unit)
-          ? settings[row.unit.slice('settings/'.length, -'.json'.length)]
+          ? settings[settingNameOfFile(row.unit)!]
           : row.unit === ENVIRONMENT_UNIT
             ? environment
             : (environment as Record<string, unknown> | null)?.[

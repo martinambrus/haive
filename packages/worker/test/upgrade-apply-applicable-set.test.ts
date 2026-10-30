@@ -40,7 +40,9 @@ const AGENT = {
   antiPatterns: [],
 };
 
-async function run(withColumn: boolean) {
+/** Applies an empty plan for a repository whose rules override is `override`, and returns the
+ *  applicable set 02 wrote. The owner's provider holds rules of its own, which the set ignores. */
+async function run(withColumn: boolean, override: string | null = '- repository rule') {
   const root = await mkdtemp(join(tmpdir(), 'upgrade-apply-set-'));
   dirs.push(root);
   const fake = createFakeDb({
@@ -59,6 +61,7 @@ async function run(withColumn: boolean) {
     source: 'blank',
     renderContext: withColumn ? column : null,
     applicableTemplateIds: null,
+    agentRulesOverride: override,
   });
   fake.insert(schema.tasks, {
     id: TASK,
@@ -110,6 +113,7 @@ async function run(withColumn: boolean) {
     currentTemplateSetHash: 'set',
     renderCtxSnapshot: REFERENCE_CONTEXT as unknown as Record<string, unknown>,
     ...(withColumn ? { renderContextColumn: column } : {}),
+    agentRulesOverride: override,
     backfilledRows: 0,
   } as UpgradePlanOutput;
   const noop = () => undefined;
@@ -168,6 +172,18 @@ describe('02 writes the applicable set the way 01 and the sync do', () => {
 
     expect(set).toContain(`custom.${BUNDLE}.${ITEM}`);
     expect(set).toContain('cli-rules');
+    expect(set).toContain('workflow-config');
+  });
+
+  it('holds cli-rules for a repository with no override, which follows the default rules', async () => {
+    expect(await run(true, null)).toContain('cli-rules');
+  });
+
+  it('leaves cli-rules out for an empty override, whatever rules its owner provider holds', async () => {
+    const set = await run(true, '');
+
+    expect(set).not.toContain('cli-rules');
+    expect(set).toContain(`custom.${BUNDLE}.${ITEM}`);
     expect(set).toContain('workflow-config');
   });
 });
