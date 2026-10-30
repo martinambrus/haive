@@ -7,6 +7,7 @@ import {
   IN_STACK_OLLAMA_URL,
   IN_STACK_OLLAMA_HOSTS,
   splitSecretLikeEnv,
+  type RefreshCliVersionsJobResult,
 } from '@haive/shared/constants';
 import {
   api,
@@ -27,6 +28,7 @@ import {
   type OpenRouterModelEntry,
 } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
+import { RefreshFailures } from '@/components/refresh-failures';
 import { runCatalogVersionRefresh, type QueuedJobPhase } from '@/lib/cli-jobs';
 import { OllamaModelDownload } from '@/components/ollama-model-download';
 import { OpenRouterModelPicker } from '@/components/openrouter-model-picker';
@@ -204,6 +206,7 @@ export function CliProviderForm({
   );
   const [refreshingVersions, setRefreshingVersions] = useState(false);
   const [refreshPhase, setRefreshPhase] = useState<QueuedJobPhase>('queued');
+  const [refreshResult, setRefreshResult] = useState<RefreshCliVersionsJobResult | null>(null);
   // Limitations the worker learned from failed invocations. Read-only here: the values are
   // written from observed failures, and the only client action is discarding them.
   const [modelLimits, setModelLimits] = useState<CliModelLimits | null>(
@@ -431,11 +434,13 @@ export function CliProviderForm({
     setRefreshPhase('queued');
     setRefreshingVersions(true);
     clearError();
+    setRefreshResult(null);
     try {
-      const entry = await runCatalogVersionRefresh(metadata.name, setRefreshPhase);
+      const { entry, result } = await runCatalogVersionRefresh(metadata.name, setRefreshPhase);
       setVersionCache(entry);
       const newest = entry.versions[0] ?? entry.latestVersion;
       setState((prev) => (prev.cliVersion || !newest ? prev : { ...prev, cliVersion: newest }));
+      setRefreshResult(result ?? null);
     } catch (err) {
       captureError(err, 'Failed to refresh versions');
     } finally {
@@ -809,6 +814,7 @@ export function CliProviderForm({
                 Last refresh failed: {versionCache.fetchError}
               </p>
             )}
+            <RefreshFailures result={refreshResult} />
           </>
         )}
       </div>

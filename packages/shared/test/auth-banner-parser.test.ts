@@ -152,3 +152,182 @@ describe('auth result signal', () => {
     ).toBe(false);
   });
 });
+
+const CLAUDE_PREFIXES = AUTH_URL_PREFIXES['claude-code'] ?? [];
+// Synthetic, ~200 characters, hard-wrapped at 80 columns the way the CLI's PTY prints it.
+const CLAUDE_URL =
+  'https://claude.ai/oauth/authorize?code=true&client_id=synthetic-client-id' +
+  '&response_type=code&redirect_uri=https%3A%2F%2Fexample.invalid%2Fcb' +
+  '&code_challenge=SyntheticChallenge0123456789&state=SyntheticState01';
+const CLAUDE_LINES = Array.from({ length: Math.ceil(CLAUDE_URL.length / 80) }, (_, i) =>
+  CLAUDE_URL.slice(i * 80, (i + 1) * 80),
+);
+const CLAUDE_INTRO = "Browser didn't open? Use the url below to sign in";
+const CLAUDE_PROSE = 'Paste code here if prompted > ';
+
+// Synthetic and shaped like `codex login --device-auth`: the URL on its own indented line, the
+// one-time code on a later one.
+const CODEX_URL = 'https://auth.openai.com/codex/device';
+const CODEX_DEVICE_BANNER =
+  '1. Open this link in your browser and sign in to your account\r\n' +
+  `   \x1b[94m${CODEX_URL}\x1b[0m\r\n` +
+  '\r\n' +
+  '2. Enter this one-time code (expires in 15 minutes)\r\n' +
+  '   \x1b[94mABCD-12345\x1b[0m\r\n';
+
+interface ChunkedBanner {
+  prefixes: string[];
+  url: string;
+  raw: string;
+  /** Offset into `raw` from which what follows the URL shows that it has ended. */
+  endsAt: number;
+}
+
+/** `body` is the URL as printed, wraps and colour included; `end` is what has to follow it before
+ *  the URL is known to be complete. */
+function chunkedBanner(
+  prefixes: string[],
+  url: string,
+  raw: string,
+  body: string,
+  end: string,
+): ChunkedBanner {
+  return { prefixes, url, raw, endsAt: raw.indexOf(body) + body.length + end.length };
+}
+
+function wrappedClaudeBanner(head: string, body: string, end: string): ChunkedBanner {
+  return chunkedBanner(
+    CLAUDE_PREFIXES,
+    CLAUDE_URL,
+    `${head}${body}${end}${CLAUDE_PROSE}`,
+    body,
+    end,
+  );
+}
+
+const AMP_DEVICE_URL = 'https://auth.ampcode.com/device?user_code=WMSD-BBRS';
+const AMP_PASTE_URL = `${AMP_PASTE_LOGIN_URL_PREFIX}?authToken=${AMP_PASTE_TOKEN}`;
+const GROK_DEVICE_URL = 'https://accounts.x.ai/oauth2/device?user_code=PZVK-REH7';
+
+const CHUNKED_BANNERS = [
+  [
+    'claude, CRLF with colour around each line and a title before',
+    wrappedClaudeBanner(
+      `\x1b]0;Claude Code\x07${CLAUDE_INTRO}\r\n\r\n`,
+      CLAUDE_LINES.map((line) => `\x1b[34m${line}\x1b[39m`).join('\r\n'),
+      '\r\n\r\n',
+    ),
+  ],
+  ['claude, bare LF', wrappedClaudeBanner(`${CLAUDE_INTRO}\n\n`, CLAUDE_LINES.join('\n'), '\n\n')],
+  [
+    'claude, cursor-forward indent on each line',
+    wrappedClaudeBanner(
+      `${CLAUDE_INTRO}\r\n\r\n`,
+      CLAUDE_LINES.map((line) => `\x1b[2C${line}`).join('\r\n'),
+      '\r\n\r\n',
+    ),
+  ],
+  [
+    'amp device',
+    chunkedBanner(
+      AUTH_URL_PREFIXES.amp ?? [],
+      AMP_DEVICE_URL,
+      AMP_DEVICE_BANNER,
+      AMP_DEVICE_URL,
+      '\x1b[22m\x1b[39m\r\n\r\n',
+    ),
+  ],
+  [
+    'amp paste-back',
+    chunkedBanner(
+      AUTH_URL_PREFIXES.amp ?? [],
+      AMP_PASTE_URL,
+      AMP_PASTE_BANNER,
+      AMP_PASTE_URL,
+      '\x1b[22m\x1b[39m\r\n\r\n',
+    ),
+  ],
+  [
+    'grok device',
+    chunkedBanner(
+      AUTH_URL_PREFIXES.grok ?? [],
+      GROK_DEVICE_URL,
+      GROK_DEVICE_BANNER,
+      GROK_DEVICE_URL,
+      '\n\n',
+    ),
+  ],
+  [
+    'codex device',
+    chunkedBanner(
+      AUTH_URL_PREFIXES.codex ?? [],
+      CODEX_URL,
+      CODEX_DEVICE_BANNER,
+      CODEX_URL,
+      '\x1b[0m\r\n\r\n',
+    ),
+  ],
+] as const;
+
+describe('extractWrappedUrl on output read in chunks', () => {
+  const afterIntro = (tail: string) => `${CLAUDE_INTRO}\r\n\r\n${CLAUDE_URL}${tail}`;
+
+  it.each(CHUNKED_BANNERS)('%s: every prefix of the output', (_label, banner) => {
+    const strictWrong: number[] = [];
+    const atEndWrong: number[] = [];
+    for (let k = 0; k <= banner.raw.length; k++) {
+      const cut = banner.raw.slice(0, k);
+      const ended = k >= banner.endsAt;
+      if (extractWrappedUrl(cut, banner.prefixes) !== (ended ? banner.url : null)) {
+        strictWrong.push(k);
+      }
+      const atEnd = extractWrappedUrl(cut, banner.prefixes, true);
+      const atEndOk = ended
+        ? atEnd === banner.url
+        : atEnd === null || (banner.url.startsWith(atEnd) && !/[\x1b[\s]/.test(atEnd));
+      if (!atEndOk) atEndWrong.push(k);
+    }
+    expect(strictWrong).toEqual([]);
+    expect(atEndWrong).toEqual([]);
+  });
+
+  it.each(['\n\n', '\r\n\r\n', '\n \n', '\x1b[39m\r\n\r\n', ' trailing prose', '\nprose here\n'])(
+    'returns the URL strictly once %j follows it',
+    (tail) => {
+      expect(extractWrappedUrl(afterIntro(tail), CLAUDE_PREFIXES)).toBe(CLAUDE_URL);
+    },
+  );
+
+  it.each(['', '\n', '\r\n', '\r\n\r', '\x1b', '\x1b[3', '\x1b[39m', '\x1b]0;t'])(
+    'waits when only %j follows the URL, and takes the URL at the end of the text',
+    (tail) => {
+      expect(extractWrappedUrl(afterIntro(tail), CLAUDE_PREFIXES)).toBeNull();
+      expect(extractWrappedUrl(afterIntro(tail), CLAUDE_PREFIXES, true)).toBe(CLAUDE_URL);
+    },
+  );
+
+  it('does not return the 50-character head of a 65-character URL', () => {
+    const url = 'https://claude.ai/oauth/authorize?code=true&client_id='.padEnd(65, 'a');
+    expect(extractWrappedUrl(url.slice(0, 50), CLAUDE_PREFIXES)).toBeNull();
+    expect(extractWrappedUrl(`${url}\n\n`, CLAUDE_PREFIXES)).toBe(url);
+  });
+
+  it('drops an unfinished escape after the URL instead of keeping "[3"', () => {
+    expect(extractWrappedUrl(`${CLAUDE_URL}\x1b[3`, CLAUDE_PREFIXES, true)).toBe(CLAUDE_URL);
+  });
+
+  it('gives null for a prefix cut short', () => {
+    const cut = 'https://claude.ai/oauth/auth';
+    expect(extractWrappedUrl(cut, CLAUDE_PREFIXES)).toBeNull();
+    expect(extractWrappedUrl(cut, CLAUDE_PREFIXES, true)).toBeNull();
+  });
+
+  it.each([
+    ['one-line', CLAUDE_URL],
+    ['hard-wrapped', CLAUDE_LINES.join('\n')],
+  ])('does not append a prose line that follows a %s URL directly', (_label, printed) => {
+    const raw = `${printed}\n${CLAUDE_PROSE}`;
+    expect(extractWrappedUrl(raw, CLAUDE_PREFIXES)).toBe(CLAUDE_URL);
+    expect(extractWrappedUrl(raw, CLAUDE_PREFIXES, true)).toBe(CLAUDE_URL);
+  });
+});

@@ -1,3 +1,4 @@
+import type { RefreshCliVersionsJobResult } from '@haive/shared/constants';
 import { api, type CliPackageVersionsEntry, type CliProbeResult } from './api-client';
 
 /** What a running cli-exec job the UI started is doing right now, for the button label.
@@ -138,26 +139,33 @@ export async function runCliSignOut(
   return result;
 }
 
+/** Neither refresh runner throws when `result.ok` is false: the sources that did refresh were
+ *  applied, and a throw would make the caller skip using them. The caller shows `result`. The
+ *  catalog poll answers it to an admin only, so for anyone else it is undefined. */
 export async function runCatalogVersionRefresh(
   name: string,
   onPhase?: (phase: QueuedJobPhase) => void,
-): Promise<CliPackageVersionsEntry> {
-  const { entry } = await runQueuedJob<{ entry: CliPackageVersionsEntry }>(
+): Promise<{ entry: CliPackageVersionsEntry; result: RefreshCliVersionsJobResult | undefined }> {
+  const { entry, result } = await runQueuedJob<{
+    entry: CliPackageVersionsEntry;
+    result?: RefreshCliVersionsJobResult;
+  }>(
     `/cli-providers/catalog/${name}/refresh-versions`,
     (jobId) => `/cli-providers/catalog/${name}/refresh-versions/${jobId}`,
     onPhase,
   );
-  return entry;
+  return { entry, result };
 }
 
 export async function runPricingRefresh(
   onPhase?: (phase: QueuedJobPhase) => void,
   signal?: AbortSignal,
-): Promise<void> {
-  await runQueuedJob(
+): Promise<RefreshCliVersionsJobResult> {
+  const { result } = await runQueuedJob<{ result: RefreshCliVersionsJobResult }>(
     '/cli-pricing/refresh',
     (jobId) => `/cli-pricing/refresh/${jobId}`,
     onPhase,
     signal,
   );
+  return result;
 }

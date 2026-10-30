@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
-import { CLI_POLLABLE_JOB_OPTS } from '@haive/shared/constants';
-import { jobPhaseForState, POLL_TIMEOUT_MS, runPricingRefresh } from './cli-jobs';
+import { CLI_POLLABLE_JOB_OPTS, type RefreshCliVersionsJobResult } from '@haive/shared/constants';
+import {
+  jobPhaseForState,
+  POLL_TIMEOUT_MS,
+  runCatalogVersionRefresh,
+  runPricingRefresh,
+} from './cli-jobs';
+import type { CliPackageVersionsEntry } from './api-client';
 
 describe('jobPhaseForState', () => {
   it('calls only an active job running', () => {
@@ -129,4 +135,38 @@ describe('queued job polling', () => {
     expect(await result).toMatchObject({ name: 'AbortError' });
     expect(vi.getTimerCount()).toBe(0);
   });
+});
+
+describe('refresh results', () => {
+  const entry: CliPackageVersionsEntry = {
+    name: 'claude-code',
+    versions: ['2.0.1', '2.0.0'],
+    latestVersion: '2.0.1',
+    fetchedAt: null,
+    fetchError: null,
+  };
+  const refreshed = [{ name: 'claude-code', count: 2, latest: '2.0.1' }];
+  const results: [string, RefreshCliVersionsJobResult][] = [
+    [
+      'a failed source',
+      { ok: false, refreshed, errors: [{ name: 'fx', error: 'fx feed HTTP 503' }] },
+    ],
+    ['every source ok', { ok: true, refreshed, errors: [] }],
+  ];
+
+  it.each(results)('hands the pricing refresh result to the caller: %s', async (_label, result) => {
+    h.get.mockResolvedValue({ status: 'done', result });
+    await expect(runPricingRefresh()).resolves.toEqual(result);
+    expect(h.get).toHaveBeenCalledWith('/cli-pricing/refresh/42');
+  });
+
+  it.each(results)(
+    'hands the version refresh entry and result to the caller: %s',
+    async (_label, result) => {
+      h.get.mockResolvedValue({ status: 'done', entry, result });
+      await expect(runCatalogVersionRefresh('claude-code')).resolves.toEqual({ entry, result });
+      expect(h.post).toHaveBeenCalledWith('/cli-providers/catalog/claude-code/refresh-versions');
+      expect(h.get).toHaveBeenCalledWith('/cli-providers/catalog/claude-code/refresh-versions/42');
+    },
+  );
 });

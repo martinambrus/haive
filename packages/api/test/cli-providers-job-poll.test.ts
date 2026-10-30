@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
+  role: 'user' as 'admin' | 'user',
   getJob: vi.fn(async (_id: string): Promise<unknown> => undefined),
 }));
 
@@ -10,6 +11,7 @@ vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', () => ({
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
     c.set('userId', USER);
+    c.set('userRole', h.role);
     await next();
   },
 }));
@@ -20,7 +22,11 @@ vi.mock('../src/queues.js', () => ({
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { CLI_EXEC_JOB_NAMES, VERSION_REFRESH_JOB_ID } from '@haive/shared';
+import {
+  CLI_EXEC_JOB_NAMES,
+  VERSION_REFRESH_JOB_ID,
+  type RefreshCliVersionsJobResult,
+} from '@haive/shared';
 import { cliProviderRoutes } from '../src/routes/cli-providers.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -37,9 +43,20 @@ app.route('/', cliProviderRoutes);
 app.onError(errorHandler);
 
 beforeEach(() => {
-  const fake = createFakeDb({ cliProviders: schema.cliProviders });
+  const fake = createFakeDb({
+    cliProviders: schema.cliProviders,
+    cliPackageVersions: schema.cliPackageVersions,
+  });
   fake.insert(schema.cliProviders, { id: PROVIDER, userId: USER });
+  fake.insert(schema.cliPackageVersions, {
+    name: 'claude-code',
+    versions: ['1.2.3', '1.2.2'],
+    latestVersion: '1.2.3',
+    fetchedAt: new Date('2026-10-30T10:00:00.000Z'),
+    fetchError: null,
+  });
   h.db = fake.db;
+  h.role = 'user';
   h.getJob.mockReset();
 });
 
@@ -114,4 +131,59 @@ describe.each(routes.slice(1))('ownership on $path', ({ path, name }) => {
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ code: 'job_expired' });
   });
+});
+
+describe('catalog refresh result', () => {
+  const entry = {
+    name: 'claude-code',
+    versions: ['1.2.3', '1.2.2'],
+    latestVersion: '1.2.3',
+    fetchedAt: '2026-10-30T10:00:00.000Z',
+    fetchError: null,
+  };
+  const refreshed = [{ name: 'claude-code', count: 3, latest: '1.2.3' }];
+  const results: [string, RefreshCliVersionsJobResult][] = [
+    [
+      'failed sources',
+      {
+        ok: false,
+        refreshed,
+        errors: [
+          { name: 'price:codex', error: 'litellm feed HTTP 503' },
+          { name: 'fx', error: 'fx feed HTTP 503' },
+        ],
+      },
+    ],
+    ['every source ok', { ok: true, refreshed, errors: [] }],
+  ];
+
+  async function pollCompleted(result: RefreshCliVersionsJobResult, role: 'admin' | 'user') {
+    h.role = role;
+    h.getJob.mockResolvedValue({
+      name: CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
+      data: {},
+      getState: vi.fn(async () => 'completed'),
+      returnvalue: result,
+    });
+    const res = await app.request(`${routes[0]!.path}/123`);
+    expect(res.status).toBe(200);
+    return res.json();
+  }
+
+  it.each(results)(
+    'answers an admin this CLI entry together with the job result: %s',
+    async (_label, result) => {
+      expect(await pollCompleted(result, 'admin')).toEqual({ status: 'done', entry, result });
+    },
+  );
+
+  it.each(results)(
+    'answers a non-admin this CLI entry alone, without the job result: %s',
+    async (_label, result) => {
+      const body = await pollCompleted(result, 'user');
+
+      expect(body).toEqual({ status: 'done', entry });
+      expect(body).not.toHaveProperty('result');
+    },
+  );
 });

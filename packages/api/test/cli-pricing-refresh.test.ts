@@ -157,6 +157,22 @@ describe('pricing refresh polling', () => {
     expect(await res.json()).toEqual({ status: 'done', result });
   });
 
+  it('passes a result with a failed source through unchanged', async () => {
+    const result = {
+      ok: false,
+      refreshed: [{ name: 'claude-code', count: 3, latest: '1.2.3' }],
+      errors: [{ name: 'fx', error: 'fx feed HTTP 503' }],
+    };
+    h.getJob.mockResolvedValue({
+      name: CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
+      getState: async () => 'completed',
+      returnvalue: result,
+    });
+    const res = await poll();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'done', result });
+  });
+
   it('returns the job failure', async () => {
     h.getJob.mockResolvedValue({
       name: CLI_EXEC_JOB_NAMES.REFRESH_VERSIONS,
