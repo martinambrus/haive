@@ -10,6 +10,7 @@ import {
   AMP_PASTE_LOGIN_URL_PREFIX,
   AUTH_URL_PREFIXES,
   CLI_EXEC_JOB_NAMES,
+  INCOMPLETE_ANSI_ESCAPE,
   TOKEN_PASTE_PROVIDERS,
   detectAuthResult,
   extractDeviceCode,
@@ -42,7 +43,10 @@ const WS_PATH_PREFIX = '/cli-login-banner/';
 const RAW_BUFFER_MAX = 64 * 1024;
 const CLEAN_BUFFER_MAX = 32 * 1024;
 const ANSI_TAIL_MAX = 4096;
-const INCOMPLETE_ANSI_ESCAPE = /\x1b(?:\[[\x20-\x3f]*|\][^\x07\x1b]*\x1b?)?$/;
+// Quiet time after which an auth URL that has not visibly ended is taken as complete. The CLIs
+// measured so far end it with a blank line, so this is the fallback for one that prints the URL
+// and waits; a chunk boundary inside the URL is over within the same burst of output.
+const AUTH_URL_SETTLE_MS = 1_000;
 const HEARTBEAT_MS = 15_000;
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 // How often the queued dialog is told what it is waiting for. Two queue reads per tick, both
@@ -168,6 +172,8 @@ interface BannerSession {
   ansiTail: string;
   decoder: StringDecoder;
   authUrlSent: boolean;
+  /** Armed while the output stops inside the auth URL: see offerAuthUrl. */
+  urlSettleTimer: NodeJS.Timeout | null;
   authSuccessSent: boolean;
   tokenSubmitted: boolean;
   tokenSubmittedAt: number | null;
@@ -461,6 +467,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       ansiTail: '',
       decoder: new StringDecoder('utf8'),
       authUrlSent: false,
+      urlSettleTimer: null,
       authSuccessSent: false,
       tokenSubmitted: false,
       tokenSubmittedAt: null,
@@ -527,6 +534,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
 
     stream.on('data', (chunk: Buffer) => onStreamData(session, chunk));
     stream.on('end', () => {
+      offerAuthUrl(session, true);
       captureClaudeOauthToken(session, session.cleanBuffer + '\n\n');
       if (session.probePending) {
         log.info({ providerId }, 'stream ended while probe pending; deferring cleanup');
@@ -672,6 +680,62 @@ function captureClaudeOauthToken(session: BannerSession, text: string): boolean 
   return true;
 }
 
+/** Sends the auth URL once its end is known. The output arrives in chunks that can stop anywhere
+ *  inside the URL, so a URL that merely reaches the end of the buffer is not sent: its head would
+ *  go out as the link, with no correction (see extractWrappedUrl). Output that stops inside the URL
+ *  gets AUTH_URL_SETTLE_MS of quiet to continue. `final` (the stream ended, or that quiet passed)
+ *  takes the end of the output as the end of the URL. Returns whether a frame was sent. */
+function offerAuthUrl(session: BannerSession, final: boolean): boolean {
+  if (session.urlSettleTimer) {
+    clearTimeout(session.urlSettleTimer);
+    session.urlSettleTimer = null;
+  }
+  if (session.authUrlSent || session.cleanedUp) return false;
+  const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
+  const url = extractWrappedUrl(session.rawBuffer, prefixes, final);
+  if (!url) {
+    if (!final && extractWrappedUrl(session.rawBuffer, prefixes, true)) {
+      session.urlSettleTimer = setTimeout(() => {
+        session.urlSettleTimer = null;
+        offerAuthUrl(session, true);
+      }, AUTH_URL_SETTLE_MS);
+    }
+    return false;
+  }
+  if (TERMINAL_LOGIN_PROVIDERS.has(session.providerName)) {
+    if (url.length <= (prefixes[0]?.length ?? 0) + 8) return false;
+    session.authUrlSent = true;
+    log.info(
+      { providerId: session.providerId, urlLen: url.length, final },
+      'antigravity auth url extracted',
+    );
+    wsSend(session.ws, { type: 'auth-url', url });
+    return true;
+  }
+  session.authUrlSent = true;
+  if (session.providerName === 'amp') {
+    session.ampPasteFlow = url.startsWith(AMP_PASTE_LOGIN_URL_PREFIX);
+    // Start in BOTH flows, and start here rather than after a paste: the
+    // paste-back flow writes its credential within ~200ms of the paste,
+    // faster than the poll cadence, so a baseline taken afterwards would
+    // already contain that credential and could never change.
+    startAmpCredsPoller(session);
+  }
+  const tokenPaste = usesTokenPaste(session);
+  const deviceCode =
+    DEVICE_CODE_PROVIDERS.has(session.providerName) && !tokenPaste
+      ? extractDeviceCode(session.rawBuffer)
+      : undefined;
+  log.info(
+    { providerId: session.providerId, urlLen: url.length, tokenPaste, final },
+    'auth url extracted',
+  );
+  // tokenPaste travels with the URL because the client's own provider set is
+  // only a default: for amp it learns the real flow here.
+  wsSend(session.ws, { type: 'auth-url', url, deviceCode, tokenPaste });
+  return true;
+}
+
 function onStreamData(session: BannerSession, chunk: Buffer): void {
   const text = session.decoder.write(chunk);
 
@@ -691,16 +755,7 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
     wsSend(session.ws, { type: 'output', data: text });
     if (!session.authUrlSent) {
       session.rawBuffer = appendCapped(session.rawBuffer, text, RAW_BUFFER_MAX);
-      const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
-      const url = extractWrappedUrl(session.rawBuffer, prefixes);
-      if (url && url.length > (prefixes[0]?.length ?? 0) + 8) {
-        session.authUrlSent = true;
-        log.info(
-          { providerId: session.providerId, urlLen: url.length },
-          'antigravity auth url extracted',
-        );
-        wsSend(session.ws, { type: 'auth-url', url });
-      } else {
+      if (!offerAuthUrl(session, false)) {
         if (!session.urlDebugged && session.rawBuffer.includes('oauth2')) {
           // Record the failed extraction without copying OAuth output, which can
           // contain authorization codes and other credentials.
@@ -748,33 +803,7 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
   // Login stdout can echo pasted codes and print complete or partial tokens.
   // Keep it in the session for parsing, never in diagnostic logs or errors.
 
-  if (!session.authUrlSent) {
-    const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
-    const url = extractWrappedUrl(session.rawBuffer, prefixes);
-    if (url) {
-      session.authUrlSent = true;
-      if (session.providerName === 'amp') {
-        session.ampPasteFlow = url.startsWith(AMP_PASTE_LOGIN_URL_PREFIX);
-        // Start in BOTH flows, and start here rather than after a paste: the
-        // paste-back flow writes its credential within ~200ms of the paste,
-        // faster than the poll cadence, so a baseline taken afterwards would
-        // already contain that credential and could never change.
-        startAmpCredsPoller(session);
-      }
-      const tokenPaste = usesTokenPaste(session);
-      const deviceCode =
-        DEVICE_CODE_PROVIDERS.has(session.providerName) && !tokenPaste
-          ? extractDeviceCode(session.rawBuffer)
-          : undefined;
-      log.info(
-        { providerId: session.providerId, urlLen: url.length, tokenPaste },
-        'auth url extracted',
-      );
-      // tokenPaste travels with the URL because the client's own provider set is
-      // only a default: for amp it learns the real flow here.
-      wsSend(session.ws, { type: 'auth-url', url, deviceCode, tokenPaste });
-    }
-  }
+  offerAuthUrl(session, false);
 
   if (!canDetectAuth(session)) return;
 
@@ -1276,6 +1305,10 @@ async function cleanupSession(session: BannerSession): Promise<void> {
   if (session.menuAdvanceTimer) {
     clearTimeout(session.menuAdvanceTimer);
     session.menuAdvanceTimer = null;
+  }
+  if (session.urlSettleTimer) {
+    clearTimeout(session.urlSettleTimer);
+    session.urlSettleTimer = null;
   }
   clearInterval(session.heartbeat);
   clearTimeout(session.timeout);
