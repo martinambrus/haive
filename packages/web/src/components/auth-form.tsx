@@ -141,7 +141,12 @@ export function AuthForm({ mode, initialStatus, initialInviteToken }: AuthFormPr
         </p>
       )}
       {canRegister && (
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        // `method="post"` covers the window before React attaches `handleSubmit`: a native submit
+        // is a GET then, which puts the email, password and setup token in the URL, the history
+        // and every access log. Next answers a urlencoded POST on these routes with the page itself
+        // (200, MEASURED on 16.4.3 in dev and in the standalone build) and a multipart one with a
+        // 409, so never set `encType`.
+        <form method="post" onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="email">Email</Label>
             <Input
