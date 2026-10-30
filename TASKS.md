@@ -443,7 +443,7 @@ Fix: the stalled sweep re-drives a running task whose current row is running, wi
 
 ### T349 · FNF[lock-order-step-rows] · multi-row step writers can deadlock on step rows (+2)
 
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T21:46Z · last: 2026-10-30T21:46Z
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T21:46Z · last: 2026-10-30T21:46Z · was modular #173
 All PRE-EXISTING.
 
 1. resetRowsForRerun (api steps.ts ~:124) updates rows in click order, while other writers lock them by id. Fix: every multi-row step writer first runs `SELECT … ORDER BY id FOR NO KEY UPDATE`. Control: a gated interleave.
