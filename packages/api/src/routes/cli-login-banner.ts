@@ -685,9 +685,12 @@ function captureClaudeOauthToken(session: BannerSession, text: string): boolean 
  *  inside the URL, so a URL that merely reaches the end of the buffer is not sent: its head would
  *  go out as the link, with no correction (see extractWrappedUrl). A URL that is open gets
  *  AUTH_URL_SETTLE_MS from when it first showed to end. `final` (that time passed, or the stream
- *  ended) takes the end of the output as the end of the URL. Returns whether a frame was sent. */
+ *  ended) takes the end of the output as the end of the URL. Returns whether a frame was sent.
+ *  Nothing is sent once the sign-in has succeeded, because the modal resets its phase on an
+ *  `auth-url` frame. Only antigravity can get there with its URL unsent: its creds poller starts
+ *  with the session, while every other provider's success follows the URL. */
 function offerAuthUrl(session: BannerSession, final: boolean): boolean {
-  if (session.authUrlSent || session.cleanedUp) return false;
+  if (session.authUrlSent || session.cleanedUp || session.authSuccessSent) return false;
   const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
   const url = extractWrappedUrl(session.rawBuffer, prefixes, final);
   if (!url) {
@@ -759,7 +762,14 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
     if (!session.authUrlSent) {
       session.rawBuffer = appendCapped(session.rawBuffer, text, RAW_BUFFER_MAX);
       if (!offerAuthUrl(session, false)) {
-        if (!session.urlDebugged && session.rawBuffer.includes('oauth2')) {
+        // Not a failed extraction while the URL is held as open (timer armed), nor once the
+        // sign-in has succeeded and offerAuthUrl declines to send it.
+        if (
+          !session.urlDebugged &&
+          !session.urlSettleTimer &&
+          !session.authSuccessSent &&
+          session.rawBuffer.includes('oauth2')
+        ) {
           // Record the failed extraction without copying OAuth output, which can
           // contain authorization codes and other credentials.
           session.urlDebugged = true;

@@ -14,9 +14,12 @@ const h = vi.hoisted(() => ({
   start: vi.fn(),
   remove: vi.fn(),
   probe: vi.fn(),
+  exec: vi.fn(),
   queueError: undefined as Error | undefined,
   createError: undefined as string | undefined,
   probeError: undefined as Error | string | undefined,
+  // While set, a post-login probe job stays pending until it resolves.
+  probeGate: undefined as Promise<void> | undefined,
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
@@ -35,6 +38,7 @@ vi.mock('ws', async (original) => ({
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/auth/jwt.js', () => ({ verifyAccessToken: async () => ({ sub: 'user', tv: 0 }) }));
 vi.mock('../src/routes/terminal.js', () => ({ attachContainerStream: h.attach }));
+vi.mock('../src/routes/docker-exec.js', () => ({ execInContainer: h.exec }));
 vi.mock('../src/queues.js', () => ({
   getCliExecQueueEvents: () => ({}),
   getUsagePollQueue: () => ({ add: async () => ({}) }),
@@ -49,6 +53,7 @@ vi.mock('../src/queues.js', () => ({
           // Completed jobs are removed and cannot supply a second container result.
           if (delivered) throw new Error('job removed');
           delivered = true;
+          if (name !== 'cli-login-create' && h.probeGate) await h.probeGate;
           if (name !== 'cli-login-create' && h.probeError) throw h.probeError;
           return name === 'cli-login-create'
             ? h.createError
@@ -83,9 +88,11 @@ beforeEach(() => {
   h.attach.mockReset();
   h.start.mockReset().mockResolvedValue(undefined);
   h.remove.mockReset().mockResolvedValue(undefined);
+  h.exec.mockReset().mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
   h.queueError = undefined;
   h.createError = undefined;
   h.probeError = undefined;
+  h.probeGate = undefined;
   providerName = 'claude-code';
   h.db = {
     query: {
@@ -1195,5 +1202,79 @@ describe('CLI login banner auth URL chunking', () => {
       Buffer.from(`https://accounts.google.com/o/oauth2/${'a'.repeat(extra)}\n\n`),
     );
     expect(authUrlFrames().length).toBe(count);
+  });
+
+  // agy's creds poller reads its token file every second: the first read is the baseline, a later
+  // one that differs is a sign-in. Here the URL shows after the baseline read, the sign-in lands 500
+  // ms into the second the open URL is held, and the probe it starts stays pending past that second.
+  async function signInWhileUrlHeld() {
+    providerName = 'antigravity';
+    const signature = (letter: string) => ({
+      exitCode: 0,
+      stdout: `${letter.repeat(32)}\n`,
+      stderr: '',
+    });
+    h.exec.mockResolvedValueOnce(signature('a')).mockResolvedValue(signature('b'));
+    let release!: () => void;
+    h.probeGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await start();
+    await vi.advanceTimersByTimeAsync(1500);
+    stream.emit('data', Buffer.from(ANTIGRAVITY.head + ANTIGRAVITY.body));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(frames().some((frame) => frame.type === 'auth-success')).toBe(true);
+    expect(authUrlFrames().length).toBe(0);
+    return release;
+  }
+
+  it.each(['the second passes', 'the stream ends'])(
+    'antigravity: no auth-url follows auth-success when %s',
+    async (when) => {
+      const release = await signInWhileUrlHeld();
+      if (when === 'the stream ends') stream.emit('end');
+      else await vi.advanceTimersByTimeAsync(1000);
+      await settle();
+      const types = frames().map((frame) => frame.type);
+      expect(types.slice(types.indexOf('auth-success') + 1)).not.toContain('auth-url');
+      release();
+      await settle();
+    },
+  );
+
+  const notExtracted = () =>
+    h.log.info.mock.calls.filter(
+      ([, message]) => message === 'antigravity oauth2 present but URL not extracted',
+    ).length;
+
+  it('antigravity: a URL that has not ended yet is not logged as one that was not extracted', async () => {
+    providerName = 'antigravity';
+    await start();
+    const cut = ANTIGRAVITY.head.length + 60;
+    stream.emit('data', Buffer.from(ANTIGRAVITY.raw.slice(0, cut)));
+    expect(authUrlFrames().length).toBe(0);
+    expect(notExtracted()).toBe(0);
+    stream.emit('data', Buffer.from(ANTIGRAVITY.raw.slice(cut)));
+    expectOneAuthUrl(ANTIGRAVITY);
+    expect(notExtracted()).toBe(0);
+  });
+
+  it('antigravity: oauth2 output with no URL in it is logged as not extracted, once', async () => {
+    providerName = 'antigravity';
+    await start();
+    stream.emit('data', Buffer.from('oauth2 consent screen\n'));
+    stream.emit('data', Buffer.from('oauth2 consent screen again\n'));
+    expect(authUrlFrames().length).toBe(0);
+    expect(notExtracted()).toBe(1);
+  });
+
+  it('antigravity: output after the sign-in does not log the unsent URL as not extracted', async () => {
+    const release = await signInWhileUrlHeld();
+    await vi.advanceTimersByTimeAsync(1000);
+    stream.emit('data', Buffer.from('⠋'));
+    expect(authUrlFrames().length).toBe(0);
+    expect(notExtracted()).toBe(0);
+    release();
+    await settle();
   });
 });
