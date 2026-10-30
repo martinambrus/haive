@@ -793,7 +793,7 @@ From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. w
 
 ### T428 · FNF[refresh-result-hidden] · a version or price refresh that fails reports ok:false that no page reads
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T17:53Z · last: 2026-10-30T17:53Z
 From the T420 review (2026-10-25). PRE-EXISTING design, minor. worker queues/cli-exec/handlers.ts ~:967-1010 records a refresh's source failures and completes the job with `ok: false` ("cannot fail the job"); web lib/cli-jobs.ts `runPricingRefresh` (since T420) and the catalog refresh discard the result, so a price-feed failure shows only as a per-CLI fetchError badge after the reload, and FX and catalog failures show nowhere. Fix: return the result and show the failed sources on the page.
 
 ### T429 · FNF[file-transport-default] · refuse the file transport on every git call by default, not by verb
