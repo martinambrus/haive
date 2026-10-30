@@ -508,10 +508,17 @@ const IDE_NODE_INSPECT_PORT = 9229; // node --inspect (Lane C)
  *  covers the JS/Node lanes), and stand up the IDE-side TCP forwards so the seeded
  *  launch configs can use stable `localhost` addresses. No-op when debug is off. */
 async function setupIdeDebugging(db: Database, taskId: string, name: string): Promise<void> {
-  const task = await db.query.tasks.findFirst({
-    where: eq(schema.tasks.id, taskId),
-    columns: { debugMode: true },
-  });
+  let task: { debugMode: boolean } | undefined;
+  try {
+    task = await db.query.tasks.findFirst({
+      where: eq(schema.tasks.id, taskId),
+      columns: { debugMode: true },
+    });
+  } catch (err) {
+    // The editor is already up: a lookup failure skips the debug setup, not the ensure.
+    log.warn({ taskId, err }, 'ide debug setup skipped: the task debug flag could not be read');
+    return;
+  }
   if (!task?.debugMode) return;
   await installXdebugExtension(taskId, name);
   await setupIdeDebugForwards(taskId, name);
