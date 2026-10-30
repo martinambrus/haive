@@ -803,14 +803,6 @@ From the T375 review (2026-10-24). PRE-EXISTING, consequential, low frequency. w
 status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T19:58Z · last: 2026-10-30T19:58Z
 From the T417 review (2026-10-25), follow-up to T417 item 6. Minor, hardening. Verb-based hardening (shared git-args.ts) still misses `remote show|prune|set-head`, `remote add -f`, `submodule update|add`, `archive --remote` and a promisor lazy fetch; none is called today. Production needs the file transport only for the host-folder refresh (worker repo/refresh.ts ~:96-102, which opts in), so `protocol.file.allow=never` in `GIT_CONFIG_SAFETY_ARGS` with `allowFileTransport` as the one opt-in would cover every verb, future ones included. Check every test that seeds with hardened git. Also: `gitSetOriginUrl` (worker repo/clone.ts ~:121-138) is exported, called only by a test, and uses the single-URL `remote set-url` form T417 replaced (dead code; remove or route through `ensureOrigin`).
 
-### T431 · FNF[ide-container-lifecycle] · a running editor container is reused whatever its launch flags or image; a task editor that never got a socket is never idle-reaped (+1)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T18:26Z · last: 2026-10-30T18:26Z
-From the T398 review (2026-10-25). PRE-EXISTING.
-
-1. Consequential: worker sandbox/ide-runner.ts ~:360-371 `ensureIdeRunnerStartedInner` returns the running container when only the workspace-subpath label matches; flags and image are never compared, so a changed launch flag (T398's `--disable-proxy`) or a `CODE_SERVER_IMAGE` bump (shared constants ~:814) never reaches a running editor, which lives as long as its tab is open. Fix: stamp a launch-spec label at create and recreate on mismatch, as `runnerSubpathVerdict` does for the subpath (app-runner.ts ~:353-369), at a moment that does not kill a live session.
-2. Minor: a task editor gets its `ide:session:` hash only when its first WebSocket connects (worker queues/ide-ensure-queue.ts ~:31-51 and the api ensure route write nothing; the repository path does, ~:81-87), and the idle reaper walks existing hashes only (ide-session-reaper.ts ~:70-105), so a task editor that never got a socket lives until the task ends.
-
 ### T434 · FNF[token-save-before-probe] [design] · a captured CLI token overwrites the stored one before the probe verifies it
 
 status: open
@@ -910,6 +902,7 @@ From the T401 review (2026-10-30). PRE-EXISTING, moderate (security). web compon
 
 ## Done
 
+- T431 — a running editor launched with another image or flags is replaced once idle (image on the host first, removed right before the launch); a socketless task editor is registered and reaped; an api restart ages no held editor or terminal session — PR #938 (82bf479fa), 2026-10-30; main CI green (rerun after the known upload-reaper flake, #941); live check passed (ensure registers, launch label stamped, reaped after the grace); follow-ups T441, T442
 - T428 — a version or price refresh lists the sources it could not update (catalog poll result admin-only) — PR #937 (1207521d4), 2026-10-30; main CI green; follow-up T440; browser acceptance owed (dev stack)
 - T433 — the login banner sends the auth URL only once it has ended (1 s deadline from first sight, stream-end flush, nothing after sign-in) — PR #936 (d7b4c605a), 2026-10-30; main CI green at 1207521d4; follow-ups T438, T439; browser acceptance per provider owed (dev stack)
 - T118 — repository CLI set is a union — PR #934 (110bb4933), 2026-10-26; final reviews/gates recorded in T118 evidence, all8 main CI green, dev libs/API/web/worker verified; finish-then-pause boundary complete.
