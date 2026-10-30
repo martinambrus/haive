@@ -14,9 +14,12 @@ const h = vi.hoisted(() => ({
   start: vi.fn(),
   remove: vi.fn(),
   probe: vi.fn(),
+  exec: vi.fn(),
   queueError: undefined as Error | undefined,
   createError: undefined as string | undefined,
   probeError: undefined as Error | string | undefined,
+  // While set, a post-login probe job stays pending until it resolves.
+  probeGate: undefined as Promise<void> | undefined,
 }));
 vi.mock('@haive/shared', async (original) => ({
   ...(await original<typeof import('@haive/shared')>()),
@@ -35,6 +38,7 @@ vi.mock('ws', async (original) => ({
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/auth/jwt.js', () => ({ verifyAccessToken: async () => ({ sub: 'user', tv: 0 }) }));
 vi.mock('../src/routes/terminal.js', () => ({ attachContainerStream: h.attach }));
+vi.mock('../src/routes/docker-exec.js', () => ({ execInContainer: h.exec }));
 vi.mock('../src/queues.js', () => ({
   getCliExecQueueEvents: () => ({}),
   getUsagePollQueue: () => ({ add: async () => ({}) }),
@@ -49,6 +53,7 @@ vi.mock('../src/queues.js', () => ({
           // Completed jobs are removed and cannot supply a second container result.
           if (delivered) throw new Error('job removed');
           delivered = true;
+          if (name !== 'cli-login-create' && h.probeGate) await h.probeGate;
           if (name !== 'cli-login-create' && h.probeError) throw h.probeError;
           return name === 'cli-login-create'
             ? h.createError
@@ -83,9 +88,11 @@ beforeEach(() => {
   h.attach.mockReset();
   h.start.mockReset().mockResolvedValue(undefined);
   h.remove.mockReset().mockResolvedValue(undefined);
+  h.exec.mockReset().mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
   h.queueError = undefined;
   h.createError = undefined;
   h.probeError = undefined;
+  h.probeGate = undefined;
   providerName = 'claude-code';
   h.db = {
     query: {
@@ -930,5 +937,356 @@ describe('CLI login banner startup cleanup', () => {
     } finally {
       vi.mocked(globalThis.setTimeout).mockRestore();
     }
+  });
+});
+
+describe('CLI login banner auth URL chunking', () => {
+  // Synthetic, ~200 characters, hard-wrapped at 80 columns the way the CLI's PTY prints it.
+  const CLAUDE_URL =
+    'https://claude.ai/oauth/authorize?code=true&client_id=synthetic-client-id' +
+    '&response_type=code&redirect_uri=https%3A%2F%2Fexample.invalid%2Fcb' +
+    '&code_challenge=SyntheticChallenge0123456789&state=SyntheticState01';
+  const CLAUDE_LINES = Array.from({ length: Math.ceil(CLAUDE_URL.length / 80) }, (_, i) =>
+    CLAUDE_URL.slice(i * 80, (i + 1) * 80),
+  );
+  const AMP_CODE = 'QRST-2468';
+
+  // `body` is the URL as printed (wraps and colour included) and `end` what has to follow it before
+  // it is known to be complete, so `done` is the offset into `raw` from which it is sent.
+  const banner = (spec: {
+    label: string;
+    provider: CliProviderName;
+    url: string;
+    head: string;
+    body?: string;
+    end: string;
+    rest: string;
+    tokenPaste?: boolean;
+    deviceCode?: string;
+  }) => {
+    const body = spec.body ?? spec.url;
+    const printed = spec.head + body + spec.end;
+    return { ...spec, body, raw: printed + spec.rest, done: printed.length };
+  };
+  type Banner = ReturnType<typeof banner>;
+
+  const CLAUDE = banner({
+    label: 'claude-code, URL wrapped over three lines',
+    provider: 'claude-code',
+    url: CLAUDE_URL,
+    head: "\x1b]0;Claude Code\x07Browser didn't open? Use the url below to sign in\r\n\r\n",
+    body: CLAUDE_LINES.map((line) => `\x1b[34m${line}\x1b[39m`).join('\r\n'),
+    end: '\r\n\r\n',
+    rest: 'Paste code here if prompted > ',
+    tokenPaste: true,
+  });
+  const CODEX = banner({
+    label: 'codex device login',
+    provider: 'codex',
+    url: 'https://auth.openai.com/codex/device',
+    head: '1. Open this link in your browser and sign in to your account\r\n   \x1b[94m',
+    end: '\x1b[0m\r\n\r\n',
+    rest: '2. Enter this one-time code (expires in 15 minutes)\r\n   \x1b[94mABCD-12345\x1b[0m\r\n',
+    tokenPaste: false,
+  });
+  const GROK = banner({
+    label: 'grok device login',
+    provider: 'grok',
+    url: `https://accounts.x.ai/oauth2/device?user_code=${CODE}`,
+    head: '\nTo sign in, open this URL in your browser:\n\n  ',
+    end: '\n\n',
+    rest: `Confirm this code in your browser:\n\n  ${CODE}\n\nWaiting for authorization...\n`,
+    tokenPaste: false,
+    deviceCode: CODE,
+  });
+  const AMP_DEVICE = banner({
+    label: 'amp device login',
+    provider: 'amp',
+    url: `https://auth.ampcode.com/device?user_code=${AMP_CODE}`,
+    head: 'To log in, visit:\r\n\r\n\x1b[34m\x1b[1m',
+    end: '\x1b[22m\x1b[39m\r\n\r\n',
+    rest: `and confirm that the code shown matches: \x1b[1m${AMP_CODE}\x1b[22m\r\n\r\nWaiting for confirmation in the browser...\r\n`,
+    tokenPaste: false,
+    deviceCode: AMP_CODE,
+  });
+  const AMP_PASTE = banner({
+    label: 'amp paste-back login',
+    provider: 'amp',
+    url: `https://ampcode.com/auth/cli-login?authToken=${'a'.repeat(64)}`,
+    head: 'If your browser does not open automatically, visit:\r\n\r\n\x1b[34m\x1b[1m',
+    end: '\x1b[22m\x1b[39m\r\n\r\n',
+    rest: '',
+    tokenPaste: true,
+  });
+  const ANTIGRAVITY = banner({
+    label: 'antigravity terminal login',
+    provider: 'antigravity',
+    url:
+      'https://accounts.google.com/o/oauth2/v2/auth?client_id=synthetic-client.example.invalid' +
+      '&response_type=code&redirect_uri=urn%3Aietf%3Awg%3Aoauth%3A2.0%3Aoob' +
+      '&scope=openid%20email&state=SyntheticState01',
+    head: 'Sign in with Google\r\n\r\nOpen this URL in your browser:\r\n\r\n',
+    end: '\r\n\r\n',
+    rest: 'Enter the authorization code: ',
+  });
+  const banners = [CLAUDE, CODEX, GROK, AMP_DEVICE, AMP_PASTE, ANTIGRAVITY];
+
+  const frames = () => ws.send.mock.calls.map(([raw]) => JSON.parse(raw));
+  const authUrlFrames = () => frames().filter((frame) => frame.type === 'auth-url');
+  function expectOneAuthUrl(b: Banner) {
+    const sent = authUrlFrames();
+    expect(sent.length).toBe(1);
+    expect(sent[0]?.url?.length).toBe(b.url.length);
+    expect(sent[0]?.url === b.url).toBe(true);
+    expect(sent[0]?.tokenPaste).toBe(b.tokenPaste);
+    if (b.deviceCode) expect(sent[0]?.deviceCode === b.deviceCode).toBe(true);
+    if (b.provider === 'grok') assertNoCredentialText(CODE);
+  }
+
+  const splits = banners.flatMap((b) =>
+    Array.from({ length: b.raw.length - 1 }, (_, i) => ({ ...b, k: i + 1 })),
+  );
+  it.each(splits)('$label: two chunks split at offset $k', async (c) => {
+    providerName = c.provider;
+    await start();
+    stream.emit('data', Buffer.from(c.raw.slice(0, c.k)));
+    expect(authUrlFrames().length).toBe(c.k >= c.done ? 1 : 0);
+    stream.emit('data', Buffer.from(c.raw.slice(c.k)));
+    expectOneAuthUrl(c);
+  });
+
+  it.each(banners)('$label: one byte per chunk sends once, at the terminator', async (b) => {
+    providerName = b.provider;
+    await start();
+    const wrong: number[] = [];
+    for (let i = 0; i < b.raw.length; i++) {
+      stream.emit('data', Buffer.from(b.raw.charAt(i)));
+      if (authUrlFrames().length !== (i + 1 >= b.done ? 1 : 0)) wrong.push(i + 1);
+    }
+    expect(wrong).toEqual([]);
+    expectOneAuthUrl(b);
+  });
+
+  const sameChunkEnds = [
+    ['a blank line', '\n\n'],
+    ['CRLF CRLF', '\r\n\r\n'],
+    ['a closing colour then CRLF CRLF', '\x1b[39m\r\n\r\n'],
+    ['a prose line right after', '\nprose here\n'],
+    ['prose on the same line', ' trailing prose'],
+  ] as const;
+  it.each(banners.flatMap((b) => sameChunkEnds.map(([after, tail]) => ({ ...b, after, tail }))))(
+    '$label: $after in the same chunk sends at once',
+    async (c) => {
+      providerName = c.provider;
+      await start();
+      stream.emit('data', Buffer.from(c.head + c.url + c.tail));
+      expectOneAuthUrl(c);
+    },
+  );
+
+  const streamEnds = [
+    ['nothing', ''],
+    ['a closing colour', '\x1b[39m'],
+    ['a cut escape', '\x1b[3'],
+  ] as const;
+  it.each(banners.flatMap((b) => streamEnds.map(([after, tail]) => ({ ...b, after, tail }))))(
+    '$label: the stream ending after the URL and $after sends it, then exit',
+    async (c) => {
+      providerName = c.provider;
+      await start();
+      stream.emit('data', Buffer.from(c.head + c.body + c.tail));
+      await settle();
+      expect(authUrlFrames().length).toBe(0);
+      stream.emit('end');
+      await settle();
+      expectOneAuthUrl(c);
+      const types = frames().map((frame) => frame.type);
+      expect(types.indexOf('exit')).toBeGreaterThan(types.indexOf('auth-url'));
+    },
+  );
+
+  const firstLineEnd = CLAUDE.body.indexOf('\r\n') + 2;
+  const firstChunk = CLAUDE.head + CLAUDE.body.slice(0, firstLineEnd);
+  const laterLines = CLAUDE.body.slice(firstLineEnd);
+
+  it('sends a URL that has not visibly ended one second after it first appeared', async () => {
+    providerName = 'grok';
+    await start();
+    stream.emit('data', Buffer.from(`${GROK.head}${GROK.url}\r\n`));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(authUrlFrames().length).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expectOneAuthUrl(GROK);
+  });
+
+  it('counts the second from when the URL first appeared, not from the last chunk', async () => {
+    providerName = 'claude-code';
+    await start();
+    const idle = vi.getTimerCount();
+    stream.emit('data', Buffer.from(firstChunk));
+    await vi.advanceTimersByTimeAsync(600);
+    stream.emit('data', Buffer.from(laterLines));
+    expect(vi.getTimerCount()).toBe(idle + 1);
+    await vi.advanceTimersByTimeAsync(399);
+    expect(authUrlFrames().length).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expectOneAuthUrl(CLAUDE);
+  });
+
+  it('is not held back by whitespace-free output that keeps arriving under the URL', async () => {
+    providerName = 'grok';
+    await start();
+    stream.emit('data', Buffer.from(`${GROK.head}${GROK.url}\r\n`));
+    for (let i = 0; i < 30; i++) {
+      await vi.advanceTimersByTimeAsync(100);
+      stream.emit('data', Buffer.from('⠋\r\n'));
+    }
+    const sent = authUrlFrames();
+    expect(sent.length).toBe(1);
+    expect(sent[0]?.url?.startsWith(GROK.url)).toBe(true);
+  });
+
+  it('cancels the wait when the URL ends in time', async () => {
+    providerName = 'claude-code';
+    await start();
+    const idle = vi.getTimerCount();
+    stream.emit('data', Buffer.from(firstChunk));
+    expect(vi.getTimerCount()).toBe(idle + 1);
+    await vi.advanceTimersByTimeAsync(500);
+    stream.emit('data', Buffer.from(laterLines + CLAUDE.end));
+    expectOneAuthUrl(CLAUDE);
+    expect(vi.getTimerCount()).toBe(idle);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(authUrlFrames().length).toBe(1);
+  });
+
+  it.each([CLAUDE, CODEX, GROK])(
+    '$label: closing the dialog inside the URL leaves no timer behind',
+    async (b) => {
+      providerName = b.provider;
+      await start();
+      const idle = vi.getTimerCount();
+      stream.emit('data', Buffer.from(b.head + b.body));
+      expect(vi.getTimerCount()).toBe(idle + 1);
+      ws.close();
+      await settle();
+      expect(vi.getTimerCount()).toBe(0);
+      stream.emit('data', Buffer.from('abc'));
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each([AMP_DEVICE, AMP_PASTE])(
+    '$label: sending the URL starts the credentials poller',
+    async (b) => {
+      providerName = b.provider;
+      await start();
+      const idle = vi.getTimerCount();
+      stream.emit('data', Buffer.from(b.raw));
+      expectOneAuthUrl(b);
+      expect(vi.getTimerCount()).toBe(idle + 1);
+      ws.close();
+      await settle();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each([
+    [8, 0],
+    [9, 1],
+  ])('antigravity: a URL %i characters past its prefix sends %i frames', async (extra, count) => {
+    providerName = 'antigravity';
+    await start();
+    stream.emit(
+      'data',
+      Buffer.from(`https://accounts.google.com/o/oauth2/${'a'.repeat(extra)}\n\n`),
+    );
+    expect(authUrlFrames().length).toBe(count);
+  });
+
+  // agy's creds poller reads its token file every second: the first read is the baseline, a later
+  // one that differs is a sign-in. Here the URL shows after the baseline read, the sign-in lands 500
+  // ms into the second the open URL is held, and the probe it starts stays pending past that second.
+  async function signInWhileUrlHeld() {
+    providerName = 'antigravity';
+    const signature = (letter: string) => ({
+      exitCode: 0,
+      stdout: `${letter.repeat(32)}\n`,
+      stderr: '',
+    });
+    h.exec.mockResolvedValueOnce(signature('a')).mockResolvedValue(signature('b'));
+    let release!: () => void;
+    h.probeGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await start();
+    await vi.advanceTimersByTimeAsync(1500);
+    stream.emit('data', Buffer.from(ANTIGRAVITY.head + ANTIGRAVITY.body));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(frames().some((frame) => frame.type === 'auth-success')).toBe(true);
+    expect(authUrlFrames().length).toBe(0);
+    return release;
+  }
+
+  it.each(['the second passes', 'the stream ends'])(
+    'antigravity: no auth-url follows auth-success when %s',
+    async (when) => {
+      const release = await signInWhileUrlHeld();
+      if (when === 'the stream ends') stream.emit('end');
+      else await vi.advanceTimersByTimeAsync(1000);
+      await settle();
+      const types = frames().map((frame) => frame.type);
+      expect(types.slice(types.indexOf('auth-success') + 1)).not.toContain('auth-url');
+      release();
+      await settle();
+    },
+  );
+
+  const notExtracted = () =>
+    h.log.info.mock.calls.filter(
+      ([, message]) => message === 'antigravity oauth2 present but URL not extracted',
+    ).length;
+
+  it('antigravity: a URL that has not ended yet is not logged as one that was not extracted', async () => {
+    providerName = 'antigravity';
+    await start();
+    const cut = ANTIGRAVITY.head.length + 60;
+    stream.emit('data', Buffer.from(ANTIGRAVITY.raw.slice(0, cut)));
+    expect(authUrlFrames().length).toBe(0);
+    expect(notExtracted()).toBe(0);
+    stream.emit('data', Buffer.from(ANTIGRAVITY.raw.slice(cut)));
+    expectOneAuthUrl(ANTIGRAVITY);
+    expect(notExtracted()).toBe(0);
+  });
+
+  it('antigravity: oauth2 output with no URL in it is logged as not extracted, once', async () => {
+    providerName = 'antigravity';
+    await start();
+    stream.emit('data', Buffer.from('oauth2 consent screen\n'));
+    stream.emit('data', Buffer.from('oauth2 consent screen again\n'));
+    expect(authUrlFrames().length).toBe(0);
+    expect(notExtracted()).toBe(1);
+  });
+
+  it('antigravity: output after the sign-in does not log the unsent URL as not extracted', async () => {
+    const release = await signInWhileUrlHeld();
+    await vi.advanceTimersByTimeAsync(1000);
+    stream.emit('data', Buffer.from('⠋'));
+    expect(authUrlFrames().length).toBe(0);
+    expect(notExtracted()).toBe(0);
+    release();
+    await settle();
+  });
+
+  it('antigravity: output after the sign-in presses no Enter, even once the URL scrolled out', async () => {
+    const release = await signInWhileUrlHeld();
+    await vi.advanceTimersByTimeAsync(1000);
+    const write = vi.spyOn(stream, 'write');
+    // More repainted TUI output than the 64 KiB raw buffer holds pushes the URL, and its 'oauth2', out.
+    stream.emit('data', Buffer.from('⠋'.repeat(70 * 1024)));
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(write).not.toHaveBeenCalledWith('\r');
+    release();
+    await settle();
   });
 });

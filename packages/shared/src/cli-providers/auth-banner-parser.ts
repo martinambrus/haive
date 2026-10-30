@@ -5,6 +5,10 @@ const ANSI_OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 const ANSI_SHORT = /\x1b[^[\]]/g;
 const ANSI_CUF = /\x1b\[(\d*)C/g;
 
+/** An escape sequence the text ends in the middle of: a bare ESC, a CSI without its final byte
+ *  or an OSC without its terminator. Output read in chunks can stop inside one. */
+export const INCOMPLETE_ANSI_ESCAPE = /\x1b(?:\[[\x20-\x3f]*|\][^\x07\x1b]*\x1b?)?$/;
+
 export function stripAnsi(str: string): string {
   return str
     .replace(ANSI_CUF, (_, n) => ' '.repeat(parseInt(n || '1', 10)))
@@ -74,28 +78,42 @@ export const TOKEN_PASTE_PROVIDERS: ReadonlySet<CliProviderName> = new Set<CliPr
   'antigravity',
 ]);
 
-export function extractWrappedUrl(raw: string, prefixes: string[]): string | null {
-  const clean = stripAnsi(raw);
-  const lines = clean.split(/\r?\n/);
+/** The auth URL in `raw`, which is output read in chunks and so may stop at any byte. A URL can be
+ *  hard-wrapped over several lines, so it is returned only once something after it shows that it
+ *  has ended: more text after it on its line, a blank line, or a line that holds whitespace
+ *  (prose; a wrapped URL continues on whitespace-free lines). Blanks alone do not end it, because
+ *  a wrapped line can be padded. Output that stops inside it gives null, because the next chunk
+ *  may continue it.
+ *
+ *  `atEnd` takes the end of the text as the end of the URL, for a stream that ended or went quiet.
+ *  A whitespace-free last line is then kept, since it may be the tail of a wrapped URL as well as
+ *  the first word of a line of prose. The same ambiguity joins a whitespace-free line directly
+ *  under the URL, and text on the same line as the last piece of a wrapped URL cuts that piece off. */
+export function extractWrappedUrl(raw: string, prefixes: string[], atEnd = false): string | null {
+  const lines = stripAnsi(raw.replace(INCOMPLETE_ANSI_ESCAPE, '')).split(/\r?\n/);
   let url = '';
   let capturing = false;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!capturing) {
-      for (const prefix of prefixes) {
-        const idx = trimmed.indexOf(prefix);
-        if (idx >= 0) {
-          capturing = true;
-          url = trimmed.slice(idx);
-          break;
-        }
-      }
-    } else {
-      if (trimmed === '') break;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i]!.trim();
+    if (capturing) {
+      // The empty text after the last newline is an unfinished line, not a blank one.
+      if (trimmed === '') return i < lines.length - 1 || atEnd ? url : null;
+      if (/\s/.test(trimmed)) return url;
       url += trimmed;
+      continue;
+    }
+    for (const prefix of prefixes) {
+      const idx = trimmed.indexOf(prefix);
+      if (idx < 0) continue;
+      const rest = trimmed.slice(idx);
+      const space = rest.search(/\s/);
+      if (space >= 0) return rest.slice(0, space);
+      capturing = true;
+      url = rest;
+      break;
     }
   }
-  return url || null;
+  return atEnd && url ? url : null;
 }
 
 const DEVICE_CODE_PATTERN = /\b([A-Z0-9]{4,6}-[A-Z0-9]{4,6})\b/;
