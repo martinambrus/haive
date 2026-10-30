@@ -101,7 +101,7 @@ All PRE-EXISTING.
 
 ### T119 · B4.2 · AGENTS.md rules block is repository-level
 
-status: open · last: 2026-10-26T21:56Z · kind: feature (user decision taken)
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T16:26Z · last: 2026-10-30T16:26Z · kind: feature (user decision taken)
 repositories.agent_rules_override + settings/agent-rules.md + tooling editor; buildRepoCliRulesBlock for 07/12/01/api. Control: two users with different personal rules are quiet and byte-identical after.
 
 Codex progress 2026-10-26T21:56Z: queued after completed T118 PR #934 (110bb4933eb75e24b148b1c0a94af240a102e158); resume from the merged main predecessor only when requested. Scoping brief .claude/tmp/board-run/T119/drive-draft.md retained; no implementation, worktree, migration or product change started. Preserve approved null/default versus explicit-empty rules semantics and dispatch protections. Session PAUSED.
@@ -811,7 +811,7 @@ From the T398 review (2026-10-25). PRE-EXISTING.
 
 ### T433 · FNF[cli-login-url-capture] · the login banner sends the auth URL before its chunk completes
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T16:26Z · last: 2026-10-30T16:26Z
 From the T427 review (2026-10-25), F2. PRE-EXISTING, minor, latent. api routes/cli-login-banner.ts ~:673-699 (authUrlSent set once ~:677; shared auth-banner-parser.ts ~:77-99): the URL is sent as soon as its prefix appears, so a chunk boundary inside it sends the head of the URL (function-level: a 50-character head of a 65-character URL is returned as the URL) and the user gets a broken link with no correction. Wait for a terminator after the URL (whitespace, end of line or a closing escape) before sending, or re-send when the URL grows. Real chunking of the URL frame not observed.
 
 ### T434 · FNF[token-save-before-probe] [design] · a captured CLI token overwrites the stored one before the probe verifies it
