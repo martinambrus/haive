@@ -89,7 +89,7 @@ board. At session start, load the board's tasks you own or will work on into the
 
 # Open tasks
 
-PAUSED 2026-10-26T21:56Z per user. T118 finished through PR #934 (110bb4933), green main CI and verified dev runtime; no active implementation remains. T119 was scoped only and stays queued with its prepared brief. Start no new task without a new request. 20 tasks completed during this conversation. Synced checklist: 140 total, 42 done, 0 in progress, 98 open. Preserve parked decisions and dependencies.
+RESUMED 2026-10-30T16:26Z per user: ready tasks first through /sonnet-sonnet (owner sonnet-sonnet@DESKTOP-IUBG9OP); tasks that need a design decision wait for the user. Preserve parked decisions and dependencies.
 
 ### T323 · FNF[uploads-3] · finished upload rows are never deleted; the reaper's removal is not identity-checked (+1)
 
