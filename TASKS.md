@@ -848,7 +848,7 @@ From the T119 review (2026-10-30). PRE-EXISTING, minor. Cross-reference: T317 [d
 
 ### T446 · FNF[bundle-descriptor-removal] [verify-first] · a custom-bundle descriptor committed by one install may be deleted by another install's sweep
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T23:15Z · last: 2026-10-30T23:15Z
 From the T119 review (2026-10-30). PRE-EXISTING, consequential if real, unverified. In the two-install smoke, install A's `custom_bundles` row (worker scripts two-install-smoke.ts ~:648) is followed by install B's 'B keeps its agents' commit (~:2478) that deletes the descriptor A committed, because B's database holds no such bundle. B's checkout then carries a tracked deletion it can commit and push, removing a teammate's bundle. Verify first whether that is intended (descriptors are per-install) or a defect; if a defect, B's sweep must leave descriptors it did not write.
 
 ### T447 · FNF[tooling-api-edges] · PATCH tooling answers 500 for a JSON null body and 200 for a malformed one; refresh-tree reads the whole row; an override's first-line indent is trimmed (+2)
