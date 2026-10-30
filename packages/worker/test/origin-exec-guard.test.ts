@@ -134,10 +134,22 @@ function unvalidatedOriginCalls(
         args.includes('fetch') &&
         args.includes('--') &&
         !args.includes('origin');
+      // `docker pull <image>`: the executable is docker and `pull` is its own first subcommand. Not
+      // git, so not an origin; `docker exec <name> git pull` has `exec` there and stays flagged.
+      const [executable, argv] = node.arguments;
+      const dockerPull =
+        executable !== undefined &&
+        ts.isStringLiteralLike(executable) &&
+        executable.text === 'docker' &&
+        argv !== undefined &&
+        ts.isArrayLiteralExpression(argv) &&
+        argv.elements[0] !== undefined &&
+        ts.isStringLiteralLike(argv.elements[0]) &&
+        argv.elements[0].text === 'pull';
       const transport =
         args.some((arg) => TRANSPORTS.has(arg)) ||
         (args.includes('remote') && args.includes('update'));
-      if (!assembly && !safe && !insideClone(node) && !localFetch && transport)
+      if (!assembly && !safe && !insideClone(node) && !localFetch && !dockerPull && transport)
         offenders.push(file.getLineAndCharacterOfPosition(node.getStart()).line + 1);
     }
     ts.forEachChild(node, check);
@@ -218,6 +230,14 @@ describe('origin network operations', () => {
         true,
       ),
     ).toHaveLength(1);
+  });
+
+  it('exempts the docker CLI own pull subcommand and nothing that merely contains the word', () => {
+    expect(unvalidatedOriginCalls("exec('docker', ['pull', '--quiet', image]);")).toEqual([]);
+    expect(unvalidatedOriginCalls("exec('git', ['pull', '--quiet', image]);")).toHaveLength(1);
+    expect(unvalidatedOriginCalls("exec('docker', ['exec', name, 'git', 'pull']);")).toHaveLength(
+      1,
+    );
   });
 
   it('requires gitClone to validate its URL before transport', () => {

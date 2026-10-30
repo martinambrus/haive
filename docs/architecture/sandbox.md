@@ -150,6 +150,24 @@ read-only git-data boundary as task editors (`repoGitDataBoundary`), since code-
 and workspace tasks execute repository code; the repository Terminal remains the surface for git
 commits and pushes.
 
+**Editor lifecycle.** Every editor carries `haive.ide.spec`, its image plus the code-server flags
+from one list (`IDE_SERVER_ARGS`, `sandbox/ide-runner.ts`). An ensure that finds a running editor
+launched with another spec, or with none, keeps it while the session registry shows it in use and
+replaces it once it is not. In use is `ideSessionHeld` (`sandbox/ide-session.ts`), the idle reaper's
+own check: a socket attached (refcount above 0) or `lastSeenAt` within `IDE_IDLE_GRACE_MS` (30 min).
+A registry that cannot be read counts as in use, and a spec that cannot be read is not stale, so a
+stale editor keeps its launch while attached and for one grace after, and a replacement takes nothing
+the reaper would not. Before replacing it the ensure makes sure `CODE_SERVER_IMAGE` is on the host
+(inspect, else a pull bounded to 120 s) and keeps the old editor with a warning when it cannot be
+had; the removal itself waits until the volumes and mounts are ready, right before `docker run`. An
+editor holding another workspace is still recreated at once, whatever its use or image. `lastSeenAt`
+is written by the api on attach and detach and by the worker on every ensure (task and repository)
+and before every launch, so a task editor no socket ever reached is reaped as well. On boot the api
+zeroes every refcount, gives a session that was held `lastSeenAt` = now (its tab is about to
+reconnect) and leaves an idle one's age; the terminal-shell registry is reset the same way. A
+docker-level launch option added later must join the spec: `IDE_SERVER_ARGS` covers only what follows
+the image.
+
 **The editor proxy never forwards the Haive session.** code-server runs `--auth none` and executes
 repository code, so `routes/ide.ts` removes `haive_access` and `haive_refresh` (every occurrence, by trimmed
 exact name, `withoutSessionCookies` in `auth/cookies.ts`), `Authorization` and `Proxy-Authorization` from the
@@ -162,9 +180,9 @@ the client's `forwarded` and `x-forwarded-*`; names are matched against the requ
 malformed `Connection` token is ignored rather than thrown, and the WebSocket connect handler tears down only
 its own session on any error. The replay head is written as latin1 so non-ASCII header bytes arrive unchanged.
 code-server's port proxy is off twice: the api answers 403 to `/proxy/<port>` and `/absproxy/<port>` (first
-segment, any case) on both transports before anything reaches the container, and new editors launch with
-`--disable-proxy`; an editor container started before that flag keeps its old launch until it is recreated
-(T431). `IDE_ENABLED=false` refuses the HTTP proxy as it does the ensure. The response direction drops the
+segment, any case) on both transports before anything reaches the container, and editors launch with
+`--disable-proxy`; one started before that flag is replaced once idle, by the editor lifecycle rule above.
+`IDE_ENABLED=false` refuses the HTTP proxy as it does the ensure. The response direction drops the
 same hop-by-hop headers and an upstream `Set-Cookie` for `haive_access` or `haive_refresh` (exact name,
 `isSessionSetCookie`), on HTTP responses and on the WebSocket upgrade response head, so the container cannot
 plant or clear the session; its other cookies, `forwarded` and `x-forwarded-*` still reach the browser. The
