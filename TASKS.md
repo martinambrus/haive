@@ -738,13 +738,6 @@ Decide which stored targets a non-admin may point at private addresses.
 
 1. The Ollama pull stream relays 200 chars of the remote error and has no size or time cap.
 
-### T401 · FNF[flagged-user-web-polish] · a forced-password user sees pollers 403 every 5 s; no e2e for the forced flow or the 429
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T19:03Z · last: 2026-10-30T19:03Z
-
-1. REGRESSION (cosmetic): sidebar-tasks.tsx ~:57 and notification-provider.tsx ~:28 keep polling. They should stop on the 403 must_change_password code.
-2. Add Playwright specs.
-
 ### T402 · FNF[context-backfill] · 237 stored steps keep the old 200k-window badge (143 read 0%)
 
 status: parked: user decision (numbered migration vs idempotent deploy script) · DEADLINE ~2026-11-30 (stream_log 90-day expiry) · was modular #284
@@ -913,6 +906,7 @@ From the T448 review (2026-10-30). PRE-EXISTING (identical before T448).
 
 ## Done
 
+- T401 — the app shell holds its recurring requests back while the password must change (gated on the layout's flag, no refused request at all) and resumes them after the change without a reload; e2e specs for the forced flow and the sign-in throttle's 429 — PR #939 (d240c9e4a), 2026-10-30; main CI green; follow-ups T448 (shipped as #943), T364 item 19
 - T431 — a running editor launched with another image or flags is replaced once idle (image on the host first, removed right before the launch); a socketless task editor is registered and reaped; an api restart ages no held editor or terminal session — PR #938 (82bf479fa), 2026-10-30; main CI green (rerun after the known upload-reaper flake, #941); live check passed (ensure registers, launch label stamped, reaped after the grace); follow-ups T441, T442
 - T428 — a version or price refresh lists the sources it could not update (catalog poll result admin-only) — PR #937 (1207521d4), 2026-10-30; main CI green; follow-up T440; browser acceptance owed (dev stack)
 - T433 — the login banner sends the auth URL only once it has ended (1 s deadline from first sight, stream-end flush, nothing after sign-in) — PR #936 (d7b4c605a), 2026-10-30; main CI green at 1207521d4; follow-ups T438, T439; browser acceptance per provider owed (dev stack)
