@@ -870,7 +870,7 @@ From the T119 review (2026-10-30). PRE-EXISTING, consequential if real, unverifi
 
 ### T447 · FNF[tooling-api-edges] · PATCH tooling answers 500 for a JSON null body and 200 for a malformed one; refresh-tree reads the whole row; an override's first-line indent is trimmed (+2)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T22:16Z · last: 2026-10-30T22:16Z
 From the T119 review (2026-10-30). PRE-EXISTING, minor.
 
 1. api routes/tooling-upgrades.ts ~:743: PATCH `/repositories/:id/tooling` answers 500 for a JSON `null` body, and a malformed body is a silent 200 no-op (~:714). Answer 400 for both.
