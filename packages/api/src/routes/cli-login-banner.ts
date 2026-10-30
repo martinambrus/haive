@@ -783,9 +783,10 @@ function onStreamData(session: BannerSession, chunk: Buffer): void {
       );
     }
     wsSend(session.ws, { type: 'output', data: text });
-    // Once the sign-in succeeded there is no URL left to find and no menu to advance. A URL still
-    // held as open then is never sent (offerAuthUrl), so authUrlSent alone would not stop this.
-    if (!session.authUrlSent && !session.authSuccessSent) {
+    // Once the sign-in succeeded or the session ended there is no URL left to find and no menu to
+    // advance. A URL still held as open after a sign-in is never sent (offerAuthUrl), so
+    // authUrlSent alone would not stop this.
+    if (!session.cleanedUp && !session.authUrlSent && !session.authSuccessSent) {
       session.rawBuffer = appendCapped(session.rawBuffer, text, RAW_BUFFER_MAX);
       if (!offerAuthUrl(session, false)) {
         // Not a failed extraction while the URL is held as open (timer armed).

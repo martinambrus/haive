@@ -1510,4 +1510,34 @@ describe('CLI login banner auth URL chunking', () => {
     release();
     await settle();
   });
+
+  it('antigravity: output with no URL in it presses Enter once, 1.5 s after it stops', async () => {
+    providerName = 'antigravity';
+    await start();
+    const write = vi.spyOn(stream, 'write');
+    stream.emit('data', Buffer.from('Select a login method\n'));
+    await vi.advanceTimersByTimeAsync(1499);
+    expect(write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(write.mock.calls).toEqual([['\r']]);
+  });
+
+  it('antigravity: output after the session ended arms no menu-advance timer', async () => {
+    providerName = 'antigravity';
+    await start();
+    ws.close();
+    await settle();
+    expect(vi.getTimerCount()).toBe(0);
+    stream.emit('data', Buffer.from('Select a login method\n'));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('antigravity: oauth2 output after the session ended is not logged as not extracted', async () => {
+    providerName = 'antigravity';
+    await start();
+    ws.close();
+    await settle();
+    stream.emit('data', Buffer.from('oauth2 consent screen\n'));
+    expect(notExtracted()).toBe(0);
+  });
 });
