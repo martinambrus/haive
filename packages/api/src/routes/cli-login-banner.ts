@@ -43,10 +43,11 @@ const WS_PATH_PREFIX = '/cli-login-banner/';
 const RAW_BUFFER_MAX = 64 * 1024;
 const CLEAN_BUFFER_MAX = 32 * 1024;
 const ANSI_TAIL_MAX = 4096;
-// Longest an auth URL may stay open, counted from when it first showed, before the end of the
-// output is taken as its end. The CLIs measured so far end it with a blank line, so this is the
-// fallback for one that prints the URL and waits, or repaints under it; a chunk boundary inside the
-// URL is over within the same burst of output.
+// Longest an auth URL may stay open, or the device code printed after it unfinished, counted from
+// when the URL first showed, before the end of the output is taken as its end. The CLIs measured so
+// far end the URL with a blank line, so this is the fallback for one that prints the URL and waits,
+// or repaints under it; a chunk boundary inside the URL or the code is over within the same burst
+// of output.
 const AUTH_URL_SETTLE_MS = 1_000;
 const HEARTBEAT_MS = 15_000;
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
@@ -173,7 +174,8 @@ interface BannerSession {
   ansiTail: string;
   decoder: StringDecoder;
   authUrlSent: boolean;
-  /** Armed from when the auth URL first shows without having visibly ended: see offerAuthUrl. */
+  /** Armed from when the auth URL first shows without having visibly ended, or without its device
+   *  code having shown and ended: see offerAuthUrl. */
   urlSettleTimer: NodeJS.Timeout | null;
   authSuccessSent: boolean;
   tokenSubmitted: boolean;
@@ -651,7 +653,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
 
 /** Whether this session's CLI reads a token or code back on stdin. Per-provider
  *  for everything but amp, which ships both shapes: there the answer comes from
- *  the URL the CLI printed and only holds once `authUrlSent`. */
+ *  the URL the CLI printed and only holds once offerAuthUrl has read it. */
 function usesTokenPaste(session: BannerSession): boolean {
   return TOKEN_PASTE_PROVIDERS.has(session.providerName) || session.ampPasteFlow;
 }
@@ -688,8 +690,11 @@ function captureClaudeOauthToken(session: BannerSession, text: string): boolean 
 /** Sends the auth URL once its end is known. The output arrives in chunks that can stop anywhere
  *  inside the URL, so a URL that merely reaches the end of the buffer is not sent: its head would
  *  go out as the link, with no correction (see extractWrappedUrl). A URL that is open gets
- *  AUTH_URL_SETTLE_MS from when it first showed to end. `final` (that time passed, or the stream
- *  ended) takes the end of the output as the end of the URL. Returns whether a frame was sent.
+ *  AUTH_URL_SETTLE_MS from when it first showed to end. A device code that has not shown or ended
+ *  is held the same way: the frame carries it, read here as the frame is sent, and codex prints it
+ *  on a later line than the URL. One wait, counted from the URL's first sight, covers both. `final`
+ *  (that time passed, or the stream ended) takes the end of the output as the end of the URL and of
+ *  the code. Returns whether a frame was sent.
  *  Nothing is sent once the sign-in has succeeded, because the modal resets its phase on an
  *  `auth-url` frame. Only antigravity can get there with its URL unsent: its creds poller starts
  *  with the session, while every other provider's success follows the URL. */
@@ -698,14 +703,19 @@ function offerAuthUrl(session: BannerSession, final: boolean): boolean {
   const prefixes = AUTH_URL_PREFIXES[session.providerName] ?? ['https://'];
   const url = extractWrappedUrl(session.rawBuffer, prefixes, final);
   if (!url) {
-    // Counted from the first sight, not from the last chunk: output that never goes quiet, such
-    // as a TUI repainting under the URL, must not hold the URL back for good.
     if (!final && !session.urlSettleTimer && extractWrappedUrl(session.rawBuffer, prefixes, true)) {
-      session.urlSettleTimer = setTimeout(() => {
-        session.urlSettleTimer = null;
-        offerAuthUrl(session, true);
-      }, AUTH_URL_SETTLE_MS);
+      holdAuthUrl(session);
     }
+    return false;
+  }
+  if (session.providerName === 'amp') {
+    session.ampPasteFlow = url.startsWith(AMP_PASTE_LOGIN_URL_PREFIX);
+  }
+  const tokenPaste = usesTokenPaste(session);
+  const wantsCode = DEVICE_CODE_PROVIDERS.has(session.providerName) && !tokenPaste;
+  const deviceCode = wantsCode ? extractDeviceCode(session.rawBuffer, final) : undefined;
+  if (wantsCode && !deviceCode && !final) {
+    holdAuthUrl(session);
     return false;
   }
   if (session.urlSettleTimer) {
@@ -724,18 +734,12 @@ function offerAuthUrl(session: BannerSession, final: boolean): boolean {
   }
   session.authUrlSent = true;
   if (session.providerName === 'amp') {
-    session.ampPasteFlow = url.startsWith(AMP_PASTE_LOGIN_URL_PREFIX);
     // Start in BOTH flows, and start here rather than after a paste: the
     // paste-back flow writes its credential within ~200ms of the paste,
     // faster than the poll cadence, so a baseline taken afterwards would
     // already contain that credential and could never change.
     startAmpCredsPoller(session);
   }
-  const tokenPaste = usesTokenPaste(session);
-  const deviceCode =
-    DEVICE_CODE_PROVIDERS.has(session.providerName) && !tokenPaste
-      ? extractDeviceCode(session.rawBuffer)
-      : undefined;
   log.info(
     { providerId: session.providerId, urlLen: url.length, tokenPaste, final },
     'auth url extracted',
@@ -744,6 +748,17 @@ function offerAuthUrl(session: BannerSession, final: boolean): boolean {
   // only a default: for amp it learns the real flow here.
   wsSend(session.ws, { type: 'auth-url', url, deviceCode, tokenPaste });
   return true;
+}
+
+/** Starts the one wait on an auth URL that is not ready to send, unless it is running. It is
+ *  counted from the first sight, not from the last chunk: output that never goes quiet, such as a
+ *  TUI repainting under the URL, must not hold the URL back for good. */
+function holdAuthUrl(session: BannerSession): void {
+  if (session.urlSettleTimer) return;
+  session.urlSettleTimer = setTimeout(() => {
+    session.urlSettleTimer = null;
+    offerAuthUrl(session, true);
+  }, AUTH_URL_SETTLE_MS);
 }
 
 function onStreamData(session: BannerSession, chunk: Buffer): void {

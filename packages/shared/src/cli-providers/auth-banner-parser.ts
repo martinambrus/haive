@@ -123,10 +123,18 @@ export function extractWrappedUrl(raw: string, prefixes: string[], atEnd = false
 
 const DEVICE_CODE_PATTERN = /\b([A-Z0-9]{4,6}-[A-Z0-9]{4,6})\b/;
 
-export function extractDeviceCode(raw: string): string | undefined {
-  const spaced = ansiToSpaces(raw);
-  const match = spaced.match(DEVICE_CODE_PATTERN);
-  return match?.[1];
+/** The one-time device code in `raw`, which is output read in chunks and so may stop at any byte. A
+ *  code that reaches the end of the text is not returned, because the next chunk may continue it
+ *  (`ABCD-1234` of `ABCD-12345`): something has to follow it, and a complete escape sequence counts.
+ *  An escape sequence the text stops inside is dropped first, so it does not.
+ *
+ *  `atEnd` takes the end of the text as the end of the code, for a stream that ended or went quiet. */
+export function extractDeviceCode(raw: string, atEnd = false): string | undefined {
+  const spaced = ansiToSpaces(raw.replace(INCOMPLETE_ANSI_ESCAPE, ''));
+  const match = DEVICE_CODE_PATTERN.exec(spaced);
+  // A code that reaches the end of the text may be cut: something has to follow it.
+  if (!match || (!atEnd && match.index + match[0].length >= spaced.length)) return undefined;
+  return match[1];
 }
 
 export interface AuthResultSignal {

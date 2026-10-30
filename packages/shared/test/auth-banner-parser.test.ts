@@ -437,3 +437,48 @@ describe('escape sequences with intermediate bytes', () => {
     },
   );
 });
+
+describe('extractDeviceCode on output read in chunks', () => {
+  it.each(['ABCD-1234', 'ABCD-12345', 'ABCD-12345\x1b[0', 'ABCD-12345\x1b'])(
+    'waits when %j is all there is, because the code may be cut',
+    (raw) => {
+      expect(extractDeviceCode(raw)).toBeUndefined();
+    },
+  );
+
+  it.each(['ABCD-12345\r', 'ABCD-12345\n', 'ABCD-12345 tail', 'ABCD-12345\x1b[0m'])(
+    'returns the code once %j follows it',
+    (raw) => {
+      expect(extractDeviceCode(raw)).toBe('ABCD-12345');
+    },
+  );
+
+  it.each([
+    ['ABCD-1234', 'ABCD-1234'],
+    ['ABCD-12345', 'ABCD-12345'],
+    ['ABCD-12345\x1b[0', 'ABCD-12345'],
+  ])('takes the end of the text as the end of the code in %j when atEnd is set', (raw, code) => {
+    expect(extractDeviceCode(raw, true)).toBe(code);
+  });
+
+  it.each([
+    ['codex', CODEX_DEVICE_BANNER, 'ABCD-12345', '\x1b[0m'],
+    ['grok', GROK_DEVICE_BANNER, 'PZVK-REH7', '\n'],
+    ['amp', AMP_DEVICE_BANNER, 'WMSD-BBRS', '\x1b[22m'],
+  ] as const)(
+    '%s device: every prefix of the output gives no code until it has ended, never a cut one',
+    (_label, raw, code, terminator) => {
+      const endsAt = raw.indexOf(code) + code.length + terminator.length;
+      const strictWrong: number[] = [];
+      const atEndWrong: number[] = [];
+      for (let k = 0; k <= raw.length; k++) {
+        const cut = raw.slice(0, k);
+        if (extractDeviceCode(cut) !== (k >= endsAt ? code : undefined)) strictWrong.push(k);
+        const atEnd = extractDeviceCode(cut, true);
+        if (atEnd !== undefined && !code.startsWith(atEnd)) atEndWrong.push(k);
+      }
+      expect(strictWrong).toEqual([]);
+      expect(atEndWrong).toEqual([]);
+    },
+  );
+});
