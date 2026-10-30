@@ -902,7 +902,7 @@ From the T119 review (2026-10-30). PRE-EXISTING, minor.
 
 ### T448 · FNF[auth-form-prehydration-submit] · a sign-in submitted before the page hydrates sends the password in the URL
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T20:16Z · last: 2026-10-30T20:16Z
 From the T401 review (2026-10-30). PRE-EXISTING, moderate (security). web components/auth-form.tsx ~:144 renders `<form onSubmit={handleSubmit}>` with no `method`, so a submit before React attaches the handler is a native GET: with JavaScript disabled the URL became `/login?email=...&password=...` (verified by the T401 driver), which puts the password in browser history, proxy and access logs. The same component serves login, register and setup. It is also why every UI-login e2e spec can race hydration. Fix direction: `method="post"` (check what Next answers to a POST on a page route first) or keep the submit disabled until hydrated; add a control that a pre-hydration submit never puts the password in the URL.
 
 ## Done
