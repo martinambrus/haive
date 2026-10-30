@@ -2,10 +2,13 @@ import { describe, it, expect } from 'vitest';
 import {
   AMP_PASTE_LOGIN_URL_PREFIX,
   AUTH_URL_PREFIXES,
+  INCOMPLETE_ANSI_ESCAPE,
   TOKEN_PASTE_PROVIDERS,
+  ansiToSpaces,
   detectAuthResult,
   extractDeviceCode,
   extractWrappedUrl,
+  stripAnsi,
 } from '../src/cli-providers/auth-banner-parser.js';
 
 describe('TOKEN_PASTE_PROVIDERS', () => {
@@ -267,6 +270,34 @@ const CHUNKED_BANNERS = [
       '\x1b[0m\r\n\r\n',
     ),
   ],
+  [
+    'claude, charset designation and colour reset after each line',
+    wrappedClaudeBanner(
+      `${CLAUDE_INTRO}\r\n\r\n`,
+      CLAUDE_LINES.map((line) => `${line}\x1b(B\x1b[m`).join('\r\n'),
+      '\r\n\r\n',
+    ),
+  ],
+  [
+    'amp device, charset designation before the closing colour',
+    chunkedBanner(
+      AUTH_URL_PREFIXES.amp ?? [],
+      AMP_DEVICE_URL,
+      AMP_DEVICE_BANNER.replace(AMP_DEVICE_URL, `${AMP_DEVICE_URL}\x1b(B`),
+      `${AMP_DEVICE_URL}\x1b(B`,
+      '\x1b[22m\x1b[39m\r\n\r\n',
+    ),
+  ],
+  [
+    'grok device, charset designation right after the URL',
+    chunkedBanner(
+      AUTH_URL_PREFIXES.grok ?? [],
+      GROK_DEVICE_URL,
+      GROK_DEVICE_BANNER.replace(GROK_DEVICE_URL, `${GROK_DEVICE_URL}\x1b(B`),
+      `${GROK_DEVICE_URL}\x1b(B`,
+      '\n\n',
+    ),
+  ],
 ] as const;
 
 describe('extractWrappedUrl on output read in chunks', () => {
@@ -330,4 +361,79 @@ describe('extractWrappedUrl on output read in chunks', () => {
     expect(extractWrappedUrl(raw, CLAUDE_PREFIXES)).toBe(CLAUDE_URL);
     expect(extractWrappedUrl(raw, CLAUDE_PREFIXES, true)).toBe(CLAUDE_URL);
   });
+});
+
+describe('escape sequences with intermediate bytes', () => {
+  it.each([
+    ['ESC ( B', '\x1b(B'],
+    ['ESC ) 0', '\x1b)0'],
+    ['ESC ( 0', '\x1b(0'],
+    ['ESC # 8', '\x1b#8'],
+    ['ESC % G', '\x1b%G'],
+  ])('%s is removed whole, with no final byte left behind', (_label, escape) => {
+    expect(stripAnsi(`a${escape}b`)).toBe('ab');
+    expect(ansiToSpaces(`a${escape}b`)).toBe('a b');
+  });
+
+  it.each([
+    ['ESC 7', '\x1b7'],
+    ['ESC =', '\x1b='],
+    ['ESC c', '\x1bc'],
+    ['ESC M', '\x1bM'],
+    ['a CSI', '\x1b[1;31m'],
+    ['an OSC', '\x1b]0;title\x07'],
+  ])('%s is still removed whole', (_label, escape) => {
+    expect(stripAnsi(`a${escape}b`)).toBe('ab');
+    expect(ansiToSpaces(`a${escape}b`)).toBe('a b');
+  });
+
+  it.each(['\x1b(', 'text\x1b(', '\x1b#', 'text\x1b#'])(
+    'INCOMPLETE_ANSI_ESCAPE matches %j, a designation cut before its final byte',
+    (cut) => {
+      expect(INCOMPLETE_ANSI_ESCAPE.test(cut)).toBe(true);
+    },
+  );
+
+  it.each(['\x1b(B', 'text\x1b(B', '\x1b#8'])(
+    'INCOMPLETE_ANSI_ESCAPE does not match %j, a finished designation',
+    (done) => {
+      expect(INCOMPLETE_ANSI_ESCAPE.test(done)).toBe(false);
+    },
+  );
+
+  const designated = [
+    {
+      label: 'claude, wrapped',
+      prefixes: CLAUDE_PREFIXES,
+      url: CLAUDE_URL,
+      body: CLAUDE_LINES.join('\r\n'),
+    },
+    {
+      label: 'grok device',
+      prefixes: AUTH_URL_PREFIXES.grok ?? [],
+      url: GROK_DEVICE_URL,
+      body: GROK_DEVICE_URL,
+    },
+    {
+      label: 'amp device',
+      prefixes: AUTH_URL_PREFIXES.amp ?? [],
+      url: AMP_DEVICE_URL,
+      body: AMP_DEVICE_URL,
+    },
+  ];
+
+  it.each(designated)(
+    '$label: a charset designation after the URL is not part of it',
+    ({ prefixes, url, body }) => {
+      expect(extractWrappedUrl(`${body}\x1b(B\r\n\r\n`, prefixes)).toBe(url);
+    },
+  );
+
+  it.each(designated)(
+    '$label: waits when only a charset designation follows, and takes the URL at the end',
+    ({ prefixes, url, body }) => {
+      expect(extractWrappedUrl(`${body}\x1b(B`, prefixes)).toBeNull();
+      expect(extractWrappedUrl(`${body}\x1b(B`, prefixes, true)).toBe(url);
+    },
+  );
 });

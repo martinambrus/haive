@@ -424,6 +424,22 @@ describe('Claude OAuth token capture controls', () => {
     },
   );
 
+  // ncurses sgr0 is a charset designation then a colour reset; a split inside `ESC (` is covered.
+  const sgr0 = `${TOKEN}\x1b(B\x1b[m\r\n\r\n`;
+  it.each(Array.from({ length: sgr0.length - 1 }, (_, i) => i + 1))(
+    'a charset designation after the token leaves no extra character on it, split at offset %i',
+    async (offset) => {
+      await ready();
+      stream.emit('data', Buffer.from(sgr0.slice(0, offset)));
+      stream.emit('data', Buffer.from(sgr0.slice(offset)));
+      await settle();
+      expect(h.save.mock.calls.length === 1 && h.save.mock.calls[0]?.[1].value === TOKEN).toBe(
+        true,
+      );
+      assertNoCredentialText(TOKEN, CODE);
+    },
+  );
+
   it('fix-round1 F1 clears an incomplete escape when the user pastes again', async () => {
     await ready();
     stream.emit('data', Buffer.from('\x1b]unfinished'));
@@ -1071,6 +1087,7 @@ describe('CLI login banner auth URL chunking', () => {
     ['a blank line', '\n\n'],
     ['CRLF CRLF', '\r\n\r\n'],
     ['a closing colour then CRLF CRLF', '\x1b[39m\r\n\r\n'],
+    ['a charset designation then CRLF CRLF', '\x1b(B\r\n\r\n'],
     ['a prose line right after', '\nprose here\n'],
     ['prose on the same line', ' trailing prose'],
   ] as const;

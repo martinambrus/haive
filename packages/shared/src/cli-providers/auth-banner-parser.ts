@@ -2,18 +2,22 @@ import type { CliProviderName } from '../types/index.js';
 
 const ANSI_CSI = /\x1b\[[\x20-\x3f]*[\x40-\x7e]/g;
 const ANSI_OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+// ECMA-35 nF: ESC, intermediate bytes, one final byte (a charset designation: ESC ( B, ESC # 8).
+const ANSI_NF = /\x1b[\x20-\x2f]+[\x30-\x7e]/g;
 const ANSI_SHORT = /\x1b[^[\]]/g;
 const ANSI_CUF = /\x1b\[(\d*)C/g;
 
-/** An escape sequence the text ends in the middle of: a bare ESC, a CSI without its final byte
- *  or an OSC without its terminator. Output read in chunks can stop inside one. */
-export const INCOMPLETE_ANSI_ESCAPE = /\x1b(?:\[[\x20-\x3f]*|\][^\x07\x1b]*\x1b?)?$/;
+/** An escape sequence the text ends in the middle of: a bare ESC, a CSI without its final byte,
+ *  an OSC without its terminator or a charset designation cut before its final byte (`ESC (` of
+ *  `ESC ( B`, which ncurses' sgr0 starts with). Output read in chunks can stop inside one. */
+export const INCOMPLETE_ANSI_ESCAPE = /\x1b(?:\[[\x20-\x3f]*|\][^\x07\x1b]*\x1b?|[\x20-\x2f]+)?$/;
 
 export function stripAnsi(str: string): string {
   return str
     .replace(ANSI_CUF, (_, n) => ' '.repeat(parseInt(n || '1', 10)))
     .replace(ANSI_CSI, '')
     .replace(ANSI_OSC, '')
+    .replace(ANSI_NF, '')
     .replace(ANSI_SHORT, '')
     .replace(/\x1b/g, '');
 }
@@ -23,6 +27,7 @@ export function ansiToSpaces(str: string): string {
     .replace(ANSI_CUF, (_, n) => ' '.repeat(parseInt(n || '1', 10)))
     .replace(ANSI_CSI, ' ')
     .replace(ANSI_OSC, ' ')
+    .replace(ANSI_NF, ' ')
     .replace(ANSI_SHORT, ' ')
     .replace(/\x1b/g, '')
     .replace(/ {2,}/g, ' ');
