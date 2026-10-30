@@ -837,6 +837,22 @@ status: open · scope: queued broader finding, not approved implementation
 
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
+### T438 · FNF[cli-login-url-capture-2] · login URL follow-ups: device code read at send time, terminal scanner sends a URL head, wrapped tail, `ESC ( B`, resize timers (+4)
+
+status: open
+From the T433 review (2026-10-30). Line numbers as of the T433 branch (fnf/433-cli-login-url-capture).
+
+1. PRE-EXISTING, minor, latent, connected: the device code in the same `auth-url` frame is read at send time (api routes/cli-login-banner.ts `offerAuthUrl` ~:730; shared auth-banner-parser.ts `extractDeviceCode` ~:121), so a chunk boundary between the URL and the code line (codex prints the code after a blank line) sends the frame without the code (70 of 77 URL-sending first-chunk splits of the codex banner) or with a truncated one (`ABCD-1234` of `ABCD-12345`). Fix: for device-code providers hold the frame for the code within the same deadline and require a terminator after it.
+2. PRE-EXISTING, minor: `scanOauthPrompts` (api routes/terminal.ts ~:411-441) emits an `oauth_prompt` frame with the head of a URL when a chunk ends inside it, then resets its buffer, so the full URL is never emitted (probe: 50 of 102 characters). Nothing consumes `oauth_prompt` (only the route, terminal-parser.test.ts and shared sandbox/types.ts): remove the scanner and the frame type, or reuse `extractWrappedUrl`.
+3. PRE-EXISTING, minor: a hard-wrapped URL whose last piece shares its line with text loses that piece (auth-banner-parser.ts ~:101; the old code joined the text into the URL, also unusable). No measured banner does it.
+4. PRE-EXISTING, minor: `stripAnsi` removes ESC plus one character (`ANSI_SHORT`, auth-banner-parser.ts ~:5), so `ESC ( B` (what ncurses `sgr0` emits) right after a URL leaves a `B` on it. No measured provider emits it. Strip the whole charset-designation sequence.
+5. PRE-EXISTING, minor: antigravity's two `setTimeout(sizeTerminalPty, 250 | 1200)` (cli-login-banner.ts ~:532-533) are untracked, so they survive `cleanupSession` and a late resize on a removed container logs a warning. Track them and clear them in cleanup.
+
+### T439 · FNF[auth-url-resend] [design] · a pause of 1 s or more inside the login URL still sends its head
+
+status: open
+From the T433 review (2026-10-30). Residual of T433's fallback: api routes/cli-login-banner.ts `offerAuthUrl` (~:689-707) takes the end of the output as the URL's end once `AUTH_URL_SETTLE_MS` (1 s) has passed since the URL first showed, so output that stops inside the URL for that long (or an event-loop stall of that length) sends the head with nothing to correct it. T433's other option, re-send when the URL grows, would cover it: keep extracting after a deadline send and send a second `auth-url` frame when the URL grew (the web re-applies `setAuthUrl` per frame; verify, and decide how amp's flow choice and the device code behave on a second frame). Real chunking inside the URL has never been observed: decide whether it is worth the mechanism.
+
 ## Done
 
 - T118 — repository CLI set is a union — PR #934 (110bb4933), 2026-10-26; final reviews/gates recorded in T118 evidence, all8 main CI green, dev libs/API/web/worker verified; finish-then-pause boundary complete.
