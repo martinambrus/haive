@@ -121,6 +121,14 @@ describe('generateFilesStep.apply — the rules region', () => {
     expect(out.agentRulesOverride).toBe('- the repository rule');
   });
 
+  it('writes an override that repeats a line as saved, every occurrence of it', async () => {
+    const override =
+      '# Rules\n\nRun the tests before you finish.\n\n    cd packages/api\n    pnpm test\n    cd ../web\n    pnpm test\n\nRun the tests before you finish.\n';
+    await apply(ctx(rulesOverrideDb(override).db), detect([{ name: 'claude-code' }]));
+
+    expect(await regionOnDisk()).toBe(`${CLI_RULES_START}\n${override}${CLI_RULES_END}`);
+  });
+
   it('writes the default rules for a repository with no override, and returns null', async () => {
     const out = await apply(ctx(rulesOverrideDb(null).db), detect([{ name: 'claude-code' }]));
 

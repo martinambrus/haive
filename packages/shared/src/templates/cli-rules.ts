@@ -115,6 +115,14 @@ const closesFence = (line: string, opener: string): boolean => {
   return t.length >= opener.length && [...t].every((c) => c === opener[0]);
 };
 
+/** The shape every rules block ends in: runs of 3+ newlines collapse to 2, trimmed, exactly one
+ *  trailing newline. */
+const shapeRulesText = (text: string): string => text.replace(/\n{3,}/g, '\n\n').trim() + '\n';
+
+/** Wrap shaped rules in the cli-rules region markers. */
+const wrapRulesBlock = (shaped: string): string =>
+  `${CLI_RULES_START}\n${shaped}${CLI_RULES_END}\n`;
+
 /** Merge rule blocks line-by-line, deduplicating on trimmed content so the
  *  first-seen capitalization and leading whitespace win. A block identical to an
  *  earlier one adds nothing. Structure is never deduplicated line by line: a line
@@ -155,12 +163,7 @@ export function dedupLines(blocks: string[]): string {
       out.push(line);
     }
   }
-  return (
-    out
-      .join('\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim() + '\n'
-  );
+  return shapeRulesText(out.join('\n'));
 }
 
 /** Build the full cli-rules block (markers included) from rule strings.
@@ -170,8 +173,7 @@ export function dedupLines(blocks: string[]): string {
 export function buildCliRulesBlock(rulesContents: readonly string[]): string | null {
   const withRules = rulesContents.filter((c) => c.trim().length > 0);
   if (withRules.length === 0) return null;
-  const combined = dedupLines(withRules.slice());
-  return `${CLI_RULES_START}\n${combined}${CLI_RULES_END}\n`;
+  return wrapRulesBlock(dedupLines(withRules.slice()));
 }
 
 /** Resolve a provider's stored rulesContent to the rules that actually reach its
@@ -195,9 +197,17 @@ export function inheritsDefaultRules(rulesContent: string): boolean {
  *  the empty one included, is the override and is used as written. It never inherits the default
  *  through a shipped-default hash the way a provider's rules do (`resolveEffectiveRules`), and an
  *  empty or whitespace-only override renders no block, as for any empty input. Personal provider
- *  rules do not enter: they reach Haive's own agents through dispatch alone. */
+ *  rules do not enter: they reach Haive's own agents through dispatch alone.
+ *
+ *  An override is never deduplicated: it is the repository's own text, so a line it repeats is an
+ *  instruction written twice (the same command under two headings), and dropping it would make the
+ *  rules the agents read differ from the override that was saved. It only gets the shape of every
+ *  block. The default keeps the merge, which drops nothing from it, so the regions already written
+ *  from it stay byte-identical. */
 export function buildRepoCliRulesBlock(override: string | null | undefined): string | null {
-  return buildCliRulesBlock([override ?? DEFAULT_AGENT_RULES]);
+  if (override === null || override === undefined) return buildCliRulesBlock([DEFAULT_AGENT_RULES]);
+  if (override.trim().length === 0) return null;
+  return wrapRulesBlock(shapeRulesText(override));
 }
 
 /** Return the marker-inclusive span between `startMarker` and `endMarker`
