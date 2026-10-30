@@ -276,7 +276,7 @@ repoRoutes.get('/', async (c) => {
     where: eq(schema.repositories.userId, userId),
     orderBy: [desc(schema.repositories.createdAt)],
     // Large, and this list is polled every 5s.
-    columns: { renderContext: false },
+    columns: { renderContext: false, agentRulesOverride: false },
   });
 
   const erroredUploads = rows.filter(
@@ -545,7 +545,8 @@ repoRoutes.post('/', requireNewWorkAllowed, async (c) => {
     }),
   );
 
-  return c.json({ repository: repo }, 201);
+  const { agentRulesOverride: _rules, ...rest } = repo;
+  return c.json({ repository: rest }, 201);
 });
 
 repoRoutes.post('/upload', requireNewWorkAllowed, async (c) => {
@@ -670,7 +671,8 @@ repoRoutes.post('/upload', requireNewWorkAllowed, async (c) => {
     });
   });
 
-  return c.json({ repository: repo }, 201);
+  const { agentRulesOverride: _rules, ...rest } = repo;
+  return c.json({ repository: rest }, 201);
 });
 
 function sessionFromRow(row: typeof schema.repoUploads.$inferSelect) {
@@ -926,7 +928,8 @@ repoRoutes.post('/upload/:id/complete', requireNewWorkAllowed, async (c) => {
     }),
   );
 
-  return c.json({ repository: repo, session: { id: row.id, status: 'complete' } }, 201);
+  const { agentRulesOverride: _rules, ...rest } = repo;
+  return c.json({ repository: rest, session: { id: row.id, status: 'complete' } }, 201);
 });
 
 repoRoutes.delete('/upload/:id', async (c) => {
@@ -958,8 +961,8 @@ repoRoutes.get('/:id', async (c) => {
   const db = getDb();
   const repo = await db.query.repositories.findFirst({
     where: and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)),
-    // Large; the list leaves both out too.
-    columns: { fileTree: false, renderContext: false },
+    // Large; the list leaves them out too.
+    columns: { fileTree: false, renderContext: false, agentRulesOverride: false },
   });
   if (!repo) throw new HttpError(404, 'Repository not found');
   return c.json({
@@ -1077,7 +1080,12 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
     await markProjectStateDirty(tx, id);
     return rows;
   });
-  const { fileTree: _drop, renderContext: _context, ...rest } = updated[0]!;
+  const {
+    fileTree: _drop,
+    renderContext: _context,
+    agentRulesOverride: _rules,
+    ...rest
+  } = updated[0]!;
   return c.json({ repository: rest });
 });
 
