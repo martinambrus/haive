@@ -196,6 +196,7 @@ interface BannerSession {
   firstChunkLogged: boolean;
   menuAdvanceTimer: NodeJS.Timeout | null;
   menuAdvanceCount: number;
+  resizeTimers: NodeJS.Timeout[];
 }
 
 const CAPTURE_TIMEOUT_MS = 60_000;
@@ -496,6 +497,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       firstChunkLogged: false,
       menuAdvanceTimer: null,
       menuAdvanceCount: 0,
+      resizeTimers: [],
     };
 
     activeSession = session;
@@ -529,8 +531,10 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
             );
           });
       };
-      setTimeout(sizeTerminalPty, 250);
-      setTimeout(sizeTerminalPty, 1200);
+      session.resizeTimers.push(
+        setTimeout(sizeTerminalPty, 250),
+        setTimeout(sizeTerminalPty, 1200),
+      );
     }
 
     stream.on('data', (chunk: Buffer) => onStreamData(session, chunk));
@@ -1319,6 +1323,8 @@ async function cleanupSession(session: BannerSession): Promise<void> {
     clearTimeout(session.menuAdvanceTimer);
     session.menuAdvanceTimer = null;
   }
+  for (const t of session.resizeTimers) clearTimeout(t);
+  session.resizeTimers = [];
   if (session.urlSettleTimer) {
     clearTimeout(session.urlSettleTimer);
     session.urlSettleTimer = null;

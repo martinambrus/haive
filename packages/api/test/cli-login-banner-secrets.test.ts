@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   attach: vi.fn(),
   start: vi.fn(),
   remove: vi.fn(),
+  resize: vi.fn(),
   probe: vi.fn(),
   exec: vi.fn(),
   queueError: undefined as Error | undefined,
@@ -88,6 +89,7 @@ beforeEach(() => {
   h.attach.mockReset();
   h.start.mockReset().mockResolvedValue(undefined);
   h.remove.mockReset().mockResolvedValue(undefined);
+  h.resize.mockReset().mockResolvedValue(undefined);
   h.exec.mockReset().mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' });
   h.queueError = undefined;
   h.createError = undefined;
@@ -128,7 +130,7 @@ afterEach(async () => {
 async function start(query = '', attached = true, providerId = PROVIDER) {
   const server = new EventEmitter();
   const docker = {
-    getContainer: () => ({ start: h.start, remove: h.remove, resize: async () => {} }),
+    getContainer: () => ({ start: h.start, remove: h.remove, resize: h.resize }),
   } as unknown as Docker;
   installCliLoginBannerWebSocket(server as Server, { docker });
   // The shared upgrade guard listens on the socket and the session registry tracks req.socket.
@@ -953,6 +955,44 @@ describe('CLI login banner startup cleanup', () => {
     } finally {
       vi.mocked(globalThis.setTimeout).mockRestore();
     }
+  });
+});
+
+describe('CLI login banner antigravity PTY size', () => {
+  const SIZE = { h: 40, w: 120 };
+
+  it('sizes the PTY at 250 ms and again at 1200 ms while the session is alive', async () => {
+    providerName = 'antigravity';
+    await start();
+    await vi.advanceTimersByTimeAsync(249);
+    expect(h.resize).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.resize.mock.calls).toEqual([[SIZE]]);
+    await vi.advanceTimersByTimeAsync(949);
+    expect(h.resize.mock.calls.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.resize.mock.calls).toEqual([[SIZE], [SIZE]]);
+  });
+
+  it('closing the dialog before 250 ms leaves no timer and no resize', async () => {
+    providerName = 'antigravity';
+    await start();
+    ws.close();
+    await settle();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(h.resize).not.toHaveBeenCalled();
+  });
+
+  it('closing the dialog between 250 and 1200 ms leaves one resize and no timer', async () => {
+    providerName = 'antigravity';
+    await start();
+    await vi.advanceTimersByTimeAsync(250);
+    ws.close();
+    await settle();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(h.resize.mock.calls).toEqual([[SIZE]]);
   });
 });
 
