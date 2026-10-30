@@ -1741,6 +1741,180 @@ describe('writeProjectStateRecord: the portable settings and the environment', (
     const [row] = s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
     expect(row).toMatchObject({ unit: 'settings/rtk-enabled.json', resolvedAt: null });
   });
+
+  describe('the agent-rules text setting', () => {
+    const NAME = 'agent-rules';
+    const UNIT = 'settings/agent-rules.md';
+    const MD = `${STATE_DIR}/${UNIT}`;
+    const PLANTED = `${SETTINGS}/agent-rules.json`;
+    const T = '# House rules\n\n- Keep it small.\n';
+    const T2 = '# House rules\n\n- Keep it small.\n- Mine.\n';
+    const U = '# House rules\n\n- Keep it small.\n- Theirs.\n';
+    const text = (root: string) => readFileSync(join(root, MD), 'utf8');
+    const rows = (s: Awaited<ReturnType<typeof setup>>) =>
+      s.fake.rows(schema.projectStateConflicts) as Record<string, unknown>[];
+    /** A checkout whose base names the file, as a sync or an earlier write left it. */
+    const named = async (s: Awaited<ReturnType<typeof setup>>, bytes: string, base = bytes) => {
+      await mkdir(join(s.root, SETTINGS), { recursive: true });
+      await writeFile(join(s.root, MD), bytes);
+      s.syncSeed({ [s.col.baseSnapshot]: { settings: { [NAME]: base } } });
+      await knownCheckout(s);
+    };
+
+    it('writes the text verbatim as the .md and names it in the base', async () => {
+      const s = await setup();
+      await setColumns(s, { agentRulesOverride: T });
+
+      const { written } = await s.writeFull(context(), true);
+
+      expect(text(s.root)).toBe(T);
+      expect(await settingFiles(s.root)).toEqual([MD]);
+      expect(written).toContain(MD);
+      expect(baseOf(s).settings[NAME]).toBe(T);
+    });
+
+    it('writes a 0-byte file for an explicit empty override and names the empty text in the base', async () => {
+      const s = await setup();
+      await setColumns(s, { agentRulesOverride: '' });
+
+      const { written } = await s.writeFull(context(), true);
+
+      expect(statSync(join(s.root, MD)).size).toBe(0);
+      expect(written).toContain(MD);
+      expect(baseOf(s).settings[NAME]).toBe('');
+      expect(Object.keys(baseOf(s).settings)).toEqual([NAME]);
+    });
+
+    it('rewrites a file that is not canonical to the canonical bytes', async () => {
+      const s = await setup();
+      await setColumns(s, { agentRulesOverride: T });
+      await named(s, T.replace(/\n/g, '\r\n'), T);
+
+      await s.writeFull(context(), true);
+
+      expect(text(s.root)).toBe(T);
+    });
+
+    it('removes the file once the column is back to NULL, and reports it', async () => {
+      const s = await setup();
+      await setColumns(s, { agentRulesOverride: T });
+      await s.writeFull(context(), true);
+      await setColumns(s, { agentRulesOverride: null });
+
+      const { removed } = await s.writeFull(context(), true);
+
+      expect(removed).toEqual([MD]);
+      expect(existsSync(join(s.root, MD))).toBe(false);
+      expect(baseOf(s).settings).toEqual({});
+    });
+
+    it('removes a file the previous base names where the column holds none', async () => {
+      const s = await setup();
+      await named(s, T);
+
+      const { removed } = await s.writeFull(context(), true);
+
+      expect(removed).toEqual([MD]);
+      expect(existsSync(join(s.root, MD))).toBe(false);
+    });
+
+    it('keeps the file of a column that holds the text, though the previous base names it', async () => {
+      const s = await setup();
+      await setColumns(s, { agentRulesOverride: T });
+      await named(s, T);
+
+      const { removed } = await s.writeFull(context(), true);
+
+      expect(removed).toEqual([]);
+      expect(text(s.root)).toBe(T);
+      expect(baseOf(s).settings[NAME]).toBe(T);
+    });
+
+    it('leaves a file the previous base never named', async () => {
+      const s = await setup();
+      await mkdir(join(s.root, SETTINGS), { recursive: true });
+      await writeFile(join(s.root, MD), T);
+
+      await expect(s.writeFull(context(), true)).rejects.toBeInstanceOf(ProjectStateMovedError);
+      expect(text(s.root)).toBe(T);
+    });
+
+    it('never touches a planted settings/agent-rules.json, whatever the column holds', async () => {
+      const s = await setup();
+      await mkdir(join(s.root, SETTINGS), { recursive: true });
+      await writeFile(join(s.root, PLANTED), '"planted"\n');
+      await knownCheckout(s);
+      await setColumns(s, { agentRulesOverride: T });
+
+      await s.writeFull(context(), true);
+      expect(text(s.root)).toBe(T);
+      expect(readFileSync(join(s.root, PLANTED), 'utf8')).toBe('"planted"\n');
+
+      await setColumns(s, { agentRulesOverride: null });
+      const { removed } = await s.writeFull(context(), true);
+      expect(removed).toEqual([MD]);
+      expect(readFileSync(join(s.root, PLANTED), 'utf8')).toBe('"planted"\n');
+    });
+
+    it('writes the other install’s text for a contested setting into the .md, and the base’s into the base', async () => {
+      const s = await setup();
+      await setColumns(s, { agentRulesOverride: T2 });
+      s.pend(UNIT, { base: T, local: T2, incoming: U });
+
+      await s.writeFull(context(), true);
+
+      expect(text(s.root)).toBe(U);
+      expect(baseOf(s).settings[NAME]).toBe(T);
+      expect(rows(s)).toHaveLength(1);
+      expect(rows(s)[0]).toMatchObject({ unit: UNIT, resolvedAt: null, local: { v: T2 } });
+    });
+
+    it('writes the other install’s empty text as a 0-byte file', async () => {
+      const s = await setup();
+      await setColumns(s, { agentRulesOverride: T2 });
+      s.pend(UNIT, { base: T, local: T2, incoming: '' });
+
+      await s.writeFull(context(), true);
+
+      expect(statSync(join(s.root, MD)).size).toBe(0);
+      expect(baseOf(s).settings[NAME]).toBe(T);
+    });
+
+    it('follows the column in the row’s local side, and closes the row once the column holds the other text', async () => {
+      const s = await setup();
+      await setColumns(s, { agentRulesOverride: T2 });
+      s.pend(UNIT, { base: T, local: 'an older text\n', incoming: U });
+
+      await s.writeFull(context(), true);
+      expect(rows(s)[0]).toMatchObject({ resolvedAt: null, local: { v: T2 } });
+
+      await setColumns(s, { agentRulesOverride: U });
+      await s.writeFull(context(), true);
+      expect(rows(s)[0]).toMatchObject({ resolution: 'converged' });
+      expect(text(s.root)).toBe(U);
+    });
+
+    it('closes the row as converged once the column holds the empty text the other install has', async () => {
+      const s = await setup();
+      await setColumns(s, { agentRulesOverride: '' });
+      s.pend(UNIT, { base: T, local: T2, incoming: '' });
+
+      await s.writeFull(context(), true);
+
+      expect(rows(s)[0]).toMatchObject({ resolution: 'converged' });
+      expect(statSync(join(s.root, MD)).size).toBe(0);
+    });
+
+    it('records the empty text as the row’s local side, not as an absent one', async () => {
+      const s = await setup();
+      await setColumns(s, { agentRulesOverride: '' });
+      s.pend(UNIT, { base: T, local: T2, incoming: U });
+
+      await s.writeFull(context(), true);
+
+      expect(rows(s)[0]).toMatchObject({ resolvedAt: null, local: { v: '' } });
+    });
+  });
 });
 
 /** Preparation is private, pre-intent IO. It must add no public record or unrelated file. */

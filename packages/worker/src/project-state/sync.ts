@@ -718,6 +718,7 @@ export async function syncProjectStateLocked(
       lspServerVersions: schema.repositories.lspServerVersions,
       chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
       reviewDimensions: schema.repositories.reviewDimensions,
+      agentRulesOverride: schema.repositories.agentRulesOverride,
       onboardingEnvironment: schema.repositories.onboardingEnvironment,
       onboardingTooling: schema.repositories.onboardingTooling,
       rtkChoiceMadeAt: schema.repositories.rtkChoiceMadeAt,

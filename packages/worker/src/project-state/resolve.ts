@@ -36,10 +36,12 @@ import {
   normalizeSetting,
   portableSettingsOf,
   settingColumnUpdate,
+  settingNameOfFile,
   renderContextColumnSchema,
   renderProjectState,
   renderSchema,
   sameValue,
+  TEXT_SETTINGS,
   type ProjectEnvironment,
   type ProjectRender,
   type ProjectStateClaim,
@@ -439,7 +441,8 @@ async function answerClaimQuestion(
 type RecordFile =
   { kind: 'absent' } | { kind: 'unreadable' } | { kind: 'file'; value: unknown; raw: Buffer };
 
-async function readRecordFile(repoPath: string, rel: string): Promise<RecordFile> {
+/** A text setting's file is its value; any other unit's file is JSON. */
+async function readRecordFile(repoPath: string, rel: string, isText: boolean): Promise<RecordFile> {
   try {
     const read = await readFileNoFollow(repoPath, rel, {
       strict: true,
@@ -447,14 +450,15 @@ async function readRecordFile(repoPath: string, rel: string): Promise<RecordFile
     });
     if (read === null) return { kind: 'absent' };
     if (read.truncated || !isUtf8(read.data)) return { kind: 'unreadable' };
-    return { kind: 'file', value: JSON.parse(read.data.toString('utf8')), raw: read.data };
+    const text = read.data.toString('utf8');
+    return { kind: 'file', value: isText ? text : JSON.parse(text), raw: read.data };
   } catch (err) {
     if (err instanceof SyntaxError || isPathContainmentError(err)) return { kind: 'unreadable' };
     throw err;
   }
 }
 
-const settingNameOf = (unit: string): string => unit.slice('settings/'.length, -'.json'.length);
+const settingNameOf = (unit: string): string => settingNameOfFile(unit)!;
 
 /** What the checkout's file holds for the unit, as the sync reads it: normalised, `undefined` where
  *  the file or the key is not there, `null` where the file is no valid value of the unit. */
@@ -499,7 +503,9 @@ async function answerSettingsQuestion(
   const environmental = isEnvironmentUnit(row.unit);
   const rel = `${PROJECT_STATE_DIR}/${row.unit.split('#')[0]}`;
   const incoming = conflictSideValue(row.incoming);
-  const file = await readRecordFile(repoPath, rel);
+  const name = settingNameOfFile(row.unit);
+  const isText = name !== null && TEXT_SETTINGS.has(name);
+  const file = await readRecordFile(repoPath, rel, isText);
   const held = fileValueOf(row.unit, file);
   if (held === null || !sameValue(held, incoming)) return moved();
 
@@ -512,6 +518,7 @@ async function answerSettingsQuestion(
       lspServerVersions: schema.repositories.lspServerVersions,
       chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
       reviewDimensions: schema.repositories.reviewDimensions,
+      agentRulesOverride: schema.repositories.agentRulesOverride,
       onboardingEnvironment: schema.repositories.onboardingEnvironment,
     })
     .from(schema.repositories)
@@ -641,7 +648,7 @@ async function answerSettingsQuestion(
     };
     written.push(rel);
   } else {
-    const again = await readRecordFile(repoPath, rel);
+    const again = await readRecordFile(repoPath, rel, isText);
     const unchanged =
       again.kind === file.kind &&
       (again.kind !== 'file' || (file.kind === 'file' && again.raw.equals(file.raw)));

@@ -671,6 +671,7 @@ async function main(): Promise<void> {
         lspServerVersions: schema.repositories.lspServerVersions,
         chromeDevtoolsMcpVersion: schema.repositories.chromeDevtoolsMcpVersion,
         reviewDimensions: schema.repositories.reviewDimensions,
+        agentRulesOverride: schema.repositories.agentRulesOverride,
         onboardingTooling: schema.repositories.onboardingTooling,
       })
       .from(schema.repositories)
