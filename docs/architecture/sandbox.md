@@ -221,7 +221,9 @@ the deadline or the stream's end the end of the output is taken as the end of th
 and amp device carry the code in the URL and send at once. `stripAnsi` strips a charset designation
 (`ESC ( B`, what ncurses' `sgr0` emits) whole, and `INCOMPLETE_ANSI_ESCAPE` holds a cut one back, so
 neither a URL nor a captured token gains a stray `B`. `cleanupSession` clears every timer the session
-armed, the two antigravity PTY resize timers included.
+armed, the two antigravity PTY resize timers and the 150 ms Enter after a token paste
+(`oneShotTimers`) included, and a chunk that arrives after cleanup starts no antigravity URL step or
+menu-advance timer.
 
 The terminal route increments `containers.attached_ws_count` only after acquiring the stream,
 and cleanup decrements only when that increment completed. Both updates are atomic
