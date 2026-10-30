@@ -535,7 +535,7 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+20)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+21)
 
 status: open · was modular #211
 
@@ -560,6 +560,7 @@ status: open · was modular #211
 19. (T401 review, 2026-10-30) PRE-EXISTING, minor: tests/e2e/helpers/auth.ts ~:46 `recordRegisteredUser` is module-private, so a user minted by `POST /admin/users` (as in forced-password.spec.ts) is unknown to the global teardown and the `users` fixture; a timed-out run leaks it until the CI database is dropped. Export it (or a registration helper for admin-minted users) and record such users.
 20. (T429 review, 2026-10-30) PRE-EXISTING, minor: nothing enforces that `allowFileTransport` is the one opt-in of the default `protocol.file.allow=never`: a caller's own later `-c protocol.file.allow=always`, or a `GIT_ALLOW_PROTOCOL` that lists `file` in a production source, lifts it silently (shared git-args.ts ~:130-132 passes the caller's argv verbatim; the env takes precedence, MEASURED). Production has none (only git-push.ts ~:147,155 set `http:https:ssh`). Pin it with a source-scan guard like git-exec-guard.test.ts.
 21. (T119 fix review, 2026-10-30) PRE-EXISTING, minor: api test/repo-artifact-reset.test.ts ~:1829,1849 create temp dirs under `os.tmpdir()` and never remove them; clean them up in an `afterEach`.
+22. (T448 review, 2026-10-30) PRE-EXISTING, minor: the UI-login e2e specs click submit right after `fill` with no hydration signal (tests/e2e/auth/forms.spec.ts ~:32,69,99,124 and harness/session-recovery/session-ordering.spec.ts); a click that beats hydration is a native navigation (a POST since T448), so the race remains. Wait for a hydration marker before submitting.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -901,6 +902,14 @@ From the T119 review (2026-10-30). PRE-EXISTING, minor.
 
 status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T20:16Z · last: 2026-10-30T20:16Z
 From the T401 review (2026-10-30). PRE-EXISTING, moderate (security). web components/auth-form.tsx ~:144 renders `<form onSubmit={handleSubmit}>` with no `method`, so a submit before React attaches the handler is a native GET: with JavaScript disabled the URL became `/login?email=...&password=...` (verified by the T401 driver), which puts the password in browser history, proxy and access logs. The same component serves login, register and setup. It is also why every UI-login e2e spec can race hydration. Fix direction: `method="post"` (check what Next answers to a POST on a page route first) or keep the submit disabled until hydrated; add a control that a pre-hydration submit never puts the password in the URL.
+
+### T449 · FNF[auth-form-prehydration-values] · values typed into the sign-in form before it hydrates are not submitted; a pre-hydration click looks live (+1)
+
+status: open
+From the T448 review (2026-10-30). PRE-EXISTING (identical before T448).
+
+1. Moderate: web components/auth-form.tsx ~:159,172,187 use controlled `value=` inputs and `handleSubmit` (~:86-104) posts React state, so text typed before hydration stays visible but is not submitted: with the scripts held back, a fill then a submit posts `{"email":"","password":""}` and the user sees "Validation failed" on a filled form (T448 evidence judge/slow-hydration-base.txt). Read the values with `new FormData(event.currentTarget)` at submit, or copy the DOM values into state on hydration. Browser autofill timing was not measured.
+2. Minor: a click on Sign in before hydration looks live but only re-renders the page (now by POST) and drops what was typed (~:197).
 
 ## Done
 
