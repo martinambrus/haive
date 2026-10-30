@@ -407,6 +407,50 @@ describe('a running editor whose launch spec cannot be read', () => {
   });
 });
 
+// What docker cannot be asked is neither another workspace nor a stale launch, so the editor is
+// kept whatever its registry says.
+describe('a running editor whose workspace label cannot be read', () => {
+  const { session, ensure } = repositoryEditor;
+  const key = ideSessionKey(session);
+  const name = ideRunnerName(session);
+
+  describe.each([
+    ['the current spec', () => ({ [SPEC_LABEL]: SPEC })],
+    ['no spec label', () => ({})],
+  ])('launched with %s', (_launch, labels) => {
+    it.each([...idleRegistries, ...heldRegistries])(
+      'is kept and returned: %s',
+      async (_registry, arrange) => {
+        const launched = labels();
+        seed(repositoryEditor, launched);
+        arrange(key);
+        h.state.unreadableLabel = RUNNER_SUBPATH_LABEL;
+
+        expect(await ensure()).toEqual({ container: name });
+
+        expect(mutations()).toEqual([]);
+        expect(h.state.containers.get(name)?.labels).toEqual({
+          [RUNNER_SUBPATH_LABEL]: SUBPATH,
+          ...launched,
+        });
+      },
+    );
+  });
+});
+
+describe('a running editor whose workspace label is empty', () => {
+  it('is recreated: a container from before the label existed mounts the whole volume', async () => {
+    const { session, ensure } = repositoryEditor;
+    const key = ideSessionKey(session);
+    const name = ideRunnerName(session);
+    seed(repositoryEditor, { [SPEC_LABEL]: SPEC, [RUNNER_SUBPATH_LABEL]: '' });
+
+    expect(await ensure()).toEqual({ container: name });
+
+    expect(mutations()).toEqual([`rm ${name}`, `hset ${key}`, `run ${name}`]);
+  });
+});
+
 describe('a fresh editor boot', () => {
   it('stamps the image and flags it launched with', async () => {
     await repositoryEditor.ensure();

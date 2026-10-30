@@ -415,7 +415,17 @@ async function ensureIdeRunnerStartedInner(
     // The editor mounts ONE workspace, and the resolved subpath can change under it (a Retry that
     // clears 01-worktree-setup's output re-resolves to the repository root). Reuse only while the
     // running container is the one for this workspace; its `.git` mount is that workspace's too.
-    if ((await runnerSubpathVerdict(name, workspaceSubpath)) === 'match') {
+    const verdict = await runnerSubpathVerdict(name, workspaceSubpath);
+    if (verdict === 'absent') {
+      // What docker cannot be asked is neither another workspace nor stale, as `launchIsStale`
+      // treats an unreadable spec: the editor is kept, not replaced on a guess.
+      log.warn(
+        { taskId, container: name, workspaceSubpath },
+        'ide runner workspace could not be read; keeping it',
+      );
+      return { container: name };
+    }
+    if (verdict === 'match') {
       if (!(await launchIsStale(name)) || (await editorHeld(taskId))) return { container: name };
       // Replacing removes this editor before the new one is launched, so make sure the image is
       // there first: a host that cannot pull (offline after a CODE_SERVER_IMAGE bump) keeps the
