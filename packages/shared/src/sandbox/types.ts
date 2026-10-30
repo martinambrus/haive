@@ -51,8 +51,7 @@ export type TerminalFrameType =
   | 'error'
   | 'ping'
   | 'pong'
-  | 'set_control_passthrough'
-  | 'oauth_prompt';
+  | 'set_control_passthrough';
 
 export interface InputFrame {
   type: 'input';
@@ -99,12 +98,6 @@ export interface SetControlPassthroughFrame {
   allow: boolean;
 }
 
-export interface OAuthPromptFrame {
-  type: 'oauth_prompt';
-  url: string;
-  service?: string;
-}
-
 export type TerminalFrame =
   | InputFrame
   | OutputFrame
@@ -114,10 +107,8 @@ export type TerminalFrame =
   | ErrorFrame
   | PingFrame
   | PongFrame
-  | SetControlPassthroughFrame
-  | OAuthPromptFrame;
+  | SetControlPassthroughFrame;
 
 export type TerminalClientFrame = InputFrame | ResizeFrame | PingFrame | SetControlPassthroughFrame;
 
-export type TerminalServerFrame =
-  OutputFrame | ConnectedFrame | ExitFrame | ErrorFrame | PongFrame | OAuthPromptFrame;
+export type TerminalServerFrame = OutputFrame | ConnectedFrame | ExitFrame | ErrorFrame | PongFrame;

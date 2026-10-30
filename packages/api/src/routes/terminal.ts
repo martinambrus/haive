@@ -21,11 +21,6 @@ const WS_PATH_PREFIX = '/terminal/';
 const KEEPALIVE_INTERVAL_MS = 30_000;
 const LOG_FLUSH_INTERVAL_MS = 2_000;
 const MAX_INPUT_BYTES = 8192;
-const OAUTH_BUFFER_MAX = 16_384;
-const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
-const URL_PATTERN = /https?:\/\/[^\s<>"'`\\]+/g;
-const URL_FULL_PATTERN = /^https?:\/\/[^\s<>"'`\\]+$/;
-const OAUTH_HINT_PATTERN = /oauth|authorize|auth\.|login\.|verification|device\/code/i;
 
 type ContainerRow = typeof schema.containers.$inferSelect;
 
@@ -114,17 +109,12 @@ async function runTerminalSession(
   let flushInterval: ReturnType<typeof setInterval> | undefined;
 
   let allowControlChars = false;
-  let oauthBuffer = '';
-  const seenOauthUrls = new Set<string>();
 
   const onStreamData = (chunk: Buffer) => {
     const text = chunk.toString('utf8');
     logBuffer.append(text);
     if (ws.readyState === WebSocket.OPEN) {
       sendFrame(ws, { type: 'output', data: text });
-      const { nextBuffer, newFrames } = scanOauthPrompts(text, oauthBuffer, seenOauthUrls);
-      oauthBuffer = nextBuffer;
-      for (const frame of newFrames) sendFrame(ws, frame);
     }
   };
 
@@ -408,36 +398,6 @@ export async function attachContainerStream(
   });
 }
 
-export function scanOauthPrompts(
-  chunk: string,
-  priorBuffer: string,
-  seen: Set<string>,
-): { nextBuffer: string; newFrames: TerminalServerFrame[] } {
-  let buffer = priorBuffer + chunk.replace(ANSI_PATTERN, '');
-  if (buffer.length > OAUTH_BUFFER_MAX) {
-    buffer = buffer.slice(-OAUTH_BUFFER_MAX);
-  }
-  const frames: TerminalServerFrame[] = [];
-  const matches = buffer.match(URL_PATTERN);
-  if (matches) {
-    for (const raw of matches) {
-      const url = raw.replace(/[.,;:)\]]+$/, '');
-      if (!OAUTH_HINT_PATTERN.test(url)) continue;
-      if (seen.has(url)) continue;
-      seen.add(url);
-      frames.push({ type: 'oauth_prompt', url, service: inferOauthService(url) });
-    }
-  }
-  const tailIdx = buffer.search(/\s[^\s]*$/);
-  const tail = tailIdx >= 0 ? buffer.slice(tailIdx + 1) : buffer;
-  let nextBuffer = tail;
-  if (tail && URL_FULL_PATTERN.test(tail)) {
-    const tailUrl = tail.replace(/[.,;:)\]]+$/, '');
-    if (seen.has(tailUrl)) nextBuffer = '';
-  }
-  return { nextBuffer, newFrames: frames };
-}
-
 export function stripControlBytes(input: string): string {
   let out = '';
   for (let i = 0; i < input.length; i += 1) {
@@ -446,17 +406,4 @@ export function stripControlBytes(input: string): string {
     out += input[i];
   }
   return out;
-}
-
-function inferOauthService(url: string): string | undefined {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    if (host.includes('anthropic') || host.includes('claude')) return 'claude';
-    if (host.includes('openai')) return 'codex';
-    if (host.includes('google') || host.includes('gemini')) return 'gemini';
-    if (host.includes('sourcegraph') || host.includes('ampcode')) return 'amp';
-    return undefined;
-  } catch {
-    return undefined;
-  }
 }
