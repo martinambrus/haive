@@ -839,7 +839,7 @@ From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `M
 
 ### T445 · FNF[first-import-visibility] · a first sync silently replaces a locally typed setting; a refused checkout value is only logged (+2)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T23:56Z · last: 2026-10-30T23:56Z
 From the T119 review (2026-10-30). PRE-EXISTING, minor. Cross-reference: T317 [design] (an RTK choice loses to the first record import).
 
 1. shared project-state merge.ts ~:29,46,58 computes `overwritten` (a local value an incoming one replaced) and nothing outside merge.ts reads it, so a first sync with no base replaces a locally typed value of every portable setting without a word. Surface it in the sync's answers or log it at warn with the unit names.
