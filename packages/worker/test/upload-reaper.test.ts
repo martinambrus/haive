@@ -1409,6 +1409,8 @@ describe('T323: repeated orphan removal failures', () => {
     expect(guard.debugs).toHaveLength(0);
   });
 
+  // 1001 files through six passes: past vitest's 20 s default under a loaded CI runner, and a timed-out
+  // run keeps reaping in the background into the next test's warnings.
   it('keeps remembered failures at capacity across repeated passes', async () => {
     for (let i = 0; i < 1001; i += 1) await orphan();
     guard.removal = () => true;
@@ -1429,7 +1431,7 @@ describe('T323: repeated orphan removal failures', () => {
     await reapAbandonedUploads(db());
     expect(guard.warnings).toHaveLength(2005);
     expect(guard.debugs).toHaveLength(3000);
-  });
+  }, 120_000);
 
   it('warns separately for the same relative path in different storage roots', async () => {
     const id = randomUUID();
