@@ -35,9 +35,6 @@ interface AuthFormProps {
 
 export function AuthForm({ mode, initialStatus, initialInviteToken }: AuthFormProps) {
   const router = useRouter();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [setupToken, setSetupToken] = useState('');
   // Not state: it comes from the URL the page was rendered for and never changes under us.
   const inviteToken = initialInviteToken ?? '';
   const [error, setError] = useState<string | null>(null);
@@ -85,6 +82,14 @@ export function AuthForm({ mode, initialStatus, initialInviteToken }: AuthFormPr
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    // The fields are uncontrolled on purpose: a value typed or autofilled before React attaches is
+    // in the DOM but in no state, and a controlled input is reset to its state by the first
+    // re-render (the form emptied after a rejected submit). Read them before any await, as
+    // currentTarget is null after it.
+    const fields = new FormData(event.currentTarget);
+    const email = String(fields.get('email') ?? '');
+    const password = String(fields.get('password') ?? '');
+    const setupToken = String(fields.get('setupToken') ?? '');
     setError(null);
     setPending(true);
     try {
@@ -149,16 +154,7 @@ export function AuthForm({ mode, initialStatus, initialInviteToken }: AuthFormPr
         <form method="post" onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="email">Email</Label>
-            <Input
-              id="email"
-              name="email"
-              type="email"
-              autoComplete="email"
-              autoFocus
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
+            <Input id="email" name="email" type="email" autoComplete="email" autoFocus required />
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="password">Password</Label>
@@ -169,8 +165,6 @@ export function AuthForm({ mode, initialStatus, initialInviteToken }: AuthFormPr
               autoComplete={isLogin ? 'current-password' : 'new-password'}
               required
               minLength={isLogin ? undefined : 12}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
             />
           </div>
           {/* Only when the api says this install demands one. Asking unconditionally would invite
@@ -184,8 +178,6 @@ export function AuthForm({ mode, initialStatus, initialInviteToken }: AuthFormPr
                 type="password"
                 autoComplete="off"
                 required
-                value={setupToken}
-                onChange={(e) => setSetupToken(e.target.value)}
               />
               <p className="text-xs text-neutral-500">
                 This install sets <code>SETUP_TOKEN</code>. Find it in the <code>.env</code> beside
