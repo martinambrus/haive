@@ -198,7 +198,10 @@ interface BannerSession {
   firstChunkLogged: boolean;
   menuAdvanceTimer: NodeJS.Timeout | null;
   menuAdvanceCount: number;
-  resizeTimers: NodeJS.Timeout[];
+  /** Fire-and-forget timers: the antigravity PTY resizes and the Enter after a token paste. Each is
+   *  kept here so cleanupSession can clear it, since one that fired after cleanup would act on a
+   *  removed container or write to an ended stream. */
+  oneShotTimers: NodeJS.Timeout[];
 }
 
 const CAPTURE_TIMEOUT_MS = 60_000;
@@ -499,7 +502,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       firstChunkLogged: false,
       menuAdvanceTimer: null,
       menuAdvanceCount: 0,
-      resizeTimers: [],
+      oneShotTimers: [],
     };
 
     activeSession = session;
@@ -533,7 +536,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
             );
           });
       };
-      session.resizeTimers.push(
+      session.oneShotTimers.push(
         setTimeout(sizeTerminalPty, 250),
         setTimeout(sizeTerminalPty, 1200),
       );
@@ -612,13 +615,15 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
           // sees the submit keystroke. Sending both in the same write is
           // interpreted as a single paste event and does not trigger submit.
           const wrote = session.stream.write(token);
-          setTimeout(() => {
-            try {
-              session.stream.write('\r');
-            } catch {
-              // ignore
-            }
-          }, 150);
+          session.oneShotTimers.push(
+            setTimeout(() => {
+              try {
+                session.stream.write('\r');
+              } catch {
+                // ignore
+              }
+            }, 150),
+          );
           log.info({ providerId: session.providerId, wrote }, 'token written');
         } catch (err) {
           log.warn(
@@ -1338,8 +1343,8 @@ async function cleanupSession(session: BannerSession): Promise<void> {
     clearTimeout(session.menuAdvanceTimer);
     session.menuAdvanceTimer = null;
   }
-  for (const t of session.resizeTimers) clearTimeout(t);
-  session.resizeTimers = [];
+  for (const t of session.oneShotTimers) clearTimeout(t);
+  session.oneShotTimers = [];
   if (session.urlSettleTimer) {
     clearTimeout(session.urlSettleTimer);
     session.urlSettleTimer = null;
