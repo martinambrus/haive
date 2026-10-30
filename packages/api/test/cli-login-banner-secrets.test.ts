@@ -1277,4 +1277,16 @@ describe('CLI login banner auth URL chunking', () => {
     release();
     await settle();
   });
+
+  it('antigravity: output after the sign-in presses no Enter, even once the URL scrolled out', async () => {
+    const release = await signInWhileUrlHeld();
+    await vi.advanceTimersByTimeAsync(1000);
+    const write = vi.spyOn(stream, 'write');
+    // More repainted TUI output than the 64 KiB raw buffer holds pushes the URL, and its 'oauth2', out.
+    stream.emit('data', Buffer.from('⠋'.repeat(70 * 1024)));
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(write).not.toHaveBeenCalledWith('\r');
+    release();
+    await settle();
+  });
 });
