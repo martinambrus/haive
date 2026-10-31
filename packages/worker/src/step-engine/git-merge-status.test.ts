@@ -10,6 +10,6 @@ it('#280 fix1 mergeCommitted rejects failed status even when the feature is an a
     if (argv.includes('status')) return { code: 128, stdout: '', stderr: 'unreadable index' };
     return { code: 0, stdout: '', stderr: '' };
   });
-  expect(await mergeCommitted('/repo', 'feature')).toBe(false);
+  await expect(mergeCommitted('/repo', 'feature')).rejects.toThrow(/git status.*unreadable index/);
   expect(vi.mocked(gitRun).mock.calls.some(([, argv]) => argv.includes('merge-base'))).toBe(false);
 });

@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { failGit, noGit, type FakeGit } from '../../test/support/fake-git.js';
 import {
+  mergeCommitted,
   abortMerge,
   abortOtherMerge,
   captureFixBaseline,
@@ -410,5 +411,38 @@ describe('D5 squashMergeCommit', () => {
     const { dir, before } = await merged();
     expect(await squashMergeCommit(dir, before, 'sq', IDENTITY, 'feature/x')).toBe(await sha(dir));
     expect((await git(dir, ['rev-list', '--count', 'HEAD'])).trim()).toBe('2');
+  });
+});
+
+describe('T397 merge completion failures are not an incomplete resolution', () => {
+  it.each([
+    ['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--diff-filter=U'],
+    ['ls-files', '-u'],
+    ['add'],
+    ['commit'],
+  ])('T397 rejects a failed %j without committing', async (...argv) => {
+    const dir = await conflictOpen();
+    await write(dir, 'base.txt', 'resolved\n');
+    const before = await sha(dir);
+    await failing(argv, async () => {
+      await expect(completeMergeHostSide(dir, IDENTITY, 'feature/x')).rejects.toThrow(
+        /git .*failed/,
+      );
+    });
+    expect(await sha(dir)).toBe(before);
+    expect(await mergeIsOpen(dir)).toBe(true);
+    expect(await completeMergeHostSide(dir, IDENTITY, 'feature/x')).toBe(true);
+  });
+  it('T397 a failed mergeCommitted status read throws rather than answering false', async () => {
+    const dir = await clean();
+    await failing(['--no-optional-locks', 'status'], async () => {
+      await expect(mergeCommitted(dir, 'feature/x')).rejects.toThrow(/git status.*failed/);
+    });
+  });
+  it('T397 a failed ancestry read throws rather than answering false', async () => {
+    const dir = await clean();
+    await failing(['merge-base', '--is-ancestor'], async () => {
+      await expect(mergeCommitted(dir, 'feature/x')).rejects.toThrow(/git merge-base.*failed/);
+    });
   });
 });

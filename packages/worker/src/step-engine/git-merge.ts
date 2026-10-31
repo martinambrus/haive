@@ -8,7 +8,6 @@ import { logger } from '@haive/shared/logger';
 import {
   chmodNoFollow,
   chownNoFollow,
-  isPathContainmentError,
   lstatNoFollow,
   readdirNoFollow,
   readLinkNoFollow,
@@ -40,14 +39,18 @@ import { REPO_IS_DATA_MERGE_LINES, safeRef, safeTitle } from './steps/_untrusted
 /** True once `branch` is merged into `worktreePath`'s HEAD: an aborted merge also leaves no
  *  MERGE_HEAD and nothing unmerged, so what marks a commit is that the branch is in HEAD. */
 export async function mergeCommitted(worktreePath: string, branch: string): Promise<boolean> {
-  const head = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
-  if (head.code === 0) return false; // merge still open (not committed)
+  const head = await revParse(worktreePath, 'MERGE_HEAD');
+  if (head !== null) return false; // merge still open (not committed)
   const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
-  if (status.code !== 0) return false;
+  if (status.code !== 0) {
+    throw new Error(`git status failed in ${worktreePath}: ${gitDetail(status)}`);
+  }
   const unmerged = status.stdout.split('\n').some((l) => /^(DD|AU|UD|UA|DU|AA|UU) /.test(l));
   if (unmerged) return false;
   const ancestor = await gitRun(worktreePath, ['merge-base', '--is-ancestor', branch, 'HEAD']);
-  return ancestor.code === 0;
+  if (ancestor.code === 0) return true;
+  if (ancestor.code === 1) return false;
+  throw new Error(`git merge-base failed in ${worktreePath}: ${gitDetail(ancestor)}`);
 }
 
 function nulPaths(out: string): string[] {
@@ -593,10 +596,10 @@ async function stagedTree(dir: string): Promise<TreeResult> {
  *  file back at its path. The partner is found by content, never by the name git chose: the same
  *  blob stands beside the moved file on its side, where the other side holds a directory, and its
  *  side changed it since the merge base: git takes the directory cleanly where it did not. */
-async function resolvingPaths(dir: string, unmerged: string[]): Promise<string[] | null> {
+async function resolvingPaths(dir: string, unmerged: string[]): Promise<string[]> {
   if (unmerged.length === 0) return [];
   const listed = await gitRun(dir, ['ls-files', '-u', '-z'], undefined, LISTING_BUFFER);
-  if (listed.code !== 0) return null;
+  if (listed.code !== 0) throw new Error(`git ls-files failed in ${dir}: ${gitDetail(listed)}`);
   const stages = new Map<string, Map<string, string>>();
   for (const record of listed.stdout.split('\0')) {
     const tab = record.indexOf('\t');
@@ -621,7 +624,8 @@ async function resolvingPaths(dir: string, unmerged: string[]): Promise<string[]
         { GIT_LITERAL_PATHSPECS: '1' },
         LISTING_BUFFER,
       );
-      if (siblings.code !== 0) return null;
+      if (siblings.code !== 0)
+        throw new Error(`git ls-tree failed in ${dir}: ${gitDetail(siblings)}`);
       for (const entry of siblings.stdout.split('\0')) {
         const tab = entry.indexOf('\t');
         if (tab === -1) continue;
@@ -630,14 +634,19 @@ async function resolvingPaths(dir: string, unmerged: string[]): Promise<string[]
         if (sibling === p || type !== 'blob' || object !== blob) continue;
         if (base === undefined) {
           const found = await gitRun(dir, ['merge-base', 'HEAD', 'MERGE_HEAD']);
+          if (found.code !== 0 && found.code !== 1)
+            throw new Error(`git merge-base failed in ${dir}: ${gitDetail(found)}`);
           base = found.code === 0 ? found.stdout.trim() : null;
         }
         if (base !== null) {
-          const was = await gitRun(dir, ['rev-parse', '-q', '--verify', `${base}:${sibling}`]);
-          if (was.code === 0 && was.stdout.trim() === object) continue;
+          const was = await revParse(dir, `${base}:${sibling}`);
+          if (was === object) continue;
         }
-        const kind = await gitRun(dir, ['cat-file', '-t', `${other}:${sibling}`]);
-        if (kind.code === 0 && kind.stdout.trim() === 'tree') partners.add(sibling);
+        const otherObject = await revParse(dir, `${other}:${sibling}`);
+        if (otherObject === null) continue;
+        const kind = await gitRun(dir, ['cat-file', '-t', otherObject]);
+        if (kind.code !== 0) throw new Error(`git cat-file failed in ${dir}: ${gitDetail(kind)}`);
+        if (kind.stdout.trim() === 'tree') partners.add(sibling);
       }
     }
   }
@@ -666,7 +675,12 @@ export async function captureFixBaseline(
     return { unavailable: err instanceof Error ? err.message : String(err) };
   }
   const [head, mergeHead, unmerged] = read;
-  const resolving = unmerged === null ? null : await resolvingPaths(dir, unmerged);
+  let resolving: string[] | null;
+  try {
+    resolving = unmerged === null ? null : await resolvingPaths(dir, unmerged);
+  } catch (err) {
+    return { unavailable: err instanceof Error ? err.message : String(err) };
+  }
   if (head === null || mergeHead === null || resolving === null) {
     return { unavailable: 'git could not read the merge' };
   }
@@ -1298,7 +1312,8 @@ export async function completeMergeHostSide(
     undefined,
     LISTING,
   );
-  if (listed.code !== 0) return false;
+  if (listed.code !== 0)
+    throw new Error(`git diff failed in ${worktreePath}: ${gitDetail(listed)}`);
   const files: string[] = [];
   for (const name of nulPaths(listed.stdout)) {
     const decoded = utf8Name(name);
@@ -1307,22 +1322,11 @@ export async function completeMergeHostSide(
     files.push(decoded);
   }
   const resolving = await resolvingPaths(worktreePath, files);
-  if (resolving === null) return false;
   // The worktree is under `.haive/`, which the sandbox mounts read-write, so it is SPLIT rather
   // than used as the anchor: every path git reported is walked a component at a time.
   const { anchor, prefix } = workspaceAnchor(worktreePath);
   for (const f of files) {
-    let content: string | null;
-    try {
-      content = await readTextNoFollow(anchor, `${prefix}${f}`, { strict: true });
-    } catch (err) {
-      // A REFUSAL must not collapse into the `null` below, which means "deleted as part of the
-      // resolution" and lets the commit proceed: a path we cannot read is one whose conflict
-      // markers we cannot check, so the merge stays incomplete instead. Every other read failure
-      // keeps its old meaning, since `.catch(() => null)` treated those as resolved-by-deletion.
-      if (isPathContainmentError(err)) return false;
-      content = null;
-    }
+    const content = await readTextNoFollow(anchor, `${prefix}${f}`, { strict: true });
     if (content === null) continue; // deleted as part of the resolution
     if (/^(<{7}|>{7})( |$)/m.test(content)) return false; // markers remain
   }
@@ -1334,10 +1338,11 @@ export async function completeMergeHostSide(
       ['add', '-A', '--', ...resolving.slice(i, i + PATHSPEC_CHUNK)],
       { GIT_LITERAL_PATHSPECS: '1' },
     );
-    if (add.code !== 0) return false;
+    if (add.code !== 0) throw new Error(`git add failed in ${worktreePath}: ${gitDetail(add)}`);
   }
   const commit = await gitRun(worktreePath, ['commit', '--no-edit'], gitEnv);
-  if (commit.code !== 0) return false;
+  if (commit.code !== 0)
+    throw new Error(`git commit failed in ${worktreePath}: ${gitDetail(commit)}`);
   return mergeCommitted(worktreePath, branch);
 }
 
