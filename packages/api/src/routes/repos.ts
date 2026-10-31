@@ -2815,6 +2815,11 @@ repoRoutes.post('/:id/remote', async (c) => {
     }
     throw err;
   };
+  // Keep the column aligned with Git: lock the repository row first, insert its
+  // audit, change Git, then write the column. Callback-visible failures restore
+  // Git while that row is still locked, before a queued relink can snapshot it.
+  // Only a COMMIT failure restores after the lock is released: a concurrent relink
+  // or an applied COMMIT with a lost acknowledgement can still race that fallback.
   try {
     await db.transaction(async (tx) => {
       const [stored] = await tx
