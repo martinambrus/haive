@@ -275,6 +275,7 @@ jobs:
           worker test/dead-task-boot.test.ts DEAD_TASK_BOOT_TEST_URL dead_task_boot_test pg
           worker test/upload-reaper-db.test.ts UPLOAD_REAPER_TEST_URL upload_reaper_test pg
           worker test/step-row-lock-order-db.test.ts WORKER_STEP_ROW_LOCK_ORDER_TEST_URL worker_step_row_lock_order_test pg
+          worker test/task-cancel-guard-db.test.ts WORKER_TASK_CANCEL_GUARD_TEST_URL worker_task_cancel_guard_test pg
           api test/terminal-attach-db.test.ts TERMINAL_ATTACH_TEST_URL terminal_attach_test pg
           api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test pg
           api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test pg
