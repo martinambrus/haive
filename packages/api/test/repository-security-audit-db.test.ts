@@ -228,6 +228,51 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       removed: [connection],
     });
   });
+  const securityCases = [
+    ['secretMaskEnabled', false, false],
+    ['secretMaskAllow', ['private'], 1],
+    ['secretMaskDenyExtend', ['other'], 1],
+    ['agentRulesOverride', 'synthetic-rule-content', true],
+    [
+      'appAuth',
+      {
+        enabled: true,
+        loginUrl: '/login',
+        usernameSelector: '#user',
+        passwordSelector: '#pass',
+        submitSelector: '#go',
+        successCondition: { type: 'url_contains', value: '/home' },
+      },
+      true,
+    ],
+    ['verifyCommands', { test: 'synthetic-command' }, 1],
+    ['prWorkflowEnabled', false, false],
+  ] as const;
+  for (const [field, value, safeValue] of securityCases)
+    for (const refused of [false, true])
+      it(`security field ${field}: ${refused ? 'refused row rolls back' : 'names only the actual field and its new safe value'}`, async () => {
+        const before = await stored();
+        const outboxBefore = await db.select().from(schema.projectStateOutbox);
+        if (refused) await refuseAudit(db);
+        const res = await sendSetting('tooling', { [field]: value });
+        expect(res.status).toBe(refused ? 500 : 200);
+        const rows = await audits(db);
+        expect(rows).toHaveLength(refused ? 0 : 1);
+        if (refused) {
+          expect(await stored()).toEqual(before);
+          expect(await db.select().from(schema.projectStateOutbox)).toEqual(outboxBefore);
+        } else {
+          expect(rows[0]).toMatchObject({
+            action: 'repository.security.update',
+            metadata: { fields: [field], values: { [field]: safeValue } },
+          });
+          expect(JSON.stringify(rows)).not.toMatch(
+            /synthetic-rule-content|synthetic-command|#user|#pass/,
+          );
+          expect((await sendSetting('tooling', { [field]: value })).status).toBe(200);
+          expect(await audits(db)).toHaveLength(1);
+        }
+      });
   const changes = [
     [
       'mask',
