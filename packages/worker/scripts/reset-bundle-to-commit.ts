@@ -26,6 +26,7 @@ import { writeFileNoFollow } from '@haive/shared/fs-safe';
 import { and, eq, isNull, like } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { getHaiveVersion, logger } from '@haive/shared';
+import { namesGitData } from '@haive/shared/project-state';
 import { parseBundle, persistBundleItems } from '../src/bundle-parser/index.js';
 import { gitRun } from '../src/repo/git-exec.js';
 import { originGitRun } from '../src/repo/git-push.js';
@@ -50,6 +51,7 @@ export async function writeRenderedBundleFile(
   diskPath: string,
   content: string,
 ) {
+  if (namesGitData(diskPath)) throw new Error(`refusing to write ${diskPath}: it names git data`);
   await writeFileNoFollow(repoStoragePath, diskPath, content, { createParents: true });
 }
 
@@ -144,6 +146,7 @@ async function main() {
   const rowsToInsert: (typeof schema.onboardingArtifacts.$inferInsert)[] = [];
   const haiveVersion = getHaiveVersion();
   for (const r of expanded) {
+    // The write comes before the row, so a path that names git data throws here and gets none.
     await writeRenderedBundleFile(repoStoragePath, r.diskPath, r.content);
 
     const itemId = r.templateId.split('.').slice(2).join('.');
