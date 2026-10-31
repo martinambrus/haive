@@ -32,8 +32,8 @@ function mergeOutcome(taskId: string, task: Task): MergeNotice | null {
       task.status === 'completed'
         ? 'The remote was merged into your checkout and pushed.'
         : task.status === 'cancelled'
-          ? 'This merge was cancelled elsewhere.'
-          : 'The merge failed. Its scratch worktree is kept so Retry on the task can resume it.',
+          ? 'This merge was cancelled elsewhere. Its scratch worktree was discarded and your checkout did not move.'
+          : 'The merge failed. Retry on its task resumes it while its scratch worktree is still there. A Save or Pull may discard it.',
     retry: task.status === 'failed',
   };
 }

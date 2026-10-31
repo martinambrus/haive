@@ -608,10 +608,13 @@ describe('PlanMergePanel with a merge task', () => {
 
   it.each([
     ['completed', 'The remote was merged into your checkout and pushed.'],
-    ['cancelled', 'This merge was cancelled elsewhere.'],
+    [
+      'cancelled',
+      'This merge was cancelled elsewhere. Its scratch worktree was discarded and your checkout did not move.',
+    ],
     [
       'failed',
-      'The merge failed. Its scratch worktree is kept so Retry on the task can resume it.',
+      'The merge failed. Retry on its task resumes it while its scratch worktree is still there. A Save or Pull may discard it.',
     ],
   ])('keeps the polled %s outcome after the page removes the merge', async (status, text) => {
     const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID));
@@ -763,7 +766,7 @@ describe('PlanMergePanel with a merge task', () => {
       respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status: 'cancelled' }));
       await vi.advanceTimersByTimeAsync(2000);
       expect(shown().find((el) => el.type === InlineMarkdown)?.props.body).toBe(
-        'This merge was cancelled elsewhere.',
+        'This merge was cancelled elsewhere. Its scratch worktree was discarded and your checkout did not move.',
       );
     },
   );
