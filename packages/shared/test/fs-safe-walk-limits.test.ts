@@ -36,7 +36,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
-import { readdirSizesNoFollow, WALK_MAX_DEPTH, walkFilesNoFollow } from '../src/fs-safe.js';
+import {
+  isWalkDepthError,
+  readdirSizesNoFollow,
+  WALK_MAX_DEPTH,
+  walkFilesNoFollow,
+} from '../src/fs-safe.js';
 
 const run = promisify(execFile);
 const errnoError = (code: string) => Object.assign(new Error(`${code}: injected`), { code });
@@ -130,7 +135,11 @@ describe('the depth the walk will enter', () => {
       for await (const entry of walkFilesNoFollow(root, 'tree')) seen.push(entry.path);
     })();
 
-    await expect(walking).rejects.toThrow(`${WALK_MAX_DEPTH}-level`);
+    const refusal = await walking.catch((err: unknown) => err);
+    // Told by its code, not by the wording of its message.
+    expect(refusal).toMatchObject({ code: 'EWALKDEPTH' });
+    expect(isWalkDepthError(refusal)).toBe(true);
+    expect(isWalkDepthError(errnoError('EMFILE'))).toBe(false);
     expect(seen).toEqual(['a/first']);
     expect(openFds()).toBe(before);
   });

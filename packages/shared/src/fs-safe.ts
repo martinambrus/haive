@@ -565,14 +565,31 @@ async function lstatHeld(
  *  near 2000 levels anyway, and only a tree built to exhaust descriptors comes close to this. */
 export const WALK_MAX_DEPTH = 128;
 
+/** The walk met a directory below WALK_MAX_DEPTH levels. Matched by `code`, never by its message,
+ *  which is for a log. */
+export class WalkDepthError extends Error {
+  readonly code = 'EWALKDEPTH' as const;
+
+  constructor(start: string) {
+    super(`Directory ${start || '.'} nests deeper than the ${WALK_MAX_DEPTH}-level limit`);
+    this.name = 'WalkDepthError';
+  }
+}
+
+export function isWalkDepthError(err: unknown): err is WalkDepthError {
+  return (
+    typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'EWALKDEPTH'
+  );
+}
+
 /** Sorted depth-first regular files, relative to relDir, with sizes. Holds each directory while
  * reading its entries instead of resolving each file from the anchor. Links, FIFOs, sockets and
  * devices are never opened and cost no syscall; a missing or refused directory contributes nothing
  * (there is no strict mode). Each directory or file examined is first checked to still sit where the
  * walk expects it. A listing is never silently short: running out of descriptors (EMFILE, ENFILE) and
- * a directory deeper than WALK_MAX_DEPTH levels are thrown. Drive it with `for await` or call
- * `return()`: breaking out of it, or a throw in the loop body, closes every held descriptor, but a
- * generator dropped after a manual `next()` keeps them. */
+ * a directory deeper than WALK_MAX_DEPTH levels (a WalkDepthError) are thrown. Drive it with
+ * `for await` or call `return()`: breaking out of it, or a throw in the loop body, closes every
+ * held descriptor, but a generator dropped after a manual `next()` keeps them. */
 export async function* walkFilesNoFollow(
   anchor: string,
   relDir: string,
@@ -600,11 +617,7 @@ export async function* walkFilesNoFollow(
         const childRel = dirRel ? `${dirRel}/${entry.name}` : entry.name;
         const childOutput = outputRel ? `${outputRel}/${entry.name}` : entry.name;
         if (entry.isDirectory()) {
-          if (depth >= WALK_MAX_DEPTH) {
-            throw new Error(
-              `Directory ${safe || '.'} nests deeper than the ${WALK_MAX_DEPTH}-level limit`,
-            );
-          }
+          if (depth >= WALK_MAX_DEPTH) throw new WalkDepthError(safe);
           if (!(await stillHeld(dir, anchor, dirRel))) return;
           const child = await readListed(async () => {
             const fh = await open(at(dir.fh.fd, entry.name), O_PATH | O_DIRECTORY | O_NOFOLLOW);

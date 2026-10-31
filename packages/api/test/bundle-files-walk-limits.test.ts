@@ -30,6 +30,7 @@ vi.mock('@haive/shared/fs-safe', async (original) => {
   const actual = await original<typeof import('@haive/shared/fs-safe')>();
   return { ...actual, walkFilesNoFollow: vi.fn(actual.walkFilesNoFollow) };
 });
+import { logger } from '@haive/shared';
 import { WALK_MAX_DEPTH, walkFilesNoFollow } from '@haive/shared/fs-safe';
 import { Hono } from 'hono';
 import { bundleRoutes } from '../src/routes/bundles.js';
@@ -63,18 +64,33 @@ afterEach(async () => {
   await rm(storage, { recursive: true, force: true });
 });
 
+// A tree this deep is a property of the bundle, not a fault of the server: asking again cannot
+// help, and only replacing the bundle can. So it is a 422 that says so, kept apart from the 500s
+// below, which are the process's own condition, and it is a warning, not an unhandled error.
+it('answers a fixed 422 for a tree nested deeper than the walk allows, and logs a warning', async () => {
+  const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+  const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+  try {
+    const levels = Array.from({ length: WALK_MAX_DEPTH + 1 }, () => 'd').join('/');
+    await mkdir(path.join(tree, levels), { recursive: true });
+
+    const res = await app.request(`/${BUNDLE}/files`);
+
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({
+      error: 'This bundle is nested too deeply to list its files',
+      code: 'bundle_too_deep',
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(error).not.toHaveBeenCalled();
+  } finally {
+    warn.mockRestore();
+    error.mockRestore();
+  }
+});
+
 // A listing that cannot be finished is the api's 500 shape, never a 200 that reads as the whole tree.
 const SERVER_ERROR = { error: 'Internal server error' };
-
-it('answers 500 for a tree nested deeper than the walk allows', async () => {
-  const levels = Array.from({ length: WALK_MAX_DEPTH + 1 }, () => 'd').join('/');
-  await mkdir(path.join(tree, levels), { recursive: true });
-
-  const res = await app.request(`/${BUNDLE}/files`);
-
-  expect(res.status).toBe(500);
-  expect(await res.json()).toEqual(SERVER_ERROR);
-});
 
 it('answers 500, not a partial list, when the walk runs out of descriptors part-way', async () => {
   vi.mocked(walkFilesNoFollow).mockImplementationOnce(async function* () {

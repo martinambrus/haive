@@ -8,6 +8,7 @@ import {
   BUNDLE_JOB_NAMES,
   createGitBundleRequestSchema,
   initBundleUploadRequestSchema,
+  logger,
   type ArchiveFormat,
   type BundleJobPayload,
   type BundleSummary,
@@ -16,6 +17,7 @@ import {
   type CustomBundleSourceType,
 } from '@haive/shared';
 import {
+  isWalkDepthError,
   openFileNoFollow,
   walkFilesNoFollow,
   removeNoFollow,
@@ -1007,7 +1009,17 @@ bundleRoutes.get('/:id/files', async (c) => {
   // A stored root this route cannot place reads as an empty tree, the same answer a missing
   // directory already gave — the listing is a convenience, not a contract about what exists.
   if (rootRel === null) return c.json({ files: [], truncated: false, cap: FILES_LIST_CAP });
-  const result = await listExtractedFiles(anchor, rootRel);
+  // A tree nested past the walk's depth is the bundle's own property, not a fault: say so (422)
+  // instead of an opaque 500, and as a warning rather than an unhandled error.
+  const result = await listExtractedFiles(anchor, rootRel).catch((err: unknown) => {
+    if (!isWalkDepthError(err)) throw err;
+    logger.warn({ userId, bundleId }, 'bundle tree is nested too deeply to list');
+    throw new HttpError(
+      422,
+      'This bundle is nested too deeply to list its files',
+      'bundle_too_deep',
+    );
+  });
   return c.json(result);
 });
 
