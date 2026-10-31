@@ -677,7 +677,7 @@ See worker task-queue.ts ~:1806-1813, ~:356. Decide per shape: fail the task, or
 
 ### T397 · FNF[failed-read-answers] · branch, count, refresh and merge-completion reads still turn a failed git into an answer (+16)
 
-status: open · was modular #279 (T396 landed as PR #884; re-check every item against T322/T325, PRs #877/#879, first)
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:48Z · last: 2026-10-31T13:48Z
 FIRST re-check each item on main: the #322 and #325 series fixed some of them.
 
 1. `rev-parse --abbrev-ref HEAD` sites: 00a ~:164, 11a ~:106, 12-worktree-cleanup ~:248, 12-post-onboarding ~:464, 13-onboarding-push ~:147, 99-run-app-ready ~:173, 01-plan-merge ~:727, :741.
