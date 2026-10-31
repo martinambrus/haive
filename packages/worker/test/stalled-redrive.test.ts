@@ -230,7 +230,7 @@ describe('redriveStalledTasks', () => {
     expect(advances).toEqual([{ taskId: 'task-2', epoch: 8 }]);
   });
 
-  it('excludes a step already parked (waiting_started_at set) from the candidates query', async () => {
+  it('reads the park marker and the row heartbeat in the candidates query', async () => {
     const { whereCond } = await captureQuery();
     const columns = conditionColumns(whereCond);
     expect(columns).toContain('waiting_started_at');
@@ -525,13 +525,14 @@ describe('the tasks the sweep takes, by task status and current row', () => {
               taskStatus: s.taskStatus,
               rowId,
               rowStatus,
+              rowWaitingStartedAt: s.row?.waitingStartedAt ?? null,
             },
           ]
         : [];
     });
   }
 
-  async function advancedBy(seeds: Seed[], owed: string[] = []) {
+  async function advancedBy(seeds: Seed[], owed: string[] = [], starts: string[] = []) {
     const advances: { taskId: string; epoch: number }[] = [];
     await redriveStalledTasks(
       makeDb(await candidatesAmong(seeds), []),
@@ -539,7 +540,7 @@ describe('the tasks the sweep takes, by task status and current row', () => {
         enqueueAdvance: async (taskId, _userId, _stepId, _round, epoch) => {
           advances.push({ taskId, epoch });
         },
-        queuedTaskJobs: async () => owesSteps(...owed),
+        queuedTaskJobs: async () => ({ ...owesSteps(...owed), starts: new Set(starts) }),
         ...noLostWork,
       },
       { staleMs: 300_000 },
@@ -605,6 +606,39 @@ describe('the tasks the sweep takes, by task status and current row', () => {
   it('still leaves a running task on a parked form', async () => {
     const parked = { ...answered, waitingStartedAt: idle };
     expect(await advancedBy([seed('task', 'running', parked)])).toEqual([]);
+  });
+
+  describe('a running task on a parked pending row, whose poll chain rewrites the row on every tick', () => {
+    const park = { status: 'pending', waitingStartedAt: idle };
+
+    it('re-drives it once the row heartbeat is older than the cutoff', async () => {
+      expect(await advancedBy([seed('task', 'running', park)])).toEqual([
+        { taskId: 'task', epoch: 4 },
+      ]);
+    });
+
+    it('leaves it to its chain while the heartbeat is newer, whatever the task row says', async () => {
+      const ticking = { ...park, updatedAt: new Date() };
+      expect(await advancedBy([seed('task', 'running', ticking)])).toEqual([]);
+    });
+
+    it('leaves it when the task queue still owes the task a job', async () => {
+      expect(await advancedBy([seed('task', 'running', park)], ['task'])).toEqual([]);
+    });
+
+    it('leaves it to a START the queue holds for the task', async () => {
+      expect(await advancedBy([seed('task', 'running', park)], [], ['task'])).toEqual([]);
+    });
+
+    it('still re-drives an unparked pending row beside a queued START', async () => {
+      expect(
+        await advancedBy([seed('task', 'running', { status: 'pending' })], [], ['task']),
+      ).toEqual([{ taskId: 'task', epoch: 4 }]);
+    });
+
+    it.each(['waiting_user', 'waiting_pr'])('leaves a %s task on it', async (taskStatus) => {
+      expect(await advancedBy([seed('task', taskStatus, park)])).toEqual([]);
+    });
   });
 
   it('still leaves a running task that moved since the cutoff to the pass that moved it', async () => {

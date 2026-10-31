@@ -152,7 +152,12 @@ async function main(): Promise<void> {
     const withJobTaskId = await makeTask('with-job');
     const freshTaskId = await makeTask('fresh', { taskUpdatedAt: new Date() });
     const missingRowTaskId = await makeTask('missing-row', { noStepRow: true });
+    // A park whose poll chain stopped: its heartbeat (the row's updated_at) is as old as the task's.
     const parkedRowTaskId = await makeTask('parked-row', { waitingStartedAt: new Date() });
+    const tickingParkTaskId = await makeTask('ticking-park', {
+      waitingStartedAt: new Date(),
+      stepUpdatedAt: new Date(),
+    });
     const waitingCliTaskId = await makeTask('waiting-cli', { stepStatus: 'waiting_cli' });
     const waitingUserTaskId = await makeTask('waiting-user', { taskStatus: 'waiting_user' });
     const freshStepRowTaskId = await makeTask('fresh-step-row', { stepUpdatedAt: new Date() });
@@ -449,7 +454,14 @@ async function main(): Promise<void> {
     );
     check('a task the queue still owes a job is left alone', (await epochOf(withJobTaskId)) === 3);
     check('a task whose rows are fresh is left alone', (await epochOf(freshTaskId)) === 3);
-    check('a stale parked pending row is left alone', (await epochOf(parkedRowTaskId)) === 3);
+    check(
+      'a parked pending row whose heartbeat is older than the cutoff is re-driven',
+      (await epochOf(parkedRowTaskId)) === 4,
+    );
+    check(
+      'a parked pending row whose poll chain is still ticking is left alone',
+      (await epochOf(tickingParkTaskId)) === 3,
+    );
     check('a stale waiting_cli row is left alone', (await epochOf(waitingCliTaskId)) === 3);
     check(
       'a waiting_user task with a stale pending row is left alone',

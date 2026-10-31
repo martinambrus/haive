@@ -47,8 +47,9 @@ import {
 /**
  * Catches what reconcileOrphanedSteps cannot: a step its own re-drive enqueue failed to queue,
  * or any hand-off lost between boots, left `pending`/missing/answered, finished with nothing after it, or
- * failed with the task still running; a task queued to start whose START was lost; and a step
- * parked on a run whose cli-exec job was; and a cancelled task whose teardown never finished.
+ * failed with the task still running; a park whose poll chain was lost; a task queued to start
+ * whose START was lost; and a step parked on a run whose cli-exec job was; and a cancelled task
+ * whose teardown never finished.
  */
 
 const log = logger.child({ module: 'stalled-redrive' });
@@ -152,6 +153,23 @@ function answeredFormRow(cutoff: Date) {
   return and(eq(schema.taskSteps.status, 'waiting_form'), redrivableRow(cutoff))!;
 }
 
+/** A park whose poll chain has stopped. The chain (15 s runtime slot, 30 s pause, 5 s module schema)
+ *  rewrites the row's updated_at on every tick, so a parked row idle since `cutoff` has no chain
+ *  behind it; the task's own stamp says nothing, since a tick that finds the pointer right never
+ *  writes it. */
+function overduePark(cutoff: Date) {
+  return and(
+    lt(schema.taskSteps.updatedAt, cutoff),
+    eq(schema.taskSteps.status, 'pending'),
+    isNotNull(schema.taskSteps.waitingStartedAt),
+  )!;
+}
+
+/** The current rows the sweep takes for a `running` task, apart from a failed one. */
+function stalledRow(cutoff: Date) {
+  return or(redrivableRow(cutoff), overduePark(cutoff))!;
+}
+
 /** Idle since `cutoff`, or waiting_pr, which the pull-request poller rewrites every few minutes. */
 function taskStale(cutoff: Date) {
   return or(lt(schema.tasks.updatedAt, cutoff), eq(schema.tasks.status, 'waiting_pr'))!;
@@ -164,6 +182,13 @@ interface StalledCandidate {
   stepId: string;
   round: number;
   epoch: number;
+  rowStatus?: (typeof schema.taskSteps.$inferSelect)['status'] | null;
+  rowWaitingStartedAt?: Date | null;
+}
+
+/** What a candidate's current row looks like, for the log. */
+function rowShape(c: Pick<StalledCandidate, 'rowStatus' | 'rowWaitingStartedAt'>) {
+  return c.rowStatus === 'pending' && c.rowWaitingStartedAt ? 'parked' : 'handoff';
 }
 
 /** Locks the rows (an answered form's first), then re-checks the whole candidate predicate before
@@ -213,7 +238,7 @@ async function redriveTask(
           taskStale(cutoff),
           answered
             ? exists(currentRow(answeredFormRow(cutoff)))
-            : not(exists(currentRow(not(redrivableRow(cutoff))))),
+            : not(exists(currentRow(not(stalledRow(cutoff))))),
         ),
       )
       .returning({ epoch: schema.tasks.orchestrationEpoch });
@@ -238,7 +263,7 @@ async function redriveTask(
     throw err;
   }
   log.info(
-    { taskId: c.taskId, stepId: c.stepId, round: c.round, epoch: fenced.epoch },
+    { taskId: c.taskId, stepId: c.stepId, round: c.round, epoch: fenced.epoch, shape: rowShape(c) },
     'redrove a stalled task',
   );
   return true;
@@ -255,7 +280,8 @@ function unstartedRun(taskStepId: SQLWrapper | string) {
 }
 
 /** One pass: re-drives each running task whose current step row is missing, pending and not
- *  parked, an answered form, or finished, and a task waiting on a person or a pull request whose
+ *  parked, parked with a heartbeat older than the cutoff, an answered form, or finished, and a
+ *  task waiting on a person or a pull request whose
  *  current form was answered; fails a running task whose current row failed; queues a START
  *  for a task still queued to start; and recovers a parked
  *  step whose recorded run no cli-exec job owes any more, as boot does. Each only while the task
@@ -276,6 +302,7 @@ export async function redriveStalledTasks(
       taskStatus: schema.tasks.status,
       rowId: schema.taskSteps.id,
       rowStatus: schema.taskSteps.status,
+      rowWaitingStartedAt: schema.taskSteps.waitingStartedAt,
       rowError: schema.taskSteps.errorMessage,
     })
     .from(schema.tasks)
@@ -297,7 +324,7 @@ export async function redriveStalledTasks(
             eq(schema.tasks.status, 'running'),
             or(
               isNull(schema.taskSteps.id),
-              redrivableRow(cutoff),
+              stalledRow(cutoff),
               and(eq(schema.taskSteps.status, 'failed'), lt(schema.taskSteps.updatedAt, cutoff)),
             ),
           ),
@@ -383,6 +410,8 @@ export async function redriveStalledTasks(
   for (const c of candidates) {
     if (c.stepId === null) continue; // excluded by isNotNull above; narrows the type
     if (queued.steps.has(c.taskId)) continue;
+    // A START in the queue owns a task's first step, which it runs itself or hands to an advance.
+    if (queued.starts.has(c.taskId) && rowShape(c) === 'parked') continue;
     try {
       if (c.rowStatus === 'failed' && c.rowId !== null) {
         // Its job died between failing the step and failing the task, and every write refuses a
