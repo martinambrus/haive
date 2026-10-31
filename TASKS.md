@@ -103,7 +103,7 @@ All PRE-EXISTING.
 
 ### T120 · B5.1 · the Haive data panel
 
-status: open · kind: feature
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T16:20Z · last: 2026-10-31T16:20Z · kind: feature · plan: PR1a shared+worker save, PR1b api, PR2 web+docs
 GET /repos/:id/haive-data + POST .../save {push} via a worker SAVE job; generalise commitPlanSnapshotFiles to a path list; conflict report. Browser 375/768/1280.
 
 ### T121 · B5.2 · project state rides Haive's pushes
