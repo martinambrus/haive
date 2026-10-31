@@ -21,6 +21,7 @@ import {
   isUniqueViolationOf,
   lockStepRows,
   ONE_LIVE_UPGRADE_INDEX,
+  OPEN_WAIT_INTO_IDLE_MS,
   CLEAR_STEP_USAGE_STAMP,
   schema,
   type Database,
@@ -3985,13 +3986,12 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
         errorMessage: 'Task cancelled',
         ...CLEAR_STEP_USAGE_STAMP,
         endedAt: now,
-        // Mirror of the fold in cancelTaskRow (api/lib/cancel-task.ts): stamping ended_at over a
-        // live waiting_started_at would turn the whole recorded park back into work, because
-        // computeStepContribution only counts an open wait while ended_at is null. Clearing the
-        // marker in the same statement keeps this idempotent — the api path usually folded it
-        // already, and a second pass adds 0 because GREATEST ignores the NULL marker.
-        idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
-        greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`,
+        // The fold of cancelTaskRow (api/lib/cancel-task.ts), the same OPEN_WAIT_INTO_IDLE_MS:
+        // stamping ended_at over a live waiting_started_at would turn the whole recorded park back
+        // into work, because computeStepContribution only counts an open wait while ended_at is
+        // null. Clearing the marker in the same statement keeps this idempotent — the api path
+        // usually folded it already, and a second pass adds 0 because the NULL marker is a wait of 0.
+        idleMs: OPEN_WAIT_INTO_IDLE_MS,
         waitingStartedAt: null,
         updatedAt: now,
       })

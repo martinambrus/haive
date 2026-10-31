@@ -3,20 +3,24 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 // Closing a parked form's wait (the form submit, the merge clarification answer, Skip, the PR poller's
-// auto-finalize) credits it to idle_ms in the SAME update that clears waiting_started_at, from the row that
-// update locks. The arithmetic lives in SQL and is exercised on Postgres by the gated step-fold-preread tests
-// (api and worker); these pins are the always-run half, for the two things that file cannot notice when it is not
-// run: the shared expression losing its clamp or its anchor, and a closing site writing its own copy.
+// auto-finalize, the two task cancels) credits it to idle_ms in the SAME update that clears
+// waiting_started_at, from the row that update locks. The arithmetic lives in SQL and is exercised on
+// Postgres by the gated step-fold-preread tests (api and worker); these pins are the always-run half, for
+// the two things that file cannot notice when it is not run: the shared expression losing its clamp or its
+// anchor, and a closing site writing its own copy.
 //
 // Same approach as resume-fold.test.ts, which pins CLOSED_GAP_INTO_IDLE_MS by reading the files.
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..');
 const SQL_SOURCE = 'packages/database/src/open-wait.ts';
 // The closing sites by file, with how many each holds. api steps.ts: the form submit, the clarification answer and
-// Skip. worker pr-poll-queue.ts: the auto-finalize.
+// Skip. worker pr-poll-queue.ts: the auto-finalize. The two cancels end a parked row the same way: api
+// cancel-task.ts (cancelTaskRow) and worker task-queue.ts (handleCancelTask).
 const SITES: [file: string, count: number][] = [
   ['packages/api/src/routes/tasks/steps.ts', 3],
   ['packages/worker/src/queues/pr-poll-queue.ts', 1],
+  ['packages/api/src/lib/cancel-task.ts', 1],
+  ['packages/worker/src/queues/task-queue.ts', 1],
 ];
 
 describe("closing a parked form's wait credits it to idle_ms", () => {
