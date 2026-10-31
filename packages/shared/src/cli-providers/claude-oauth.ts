@@ -151,6 +151,7 @@ export function isClaudeRefreshRejected(err: unknown): boolean {
 async function postToken(params: Record<string, string>): Promise<ClaudeOauthTokens> {
   const res = await fetch(CLAUDE_OAUTH_TOKEN_URL, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: new URLSearchParams(params).toString(),
   });
