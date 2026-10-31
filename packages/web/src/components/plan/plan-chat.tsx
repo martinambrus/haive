@@ -65,12 +65,12 @@ const DEAD_POLL_MS = 30_000;
  *  chatted about for weeks would otherwise open as a wall of folded boxes. */
 const HISTORY_PREVIEW = 3;
 
-/** How a conversation that can no longer take a turn ENDED. A plain completion
- *  needs no word — the date says everything — but a cancelled or failed one is
- *  a different fact about the same transcript and has to say so. */
 // Notify the currently mounted chat when an older instance settles its send.
 const draftListeners = new WeakMap<Map<string, string>, Set<() => void>>();
 
+/** How a conversation that can no longer take a turn ENDED. A plain completion
+ *  needs no word — the date says everything — but a cancelled or failed one is
+ *  a different fact about the same transcript and has to say so. */
 const OUTCOME_NOTE: Record<string, string> = {
   cancelled: 'cancelled',
   failed: 'failed',

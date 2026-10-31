@@ -21,11 +21,12 @@ import { isTaskDead } from '@/lib/step-banners';
 
 const POLL_MS = 2000;
 const DEAD_POLL_MS = 30_000;
+const ENDED_MERGE_STATUSES = new Set<Task['status']>(['completed', 'cancelled', 'failed']);
 
 type MergeNotice = { taskId: string; text: string; retry?: boolean };
 
 function mergeOutcome(taskId: string, task: Task): MergeNotice | null {
-  if (!['completed', 'cancelled', 'failed'].includes(task.status)) return null;
+  if (!ENDED_MERGE_STATUSES.has(task.status)) return null;
   return {
     taskId,
     text:
@@ -66,8 +67,8 @@ export function PlanMergePanel({
   merge: PlanMergeState | null;
   /** Re-read the merge (new turns in the transcript). */
   onChanged: () => void;
-  /** Called when the merge lands or a discard settles (including when nothing was discarded),
-   *  so the page can refresh. */
+  /** Called when an end is polled or recovered, or a discard settles (including when
+   *  nothing was discarded), so the page can refresh. */
   onSettled: () => void;
 }) {
   const [liveStep, setLiveStep] = useState<TaskStep | null>(null);
@@ -93,8 +94,9 @@ export function PlanMergePanel({
   // a terminal status — the same self-terminating shape the plan chat uses, so an
   // idle conversation costs nothing.
   const taskId = merge?.taskId ?? null;
-  // An answer or discard can settle after the page switches to another conversation.
+  // Retain the last displayed merge so its outcome can be recovered after the page removes it.
   const lastTaskIdRef = useRef(taskId);
+  // An answer or discard can settle after the page switches to another conversation.
   const displayedTaskIdRef = useRef(taskId);
   displayedTaskIdRef.current = taskId;
   const isStaleReply = (replyTaskId: string): boolean =>
@@ -162,7 +164,7 @@ export function PlanMergePanel({
         const taskDead = isTaskDead(res.task);
         setLiveStep(step);
         setDeadTaskId(taskDead ? taskId : null);
-        const ended = ['completed', 'cancelled', 'failed'].includes(res.task.status);
+        const ended = ENDED_MERGE_STATUSES.has(res.task.status);
         const settled = !taskDead && ((!discarding && isAwaitingFormInput(step)) || ended);
         if (settled || (taskDead && !polledDead)) onChangedRef.current();
         if (settled) {
