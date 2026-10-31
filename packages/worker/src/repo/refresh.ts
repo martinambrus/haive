@@ -128,10 +128,14 @@ export async function usableCheckout(
           Buffer.from(gitfile).equals(read.data)
         ) {
           // Git removes trailing CR/LF from a gitfile; spaces belong to the directory name.
-          const target = path.resolve(dest, gitfile.slice(8).replace(/[\r\n]+$/, ''));
-          const rel = path.relative(dest, target);
-          if (rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) {
-            if ((await lstatNoFollow(dest, rel, { strict: true })) === null) return 'unusable';
+          const gitdir = gitfile.slice(GITFILE_PREFIX.length).replace(/[\r\n]+$/, '');
+          // Git opens ".." through the file system, behind any link on the way; path.resolve
+          // collapses it by its text. A gitdir with one cannot be judged absent from its text.
+          if (!gitdir.split('/').includes('..')) {
+            const rel = path.relative(dest, path.resolve(dest, gitdir));
+            if (rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) {
+              if ((await lstatNoFollow(dest, rel, { strict: true })) === null) return 'unusable';
+            }
           }
         }
       }

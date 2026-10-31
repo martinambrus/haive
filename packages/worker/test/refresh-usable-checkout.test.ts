@@ -278,6 +278,27 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     expect(await usableCheckout(dir)).toEqual(needsRepair);
   });
 
+  it('a gitdir that goes through a link and back with .. is unknown, not absent', async () => {
+    const dir = await intact();
+    await mkdir(path.join(dir, 'real/inner'), { recursive: true });
+    await rename(path.join(dir, '.git'), path.join(dir, 'real/meta.git'));
+    await symlink('real/inner', path.join(dir, 'link'));
+    // By its text this is dir/meta.git, which is absent; the file system takes it to dir/real/meta.git.
+    await writeFile(path.join(dir, '.git'), 'gitdir: link/../meta.git\n');
+    expect(await cdupExit(dir)).toBe(0);
+    await writeFile(path.join(dir, 'real/meta.git/config'), '[core\n');
+    expect(await cdupExit(dir)).toBe(128);
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
+  });
+
+  it('a missing gitdir named with .. is unknown, whatever the path collapses to', async () => {
+    const dir = await intact();
+    await mkdir(path.join(dir, 'sub'));
+    await replaceGit(dir, 'gitdir: sub/../missing.git\n');
+    expect(await cdupExit(dir)).toBe(128);
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
+  });
+
   it('a HEAD that is a link is unknown, not absent', async () => {
     const dir = await intact();
     await rm(path.join(dir, '.git/HEAD'));
