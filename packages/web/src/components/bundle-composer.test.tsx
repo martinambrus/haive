@@ -22,6 +22,7 @@ const reply = (body: unknown) => ({
 });
 
 let filesBody: unknown = { files: [], truncated: false, cap: 37 };
+let filesFailure: { ok: false; status: number; json: () => Promise<unknown> } | null = null;
 let bundleState: 'active' | 'failed' = 'active';
 let syncError: string | null = null;
 
@@ -41,7 +42,7 @@ async function fakeFetch(input: unknown) {
       ],
     });
   }
-  if (url.pathname.endsWith('/bundles/b1/files')) return reply(filesBody);
+  if (url.pathname.endsWith('/bundles/b1/files')) return filesFailure ?? reply(filesBody);
   return { ok: false, status: 404, json: async () => ({}) };
 }
 
@@ -50,6 +51,7 @@ afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
   bundleState = 'active';
   syncError = null;
+  filesFailure = null;
   filesBody = { files: [{ path: 'a.md', size: 1 }], truncated: true, cap: 37 };
 });
 
@@ -105,5 +107,35 @@ describe('the bundle file note prints the cap the api answered', () => {
     filesBody = { files: [{ path: 'a.md', size: 1 }], truncated: false, cap: 37 };
     const { root } = await mountExpanded();
     expect(textOf(root())).not.toContain('Showing first');
+  });
+});
+
+describe('a refused file listing shows why', () => {
+  it("shows the api's own reason, not the status", async () => {
+    filesFailure = {
+      ok: false,
+      status: 409,
+      json: async () => ({
+        error: 'This bundle is nested too deeply to list its files',
+        code: 'bundle_too_deep',
+      }),
+    };
+    const { root } = await mountExpanded();
+    expect(textOf(root())).toContain('This bundle is nested too deeply to list its files');
+    expect(textOf(root())).not.toContain('files fetch failed');
+  });
+
+  it('falls back to the status when the answer names no reason', async () => {
+    for (const json of [
+      async () => {
+        throw new SyntaxError('Unexpected token <');
+      },
+      async () => null,
+      async () => ({ error: 42 }),
+    ]) {
+      filesFailure = { ok: false, status: 500, json };
+      const { root } = await mountExpanded();
+      expect(textOf(root())).toContain('files fetch failed (500)');
+    }
   });
 });

@@ -162,7 +162,14 @@ export function BundleComposer({
       const res = await fetch(`${API_BASE_URL}/bundles/${bundleId}/files`, {
         credentials: 'include',
       });
-      if (!res.ok) throw new Error(`files fetch failed (${res.status})`);
+      if (!res.ok) {
+        // The api says why in `error` (a bundle nested too deeply to list, for one); the status is
+        // the fallback for an answer that names nothing.
+        const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+        throw new Error(
+          typeof body?.error === 'string' ? body.error : `files fetch failed (${res.status})`,
+        );
+      }
       const data = (await res.json()) as {
         files: BundleFileEntry[];
         truncated: boolean;
