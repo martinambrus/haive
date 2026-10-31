@@ -997,7 +997,7 @@ From the T474 review (2026-10-31). PRE-EXISTING unless stated; minor to moderate
 6. release.yml: no job has `timeout-minutes` (default 360 min), and a hung one holds the `release-<ref>` concurrency group (~:19-20).
 7. Known pin survivors: `|| true` inside a check's `run`, `fail-fast: true` on production-images (~:522), a job `defaults.run.shell`, a job `if: false`; step limits have no floor.
 
-### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+7)
+### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+8)
 
 status: open
 From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErrorPaths` (@haive/shared logger) and passed the plan snapshot error, the plan Save/Pull 409 bodies, `repositories.status_message` and 12's plan-mirror warning through it.
@@ -1010,6 +1010,7 @@ From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErr
 6. (T365 review 4, by reading) Upload and import routes put a filesystem failure's own message into a 500 reply with no `scrubErrorPaths`: api routes/bundles.ts ~:576, ~:668, routes/repos.ts ~:674, ~:873, routes/db-dumps.ts ~:223, routes/tasks/attachments.ts ~:313, routes/user-settings.ts ~:419. error-diagnostics.md says a filesystem failure shown to a person goes through it. PRE-EXISTING, minor.
 7. (T365 review 4) The bundle composer's other failure branches (web components/bundle-composer.tsx ~:303, ~:321, ~:348, ~:364, ~:372, ~:414, ~:455, ~:471, ~:479) throw `<what> failed (<status>)` and drop the answer's reason, so "archive exceeds N bytes limit" (api bundles.ts ~:453, ~:776) reads "upload init failed (413)" and "an import of this bundle is already running" (~:956) reads "resync failed (409)". Show the reason as T365 does for the file listing (trimmed, status fallback), but only after item 6, so no unscrubbed path reaches the page. PRE-EXISTING, minor.
 8. (T397 fix round 6, latent) `safeErrorForTransport` (shared logger/index.ts ~:33-38) turns any error with a bound-query error in its cause chain into a plain `Error`, so an `UnrecoverableError` with such a cause would lose its class and be retried. Unreachable on every current `UnrecoverableError` path. Keep the class (or the name) when rewrapping. Minor.
+9. (T120 PR1b fix round 1) The plan snapshot error (api routes/plan.ts ~:435) is path-scrubbed but not URL-redacted, while the Haive data status now passes the same columns through `redactGitText(scrubErrorPaths(x))`; a git error naming a remote with userinfo reaches the plan page as is. PRE-EXISTING, minor.
 
 ### T492 · FNF[house-rule-lapse-audit] [design] · a house rule's approval lapses with no audit row
 
