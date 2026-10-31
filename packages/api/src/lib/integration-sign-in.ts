@@ -127,7 +127,6 @@ async function writeCredential(
     .where(
       and(
         eq(schema.repoCredentials.userId, args.userId),
-        eq(schema.repoCredentials.host, host),
         eq(schema.repoCredentials.signInAccountId, identity.externalAccountId),
       ),
     )

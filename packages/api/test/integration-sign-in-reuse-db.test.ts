@@ -397,6 +397,20 @@ describe.skipIf(!url)(
       ]);
     });
 
+    it('R13 an orphan whose host was stored in other case is still on the sign-in host: it is taken back', async () => {
+      const user = await makeUser();
+      const first = await signIn(user, 'tok-a');
+      const orphanId = credentialIdOf(first);
+      await disconnectConnection(db, user, first.connection.id);
+      await editCredential(orphanId, { host: 'GitHub.com' });
+
+      const again = await signIn(user, 'tok-a-2');
+
+      expect(await credentialsOf(user)).toHaveLength(1);
+      expect(credentialIdOf(again)).toBe(orphanId);
+      expect(secretOf(await credentialById(orphanId))).toBe('tok-a-2');
+    });
+
     const reconnectDrifts: Array<{ drift: string; edit: CredentialEdit }> = [
       { drift: 'host', edit: { host: 'ghe.example.com', provider: 'github' } },
       { drift: 'provider', edit: { host: 'github.com', provider: 'gitea' } },
