@@ -1785,6 +1785,11 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
   return c.json({ invocations, historyTotal, totalCount: ranking.length });
 });
 
+/** The switch resets the step's row, so it is refused while the step's CLI may still be running. */
+function refuseSwitchWhileLive(row: { status: string }): void {
+  if (isLive(row)) throw new HttpError(409, `Cannot change provider while step is ${row.status}`);
+}
+
 stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -1866,9 +1871,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     });
     return c.json({ ok: true, stepId, role, cliProviderId: body.cliProviderId });
   }
-  if (step.status === 'running' || step.status === 'waiting_cli') {
-    throw new HttpError(409, `Cannot change provider while step is ${step.status}`);
-  }
+  refuseSwitchWhileLive(step);
 
   if (role !== 'default') {
     await writeStepCliChoice(db, choice);
@@ -1961,6 +1964,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         .where(eq(schema.taskSteps.id, step.id))
         .for('no key update');
       if (!held) throw new HttpError(404, 'Step not found');
+      // A pass can activate the row between the handler's read of its status and this lock, by claiming
+      // a pending row or by taking up a form just answered. This read waited for it, so it sees it.
+      refuseSwitchWhileLive(held);
       const contrib = computeFoldContribution(held, now.getTime());
       await tx
         .update(schema.taskSteps)

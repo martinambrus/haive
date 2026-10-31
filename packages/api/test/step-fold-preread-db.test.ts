@@ -527,5 +527,46 @@ describe.skipIf(!url)(
       },
       TEST_TIMEOUT,
     );
+
+    // H4 and H5: a pass activates the row between the handler's read of its status and the row lock. The peer
+    // flips it as the pass does, the claim of a pending row and the flip of an answered form, and the switch
+    // that read the row first must refuse it as it refuses a row it read live, leaving the row as the pass has it.
+    const peerClaims = (id: string) => (tx: Tx) =>
+      tx.execute(sql`
+        update task_steps set status = 'running', started_at = now()
+        where id = ${id} and status in ('pending', 'waiting_form')`);
+
+    it.each([
+      ['H4', 'pending'],
+      ['H5', 'waiting_form'],
+    ] as const)(
+      '%s: the per-step CLI switch refuses a %s row that a pass activated after the status was read',
+      async (_label, readAs) => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, { status: readAs });
+
+        const outcome = await settle(
+          besidePeer(
+            () =>
+              patch(`/tasks/${taskId}/steps/${STEP.stepId}/cli-provider`, { cliProviderId: null }),
+            peerClaims(STEP.id),
+          ),
+        );
+
+        expect.soft(outcome).toMatchObject({
+          ok: false,
+          error: { status: 409, message: 'Cannot change provider while step is running' },
+        });
+        expect.soft(await finalRow()).toEqual({
+          status: 'running',
+          idleMs: 4000,
+          userActiveMs: 800,
+          carriedWorkMs: 1000,
+          carriedIdleMs: 200,
+          carriedUserActiveMs: 50,
+        });
+      },
+      TEST_TIMEOUT,
+    );
   },
 );
