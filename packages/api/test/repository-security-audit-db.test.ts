@@ -175,6 +175,51 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
           expect(JSON.stringify(await audits(db))).not.toMatch(/synthetic-password|user:|https:/);
         }
       });
+  it.each([undefined, '', 'main'])(
+    'remote metadata treats retained credentials and branch %s as unchanged',
+    async (branch) => {
+      const root = await mkdtemp(path.join(tmpdir(), 'remote-flags-'));
+      roots.push(root);
+      await git(root, ['init']);
+      await git(root, ['remote', 'add', 'origin', 'git@same.test:o/old.git']);
+      const [cred] = await db
+        .insert(schema.repoCredentials)
+        .values({
+          userId: h.actor,
+          host: 'same.test',
+          label: 'test',
+          usernameEncrypted: 'synthetic',
+          secretEncrypted: 'synthetic',
+          encryptedDek: 'synthetic',
+        })
+        .returning();
+      await db
+        .update(schema.repositories)
+        .set({
+          localPath: root,
+          remoteUrl: 'git@same.test:o/old.git',
+          credentialsSecretId: cred!.id,
+          branch: 'main',
+        })
+        .where(eq(schema.repositories.id, repository));
+      const res = await app.request(`/repos/${repository}/remote`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          remoteUrl: 'git@same.test:o/new.git',
+          branch,
+          ...(branch === 'main' ? { credentialsId: cred!.id } : {}),
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect((await stored())!).toMatchObject({ credentialsSecretId: cred!.id, branch: 'main' });
+      expect((await audits(db))[0]!.metadata).toEqual({
+        host: 'same.test',
+        credentialsChanged: false,
+        branchChanged: false,
+      });
+    },
+  );
   it('restores a failed remote update before a queued relink acquires the row', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'remote-race-'));
     roots.push(root);

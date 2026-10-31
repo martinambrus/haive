@@ -2833,7 +2833,7 @@ repoRoutes.post('/:id/remote', async (c) => {
           host,
           credentialsChanged:
             (body.credentialsId ?? stored.credentialsSecretId) !== stored.credentialsSecretId,
-          branchChanged: (body.branch ?? stored.branch) !== stored.branch,
+          branchChanged: Boolean(body.branch && body.branch !== stored.branch),
         },
       };
       await insertAuditEvent(tx, event);
