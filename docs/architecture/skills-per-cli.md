@@ -52,7 +52,7 @@ recorded CLI set; the current onboarding task supplies its pending union before 
 Only legacy contexts without recorded membership use the user's enabled providers as a fallback.
 An explicit empty destination list stays empty through agent selection, generation/repair/sync
 apply and scoped staging: these steps create, rewrite, remove and commit no skill tree there.
-Only an older detected payload with no destination field retains its legacy default directory.
+Only an older detected payload with no destination field retains its legacy default directory. A stored destination that names git data is dropped at apply (`withoutGitDataDirs`) and in 12's stage plan, not at agent selection, so a list holding only such directories still dispatches its agents and then writes nothing; a skill directory that names git data is no skill (`listSkillDirs`).
 Adding a maintained CLI does not rewrite existing generated skills until the next generation,
 repair or sync; those generated files remain outside onboarding-upgrade scope. Every lever above
 is version-bound vendor behaviour: re-capture after a CLI bump before trusting it.

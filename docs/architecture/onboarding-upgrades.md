@@ -120,8 +120,7 @@ files 12 writes itself (the `.haive-data` plan mirror, the project state, the le
 even when a write threw after some of the files landed. The plan mirror reports what it wrote and
 removed through an accumulator (`writePlanMirror`'s `changes`), also on a throw, so a plan file the
 refresh never reached (a symlink it refused) is not staged, and a mirror that failed before it knew
-the plan was empty removes nothing. A
-quarantine target under `<agents>-legacy/` is staged only when its source is in HEAD, together with
+the plan was empty removes nothing. A path that names git data is left out of the plan, whether a step recorded it or HEAD lists it, because git rejects an alias spelling such as `.GIT./x` as an invalid path and fails the whole `add`, and adds nothing for `.git/x`; a quarantine move with such a source or target is left out whole (`repoRel` in `_stage-paths.ts` returns none for it). A quarantine target under `<agents>-legacy/` is staged only when its source is in HEAD, together with
 the source's deletion: an agent git never tracked is the person's file, and its move is theirs to
 commit. A removal is staged with `git rm --cached --ignore-unmatch` from a record, and only while the
 path is still absent from disk, never with `add -u <dir>`. The legacy knowledge
@@ -229,7 +228,7 @@ judge and the act, and nothing short of a lock it takes too can exclude one. A l
 standing there is kept the same way, since neither is what Haive
 wrote; only a read that could not run fails, which leaves the row for the next attempt. A row
 alone proves nothing:
-`12-post-onboarding` records one even for a file 07 skipped. 02's obsolete removal keeps such a file,
+`12-post-onboarding` records one even for a file 07 skipped (bar one that names git data). 02's obsolete removal keeps such a file,
 warns, and leaves its row live. 04's undo of a file the upgrade introduced keeps one edited or replaced
 since, warns, and retires the upgrade's row all the same. 04 also reads only the rows the upgrade WROTE
 (`source = 'upgrade'`). 01's backfill rows belong to the same task, but they record what was already
@@ -625,7 +624,7 @@ kind, schema version, template and written hashes, Haive version), written by 12
 `.git` (`isClaimablePath` through `namesGitData`, which mirrors git's NTFS and HFS+ checks: `.git`
 or `git~1` in any ASCII letter case, followed only by dots and spaces or by a `:` stream name, and
 `.git` with HFS+'s ignorable code points; a `\` separates segments as `/` does, and the check is linear in
-the path's length): a record never imports a claim to git data and no writer records a ledger row there: 12 skips such a rendering and names it in its warnings, 01's lazy backfill skips it with a logged warning before it reads the path, and the manual helper `scripts/reset-bundle-to-commit.ts` throws before it writes. 02's `safeDiskRel` refuses such a path as a backstop (so do 04's restore and undo, its put-back of an untracked row skips one, and an answer to a claim question at one is `invalid`), and 01 neither lists nor reads a ledger row imported before the rule. The convergent boot data migration `supersedeGitDataArtifacts` (`data-migrations.ts`)
+the path's length): a record never imports a claim to git data and no writer records a ledger row there: 12 skips such a rendering and names it in its warnings, 01's lazy backfill skips it with a logged warning before it reads the path, and the manual helper `scripts/reset-bundle-to-commit.ts` throws before it writes. 02's `safeDiskRel` refuses such a path as a backstop (so do 04's restore and undo, its put-back of an untracked row skips one, and an answer to a claim question at one is `invalid`), and 01 neither lists nor reads a ledger row imported before the rule. The step writers refuse such a path from a stored detect payload too, whose directories and ids are bare strings: 07's `writeIfAllowed` and its quarantine move skip it and report it in `skippedFiles`, never in `wroteFiles`, `wroteFileHashes` or `leftAsIs`; 09_5, 09_5b and 11d drop a skills directory that names it (`withoutGitDataDirs`), 09_5b and 11d leave a skill whose id names it alone, and `listSkillDirs` does not list such a directory (a nested repository's own `.git` in a skills directory is no skill, and 09_5b would have deleted it to repair it), so it reaches no write, removal, `mirroredDirs`, README hash or staging. The convergent boot data migration `supersedeGitDataArtifacts` (`data-migrations.ts`)
 retires every live row at such a path at every boot (`superseded_at` and `updated_at` only, so
 `ledgerImportedSince` still counts an imported marker), so none counts in the banner, the onboarded
 and admission verdicts or the CLI membership seed. A claim file at such a path that an earlier
