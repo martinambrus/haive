@@ -102,8 +102,15 @@ it('does not persist a relink whose push URL cleanup failed', async () => {
   h.git
     .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
     .mockRejectedValueOnce(fail(3, 'different language'))
+    .mockResolvedValueOnce({ stdout: 'https://old.test/r', stderr: '' })
+    .mockRejectedValueOnce(fail(1, 'no push URL'))
     .mockRejectedValueOnce(fail(128, 'different language'));
-  expect((await link()).status).toBe(409);
+  const response = await link();
+  expect(response.status).toBe(409);
+  expect(await response.text()).toContain("Could not clear the remote's push URLs");
+  expect(h.git.mock.calls.at(-1)![1]).toEqual(
+    expect.arrayContaining(['--unset-all', 'remote.origin.pushurl']),
+  );
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
 });
 
