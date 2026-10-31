@@ -1,0 +1,334 @@
+import { execFile } from 'node:child_process';
+import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CLI_PROVIDER_CATALOG } from '@haive/shared';
+import type { AgentMiningResult, StepContext } from '../src/step-engine/step-definition.js';
+import { skillGenerationStep } from '../src/step-engine/steps/onboarding/09_5-skill-generation.js';
+import { skillRepairStep } from '../src/step-engine/steps/onboarding/09_5b-skill-repair.js';
+import { withoutGitDataDirs } from '../src/step-engine/steps/onboarding/_helpers.js';
+import { skillSyncStep } from '../src/step-engine/steps/workflow/11d-skill-sync.js';
+
+/**
+ * `detected.skillTargetDirs` is read back from the STORED detect payload, so a legacy or
+ * hand-edited one may name any string. The three steps that write (and, for two of them, remove)
+ * under it must leave out a dir that names git data, and say so.
+ */
+
+const execFileP = promisify(execFile);
+
+const REFUSED = ['.git/hooks', '.GIT./hooks', 'git~1/hooks'];
+const ORDINARY = '.claude/skills';
+const STORED = [...REFUSED, ORDINARY];
+const HOOK = '#!/bin/sh\nexit 0\n';
+const KEEP = 'keep me\n';
+
+let repo: string;
+beforeEach(async () => {
+  repo = await mkdtemp(path.join(os.tmpdir(), 'skill-target-git-'));
+});
+afterEach(async () => {
+  await rm(repo, { recursive: true, force: true });
+});
+
+function recordingLogger() {
+  const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn() };
+  log.child.mockReturnValue(log);
+  return log;
+}
+type RecordingLogger = ReturnType<typeof recordingLogger>;
+
+const asLogger = (log: RecordingLogger) => log as unknown as StepContext['logger'];
+const warnedDirs = (log: RecordingLogger): string[] =>
+  log.warn.mock.calls.map(([fields]) => (fields as { dir: string }).dir);
+
+const ctxFor = (log: RecordingLogger, over: Record<string, unknown> = {}): StepContext =>
+  ({ repoPath: repo, logger: log, ...over }) as unknown as StepContext;
+
+async function put(rel: string, text: string): Promise<void> {
+  const file = path.join(repo, ...rel.split('/'));
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, text);
+}
+
+async function exists(rel: string): Promise<boolean> {
+  try {
+    await access(path.join(repo, ...rel.split('/')));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Every file under `rel` with its bytes, so an overwrite shows as well as an add or a delete. */
+async function snapshot(rel: string): Promise<string[]> {
+  const root = path.join(repo, ...rel.split('/'));
+  const out: string[] = [];
+  const walk = async (sub: string): Promise<void> => {
+    for (const entry of await readdir(path.join(root, sub), { withFileTypes: true })) {
+      const next = sub === '' ? entry.name : `${sub}/${entry.name}`;
+      if (entry.isDirectory()) await walk(next);
+      else out.push(`${next}:${await readFile(path.join(root, next), 'utf8')}`);
+    }
+  };
+  await walk('');
+  return out.sort();
+}
+
+/** The step's result or its failure, so the disk can be inspected whichever happened. */
+async function settle<T>(run: Promise<T>): Promise<{ value: T } | { error: unknown }> {
+  try {
+    return { value: await run };
+  } catch (error) {
+    return { error };
+  }
+}
+
+function skill(id: string) {
+  return {
+    id,
+    title: `${id} title`,
+    description: `${id} description`,
+    overview: 'What this domain covers.',
+    subSkills: [
+      {
+        slug: 'alpha',
+        name: `${id}-alpha`,
+        title: 'Alpha',
+        description: 'd',
+        summary: 's',
+        body: '## Purpose\n\nx',
+      },
+    ],
+  };
+}
+
+const mined = (id: string): AgentMiningResult => ({
+  agentId: id,
+  agentTitle: id,
+  status: 'done',
+  output: { skills: [skill(id)] },
+  rawOutput: null,
+  errorMessage: null,
+});
+
+describe('09_5 skillGenerationStep.apply with a stored git-data target dir', () => {
+  const applyWith = (dirs: string[], log: RecordingLogger) =>
+    skillGenerationStep.apply(ctxFor(log), {
+      detected: {
+        framework: 'general',
+        language: 'php',
+        kbFiles: [],
+        requiredDomains: [],
+        skillTargetDirs: dirs,
+        bundleSkills: [],
+      },
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+      isFinalLlmAttempt: true,
+      llmOutput: { skills: [skill('conventions')] },
+    } as unknown as Parameters<typeof skillGenerationStep.apply>[1]);
+
+  it('writes only the ordinary dir, records only it, and names each dir it left out', async () => {
+    await put('.git/hooks/pre-commit', HOOK);
+    const before = await snapshot('.git');
+    const log = recordingLogger();
+
+    const out = await applyWith(STORED, log);
+
+    expect(await readdir(path.join(repo, '.git', 'hooks'))).toEqual(['pre-commit']);
+    expect(await snapshot('.git')).toEqual(before);
+    expect(await exists('.GIT.')).toBe(false);
+    expect(await exists('git~1')).toBe(false);
+
+    expect(await exists(`${ORDINARY}/conventions/SKILL.md`)).toBe(true);
+    expect(await exists(`${ORDINARY}/conventions/sub-skills/alpha.md`)).toBe(true);
+    expect(await exists(`${ORDINARY}/README.md`)).toBe(true);
+    expect(out.written[0]!.mirroredDirs).toEqual([ORDINARY]);
+    expect(Object.keys(out.skillReadmeHashes ?? {})).toEqual([ORDINARY]);
+    expect(warnedDirs(log)).toEqual(REFUSED);
+  });
+
+  it('writes nothing and ends the loop when every stored dir names git data', async () => {
+    await put('.git/hooks/pre-commit', HOOK);
+    const before = await snapshot('.git');
+    const log = recordingLogger();
+
+    const out = await applyWith(['.git/hooks'], log);
+
+    expect(out.written).toEqual([]);
+    expect(await readdir(repo)).toEqual(['.git']);
+    expect(await snapshot('.git')).toEqual(before);
+    expect(warnedDirs(log)).toEqual(['.git/hooks']);
+    expect(
+      await skillGenerationStep.loop!.shouldContinue({
+        ctx: ctxFor(log),
+        applyOutput: out,
+        llmOutput: null,
+        iteration: 0,
+        previousIterations: [],
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('09_5b skillRepairStep.apply with a stored git-data target dir', () => {
+  it('clears and rewrites only the ordinary dir, and names each dir it left out', async () => {
+    await put('.git/hooks/pre-commit', HOOK);
+    // The recursive-remove target: a skill dir of the failing skill's own id inside git data.
+    await put('.git/hooks/conventions/keep.txt', KEEP);
+    await put(`${ORDINARY}/conventions/SKILL.md`, '# Conventions\n\n(no overview)\n');
+    await put(`${ORDINARY}/conventions/sub-skills/stale.md`, 'not a real sub-skill');
+    const before = await snapshot('.git');
+    const log = recordingLogger();
+
+    const out = await skillRepairStep.apply(ctxFor(log), {
+      detected: {
+        failingSkills: [
+          {
+            skillId: 'conventions',
+            issues: ['no sub-skills'],
+            skillMdExcerpt: null,
+            maxSub: 8,
+            bodyLen: '100-250',
+            shrunk: false,
+          },
+        ],
+        skillTargetDirs: STORED,
+        framework: null,
+        language: null,
+        kbFiles: [],
+      },
+      formValues: {},
+      agentMiningResults: [mined('conventions')],
+      iteration: 0,
+      previousIterations: [],
+    } as unknown as Parameters<typeof skillRepairStep.apply>[1]);
+
+    expect(await readFile(path.join(repo, '.git/hooks/conventions/keep.txt'), 'utf8')).toBe(KEEP);
+    expect(await snapshot('.git')).toEqual(before);
+    expect(await exists('.GIT.')).toBe(false);
+    expect(await exists('git~1')).toBe(false);
+
+    expect(await exists(`${ORDINARY}/conventions/sub-skills/stale.md`)).toBe(false);
+    expect(await readFile(path.join(repo, ORDINARY, 'conventions', 'SKILL.md'), 'utf8')).toContain(
+      'conventions title',
+    );
+    expect(await exists(`${ORDINARY}/conventions/sub-skills/alpha.md`)).toBe(true);
+    expect(out.repaired).toEqual(['conventions']);
+    expect(Object.keys(out.repairedReadmeHashes ?? {})).toEqual([ORDINARY]);
+    expect(warnedDirs(log)).toEqual(REFUSED);
+  });
+});
+
+describe('11d skillSyncStep.apply with a stored git-data target dir', () => {
+  it('writes, removes and stages only under the ordinary dir, and names each dir it left out', async () => {
+    // A real repository: 11d refuses a `.git` entry git cannot use, and a bare `hooks/` is one.
+    await execFileP('git', ['-C', repo, 'init', '-q']);
+    await put('.git/hooks/pre-commit', HOOK);
+    await put('.git/hooks/old/keep.txt', KEEP);
+    await put('.git/hooks/conventions/keep.txt', KEEP);
+    await put(`${ORDINARY}/old/SKILL.md`, '# Old\n');
+    const before = await snapshot('.git/hooks');
+    const log = recordingLogger();
+
+    const settled = await settle(
+      skillSyncStep.apply(
+        ctxFor(log, {
+          userId: 'u',
+          db: { query: { users: { findFirst: async () => null } } },
+        }),
+        {
+          detected: {
+            targets: [
+              {
+                kind: 'new',
+                skillId: 'conventions',
+                capability: 'Conventions',
+                rationale: 'what it does',
+                skillMdExcerpt: null,
+              },
+            ],
+            removals: ['old'],
+            skillTargetDirs: STORED,
+            worktreePath: repo,
+            framework: 'general',
+            language: 'php',
+            kbFiles: [],
+            __fileTree: '(tree)',
+            __scopeExclude: [],
+          },
+          formValues: {},
+          agentMiningResults: [mined('conventions')],
+          iteration: 0,
+          previousIterations: [],
+        } as unknown as Parameters<typeof skillSyncStep.apply>[1],
+      ),
+    );
+
+    // The disk comes first: a step that threw part-way has already written and removed.
+    for (const keep of ['old', 'conventions']) {
+      expect(await readFile(path.join(repo, '.git/hooks', keep, 'keep.txt'), 'utf8')).toBe(KEEP);
+    }
+    expect(await snapshot('.git/hooks')).toEqual(before);
+    expect(await exists('.GIT.')).toBe(false);
+    expect(await exists('git~1')).toBe(false);
+
+    expect(await exists(`${ORDINARY}/conventions/SKILL.md`)).toBe(true);
+    expect(await exists(`${ORDINARY}/conventions/sub-skills/alpha.md`)).toBe(true);
+    expect(await exists(`${ORDINARY}/README.md`)).toBe(true);
+    expect(await exists(`${ORDINARY}/old`)).toBe(false);
+    expect(warnedDirs(log)).toEqual(REFUSED);
+
+    if ('error' in settled) throw settled.error;
+    const out = settled.value;
+    expect(out.generated).toEqual(['conventions']);
+    expect(out.removed).toEqual(['old']);
+    // What was staged and committed: the ordinary dir's files and nothing else.
+    expect(out.committed).toBe(true);
+    const { stdout } = await execFileP('git', ['-C', repo, 'ls-tree', '-r', '--name-only', 'HEAD']);
+    expect(stdout.trim().split('\n').sort()).toEqual([
+      `${ORDINARY}/README.md`,
+      `${ORDINARY}/conventions/SKILL.md`,
+      `${ORDINARY}/conventions/sub-skills/alpha.md`,
+    ]);
+  });
+});
+
+describe('withoutGitDataDirs', () => {
+  it('keeps every skills dir a provider can declare, and logs nothing', () => {
+    const log = recordingLogger();
+    const dirs = Object.values(CLI_PROVIDER_CATALOG).map((p) => p.projectSkillsDir);
+
+    expect(dirs.length).toBeGreaterThan(0);
+    expect(withoutGitDataDirs(dirs, asLogger(log))).toEqual(dirs);
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('drops exactly the git-data dirs from a mixed list, in order, naming each', () => {
+    const log = recordingLogger();
+    const mixed = [
+      '.claude/skills',
+      '.git/hooks',
+      '.gemini/skills',
+      '.GIT./hooks',
+      '.agents/skills',
+      'sub/.git',
+      'git~1/hooks',
+      '.grok/skills',
+      '.github/x',
+    ];
+
+    expect(withoutGitDataDirs(mixed, asLogger(log))).toEqual([
+      '.claude/skills',
+      '.gemini/skills',
+      '.agents/skills',
+      '.grok/skills',
+      '.github/x',
+    ]);
+    expect(warnedDirs(log)).toEqual(['.git/hooks', '.GIT./hooks', 'sub/.git', 'git~1/hooks']);
+  });
+});

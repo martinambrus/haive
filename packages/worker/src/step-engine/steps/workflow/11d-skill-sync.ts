@@ -16,7 +16,11 @@ import {
 } from '../../mining-failure.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import type { KbFileSummary } from '../onboarding/09-qa.js';
-import { loadPreviousStepOutput, resolveTaskSkillTargetDirs } from '../onboarding/_helpers.js';
+import {
+  loadPreviousStepOutput,
+  resolveTaskSkillTargetDirs,
+  withoutGitDataDirs,
+} from '../onboarding/_helpers.js';
 import { buildSkillContractBlocks } from '../onboarding/_skill-prompt.js';
 import {
   loadMiningScopeExcludeGlobs,
@@ -419,7 +423,10 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
   async apply(ctx, args): Promise<SkillSyncApply> {
     const detected = args.detected as SkillSyncDetect;
     const worktree = detected.worktreePath;
-    const targetDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    const targetDirs = withoutGitDataDirs(
+      detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
+      ctx.logger,
+    );
     if (targetDirs.length === 0)
       return {
         generated: [],

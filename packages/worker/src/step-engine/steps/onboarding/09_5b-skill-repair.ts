@@ -11,7 +11,11 @@ import {
   shouldRetryMiningTerminalFailure,
   type MinedAgentOutcome,
 } from '../../mining-failure.js';
-import { loadPreviousStepOutput, resolveTaskSkillTargetDirs } from './_helpers.js';
+import {
+  loadPreviousStepOutput,
+  resolveTaskSkillTargetDirs,
+  withoutGitDataDirs,
+} from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
 import {
@@ -438,7 +442,10 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
 
   async apply(ctx, args): Promise<SkillRepairApply> {
     const detected = args.detected as SkillRepairDetect;
-    const targetDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    const targetDirs = withoutGitDataDirs(
+      detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
+      ctx.logger,
+    );
     if (targetDirs.length === 0)
       return {
         summary: 'The repository maintains no skill destinations.',

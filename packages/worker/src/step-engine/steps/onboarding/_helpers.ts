@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
+import type { StepContext } from '../../step-definition.js';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import {
@@ -9,6 +10,7 @@ import {
   type CliProviderName,
 } from '@haive/shared';
 import {
+  namesGitData,
   readRenderContextColumn,
   renderContextColumnSchema,
   recordedCliTargets,
@@ -149,6 +151,19 @@ export async function resolveTaskSkillTargetDirs(
     if (names.success && names.data !== undefined) return skillTargetDirs(names.data);
   }
   return resolveSkillTargetDirs(ctx.db, ctx.userId, fallback, task?.repositoryId);
+}
+
+/** Stored skill target dirs may be legacy or hand-edited, so one that names git data is left out
+ *  before anything is written, removed or staged under it. */
+export function withoutGitDataDirs(
+  dirs: readonly string[],
+  logger: StepContext['logger'],
+): string[] {
+  return dirs.filter((dir) => {
+    if (!namesGitData(dir)) return true;
+    logger.warn({ dir }, 'did not use a skills directory: its path names git data');
+    return false;
+  });
 }
 
 export async function loadPreviousStepOutput(
