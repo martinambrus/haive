@@ -2754,6 +2754,8 @@ repoRoutes.post('/:id/remote', async (c) => {
         cwd: root,
         env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(root) },
         timeout: 10_000,
+        // A child that ignores the default SIGTERM would hold the request and the restore.
+        killSignal: 'SIGKILL',
       });
       return {
         ok: true,

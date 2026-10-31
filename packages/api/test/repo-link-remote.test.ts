@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ChildProcess } from 'node:child_process';
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({ db: undefined as unknown, git: vi.fn(), entry: vi.fn() }));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
@@ -54,6 +55,22 @@ const link = () =>
   });
 const fail = (code: number | string, stderr: string) =>
   Object.assign(new Error(stderr), { code, stderr });
+
+/** The pending value, or an error naming the wait when `ms` pass first. */
+async function answeredWithin<T>(ms: number, pending: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`no answer within ${ms} ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 describe('link origin uses git exit codes', () => {
   it('updates after exit 3 regardless of human wording', async () => {
     h.git
@@ -250,4 +267,36 @@ it('waits for a disconnected transaction callback before restoring the remote', 
   expect(checkout).toBe(old);
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
   expect(fake.rows(schema.auditEvents)).toEqual([]);
+});
+
+it('kills a git child that ignores SIGTERM when its time is up', async () => {
+  const { execFile } =
+    await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  let child: ChildProcess | undefined;
+  let routeOptions: { timeout?: number; killSignal?: NodeJS.Signals } | undefined;
+  h.git.mockImplementation(
+    (_command, args: string[], options: { timeout?: number; killSignal?: NodeJS.Signals }) => {
+      if (args.includes('rev-parse')) return Promise.resolve({ stdout: 'true', stderr: '' });
+      routeOptions = options;
+      // A git that ignores SIGTERM, cut after 200 ms (not the route's bound) with the route's kill signal.
+      return new Promise((resolve, reject) => {
+        child = execFile(
+          'sh',
+          ['-c', 'trap "" TERM; exec sleep 30'],
+          { timeout: 200, killSignal: options.killSignal },
+          (error, stdout, stderr) => (error ? reject(error) : resolve({ stdout, stderr })),
+        );
+      });
+    },
+  );
+  const response = Promise.resolve(link());
+  try {
+    const res = await answeredWithin(3_000, response);
+    expect(res.status).toBe(409);
+    expect(routeOptions).toMatchObject({ timeout: expect.any(Number), killSignal: 'SIGKILL' });
+    expect(child!.signalCode).toBe('SIGKILL');
+  } finally {
+    child?.kill('SIGKILL');
+    await response;
+  }
 });
