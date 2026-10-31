@@ -123,8 +123,9 @@ githubOauthRoutes.get('/repos', async (c) => {
       );
     }
     repos.push(...batch);
-    if (batch.length < REPOS_PER_PAGE) break;
-    if (page === REPOS_PAGE_CAP) truncated = /rel="next"/.test(res.headers.get('link') ?? '');
+    const hasNext = /rel="next"/.test(res.headers.get('link') ?? '');
+    if (!hasNext) break;
+    if (page === REPOS_PAGE_CAP) truncated = true;
   }
 
   return c.json({

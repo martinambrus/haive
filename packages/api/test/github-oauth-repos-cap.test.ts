@@ -164,3 +164,13 @@ describe('a GitHub answer that is not a repository list', () => {
     expect(res.status).toBe(502);
   });
 });
+
+it.each([REPOS_PER_PAGE, REPOS_PER_PAGE * 2])(
+  'reads no empty page after an exactly full final page (%i repositories)',
+  async (total) => {
+    const body = await listRepos(total);
+    expect(body.repos).toHaveLength(total);
+    expect(body.truncated).toBe(false);
+    expect(pagesRead).toEqual(Array.from({ length: total / REPOS_PER_PAGE }, (_, i) => i + 1));
+  },
+);
