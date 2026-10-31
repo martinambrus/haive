@@ -601,3 +601,38 @@ describe('the gated database probe', () => {
     assert.doesNotMatch(out.calls, /test\/logger-db-error-params\.test\.ts/);
   });
 });
+
+function checkRedisIsolation(job) {
+  const index = job.steps.findIndex((step) => gatedRows(step) !== null);
+  assert.ok(index >= 0, 'no gated step');
+  const databases = (steps) =>
+    steps.flatMap((step) =>
+      Object.values(step.env ?? {})
+        .filter((url) => url.startsWith('redis://'))
+        .map((url) => new URL(url).pathname || '/0'),
+    );
+  const gated = databases([job.steps[index]]);
+  const later = databases(job.steps.slice(index + 1));
+  assert.ok(gated.length > 0 && later.length > 0, 'both sets must contain Redis databases');
+  assert.deepEqual(
+    later.filter((db) => gated.includes(db)),
+    [],
+    'later steps share a gated Redis database',
+  );
+}
+
+describe('gated Redis isolation', () => {
+  const job = workflows['ci.yml'].jobs.smokes;
+  it('keeps later steps out of every gated Redis database', () => checkRedisIsolation(job));
+  it('rejects a later step reusing a gated Redis database', () => {
+    const mutant = structuredClone(job);
+    const gated = mutant.steps.findIndex((step) => gatedRows(step) !== null);
+    const later = mutant.steps.slice(gated + 1).find((step) => step.env);
+    later.env = {
+      TEST_REDIS_URL: Object.values(mutant.steps[gated].env).find((url) =>
+        url.startsWith('redis://'),
+      ),
+    };
+    assert.throws(() => checkRedisIsolation(mutant), assert.AssertionError);
+  });
+});

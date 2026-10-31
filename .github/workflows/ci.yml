@@ -428,14 +428,14 @@ jobs:
         timeout-minutes: 5
         run: pnpm --filter @haive/api exec vitest run test/cli-providers-usage-auth.test.ts
         env:
-          USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/12
+          USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/8
 
       - name: Module activation watch on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         timeout-minutes: 5
         run: pnpm --filter @haive/worker exec vitest run test/module-activation-watch.test.ts
         env:
-          MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/11
+          MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/7
 
       - name: Auth throttle script on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
