@@ -184,6 +184,52 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
         if (label === 'usage connect' && refuse) expect(h.exchange).not.toHaveBeenCalled();
       });
   }
+  it.each(['create', 'patch', 'clone'])(
+    '%s bounds sorted secret names and retains the full count',
+    async (operation) => {
+      const names = Array.from({ length: 60 }, (_, i) => `SECRET_${String(i).padStart(2, '0')}`);
+      const envVars = Object.fromEntries(
+        [...names].reverse().map((name) => [name, 'synthetic-value']),
+      );
+      if (operation === 'clone') {
+        await db.insert(schema.cliProviderSecrets).values(
+          names.slice(0, 55).map((secretName) => ({
+            providerId: provider,
+            secretName,
+            encryptedValue: 'synthetic',
+            encryptedDek: 'synthetic',
+          })),
+        );
+        await db
+          .update(schema.cliProviders)
+          .set({ envVars })
+          .where(eq(schema.cliProviders.id, provider));
+      }
+      const response = await app.request(
+        operation === 'create'
+          ? '/cli-providers'
+          : `/cli-providers/${provider}${operation === 'clone' ? '/clone' : ''}`,
+        {
+          method: operation === 'patch' ? 'PATCH' : 'POST',
+          headers: { 'content-type': 'application/json' },
+          body:
+            operation === 'clone'
+              ? undefined
+              : JSON.stringify(
+                  operation === 'create'
+                    ? { name: 'claude-code', label: 'many secrets', authMode: 'api_key', envVars }
+                    : { envVars },
+                ),
+        },
+      );
+      expect(response.status).toBe(operation === 'patch' ? 200 : 201);
+      const rows = await audits(db);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.metadata).toMatchObject({ secretCount: 60, secretNames: names.slice(0, 50) });
+      expect(h.auditLog.mock.calls[0]![0]).toBe(h.auditInsert.mock.calls[0]![0]);
+      expect(JSON.stringify(rows)).not.toContain('synthetic');
+    },
+  );
   for (const refused of [false, true]) {
     for (const operation of ['create', 'patch', 'clone', 'provider-delete'] as const)
       it(`${operation}: ${refused ? 'audit refusal undoes secrets and provider change' : 'commits safe audit'}`, async () => {

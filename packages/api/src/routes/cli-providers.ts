@@ -55,6 +55,14 @@ import { getCliExecQueue, getUsagePollQueue } from '../queues.js';
 import { enqueueCliVersionRefresh } from '../lib/cli-version-refresh.js';
 import { loadPollableJob } from '../lib/cli-job-poll.js';
 
+function secretAuditMetadata(names: Iterable<string>): {
+  secretCount: number;
+  secretNames: string[];
+} {
+  const sorted = [...new Set(names)].sort();
+  return { secretCount: sorted.length, secretNames: sorted.slice(0, 50) };
+}
+
 async function loadOwnedProvider(db: Database, userId: string, providerId: string) {
   const provider = await db.query.cliProviders.findFirst({
     where: and(eq(schema.cliProviders.id, providerId), eq(schema.cliProviders.userId, userId)),
@@ -404,8 +412,7 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
         targetId: rows[0]!.id,
         metadata: {
           source: 'environment',
-          secretCount: Object.keys(split?.secrets ?? {}).length,
-          secretNames: Object.keys(split?.secrets ?? {}).sort(),
+          ...secretAuditMetadata(Object.keys(split?.secrets ?? {})),
         },
       };
       await insertAuditEvent(tx, secretEvent);
@@ -534,8 +541,7 @@ cliProviderRoutes.patch('/:id', async (c) => {
         targetId: id,
         metadata: {
           source: 'environment',
-          secretCount: Object.keys(split?.secrets ?? {}).length,
-          secretNames: Object.keys(split?.secrets ?? {}).sort(),
+          ...secretAuditMetadata(Object.keys(split?.secrets ?? {})),
         },
       }
     : undefined;
@@ -828,9 +834,10 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
       targetId: row.id,
       metadata: {
         sourceProviderId: source.id,
-        secretNames: [
-          ...new Set([...sourceSecrets.map((s) => s.secretName), ...Object.keys(split.secrets)]),
-        ].sort(),
+        ...secretAuditMetadata([
+          ...sourceSecrets.map((s) => s.secretName),
+          ...Object.keys(split.secrets),
+        ]),
       },
     };
     await insertAuditEvent(tx, cloneEvent);
