@@ -9,6 +9,7 @@ import { emptyProjectState, renderProjectState } from '@haive/shared/project-sta
 import { gitRun } from '../repo/git-exec.js';
 import * as gitCommands from '../repo/git-exec.js';
 import { commitHaiveProjections } from './commit.js';
+import { commitRecorded } from '../step-engine/steps/onboarding/_stage-paths.js';
 const identity = {
   GIT_AUTHOR_NAME: 'fixture',
   GIT_AUTHOR_EMAIL: 'fixture@local',
@@ -36,12 +37,17 @@ async function record(dir: string, settings: Record<string, unknown> = {}) {
     await writeFile(dest, text);
   }
 }
-const save = (repoPath: string, message?: string) =>
+const save = (
+  repoPath: string,
+  message?: string,
+  waitForIndexRetry?: (ms: number) => Promise<void>,
+) =>
   commitHaiveProjections({
     repositoryId: '00000000-0000-4000-8000-000000000001',
     repoPath,
     identity,
     message,
+    waitForIndexRetry,
   });
 describe('commitHaiveProjections', () => {
   it('reports its own commit even when another commit lands before the index sync', async () => {
@@ -225,7 +231,12 @@ describe('commit read and repair controls', () => {
         throw new Error('index locked');
       return exec(args, options);
     });
-    expect(await save(dir)).toMatchObject({ committed: true, indexSynced: false });
+    const waitForIndexRetry = vi.fn(async (_ms: number) => undefined);
+    expect(await save(dir, undefined, waitForIndexRetry)).toMatchObject({
+      committed: true,
+      indexSynced: false,
+    });
+    expect(waitForIndexRetry.mock.calls.map(([ms]) => ms)).toEqual([200, 400, 800, 1600, 3200]);
     vi.restoreAllMocks();
     expect((await gitRun(dir, ['diff', '--cached', '--name-only'])).stdout).toContain(
       'format.json',
@@ -281,4 +292,35 @@ it('refuses a previous record missing its format when a recognized file is prese
   const before = (await gitRun(dir, ['rev-parse', 'HEAD'])).stdout;
   await expect(save(dir)).rejects.toHaveProperty('refusal.code', 'record_refused');
   expect((await gitRun(dir, ['rev-parse', 'HEAD'])).stdout).toBe(before);
+});
+
+it('bounds index warnings to the count and ten paths on a commit and an unchanged retry', async () => {
+  const dir = await fixture();
+  const names = Array.from({ length: 11 }, (_, i) => `named-${String(i).padStart(2, '0')}`);
+  for (const name of names) await writeFile(join(dir, name), 'content');
+  const exec = gitCommands.gitExec;
+  vi.spyOn(gitCommands, 'gitExec').mockImplementation(async (args, options) => {
+    if (args[0] === 'update-index' && !options?.env?.GIT_INDEX_FILE)
+      throw new Error('index locked');
+    return exec(args, options);
+  });
+  const waitForIndexRetry = vi.fn(async (_ms: number) => undefined);
+  for (const committed of [true, false]) {
+    const warnings: string[] = [];
+    const files = await commitRecorded(
+      dir,
+      { add: names, remove: [] },
+      'save',
+      identity,
+      warnings,
+      undefined,
+      { repairUnchangedIndex: true, waitForIndexRetry },
+    );
+    expect(files.length > 0).toBe(committed);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('11 paths:');
+    for (const name of names.slice(0, 10)) expect(warnings[0]).toContain(name);
+    expect(warnings[0]).not.toContain('named-10');
+  }
+  expect(waitForIndexRetry).toHaveBeenCalledTimes(10);
 });

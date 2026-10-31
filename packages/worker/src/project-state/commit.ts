@@ -29,6 +29,7 @@ export async function commitHaiveProjections(args: {
   repoPath: string;
   identity: Record<string, string>;
   message?: string;
+  waitForIndexRetry?: (ms: number) => Promise<void>;
 }): Promise<HaiveProjectionCommit> {
   const { repoPath, repositoryId } = args;
   const unreadable = (err: unknown): never => {
@@ -99,7 +100,7 @@ export async function commitHaiveProjections(args: {
     (sha) => {
       commitSha = sha;
     },
-    { repairUnchangedIndex: true },
+    { repairUnchangedIndex: true, waitForIndexRetry: args.waitForIndexRetry },
   );
   for (const warning of warnings)
     logger.warn({ repoPath, warning }, 'Haive data commit index sync');

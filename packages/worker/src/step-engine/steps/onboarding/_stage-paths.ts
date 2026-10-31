@@ -324,10 +324,16 @@ export async function commitRecorded(
   env: NodeJS.ProcessEnv,
   warnings?: string[],
   onCommitted?: (sha: string) => void,
-  options: { repairUnchangedIndex?: boolean } = {},
+  options: {
+    repairUnchangedIndex?: boolean;
+    waitForIndexRetry?: (ms: number) => Promise<void>;
+  } = {},
 ): Promise<string[]> {
   const run = (args: string[], extra?: NodeJS.ProcessEnv) =>
     gitExec(args, { cwd: repoPath, env: { ...env, ...extra }, maxBuffer: GIT_MAX_BUFFER });
+  const waitForIndexRetry =
+    options.waitForIndexRetry ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   for (const mark of ['MERGE_HEAD', 'CHERRY_PICK_HEAD']) {
     const open = await gitRun(repoPath, ['rev-parse', '-q', '--verify', mark]);
     const name = mark.split('_')[0]!.toLowerCase();
@@ -386,7 +392,7 @@ export async function commitRecorded(
         if (stale.length === 0) return [];
         let synced = false;
         for (let attempt = 0; attempt < 6 && !synced; attempt++) {
-          if (attempt > 0) await new Promise((r) => setTimeout(r, 100 * 2 ** attempt));
+          if (attempt > 0) await waitForIndexRetry(100 * 2 ** attempt);
           synced = await syncRealIndex(run, parent, stale).then(
             () => true,
             () => false,
@@ -409,7 +415,7 @@ export async function commitRecorded(
     // The commit has landed; a real index another writer holds locked is retried, then reported.
     let synced = false;
     for (let attempt = 0; attempt < 6 && !synced; attempt += 1) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, 100 * 2 ** attempt));
+      if (attempt > 0) await waitForIndexRetry(100 * 2 ** attempt);
       synced = await syncRealIndex(run, commit, changed).then(
         () => true,
         () => false,
