@@ -95,6 +95,14 @@ describe('the fake database', () => {
     expect(fake.compileWhere(steps, eq(steps.title, 'TITLE'))({ title: 'title' })).toBe(false);
   });
 
+  it('orders UUID values without case, as PostgreSQL does', () => {
+    const fake = createFakeDb({ taskSteps: steps });
+    const takes = (condition: unknown) =>
+      fake.compileWhere(steps, condition)({ id: 'F0000000-0000-4000-8000-000000000000' });
+    expect(takes(gt(steps.id, 'a0000000-0000-4000-8000-000000000000'))).toBe(true);
+    expect(takes(lt(steps.id, 'a0000000-0000-4000-8000-000000000000'))).toBe(false);
+  });
+
   it.each([
     { label: 'upper-case inner', innerId: USER.toUpperCase(), outerId: USER },
     { label: 'upper-case outer', innerId: USER, outerId: USER.toUpperCase() },
