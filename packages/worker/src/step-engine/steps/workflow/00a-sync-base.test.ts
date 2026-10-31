@@ -1735,3 +1735,29 @@ it.each([false, true])(
     }
   },
 );
+
+it('T397 a failed ff that moved HEAD fails after re-sync, without putting old projections back', async () => {
+  const { bare, seed } = await seedOrigin();
+  const local = await cloneLocal(bare);
+  let shim: Awaited<ReturnType<typeof failGit>> | null = null;
+  try {
+    await advanceOrigin(seed, 'b.txt');
+    projections.setAside.mockResolvedValue({ outcome: 'set-aside', paths: [], kept: new Map() });
+    const ctx = mkCtx(local, 'repo-1');
+    const d = await syncBaseStep.detect!(ctx);
+    const before = await git(local, ['rev-parse', 'HEAD']);
+    shim = await failGit(['merge', '--ff-only'], { afterRun: true });
+    await expect(syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }))).rejects.toThrow(
+      /fast-forward.*failed/,
+    );
+    await shim.restore();
+    shim = null;
+    expect(await git(local, ['rev-parse', 'HEAD'])).not.toBe(before);
+    expect(projections.resync).toHaveBeenCalled();
+    expect(projections.putBack).not.toHaveBeenCalled();
+  } finally {
+    await shim?.restore();
+    for (const dir of [bare, seed, local])
+      await rm(dir, { recursive: true, force: true, maxRetries: 5 });
+  }
+});

@@ -21,6 +21,7 @@ import {
   setAsideHaiveProjections,
   type KeptFiles,
 } from '../project-state/set-aside.js';
+import { headCommit } from '../plan/merge.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
 import { gitWorkspaceStatus } from './git-workspace.js';
@@ -154,7 +155,9 @@ export async function fastForward(
   dest: string,
 ): Promise<string | null> {
   const head = await gitRun(dest, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-  if (head.code !== 0) return 'Not refreshed: the checkout is not on a branch.';
+  if (head.code === 1) return 'Not refreshed: the checkout is not on a branch.';
+  if (head.code !== 0)
+    return `Not refreshed: could not read the checkout's branch (${firstLine(head.stderr || head.stdout)}).`;
   const branch = head.stdout.trim();
   let source: RefreshSource | null;
   try {
@@ -167,22 +170,30 @@ export async function fastForward(
   const fetchError = await source.fetch(branch, []);
   if (fetchError)
     return `Not refreshed: could not fetch ${branch} from ${source.label} (${fetchError}).`;
-  const target = (
-    await gitRun(dest, ['rev-parse', '--verify', 'FETCH_HEAD^{commit}'])
-  ).stdout.trim();
-  if (!target) return `Not refreshed: fetching ${branch} from ${source.label} brought no commit.`;
+  const fetchedHead = await gitRun(dest, ['rev-parse', '--verify', 'FETCH_HEAD^{commit}']);
+  if (fetchedHead.code !== 0)
+    return `Not refreshed: could not read the fetched commit (${firstLine(fetchedHead.stderr || fetchedHead.stdout)}).`;
+  const target = fetchedHead.stdout.trim();
+  if (!target) return `Not refreshed: could not read the fetched commit (empty answer).`;
 
   let base = await gitRun(dest, ['merge-base', 'HEAD', target]);
-  if (base.code !== 0) {
+  if (base.code === 1) {
     const shallow = await gitRun(dest, ['rev-parse', '--is-shallow-repository']);
+    if (shallow.code !== 0 || !['true', 'false'].includes(shallow.stdout.trim())) {
+      return `Not refreshed: could not read whether the checkout is shallow (${firstLine(shallow.stderr || shallow.stdout)}).`;
+    }
     if (shallow.stdout.trim() === 'true') {
-      await source.fetch(branch, ['--deepen=50']);
+      const deepenError = await source.fetch(branch, ['--deepen=50']);
+      if (deepenError)
+        return `Not refreshed: could not deepen ${branch} from ${source.label} (${deepenError}).`;
       base = await gitRun(dest, ['merge-base', 'HEAD', target]);
     }
   }
-  if (base.code !== 0) {
+  if (base.code === 1) {
     return `Not refreshed: this checkout and ${source.label} have no history in common.`;
   }
+  if (base.code !== 0)
+    return `Not refreshed: could not read the merge base (${firstLine(base.stderr || base.stdout)}).`;
 
   const counts = await gitRun(dest, ['rev-list', '--left-right', '--count', `HEAD...${target}`]);
   const [ahead, behind] = counts.stdout.trim().split(/\s+/).map(Number);
@@ -235,19 +246,21 @@ export async function fastForward(
         // Every task's start and every revival take this lock, so none lands between the fence and the move.
         await lockRepositoryTasksKey(tx, payload.repositoryId);
         const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
-        if (check.outcome !== 'clean') return { again: check, merge: null };
+        if (check.outcome !== 'clean') return { again: check, merge: null, after: null };
         if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {
-          return { again: check, merge: null };
+          return { again: check, merge: null, after: null };
         }
-        return { again: check, merge: await gitRun(dest, ['merge', '--ff-only', target]) };
+        const merge = await gitRun(dest, ['merge', '--ff-only', target]);
+        // A failed process may still have moved HEAD; only this read decides recovery.
+        return { again: check, merge, after: await headCommit(dest) };
       });
     } catch (err) {
       if (asided) await recoverAfterMoveFailure(db, payload.repositoryId, dest, kept, before, err);
       throw err;
     }
-    const { again, merge: merged } = moved;
+    const { again, merge: merged, after } = moved;
     if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
-    if (merged?.code === 0) {
+    if (after !== null && after !== before) {
       await handBackAfterMove(dest, before);
       await resyncHaiveProjections(db, payload.repositoryId, dest);
       await restoreKeptMetadata(dest, kept);
@@ -260,7 +273,7 @@ export async function fastForward(
     }
     if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
     if (merged.code !== 0) {
-      return `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`;
+      return `Refresh failed: the fast-forward${after !== before ? ' moved the checkout but failed' : ' failed'} (${firstLine(merged.stderr || merged.stdout)}).`;
     }
     break;
   }

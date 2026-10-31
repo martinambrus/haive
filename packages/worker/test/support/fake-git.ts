@@ -20,7 +20,7 @@ const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
  */
 export async function failGit(
   startsWith: string[],
-  opts: { exit?: number; hang?: boolean; from?: number; until?: number } = {},
+  opts: { exit?: number; hang?: boolean; from?: number; until?: number; afterRun?: boolean } = {},
 ): Promise<FakeGit> {
   const real = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
   const dir = await mkdtemp(path.join(tmpdir(), 'fake-git-'));
@@ -41,6 +41,7 @@ export async function failGit(
       'if [ "$got" = "$want" ]; then',
       `  seen=$(cat ${counter} 2>/dev/null || echo 0); seen=$((seen + 1)); echo "$seen" > ${counter}`,
       `  if [ "$seen" -ge ${opts.from ?? 1} ] && [ "$seen" -le ${opts.until ?? Number.MAX_SAFE_INTEGER} ]; then`,
+      ...(opts.afterRun ? [`    ${quote(real)} "$@"`] : []),
       `    ${failure}`,
       '  fi',
       'fi',
