@@ -254,6 +254,7 @@ async function scanExistingKb(repoPath: string): Promise<ExistingKbFile[]> {
     .map((rel) => rel.slice(KB_DIR.length + 1));
   const out: ExistingKbFile[] = [];
   for (const rel of rels) {
+    if (!sanitizeKbRelPath(rel).ok) continue;
     if (rel === 'INDEX.md') continue; // generated index, not content
     let title = rel;
     try {
@@ -2121,6 +2122,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         continue;
       }
       const dest = routePlacement(u) ?? src.relPath;
+      if (!sanitizeKbRelPath(dest).ok) continue;
       if (takenDest.has(dest)) continue;
       takenDest.add(dest);
       handledSrc.add(src.relPath);
@@ -2259,6 +2261,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
         // fall through to the local re-placement branch below
       }
       const dest = routePlacement(p) ?? src.relPath; // null → leave in place
+      if (!sanitizeKbRelPath(dest).ok) continue;
       if (takenDest.has(dest)) continue;
       takenDest.add(dest);
       handledSrc.add(src.relPath);
@@ -2372,6 +2375,7 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       // never overwriting an existing/re-placed file.
       const routed = routeEntries(localChosen);
       for (const r of routed) {
+        if (!sanitizeKbRelPath(r.relPath).ok) continue;
         const filePath = path.join(kbDir, r.relPath);
         // `create-exclusive` IS the "preserve an existing file" rule — race-free, no separate probe,
         // and EEXIST covers a DANGLING link, which the `pathExists` probe read as absent and then

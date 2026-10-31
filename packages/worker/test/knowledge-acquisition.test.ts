@@ -205,6 +205,24 @@ describe('parseKbEntries', () => {
 });
 
 describe('knowledgeAcquisitionStep.apply', () => {
+  it('does not update or move existing KB paths that name git data', async () => {
+    const rel = '.GIT./hooks/keep.md';
+    await mkdir(path.join(tmpRoot, '.haive-data/knowledge_base/.GIT./hooks'), { recursive: true });
+    await writeFile(path.join(tmpRoot, '.haive-data/knowledge_base', rel), '# Keep\noriginal');
+    const out = await knowledgeAcquisitionStep.apply(makeCtx(tmpRoot), {
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
+      formValues: {},
+      llmOutput: {
+        updates: [{ path: rel, title: 'Changed', sections: [{ heading: 'X', body: 'overwrite' }] }],
+      },
+    });
+    expect(await readFile(path.join(tmpRoot, '.haive-data/knowledge_base', rel), 'utf8')).toBe(
+      '# Keep\noriginal',
+    );
+    expect(out.written).toEqual([]);
+  });
   it('writes LLM entries as markdown when selected', async () => {
     const ctx = makeCtx(tmpRoot);
     const raw = [
