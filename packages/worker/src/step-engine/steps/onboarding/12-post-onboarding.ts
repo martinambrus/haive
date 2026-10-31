@@ -18,7 +18,7 @@ import type {
   OnboardingToolingMirror,
 } from '@haive/shared';
 import { HAIVE_DATA_DIR, RTK_SETTINGS_PATHS } from '@haive/shared';
-import { safeErrorMessage } from '@haive/shared/logger';
+import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
 import {
   buildRepoCliRulesBlock,
   CLI_RULES_DISK_PATH,
@@ -562,7 +562,7 @@ async function writeHaiveDataMirror(
   try {
     await writePlanMirror(ctx.db, repositoryId, ctx.repoPath, changes);
   } catch (err) {
-    warnings.push(`haive-data mirror: plan mirror failed (${safeErrorMessage(err)})`);
+    warnings.push(`haive-data mirror: plan mirror failed (${scrubErrorPaths(err)})`);
   } finally {
     filesWritten.push(...changes.written);
     filesRemoved.push(...changes.removed);
