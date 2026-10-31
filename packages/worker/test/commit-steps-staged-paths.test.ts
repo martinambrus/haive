@@ -16,6 +16,7 @@ import {
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
 import { upgradeCommitStep } from '../src/step-engine/steps/onboarding-upgrade/03-upgrade-commit.js';
 import { recordWritten } from './support/upgrade-apply-record.js';
+import { failGit } from './support/fake-git.js';
 import { killGit, type KilledGit } from './support/kill-git.js';
 import { dropIgnoredRulesFiles } from '../src/step-engine/steps/onboarding/_rules-files.js';
 
@@ -1115,6 +1116,20 @@ describe('commitRecorded commits what it staged in a private index', () => {
     await expect(
       commitRecorded(repo, { add: ['a.md'], remove: [] }, 'chore: x', GIT_ENV),
     ).rejects.toThrow(/merge/);
+  });
+  it('T397 fix6d a failed commit parent read names the cause and does not create a root commit', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n' });
+    await writeFile(path.join(repo, 'a.md'), 'ours\n');
+    const before = await git(repo, ['rev-parse', 'HEAD']);
+    const shim = await failGit(['rev-parse', '-q', '--verify', 'HEAD^{commit}']);
+    try {
+      await expect(
+        commitRecorded(repo, { add: ['a.md'], remove: [] }, 'chore: onboard', GIT_ENV),
+      ).rejects.toThrow(/could not read HEAD.*simulated failure/);
+    } finally {
+      await shim.restore();
+    }
+    expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(before);
   });
 });
 

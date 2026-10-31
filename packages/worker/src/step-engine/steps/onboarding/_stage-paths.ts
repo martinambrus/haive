@@ -333,6 +333,11 @@ export async function commitRecorded(
     if (open.code !== 1) throw new Error(`could not check for a ${name}: git exited ${open.code}`);
   }
   const head = await gitRun(repoPath, ['rev-parse', '-q', '--verify', 'HEAD^{commit}']);
+  if (head.code !== 0 && head.code !== 1) {
+    throw new Error(
+      `could not read HEAD before partial commit: ${(head.stderr || head.stdout).trim()} (git exited ${head.code})`,
+    );
+  }
   const parent = head.code === 0 ? head.stdout.trim() : '';
   const indexFile = path.join(tmpdir(), `${randomUUID()}.index`);
   const temp = { GIT_INDEX_FILE: indexFile };
