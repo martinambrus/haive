@@ -30,11 +30,14 @@ describe('resetStepAndDownstream on a step whose merge retries ran out', () => {
       then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
         Promise.resolve(value).then(res, rej),
     });
+    // Read as a bare `where` twice: the downstream rows, then the rows the reset holds.
+    let reads = 0;
     const handle = {
       select: () => ({
         from: () => ({
           where: () => ({
-            ...thenable([]),
+            then: (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
+              Promise.resolve(reads++ === 0 ? [] : [target]).then(res, rej),
             limit: async () => [target],
             // The id-ordered lock of the rows the reset writes.
             orderBy: () => ({ for: async () => [{ id: target.id }] }),
