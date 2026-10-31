@@ -146,3 +146,28 @@ describe('remaining failure masks (item 6)', () => {
     it(`rejects ${JSON.stringify(script)}`, () => rejects(script, matched));
   }
 });
+
+describe('shell control data and empty bodies (item 7)', () => {
+  for (const script of [
+    'echo ${{ inputs.flag || true }}',
+    "echo ${{ format('}}', inputs.flag || true) }}",
+    'case "$v" in\na)\ntrue\n;;\nesac',
+    'while check; do\ntrue\ndone',
+    'for x in a b; do\ntrue\ndone',
+    'f() {\ntrue\n}',
+    'function f {\ntrue\n}',
+  ]) {
+    it(`accepts ${JSON.stringify(script)}`, () => assert.equal(swallowedFailure(script), null));
+  }
+  for (const prefix of [
+    'echo ${{ inputs.flag || true }}',
+    'case "$v" in a) true ;; esac',
+    'while check; do true; done',
+    'f() { true; }',
+  ]) {
+    it(`still checks code after ${JSON.stringify(prefix)}`, () =>
+      rejects(`${prefix}\ntrue`, 'true'));
+  }
+  it('rejects an errexit window even when it is closed later', () =>
+    rejects('set +e\ncmd\nstatus=$?\nset -e', 'set +e'));
+});

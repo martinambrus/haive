@@ -15,7 +15,37 @@ function heredocConsumer(header) {
   return 'data';
 }
 
+// GitHub evaluates expressions before the shell sees the script. Preserve line boundaries.
+function withoutExpressions(source, step) {
+  let result = '';
+  for (let i = 0; i < source.length;) {
+    if (!source.startsWith('${{', i)) {
+      result += source[i++];
+      continue;
+    }
+    const start = i;
+    i += 3;
+    let quoted = false;
+    while (i < source.length) {
+      if (source[i] === "'") {
+        if (quoted && source[i + 1] === "'") {
+          i += 2;
+          continue;
+        }
+        quoted = !quoted;
+      }
+      if (!quoted && source.startsWith('}}', i)) break;
+      i++;
+    }
+    if (i === source.length) throw new Error(`${step}: unterminated GitHub expression`);
+    i += 2;
+    result += source.slice(start, i).replace(/[^\n]/g, '_');
+  }
+  return result;
+}
+
 export function shellSource(source, { maskQuotes = false, step = 'shell script' } = {}) {
+  source = withoutExpressions(source, step);
   const fail = (what) => {
     throw new Error(`${step}: unterminated ${what}`);
   };
@@ -184,8 +214,14 @@ export function swallowedFailure(source, options = {}) {
   if (continued) return continued[0].replace(/\s+/g, ' ').trim();
   let branches = 0;
   let cases = 0;
+  let loops = 0;
+  let functions = 0;
   for (let command of script.replace(/&&\s*true\s*$/, '&& _').split(/&&|\|\||[;\n]/)) {
     command = command.trim().replace(/^[({]\s*/, '');
+    if (/^(?:while|until|for|select)\b/.test(command)) loops++;
+    if (/^done\b/.test(command)) loops = Math.max(0, loops - 1);
+    if (/^(?:\w+\s*\(\)|function\s+\w+(?:\s*\(\))?)\s*(?:\{|$)/.test(command)) functions++;
+    if (/^}/.test(command)) functions = Math.max(0, functions - 1);
     if (/^case\b/.test(command)) cases++;
     if (/^esac\b/.test(command)) cases = Math.max(0, cases - 1);
     if (/^fi\b/.test(command)) branches = Math.max(0, branches - 1);
@@ -199,7 +235,14 @@ export function swallowedFailure(source, options = {}) {
         command,
       );
     if (disabled) return disabled[0];
-    if (branches === 0 && !(cases && /^true\)/.test(command)) && /^true(?=\s|[)}]|$)/.test(command))
+    if (
+      branches === 0 &&
+      loops === 0 &&
+      functions === 0 &&
+      cases === 0 &&
+      !(cases && /^true\)/.test(command)) &&
+      /^true(?=\s|[)}]|$)/.test(command)
+    )
       return 'true';
   }
   return null;
