@@ -46,6 +46,7 @@ export function toConnectionSummary(row: ConnectionRow) {
     grantedScopes: row.grantedScopes,
     status: row.status,
     lastError: row.lastError,
+    refreshRefusedAt: row.refreshRefusedAt,
     repoCredentialId: row.repoCredentialId,
     expiresAt: row.expiresAt,
     createdAt: row.createdAt,
@@ -243,6 +244,7 @@ export async function finishSignIn(input: {
       grantedScopes: tokens.scopes ?? input.requestedScopes,
       status: 'connected' as const,
       lastError: null,
+      refreshRefusedAt: null,
       oauthClientId: client.clientId,
       updatedAt: new Date(),
       ...(credential
