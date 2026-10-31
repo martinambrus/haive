@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => ({ db: undefined as unknown }));
@@ -39,6 +39,8 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+afterEach(() => vi.restoreAllMocks());
+
 describe('a plan write for a repository that was deleted meanwhile', () => {
   it('is a 404, not a 400 or a 500', async () => {
     const fake = createFakeDb({
@@ -62,6 +64,43 @@ describe('a plan write for a repository that was deleted meanwhile', () => {
       body: JSON.stringify({ fromNodeId: FROM, toNodeId: TO, kind: 'depends_on' }),
     });
 
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ code: 'plan_repository_gone' });
+    expect(enqueuePlanMirrorRefresh).not.toHaveBeenCalled();
+  });
+});
+
+describe('deleting a plan after its repository disappears', () => {
+  it('maps the applier refusal to 404 and does not enqueue a refresh', async () => {
+    const fake = createFakeDb({
+      repositories: schema.repositories,
+      tasks: schema.tasks,
+      planNodes: schema.planNodes,
+      planNodeEdges: schema.planNodeEdges,
+      planMirrorState: schema.planMirrorState,
+    });
+    fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo' });
+    fake.insert(schema.planNodes, {
+      id: FROM,
+      repositoryId: REPO,
+      parentId: null,
+      title: 'Plan',
+      path: `/${FROM}/`,
+      version: 1,
+    });
+    h.db = fake.db;
+    const transaction = fake.db.transaction.bind(fake.db);
+    // Ownership and the root have been read; the real applier first discovers the deletion.
+    const patch = vi.spyOn(fake.db, 'transaction').mockImplementationOnce(async (run) => {
+      await fake.db.delete(schema.repositories).where(eq(schema.repositories.id, REPO));
+      return transaction(run);
+    });
+    const response = await app.request(`/${REPO}/plan`, {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirm: 'repo' }),
+    });
+    expect(patch).toHaveBeenCalledOnce();
     expect(response.status).toBe(404);
     expect(await response.json()).toMatchObject({ code: 'plan_repository_gone' });
     expect(enqueuePlanMirrorRefresh).not.toHaveBeenCalled();

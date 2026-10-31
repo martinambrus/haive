@@ -1039,7 +1039,7 @@ planRoutes.delete('/:id/plan', async (c) => {
     db,
     { ops: [{ op: 'delete', nodeRef: root.id }] },
     { repositoryId, origin: 'user' },
-  );
+  ).catch(planError);
   await enqueuePlanMirrorRefresh(repositoryId, userId);
 
   // Mirror second: the database is the source of truth and these files are
