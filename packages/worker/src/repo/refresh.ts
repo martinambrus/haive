@@ -149,6 +149,12 @@ export async function usableCheckout(
         'checkout structure unreadable after git failed; leaving it unknown',
       );
     }
+    // Git's own words tell a corrupt config from an ownership refusal. For the reader of the log
+    // only: nothing branches on them.
+    logger.warn(
+      { dest, stderr: cdup.stderr.trim().slice(0, 500) },
+      'git exited non-zero over a checkout nothing proves dead; leaving it unknown',
+    );
     return { unknown: whyNoAnswer(cdup), repairNeeded: true };
   }
   if (cdup.stdout.trim() !== '') return 'unusable';

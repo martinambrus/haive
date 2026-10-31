@@ -92,6 +92,8 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     const dir = await intact();
     shim = await killGit(['rev-parse', '--show-cdup']);
     expect(await usableCheckout(dir)).toEqual({ unknown: expect.stringContaining('SIGKILL') });
+    // A git with no exit status has said nothing to log.
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('a killed HEAD read is unknown', async () => {
@@ -377,11 +379,32 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     },
   );
 
-  it('an unknown that no read failed for says nothing', async () => {
+  it('a checkout every read succeeded on and git exited 0 for says nothing', async () => {
+    const dir = await intact();
+    expect(await usableCheckout(dir)).toBe('usable');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  // Display only: what git said is for whoever reads the log; nothing branches on it.
+  it('an unknown that git exited non-zero for logs what git said, beside the checkout', async () => {
     const dir = await intact();
     await corruptConfig(dir);
+    expect(await cdupExit(dir)).toBe(128);
     expect(await usableCheckout(dir)).toEqual(needsRepair);
-    expect(warn).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ dest: dir, stderr: expect.stringMatching(/\S/) }),
+      expect.any(String),
+    );
+  });
+
+  it('logs what git said trimmed and cut to 500 characters', async () => {
+    const dir = await intact();
+    shim = await failGit(['rev-parse', '--show-cdup'], { stderr: `\n  ${'x'.repeat(2000)}  \n` });
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ dest: dir, stderr: 'x'.repeat(500) }),
+      expect.any(String),
+    );
   });
 
   it('an empty folder is unusable', async () => {

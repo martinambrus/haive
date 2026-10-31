@@ -14,8 +14,9 @@ const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
  * Puts a `git` first on PATH that fails every call whose argv starts with `startsWith` and runs the
  * real git for the rest. `hardenGitArgs` prepends `-c key=value` pairs, so the match skips those:
  * `['remote']` fails `git remote get-url origin`, `['rev-parse', 'HEAD']` fails `rev-parse HEAD` but
- * not `rev-parse --abbrev-ref HEAD`. The failure is `exit` (default 128) with a `fatal:` line, or,
- * with `hang`, a process that outlives any shortened `gitTimeoutLimits` and is killed by it.
+ * not `rev-parse --abbrev-ref HEAD`. The failure is `exit` (default 128) with a `fatal:` line, or
+ * with the given `stderr` text instead of that line, or, with `hang`, a process that outlives any
+ * shortened `gitTimeoutLimits` and is killed by it.
  * `from` and `until` (1-based, counted over the calls that match) fail only the Nth to Mth match.
  */
 export async function failGit(
@@ -27,6 +28,7 @@ export async function failGit(
     until?: number;
     afterRun?: boolean;
     stdout?: string;
+    stderr?: string;
   } = {},
 ): Promise<FakeGit> {
   const real = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
@@ -34,7 +36,7 @@ export async function failGit(
   const counter = quote(path.join(dir, 'matches'));
   const failure = opts.hang
     ? 'exec sleep 30'
-    : `printf '%s' ${quote(opts.stdout ?? '')}; echo "fatal: simulated failure" >&2; exit ${opts.exit ?? 128}`;
+    : `printf '%s' ${quote(opts.stdout ?? '')}; ${opts.stderr === undefined ? 'echo "fatal: simulated failure"' : `printf '%s' ${quote(opts.stderr)}`} >&2; exit ${opts.exit ?? 128}`;
   await writeFile(
     path.join(dir, 'git'),
     [
