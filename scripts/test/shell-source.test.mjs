@@ -311,6 +311,23 @@ describe('syntax bash accepts that the lexer must not throw on', () => {
       rejects(script);
     });
   }
+  for (const word of ['"${a:-"b c"}"', '"$(printf %s "$x")"', '$(echo $(uname))']) {
+    it(`reads the case statement on ${word} at a command position`, () => {
+      const script = `echo "$(case ${word} in a) pnpm test || true ;; esac)"`;
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
+  it('reads a case statement that starts an arm of another one', () => {
+    const script = 'echo "$(case $a in x) case $b in y) pnpm test || true ;; esac ;; esac)"';
+    bashAccepts(script);
+    rejects(script);
+  });
+  it('does not take a variable named case for a case statement', () => {
+    const script = 'x=$(case=1; for y in a; do :; done); pnpm test || true';
+    bashAccepts(script);
+    rejects(script);
+  });
 });
 
 describe('strings that a shell runs as code', () => {

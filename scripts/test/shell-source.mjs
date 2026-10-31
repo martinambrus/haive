@@ -39,6 +39,9 @@ function kindOf(command) {
   return 'other';
 }
 
+// Whether the next word starts a command.
+const atCommand = (text) => commandOf(lastCommand(text) + ' _') === '_';
+
 // Whether the command being read runs its input as code.
 const readsCode = (text) => kindOf(commandOf(lastCommand(text))) === 'shell';
 
@@ -271,8 +274,11 @@ export function shellSource(
         /[a-zA-Z_]/.test(char) &&
         (i === 0 || /[\s;|&()]/.test(source[i - 1]))
       ) {
-        const word = /^[a-zA-Z_][a-zA-Z_0-9]*/.exec(source.slice(i))[0];
-        if (word === 'case' && CASE.test(source.slice(i))) cases.push({ pattern: false });
+        const rest = source.slice(i);
+        const word = /^[a-zA-Z_][a-zA-Z_0-9]*/.exec(rest)[0];
+        // A case word among arguments is no statement; at a command position anything may follow it.
+        if (word === 'case' && (CASE.test(rest) || (/^case\s/.test(rest) && atCommand(result))))
+          cases.push({ pattern: false });
         if (word === 'in' && cases.length) cases.at(-1).pattern = true;
         if (word === 'esac') cases.pop();
         result += word;
