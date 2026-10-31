@@ -520,7 +520,7 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+26)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+27)
 
 status: open · was modular #211
 
@@ -551,6 +551,7 @@ status: open · was modular #211
 25. (T445 review, 2026-10-31) PRE-EXISTING, minor: since T445 the node-free guard fails on Node globals read as values, but it covers only the project-state subpath the web imports; shared naming/index.ts ~:63 (`process.env` as a default parameter) and forge/bitbucket-cloud.ts ~:33 (`Buffer.from`) are unguarded. The web never calls them today. Extend the guard to every shared subpath the web bundles.
 26. (T455 review, 2026-10-31) PRE-EXISTING, hardening: nothing enforces T455's `requireJsonObject` guard, so a new `(await c.req.json()) as {...}` in an api route brings the `null`-body 500 back. A ratchet test over api routes (as `fs-ratchet.test.ts` does for path-based fs calls) would catch it; it should also cover WebSocket `message` listeners that read a field off a parsed frame (the CLI login banner's was one, fixed by T463).
 27. (T454 review, 2026-10-31) PRE-EXISTING, minor, dev hosts only: tests/e2e/repos/create.spec.ts ~:17 `findFirstGitDir` counts hidden git directories while the UI hides them, so the local_path case fails on a host with e.g. `~/.nvm` (identical before T454).
+28. (T461 review, 2026-10-31) PRE-EXISTING, minor: no test covers the 404 the per-step CLI switch answers for a step row that vanished (api routes/tasks/steps.ts ~:1914).
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+5)
 
@@ -885,17 +886,14 @@ From the T349 review (2026-10-31). PRE-EXISTING; narrow windows unless stated. T
 5. [verify-first] A possible cycle: shared plan/apply-patch.ts `applyPlanPatch` (~:186-199) writes plan_nodes rows and then upserts `plan_mirror_state`, which needs the repositories row; a repository delete holds that row FOR UPDATE and cascades into plan_nodes. Not traced to the end. Cross-reference T270 and T318 item 5 (the advisory start's plan_nodes lock still waits unbounded).
 6. Minor cost: the four left-active moves (loop Resume, `retry_ai`, Skip, CLI switch) take the whole-task step batch twice (`lockRowsForMove`, then `resetRowsForRerun`); the second is a no-wait re-lock.
 
+Also (T461 review, 2026-10-31): since T461 the task-level provider switch (api routes/tasks/index.ts ~:1781-1827) holds its rows in id order across statements, so it joins the peers of item 4's unordered single-statement updaters (`handleCancelTask`'s bulk UPDATE ~:3799-3820, `takeLeftOpenKept` left-open-merge.ts ~:504, `skipRemovedSteps`, data-migrations); and item 1's swap in `requeueAbandonedOrphan` (~:3327) now meets a locked read at the top of that transaction: move the runs sweep before the read and keep the fold reading the step row under its lock.
+
 ### T460 · FNF[retry-repo-deleted] [design] · a Retry revives a failed task whose repository was deleted (+1)
 
 status: open
 From the T349 review (2026-10-31). PRE-EXISTING. A failed task whose repository was deleted still passes `checkRevive` (database repository-task-lock.ts ~:109), while the repository delete's `cancelOpenTasksForRepo` (api lib/cancel-task.ts ~:130) skips failed tasks; a Retry then sets it `running` with no repository and the worker's next advance throws. Decide: refuse that Retry (say why on the page), or have the delete cancel failed tasks too. Cross-reference T393, T394, T409.
 
 Also (T349 fix-round review, 2026-10-31, reasoned from the code, not reproduced): since T349 the delete takes the task-creation key a Retry takes, but a Retry already waiting on the key when the delete commits goes on: `checkRevive` returns null after the wait without reading the repository again (database repository-task-lock.ts ~:109-113), so the task is revived to `running` with a NULL repository. Whichever way this is decided, the Retry must read the repository again after its wait.
-
-### T461 · FNF[stale-preread-fold] · two folds add to values read before their transaction
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T03:46Z · last: 2026-10-31T03:46Z
-From the T349 review (2026-10-31). PRE-EXISTING, minor. The `carried_*` fold in `resetRowsForRerun` (api routes/tasks/steps.ts ~:211) and the provider-switch loop (routes/tasks/index.ts ~:1813) add to values read before the transaction, so a fold that interleaves loses an update. Read the values under the row lock, or fold in SQL (`col = col + delta`).
 
 ### T462 · FNF[project-state-notices] [design] · the repository page cannot say a sync replaced or refused a value (+2)
 
@@ -936,7 +934,7 @@ From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. 
 
 ### T469 · FNF[git-data-ledger-rows-2] · a reset leaves a git-data claim file no ledger row names; three writers record ledger rows with no path check (+1)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T05:02Z · last: 2026-10-31T05:02Z
 From the T421 fix-round review (2026-10-31). PRE-EXISTING, minor.
 
 1. api routes/repos.ts (~:2568-2574): a git-data claim file named by no ledger row on this install (for example a teammate's older-release file the sync read into the base; it never creates a row) is still left by an onboarding reset, and the record then reads refused, so the next record write throws (confirmed by a one-off run). Direction: also remove base claims that name git data; `baseRecord` (~:3100) is already read there.
@@ -944,7 +942,7 @@ From the T421 fix-round review (2026-10-31). PRE-EXISTING, minor.
 
 ### T470 · FNF[ci-step-independence] · a failed CI step still skips the independent checks after it (+1)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T05:58Z · last: 2026-10-31T05:58Z
 From the T465 review (2026-10-31). PRE-EXISTING, minor to moderate (the same hiding class as T465, for non-smoke checks).
 
 1. .github/workflows/ci.yml, the "Postgres-gated tests" step (~:221-340, ends `exit "$failed"`) has no successor guard, so a failed gated test skips "Run api smokes" (~:348) and with it every smoke.
@@ -952,8 +950,31 @@ From the T465 review (2026-10-31). PRE-EXISTING, minor to moderate (the same hid
 
 Give each independent check the `if: ${{ !cancelled() && <its prerequisites succeeded> }}` T465 gave the worker smokes, so one red step no longer hides the others; keep install/build/migrate failures stopping the rest.
 
+### T471 · FNF[stale-preread-fold-2] · idle_ms writes add to a value read before the write; the per-step switch decides on a pre-transaction status (+1)
+
+status: open
+From the T461 review (2026-10-31). PRE-EXISTING, minor.
+
+1. `idle_ms = step.idleMs + closedIdleMs` from a read made before the transaction, so a concurrent SQL write to `idle_ms` in between is written over: api routes/tasks/steps.ts ~:808 (form submit), ~:894 (merge clarify), ~:1520 (Skip), and worker pr-poll-queue.ts ~:260 (`advancePrWaitStep`, whose guard compares status and `waiting_started_at` only). The delta depends on `waiting_started_at`, so fold it in one SQL statement like `handleCancelTask`'s (`idle_ms + greatest(0, floor(extract(epoch from (now() - waiting_started_at)) * 1000))`) or read the row under its lock, as T461 did for `carried_*`.
+2. The per-step switch decides on the status read before its transaction (api routes/tasks/steps.ts ~:1820, the 409 when running or waiting_cli; ~:1836, `movesTask` and iterationCount) although the transaction now holds the row (`held`, ~:1909) and could re-check it. Not checked whether a pass can activate the row in that gap (the ownership fence drops a pass whose row was reset).
+
+### T472 · FNF[git-data-claim-sweep] [design] · an onboarding reset leaves a git-data claim file that neither a ledger row nor the sync base names
+
+status: open
+From the T469 review (2026-10-31). PRE-EXISTING, minor (narrow window).
+
+api routes/repos.ts `resetOnboardingArtifacts` (~:2615-2625, the claim-file loop) takes back the claim files a live row, a retired git-data row (`supersededGitDataPaths`, T421) or a git-data claim in the sync base (`baseGitDataPaths`, T469) names. A git-data claim file that reached the checkout after the last sync (or that `applyRebase` dropped from the base, sync.ts ~:1131, until the next sync re-adds it) is in none of them, so it stays, and the record then reads `refused` ("format.json is missing") until someone removes it by hand: the sync cannot read it in once the reset removed `format.json`. Measured by the T469 driver (C4a/C4b). Direction (a decision, since it adds a read path to a destructive route): list `artifacts/` through the fs-safe primitives under a cap and take back each file the codec itself classes as a git-data claim (a canonical path that names git data and `claimFileName(path)` equal to the file name, codec.ts ~:374-379).
+
+### T473 · FNF[git-data-file-writers] · 07 writes agent files under a stored agent-target dir with no git-data refusal
+
+status: open
+From the T469 review (2026-10-31). PRE-EXISTING, minor (reachable only from a stored legacy or hand-edited render context).
+
+worker 07-generate-files.ts writes `agentFilePath(target, agent.id)` (~:918) and `${target.dir}/README.md` (~:922) through `writeIfAllowed` (~:832, `writeFileNoFollow`) at the stored `detected.agentTargets[].dir`, a bare string (`agentTargetSchema.dir`, render-context.ts ~:7-11), with no git-data refusal; fs-safe has none either. 12 then stages 07's `wroteFiles` by name (_stage-paths.ts ~:145), and since T469 such a file gets no ledger row, so no reset or upgrade knows it. Direction: refuse a path that `namesGitData` beside `writeIfAllowed` (report it skipped) and keep it out of the stage plan, with a control per writer through a stored `agentTargets[].dir` of `.git/hooks` (T469's control shape).
+
 ## Done
 
+- T461 — every carried_* fold reads the row after it holds it and folds from that read (a delta computed from a pre-transaction read lost a concurrent fold or idle write): resetRowsForRerun, the per-step and the task-level provider switch (now one transaction under T349's batch), resetStepAndDownstream, requeueAbandonedOrphan and writeFencedPark's first park — PR #958 (ffa1c2d0c), 2026-10-31; main CI green; follow-ups T471, T459 note, T364 item 28
 - T465 — smoke:ci of api, worker and database runs through scripts/run-smokes.mjs: each smoke in its own process group under its own limit (default 120 s; repo-refresh 480, two-install 240, from 8 green main runs), a hung one killed and named, the chain going on with a summary and exit 1; the worker and migration smoke steps run after a failed api smoke — PR #957 (1d14f60cf), 2026-10-31; main CI green with the runner on a real Actions run; docs/architecture/ci-smokes.md; follow-up T470
 - T421 — a convergent boot data migration (supersedeGitDataArtifacts, the real namesGitData) retires every live ledger row at a git-data path at every worker boot, setting only superseded_at and updated_at, ordered before seedRepositoryCliTargets; the onboarding reset takes back a retired git-data row's claim file (a leftover made the record unreadable and the writer throw); take_theirs/keep_mine at a non-claimable path answer invalid and 04's untracked put-back skips a git-data row — PR #956 (54f846e0d), 2026-10-31; main CI green; follow-ups T468, T469
 - T463 — a form read of a request that is not a form answers 400 invalid_form (formBodyErrors maps the TypeError class), the CLI login banner ignores a WebSocket frame that is not a JSON object, PUT /user-settings/ide and /ui-prefs refuse a settingsJson that is not an object, and five sources added 100755 are 100644 — PR #955 (98e0f3762), 2026-10-31; main CI green; follow-ups T467, T364 item 26 note

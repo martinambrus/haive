@@ -108,17 +108,16 @@ export async function resetStepAndDownstream(
       // the step re-halts with the identical error. Reset the current level's stuck issues too.
       // No-op when the task has no DAG / no stuck issue. Keep in sync with the API retry site.
       await resetDagCurrentLevelForRetry(tx, taskId);
-      const resetRows = [target, ...downstream.filter((r) => r.status !== 'pending')];
-      // The rows the loop writes, in id order: the loop takes the target first and the rest in the
-      // order of the unordered read above, while the api's writers (a Stop, a repository delete)
-      // take theirs by id. After the sweeps, since a pass holds a run and then wants its step row.
-      await lockStepRows(
-        tx,
-        inArray(
-          schema.taskSteps.id,
-          resetRows.map((r) => r.id),
-        ),
-      );
+      // The rows the loop writes, in id order: the loop takes them in the order of an unordered read,
+      // while the api's writers (a Stop, a repository delete) take theirs by id. After the sweeps,
+      // since a pass holds a run and then wants its step row.
+      await lockStepRows(tx, inArray(schema.taskSteps.id, allStepIds));
+      // Held by this tx now, so this read is current. The reads above predate the lock: a fold from
+      // them would overwrite what a peer added to carried_* or idle_ms before the lock was granted.
+      const held = await tx
+        .select()
+        .from(schema.taskSteps)
+        .where(inArray(schema.taskSteps.id, allStepIds));
       // Clearing formSchema is essential: the runner only re-renders the form when the
       // persisted schema is null. formValues is cleared so the regenerated form re-decides.
       // Zero the live timing per row, but first fold the finishing run's work/idle/user
@@ -127,7 +126,7 @@ export async function resetStepAndDownstream(
       // counts a failed step's fail->retry dead-wait as idle so wall reconciles, and
       // reclassifies an orphaned still-open run's span as idle rather than inflating carried
       // work with it. Per-row (not a blanket update) because each row's contribution differs.
-      for (const r of resetRows) {
+      for (const r of held) {
         const c = computeFoldContribution(r, now.getTime());
         await tx
           .update(schema.taskSteps)

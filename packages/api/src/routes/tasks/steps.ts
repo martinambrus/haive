@@ -154,7 +154,9 @@ async function sweepRunsOf(tx: DbHandle, ids: string[], now: Date): Promise<void
  *  the DAG reset because a pass holds a run and then wants its step row, so holding the step row
  *  while waiting on that run would deadlock with it. `rowsHeld` skips it for a call made after the
  *  task row was bumped, where `rowsActivatedMeanwhile` already holds the rows: a pass holding a step
- *  row waits for the task row, so a batch that waited there would deadlock with it.
+ *  row waits for the task row, so a batch that waited there would deadlock with it. The carried_*
+ *  fold reads each row again once it is held: `rows` was read before the transaction, and a fold or
+ *  idle write that landed since would otherwise be overwritten.
  *  Exported for the unit test. */
 export async function resetRowsForRerun(
   tx: DbHandle,
@@ -172,7 +174,10 @@ export async function resetRowsForRerun(
   // the task has no DAG / no stuck issue.
   await resetDagCurrentLevelForRetry(tx, taskId);
   if (!opts.rowsHeld) await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
-  for (const r of rows) {
+  // This transaction holds the rows now (the batch above, or the caller's lock under rowsHeld), so
+  // this read is current; `rows` is the caller's read from before the transaction began.
+  const held = await tx.select().from(schema.taskSteps).where(inArray(schema.taskSteps.id, ids));
+  for (const r of held) {
     const contrib = computeFoldContribution(r, now.getTime());
     await tx
       .update(schema.taskSteps)
@@ -1773,15 +1778,6 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       round: true,
       runSeq: true,
       stepIndex: true,
-      // Timing fields for the carried_* fold when this change resets the step below.
-      startedAt: true,
-      endedAt: true,
-      idleMs: true,
-      userActiveMs: true,
-      waitingStartedAt: true,
-      carriedWorkMs: true,
-      carriedIdleMs: true,
-      carriedUserActiveMs: true,
     },
     orderBy: desc(schema.taskSteps.round),
   });
@@ -1881,7 +1877,6 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     // CLI and re-running the step keeps its accrued work/idle/effort (same as retry).
     // computeFoldContribution avoids carrying an orphaned open run's span as work.
     const now = new Date();
-    const contrib = computeFoldContribution(step, now.getTime());
     redrive = await db.transaction(async (tx) => {
       if (movesTask) await admitNewWork(tx);
       // The repository lock first, in the order the worker's revivals take it, before any row lock.
@@ -1909,6 +1904,15 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       // The clicked row joins the rows it resets in one id-ordered batch; `leftActive` is empty
       // unless the switch moves the task.
       await lockRowsForMove(tx, id, leftActive, now);
+      // Read under the row lock, so a fold or idle write that landed after the handler read `step`
+      // is in it and none can land before this transaction ends.
+      const [held] = await tx
+        .select()
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, step.id))
+        .for('no key update');
+      if (!held) throw new HttpError(404, 'Step not found');
+      const contrib = computeFoldContribution(held, now.getTime());
       await tx
         .update(schema.taskSteps)
         .set({
@@ -1924,9 +1928,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           idleMs: 0,
           waitingStartedAt: null,
           userActiveMs: 0,
-          carriedWorkMs: step.carriedWorkMs + contrib.workMs,
-          carriedIdleMs: step.carriedIdleMs + contrib.idleMs,
-          carriedUserActiveMs: step.carriedUserActiveMs + contrib.userActiveMs,
+          carriedWorkMs: held.carriedWorkMs + contrib.workMs,
+          carriedIdleMs: held.carriedIdleMs + contrib.idleMs,
+          carriedUserActiveMs: held.carriedUserActiveMs + contrib.userActiveMs,
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
