@@ -693,6 +693,41 @@ async function writeTaskFailed(
   return failed !== undefined;
 }
 
+export type TaskCancelOutcome = 'cancelled' | 'already_cancelled' | 'completed' | 'gone';
+
+/** Cancel the task, decided under the task row's lock. `completed` is terminal and the cancelled
+ *  teardown would remove what a completed task keeps, so it is left as it is. An already-cancelled
+ *  task keeps its stamps (no completed_at rewrite, no second epoch bump) but still gets the event
+ *  the stalled re-drive paces its retries on. The transaction takes no step row. */
+export async function markTaskCancelled(db: Database, taskId: string): Promise<TaskCancelOutcome> {
+  return db.transaction(async (tx) => {
+    const [task] = await tx
+      .select({ status: schema.tasks.status })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId))
+      .for('no key update');
+    if (!task) return 'gone';
+    if (task.status === 'completed') return 'completed';
+    if (task.status !== 'cancelled') {
+      const now = new Date();
+      await tx
+        .update(schema.tasks)
+        .set({
+          status: 'cancelled',
+          completedAt: now,
+          // Same epoch bump the api's cancelTaskRow makes, for a cancel that starts worker-side
+          // (abort): it invalidates every advance-step job still queued for this task, so no park
+          // loop can keep re-driving — and resurrecting — a cancelled task.
+          orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
+          updatedAt: now,
+        })
+        .where(eq(schema.tasks.id, taskId));
+    }
+    await appendEvent(tx, taskId, null, 'task.cancelled', { source: 'worker' });
+    return task.status === 'cancelled' ? 'already_cancelled' : 'cancelled';
+  });
+}
+
 /** With no unresolved id, `unlistedStepId` is a registered step outside the run list. */
 export function deadReasonFor(ids: readonly string[], unlistedStepId?: string): string {
   if (ids.length === 0 && unlistedStepId !== undefined) {
@@ -3778,19 +3813,15 @@ export async function backfillMissingRunSeq(db: Database): Promise<void> {
 }
 
 async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<void> {
+  const outcome = await markTaskCancelled(db, payload.taskId);
+  if (outcome === 'completed' || outcome === 'gone') {
+    logger.info(
+      { taskId: payload.taskId, outcome },
+      'cancel ignored: the task is completed or no longer exists',
+    );
+    return;
+  }
   const now = new Date();
-  await db
-    .update(schema.tasks)
-    .set({
-      status: 'cancelled',
-      completedAt: now,
-      // Same epoch bump the api's cancelTaskRow makes, for a cancel that starts worker-side
-      // (abort): it invalidates every advance-step job still queued for this task, so no park
-      // loop can keep re-driving — and resurrecting — a cancelled task.
-      orchestrationEpoch: sql`${schema.tasks.orchestrationEpoch} + 1`,
-      updatedAt: now,
-    })
-    .where(eq(schema.tasks.id, payload.taskId));
   // The task is terminal now, but its active/parked step rows are still in a
   // non-terminal state (e.g. a run_app hold step left at waiting_form) — that
   // shows a live form on a cancelled task. step_status has no 'cancelled' value,
@@ -3819,7 +3850,6 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
         inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
       ),
     );
-  await appendEvent(db, payload.taskId, null, 'task.cancelled', { source: 'worker' });
   // Before the kill and the listing: a run still queued reads this right before it creates its sandbox.
   await supersedeTaskRuns(db, payload.taskId);
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');

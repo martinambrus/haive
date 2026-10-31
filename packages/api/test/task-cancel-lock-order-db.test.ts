@@ -60,6 +60,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
 });
 
 import { Hono } from 'hono';
+import { cancelTaskIfOpen } from '../src/lib/cancel-task.js';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -68,14 +69,17 @@ import type { AppEnv } from '../src/context.js';
 // by id (cancelOpenTasksForRepo) the wrong way round: the cancel holds the higher id and waits for
 // the lower one while the other holds the lower id and wants the higher (40P01).
 //
-// Both cases seed two `pending` open rows, A (lower id) and B (higher id), inserted B then A, with
-// step ids that make every scan order (physical, task_id index, the unique task/step/round index)
-// reach B first. Pending rows with no park marker and no saved gate answer are ones Stop's
+// The three cases seed two `pending` open rows, A (lower id) and B (higher id), inserted B then A,
+// with step ids that make every scan order (physical, task_id index, the unique task/step/round
+// index) reach B first. Pending rows with no park marker and no saved gate answer are ones Stop's
 // failStuckSteps does not write, so before the Stop took the task's rows in id order it wrote no
-// step row and the bulk UPDATE in cancelTaskRow was the first writer. The Stop's batch alone now
-// keeps K7 clean; K8, the abort action, which has no Stop, is the case that pins cancelStillOpen.
-// The peer locks A and waits until the request is blocked on it, then locks B and commits. A
-// request that takes its rows in id order waits for A holding nothing, so both finish.
+// step row and the bulk UPDATE in cancelTaskRow was the first writer. The Stop's batch now keeps
+// K7 and K8 clean: the Cancel route and the abort action both run a Stop first, and its
+// lockStepRows takes every row of the task in id order before the cancel writes one. K8b calls
+// cancelTaskIfOpen directly, with no Stop before it, so it is the case that pins cancelStillOpen's
+// own batch.
+// The peer locks A and waits until the code under test is blocked on it, then locks B and commits.
+// Code that takes its rows in id order waits for A holding nothing, so both finish.
 const A = { id: '00000000-0000-4000-8000-0000000000a1', stepId: 'step-b' } as const;
 const B = { id: '00000000-0000-4000-8000-0000000000b1', stepId: 'step-a' } as const;
 const NAMES: Record<string, string> = { [A.id]: 'A', [B.id]: 'B' };
@@ -360,7 +364,7 @@ describe.skipIf(!url)(
     );
 
     it(
-      'K8: the abort action over two pending open rows B and A waits for A without holding B',
+      'K8: the abort action (its Stop, then the cancel) over two pending open rows B and A waits for A without holding B',
       async () => {
         const taskId = await seedTask('running');
         await seedSteps(taskId, { status: 'pending' }, { status: 'pending' });
@@ -373,6 +377,25 @@ describe.skipIf(!url)(
 
         expectClean(run);
         expect(run.result).toMatchObject({ status: 200, body: { ok: true, status: 'cancelled' } });
+        await expectCancelled(taskId);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'K8b: cancelTaskIfOpen on its own, with no Stop before it, over two pending open rows B and A waits for A without holding B',
+      async () => {
+        const taskId = await seedTask('running');
+        await seedSteps(taskId, { status: 'pending' }, { status: 'pending' });
+
+        const run = await interleave(
+          () => db.transaction((tx) => cancelTaskIfOpen(tx, taskId, { by: USER })),
+          idOrderedPeer,
+          [B.id],
+        );
+
+        expectClean(run);
+        expect(run.result).toEqual({ cancelled: true });
         await expectCancelled(taskId);
       },
       TEST_TIMEOUT,

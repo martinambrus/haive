@@ -96,7 +96,7 @@ ended, since a live worker may be starting younger ones. A step whose old runs a
 (a pause, the per-task cap and the runtime reserve all hold jobs `delayed`) is left to them. The
 lost run never started, so its re-dispatch charges no orphan budget.
 
-A `cancelled` task with a `task.cancelled` event five minutes old and no `task.cancel_finished` (the api commits the cancel before it queues the teardown) gets a CANCEL from the same sweep (`redriveCancelledTasks`), unless one is waiting, active or delayed; a finished or failed one in history does not count, since the finish record is what says the teardown ran, and the teardown is idempotent. Each re-drive is a `task.cancel_redriven` event, and a task stops being re-driven after three (`CANCEL_REDRIVE_MAX`); cancellations older than seven days are not re-driven, since many predate the finish record. A task the re-drive no longer retries but that still holds a merge dir claim is given up instead (`abandonCancelledTeardowns`, started by the same sweep without being awaited, one pass at a time, since its dir locks can wait behind a long merge): capped with its last re-drive older than the cutoff, or with its `task.cancelled` event older than seven days whatever its re-drive count. Giving up keeps the CANCEL teardown's guard: it supersedes the task's runs, kills its cli sandboxes and goes on only when the listing shows none left, or the task keeps its claims for the next pass. Then it reports the merges left open (a failure stops there, with nothing released, and the next pass tries again), writes a `task.cancel_finished` event with `abandoned: true` and its reason (`re-drive cap reached` or `cancelled before the re-drive window`), and only then runs the claim release, the plan-merge discard and the re-sync, each logged and passed over when it fails. The event comes before the release because it is what frees the dir: a cancelled task with that record holds no claim (`liveClaimHolder`), so a pass cut off after it leaves only stale rows that the next claimer takes over. A re-drive whose CANCEL the queue refuses gives its `task.cancel_redriven` event back, so a queue outage never counts toward the cap. A task with a CANCEL waiting, active or delayed is left to it.
+A `cancelled` task with a `task.cancelled` event five minutes old and no `task.cancel_finished` (the api commits the cancel before it queues the teardown) gets a CANCEL from the same sweep (`redriveCancelledTasks`), unless one is waiting, active or delayed; a finished or failed one in history does not count, since the finish record is what says the teardown ran, and the teardown is idempotent. The sweep waits for the newest `task.cancelled` event to be five minutes old, and the CANCEL job writes one of its own on every run that is not ignored (`markTaskCancelled`), so a teardown that keeps failing is re-driven at most once per five minutes (smoke case `rerunning-cancel`, `stalled-redrive-smoke.ts`). Each re-drive is a `task.cancel_redriven` event, and a task stops being re-driven after three (`CANCEL_REDRIVE_MAX`); cancellations older than seven days are not re-driven, since many predate the finish record. A task the re-drive no longer retries but that still holds a merge dir claim is given up instead (`abandonCancelledTeardowns`, started by the same sweep without being awaited, one pass at a time, since its dir locks can wait behind a long merge): capped with its last re-drive older than the cutoff, or with its `task.cancelled` event older than seven days whatever its re-drive count. Giving up keeps the CANCEL teardown's guard: it supersedes the task's runs, kills its cli sandboxes and goes on only when the listing shows none left, or the task keeps its claims for the next pass. Then it reports the merges left open (a failure stops there, with nothing released, and the next pass tries again), writes a `task.cancel_finished` event with `abandoned: true` and its reason (`re-drive cap reached` or `cancelled before the re-drive window`), and only then runs the claim release, the plan-merge discard and the re-sync, each logged and passed over when it fails. The event comes before the release because it is what frees the dir: a cancelled task with that record holds no claim (`liveClaimHolder`), so a pass cut off after it leaves only stale rows that the next claimer takes over. A re-drive whose CANCEL the queue refuses gives its `task.cancel_redriven` event back, so a queue outage never counts toward the cap. A task with a CANCEL waiting, active or delayed is left to it.
 
 The CANCEL teardown releases the task's `merge_dir_claims` rows once `cleanupTaskContainers` has returned and a docker listing (`listCliSandboxesForTask`, null on any failure) shows no cli sandbox of the task left (`releaseTaskMergeClaims`), each one under its dir's advisory lock, so a section the old pass is inside finishes first and a later section of it reads the task as cancelled and refuses. When that listing is not clean the teardown keeps the claims, skips the release, the report of merges left open (`recordLeftOpenMerges`, which otherwise precedes the release), the plan-merge discard and the scratch cleanup (they would remove a dir a fixer may still write), still runs the model unloads and the KB reconcile, then throws: the job fails, no `task.cancel_finished` is written, and the re-drive above repeats the whole idempotent teardown, at most three times, after which the teardown is given up as above and the dir is freed. A cancel that died before then keeps its merge dir held until the re-drive above finishes it; a crashed worker's claim stays held and the boot re-drive of the owning step resumes it ([merge conflicts](merge-conflicts.md)).
 
@@ -420,12 +420,13 @@ task-level provider switches, `resetStepAndDownstream`, the first park of `write
 predates the lock, and a fold or idle write that landed since would be written over. The contribution comes from
 the stored row (`computeFoldContribution`), so adding a stale delta in SQL would only trade the lost update for a
 double count; the SQL folds in `cli-park-timing.ts` are single statements and need no read. The worker's
-single-statement bulk updates (`handleCancelTask`,
+single-statement bulk updates (`handleCancelTask`'s step sweep,
 `takeLeftOpenKept`, `skipRemovedSteps`, the `run_seq` backfill) take no batch.
 
 **A cancel ends only the step rows it locked.** Every task cancel the api commits goes through one core
-(`cancelStillOpen`, `api/src/lib/cancel-task.ts`): the Cancel action and the step `abort` through
-`cancelTaskIfOpen`, a repository delete through `cancelOpenTasksForRepo`. It takes every step row of the
+(`cancelStillOpen`, `api/src/lib/cancel-task.ts`): the Cancel action, the step `abort` and
+`DELETE /repositories/:id/plan/merge` through `cancelTaskIfOpen`, a repository delete through
+`cancelOpenTasksForRepo`. It takes every step row of the
 tasks, the open ones and the finished, in one id-ordered batch, then the task rows, re-read and locked in id
 order, since the wait for the step rows can let a Stop, a completion or another cancel end a task, and it
 cancels only the tasks still open. `cancelTaskRow` is handed, per task, the rows that batch locked and ends
@@ -433,11 +434,27 @@ only those that are still open. A row created and committed after the batch is n
 that scanned it would lock it in scan order while a worker's claim of it (`openPendingStep`: the flip, then
 the task row FOR SHARE) holds it and waits for the task row the cancel holds (40P01). Such a row is left to
 the CANCEL job every cancel queues after its commit: `handleCancelTask` fails every open row of the task, and
-the stalled sweep queues a CANCEL that was lost. The Cancel action runs a Stop before `cancelTaskIfOpen`; the
-step `abort` does not. `cancelTaskIfOpen` cancels a task that is neither `completed` nor `cancelled` (a
-`failed` one stays cancellable), judged under those locks and not from the status the route read earlier. A
-cancel that did not apply answers the status it found, writes no event, queues no CANCEL job and, for the
-Cancel action, clears no pause.
+the stalled sweep queues a CANCEL that was lost. The Cancel action, the step `abort` and
+`DELETE /repositories/:id/plan/merge` each run a Stop (`stopActiveCliInvocations`, `failTask: false`) before
+`cancelTaskIfOpen`; the Cancel action and the abort first answer the found status when the route's own read
+says the task is `completed` or `cancelled`, so a task that is already over is not stopped. After a cancel
+that applied, the three routes clear the task's pause (`clearTaskPause`) before they queue the CANCEL job: the
+step-retry endpoint has no status guard, so a cancelled task is still resumable, and a stale `paused_at` would
+park it again the moment someone revived it. `cancelTaskIfOpen` cancels a task that is neither `completed`
+nor `cancelled` (a `failed` one stays cancellable), judged under those locks and not from the status the
+route read earlier. A cancel that did not apply answers what it found (the plan merge DELETE answers
+`cancelled: false`), writes no event, queues no CANCEL job and clears no pause. The CANCEL job applies the
+same rule on its side (`markTaskCancelled`, `worker/src/queues/task-queue.ts`): one
+transaction takes the task row FOR NO KEY UPDATE and decides. A `completed` task, or one that no longer
+exists, is left as it is: no status write, no event, no step sweep and no teardown, since the `cancelled`
+teardown removes the worktree and deletes the env template that a completed task keeps, and the completion
+ran its own. A `cancelled` task (the api commits the cancel before it queues the job) keeps its status,
+`completed_at` and epoch, but the job still writes its own `task.cancelled` event, ends the step rows opened
+after the api's batch and runs the teardown. Any other status, a `failed` task included, is cancelled by the
+job: status, `completed_at`, epoch + 1 and the event, in the same transaction. The transaction writes no step
+row, so it takes no `lockStepRows` batch and never waits for a step row while it holds the task row (the cycle
+with a pass's claim: a step row, then the task row FOR SHARE); the step sweep after it is the single
+autocommit statement it always was.
 
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
