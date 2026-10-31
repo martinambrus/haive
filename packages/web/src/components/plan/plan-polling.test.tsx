@@ -457,6 +457,32 @@ describe('PlanMergePanel with a merge task', () => {
     expect(taskFetches()).toBe(1);
   });
 
+  it.each(['notice', 'error'] as const)(
+    'resets the old %s and draft for a new merge task',
+    async (outcome) => {
+      vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+      if (outcome === 'notice')
+        net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: false });
+      else net.discardPlanMerge.mockRejectedValue({ message: 'Discard request failed' });
+      const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+      await typeDraft('old merge instructions');
+      await press('Discard');
+      expect(
+        outcome === 'notice'
+          ? hasNotice()
+          : shown().some((el) => el.props.message === 'Discard request failed'),
+      ).toBe(true);
+
+      rerender(null);
+      rerender({ ...merge, taskId: 'task-2' });
+      await settle();
+
+      expect(hasNotice()).toBe(false);
+      expect(shown().find((el) => el.type === FormError)?.props.message).toBeNull();
+      expect(host('textarea')?.props.value).toBe('');
+    },
+  );
+
   it('treats the merge as discarded only when DELETE cancelled it', async () => {
     vi.stubGlobal('window', { confirm: vi.fn(() => true) });
     net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: true, taskId: 'task-1' });

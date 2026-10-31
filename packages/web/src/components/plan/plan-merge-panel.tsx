@@ -77,6 +77,17 @@ export function PlanMergePanel({
   const discarding = taskId !== null && discardedTaskId === taskId;
   const dead = taskId !== null && deadTaskId === taskId;
   useEffect(() => {
+    setDraft('');
+    setError(null);
+    setLiveStep(null);
+    setBusy(false);
+    setDiscardedTaskId(null);
+    setDeadTaskId(null);
+    // An ended outcome survives the refresh to null, but belongs to no later conversation.
+    if (taskId !== null) setNotice(null);
+  }, [taskId]);
+
+  useEffect(() => {
     if (!taskId) {
       setLiveStep(null);
       return;
