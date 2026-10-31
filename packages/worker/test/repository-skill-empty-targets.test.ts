@@ -294,3 +294,51 @@ describe('authoritative empty skill targets', () => {
     expect(await resolveTaskSkillTargetDirs(ctx, ['.claude/skills'])).toEqual(['.claude/skills']);
   });
 });
+
+it.each(['', '.', 'other/skills', '.claude/skills/../skills'])(
+  'does not stage stored generation or repair outputs in noncatalog dir %j',
+  async (dir) => {
+    const fake = createFakeDb({ taskSteps: schema.taskSteps });
+    const taskId = randomUUID();
+    fake.insert(schema.taskSteps, {
+      taskId,
+      stepId: '09_5-skill-generation',
+      round: 0,
+      output: { written: [{ id: 'kept', mirroredDirs: [dir], subSkillSlugs: ['alpha'] }] },
+    });
+    fake.insert(schema.taskSteps, {
+      taskId,
+      stepId: '09_5b-skill-repair',
+      round: 0,
+      detectOutput: { skillTargetDirs: [dir] },
+      output: { repaired: ['kept'], repairedSubSkillSlugs: { kept: ['alpha'] } },
+    });
+    expect(await collectOnboardingStagePaths(root, fake.db as never, taskId)).toEqual({
+      add: [],
+      remove: [],
+    });
+  },
+);
+it('does not stage a stored multisegment skill ID', async () => {
+  const fake = createFakeDb({ taskSteps: schema.taskSteps });
+  const taskId = randomUUID();
+  fake.insert(schema.taskSteps, {
+    taskId,
+    stepId: '09_5-skill-generation',
+    round: 0,
+    output: {
+      written: [{ id: 'a/b', mirroredDirs: ['.claude/skills'], subSkillSlugs: ['alpha'] }],
+    },
+  });
+  fake.insert(schema.taskSteps, {
+    taskId,
+    stepId: '09_5b-skill-repair',
+    round: 0,
+    detectOutput: { skillTargetDirs: ['.claude/skills'] },
+    output: { repaired: ['a/b'] },
+  });
+  expect(await collectOnboardingStagePaths(root, fake.db as never, taskId)).toEqual({
+    add: [],
+    remove: [],
+  });
+});

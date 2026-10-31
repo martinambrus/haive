@@ -9,6 +9,18 @@ import { applyKbWrites, sanitizeKbRelPath } from '../src/step-engine/steps/onboa
 /* ------------------------------------------------------------------ */
 
 describe('sanitizeKbRelPath', () => {
+  it.each([
+    '.git/hooks/x',
+    '.GIT./x',
+    'git~1/x',
+    'nested/.git/x',
+    '.git',
+    '.haive-data/knowledge_base/.git/x',
+    '.claude/knowledge_base/.GIT./x',
+    String.raw`nested\.git\x`,
+  ])('refuses git data before adding an extension: %s', (rel) => {
+    expect(sanitizeKbRelPath(rel).ok).toBe(false);
+  });
   it('accepts a normal path and adds .md if missing', () => {
     const out = sanitizeKbRelPath('BUSINESS_LOGIC');
     expect(out.ok).toBe(true);

@@ -1,4 +1,4 @@
-import { safeErrorMessage } from '@haive/shared/logger';
+import { scrubErrorPaths } from '@haive/shared/logger';
 import { safeProcessor } from './safe-processor.js';
 import { Worker, type Job } from 'bullmq';
 import { eq } from 'drizzle-orm';
@@ -38,7 +38,7 @@ export function startRepoWorker(repoStorageRoot: string): Worker {
           throw new Error(`Unknown repo job: ${job.name}`);
         }
       } catch (err) {
-        const message = safeErrorMessage(err);
+        const message = scrubErrorPaths(err);
         logger.error(
           { repositoryId: payload.repositoryId, jobName: job.name, err },
           'Repo job failed',

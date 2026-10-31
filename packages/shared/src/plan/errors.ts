@@ -1,7 +1,7 @@
 /** Why a plan write was refused. Kept as a typed kind rather than a message so
  *  each caller can map it to its own surface without string-matching: the api
  *  turns `conflict` into a 409 and `invalid` into a 400, while a worker step
- *  turns `invalid` into a RetryableParseError so the runner re-prompts the model.
+ *  handles `invalid` in its own apply phase without translating the error type.
  *  Shared cannot import either package's error types, and neither should have to
  *  parse the other's prose. */
 export type PlanPatchErrorKind =

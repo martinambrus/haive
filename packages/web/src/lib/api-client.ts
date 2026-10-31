@@ -2291,8 +2291,14 @@ export function getPlanMerge(repositoryId: string): Promise<{ merge: PlanMergeSt
   return api.get<{ merge: PlanMergeState | null }>(`${planBase(repositoryId)}/merge`);
 }
 
-export function discardPlanMerge(repositoryId: string): Promise<{ ok: boolean }> {
-  return api.delete<{ ok: boolean }>(`${planBase(repositoryId)}/merge`);
+export function discardPlanMerge(
+  repositoryId: string,
+  taskId?: string,
+): Promise<{ ok: boolean; cancelled: boolean; taskId?: string }> {
+  const query = taskId === undefined ? '' : `?taskId=${encodeURIComponent(taskId)}`;
+  return api.delete<{ ok: boolean; cancelled: boolean; taskId?: string }>(
+    `${planBase(repositoryId)}/merge${query}`,
+  );
 }
 
 /** Answer the merge form: confirm lands and pushes, revise runs another pass. */

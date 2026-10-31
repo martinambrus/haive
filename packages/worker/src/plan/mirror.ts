@@ -1,7 +1,7 @@
 import { lockRepositoryTasksKey } from '@haive/database';
 import { checkoutMatches, checkoutMissing, type NamedCheckout } from '../repo/checkout-head.js';
 import { admitWatchedCheckout } from '../project-state/watch-admission.js';
-import { safeErrorMessage } from '@haive/shared/logger';
+import { scrubErrorPaths } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import {
   readFileNoFollow,
@@ -1716,7 +1716,7 @@ export async function recordPlanMirrorError(
   repositoryId: string,
   err: unknown,
 ): Promise<void> {
-  const message = safeErrorMessage(err);
+  const message = scrubErrorPaths(err);
   await db
     .insert(schema.planMirrorState)
     .values({
