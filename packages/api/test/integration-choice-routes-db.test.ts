@@ -192,7 +192,12 @@ describe.skipIf(!url)('integration choice routes on Postgres', () => {
 
   async function createAccount(
     userId: string,
-    over: { host?: string; provider?: string; status?: 'connected' | 'needs_reauth' } = {},
+    over: {
+      host?: string;
+      provider?: string;
+      credentialProvider?: string;
+      status?: 'connected' | 'needs_reauth';
+    } = {},
   ): Promise<string> {
     const { host = 'github.com', provider = 'github', status = 'connected' } = over;
     const [credential] = await db
@@ -201,7 +206,7 @@ describe.skipIf(!url)('integration choice routes on Postgres', () => {
         userId,
         label: `credential ${randomUUID()}`,
         host,
-        provider,
+        provider: over.credentialProvider ?? provider,
         usernameEncrypted: 'x',
         secretEncrypted: 'x',
         encryptedDek: 'x',
@@ -763,6 +768,28 @@ describe.skipIf(!url)('integration choice routes on Postgres', () => {
       await unchanged(async () => {
         const reply = await putChoice({ providerId: 'gitea', connectionId: elsewhere }, selfHosted);
         expectStatus(reply, 400);
+      });
+      expectOk(await putChoice({ providerId: 'gitea', connectionId: here }, selfHosted));
+    });
+
+    it('C3d2 answers 400 to a forge account whose credential was edited to another forge and writes nothing', async () => {
+      const selfHosted = await createTask(
+        a.id,
+        await createRepository(a.id, 'https://git.example.com/acme/app.git'),
+      );
+      const drifted = await createAccount(a.id, {
+        host: 'git.example.com',
+        provider: 'github',
+        credentialProvider: 'gitea',
+      });
+      const here = await createAccount(a.id, { host: 'git.example.com', provider: 'gitea' });
+      await unchanged(async () => {
+        const reply = await putChoice(
+          { providerId: 'github', connectionId: drifted, remember: true },
+          selfHosted,
+        );
+        expectStatus(reply, 400);
+        expect(reply.json).toMatchObject({ error: expect.stringContaining('does not fit') });
       });
       expectOk(await putChoice({ providerId: 'gitea', connectionId: here }, selfHosted));
     });

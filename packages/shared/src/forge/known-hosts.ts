@@ -131,6 +131,18 @@ export function credentialUsableForPr(
   return credHost.toLowerCase() === originHost.toLowerCase() && isForgeProviderName(c.provider);
 }
 
+/** A connection's credential must still be of the connection's own forge, and usable for the origin. */
+export function connectionCredentialFits(
+  providerId: string,
+  c: { provider: string | null; host: string },
+  originUrl: string | null,
+): boolean {
+  return (
+    credentialForgeProvider(c.provider, c.host) === providerId &&
+    credentialUsableForPr(c, originUrl)
+  );
+}
+
 type ApiBaseTarget = { host: string; provider?: string | null; apiBaseUrl?: string | null };
 
 /** The host of the forge's default API base, which for github.com and bitbucket.org is not the web host. */

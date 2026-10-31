@@ -541,6 +541,52 @@ describe('forge is bound to the repository', () => {
     expect(outcome(resolveTarget(ctx({ connections: [bare] }), FORGE))).toBe('no-connection');
   });
 
+  describe('a connection whose Git credential was edited to another forge', () => {
+    const drifted = conn('drifted', 'github', {
+      credential: credential('gitea', 'git.example.com'),
+    });
+
+    it('is no candidate: with no other account the forge has no connection', () => {
+      const r = unresolved(resolveTarget(ctx({ repository: SELF, connections: [drifted] }), FORGE));
+      expect(r).toMatchObject({ reason: 'no-connection', connectionId: null });
+      expect(r.candidates).toEqual([]);
+    });
+
+    it('is left out beside an account that fits, by category and by pinned provider', () => {
+      const context = ctx({ repository: SELF, connections: [drifted, giteaSelf] });
+      expect(outcome(resolveTarget(context, FORGE))).toBe('giteaSelf/only');
+      expect(outcome(resolveTarget(context, { provider: 'github' }))).toBe('no-connection');
+    });
+
+    it('in a task choice asks again instead of resolving', () => {
+      const context = ctx({
+        repository: SELF,
+        connections: [drifted, giteaSelf],
+        choices: picked('forge', 'github', 'drifted'),
+      });
+      const r = unresolved(resolveTarget(context, FORGE));
+      expect(r).toMatchObject({ reason: 'needs-choice', providerId: 'github' });
+      expect(r.candidates).toEqual(['giteaSelf']);
+    });
+  });
+
+  describe('a GitHub Enterprise style github connection on its own host', () => {
+    const ghe = conn('ghe', 'github', { credential: credential('github', 'ghe.example.com') });
+    const GHE = repo('https://ghe.example.com/acme/app.git');
+
+    it('still resolves, as the only account and as a task choice', () => {
+      expect(outcome(resolveTarget(ctx({ repository: GHE, connections: [ghe] }), FORGE))).toBe(
+        'ghe/only',
+      );
+      const chosen = ctx({
+        repository: GHE,
+        connections: [ghe],
+        choices: picked('forge', 'github', 'ghe'),
+      });
+      expect(outcome(resolveTarget(chosen, FORGE))).toBe('ghe/task');
+    });
+  });
+
   it('names the missing repository or remote before a choice is even looked at', () => {
     const choice = picked('forge', 'github', 'gh1');
     expect(outcome(resolveTarget(ctx({ repository: null, choices: choice }), FORGE))).toBe(

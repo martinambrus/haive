@@ -1,5 +1,5 @@
 import type { schema } from '@haive/database';
-import { credentialUsableForPr } from '../forge/known-hosts.js';
+import { connectionCredentialFits } from '../forge/known-hosts.js';
 import {
   REPOSITORY_BOUND_CATEGORIES,
   type IntegrationRequirement,
@@ -156,7 +156,7 @@ export function resolveTarget(ctx: ResolverContext, target: ResolverTarget): Tar
   const fits = (c: ResolverConnection) =>
     repository !== null &&
     c.credential !== null &&
-    credentialUsableForPr(c.credential, repository.remoteUrl);
+    connectionCredentialFits(c.providerId, c.credential, repository.remoteUrl);
   const allowed = (c: ResolverConnection) =>
     repository === null || !repository.restricted || repository.allowedConnectionIds.has(c.id);
 
