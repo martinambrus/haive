@@ -118,13 +118,17 @@ it('reads the sizes through the listed directory, not by resolving each file fro
   expect(vi.mocked(lstatNoFollow).mock.calls.length).toBeLessThanOrEqual(1);
 });
 
-it('answers an error, never a list with null sizes, when the listing runs out of descriptors', async () => {
-  vi.mocked(readdirSizesNoFollow).mockRejectedValueOnce(
-    Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }),
-  );
+// The process's own condition, so the api's 500: a 400 would blame the path the client asked for.
+it.each(['EMFILE', 'ENFILE'])(
+  'answers 500, never a client error or a list with null sizes, when the listing fails with %s',
+  async (code) => {
+    vi.mocked(readdirSizesNoFollow).mockRejectedValueOnce(
+      Object.assign(new Error(`${code}: too many open files`), { code }),
+    );
 
-  const res = await app.request(`/${TASK}/files`);
+    const res = await app.request(`/${TASK}/files`);
 
-  expect(res.ok).toBe(false);
-  expect(await res.json()).not.toHaveProperty('entries');
-});
+    expect(res.status).toBe(500);
+    expect(await res.json()).not.toHaveProperty('entries');
+  },
+);
