@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { getDb, type Database } from '../db.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { requireOwnConnections } from '../lib/integration-choice.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -51,6 +52,13 @@ repositoryIntegrationRoutes.put('/:id/integrations', async (c) => {
   const wanted = new Set(body.connectionIds);
   await requireOwnConnections(db, userId, [...wanted]);
 
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'repository.integrations.update',
+    targetType: 'repository',
+    targetId: repositoryId,
+    metadata: { restricted: body.restricted, connectionIds: [...wanted] },
+  };
   await db.transaction(async (tx) => {
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`integration-allow-list:${repositoryId}`}, 0))`,
@@ -91,6 +99,8 @@ repositoryIntegrationRoutes.put('/:id/integrations', async (c) => {
           ne(schema.repositories.integrationsRestricted, body.restricted),
         ),
       );
+    await insertAuditEvent(tx, event);
   });
+  logAuditEvent(event);
   return c.json({ restricted: body.restricted, connectionIds: [...wanted] });
 });

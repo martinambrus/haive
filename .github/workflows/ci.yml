@@ -385,6 +385,7 @@ jobs:
           api test/cli-secrets-audit-db.test.ts SECURITY_AUDIT_TEST_URL t376_audit_test pg
           api test/account-security-audit-db.test.ts SECURITY_AUDIT_TEST_URL t376_audit_test pg
           api test/login-audit-db.test.ts SECURITY_AUDIT_TEST_URL t376_audit_test pg
+          api test/repository-security-audit-db.test.ts SECURITY_AUDIT_TEST_URL t376_audit_test pg
           GATED
           exit "$failed"
 

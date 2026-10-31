@@ -767,6 +767,13 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     if (!read || !decided) {
       throw new HttpError(409, 'No imported MCP servers are waiting for a decision');
     }
+    const event: AuditEvent = {
+      actorUserId: userId,
+      action: 'repository.mcp_servers.decide',
+      targetType: 'repository',
+      targetId: repositoryId,
+      metadata: { decision: body.repoMcpServersAction },
+    };
     const written = await db.transaction(async (tx) => {
       const rows = await tx
         .update(schema.repositories)
@@ -781,7 +788,10 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
           ),
         )
         .returning({ id: schema.repositories.id });
-      if (rows.length > 0) await markProjectStateDirty(tx, repositoryId);
+      if (rows.length > 0) {
+        await markProjectStateDirty(tx, repositoryId);
+        await insertAuditEvent(tx, event);
+      }
       return rows;
     });
     if (written.length === 0) {
@@ -790,6 +800,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         'The MCP server settings changed meanwhile; reload and decide again',
       );
     }
+    logAuditEvent(event);
     return c.json({ repositoryId, ok: true, reembedQueued: false });
   }
 
@@ -958,6 +969,24 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         appAuthWrites.map(({ suffix, value }) => [suffix, value ? 'set' : 'cleared']),
       ),
     };
+    const securityFields = [
+      'secretMaskEnabled',
+      'secretMaskAllow',
+      'secretMaskDenyExtend',
+      'agentRulesOverride',
+      'appAuth',
+      'reviewDimensions',
+      'verifyCommands',
+      'stepGuidanceEnabled',
+      'prWorkflowEnabled',
+    ].filter((field) => field in updates);
+    const securityEvent: AuditEvent = {
+      actorUserId: userId,
+      action: 'repository.security.update',
+      targetType: 'repository',
+      targetId: repositoryId,
+      metadata: { fields: securityFields },
+    };
     assertRagLockHeld(lock);
     await db.transaction(async (tx) => {
       if (typeof body.rtkEnabled === 'boolean') {
@@ -978,12 +1007,14 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
         else await userSecretsService.delete(userId, key, tx);
       }
       if (appAuthWrites.length > 0) await insertAuditEvent(tx, appAuthEvent);
+      if (securityFields.length > 0) await insertAuditEvent(tx, securityEvent);
       if (updates.rtkEnabled === false) await convergeRtkQuestion(tx, repositoryId, userId);
       if (PORTABLE_SETTING_UPDATE_KEYS.some((key) => key in updates)) {
         await markProjectStateDirty(tx, repositoryId);
       }
     });
     if (appAuthWrites.length > 0) logAuditEvent(appAuthEvent);
+    if (securityFields.length > 0) logAuditEvent(securityEvent);
     // A sync can write fallback rows between the probe and the clear; look once more after it.
     // Unfenced: the save has committed, and a lock lost by expiry leaves no sync to restore the flag.
     if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {

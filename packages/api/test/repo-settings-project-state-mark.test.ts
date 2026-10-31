@@ -36,6 +36,7 @@ let fake: ReturnType<typeof createFakeDb>;
 beforeEach(() => {
   fake = createFakeDb({
     repositories: schema.repositories,
+    auditEvents: schema.auditEvents,
     tasks: schema.tasks,
     projectStateOutbox: schema.projectStateOutbox,
     envTemplates: schema.envTemplates,

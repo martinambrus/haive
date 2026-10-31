@@ -38,6 +38,7 @@ app.onError(errorHandler);
 function setup(onboardingTooling: Record<string, unknown> | null = pending) {
   const fake = createFakeDb({
     repositories: schema.repositories,
+    auditEvents: schema.auditEvents,
     projectStateOutbox: schema.projectStateOutbox,
   });
   fake.insert(schema.repositories, {

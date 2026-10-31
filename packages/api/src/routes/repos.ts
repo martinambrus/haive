@@ -118,6 +118,7 @@ import {
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { logger, type RepoRagCleanupPayload, type RepoResourceCleanupPayload } from '@haive/shared';
 import { getDb } from '../db.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRepoQueue, type RepoJobPayload } from '../queues.js';
 import { requireAuth } from '../middleware/auth.js';
 import { enqueueCheckoutSync } from '../lib/plan-mirror.js';
@@ -1122,6 +1123,13 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
     Array.from(new Set(body.scopeExcludeGlobs.map(trimGlobSlashes).filter((p) => p.length > 0))),
   ).sort();
 
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'repository.scope.update',
+    targetType: 'repository',
+    targetId: id,
+    metadata: { excludeCount: scopeExcludeGlobs.length },
+  };
   const updated = await db.transaction(async (tx) => {
     const rows = await tx
       .update(schema.repositories)
@@ -1129,8 +1137,10 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
       .where(eq(schema.repositories.id, id))
       .returning();
     await markProjectStateDirty(tx, id);
+    await insertAuditEvent(tx, event);
     return rows;
   });
+  logAuditEvent(event);
   const {
     fileTree: _drop,
     renderContext: _context,

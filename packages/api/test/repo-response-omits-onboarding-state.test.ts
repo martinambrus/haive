@@ -81,6 +81,7 @@ function noRows(): unknown {
 const newFakeDb = () =>
   createFakeDb({
     repositories: schema.repositories,
+    auditEvents: schema.auditEvents,
     projectStateOutbox: schema.projectStateOutbox,
     repoUploads: schema.repoUploads,
   });

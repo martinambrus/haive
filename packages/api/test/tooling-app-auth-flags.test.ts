@@ -44,6 +44,7 @@ app.onError(errorHandler);
 async function toolingConfig(secrets: Record<string, string>) {
   const fake = createFakeDb({
     repositories: schema.repositories,
+    auditEvents: schema.auditEvents,
     onboardingArtifacts: schema.onboardingArtifacts,
     projectStateOutbox: schema.projectStateOutbox,
     envTemplates: schema.envTemplates,
