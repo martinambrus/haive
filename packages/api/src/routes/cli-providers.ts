@@ -43,6 +43,7 @@ import {
   parseClaudeAuthCode,
 } from '@haive/shared/claude-oauth';
 import { getDb } from '../db.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
 import {
@@ -394,10 +395,26 @@ cliProviderRoutes.post('/', requireNewWorkAllowed, async (c) => {
         onExisting: 'overwrite',
       });
     }
+    if (Object.keys(split?.secrets ?? {}).length > 0)
+      await insertAuditEvent(tx, {
+        actorUserId: userId,
+        action: 'cli_provider.secret.set',
+        targetType: 'cli_provider',
+        targetId: rows[0]!.id,
+        metadata: { source: 'environment', secretCount: Object.keys(split?.secrets ?? {}).length },
+      });
     return rows;
   });
 
   const created = inserted[0]!;
+  if (Object.keys(split?.secrets ?? {}).length > 0)
+    logAuditEvent({
+      actorUserId: userId,
+      action: 'cli_provider.secret.set',
+      targetType: 'cli_provider',
+      targetId: created.id,
+      metadata: { source: 'environment', secretCount: Object.keys(split?.secrets ?? {}).length },
+    });
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(
@@ -525,9 +542,25 @@ cliProviderRoutes.patch('/:id', async (c) => {
         onExisting: 'overwrite',
       });
     }
+    if (Object.keys(split?.secrets ?? {}).length > 0)
+      await insertAuditEvent(tx, {
+        actorUserId: userId,
+        action: 'cli_provider.secret.set',
+        targetType: 'cli_provider',
+        targetId: id,
+        metadata: { source: 'environment', secretCount: Object.keys(split?.secrets ?? {}).length },
+      });
     return rows;
   });
   const updatedRow = updated[0]!;
+  if (Object.keys(split?.secrets ?? {}).length > 0)
+    logAuditEvent({
+      actorUserId: userId,
+      action: 'cli_provider.secret.set',
+      targetType: 'cli_provider',
+      targetId: id,
+      metadata: { source: 'environment', secretCount: Object.keys(split?.secrets ?? {}).length },
+    });
 
   if (provisioningModel) await enqueueOllamaProvisionForProvider(id, userId);
   const modelStatusOverride = provisioningModel
@@ -553,11 +586,22 @@ cliProviderRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
-  const result = await db
-    .delete(schema.cliProviders)
-    .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
-    .returning({ id: schema.cliProviders.id, imageTag: schema.cliProviders.sandboxImageTag });
-  if (result.length === 0) throw new HttpError(404, 'CLI provider not found');
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.delete',
+    targetType: 'cli_provider',
+    targetId: id,
+  };
+  const result = await db.transaction(async (tx) => {
+    const result = await tx
+      .delete(schema.cliProviders)
+      .where(and(eq(schema.cliProviders.id, id), eq(schema.cliProviders.userId, userId)))
+      .returning({ id: schema.cliProviders.id, imageTag: schema.cliProviders.sandboxImageTag });
+    if (result.length === 0) throw new HttpError(404, 'CLI provider not found');
+    await insertAuditEvent(tx, event);
+    return result;
+  });
+  logAuditEvent(event);
   const imageTag = result[0]!.imageTag;
   if (imageTag) {
     const payload: SandboxImageRemoveJobPayload = { providerId: id, imageTag };
@@ -777,9 +821,23 @@ cliProviderRoutes.post('/:id/clone', requireNewWorkAllowed, async (c) => {
         });
       }
     }
+    await insertAuditEvent(tx, {
+      actorUserId: userId,
+      action: 'cli_provider.clone',
+      targetType: 'cli_provider',
+      targetId: row.id,
+      metadata: { sourceProviderId: source.id },
+    });
     return row;
   });
 
+  logAuditEvent({
+    actorUserId: userId,
+    action: 'cli_provider.clone',
+    targetType: 'cli_provider',
+    targetId: created.id,
+    metadata: { sourceProviderId: source.id },
+  });
   await enqueueBuildForProvider(created.id, userId);
   if (provisioningModel) await enqueueOllamaProvisionForProvider(created.id, userId);
   return c.json(
@@ -830,13 +888,26 @@ cliProviderRoutes.post('/:providerId/secrets', async (c) => {
     ),
     columns: { id: true },
   });
-  const secret = await upsertProviderSecret(db, {
-    providerId,
-    name: body.secretName,
-    value: body.value,
-    masterKek: await secretsService.getMasterKek(),
-    onExisting: 'overwrite',
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.secret.set',
+    targetType: 'cli_provider',
+    targetId: providerId,
+    metadata: { source: 'manual' },
+  };
+  const masterKek = await secretsService.getMasterKek();
+  const secret = await db.transaction(async (tx) => {
+    await insertAuditEvent(tx, event);
+    const secret = await upsertProviderSecret(tx, {
+      providerId,
+      name: body.secretName,
+      value: body.value,
+      masterKek,
+      onExisting: 'overwrite',
+    });
+    return secret;
   });
+  logAuditEvent(event);
   return existing ? c.json({ secret }) : c.json({ secret }, 201);
 });
 
@@ -913,25 +984,38 @@ cliProviderRoutes.post('/:providerId/usage-auth/complete', async (c) => {
     );
   }
   const { verifier } = JSON.parse(taken) as { verifier: string };
-  let tokens;
-  try {
-    tokens = await exchangeClaudeAuthCode(code, verifier, state);
-  } catch (err) {
-    throw new HttpError(400, err instanceof Error ? err.message : 'Token exchange failed');
-  }
-  if (!claudeTokensHaveUsageScope(tokens)) {
-    throw new HttpError(
-      400,
-      'The granted token is missing the user:profile scope required for usage tracking.',
-    );
-  }
-  await upsertProviderSecret(db, {
-    providerId,
-    name: CLAUDE_USAGE_OAUTH_SECRET,
-    value: JSON.stringify(tokens),
-    masterKek: await secretsService.getMasterKek(),
-    onExisting: 'overwrite',
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.secret.set',
+    targetType: 'cli_provider',
+    targetId: providerId,
+    metadata: { source: 'usage_oauth' },
+  };
+  const masterKek = await secretsService.getMasterKek();
+  const tokens = await db.transaction(async (tx) => {
+    await insertAuditEvent(tx, event);
+    let tokens;
+    try {
+      tokens = await exchangeClaudeAuthCode(code, verifier, state);
+    } catch (err) {
+      throw new HttpError(400, err instanceof Error ? err.message : 'Token exchange failed');
+    }
+    if (!claudeTokensHaveUsageScope(tokens)) {
+      throw new HttpError(
+        400,
+        'The granted token is missing the user:profile scope required for usage tracking.',
+      );
+    }
+    await upsertProviderSecret(tx, {
+      providerId,
+      name: CLAUDE_USAGE_OAUTH_SECRET,
+      value: JSON.stringify(tokens),
+      masterKek,
+      onExisting: 'overwrite',
+    });
+    return tokens;
   });
+  logAuditEvent(event);
   // Kick an immediate usage poll so the header meter refreshes within seconds instead of
   // waiting for the ~5-min repeatable tick: the freshly rotated token clears the worker's
   // dead-token gate and this poll overwrites the needs_reconnect snapshot with a live one.
@@ -963,19 +1047,30 @@ cliProviderRoutes.delete('/:providerId/usage-auth', async (c) => {
   const providerId = c.req.param('providerId');
   const db = getDb();
   await loadOwnedProvider(db, userId, providerId);
-  await db
-    .delete(schema.cliProviderSecrets)
-    .where(
-      and(
-        eq(schema.cliProviderSecrets.providerId, providerId),
-        eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
-      ),
-    );
-  // Drop the last usage snapshot too: with no token the poller will never touch this row
-  // again, so a stale meter / needs_reconnect chip would otherwise linger indefinitely.
-  await db
-    .delete(schema.usageWindowSnapshots)
-    .where(eq(schema.usageWindowSnapshots.providerId, providerId));
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.secret.delete',
+    targetType: 'cli_provider',
+    targetId: providerId,
+    metadata: { source: 'usage_oauth' },
+  };
+  await db.transaction(async (tx) => {
+    await insertAuditEvent(tx, event);
+    await tx
+      .delete(schema.cliProviderSecrets)
+      .where(
+        and(
+          eq(schema.cliProviderSecrets.providerId, providerId),
+          eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
+        ),
+      );
+    // Drop the last usage snapshot too: with no token the poller will never touch this row
+    // again, so a stale meter / needs_reconnect chip would otherwise linger indefinitely.
+    await tx
+      .delete(schema.usageWindowSnapshots)
+      .where(eq(schema.usageWindowSnapshots.providerId, providerId));
+  });
+  logAuditEvent(event);
   return c.json({ connected: false });
 });
 
@@ -986,15 +1081,26 @@ cliProviderRoutes.delete('/:providerId/secrets/:secretName', async (c) => {
   const db = getDb();
   await loadOwnedProvider(db, userId, providerId);
 
-  const result = await db
-    .delete(schema.cliProviderSecrets)
-    .where(
-      and(
-        eq(schema.cliProviderSecrets.providerId, providerId),
-        eq(schema.cliProviderSecrets.secretName, secretName),
-      ),
-    )
-    .returning({ id: schema.cliProviderSecrets.id });
-  if (result.length === 0) throw new HttpError(404, 'Secret not found');
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'cli_provider.secret.delete',
+    targetType: 'cli_provider',
+    targetId: providerId,
+    metadata: { source: 'manual' },
+  };
+  await db.transaction(async (tx) => {
+    const result = await tx
+      .delete(schema.cliProviderSecrets)
+      .where(
+        and(
+          eq(schema.cliProviderSecrets.providerId, providerId),
+          eq(schema.cliProviderSecrets.secretName, secretName),
+        ),
+      )
+      .returning({ id: schema.cliProviderSecrets.id });
+    if (result.length === 0) throw new HttpError(404, 'Secret not found');
+    await insertAuditEvent(tx, event);
+  });
+  logAuditEvent(event);
   return c.json({ ok: true });
 });

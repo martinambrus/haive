@@ -382,6 +382,7 @@ jobs:
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
+          api test/cli-secrets-audit-db.test.ts SECURITY_AUDIT_TEST_URL t376_audit_test pg
           GATED
           exit "$failed"
 

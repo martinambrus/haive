@@ -1073,6 +1073,7 @@ describe('the routes that start a background job', () => {
   const JOB_UPLOAD = '00000000-0000-4000-8000-0000000000f2';
   const JOB_PROVIDER = '00000000-0000-4000-8000-0000000000f3';
   const JOB_TABLES = {
+    auditEvents: schema.auditEvents,
     repositories: schema.repositories,
     repoUploads: schema.repoUploads,
     tasks: schema.tasks,
