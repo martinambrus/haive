@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -210,3 +210,23 @@ it.each([false, true])(
     expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
   },
 );
+
+it('refresh keeps a checkout with no HEAD aside and clones a usable replacement', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  await runRefresh(payload);
+  const aside = (await readdir(path.dirname(dest))).find((entry) => entry.startsWith('r1.aside-'));
+  expect(aside).toBeTruthy();
+  expect(await readFile(path.join(path.dirname(dest), aside!, '.haive-data/plan.md'), 'utf8')).toBe(
+    'pending\n',
+  );
+  await expect(readFile(path.join(path.dirname(dest), aside!, '.git/HEAD'))).rejects.toHaveProperty(
+    'code',
+    'ENOENT',
+  );
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(
+    await git(payload.localPath!, ['rev-parse', 'HEAD']),
+  );
+  expect(row.status).toBe('ready');
+  expect(row.statusMessage).toContain(aside);
+});

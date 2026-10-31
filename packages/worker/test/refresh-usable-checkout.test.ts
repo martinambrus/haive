@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -78,6 +78,46 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
   it('T397 a corrupt config is unknown rather than a reason to rebuild', async () => {
     const dir = await intact();
     await writeFile(path.join(dir, '.git', 'config'), '[core\n');
+    expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+  });
+
+  it.each(['no HEAD', 'empty .git', 'relative missing gitdir', 'absolute missing gitdir'])(
+    'a structurally dead checkout is unusable: %s',
+    async (shape) => {
+      const dir = await intact();
+      if (shape === 'no HEAD') await rm(path.join(dir, '.git/HEAD'));
+      else {
+        await rm(path.join(dir, '.git'), { recursive: true });
+        if (shape === 'empty .git') await mkdir(path.join(dir, '.git'));
+        else
+          await writeFile(
+            path.join(dir, '.git'),
+            `gitdir: ${shape === 'relative missing gitdir' ? 'missing.git' : path.join(dir, 'missing.git')}\n`,
+          );
+      }
+      expect(await usableCheckout(dir)).toBe('unusable');
+    },
+  );
+
+  it('a gitdir outside the checkout is unknown even when missing', async () => {
+    const dir = await intact();
+    await rm(path.join(dir, '.git'), { recursive: true });
+    await writeFile(path.join(dir, '.git'), 'gitdir: ../missing.git\n');
+    expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+  });
+
+  it('a truncated gitfile cannot prove that its gitdir is absent', async () => {
+    const dir = await intact();
+    await rm(path.join(dir, '.git'), { recursive: true });
+    await writeFile(path.join(dir, '.git'), `gitdir: ${'a'.repeat(5000)}\n`);
+    expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+  });
+
+  it('a HEAD behind a linked .git entry is unknown', async () => {
+    const dir = await intact();
+    await rm(path.join(dir, '.git'), { recursive: true });
+    await mkdir(path.join(dir, 'metadata'));
+    await symlink('metadata', path.join(dir, '.git'));
     expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
   });
 

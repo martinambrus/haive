@@ -4,6 +4,7 @@ import {
   ensureDirNoFollow,
   lstatNoFollow,
   readdirNoFollow,
+  readFileNoFollow,
   removeNoFollow,
   renameNoFollow,
 } from '@haive/shared/fs-safe';
@@ -25,7 +26,6 @@ import { headCommit } from '../plan/merge.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
 import { GitOperationUnreadableError } from './git-operation.js';
-import { gitWorkspaceStatus } from './git-workspace.js';
 import { GIT_TIMED_OUT, gitGaveNoAnswer, type GitRunResult } from './git-exec.js';
 import {
   buildCredentialHelper,
@@ -71,13 +71,34 @@ export async function usableCheckout(
 ): Promise<'usable' | 'unusable' | { unknown: string }> {
   const cdup = await gitRun(dest, ['rev-parse', '--show-cdup']);
   if (gitGaveNoAnswer(cdup)) {
-    const there = await lstatNoFollow(path.dirname(dest), path.basename(dest));
-    return there?.kind === 'directory' ? { unknown: whyNoAnswer(cdup) } : 'unusable';
+    try {
+      const there = await lstatNoFollow(path.dirname(dest), path.basename(dest), { strict: true });
+      return there?.kind === 'directory' ? { unknown: whyNoAnswer(cdup) } : 'unusable';
+    } catch {
+      return { unknown: whyNoAnswer(cdup) };
+    }
   }
   if (cdup.code !== 0) {
-    return (await gitWorkspaceStatus(dest)) === 'absent'
-      ? 'unusable'
-      : { unknown: whyNoAnswer(cdup) };
+    try {
+      const entry = await lstatNoFollow(dest, '.git', { strict: true });
+      if (entry === null) return 'unusable';
+      if (entry.kind === 'directory') {
+        if ((await lstatNoFollow(dest, '.git/HEAD', { strict: true })) === null) return 'unusable';
+      } else if (entry.kind === 'file') {
+        const read = await readFileNoFollow(dest, '.git', { strict: true, maxBytes: 4096 });
+        const gitfile = read && !read.truncated ? read.data.toString('utf8') : null;
+        if (gitfile?.startsWith('gitdir: ')) {
+          const target = path.resolve(dest, gitfile.slice(8).trim());
+          const rel = path.relative(dest, target);
+          if (rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) {
+            if ((await lstatNoFollow(dest, rel, { strict: true })) === null) return 'unusable';
+          }
+        }
+      }
+    } catch {
+      // An unreadable entry cannot prove that rebuilding is safe.
+    }
+    return { unknown: whyNoAnswer(cdup) };
   }
   if (cdup.stdout.trim() !== '') return 'unusable';
   const head = await gitRun(dest, ['rev-parse', '--verify', '--quiet', 'HEAD']);
