@@ -265,6 +265,16 @@ async function saveHaiveDataInScope(payload: HaiveDataSavePayload): Promise<Haiv
             (refreshed.reason === 'git_operation' ? 'git_operation' : 'write_pending'),
         });
       }
+      default: {
+        // An outcome added to ProjectStateRefreshOutcome must be mapped above (this stops compiling
+        // until it is); a value that gets past it anyway refuses rather than read as a flush that wrote.
+        const unhandled: never = refreshed;
+        logger.error(
+          { repositoryId: repo.id, flush: unhandled },
+          'Haive data record flush returned an outcome the Save does not handle',
+        );
+        fail({ code: 'projections_changing' });
+      }
     }
   };
   const commit = async ({ repoPath, identity, message }: SaveScope) => {

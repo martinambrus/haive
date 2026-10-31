@@ -327,6 +327,20 @@ describe('data Save failure and race controls', () => {
     expect(calls.refresh).toHaveBeenCalledOnce();
     expect(calls.commit).not.toHaveBeenCalled();
   });
+  it('refuses a flush outcome it does not know instead of going on as if the flush had written', async () => {
+    calls.refresh.mockResolvedValue({ outcome: 'a-later-outcome' });
+    const error = vi.spyOn(logger, 'error');
+    expect(await saveHaiveData({ ...payload, push: false })).toMatchObject({
+      outcome: 'refused',
+      committed: false,
+      refusal: { code: 'projections_changing' },
+    });
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({ repositoryId: REPO }),
+      expect.any(String),
+    );
+    expect(calls.commit).not.toHaveBeenCalled();
+  });
   it.each([
     'checkout_unreadable',
     'git_operation_unreadable',
