@@ -458,7 +458,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The last setup step. Both checks below run on `!cancelled() && steps.build.conclusion ==
+      # 'success'`, as the smokes job's do on `migrate`: a failed check no longer skips the other,
+      # a failed setup step still stops both. scripts/test/ci-step-independence.test.mjs pins it.
       - name: Build shared + database
+        id: build
         run: |
           pnpm --filter @haive/database build
           pnpm --filter @haive/shared build
@@ -467,6 +471,7 @@ jobs:
       # because ubuntu-latest ships a client older than PG18 and pg_dump refuses a newer server.
       # Same reason the smokes job reaches redis through `docker exec <service id>`.
       - name: Compare migration corpus against push --force
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' }}
         run: bash packages/database/scripts/schema-parity.sh
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
@@ -477,6 +482,7 @@ jobs:
       # corpus into a shipped image — and the updater in steadfast-committing-gray runs the
       # runner from exactly that image, with no source tree to fall back on.
       - name: Migration corpus reaches the production image
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' }}
         run: |
           scripts/ci-retry.sh docker build --target production -f packages/api/Dockerfile -t haive-api-prod-check .
           docker run --rm haive-api-prod-check \
@@ -498,16 +504,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The setup ends at this step: the web checks below run on `!cancelled() &&
+      # steps.build.conclusion == 'success' && matrix.service == 'web'`, so a failed check no
+      # longer skips the other. scripts/test/ci-step-independence.test.mjs pins it.
       - name: Build the production stage
+        id: build
         run: scripts/ci-retry.sh docker build --target production -f packages/${{ matrix.service }}/Dockerfile -t haive-${{ matrix.service }}-prod-check .
 
       - name: The built production web image boots and enforces anonymous routing
-        if: matrix.service == 'web'
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' && matrix.service == 'web' }}
         run: node scripts/check-web-image.mjs haive-web-prod-check
 
       # A channel build proves which modules an image carries from this file before it pushes anything.
       - name: The web image names the modules compiled into it
-        if: matrix.service == 'web'
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' && matrix.service == 'web' }}
         run: |
           docker run --rm --network none --entrypoint cat haive-web-prod-check /app/packages/web/modules.generated.json |
             node -e "const m=JSON.parse(require('fs').readFileSync(0,'utf8'));
