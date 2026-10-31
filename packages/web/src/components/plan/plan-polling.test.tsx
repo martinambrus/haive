@@ -1013,6 +1013,20 @@ describe('PlanMergePanel with a merge task', () => {
     },
   );
 
+  it.each([
+    ['step_form_not_waiting', 'The form is closed', true],
+    [undefined, 'No step awaiting form submission for id 01-plan-merge', false],
+    ['another_conflict', 'No step awaiting form submission for id 01-plan-merge', false],
+  ])('classifies an ended merge answer by code %s', async (code, message, ended) => {
+    net.submitPlanMergeTurn.mockRejectedValueOnce({ code, message });
+    await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    await press(CONFIRM);
+    expect(shown().find((el) => el.type === FormError)?.props.message).toBe(
+      ended ? 'That merge is no longer awaiting an answer. Refreshing its status.' : message,
+    );
+    expect(onChanged).toHaveBeenCalledTimes(ended ? 2 : 1);
+  });
+
   it('accepts an answer that settles after the page removed the merge', async () => {
     const request = deferred<unknown>();
     net.submitPlanMergeTurn.mockReturnValueOnce(request.promise);

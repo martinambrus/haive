@@ -54,3 +54,26 @@ it.each(['running', 'done', 'failed'])(
     expect(h.add).not.toHaveBeenCalled();
   },
 );
+
+it.each(['running', 'done', 'failed'])(
+  'returns the same stable code when clarification step is %s rather than awaiting a form',
+  async (status) => {
+    const fake = createFakeDb({ tasks: schema.tasks, taskSteps: schema.taskSteps });
+    fake.insert(schema.tasks, { id: TASK, userId: USER, status: 'running' });
+    fake.insert(schema.taskSteps, { taskId: TASK, stepId: STEP, status, round: 0 });
+    h.db = fake.db;
+    const before = structuredClone(fake.rows(schema.taskSteps));
+    const res = await app.request(`/${TASK}/steps/${STEP}/clarify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ answer: 'Keep both changes' }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: `No step awaiting clarification for id ${STEP}`,
+      code: 'step_form_not_waiting',
+    });
+    expect(fake.rows(schema.taskSteps)).toEqual(before);
+    expect(h.add).not.toHaveBeenCalled();
+  },
+);

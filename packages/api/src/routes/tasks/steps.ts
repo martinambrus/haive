@@ -912,7 +912,12 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const step = stepRows[0];
-  if (!step) throw new HttpError(409, `No step awaiting clarification for id ${stepId}`);
+  if (!step)
+    throw new HttpError(
+      409,
+      `No step awaiting clarification for id ${stepId}`,
+      'step_form_not_waiting',
+    );
 
   const now = new Date();
   const closedIdleMs = step.waitingStartedAt

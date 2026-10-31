@@ -211,7 +211,13 @@ export function PlanMergePanel({
       onChanged();
     } catch (e) {
       if (isStaleReply(merge.taskId)) return;
-      setError((e as ApiError).message ?? 'Could not send that');
+      if ((e as ApiError).code === 'step_form_not_waiting') {
+        setError('That merge is no longer awaiting an answer. Refreshing its status.');
+        setLiveStep(null);
+        setPollRestart((n) => n + 1);
+      } else {
+        setError((e as ApiError).message ?? 'Could not send that');
+      }
     } finally {
       if (!isStaleReply(merge.taskId)) setBusy(false);
     }
