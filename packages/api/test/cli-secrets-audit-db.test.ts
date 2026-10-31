@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import {
   allowAudit,
@@ -198,16 +198,78 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     expect(h.poll).not.toHaveBeenCalled();
   });
   it('a captured login preserves concurrent environment edits', async () => {
-    await Promise.all([
-      saveCliLoginSecret(db, h.actor, provider, 'synthetic-token'),
-      Promise.resolve(
-        app.request(`/cli-providers/${provider}`, {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ envVars: { KEEP: 'next', ANTHROPIC_API_KEY: 'synthetic-key' } }),
-        }),
-      ).then((res) => expect(res.status).toBe(200)),
-    ]);
+    await db
+      .update(schema.cliProviders)
+      .set({ envVars: { CLAUDE_CODE_OAUTH_TOKEN: 'legacy-token', KEEP: 'before' } })
+      .where(eq(schema.cliProviders.id, provider));
+    let read!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      read = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Pause at the audit insert, immediately after the legacy environment was read.
+    const captureDb = new Proxy(db, {
+      get(target, key) {
+        if (key === 'transaction')
+          return (fn: (tx: any) => Promise<unknown>) =>
+            target.transaction((tx) =>
+              fn(
+                new Proxy(tx, {
+                  get(t, prop) {
+                    if (prop === 'insert')
+                      return (table: any) => {
+                        const builder = t.insert(table);
+                        if (table === schema.auditEvents)
+                          return {
+                            values: async (values: any) => {
+                              read();
+                              await resume;
+                              return builder.values(values);
+                            },
+                          };
+                        return builder;
+                      };
+                    const value = Reflect.get(t, prop);
+                    return typeof value === 'function' ? value.bind(t) : value;
+                  },
+                }),
+              ),
+            );
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const save = saveCliLoginSecret(captureDb, h.actor, provider, 'synthetic-token');
+    await reached;
+    const patch = Promise.resolve(
+      app.request(`/cli-providers/${provider}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ envVars: { KEEP: 'next', ANTHROPIC_API_KEY: 'synthetic-key' } }),
+      }),
+    );
+    let patchFinished = false;
+    void patch.then(() => {
+      patchFinished = true;
+    });
+    try {
+      // With the lock, PATCH waits on the captured read. Without it, PATCH commits first.
+      for (let i = 0; i < 200 && !patchFinished; i++) {
+        const waiting = await db.execute(
+          sql`select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query like 'update "cli_providers"%'`,
+        );
+        if (waiting.length) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        if (i === 199) throw new Error('PATCH neither completed nor waited on the provider lock');
+      }
+    } finally {
+      release();
+    }
+    await save;
+    expect((await patch).status).toBe(200);
     expect(
       (await db.query.cliProviders.findFirst({ where: eq(schema.cliProviders.id, provider) }))!
         .envVars,
