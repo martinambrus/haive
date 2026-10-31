@@ -25,6 +25,7 @@ vi.mock('node:child_process', async (original) => {
 });
 import { Hono } from 'hono';
 import { eq } from 'drizzle-orm';
+import { logger } from '@haive/shared';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { hardenGitArgs } from '@haive/shared/git-args';
@@ -503,12 +504,19 @@ it('answers with the failed restore, not the lost connection, when the callback 
     if (args.includes('--replace-all') && args.at(-1) === old) throw fail(128, 'restore refused');
     return { stdout: '', stderr: '' };
   });
-  const res = await link();
-  expect(res.status).toBe(500);
-  expect(await res.json()).toEqual({
-    error: 'Remote update failed and the previous remote could not be restored',
-    code: null,
-  });
-  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
-  expect(fake.rows(schema.auditEvents)).toEqual([]);
+  const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
+  try {
+    const res = await link();
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({
+      error: 'Remote update failed and the previous remote could not be restored',
+      code: null,
+    });
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    // The callback's restore logged its failure; the outer restore returned that same failure.
+    expect(errors).toHaveBeenCalledTimes(1);
+  } finally {
+    errors.mockRestore();
+  }
 });

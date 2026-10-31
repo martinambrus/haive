@@ -2682,17 +2682,13 @@ export async function resetOnboardingArtifacts(
   return { removed, cleaned, skipped, quarantined, vacatedPaths };
 }
 
-/** The repo's on-disk root, or a 404/409 explaining why there isn't one.
- *  Exported because the plan routes remove the committed `.haive-data/` mirror
- *  on delete and must resolve the root exactly as every other file route does —
- *  a second copy of this would be a second place for the storage/local
- *  fallback to drift. */
 const execGit = promisify(execFile);
 // A relink's git child still running after GIT_DEADLINE_MS gets SIGTERM, and SIGKILL only if it is
-// still running GIT_KILL_GRACE_MS later. SIGTERM lets git remove the lock file it holds (MEASURED on
-// a config write held inside its lock window: gone 1-3 ms after the signal), while SIGKILL leaves
-// `.git/config.lock` behind and fails the restore and every later relink. So SIGKILL is for a child
-// that ignores SIGTERM, after a grace that is wide for git's cleanup and short for a waiting request.
+// still running GIT_KILL_GRACE_MS later. SIGTERM lets git remove the lock file it holds (MEASURED
+// with git 2.43.0, the host's, on a config write held inside its lock window: gone 1-3 ms after the
+// signal), while SIGKILL leaves `.git/config.lock` behind and fails the restore and every later
+// relink. So SIGKILL is for a child that ignores SIGTERM, after a grace that is wide for git's
+// cleanup and short for a waiting request.
 const GIT_DEADLINE_MS = 10_000;
 const GIT_KILL_GRACE_MS = 2_000;
 
@@ -2971,6 +2967,11 @@ repoRoutes.post('/:id/remote', async (c) => {
   return c.json({ ok: true, remoteUrl: body.remoteUrl, relinked: repo.remoteUrl !== null });
 });
 
+/** The repo's on-disk root, or a 404/409 explaining why there isn't one.
+ *  Exported because the plan routes remove the committed `.haive-data/` mirror
+ *  on delete and must resolve the root exactly as every other file route does —
+ *  a second copy of this would be a second place for the storage/local
+ *  fallback to drift. */
 export async function resolveRepoRoot(
   db: ReturnType<typeof getDb>,
   userId: string,

@@ -15,7 +15,8 @@ export const LIVE_TASK_STATUSES = [
   'waiting_pr',
 ] as const;
 
-/** How long an api task start waits for the creation lock behind a checkout move. */
+/** How long a request or the worker's upgrade apply waits for a lock on a repository (its task-creation
+ *  key, a plan or project-state key, or its row) before giving up. */
 export const REPOSITORY_TASKS_LOCK_TIMEOUT_MS = 30_000;
 
 /** The repository's task-creation lock alone, without the row: a checkout move holds it so no task is
