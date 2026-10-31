@@ -142,7 +142,12 @@ index agrees with the newest commit even when another writer committed on top in
 moved to something that does not contain the commit is left alone, and a `HEAD` that moves during
 the sync is retried. Every other real-index entry,
 a file the person staged included, is neither committed nor unstaged (a blob they staged at one of
-those very names is not committed and is reset to `HEAD`). A pathspec is `:(literal)`
+those very names is not committed and is reset to `HEAD`). When nothing differs, nothing is committed and the real
+index is not written, except for the one caller that opts in, the Haive data Save (`commitHaiveProjections`):
+its no-op sets in the real index only the named entries that differ from `HEAD` there, which repairs a sync
+that failed after an earlier commit, leaves a staged entry below a named path alone, and writes nothing
+when none differ. A failed sync is retried with backoff and warned about with the count and at most ten
+paths. A pathspec is `:(literal)`
 and the changed list is read with `--no-renames`, since a detected rename would name only the new
 path and leave the deletion out. A merge or cherry-pick in progress is refused, which fails the
 step loudly, as `--only` did. The first commit of a
@@ -920,7 +925,7 @@ untracked file under `.haive-data/state/` that Haive did not write. A merge the 
 checkout itself (00a's merge, 12 when the parent checkout is on the base branch, 13) sets aside after
 it seeds the plan base and checks again under the projection locks right before `openMerge`, where a
 file Haive rewrote since the set-aside sends it round again, up to `MOVE_ATTEMPTS`. Every outcome that
-did not merge puts the files back and, once no merge or rebase is open, re-syncs them, a throw from
+did not merge puts the files back and, once no merge, rebase, cherry-pick or revert is open, re-syncs them, a throw from
 the merge section recovers them before it reaches the caller (put back while HEAD is still where the section started, re-synced once it moved or cannot be read), and reaching done re-syncs. The owner
 and mode a set-aside captured ride in the merge state (`keptMetadata`, never the bytes), so the
 call that ends a merge restores them even when an earlier call set the files aside; a merge left
