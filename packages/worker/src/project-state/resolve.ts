@@ -26,6 +26,7 @@ import {
   environmentColumnOf,
   environmentSchema,
   environmentUnitOf,
+  isClaimablePath,
   isClaimUnit,
   isConflictUnit,
   isEnvironmentUnit,
@@ -307,7 +308,9 @@ async function answerClaimQuestion(
     return { kind: 'invalid' };
   }
   const path = named.path;
-  if (claimFileName(path) !== row.unit) return { kind: 'invalid' };
+  // No claim may name git data. A question raised before that rule can still be pending, and taking
+  // theirs would record its path in the ledger as an import marker.
+  if (!isClaimablePath(path) || claimFileName(path) !== row.unit) return { kind: 'invalid' };
 
   const file = await readClaimFile(repoPath, rel);
   if (file.kind === 'unreadable') return moved();

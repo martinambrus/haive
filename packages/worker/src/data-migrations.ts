@@ -882,10 +882,10 @@ const GIT_DATA_RETIRE_CHUNK = 1000;
  *  Sets `superseded_at` and `updated_at` and nothing else, so `imported_at` still reaches
  *  `ledgerImportedSince`. The rule is `namesGitData` itself, not a SQL port that would freeze a copy
  *  of a rule already widened once; a SQL prefilter on `git` would also miss `.g<U+200C>it`, so the id
- *  and path of every live row are read. It runs at every boot, not once: `project-state/resolve.ts`
- *  and the rollback's untracked put-back can still record such a row from legacy state. Idempotent:
- *  the `superseded_at IS NULL` guard makes a second run retire nothing, and two racing runs retire
- *  each row once.
+ *  and path of every live row are read. It runs at every boot, not once: no constraint keeps such a
+ *  row out of the ledger, and a restored backup or a release rolled back to can bring one back.
+ *  Idempotent: the `superseded_at IS NULL` guard makes a second run retire nothing, and two racing
+ *  runs retire each row once.
  *
  *  Undo: deploy a release without this entry (it would retire the rows again), then
  *  `UPDATE onboarding_artifacts SET superseded_at = NULL, updated_at = now() WHERE id IN (...)` with
