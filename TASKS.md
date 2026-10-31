@@ -967,7 +967,7 @@ Also (T459 fix round, 2026-10-31; PRE-EXISTING, minor): `DELETE /repositories/:i
 
 ### T479 · FNF[extract-swap] · an archive extract that fails between its two renames loses the previous repository tree
 
-status: open
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T12:36Z · last: 2026-10-31T12:36Z
 From the T466 review (2026-10-31). PRE-EXISTING, minor, theoretical.
 
 `extractArchive` (worker repo/clone.ts ~:604-614) moves the old `dest` into the stage and then renames the new tree in; if the second rename fails or the process dies between the two, no repository directory is left, and the `finally` removes the stage with the old tree in it, although the doc comment (~:509-511) says a failure leaves the previous contents untouched. Direction: on a failed second rename move the old tree back before the `finally`, and say in the comment what a crash between the renames leaves.
