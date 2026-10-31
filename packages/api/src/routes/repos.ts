@@ -2817,7 +2817,8 @@ repoRoutes.post('/:id/remote', async (c) => {
     }
     throw err;
   };
-  // Keep the column aligned with Git: lock the repository row first, insert its
+  // Keep the column aligned with Git: lock the repository row first (a wait past the
+  // repository lock bound answers 409 busy, before any Git write), insert its
   // audit, change Git, then write the column. Callback-visible failures restore
   // Git while that row is still locked, before a queued relink can snapshot it.
   // COMMIT or connection-close failures may restore after the lock is released:
@@ -2830,11 +2831,13 @@ repoRoutes.post('/:id/remote', async (c) => {
         settle = resolve;
       });
       try {
-        const [stored] = await tx
-          .select()
-          .from(schema.repositories)
-          .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
-          .for('no key update');
+        const [stored] = await boundedLockWait(tx, () =>
+          tx
+            .select()
+            .from(schema.repositories)
+            .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
+            .for('no key update'),
+        );
         if (!stored) throw new HttpError(404, 'Repository not found');
         await requireFittingCredential(tx, body.credentialsId ?? stored.credentialsSecretId);
         const host = parseScpLikeGitUrl(body.remoteUrl)?.host ?? new URL(body.remoteUrl).hostname;

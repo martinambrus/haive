@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   db: undefined as any,
   actor: '',
   gitHook: undefined as ((args: string[]) => Promise<void>) | undefined,
+  lockTimeoutMs: 30_000,
 }));
 vi.mock('node:child_process', async (original) => {
   const actual = await original<typeof import('node:child_process')>();
@@ -37,6 +38,12 @@ vi.mock('node:child_process', async (original) => {
   };
 });
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('@haive/database', async (original) => ({
+  ...(await original<typeof import('@haive/database')>()),
+  get REPOSITORY_TASKS_LOCK_TIMEOUT_MS() {
+    return h.lockTimeoutMs;
+  },
+}));
 vi.mock('../src/middleware/auth.js', async (original) => ({
   ...(await original<any>()),
   requireAuth: async (c: any, next: any) => {
@@ -51,8 +58,24 @@ vi.mock('@haive/shared', async (original) => ({
 import { toolingUpgradeRoutes } from '../src/routes/tooling-upgrades.js';
 import { repoRoutes } from '../src/routes/repos.js';
 import { repositoryIntegrationRoutes } from '../src/routes/repository-integrations.js';
+import { REPOSITORY_BUSY } from '../src/lib/repository-busy.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
+
+/** The pending value, or an error naming the wait when `ms` pass first. */
+async function answeredWithin<T>(ms: number, pending: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`no answer within ${ms} ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 describe.skipIf(!url)('Repository security settings commit with their audit, on Postgres', () => {
   let db: ReturnType<typeof createDatabase>;
@@ -110,6 +133,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
   afterEach(async () => {
     h.db = db;
     h.gitHook = undefined;
+    h.lockTimeoutMs = 30_000;
     await allowAudit(db);
     await db.execute(sql`DROP TRIGGER IF EXISTS refuse_remote_persist ON repositories`);
     await db.execute(sql`DROP FUNCTION IF EXISTS refuse_remote_persist()`);
@@ -416,6 +440,64 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     expect((await request).status).toBe(200);
     expect((await stored())!.remoteUrl).toBe('https://new.test/r');
     expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://new.test/r');
+  }, 30_000);
+  it('answers a queued relink 409 busy within the lock bound, before it changes Git', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'remote-busy-'));
+    roots.push(root);
+    await git(root, ['init']);
+    await git(root, ['remote', 'add', 'origin', 'https://old.test/r']);
+    await db
+      .update(schema.repositories)
+      .set({ localPath: root, remoteUrl: 'https://old.test/r' })
+      .where(eq(schema.repositories.id, repository));
+    h.lockTimeoutMs = 300;
+    let reached = false;
+    let release!: () => void;
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queuedGitCalls: string[][] = [];
+    h.gitHook = async (args) => {
+      if (args.includes('https://queued.test/r')) queuedGitCalls.push(args);
+      if (args.includes('--replace-all') && args.at(-1) === 'https://first.test/r') {
+        reached = true;
+        await resume;
+      }
+    };
+    const relink = (remoteUrl: string) =>
+      Promise.resolve(
+        app.request(`/repos/${repository}/remote`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ remoteUrl }),
+        }),
+      );
+    const first = relink('https://first.test/r');
+    let queued: Promise<Response> | undefined;
+    try {
+      await vi.waitFor(() => expect(reached).toBe(true), { timeout: 15_000 });
+      queued = relink('https://queued.test/r');
+      const answer = await answeredWithin(5_000, queued);
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toEqual({ error: REPOSITORY_BUSY, code: null });
+      expect(queuedGitCalls).toEqual([]);
+      expect(await git(root, ['config', '--get-all', 'remote.origin.url'])).toBe(
+        'https://old.test/r',
+      );
+      expect((await stored())!.remoteUrl).toBe('https://old.test/r');
+    } finally {
+      release();
+      await Promise.all([first, queued]);
+      h.gitHook = undefined;
+    }
+    expect((await first).status).toBe(200);
+    expect((await stored())!.remoteUrl).toBe('https://first.test/r');
+    expect(await git(root, ['config', '--get-all', 'remote.origin.url'])).toBe(
+      'https://first.test/r',
+    );
+    expect((await audits(db)).map((row) => row.metadata)).toEqual([
+      { host: 'first.test', credentialsChanged: false, branchChanged: false },
+    ]);
   }, 30_000);
   const sendSetting = (suffix: string, body: unknown, method = 'PATCH') =>
     app.request(`${suffix === 'exclusions' ? '/repos' : '/repositories'}/${repository}/${suffix}`, {
