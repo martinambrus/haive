@@ -297,5 +297,31 @@ describe.skipIf(!url)(
       },
       TEST_TIMEOUT,
     );
+
+    it(
+      'F3: the task-level CLI switch folds the row as a peer left it while the switch waited, not the row it read first',
+      async () => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId);
+
+        const response = await besidePeer(() =>
+          patch(`/tasks/${taskId}/cli-provider`, { cliProviderId: null }),
+        );
+
+        expect(response).toMatchObject({
+          status: 200,
+          body: { ok: true, invalidatedSteps: [STEP.stepId] },
+        });
+        expect(await finalRow()).toEqual({
+          status: 'pending',
+          idleMs: 0,
+          userActiveMs: 0,
+          carriedWorkMs: 1000 + 7000,
+          carriedIdleMs: 200 + 3000 + 6000,
+          carriedUserActiveMs: 50 + 500 + 800,
+        });
+      },
+      TEST_TIMEOUT,
+    );
   },
 );
