@@ -158,6 +158,16 @@ describe('unclassified inputs throw their named diagnostic', () => {
     ["su -c 'x || true'", 'unsupported command "su -c"'],
     ["echo 'x || true' | sh", 'unsupported command "| sh"'],
     ["bash <<< 'x || true'", 'unsupported command "bash <<<"'],
+    [
+      'echo "$(case $v in a) cmd || true ;; esac)"',
+      'unsupported command "case $v in a) cmd || true ;; esac)\\""',
+    ],
+    ["time eval 'x || true'", 'unsupported command "time eval \'x || true\'"'],
+    [
+      "source <(cat <<'EOF'\npnpm test || true\nEOF\n)",
+      'unsupported command "source <(cat <<\'EOF\'"',
+    ],
+    [". <(echo 'x || true')", 'unsupported command ". <(echo \'x || true\')"'],
   ]) {
     it(`throws ${message}`, () => {
       bashAccepts(script);
@@ -180,6 +190,8 @@ describe('parameter patterns and case words among arguments stay ordinary words'
     'n=$(echo case x in y)',
     'n=$(grep -w case x in)',
     'x=$(echo case "a b" in y)',
+    'case=1',
+    'x=$(case=1; echo ok)',
   ]) {
     it(`reads ${JSON.stringify(script)}`, () => {
       bashAccepts(script);
@@ -346,4 +358,58 @@ describe('expressions and empty construct bodies', () => {
   }
   it('rejects an errexit window even when it is closed later', () =>
     rejects('set +e\ncmd\nstatus=$?\nset -e', 'set +e'));
+});
+
+// Distinguishing controls for the single-branch mutation pass.
+describe('lexical boundaries that change a verdict or URL scan', () => {
+  for (const prefix of ['echo a & ', 'echo a | '])
+    it(`finds the heredoc command after ${prefix}`, () => {
+      const script = `${prefix}cat <<'EOF'\nit's data\nEOF`;
+      bashAccepts(script);
+      assert.equal(swallowedFailure(script), null);
+    });
+  for (const script of ["echo a | cat 'do sh -c'", 'cmd; :foo', "echo . 'x || true'"])
+    it(`keeps ${JSON.stringify(script)} inert`, () => assert.equal(swallowedFailure(script), null));
+  for (const script of [
+    '`cmd || true`',
+    'set \\\n+e',
+    'echo $(( ((1)) << 2 )); cmd || true',
+    "bash -c $'true'",
+  ])
+    it(`sees the code in ${JSON.stringify(script)}`, () =>
+      rejects(
+        script,
+        script.startsWith('set') ? 'set +e' : script.endsWith("'true'") ? 'true' : '|| true',
+      ));
+  for (const [script, what] of [
+    ['echo ${{ unfinished', 'GitHub expression'],
+    ['cat <<', 'heredoc delimiter'],
+    ['cat <<\\', 'heredoc delimiter'],
+  ])
+    it(`names unterminated ${what} for ${JSON.stringify(script)}`, () =>
+      assert.throws(() => shellSource(script, { step }), {
+        message: `${step}: unterminated ${what}`,
+      }));
+  it('does not open a case for an assignment before a bare success', () =>
+    rejects('case=1; pnpm test; true', 'true'));
+  it('preserves expression line boundaries', () =>
+    assert.equal(shellSource('echo ${{\na\n}}\ntrue').split('\n').length, 4));
+  it('keeps escaped GitHub quotes from exposing a literal fallback', () =>
+    assert.equal(swallowedFailure("echo ${{ format('it''s }} || true', inputs.x) }}"), null));
+  it('does not treat backticks after -c as a literal script string', () =>
+    assert.equal(swallowedFailure('bash -c `echo hi`'), null));
+  it('keeps shell strings visible to the Redis URL scan', () =>
+    assert.ok(shellSource(`bash -c 'echo ${url}'`).includes(url)));
+  it('keeps heredoc operators inside parameter patterns inert', () =>
+    rejects('echo ${x:-<<EOF}; cmd || true'));
+  it('ignores a pipe in a heredoc header comment', () =>
+    assert.equal(swallowedFailure("cat <<'EOF' # | sh\nit's data\nEOF"), null));
+  it('judges a shell heredoc independently of an outer conditional', () =>
+    rejects("if check; then\nbash <<'EOF'\npnpm test\ntrue\nEOF\nfi", 'true'));
+  it('rejects a shell on the line after a pipe', () =>
+    assert.throws(() => swallowedFailure("echo 'x || true' |\n sh", { step }), {
+      message: `${step}: unsupported command "| sh"`,
+    }));
+  it('does not append masked code parts to the URL scan', () =>
+    assert.equal(shellSource('echo "$(echo hi)"'), 'echo "$(echo hi)"'));
 });

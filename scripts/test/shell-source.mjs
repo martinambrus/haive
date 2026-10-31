@@ -34,10 +34,6 @@ function withoutExpressions(source, step) {
     let quoted = false;
     while (i < source.length) {
       if (source[i] === "'") {
-        if (quoted && source[i + 1] === "'") {
-          i += 2;
-          continue;
-        }
         quoted = !quoted;
       }
       if (!quoted && source.startsWith('}}', i)) break;
@@ -214,14 +210,16 @@ export function shellSource(source, { maskQuotes = false, step = 'shell script' 
           }
           if (consumer === 'interpreter' && !maskQuotes) result += '\n' + body + '\n';
         }
-      } else if (!parameter && char === '|' && source[i - 1] !== '|' && source[i + 1] !== '|') {
+      } else if (!parameter && char === '|' && source[i - 1] !== '|') {
         const next = source
           .slice(i + 1)
-          .trimStart()
+          .trim()
           .split(/[;&|\n]/, 1)[0];
         if (SHELL.test(plain(next))) unsupported('| ' + next);
         result += char;
         i++;
+      } else if (char === '.' && /\s/.test(source[i + 1] ?? '') && atCommand(result)) {
+        unsupported(source.slice(i).split('\n')[0]);
       } else if (char === stop) {
         if (heredocs.length) fail('heredoc');
         return { text: result, end: i + 1 };
@@ -232,7 +230,10 @@ export function shellSource(source, { maskQuotes = false, step = 'shell script' 
       ) {
         const rest = source.slice(i);
         const word = /^[a-zA-Z_][a-zA-Z_0-9]*/.exec(rest)[0];
-        if (/^(?:eval|ssh)$/.test(word) && atCommand(result)) unsupported(rest.split('\n')[0]);
+        if (word === 'case' && /^case\s/.test(rest) && stop === ')' && atCommand(result))
+          unsupported(rest.split('\n')[0]);
+        if (/^(?:eval|ssh|source)$/.test(word))
+          unsupported(lastCommand(result) + rest.split('\n')[0]);
         result += word;
         i += word.length;
       } else {
@@ -278,7 +279,7 @@ function swallowedBy(script) {
     if (/^(?:\w+\s*\(\)|function\s+\w+(?:\s*\(\))?)\s*(?:\{|$)/.test(command)) functions++;
     if (/^}/.test(command)) functions = Math.max(0, functions - 1);
     if (/^(?:fi|esac)\b/.test(command)) branches = Math.max(0, branches - 1);
-    if (/^(?:if|case)\b/.test(command)) branches++;
+    if (/^(?:if\b|case\s)/.test(command)) branches++;
     // The keyword or case pattern that opens a body is not the command in it.
     command = command.replace(/^(?:then|else|do)\b\s*/, '');
     if (branches) command = command.replace(/^(?:case\b.*?\bin\s+)?[^)]*\)\s*/, '');
