@@ -48,7 +48,7 @@ import {
   normalizeReviewDimensionIds,
 } from '@haive/shared/review';
 import { getDb } from '../db.js';
-import { boundedLockWait } from '../lib/repository-busy.js';
+import { boundedLockWait, REPOSITORY_BUSY } from '../lib/repository-busy.js';
 import { requireJsonObject } from '../lib/json-object.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
@@ -1043,17 +1043,28 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
       if (PORTABLE_SETTING_UPDATE_KEYS.some((key) => key in updates)) {
         await markProjectStateDirty(tx, repositoryId);
       }
-      // Recheck after the clear while we still hold the row taken within the bound.
-      // A separate post-commit restore could queue behind a relink without a bound.
-      // Unfenced: a lease lost by expiry leaves no sync to restore the flag.
-      if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
-        await tx
-          .update(schema.repositories)
-          .set(retryCleared)
-          .where(eq(schema.repositories.id, repositoryId));
-        degradationKept = true;
-      }
     });
+    // External RAG I/O needs its own pool connection: probe only after the save commits,
+    // with no repository row lock held. Unfenced: expiry can leave no sync to restore the flag.
+    if (retryCleared && (await ragStoreAwaitsReembedBounded(db, repositoryId))) {
+      try {
+        await db.transaction((tx) =>
+          boundedLockWait(tx, () =>
+            tx
+              .update(schema.repositories)
+              .set(retryCleared!)
+              .where(eq(schema.repositories.id, repositoryId)),
+          ),
+        );
+        degradationKept = true;
+      } catch (err) {
+        if (!(err instanceof HttpError && err.status === 409 && err.message === REPOSITORY_BUSY))
+          throw err;
+        // The save already committed: keep its answer. If a relink holds the row,
+        // the flag stays cleared until the next sync rather than waiting without a bound.
+        logger.warn({ repositoryId }, 'retry degraded flag restore deferred by repository lock');
+      }
+    }
     if (appAuthWrites.length > 0) logAuditEvent(appAuthEvent);
     if (changedFields.length > 0) logAuditEvent(securityEvent);
     return c.json({

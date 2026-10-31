@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '@haive/shared';
 import { eq, sql } from 'drizzle-orm';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -612,7 +613,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       ),
     30_000,
   );
-  it('finishes a retry flag restore while a relink arrives during its second probe', async () => {
+  it('keeps a committed retry answer while a relink holds the row across its second probe', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'remote-retry-'));
     roots.push(root);
     await git(root, ['init']);
@@ -646,6 +647,9 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
         await resume;
       }
     };
+    h.lockTimeoutMs = 300;
+    let relinkArrived = false;
+    const warnings = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     let relink: Promise<Response> | undefined;
     let probes = 0;
     h.ragProbe = async () => {
@@ -657,22 +661,10 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
           body: JSON.stringify({ remoteUrl: 'https://first.test/r' }),
         }),
       );
-      // On the old code the relink takes the row and holds it in git; on the fix it
-      // queues on the save's row. Either proves it has arrived before the flag restore.
-      await expect
-        .poll(
-          async () =>
-            reached ||
-            (
-              await db.execute(sql`
-        select 1 from pg_stat_activity a join pg_locks l on l.pid = a.pid
-        where a.datname = current_database() and not l.granted
-          and a.query like 'select %"repositories"%'
-      `)
-            ).length > 0,
-          { timeout: 3_000 },
-        )
-        .toBe(true);
+      // Probe errors are swallowed by the route: record arrival here, assert it outside.
+      for (let i = 0; i < 100 && !reached; i++)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      relinkArrived = reached;
       return true;
     };
     const save = Promise.resolve(
@@ -681,19 +673,126 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     try {
       const answer = await answeredWithin(5_000, save);
       expect(answer.status).toBe(200);
-      expect(await answer.json()).toMatchObject({ degradationKept: true });
+      expect(await answer.json()).toMatchObject({ degradationKept: false });
       expect(await stored()).toMatchObject({
         secretMaskEnabled: false,
-        ragEmbedDegradedAt: degradedAt,
-        ragEmbedDegradedReason: 'pending fallback rows',
+        ragEmbedDegradedAt: null,
+        ragEmbedDegradedReason: null,
       });
       expect(probes).toBe(2);
+      expect(relinkArrived).toBe(true);
+      expect(
+        warnings.mock.calls.some(
+          (call) => call[1] === 'retry degraded flag restore deferred by repository lock',
+        ),
+      ).toBe(true);
     } finally {
       release();
       await Promise.all([save, relink]);
+      warnings.mockRestore();
     }
     expect((await relink!).status).toBe(200);
   }, 30_000);
+  const prepareRetry = async () => {
+    const degradedAt = new Date('2026-01-01T00:00:00Z');
+    await db
+      .update(schema.repositories)
+      .set({
+        ragEmbedDegradedAt: degradedAt,
+        ragEmbedDegradedReason: 'pending fallback rows',
+        onboardingTooling: {
+          schemaVersion: 1,
+          tooling: {
+            ragMode: 'external',
+            ragConnectionString: 'postgres://unused.test/rag',
+            embeddingDimensions: 8,
+          },
+        },
+      })
+      .where(eq(schema.repositories.id, repository));
+    return degradedAt;
+  };
+  it('runs both retry probes with no repository row lock held', async () => {
+    const degradedAt = await prepareRetry();
+    const available: boolean[] = [];
+    h.ragProbe = async () => {
+      try {
+        await db.transaction((tx) =>
+          tx.execute(sql`SELECT id FROM repositories WHERE id = ${repository} FOR UPDATE NOWAIT`),
+        );
+        available.push(true);
+      } catch {
+        available.push(false);
+      }
+      return available.length === 2;
+    };
+    const answer = await sendSetting('tooling', { ragEmbedAction: 'retry' });
+    expect(answer.status).toBe(200);
+    expect(available).toEqual([true, true]);
+    expect(await answer.json()).toMatchObject({ degradationKept: true });
+    expect(await stored()).toMatchObject({ ragEmbedDegradedAt: degradedAt });
+  });
+  it('warns and preserves a committed retry save when its bounded restore cannot lock the row', async () => {
+    await prepareRetry();
+    h.lockTimeoutMs = 300;
+    let probes = 0;
+    let acquired = false;
+    let release!: () => void;
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holder: Promise<unknown> | undefined;
+    let holderError: unknown;
+    h.ragProbe = async () => {
+      if (++probes === 1) return false;
+      let arrived!: () => void;
+      const arrival = new Promise<void>((resolve) => {
+        arrived = resolve;
+      });
+      holder = db
+        .transaction(async (tx) => {
+          try {
+            await tx.execute(
+              sql`SELECT id FROM repositories WHERE id = ${repository} FOR UPDATE NOWAIT`,
+            );
+            acquired = true;
+          } catch {
+            /* Assert acquisition outside this swallowed probe. */
+          } finally {
+            arrived();
+          }
+          if (acquired) await resume;
+        })
+        .catch((err: unknown) => {
+          holderError = err;
+        });
+      await arrival;
+      return true;
+    };
+    const warnings = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const save = Promise.resolve(
+      sendSetting('tooling', { ragEmbedAction: 'retry', secretMaskEnabled: false }),
+    );
+    try {
+      const answer = await answeredWithin(5_000, save);
+      expect(answer.status).toBe(200);
+      expect(await answer.json()).toMatchObject({ degradationKept: false });
+      expect(acquired).toBe(true);
+      expect(holderError).toBeUndefined();
+      expect(probes).toBe(2);
+      expect(await stored()).toMatchObject({ secretMaskEnabled: false, ragEmbedDegradedAt: null });
+      expect((await audits(db)).map((row) => row.action)).toEqual(['repository.security.update']);
+      expect(
+        warnings.mock.calls.some(
+          (call) => call[1] === 'retry degraded flag restore deferred by repository lock',
+        ),
+      ).toBe(true);
+    } finally {
+      release();
+      await Promise.all([save, holder]);
+      warnings.mockRestore();
+    }
+  });
   it(
     'answers an integrations allow-list save 409 busy within the lock bound while a relink holds the row',
     () =>
