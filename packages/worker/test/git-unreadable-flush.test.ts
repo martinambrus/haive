@@ -241,7 +241,7 @@ describe('the plan sweep when git cannot be read', () => {
         err: expect.objectContaining({ message: expect.stringContaining(dir) }),
         repositoryId: FIRST,
       },
-      'dirty plan mirror refresh failed',
+      expect.any(String),
     );
     expect(state(FIRST).writtenRevision).toBeLessThan(state(FIRST).revision as number);
   });

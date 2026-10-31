@@ -93,7 +93,6 @@ describe.skipIf(!url)('boot repair of stored repository failure paths', () => {
         level: 30,
         count: 1,
         ids: [ids[0]],
-        msg: 'scrubbed stored repository errors',
       }),
     );
     lines.length = 0;

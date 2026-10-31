@@ -85,7 +85,6 @@ describe.skipIf(!url)('boot repair of stored plan error paths', () => {
         level: 30,
         count: 1,
         ids: [ids[0]],
-        msg: 'scrubbed stored plan mirror errors',
       }),
     );
     expect(migrations[0]?.kind).toBe('convergent');

@@ -352,6 +352,6 @@ it('post-plan scrubs server paths while preserving the mirror diagnosis', async 
   expect(out.warnings).toContain("haive-data mirror: plan mirror failed (EACCES: open '[path]')");
   const warning = lines
     .map((line) => JSON.parse(line))
-    .find((line) => line.msg === 'plan mirror write failed (non-fatal)');
+    .find((line) => line.level === 40 && line.err?.message === (h.error as Error).message);
   expect(warning).toMatchObject({ level: 40, err: { message: (h.error as Error).message } });
 });

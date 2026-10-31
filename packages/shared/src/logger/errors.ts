@@ -67,7 +67,9 @@ export function safeErrorMessage(err: unknown): string {
 /** Display copy for filesystem/git failures: retain the diagnosis and URLs, hide absolute
  *  POSIX, drive and UNC paths. Quoted paths may contain spaces; unquoted tokens end at
  *  whitespace or diagnostic punctuation. The placeholder contains no path, so repairs converge.
- *  Keep safeErrorMessage's ordinary-error contract unchanged for other diagnostic sinks. */
+ *  Keep safeErrorMessage's ordinary-error contract unchanged for other diagnostic sinks. The URL
+ *  scheme is bounded to 32 characters: an unbounded one restarts at every letter of a long token,
+ *  which is quadratic (a 200,000-character token took about 40 s). */
 export function scrubErrorPaths(err: unknown): string {
   return safeErrorMessage(err).replace(
     /[a-zA-Z][a-zA-Z0-9+.-]{0,31}:\/\/[^\s"'`<>]+|(["'`])(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\r\n]*?\1|(?<![\w./\\:-])(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\s"'`<>:,;!?()[\]{}]*/g,
