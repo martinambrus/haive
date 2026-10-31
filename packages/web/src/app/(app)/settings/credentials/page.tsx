@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { api, type ApiError } from '@/lib/api-client';
 import { Button, Card, CardHeader, CardTitle, CardDescription, FormError } from '@/components/ui';
 import { CredentialModal } from '@/components/credential-modal';
+import { CredentialDeleteDialog } from '@/components/credential-delete-dialog';
 import { usePageTitle } from '@/lib/use-page-title';
 
 interface CredentialRow {
@@ -15,6 +16,7 @@ interface CredentialRow {
   gitName: string | null;
   gitEmail: string | null;
   createdAt: string;
+  connection?: { accountLabel: string; providerName: string } | null;
 }
 
 export default function CredentialsPage() {
@@ -22,27 +24,17 @@ export default function CredentialsPage() {
   const [credentials, setCredentials] = useState<CredentialRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
-  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<CredentialRow | null>(null);
   const [editing, setEditing] = useState<CredentialRow | null>(null);
 
-  useEffect(() => {
+  function load() {
     api
       .get<{ credentials: CredentialRow[] }>('/repo-credentials')
       .then((data) => setCredentials(data.credentials))
       .catch((err) => setError((err as ApiError).message ?? 'Failed to load credentials'));
-  }, []);
-
-  async function handleDelete(id: string) {
-    setDeleting(id);
-    try {
-      await api.delete(`/repo-credentials/${id}`);
-      setCredentials((prev) => prev?.filter((c) => c.id !== id) ?? null);
-    } catch (err) {
-      setError((err as ApiError).message ?? 'Failed to delete credential');
-    } finally {
-      setDeleting(null);
-    }
   }
+
+  useEffect(load, []);
 
   if (credentials === null && !error) {
     return <p className="text-sm text-neutral-400">Loading credentials...</p>;
@@ -96,13 +88,8 @@ export default function CredentialsPage() {
                 <Button variant="secondary" size="sm" onClick={() => setEditing(cred)}>
                   Edit
                 </Button>
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  disabled={deleting === cred.id}
-                  onClick={() => handleDelete(cred.id)}
-                >
-                  {deleting === cred.id ? 'Deleting...' : 'Delete'}
+                <Button variant="destructive" size="sm" onClick={() => setDeleting(cred)}>
+                  Delete
                 </Button>
               </div>
             </div>
@@ -140,6 +127,17 @@ export default function CredentialsPage() {
                   : c,
               ) ?? null,
           );
+          // A rename also reaches the connection the credential backs, which the list names.
+          load();
+        }}
+      />
+
+      <CredentialDeleteDialog
+        credential={deleting}
+        onClose={() => setDeleting(null)}
+        onDeleted={(id) => {
+          setCredentials((prev) => prev?.filter((c) => c.id !== id) ?? null);
+          setDeleting(null);
         }}
       />
     </div>

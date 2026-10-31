@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
-import { credentialUsableForPr } from '@haive/shared/forge';
+import { connectionCredentialFits } from '@haive/shared/forge';
 import {
   getIntegrationProvider,
   isProviderEnabled,
@@ -116,7 +116,11 @@ export async function requireFitsRepository(
           .where(eq(schema.repositories.id, repositoryId));
   if (
     connection.credential === null ||
-    !credentialUsableForPr(connection.credential, repository?.remoteUrl ?? null)
+    !connectionCredentialFits(
+      connection.providerId,
+      connection.credential,
+      repository?.remoteUrl ?? null,
+    )
   ) {
     throw new HttpError(400, "That account does not fit this task's repository");
   }

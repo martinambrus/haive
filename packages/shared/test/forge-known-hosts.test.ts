@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { credentialForgeProvider, inferForgeProviderFromHost } from '../src/forge/index.js';
+import {
+  AUTO_DETECT_HOSTS,
+  credentialForgeProvider,
+  inferForgeProviderFromHost,
+} from '../src/forge/index.js';
 
 describe('inferForgeProviderFromHost', () => {
   it.each([
@@ -29,6 +33,21 @@ describe('inferForgeProviderFromHost', () => {
     expect(inferForgeProviderFromHost('constructor')).toBeNull();
     expect(inferForgeProviderFromHost('__proto__')).toBeNull();
     expect(inferForgeProviderFromHost('toString')).toBeNull();
+  });
+});
+
+describe('AUTO_DETECT_HOSTS', () => {
+  it('lists the public hosts whose forge is inferred, in the order the table holds them', () => {
+    expect(AUTO_DETECT_HOSTS).toEqual([
+      'github.com',
+      'gitlab.com',
+      'codeberg.org',
+      'bitbucket.org',
+    ]);
+  });
+
+  it('holds only hosts that infer a forge', () => {
+    for (const host of AUTO_DETECT_HOSTS) expect(inferForgeProviderFromHost(host)).not.toBeNull();
   });
 });
 

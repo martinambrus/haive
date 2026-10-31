@@ -413,6 +413,10 @@ export const repoCredentials = pgTable(
     apiBaseUrl: text('api_base_url'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
+    /** The provider's id for the account whose sign-in made this credential; NULL for one typed by
+     *  hand, which a sign-in never rewrites. A later sign-in to that account on this host takes the
+     *  credential back instead of adding a second one. */
+    signInAccountId: text('sign_in_account_id'),
   },
   (table) => [
     index('repo_credentials_user_id_idx').on(table.userId),

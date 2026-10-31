@@ -11,6 +11,7 @@ const connection = (over: Partial<IntegrationConnection> = {}): IntegrationConne
   grantedScopes: ['files.read'],
   status: 'connected',
   lastError: null,
+  refreshRefusedAt: null,
   repoCredentialId: null,
   expiresAt: null,
   createdAt: '2026-10-14T10:00:00.000Z',
@@ -59,10 +60,23 @@ describe('ConnectionRow', () => {
     expect(html).toMatch(/<button[^>]*>Disconnect<\/button>/);
   });
 
-  it('keys the badge on the status column and leaves a stale last error out of a connected row', () => {
+  it('keys the badge on the status column and leaves a stale last error out of an unflagged connected row', () => {
     const html = render(connection({ status: 'connected', lastError: 'invalid_grant: stale' }));
     expect(html).toContain('>Connected<');
     expect(html).not.toContain('invalid_grant: stale');
+  });
+
+  it('keeps the connected badge and says why the refresh was refused while the flag is set', () => {
+    const html = render(
+      connection({
+        lastError: 'invalid_grant: refresh refused',
+        refreshRefusedAt: '2026-10-30T09:00:00.000Z',
+      }),
+    );
+    expect(html).toContain('>Connected<');
+    expect(html).toContain('invalid_grant: refresh refused');
+    expect(html).not.toMatch(/<button[^>]*>Reconnect<\/button>/);
+    expect(html).toMatch(/<button[^>]*>Disconnect<\/button>/);
   });
 
   it('asks a connection that needs it to reconnect, with the error as words under the badge', () => {

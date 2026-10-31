@@ -321,6 +321,7 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
       const row = await readRow(id);
       expect(row.status).toBe('needs_reauth');
       expect(row.lastError).toBe('The grant was revoked.');
+      expect(row.refreshRefusedAt).toBeNull();
       expect(row.accessTokenEncrypted).toBe(before.accessTokenEncrypted);
       expect(row.refreshTokenEncrypted).toBe(before.refreshTokenEncrypted);
       expect(row.encryptedDek).toBe(before.encryptedDek);
@@ -374,9 +375,30 @@ describe.skipIf(!url)('connection access tokens on Postgres', () => {
         expect(row.refreshTokenEncrypted).toBe(before.refreshTokenEncrypted);
         expect(row.lastError).toContain(code);
         expect(row.lastError).toContain('client secret');
+        expect(before.refreshRefusedAt).toBeNull();
+        expect(row.refreshRefusedAt).toBeInstanceOf(Date);
+        expect(Math.abs(row.refreshRefusedAt!.getTime() - Date.now())).toBeLessThan(10_000);
         expect(vendor.calls()).toBe(1);
       },
     );
+
+    it('forgets a refused client once a later refresh succeeds: lastError and refreshRefusedAt go', async () => {
+      const id = await createConnection();
+      const refused = answering(() => json(401, { error: 'invalid_client' }));
+      await rejection(getConnectionAccessToken(dbA, id, { fetchFn: refused.fetchFn }));
+      const stuck = await readRow(id);
+      expect.soft(stuck.lastError).toContain('invalid_client');
+      expect.soft(stuck.refreshRefusedAt).toBeInstanceOf(Date);
+
+      const vendor = createVendor();
+      expect(await getConnectionAccessToken(dbA, id, { fetchFn: vendor.fetchFn })).toBe(
+        'stub-access-1',
+      );
+      const row = await readRow(id);
+      expect(row.status).toBe('connected');
+      expect(row.lastError).toBeNull();
+      expect(row.refreshRefusedAt).toBeNull();
+    });
 
     it('goes by the code, never by the words around it', async () => {
       const flagged = await createConnection();
