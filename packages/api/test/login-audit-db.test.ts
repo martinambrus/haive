@@ -118,4 +118,29 @@ describe.skipIf(!url)('Login audit on Postgres', () => {
         }
       });
   }
+  it('refresh and logout do not add audit rows', async () => {
+    const signed = await send('/auth/login', {
+      email: 'known@example.test',
+      password: 'synthetic-password',
+    });
+    expect(signed.status).toBe(200);
+    await db.delete(schema.auditEvents);
+    const cookies = (response: Response) =>
+      response.headers
+        .getSetCookie()
+        .map((value) => value.split(';')[0])
+        .join('; ');
+    const refreshed = await app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { cookie: cookies(signed) },
+    });
+    expect(refreshed.status).toBe(200);
+    expect(await audits(db)).toEqual([]);
+    const loggedOut = await app.request('/auth/logout', {
+      method: 'POST',
+      headers: { cookie: cookies(refreshed) },
+    });
+    expect(loggedOut.status).toBe(200);
+    expect(await audits(db)).toEqual([]);
+  });
 });

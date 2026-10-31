@@ -79,7 +79,11 @@ let fake: ReturnType<typeof makeFake>;
 const reg = { userCount: 1, existing: false, mode: 'closed' as 'closed' | 'open' };
 
 function makeFake() {
-  return createFakeDb({ users: schema.users, refreshTokens: schema.refreshTokens });
+  return createFakeDb({
+    users: schema.users,
+    refreshTokens: schema.refreshTokens,
+    auditEvents: schema.auditEvents,
+  });
 }
 
 function installDb() {
@@ -91,19 +95,22 @@ function installDb() {
       userInvites: { findFirst: async () => undefined },
     },
     select: () => ({ from: async () => [{ n: reg.userCount }] }),
-    insert: () => ({
-      values: () => ({
-        returning: async () => [
-          {
-            id: randomUUID(),
-            role: reg.userCount === 0 ? 'admin' : 'user',
-            status: 'active',
-            tokenVersion: 0,
-            createdAt: new Date(),
+    insert: (table: any) =>
+      table !== schema.users
+        ? fake.db.insert(table)
+        : {
+            values: () => ({
+              returning: async () => [
+                {
+                  id: randomUUID(),
+                  role: reg.userCount === 0 ? 'admin' : 'user',
+                  status: 'active',
+                  tokenVersion: 0,
+                  createdAt: new Date(),
+                },
+              ],
+            }),
           },
-        ],
-      }),
-    }),
     update: () => ({ set: () => ({ where: () => ({ returning: async () => [] }) }) }),
   };
   h.db = {
@@ -168,7 +175,11 @@ async function expectRefused(send: () => Promise<Response>, seconds?: number): P
   expect(body.retryAfterSeconds).toBe(Number(header));
   expect(body.error).toContain(String(body.retryAfterSeconds));
   expect(res.headers.get('set-cookie')).toBeNull();
-  expect(h.getDb).not.toHaveBeenCalled();
+  if (h.getDb.mock.calls.length > 0)
+    expect(fake.rows(schema.auditEvents).at(-1)).toMatchObject({
+      action: 'auth.login.failure',
+      metadata: { reason: 'throttled' },
+    });
   expect(verifyPassword).not.toHaveBeenCalled();
   expect(hashPassword).not.toHaveBeenCalled();
   if (seconds !== undefined) expect(body.retryAfterSeconds).toBe(seconds);

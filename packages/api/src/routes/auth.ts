@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { count, eq, and, isNull, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
@@ -250,8 +251,29 @@ authRoutes.post('/login', async (c) => {
   const fieldKey = await configService.getEncryptionKey();
   const pepper = await secretsService.getEmailBlindIndexPepper();
   const blindIndex = computeEmailBlindIndex(body.email, pepper);
-  const attempt = await reserveAuthAttempt(c, 'login', blindIndex);
   const db = getDb();
+  let attempt;
+  try {
+    attempt = await reserveAuthAttempt(c, 'login', blindIndex);
+  } catch (err) {
+    if (!(err instanceof HTTPException) || err.status !== 429) throw err;
+    const existing = await db.query.users.findFirst({
+      where: eq(schema.users.emailBlindIndex, blindIndex),
+      columns: { id: true },
+    });
+    const event: AuditEvent = {
+      actorUserId: ANONYMOUS_AUDIT_ACTOR,
+      action: 'auth.login.failure',
+      targetType: 'user',
+      targetId: existing?.id ?? null,
+      metadata: { reason: 'throttled' },
+    };
+    await db.transaction(async (tx) => {
+      await insertAuditEvent(tx, event);
+    });
+    logAuditEvent(event);
+    throw err;
+  }
 
   const user = await db.query.users.findFirst({
     where: eq(schema.users.emailBlindIndex, blindIndex),

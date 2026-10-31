@@ -1,0 +1,150 @@
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
+import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
+import {
+  allowAudit,
+  audits,
+  cleanActor,
+  createDatabase,
+  KEK,
+  makeActor,
+  refuseAudit,
+  schema,
+} from './security-audit-db.js';
+const url = process.env.SECURITY_AUDIT_TEST_URL;
+if (url && !new URL(url).pathname.startsWith('/t376_audit_test'))
+  throw new Error('Use a dedicated t376_audit_test database');
+const h = vi.hoisted(() => ({
+  db: undefined as any,
+  actor: '',
+  throttle: vi.fn(),
+  close: vi.fn(),
+}));
+vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
+vi.mock('../src/lib/user-sockets.js', () => ({ closeUserSockets: h.close }));
+vi.mock('../src/lib/auth-throttle.js', () => ({ reserveAuthAttempt: h.throttle }));
+vi.mock('../src/auth/password.js', () => ({
+  hashPassword: async () => 'next-hash',
+  verifyPassword: async (password: string) => password === 'synthetic-password',
+}));
+vi.mock('@haive/shared', async (original) => ({
+  ...(await original<any>()),
+  configService: { getEncryptionKey: async () => 'ab'.repeat(32), get: async () => 'open' },
+}));
+import { computeEmailBlindIndex, encryptEmail, secretsService } from '@haive/shared';
+import { authRoutes } from '../src/routes/auth.js';
+import { userSettingsRoutes } from '../src/routes/user-settings.js';
+import { signAccessToken } from '../src/auth/jwt.js';
+import { ACCESS_COOKIE } from '../src/auth/cookies.js';
+import { errorHandler } from '../src/middleware/error-handler.js';
+import type { AppEnv } from '../src/context.js';
+
+describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
+  let db: ReturnType<typeof createDatabase>;
+  let cookie: string;
+  const app = new Hono<AppEnv>()
+    .onError(errorHandler)
+    .route('/auth', authRoutes)
+    .route('/user-settings', userSettingsRoutes);
+  const send = (path: string, body: unknown) =>
+    app.request(path, {
+      method: path === '/user-settings/password' ? 'PUT' : 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify(body),
+    });
+  const sessions = () => db.select().from(schema.refreshTokens);
+  const user = () => db.query.users.findFirst({ where: eq(schema.users.id, h.actor) });
+  beforeAll(() => {
+    db = createDatabase(url!);
+    h.db = db;
+  });
+  afterAll(async () => {
+    await db.$client.end({ timeout: 5 });
+  });
+  beforeEach(async () => {
+    vi.spyOn(secretsService, 'getJwtSecret').mockResolvedValue('cd'.repeat(32));
+    vi.spyOn(secretsService, 'getEmailBlindIndexPepper').mockResolvedValue('ef'.repeat(32));
+    h.actor = (await makeActor(db)).id;
+    await db
+      .update(schema.users)
+      .set({
+        emailEncrypted: encryptEmail('known@example.test', KEK),
+        emailBlindIndex: computeEmailBlindIndex('known@example.test', 'ef'.repeat(32)),
+      })
+      .where(eq(schema.users.id, h.actor));
+    cookie = `${ACCESS_COOKIE}=${await signAccessToken({ sub: h.actor, role: 'admin', tv: 0 })}`;
+    h.throttle.mockReset().mockResolvedValue({ refund: async () => {} });
+    h.close.mockClear();
+  });
+  afterEach(async () => {
+    await allowAudit(db);
+    await db.delete(schema.userInvites);
+    await db
+      .delete(schema.users)
+      .where(
+        eq(
+          schema.users.emailBlindIndex,
+          computeEmailBlindIndex('new@example.test', 'ef'.repeat(32)),
+        ),
+      );
+    await cleanActor(db, h.actor);
+    vi.restoreAllMocks();
+  });
+  for (const refused of [false, true]) {
+    for (const known of [true, false])
+      it(`throttled ${known ? 'known' : 'unknown'} login: ${refused ? 'refused audit fails request' : 'writes safe row before 429'}`, async () => {
+        h.throttle.mockRejectedValue(
+          new HTTPException(429, {
+            res: Response.json(
+              { code: 'rate_limited' },
+              { status: 429, headers: { 'Retry-After': '60' } },
+            ),
+          }),
+        );
+        if (refused) await refuseAudit(db);
+        const res = await send('/auth/login', {
+          email: known ? 'known@example.test' : 'absent@example.test',
+          password: 'synthetic-password',
+        });
+        expect(res.status).toBe(refused ? 500 : 429);
+        const rows = await audits(db);
+        expect(rows).toHaveLength(refused ? 0 : 1);
+        expect(await sessions()).toEqual([]);
+        if (!refused) {
+          expect(res.headers.get('Retry-After')).toBe('60');
+          expect(rows[0]).toMatchObject({
+            action: 'auth.login.failure',
+            targetId: known ? h.actor : null,
+            metadata: { reason: 'throttled' },
+          });
+          expect(JSON.stringify(rows)).not.toContain('example.test');
+        }
+      });
+    it(`forced password change: ${refused ? 'refusal keeps the gate and password' : 'records the forced change'}`, async () => {
+      await db
+        .update(schema.users)
+        .set({ mustChangePassword: true })
+        .where(eq(schema.users.id, h.actor));
+      const before = await user();
+      if (refused) await refuseAudit(db);
+      const res = await send('/user-settings/password', {
+        currentPassword: 'synthetic-password',
+        newPassword: 'synthetic-next-password',
+      });
+      expect(res.status).toBe(refused ? 500 : 200);
+      if (refused) {
+        expect(await user()).toEqual(before);
+        expect(res.headers.getSetCookie()).toEqual([]);
+        expect(h.close).not.toHaveBeenCalled();
+      } else {
+        expect((await user())!.mustChangePassword).toBe(false);
+        expect((await audits(db))[0]).toMatchObject({
+          action: 'user.password.change',
+          metadata: { forced: true },
+        });
+      }
+      expect(await sessions()).toHaveLength(refused ? 0 : 1);
+    });
+  }
+});
