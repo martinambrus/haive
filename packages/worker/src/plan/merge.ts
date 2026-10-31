@@ -321,7 +321,7 @@ export async function commitMerge(
   worktreePath: string,
   message: string,
   gitEnv: Record<string, string>,
-): Promise<string | null> {
+): Promise<string> {
   const open = await gitRun(worktreePath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']);
   if (open.code !== 0 && open.code !== 1) {
     throw new Error(
@@ -334,8 +334,7 @@ export async function commitMerge(
       throw new Error(`git commit (plan merge) failed: ${commit.stderr || commit.stdout}`);
     }
   }
-  const head = await gitRun(worktreePath, ['rev-parse', 'HEAD']);
-  return head.code === 0 ? head.stdout.trim() : null;
+  return headCommit(worktreePath);
 }
 
 /** HEAD's commit; a failed read throws, since an empty answer reads as a HEAD that moved. */

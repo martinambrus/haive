@@ -310,6 +310,23 @@ describe('ensurePlanMergeWorktree on a failed worktree list', () => {
   });
 });
 
+it('T397 commitMerge rejects a failed post-commit HEAD read', async () => {
+  const dir = await mkdtemp(path.join(fixtureBase, 'post-commit-head-'));
+  dirs.push(dir);
+  await git(dir, ['init', '-b', 'main']);
+  await git(dir, ['commit', '--allow-empty', '-m', 'initial']);
+  await git(dir, ['checkout', '-b', 'incoming']);
+  await git(dir, ['commit', '--allow-empty', '-m', 'incoming']);
+  await git(dir, ['checkout', 'main']);
+  await git(dir, ['merge', '--no-ff', '--no-commit', 'incoming']);
+  const shim = await failGit(['rev-parse', 'HEAD']);
+  try {
+    await expect(commitMerge(dir, 'msg', COMMIT_ENV)).rejects.toThrow(/HEAD/);
+  } finally {
+    await shim.restore();
+  }
+});
+
 describe('commitMerge on a failed MERGE_HEAD read', () => {
   it('rejects, leaves the merge open and makes no commit', async () => {
     const { wt } = await openMerge();
