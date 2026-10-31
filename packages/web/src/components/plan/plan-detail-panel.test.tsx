@@ -226,6 +226,7 @@ async function mount() {
   api.getPlanNode.mockResolvedValue(DETAIL);
   const props = {
     repositoryId: 'r1',
+    chatDrafts: new Map<string, string>(),
     nodeId: 'n0',
     tree: [treeNode('n0', 'Checkout'), treeNode('n1', 'Auth service'), treeNode('n2', 'Billing')],
     tab: 'links' as const,

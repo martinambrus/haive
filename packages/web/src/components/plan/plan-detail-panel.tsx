@@ -93,7 +93,7 @@ export function PlanDetailPanel({
   onNavigate: (nodeId: string) => void;
   onClose: () => void;
   /** Owned by the plan page because this panel unmounts when selection clears. */
-  chatDrafts?: Map<string, string>;
+  chatDrafts: Map<string, string>;
 }) {
   const router = useRouter();
   const [detail, setDetail] = useState<PlanNodeDetail | null>(null);
