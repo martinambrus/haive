@@ -38,11 +38,17 @@ const OPEN_STEP_STATUSES = ['pending', 'running', 'waiting_form', 'waiting_cli']
 /** Mark a single task row as cancelled and append the activity event.
  *  Caller is responsible for enqueueing the BullMQ CANCEL job (via
  *  enqueueCancelJob) AFTER any surrounding transaction commits — enqueueing
- *  inside a transaction would queue work for state that may roll back. */
+ *  inside a transaction would queue work for state that may roll back.
+ *
+ *  `lockedStepIds` are the task's step rows the caller holds; only those still open are ended
+ *  here, and none are when it holds none. A row created after the caller's batch is not held:
+ *  the bulk update would lock it in scan order while a worker's claim of it, holding it, waits
+ *  for the task row this transaction holds (40P01). The CANCEL job ends such a row. */
 export async function cancelTaskRow(
   tx: DbOrTx,
   taskId: string,
   opts: { by: string; reason?: string },
+  lockedStepIds: string[],
 ): Promise<void> {
   const now = new Date();
   await tx
@@ -60,38 +66,42 @@ export async function cancelTaskRow(
       updatedAt: now,
     })
     .where(eq(schema.tasks.id, taskId));
-  // Transition any non-terminal step rows so a cancelled task never shows a live
-  // step (e.g. a run_app hold step parked at waiting_form). step_status has no
-  // 'cancelled' value, so mark them failed (mirrors the Stop path). The worker's
-  // handleCancelTask repeats this idempotently; doing it here makes the UI
-  // consistent immediately instead of after the CANCEL job runs.
-  await tx
-    .update(schema.taskSteps)
-    .set({
-      status: 'failed',
-      ...CLEAR_STEP_USAGE_STAMP,
-      errorMessage: 'Task cancelled',
-      endedAt: now,
-      // A parked step holds its live wait in waiting_started_at, which computeStepContribution
-      // only counts as idle while ended_at is null. Stamping ended_at without folding therefore
-      // reclassifies the WHOLE recorded park from idle back into WORK (measured: 111h across 20
-      // cancelled steps). Fold it into idle_ms and clear the marker in the SAME statement, so
-      // the row is never terminal with an unfolded park. Expression mirrors foldCliParkOnResume
-      // (worker cli-park-timing.ts); GREATEST ignores NULLs in Postgres, so an unparked
-      // pending/running row adds 0 rather than NULL. The least() clamp is required, not
-      // defensive: idle_ms is int4, so a step parked longer than ~24.8 days (this DB has
-      // waiting_form rows parked 40+) would raise "integer out of range" and abort the cancel.
-      idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
-        greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`,
-      waitingStartedAt: null,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(schema.taskSteps.taskId, taskId),
-        inArray(schema.taskSteps.status, [...OPEN_STEP_STATUSES]),
-      ),
-    );
+  // Transition the step rows this transaction holds that are still non-terminal so a cancelled
+  // task never shows a live step (e.g. a run_app hold step parked at waiting_form). step_status has
+  // no 'cancelled' value, so mark them failed (mirrors the Stop path). The worker's
+  // handleCancelTask repeats this idempotently for every open row of the task, which is what ends a
+  // row created after the caller's batch; doing it here makes the UI consistent immediately
+  // instead of after the CANCEL job runs.
+  if (lockedStepIds.length > 0) {
+    await tx
+      .update(schema.taskSteps)
+      .set({
+        status: 'failed',
+        ...CLEAR_STEP_USAGE_STAMP,
+        errorMessage: 'Task cancelled',
+        endedAt: now,
+        // A parked step holds its live wait in waiting_started_at, which computeStepContribution
+        // only counts as idle while ended_at is null. Stamping ended_at without folding therefore
+        // reclassifies the WHOLE recorded park from idle back into WORK (measured: 111h across 20
+        // cancelled steps). Fold it into idle_ms and clear the marker in the SAME statement, so
+        // the row is never terminal with an unfolded park. Expression mirrors foldCliParkOnResume
+        // (worker cli-park-timing.ts); GREATEST ignores NULLs in Postgres, so an unparked
+        // pending/running row adds 0 rather than NULL. The least() clamp is required, not
+        // defensive: idle_ms is int4, so a step parked longer than ~24.8 days (this DB has
+        // waiting_form rows parked 40+) would raise "integer out of range" and abort the cancel.
+        idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
+          greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`,
+        waitingStartedAt: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.taskSteps.taskId, taskId),
+          inArray(schema.taskSteps.id, lockedStepIds),
+          inArray(schema.taskSteps.status, [...OPEN_STEP_STATUSES]),
+        ),
+      );
+  }
   await tx.insert(schema.taskEvents).values({
     taskId,
     taskStepId: null,
@@ -166,9 +176,11 @@ export async function cancelTaskIfOpen(
 
 /** Lock every step row of the tasks, then cancel those of them that still satisfy `isOpen`.
  *  Step rows before task rows, in id order: the order every other transaction that writes both
- *  takes. All of the rows rather than the open ones, since the task row is held across
- *  cancelTaskRow's bulk step update, and a row that opens before it (a Retry's commit) would be
- *  locked there in scan order while a worker's claim holding it waits for the task row. The wait for
+ *  takes. All of the rows rather than the open ones, so a Retry that reopens a finished row waits
+ *  for this transaction instead of opening it behind the cancel. Each task is handed the rows
+ *  locked here, and only those are ended: a row created after the batch is not held, and the bulk
+ *  update would lock it in scan order while a worker's claim of it, holding it, waits for the task
+ *  row held here. The CANCEL job the caller queues after the commit ends such a row. The wait for
  *  the rows may have let a Stop, a completion or another cancel end a task, so the tasks are read
  *  again, locked, and only those still open are cancelled. */
 async function cancelStillOpen(
@@ -177,7 +189,7 @@ async function cancelStillOpen(
   isOpen: SQL | undefined,
   opts: { by: string; reason?: string },
 ): Promise<Array<{ id: string }>> {
-  await lockStepRows(tx, inArray(schema.taskSteps.taskId, ids));
+  const locked = await lockStepRows(tx, inArray(schema.taskSteps.taskId, ids));
   const open = await tx
     .select({ id: schema.tasks.id })
     .from(schema.tasks)
@@ -185,7 +197,8 @@ async function cancelStillOpen(
     .orderBy(schema.tasks.id)
     .for('no key update');
   for (const t of open) {
-    await cancelTaskRow(tx, t.id, opts);
+    const rows = locked.filter((row) => row.taskId === t.id).map((row) => row.id);
+    await cancelTaskRow(tx, t.id, opts, rows);
   }
   return open;
 }

@@ -318,6 +318,7 @@ jobs:
           api test/repo-delete-retry-db.test.ts REPO_DELETE_RETRY_TEST_URL repo_delete_retry_test pg
           api test/task-cancel-guard-db.test.ts TASK_CANCEL_GUARD_TEST_URL task_cancel_guard_test pg
           api test/task-cancel-lock-order-db.test.ts TASK_CANCEL_LOCK_ORDER_TEST_URL task_cancel_lock_order_test pg
+          api test/task-cancel-late-row-db.test.ts TASK_CANCEL_LATE_ROW_TEST_URL task_cancel_late_row_test pg
           api test/step-row-lock-order-db.test.ts STEP_ROW_LOCK_ORDER_TEST_URL step_row_lock_order_test pg
           api test/plan-advisory-delete-db.test.ts PLAN_ADVISORY_DELETE_TEST_URL plan_advisory_delete_test pg
           api test/admin-config-pool-db.test.ts ADMIN_CONFIG_POOL_TEST_URL admin_config_pool_test pg
