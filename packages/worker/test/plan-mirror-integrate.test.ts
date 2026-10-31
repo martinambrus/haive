@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
 import { failGit, type FakeGit } from './support/fake-git.js';
 
 const h = vi.hoisted(() => ({ db: null as unknown }));
@@ -260,4 +261,46 @@ describe('plan snapshot save and pull: a merge a conversation left open', () => 
     const detected = await planMergeStep.detect!(contextFor(local, db));
     expect(detected).toMatchObject({ branch: '', conflicts: [], mergeOpen: false });
   });
+});
+
+it('names an unknown untracked state file through the real set-aside with origin ahead', async () => {
+  const repoPath = await unrelatedPair();
+  const fake = createFakeDb({
+    repositories: schema.repositories,
+    tasks: schema.tasks,
+    projectStateOutbox: schema.projectStateOutbox,
+    projectStateSync: schema.projectStateSync,
+    projectStateConflicts: schema.projectStateConflicts,
+    planMirrorState: schema.planMirrorState,
+  });
+  const repositoryId = '00000000-0000-4000-8000-000000000001';
+  const userId = '00000000-0000-4000-8000-000000000002';
+  fake.insert(schema.repositories, {
+    id: repositoryId,
+    userId,
+    storagePath: repoPath,
+    status: 'ready',
+  });
+  h.db = fake.db;
+  await mkdir(path.join(repoPath, '.haive-data/state'), { recursive: true });
+  await writeFile(path.join(repoPath, '.haive-data/state/my-unknown.txt'), 'mine');
+  const before = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, encoding: 'utf8' });
+  const result = await integrateOrigin({
+    repositoryId,
+    repoPath,
+    branch: 'main',
+    userId,
+    identity: IDENTITY,
+    kept: new Map(),
+  });
+  expect(result).toMatchObject({
+    landed: false,
+    refusal: { code: 'projection_not_owned', file: '.haive-data/state/my-unknown.txt' },
+  });
+  expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoPath, encoding: 'utf8' })).toBe(
+    before,
+  );
+  expect(await readFile(path.join(repoPath, '.haive-data/state/my-unknown.txt'), 'utf8')).toBe(
+    'mine',
+  );
 });

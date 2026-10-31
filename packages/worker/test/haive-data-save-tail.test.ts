@@ -195,6 +195,25 @@ describe('data Save failure and race controls', () => {
       pushed: true,
     });
   });
+  it('retains the pushed tip distinct from the merge when post-push bookkeeping fails', async () => {
+    const run = push.gitRun;
+    vi.spyOn(push, 'gitRun').mockImplementation(async (cwd, args, ...rest) =>
+      args.includes('refs/heads/main^{commit}')
+        ? { code: 0, stdout: 'pushed-tip', stderr: '' }
+        : run(cwd, args, ...rest),
+    );
+    vi.spyOn(mirror, 'advancePlanBaseFromCommit').mockRejectedValue(new Error('after push'));
+    expect(await saveHaiveData(payload)).toMatchObject({
+      outcome: 'failed',
+      pushed: true,
+      committed: true,
+      commitSha: 'pushed-tip',
+      failure: { code: 'save_failed' },
+    });
+    expect(h.head).toBe('merged');
+    expect(push.pushBranch).toHaveBeenCalledWith(expect.objectContaining({ sha: 'pushed-tip' }));
+    expect(h.record).not.toHaveBeenCalled();
+  });
   it('reports failed index sync', async () => {
     calls.commit.mockResolvedValue({ ...preserved, indexSynced: false });
     expect(await saveHaiveData({ ...payload, push: false })).toMatchObject({ indexSynced: false });
@@ -275,6 +294,8 @@ describe('data Save failure and race controls', () => {
     });
   });
   it.each([
+    [{ outcome: 'missing' }, 'checkout_missing'],
+    [{ outcome: 'refused', reason: 'record' }, 'record_refused'],
     [{ outcome: 'absent' }, 'record_absent'],
     [{ outcome: 'superseded' }, 'checkout_changed'],
     [{ outcome: 'held', reason: 'checkout' }, 'checkout_held'],
@@ -401,3 +422,33 @@ it('retains commit fields when the surrounding database transaction fails after 
   });
   expect(h.record).not.toHaveBeenCalled();
 });
+
+it.each(['refresh', 'mirror'] as const)(
+  'prioritizes the live fact hold after a held %s flush',
+  async (site) => {
+    const hold = async () => {
+      fake.insert(schema.tasks, {
+        id: USER,
+        repositoryId: REPO,
+        type: 'onboarding',
+        status: 'running',
+        deadAt: null,
+      });
+    };
+    if (site === 'refresh')
+      calls.refresh.mockImplementation(async () => {
+        await hold();
+        return { outcome: 'held', reason: 'recovery' };
+      });
+    else
+      h.flush.mockImplementation(async () => {
+        await hold();
+        throw new mirror.PlanMirrorHeldError('copy only');
+      });
+    expect(await saveHaiveData({ ...payload, push: false })).toMatchObject({
+      outcome: 'refused',
+      refusal: { code: 'checkout_held', taskIds: [USER] },
+    });
+    expect(calls.commit).not.toHaveBeenCalled();
+  },
+);

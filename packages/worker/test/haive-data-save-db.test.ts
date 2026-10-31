@@ -398,7 +398,8 @@ describe.skipIf(!url)('Haive data Save on real Postgres', () => {
       const results = await Promise.all([saved, bumped]);
       expect(waitError).toBeNull();
       for (const result of results) expect(result.error).toBeNull();
-      expect(results[0]!.value).toMatchObject({ committed: true });
+      expect(results[0]!.value).toMatchObject({ outcome: 'saved', committed: true, refusal: null });
+      expect(results[0]!.value).not.toHaveProperty('failure');
     },
   );
 
@@ -507,7 +508,8 @@ describe.skipIf(!url)('Haive data Save on real Postgres', () => {
       expect(hasPgCode(result.error, '40P01')).toBe(false);
       expect(result.error).toBeNull();
     }
-    expect(results[0]!.value).toMatchObject({ committed: true });
+    expect(results[0]!.value).toMatchObject({ outcome: 'saved', committed: true, refusal: null });
+    expect(results[0]!.value).not.toHaveProperty('failure');
     expect(results[1]!.value).toMatchObject({ kind: 'resolved' });
   }, 30_000);
 });

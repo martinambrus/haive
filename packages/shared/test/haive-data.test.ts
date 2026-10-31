@@ -85,3 +85,11 @@ it('validates and trims data Save requests', () => {
     expect(haiveDataSaveRequestSchema.safeParse({ push: true, commitMessage }).success).toBe(false);
   expect(haiveDataSaveRequestSchema.safeParse({ push: 'true' }).success).toBe(false);
 });
+
+it.each([
+  ['checkout_unreadable', { checkout: 'not_git', push: true, branch: null, origin: false }],
+  ['branch_unreadable', { push: true, branch: null }],
+  ['origin_unreadable', { push: true, origin: false }],
+] as const)('suppresses every dependent negative answer after %s', (code, change) => {
+  expect(holdsFor({ ...clear, ...change, readHolds: [{ code }] })).toEqual([{ code }]);
+});

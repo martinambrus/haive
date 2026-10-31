@@ -148,7 +148,7 @@ describe('commit read and repair controls', () => {
     dirs.push(dir);
     await gitRun(dir, ['init', '-q', '-b', 'main']);
     await record(dir);
-    expect(await save(dir)).toMatchObject({ committed: true, indexSynced: true });
+    await expect(save(dir)).resolves.toMatchObject({ committed: true, indexSynced: true });
     expect((await gitRun(dir, ['rev-list', '--count', 'HEAD'])).stdout.trim()).toBe('1');
   });
   it.each(['head', 'tree', 'blob', 'plan'] as const)(
@@ -241,4 +241,18 @@ it('a no-op repairs only the named entries differing from HEAD', async () => {
   expect(writes[0]!.join(' ')).toContain('settings/rtk-version.json');
   expect(writes[0]!.join(' ')).not.toContain('format.json');
   expect((await gitRun(dir, ['diff', '--cached', '--name-only'])).stdout).toBe('');
+});
+
+it('refuses a previous record missing its format when a recognized file is present', async () => {
+  const dir = await fixture();
+  await mkdir(join(dir, '.haive-data/state/settings'), { recursive: true });
+  await writeFile(join(dir, '.haive-data/state/settings/agent-rules.md'), 'owned-looking text');
+  await writeFile(join(dir, '.haive-data/state/stray.txt'), 'stray');
+  await gitRun(dir, ['add', '.haive-data/state']);
+  await gitRun(dir, ['commit', '-qm', 'broken record'], identity);
+  await rm(join(dir, '.haive-data/state/settings/agent-rules.md'));
+  await record(dir);
+  const before = (await gitRun(dir, ['rev-parse', 'HEAD'])).stdout;
+  await expect(save(dir)).rejects.toHaveProperty('refusal.code', 'record_refused');
+  expect((await gitRun(dir, ['rev-parse', 'HEAD'])).stdout).toBe(before);
 });
