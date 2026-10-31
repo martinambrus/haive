@@ -283,8 +283,13 @@ exec ${quote(real)} "$@"
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
 });
 
-it('logs both errors when real git cannot restore a failed remote update', async () => {
-  const { root, link, fake } = await setup();
+it('logs both causes in one error when real git cannot restore a failed remote update', async () => {
+  const { root, link, fake, app } = await setup();
+  let routedError: Error | undefined;
+  app.onError((err, c) => {
+    routedError = err;
+    return errorHandler(err, c);
+  });
   const original = Object.assign(new Error('bound synthetic-secret'), {
     query: 'update repositories set remote_url = $1',
     params: ['synthetic-secret'],
@@ -333,14 +338,23 @@ exec ${quote(real)} "$@"
   try {
     const response = await link();
     expect(response.status).toBe(500);
-    expect(await response.text()).toContain('previous remote could not be restored');
+    expect(await response.json()).toEqual({
+      error: 'Remote update failed and the previous remote could not be restored',
+      code: null,
+    });
     expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
     expect(fake.rows(schema.auditEvents)).toEqual([]);
     expect(await git(root, ['config', '--local', '--list'])).not.toContain('remote.origin.url=');
     const diagnostics = errors.mock.calls.map(([fields]) => fields as { err?: unknown });
-    expect(diagnostics).toHaveLength(2);
-    expect(diagnostics[0]!.err).toBe(original);
-    expect(diagnostics[1]!.err).toBeInstanceOf(Error);
+    expect(diagnostics).toHaveLength(1);
+    const failure = diagnostics[0]!.err as AggregateError;
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure.cause).toBe(original);
+    expect(failure.errors).toHaveLength(1);
+    expect(failure.errors[0]).toBeInstanceOf(Error);
+    expect(failure.errors[0].message).toBe('remote restore failed');
+    expect(routedError?.cause).toBe(failure);
+    expect(errors.mock.calls[0]![0]).toMatchObject({ repositoryId: REPO });
     expect(JSON.stringify(diagnostics.map(({ err }) => serializeError(err)))).not.toContain(
       'synthetic-secret',
     );

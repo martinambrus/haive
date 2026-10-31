@@ -2806,15 +2806,13 @@ repoRoutes.post('/:id/remote', async (c) => {
         restore = undefined;
         await undo();
       } catch (restoreError) {
-        logger.error({ err, repositoryId: id }, 'remote update failed before origin restoration');
+        const message = 'Remote update failed and the previous remote could not be restored';
+        const failure = new AggregateError([restoreError], message, { cause: err });
         logger.error(
-          { err: restoreError, repositoryId: id },
+          { err: failure, repositoryId: id },
           'failed to restore origin after remote update failure',
         );
-        throw new HttpError(
-          500,
-          'Remote update failed and the previous remote could not be restored',
-        );
+        throw Object.assign(new HttpError(500, message), { cause: failure });
       }
     }
     throw err;
