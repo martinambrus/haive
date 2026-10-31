@@ -133,3 +133,32 @@ export interface HaiveDataSaveResult {
   indexSynced: boolean;
   conflict?: PlanMergeConflict;
 }
+
+export type HaiveDataFileChange = 'unchanged' | 'modified' | 'added' | 'deleted' | 'untracked';
+
+/** One path under `.haive-data/plan.json`, `.haive-data/plan.md` or `.haive-data/state/`, tracked or
+ *  not. `change` is how the working copy differs from HEAD; `staged` is whether the index does. */
+export interface HaiveDataFile {
+  path: string;
+  change: HaiveDataFileChange;
+  staged: boolean;
+}
+
+/** What the Haive data page shows. It queues nothing: `holds.save` and `holds.push` are `holdsFor`
+ *  over the facts a Save without and with a push would meet, so the page never disagrees with the
+ *  worker's check. `checkout` is `unreadable` when the checkout could not be read, which the holds
+ *  then say alone; `files` is null unless the checkout is ready and git listed them. */
+export interface HaiveDataStatus {
+  checkout: HaiveDataFacts['checkout'] | 'unreadable';
+  branch: string | null;
+  files: HaiveDataFile[] | null;
+  record: {
+    dirty: boolean;
+    writePending: boolean;
+    lastError: string | null;
+    syncError: string | null;
+    syncedHead: string | null;
+  };
+  snapshot: { dirty: boolean; lastError: string | null };
+  holds: { save: HaiveDataHold[]; push: HaiveDataHold[] };
+}
