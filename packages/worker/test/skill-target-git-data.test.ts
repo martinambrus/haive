@@ -660,6 +660,26 @@ describe('09_5 stored loop IDs', () => {
   });
 });
 
+describe('empty stored destinations with refused IDs', () => {
+  it('repair does not claim failing skills when no destinations were stored', async () => {
+    const out = await skillRepairStep.apply(
+      ctxFor(recordingLogger()),
+      applyArgs(repairDetect([], ['conventions', '.git'])) as never,
+    );
+    expect(out.stillFailing).toEqual([]);
+    expect(out.attempted).toBe(0);
+  });
+
+  it('sync does not claim skipped targets when no destinations were stored', async () => {
+    const out = await skillSyncStep.apply(
+      ctxFor(recordingLogger()),
+      applyArgs(syncDetect([], ['conventions', '.git'])) as never,
+    );
+    expect(out.skipped).toEqual([]);
+    expect(out.committed).toBe(false);
+  });
+});
+
 describe('stored skill positive path validation', () => {
   beforeEach(() => vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0'));
   afterEach(() => vi.unstubAllEnvs());

@@ -456,7 +456,7 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
       return {
         summary: 'The repository maintains no skill destinations.',
         repaired: [],
-        stillFailing: refusalNote ? storedIds : [],
+        stillFailing: storedDirs.length > 0 ? storedIds : [],
         attempted: 0,
         ...(refusalNote ? { degradedNote: refusalNote } : {}),
       };

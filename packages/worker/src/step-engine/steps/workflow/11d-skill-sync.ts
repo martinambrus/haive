@@ -438,7 +438,7 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
         generated: [],
         removed: [],
         indexRemovedDirs: [],
-        skipped: refusalNote ? detected.targets.map((t) => t.skillId) : [],
+        skipped: storedDirs.length > 0 ? detected.targets.map((t) => t.skillId) : [],
         ...(refusalNote ? { degradedNote: refusalNote } : {}),
         committed: false,
         commitSha: null,
