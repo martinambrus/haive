@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Database } from '@haive/database';
+import { schema, type Database } from '@haive/database';
+import { createFakeDb } from '@haive/database/testing';
+import { resyncHaiveProjections } from './set-aside.js';
 import { refreshProjectState, refreshProjectStateOutcome } from './refresh.js';
 
 const mocks = vi.hoisted(() => ({
@@ -17,6 +19,7 @@ vi.mock('./write.js', async (original) => ({
   recoverProjectStateWrite: mocks.recover,
   writeProjectStateColumn: mocks.write,
 }));
+vi.mock('../plan/sync-checkout.js', () => ({ syncPlanFromCheckout: async () => undefined }));
 const context = {
   projectInfo: {},
   framework: null,
@@ -129,7 +132,33 @@ it('surfaces the stable writer blockage', async () => {
     code: 'unowned_malformed_rtk',
     file: '.haive-data/state/settings/rtk-enabled.json',
   });
-  expect(await refreshProjectState(db(), 'repo')).toBe(false);
+  expect(await refreshProjectState(db(), 'repo')).toBe(true);
+});
+it('settles a resync when an unowned malformed RTK unit blocks only its writer', async () => {
+  const fake = createFakeDb({
+    repositories: schema.repositories,
+    projectStateOutbox: schema.projectStateOutbox,
+    planMirrorState: schema.planMirrorState,
+  });
+  fake.insert(schema.repositories, {
+    id: '00000000-0000-4000-8000-000000000001',
+    storagePath: '/fixture',
+    renderContext: context,
+  });
+  fake.insert(schema.projectStateOutbox, {
+    repositoryId: '00000000-0000-4000-8000-000000000001',
+    revision: 2,
+    writtenRevision: 1,
+  });
+  mocks.write.mockResolvedValue({
+    written: [],
+    removed: [],
+    blocked: { code: 'unowned_malformed_rtk', file: '.haive-data/state/settings/rtk-enabled.json' },
+  });
+  expect(
+    await resyncHaiveProjections(fake.db, '00000000-0000-4000-8000-000000000001', '/fixture'),
+  ).toBe(true);
+  expect(mocks.write).toHaveBeenCalledOnce();
 });
 it.each(['write_pending', 'git_operation'] as const)(
   'carries the sync hold code %s',

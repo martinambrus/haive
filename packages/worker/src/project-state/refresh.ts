@@ -74,15 +74,14 @@ export type ProjectStateRefreshOutcome =
   | { outcome: 'blocked'; code: 'unowned_malformed_rtk'; file: string }
   | { outcome: 'refused'; reason: 'record' | 'context' };
 
-/** Compatibility for the sweep and existing callers which only count completed writes. */
+/** Compatibility for callers which accept a stable writer blockage as a completed refresh. */
 export async function refreshProjectState(
   db: Database,
   repositoryId: string,
   expectedCheckout?: NamedCheckout,
 ): Promise<boolean> {
-  return (
-    (await refreshProjectStateOutcome(db, repositoryId, expectedCheckout)).outcome === 'written'
-  );
+  const { outcome } = await refreshProjectStateOutcome(db, repositoryId, expectedCheckout);
+  return outcome === 'written' || outcome === 'blocked';
 }
 
 export async function refreshProjectStateOutcome(
