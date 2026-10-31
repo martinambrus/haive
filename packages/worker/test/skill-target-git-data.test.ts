@@ -9,13 +9,17 @@ import type { AgentMiningResult, StepContext } from '../src/step-engine/step-def
 import { skillGenerationStep } from '../src/step-engine/steps/onboarding/09_5-skill-generation.js';
 import { skillRepairStep } from '../src/step-engine/steps/onboarding/09_5b-skill-repair.js';
 import { listSkillDirs } from '../src/step-engine/steps/onboarding/09_6-skill-verification.js';
-import { withoutGitDataDirs } from '../src/step-engine/steps/onboarding/_helpers.js';
+import {
+  filterCatalogSkillDirs,
+  withoutUnsafeSkillIds,
+} from '../src/step-engine/steps/onboarding/_helpers.js';
 import { skillSyncStep } from '../src/step-engine/steps/workflow/11d-skill-sync.js';
 
 /**
  * `detected.skillTargetDirs` is read back from the STORED detect payload, so a legacy or
  * hand-edited one may name any string. The three steps that write (and, for two of them, remove)
- * under it must leave out a dir that names git data, and say so.
+ * under it must accept only catalog skill destinations and single-segment, non-git-data IDs.
+ * Dispatch, loop prompts, cumulative output and writes must omit refused values and report them.
  */
 
 const execFileP = promisify(execFile);
@@ -299,17 +303,17 @@ describe('11d skillSyncStep.apply with a stored git-data target dir', () => {
   });
 });
 
-describe('withoutGitDataDirs', () => {
+describe('filterCatalogSkillDirs', () => {
   it('keeps every skills dir a provider can declare, and logs nothing', () => {
     const log = recordingLogger();
     const dirs = Object.values(CLI_PROVIDER_CATALOG).map((p) => p.projectSkillsDir);
 
     expect(dirs.length).toBeGreaterThan(0);
-    expect(withoutGitDataDirs(dirs, asLogger(log))).toEqual(dirs);
+    expect(filterCatalogSkillDirs(dirs, asLogger(log))).toEqual(dirs);
     expect(log.warn).not.toHaveBeenCalled();
   });
 
-  it('drops exactly the git-data dirs from a mixed list, in order, naming each', () => {
+  it('keeps only catalog skills dirs from a mixed list, in order, naming each refusal', () => {
     const log = recordingLogger();
     const mixed = [
       '.claude/skills',
@@ -323,14 +327,19 @@ describe('withoutGitDataDirs', () => {
       '.github/x',
     ];
 
-    expect(withoutGitDataDirs(mixed, asLogger(log))).toEqual([
+    expect(filterCatalogSkillDirs(mixed, asLogger(log))).toEqual([
       '.claude/skills',
       '.gemini/skills',
       '.agents/skills',
       '.grok/skills',
+    ]);
+    expect(warnedDirs(log)).toEqual([
+      '.git/hooks',
+      '.GIT./hooks',
+      'sub/.git',
+      'git~1/hooks',
       '.github/x',
     ]);
-    expect(warnedDirs(log)).toEqual(['.git/hooks', '.GIT./hooks', 'sub/.git', 'git~1/hooks']);
   });
 });
 
@@ -448,8 +457,8 @@ describe('11d skillSyncStep.apply with a skill id that names git data', () => {
     expect(await readdir(path.join(repo, ORDINARY, '.git'))).toEqual(['keep.txt']);
     expect(await exists(`${ORDINARY}/conventions/SKILL.md`)).toBe(true);
     expect(await exists(`${ORDINARY}/old`)).toBe(false);
-    // Once as a target, once as a removal.
-    expect(warnedSkillIds(log)).toEqual(['.git', '.git']);
+    // One refusal even when the ID appears as both a target and a removal.
+    expect(warnedSkillIds(log)).toEqual(['.git']);
 
     if ('error' in settled) throw settled.error;
     const out = settled.value;
@@ -482,6 +491,7 @@ describe('09_5b and 11d apply when every stored skills dir names git data', () =
     } as unknown as Parameters<typeof skillRepairStep.apply>[1]);
 
     expect(out.repaired).toEqual([]);
+    expect(out.stillFailing).toEqual(['conventions']);
     expect(out.attempted).toBe(0);
     expect(await readdir(repo)).toEqual(['.git']);
     expect(await snapshot('.git')).toEqual(before);
@@ -522,10 +532,308 @@ describe('09_5b and 11d apply when every stored skills dir names git data', () =
     } as unknown as Parameters<typeof skillSyncStep.apply>[1]);
 
     expect(out.generated).toEqual([]);
+    expect(out.skipped).toEqual(['conventions']);
     expect(out.removed).toEqual([]);
     expect(out.committed).toBe(false);
     expect(await readdir(repo)).toEqual(['.git']);
     expect(await snapshot('.git')).toEqual(before);
     expect(warnedDirs(log)).toEqual(['.git/hooks']);
+  });
+});
+
+const genDetect = (dirs: string[]) => ({
+  framework: null,
+  language: null,
+  kbFiles: [],
+  requiredDomains: [],
+  skillTargetDirs: dirs,
+  bundleSkills: [],
+});
+const repairDetect = (dirs: string[], ids = ['conventions']) => ({
+  ...genDetect(dirs),
+  failingSkills: ids.map(failing),
+});
+const syncDetect = (dirs: string[], ids = ['conventions'], removals: string[] = []) => ({
+  ...genDetect(dirs),
+  worktreePath: repo,
+  removals,
+  targets: ids.map((skillId) => ({
+    kind: 'new',
+    skillId,
+    capability: 'Conventions',
+    rationale: '',
+    skillMdExcerpt: null,
+  })),
+});
+const applyArgs = (detected: unknown) => ({
+  detected,
+  formValues: {},
+  iteration: 0,
+  previousIterations: [],
+  isFinalLlmAttempt: true,
+  llmOutput: { skills: [skill('conventions')] },
+  agentMiningResults: [mined('conventions')],
+});
+
+describe('stored skill dispatch targets', () => {
+  beforeEach(() => vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0'));
+  afterEach(() => vi.unstubAllEnvs());
+  it('09_5 skips both sequential and parallel dispatch for git-data-only dirs', async () => {
+    const detected = { ...genDetect(REFUSED), requiredDomains: ['Billing', 'Search', 'Orders'] };
+    expect
+      .soft(skillGenerationStep.llm!.skipIf!({ detected, formValues: {}, iteration: 1 } as never))
+      .toBe(true);
+    expect(
+      await skillGenerationStep.agentMining!.selectAgents({ detected, formValues: {} } as never),
+    ).toEqual([]);
+  });
+  it.each([
+    { step: skillRepairStep, detected: () => repairDetect(REFUSED) },
+    { step: skillSyncStep, detected: () => syncDetect(REFUSED) },
+  ])('does not dispatch for git-data-only dirs: $step.metadata.id', async ({ step, detected }) => {
+    expect(
+      await step.agentMining!.selectAgents({ detected: detected(), formValues: {} } as never),
+    ).toEqual([]);
+  });
+  it.each([
+    { step: skillRepairStep, detected: () => repairDetect(STORED, ['conventions', ...GIT_IDS]) },
+    { step: skillSyncStep, detected: () => syncDetect(STORED, ['conventions', ...GIT_IDS]) },
+  ])(
+    'filters ids and chooses the valid primary in $step.metadata.id prompts',
+    async ({ step, detected }) => {
+      const agents = await step.agentMining!.selectAgents({
+        detected: detected(),
+        formValues: {},
+      } as never);
+      expect(agents.map((a) => a.agentId)).toEqual(['conventions']);
+      expect(agents[0]?.prompt).toContain(ORDINARY);
+      for (const dir of REFUSED) expect(agents[0]?.prompt).not.toContain(dir);
+    },
+  );
+  it('09_5 omits refused dirs and bundle ids from the sequential prompt', () => {
+    const detected = { ...genDetect(STORED), bundleSkills: [skill('.git')] };
+    const prompt = skillGenerationStep.llm!.buildPrompt({ detected, formValues: {} } as never);
+    expect(prompt).toContain(ORDINARY);
+    for (const dir of REFUSED) expect(prompt).not.toContain(dir);
+    expect(prompt).not.toContain('.git');
+  });
+});
+describe('09_5 stored loop IDs', () => {
+  const refusedIds = ['.git', 'nested/unsafe-loop-id'];
+
+  it('omits refused bundle IDs from the first loop prompt', () => {
+    const prompt = skillGenerationStep.loop!.buildIterationPrompt!({
+      detected: { ...genDetect([ORDINARY]), bundleSkills: refusedIds.map(skill) },
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+    for (const id of refusedIds) expect(prompt).not.toContain(id);
+  });
+
+  it('filters prior written IDs from the next loop prompt, output and README', async () => {
+    const log = recordingLogger();
+    const detected = genDetect([ORDINARY]);
+    const first = await skillGenerationStep.apply(ctxFor(log), applyArgs(detected) as never);
+    const prior = {
+      ...first,
+      written: [
+        ...first.written,
+        ...refusedIds.map((id) => ({ ...first.written[0]!, id, title: id, description: id })),
+      ],
+    };
+    const previousIterations = [{ applyOutput: prior }];
+    const prompt = skillGenerationStep.loop!.buildIterationPrompt!({
+      detected,
+      formValues: {},
+      iteration: 1,
+      previousIterations,
+    } as never);
+    expect(prompt).toContain('conventions');
+    for (const id of refusedIds) expect(prompt).not.toContain(id);
+    const out = await skillGenerationStep.apply(ctxFor(log), {
+      ...applyArgs(detected),
+      iteration: 1,
+      llmOutput: null,
+      previousIterations,
+    } as never);
+    expect(out.written.map((w) => w.id)).toEqual(['conventions']);
+    const readme = await readFile(path.join(repo, ORDINARY, 'README.md'), 'utf8');
+    for (const id of refusedIds) expect(readme).not.toContain(id);
+  });
+});
+
+describe('empty stored destinations with refused IDs', () => {
+  it('repair does not claim failing skills when no destinations were stored', async () => {
+    const out = await skillRepairStep.apply(
+      ctxFor(recordingLogger()),
+      applyArgs(repairDetect([], ['conventions', '.git'])) as never,
+    );
+    expect(out.stillFailing).toEqual([]);
+    expect(out.attempted).toBe(0);
+  });
+
+  it('sync does not claim skipped targets when no destinations were stored', async () => {
+    const out = await skillSyncStep.apply(
+      ctxFor(recordingLogger()),
+      applyArgs(syncDetect([], ['conventions', '.git'])) as never,
+    );
+    expect(out.skipped).toEqual([]);
+    expect(out.committed).toBe(false);
+  });
+});
+
+describe('all-refused destination summaries', () => {
+  it.each([
+    { step: skillGenerationStep, detected: () => genDetect(REFUSED) },
+    { step: skillRepairStep, detected: () => repairDetect(REFUSED) },
+  ])('explains refused stored destinations: $step.metadata.id', async ({ step, detected }) => {
+    const out = await step.apply(ctxFor(recordingLogger()), applyArgs(detected()) as never);
+    expect(out.summary).toBe('Every stored skill destination was refused; no skills were applied.');
+  });
+
+  it.each([
+    { step: skillGenerationStep, detected: () => genDetect([]) },
+    { step: skillRepairStep, detected: () => repairDetect([]) },
+  ])('retains the explicit empty-list summary: $step.metadata.id', async ({ step, detected }) => {
+    const out = await step.apply(ctxFor(recordingLogger()), applyArgs(detected()) as never);
+    expect(out.summary).toBe('The repository maintains no skill destinations.');
+  });
+});
+describe('stored skill positive path validation', () => {
+  beforeEach(() => vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0'));
+  afterEach(() => vi.unstubAllEnvs());
+  it('accepts only a single non-git-data ID segment', () => {
+    expect(
+      withoutUnsafeSkillIds([
+        'alpha',
+        '.github',
+        '',
+        '.',
+        '..',
+        'a/b',
+        String.raw`a\b`,
+        '\0',
+        ...GIT_IDS,
+      ]),
+    ).toEqual(['alpha', '.github']);
+  });
+  it.each(['', '.', 'other/skills'])(
+    'does not dispatch to a noncatalog directory %j',
+    async (dir) => {
+      const generation = { ...genDetect([dir]), requiredDomains: ['Billing', 'Search', 'Orders'] };
+      expect(
+        skillGenerationStep.llm!.skipIf!({
+          detected: generation,
+          formValues: {},
+          iteration: 1,
+        } as never),
+      ).toBe(true);
+      for (const [step, detected] of [
+        [skillGenerationStep, generation],
+        [skillRepairStep, repairDetect([dir])],
+        [skillSyncStep, syncDetect([dir])],
+      ] as const) {
+        expect(await step.agentMining!.selectAgents({ detected, formValues: {} } as never)).toEqual(
+          [],
+        );
+      }
+    },
+  );
+  it.each(['a/b', String.raw`a\b`, '', '.', '..'])('does not dispatch a path ID %j', async (id) => {
+    for (const [step, detected] of [
+      [skillRepairStep, repairDetect([ORDINARY], [id])],
+      [skillSyncStep, syncDetect([ORDINARY], [id])],
+    ] as const) {
+      expect(await step.agentMining!.selectAgents({ detected, formValues: {} } as never)).toEqual(
+        [],
+      );
+    }
+  });
+  it.each(['', '.', 'other/skills', '.claude/skills/../skills'])(
+    'refuses noncatalog directory %j',
+    async (dir) => {
+      for (const [step, detected] of [
+        [skillGenerationStep, genDetect([dir])],
+        [skillRepairStep, repairDetect([dir])],
+        [skillSyncStep, syncDetect([dir], ['conventions'], ['old'])],
+      ] as const) {
+        const log = recordingLogger();
+        await step.apply(ctxFor(log), applyArgs(detected) as never);
+        expect(await readdir(repo)).toEqual([]);
+        expect(log.warn).toHaveBeenCalled();
+      }
+    },
+  );
+  it('refuses multi-segment bundle IDs before generation writes', async () => {
+    const log = recordingLogger();
+    const out = await skillGenerationStep.apply(
+      ctxFor(log),
+      applyArgs({ ...genDetect([ORDINARY]), bundleSkills: [skill('a/b'), skill('.git')] }) as never,
+    );
+    expect(out.written.map((w) => w.id)).toEqual(['conventions']);
+    expect(await exists(`${ORDINARY}/a`)).toBe(false);
+    expect(await exists(`${ORDINARY}/.git`)).toBe(false);
+    expect(warnedSkillIds(log)).toEqual(['a/b', '.git']);
+  });
+  it('repair preserves a multi-segment ID tree', async () => {
+    await put(`${ORDINARY}/a/b/keep.txt`, KEEP);
+    const log = recordingLogger();
+    const out = await skillRepairStep.apply(
+      ctxFor(log),
+      applyArgs(repairDetect([ORDINARY], ['a/b'])) as never,
+    );
+    expect(await readFile(path.join(repo, ORDINARY, 'a/b/keep.txt'), 'utf8')).toBe(KEEP);
+    expect(out.repaired).toEqual([]);
+    expect(warnedSkillIds(log)).toEqual(['a/b']);
+  });
+  it('sync preserves a multi-segment ID for writes and removals', async () => {
+    await put(`${ORDINARY}/a/b/keep.txt`, KEEP);
+    const log = recordingLogger();
+    const out = await skillSyncStep.apply(
+      ctxFor(log),
+      applyArgs(syncDetect([ORDINARY], ['a/b'], ['a/b'])) as never,
+    );
+    expect(await readFile(path.join(repo, ORDINARY, 'a/b/keep.txt'), 'utf8')).toBe(KEEP);
+    expect(out.generated).toEqual([]);
+    expect(out.removed).toEqual([]);
+    expect(out.committed).toBe(false);
+  });
+});
+describe('stored target refusals are visible once per run', () => {
+  it.each([
+    { step: skillGenerationStep, detected: () => genDetect(REFUSED) },
+    { step: skillRepairStep, detected: () => repairDetect(REFUSED) },
+    { step: skillSyncStep, detected: () => syncDetect(REFUSED, ['conventions'], ['old']) },
+  ])(
+    'sets degradedNote even when every dir is dropped: $step.metadata.id',
+    async ({ step, detected }) => {
+      const log = recordingLogger();
+      const out = await step.apply(ctxFor(log), applyArgs(detected()) as never);
+      expect(out.degradedNote).toBeTruthy();
+    },
+  );
+  it('09_5 logs dropped dirs once across loop passes and retains the note', async () => {
+    const log = recordingLogger();
+    const detected = genDetect(STORED);
+    const first = await skillGenerationStep.apply(ctxFor(log), applyArgs(detected) as never);
+    const out = await skillGenerationStep.apply(ctxFor(log), {
+      ...applyArgs(detected),
+      iteration: 1,
+      llmOutput: null,
+      previousIterations: [{ applyOutput: first }],
+    } as never);
+    expect(warnedDirs(log)).toEqual(REFUSED);
+    expect(first.degradedNote).toBeTruthy();
+    expect(out.degradedNote).toBe(first.degradedNote);
+  });
+  it('11d reports a refused removal even with no generation targets', async () => {
+    const log = recordingLogger();
+    const out = await skillSyncStep.apply(
+      ctxFor(log),
+      applyArgs(syncDetect([ORDINARY], [], ['.git'])) as never,
+    );
+    expect(out.degradedNote).toBeTruthy();
+    expect(out.removed).toEqual([]);
   });
 });

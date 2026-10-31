@@ -342,3 +342,16 @@ it.each(['post-record', 'upgrade-record', 'rollback-record'])(
     expect(JSON.stringify(lines).includes(secret)).toBe(false);
   },
 );
+
+it('post-plan scrubs server paths while preserving the mirror diagnosis', async () => {
+  h.site = 'post-plan';
+  h.error = new Error("EACCES: open '/srv/private/repo/.haive-data/plan.json'");
+  const s = await setup(h.site);
+  const out = await s.apply();
+  expect(h.hits).toBe(1);
+  expect(out.warnings).toContain("haive-data mirror: plan mirror failed (EACCES: open '[path]')");
+  const warning = lines
+    .map((line) => JSON.parse(line))
+    .find((line) => line.level === 40 && line.err?.message === (h.error as Error).message);
+  expect(warning).toMatchObject({ level: 40, err: { message: (h.error as Error).message } });
+});

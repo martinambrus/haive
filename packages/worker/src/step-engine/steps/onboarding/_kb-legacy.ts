@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { namesGitData } from '@haive/shared/project-state';
 import { LEGACY_KNOWLEDGE_MIGRATIONS } from '@haive/shared/knowledge-paths';
 import {
   lstatNoFollow,
@@ -65,6 +66,12 @@ export async function migrateLegacyKnowledge(
     let left = 0;
     for (const relPosix of await listFiles(repoPath, from)) {
       const srcRel = `${from}/${relPosix}`;
+      if (namesGitData(relPosix)) {
+        result.skipped.push(srcRel);
+        logger?.warn({ src: srcRel }, 'kb: did not migrate a path that names git data');
+        left++;
+        continue;
+      }
       const destRel = `${to}/${relPosix}`;
       let targetRel = destRel;
       let bucket = result.moved;
