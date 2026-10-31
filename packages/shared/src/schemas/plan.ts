@@ -514,7 +514,13 @@ export type PlanAdvisoryRequest = z.infer<typeof planAdvisoryRequestSchema>;
 
 export const planSnapshotSaveRequestSchema = z.object({
   push: z.boolean().optional().default(false),
-  commitMessage: z.string().trim().min(1).max(500).optional(),
+  commitMessage: z
+    .string()
+    .trim()
+    .min(1)
+    .max(500)
+    .refine((value) => !value.includes('\0'))
+    .optional(),
 });
 export type PlanSnapshotSaveRequest = z.infer<typeof planSnapshotSaveRequestSchema>;
 

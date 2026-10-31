@@ -83,6 +83,7 @@ export type ProjectStateSyncOutcome =
   'absent' | 'refused' | 'deferred' | 'superseded' | 'held' | 'unchanged' | 'applied' | 'conflict';
 
 export interface ProjectStateSyncResult {
+  code?: 'write_pending' | 'git_operation';
   outcome: ProjectStateSyncOutcome;
   /** Why the record was refused, or what conflicted, worded as `last_error` holds it. */
   reason?: string;
@@ -623,7 +624,7 @@ export async function syncProjectStateFromCheckout(
   }: {
     repositoryId: string;
     repoPath: string;
-    /** An open merge or rebase holds the read. A checkout that changed since its first read always holds it. */
+    /** An open merge, rebase, cherry-pick or revert holds the read. A checkout that changed since its first read always holds it. */
     refuseDuringGitOperation?: boolean;
     expectedCheckout?: NamedCheckout;
   },
@@ -635,7 +636,11 @@ export async function syncProjectStateFromCheckout(
     .from(schema.projectStateOutbox)
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
   if (writing?.intent)
-    return { outcome: 'held', reason: 'an interrupted project state write awaits recovery' };
+    return {
+      outcome: 'held',
+      code: 'write_pending',
+      reason: 'an interrupted project state write awaits recovery',
+    };
   // The base goes first: a writer that finishes after it left a newer base for the lock to find.
   const seen = await readSyncRow(db, repositoryId);
   const [seenRepo] = await db
@@ -694,14 +699,18 @@ export async function syncProjectStateLocked(
     .from(schema.projectStateOutbox)
     .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
   if (writing?.intent)
-    return { outcome: 'held', reason: 'an interrupted project state write awaits recovery' };
+    return {
+      outcome: 'held',
+      code: 'write_pending',
+      reason: 'an interrupted project state write awaits recovery',
+    };
   if (
     expectedCheckout &&
     !(await admitWatchedCheckout(tx, repositoryId, repoPath, expectedCheckout))
   )
     return { outcome: 'superseded' };
   if (refuseDuringGitOperation) {
-    if (await gitOperationInProgress(repoPath)) return { outcome: 'held' };
+    if (await gitOperationInProgress(repoPath)) return { outcome: 'held', code: 'git_operation' };
   }
   // Every producer must reject an intermediate checkout, including clone scans and moved answers
   // that do not request the git-operation guard. The database base alone cannot see a file move.

@@ -205,14 +205,16 @@ describe('a plan flush when git cannot be read', () => {
     await openMerge(dir);
     shim = await failGit(['rev-parse', '--git-path']);
 
-    await expect(writePlanMirror(db, FIRST, dir)).rejects.toThrow(/failed in/);
+    // An unreadable git dir is its own error, not the hold an open operation gives.
+    await expect(writePlanMirror(db, FIRST, dir)).rejects.toMatchObject({
+      name: 'GitOperationUnreadableError',
+    });
 
     expect(await readFile(planJson(dir))).toEqual(before);
     expect((await stat(planJson(dir))).mtimeMs).toBe(mtime);
     const row = state(FIRST);
     expect(row.writtenRevision).toBeLessThan(row.revision as number);
     expect(row.lastError).toMatch(/failed in/);
-    expect(row.lastError).not.toMatch(/merge or rebase is open/);
   });
 
   it('still writes plan.json and plan.md in a checkout with no .git', async () => {

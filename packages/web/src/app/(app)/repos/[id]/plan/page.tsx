@@ -140,6 +140,9 @@ export default function PlanPage() {
   // Which panel tab is open, held HERE because the panel unmounts every time
   // the selection clears — inside it, the choice died with each Escape.
   const [panelTab, setPanelTab] = useState<PlanPanelTab>('details');
+  // The chat unmounts on card loads, tab changes and closing the panel. Its drafts
+  // live for this page visit, keyed by repository and node rather than selection.
+  const chatDrafts = useRef(new Map<string, string>());
   // Mirrors for the once-registered ESC listener.
   const selectedIdRef = useRef<string | null>(null);
   const pickedRef = useRef<ReadonlySet<string>>(new Set());
@@ -1501,6 +1504,7 @@ export default function PlanPage() {
               <PlanDetailPanel
                 repositoryId={repositoryId}
                 nodeId={selectedId}
+                chatDrafts={chatDrafts.current}
                 tree={tree}
                 unreadCount={unread[selectedId] ?? 0}
                 onRead={() => {
