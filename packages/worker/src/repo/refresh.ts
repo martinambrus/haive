@@ -64,14 +64,27 @@ const holdingRefusal = (holding: number): string =>
 const whyNoAnswer = (res: GitRunResult): string =>
   res.noExit ?? (res.code === GIT_TIMED_OUT ? 'timed out' : `git exited ${res.code}`);
 
+/** What a gitfile starts with, byte for byte. */
+const GITFILE_PREFIX = Buffer.from('gitdir: ');
+
+/** Said when git answered with an exit status of its own and no structure proves the checkout dead:
+ *  another Retry reads the same bytes and gets the same answer. */
+const REPAIR_ADVICE =
+  'Retry cannot help until the checkout is repaired; removing and re-adding the repository rebuilds it from its source.';
+
 /** A git work tree whose top level is `dest` itself and that has a commit to stand on.
- *  Failed or timed-out runs, failed top-level reads without structural proof of a dead checkout,
- *  unreadable or external metadata, and HEAD reads other than exit 0 or 1 are `unknown`.
- *  Missing .git, a missing HEAD or contained gitdir proven by strict no-follow reads, a different
- *  top level, and HEAD exit 1 are `unusable`. Unknown must never trigger a rebuild: it moves the folder. */
+ *  `unusable`: a different top level, HEAD exit 1, or, after `--show-cdup` exited non-zero, a `.git`
+ *  that strict no-follow reads prove is not what git requires: absent; a directory without HEAD,
+ *  with a HEAD that is neither a `ref:` line nor an object id, or without objects/ or refs/ (unless
+ *  a commondir names their home); a file that does not start with `gitdir: `; or a file naming a
+ *  gitdir inside `dest` that is absent.
+ *  `unknown`: git gave no answer, or exited non-zero over a `.git` those reads cannot prove dead
+ *  (a corrupt config, unreadable, linked or external metadata), or a HEAD read other than exit 0 or
+ *  1. `repairNeeded` marks the ones where git answered with an exit status of its own.
+ *  Unknown must never trigger a rebuild: it moves the folder. */
 export async function usableCheckout(
   dest: string,
-): Promise<'usable' | 'unusable' | { unknown: string }> {
+): Promise<'usable' | 'unusable' | { unknown: string; repairNeeded?: true }> {
   const cdup = await gitRun(dest, ['rev-parse', '--show-cdup']);
   if (gitGaveNoAnswer(cdup)) {
     try {
@@ -82,20 +95,36 @@ export async function usableCheckout(
     }
   }
   if (cdup.code !== 0) {
-    // Exit codes cannot distinguish corrupt config from a dead .git. Rebuild only when
-    // strict no-follow reads prove missing structure; everything else stays unknown.
+    // Exit codes cannot distinguish corrupt config from a dead .git. Rebuild only when strict
+    // no-follow reads prove that what git requires is missing or cannot be what it requires;
+    // everything else stays unknown.
     try {
       const entry = await lstatNoFollow(dest, '.git', { strict: true });
       if (entry === null) return 'unusable';
       if (entry.kind === 'directory') {
-        if ((await lstatNoFollow(dest, '.git/HEAD', { strict: true })) === null) return 'unusable';
+        // git takes a HEAD that starts with `ref:` or with an object id; the first 40 bytes tell.
+        const head = await readFileNoFollow(dest, '.git/HEAD', { strict: true, maxBytes: 40 });
+        if (head === null) return 'unusable';
+        const start = head.data.toString('latin1');
+        if (!start.startsWith('ref:') && !/^[0-9a-f]{40}/i.test(start)) return 'unusable';
+        // A commondir file moves objects/ and refs/ to the directory it names.
+        if ((await lstatNoFollow(dest, '.git/commondir', { strict: true })) === null) {
+          for (const part of ['objects', 'refs']) {
+            if ((await lstatNoFollow(dest, `.git/${part}`, { strict: true })) === null) {
+              return 'unusable';
+            }
+          }
+        }
       } else if (entry.kind === 'file') {
         const read = await readFileNoFollow(dest, '.git', { strict: true, maxBytes: 4096 });
+        if (read && !read.data.subarray(0, GITFILE_PREFIX.length).equals(GITFILE_PREFIX)) {
+          return 'unusable';
+        }
         const gitfile = read?.data.toString('utf8');
         if (
           read &&
           !read.truncated &&
-          gitfile?.startsWith('gitdir: ') &&
+          gitfile !== undefined &&
           Buffer.from(gitfile).equals(read.data)
         ) {
           // Git removes trailing CR/LF from a gitfile; spaces belong to the directory name.
@@ -109,12 +138,15 @@ export async function usableCheckout(
     } catch {
       // An unreadable entry cannot prove that rebuilding is safe.
     }
-    return { unknown: whyNoAnswer(cdup) };
+    return { unknown: whyNoAnswer(cdup), repairNeeded: true };
   }
   if (cdup.stdout.trim() !== '') return 'unusable';
   const head = await gitRun(dest, ['rev-parse', '--verify', '--quiet', 'HEAD']);
   if (head.code === 0) return 'usable';
-  return head.code === 1 ? 'unusable' : { unknown: whyNoAnswer(head) };
+  if (head.code === 1) return 'unusable';
+  return gitGaveNoAnswer(head)
+    ? { unknown: whyNoAnswer(head) }
+    : { unknown: whyNoAnswer(head), repairNeeded: true };
 }
 
 interface RefreshSource {
@@ -423,7 +455,8 @@ export async function handleRefresh(
         // The queue starts at cloning. Throw so its catch records error and offers Retry;
         // detection would import a mirror from a checkout we could not examine.
         throw new Error(
-          `Not refreshed: the checkout could not be examined (${state.unknown}). Nothing was moved.`,
+          `Not refreshed: the checkout could not be examined (${state.unknown}). Nothing was moved.` +
+            (state.repairNeeded ? ` ${REPAIR_ADVICE}` : ''),
         );
       }
       const usable = state === 'usable';

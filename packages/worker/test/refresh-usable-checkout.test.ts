@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -19,6 +19,17 @@ const GIT_ENV = {
 async function git(dir: string, args: string[]): Promise<void> {
   await exec('git', ['-c', 'gc.auto=0', ...args], { cwd: dir, env: GIT_ENV });
 }
+/** What `git rev-parse --show-cdup` exits with in `dir`: the read `usableCheckout` starts from. */
+async function cdupExit(dir: string): Promise<number> {
+  try {
+    await exec('git', ['rev-parse', '--show-cdup'], { cwd: dir, env: GIT_ENV });
+    return 0;
+  } catch (err) {
+    return (err as { code: number }).code;
+  }
+}
+/** git exited non-zero, no structure proves the checkout dead, and only a repair changes that. */
+const needsRepair = { unknown: expect.any(String), repairNeeded: true };
 
 describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
   const dirs: string[] = [];
@@ -69,7 +80,7 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
   it('a HEAD read that exits 128 is unknown, one that exits 1 is unusable', async () => {
     const dir = await intact();
     shim = await failGit(['rev-parse', '--verify', '--quiet', 'HEAD'], { exit: 128 });
-    expect(await usableCheckout(dir)).toEqual({ unknown: 'git exited 128' });
+    expect(await usableCheckout(dir)).toEqual({ unknown: 'git exited 128', repairNeeded: true });
     await shim.restore();
     shim = await failGit(['rev-parse', '--verify', '--quiet', 'HEAD'], { exit: 1 });
     expect(await usableCheckout(dir)).toBe('unusable');
@@ -78,7 +89,7 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
   it('a corrupt config is unknown rather than a reason to rebuild', async () => {
     const dir = await intact();
     await writeFile(path.join(dir, '.git', 'config'), '[core\n');
-    expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
   });
 
   it.each(['no HEAD', 'empty .git', 'relative missing gitdir', 'absolute missing gitdir'])(
@@ -99,11 +110,95 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     },
   );
 
+  // What an interrupted `cp -a` of the source leaves, and the other ways a `.git` stops being what git requires.
+  const replaceGit = async (dir: string, content: string | Buffer): Promise<void> => {
+    await rm(path.join(dir, '.git'), { recursive: true });
+    await writeFile(path.join(dir, '.git'), content);
+  };
+  const notWhatGitRequires: Array<[string, (dir: string) => Promise<void>]> = [
+    ['no objects/', (dir) => rm(path.join(dir, '.git/objects'), { recursive: true })],
+    ['no refs/', (dir) => rm(path.join(dir, '.git/refs'), { recursive: true })],
+    ['an empty HEAD', (dir) => writeFile(path.join(dir, '.git/HEAD'), '')],
+    ['a zero-filled HEAD', (dir) => writeFile(path.join(dir, '.git/HEAD'), Buffer.alloc(21))],
+    [
+      'a HEAD of 39 hex digits',
+      async (dir) => {
+        const oid = (await readFile(path.join(dir, '.git/refs/heads/main'), 'utf8')).trim();
+        await writeFile(path.join(dir, '.git/HEAD'), `${oid.slice(0, 39)}\n`);
+      },
+    ],
+    [
+      'a HEAD that is neither a ref nor an object id',
+      (dir) => writeFile(path.join(dir, '.git/HEAD'), 'garbage\n'),
+    ],
+    ['an empty .git file', (dir) => replaceGit(dir, '')],
+    ['a .git file that is not a gitfile', (dir) => replaceGit(dir, 'garbage\n')],
+    ['a .git file with no space after gitdir:', (dir) => replaceGit(dir, 'gitdir:meta.git\n')],
+    [
+      'a .git file behind a byte-order mark',
+      (dir) =>
+        replaceGit(
+          dir,
+          Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('gitdir: meta.git\n')]),
+        ),
+    ],
+  ];
+  it.each(notWhatGitRequires)(
+    'git exits 128 on %s and the checkout is unusable',
+    async (_shape, breakGit) => {
+      const dir = await intact();
+      await breakGit(dir);
+      expect(await cdupExit(dir)).toBe(128);
+      expect(await usableCheckout(dir)).toBe('unusable');
+    },
+  );
+
+  it.each([
+    ['an object id', (oid: string) => `${oid}\n`],
+    ['an upper-case object id', (oid: string) => `${oid.toUpperCase()}\n`],
+    ['a ref with no space after the colon', () => 'ref:refs/heads/main\n'],
+  ])(
+    'a HEAD holding %s is one git reads, so a corrupt config stays unknown',
+    async (_head, text) => {
+      const dir = await intact();
+      const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: dir, env: GIT_ENV });
+      await writeFile(path.join(dir, '.git/HEAD'), text(stdout.trim()));
+      expect(await cdupExit(dir)).toBe(0);
+      await writeFile(path.join(dir, '.git', 'config'), '[core\n');
+      expect(await cdupExit(dir)).toBe(128);
+      expect(await usableCheckout(dir)).toMatchObject({ unknown: expect.any(String) });
+    },
+  );
+
+  it('objects/ and refs/ that exist as links are not missing', async () => {
+    const dir = await intact();
+    for (const name of ['objects', 'refs']) {
+      await rename(path.join(dir, '.git', name), path.join(dir, `${name}-store`));
+      await symlink(path.join(dir, `${name}-store`), path.join(dir, '.git', name));
+    }
+    expect(await cdupExit(dir)).toBe(0);
+    await writeFile(path.join(dir, '.git', 'config'), '[core\n');
+    expect(await cdupExit(dir)).toBe(128);
+    expect(await usableCheckout(dir)).toMatchObject({ unknown: expect.any(String) });
+  });
+
+  it('objects/ and refs/ kept in a commondir are not missing', async () => {
+    const main = await intact();
+    const dir = await tmp();
+    await mkdir(path.join(dir, '.git'));
+    await writeFile(path.join(dir, '.git/HEAD'), 'ref: refs/heads/main\n');
+    await writeFile(path.join(dir, '.git/commondir'), `${path.join(main, '.git')}\n`);
+    expect(await cdupExit(dir)).toBe(0);
+    await writeFile(path.join(main, '.git', 'config'), '[core\n');
+    expect(await cdupExit(dir)).toBe(128);
+    expect(await usableCheckout(dir)).toMatchObject({ unknown: expect.any(String) });
+  });
+
   it('a gitdir outside the checkout is unknown even when missing', async () => {
     const dir = await intact();
     await rm(path.join(dir, '.git'), { recursive: true });
     await writeFile(path.join(dir, '.git'), 'gitdir: ../missing.git\n');
-    expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
   });
 
   it.each([' metadata', 'metadata '])(
@@ -114,7 +209,7 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
       await writeFile(path.join(dir, '.git'), `gitdir: ${name}\n`);
       await git(dir, ['rev-parse', '--show-cdup']);
       await writeFile(path.join(dir, name, 'config'), '[core\n');
-      expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+      expect(await usableCheckout(dir)).toEqual(needsRepair);
     },
   );
 
@@ -128,14 +223,14 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     );
     await git(dir, ['rev-parse', '--show-cdup']);
     await writeFile(Buffer.concat([target, Buffer.from('/config')]), '[core\n');
-    expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
   });
 
   it('a truncated gitfile cannot prove that its gitdir is absent', async () => {
     const dir = await intact();
     await rm(path.join(dir, '.git'), { recursive: true });
     await writeFile(path.join(dir, '.git'), `gitdir: ${'a'.repeat(5000)}\n`);
-    expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
   });
 
   it('a HEAD behind a linked .git entry is unknown', async () => {
@@ -143,7 +238,7 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     await rm(path.join(dir, '.git'), { recursive: true });
     await mkdir(path.join(dir, 'metadata'));
     await symlink('metadata', path.join(dir, '.git'));
-    expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
   });
 
   it('an empty folder is unusable', async () => {

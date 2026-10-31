@@ -12,6 +12,7 @@ import * as projections from '../src/project-state/set-aside.js';
 import type { Database } from '@haive/database';
 import type { RepoJobPayload } from '@haive/shared';
 import { failGit, type FakeGit } from './support/fake-git.js';
+import { killGit } from './support/kill-git.js';
 
 const h = vi.hoisted(() => ({
   persist: vi.fn(),
@@ -141,7 +142,7 @@ it('an unknown checkout fails through the queue without detection, import or reb
   const before = await git(dest, ['rev-parse', 'HEAD']);
   shim = await failGit(['rev-parse', '--show-cdup']);
   await expect(runRefresh(payload)).rejects.toThrow(
-    /^Not refreshed: the checkout could not be examined \(.*\)\. Nothing was moved\.$/,
+    /^Not refreshed: the checkout could not be examined \(.*\)\. Nothing was moved\. Retry cannot help until the checkout is repaired; removing and re-adding the repository rebuilds it from its source\.$/,
   );
   expect(h.persist).not.toHaveBeenCalled();
   expect(h.seed).not.toHaveBeenCalled();
@@ -150,6 +151,19 @@ it('an unknown checkout fails through the queue without detection, import or reb
   await shim.restore();
   shim = null;
   expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
+  expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+});
+
+it('a git read that never finished does not tell the user to repair the checkout', async () => {
+  const { dest, payload } = await fixture();
+  shim = await killGit(['rev-parse', '--show-cdup']);
+  await expect(runRefresh(payload)).rejects.toThrow(
+    /^Not refreshed: the checkout could not be examined \(.*SIGKILL.*\)\. Nothing was moved\.$/,
+  );
+  expect(row.status).toBe('error');
+  expect(row.statusMessage).not.toContain('Retry cannot help');
+  await shim.restore();
+  shim = null;
   expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
 });
 
@@ -213,25 +227,30 @@ it.each([false, true])(
   },
 );
 
-it('refresh keeps a checkout with no HEAD aside and copies a usable replacement', async () => {
-  const { dest, payload } = await fixture();
-  await rm(path.join(dest, '.git/HEAD'));
-  await runRefresh(payload);
-  const aside = (await readdir(path.dirname(dest))).find((entry) => entry.startsWith('r1.aside-'));
-  expect(aside).toBeTruthy();
-  expect(await readFile(path.join(path.dirname(dest), aside!, '.haive-data/plan.md'), 'utf8')).toBe(
-    'pending\n',
-  );
-  await expect(readFile(path.join(path.dirname(dest), aside!, '.git/HEAD'))).rejects.toHaveProperty(
-    'code',
-    'ENOENT',
-  );
-  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(
-    await git(payload.localPath!, ['rev-parse', 'HEAD']),
-  );
-  expect(row.status).toBe('ready');
-  expect(row.statusMessage).toContain(aside);
-});
+it.each(['.git/HEAD', '.git/objects'])(
+  'refresh keeps a checkout with no %s aside and copies a usable replacement',
+  async (missing) => {
+    const { dest, payload } = await fixture();
+    await rm(path.join(dest, missing), { recursive: true });
+    await runRefresh(payload);
+    const aside = (await readdir(path.dirname(dest))).find((entry) =>
+      entry.startsWith('r1.aside-'),
+    );
+    expect(aside).toBeTruthy();
+    expect(
+      await readFile(path.join(path.dirname(dest), aside!, '.haive-data/plan.md'), 'utf8'),
+    ).toBe('pending\n');
+    await expect(readFile(path.join(path.dirname(dest), aside!, missing))).rejects.toHaveProperty(
+      'code',
+      'ENOENT',
+    );
+    expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(
+      await git(payload.localPath!, ['rev-parse', 'HEAD']),
+    );
+    expect(row.status).toBe('ready');
+    expect(row.statusMessage).toContain(aside);
+  },
+);
 
 it('an unreadable first gate after a retry puts pending bytes and index back', async () => {
   const { dest, payload } = await fixture();
