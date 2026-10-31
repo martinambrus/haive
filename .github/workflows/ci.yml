@@ -232,6 +232,9 @@ jobs:
       # limit and cancelling them. Each limit is well above the step's slowest green run (the
       # measurements are in docs/architecture/ci-smokes.md). scripts/test/ci-step-independence.test.mjs
       # pins that every check that is not a smoke:ci chain has one.
+      #
+      # The script's `set -uo pipefail` leaves errexit on: a step with no `shell:` runs as `bash -e {0}`,
+      # so a failed build before the loop ends the step and no gated file runs on it.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         timeout-minutes: 25
