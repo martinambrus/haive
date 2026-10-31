@@ -146,13 +146,13 @@ describe('13-onboarding-push detect', () => {
 });
 
 // T397: an ordinary git error is no answer either.
-it('T397 rejects exit 128 from the current branch read', async () => {
+it('rejects exit 128 from the current branch read', async () => {
   const dir = await makeRepo();
   shim = await failGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   await expect(onboardingPushStep.detect!(mkCtx(dir))).rejects.toThrow(/current branch/);
 });
 
-it('T397 a failed origin-ref read cannot supply zero commit counts', async () => {
+it('a failed origin-ref read cannot supply zero commit counts', async () => {
   const dir = await makeRepo();
   await addBareOrigin(dir);
   shim = await failGit(['rev-parse', '--verify', '--quiet', 'origin/main']);

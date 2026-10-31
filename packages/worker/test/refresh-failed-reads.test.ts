@@ -84,22 +84,22 @@ async function fixture(withPlan = false) {
     } as RepoJobPayload,
   };
 }
-it('T397 symbolic-ref exit 128 reports an unreadable branch, not detached HEAD', async () => {
+it('symbolic-ref exit 128 reports an unreadable branch, not detached HEAD', async () => {
   const { dest, payload } = await fixture();
   shim = await failGit(['symbolic-ref']);
   expect(await fastForward(db, payload, dest)).toMatch(/could not read.*branch/);
 });
-it('T397 a failed FETCH_HEAD read reports a read failure, not an empty fetch', async () => {
+it('a failed FETCH_HEAD read reports a read failure, not an empty fetch', async () => {
   const { dest, payload } = await fixture();
   shim = await failGit(['rev-parse', '--verify', 'FETCH_HEAD^{commit}']);
   expect(await fastForward(db, payload, dest)).toMatch(/could not read.*fetch/i);
 });
-it('T397 merge-base exit 128 reports a comparison failure, not unrelated history', async () => {
+it('merge-base exit 128 reports a comparison failure, not unrelated history', async () => {
   const { dest, payload } = await fixture();
   shim = await failGit(['merge-base']);
   expect(await fastForward(db, payload, dest)).toMatch(/could not.*merge base/);
 });
-it('T397 a failed shallow read reports a read failure', async () => {
+it('a failed shallow read reports a read failure', async () => {
   const { dest, payload } = await fixture();
   await git(dest, ['checkout', '--orphan', 'other']);
   await git(dest, ['commit', '--allow-empty', '-m', 'unrelated']);
@@ -108,7 +108,7 @@ it('T397 a failed shallow read reports a read failure', async () => {
   shim = await failGit(['rev-parse', '--is-shallow-repository']);
   expect(await fastForward(db, payload, dest)).toMatch(/could not.*shallow/);
 });
-it('T397 a non-zero merge that moved HEAD re-syncs projections and reports failure', async () => {
+it('a non-zero merge that moved HEAD re-syncs projections and reports failure', async () => {
   const { dest, payload } = await fixture();
   const before = await git(dest, ['rev-parse', 'HEAD']);
   shim = await failGit(['merge', '--ff-only'], { afterRun: true });
@@ -121,14 +121,14 @@ it('T397 a non-zero merge that moved HEAD re-syncs projections and reports failu
   expect(h.putBack).not.toHaveBeenCalled();
   expect(result).toMatch(/fast-forward.*failed/i);
 });
-it('T397 fix8 a failed post-merge HEAD read leaves incoming projection bytes on disk', async () => {
+it('a failed post-merge HEAD read leaves incoming projection bytes on disk', async () => {
   const { dest, payload } = await fixture(true);
   h.kept.set('.haive-data/plan.md', { bytes: Buffer.from('old pending\n'), index: null });
   shim = await failGit(['rev-parse', 'HEAD'], { from: 2 });
   await expect(fastForward(db, payload, dest)).rejects.toThrow(/HEAD/);
   expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('incoming\n');
 });
-it('T397 a refused fast-forward at the same HEAD restores projections', async () => {
+it('a refused fast-forward at the same HEAD restores projections', async () => {
   const { dest, payload } = await fixture();
   shim = await failGit(['merge', '--ff-only']);
   expect(await fastForward(db, payload, dest)).toMatch(
@@ -138,7 +138,7 @@ it('T397 a refused fast-forward at the same HEAD restores projections', async ()
   expect(h.resync).not.toHaveBeenCalled();
 });
 
-it('T397 fix3 refresh finishes projection bookkeeping when hand-back throws after a move', async () => {
+it('refresh finishes projection bookkeeping when hand-back throws after a move', async () => {
   const { dest, payload } = await fixture();
   const before = await git(dest, ['rev-parse', 'HEAD']);
   h.handBack.mockRejectedValueOnce(new Error('git diff hand-back failed'));
@@ -149,7 +149,7 @@ it('T397 fix3 refresh finishes projection bookkeeping when hand-back throws afte
   expect(h.putBack).not.toHaveBeenCalled();
 });
 
-it('T397 fix8 an empty FETCH_HEAD answer refuses before comparing or moving', async () => {
+it('an empty FETCH_HEAD answer refuses before comparing or moving', async () => {
   const { dest, payload } = await fixture();
   const before = await git(dest, ['rev-parse', 'HEAD']);
   shim = await failGit(['rev-parse', '--verify', 'FETCH_HEAD^{commit}'], { exit: 0 });
@@ -158,7 +158,7 @@ it('T397 fix8 an empty FETCH_HEAD answer refuses before comparing or moving', as
   shim = null;
   expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
 });
-it('T397 fix8 a deepen failure has its own refusal and does not move HEAD', async () => {
+it('a deepen failure has its own refusal and does not move HEAD', async () => {
   const { dest, payload } = await fixture();
   const before = await git(dest, ['rev-parse', 'HEAD']);
   const base = await failGit(['merge-base'], { exit: 1 });
@@ -177,7 +177,7 @@ it('T397 fix8 a deepen failure has its own refusal and does not move HEAD', asyn
   expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
 });
 
-it('T397 D4 an unreadable operation error after the move is not an unmoved refusal', async () => {
+it('an unreadable operation error after the move is not an unmoved refusal', async () => {
   const { dest, payload } = await fixture();
   const before = await git(dest, ['rev-parse', 'HEAD']);
   const err = new GitOperationUnreadableError('post-move gate failure');
@@ -185,7 +185,7 @@ it('T397 D4 an unreadable operation error after the move is not an unmoved refus
   await expect(fastForward(db, payload, dest)).rejects.toBe(err);
   expect(await git(dest, ['rev-parse', 'HEAD'])).not.toBe(before);
 });
-it('T397 D5 refresh preserves hand-back failure when resync fails too', async () => {
+it('refresh preserves hand-back failure when resync fails too', async () => {
   const { dest, payload } = await fixture();
   const err = new Error('primary hand-back failure');
   const secondary = new Error('secondary resync failure');

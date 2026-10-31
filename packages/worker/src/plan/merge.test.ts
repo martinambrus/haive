@@ -310,7 +310,7 @@ describe('ensurePlanMergeWorktree on a failed worktree list', () => {
   });
 });
 
-it('T397 commitMerge rejects a failed post-commit HEAD read', async () => {
+it('commitMerge rejects a failed post-commit HEAD read', async () => {
   const dir = await mkdtemp(path.join(fixtureBase, 'post-commit-head-'));
   dirs.push(dir);
   await git(dir, ['init', '-b', 'main']);
@@ -1350,7 +1350,7 @@ describe.runIf(process.getuid?.() === 0)(
   },
 );
 
-it('T397 fix7 commitMerge rejects an empty post-commit HEAD answer', async () => {
+it('commitMerge rejects an empty post-commit HEAD answer', async () => {
   const { wt } = await openMerge();
   shim = await failGit(['rev-parse', 'HEAD'], { exit: 0 });
   await expect(commitMerge(wt, 'msg', COMMIT_ENV)).rejects.toThrow(/HEAD.*empty answer/);

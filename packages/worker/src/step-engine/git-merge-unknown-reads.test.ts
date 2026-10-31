@@ -427,13 +427,13 @@ describe('D5 squashMergeCommit', () => {
   });
 });
 
-describe('T397 merge completion failures are not an incomplete resolution', () => {
+describe('merge completion failures are not an incomplete resolution', () => {
   it.each([
     ['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--diff-filter=U'],
     ['ls-files', '-u'],
     ['add'],
     ['commit'],
-  ])('T397 rejects a failed %j without committing', async (...argv) => {
+  ])('rejects a failed %j without committing', async (...argv) => {
     const dir = await conflictOpen();
     await write(dir, 'base.txt', 'resolved\n');
     const before = await sha(dir);
@@ -446,13 +446,13 @@ describe('T397 merge completion failures are not an incomplete resolution', () =
     expect(await mergeIsOpen(dir)).toBe(true);
     expect(await completeMergeHostSide(dir, IDENTITY, 'feature/x')).toBe(true);
   });
-  it('T397 a failed mergeCommitted status read throws rather than answering false', async () => {
+  it('a failed mergeCommitted status read throws rather than answering false', async () => {
     const dir = await clean();
     await failing(['--no-optional-locks', 'status'], async () => {
       await expect(mergeCommitted(dir, 'feature/x')).rejects.toThrow(/git status.*failed/);
     });
   });
-  it('T397 a failed ancestry read throws rather than answering false', async () => {
+  it('a failed ancestry read throws rather than answering false', async () => {
     const dir = await clean();
     await failing(['merge-base', '--is-ancestor'], async () => {
       await expect(mergeCommitted(dir, 'feature/x')).rejects.toThrow(/git merge-base.*failed/);
@@ -461,7 +461,7 @@ describe('T397 merge completion failures are not an incomplete resolution', () =
 });
 
 it.each(['link', 'directory', 'fifo'])(
-  'T397 fix4 containment refusal costs one fixer attempt: %s',
+  'containment refusal costs one fixer attempt: %s',
   async (kind) => {
     const dir = await conflictOpen();
     const file = path.join(dir, 'base.txt');
@@ -476,14 +476,14 @@ it.each(['link', 'directory', 'fifo'])(
     expect(await completeMergeHostSide(dir, IDENTITY, 'feature/x')).toBe(true);
   },
 );
-it('T397 fix4 a genuine IO failure still throws with the merge open', async () => {
+it('a genuine IO failure still throws with the merge open', async () => {
   const dir = await conflictOpen();
   await write(dir, 'base.txt', 'resolved\n');
   readFault.file = 'base.txt';
   await expect(completeMergeHostSide(dir, IDENTITY, 'feature/x')).rejects.toThrow('simulated EIO');
   expect(await mergeIsOpen(dir)).toBe(true);
 });
-it('T397 fix4 a vanished merge directory is not committed', async () => {
+it('a vanished merge directory is not committed', async () => {
   const dir = await conflictOpen();
   await rm(dir, { recursive: true, force: true });
   await expect(mergeCommitted(dir, 'feature/x')).resolves.toBe(false);
@@ -499,14 +499,14 @@ async function linkedMergeDir() {
   await symlink(real, path.join(root, '.haive/worktrees'));
   return path.join(root, '.haive/worktrees/merge');
 }
-it('T397 D3 a merge directory behind a link is unreadable, not vanished', async () => {
+it('a merge directory behind a link is unreadable, not vanished', async () => {
   const dir = await linkedMergeDir();
   await expect(mergeCommitted(dir, 'feature/x')).rejects.toHaveProperty(
     'name',
     'PathContainmentError',
   );
 });
-it('T397 D7 a failed stat cannot silently skip hand-back before a merge', async () => {
+it('a failed stat cannot silently skip hand-back before a merge', async () => {
   const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
   try {
     const dir = await linkedMergeDir();

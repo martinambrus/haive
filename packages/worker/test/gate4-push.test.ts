@@ -308,7 +308,7 @@ describe('gate-4 push: apply', () => {
   });
 });
 
-it('T397 a failed branch read fails the push gate', async () => {
+it('a failed branch read fails the push gate', async () => {
   const { dir } = await makeRepo(false);
   const shim = await failGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   try {
@@ -318,7 +318,7 @@ it('T397 a failed branch read fails the push gate', async () => {
   }
 });
 
-it('T397 a failed commit log cannot report that no commits were found', async () => {
+it('a failed commit log cannot report that no commits were found', async () => {
   const { dir } = await makeRepo(false);
   const shim = await failGit(['log']);
   try {
@@ -328,7 +328,7 @@ it('T397 a failed commit log cannot report that no commits were found', async ()
   }
 });
 
-it('T397 fix8 an unborn push gate has no branch and skips the log read', async () => {
+it('an unborn push gate has no branch and skips the log read', async () => {
   const dir = await mkTmp('gate4-unborn-');
   await git(dir, ['init', '-b', 'main']);
   const shim = await failGit(['log']);

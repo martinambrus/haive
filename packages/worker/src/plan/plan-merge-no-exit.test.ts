@@ -176,20 +176,20 @@ describe('resolveHaiveProjectionConflicts on state reads that gave no answer', (
   });
 });
 
-it('T397 a failed initial conflict listing cannot answer no conflicts', async () => {
+it('a failed initial conflict listing cannot answer no conflicts', async () => {
   const wt = await divergedPair(...planSides());
   await openConflict(wt);
   shim = await killGit(DIFF_U);
   await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(/git diff.*failed/);
 });
-it('T397 a failed remaining-state listing cannot answer no conflicts', async () => {
+it('a failed remaining-state listing cannot answer no conflicts', async () => {
   const wt = await divergedPair(...stateSides());
   await openConflict(wt);
   shim = await killGit(DIFF_U, { after: 1 });
   await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(/git diff.*failed/);
 });
 
-it('T397 fix6a a failed plan stage listing throws instead of returning no stages', async () => {
+it('a failed plan stage listing throws instead of returning no stages', async () => {
   const wt = await divergedPair(...planSides());
   await openConflict(wt);
   shim = await failGit(['ls-files', '-u', '-z', '--', PLAN_JSON]);
@@ -197,7 +197,7 @@ it('T397 fix6a a failed plan stage listing throws instead of returning no stages
     /git ls-files.*failed.*simulated failure/,
   );
 });
-it('T397 fix6a a failed blob warns and keeps the plan unmerged', async () => {
+it('a failed blob warns and keeps the plan unmerged', async () => {
   const wt = await divergedPair(...planSides());
   await openConflict(wt);
   const warning = vi.spyOn(logger, 'warn');
@@ -216,7 +216,7 @@ it('T397 fix6a a failed blob warns and keeps the plan unmerged', async () => {
   expect((await git(wt, ['ls-files', '-u', '--', PLAN_JSON])).trim()).not.toBe('');
 });
 
-it('T397 fix6b a failed fallback stage-number listing throws instead of answering no stages', async () => {
+it('a failed fallback stage-number listing throws instead of answering no stages', async () => {
   const wt = await divergedPair(...planSides());
   await openConflict(wt);
   // Invalid JSON sides enter the fallback; only its literal-path listing fails.
@@ -255,7 +255,7 @@ it.each([
     { operation: 'checkout-index', args: ['checkout-index', '-f'], shape },
   ]),
 ])(
-  'T397 D7 projection $shape failure warns with path and operation: $operation',
+  'projection $shape failure warns with path and operation: $operation',
   async ({ operation, args, shape }) => {
     const md = '.haive-data/plan.md';
     const sides: [Files, Files, Files] =
@@ -291,7 +291,7 @@ it.each([
   },
 );
 
-it('T397 D7 a failed markdown render write warns without claiming plan.json gave nothing', async () => {
+it('a failed markdown render write warns without claiming plan.json gave nothing', async () => {
   const md = '.haive-data/plan.md';
   const wt = await divergedPair(
     { [PLAN_JSON]: validPlan('base'), [md]: 'base' },

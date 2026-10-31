@@ -1770,7 +1770,7 @@ describe('runLevelMerge (via resolveDagPhase): a fix run superseded before it st
   });
 
   it.each(['add', 'status', 'commit'])(
-    'T397 preserves a failed issue git %s error',
+    'preserves the failed git %s error when committing an issue',
     async (command) => {
       const integrationDir = await setupConflictedIntegration(true);
       const issueDir = await mkdtemp(path.join(tmpdir(), 'dag-issue-error-'));

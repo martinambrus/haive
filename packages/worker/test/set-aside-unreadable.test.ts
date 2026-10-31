@@ -12,7 +12,7 @@ import { failGit } from './support/fake-git.js';
 import type { Database } from '@haive/database';
 const exec = promisify(execFile);
 it.each(['set-aside', 'final-check'])(
-  'T397 unreadable git fails the %s instead of refusing as an open merge',
+  'unreadable git fails the %s instead of refusing as an open merge',
   async (run) => {
     const dir = await mkdtemp(path.join(tmpdir(), 'aside-unreadable-'));
     const db = {

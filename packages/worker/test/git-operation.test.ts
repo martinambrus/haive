@@ -55,7 +55,7 @@ describe('gitOperationInProgress', () => {
     expect(await gitOperationInProgress(repo)).toBe(false);
   });
 
-  it('T397 reports a git dir outside the checkout as unreadable, never anchoring there', async () => {
+  it('reports a git dir outside the checkout as unreadable, never anchoring there', async () => {
     const outside = mkdtempSync(join(tmpdir(), 'git-operation-gitdir-'));
     try {
       git(repo, 'init', '-q', '--separate-git-dir', join(outside, 'git'));

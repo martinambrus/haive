@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { expect, it, vi } from 'vitest';
 import { handBackAfterMove } from './git-merge.js';
 import { failGit } from '../../test/support/fake-git.js';
-it('T397 a failed hand-back diff fails even for the usual non-strict caller', async () => {
+it('a failed hand-back diff fails even for the usual non-strict caller', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'handback-read-'));
   const exec = promisify(execFile);
   const env = {

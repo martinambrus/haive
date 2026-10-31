@@ -4943,7 +4943,7 @@ it('merge_remove completes locally without any origin transport when detect refu
   }
 });
 
-it('T397 a failed pre-push count fails without pushing or opening a sync round', async () => {
+it('a failed pre-push count fails without pushing or opening a sync round', async () => {
   const { parent, wt } = await setupWorktree();
   const bare = await pushParentMainToOrigin(parent);
   try {
@@ -4968,7 +4968,7 @@ it('T397 a failed pre-push count fails without pushing or opening a sync round',
     await rm(bare, { recursive: true, force: true, maxRetries: 5 });
   }
 });
-it('T397 a failed conflict listing never dispatches a fixer with no paths', async () => {
+it('a failed conflict listing never dispatches a fixer with no paths', async () => {
   const { parent, wt } = await setupWorktree();
   try {
     // Make the feature collide with the parent, then fail the listing after git opens the merge.

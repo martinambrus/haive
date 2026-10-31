@@ -1737,7 +1737,7 @@ it.each([false, true])(
   },
 );
 
-it('T397 a failed ff that moved HEAD fails after re-sync, without putting old projections back', async () => {
+it('a failed ff that moved HEAD fails after re-sync, without putting old projections back', async () => {
   const { bare, seed } = await seedOrigin();
   const local = await cloneLocal(bare);
   let shim: Awaited<ReturnType<typeof failGit>> | null = null;
@@ -1763,7 +1763,7 @@ it('T397 a failed ff that moved HEAD fails after re-sync, without putting old pr
   }
 });
 
-it('T397 fix3 sync finishes projection bookkeeping when hand-back throws after a move', async () => {
+it('sync finishes projection bookkeeping when hand-back throws after a move', async () => {
   const { bare, seed } = await seedOrigin();
   const local = await cloneLocal(bare);
   let shim: Awaited<ReturnType<typeof failGit>> | null = null;
@@ -1800,7 +1800,7 @@ it('T397 fix3 sync finishes projection bookkeeping when hand-back throws after a
   }
 });
 
-it('T397 D5 sync preserves hand-back failure when resync also throws', async () => {
+it('sync preserves hand-back failure when resync also throws', async () => {
   const { bare, seed } = await seedOrigin();
   const local = await cloneLocal(bare);
   let shim: Awaited<ReturnType<typeof failGit>> | null = null;

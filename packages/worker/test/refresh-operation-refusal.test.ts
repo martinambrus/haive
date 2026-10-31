@@ -114,7 +114,7 @@ async function fixture() {
   };
 }
 it.each(['failed git-path', 'external git-dir'])(
-  'T397 fix1 refresh refuses an unreadable operation: %s',
+  'refresh refuses an unreadable operation: %s',
   async (kind) => {
     const { dest, payload } = await fixture();
     const before = await git(dest, ['rev-parse', 'HEAD']);
@@ -136,7 +136,7 @@ it.each(['failed git-path', 'external git-dir'])(
   },
 );
 
-it('T397 D1 an unknown checkout fails through the queue without detection, import or rebuild', async () => {
+it('an unknown checkout fails through the queue without detection, import or rebuild', async () => {
   const { dest, payload } = await fixture();
   const before = await git(dest, ['rev-parse', 'HEAD']);
   shim = await failGit(['rev-parse', '--show-cdup']);
@@ -159,7 +159,7 @@ async function runRefresh(payload: RepoJobPayload) {
 }
 
 it.each(['usable', 'unusable', 'unknown', 'holding', 'refused'] as const)(
-  'T397 D1 refresh %s reaches a terminal repository status',
+  'refresh %s reaches a terminal repository status',
   async (kind) => {
     const { dest, payload } = await fixture();
     if (kind === 'usable') await git(payload.localPath!, ['reset', '--hard', 'HEAD^']);
@@ -173,7 +173,7 @@ it.each(['usable', 'unusable', 'unknown', 'holding', 'refused'] as const)(
   },
 );
 it.each([false, true])(
-  'T397 D2 later unreadable gate puts pending bytes and index back (put-back fails: %s)',
+  'later unreadable gate puts pending bytes and index back (put-back fails: %s)',
   async (failedPutBack) => {
     const { dest, payload } = await fixture();
     const file = '.haive-data/plan.md';
@@ -213,7 +213,7 @@ it.each([false, true])(
   },
 );
 
-it('refresh keeps a checkout with no HEAD aside and clones a usable replacement', async () => {
+it('refresh keeps a checkout with no HEAD aside and copies a usable replacement', async () => {
   const { dest, payload } = await fixture();
   await rm(path.join(dest, '.git/HEAD'));
   await runRefresh(payload);

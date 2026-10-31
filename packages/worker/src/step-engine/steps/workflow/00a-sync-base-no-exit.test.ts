@@ -87,7 +87,7 @@ describe('00a-sync-base detect: the current branch read', () => {
 });
 
 // T397: an ordinary git error is no answer either.
-it('T397 rejects exit 128 from the current branch read', async () => {
+it('rejects exit 128 from the current branch read', async () => {
   const dir = await makeRepo(true);
   shim = await failGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   await expect(syncBaseStep.detect!(mkCtx(dir))).rejects.toThrow(/current branch/);

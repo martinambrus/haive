@@ -291,7 +291,7 @@ describe('01 worktree setup apply: a base that cannot be told', () => {
   });
 });
 
-it('T397 D6 exit 128 retains the recorded base through detect and apply', async () => {
+it('exit 128 retains the recorded base through detect and apply', async () => {
   vi.spyOn(configService, 'getBoolean').mockResolvedValue(false);
   const root = await mkRepo(true);
   await git(root, ['branch', 'develop']);

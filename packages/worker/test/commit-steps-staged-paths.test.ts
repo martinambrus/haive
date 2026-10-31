@@ -1117,7 +1117,7 @@ describe('commitRecorded commits what it staged in a private index', () => {
       commitRecorded(repo, { add: ['a.md'], remove: [] }, 'chore: x', GIT_ENV),
     ).rejects.toThrow(/merge/);
   });
-  it('T397 fix6d a failed commit parent read names the cause and does not create a root commit', async () => {
+  it('a failed commit parent read names the cause and does not create a root commit', async () => {
     const repo = await seededRepo({ 'README.md': 'r\n' });
     await writeFile(path.join(repo, 'a.md'), 'ours\n');
     const before = await git(repo, ['rev-parse', 'HEAD']);
