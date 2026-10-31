@@ -491,6 +491,7 @@ describe('09_5b and 11d apply when every stored skills dir names git data', () =
     } as unknown as Parameters<typeof skillRepairStep.apply>[1]);
 
     expect(out.repaired).toEqual([]);
+    expect(out.stillFailing).toEqual(['conventions']);
     expect(out.attempted).toBe(0);
     expect(await readdir(repo)).toEqual(['.git']);
     expect(await snapshot('.git')).toEqual(before);
@@ -531,6 +532,7 @@ describe('09_5b and 11d apply when every stored skills dir names git data', () =
     } as unknown as Parameters<typeof skillSyncStep.apply>[1]);
 
     expect(out.generated).toEqual([]);
+    expect(out.skipped).toEqual(['conventions']);
     expect(out.removed).toEqual([]);
     expect(out.committed).toBe(false);
     expect(await readdir(repo)).toEqual(['.git']);
