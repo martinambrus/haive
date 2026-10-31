@@ -564,9 +564,7 @@ status: open · was modular #211
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+5)
 
 status: open · was modular #213
-Items 1-2 merged (#831). 3. PERF: the bundle file browser runs fs-safe lstat per file (5000 files took 8.8 s). Fix: a walk that holds directory descriptors. 4. new-repo-form.tsx shows only the first 100 matches, with no note. 5. github-oauth.ts:110-111 echoes an unbounded GitHub error body, and a body that echoed the request's token would reach the response and the error log (T378 review, fake-vendor repro). Reuse the forge excerpt helper. 6. The /user/repos loop makes one extra empty request. Fix: stop when the Link header has no rel="next".
-5. (T454 review, 2026-10-31) PRE-EXISTING, minor, measured (identical before T454): the GitHub source's `oauthLabel` is never reset (web components/new-repo-form.tsx ~:125, ~:146, ~:271, ~:437), so GitHub, then another source, then GitHub again shows the manual URL input and Create refuses until a reload.
-6. (T454 review) PRE-EXISTING, minor, by code reading: web filesystem-browser.tsx ~:96-99, the `flex-1` button has no `min-w-0`, so at 375 px a long directory name clips the Pick button (T454 judge/repos-new-375.png).
+Items 1-2 merged (#831). 3. PERF: the bundle file browser runs fs-safe lstat per file (5000 files took 8.8 s). Fix: a walk that holds directory descriptors. 4. new-repo-form.tsx shows only the first 100 matches, with no note. 5. github-oauth.ts:110-111 echoes an unbounded GitHub error body, and a body that echoed the request's token would reach the response and the error log (T378 review, fake-vendor repro). Reuse the forge excerpt helper. 6. The /user/repos loop makes one extra empty request. Fix: stop when the Link header has no rel="next". 7. (T454 review, 2026-10-31) PRE-EXISTING, minor, measured (identical before T454): the GitHub source's `oauthLabel` is never reset (web components/new-repo-form.tsx ~:125, ~:146, ~:271, ~:437), so GitHub, then another source, then GitHub again shows the manual URL input and Create refuses until a reload. 8. (T454 review) PRE-EXISTING, minor, by code reading: web filesystem-browser.tsx ~:96-99, the `flex-1` button has no `min-w-0`, so at 375 px a long directory name clips the Pick button (T454 judge/repos-new-375.png).
 
 ### T366 · FNF[shutdown-deadline] · the worker shutdown's per-part limits are summed by hand
 
@@ -960,9 +958,11 @@ status: open
 From the T454 review (2026-10-31). PRE-EXISTING, minor (typed text is lost; nothing reaches a URL).
 
 T449 and T454 made the sign-in form and /repos/new keep pre-hydration input (uncontrolled fields read with FormData). The rest of the class is not the same small change:
+
 1. /tasks/new (web app/(app)/tasks/new/page.tsx ~:875; fields ~:1106, ~:1131, ~:1147) loses its title, description and estimate typed before attach: the plan fill is guarded by `titleTouched`/`descriptionTouched` refs that only an `onChange` sets, the block unmounts when the type switches to run_app, and HoursMinutesInput keeps its own state. It has no native submit before attach (its submit button is disabled in the server HTML).
 2. Controlled inputs outside any form on seven pages (admin/users, admin/pricing, admin/audit, global-kb, rag-playground, the tasks list, github-client-card) lose typed text the same way.
 3. The Source select on /repos/new (web components/new-repo-form.tsx ~:263) stays controlled because it decides which sections render, so a Source chosen before attach is reset at the first re-render.
+
 Decide whether the class is worth a general mechanism (copy DOM values into state on hydration, a shared hook) or is left as is.
 
 ## Done
