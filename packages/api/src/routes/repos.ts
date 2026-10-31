@@ -8,6 +8,7 @@ import {
   schema,
   acquireRootClaim,
   isRootClaimLive,
+  lockRepositoryTasksKey,
   readLiveRootClaim,
   rootClaimRefusal,
   type RootClaimKind,
@@ -120,6 +121,7 @@ import {
   enqueueRepoRagCleanupJob,
   enqueueRepoResourceCleanupJob,
 } from '../lib/cancel-task.js';
+import { boundedLockWait } from '../lib/repository-busy.js';
 import { validateLocalPath, pathExists, isGitRepository } from '../lib/filesystem.js';
 import {
   checkRepositoryOnboardingMarkers,
@@ -3206,6 +3208,15 @@ repoRoutes.delete('/:id', async (c) => {
   let resourceCleanup: RepoResourceCleanupPayload | null = null;
 
   await db.transaction(async (tx) => {
+    // Read before the key is taken, so a caller who does not own the repository never queues on it.
+    const [owned] = await tx
+      .select({ id: schema.repositories.id })
+      .from(schema.repositories)
+      .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)));
+    if (!owned) return;
+    // The key a Retry of a failed task takes: a Retry that commits after this delete read its tasks
+    // would leave one `running` with the repository_id the delete cleared, and nothing cancels it.
+    await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, id));
     // Locked, so a clone or a reset that has not claimed the root yet claims it only after this
     // commits, and finds no row: every writer of the root runs under that claim.
     const repoRows = await tx

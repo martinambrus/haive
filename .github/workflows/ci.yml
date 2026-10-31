@@ -315,9 +315,11 @@ jobs:
           api test/tooling-app-auth-atomic-db.test.ts TOOLING_APP_AUTH_TEST_URL tooling_app_auth_test pg
           api test/task-tool-usage-calls-db.test.ts TASK_TOOL_USAGE_TEST_URL task_tool_usage_test pg
           api test/repo-delete-lock-order-db.test.ts REPO_DELETE_LOCK_ORDER_TEST_URL repo_delete_lock_order_test pg
+          api test/repo-delete-retry-db.test.ts REPO_DELETE_RETRY_TEST_URL repo_delete_retry_test pg
           api test/task-cancel-guard-db.test.ts TASK_CANCEL_GUARD_TEST_URL task_cancel_guard_test pg
           api test/task-cancel-lock-order-db.test.ts TASK_CANCEL_LOCK_ORDER_TEST_URL task_cancel_lock_order_test pg
           api test/step-row-lock-order-db.test.ts STEP_ROW_LOCK_ORDER_TEST_URL step_row_lock_order_test pg
+          api test/plan-advisory-delete-db.test.ts PLAN_ADVISORY_DELETE_TEST_URL plan_advisory_delete_test pg
           api test/admin-config-pool-db.test.ts ADMIN_CONFIG_POOL_TEST_URL admin_config_pool_test pg
           api test/admin-security-audit-db.test.ts ADMIN_SECURITY_AUDIT_TEST_URL admin_security_audit_test pg
           api test/repo-credentials-audit-db.test.ts REPO_CREDENTIALS_AUDIT_TEST_URL repo_credentials_audit_test pg
