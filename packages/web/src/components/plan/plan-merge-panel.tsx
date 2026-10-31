@@ -197,7 +197,12 @@ export function PlanMergePanel({
           <p className="text-xs font-semibold text-amber-200">
             Resolving the merge with the remote
           </p>
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void discard()}>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy || discarding}
+            onClick={() => void discard()}
+          >
             Discard
           </Button>
         </div>

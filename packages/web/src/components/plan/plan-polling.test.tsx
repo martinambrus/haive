@@ -525,6 +525,8 @@ describe('PlanMergePanel with a merge task', () => {
     expect(pulsing()).toBe(true);
     expect(shown().find((el) => el.type === FormError)?.props.message).toBeNull();
     expect(taskFetches()).toBe(2);
+    // A second press could only answer "nothing was discarded" about the discard that just happened.
+    expect(labelled('Discard')?.props.disabled).toBe(true);
   });
 
   it('shows a working merge as working: pulse and nothing to answer', async () => {
