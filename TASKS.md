@@ -773,11 +773,6 @@ status: open · area: modular-haive-plan owns merge-resolver.ts landing sections
 1. merge-resolver.ts ~:1320-1322, ~:1362: persist baseShaBefore before the merge.
 2. reopen (~:1642) never calls ensureBaseWorktree.
 
-### T421 · FNF[git-data-ledger-rows] · ledger rows recorded at git-data paths stay live forever
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T01:43Z · last: 2026-10-31T01:43Z
-From the T304 review (2026-10-24). PRE-EXISTING, minor. `onboarding_artifacts` rows an earlier release recorded at a git-data path (a literal `.git` segment or, since T304, an NTFS or HFS+ alias of it) are skipped by every reader (01 plan, 02 and 04 writes, 03 staging, the sync), but nothing retires them and they still count in `liveArtifacts` (api upgrades.ts ~:456, ~:723, ~:787). Fix: retire them in a numbered, idempotent data migration (SQL cannot call `namesGitData`, so the migration needs the same rule in SQL, or ship a deploy script), or leave them out of the counts.
-
 ### T425 · FNF[orphan-gitlink] · gate 3 commits an agent-left nested repository as a gitlink with no .gitmodules entry
 
 status: open · kind: design
@@ -924,11 +919,6 @@ T449 and T454 made the sign-in form and /repos/new keep pre-hydration input (unc
 
 Decide whether the class is worth a general mechanism (copy DOM values into state on hydration, a shared hook) or is left as is.
 
-### T465 · FNF[smoke-hang-watchdog] · one hung smoke burns the whole CI smokes job and hides every smoke after it
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T02:35Z · last: 2026-10-31T02:35Z
-From the T349 fix-round review (2026-10-31). PRE-EXISTING, minor (CI cost and lost signal). `smoke:ci` chains the smokes with `&&` and no per-smoke limit (api package.json ~:29, worker package.json ~:59), so a smoke that hangs runs until the job's 30-minute limit cancels it, and the smokes after it never run: in PR #951's first run 46 of the 52 smokes never ran. Main's green run uses about 1408 of the 1800 s. Give each smoke its own limit (a wrapper that kills it and names it), so a hang fails one smoke fast and the rest still run.
-
 ### T466 · FNF[stale-outbox-rows] [verify-first] · dirty project-state outbox rows whose checkout is gone fail every sweep tick
 
 status: open
@@ -964,6 +954,8 @@ Give each independent check the `if: ${{ !cancelled() && <its prerequisites succ
 
 ## Done
 
+- T465 — smoke:ci of api, worker and database runs through scripts/run-smokes.mjs: each smoke in its own process group under its own limit (default 120 s; repo-refresh 480, two-install 240, from 8 green main runs), a hung one killed and named, the chain going on with a summary and exit 1; the worker and migration smoke steps run after a failed api smoke — PR #957 (1d14f60cf), 2026-10-31; main CI green with the runner on a real Actions run; docs/architecture/ci-smokes.md; follow-up T470
+- T421 — a convergent boot data migration (supersedeGitDataArtifacts, the real namesGitData) retires every live ledger row at a git-data path at every worker boot, setting only superseded_at and updated_at, ordered before seedRepositoryCliTargets; the onboarding reset takes back a retired git-data row's claim file (a leftover made the record unreadable and the writer throw); take_theirs/keep_mine at a non-claimable path answer invalid and 04's untracked put-back skips a git-data row — PR #956 (54f846e0d), 2026-10-31; main CI green; follow-ups T468, T469
 - T463 — a form read of a request that is not a form answers 400 invalid_form (formBodyErrors maps the TypeError class), the CLI login banner ignores a WebSocket frame that is not a JSON object, PUT /user-settings/ide and /ui-prefs refuse a settingsJson that is not an object, and five sources added 100755 are 100644 — PR #955 (98e0f3762), 2026-10-31; main CI green; follow-ups T467, T364 item 26 note
 - T349 — every multi-row step writer locks its step rows in one id-ordered batch first (lockStepRows; 11 api and 2 worker writers, after the run, mining and DAG statements); a repository delete takes the task-creation key a Retry takes, and the plan advisory takes it before its node row; the single cancel and the step abort lock, re-check and cancel only a task that is not completed or cancelled, ending only the step rows they locked (a later row is the CANCEL job's); the claim-race smoke pins the new rule (a pass waits for an in-flight Retry; the 503 covers a row created after the batch) — PR #951 (a767e7ffa), 2026-10-31; main CI green incl. all smokes; follow-ups T458, T459, T460, T461, T364 item 24, T465, T466
 - T454 — /repos/new keeps a display name, branch and writable-copy choice typed before React attaches: uncontrolled fields read with FormData before the first await, the branch also written through a ref by the GitHub picker and a Source switch, and the form declares method=post now that its fields have names; the survey found /tasks/new (design, T464) and no other server-rendered form; the pre-hydration helpers moved to tests/e2e/helpers/hydration.ts — PR #954 (cfc0c37e6), 2026-10-31; main CI green; checked on the dev stack; follow-ups T464, T453 note, T365 +2, T343 +1, T364 +1
