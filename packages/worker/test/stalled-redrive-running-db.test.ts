@@ -535,7 +535,7 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
     };
     const modes = ['cli', 'agent_mining', 'dag_parallel'] as const;
     it.each(modes.flatMap((mode) => [true, false].map((started) => ({ mode, started }))))(
-      'F7: a live $mode run (started: $started) never enters the task-locking fence',
+      'a live $mode run (started: $started) never enters the task-locking fence',
       async ({ mode, started }) => {
         const taskId = await live(mode, started);
         const before = await state(taskId);

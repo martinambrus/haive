@@ -170,6 +170,12 @@ function overduePark(cutoff: Date) {
   )!;
 }
 
+/** A run of the row that has neither ended nor been superseded, started or not: something to wait for. */
+const liveRun = sql`EXISTS (SELECT 1 FROM ${schema.cliInvocations}
+  WHERE ${schema.cliInvocations.taskStepId} = ${schema.taskSteps.id}
+    AND ${schema.cliInvocations.endedAt} IS NULL
+    AND ${schema.cliInvocations.supersededAt} IS NULL)`;
+
 /** A row re-opened as `running` (a Resume, retry_ai, the allowance auto-resume) whose advance never
  *  reached the queue: the re-open commits before the add, so a rejected add leaves the row as it is
  *  now. Idle since `cutoff` is not enough, since a fan-out behind queued agents sits idle too: the
@@ -182,12 +188,6 @@ function idleRunningRow(cutoff: Date) {
     not(liveRun),
   )!;
 }
-
-/** A run of the row that has not ended, started or not: something to wait for. */
-const liveRun = sql`EXISTS (SELECT 1 FROM ${schema.cliInvocations}
-  WHERE ${schema.cliInvocations.taskStepId} = ${schema.taskSteps.id}
-    AND ${schema.cliInvocations.endedAt} IS NULL
-    AND ${schema.cliInvocations.supersededAt} IS NULL)`;
 
 /** The current rows the sweep takes for a `running` task, apart from a failed one. */
 function stalledRow(cutoff: Date) {
