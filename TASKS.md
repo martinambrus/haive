@@ -558,7 +558,7 @@ status: open · was modular #211
 23. (main CI on 02a25e357, 2026-10-30) PRE-EXISTING since T118, flaky: worker test/onboarding-recorded-membership.test.ts `tree()` (~:287) reads every file under the fixture repository, `.git` included, right after the fixture's `git commit` (~:340-345, ~:442-445), and the detached `git maintenance run --auto` that commit starts creates and removes `.git/objects/maintenance.lock` in between: `ENOENT ... open '.../.git/objects/maintenance.lock'` (run 41136606433). Give the fixture's git calls `-c maintenance.auto=false` (or skip that lock in the walk), and grep the other tests that walk a git fixture after a commit for the same race.
 24. (T349 review, 2026-10-31) PRE-EXISTING, minor: of the four step actions that write the clicked row before they move the task (loop Resume, `retry_ai`, the CLI switch, Skip), only Skip has a committed lock-order control; no case tells `cancelStillOpen` locking every row of the task from locking only the open ones; and the cancel route's control (K7) now passes from the Stop batch alone, so the step abort's (K8) is the only one that pins `cancelStillOpen`.
 25. (T445 review, 2026-10-31) PRE-EXISTING, minor: since T445 the node-free guard fails on Node globals read as values, but it covers only the project-state subpath the web imports; shared naming/index.ts ~:63 (`process.env` as a default parameter) and forge/bitbucket-cloud.ts ~:33 (`Buffer.from`) are unguarded. The web never calls them today. Extend the guard to every shared subpath the web bundles.
-26. (T455 review, 2026-10-31) PRE-EXISTING, hardening: nothing enforces T455's `requireJsonObject` guard, so a new `(await c.req.json()) as {...}` in an api route brings the `null`-body 500 back. A ratchet test over api routes (as `fs-ratchet.test.ts` does for path-based fs calls) would catch it.
+26. (T455 review, 2026-10-31) PRE-EXISTING, hardening: nothing enforces T455's `requireJsonObject` guard, so a new `(await c.req.json()) as {...}` in an api route brings the `null`-body 500 back. A ratchet test over api routes (as `fs-ratchet.test.ts` does for path-based fs calls) would catch it; it should also cover WebSocket `message` listeners that read a field off a parsed frame (the CLI login banner's was one, fixed by T463).
 27. (T454 review, 2026-10-31) PRE-EXISTING, minor, dev hosts only: tests/e2e/repos/create.spec.ts ~:17 `findFirstGitDir` counts hidden git directories while the UI hides them, so the local_path case fails on a host with e.g. `~/.nvm` (identical before T454).
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+5)
@@ -960,6 +960,11 @@ From the T349 fix-round review (2026-10-31). PRE-EXISTING, minor (CI cost and lo
 
 status: open
 From the T349 fix-round review (2026-10-31). PRE-EXISTING, unsure, not traced. With 125 dirty `project_state_outbox` rows (and 21 dirty `plan_mirror_state` rows) left in a scratch database by a killed smoke, every sweep tick logged `ProjectStateWriteError` ENOENT per row (T349 fix-s2 evidence sweep-branch-worker-two-install.log ~:92+). Verify first whether rows whose checkout no longer exists can delay or starve healthy rows in production (worker plan-mirror-queue sweep, project-state/write.ts), and whether such a row is ever retired.
+
+### T467 · FNF[form-body-buffering] [design] · both form readers buffer the whole multipart body before their size checks
+
+status: open
+From the T463 review (2026-10-31). PRE-EXISTING, minor to moderate. `POST /repos/upload` (api routes/repos.ts ~:575, size check ~:592, default cap 2 GiB) and the notification sound upload (routes/user-settings.ts ~:386, check ~:390, cap 2 MiB) call `c.req.formData()`, which reads the whole body into memory before the route's own size check runs, and neither route sets a `bodyLimit`. `/repos/upload` is a documented route (docs/architecture/repository-refresh.md ~:34) with no web caller: decide whether to cap it with a streaming limit or retire it; the sound upload needs a `bodyLimit` at its own cap.
 
 ## Done
 
