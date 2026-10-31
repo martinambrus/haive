@@ -141,7 +141,12 @@ jobs:
   smokes:
     name: End-to-end smokes
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The longest of the CI jobs, and it grows with every gated test (about 7.5 s a row of the GATED
+    # list). 45 minutes keeps more than 600 s over a green run and room for a run in which the gated
+    # tests end at their 25 minutes, so the checks after a hung step still run. The budget in
+    # scripts/test/ci-step-independence.test.mjs fails when the list outgrows these limits;
+    # docs/architecture/ci-smokes.md (Limits) has the measurements.
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:18-alpine
@@ -226,8 +231,18 @@ jobs:
 
       # A gated file skips green when its URL is unset, so each must report tests run and none skipped.
       # The database column is the name each file's own guard demands.
+      #
+      # This step and the six Redis script steps below carry a timeout-minutes, so that one that
+      # hangs ends at its own limit and the checks after it still run, instead of burning the job's
+      # limit and cancelling them. Each limit is well above the step's slowest green run (the
+      # measurements are in docs/architecture/ci-smokes.md). scripts/test/ci-step-independence.test.mjs
+      # pins that every check that is not a smoke:ci chain has one.
+      #
+      # The script's `set -uo pipefail` leaves errexit on: a step with no `shell:` runs as `bash -e {0}`,
+      # so a failed build before the loop ends the step and no gated file runs on it.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 25
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
@@ -371,7 +386,7 @@ jobs:
           exit "$failed"
 
       # api smokes first: they are seconds each, so a broken route surfaces before the
-      # worker suite spends most of the job's 30-minute budget. smoke:terminal is
+      # worker suite spends most of the job's budget. smoke:terminal is
       # excluded from smoke:ci — it needs a docker daemon and pulls an image, the same
       # reason the worker job leaves smoke:sub-agent out of its own smoke:ci.
       # Every smoke:ci runs its smokes through scripts/run-smokes.mjs: each smoke has its own time
@@ -386,36 +401,42 @@ jobs:
 
       - name: Agent pool script on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
         run: pnpm --filter @haive/worker exec vitest run src/queues/cli-exec/agent-lease.test.ts
         env:
           HAIVE_LEASE_TEST_REDIS_URL: redis://localhost:6379/15
 
       - name: CLI job retention on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
         run: pnpm --filter @haive/worker exec vitest run test/cli-job-retention.test.ts
         env:
           CLI_JOB_RETENTION_TEST_REDIS_URL: redis://localhost:6379/9
 
       - name: RAG sync lock on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
         run: pnpm --filter @haive/shared exec vitest run test/rag-sync-lock.test.ts
         env:
           HAIVE_RAG_LOCK_TEST_REDIS_URL: redis://localhost:6379/14
 
       - name: Usage-auth stash script on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
         run: pnpm --filter @haive/api exec vitest run test/cli-providers-usage-auth.test.ts
         env:
           USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/12
 
       - name: Module activation watch on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
         run: pnpm --filter @haive/worker exec vitest run test/module-activation-watch.test.ts
         env:
           MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/11
 
       - name: Auth throttle script on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 10
         run: pnpm --filter @haive/api exec vitest run test/auth-throttle.test.ts
         env:
           AUTH_THROTTLE_TEST_REDIS_URL: redis://localhost:6379/10
@@ -466,7 +487,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The last setup step. Both checks below run on `!cancelled() && steps.build.conclusion ==
+      # 'success'`, as the smokes job's do on `migrate`: a failed check no longer skips the other,
+      # a failed setup step still stops both. scripts/test/ci-step-independence.test.mjs pins it.
       - name: Build shared + database
+        id: build
         run: |
           pnpm --filter @haive/database build
           pnpm --filter @haive/shared build
@@ -475,6 +500,7 @@ jobs:
       # because ubuntu-latest ships a client older than PG18 and pg_dump refuses a newer server.
       # Same reason the smokes job reaches redis through `docker exec <service id>`.
       - name: Compare migration corpus against push --force
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' }}
         run: bash packages/database/scripts/schema-parity.sh
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
@@ -485,6 +511,7 @@ jobs:
       # corpus into a shipped image — and the updater in steadfast-committing-gray runs the
       # runner from exactly that image, with no source tree to fall back on.
       - name: Migration corpus reaches the production image
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' }}
         run: |
           scripts/ci-retry.sh docker build --target production -f packages/api/Dockerfile -t haive-api-prod-check .
           docker run --rm haive-api-prod-check \
@@ -506,16 +533,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The setup ends at this step: the web checks below run on `!cancelled() &&
+      # steps.build.conclusion == 'success' && matrix.service == 'web'`, so a failed check no
+      # longer skips the other. scripts/test/ci-step-independence.test.mjs pins it.
       - name: Build the production stage
+        id: build
         run: scripts/ci-retry.sh docker build --target production -f packages/${{ matrix.service }}/Dockerfile -t haive-${{ matrix.service }}-prod-check .
 
       - name: The built production web image boots and enforces anonymous routing
-        if: matrix.service == 'web'
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' && matrix.service == 'web' }}
         run: node scripts/check-web-image.mjs haive-web-prod-check
 
       # A channel build proves which modules an image carries from this file before it pushes anything.
       - name: The web image names the modules compiled into it
-        if: matrix.service == 'web'
+        if: ${{ !cancelled() && steps.build.conclusion == 'success' && matrix.service == 'web' }}
         run: |
           docker run --rm --network none --entrypoint cat haive-web-prod-check /app/packages/web/modules.generated.json |
             node -e "const m=JSON.parse(require('fs').readFileSync(0,'utf8'));
