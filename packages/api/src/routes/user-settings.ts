@@ -24,6 +24,7 @@ import {
 } from '@haive/shared/fs-safe';
 import { requireAuth, requireAuthAllowingPasswordChange } from '../middleware/auth.js';
 import { getDb } from '../db.js';
+import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { isJsonObject, requireJsonObject } from '../lib/json-object.js';
@@ -123,6 +124,13 @@ userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c)
     tv: newTokenVersion,
   });
   const { token: refreshToken, expiresAt } = await signRefreshToken(user.id, newTokenVersion);
+  const event: AuditEvent = {
+    actorUserId: userId,
+    action: 'user.password.change',
+    targetType: 'user',
+    targetId: userId,
+    metadata: { forced: user.mustChangePassword },
+  };
   await db.transaction(async (tx) => {
     const changed = await tx
       .update(schema.users)
@@ -148,8 +156,10 @@ userSettingsRoutes.put('/password', requireAuthAllowingPasswordChange, async (c)
       tokenHash: hashRefreshToken(refreshToken),
       expiresAt,
     });
+    await insertAuditEvent(tx, event);
   });
 
+  logAuditEvent(event);
   closeUserSockets(userId);
   setAuthCookies(c, accessToken, refreshToken);
 

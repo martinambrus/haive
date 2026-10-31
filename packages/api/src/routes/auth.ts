@@ -15,6 +15,7 @@ import {
   secretsService,
 } from '@haive/shared';
 import { getDb } from '../db.js';
+import { insertAuditEvent, logAuditEvent } from '../lib/audit.js';
 import { hashPassword, verifyPassword } from '../auth/password.js';
 import {
   signAccessToken,
@@ -171,10 +172,24 @@ authRoutes.post('/register', async (c) => {
       }
     }
 
+    await insertAuditEvent(tx, {
+      actorUserId: inserted[0]!.id,
+      action: 'user.register',
+      targetType: 'user',
+      targetId: inserted[0]!.id,
+      metadata: { role, invited: invite !== null, firstRun: decision.firstRun },
+    });
     if (decision.firstRun) {
       log.info({ userId: inserted[0]!.id }, 'first account created — anointed as administrator');
     }
-    return inserted[0]!;
+    return { ...inserted[0]!, firstRun: decision.firstRun };
+  });
+  logAuditEvent({
+    actorUserId: user.id,
+    action: 'user.register',
+    targetType: 'user',
+    targetId: user.id,
+    metadata: { role: user.role, invited: Boolean(body.inviteToken), firstRun: user.firstRun },
   });
   const { accessToken, refreshToken, expiresAt } = await issueTokens(
     user.id,
