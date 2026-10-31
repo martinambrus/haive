@@ -100,6 +100,8 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     const dir = await intact();
     shim = await killGit(['rev-parse', '--verify', '--quiet', 'HEAD']);
     expect(await usableCheckout(dir)).toEqual({ unknown: expect.stringContaining('SIGKILL') });
+    // A git with no exit status has said nothing to log.
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('no git on PATH is unknown while the folder exists', async () => {
@@ -115,6 +117,43 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     await shim.restore();
     shim = await failGit(['rev-parse', '--verify', '--quiet', 'HEAD'], { exit: 1 });
     expect(await usableCheckout(dir)).toBe('unusable');
+  });
+
+  // Display only: what git said is for whoever reads the log; nothing branches on it.
+  it('a HEAD read that exits other than 0 or 1 logs what git said, beside the checkout', async () => {
+    const dir = await intact();
+    shim = await failGit(['rev-parse', '--verify', '--quiet', 'HEAD'], {
+      exit: 128,
+      stderr: 'fatal: simulated HEAD failure\n',
+    });
+    expect(await usableCheckout(dir)).toEqual({ unknown: 'git exited 128', repairNeeded: true });
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ dest: dir, stderr: 'fatal: simulated HEAD failure' }),
+      expect.any(String),
+    );
+  });
+
+  it('logs what git said about HEAD trimmed and cut to 500 characters', async () => {
+    const dir = await intact();
+    shim = await failGit(['rev-parse', '--verify', '--quiet', 'HEAD'], {
+      exit: 2,
+      stderr: `\n  ${'x'.repeat(2000)}  \n`,
+    });
+    expect(await usableCheckout(dir)).toEqual({ unknown: 'git exited 2', repairNeeded: true });
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ dest: dir, stderr: 'x'.repeat(500) }),
+      expect.any(String),
+    );
+  });
+
+  it('a HEAD read that exits 1 is an answer, and says nothing', async () => {
+    const dir = await intact();
+    shim = await failGit(['rev-parse', '--verify', '--quiet', 'HEAD'], {
+      exit: 1,
+      stderr: 'fatal: not logged\n',
+    });
+    expect(await usableCheckout(dir)).toBe('unusable');
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('a corrupt config is unknown rather than a reason to rebuild', async () => {

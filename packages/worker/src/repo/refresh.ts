@@ -162,9 +162,13 @@ export async function usableCheckout(
   const head = await gitRun(dest, ['rev-parse', '--verify', '--quiet', 'HEAD']);
   if (head.code === 0) return 'usable';
   if (head.code === 1) return 'unusable';
-  return gitGaveNoAnswer(head)
-    ? { unknown: whyNoAnswer(head) }
-    : { unknown: whyNoAnswer(head), repairNeeded: true };
+  if (gitGaveNoAnswer(head)) return { unknown: whyNoAnswer(head) };
+  // For the reader of the log only: nothing branches on git's words.
+  logger.warn(
+    { dest, stderr: head.stderr.trim().slice(0, 500) },
+    'git exited other than 0 or 1 reading HEAD; leaving the checkout unknown',
+  );
+  return { unknown: whyNoAnswer(head), repairNeeded: true };
 }
 
 interface RefreshSource {
