@@ -932,14 +932,6 @@ From the T463 review (2026-10-31). PRE-EXISTING, minor to moderate. `POST /repos
 status: open
 From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. worker/api onboarding-admission.ts `ledgerImportedSince` (~:128-144) counts every import marker imported after an upgrade, path-blind and including the superseded ones, so a marker at a git-data path that T421's boot migration retired still blocks that upgrade's rollback. Decide whether a retired git-data marker should count (it was never a real import) or the conservative block stays.
 
-### T469 · FNF[git-data-ledger-rows-2] · a reset leaves a git-data claim file no ledger row names; three writers record ledger rows with no path check (+1)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T05:02Z · last: 2026-10-31T05:02Z
-From the T421 fix-round review (2026-10-31). PRE-EXISTING, minor.
-
-1. api routes/repos.ts (~:2568-2574): a git-data claim file named by no ledger row on this install (for example a teammate's older-release file the sync read into the base; it never creates a row) is still left by an onboarding reset, and the record then reads refused, so the next record write throws (confirmed by a one-off run). Direction: also remove base claims that name git data; `baseRecord` (~:3100) is already read there.
-2. worker 12-post-onboarding.ts ~:456, 01-upgrade-plan.ts ~:397 and worker/scripts/reset-bundle-to-commit.ts ~:171 insert ledger rows with no path check; they hold only by the static catalog and the bundle-id grammar (the script is a manual dev helper). Add the same `namesGitData` refusal T421 gave the other writers.
-
 ### T470 · FNF[ci-step-independence] · a failed CI step still skips the independent checks after it (+1)
 
 status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T05:58Z · last: 2026-10-31T05:58Z
@@ -972,8 +964,26 @@ From the T469 review (2026-10-31). PRE-EXISTING, minor (reachable only from a st
 
 worker 07-generate-files.ts writes `agentFilePath(target, agent.id)` (~:918) and `${target.dir}/README.md` (~:922) through `writeIfAllowed` (~:832, `writeFileNoFollow`) at the stored `detected.agentTargets[].dir`, a bare string (`agentTargetSchema.dir`, render-context.ts ~:7-11), with no git-data refusal; fs-safe has none either. 12 then stages 07's `wroteFiles` by name (_stage-paths.ts ~:145), and since T469 such a file gets no ledger row, so no reset or upgrade knows it. Direction: refuse a path that `namesGitData` beside `writeIfAllowed` (report it skipped) and keep it out of the stage plan, with a control per writer through a stored `agentTargets[].dir` of `.git/hooks` (T469's control shape).
 
+### T474 · FNF[ci-step-independence-2] · other CI jobs still skip independent checks after a failed one; the smokes job has no per-step limits and about 275 s of headroom (+3)
+
+status: open
+From the T470 review (2026-10-31). PRE-EXISTING, minor to moderate (the T470 hiding class in other jobs).
+
+1. A failed check skips an independent one after it: `schema-parity` "Compare migration corpus against push --force" (ci.yml ~:465) skips "Migration corpus reaches the production image" (~:475); `production-images` web leg ~:500 skips ~:505; platform-checks.yml `macos-preflight` ~:80 skips ~:88 (`compose-boot` ~:609-:630 is arguable). Give each the `!cancelled() && steps.<setup>.conclusion == 'success'` guard T470 gave the smokes job, with a pin in scripts/test/.
+2. No per-step `timeout-minutes` on the smokes job's "Postgres-gated tests" step (~:229, about 621 s) or the six Redis-script steps (~:375-410), so a hang there burns the job's 30 minutes and cancels every later check.
+3. The gated step's preamble runs `set -uo pipefail` without `-e` (~:238-241), so a failed web-kit or modules build or `gen-modules` does not fail the step by itself.
+4. The smokes job's 1800 s leaves about 275 s over a green run (the last 13 green main runs took 1221-1525 s, the newest the slowest), and a hung repo-refresh costs about 240 s of it: raise the job limit or split the job before a slower runner cancels green runs.
+
+### T475 · FNF[ci-unit-tests-job] [design] · a format or typecheck failure skips the unit tests in lint-typecheck-test
+
+status: open
+From the T470 review (2026-10-31). PRE-EXISTING, minor to moderate.
+
+`lint-typecheck-test` (ci.yml ~:55-110) runs Format check, Typecheck, Unit tests, Module scripts, Shellcheck and Installer boot-failure paths with no `if:`, so a 41 s format error hides the 591 s unit tests, and shellcheck and the installer test need only the checkout. A guard there would hold the job's red verdict until the unit tests end; the alternative is giving Unit tests their own job, which renames a required check (a decision for the owner). The e2e job's "Typecheck the suite" (~:677) before the stack boot is deliberate and stays.
+
 ## Done
 
+- T469 — the onboarding reset also takes back a git-data claim file only the sync base names (baseGitDataPaths; left behind, the record read refused and the next record write threw); 12, 01's lazy backfill and the manual bundle helper refuse a path that names git data — PR #959 (68af9d174), 2026-10-31; main CI green; follow-ups T472, T473
 - T461 — every carried_* fold reads the row after it holds it and folds from that read (a delta computed from a pre-transaction read lost a concurrent fold or idle write): resetRowsForRerun, the per-step and the task-level provider switch (now one transaction under T349's batch), resetStepAndDownstream, requeueAbandonedOrphan and writeFencedPark's first park — PR #958 (ffa1c2d0c), 2026-10-31; main CI green; follow-ups T471, T459 note, T364 item 28
 - T465 — smoke:ci of api, worker and database runs through scripts/run-smokes.mjs: each smoke in its own process group under its own limit (default 120 s; repo-refresh 480, two-install 240, from 8 green main runs), a hung one killed and named, the chain going on with a summary and exit 1; the worker and migration smoke steps run after a failed api smoke — PR #957 (1d14f60cf), 2026-10-31; main CI green with the runner on a real Actions run; docs/architecture/ci-smokes.md; follow-up T470
 - T421 — a convergent boot data migration (supersedeGitDataArtifacts, the real namesGitData) retires every live ledger row at a git-data path at every worker boot, setting only superseded_at and updated_at, ordered before seedRepositoryCliTargets; the onboarding reset takes back a retired git-data row's claim file (a leftover made the record unreadable and the writer throw); take_theirs/keep_mine at a non-claimable path answer invalid and 04's untracked put-back skips a git-data row — PR #956 (54f846e0d), 2026-10-31; main CI green; follow-ups T468, T469
