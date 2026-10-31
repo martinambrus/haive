@@ -899,7 +899,7 @@ Also (T349 fix-round review, 2026-10-31, reasoned from the code, not reproduced)
 
 ### T461 · FNF[stale-preread-fold] · two folds add to values read before their transaction
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T03:46Z · last: 2026-10-31T03:46Z
 From the T349 review (2026-10-31). PRE-EXISTING, minor. The `carried_*` fold in `resetRowsForRerun` (api routes/tasks/steps.ts ~:211) and the provider-switch loop (routes/tasks/index.ts ~:1813) add to values read before the transaction, so a fold that interleaves loses an update. Read the values under the row lock, or fold in SQL (`col = col + delta`).
 
 ### T462 · FNF[project-state-notices] [design] · the repository page cannot say a sync replaced or refused a value (+2)
