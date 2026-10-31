@@ -944,7 +944,7 @@ From the T445 review (2026-10-31; was T445 item 2). PRE-EXISTING.
 
 ### T463 · FNF[api-body-shape-2] · a form read of a JSON request is a 500; a `null` WebSocket frame throws in the login listener; two settings PUTs accept a non-object (+2)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T02:01Z · last: 2026-10-31T02:01Z
 From the T455 review (2026-10-31). PRE-EXISTING, minor.
 
 1. `c.req.formData()` on a request whose content type is not a form throws and answers 500: api routes/repos.ts ~:556 and routes/user-settings.ts ~:382. Answer 400 (or 415) instead.
