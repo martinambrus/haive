@@ -144,8 +144,8 @@ jobs:
     # The longest CI job grows with the GATED list (about 7.5 s a row). Its 45 minutes must
     # cover a modelled green run plus a non-gated check's limit (worker smokes: 15 minutes).
     # For the gated step, count its 25-minute limit plus the 907 s outside it. The budget pin
-    # leaves later checks room after either hang and fails when the list outgrows these limits. Measure again
-    # before raising them; docs/architecture/ci-smokes.md (Limits) records the measurements.
+    # leaves later checks room after either hang and fails when the list outgrows these limits.
+    # Measure again before raising them; docs/architecture/ci-smokes.md (Limits) has the measurements.
     timeout-minutes: 45
     services:
       postgres:

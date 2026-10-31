@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parsers } from 'prettier/plugins/yaml';
 
-// The YAML parser declared through Prettier, as ci-browser-budget.test.mjs reads it, so
+// Share the YAML parser declared through Prettier across the workflow pins so
 // indentation and comments cannot satisfy the checks. Scalars stay strings.
 function value(node) {
   if (!node) return null;

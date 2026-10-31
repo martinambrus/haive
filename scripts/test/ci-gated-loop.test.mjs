@@ -17,7 +17,8 @@ function fixture(script, full = false) {
   assert.ok(list, 'gated harness: missing GATED list and target row');
   const rows = list.split('\n').filter(Boolean);
   assert.ok(rows.length >= 3, 'gated harness: needs three GATED rows including a target row');
-  const target = rows[0].split(/\s+/);
+  // Preserve empty columns so malformed fixture targets receive the specific diagnostic.
+  const target = rows[0].split(/[ \t]/);
   assert.equal(target.length, 5, 'gated harness: target row needs pkg, file, var, db and server');
   const [, file, , db] = target;
   assert.ok(file && db, 'gated harness: missing target file or database');
@@ -274,5 +275,26 @@ describe('independent gated harness targets (item 9)', () => {
         out.output,
       );
     });
+  }
+});
+
+describe('remaining gated fixture diagnostics (item 10)', () => {
+  it('explains a list with fewer than three rows', () =>
+    assert.throws(
+      () =>
+        fixture(
+          "done <<'GATED'\nworker file VAR db postgres\nworker another VAR other postgres\nGATED\n",
+        ),
+      /needs three GATED rows including a target row/,
+    ));
+  for (const row of ['worker  VAR db postgres', 'worker file VAR  postgres']) {
+    it(`explains an empty file or database in ${JSON.stringify(row)}`, () =>
+      assert.throws(
+        () =>
+          fixture(
+            `done <<'GATED'\n${row}\nworker two VAR db2 postgres\nworker three VAR db3 postgres\nGATED\n`,
+          ),
+        /missing target file or database/,
+      ));
   }
 });
