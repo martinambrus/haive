@@ -754,6 +754,50 @@ describe('PlanMergePanel with a merge task', () => {
     expect(onSettled).toHaveBeenCalledTimes(1);
   });
 
+  it('retries a transient recovery failure and stops as soon as it gets an answer', async () => {
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    net.get.mockRejectedValueOnce(new Error('Temporary recovery failure'));
+    rerender(null);
+    await settle();
+    expect(taskFetches()).toBe(2);
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status: 'failed' }));
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(taskFetches()).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(taskFetches()).toBe(3);
+    expect(shown().find((el) => el.props.role === 'status')).toBeDefined();
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(taskFetches()).toBe(3);
+  });
+
+  it('bounds recovery to three failed reads', async () => {
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    net.get.mockRejectedValue(new Error('Recovery unavailable'));
+    rerender(null);
+    await settle();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(taskFetches()).toBe(4);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(taskFetches()).toBe(4);
+    expect(onSettled).not.toHaveBeenCalled();
+  });
+
+  it('stops recovery retries after a readable working task', async () => {
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    net.get.mockRejectedValueOnce(new Error('Temporary recovery failure'));
+    rerender(null);
+    await settle();
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(taskFetches()).toBe(3);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(onSettled).not.toHaveBeenCalled();
+    expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+  });
+
   it('drops a recovered outcome if another merge is displayed before it returns', async () => {
     const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
     const recovery = deferred<unknown>();

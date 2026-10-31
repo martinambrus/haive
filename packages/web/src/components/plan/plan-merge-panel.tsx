@@ -127,22 +127,28 @@ export function PlanMergePanel({
       )
         return;
       // The page may see the end first, or the panel may have stopped at a form.
-      // Read the last task once when the page removes it, using the same status copy.
+      // Retry unreadable tasks twice; any answer ends this bounded recovery.
       let cancelled = false;
-      void api
-        .get<{ task: Task }>(`/tasks/${previousTaskId}`)
-        .then((res) => {
-          if (cancelled || isStaleReply(previousTaskId) || isTaskDead(res.task)) return;
-          if (discardRequestedRef.current === previousTaskId) return;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let attempts = 0;
+      const recover = async (): Promise<void> => {
+        attempts++;
+        try {
+          const res = await api.get<{ task: Task }>(`/tasks/${previousTaskId}`);
+          if (cancelled || isTaskDead(res.task)) return;
           const outcome = mergeOutcome(previousTaskId, res.task);
           if (outcome) {
             setNotice(outcome);
             onSettledRef.current();
           }
-        })
-        .catch(() => {});
+        } catch {
+          if (!cancelled && attempts < 3) timer = setTimeout(() => void recover(), POLL_MS);
+        }
+      };
+      void recover();
       return () => {
         cancelled = true;
+        if (timer) clearTimeout(timer);
       };
     }
     let cancelled = false;
