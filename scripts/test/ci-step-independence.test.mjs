@@ -159,7 +159,12 @@ function minimumMinutes(step) {
   return 2;
 }
 
-function checkJob(job, spec) {
+function checkJob(job, spec, workflow = workflows[spec.file]) {
+  assert.equal(
+    workflow.defaults?.run?.shell,
+    undefined,
+    'a workflow shell overrides runner errexit',
+  );
   const steps = spec.cleanup ? job.steps.slice(0, -spec.cleanup.length) : job.steps;
   if (spec.cleanup) {
     assert.deepEqual(
@@ -172,6 +177,7 @@ function checkJob(job, spec) {
   assert.equal(job.if, undefined, 'a job condition can skip all checks green');
   assert.equal(job.defaults?.run?.shell, undefined, 'a job shell overrides runner errexit');
   for (const step of steps) {
+    assert.equal(step.shell, undefined, `${label(step)} overrides runner errexit`);
     const script = (step.run ?? '')
       .split('\n')
       .filter((line) => !line.trimStart().startsWith('#'))
@@ -368,6 +374,12 @@ const MUTANTS = [
     'survivor: a job shell overriding runner errexit',
     (job) => {
       job.defaults = { run: { shell: 'bash {0}' } };
+    },
+  ],
+  [
+    'survivor: a check shell overriding runner errexit',
+    ({ steps }, last) => {
+      steps[last + 1].shell = 'bash {0}';
     },
   ],
   [
@@ -672,6 +684,12 @@ for (const spec of JOBS) {
       const renamed = structuredClone(job);
       renamed.steps.find((step) => step.id === spec.prerequisite).name = 'Different wording';
       checkJob(renamed, spec);
+    });
+
+    it('rejects a workflow shell overriding runner errexit', () => {
+      const mutant = structuredClone(workflows[spec.file]);
+      mutant.defaults = { run: { shell: 'bash {0}' } };
+      assert.throws(() => checkJob(mutant.jobs[spec.id], spec, mutant), assert.AssertionError);
     });
 
     for (const [name, mutate, applies] of MUTANTS) {
