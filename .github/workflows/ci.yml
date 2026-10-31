@@ -262,7 +262,8 @@ jobs:
             url="postgres://haive:haive_dev_password@localhost:$port/$db"
             report="$RUNNER_TEMP/$db.json"
             rm -f "$report"
-            exists=$(docker exec "$container" psql -U haive -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$db'")
+            exists=$(docker exec "$container" psql -U haive -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$db'") \
+              || { echo "::error::database probe failed for $file ($db)"; failed=1; echo "::endgroup::"; continue; }
             if [ "$exists" != 1 ]; then
               docker exec "$container" psql -U haive -d postgres -c "CREATE DATABASE $db" \
                 || { echo "::error::could not create $db"; failed=1; echo "::endgroup::"; continue; }

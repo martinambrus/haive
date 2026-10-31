@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -575,7 +575,7 @@ if [[ "$1" != scripts/gen-modules.mjs ]]; then exec "$REAL_NODE" "$@"; fi
   assert.ifError(out.error);
   return {
     ...out,
-    calls: readFileSync(join(dir, 'calls'), 'utf8'),
+    calls: existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '',
     output: out.stdout + out.stderr,
   };
 }
@@ -586,5 +586,18 @@ describe('the gated loop verdict', () => {
     assert.equal(out.status, 1, out.output);
     assert.match(out.output, /::error::test\/logger-db-error-params\.test\.ts failed/);
     assert.equal(out.calls.trim().split('\n').length, gatedRows(gatedStep()));
+  });
+});
+
+describe('the gated database probe', () => {
+  it('annotates a failed probe, counts the row failed and runs all later rows', (t) => {
+    const out = runGated(t, 'probe');
+    assert.equal(out.status, 1, out.output);
+    assert.match(
+      out.output,
+      /::error::.*test\/logger-db-error-params\.test\.ts.*db_error_params_test/,
+    );
+    assert.equal(out.calls.trim().split('\n').length, gatedRows(gatedStep()) - 1);
+    assert.doesNotMatch(out.calls, /test\/logger-db-error-params\.test\.ts/);
   });
 });
