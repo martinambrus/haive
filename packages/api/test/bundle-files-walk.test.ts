@@ -86,5 +86,5 @@ it('lists a cap-sized tree of nested files identically without resolving each fi
   const body = await response.json();
   expect(response.status).toBe(200);
   expect(body).toEqual({ files: expected, truncated: false, cap: FILES_LIST_CAP });
-  expect(vi.mocked(lstatNoFollow).mock.calls.length).toBeLessThanOrEqual(1);
+  expect(vi.mocked(lstatNoFollow)).not.toHaveBeenCalled();
 }, 60_000);

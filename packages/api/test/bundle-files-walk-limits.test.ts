@@ -4,7 +4,20 @@ import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
-const h = vi.hoisted(() => ({ db: undefined as unknown }));
+const h = vi.hoisted(() => ({ db: undefined as unknown, failOpenOf: null as string | null }));
+// The open of the one path in `failOpenOf` fails the way a process out of descriptors fails.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    open: async (...args: unknown[]) => {
+      if (h.failOpenOf !== null && String(args[0]) === h.failOpenOf) {
+        throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' });
+      }
+      return (real.open as (...opened: unknown[]) => Promise<unknown>)(...args);
+    },
+  };
+});
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => ({ getBundleQueue: () => ({ add: async () => ({}) }) }));
 vi.mock('../src/middleware/auth.js', () => ({
@@ -44,6 +57,7 @@ beforeEach(async () => {
   };
 });
 afterEach(async () => {
+  h.failOpenOf = null;
   if (saved === undefined) delete process.env.BUNDLE_STORAGE_ROOT;
   else process.env.BUNDLE_STORAGE_ROOT = saved;
   await rm(storage, { recursive: true, force: true });
@@ -67,6 +81,16 @@ it('answers 500, not a partial list, when the walk runs out of descriptors part-
     yield { path: 'a/first', size: 1 };
     throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' });
   });
+
+  const res = await app.request(`/${BUNDLE}/files`);
+
+  expect(res.status).toBe(500);
+  expect(await res.json()).toEqual(SERVER_ERROR);
+});
+
+// The walk above is stubbed; this one is the real walk, failing at the first thing it opens.
+it('answers 500, not an empty listing, when the real walk cannot open the root for want of descriptors', async () => {
+  h.failOpenOf = storage;
 
   const res = await app.request(`/${BUNDLE}/files`);
 

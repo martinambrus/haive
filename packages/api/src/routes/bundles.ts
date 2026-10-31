@@ -16,7 +16,6 @@ import {
   type CustomBundleSourceType,
 } from '@haive/shared';
 import {
-  lstatNoFollow,
   openFileNoFollow,
   walkFilesNoFollow,
   removeNoFollow,
@@ -1008,10 +1007,6 @@ bundleRoutes.get('/:id/files', async (c) => {
   // A stored root this route cannot place reads as an empty tree, the same answer a missing
   // directory already gave — the listing is a convenience, not a contract about what exists.
   if (rootRel === null) return c.json({ files: [], truncated: false, cap: FILES_LIST_CAP });
-  const exists = await lstatNoFollow(anchor, rootRel);
-  if (exists?.kind !== 'directory') {
-    return c.json({ files: [], truncated: false, cap: FILES_LIST_CAP });
-  }
   const result = await listExtractedFiles(anchor, rootRel);
   return c.json(result);
 });
