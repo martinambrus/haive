@@ -35,6 +35,7 @@ const JOBS = [
   {
     file: 'ci.yml',
     id: 'smokes',
+    allStepsBounded: true,
     prerequisite: 'migrate',
     // Every check is cut by its own time limit (see RUN_SMOKES), not only by the job's.
     bounded: true,
@@ -70,6 +71,7 @@ const JOBS = [
   {
     file: 'ci.yml',
     id: 'schema-parity',
+    allStepsBounded: true,
     prerequisite: 'build',
     setup: [
       'actions/checkout',
@@ -82,6 +84,7 @@ const JOBS = [
   {
     file: 'ci.yml',
     id: 'production-images',
+    allStepsBounded: true,
     prerequisite: 'build',
     // The checks run on the web leg of the matrix only; the worker leg is the build alone.
     leg: "matrix.service == 'web'",
@@ -90,6 +93,7 @@ const JOBS = [
   {
     file: 'platform-checks.yml',
     id: 'macos-preflight',
+    allStepsBounded: true,
     prerequisite: 'checkout',
     setup: ['actions/checkout'],
   },
@@ -218,6 +222,15 @@ function checkJob(job, spec) {
       `a check is a smoke:ci chain or has a timeout-minutes of whole minutes, so that a hang ends it and not the job: ${unbounded.map(label).join('; ')}`,
     );
   }
+  if (spec.allStepsBounded) {
+    for (const step of steps) {
+      assert.match(
+        step['timeout-minutes'] ?? '',
+        WHOLE_MINUTES,
+        `${step.id ?? label(step)} needs a timeout-minutes of whole minutes`,
+      );
+    }
+  }
   if (spec.budget) {
     const { outsideGatedSeconds, slowRunnerFactor, marginSeconds } = spec.budget;
     const { gated, rows, gatedSeconds, greenSeconds } = model(checks, spec.budget);
@@ -257,6 +270,20 @@ function checkJob(job, spec) {
 // Each mutant breaks one rule of a job that passes, and checkJob has to refuse it. They are
 // written against the position of the prerequisite step (last), so they fit every job above.
 const MUTANTS = [
+  [
+    'a setup step with no time limit',
+    ({ steps }) => {
+      delete steps[0]['timeout-minutes'];
+    },
+    (spec) => spec.allStepsBounded,
+  ],
+  [
+    'a check with no explicit step limit',
+    ({ steps }, last) => {
+      delete steps[last + 1]['timeout-minutes'];
+    },
+    (spec) => spec.allStepsBounded,
+  ],
   [
     'a check without a guard',
     ({ steps }, last) => {

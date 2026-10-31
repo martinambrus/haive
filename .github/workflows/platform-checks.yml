@@ -79,9 +79,11 @@ jobs:
       # 'success'`, so a failed check no longer skips the other.
       # scripts/test/ci-step-independence.test.mjs pins it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         id: checkout
 
       - name: --help and an unknown option behave
+        timeout-minutes: 2
         if: ${{ !cancelled() && steps.checkout.conclusion == 'success' }}
         run: |
           set -euo pipefail
@@ -91,6 +93,7 @@ jobs:
           fi
 
       - name: Preflight names Docker and changes nothing
+        timeout-minutes: 2
         if: ${{ !cancelled() && steps.checkout.conclusion == 'success' }}
         # No daemon can run here, so preflight MUST fail — the assertion is that it fails the
         # right way: naming Docker, pointing at Docker Desktop for this platform, and writing
