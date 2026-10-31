@@ -43,7 +43,7 @@ describe('person-facing plan snapshot errors', () => {
         expect(message).not.toContain('/srv/');
         expect(message).not.toContain('private-repo');
         expect(message).toContain(code);
-        expect(message).toMatch(/plan snapshot/i);
+        expect(message).toBe(`${code}: cannot open '[path]'`);
       }
     },
   );
@@ -53,6 +53,22 @@ describe('person-facing plan snapshot errors', () => {
     const err = Object.assign(new Error(`EACCES: open '${SERVER_PATH}'`), { code: 'EACCES' });
     await recordPlanMirrorError(db, REPO, err);
     expect(warn).toHaveBeenCalledWith({ err, repositoryId: REPO }, expect.any(String));
+  });
+
+  it.each([
+    [
+      'git branch failed in /srv/private/repo: fatal: bad config',
+      'git branch failed in [path]: fatal: bad config',
+    ],
+    [String.raw`ENOENT: open 'C:\private\repo\plan.json'`, "ENOENT: open '[path]'"],
+    [String.raw`EACCES: open '\\server\share\plan.json'`, "EACCES: open '[path]'"],
+    [
+      "git push failed: unable to access 'https://github.com/o/r.git/': 403",
+      "git push failed: unable to access 'https://github.com/o/r.git/': 403",
+    ],
+  ])('preserves surrounding words and URLs: %s', async (raw, expected) => {
+    await recordPlanMirrorError(db, REPO, new Error(raw));
+    expect(await lastError()).toBe(expected);
   });
 
   it.each([

@@ -63,3 +63,17 @@ export function safeErrorMessage(err: unknown): string {
   if (boundQueryError(err)) return 'Database operation failed';
   return err instanceof Error ? err.message : String(err);
 }
+
+/** Display copy for filesystem/git failures: retain the diagnosis and URLs, hide absolute
+ *  POSIX, drive and UNC paths. Quoted paths may contain spaces; unquoted tokens end at
+ *  whitespace or diagnostic punctuation. The placeholder contains no path, so repairs converge.
+ *  Keep safeErrorMessage's ordinary-error contract unchanged for other diagnostic sinks. */
+export function scrubErrorPaths(err: unknown): string {
+  return safeErrorMessage(err).replace(
+    /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'`<>]+|(["'`])(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\r\n]*?\1|(?<![\w./\\:-])(?:[a-zA-Z]:[\\/]|\\\\|\/)[^\s"'`<>:,;!?()[\]{}]*/g,
+    (token: string, quote: string | undefined) => {
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(token)) return token;
+      return quote ? `${quote}[path]${quote}` : '[path]';
+    },
+  );
+}
