@@ -16,11 +16,12 @@ export type RecordReadable = { readable: true } | { readable: false; reason: str
 /** Whether a reader's walk of these files (relative to the state directory) would accept them. */
 export function recordReadable(files: ReadonlyMap<string, string>): RecordReadable {
   const dirs = new Set<string>();
+  const utf8 = new TextEncoder();
   let bytes = 0;
   for (const [rel, text] of files) {
     const parts = rel.split('/');
     for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
-    const size = Buffer.byteLength(text, 'utf8');
+    const size = utf8.encode(text).length;
     if (size > PROJECT_STATE_LIMITS.maxFileBytes) {
       return {
         readable: false,
