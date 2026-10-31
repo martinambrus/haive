@@ -942,6 +942,8 @@ From the T470 review (2026-10-31). PRE-EXISTING, minor to moderate.
 
 `lint-typecheck-test` (ci.yml ~:55-110) runs Format check, Typecheck, Unit tests, Module scripts, Shellcheck and Installer boot-failure paths with no `if:`, so a 41 s format error hides the 591 s unit tests, and shellcheck and the installer test need only the checkout. A guard there would hold the job's red verdict until the unit tests end; the alternative is giving Unit tests their own job, which renames a required check (a decision for the owner). The e2e job's "Typecheck the suite" (~:677) before the stack boot is deliberate and stays.
 
+Notes (T474 review, 2026-10-31; PRE-EXISTING): `lint-typecheck-test` has a 20-minute limit (ci.yml ~:38, pinned at ci-browser-budget.test.mjs ~:44) against a slowest green run of 1017 s, leaving 183 s; and Module scripts, Shellcheck and Installer boot (~:71, ~:93, ~:108) run after the slow unit tests, so guarding only them would not delay the red verdict.
+
 ### T476 · FNF[plan-merge-discard-result] · the plan merge panel reads a discard that cancelled nothing as discarded
 
 status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:14Z · last: 2026-10-31T13:14Z
@@ -1047,6 +1049,26 @@ status: open
 From the T479 follow-up review (2026-10-31). PRE-EXISTING, minor.
 
 The Replace ZIP route (api routes/bundles.ts ~:895-907; the removal at ~:906, inside the bundle-then-upload transaction) deletes the bundle's `extracted/` tree before it enqueues the ingest job (`attempts: 1`, ~:921), so the worker's `extractArchive` finds no destination and a corrupt replacement zip leaves a failed bundle (bundle-ingest.ts ~:173-176) whose item rows stay (worker-restarts.md ~:130-131) with no tree behind them. Since T479 the swap restores the previous tree on failure, so the route's removal no longer buys atomicity; but the comment at bundles.ts ~:896-897 ties it to the stale-complete guard and the docs record it as intended. Decide whether the route keeps the tree and lets the swap replace it.
+
+### T488 · FNF[ci-smokes-split] [design] · the smokes job grows about 7.5 s per gated test row; its budget pin fails at 134 rows
+
+status: open
+From the T474 review (2026-10-31). Latent, consequential once it bites.
+
+Since T474 the smokes job has a 45-minute limit and the gated step 25 minutes, with a pin that models a green run as 907 s plus 7.5 s per GATED row and fails at 134 rows (step) and 160 rows (job margin); the list had 79 rows on 2026-10-30 and 98 on 2026-10-31. Options: give the gated tests their own job (the critical path falls toward the next job's 579-1017 s; main is not protected, so a rename is free), run the gated files in parallel, or put each file under its own limit; a final step that warns when the elapsed time is within 600 s of the limit would make the budget self-monitoring.
+
+### T489 · FNF[ci-step-independence-3] · the gated loop's verdict is unpinned; unguarded steps and jobs with no limits (+5)
+
+status: open
+From the T474 review (2026-10-31). PRE-EXISTING unless stated; minor to moderate.
+
+1. Moderate: the gated loop's verdict `exit "$failed"` (ci.yml ~:378) is unpinned; deleting it turns every failing gated test green. A stub-based pin that fails one vitest call would cover it.
+2. `exists=$(docker exec ...)` (ci.yml ~:265) is the one unguarded command in the gated loop: under the runner's `bash -e` a failing docker exec ends the step at that row with no `::error::` and the remaining rows unrun.
+3. New with T474, unverified on a hosted runner: a step timeout signals only the shell, so hung children can outlive the step; the gated tests share Redis DBs 11-13 with later steps (ci.yml ~:248-250 vs ~:419, ~:426).
+4. compose-boot "Probe web root" (ci.yml ~:644) skips "Extraction tests inside the worker image" (~:665); left by T474 because the job ends in `always()`/`failure()` cleanup steps the setup-then-checks model has no slot for.
+5. schema-parity (15 min, ~:445), production-images (20 min, ~:519) and macos-preflight (10 min) rely on the job limit alone for a hang; `schema-parity.sh` and `ci-retry.sh` have no timeout; the smokes setup steps have none, so a hang there costs 45 minutes.
+6. release.yml: no job has `timeout-minutes` (default 360 min), and a hung one holds the `release-<ref>` concurrency group (~:19-20).
+7. Known pin survivors: `|| true` inside a check's `run`, `fail-fast: true` on production-images (~:522), a job `defaults.run.shell`, a job `if: false`; step limits have no floor.
 
 ## Done
 
