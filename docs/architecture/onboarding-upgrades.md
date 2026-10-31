@@ -836,7 +836,7 @@ signal. The writer reads the row's `revision` under `lockProjectState`, before i
 database, and stamps `written_revision` to what it read when it finishes, so 12, 02 and 04 leave the
 row clean and a mutation that lands during a write stays dirty. The 10 s plan-mirror sweep calls
 `sweepDirtyProjectStates` (`project-state/refresh.ts`, at most 25 rows with a render context, each
-sweep in its own try): it skips a checkout with `MERGE_HEAD` or `REBASE_HEAD`, and looks again once it
+sweep in its own try): it skips a checkout with a merge, rebase, cherry-pick or revert open (`gitOperationInProgress`), and looks again once it
 holds the project-state lock, for the sync and for the write (`refuseDuringGitOperation`), since a
 merge can open while it waits there: the sync then answers `held`, imports nothing it read and leaves
 `last_error` alone, as the first check does, and the write refuses. A row whose repository directory is gone is held before anything else is read (`refreshProjectState`; `checkoutMissing`, `repo/checkout-head.ts`: ENOENT or a path that is not a directory, read strictly so an unreadable parent still fails the row): `last_error` says so, the row stays dirty and is touched to the back of the sweep's order like any held row, so a checkout that comes back (a re-clone into the same path) is written on the next tick, and no recovery, sync, transaction or warning runs per tick. MEASURED per dead row per tick, before: 35 statements, 11 failing opens, 3 failed git spawns, 43-46 ms and a 3.1 KB warn (about 27 MB of log a day); after: 3 statements, 1 probe and no log. Only a repository delete (the `repository_id` foreign key cascades) or the onboarding reset retires it, and the boot mark makes a clean one dirty again. Admission refused by the
