@@ -91,9 +91,15 @@ export async function usableCheckout(
         if ((await lstatNoFollow(dest, '.git/HEAD', { strict: true })) === null) return 'unusable';
       } else if (entry.kind === 'file') {
         const read = await readFileNoFollow(dest, '.git', { strict: true, maxBytes: 4096 });
-        const gitfile = read && !read.truncated ? read.data.toString('utf8') : null;
-        if (gitfile?.startsWith('gitdir: ')) {
-          const target = path.resolve(dest, gitfile.slice(8).trim());
+        const gitfile = read?.data.toString('utf8');
+        if (
+          read &&
+          !read.truncated &&
+          gitfile?.startsWith('gitdir: ') &&
+          Buffer.from(gitfile).equals(read.data)
+        ) {
+          // Git removes trailing CR/LF from a gitfile; spaces belong to the directory name.
+          const target = path.resolve(dest, gitfile.slice(8).replace(/[\r\n]+$/, ''));
           const rel = path.relative(dest, target);
           if (rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) {
             if ((await lstatNoFollow(dest, rel, { strict: true })) === null) return 'unusable';

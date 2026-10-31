@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -103,6 +103,31 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     const dir = await intact();
     await rm(path.join(dir, '.git'), { recursive: true });
     await writeFile(path.join(dir, '.git'), 'gitdir: ../missing.git\n');
+    expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+  });
+
+  it.each([' metadata', 'metadata '])(
+    'a gitdir named %j with corrupt config stays unknown',
+    async (name) => {
+      const dir = await intact();
+      await rename(path.join(dir, '.git'), path.join(dir, name));
+      await writeFile(path.join(dir, '.git'), `gitdir: ${name}\n`);
+      await git(dir, ['rev-parse', '--show-cdup']);
+      await writeFile(path.join(dir, name, 'config'), '[core\n');
+      expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+    },
+  );
+
+  it('an undecodable gitdir name cannot prove that its gitdir is missing', async () => {
+    const dir = await intact();
+    const target = Buffer.concat([Buffer.from(`${dir}/metadata-`), Buffer.from([0xff])]);
+    await rename(path.join(dir, '.git'), target);
+    await writeFile(
+      path.join(dir, '.git'),
+      Buffer.concat([Buffer.from('gitdir: metadata-'), Buffer.from([0xff, 10])]),
+    );
+    await git(dir, ['rev-parse', '--show-cdup']);
+    await writeFile(Buffer.concat([target, Buffer.from('/config')]), '[core\n');
     expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
   });
 
