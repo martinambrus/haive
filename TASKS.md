@@ -944,7 +944,7 @@ From the T470 review (2026-10-31). PRE-EXISTING, minor to moderate.
 
 ### T476 · FNF[plan-merge-discard-result] · the plan merge panel reads a discard that cancelled nothing as discarded
 
-status: open
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:14Z · last: 2026-10-31T13:14Z
 From the T458 review (2026-10-31). PRE-EXISTING, minor (web).
 
 `DELETE /repositories/:id/plan/merge` answers `{ ok: true, cancelled: false }` when no merge is open or (since T458) when the merge completed while the request ran, but `discardPlanMerge` types its answer as `{ ok: boolean }` (web lib/api-client.ts ~:2293) and the panel's `discard` (components/plan/plan-merge-panel.tsx ~:141-155) hides the merge as discarded whatever it says, after a confirm that promises "nothing is lost". Direction: read `cancelled`; when false, say the merge had already ended and refresh the plan instead of reporting a discard.
@@ -967,7 +967,7 @@ Also (T459 fix round, 2026-10-31; PRE-EXISTING, minor): `DELETE /repositories/:i
 
 ### T479 · FNF[extract-swap] · an archive extract that fails between its two renames loses the previous repository tree
 
-status: open
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T12:36Z · last: 2026-10-31T12:36Z
 From the T466 review (2026-10-31). PRE-EXISTING, minor, theoretical.
 
 `extractArchive` (worker repo/clone.ts ~:604-614) moves the old `dest` into the stage and then renames the new tree in; if the second rename fails or the process dies between the two, no repository directory is left, and the `finally` removes the stage with the old tree in it, although the doc comment (~:509-511) says a failure leaves the previous contents untouched. Direction: on a failed second rename move the old tree back before the `finally`, and say in the comment what a crash between the renames leaves.
@@ -1032,6 +1032,14 @@ From the T341 review (2026-10-31). Minor; PRE-EXISTING unless stated.
 6. New with 0217, harmless: `needsReauth` (shared integrations/access-token.ts ~:158-161) leaves a stale `refresh_refused_at` (the status shows, and a sign-in clears it).
 7. Cosmetic: web credential-modal.tsx ~:19 `HOST_PRESETS` is a second hand-written host list (no codeberg.org); derive it from `AUTO_DETECT_HOSTS`.
 8. The 400 "That account does not fit this task's repository" (api integration-choice.ts ~:125) does not say the credential moved to another forge.
+
+### T486 · FNF[aside-trees] · a kept-aside repository tree is never swept, reported or named on failure (+1)
+
+status: open
+From the T479 review (2026-10-31). PRE-EXISTING, minor (needs a crash between two renames or two consecutive failures).
+
+1. `.haive-extract-*` stages (worker repo/clone.ts ~:543) are never swept, reported or documented: upload-reaper.ts (~:408-452) sweeps `_uploads` only and scratch-workspace.ts (~:167-196) `_scratch` only. Since T479 a stage kept after a failed restore holds the only copy of the previous tree, and a crash between the swap's two renames leaves one too. Decide whether a sweep reports or removes them (removal must never take the only copy).
+2. `rebuild` (worker repo/refresh.ts ~:282-311): after `moveAside` a failed `copyTree` or `gitClone` throws without naming the aside folder; only the success note carries it, and the repo queue records the clone error alone, although repository-refresh.md (~:24) promises the old tree is never removed. Name the aside folder in the failure text the repository page shows.
 
 ## Done
 

@@ -79,6 +79,9 @@ export const integrationConnections = pgTable(
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
     oauthClientId: text('oauth_client_id'),
+    /** When the provider's OAuth client last refused a refresh. The status stays `connected`, so this
+     *  is what says `last_error` is current; the next refresh that succeeds and a sign-in clear it. */
+    refreshRefusedAt: timestamp('refresh_refused_at'),
   },
   (table) => [
     index('integration_connections_owner_user_id_idx').on(table.ownerUserId),

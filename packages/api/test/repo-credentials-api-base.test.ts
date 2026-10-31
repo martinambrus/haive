@@ -43,6 +43,7 @@ function setup(
 ) {
   const fake = createFakeDb({
     repoCredentials: schema.repoCredentials,
+    integrationConnections: schema.integrationConnections,
     auditEvents: schema.auditEvents,
   });
   const dek = generateDek();
@@ -598,7 +599,9 @@ describe('the row an edit reads, judges and updates', () => {
     expect(rowOf(fake)).toMatchObject({ label: 'renamed' });
     expect(events).toEqual([
       'begin',
+      'tx selects integration_connections for update',
       'tx selects repo_credentials for update',
+      'tx selects integration_connections for update',
       'tx updates repo_credentials',
       'commit',
     ]);
@@ -622,7 +625,9 @@ describe('the row an edit reads, judges and updates', () => {
     expect(decrypt(row.secretEncrypted as string, dek)).toBe(secret);
     expect(events).toEqual([
       'begin',
+      'tx selects integration_connections for update',
       'tx selects repo_credentials for update',
+      'tx selects integration_connections for update',
       'tx updates repo_credentials',
       'commit',
     ]);
@@ -643,6 +648,11 @@ describe('the row an edit reads, judges and updates', () => {
 
     expect(res.status).toBe(status);
     expect(rowOf(fake)).toMatchObject({ label: 'work', host: HOST, apiBaseUrl: STORED });
-    expect(events).toEqual(['begin', 'tx selects repo_credentials for update', 'rollback']);
+    expect(events).toEqual([
+      'begin',
+      'tx selects integration_connections for update',
+      'tx selects repo_credentials for update',
+      'rollback',
+    ]);
   });
 });

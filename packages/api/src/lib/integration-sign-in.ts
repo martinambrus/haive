@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { schema, type DbTx } from '@haive/database';
 import {
   decryptDek,
@@ -8,6 +8,7 @@ import {
   generateDek,
   secretsService,
 } from '@haive/shared';
+import { credentialForgeProvider } from '@haive/shared/forge';
 import {
   decryptConnectionTokens,
   encryptConnectionTokens,
@@ -33,6 +34,7 @@ export const EXPIRING_TOKENS_MESSAGE =
 const CREDENTIAL_LABEL_MAX_LENGTH = 255;
 
 export type ConnectionRow = typeof schema.integrationConnections.$inferSelect;
+type CredentialRow = typeof schema.repoCredentials.$inferSelect;
 
 /** What a connection looks like to the browser: the token columns never leave the server. */
 export function toConnectionSummary(row: ConnectionRow) {
@@ -44,6 +46,7 @@ export function toConnectionSummary(row: ConnectionRow) {
     grantedScopes: row.grantedScopes,
     status: row.status,
     lastError: row.lastError,
+    refreshRefusedAt: row.refreshRefusedAt,
     repoCredentialId: row.repoCredentialId,
     expiresAt: row.expiresAt,
     createdAt: row.createdAt,
@@ -56,19 +59,52 @@ export interface SignInResult {
   credential: { id: string; label: string; host: string } | null;
 }
 
-/** The Git credential a forge sign-in leaves behind: refreshed in place when the connection has one. */
+/**
+ * The Git credential a forge sign-in leaves behind: the one the connection points at, else one an
+ * earlier sign-in of this account made that backs no connection now (a disconnect keeps it), else a
+ * new one. An existing credential is written only while it is still on the sign-in's host and still
+ * that provider's forge; one that moved stays as it is, and one typed by hand (no sign-in account)
+ * is never taken.
+ */
 async function writeCredential(
   tx: DbTx,
   args: {
     userId: string;
     spec: IntegrationProviderSpec;
     method: Oauth2Method | DeviceMethod;
-    accountLabel: string;
+    identity: { externalAccountId: string; accountLabel: string };
     accessToken: string;
     linkedCredentialId: string | null;
     kek: string;
   },
 ): Promise<{ id: string; label: string; host: string }> {
+  const { identity } = args;
+  const host = endpointHost(args.method);
+  const own = (row: CredentialRow) =>
+    row.host.toLowerCase() === host &&
+    credentialForgeProvider(row.provider, row.host) === args.spec.id;
+  // A credential stored under a replaced key cannot be written; the sign-in makes its own.
+  const readable = (row: CredentialRow) => {
+    try {
+      decryptDek(row.encryptedDek, args.kek);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const refresh = async (row: CredentialRow) => {
+    const dek = decryptDek(row.encryptedDek, args.kek);
+    await tx
+      .update(schema.repoCredentials)
+      .set({
+        secretEncrypted: encrypt(args.accessToken, dek),
+        signInAccountId: identity.externalAccountId,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.repoCredentials.id, row.id));
+    return { id: row.id, label: row.label, host: row.host };
+  };
+
   if (args.linkedCredentialId !== null) {
     const [linked] = await tx
       .select()
@@ -80,30 +116,47 @@ async function writeCredential(
         ),
       )
       .for('update');
-    if (linked) {
-      const dek = decryptDek(linked.encryptedDek, args.kek);
-      await tx
-        .update(schema.repoCredentials)
-        .set({ secretEncrypted: encrypt(args.accessToken, dek), updatedAt: new Date() })
-        .where(eq(schema.repoCredentials.id, linked.id));
-      return { id: linked.id, label: linked.label, host: linked.host };
-    }
+    if (linked && own(linked)) return refresh(linked);
   }
+
+  // Locked before checked: a connection cannot start pointing at a locked credential, so what the
+  // backing check finds holds until this transaction ends.
+  const earlier = await tx
+    .select()
+    .from(schema.repoCredentials)
+    .where(
+      and(
+        eq(schema.repoCredentials.userId, args.userId),
+        eq(schema.repoCredentials.signInAccountId, identity.externalAccountId),
+      ),
+    )
+    .orderBy(asc(schema.repoCredentials.createdAt), asc(schema.repoCredentials.id))
+    .for('update');
+  for (const candidate of earlier) {
+    if (!own(candidate)) continue;
+    const [backed] = await tx
+      .select({ id: schema.integrationConnections.id })
+      .from(schema.integrationConnections)
+      .where(eq(schema.integrationConnections.repoCredentialId, candidate.id));
+    if (!backed && readable(candidate)) return refresh(candidate);
+  }
+
   const dek = generateDek();
   const forge = forgeProviderSchema.safeParse(args.spec.id);
   const [created] = await tx
     .insert(schema.repoCredentials)
     .values({
       userId: args.userId,
-      label: `${args.spec.displayName} OAuth (${args.accountLabel})`.slice(
+      label: `${args.spec.displayName} OAuth (${identity.accountLabel})`.slice(
         0,
         CREDENTIAL_LABEL_MAX_LENGTH,
       ),
-      host: endpointHost(args.method),
+      host,
       provider: forge.success ? forge.data : null,
-      usernameEncrypted: encrypt(args.accountLabel, dek),
+      usernameEncrypted: encrypt(identity.accountLabel, dek),
       secretEncrypted: encrypt(args.accessToken, dek),
       encryptedDek: encryptDek(dek, args.kek),
+      signInAccountId: identity.externalAccountId,
     })
     .returning({
       id: schema.repoCredentials.id,
@@ -132,9 +185,12 @@ function storedRefreshToken(
 
 /**
  * Turns tokens a provider just issued into a connection: the account is looked up, then ONE
- * transaction writes the Git credential (a forge) and the connection, or updates both in place
- * when this account is already connected. A forge's Git credential holds the only copy of the
- * token, and nothing refreshes it, so a response that expires is refused before anything is written.
+ * transaction writes the Git credential (a forge) and the connection, or updates the connection in
+ * place when this account is already connected. The connection ends up on its own credential while
+ * that stays on the sign-in's host and forge, else on the one an earlier sign-in of this account
+ * left behind, else on a new one (`writeCredential`). A forge's Git credential holds the only copy
+ * of the token, and nothing refreshes it, so a response that expires is refused before anything is
+ * written.
  */
 export async function finishSignIn(input: {
   db: Database;
@@ -175,7 +231,7 @@ export async function finishSignIn(input: {
           userId,
           spec,
           method,
-          accountLabel: identity.accountLabel,
+          identity,
           accessToken: tokens.accessToken,
           linkedCredentialId: existing?.repoCredentialId ?? null,
           kek,
@@ -187,6 +243,7 @@ export async function finishSignIn(input: {
       grantedScopes: tokens.scopes ?? input.requestedScopes,
       status: 'connected' as const,
       lastError: null,
+      refreshRefusedAt: null,
       oauthClientId: client.clientId,
       updatedAt: new Date(),
       ...(credential
