@@ -52,9 +52,9 @@ it('walks sorted files with sizes, skipping links and excluded names', async () 
     { path: 'b', size: 5 },
   ]);
 });
-it('does not enter a linked root or an intermediate link', async () => {
+it('does not enter a linked root, an intermediate link or a root that is a file', async () => {
   await fixture();
-  for (const rel of ['tree/linked-dir', 'tree/linked-dir/sub', 'missing']) {
+  for (const rel of ['tree/linked-dir', 'tree/linked-dir/sub', 'missing', 'tree/b']) {
     const found = [];
     for await (const entry of walkFilesNoFollow(root, rel)) found.push(entry);
     expect(found).toEqual([]);
