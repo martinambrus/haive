@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StepContext } from '../../step-definition.js';
+import { failGit } from '../../../../test/support/fake-git.js';
 import { killGit, type KilledGit } from '../../../../test/support/kill-git.js';
 
 vi.mock('./_helpers.js', async (importOriginal) => ({
@@ -142,4 +143,20 @@ describe('13-onboarding-push detect', () => {
       /git rev-list --count .* failed in /,
     );
   });
+});
+
+// T397: an ordinary git error is no answer either.
+it('T397 rejects exit 128 from the current branch read', async () => {
+  const dir = await makeRepo();
+  shim = await failGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+  await expect(onboardingPushStep.detect!(mkCtx(dir))).rejects.toThrow(/current branch/);
+});
+
+it('T397 a failed origin-ref read cannot supply zero commit counts', async () => {
+  const dir = await makeRepo();
+  await addBareOrigin(dir);
+  shim = await failGit(['rev-parse', '--verify', '--quiet', 'origin/main']);
+  await expect(onboardingPushStep.detect!(mkCtx(dir))).rejects.toThrow(
+    /git rev-parse origin\/main failed/,
+  );
 });

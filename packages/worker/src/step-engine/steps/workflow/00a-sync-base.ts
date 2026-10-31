@@ -173,11 +173,17 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
     if (!(await requireUsableGit(ctx.repoPath))) return empty;
 
     const cur = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    if (gitGaveNoAnswer(cur))
+    if (cur.code !== 0) {
+      // An unborn HEAD is an explicit absence (exit 1), not every failure of the branch read.
+      if (!gitGaveNoAnswer(cur)) {
+        const head = await gitRun(ctx.repoPath, ['rev-parse', '-q', '--verify', 'HEAD']);
+        if (head.code === 1) return empty;
+      }
       throw new Error(
         `could not read the checkout's current branch: ${(cur.stderr || cur.stdout).trim()}`,
       );
-    const currentBranch = cur.code === 0 ? cur.stdout.trim() : null;
+    }
+    const currentBranch = cur.stdout.trim();
     // Detached HEAD ('HEAD') has no branch to freshen — skip the sync, let 01 cope.
     const base = currentBranch && currentBranch !== 'HEAD' ? currentBranch : null;
 

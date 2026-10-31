@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { StepContext } from '../../step-definition.js';
 import { syncBaseStep } from './00a-sync-base.js';
+import { failGit } from '../../../../test/support/fake-git.js';
 import { killGit, type KilledGit } from '../../../../test/support/kill-git.js';
 
 const exec = promisify(execFile);
@@ -83,4 +84,11 @@ describe('00a-sync-base detect: the current branch read', () => {
     const detected = await syncBaseStep.detect!(mkCtx(dir));
     expect(detected).toMatchObject({ baseBranch: null });
   });
+});
+
+// T397: an ordinary git error is no answer either.
+it('T397 rejects exit 128 from the current branch read', async () => {
+  const dir = await makeRepo(true);
+  shim = await failGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+  await expect(syncBaseStep.detect!(mkCtx(dir))).rejects.toThrow(/current branch/);
 });
