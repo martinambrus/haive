@@ -534,6 +534,26 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
       return taskId;
     };
     const modes = ['cli', 'agent_mining', 'dag_parallel'] as const;
+    it.each(modes.flatMap((mode) => [true, false].map((started) => ({ mode, started }))))(
+      'F7: a live $mode run (started: $started) never enters the task-locking fence',
+      async ({ mode, started }) => {
+        const taskId = await live(mode, started);
+        const before = await state(taskId);
+        const transaction = vi.spyOn(db, 'transaction');
+        const { deps, advances } = rig();
+        try {
+          await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(0);
+          expect(
+            transaction,
+            'no candidate reached the fence, so no task row was locked',
+          ).not.toHaveBeenCalled();
+          expect(advances).toEqual([]);
+          expect(await state(taskId)).toEqual(before);
+        } finally {
+          transaction.mockRestore();
+        }
+      },
+    );
     const statuses = ['waiting_user', 'waiting_pr', 'failed', 'paused'] as const;
     const ALONE: Alone[] = [
       ...modes.flatMap((mode, index) =>

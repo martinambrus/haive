@@ -489,6 +489,7 @@ describe('the tasks the sweep takes, by task status and current row', () => {
     taskUpdatedAt: Date;
     row: { status: string; waitingStartedAt?: Date | null; updatedAt?: Date } | null;
     deadAt?: Date;
+    runs?: Partial<typeof schema.cliInvocations.$inferInsert>[];
   }
   const seed = (
     taskId: string,
@@ -500,9 +501,20 @@ describe('the tasks the sweep takes, by task status and current row', () => {
   /** What the candidates SELECT returns over these tasks: its own condition, run by the fake db. */
   async function candidatesAmong(seeds: Seed[]): Promise<Candidate[]> {
     const { whereCond } = await captureQuery();
-    const takes = createFakeDb({ taskSteps: schema.taskSteps }).compileWhere(joined, whereCond);
+    const fake = createFakeDb({
+      taskSteps: schema.taskSteps,
+      cliInvocations: schema.cliInvocations,
+    });
+    const idOf = (s: Seed) =>
+      `00000000-0000-4000-8000-${String(seeds.indexOf(s) + 1).padStart(12, '0')}`;
+    for (const s of seeds) {
+      for (const run of s.runs ?? []) {
+        fake.insert(schema.cliInvocations, { taskStepId: idOf(s), ...run });
+      }
+    }
+    const takes = fake.compileWhere(joined, whereCond);
     return seeds.flatMap((s) => {
-      const rowId = s.row ? `row-${s.taskId}` : null;
+      const rowId = s.row ? idOf(s) : null;
       const rowStatus = s.row?.status ?? null;
       const taken = takes({
         'task.status': s.taskStatus,
@@ -650,6 +662,31 @@ describe('the tasks the sweep takes, by task status and current row', () => {
   describe('a running task on a running row, re-opened by a Resume whose advance never reached the queue', () => {
     const reopened = { status: 'running' };
 
+    it.each([null, idle])(
+      'F7: excludes a row with a live run started at %s from candidates',
+      async (startedAt) => {
+        const task = { ...seed('task', 'running', reopened), runs: [{ startedAt }] };
+        expect(await candidatesAmong([task])).toEqual([]);
+      },
+    );
+
+    it.each([
+      { endedAt: idle },
+      { supersededAt: idle },
+      { taskStepId: '00000000-0000-4000-8000-000000000099' },
+    ])('still takes a row whose only run does not hold it: %j', async (run) => {
+      const task = { ...seed('task', 'running', reopened), runs: [run] };
+      expect(await candidatesAmong([task])).toHaveLength(1);
+    });
+
+    it('excludes a row with a live run among ended and superseded runs', async () => {
+      const task = {
+        ...seed('task', 'running', reopened),
+        runs: [{ endedAt: idle }, { supersededAt: idle }, {}],
+      };
+      expect(await candidatesAmong([task])).toEqual([]);
+    });
+
     it('re-drives it once the row has been idle longer than the cutoff', async () => {
       expect(await advancedBy([seed('task', 'running', reopened)])).toEqual([
         { taskId: 'task', epoch: 4 },
@@ -740,7 +777,10 @@ describe('the tasks the sweep takes, by task status and current row', () => {
     const TASK = '00000000-0000-4000-8000-000000000001';
     const t0 = new Date('2026-02-01T12:00:00Z');
     const after = (ms: number) => new Date(t0.getTime() + ms);
-    const fake = createFakeDb({ taskSteps: schema.taskSteps });
+    const fake = createFakeDb({
+      taskSteps: schema.taskSteps,
+      cliInvocations: schema.cliInvocations,
+    });
 
     interface World {
       taskStatus: string;

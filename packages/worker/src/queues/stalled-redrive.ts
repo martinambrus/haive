@@ -173,9 +173,14 @@ function overduePark(cutoff: Date) {
 /** A row re-opened as `running` (a Resume, retry_ai, the allowance auto-resume) whose advance never
  *  reached the queue: the re-open commits before the add, so a rejected add leaves the row as it is
  *  now. Idle since `cutoff` is not enough, since a fan-out behind queued agents sits idle too: the
- *  fence rules those out with `liveRun`, in the statement that bumps the epoch. */
+ *  candidate read and the fence rule those out with the same `liveRun` expression; the fence
+ *  re-reads it in the statement that bumps the epoch. */
 function idleRunningRow(cutoff: Date) {
-  return and(lt(schema.taskSteps.updatedAt, cutoff), eq(schema.taskSteps.status, 'running'))!;
+  return and(
+    lt(schema.taskSteps.updatedAt, cutoff),
+    eq(schema.taskSteps.status, 'running'),
+    not(liveRun),
+  )!;
 }
 
 /** A run of the row that has not ended, started or not: something to wait for. */
@@ -258,16 +263,7 @@ async function redriveTask(
           taskStale(cutoff),
           answered
             ? exists(currentRow(answeredFormRow(cutoff)))
-            : not(
-                exists(
-                  currentRow(
-                    or(
-                      not(stalledRow(cutoff)),
-                      and(eq(schema.taskSteps.status, 'running'), liveRun),
-                    ),
-                  ),
-                ),
-              ),
+            : not(exists(currentRow(not(stalledRow(cutoff))))),
         ),
       )
       .returning({ epoch: schema.tasks.orchestrationEpoch });
