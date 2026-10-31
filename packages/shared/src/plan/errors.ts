@@ -13,7 +13,11 @@ export type PlanPatchErrorKind =
    *  retryable without showing a human the other write. */
   | 'conflict'
   /** A referenced node/edge is not in this repository. */
-  | 'not_found';
+  | 'not_found'
+  /** The repository itself is gone: it was deleted while the patch was being applied. Not the
+   *  model's fault and no re-prompt can fix it, so a worker step fails at once instead of
+   *  re-rolling the planner; the api answers 404 like `not_found`. */
+  | 'repository_gone';
 
 export class PlanPatchError extends Error {
   readonly kind: PlanPatchErrorKind;

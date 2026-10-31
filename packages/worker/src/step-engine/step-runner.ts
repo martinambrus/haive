@@ -1926,6 +1926,28 @@ export async function consumeFoldedMiningRows(
     );
 }
 
+/** The reopened form's consumed agent rows and its hold, in one transaction. The agent rows go
+ *  first, the order a Retry takes them in (its reset deletes them and then writes the step row), so
+ *  a reset that holds them makes this wait holding no step row. The step write is the check that the
+ *  pass still owns the row: a Retry's reset makes it throw, and the transaction takes the consumed
+ *  rows back with it. Exported for the lock-order test. */
+export async function holdReopenedForm(
+  db: Database,
+  taskStepId: string,
+  folded: readonly AgentMiningResult[] | undefined,
+  at: Date,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await consumeFoldedMiningRows(tx, taskStepId, folded, at);
+    await updateOwnedStep(tx, taskStepId, {
+      detectOutput: null,
+      formSchema: null,
+      formValues: null,
+      pauseFormOnRetry: true,
+    });
+  });
+}
+
 /** Rows per reservation statement; each carries a whole prompt. */
 const RESERVE_CHUNK = 50;
 
@@ -3327,19 +3349,10 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           !stepDef.loop
         ) {
           // Consumed and cleared together, with the form held: a worker that dies before the park
-          // below re-detects and stops at the form rather than re-sending the answered items. The
-          // row is written first and only while the pass owns it, so a Retry's reset keeps its own
-          // hold and the agent rows are left as the reset left them.
-          const reopenedAt = new Date();
-          await db.transaction(async (tx) => {
-            await updateOwnedStep(tx, current.id, {
-              detectOutput: null,
-              formSchema: null,
-              formValues: null,
-              pauseFormOnRetry: true,
-            });
-            await consumeFoldedMiningRows(tx, current.id, applyArgs.agentMiningResults, reopenedAt);
-          });
+          // below re-detects and stops at the form rather than re-sending the answered items. Only
+          // while the pass owns the row, so a Retry's reset keeps its own hold and the agent rows are
+          // left as the reset left them.
+          await holdReopenedForm(db, current.id, applyArgs.agentMiningResults, new Date());
           const refreshedDetected = await stepDef.detect(ctx);
           if (stepDef.prepareForm) {
             await stepDef.prepareForm(ctx, refreshedDetected, llmOutput);

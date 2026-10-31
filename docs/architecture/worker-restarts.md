@@ -402,26 +402,42 @@ every other writer but not with the KEY SHARE a pass's run insert holds on the r
 active (`lockRowsForMove`: the sweep and the DAG reset, then the batch, before the clicked row is written), the
 task-level provider switch (`PATCH /tasks/:id/cli-provider`: its provider-sensitive open rows, read and folded in
 the one transaction), the cancel core below, and on the worker `resetStepAndDownstream` (its reset rows) and `foldOtherTaskParks` (its
-parked rows, in a transaction opened only when a plain read finds one). The batch goes behind the
-transaction's sweeps of runs and agent rows and its DAG reset, since a pass holds a run and then wants its step
-row, and before its first step write. The rows stay held until the action commits, so a pass that goes to flip
-or lock one of them waits for the action, and a claim then finds the epoch moved past it, instead of
-activating the row between the batch and the bump. The batch is never a waiting statement once the task row
-has been written, since a pass holding a step row waits for the task row: the Retry, the fan-out Resume and
-`moveTaskToStep` reset what a pass activated meanwhile with the rows already held (`rowsActivatedMeanwhile`
-stays NOWAIT, and `resetRowsForRerun` takes `rowsHeld` there), and a FOR UPDATE on a row held FOR NO KEY UPDATE
-is an upgrade that conflicts with that run insert. The 503 of that NOWAIT is therefore left to a row created
-after the batch that a pass has activated and still writes when the bump lands, and to an action that took no
-batch (a fan-out Resume with nothing to reset, the loop Resume, `retry_ai`, Skip or a CLI switch with no row
-left active), which holds only the rows it writes itself; the `step-retry-claim-race` smoke pins both
-(scenarios 5 and 5b). A writer that folds a row's run into `carried_*` (`resetRowsForRerun`, the per-step and
-task-level provider switches, `resetStepAndDownstream`, the first park of `writeFencedPark` (`foldRun`),
-`requeueAbandonedOrphan`) reads the row after it holds it and folds from that read: its caller's earlier read
-predates the lock, and a fold or idle write that landed since would be written over. The contribution comes from
-the stored row (`computeFoldContribution`), so adding a stale delta in SQL would only trade the lost update for a
-double count; the SQL folds in `cli-park-timing.ts` are single statements and need no read. The worker's
-single-statement bulk updates (`handleCancelTask`'s step sweep,
-`takeLeftOpenKept`, `skipRemovedSteps`, the `run_seq` backfill) take no batch.
+parked rows, in a transaction opened only when a plain read finds one). The CANCEL job's step sweep takes its
+open rows through `lockStepRows` in a short transaction of its own, then runs the same UPDATE; no task row is
+held there, since `markTaskCancelled` committed before it. The batch goes behind the transaction's sweeps of
+runs and agent rows and its DAG reset, since a pass holds a run and then wants its step row, and before its
+first step write. The rows stay held until the action commits, so a pass that goes to flip or lock one of them
+waits for the action, and a claim then finds the epoch moved past it, instead of activating the row between the
+batch and the bump. The batch is never a waiting statement once the task row has been written, since a pass
+holding a step row waits for the task row: the Retry, the fan-out Resume and `moveTaskToStep` reset what a pass
+activated meanwhile with the rows already held (`rowsActivatedMeanwhile` stays NOWAIT, and `resetRowsForRerun`
+takes `rowsHeld` there) and sweep those rows' runs and agent rows without waiting as well (`sweepRunsOf` with
+`noWait`: runs FOR NO KEY UPDATE, agent rows FOR UPDATE), since a pass holds a run and then wants its step row
+(`writeLoginHint`) and a Stop holds the runs it ended and then wants the step rows, and a FOR UPDATE on a row
+held FOR NO KEY UPDATE is an upgrade that conflicts with that run insert. The 503 of that NOWAIT is therefore
+left to a row created after the batch that a pass has activated and still writes when the bump lands, to a run
+or agent row of such a late row that a pass or a Stop holds, and to an action that took no batch (a fan-out
+Resume with nothing to reset, the loop Resume, `retry_ai`, Skip or a CLI switch with no row left active), which
+holds only the rows it writes itself; the `step-retry-claim-race` smoke pins both (scenarios 5 and 5b). The
+second sweep at the end of the reset still waits: it matches only runs created since the first one. A writer
+that folds a row's run into `carried_*` (`resetRowsForRerun`, the per-step and task-level provider switches,
+`resetStepAndDownstream`, the first park of `writeFencedPark` (`foldRun`), `requeueAbandonedOrphan`) reads the
+row after it holds it and folds from that read: its caller's earlier read predates the lock, and a fold or idle
+write that landed since would be written over. `requeueAbandonedOrphan` locks the step's open runs before it
+reads the row, as a Retry takes them, and ends them only when its guarded flip landed. The contribution comes
+from the stored row (`computeFoldContribution`), so adding a stale delta in SQL would only trade the lost update
+for a double count; the SQL folds in `cli-park-timing.ts` are single statements and need no read.
+`takeLeftOpenKept` (under the creation key and the dir lock; usually one row), `skipRemovedSteps` (one row per
+task, at boot) and the `run_seq` backfill (the rounds of one step, at boot) are single statements with no
+realistic peer and take no batch. The tiers above the step rows are taken in the same order, runs before agent
+rows: the fan-out Resume supersedes its blocking run before it marks the failed agent rows, and the reopened
+step form (`holdReopenedForm`) consumes its agent rows before it writes the step row. One exception remains: a
+fan-out Resume that also resets downstream or left-active rows still writes the clicked step's agent rows before
+the sweep of THOSE rows' runs; it meets a Retry-family action only through a worker reset of the same range or
+on a task with no repository (every other Retry-family action takes the repository's creation key first).
+Statements that match several runs or agent rows are not batched: each locks its rows in heap order (MEASURED at
+96,000 runs: a Seq Scan or Bitmap Heap Scan, rows locked in ctid order), the same order for all of them, so an
+id-ordered batch on some of them would be inconsistent with the rest.
 
 **A cancel ends only the step rows it locked.** Every task cancel the api commits goes through one core
 (`cancelStillOpen`, `api/src/lib/cancel-task.ts`): the Cancel action, the step `abort` and
@@ -453,8 +469,8 @@ ran its own. A `cancelled` task (the api commits the cancel before it queues the
 after the api's batch and runs the teardown. Any other status, a `failed` task included, is cancelled by the
 job: status, `completed_at`, epoch + 1 and the event, in the same transaction. The transaction writes no step
 row, so it takes no `lockStepRows` batch and never waits for a step row while it holds the task row (the cycle
-with a pass's claim: a step row, then the task row FOR SHARE); the step sweep after it is the single
-autocommit statement it always was.
+with a pass's claim: a step row, then the task row FOR SHARE); the step sweep after it takes its open rows
+through `lockStepRows` in a short transaction of its own and holds no task row.
 
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,

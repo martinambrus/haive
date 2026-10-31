@@ -202,6 +202,58 @@ export async function markPlanMirrorDirty(tx: DbOrTx, repositoryId: string): Pro
 }
 
 /**
+ * Take the repository row FOR KEY SHARE, which is the lock a child INSERT's foreign key takes
+ * anyway, but before the first plan row instead of after it.
+ *
+ * A repository delete holds that row FOR UPDATE and then cascades into every plan table, so it
+ * waits for each plan row a patch holds. A patch that holds a node row and only then inserts a
+ * child (a node, an edge, a code link, the first mirror row) waits for the repository row in turn:
+ * a cycle (40P01). Taken first, the patch and the delete exclude each other for the whole of both
+ * transactions, and a patch that loses finds no repository: `repository_gone`, a kind of its own
+ * because a caller that re-rolls a refused patch must not re-roll this one. KEY SHARE conflicts
+ * with nothing but FOR UPDATE and DELETE, so patches do not wait for each other.
+ */
+async function lockRepositoryForPlanWrite(tx: DbOrTx, repositoryId: string): Promise<void> {
+  const [repository] = await tx
+    .select({ id: schema.repositories.id })
+    .from(schema.repositories)
+    .where(eq(schema.repositories.id, repositoryId))
+    .for('key share');
+  if (!repository) {
+    throw new PlanPatchError('repository_gone', `repository ${repositoryId} not found`);
+  }
+}
+
+/**
+ * Whether a patch can insert a row that references the repository: a node it creates (a ref that
+ * is neither a uuid nor an alias), an edge, a code link, or the repository's first mirror row.
+ * Conservative: a link that already exists still counts. An update-only patch of a plan whose
+ * mirror row exists inserts nothing and takes no repository lock, so a writer that holds the
+ * repository row for a while (a project-state write holds it through its file and git work) does
+ * not stall an interactive edit.
+ */
+async function mayInsertPlanRows(
+  tx: DbOrTx,
+  ops: PlanPatch['ops'],
+  refs: ReadonlyMap<string, string>,
+  repositoryId: string,
+): Promise<boolean> {
+  const inserts = ops.some(
+    (op) =>
+      op.op === 'link' ||
+      (op.op === 'upsert' &&
+        ((op.codeLinks?.length ?? 0) > 0 || !(refs.has(op.nodeRef) || isPlanNodeId(op.nodeRef)))),
+  );
+  if (inserts) return true;
+  const [mirror] = await tx
+    .select({ repositoryId: schema.planMirrorState.repositoryId })
+    .from(schema.planMirrorState)
+    .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+    .limit(1);
+  return !mirror;
+}
+
+/**
  * Strip the `node:` marker off a ref that carries one.
  *
  * `renderPlanMarkdown` shows every id as `node:<uuid>` — deliberately visible, so
@@ -819,6 +871,12 @@ async function applyOps(
   // loop below. Normalising in only one of them would make an op's survival
   // depend on which of the two looked at it.
   const patchOps = normalizeOpRefs(patch.ops);
+  // Before the drop pre-flight and the first write, from the whole patch: an agent patch whose
+  // every create is dropped for a repository that is gone is `repository_gone`, not an empty
+  // success.
+  if (await mayInsertPlanRows(tx, patchOps, refs, repositoryId)) {
+    await lockRepositoryForPlanWrite(tx, repositoryId);
+  }
   const ops =
     opts.onUnresolvableRef === 'drop'
       ? await dropUnresolvableOps(tx, patchOps, repositoryId, refs, result.dropped)
