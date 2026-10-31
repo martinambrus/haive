@@ -141,3 +141,70 @@ describe('commitHaiveProjections', () => {
     await expect(save(dir)).rejects.toHaveProperty('refusal.code', 'record_unreadable');
   });
 });
+
+describe('commit read and repair controls', () => {
+  it('commits on unborn HEAD', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'haive-data-unborn-'));
+    dirs.push(dir);
+    await gitRun(dir, ['init', '-q', '-b', 'main']);
+    await record(dir);
+    expect(await save(dir)).toMatchObject({ committed: true, indexSynced: true });
+    expect((await gitRun(dir, ['rev-list', '--count', 'HEAD'])).stdout.trim()).toBe('1');
+  });
+  it.each(['head', 'tree', 'blob', 'plan'] as const)(
+    'classifies unreadable HEAD %s before committing',
+    async (site) => {
+      const dir = await fixture();
+      await record(dir);
+      await save(dir);
+      await writeFile(join(dir, '.haive-data/state/format.json'), ' {"formatVersion": 1}');
+      await record(dir, { 'rtk-version': 'changed' });
+      const run = gitCommands.gitRun;
+      vi.spyOn(gitCommands, 'gitRun').mockImplementation(async (cwd, args, ...rest) => {
+        const fails =
+          site === 'head'
+            ? args.includes('HEAD^{commit}')
+            : site === 'blob'
+              ? args[0] === 'cat-file'
+              : site === 'plan'
+                ? args[0] === 'ls-tree' && args.some((a) => a.includes('plan.json'))
+                : args[0] === 'ls-tree' && args.includes('-r');
+        return fails ? { code: 128, stdout: '', stderr: 'unreadable' } : run(cwd, args, ...rest);
+      });
+      await expect(save(dir)).rejects.toHaveProperty('refusal.code', 'record_unreadable');
+    },
+  );
+  it('skips deletions from a HEAD state directory holding only stray files', async () => {
+    const dir = await fixture();
+    await mkdir(join(dir, '.haive-data/state'), { recursive: true });
+    await writeFile(join(dir, '.haive-data/state/stray.txt'), '<<<<<<< mine');
+    await gitRun(dir, ['add', '.haive-data/state/stray.txt']);
+    await gitRun(dir, ['commit', '-qm', 'stray'], identity);
+    await rm(join(dir, '.haive-data/state/stray.txt'));
+    await record(dir);
+    expect(await save(dir)).toMatchObject({
+      committed: true,
+      skipped: ['.haive-data/state/stray.txt'],
+    });
+    expect((await gitRun(dir, ['show', 'HEAD:.haive-data/state/stray.txt'])).stdout).toBe(
+      '<<<<<<< mine',
+    );
+  });
+  it('repairs an index sync that failed on a prior commit even when the named tree is unchanged', async () => {
+    const dir = await fixture();
+    await record(dir);
+    const exec = gitCommands.gitExec;
+    vi.spyOn(gitCommands, 'gitExec').mockImplementation(async (args, options) => {
+      if (args[0] === 'update-index' && !options?.env?.GIT_INDEX_FILE)
+        throw new Error('index locked');
+      return exec(args, options);
+    });
+    expect(await save(dir)).toMatchObject({ committed: true, indexSynced: false });
+    vi.restoreAllMocks();
+    expect((await gitRun(dir, ['diff', '--cached', '--name-only'])).stdout).toContain(
+      'format.json',
+    );
+    expect(await save(dir)).toMatchObject({ committed: false, indexSynced: true });
+    expect((await gitRun(dir, ['diff', '--cached', '--name-only'])).stdout).toBe('');
+  }, 15_000);
+});

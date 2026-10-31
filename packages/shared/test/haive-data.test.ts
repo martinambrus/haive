@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { holdsFor, type HaiveDataFacts } from '../src/haive-data.js';
+import { holdsFor, haiveDataSaveRequestSchema, type HaiveDataFacts } from '../src/haive-data.js';
 
 const clear: HaiveDataFacts = {
   checkout: 'ready',
@@ -58,4 +58,30 @@ describe('Haive data Save holds', () => {
     ]);
     expect(facts.pendingUnits).toHaveLength(2);
   });
+});
+
+it('sorts holder IDs without mutating the facts', () => {
+  const holdingTaskIds = ['z', 'a'];
+  expect(holdsFor({ ...clear, holdingTaskIds })).toEqual([
+    { code: 'checkout_held', taskIds: ['a', 'z'] },
+  ]);
+  expect(holdingTaskIds).toEqual(['z', 'a']);
+});
+it.each([
+  'checkout_unreadable',
+  'git_operation_unreadable',
+  'branch_unreadable',
+  'origin_unreadable',
+] as const)('reports structural fact failure %s', (code) => {
+  expect(holdsFor({ ...clear, readHolds: [{ code }] })).toEqual([{ code }]);
+});
+
+it('validates and trims data Save requests', () => {
+  expect(haiveDataSaveRequestSchema.parse({ commitMessage: '  subject  ' })).toEqual({
+    push: false,
+    commitMessage: 'subject',
+  });
+  for (const commitMessage of ['', ' ', 'bad\0message', 'x'.repeat(501)])
+    expect(haiveDataSaveRequestSchema.safeParse({ push: true, commitMessage }).success).toBe(false);
+  expect(haiveDataSaveRequestSchema.safeParse({ push: 'true' }).success).toBe(false);
 });

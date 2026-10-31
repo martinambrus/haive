@@ -363,7 +363,23 @@ export async function commitRecorded(
       ...env,
       ...temp,
     });
-    if (changed.length === 0) return [];
+    if (changed.length === 0) {
+      // A prior commit may have landed while the real index was locked. Repair its named
+      // entries on a repeat too, without creating a commit or touching unrelated staged work.
+      if (parent !== '') {
+        let synced = false;
+        for (let attempt = 0; attempt < 6 && !synced; attempt++) {
+          if (attempt > 0) await new Promise((r) => setTimeout(r, 100 * 2 ** attempt));
+          synced = await syncRealIndex(run, parent, [...named]).then(
+            () => true,
+            () => false,
+          );
+        }
+        if (!synced)
+          warnings?.push(`the git index could not be synced for: ${[...named].join(', ')}`);
+      }
+      return [];
+    }
     const tree = (await run(['write-tree'], temp)).stdout.trim();
     const commit = (
       await run(['commit-tree', tree, ...(parent !== '' ? ['-p', parent] : []), '-m', message])

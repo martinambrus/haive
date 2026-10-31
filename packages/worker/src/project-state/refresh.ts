@@ -66,7 +66,12 @@ export async function markProjectStatesDirtyAtBoot(db: Database): Promise<void> 
 
 export type ProjectStateRefreshOutcome =
   | { outcome: 'written' | 'missing' | 'absent' | 'superseded' }
-  | { outcome: 'held'; reason: 'git_operation' | 'recovery' | 'checkout' | 'sync' }
+  | {
+      outcome: 'held';
+      reason: 'git_operation' | 'recovery' | 'checkout' | 'sync';
+      code?: 'write_pending' | 'git_operation';
+    }
+  | { outcome: 'blocked'; code: 'unowned_malformed_rtk'; file: string }
   | { outcome: 'refused'; reason: 'record' | 'context' };
 
 /** Compatibility for the sweep and existing callers which only count completed writes. */
@@ -123,7 +128,8 @@ export async function refreshProjectStateOutcome(
     refuseDuringGitOperation: true,
     expectedCheckout,
   });
-  if (synced.outcome === 'held') return { outcome: 'held', reason: 'sync' };
+  if (synced.outcome === 'held')
+    return { outcome: 'held', reason: 'sync', ...(synced.code ? { code: synced.code } : {}) };
   if (synced.outcome === 'refused') {
     await setOutboxError(db, repositoryId, synced.reason ?? 'the checkout record was refused');
     return { outcome: 'refused', reason: 'record' };
@@ -154,7 +160,7 @@ export async function refreshProjectStateOutcome(
     return { outcome: 'refused', reason: 'context' };
   }
   try {
-    await writeProjectStateColumn(db, {
+    const written = await writeProjectStateColumn(db, {
       repositoryId,
       repoPath,
       column: read.column,
@@ -165,6 +171,7 @@ export async function refreshProjectStateOutcome(
       expectedCheckout,
       refuseWhileHeld: true,
     });
+    if (written?.blocked) return { outcome: 'blocked', ...written.blocked };
   } catch (err) {
     if (err instanceof ProjectStateCheckoutHeldError) {
       // Operational metadata only: a refused writer must not change revisions, intent or state.

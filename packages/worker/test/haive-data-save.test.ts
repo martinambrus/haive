@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFakeDb } from '@haive/database/testing';
 import { schema } from '@haive/database';
-import { PLAN_MIRROR_JOB_NAMES } from '@haive/shared';
 const h = vi.hoisted(() => ({ db: null as unknown, refresh: vi.fn(), commit: vi.fn() }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/repo/checkout-head.js', () => ({ checkoutMissing: async () => false }));
@@ -33,9 +32,15 @@ function fixture(extra = {}) {
   return fake;
 }
 describe('Haive data Save preflight', () => {
-  it('has its own queue job name', () => {
-    expect(PLAN_MIRROR_JOB_NAMES.SAVE_HAIVE_DATA).toBe('save-haive-data');
-  });
+  it.each(['', '   ', 'bad\0message', 'x'.repeat(501)])(
+    'rejects invalid commit messages before database access: %j',
+    async (commitMessage) => {
+      h.db = null;
+      expect(
+        await saveHaiveData({ repositoryId: repoId, userId, push: false, commitMessage }),
+      ).toMatchObject({ outcome: 'refused', refusal: { code: 'invalid_request' } });
+    },
+  );
   it('refuses a live root claim with a result and starts no flush', async () => {
     fixture({ rootClaimedAt: new Date(), rootClaimKind: 'reset' });
     const result = await saveHaiveData({ repositoryId: repoId, userId, push: false });

@@ -14,6 +14,7 @@ import {
 import { lockPlanMerge } from '@haive/shared/plan';
 import { safeErrorForTransport } from '@haive/shared/logger';
 import type {
+  HaiveDataFailure,
   HaiveDataRefusal,
   HaiveDataSavePayload,
   HaiveDataSaveResult,
@@ -220,6 +221,7 @@ export interface IntegrateOutcome {
   held?: number;
   /** Why Haive's own files could not make way for the move; it did not happen. */
   refused?: string;
+  refusal?: HaiveDataRefusal;
 }
 
 /**
@@ -248,6 +250,7 @@ export async function integrateOrigin(args: {
   credentialId?: string | null;
   identity: Record<string, string>;
   kept: KeptFiles;
+  onLanded?: (sha: string) => void;
 }): Promise<IntegrateOutcome> {
   const db = getDb();
   const previousCommit = await headCommit(args.repoPath);
@@ -282,7 +285,12 @@ export async function integrateOrigin(args: {
       await putBack();
       return aside.outcome === 'held'
         ? { landed: false, previousCommit, held: aside.holding }
-        : { landed: false, previousCommit, refused: aside.reason };
+        : {
+            landed: false,
+            previousCommit,
+            refused: aside.reason,
+            refusal: { code: aside.code, file: aside.file },
+          };
     }
     if (aside.outcome === 'set-aside') {
       for (const [file, was] of aside.kept) if (!args.kept.has(file)) args.kept.set(file, was);
@@ -315,7 +323,11 @@ export async function integrateOrigin(args: {
     if (movedFrom !== undefined) await handBackAfterMove(args.repoPath, movedFrom);
     if (!outcome.landed) await putBack();
     return retry
-      ? { ...outcome, refused: "Haive's project files kept changing under the move" }
+      ? {
+          ...outcome,
+          refused: "Haive's project files kept changing under the move",
+          refusal: { code: 'projection_rewritten', file: '.haive-data' },
+        }
       : outcome;
   }
 }
@@ -357,11 +369,17 @@ async function mergeInScratch(
     const check = await restoreProjectionsInTx(tx, args.repositoryId, args.repoPath);
     if (check.outcome === 'retry') return { landed: false, previousCommit, retry: true };
     if (check.outcome === 'refused') {
-      return { landed: false, previousCommit, refused: check.reason };
+      return {
+        landed: false,
+        previousCommit,
+        refused: check.reason,
+        refusal: { code: check.code, file: check.file },
+      };
     }
     const holding = await fence(tx);
     if (holding > 0) return { landed: false, previousCommit, held: holding };
     const movedFrom = await landPlanMerge(args.repoPath, sha);
+    args.onLanded?.(sha);
     return { landed: true, previousCommit, movedFrom };
   } finally {
     if (!removed) await removePlanMergeWorktree(args.repoPath);
@@ -377,6 +395,10 @@ export interface SaveScope {
   identity: Record<string, string>;
 }
 export interface SaveSeams {
+  /** Optional data-scope reporting; the plan Save retains its existing error contract. */
+  onFailure?(err: unknown, code: HaiveDataFailure['code']): void;
+  onLanded?(sha: string): void;
+  onPushed?(sha: string): void;
   prepare(
     repo: SaveRepository,
     payload: PlanMirrorJobPayload,
@@ -414,6 +436,7 @@ export async function saveCore(
   const repo = await requireOwnedRepository(payload.repositoryId, payload.userId);
   let files: string[] = [];
   let repoPath = '';
+  let failureCode: HaiveDataFailure['code'] = 'save_failed';
   try {
     const prepared = await seams.prepare(repo, payload);
     ({ files, repoPath } = prepared);
@@ -433,6 +456,7 @@ export async function saveCore(
     const { committed, commitSha } = await seams.commit(scope);
 
     // The commit has landed: only a push needs the branch, so a failed read fails only a push.
+    failureCode = 'branch_unreadable';
     const branch = payload.push
       ? await currentBranch(repoPath)
       : await currentBranch(repoPath).catch(() => null);
@@ -446,11 +470,13 @@ export async function saveCore(
         throw new SavePreconditionError('cannot push a plan snapshot from a detached HEAD', {
           code: 'detached_head',
         });
+      failureCode = 'origin_unreadable';
       if (!(await detectOrigin(repoPath))) {
         throw new SavePreconditionError('this repository has no origin remote to push to', {
           code: 'no_origin',
         });
       }
+      failureCode = 'integration_failed';
       const kept: KeptFiles = new Map();
       const before = await headCommit(repoPath);
       try {
@@ -466,6 +492,7 @@ export async function saveCore(
           credentialId: repo.credentialsSecretId,
           identity,
           kept,
+          ...(seams.onLanded ? { onLanded: seams.onLanded } : {}),
         });
         if (integrated.held !== undefined)
           throw new PlanMirrorRefusal(SAVE_BUSY, {
@@ -475,7 +502,7 @@ export async function saveCore(
         if (integrated.refused !== undefined) {
           throw new PlanMirrorRefusal(
             `${integrated.refused}; the plan commit stays local and nothing was pushed`,
-            { code: 'integration_refused' },
+            integrated.refusal ?? { code: 'integration_refused' },
           );
         }
         if (integrated.conflict) {
@@ -498,6 +525,7 @@ export async function saveCore(
       } catch (err) {
         return await recoverAfterMoveFailure(getDb(), repo.id, repoPath, kept, before, err);
       }
+      failureCode = 'branch_tip_unreadable';
       const upstream = await gitRun(repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
       const head = await gitRun(repoPath, [
         'rev-parse',
@@ -517,6 +545,7 @@ export async function saveCore(
         throw new PlanMirrorRefusal('the checkout branch changed before pushing', {
           code: 'checkout_changed',
         });
+      failureCode = 'push_failed';
       await pushBranch({
         sha: pushedHead,
         cwd: repoPath,
@@ -528,12 +557,15 @@ export async function saveCore(
         userId: payload.userId,
       });
       pushed = true;
+      seams.onPushed?.(pushedHead);
+      failureCode = 'save_failed';
       await advancePlanBaseFromCommit(getDb(), repo.id, repoPath, pushedHead, branch);
     }
 
     return resultFor(repo.id, files, { committed, commitSha, pushed, branch });
   } catch (err) {
-    if (!(err instanceof PlanMirrorRefusal)) {
+    if (seams.onFailure) seams.onFailure(err, failureCode);
+    else if (!(err instanceof PlanMirrorRefusal)) {
       await recordPlanMirrorError(getDb(), repo.id, err).catch(() => undefined);
     }
     throw err;

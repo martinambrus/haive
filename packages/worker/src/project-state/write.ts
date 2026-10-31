@@ -160,6 +160,7 @@ export class ProjectStateUnreadableError extends Error {
 /** What a record write left behind, as repository-relative paths: the files it wrote and the claim
  *  files it removed, for whoever commits the repository to stage. */
 export interface ProjectStateWriteResult {
+  blocked?: { code: 'unowned_malformed_rtk'; file: string };
   written: string[];
   removed: string[];
 }
@@ -574,6 +575,7 @@ export async function writeProjectStateColumn(
   const removed: string[] = [];
   let attempted: ProjectRender | null = null;
   let mutatedFiles = false;
+  let blocked = false;
   try {
     const portable = portableRender(column);
     attempted = portable;
@@ -965,6 +967,7 @@ export async function writeProjectStateColumn(
       if (revision !== null && !prepared.unownedMalformedRtk)
         await stampOutbox(tx, repositoryId, revision);
       if (prepared.unownedMalformedRtk) {
+        blocked = true;
         await tx
           .update(schema.projectStateOutbox)
           .set({
@@ -999,7 +1002,18 @@ export async function writeProjectStateColumn(
       ));
     throw new ProjectStateWriteError(err, written, !cleared, removed);
   }
-  return { written, removed };
+  return {
+    written,
+    removed,
+    ...(blocked
+      ? {
+          blocked: {
+            code: 'unowned_malformed_rtk' as const,
+            file: `${PROJECT_STATE_DIR}/settings/rtk-enabled.json`,
+          },
+        }
+      : {}),
+  };
 }
 
 interface WriteIntent {

@@ -1,15 +1,18 @@
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import { isRootClaimLive, lockRepositoryTasksKey, schema, type Database } from '@haive/database';
-import { CHECKOUT_HOLDING_TASK_STATUSES } from '@haive/shared';
+import { CHECKOUT_HOLDING_TASK_STATUSES, logger } from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import {
   holdsFor,
+  haiveDataSaveRequestSchema,
+  type HaiveDataFailure,
   type HaiveDataFacts,
   type HaiveDataRefusal,
   type HaiveDataSavePayload,
   type HaiveDataSaveResult,
 } from '@haive/shared/haive-data';
 import { lockPlanMerge } from '@haive/shared/plan';
+import { withoutPlanMirrorErrors } from '../plan/error-scope.js';
 import { getDb } from '../db.js';
 import { lockPlanMirror, PlanMirrorHeldError } from '../plan/mirror.js';
 import { PLAN_MERGE_LIVE_STATUSES } from '../plan/merge.js';
@@ -55,7 +58,16 @@ async function factsAt(
 ): Promise<HaiveDataFacts> {
   const repoPath = repo.storagePath ?? repo.localPath;
   const missing = !repoPath || (await checkoutMissing(repoPath));
-  const checkout = missing ? 'missing' : (await requireUsableGit(repoPath!)) ? 'ready' : 'not_git';
+  const readHolds: NonNullable<HaiveDataFacts['readHolds']>[number][] = [];
+  let checkout: HaiveDataFacts['checkout'] = missing ? 'missing' : 'not_git';
+  if (!missing) {
+    try {
+      checkout = (await requireUsableGit(repoPath!)) ? 'ready' : 'not_git';
+    } catch (err) {
+      logger.warn({ err, repositoryId: repo.id }, 'Haive data checkout read failed');
+      readHolds.push({ code: 'checkout_unreadable' });
+    }
+  }
   const tasks = await conn
     .select({ id: schema.tasks.id, type: schema.tasks.type })
     .from(schema.tasks)
@@ -65,7 +77,8 @@ async function factsAt(
         inArray(schema.tasks.status, [...CHECKOUT_HOLDING_TASK_STATUSES]),
         isNull(schema.tasks.deadAt),
       ),
-    );
+    )
+    .orderBy(asc(schema.tasks.id));
   const [merge] = await conn
     .select({ id: schema.tasks.id })
     .from(schema.tasks)
@@ -99,28 +112,71 @@ async function factsAt(
     .from(schema.planMirrorState)
     .where(eq(schema.planMirrorState.repositoryId, repo.id));
   const [mirror] = await (locked ? mirrorQuery.for('update') : mirrorQuery);
+  let gitOperation = false;
+  let branch: string | null = null;
+  let origin = true;
+  if (checkout === 'ready') {
+    try {
+      gitOperation = await gitOperationInProgress(repoPath!);
+    } catch (err) {
+      logger.warn({ err, repositoryId: repo.id }, 'Haive data operation read failed');
+      readHolds.push({ code: 'git_operation_unreadable' });
+    }
+    if (payload.push) {
+      try {
+        branch = await branchAt(repoPath!);
+      } catch (err) {
+        logger.warn({ err, repositoryId: repo.id }, 'Haive data branch read failed');
+        readHolds.push({ code: 'branch_unreadable' });
+      }
+      try {
+        origin = await detectOrigin(repoPath!);
+      } catch (err) {
+        logger.warn({ err, repositoryId: repo.id }, 'Haive data origin read failed');
+        readHolds.push({ code: 'origin_unreadable' });
+      }
+    }
+  }
   return {
+    readHolds,
     checkout,
     rootClaimLive: isRootClaimLive(repo.rootClaimedAt),
     holdingTaskIds: tasks
-      .filter(
-        (task) => payload.push || task.type === 'onboarding' || task.type === 'onboarding_upgrade',
-      )
+      .filter((task) => task.type === 'onboarding' || task.type === 'onboarding_upgrade')
       .map((task) => task.id),
     writeIntent: outbox?.writeIntent != null,
-    gitOperation: checkout === 'ready' && (await gitOperationInProgress(repoPath!)),
+    gitOperation,
     planMergeTaskId: merge?.id ?? null,
     pendingUnits: questions.map((question) => question.unit),
     stateDirty: outbox !== undefined && outbox.writtenRevision < outbox.revision,
     mirrorDirty: mirror !== undefined && mirror.writtenRevision < mirror.revision,
     push: payload.push,
-    branch: payload.push && checkout === 'ready' ? await branchAt(repoPath!) : null,
-    origin: !payload.push || checkout !== 'ready' || (await detectOrigin(repoPath!)),
+    branch,
+    origin,
   };
 }
 
-export async function saveHaiveData(payload: HaiveDataSavePayload): Promise<HaiveDataSaveResult> {
+export function saveHaiveData(payload: HaiveDataSavePayload): Promise<HaiveDataSaveResult> {
+  return withoutPlanMirrorErrors(() => saveHaiveDataInScope(payload));
+}
+
+async function saveHaiveDataInScope(payload: HaiveDataSavePayload): Promise<HaiveDataSaveResult> {
   if (!payload.repositoryId || !payload.userId) throw new Error('repositoryId and userId required');
+  let result: HaiveDataSaveResult = {
+    indexSynced: true,
+    outcome: 'unchanged',
+    committed: false,
+    commitSha: null,
+    files: [],
+    skipped: [],
+    pushed: false,
+    branch: null,
+    refusal: null,
+  };
+  const request = haiveDataSaveRequestSchema.safeParse(payload);
+  if (!request.success)
+    return { ...result, outcome: 'refused', refusal: { code: 'invalid_request' } };
+  payload = { ...payload, ...request.data };
   const db = getDb();
   const [repo] = await db
     .select()
@@ -132,20 +188,12 @@ export async function saveHaiveData(payload: HaiveDataSavePayload): Promise<Haiv
       ),
     );
   if (!repo) throw new Error('repository not found');
-  let result: HaiveDataSaveResult = {
-    outcome: 'unchanged',
-    committed: false,
-    commitSha: null,
-    files: [],
-    skipped: [],
-    pushed: false,
-    branch: null,
-    refusal: null,
-  };
   let expectedBranch: string | null = null;
+  let failureCode: HaiveDataFailure['code'] = 'save_failed';
   const note = (commit: HaiveProjectionCommit) => {
     result = {
       ...result,
+      indexSynced: commit.indexSynced ?? true,
       committed: result.committed || commit.committed,
       commitSha: commit.commitSha ?? result.commitSha,
       files: [...new Set([...result.files, ...commit.files])].sort(),
@@ -167,13 +215,20 @@ export async function saveHaiveData(payload: HaiveDataSavePayload): Promise<Haiv
     try {
       await flushCurrentPlanMirror(repo.id);
     } catch (err) {
-      if (err instanceof PlanMirrorHeldError) fail({ code: 'plan_mirror_held' });
+      if (err instanceof PlanMirrorHeldError) {
+        const holds = holdsFor(await factsAt(db, repo, payload));
+        if (holds[0]) fail(holds[0]);
+        if (err.code === 'git_operation') fail({ code: 'git_operation' });
+        fail({ code: err.code });
+      }
       throw err;
     }
     const refreshed = await refreshProjectStateOutcome(db, repo.id);
     switch (refreshed.outcome) {
       case 'written':
         return;
+      case 'blocked':
+        fail({ code: refreshed.code, file: refreshed.file });
       case 'missing':
         fail({ code: 'checkout_missing' });
       case 'absent':
@@ -182,15 +237,17 @@ export async function saveHaiveData(payload: HaiveDataSavePayload): Promise<Haiv
         fail({ code: 'checkout_changed' });
       case 'refused':
         fail({ code: 'record_refused' });
-      case 'held':
+      case 'held': {
+        const holds = holdsFor(await factsAt(db, repo, payload));
+        const hold = holds[0];
+        if (hold) fail(hold);
+        if (refreshed.reason === 'checkout') fail({ code: 'checkout_held', taskIds: [] });
         fail({
           code:
-            refreshed.reason === 'git_operation'
-              ? 'git_operation'
-              : refreshed.reason === 'recovery'
-                ? 'write_pending'
-                : 'projections_changing',
+            refreshed.code ??
+            (refreshed.reason === 'git_operation' ? 'git_operation' : 'write_pending'),
         });
+      }
     }
   };
   const commit = async ({ repoPath, identity, message }: SaveScope) => {
@@ -220,14 +277,15 @@ export async function saveHaiveData(payload: HaiveDataSavePayload): Promise<Haiv
         if (payload.push && facts.branch !== expectedBranch) fail({ code: 'checkout_changed' });
         if (facts.stateDirty || facts.mirrorDirty) return null;
         try {
-          return await commitHaiveProjections({ repoPath, identity, message });
+          const committed = await commitHaiveProjections({ repoPath, identity, message });
+          note(committed); // The Git commit survives even if the transaction commit fails.
+          return committed;
         } catch (err) {
           if (err instanceof HaiveProjectionRefusal) fail(err.refusal);
           throw err;
         }
       });
       if (saved) {
-        note(saved);
         return saved;
       }
     }
@@ -235,6 +293,15 @@ export async function saveHaiveData(payload: HaiveDataSavePayload): Promise<Haiv
   };
   try {
     const saved = await saveCore(payload, {
+      onFailure(_err, code) {
+        failureCode = code;
+      },
+      onLanded(sha) {
+        result = { ...result, committed: true, commitSha: sha };
+      },
+      onPushed(sha) {
+        result = { ...result, pushed: true, commitSha: sha };
+      },
       async prepare() {
         const facts = await factsAt(db, repo, payload);
         const refusal = holdsFor(facts)[0];
@@ -272,7 +339,15 @@ export async function saveHaiveData(payload: HaiveDataSavePayload): Promise<Haiv
       ...(saved.conflict ? { conflict: saved.conflict } : {}),
     };
   } catch (err) {
-    if (!(err instanceof PlanMirrorRefusal) && !(err instanceof SavePreconditionError)) throw err;
+    if (!(err instanceof PlanMirrorRefusal) && !(err instanceof SavePreconditionError)) {
+      logger.error({ err, repositoryId: repo.id, code: failureCode }, 'Haive data Save failed');
+      return {
+        ...result,
+        outcome: 'failed',
+        branch: expectedBranch,
+        failure: { code: failureCode },
+      };
+    }
     return {
       ...result,
       outcome: 'refused',

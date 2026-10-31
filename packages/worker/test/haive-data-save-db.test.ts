@@ -6,6 +6,7 @@ import { eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, hasPgCode, schema, type Database } from '@haive/database';
 import { CONFIG_KEYS, configService } from '@haive/shared';
+import { recordPlanMirrorError } from '../src/plan/mirror.js';
 import * as planLocks from '@haive/shared/plan';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
 import { initDatabase } from '../src/db.js';
@@ -136,6 +137,27 @@ describe.skipIf(!url)('Haive data Save on real Postgres', () => {
     expect(outbox!.writeIntent).toBeNull();
     expect(await save()).toMatchObject({ outcome: 'unchanged', committed: false });
   });
+  it('never records data-scope flush failures as plan snapshot errors', async () => {
+    await db.insert(schema.planMirrorState).values({
+      repositoryId,
+      revision: 0,
+      writtenRevision: 0,
+      lastError: 'prior snapshot diagnosis',
+    });
+    vi.spyOn(db, 'transaction').mockRejectedValueOnce(new Error('data flush failure'));
+    expect(await save()).toMatchObject({ outcome: 'failed', failure: { code: 'save_failed' } });
+    const read = async () =>
+      (
+        await db
+          .select()
+          .from(schema.planMirrorState)
+          .where(eq(schema.planMirrorState.repositoryId, repositoryId))
+      )[0]!.lastError;
+    expect(await read()).toBe('prior snapshot diagnosis');
+    // Suppression belongs to this job's async chain, never to later ordinary writers.
+    await recordPlanMirrorError(db, repositoryId, new Error('ordinary plan failure'));
+    expect(await read()).toBe('ordinary plan failure');
+  });
   it('works with both observer and plan-canvas switches off', async () => {
     const config = vi
       .spyOn(configService, 'getBoolean')
@@ -198,12 +220,37 @@ describe.skipIf(!url)('Haive data Save on real Postgres', () => {
     expect(await save()).toMatchObject({ committed: false, refusal: { code: 'write_pending' } });
     expect(await git('rev-parse', 'HEAD')).toBe(before);
   });
-  it.each(['MERGE_HEAD', 'rebase-merge'])('refuses an open Git operation (%s)', async (mark) => {
+  it.each(['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge'])(
+    'refuses an open Git operation (%s)',
+    async (mark) => {
+      const before = await git('rev-parse', 'HEAD');
+      if (mark !== 'rebase-merge') await writeFile(join(repoPath, '.git', mark), `${before}\n`);
+      else await mkdir(join(repoPath, '.git', mark));
+      expect(await save()).toMatchObject({ committed: false, refusal: { code: 'git_operation' } });
+      expect(await git('rev-parse', 'HEAD')).toBe(before);
+    },
+  );
+  it('surfaces the writer stable malformed RTK outcome without retrying', async () => {
+    await save();
     const before = await git('rev-parse', 'HEAD');
-    if (mark === 'MERGE_HEAD') await writeFile(join(repoPath, '.git', mark), `${before}\n`);
-    else await mkdir(join(repoPath, '.git', mark));
-    expect(await save()).toMatchObject({ committed: false, refusal: { code: 'git_operation' } });
+    await mkdir(join(repoPath, '.haive-data/state/settings'), { recursive: true });
+    await writeFile(join(repoPath, '.haive-data/state/settings/rtk-enabled.json'), '"yes"\n');
+    const refreshSpy = vi.spyOn(refresh, 'refreshProjectStateOutcome');
+    expect(await save()).toMatchObject({
+      outcome: 'refused',
+      committed: false,
+      refusal: {
+        code: 'unowned_malformed_rtk',
+        file: '.haive-data/state/settings/rtk-enabled.json',
+      },
+    });
+    expect(refreshSpy).toHaveBeenCalledOnce();
     expect(await git('rev-parse', 'HEAD')).toBe(before);
+    const [outbox] = await db
+      .select()
+      .from(schema.projectStateOutbox)
+      .where(eq(schema.projectStateOutbox.repositoryId, repositoryId));
+    expect(outbox!.writtenRevision).toBeLessThan(outbox!.revision);
   });
   it('refuses a plan merge conversation and pending project-state questions', async () => {
     const before = await git('rev-parse', 'HEAD');

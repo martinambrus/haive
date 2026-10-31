@@ -15,6 +15,7 @@ export class HaiveProjectionRefusal extends Error {
 }
 
 export interface HaiveProjectionCommit {
+  indexSynced: boolean;
   committed: boolean;
   commitSha: string | null;
   files: string[];
@@ -45,15 +46,21 @@ export async function commitHaiveProjections(args: {
   };
   const head = await gitRun(repoPath, ['rev-parse', '-q', '--verify', 'HEAD^{commit}']);
   if (head.code !== 0 && head.code !== 1)
-    throw new Error('could not read the Haive data commit parent');
+    throw new HaiveProjectionRefusal({ code: 'record_unreadable' });
   const parent = head.code === 0 ? head.stdout.trim() : null;
   if (parent) {
-    const previous = await readStateTree(repoPath, parent);
+    const previous = await readStateTree(repoPath, parent).catch(() => {
+      throw new HaiveProjectionRefusal({ code: 'record_unreadable' });
+    });
     if (previous.size) {
       const old = parseProjectState(previous);
       // An invalid old record proves no ownership of its deleted names.
-      if (!old.ok) throw new HaiveProjectionRefusal({ code: 'record_refused' });
-      const unknown = new Set(old.ignored);
+      const names = new Map([...previous.keys()].map((rel) => [rel, '']));
+      names.set('format.json', current.get('format.json')!);
+      const strayOnly = !previous.has('format.json') ? parseProjectState(names) : null;
+      if (!old.ok && !(strayOnly?.ok && strayOnly.ignored.length === previous.size))
+        throw new HaiveProjectionRefusal({ code: 'record_refused' });
+      const unknown = new Set(old.ok ? old.ignored : previous.keys());
       for (const rel of previous.keys()) {
         if (current.has(rel)) continue;
         if (unknown.has(rel)) skipped.add(`${PROJECT_STATE_DIR}/${rel}`);
@@ -70,7 +77,7 @@ export async function commitHaiveProjections(args: {
     if (entry) plan.add.push(rel);
     else if (parent) {
       const tree = await gitRun(repoPath, ['ls-tree', '-z', parent, '--', `:(literal)${rel}`]);
-      if (tree.code !== 0) throw new Error('could not read the committed plan path');
+      if (tree.code !== 0) throw new HaiveProjectionRefusal({ code: 'record_unreadable' });
       if (tree.stdout) plan.remove.push(rel);
     }
   }
@@ -89,6 +96,7 @@ export async function commitHaiveProjections(args: {
   for (const warning of warnings)
     logger.warn({ repoPath, warning }, 'Haive data commit index sync');
   return {
+    indexSynced: warnings.length === 0,
     committed: files.length > 0,
     commitSha,
     files: files.sort(),

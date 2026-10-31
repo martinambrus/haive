@@ -1,10 +1,18 @@
+import { z } from 'zod';
 import { isConflictUnit, isPlanUnit } from './project-state/conflicts.js';
 import type { PlanMergeConflict } from './constants/index.js';
 
-export interface HaiveDataSaveRequest {
-  push: boolean;
-  commitMessage?: string;
-}
+export const haiveDataSaveRequestSchema = z.object({
+  push: z.boolean().optional().default(false),
+  commitMessage: z
+    .string()
+    .trim()
+    .min(1)
+    .max(500)
+    .refine((value) => !value.includes('\0'))
+    .optional(),
+});
+export type HaiveDataSaveRequest = z.infer<typeof haiveDataSaveRequestSchema>;
 
 export interface HaiveDataSavePayload extends HaiveDataSaveRequest {
   repositoryId: string;
@@ -14,6 +22,7 @@ export interface HaiveDataSavePayload extends HaiveDataSaveRequest {
 /** Read-only status and the worker's locked check use this same policy. Switches which govern
  * observation or new plan tasks deliberately do not govern an explicit Save. */
 export interface HaiveDataFacts {
+  readHolds?: readonly HaiveDataReadHold[];
   checkout: 'ready' | 'missing' | 'not_git';
   rootClaimLive: boolean;
   holdingTaskIds: readonly string[];
@@ -29,7 +38,21 @@ export interface HaiveDataFacts {
   origin: boolean;
 }
 
+export type HaiveDataReadHold = {
+  code:
+    'checkout_unreadable' | 'git_operation_unreadable' | 'branch_unreadable' | 'origin_unreadable';
+};
+export type HaiveDataFailure = {
+  code:
+    | 'save_failed'
+    | 'branch_unreadable'
+    | 'origin_unreadable'
+    | 'integration_failed'
+    | 'branch_tip_unreadable'
+    | 'push_failed';
+};
 export type HaiveDataHold =
+  | HaiveDataReadHold
   | {
       code:
         | 'checkout_missing'
@@ -48,6 +71,7 @@ export type HaiveDataRefusal =
   | HaiveDataHold
   | {
       code:
+        | 'invalid_request'
         | 'record_absent'
         | 'record_unreadable'
         | 'record_refused'
@@ -57,16 +81,30 @@ export type HaiveDataRefusal =
         | 'integration_refused'
         | 'resync_failed';
     }
-  | { code: 'integration_held'; count: number };
+  | { code: 'integration_held'; count: number }
+  | { code: 'unowned_malformed_rtk'; file: string }
+  | {
+      code:
+        | 'projection_not_owned'
+        | 'projection_rewritten'
+        | 'write_pending'
+        | 'git_operation'
+        | 'git_operation_unreadable';
+      file: string;
+    };
 
 /** Stable precedence, with details from structural state only, never diagnostic message text. */
 export function holdsFor(facts: HaiveDataFacts): HaiveDataHold[] {
-  const holds: HaiveDataHold[] = [];
+  const holds: HaiveDataHold[] = [...(facts.readHolds ?? [])];
   if (facts.checkout === 'missing') holds.push({ code: 'checkout_missing' });
-  if (facts.checkout === 'not_git') holds.push({ code: 'not_git_checkout' });
+  if (
+    facts.checkout === 'not_git' &&
+    !facts.readHolds?.some((h) => h.code === 'checkout_unreadable')
+  )
+    holds.push({ code: 'not_git_checkout' });
   if (facts.rootClaimLive) holds.push({ code: 'root_claim' });
   if (facts.holdingTaskIds.length)
-    holds.push({ code: 'checkout_held', taskIds: [...facts.holdingTaskIds] });
+    holds.push({ code: 'checkout_held', taskIds: [...facts.holdingTaskIds].sort() });
   if (facts.writeIntent) holds.push({ code: 'write_pending' });
   if (facts.gitOperation) holds.push({ code: 'git_operation' });
   if (facts.planMergeTaskId) holds.push({ code: 'plan_merge', taskId: facts.planMergeTaskId });
@@ -74,13 +112,27 @@ export function holdsFor(facts: HaiveDataFacts): HaiveDataHold[] {
     ...new Set(facts.pendingUnits.filter((unit) => isConflictUnit(unit) && !isPlanUnit(unit))),
   ].sort();
   if (units.length) holds.push({ code: 'project_state_questions', units });
-  if (facts.push && !facts.branch) holds.push({ code: 'detached_head' });
-  if (facts.push && !facts.origin) holds.push({ code: 'no_origin' });
+  if (
+    facts.push &&
+    !facts.branch &&
+    !facts.readHolds?.some(
+      (h) => h.code === 'branch_unreadable' || h.code === 'checkout_unreadable',
+    )
+  )
+    holds.push({ code: 'detached_head' });
+  if (
+    facts.push &&
+    !facts.origin &&
+    !facts.readHolds?.some(
+      (h) => h.code === 'origin_unreadable' || h.code === 'checkout_unreadable',
+    )
+  )
+    holds.push({ code: 'no_origin' });
   return holds;
 }
 
 export interface HaiveDataSaveResult {
-  outcome: 'saved' | 'unchanged' | 'refused' | 'conflict';
+  outcome: 'saved' | 'unchanged' | 'refused' | 'conflict' | 'failed';
   committed: boolean;
   commitSha: string | null;
   files: string[];
@@ -88,5 +140,7 @@ export interface HaiveDataSaveResult {
   pushed: boolean;
   branch: string | null;
   refusal: HaiveDataRefusal | null;
+  failure?: HaiveDataFailure;
+  indexSynced: boolean;
   conflict?: PlanMergeConflict;
 }

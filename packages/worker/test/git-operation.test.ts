@@ -73,6 +73,11 @@ describe('gitOperationInProgress', () => {
     expect(await gitOperationInProgress(repo)).toBe(true);
   });
 
+  it.each(['CHERRY_PICK_HEAD', 'REVERT_HEAD'])('sees a stopped %s', async (ref) => {
+    writeFileSync(join(repo, '.git', ref), git(repo, 'rev-parse', 'HEAD'));
+    expect(await gitOperationInProgress(repo)).toBe(true);
+  });
+
   it('sees a merge left open by a conflict', async () => {
     openMerge(repo);
     expect(await gitOperationInProgress(repo)).toBe(true);

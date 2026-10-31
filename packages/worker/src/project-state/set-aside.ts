@@ -75,7 +75,17 @@ export type KeptFiles = Map<string, KeptFile>;
 export type SetAsideResult =
   | { outcome: 'clean' }
   | { outcome: 'set-aside'; paths: string[]; kept: KeptFiles }
-  | { outcome: 'refused'; file: string; reason: string }
+  | {
+      outcome: 'refused';
+      file: string;
+      reason: string;
+      code:
+        | 'projection_not_owned'
+        | 'projection_rewritten'
+        | 'write_pending'
+        | 'git_operation'
+        | 'git_operation_unreadable';
+    }
   | { outcome: 'held'; holding: number };
 
 /** What the check inside the caller's move transaction finds; it writes nothing, so a dirty file is
@@ -95,7 +105,12 @@ const ABSENT_PLAN_HASH = 'absent';
 
 type Refused = Extract<SetAsideResult, { outcome: 'refused' }>;
 
-const refuse = (file: string, why: string): Refused => ({
+const refuse = (
+  file: string,
+  why: string,
+  code: Refused['code'] = 'projection_not_owned',
+): Refused => ({
+  code,
   outcome: 'refused',
   file,
   reason: `${file} ${why}`,
@@ -114,6 +129,7 @@ async function pendingStateWrite(db: DbOrTx, repositoryId: string): Promise<Refu
     ? refuse(
         PROJECT_STATE_DIR,
         'is waiting for project settings recovery; retry after recovery finishes',
+        'write_pending',
       )
     : null;
 }
@@ -125,7 +141,7 @@ async function openOperationRefusal(
 ): Promise<Refused | null> {
   try {
     if (unmerged || (await gitOperationInProgress(repoPath))) {
-      return refuse(file, 'is part of a merge or rebase that is still open');
+      return refuse(file, 'is part of a merge or rebase that is still open', 'git_operation');
     }
     return null;
   } catch (err) {
@@ -133,6 +149,7 @@ async function openOperationRefusal(
     return refuse(
       file,
       `could not be checked for an open merge or rebase (${err.message.split('\n')[0]})`,
+      'git_operation_unreadable',
     );
   }
 }
@@ -529,7 +546,7 @@ async function restoreJudged(
   await restoreFaults.beforeRestore?.();
   const raced = await restoreFromHead(repoPath, mine, kept);
   if (typeof raced === 'string') return { changed: raced };
-  if (raced !== null) return refuse(raced.path, raced.reason);
+  if (raced !== null) return refuse(raced.path, raced.reason, 'projection_rewritten');
   await restoreFaults.afterRestore?.();
   await after?.(tx);
   return null;
@@ -752,7 +769,11 @@ export async function setAsideHaiveProjections(
     busy = result.changed;
   }
   return stop(
-    refuse(busy, 'was rewritten again while it was set aside; the move was not attempted, retry'),
+    refuse(
+      busy,
+      'was rewritten again while it was set aside; the move was not attempted, retry',
+      'projection_rewritten',
+    ),
   );
 }
 

@@ -78,3 +78,81 @@ describe('refreshProjectStateOutcome', () => {
     expect(mocks.write).toHaveBeenCalledTimes(2);
   });
 });
+
+it.each(['recovery', 'checkout', 'moved', 'unknown'] as const)(
+  'reports recovery %s',
+  async (site) => {
+    const { ProjectStateRecoveryHeldError, ProjectStateCheckoutHeldError, ProjectStateMovedError } =
+      await import('./write.js');
+    const err =
+      site === 'recovery'
+        ? new ProjectStateRecoveryHeldError('held')
+        : site === 'checkout'
+          ? new ProjectStateCheckoutHeldError()
+          : site === 'moved'
+            ? new ProjectStateMovedError()
+            : new Error('failure');
+    mocks.recover.mockRejectedValue(err);
+    const result = refreshProjectStateOutcome(db(), 'repo');
+    if (site === 'unknown') await expect(result).rejects.toBe(err);
+    else
+      expect(await result).toEqual(
+        site === 'moved' ? { outcome: 'superseded' } : { outcome: 'held', reason: site },
+      );
+    expect(mocks.sync).not.toHaveBeenCalled();
+  },
+);
+it.each(['checkout', 'moved', 'unknown'] as const)('reports write %s', async (site) => {
+  const { ProjectStateCheckoutHeldError, ProjectStateMovedError } = await import('./write.js');
+  const err =
+    site === 'checkout'
+      ? new ProjectStateCheckoutHeldError()
+      : site === 'moved'
+        ? new ProjectStateMovedError()
+        : new Error('failure');
+  mocks.write.mockRejectedValue(err);
+  const result = refreshProjectStateOutcome(db(), 'repo');
+  if (site === 'unknown') await expect(result).rejects.toBe(err);
+  else
+    expect(await result).toEqual(
+      site === 'moved' ? { outcome: 'superseded' } : { outcome: 'held', reason: site },
+    );
+});
+it('surfaces the stable writer blockage', async () => {
+  mocks.write.mockResolvedValue({
+    written: [],
+    removed: [],
+    blocked: { code: 'unowned_malformed_rtk', file: '.haive-data/state/settings/rtk-enabled.json' },
+  });
+  expect(await refreshProjectStateOutcome(db(), 'repo')).toEqual({
+    outcome: 'blocked',
+    code: 'unowned_malformed_rtk',
+    file: '.haive-data/state/settings/rtk-enabled.json',
+  });
+  expect(await refreshProjectState(db(), 'repo')).toBe(false);
+});
+it.each(['write_pending', 'git_operation'] as const)(
+  'carries the sync hold code %s',
+  async (code) => {
+    mocks.sync.mockResolvedValue({ outcome: 'held', code });
+    expect(await refreshProjectStateOutcome(db(), 'repo')).toEqual({
+      outcome: 'held',
+      reason: 'sync',
+      code,
+    });
+  },
+);
+it.each([
+  undefined,
+  { storagePath: null },
+  { storagePath: '/fixture', renderContext: null },
+  { storagePath: '/fixture', renderContext: { invalid: true } },
+])('reports missing path/context %j', async (row) => {
+  const rows = row ? [row] : [];
+  const query = { from: () => query, where: () => query, limit: async () => rows };
+  const fixture = { ...db(), select: () => query } as unknown as Database;
+  expect(await refreshProjectStateOutcome(fixture, 'repo')).toEqual(
+    row?.renderContext ? { outcome: 'refused', reason: 'context' } : { outcome: 'absent' },
+  );
+  expect(mocks.write).not.toHaveBeenCalled();
+});
