@@ -417,27 +417,29 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillRepairDetect;
-      const primary = (det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR])[0];
+      const primary = withoutGitDataDirs(det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR])[0];
       if (primary === undefined) return [];
       const fileTree = det.__fileTree ?? '';
-      return det.failingSkills.map((f) => ({
-        agentId: f.skillId.slice(0, 120),
-        agentTitle: f.skillId,
-        prompt: buildSkillRepairPrompt({
-          skillId: f.skillId,
-          issues: f.issues,
-          skillMdExcerpt: f.skillMdExcerpt,
-          framework: det.framework,
-          language: det.language,
-          kbFiles: det.kbFiles,
-          fileTree,
-          scopeExclude: det.__scopeExclude ?? [],
-          skillsDir: primary,
-          maxSub: f.maxSub,
-          bodyLen: f.bodyLen,
-          shrunk: f.shrunk,
-        }),
-      }));
+      return det.failingSkills
+        .filter((entry) => !namesGitData(entry.skillId))
+        .map((f) => ({
+          agentId: f.skillId.slice(0, 120),
+          agentTitle: f.skillId,
+          prompt: buildSkillRepairPrompt({
+            skillId: f.skillId,
+            issues: f.issues,
+            skillMdExcerpt: f.skillMdExcerpt,
+            framework: det.framework,
+            language: det.language,
+            kbFiles: det.kbFiles,
+            fileTree,
+            scopeExclude: det.__scopeExclude ?? [],
+            skillsDir: primary,
+            maxSub: f.maxSub,
+            bodyLen: f.bodyLen,
+            shrunk: f.shrunk,
+          }),
+        }));
     },
   },
 

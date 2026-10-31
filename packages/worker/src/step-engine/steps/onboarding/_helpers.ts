@@ -157,11 +157,11 @@ export async function resolveTaskSkillTargetDirs(
  *  before anything is written, removed or staged under it. */
 export function withoutGitDataDirs(
   dirs: readonly string[],
-  logger: StepContext['logger'],
+  logger?: StepContext['logger'],
 ): string[] {
   return dirs.filter((dir) => {
     if (!namesGitData(dir)) return true;
-    logger.warn({ dir }, 'did not use a skills directory: its path names git data');
+    logger?.warn({ dir }, 'did not use a skills directory: its path names git data');
     return false;
   });
 }

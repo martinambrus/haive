@@ -1,3 +1,4 @@
+import { namesGitData } from '@haive/shared/project-state';
 import { readdirNoFollow, readTextNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
@@ -826,8 +827,9 @@ function coveredSkillIds(
   bundleSkills: SkillEntry[],
 ): string[] {
   const last = previousIterations.at(-1)?.applyOutput as SkillGenApply | undefined;
-  if (last?.written && last.written.length > 0) return last.written.map((w) => w.id);
-  return bundleSkills.map((s) => s.id);
+  if (last?.written && last.written.length > 0)
+    return last.written.map((w) => w.id).filter((id) => !namesGitData(id));
+  return bundleSkills.map((s) => s.id).filter((id) => !namesGitData(id));
 }
 
 /** Per-skill prompt. Each loop pass asks for EXACTLY ONE new skill so the output
@@ -842,7 +844,8 @@ function buildSkillPrompt(
   truncationRetries = 0,
   targetCapability?: string,
 ): string {
-  if (detected.skillTargetDirs?.length === 0)
+  const targetDirs = withoutGitDataDirs(detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR]);
+  if (targetDirs.length === 0)
     return 'The repository maintains no skill destinations. Do not generate or write skills.';
   const values = formValues as { maxSkills?: number; domainHints?: string };
   const maxSkills = clampMaxSkills(values.maxSkills);
@@ -894,12 +897,14 @@ function buildSkillPrompt(
           .join('\n')
       : '(no knowledge base files yet)';
 
-  const primarySkillsDir = detected.skillTargetDirs[0] ?? DEFAULT_PROJECT_SKILLS_DIR;
+  const primarySkillsDir = targetDirs[0]!;
   const mirroredDirsNote =
-    detected.skillTargetDirs.length > 1
-      ? ` (mirrored to ${detected.skillTargetDirs.map((d) => `\`${d}/\``).join(', ')} so every enabled CLI sees the same skills)`
+    targetDirs.length > 1
+      ? ` (mirrored to ${targetDirs.map((d) => `\`${d}/\``).join(', ')} so every enabled CLI sees the same skills)`
       : '';
-  const bundleSkillIds = (detected.bundleSkills ?? []).map((s) => s.id);
+  const bundleSkillIds = (detected.bundleSkills ?? [])
+    .map((s) => s.id)
+    .filter((id) => !namesGitData(id));
   const reservedSection =
     bundleSkillIds.length > 0
       ? [
@@ -1153,7 +1158,9 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     // loop's gap-fill for any capability the parallel batch missed — let llm run then.
     // Discovery mode (no fixed list to parallelize) always runs llm.
     skipIf: ({ detected, formValues, iteration }) =>
-      (detected as SkillGenDetect).skillTargetDirs?.length === 0 ||
+      withoutGitDataDirs(
+        (detected as SkillGenDetect).skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
+      ).length === 0 ||
       (computeDomainPlan(
         detected as SkillGenDetect,
         clampMaxSkills((formValues as { maxSkills?: number }).maxSkills),
@@ -1226,7 +1233,8 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     async selectAgents({ detected, formValues }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillGenDetect;
-      if (det.skillTargetDirs?.length === 0) return [];
+      if (withoutGitDataDirs(det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR]).length === 0)
+        return [];
       const fv = formValues as Record<string, unknown>;
       const maxSkills = clampMaxSkills((fv as { maxSkills?: number }).maxSkills);
       const plan = computeDomainPlan(det, maxSkills);

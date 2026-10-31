@@ -402,22 +402,24 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillSyncDetect;
-      const primary = (det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR])[0];
+      const primary = withoutGitDataDirs(det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR])[0];
       if (primary === undefined) return [];
       const fileTree = det.__fileTree ?? '';
-      return det.targets.map((target) => ({
-        agentId: target.skillId.slice(0, 120),
-        agentTitle: target.skillId,
-        prompt: buildSkillSyncPrompt({
-          target,
-          framework: det.framework,
-          language: det.language,
-          kbFiles: det.kbFiles,
-          fileTree,
-          scopeExclude: det.__scopeExclude ?? [],
-          skillsDir: primary,
-        }),
-      }));
+      return det.targets
+        .filter((entry) => !namesGitData(entry.skillId))
+        .map((target) => ({
+          agentId: target.skillId.slice(0, 120),
+          agentTitle: target.skillId,
+          prompt: buildSkillSyncPrompt({
+            target,
+            framework: det.framework,
+            language: det.language,
+            kbFiles: det.kbFiles,
+            fileTree,
+            scopeExclude: det.__scopeExclude ?? [],
+            skillsDir: primary,
+          }),
+        }));
     },
   },
 

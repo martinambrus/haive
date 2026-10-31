@@ -529,3 +529,81 @@ describe('09_5b and 11d apply when every stored skills dir names git data', () =
     expect(warnedDirs(log)).toEqual(['.git/hooks']);
   });
 });
+
+const genDetect = (dirs: string[]) => ({
+  framework: null,
+  language: null,
+  kbFiles: [],
+  requiredDomains: [],
+  skillTargetDirs: dirs,
+  bundleSkills: [],
+});
+const repairDetect = (dirs: string[], ids = ['conventions']) => ({
+  ...genDetect(dirs),
+  failingSkills: ids.map(failing),
+});
+const syncDetect = (dirs: string[], ids = ['conventions'], removals: string[] = []) => ({
+  ...genDetect(dirs),
+  worktreePath: repo,
+  removals,
+  targets: ids.map((skillId) => ({
+    kind: 'new',
+    skillId,
+    capability: 'Conventions',
+    rationale: '',
+    skillMdExcerpt: null,
+  })),
+});
+const applyArgs = (detected: unknown) => ({
+  detected,
+  formValues: {},
+  iteration: 0,
+  previousIterations: [],
+  isFinalLlmAttempt: true,
+  llmOutput: { skills: [skill('conventions')] },
+  agentMiningResults: [mined('conventions')],
+});
+
+describe('stored skill dispatch targets', () => {
+  beforeEach(() => vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0'));
+  afterEach(() => vi.unstubAllEnvs());
+  it('09_5 skips both sequential and parallel dispatch for git-data-only dirs', async () => {
+    const detected = { ...genDetect(REFUSED), requiredDomains: ['Billing', 'Search', 'Orders'] };
+    expect
+      .soft(skillGenerationStep.llm!.skipIf!({ detected, formValues: {}, iteration: 1 } as never))
+      .toBe(true);
+    expect(
+      await skillGenerationStep.agentMining!.selectAgents({ detected, formValues: {} } as never),
+    ).toEqual([]);
+  });
+  it.each([
+    { step: skillRepairStep, detected: () => repairDetect(REFUSED) },
+    { step: skillSyncStep, detected: () => syncDetect(REFUSED) },
+  ])('does not dispatch for git-data-only dirs: $step.metadata.id', async ({ step, detected }) => {
+    expect(
+      await step.agentMining!.selectAgents({ detected: detected(), formValues: {} } as never),
+    ).toEqual([]);
+  });
+  it.each([
+    { step: skillRepairStep, detected: () => repairDetect(STORED, ['conventions', ...GIT_IDS]) },
+    { step: skillSyncStep, detected: () => syncDetect(STORED, ['conventions', ...GIT_IDS]) },
+  ])(
+    'filters ids and chooses the valid primary in $step.metadata.id prompts',
+    async ({ step, detected }) => {
+      const agents = await step.agentMining!.selectAgents({
+        detected: detected(),
+        formValues: {},
+      } as never);
+      expect(agents.map((a) => a.agentId)).toEqual(['conventions']);
+      expect(agents[0]?.prompt).toContain(ORDINARY);
+      for (const dir of REFUSED) expect(agents[0]?.prompt).not.toContain(dir);
+    },
+  );
+  it('09_5 omits refused dirs and bundle ids from sequential and loop prompts', () => {
+    const detected = { ...genDetect(STORED), bundleSkills: [skill('.git')] };
+    const prompt = skillGenerationStep.llm!.buildPrompt({ detected, formValues: {} } as never);
+    expect(prompt).toContain(ORDINARY);
+    for (const dir of REFUSED) expect(prompt).not.toContain(dir);
+    expect(prompt).not.toContain('- .git');
+  });
+});
