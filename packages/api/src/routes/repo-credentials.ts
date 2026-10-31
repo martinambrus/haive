@@ -323,7 +323,7 @@ repoCredentialsRoutes.put('/:id', async (c) => {
       apiBaseUrl: body.apiBaseUrl ?? existing.apiBaseUrl,
     });
 
-    // One a link committed while this waited for the credential.
+    // A connection a link committed while this request waited for the credential.
     connection ??= await lockLateConnectionOf(tx, id, userId);
     if (connection) {
       const nextProvider = body.provider === undefined ? existing.provider : body.provider || null;
@@ -395,7 +395,7 @@ repoCredentialsRoutes.delete('/:id', async (c) => {
       .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
       .for('update');
     if (!locked) throw new HttpError(404, 'Credential not found');
-    // One a link committed while this waited for the credential.
+    // A connection a link committed while this request waited for the credential.
     connection ??= await lockLateConnectionOf(tx, id, userId);
     await tx
       .delete(schema.repoCredentials)
