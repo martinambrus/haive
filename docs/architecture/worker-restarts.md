@@ -70,8 +70,8 @@ answer whose job is queued and an answer newer than the cutoff are left alone. F
 task-level cutoff gives way to the row's, since the pull-request poller rewrites `tasks.updated_at`
 every few minutes. For a `waiting_user` or `waiting_pr` task the fence stamps the row's `updated_at`,
 so an advance dropped before pickup is re-driven once per cutoff rather than on every pass, and it
-locks that row before the task row, the order a Retry takes (the other order deadlocked); a Retry,
-Resume or CLI switch whose NOWAIT re-check meets that lock answers 503 and can be sent again. A
+locks that row before the task row, the order a Retry takes (the other order deadlocked); an action
+whose NOWAIT re-check meets that lock answers 503 and can be sent again. A
 `running` task's fence locks only the task row: it reads the row inside the update its epoch guards,
 and that update's stamp on the task throttles the next pass. A dead `waiting_user` or `waiting_pr` task revived
 with an answered form gets that advance at revival (`jobAfterRevive`).
@@ -331,7 +331,8 @@ or finished) FOR SHARE and rolls the flip back when the fence fails. A reset's e
 holds that read until it commits, so no row is ever activated at an epoch a reset has moved past. A
 claim that committed before the bump is on the rows the reset reads after it: the api Retry and the
 fan-out Resume reset every row still active once they have bumped (`rowsActivatedMeanwhile`, NOWAIT,
-since they hold the task row, answering 503 when a pass is mid-write). Both kill the task's CLI
+since they hold the task row, answering 503 when a pass is mid-write on a row they do not hold already,
+see the batch below). Both kill the task's CLI
 sandboxes only once that has committed: a refused action then leaves every run alive, and a dying
 run's completion finds its invocation already superseded.
 The loop Resume, `retry_ai`, Skip and a CLI switch on a failed or parked step take the task back
@@ -402,11 +403,17 @@ active (`lockRowsForMove`: the sweep and the DAG reset, then the batch, before t
 cancel core below, and on the worker `resetStepAndDownstream` (its reset rows) and `foldOtherTaskParks` (its
 parked rows, in a transaction opened only when a plain read finds one). The batch goes behind the
 transaction's sweeps of runs and agent rows and its DAG reset, since a pass holds a run and then wants its step
-row, and before its first step write. It is never a waiting statement once the task row has been written,
-since a pass holding a step row waits for the task row: the Retry, the fan-out Resume and `moveTaskToStep`
-reset what a pass activated meanwhile with the rows already held (`rowsActivatedMeanwhile` stays NOWAIT, and
-`resetRowsForRerun` takes `rowsHeld` there), and a FOR UPDATE on a row held FOR NO KEY UPDATE is an upgrade
-that conflicts with that run insert. The worker's single-statement bulk updates (`handleCancelTask`,
+row, and before its first step write. The rows stay held until the action commits, so a pass that goes to flip
+or lock one of them waits for the action, and a claim then finds the epoch moved past it, instead of
+activating the row between the batch and the bump. The batch is never a waiting statement once the task row
+has been written, since a pass holding a step row waits for the task row: the Retry, the fan-out Resume and
+`moveTaskToStep` reset what a pass activated meanwhile with the rows already held (`rowsActivatedMeanwhile`
+stays NOWAIT, and `resetRowsForRerun` takes `rowsHeld` there), and a FOR UPDATE on a row held FOR NO KEY UPDATE
+is an upgrade that conflicts with that run insert. The 503 of that NOWAIT is therefore left to a row created
+after the batch that a pass has activated and still writes when the bump lands, and to an action that took no
+batch (a fan-out Resume with nothing to reset, the loop Resume, `retry_ai`, Skip or a CLI switch with no row
+left active), which holds only the rows it writes itself; the `step-retry-claim-race` smoke pins both
+(scenarios 5 and 5b). The worker's single-statement bulk updates (`handleCancelTask`,
 `takeLeftOpenKept`, `skipRemovedSteps`, the `run_seq` backfill) take no batch.
 
 **A cancel ends only the step rows it locked.** Every task cancel the api commits goes through one core
