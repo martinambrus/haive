@@ -3,9 +3,16 @@ import { readdirSync, rmSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { logger } from '@haive/shared';
+import { renameNoFollow } from '@haive/shared/fs-safe';
 import JSZip from 'jszip';
 import { describe, expect, it, afterEach, beforeEach, vi } from 'vitest';
 import { extractArchive } from '../src/repo/clone.js';
+
+vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
+  return { ...real, renameNoFollow: vi.fn(real.renameNoFollow) };
+});
 
 /** Every argv a tool was started with, so a test can say what the child was told to resolve. */
 const toolCalls = vi.hoisted(() => [] as string[][]);
@@ -63,6 +70,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.mocked(renameNoFollow).mockReset();
+  vi.restoreAllMocks();
   await rm(tmpRoot, { recursive: true, force: true });
 });
 
@@ -303,6 +312,70 @@ describe('extractArchive', () => {
     expect((await stat(path.join(dest, 'nested', 'keep.txt'))).ino).toBe(previousFile.ino);
     expect((await readdir(dest)).sort()).toEqual(['nested', 'previous.txt']);
     expect((await readdir(tmpRoot)).filter((n) => n.startsWith('.haive-extract-'))).toEqual([]);
+  });
+
+  it('retains the previous tree and logs when restoring the destination also fails', async () => {
+    const dest = path.join(tmpRoot, 'out-restore-fails');
+    await mkdir(dest);
+    await writeFile(path.join(dest, 'previous.txt'), 'old\n');
+    await buildFixtureSource(tmpRoot, 'fresh');
+    await run('tar', ['-czf', path.join(tmpRoot, 'fresh.tar.gz'), '-C', tmpRoot, 'fresh']);
+
+    const real =
+      await vi.importActual<typeof import('@haive/shared/fs-safe')>('@haive/shared/fs-safe');
+    const restoreError = new Error('restore rename failed');
+    let installError: unknown;
+    vi.mocked(renameNoFollow).mockImplementation(async (...args) => {
+      if (args[1].endsWith('/old')) throw restoreError;
+      try {
+        return await real.renameNoFollow(...args);
+      } catch (err) {
+        installError = err;
+        throw err;
+      }
+    });
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+    const extraction = extractArchive(at('fresh.tar.gz'), 'tar.gz', at('out-restore-fails'), {
+      keepLoneDir: (name) => {
+        const stage = readdirSync(tmpRoot).find((n) => n.startsWith('.haive-extract-'))!;
+        rmSync(path.join(tmpRoot, stage, 'x', name), { recursive: true });
+        return false;
+      },
+    });
+    await expect(extraction).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(extraction).rejects.toBe(installError);
+    expect(vi.mocked(renameNoFollow)).toHaveBeenCalledTimes(3);
+
+    const stages = (await readdir(tmpRoot)).filter((n) => n.startsWith('.haive-extract-'));
+    expect(stages).toHaveLength(1);
+    const oldRel = `${stages[0]}/old`;
+    expect(await readFile(path.join(tmpRoot, oldRel, 'previous.txt'), 'utf8')).toBe('old\n');
+    expect(errorLog).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ err: restoreError, anchor: tmpRoot, oldRel }),
+      'archive swap rollback failed; previous destination retained in stage',
+    );
+  });
+
+  it('removes the stage without a rollback error when the first install fails', async () => {
+    await buildFixtureSource(tmpRoot, 'fresh');
+    await run('tar', ['-czf', path.join(tmpRoot, 'fresh.tar.gz'), '-C', tmpRoot, 'fresh']);
+    const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+    await expect(
+      extractArchive(at('fresh.tar.gz'), 'tar.gz', at('out-first-install'), {
+        keepLoneDir: (name) => {
+          const stage = readdirSync(tmpRoot).find((n) => n.startsWith('.haive-extract-'))!;
+          rmSync(path.join(tmpRoot, stage, 'x', name), { recursive: true });
+          return false;
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'ENOENT', path: expect.stringMatching(/\/fresh$/) });
+
+    expect(errorLog).not.toHaveBeenCalled();
+    const entries = await readdir(tmpRoot);
+    expect(entries).not.toContain('out-first-install');
+    expect(entries.filter((n) => n.startsWith('.haive-extract-'))).toEqual([]);
   });
 
   it('rejects unsupported format', async () => {
