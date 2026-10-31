@@ -75,7 +75,7 @@ describe('conditional construct balance (item 3)', () => {
     assert.equal(swallowedFailure('if a; then x; elif b; then true; else true; fi'), null));
 });
 
-describe('executable heredocs (item 4)', () => {
+describe('heredoc bodies by consumer', () => {
   for (const command of [
     'bash',
     'sh',
@@ -83,16 +83,100 @@ describe('executable heredocs (item 4)', () => {
     'docker exec -i container sh',
     '/bin/bash',
     'env X=y bash',
+    'sudo bash',
+    'sudo -E bash',
+    'sudo -u x sh',
+    'time bash',
+    'timeout 60 bash',
+    'nohup sh',
+    'env -i bash',
+    '/usr/bin/env bash',
+    'exec bash',
+    'command bash',
+    'FOO="a b" bash',
+    'source /dev/stdin',
+    '. /dev/stdin',
+    'docker compose exec -T svc sh',
+    'docker run -i img sh',
+    'kubectl exec -i p -- sh',
+    'xargs -I{} sh',
+    '$SHELL',
+    'mycmd',
   ]) {
-    it(`sees a swallow fed to ${command}`, () =>
-      rejects(`${command} <<'EOF'\npnpm test || true\nEOF`));
+    it(`sees a swallow fed to ${command}`, () => {
+      const script = `${command} <<'EOF'\npnpm test || true\nEOF`;
+      bashAccepts(script);
+      rejects(script);
+    });
     it(`sees Redis fed to ${command}`, () =>
       assert.ok(shellSource(`${command} <<'EOF'\nexport X=${url}\nEOF`).includes(url)));
   }
-  for (const command of ['node', 'python', 'python3 -', 'psql']) {
+  for (const [prefix, suffix] of [
+    ['if true; then ', '\nfi'],
+    ['for x in a; do ', '\ndone'],
+    ['! ', ''],
+    ['{ ', '\n}'],
+    ['(', '\n)'],
+  ]) {
+    it(`sees a swallow fed to bash after ${JSON.stringify(prefix)}`, () => {
+      const script = `${prefix}bash <<'EOF'\npnpm test || true\nEOF${suffix}`;
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
+  for (const script of [
+    "<<'EOF' bash\npnpm test || true\nEOF",
+    "<<'EOF' bash -s\npnpm test || true\nEOF",
+    "cat <<'EOF' | bash\npnpm test || true\nEOF",
+    "cat <<'EOF' | sh -e\npnpm test || true\nEOF",
+    "cat <<'EOF' | sudo bash\npnpm test || true\nEOF",
+    "cat <<'EOF' | tee out | bash\npnpm test || true\nEOF",
+    "cat <<'EOF' | tr a b\npnpm test || true\nEOF",
+    "cat <<'EOF' |\npnpm test || true\nEOF\nbash",
+  ]) {
+    it(`sees a swallow in ${JSON.stringify(script)}`, () => {
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
+  for (const script of [
+    'eval "$(cat <<\'EOF\'\npnpm test || true\nEOF\n)"',
+    "eval $(cat <<'EOF'\npnpm test || true\nEOF\n)",
+    "source <(cat <<'EOF'\npnpm test || true\nEOF\n)",
+    'bash -c "$(cat <<\'EOF\'\npnpm test || true\nEOF\n)"',
+    "bash < <(cat <<'EOF'\npnpm test || true\nEOF\n)",
+  ]) {
+    it(`sees a swallow in ${JSON.stringify(script)}`, () => {
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
+  it('keeps a body inert when a substitution only echoes it', () => {
+    const script = 'echo "$(cat <<\'EOF\'\npnpm test || true\nEOF\n)"';
+    bashAccepts(script);
+    assert.equal(swallowedFailure(script), null);
+  });
+  for (const command of [
+    'node',
+    'python',
+    'python3 -',
+    'psql',
+    'docker exec -i c node -',
+    'sudo node',
+    'tsx -',
+    'deno run -',
+    'bun -',
+  ]) {
     it(`sees Redis fed to ${command}`, () =>
       assert.ok(shellSource(`${command} <<'EOF'\nclient("${url}")\nEOF`).includes(url)));
+    it(`keeps a swallow fed to ${command} inert`, () =>
+      assert.equal(swallowedFailure(`${command} <<'EOF'\nx || true\nEOF`), null));
   }
+  it('sees Redis fed to an interpreter through a pipe', () => {
+    const script = `cat <<'EOF' | node -\nclient("${url}")\nEOF`;
+    assert.ok(shellSource(script).includes(url));
+    assert.equal(swallowedFailure(script), null);
+  });
   for (const body of ['$(pnpm test || true)', '`pnpm test || true`']) {
     it(`sees an unquoted substitution ${body}`, () => rejects(`cat <<EOF\n${body}\nEOF`));
     it(`sees Redis in an unquoted substitution ${body}`, () =>
@@ -102,15 +186,40 @@ describe('executable heredocs (item 4)', () => {
         ),
       ));
   }
-  for (const command of ['cat', 'tee file', '>file']) {
+  for (const command of [
+    'cat',
+    'tee file',
+    '>file',
+    'read -r a',
+    'mapfile -t a',
+    'sed s/a/b/',
+    'awk 1',
+    'grep x',
+    'jq .',
+    'while read -r a; do :; done',
+  ]) {
     it(`keeps quoted data for ${command} inert`, () => {
       const script = `${command} <<'EOF'\nset +e\n$(cmd || true)\n${url}\nEOF`;
+      bashAccepts(script);
       assert.equal(swallowedFailure(script), null);
       assert.ok(!shellSource(script).includes(url));
     });
   }
-  it('keeps an interpreter name in an echo argument inert', () =>
-    assert.equal(swallowedFailure("echo bash <<'EOF'\ncmd || true\nEOF"), null));
+  it('keeps quoted data piped to another data sink inert', () => {
+    const script = `cat <<'EOF' | grep x\nset +e\n$(cmd || true)\n${url}\nEOF`;
+    bashAccepts(script);
+    assert.equal(swallowedFailure(script), null);
+    assert.ok(!shellSource(script).includes(url));
+  });
+  it('keeps quoted data inert for a bare redirection', () =>
+    assert.equal(swallowedFailure("<<'EOF'\nset +e\nEOF"), null));
+  it('keeps a shell name in the arguments of a data command inert', () =>
+    assert.equal(swallowedFailure("grep bash <<'EOF'\ncmd || true\nEOF"), null));
+  it('throws with the step name when an unrecognised command reads a body that is not shell', () => {
+    const script = "mycmd <<'EOF'\nIt's data\nEOF";
+    bashAccepts(script);
+    assert.throws(() => shellSource(script, { step }), /scanner-control: unterminated quote/);
+  });
 });
 
 describe('unquoted heredoc bodies: only the expansions are code', () => {

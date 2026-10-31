@@ -1,18 +1,59 @@
 // Conservative lexical filter for workflow safety pins. Uncertain syntax fails closed.
 // Keep quoted strings for URL scans, and expose executable substitutions for command scans.
-function heredocConsumer(header) {
-  // Recognize the command, including common dispatch wrappers, rather than an argument to echo.
-  const command = header
-    .split(/[;|&\n]/)
-    .at(-1)
-    .trim()
-    .replace(/^(?:[A-Za-z_]\w*=\S+\s+|env\s+|command\s+|exec\s+)+/, '');
-  const shell = /^(?:['"]?(?:\/[^\s'"/]+)*\/?)?(?:bash|sh|dash|ksh|zsh|ssh)\b/;
-  if (shell.test(command) || /^docker\s+exec\b.*\s(?:bash|sh|dash|ksh|zsh)(?:\s|$)/.test(command))
-    return 'shell';
-  if (/^(?:['"]?(?:\/[^\s'"/]+)*\/?)?(?:node|python[\d.]*|psql|ruby|perl|php)\b/.test(command))
+// Prefixes that only run the command after them: reserved words, redirections, assignments,
+// paths and the wrappers sudo, env, timeout, xargs and docker exec.
+const WRAPPERS = [
+  /^(?:\(|\{(?=\s))\s*/,
+  /^(?:if|then|elif|else|while|until|do|time|nohup|command|exec|builtin|!)\s+/,
+  /^\d*[<>]+&?\s*[^\s<>]+\s*/,
+  /^[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|[^\s"'])*\s+/,
+  /^\/(?:[^\s/]+\/)*/,
+  /^env(?:\s+(?:-\S+|[A-Za-z_]\w*=\S*))*\s+/,
+  /^sudo(?:\s+(?:-[ughpCDrtTU]\s+\S+|-\S*))*\s+/,
+  /^timeout(?:\s+(?:-[ks]\s+\S+|-\S+))*\s+[\d.]+[smhd]?\s+/,
+  /^xargs(?:\s+(?:-[ILnPdsEa]\s*\S+|-\S+))*\s+/,
+  /^docker(?:-compose|\s+compose)?(?:\s+-\S+(?:\s+[^-\s]\S*)?)*\s+exec(?:\s+(?:-[euw]\s+\S+|--(?:env|user|workdir)\s+\S+|-\S+))*\s+\S+\s+/,
+];
+
+// The text after the last separator: the simple command being read.
+const lastCommand = (text) =>
+  text.slice(Math.max(...[';', '&', '|', '\n'].map((char) => text.lastIndexOf(char))) + 1);
+
+// The command word and its arguments, once the wrappers are stripped.
+function commandOf(text) {
+  let command = text.trim();
+  for (let before = ''; before !== command;) {
+    before = command;
+    for (const wrapper of WRAPPERS) command = command.replace(wrapper, '');
+  }
+  return command;
+}
+
+// What a command does with its input: a shell runs it, an interpreter reads it, a data sink
+// only stores or filters it. Everything else is unknown.
+function kindOf(command) {
+  if (/^(?:bash|sh|dash|ksh|zsh|ssh|su|eval|source|\.)(?=\s|$)/.test(command)) return 'shell';
+  if (/^(?:node|python[\d.]*|psql|ruby|perl|php|tsx|deno|bun)(?=\s|$)/.test(command))
     return 'interpreter';
-  return 'data';
+  if (/^(?:(?:cat|tee|read|mapfile|sed|awk|grep|jq|done)(?=\s|$)|$)/.test(command)) return 'data';
+  return 'other';
+}
+
+// Whether the command being read runs its input as code.
+const readsCode = (text) => kindOf(commandOf(lastCommand(text))) === 'shell';
+
+// Who reads a heredoc body: the command the operator belongs to and each command piped after it.
+// Only data sinks leave the body as data; whatever is not recognised is read as code.
+function heredocConsumer(header, line) {
+  const [first, ...piped] = line.split(/(?<!\|)\|(?!\|)/);
+  const commands = [
+    lastCommand(header) + ' ' + first.split(/[;&]/)[0],
+    // A pipe at the end of the line names its consumer on a later line.
+    ...piped.map((command) => command.split(/[;&]/)[0].trim() || '|'),
+  ];
+  const kinds = commands.map((command) => kindOf(commandOf(command)));
+  if (kinds.some((kind) => kind === 'shell' || kind === 'other')) return 'code';
+  return kinds.includes('interpreter') ? 'interpreter' : 'data';
 }
 
 // The head of a real case statement: the word `case` among another command's arguments is not one.
@@ -56,7 +97,7 @@ export function shellSource(
     throw new Error(`${step}: unterminated ${what}`);
   };
   const substitutions = [];
-  const quoted = (start, quote, ansi = false) => {
+  const quoted = (start, quote, ansi = false, code = false) => {
     let i = start + 1;
     while (i < source.length) {
       if (source[i] === '\\' && (quote !== "'" || ansi)) {
@@ -65,7 +106,7 @@ export function shellSource(
       }
       if (source[i] === quote) return i + 1;
       if (quote === '"' && source.startsWith('$(', i) && !source.startsWith('$((', i)) {
-        const nested = scan(i + 2, ')');
+        const nested = scan(i + 2, ')', false, code);
         substitutions.push(nested.text);
         i = nested.end;
       } else if (quote === '"' && source[i] === '`') {
@@ -104,7 +145,7 @@ export function shellSource(
     if (i === start) fail('heredoc delimiter');
     return { delimiter, quotedWord, end: i };
   };
-  const scan = (start, stop = null, parameter = false) => {
+  const scan = (start, stop = null, parameter = false, code = false) => {
     let result = '';
     let i = start;
     const heredocs = [];
@@ -117,7 +158,7 @@ export function shellSource(
       } else if (char === "'" || char === '"' || char === '`' || source.startsWith("$'", i)) {
         const ansi = source.startsWith("$'", i);
         const quoteStart = i + Number(ansi);
-        const end = quoted(quoteStart, source[quoteStart], ansi);
+        const end = quoted(quoteStart, source[quoteStart], ansi, code || readsCode(result));
         if (char === '`')
           substitutions.push(shellSource(source.slice(i + 1, end - 1), { maskQuotes, step }));
         const literal = source.slice(quoteStart + 1, end - 1);
@@ -138,7 +179,7 @@ export function shellSource(
         i = nested.end;
       } else if (source.startsWith('$(', i) || (!parameter && char === '(')) {
         const size = char === '$' ? 2 : 1;
-        const nested = scan(i + size, ')');
+        const nested = scan(i + size, ')', false, code || readsCode(result));
         result += source.slice(i, i + size) + nested.text + ')';
         i = nested.end;
       } else if (!parameter && char === '#' && (i === 0 || /[\s;|&()]/.test(source[i - 1]))) {
@@ -151,7 +192,13 @@ export function shellSource(
         let wordStart = i + 2 + Number(tabs);
         while (/[ \t]/.test(source[wordStart] ?? '')) wordStart++;
         const word = delimiterWord(wordStart);
-        heredocs.push({ ...word, tabs, consumer: heredocConsumer(source.slice(start, i)) });
+        const eol = source.indexOf('\n', word.end);
+        const line = source.slice(word.end, eol === -1 ? undefined : eol);
+        heredocs.push({
+          ...word,
+          tabs,
+          consumer: code ? 'code' : heredocConsumer(source.slice(start, i), line),
+        });
         result += maskQuotes ? '<<_' : source.slice(i, word.end);
         i = word.end;
       } else if (char === '\n') {
@@ -173,7 +220,7 @@ export function shellSource(
           if (!terminated) fail(`heredoc ${JSON.stringify(delimiter)}`);
           // Bash expands an unquoted body before its consumer reads it: those expansions run here.
           if (!quotedWord) result += '\n' + shellSource(body, { maskQuotes, step, prose: true });
-          if (consumer === 'shell') result += '\n' + shellSource(body, { maskQuotes, step }) + '\n';
+          if (consumer === 'code') result += '\n' + shellSource(body, { maskQuotes, step }) + '\n';
           else if (consumer === 'interpreter' && !maskQuotes) result += '\n' + body + '\n';
         }
       } else if (!parameter && source.startsWith(';;', i)) {
