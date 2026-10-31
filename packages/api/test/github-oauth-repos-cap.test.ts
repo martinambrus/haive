@@ -27,6 +27,7 @@ app.route('/', githubOauthRoutes);
 app.onError(errorHandler);
 
 let pagesRead: number[] = [];
+let credentialHost = 'github.com';
 
 function githubWith(total: number): typeof fetch {
   return (async (input: string | URL | Request) => {
@@ -72,6 +73,7 @@ async function listRepos(total: number) {
 
 beforeEach(() => {
   pagesRead = [];
+  credentialHost = 'github.com';
   vi.spyOn(secretsService, 'getMasterKek').mockResolvedValue(KEK);
   const dek = generateDek();
   h.db = {
@@ -80,7 +82,7 @@ beforeEach(() => {
         findFirst: async () => ({
           id: CREDENTIAL,
           userId: USER,
-          host: 'github.com',
+          host: credentialHost,
           encryptedDek: encryptDek(dek, KEK),
           secretEncrypted: encrypt('gh-token', dek),
         }),
@@ -113,6 +115,36 @@ describe('the GitHub repository list says it is cut only when a repository was l
     expect(body.cap).toBe(CAP);
     expect(pagesRead).toEqual(ALL_PAGES);
   });
+});
+
+describe('the credential must be a github.com one, whatever the letter case of its host', () => {
+  it.each(['GitHub.com', 'GITHUB.COM'])(
+    'lists the repositories of a credential stored as %s',
+    async (host) => {
+      credentialHost = host;
+      const body = await listRepos(3);
+
+      expect(body.repos).toHaveLength(3);
+      expect(pagesRead).toEqual([1]);
+    },
+  );
+
+  it.each(['github.com.evil.example', 'github.com:443'])(
+    'answers 400 to a credential on %s and sends its token nowhere',
+    async (host) => {
+      credentialHost = host;
+      const fetchSpy = vi.fn(githubWith(3));
+      vi.stubGlobal('fetch', fetchSpy);
+
+      const res = await app.request(`/repos?credentialId=${CREDENTIAL}`);
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({
+        error: 'Credential is not a github.com credential',
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('a GitHub answer that is not a repository list', () => {
