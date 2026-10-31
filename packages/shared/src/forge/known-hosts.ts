@@ -131,16 +131,20 @@ export function credentialUsableForPr(
   return credHost.toLowerCase() === originHost.toLowerCase() && isForgeProviderName(c.provider);
 }
 
-/** A connection's credential must still be of the connection's own forge, and usable for the origin. */
+/** A forge connection's credential must still be of the connection's own forge, and usable for the
+ *  origin; a provider that is no forge has no forge to compare and is judged by the origin alone. */
 export function connectionCredentialFits(
   providerId: string,
   c: { provider: string | null; host: string },
   originUrl: string | null,
 ): boolean {
-  return (
-    credentialForgeProvider(c.provider, c.host) === providerId &&
-    credentialUsableForPr(c, originUrl)
-  );
+  if (
+    isForgeProviderName(providerId) &&
+    credentialForgeProvider(c.provider, c.host) !== providerId
+  ) {
+    return false;
+  }
+  return credentialUsableForPr(c, originUrl);
 }
 
 type ApiBaseTarget = { host: string; provider?: string | null; apiBaseUrl?: string | null };

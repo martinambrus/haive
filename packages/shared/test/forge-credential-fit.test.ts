@@ -281,6 +281,19 @@ describe('connectionCredentialFits', () => {
     },
   );
 
+  it('judges a connection of a provider that is no forge by the remote alone', () => {
+    // No Git credential has a module provider as its forge; a connection that still holds one is the
+    // engine's to route (the worker's module-provider stamping tests do), not this comparison's.
+    expect(
+      credentialFits('module.fx.crm', 'github', 'github.com', 'https://github.com/acme/app.git'),
+    ).toBe(true);
+    expect(credentialFits('module.fx.crm', 'gitea', 'git.example.com', SELF_REMOTE)).toBe(true);
+    expect(credentialFits('module.fx.crm', null, 'git.example.com', SELF_REMOTE)).toBe(false);
+    expect(
+      credentialFits('module.fx.crm', 'github', 'github.com', 'https://gitlab.com/g/app.git'),
+    ).toBe(false);
+  });
+
   it.each([[null], [''], ['file:///srv/git/app.git']])(
     'fits no connection to the remote %j',
     (remote) => {
