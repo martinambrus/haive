@@ -16,6 +16,8 @@ import {
   resolveTaskSkillTargetDirs,
   withoutGitDataDirs,
   isSkillPathId,
+  withoutUnsafeSkillIds,
+  skillTargetRefusalNote,
 } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
@@ -445,16 +447,18 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
 
   async apply(ctx, args): Promise<SkillRepairApply> {
     const detected = args.detected as SkillRepairDetect;
-    const targetDirs = withoutGitDataDirs(
-      detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
-      ctx.logger,
-    );
+    const storedDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    const storedIds = detected.failingSkills.map((f) => f.skillId);
+    const targetDirs = withoutGitDataDirs(storedDirs, ctx.logger);
+    withoutUnsafeSkillIds(storedIds, ctx.logger);
+    const refusalNote = skillTargetRefusalNote(storedDirs, storedIds);
     if (targetDirs.length === 0)
       return {
         summary: 'The repository maintains no skill destinations.',
         repaired: [],
-        stillFailing: [],
+        stillFailing: refusalNote ? storedIds : [],
         attempted: 0,
+        ...(refusalNote ? { degradedNote: refusalNote } : {}),
       };
     const results = args.agentMiningResults ?? [];
 
@@ -471,10 +475,6 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     for (const failing of detected.failingSkills) {
       // The id is a directory name below, removed and rewritten: a stored one may name git data.
       if (!isSkillPathId(failing.skillId)) {
-        ctx.logger.warn(
-          { skillId: failing.skillId },
-          'did not repair a skill with an invalid path ID',
-        );
         stillFailing.push(failing.skillId);
         outcomes.push({
           agentId: failing.skillId,
@@ -576,7 +576,9 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
       },
       'skill repair apply complete',
     );
-    const degradedNote = miningLossNote('skill repair', outcomes);
+    const degradedNote =
+      [refusalNote, miningLossNote('skill repair', outcomes)].filter(Boolean).join(' ') ||
+      undefined;
     // Lifted verbatim into the step's "What the agent did" panel by `resolveCuratedSummary`, so
     // this recap costs no CLI call. `degradedNote` is a separate column written beside it on the
     // same finalize, so the caveat is deliberately not repeated here — what this says is what the

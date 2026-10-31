@@ -21,6 +21,8 @@ import {
   resolveTaskSkillTargetDirs,
   withoutGitDataDirs,
   isSkillPathId,
+  withoutUnsafeSkillIds,
+  skillTargetRefusalNote,
 } from '../onboarding/_helpers.js';
 import { buildSkillContractBlocks } from '../onboarding/_skill-prompt.js';
 import {
@@ -426,16 +428,18 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
   async apply(ctx, args): Promise<SkillSyncApply> {
     const detected = args.detected as SkillSyncDetect;
     const worktree = detected.worktreePath;
-    const targetDirs = withoutGitDataDirs(
-      detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
-      ctx.logger,
-    );
+    const storedDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    const storedIds = [...detected.targets.map((t) => t.skillId), ...detected.removals];
+    const targetDirs = withoutGitDataDirs(storedDirs, ctx.logger);
+    withoutUnsafeSkillIds(storedIds, ctx.logger);
+    const refusalNote = skillTargetRefusalNote(storedDirs, storedIds);
     if (targetDirs.length === 0)
       return {
         generated: [],
         removed: [],
         indexRemovedDirs: [],
-        skipped: [],
+        skipped: refusalNote ? detected.targets.map((t) => t.skillId) : [],
+        ...(refusalNote ? { degradedNote: refusalNote } : {}),
         committed: false,
         commitSha: null,
       };
@@ -451,10 +455,6 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     for (const target of detected.targets) {
       // The id is a directory name below, removed and rewritten: a stored one may name git data.
       if (!isSkillPathId(target.skillId)) {
-        ctx.logger.warn(
-          { skillId: target.skillId },
-          'did not write a skill with an invalid path ID',
-        );
         skipped.push(target.skillId);
         outcomes.push({
           agentId: target.skillId,
@@ -497,7 +497,6 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     for (const skillId of detected.removals) {
       // Same reason as the targets above: the id is removed recursively as a directory name.
       if (!isSkillPathId(skillId)) {
-        ctx.logger.warn({ skillId }, 'did not remove a skill with an invalid path ID');
         continue;
       }
       for (const dir of targetDirs) {
@@ -571,7 +570,8 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
       { generated: generated.length, removed: removed.length, skipped: skipped.length, committed },
       'skill sync apply complete',
     );
-    const degradedNote = miningLossNote('skill', outcomes);
+    const degradedNote =
+      [refusalNote, miningLossNote('skill', outcomes)].filter(Boolean).join(' ') || undefined;
     return {
       generated,
       removed,

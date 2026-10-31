@@ -174,8 +174,11 @@ export function withoutGitDataDirs(
   dirs: readonly string[],
   logger?: StepContext['logger'],
 ): string[] {
+  const warned = new Set<string>();
   return dirs.filter((dir) => {
     if (isSkillTargetDir(dir)) return true;
+    if (warned.has(dir)) return false;
+    warned.add(dir);
     logger?.warn({ dir }, 'did not use a skills directory: not a catalog skills destination');
     return false;
   });
@@ -185,11 +188,30 @@ export function withoutUnsafeSkillIds(
   ids: readonly string[],
   logger?: StepContext['logger'],
 ): string[] {
+  const warned = new Set<string>();
   return ids.filter((skillId) => {
     if (isSkillPathId(skillId)) return true;
+    if (warned.has(skillId)) return false;
+    warned.add(skillId);
     logger?.warn({ skillId }, 'did not use a skill ID: not a single non-git-data path segment');
     return false;
   });
+}
+
+/** A visible caveat alongside the existing mining/coverage note, including all-refused runs. */
+export function skillTargetRefusalNote(
+  dirs: readonly string[],
+  ids: readonly string[] = [],
+): string | undefined {
+  const droppedDirs = new Set(dirs.filter((dir) => !isSkillTargetDir(dir))).size;
+  const droppedIds = new Set(ids.filter((id) => !isSkillPathId(id))).size;
+  if (droppedDirs === 0 && droppedIds === 0) return undefined;
+  return (
+    `Skipped ${droppedDirs} invalid stored skill destination(s) and ${droppedIds} invalid stored skill ID(s). ` +
+    (dirs.length > 0 && dirs.every((dir) => !isSkillTargetDir(dir))
+      ? 'No skill operations were applied because every stored destination was refused.'
+      : 'Operations at those targets were left unapplied.')
+  );
 }
 
 export async function loadPreviousStepOutput(

@@ -13,6 +13,7 @@ import {
   withoutGitDataDirs,
   isSkillPathId,
   withoutUnsafeSkillIds,
+  skillTargetRefusalNote,
 } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
@@ -103,7 +104,7 @@ interface SkillGenApply {
   llmSkillCount: number;
   /** Consecutive dry passes. Bounds in-loop re-rolls before the loop gives up. */
   consecutiveEmpty: number;
-  /** Set when the loop gives up short of `targetCount` but above the failure floor.
+  /** Set when stored targets are refused, or the loop stops short of `targetCount` above its failure floor.
    *  Lifted verbatim by computeDegradedNote. Optional: apply outputs are persisted. */
   degradedNote?: string;
   /* --- Content hashes of what this step WROTE, so the onboarding-artifact reset can tell a
@@ -1285,13 +1286,22 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const maxSkills = clampMaxSkills(values.maxSkills);
 
     const detected = args.detected as SkillGenDetect;
-    const targetDirs = withoutGitDataDirs(
-      detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
-      ctx.logger,
-    );
+    const storedDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    // Iteration is structural loop state: the same persisted targets are read on every pass.
+    const refusalLogger = args.iteration === 0 ? ctx.logger : undefined;
+    const targetDirs = withoutGitDataDirs(storedDirs, refusalLogger);
+    const prior =
+      (args.previousIterations.at(-1)?.applyOutput as SkillGenApply | undefined) ?? null;
+    const storedIds = [
+      ...(detected.bundleSkills ?? []).map((s) => s.id),
+      ...(prior?.written ?? []).map((w) => w.id),
+    ];
+    const allowedIds = new Set(withoutUnsafeSkillIds(storedIds, refusalLogger));
+    const refusalNote = skillTargetRefusalNote(storedDirs, storedIds);
     if (targetDirs.length === 0)
       return {
         summary: 'The repository maintains no skill destinations.',
+        ...(refusalNote ? { degradedNote: refusalNote } : {}),
         written: [],
         totalSubSkills: 0,
         droppedFromCap: 0,
@@ -1316,26 +1326,16 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     // LAST, not first, is what keeps it behaviour-preserving on disk: the later write is the one
     // whose bytes survived the overwrite, so the tree is byte-identical and the index now names
     // the entry that is actually there.
-    const allowedBundleIds = new Set(
-      withoutUnsafeSkillIds(
-        (detected.bundleSkills ?? []).map((s) => s.id),
-        ctx.logger,
-      ),
-    );
     const bundleSkills = [
       ...new Map(
-        (detected.bundleSkills ?? [])
-          .filter((s) => allowedBundleIds.has(s.id))
-          .map((s) => [s.id, s]),
+        (detected.bundleSkills ?? []).filter((s) => allowedIds.has(s.id)).map((s) => [s.id, s]),
       ).values(),
     ];
     const plan = computeDomainPlan(detected, maxSkills);
 
     // Prior cumulative state — each loop pass extends the previous one so the
     // loop's final output is the complete library. Iteration 0 has no prior.
-    const prior =
-      (args.previousIterations.at(-1)?.applyOutput as SkillGenApply | undefined) ?? null;
-    const priorWritten = (prior?.written ?? []).filter((w) => isSkillPathId(w.id));
+    const priorWritten = (prior?.written ?? []).filter((w) => allowedIds.has(w.id));
 
     // Ids already on disk: bundle ids + everything prior passes wrote.
     const seenIds = new Set<string>([
@@ -1497,11 +1497,11 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     // readable only by comparing two numbers in the persisted output that nothing compares.
     // The note is computed only on this terminal branch, never mid-loop, because a pass that
     // is merely not finished yet is not a degradation.
-    let degradedNote: string | undefined;
+    let coverageNote: string | undefined;
     if (lastBatchCount === 0 && consecutiveEmpty >= MAX_EMPTY_PASSES) {
       const targetCount = plan.mode === 'deterministic' ? plan.domains.length : 0;
       if (targetCount > 0 && llmSkillCount < targetCount) {
-        degradedNote =
+        coverageNote =
           `Skill generation stopped after ${consecutiveEmpty} empty passes with ` +
           `${llmSkillCount} of ${targetCount} business capabilities covered. The uncovered ` +
           `ones have no skill — treat them as un-documented rather than simple.`;
@@ -1520,6 +1520,8 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
         );
       }
     }
+
+    const degradedNote = [refusalNote, coverageNote].filter(Boolean).join(' ') || undefined;
 
     ctx.logger.info(
       {

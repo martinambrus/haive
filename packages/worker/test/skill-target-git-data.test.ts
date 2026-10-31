@@ -456,8 +456,8 @@ describe('11d skillSyncStep.apply with a skill id that names git data', () => {
     expect(await readdir(path.join(repo, ORDINARY, '.git'))).toEqual(['keep.txt']);
     expect(await exists(`${ORDINARY}/conventions/SKILL.md`)).toBe(true);
     expect(await exists(`${ORDINARY}/old`)).toBe(false);
-    // Once as a target, once as a removal.
-    expect(warnedSkillIds(log)).toEqual(['.git', '.git']);
+    // One refusal even when the ID appears as both a target and a removal.
+    expect(warnedSkillIds(log)).toEqual(['.git']);
 
     if ('error' in settled) throw settled.error;
     const out = settled.value;
@@ -713,5 +713,42 @@ describe('stored skill positive path validation', () => {
     expect(out.generated).toEqual([]);
     expect(out.removed).toEqual([]);
     expect(out.committed).toBe(false);
+  });
+});
+describe('stored target refusals are visible once per run', () => {
+  it.each([
+    { step: skillGenerationStep, detected: () => genDetect(REFUSED) },
+    { step: skillRepairStep, detected: () => repairDetect(REFUSED) },
+    { step: skillSyncStep, detected: () => syncDetect(REFUSED, ['conventions'], ['old']) },
+  ])(
+    'sets degradedNote even when every dir is dropped: $step.metadata.id',
+    async ({ step, detected }) => {
+      const log = recordingLogger();
+      const out = await step.apply(ctxFor(log), applyArgs(detected()) as never);
+      expect(out.degradedNote).toBeTruthy();
+    },
+  );
+  it('09_5 logs dropped dirs once across loop passes and retains the note', async () => {
+    const log = recordingLogger();
+    const detected = genDetect(STORED);
+    const first = await skillGenerationStep.apply(ctxFor(log), applyArgs(detected) as never);
+    const out = await skillGenerationStep.apply(ctxFor(log), {
+      ...applyArgs(detected),
+      iteration: 1,
+      llmOutput: null,
+      previousIterations: [{ applyOutput: first }],
+    } as never);
+    expect(warnedDirs(log)).toEqual(REFUSED);
+    expect(first.degradedNote).toBeTruthy();
+    expect(out.degradedNote).toBe(first.degradedNote);
+  });
+  it('11d reports a refused removal even with no generation targets', async () => {
+    const log = recordingLogger();
+    const out = await skillSyncStep.apply(
+      ctxFor(log),
+      applyArgs(syncDetect([ORDINARY], [], ['.git'])) as never,
+    );
+    expect(out.degradedNote).toBeTruthy();
+    expect(out.removed).toEqual([]);
   });
 });
