@@ -9,11 +9,20 @@ if (url && !new URL(url).pathname.startsWith('/step_fold_preread_test'))
   );
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000f2');
-const h = vi.hoisted(() => ({ db: undefined as unknown, thrown: undefined as unknown }));
+const h = vi.hoisted(() => ({
+  db: undefined as unknown,
+  thrown: undefined as unknown,
+  /** What the task queue was asked to enqueue. */
+  jobs: [] as { name: string; data: unknown }[],
+}));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/queues.js', () => {
-  const queue = () => ({ add: async () => undefined });
+  const queue = () => ({
+    add: async (name: string, data: unknown) => {
+      h.jobs.push({ name, data });
+    },
+  });
   return {
     getTaskQueue: queue,
     getRepoQueue: queue,
@@ -46,7 +55,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
 });
 
 import { Hono } from 'hono';
-import { PROVIDER_SENSITIVE_STEP_IDS } from '@haive/shared';
+import { MODEL_HEALTH_STEP_IDS, PROVIDER_SENSITIVE_STEP_IDS } from '@haive/shared';
 import { taskRoutes } from '../src/routes/tasks/index.js';
 import { resetRowsForRerun } from '../src/routes/tasks/steps.js';
 import type { AppEnv } from '../src/context.js';
@@ -74,6 +83,12 @@ const SKIPPABLE = {
   id: '00000000-0000-4000-8000-0000000000c1',
   stepId: '11g-save-database',
   index: 3,
+} as const;
+// The model-health canary: a CLI swap on it also rewrites the task's default CLI and records the change.
+const CANARY = {
+  id: '00000000-0000-4000-8000-0000000000d1',
+  stepId: MODEL_HEALTH_STEP_IDS[1]!,
+  index: 0,
 } as const;
 const BLIND_INDEX = 'step-fold-preread-test-user';
 const BLOCKED_WITHIN_MS = 10_000;
@@ -112,6 +127,7 @@ describe.skipIf(!url)(
   () => {
     let db: Database;
     let peer: Database;
+    let providerId: string;
 
     beforeAll(async () => {
       db = createDatabase(url as string);
@@ -125,9 +141,15 @@ describe.skipIf(!url)(
         passwordHash: 'not-real',
         role: 'user',
       });
+      const [provider] = await db
+        .insert(schema.cliProviders)
+        .values({ userId: USER, name: 'claude-code', label: 'step fold pre-read', enabled: true })
+        .returning({ id: schema.cliProviders.id });
+      providerId = provider!.id;
     });
 
     beforeEach(async () => {
+      h.jobs.length = 0;
       await db.delete(schema.tasks).where(eq(schema.tasks.userId, USER));
     });
 
@@ -447,6 +469,28 @@ describe.skipIf(!url)(
       return row!;
     };
 
+    const choiceRows = (taskId: string) =>
+      db
+        .select({
+          stepId: schema.taskStepCliChoices.stepId,
+          cliProviderId: schema.taskStepCliChoices.cliProviderId,
+        })
+        .from(schema.taskStepCliChoices)
+        .where(eq(schema.taskStepCliChoices.taskId, taskId));
+
+    const eventTypes = async (taskId: string) =>
+      (
+        await db
+          .select({ type: schema.taskEvents.eventType })
+          .from(schema.taskEvents)
+          .where(eq(schema.taskEvents.taskId, taskId))
+      ).map((e) => e.type);
+
+    const taskRow = async (taskId: string) => {
+      const [row] = await db.select().from(schema.tasks).where(eq(schema.tasks.id, taskId));
+      return row!;
+    };
+
     const expectIdleIncludesPeer = (
       idleMs: number,
       parkedAt: Date,
@@ -530,7 +574,8 @@ describe.skipIf(!url)(
 
     // H4 and H5: a pass activates the row between the handler's read of its status and the row lock. The peer
     // flips it as the pass does, the claim of a pending row and the flip of an answered form, and the switch
-    // that read the row first must refuse it as it refuses a row it read live, leaving the row as the pass has it.
+    // that read the row first must refuse it as it refuses a row it read live, leaving the row as the pass has it
+    // and saving no choice: the refusal changes nothing, as the one on the first read does.
     const peerClaims = (id: string) => (tx: Tx) =>
       tx.execute(sql`
         update task_steps set status = 'running', started_at = now()
@@ -565,8 +610,107 @@ describe.skipIf(!url)(
           carriedIdleMs: 200,
           carriedUserActiveMs: 50,
         });
+        expect.soft(await choiceRows(taskId), 'task_step_cli_choices').toEqual([]);
       },
       TEST_TIMEOUT,
+    );
+
+    // The model-health canary also rewrites the task's default CLI and records that, so a refused switch on it
+    // must leave those alone too.
+    const canaryPatch = (taskId: string) =>
+      patch(`/tasks/${taskId}/steps/${CANARY.stepId}/cli-provider`, { cliProviderId: providerId });
+
+    it(
+      'H4c: a refused switch on the model-health canary leaves the task default, the choice and the event alone',
+      async () => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, {}, CANARY);
+
+        const outcome = await settle(besidePeer(() => canaryPatch(taskId), peerClaims(CANARY.id)));
+
+        expect.soft(outcome).toMatchObject({
+          ok: false,
+          error: { status: 409, message: 'Cannot change provider while step is running' },
+        });
+        expect.soft((await wholeRow(CANARY.id)).status).toBe('running');
+        expect.soft(await choiceRows(taskId), 'task_step_cli_choices').toEqual([]);
+        expect.soft((await taskRow(taskId)).cliProviderId, 'tasks.cli_provider_id').toBeNull();
+        expect.soft(await eventTypes(taskId)).not.toContain('task.cli_provider_changed');
+      },
+      TEST_TIMEOUT,
+    );
+
+    it('H4d: a switch on the model-health canary that nothing refuses saves the choice, rewrites the task default and records it', async () => {
+      const taskId = await seedTask('running');
+      await seedStep(taskId, {}, CANARY);
+
+      const response = await canaryPatch(taskId);
+
+      expect(response).toMatchObject({ status: 200, body: { ok: true } });
+      expect((await wholeRow(CANARY.id)).status).toBe('pending');
+      expect(await choiceRows(taskId)).toEqual([
+        { stepId: CANARY.stepId, cliProviderId: providerId },
+      ]);
+      expect((await taskRow(taskId)).cliProviderId).toBe(providerId);
+      expect(await eventTypes(taskId)).toContain('task.cli_provider_changed');
+    });
+
+    it('H4f: a disabled CLI on a pending row is still refused with the same 400, and nothing of the switch stays', async () => {
+      const taskId = await seedTask('running');
+      await seedStep(taskId);
+      const [disabled] = await db
+        .insert(schema.cliProviders)
+        .values({ userId: USER, name: 'codex', label: 'step fold disabled', enabled: false })
+        .returning({ id: schema.cliProviders.id });
+
+      const outcome = await settle(
+        patch(`/tasks/${taskId}/steps/${STEP.stepId}/cli-provider`, {
+          cliProviderId: disabled!.id,
+        }),
+      );
+
+      expect(outcome).toMatchObject({
+        ok: false,
+        error: { status: 400, code: 'cli_provider_disabled' },
+      });
+      expect(await choiceRows(taskId)).toEqual([]);
+      expect(await finalRow()).toEqual({
+        status: 'pending',
+        idleMs: 4000,
+        userActiveMs: 800,
+        carriedWorkMs: 1000,
+        carriedIdleMs: 200,
+        carriedUserActiveMs: 50,
+      });
+    });
+
+    // A row the switch does not re-run takes the choice and nothing else, and does not enter the transaction.
+    it.each([
+      ['a finished step', { status: 'done' }],
+      ['a step in its next loop iteration', { status: 'waiting_form', iterationCount: 1 }],
+    ] as const)(
+      'H4e: the switch on %s saves the choice and leaves the row alone',
+      async (_what, over) => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, over);
+
+        const response = await patch(`/tasks/${taskId}/steps/${STEP.stepId}/cli-provider`, {
+          cliProviderId: providerId,
+        });
+
+        expect(response).toMatchObject({ status: 200, body: { ok: true } });
+        expect(await choiceRows(taskId)).toEqual([
+          { stepId: STEP.stepId, cliProviderId: providerId },
+        ]);
+        expect(await finalRow()).toEqual({
+          status: over.status,
+          idleMs: 4000,
+          userActiveMs: 800,
+          carriedWorkMs: 1000,
+          carriedIdleMs: 200,
+          carriedUserActiveMs: 50,
+        });
+      },
     );
   },
 );

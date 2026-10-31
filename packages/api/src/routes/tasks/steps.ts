@@ -1902,19 +1902,20 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       by: userId,
     });
   };
-  // A re-run saves the choice inside its fenced admission, so a refused one changes nothing.
-  if (!movesTask) await saveChoice(db);
-
   // Invalidate the step's cached detect/form so the next advance re-detects
   // against the newly-preferred CLI's metadata. Skipped if step is terminal, and
   // for a mid-loop step (iterationCount > 0) so swapping the CLI before Resume
   // keeps the completed passes + the form instead of restarting the step.
+  const reruns =
+    step.iterationCount === 0 &&
+    (step.status === 'pending' || step.status === 'waiting_form' || step.status === 'failed');
+  // A re-run saves the choice inside its transaction, after its check of the row it holds, so a
+  // refused one changes nothing: a row that never enters the transaction saves it here.
+  if (!reruns) await saveChoice(db);
+
   let redrive: { epoch: number; leftActive: (typeof schema.taskSteps.$inferSelect)[] } | null =
     null;
-  if (
-    step.iterationCount === 0 &&
-    (step.status === 'pending' || step.status === 'waiting_form' || step.status === 'failed')
-  ) {
+  if (reruns) {
     // A failed or parked step is re-run on the new CLI, which takes the task back to it as a
     // Retry does, so what the task leaves active elsewhere is reset. A pending row is only
     // invalidated: the task has either not reached it, where an advance queued from here would
@@ -1989,8 +1990,10 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
-      if (!movesTask) return null;
-      const moved = await moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now);
+      const moved = movesTask
+        ? await moveTaskToStep(tx, id, { ...step, stepId }, leftActive, now)
+        : null;
+      // After the step row and, when the task moves, the task row, as a pass and a Retry take them.
       await saveChoice(tx);
       return moved;
     });
