@@ -3,7 +3,12 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { and, asc, eq, inArray, isNull } from 'drizzle-orm';
 import { isRootClaimLive, schema, type Database } from '@haive/database';
-import { CHECKOUT_HOLDING_TASK_STATUSES, HAIVE_DATA_FILES, logger } from '@haive/shared';
+import {
+  CHECKOUT_HOLDING_TASK_STATUSES,
+  HAIVE_DATA_FILES,
+  logger,
+  PLAN_MERGE_LIVE_STATUSES,
+} from '@haive/shared';
 import { lstatNoFollow } from '@haive/shared/fs-safe';
 import { GIT_OPERATION_STATE_ENTRIES, hardenGitArgs } from '@haive/shared/git-args';
 import {
@@ -16,7 +21,6 @@ import {
 import { scrubErrorPaths } from '@haive/shared/logger';
 import { PROJECT_STATE_DIR } from '@haive/shared/project-state';
 import { isAllowedGitRemoteUrl } from '@haive/shared/schemas';
-import { OPEN_PLAN_TASK_STATES } from './plan-advisories.js';
 
 /* The facts below are the ones the worker's locked check builds (`factsAt`,
  * worker/src/project-state/save.ts), read without its locks and re-implemented here because the api
@@ -213,7 +217,7 @@ export async function readHaiveDataStatus(
         and(
           eq(schema.tasks.repositoryId, repo.id),
           eq(schema.tasks.type, 'plan_merge'),
-          inArray(schema.tasks.status, [...OPEN_PLAN_TASK_STATES]),
+          inArray(schema.tasks.status, [...PLAN_MERGE_LIVE_STATUSES]),
         ),
       )
       .limit(1),

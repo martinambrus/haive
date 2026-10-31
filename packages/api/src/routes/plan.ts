@@ -24,6 +24,7 @@ import {
   planSequenceRequestSchema,
   planSnapshotSaveRequestSchema,
   logger,
+  PLAN_MERGE_LIVE_STATUSES,
   resolveDefaultCliProvider,
   updatePlanNodeRequestSchema,
   resolvePlanNodeRequestSchema,
@@ -452,7 +453,7 @@ async function findOpenPlanMerge(
     where: and(
       eq(schema.tasks.repositoryId, repositoryId),
       eq(schema.tasks.type, 'plan_merge'),
-      inArray(schema.tasks.status, [...OPEN_TASK_STATES]),
+      inArray(schema.tasks.status, [...PLAN_MERGE_LIVE_STATUSES]),
     ),
     columns: { id: true, status: true, cliProviderId: true, createdAt: true },
   });
