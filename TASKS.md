@@ -1069,7 +1069,7 @@ From the T385/T348 driver (2026-10-31), verified at 163cff3a3. Connected to the 
 3. A `running` row whose only run is orphaned (its cli-exec job lost) is never recovered between boots: `liveRun` (~:182) counts it and the recovery arm takes `waiting_cli` rows only; boot pass 2 is task-queue.ts ~:3829-3888. Minor.
 4. The usage-poll auto-resume advance carries no epoch (usage-poll-queue.ts ~:614-625), so it is exempt from the stale-epoch drop and serialised only by `holdStepAdvance`. Minor.
 
-### T499 · FNF[parks-accounting] · a Retry's re-offered form keeps its started_at and books its wait to idle_ms (+5)
+### T499 · FNF[parks-accounting] · a Retry's re-offered form keeps its started_at and books its wait to idle_ms (+6)
 
 status: open
 From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor.
@@ -1080,6 +1080,7 @@ From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor.
 4. A parked current row beside another `running`, `waiting_cli` or `waiting_form` row: every advance is dropped by the other-step guard (task-queue.ts ~:2813-2859), `foldAbandonedPark` unparks the row and the sweep re-drives it every 5 minutes with an epoch bump (T385 adds an overdue park as one more way in). See also T393/T394.
 5. Cosmetic: slot-wait-badge.tsx ~:40 unreachable fallback "Queued for a slot"; the "Waiting for slot" filter wording now also lists module-setup parks (web tasks/page.tsx ~:498, shared schemas/tasks.ts ~:440-441, api tasks/index.ts ~:250); cli-park-timing.ts ~:15 still calls the marker the runtime park's signature; stalled-redrive.test.ts ~:463-469 titles read as sweep rules though they test `redrivableRow`; the handleResult 'deferred' enqueue is pinned by no control (it must stay free of the dedup id); a module step that declared `needsRuntime` reads as module (slot-wait.ts ~:126).
 6. (T498 review) The stalled sweep's new `waiting_cli` re-drive does not restamp the park marker as boot does (`foldOrphanedCliParkOnBoot`, worker cli-park-timing.ts ~:216-243): a row with no marker (the handler died between the run-end write and `markCliParkBegin`) bills the gap until the re-drive as work (shared timing.ts ~:77-85). Statistics only, minor.
+7. (T471 fix round 1) Since T471 a full task Retry that restarts through START (`settleActiveStepsIn`, api task-control.ts) also books a parked form's wait with `...parkFolded`, so item 1's display (the claim re-stamps `started_at` and the booked `idle_ms` is subtracted from the new span: work reads 0 against idle 601251 five minutes into the replay, T471/fix-1/trace-item7-claim-after-fix.log) now reaches that path too. Minor, display only.
 
 ### T500 · FNF[handoff-silent-writes] · three handleResult neighbours write silently or re-fail a stopped task (+4)
 
@@ -1203,13 +1204,14 @@ From the T498 builder and the T365 fix round 2 (2026-10-31). PRE-EXISTING, minor
 status: open
 From the T498 review (2026-10-31). PRE-EXISTING design, minor. No sweep shape counts its re-drives: a step that re-parks `waiting_cli` (or stays `running`) with nothing live gets its row and task stamps refreshed by handleResult (worker task-queue.ts ~:2029-2041) and `markCliParkBegin`, so the sweep takes it again every cutoff, each time with an epoch bump and a `step.waiting_cli` event. No in-tree producer is known to loop this way (the DAG `!issue.cliInvocationId` branch, dag-executor.ts ~:2813-2817, is defensive), but T499 item 4 is one way in. Design direction: count consecutive sweep re-drives per (task, step, round) in a task event and stop at N with a visible failure, as `CANCEL_REDRIVE_MAX` does for cancels.
 
-### T515 · FNF[advance-epochs] · two advances still carry no epoch: the auto-continue toggle's, and the one after an auto-resume that bumped none (+1)
+### T515 · FNF[advance-epochs] · two advances still carry no epoch: the auto-continue toggle's, and the one after an auto-resume that bumped none (+2)
 
 status: open
 From the T498 review (2026-10-31). PRE-EXISTING, minor. Same class as T498 item 4 (the usage poller's advance now carries the task's epoch).
 
 1. api routes/tasks/index.ts ~:1210-1225: the auto-continue toggle queues an advance for the current form step with no epoch; `advanceChainHasMoved` (worker task-queue.ts ~:2772) drops one whose pointer moved, not one a Retry of the same step made stale.
 2. worker queues/_step-reset.ts ~:222-400 `autoResumeFailedStep` reopens a failed task without bumping the epoch, while every api reopen does (`moveTaskToStep`, api steps.ts ~:356), although its header says it mirrors them. A same-epoch job left from before the failure is not made stale by the auto-resume. Fix direction: bump the epoch with the reopen (and return it, so the poller's T498 stamp need not read it back).
+3. (T471 fix round 1) A second submit to a parked form whose wait is already closed (`waiting_form`, NULL marker, not yet picked up) is accepted: it writes its form values over the first answer's and queues another advance (pinned as accepted by T471's control C3). PRE-EXISTING, minor. Fix direction: an answered marker the submit can test, or refuse when the step already has form values for this round.
 
 ### T516 · FNF[relink-row-hold] [design] · writers of a repository row wait behind a relink that holds it across git, bounded only by the relink's own git deadlines (+1)
 
