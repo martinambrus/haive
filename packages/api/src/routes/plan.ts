@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { isAllowedGitRemoteUrl, redactEditableGitUrl } from '@haive/shared/schemas';
 import { hardenGitArgs } from '@haive/shared/git-args';
 import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
-import { schema, type DbTx } from '@haive/database';
+import { lockRepositoryTasksKey, schema, type DbTx } from '@haive/database';
 import {
   CONFIG_KEYS,
   HAIVE_DATA_FILES,
@@ -1442,6 +1442,8 @@ planRoutes.post('/:id/plan/nodes/:nodeId/advisory', requireNewWorkAllowed, async
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
   const { taskId, created } = await getDb().transaction(async (tx) => {
     await admitNewWork(tx);
+    // Before the node row: a repository delete holds this key and cascades into plan_nodes.
+    await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, repositoryId));
     // Two clicks (including from two tabs) serialize on the node, so both
     // continue the same advisory. Its row commits before any queue delivery.
     const [locked] = await tx

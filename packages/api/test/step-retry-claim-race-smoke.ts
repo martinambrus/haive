@@ -4,7 +4,7 @@
  * in their own transaction, in the shape the worker writes them.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { configService, secretsService, userSecretsService, logger } from '@haive/shared';
 import { initDatabase, getDb } from '../src/db.js';
@@ -70,6 +70,41 @@ function claimWrites(taskId: string, stepRowId: string, epoch: number) {
       .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.orchestrationEpoch, epoch)))
       .for('share');
   };
+}
+
+/** Hold the task row FOR SHARE, as a claim in flight does, and answer the holder's backend pid so a
+ *  probe can tell who is waiting behind it. */
+async function holdTaskRow(db: Db, taskId: string) {
+  let pid = 0;
+  const release = await holdOpen(db, async (tx) => {
+    const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+    pid = row!.pid;
+    await tx
+      .select({ id: schema.tasks.id })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId))
+      .for('share');
+  });
+  return { pid, release };
+}
+
+/** The backends waiting for a lock the backend `pid` holds. */
+async function waitersOf(db: Db, pid: number): Promise<number[]> {
+  const rows = await db.execute<{ pid: number }>(sql`
+    select pid from pg_stat_activity
+    where wait_event_type = 'Lock' and ${pid}::int = any (pg_blocking_pids(pid))`);
+  return rows.map((row) => row.pid);
+}
+
+/** Poll until `probe` holds. A state that never arrives fails its check instead of hanging the job:
+ *  the waits this script sets up are invisible to Postgres once its own code is part of the cycle. */
+async function until(probe: () => Promise<boolean>, withinMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + withinMs;
+  while (!(await probe())) {
+    if (Date.now() > deadline) return false;
+    await sleep(25);
+  }
+  return true;
 }
 
 async function main(): Promise<void> {
@@ -316,8 +351,12 @@ async function main(): Promise<void> {
       (await statusOf(stillParked!.id)) === 'pending',
     );
 
-    // 5. A Retry whose sweep meets a row a pass is still writing answers 503 and changes nothing: a
-    //    row activated after the Retry read the rows, and locked when the sweep reaches it.
+    // 5. A pass activating a row the Retry already holds waits for the Retry. The Retry takes every
+    //    row of the task in one batch before it writes one, so a row that existed then cannot turn
+    //    active between the batch and the epoch bump: the pass waits, the Retry has nothing to
+    //    refuse and answers 200, and only then does the pass go on, to find the epoch moved past it.
+    //    The task row is let go before the activation is awaited: the Retry needs it, and the
+    //    activation needs the Retry, a cycle through this script that Postgres cannot see.
     await db
       .update(schema.taskSteps)
       .set({ status: 'failed', errorMessage: 'kaboom again', endedAt: now })
@@ -326,32 +365,91 @@ async function main(): Promise<void> {
       .insert(schema.taskSteps)
       .values({ taskId, stepId: 'contended', stepIndex: 11, title: 'Contended', status: 'pending' })
       .returning();
-    const epochBeforeRefusal = await epochNow();
-    const releaseTaskRow = await holdOpen(db, async (tx) => {
-      await tx
-        .select({ id: schema.tasks.id })
-        .from(schema.tasks)
-        .where(eq(schema.tasks.id, taskId!))
-        .for('share');
-    });
+    const epochBeforeWait = await epochNow();
+    const taskHeld = await holdTaskRow(db, taskId);
     action = post(stepAction, { action: 'retry', round: 0 });
-    await sleep(500);
+    check(
+      'the Retry takes its rows and waits for the task row',
+      await until(async () => (await waitersOf(db, taskHeld.pid)).length > 0),
+    );
+    const retryPid = (await waitersOf(db, taskHeld.pid))[0] ?? 0;
+    let activated = false;
+    const activation = db
+      .transaction(claimWrites(taskId, contended!.id, epochBeforeWait))
+      .then(() => (activated = true));
+    check(
+      'the pass activating a row the Retry holds waits for the Retry',
+      await until(async () => (await waitersOf(db, retryPid)).length > 0),
+    );
+    check(
+      'the row is still pending while the pass waits',
+      !activated && (await statusOf(contended!.id)) === 'pending',
+      await statusOf(contended!.id),
+    );
+    await taskHeld.release();
+    res = await action;
+    check('the Retry answers 200 beside the waiting pass', res.status === 200, res.status);
+    check(
+      'the Retry resets its step',
+      (await statusOf(retried!.id)) === 'pending',
+      await statusOf(retried!.id),
+    );
+    check(
+      'the Retry moves the epoch past the waiting pass',
+      (await epochNow()) === epochBeforeWait + 1,
+    );
+    await activation;
+    check(
+      'the pass goes on once the Retry has committed',
+      (await statusOf(contended!.id)) === 'running',
+      await statusOf(contended!.id),
+    );
+
+    // 5b. A row created after the Retry took its rows is not held by it. When a pass has activated
+    //     one and is still writing it as the Retry's bump lands, the sweep after the bump cannot
+    //     take the row without waiting for a pass that waits for the task row: the Retry answers
+    //     503 and changes nothing.
+    await db
+      .update(schema.taskSteps)
+      .set({ status: 'failed', errorMessage: 'kaboom once more', endedAt: now })
+      .where(eq(schema.taskSteps.id, retried!.id));
+    const epochBeforeRefusal = await epochNow();
+    const taskHeldAgain = await holdTaskRow(db, taskId);
+    action = post(stepAction, { action: 'retry', round: 0 });
+    check(
+      'the Retry takes its rows before the row below exists',
+      await until(async () => (await waitersOf(db, taskHeldAgain.pid)).length > 0),
+    );
+    const [created] = await db
+      .insert(schema.taskSteps)
+      .values({
+        taskId,
+        stepId: 'created-after-batch',
+        stepIndex: 13,
+        title: 'Created after the batch',
+        status: 'pending',
+      })
+      .returning();
     await db
       .update(schema.taskSteps)
       .set({ status: 'running', updatedAt: new Date() })
-      .where(eq(schema.taskSteps.id, contended!.id));
+      .where(eq(schema.taskSteps.id, created!.id));
     const releaseRowLock = await holdOpen(db, async (tx) => {
       await tx
         .select({ id: schema.taskSteps.id })
         .from(schema.taskSteps)
-        .where(eq(schema.taskSteps.id, contended!.id))
+        .where(eq(schema.taskSteps.id, created!.id))
         .for('update');
     });
-    await releaseTaskRow();
-    res = await action;
+    await taskHeldAgain.release();
+    // This script lets go of the row only once the Retry has answered, so a Retry that waited for it
+    // instead of refusing would wait for good: fail the check rather than hang.
+    const refused = await Promise.race([action, sleep(10_000).then(() => null)]);
     await releaseRowLock();
+    res = refused ?? (await action);
+    check('the Retry does not wait for the pass writing the row', refused !== null);
     check(
-      'a Retry whose sweep meets a row being written answers 503',
+      'a Retry whose sweep meets a row created after its rows were taken and being written answers 503',
       res.status === 503,
       res.status,
     );
@@ -366,7 +464,7 @@ async function main(): Promise<void> {
     );
 
     // 6. A pass records a run and an agent row under its row's lock, as insertOwnedRun and the
-    //    fan-out's reservation do, while a Retry is applied: the Retry's write to the row waits for
+    //    fan-out's reservation do, while a Retry is applied: the Retry's lock on the row waits for
     //    it, and its second sweep ends what the first could not see.
     await db
       .update(schema.taskSteps)

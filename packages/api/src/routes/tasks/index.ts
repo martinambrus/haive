@@ -79,7 +79,11 @@ import {
 } from '../../middleware/maintenance.js';
 import { loadUsableProvider } from '../../lib/step-cli-choice.js';
 import { HttpError, type AppEnv } from '../../context.js';
-import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
+import {
+  cancelTaskIfOpen,
+  enqueueCancelJob,
+  CLEAR_ALLOWANCE_WATCH,
+} from '../../lib/cancel-task.js';
 import {
   clearTaskPause,
   settleActiveSteps,
@@ -1274,7 +1278,7 @@ taskRoutes.post('/:id/action', async (c) => {
       await enqueueStart(id, userId);
       return c.json({ ok: true, started: true, status: 'queued' });
     }
-    case 'cancel':
+    case 'cancel': {
       if (task.status === 'completed' || task.status === 'cancelled') {
         return c.json({ ok: true, status: task.status });
       }
@@ -1283,13 +1287,17 @@ taskRoutes.post('/:id/action', async (c) => {
       // `failed` — otherwise Cancel needs two clicks. Then cancel + enqueue the
       // full teardown job (tears down the DDEV/app runtime too).
       await stopActiveCliInvocations(db, id, { failTask: false });
-      await cancelTaskRow(db, id, { by: userId });
+      // The status read above is stale by now: the stop waited on the task's rows, and a completion
+      // or another cancel may have ended the task meanwhile, so it is decided again under the locks.
+      const result = await db.transaction((tx) => cancelTaskIfOpen(tx, id, { by: userId }));
+      if (!result.cancelled) return c.json({ ok: true, status: result.status });
       // Cancelling a paused task must not leave the hold behind: the step-retry endpoint has
       // no status guard, so a cancelled task is still resumable, and a stale paused_at would
       // silently park it again the moment someone revived it.
       await clearTaskPause(db, id);
       await enqueueCancelJob(id, userId);
       return c.json({ ok: true, status: 'cancelled' });
+    }
     case 'retry': {
       await assertNewWorkAllowed();
       refuseDeadTask(task);

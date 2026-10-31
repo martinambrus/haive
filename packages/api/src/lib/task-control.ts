@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
-import { CLEAR_STEP_USAGE_STAMP, schema } from '@haive/database';
+import { CLEAR_STEP_USAGE_STAMP, lockStepRows, schema } from '@haive/database';
 import { FIX_LOOP_ACTION_FIELD } from '@haive/shared';
 import { getDb } from '../db.js';
 import { killTaskSandboxes } from './sandbox-kill.js';
@@ -57,6 +57,9 @@ export async function supersedeLiveRuns(
   // owner-initiated path is unchanged.
   const by = opts.actor === 'admin' ? 'an administrator' : 'user';
   const first = await cancelLiveRuns(tx, taskId, by, now);
+  // Every step row of the task in id order, after the runs and before the bulk update below, which
+  // would otherwise take its rows in scan order.
+  await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
   const failed = await failStuckSteps(tx, taskId, by, now, opts.failTask);
   // A pass records a run only under its row's lock, so the step writes above waited for any run
   // being recorded, and this ends it.
@@ -147,7 +150,7 @@ export async function reofferParkedSteps(
     ),
     ...(exclude.length > 0 ? [notInArray(schema.taskSteps.id, [...exclude])] : []),
   );
-  await tx.select({ id: schema.taskSteps.id }).from(schema.taskSteps).where(parked).for('update');
+  await lockStepRows(tx, parked);
   return tx
     .update(schema.taskSteps)
     .set({
@@ -163,8 +166,8 @@ export async function reofferParkedSteps(
 }
 
 /** Leave none of a restarting task's steps active: fail the stuck ones and re-offer a parked form
- *  rather than fail it. A pass can move a row between those two writes, so every active row is
- *  locked first and both land in one transaction. */
+ *  rather than fail it. A pass can move a row between those two writes, so every row of the task is
+ *  locked first, in id order, and both land in one transaction. */
 export async function settleActiveSteps(
   db: ReturnType<typeof getDb>,
   taskId: string,
@@ -175,16 +178,7 @@ export async function settleActiveSteps(
 /** `settleActiveSteps` inside the caller's transaction. */
 export async function settleActiveStepsIn(tx: DbHandle, taskId: string): Promise<void> {
   const now = new Date();
-  await tx
-    .select({ id: schema.taskSteps.id })
-    .from(schema.taskSteps)
-    .where(
-      and(
-        eq(schema.taskSteps.taskId, taskId),
-        inArray(schema.taskSteps.status, ['running', 'waiting_cli', 'waiting_form']),
-      ),
-    )
-    .for('update');
+  await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
   await failStuckSteps(tx, taskId, 'user', now, false);
   await tx
     .update(schema.taskSteps)
