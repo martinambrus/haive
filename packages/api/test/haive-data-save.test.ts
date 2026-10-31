@@ -224,17 +224,17 @@ describe('POST /repositories/:id/haive-data/save', () => {
     expect(await res.json()).toEqual(result);
   });
 
-  it('answers 409 haive_data_save_failed when the worker job throws, with paths scrubbed', async () => {
+  it('answers 409 data_save_failed when the worker job throws, with paths scrubbed', async () => {
     h.wait.mockRejectedValue(new Error("fatal: cannot open '/srv/haive/repos/u/r/.git/index'"));
     const res = await save('{}');
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({
       error: "fatal: cannot open '[path]'",
-      code: 'haive_data_save_failed',
+      code: 'data_save_failed',
     });
   });
 
-  it('answers 409 haive_data_save_failed when the wait times out', async () => {
+  it('answers 409 data_save_failed when the wait times out', async () => {
     h.wait.mockRejectedValue(
       new Error(
         'Job wait save-haive-data timed out before finishing, no finish notification arrived',
@@ -242,16 +242,16 @@ describe('POST /repositories/:id/haive-data/save', () => {
     );
     const res = await save('{}');
     expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ code: 'haive_data_save_failed' });
+    expect(await res.json()).toMatchObject({ code: 'data_save_failed' });
   });
 
-  it('answers 409 haive_data_save_failed when the job cannot be queued', async () => {
+  it('answers 409 data_save_failed when the job cannot be queued', async () => {
     h.add.mockRejectedValue(new Error('Connection is closed.'));
     const res = await save('{}');
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({
       error: 'Connection is closed.',
-      code: 'haive_data_save_failed',
+      code: 'data_save_failed',
     });
   });
 

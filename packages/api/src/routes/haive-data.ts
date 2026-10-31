@@ -63,6 +63,6 @@ haiveDataRoutes.post('/:id/haive-data/save', async (c) => {
       }),
     );
   } catch (err) {
-    throw new HttpError(409, scrubErrorPaths(err), 'haive_data_save_failed');
+    throw new HttpError(409, scrubErrorPaths(err), 'data_save_failed');
   }
 });
