@@ -904,13 +904,6 @@ From the T470 review (2026-10-31). PRE-EXISTING, minor to moderate.
 
 Notes (T474 review, 2026-10-31; PRE-EXISTING): `lint-typecheck-test` has a 20-minute limit (ci.yml ~:38, pinned at ci-browser-budget.test.mjs ~:44) against a slowest green run of 1017 s, leaving 183 s; and Module scripts, Shellcheck and Installer boot (~:71, ~:93, ~:108) run after the slow unit tests, so guarding only them would not delay the red verdict.
 
-### T476 · FNF[plan-merge-discard-result] · the plan merge panel reads a discard that cancelled nothing as discarded
-
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:14Z · last: 2026-10-31T13:14Z
-From the T458 review (2026-10-31). PRE-EXISTING, minor (web).
-
-`DELETE /repositories/:id/plan/merge` answers `{ ok: true, cancelled: false }` when no merge is open or (since T458) when the merge completed while the request ran, but `discardPlanMerge` types its answer as `{ ok: boolean }` (web lib/api-client.ts ~:2293) and the panel's `discard` (components/plan/plan-merge-panel.tsx ~:141-155) hides the merge as discarded whatever it says, after a confirm that promises "nothing is lost". Direction: read `cancelled`; when false, say the merge had already ended and refresh the plan instead of reporting a discard.
-
 ### T477 · FNF[sweep-held-slots] [design] · held outbox and mirror rows still take the sweep's 25 slots; the two sweeps share one job
 
 status: open
@@ -1048,6 +1041,7 @@ From the T476 follow-up review (2026-10-31). Minor (UX); PRE-EXISTING unless sta
 
 ## Done
 
+- T476 — the plan merge panel reads the DELETE's `cancelled` answer: a discard that cancelled nothing keeps a neutral status notice (completed, cancelled or failed; nothing discarded) that survives the refresh, is cleared by the next merge, Discard or answer, and Discard stays disabled while its own discard settles; the panel sends the displayed task id (`?taskId=`) and the route cancels nothing when a different merge is open — PR #968 (0177599c3), 2026-10-31; main CI green; delivered with codex-sonnet (1 fix round, session Direct guard); follow-up T491
 - T479 — an archive extract whose swap fails restores the previous destination tree before the stage is removed (the old tree was deleted with the stage); a failed restore keeps the stage and logs the absolute path of the kept tree; a failed stage removal after a good swap warns instead of failing silently; the comment says what a crash between the two renames leaves — PR #966 (a1a74f596), 2026-10-31; main CI green; delivered with codex-sonnet (1 fix round); follow-ups T486, T487
 - T474 — schema-parity, the web checks of production-images and macos-preflight run each check on !cancelled() && steps.<setup>.conclusion == 'success'; the smokes job's gated step and Redis-script steps have their own limits (25, 10, 5 minutes) and the job 45 minutes, pinned by a budget model of the GATED list (907 s plus 7.5 s a row; fails at 134 and 160 rows); the gated step's errexit comes from the runner's bash -e (comment only) — PR #967 (6bad0f036), 2026-10-31; main CI green with every guarded check run (PR run and main); ci-smokes.md; follow-ups T488, T489, T475 notes
 - T341 — a credential delete confirms and names the connection the cascade takes (audited with its id), a re-sign-in takes back the account's earlier credential by (user, host, account id: repo_credentials.sign_in_account_id, 0216) instead of adding one, a backing credential's host or forge cannot be edited (409), the resolver and task choice compare a forge connection's credential forge, hosts compare case-insensitively, a refused OAuth refresh is recorded and shown (refresh_refused_at, 0217), a rename follows into the token connection's label, and delete and edit lock the connection before the credential (a late link NOWAIT, 503) — PR #965 (e880cf343), 2026-10-31; main CI green; checked live on the dev stack with throwaway credentials; follow-up T485; item 14 (device poll retry on 5xx) is an owner question
