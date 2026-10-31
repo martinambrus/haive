@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { eq, and, desc, isNotNull } from 'drizzle-orm';
-import { schema, type DbTx } from '@haive/database';
+import { isLockNotAvailable, schema, type DbTx } from '@haive/database';
 import {
   encrypt,
   generateDek,
@@ -110,7 +110,7 @@ const updateCredentialSchema = z
 
 /** The connection that points at a credential of this user, its row locked. A reconnect locks its
  *  connection before its credential, so the writers here take the two in that order as well. */
-const lockConnectionOf = (tx: DbTx, credentialId: string, userId: string) =>
+const lockConnectionOf = (tx: DbTx, credentialId: string, userId: string, noWait = false) =>
   tx
     .select({
       id: schema.integrationConnections.id,
@@ -125,7 +125,22 @@ const lockConnectionOf = (tx: DbTx, credentialId: string, userId: string) =>
         eq(schema.integrationConnections.ownerUserId, userId),
       ),
     )
-    .for('update');
+    .for('update', noWait ? { noWait: true } : {});
+
+/** The connection a link committed while the request waited for the credential row, which it holds
+ *  by now. A reconnect holds its connection and queues for the credential, so waiting for the row
+ *  here would be the reverse order and deadlock with it: a row someone holds answers 503 instead,
+ *  and the request can be sent again. */
+const lockLateConnectionOf = async (tx: DbTx, credentialId: string, userId: string) => {
+  try {
+    return (await lockConnectionOf(tx, credentialId, userId, true))[0];
+  } catch (err) {
+    if (isLockNotAvailable(err)) {
+      throw new HttpError(503, "This Git credential's connection is being changed; try again");
+    }
+    throw err;
+  }
+};
 
 export const repoCredentialsRoutes = new Hono<AppEnv>();
 repoCredentialsRoutes.use('*', requireAuth);
@@ -309,7 +324,7 @@ repoCredentialsRoutes.put('/:id', async (c) => {
     });
 
     // One a link committed while this waited for the credential.
-    connection ??= (await lockConnectionOf(tx, id, userId))[0];
+    connection ??= await lockLateConnectionOf(tx, id, userId);
     if (connection) {
       const nextProvider = body.provider === undefined ? existing.provider : body.provider || null;
       const existingForge = credentialForgeProvider(existing.provider, existing.host);
@@ -381,7 +396,7 @@ repoCredentialsRoutes.delete('/:id', async (c) => {
       .for('update');
     if (!locked) throw new HttpError(404, 'Credential not found');
     // One a link committed while this waited for the credential.
-    connection ??= (await lockConnectionOf(tx, id, userId))[0];
+    connection ??= await lockLateConnectionOf(tx, id, userId);
     await tx
       .delete(schema.repoCredentials)
       .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)));
