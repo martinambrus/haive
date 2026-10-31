@@ -7,6 +7,7 @@ import {
   recordedCliTargets,
   completeRecordedCliMembership,
   recoverCliMembership,
+  namesGitData,
 } from '@haive/shared/project-state';
 import { and, eq, isNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -820,6 +821,12 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     };
 
     const writeIfAllowed = async (rel: string, contents: string): Promise<void> => {
+      // A target dir comes from the stored detect payload, which nothing validated.
+      if (namesGitData(rel)) {
+        ctx.logger.warn({ rel }, 'did not write a file because its path names git data');
+        skippedFiles.push(rel);
+        return;
+      }
       // `lstatNoFollow` rather than the old `stat` probe: `stat` follows a link, and reports a
       // DANGLING one as absent — so the exists check could pass and the write then land on whatever
       // the link names. replace-atomic (the default) because every file here is machine-parsed.
@@ -931,6 +938,12 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
         for (const name of group.files) {
           const from = `${group.dir}/${name}`;
           const to = `${destDir}/${name}`;
+          // The group dir is from the stored detect payload too, and `to` is where the move lands.
+          if (namesGitData(from) || namesGitData(to)) {
+            ctx.logger.warn({ rel: from }, 'did not move a file because its path names git data');
+            skippedFiles.push(from);
+            continue;
+          }
           // Never clobber: a name already quarantined is an earlier run's file, and which of the
           // two a person wants is not ours to decide. `noReplace` makes that decision RACE-FREE,
           // where the `pathExists` check it replaces could pass and the name be taken before the

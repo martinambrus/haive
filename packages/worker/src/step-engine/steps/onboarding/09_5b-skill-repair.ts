@@ -1,4 +1,5 @@
 import { readTextNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
+import { namesGitData } from '@haive/shared/project-state';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, SkillEntry } from '@haive/shared';
@@ -11,7 +12,11 @@ import {
   shouldRetryMiningTerminalFailure,
   type MinedAgentOutcome,
 } from '../../mining-failure.js';
-import { loadPreviousStepOutput, resolveTaskSkillTargetDirs } from './_helpers.js';
+import {
+  loadPreviousStepOutput,
+  resolveTaskSkillTargetDirs,
+  withoutGitDataDirs,
+} from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
 import {
@@ -438,7 +443,10 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
 
   async apply(ctx, args): Promise<SkillRepairApply> {
     const detected = args.detected as SkillRepairDetect;
-    const targetDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    const targetDirs = withoutGitDataDirs(
+      detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
+      ctx.logger,
+    );
     if (targetDirs.length === 0)
       return {
         summary: 'The repository maintains no skill destinations.',
@@ -459,6 +467,21 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     const outcomes: MinedAgentOutcome[] = [];
 
     for (const failing of detected.failingSkills) {
+      // The id is a directory name below, removed and rewritten: a stored one may name git data.
+      if (namesGitData(failing.skillId)) {
+        ctx.logger.warn(
+          { skillId: failing.skillId },
+          'did not repair a skill whose name names git data',
+        );
+        stillFailing.push(failing.skillId);
+        outcomes.push({
+          agentId: failing.skillId,
+          agentTitle: null,
+          status: 'failed',
+          errorMessage: 'its name names git data',
+        });
+        continue;
+      }
       const res = results.find((r) => r.agentId === failing.skillId.slice(0, 120));
       const entries =
         res && res.status === 'done' ? parseSkillEntries(res.output ?? res.rawOutput) : [];
