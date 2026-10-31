@@ -334,6 +334,95 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     expect(res.status).toBe(200);
     expect(await audits(db)).toEqual([]);
   });
+  it('a mixed tooling save audits only the security field that changed', async () => {
+    const current = (await stored())!;
+    expect(
+      (
+        await sendSetting('tooling', {
+          secretMaskEnabled: current.secretMaskEnabled,
+          secretMaskAllow: current.secretMaskAllow,
+          secretMaskDenyExtend: current.secretMaskDenyExtend,
+          agentRulesOverride: current.agentRulesOverride,
+          appAuth: current.appAuth,
+          prWorkflowEnabled: !current.prWorkflowEnabled,
+        })
+      ).status,
+    ).toBe(200);
+    expect((await audits(db))[0]!.metadata).toEqual({
+      fields: ['prWorkflowEnabled'],
+      values: { prWorkflowEnabled: !current.prWorkflowEnabled },
+    });
+  });
+  it('integrations audit a restricted-only flip with no grant delta', async () => {
+    for (const restricted of [true, true, false]) {
+      expect(
+        (await sendSetting('integrations', { restricted, connectionIds: [] }, 'PUT')).status,
+      ).toBe(200);
+    }
+    const rows = await audits(db);
+    expect(rows.map((row) => row.metadata)).toEqual([
+      { restricted: true, added: [], removed: [] },
+      { restricted: false, added: [], removed: [] },
+    ]);
+  });
+  for (const suffix of ['tooling', 'exclusions', 'integrations'] as const)
+    it(`interleaved ${suffix} saves read the prior commit under the row lock`, async () => {
+      const change =
+        suffix === 'tooling'
+          ? { secretMaskEnabled: false }
+          : suffix === 'exclusions'
+            ? { scopeExcludeGlobs: ['saved'] }
+            : { integrationsRestricted: true };
+      const body = suffix === 'integrations' ? { restricted: true, connectionIds: [] } : change;
+      let reached!: () => void;
+      let release!: () => void;
+      const written = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      // An independent repository save, like an imported settings write, holds only
+      // the row lock. Route-specific advisory locks cannot substitute for this read.
+      const prior = db.transaction(async (tx) => {
+        await tx
+          .update(schema.repositories)
+          .set(change)
+          .where(eq(schema.repositories.id, repository));
+        reached();
+        await resume;
+      });
+      await written;
+      const save = Promise.resolve(
+        sendSetting(suffix, body, suffix === 'integrations' ? 'PUT' : 'PATCH'),
+      );
+      let waiting: string | undefined;
+      let response: Response | undefined;
+      try {
+        await expect
+          .poll(
+            async () => {
+              const rows = await db.execute<{ query: string }>(sql`
+            select a.query from pg_stat_activity a join pg_locks l on l.pid = a.pid
+            where a.datname = current_database() and not l.granted
+              and a.query like '%"repositories"%'
+          `);
+              waiting = rows[0]?.query;
+              return Boolean(waiting);
+            },
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+        expect(waiting).toMatch(/^select /);
+      } finally {
+        release();
+        await prior;
+        response = await save;
+      }
+      expect(response!.status).toBe(200);
+      expect(await stored()).toMatchObject(change);
+      expect(await audits(db)).toEqual([]);
+    }, 30_000);
   it('scope records added and removed counts and omits no-op saves', async () => {
     await db
       .update(schema.repositories)
