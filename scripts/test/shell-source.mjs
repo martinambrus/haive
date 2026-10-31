@@ -44,7 +44,10 @@ function withoutExpressions(source, step) {
   return result;
 }
 
-export function shellSource(source, { maskQuotes = false, step = 'shell script' } = {}) {
+export function shellSource(
+  source,
+  { maskQuotes = false, step = 'shell script', prose = false } = {},
+) {
   source = withoutExpressions(source, step);
   const fail = (what) => {
     throw new Error(`${step}: unterminated ${what}`);
@@ -162,9 +165,10 @@ export function shellSource(source, { maskQuotes = false, step = 'shell script' 
             body += (tabs ? line.replace(/^\t+/, '') : line) + '\n';
           }
           if (!terminated) fail(`heredoc ${JSON.stringify(delimiter)}`);
-          if (consumer === 'shell' || (!quotedWord && /(?<!\\)(?:\$\(|`)/.test(body))) {
-            result += '\n' + shellSource(body, { maskQuotes, step }) + '\n';
-          } else if (consumer === 'interpreter' && !maskQuotes) result += '\n' + body + '\n';
+          // Bash expands an unquoted body before its consumer reads it: those expansions run here.
+          if (!quotedWord) result += '\n' + shellSource(body, { maskQuotes, step, prose: true });
+          if (consumer === 'shell') result += '\n' + shellSource(body, { maskQuotes, step }) + '\n';
+          else if (consumer === 'interpreter' && !maskQuotes) result += '\n' + body + '\n';
         }
       } else if (!parameter && source.startsWith(';;', i)) {
         if (cases.length) cases.at(-1).pattern = true;
@@ -197,7 +201,33 @@ export function shellSource(source, { maskQuotes = false, step = 'shell script' 
     if (stop) fail(stop === '}' ? 'parameter expansion' : 'command substitution');
     return { text: result, end: i };
   };
-  const result = scan(0).text;
+  // An unquoted heredoc body is text to the script that holds it: only its expansions run.
+  const expansions = () => {
+    let result = '';
+    for (let i = 0; i < source.length;) {
+      let end = i + 1;
+      if (source[i] === '\\') end = i + 2;
+      else if (source.startsWith('$((', i)) {
+        end = arithmetic(i + 3);
+        result += '\n' + source.slice(i, end);
+      } else if (source.startsWith('${', i)) {
+        const nested = scan(i + 2, '}', true);
+        result += '\n${' + nested.text + '}';
+        end = nested.end;
+      } else if (source.startsWith('$(', i)) {
+        const nested = scan(i + 2, ')');
+        result += '\n$(' + nested.text + ')';
+        end = nested.end;
+      } else if (source[i] === '`') {
+        end = quoted(i, '`');
+        substitutions.push(shellSource(source.slice(i + 1, end - 1), { maskQuotes, step }));
+        result += '\n' + (maskQuotes ? '_'.repeat(end - i) : source.slice(i, end));
+      }
+      i = end;
+    }
+    return result;
+  };
+  const result = prose ? expansions() : scan(0).text;
   return result + (maskQuotes ? substitutions.map((code) => '\n' + code).join('') : '');
 }
 

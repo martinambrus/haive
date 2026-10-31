@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { describe, it } from 'node:test';
 import { shellSource, swallowedFailure } from './shell-source.mjs';
 
@@ -6,6 +7,11 @@ const step = 'scanner-control';
 const rejects = (script, matched = '|| true') =>
   assert.equal(swallowedFailure(script, { step }), matched);
 const url = 'redis://localhost:6379/13';
+// bash -n is the oracle for a script the scanner must not throw on.
+const bashAccepts = (script) => {
+  const { status, stderr } = spawnSync('bash', ['-n'], { input: script, encoding: 'utf8' });
+  assert.equal(status, 0, `bash rejects the control: ${stderr}`);
+};
 
 describe('fail-closed shell lexing (item 1)', () => {
   for (const prefix of [
@@ -105,6 +111,59 @@ describe('executable heredocs (item 4)', () => {
   }
   it('keeps an interpreter name in an echo argument inert', () =>
     assert.equal(swallowedFailure("echo bash <<'EOF'\ncmd || true\nEOF"), null));
+});
+
+describe('unquoted heredoc bodies: only the expansions are code', () => {
+  for (const expansion of [
+    '$(pnpm test || true)',
+    '`pnpm test || true`',
+    '${x:-$(pnpm test || true)}',
+    '$(( $(pnpm test || true) + 1 ))',
+  ]) {
+    for (const lead of ['### Report ', '# ', 'Total: ']) {
+      it(`runs ${expansion} after ${JSON.stringify(lead)}`, () =>
+        rejects(`cat <<EOF\n${lead}${expansion}\nEOF`));
+    }
+  }
+  for (const prose of ['if', 'for', 'while', 'until', 'select', 'case', 'f() {', 'function f']) {
+    it(`keeps the bare true rule after a prose line starting with ${JSON.stringify(prose)}`, () =>
+      rejects(`cat <<EOF\n${prose} $(date)\ntrue\nEOF\npnpm test\ntrue`, 'true'));
+  }
+  for (const prose of [
+    "It's",
+    'say "hi',
+    'Rows (approx:',
+    '100% ) of',
+    "Run took $(( SECONDS / 60 )) min - it's fine,",
+  ]) {
+    it(`does not lex the prose ${JSON.stringify(prose)} beside an expansion`, () => {
+      const script = `cat >> "$GITHUB_STEP_SUMMARY" <<EOF\n${prose} $(date)\nEOF\npnpm test || true`;
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
+  it('keeps a swallow written as prose beside an expansion inert', () =>
+    assert.equal(swallowedFailure('cat <<EOF\nretry with cmd || true: $(date)\nEOF'), null));
+  it('keeps an escaped expansion inert', () =>
+    assert.equal(
+      swallowedFailure('cat <<EOF\n\\$(pnpm test || true) \\`pnpm test || true\\`\nEOF'),
+      null,
+    ));
+  it('reads the Redis URL of an expansion but not of the prose', () => {
+    const text = shellSource(`cat <<EOF\nuse redis://localhost:6379/7 $(echo ${url})\nEOF`, {
+      step,
+    });
+    assert.ok(text.includes(url));
+    assert.ok(!text.includes('/7'));
+  });
+  it('reads an interpreter body for Redis beside an expansion and an apostrophe', () =>
+    assert.ok(
+      shellSource(`node <<EOF\nclient("${url}") // it's $(date)\nEOF`, { step }).includes(url),
+    ));
+  it('runs an expansion on a comment line of a script heredoc', () =>
+    rejects('bash <<EOF\n# $(pnpm test || true)\nEOF'));
+  it('keeps the same comment line inert when the delimiter is quoted', () =>
+    assert.equal(swallowedFailure("bash <<'EOF'\n# $(pnpm test || true)\nEOF"), null));
 });
 
 describe('mutation-sensitive lexical branches (item 5)', () => {
