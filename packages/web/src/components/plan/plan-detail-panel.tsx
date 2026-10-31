@@ -74,6 +74,7 @@ export function PlanDetailPanel({
   onChanged,
   onNavigate,
   onClose,
+  chatDrafts,
 }: {
   repositoryId: string;
   nodeId: string;
@@ -91,6 +92,8 @@ export function PlanDetailPanel({
   onChanged: () => void;
   onNavigate: (nodeId: string) => void;
   onClose: () => void;
+  /** Owned by the plan page because this panel unmounts when selection clears. */
+  chatDrafts: Map<string, string>;
 }) {
   const router = useRouter();
   const [detail, setDetail] = useState<PlanNodeDetail | null>(null);
@@ -1013,6 +1016,7 @@ export function PlanDetailPanel({
           onPatched={onChanged}
           onRead={onRead}
           unreadCount={unreadCount}
+          drafts={chatDrafts}
         />
       )}
 

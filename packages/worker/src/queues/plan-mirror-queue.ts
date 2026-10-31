@@ -14,6 +14,12 @@ import {
 import { lockPlanMerge } from '@haive/shared/plan';
 import { safeErrorForTransport } from '@haive/shared/logger';
 import type {
+  HaiveDataFailure,
+  HaiveDataRefusal,
+  HaiveDataSavePayload,
+  HaiveDataSaveResult,
+} from '@haive/shared/haive-data';
+import type {
   ProjectStateResolvePayload,
   ProjectStateResolveResult,
 } from '@haive/shared/project-state';
@@ -100,6 +106,23 @@ const SAVE_BUSY =
  *  conversation): the api answers it 409 and `last_error` never records it. */
 export class PlanMirrorRefusal extends Error {
   override readonly name = 'PlanMirrorRefusal';
+  constructor(
+    message: string,
+    readonly refusal?: HaiveDataRefusal,
+  ) {
+    super(message);
+  }
+}
+
+/** Keeps the plan Save's thrown-error contract, while the data scope can carry the same
+ * structural precondition across the queue as a result. No diagnostic text is classified. */
+export class SavePreconditionError extends Error {
+  constructor(
+    message: string,
+    readonly refusal: HaiveDataRefusal,
+  ) {
+    super(message);
+  }
 }
 
 async function requireOwnedRepository(repositoryId: string, userId?: string) {
@@ -159,7 +182,7 @@ async function refresh(repositoryId: string, userId?: string): Promise<PlanMirro
  *  let a mutation racing the file write produce a knowingly old commit. The
  *  conditional writtenRevision update in writePlanMirror exposes that race;
  *  retry a bounded number of times until the two revisions meet. */
-async function flushCurrentPlanMirror(
+export async function flushCurrentPlanMirror(
   repositoryId: string,
 ): Promise<{ files: string[]; repoPath: string }> {
   let last: { files: string[]; repoPath: string } | null = null;
@@ -171,11 +194,15 @@ async function flushCurrentPlanMirror(
     });
     if (state && state.revision === state.writtenRevision) return last;
   }
-  throw new Error('the plan changed repeatedly while its snapshot was being saved; try again');
+  throw new SavePreconditionError(
+    'the plan changed repeatedly while its snapshot was being saved; try again',
+    { code: 'projections_changing' },
+  );
 }
 
 async function requireGitCheckout(repoPath: string, refusal: string): Promise<void> {
-  if (!(await requireUsableGit(repoPath))) throw new Error(refusal);
+  if (!(await requireUsableGit(repoPath)))
+    throw new SavePreconditionError(refusal, { code: 'not_git_checkout' });
 }
 
 async function currentBranch(repoPath: string): Promise<string | null> {
@@ -194,6 +221,7 @@ export interface IntegrateOutcome {
   held?: number;
   /** Why Haive's own files could not make way for the move; it did not happen. */
   refused?: string;
+  refusal?: HaiveDataRefusal;
 }
 
 /**
@@ -222,6 +250,7 @@ export async function integrateOrigin(args: {
   credentialId?: string | null;
   identity: Record<string, string>;
   kept: KeptFiles;
+  onLanded?: (sha: string) => void;
 }): Promise<IntegrateOutcome> {
   const db = getDb();
   const previousCommit = await headCommit(args.repoPath);
@@ -256,7 +285,12 @@ export async function integrateOrigin(args: {
       await putBack();
       return aside.outcome === 'held'
         ? { landed: false, previousCommit, held: aside.holding }
-        : { landed: false, previousCommit, refused: aside.reason };
+        : {
+            landed: false,
+            previousCommit,
+            refused: aside.reason,
+            refusal: { code: aside.code, file: aside.file },
+          };
     }
     if (aside.outcome === 'set-aside') {
       for (const [file, was] of aside.kept) if (!args.kept.has(file)) args.kept.set(file, was);
@@ -277,7 +311,11 @@ export async function integrateOrigin(args: {
           ),
         )
         .limit(1);
-      if (open) throw new PlanMirrorRefusal('A merge conversation is open for this repository');
+      if (open)
+        throw new PlanMirrorRefusal('A merge conversation is open for this repository', {
+          code: 'plan_merge',
+          taskId: open.id,
+        });
       return mergeInScratch(tx, args, gap, previousCommit, fence);
     });
     if (moved.retry && attempt < MOVE_ATTEMPTS) continue;
@@ -285,7 +323,11 @@ export async function integrateOrigin(args: {
     if (movedFrom !== undefined) await handBackAfterMove(args.repoPath, movedFrom);
     if (!outcome.landed) await putBack();
     return retry
-      ? { ...outcome, refused: "Haive's project files kept changing under the move" }
+      ? {
+          ...outcome,
+          refused: "Haive's project files kept changing under the move",
+          refusal: { code: 'projection_rewritten', file: '.haive-data' },
+        }
       : outcome;
   }
 }
@@ -327,25 +369,77 @@ async function mergeInScratch(
     const check = await restoreProjectionsInTx(tx, args.repositoryId, args.repoPath);
     if (check.outcome === 'retry') return { landed: false, previousCommit, retry: true };
     if (check.outcome === 'refused') {
-      return { landed: false, previousCommit, refused: check.reason };
+      return {
+        landed: false,
+        previousCommit,
+        refused: check.reason,
+        refusal: { code: check.code, file: check.file },
+      };
     }
     const holding = await fence(tx);
     if (holding > 0) return { landed: false, previousCommit, held: holding };
     const movedFrom = await landPlanMerge(args.repoPath, sha);
+    args.onLanded?.(sha);
     return { landed: true, previousCommit, movedFrom };
   } finally {
     if (!removed) await removePlanMergeWorktree(args.repoPath);
   }
 }
 
+type SaveRepository = Awaited<ReturnType<typeof requireOwnedRepository>>;
+export interface SaveScope {
+  repo: SaveRepository;
+  payload: PlanMirrorJobPayload;
+  repoPath: string;
+  message: string;
+  identity: Record<string, string>;
+}
+export interface SaveSeams {
+  /** Optional data-scope reporting; the plan Save retains its existing error contract. */
+  onFailure?(err: unknown, code: HaiveDataFailure['code']): void;
+  onLanded?(sha: string): void;
+  onPushed?(sha: string): void;
+  prepare(
+    repo: SaveRepository,
+    payload: PlanMirrorJobPayload,
+  ): Promise<{ files: string[]; repoPath: string; message?: string; expectedBranch?: string }>;
+  commit(scope: SaveScope): Promise<{ committed: boolean; commitSha: string | null }>;
+  afterLanding(scope: SaveScope & { kept: KeptFiles }): Promise<void>;
+}
+
+const planSaveSeams: SaveSeams = {
+  async prepare(repo) {
+    const prepared = await flushCurrentPlanMirror(repo.id);
+    if (prepared.files.length === 0) throw new Error('the repository has no plan snapshot to save');
+    return prepared;
+  },
+  commit: ({ repoPath, message, identity }) =>
+    commitPlanSnapshotFiles({ repoPath, message, identity }),
+  async afterLanding({ repo, repoPath, message, identity, kept }) {
+    await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
+    await flushPlanMirrorForRepository(getDb(), repo.id);
+    await commitPlanSnapshotFiles({ repoPath, message, identity });
+    await resyncHaiveProjections(getDb(), repo.id, repoPath);
+    await restoreKeptMetadata(repoPath, kept);
+  },
+};
+
 export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
+  return saveCore(payload, planSaveSeams);
+}
+
+export async function saveCore(
+  payload: PlanMirrorJobPayload,
+  seams: SaveSeams,
+): Promise<PlanMirrorJobResult> {
   if (!payload.repositoryId || !payload.userId) throw new Error('repositoryId and userId required');
   const repo = await requireOwnedRepository(payload.repositoryId, payload.userId);
   let files: string[] = [];
   let repoPath = '';
+  let failureCode: HaiveDataFailure['code'] = 'save_failed';
   try {
-    ({ files, repoPath } = await flushCurrentPlanMirror(repo.id));
-    if (files.length === 0) throw new Error('the repository has no plan snapshot to save');
+    const prepared = await seams.prepare(repo, payload);
+    ({ files, repoPath } = prepared);
 
     await requireGitCheckout(
       repoPath,
@@ -357,23 +451,32 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
       repositoryId: repo.id,
     });
     const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
-    const message = payload.commitMessage?.trim() || 'docs: save project plan';
-    const { committed, commitSha } = await commitPlanSnapshotFiles({
-      repoPath,
-      message,
-      identity,
-    });
+    const message = payload.commitMessage?.trim() || prepared.message || 'docs: save project plan';
+    const scope = { repo, payload, repoPath, message, identity };
+    const { committed, commitSha } = await seams.commit(scope);
 
     // The commit has landed: only a push needs the branch, so a failed read fails only a push.
+    failureCode = 'branch_unreadable';
     const branch = payload.push
       ? await currentBranch(repoPath)
       : await currentBranch(repoPath).catch(() => null);
     let pushed = false;
+    if (prepared.expectedBranch !== undefined && branch !== prepared.expectedBranch)
+      throw new PlanMirrorRefusal('the checkout branch changed while saving', {
+        code: 'checkout_changed',
+      });
     if (payload.push) {
-      if (!branch) throw new Error('cannot push a plan snapshot from a detached HEAD');
+      if (!branch)
+        throw new SavePreconditionError('cannot push a plan snapshot from a detached HEAD', {
+          code: 'detached_head',
+        });
+      failureCode = 'origin_unreadable';
       if (!(await detectOrigin(repoPath))) {
-        throw new Error('this repository has no origin remote to push to');
+        throw new SavePreconditionError('this repository has no origin remote to push to', {
+          code: 'no_origin',
+        });
       }
+      failureCode = 'integration_failed';
       const kept: KeptFiles = new Map();
       const before = await headCommit(repoPath);
       try {
@@ -389,11 +492,17 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
           credentialId: repo.credentialsSecretId,
           identity,
           kept,
+          ...(seams.onLanded ? { onLanded: seams.onLanded } : {}),
         });
-        if (integrated.held !== undefined) throw new PlanMirrorRefusal(SAVE_BUSY);
+        if (integrated.held !== undefined)
+          throw new PlanMirrorRefusal(SAVE_BUSY, {
+            code: 'integration_held',
+            count: integrated.held,
+          });
         if (integrated.refused !== undefined) {
           throw new PlanMirrorRefusal(
             `${integrated.refused}; the plan commit stays local and nothing was pushed`,
+            integrated.refusal ?? { code: 'integration_refused' },
           );
         }
         if (integrated.conflict) {
@@ -411,15 +520,12 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
           // The merge brought in the other side's plan; fold it into the database and
           // rewrite the files, exactly as a pull does, so what is pushed is the union
           // rather than only this side.
-          await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
-          await flushPlanMirrorForRepository(getDb(), repo.id);
-          await commitPlanSnapshotFiles({ repoPath, message, identity });
-          await resyncHaiveProjections(getDb(), repo.id, repoPath);
-          await restoreKeptMetadata(repoPath, kept);
+          await seams.afterLanding({ ...scope, kept });
         }
       } catch (err) {
         return await recoverAfterMoveFailure(getDb(), repo.id, repoPath, kept, before, err);
       }
+      failureCode = 'branch_tip_unreadable';
       const upstream = await gitRun(repoPath, ['rev-parse', '--abbrev-ref', '@{upstream}']);
       const head = await gitRun(repoPath, [
         'rev-parse',
@@ -432,6 +538,14 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
           'could not read branch tip; the plan commit is saved locally, retry the push',
         );
       }
+      if (
+        prepared.expectedBranch !== undefined &&
+        (await currentBranch(repoPath)) !== prepared.expectedBranch
+      )
+        throw new PlanMirrorRefusal('the checkout branch changed before pushing', {
+          code: 'checkout_changed',
+        });
+      failureCode = 'push_failed';
       await pushBranch({
         sha: pushedHead,
         cwd: repoPath,
@@ -443,12 +557,15 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
         userId: payload.userId,
       });
       pushed = true;
+      seams.onPushed?.(pushedHead);
+      failureCode = 'save_failed';
       await advancePlanBaseFromCommit(getDb(), repo.id, repoPath, pushedHead, branch);
     }
 
     return resultFor(repo.id, files, { committed, commitSha, pushed, branch });
   } catch (err) {
-    if (!(err instanceof PlanMirrorRefusal)) {
+    if (seams.onFailure) seams.onFailure(err, failureCode);
+    else if (!(err instanceof PlanMirrorRefusal)) {
       await recordPlanMirrorError(getDb(), repo.id, err).catch(() => undefined);
     }
     throw err;
@@ -683,42 +800,60 @@ export async function schedulePlanMirrorSweep(): Promise<void> {
 }
 
 export function startPlanMirrorWorker(): Worker<
-  PlanMirrorJobPayload | ProjectStateResolvePayload,
-  PlanMirrorJobResult | ProjectStateResolveResult | CheckoutWatchResult | number
+  PlanMirrorJobPayload | ProjectStateResolvePayload | HaiveDataSavePayload,
+  | PlanMirrorJobResult
+  | ProjectStateResolveResult
+  | HaiveDataSaveResult
+  | CheckoutWatchResult
+  | number
 > {
   const worker = new Worker<
-    PlanMirrorJobPayload | ProjectStateResolvePayload,
-    PlanMirrorJobResult | ProjectStateResolveResult | CheckoutWatchResult | number
+    PlanMirrorJobPayload | ProjectStateResolvePayload | HaiveDataSavePayload,
+    | PlanMirrorJobResult
+    | ProjectStateResolveResult
+    | HaiveDataSaveResult
+    | CheckoutWatchResult
+    | number
   >(
     QUEUE_NAMES.PLAN_MIRROR,
-    safeProcessor(async (job: Job<PlanMirrorJobPayload | ProjectStateResolvePayload>) => {
-      if (job.name === PLAN_MIRROR_JOB_NAMES.RESOLVE_PROJECT_STATE) {
-        return resolveProjectStateConflict(getDb(), job.data as ProjectStateResolvePayload);
-      }
-      const data = job.data as PlanMirrorJobPayload;
-      switch (job.name) {
-        case PLAN_MIRROR_JOB_NAMES.REFRESH:
-          if (!data.repositoryId) throw new Error('repositoryId required');
-          return refresh(data.repositoryId, data.userId);
-        case PLAN_MIRROR_JOB_NAMES.SAVE:
-          return save(data).catch((err) => {
-            throw safeErrorForTransport(err, job);
-          });
-        case PLAN_MIRROR_JOB_NAMES.PULL:
-          return pull(data).catch((err) => {
-            throw safeErrorForTransport(err, job);
-          });
-        case PLAN_MIRROR_JOB_NAMES.SWEEP:
-          return sweepAll();
-        case PLAN_MIRROR_JOB_NAMES.SWEEP_CHECKOUTS:
-          return sweepCheckouts();
-        case PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT:
-          if (!data.repositoryId) throw new Error('repositoryId required');
-          return watchCheckout(getDb(), data.repositoryId);
-        default:
-          throw new Error(`unknown plan-mirror job: ${job.name}`);
-      }
-    }),
+    safeProcessor(
+      async (
+        job: Job<PlanMirrorJobPayload | ProjectStateResolvePayload | HaiveDataSavePayload>,
+      ) => {
+        if (job.name === PLAN_MIRROR_JOB_NAMES.RESOLVE_PROJECT_STATE) {
+          return resolveProjectStateConflict(getDb(), job.data as ProjectStateResolvePayload);
+        }
+        const data = job.data as PlanMirrorJobPayload;
+        switch (job.name) {
+          case PLAN_MIRROR_JOB_NAMES.REFRESH:
+            if (!data.repositoryId) throw new Error('repositoryId required');
+            return refresh(data.repositoryId, data.userId);
+          case PLAN_MIRROR_JOB_NAMES.SAVE_HAIVE_DATA: {
+            const { saveHaiveData } = await import('../project-state/save.js');
+            return saveHaiveData(job.data as HaiveDataSavePayload).catch((err) => {
+              throw safeErrorForTransport(err, job);
+            });
+          }
+          case PLAN_MIRROR_JOB_NAMES.SAVE:
+            return save(data).catch((err) => {
+              throw safeErrorForTransport(err, job);
+            });
+          case PLAN_MIRROR_JOB_NAMES.PULL:
+            return pull(data).catch((err) => {
+              throw safeErrorForTransport(err, job);
+            });
+          case PLAN_MIRROR_JOB_NAMES.SWEEP:
+            return sweepAll();
+          case PLAN_MIRROR_JOB_NAMES.SWEEP_CHECKOUTS:
+            return sweepCheckouts();
+          case PLAN_MIRROR_JOB_NAMES.SYNC_CHECKOUT:
+            if (!data.repositoryId) throw new Error('repositoryId required');
+            return watchCheckout(getDb(), data.repositoryId);
+          default:
+            throw new Error(`unknown plan-mirror job: ${job.name}`);
+        }
+      },
+    ),
     { connection: getBullRedis(), concurrency: 2 },
   );
   worker.on('failed', (job, err) => {

@@ -47,7 +47,8 @@ against 584-927 s for e2e and 579-1017 s for lint and unit tests) but repeats th
 
 A check that is not a `smoke:ci` chain has its own `timeout-minutes`, set well above its slowest green run (MEASURED over
 the same runs): the Postgres-gated tests 378-704 s (25 minutes), the auth throttle script 90-149 s (10 minutes), the
-other five Redis scripts at most 10 s (5 minutes). A new such check gets a limit the same way.
+other five Redis scripts at most 10 s (5 minutes). The recovery re-drive script came later and has no CI runs yet: 6 s
+locally (5 minutes, as its siblings). A new such check gets a limit the same way.
 
 `smoke:all` is the local chain and stays a plain `&&` chain: beside other suites on one host, CI's limits would time
 out falsely, and Ctrl-C works there.

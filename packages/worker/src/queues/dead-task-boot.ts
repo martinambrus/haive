@@ -14,7 +14,7 @@ import {
 } from './run-list.js';
 import {
   deadReasonFor,
-  enqueueAdvance,
+  enqueueRedrive,
   enqueueStart,
   markTaskDead,
   REDRIVE_RETRY_DELAYS_MS,
@@ -40,7 +40,7 @@ export interface DeadTaskBootDeps {
   redriveRetryDelaysMs?: number[];
 }
 
-const defaultDeps: DeadTaskBootDeps = { enqueueStart, enqueueAdvance };
+const defaultDeps: DeadTaskBootDeps = { enqueueStart, enqueueAdvance: enqueueRedrive };
 
 export const DEAD_TASK_REVIVE_RETRY_MS = 30_000;
 

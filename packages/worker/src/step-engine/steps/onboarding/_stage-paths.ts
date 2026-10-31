@@ -323,9 +323,17 @@ export async function commitRecorded(
   message: string,
   env: NodeJS.ProcessEnv,
   warnings?: string[],
+  onCommitted?: (sha: string) => void,
+  options: {
+    repairUnchangedIndex?: boolean;
+    waitForIndexRetry?: (ms: number) => Promise<void>;
+  } = {},
 ): Promise<string[]> {
   const run = (args: string[], extra?: NodeJS.ProcessEnv) =>
     gitExec(args, { cwd: repoPath, env: { ...env, ...extra }, maxBuffer: GIT_MAX_BUFFER });
+  const waitForIndexRetry =
+    options.waitForIndexRetry ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   for (const mark of ['MERGE_HEAD', 'CHERRY_PICK_HEAD']) {
     const open = await gitRun(repoPath, ['rev-parse', '-q', '--verify', mark]);
     const name = mark.split('_')[0]!.toLowerCase();
@@ -362,17 +370,54 @@ export async function commitRecorded(
       ...env,
       ...temp,
     });
-    if (changed.length === 0) return [];
+    if (changed.length === 0) {
+      // A prior commit may have landed while the real index was locked. Repair its named
+      // entries on a repeat too, without creating a commit or touching unrelated staged work.
+      if (options.repairUnchangedIndex && parent !== '') {
+        // Only inspect the real index here. An already-clean no-op needs no index lock.
+        // A pathspec reaches into a directory standing at a named path (and, with none, into
+        // everything staged); only the names themselves are repaired, never what the person staged.
+        const stale = (
+          await run([
+            'diff-index',
+            '--cached',
+            '--name-only',
+            '--no-renames',
+            '-z',
+            parent,
+            '--',
+            ...literal([...named]),
+          ])
+        ).stdout
+          .split('\0')
+          .filter((p) => named.has(p));
+        if (stale.length === 0) return [];
+        let synced = false;
+        for (let attempt = 0; attempt < 6 && !synced; attempt++) {
+          if (attempt > 0) await waitForIndexRetry(100 * 2 ** attempt);
+          synced = await syncRealIndex(run, parent, stale).then(
+            () => true,
+            () => false,
+          );
+        }
+        if (!synced)
+          warnings?.push(
+            `the git index could not be synced for ${stale.length} paths: ${stale.slice(0, 10).join(', ')}`,
+          );
+      }
+      return [];
+    }
     const tree = (await run(['write-tree'], temp)).stdout.trim();
     const commit = (
       await run(['commit-tree', tree, ...(parent !== '' ? ['-p', parent] : []), '-m', message])
     ).stdout.trim();
     const subject = message.split('\n')[0]!;
     await run(['update-ref', '-m', `commit: ${subject}`, 'HEAD', commit, parent]);
+    onCommitted?.(commit);
     // The commit has landed; a real index another writer holds locked is retried, then reported.
     let synced = false;
     for (let attempt = 0; attempt < 6 && !synced; attempt += 1) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, 100 * 2 ** attempt));
+      if (attempt > 0) await waitForIndexRetry(100 * 2 ** attempt);
       synced = await syncRealIndex(run, commit, changed).then(
         () => true,
         () => false,
@@ -380,7 +425,7 @@ export async function commitRecorded(
     }
     if (!synced) {
       warnings?.push(
-        `committed, but the git index could not be synced (locked, or HEAD kept moving), so these files may show as staged changes until you run \`git reset -- <file>\`: ${changed.join(', ')}`,
+        `committed, but the git index could not be synced (locked, or HEAD kept moving), so these files may show as staged changes until you run \`git reset -- <file>\`: ${changed.length} paths: ${changed.slice(0, 10).join(', ')}`,
       );
     }
     return changed;

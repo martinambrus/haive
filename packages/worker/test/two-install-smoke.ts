@@ -43,6 +43,7 @@ import {
   PROJECT_STATE_IMPORT_STEP_ID,
   renderProjectState,
 } from '@haive/shared/project-state';
+import type { HaiveDataSaveResult } from '@haive/shared/haive-data';
 import { applyPlanPatch, lockPlanMerge } from '@haive/shared/plan';
 import { upgradeAdmission } from '@haive/shared/onboarding-admission';
 import { markProjectStateDirty } from '@haive/shared/project-state-outbox';
@@ -3779,6 +3780,83 @@ async function main(): Promise<void> {
           notQuietC.length === 0 &&
           isDeepStrictEqual(bucketsOf(planFreshC.plan), ['unchanged']),
         planFreshC.error ?? { column: await ruleCol(freshC), notQuietC },
+      );
+    }
+
+    // T120: explicit Haive data Save carries both projections, including a landed union.
+    {
+      const { x, y, origin } = await landing('t120-data-save');
+      // Save on A runs in another worker process, as a second installation does: getDb is
+      // process-local and the queue-driven cases below intentionally keep this process on B.
+      const saveOnA = (): HaiveDataSaveResult => {
+        const script = `
+          import { initDatabase } from ${JSON.stringify(new URL('../src/db.ts', import.meta.url).href)};
+          import { saveHaiveData } from ${JSON.stringify(new URL('../src/project-state/save.ts', import.meta.url).href)};
+          const db = initDatabase(process.env.DATABASE_URL);
+          try {
+            const result = await saveHaiveData(JSON.parse(process.env.HAIVE_DATA_SAVE_SMOKE_PAYLOAD));
+            console.log('HAIVE_DATA_SAVE_RESULT=' + JSON.stringify(result));
+          } finally { await db.$client.end({ timeout: 5 }); }
+        `;
+        const output = execFileSync(
+          'node',
+          ['--import', 'tsx', '--input-type=module', '--eval', script],
+          {
+            env: {
+              ...process.env,
+              DATABASE_URL: urlA,
+              HAIVE_DATA_SAVE_SMOKE_PAYLOAD: JSON.stringify({
+                repositoryId: x.repositoryId,
+                userId: x.userId,
+                push: true,
+              }),
+            },
+            encoding: 'utf8',
+            timeout: 60_000,
+          },
+        );
+        const line = output.split('\n').find((item) => item.startsWith('HAIVE_DATA_SAVE_RESULT='));
+        if (!line) throw new Error('A returned no Haive data Save result');
+        return JSON.parse(line.slice('HAIVE_DATA_SAVE_RESULT='.length)) as HaiveDataSaveResult;
+      };
+      await setRender(x, { acceptedAgentIds: ['a', 'b'] });
+      await editPlan(x, 1, 'T120 plan on A');
+      const sent = saveOnA();
+      const picked = await pull({ repositoryId: y.repositoryId, userId: y.userId });
+      check(
+        'T120: A saves and pushes its record and plan in one commit; B picks both up',
+        sent.committed &&
+          sent.pushed &&
+          sent.refusal === null &&
+          sent.files.includes(RECORD_RENDER) &&
+          sent.files.includes(planFileRel) &&
+          picked.pulled?.fastForwarded === true &&
+          isDeepStrictEqual((await columnOf(y))?.acceptedAgentIds, ['a', 'b']) &&
+          (await titlesOf(y)).includes('T120 plan on A'),
+        { sent, picked },
+      );
+
+      await setRender(y, { acceptedAgentIds: ['a', 'b'], lspLanguages: ['php'] });
+      await editPlan(y, 0, 'T120 plan on B');
+      await setRender(x, { acceptedAgentIds: ['a', 'b', 'c'] });
+      await editPlan(x, 1, 'T120 latest on A');
+      saveOnA();
+      const merged = await (
+        await import('../src/project-state/save.js')
+      ).saveHaiveData({ repositoryId: y.repositoryId, userId: y.userId, push: true });
+      const remote = JSON.parse(git(origin, 'show', `main:${RECORD_RENDER}`)) as Render;
+      const remotePlan = git(origin, 'show', `main:${planFileRel}`);
+      check(
+        'T120: a landed Haive data Save pushes the union record and both plan edits',
+        merged.pushed &&
+          merged.refusal === null &&
+          git(origin, 'rev-parse', 'main') === git(y.repoPath, 'rev-parse', 'HEAD') &&
+          isDeepStrictEqual(remote?.acceptedAgentIds, ['a', 'b', 'c']) &&
+          isDeepStrictEqual(remote?.lspLanguages, ['php']) &&
+          remotePlan.includes('T120 latest on A') &&
+          remotePlan.includes('T120 plan on B') &&
+          dirtyOn(y) === '',
+        { merged, remote, dirty: dirtyOn(y) },
       );
     }
 
