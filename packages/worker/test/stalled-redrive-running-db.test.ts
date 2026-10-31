@@ -17,11 +17,14 @@ import {
 import { stepRegistry } from '../src/step-engine/registry.js';
 import type { StepDefinition } from '../src/step-engine/step-definition.js';
 
-// The stalled sweep and a running row nothing drives (T385 item 1's twin, and T348): a task whose
-// current row is `running` is re-driven once both stamps are older than the cutoff, the task queue
+// The stalled sweep and a running or waiting_cli row nothing drives (T385 item 1's twin, T348 and
+// T498): a task whose current row is `running`, or `waiting_cli` with every run ended (its
+// continuation add lost), is re-driven once both stamps are older than the cutoff, the task queue
 // owes it no job (a START included: it runs the first step inline) and the row has no live run
 // (a cli_invocations row of the row with ended_at and superseded_at NULL, started or not), by the same
-// fence. Real Postgres, fake queue deps, real clock offsets.
+// fence. A waiting_cli row also waits out the cutoff from the end of its last run, and the run
+// recovery of a parked step leaves a step a pass of this process is on. Real Postgres, fake queue
+// deps, real clock offsets.
 
 const h = vi.hoisted(() => ({
   db: undefined as unknown,
@@ -141,7 +144,7 @@ function rig(
   return { deps, advances, failed, seen };
 }
 
-describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Postgres', () => {
+describe.skipIf(!url)('the stalled sweep and a running or waiting_cli row, on Postgres', () => {
   const EMAIL_INDEX = 'stalled-running-test-user';
   let db: Database;
   let userId: string;
