@@ -124,7 +124,9 @@ the database or host filesystem into the browser.
 **An advisory holds its question.** Open advisories are linked by `tasks.metadata.planNodeId`,
 not by `plan_node_tasks`: they neither implement a node nor touch its code. Readiness includes
 those metadata links in its open-task exclusion. The node detail names an open advisory so
-the panel offers **Continue research**. Advisory starts lock the plan node, reuse an existing
+the panel offers **Continue research**. Advisory starts take the repository's task-creation key
+first (`boundedLockWait`: 409 `The repository is busy, try again` after 30 s), since a repository
+delete holds that key and cascades into the plan node rows, then lock the plan node, reuse an existing
 open advisory, or insert the new task in that transaction through `spawnPlanTask`'s injected
 writer, which claims its START (`markQueuedForStart`) in the same transaction; `enqueueStart`
 queues it only after commit, and a reused advisory is re-driven by `enqueuePlanTask`. Two tabs

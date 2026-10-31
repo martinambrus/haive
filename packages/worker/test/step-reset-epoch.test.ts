@@ -58,7 +58,12 @@ function resetDb(taskEpoch: number) {
   const handle = {
     select: () => ({
       from: () => ({
-        where: () => ({ ...thenable([]), limit: async () => [target] }),
+        where: () => ({
+          ...thenable([]),
+          limit: async () => [target],
+          // The id-ordered lock of the rows the reset writes.
+          orderBy: () => ({ for: async () => [{ id: target.id }] }),
+        }),
       }),
     }),
     update: (table: unknown) => ({

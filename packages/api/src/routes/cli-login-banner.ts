@@ -26,6 +26,7 @@ import {
   type CliProviderName,
 } from '@haive/shared';
 import { getDb } from '../db.js';
+import { isJsonObject } from '../lib/json-object.js';
 import { authenticateUpgrade, rejectUpgrade } from '../lib/upgrade-auth.js';
 import { guardUpgradeSocket } from '../lib/upgrade-errors.js';
 import { getCliExecQueue, getCliExecQueueEvents, getUsagePollQueue } from '../queues.js';
@@ -563,6 +564,7 @@ async function runBannerSession(opts: RunBannerOpts): Promise<void> {
       } catch {
         return;
       }
+      if (!isJsonObject(parsed)) return;
       const msg = parsed as {
         type?: string;
         token?: string;

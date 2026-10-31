@@ -8,6 +8,7 @@ import { HttpError, type AppEnv } from './context.js';
 import { isForeignOrigin, trustedOrigins } from './lib/request-origin.js';
 import { installUnhandledRejectionLogger } from './lib/unhandled-rejection.js';
 import { errorHandler } from './middleware/error-handler.js';
+import { formBodyErrors } from './middleware/form-body.js';
 import { jsonBodyErrors } from './middleware/json-body.js';
 import { requestLogger } from './middleware/request-logger.js';
 import { adminRoutes } from './routes/admin.js';
@@ -86,6 +87,7 @@ export function createApiApp(webOrigin: string): Hono<AppEnv> {
   // normal state it costs a single cached config read and no database work.
   app.use('*', maintenanceGate);
   app.use('*', jsonBodyErrors);
+  app.use('*', formBodyErrors);
 
   app.onError(errorHandler);
 

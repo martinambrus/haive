@@ -435,15 +435,6 @@ status: open · was modular #172
 PRE-EXISTING. In worker queues/usage-poll-queue.ts ~:612, ADVANCE_STEP is queued outside the transaction after autoResumeFailedStep. If that add is rejected, the task stays `running` with a `running` step and no job. The stalled sweep's redrivableRow never takes a running row.
 Fix: the stalled sweep re-drives a running task whose current row is running, with no live invocation and no queued job past the cutoff. Alternatively, write the advance through an outbox.
 
-### T349 · FNF[lock-order-step-rows] · multi-row step writers can deadlock on step rows (+2)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T21:46Z · last: 2026-10-30T21:46Z · was modular #173
-All PRE-EXISTING.
-
-1. resetRowsForRerun (api steps.ts ~:124) updates rows in click order, while other writers lock them by id. Fix: every multi-row step writer first runs `SELECT … ORDER BY id FOR NO KEY UPDATE`. Control: a gated interleave.
-2. A Retry of a failed non-onboarding task is not serialized with a repository delete (repository-task-lock.ts ~:108-111). Fix: the delete takes the same key.
-3. The single-task cancel (tasks/index.ts ~:1192-1206) calls cancelTaskRow with no status guard. Fix: lock and re-check first.
-
 ### T350 · FNF[module-runtime-status] · a module whose reactivation used every attempt shows active with no schema or jobs (+1)
 
 status: open · kind: design · was modular #174
@@ -862,14 +853,6 @@ Before React attaches `handleSubmit`, a click on Sign in (web components/auth-fo
 
 Also (T454 review, 2026-10-31): `/repos/new` has the same pre-attach click (web components/new-repo-form.tsx ~:247, `method="post"` since T454); whatever replay mechanism is chosen here should cover every server-rendered form, not the sign-in form alone.
 
-### T454 · FNF[ssr-form-prehydration-values] · server-rendered controlled forms lose text typed before hydration
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T01:06Z · last: 2026-10-31T01:06Z
-From the T449 review (2026-10-30). PRE-EXISTING, minor (signed-in pages; only a hard load exposes it).
-
-1. web components/new-repo-form.tsx ~:116 keeps the repository name in a controlled `useState('')` and ~:239 renders `<form onSubmit>` with no `method`: text typed into `/repos/new` before hydration is reset to '' by the first re-render, and a submit before hydration is a GET reload of the same page (the input has no `name`, so nothing reaches the URL). The fix class is T449's: uncontrolled inputs read with `new FormData(event.currentTarget)` at submit.
-2. The other server-rendered forms were not surveyed: list each controlled form a page renders on the server and say which lose pre-hydration input or put a value in the URL on a native submit.
-
 ### T456 · FNF[api-optional-body-defaults] [design] · a malformed or empty body becomes `{}` and succeeds where the body is optional (+1)
 
 status: open
@@ -888,7 +871,7 @@ In api routes/cli-login-banner.ts `onStreamData` (~:876-882), a success or error
 
 ### T458 · FNF[cancel-status-guard] · the worker's CANCEL marks a task cancelled whatever its status; the plan merge's DELETE queues a CANCEL unchecked (+1)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T03:22Z · last: 2026-10-31T03:22Z
 From the T349 review (2026-10-31). PRE-EXISTING, consequential. Cross-reference: T309 FNF[cancel-cap-2].
 
 1. worker queues/task-queue.ts `handleCancelTask` (~:3760-3773) sets `status = 'cancelled'` where only the id matches, so a CANCEL job that lands after the task completed (queued before the completion, or by a caller that never checked) turns a completed task into a cancelled one. T349 (PR pending) guards the api's single cancel and step abort (`cancelTaskIfOpen`: completed and cancelled are terminal, failed stays cancellable); the worker needs the same guard, with the decision made under the task row's lock.
@@ -928,16 +911,6 @@ From the T445 review (2026-10-31; was T445 item 2). PRE-EXISTING.
 2. Minor: the sync's warns (~:933, ~:953, and T445's first-sync warn) are emitted before the writer that called the sync may roll back (worker project-state/write.ts ~:818, throws at ~:848 and ~:850): one extra line for a sync that did not commit, repeated by the retry. A stored notice would replace them.
 3. Minor: shared plan/projection-merge.ts ~:289, the other `mergeProjectState` caller, drops `merge.overwritten` for a plan merge with no merge base (`--allow-unrelated-histories`, plan/merge.ts ~:232), per that resolver's documented "takes theirs" rule.
 
-### T463 · FNF[api-body-shape-2] · a form read of a JSON request is a 500; a `null` WebSocket frame throws in the login listener; two settings PUTs accept a non-object (+2)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T02:01Z · last: 2026-10-31T02:01Z
-From the T455 review (2026-10-31). PRE-EXISTING, minor.
-
-1. `c.req.formData()` on a request whose content type is not a form throws and answers 500: api routes/repos.ts ~:556 and routes/user-settings.ts ~:382. Answer 400 (or 415) instead.
-2. A JSON `null` WebSocket frame throws in the CLI login banner's message listener (api routes/cli-login-banner.ts ~:557-573); it is logged as an unhandled rejection and the api stays up (read, not run). Guard the parsed frame as an object. T457 [design] is a design single in that file and must not carry this.
-3. PUT `/user-settings/ide` and `/user-settings/ui-prefs` accept a `settingsJson` that parses to `null`, a list or a scalar (user-settings.ts ~:252, ~:288), while the PATCH refuses it (~:328). Refuse it the same way.
-4. Trivial: api routes/user-settings.ts is tracked with mode 100755, the only such file among the api's sources; reset it to 100644.
-
 ### T464 · FNF[ssr-controlled-values] [design] · controlled inputs a page renders on the server lose what is typed before hydration
 
 status: open
@@ -953,7 +926,7 @@ Decide whether the class is worth a general mechanism (copy DOM values into stat
 
 ### T465 · FNF[smoke-hang-watchdog] · one hung smoke burns the whole CI smokes job and hides every smoke after it
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T02:35Z · last: 2026-10-31T02:35Z
 From the T349 fix-round review (2026-10-31). PRE-EXISTING, minor (CI cost and lost signal). `smoke:ci` chains the smokes with `&&` and no per-smoke limit (api package.json ~:29, worker package.json ~:59), so a smoke that hangs runs until the job's 30-minute limit cancels it, and the smokes after it never run: in PR #951's first run 46 of the 52 smokes never ran. Main's green run uses about 1408 of the 1800 s. Give each smoke its own limit (a wrapper that kills it and names it), so a hang fails one smoke fast and the rest still run.
 
 ### T466 · FNF[stale-outbox-rows] [verify-first] · dirty project-state outbox rows whose checkout is gone fail every sweep tick
@@ -966,8 +939,24 @@ From the T349 fix-round review (2026-10-31). PRE-EXISTING, unsure, not traced. W
 status: open
 From the T463 review (2026-10-31). PRE-EXISTING, minor to moderate. `POST /repos/upload` (api routes/repos.ts ~:575, size check ~:592, default cap 2 GiB) and the notification sound upload (routes/user-settings.ts ~:386, check ~:390, cap 2 MiB) call `c.req.formData()`, which reads the whole body into memory before the route's own size check runs, and neither route sets a `bodyLimit`. `/repos/upload` is a documented route (docs/architecture/repository-refresh.md ~:34) with no web caller: decide whether to cap it with a streaming limit or retire it; the sound upload needs a `bodyLimit` at its own cap.
 
+### T468 · FNF[ledger-imported-since-path] [design] · a retired git-data import marker still blocks an upgrade's rollback
+
+status: open
+From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. worker/api onboarding-admission.ts `ledgerImportedSince` (~:128-144) counts every import marker imported after an upgrade, path-blind and including the superseded ones, so a marker at a git-data path that T421's boot migration retired still blocks that upgrade's rollback. Decide whether a retired git-data marker should count (it was never a real import) or the conservative block stays.
+
+### T469 · FNF[git-data-ledger-rows-2] · a reset leaves a git-data claim file no ledger row names; three writers record ledger rows with no path check (+1)
+
+status: open
+From the T421 fix-round review (2026-10-31). PRE-EXISTING, minor.
+
+1. api routes/repos.ts (~:2568-2574): a git-data claim file named by no ledger row on this install (for example a teammate's older-release file the sync read into the base; it never creates a row) is still left by an onboarding reset, and the record then reads refused, so the next record write throws (confirmed by a one-off run). Direction: also remove base claims that name git data; `baseRecord` (~:3100) is already read there.
+2. worker 12-post-onboarding.ts ~:456, 01-upgrade-plan.ts ~:397 and worker/scripts/reset-bundle-to-commit.ts ~:171 insert ledger rows with no path check; they hold only by the static catalog and the bundle-id grammar (the script is a manual dev helper). Add the same `namesGitData` refusal T421 gave the other writers.
+
 ## Done
 
+- T463 — a form read of a request that is not a form answers 400 invalid_form (formBodyErrors maps the TypeError class), the CLI login banner ignores a WebSocket frame that is not a JSON object, PUT /user-settings/ide and /ui-prefs refuse a settingsJson that is not an object, and five sources added 100755 are 100644 — PR #955 (98e0f3762), 2026-10-31; main CI green; follow-ups T467, T364 item 26 note
+- T349 — every multi-row step writer locks its step rows in one id-ordered batch first (lockStepRows; 11 api and 2 worker writers, after the run, mining and DAG statements); a repository delete takes the task-creation key a Retry takes, and the plan advisory takes it before its node row; the single cancel and the step abort lock, re-check and cancel only a task that is not completed or cancelled, ending only the step rows they locked (a later row is the CANCEL job's); the claim-race smoke pins the new rule (a pass waits for an in-flight Retry; the 503 covers a row created after the batch) — PR #951 (a767e7ffa), 2026-10-31; main CI green incl. all smokes; follow-ups T458, T459, T460, T461, T364 item 24, T465, T466
+- T454 — /repos/new keeps a display name, branch and writable-copy choice typed before React attaches: uncontrolled fields read with FormData before the first await, the branch also written through a ref by the GitHub picker and a Source switch, and the form declares method=post now that its fields have names; the survey found /tasks/new (design, T464) and no other server-rendered form; the pre-hydration helpers moved to tests/e2e/helpers/hydration.ts — PR #954 (cfc0c37e6), 2026-10-31; main CI green; checked on the dev stack; follow-ups T464, T453 note, T365 +2, T343 +1, T364 +1
 - T455 — a JSON body that is not an object answers 400 invalid_body in the twelve handlers that read fields off it, through one shared guard (requireJsonObject; the Ollama pull SSE route answers an error event); PATCH tooling parses its body with a zod schema, so a field of the wrong type answers 400 Validation failed naming it and an unknown ragEmbedAction never reaches the RAG lock — PR #953 (dbc091f20), 2026-10-31; main CI green; checked on the dev stack; follow-ups T463, T456 +1, T364 item 26
 - T437 — repository responses carry no credential: the create and exclusions PATCH responses answer redactEditableGitUrl(remote) like list and detail, and no repository response (list, detail, create, upload, upload-complete, exclusions) carries the onboarding tooling or environment mirror, which held the RAG connection string with its password and MCP env values; a failed clone or refresh was already stored redacted (pinned) — PR #952 (52985ee80), 2026-10-31; main CI green; checked on the dev stack (78 list rows, detail)
 - T445 — a project-state sync with no base logs one warn naming the units whose held value the checkout's replaced (at most ten, settings and environment first, never a value); the web-bundle guard also fails on Node globals read as values (Buffer.byteLength became TextEncoder); the conflict-sides comment moved onto conflictSide; item 2 (the page saying a value was refused or replaced) moved to T462 [design] — PR #950 (9d8c78f58), 2026-10-31; main CI green; docs also record T446's verdict; follow-ups T462, T364 item 25
