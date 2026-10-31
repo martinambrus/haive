@@ -690,18 +690,25 @@ function runGated(t, mode, script = gatedStep().run) {
     `
 if [[ "$*" == *"SELECT 1"* ]]; then
   if [[ "$MODE" == probe && "$*" == *"db_error_params_test"* ]]; then exit 3; fi
+  if [[ "$MODE" == create && "$*" == *"db_error_params_test"* ]]; then exit 0; fi
   echo 1
 fi
+if [[ "$MODE" == create && "$*" == *"CREATE DATABASE db_error_params_test"* ]]; then exit 4; fi
 `,
   );
   stub(
     'pnpm',
     `
+if [[ "$MODE" == migrate && "$*" == *"@haive/database migrate"* && "$DATABASE_URL" == */db_error_params_test ]]; then exit 5; fi
 if [[ "$*" == *"exec vitest run"* ]]; then
+  passed=1; pending=0; todo=0
+  if [[ "$*" == *"test/logger-db-error-params.test.ts"* ]]; then
+    case "$MODE" in pending) pending=1 ;; todo) todo=1 ;; empty) passed=0 ;; esac
+  fi
   echo "$*" >> "$CALLS"
   for arg in "$@"; do
     case "$arg" in --outputFile.json=*)
-      printf '%s' '{"numPassedTests":1,"numFailedTests":0,"numPendingTests":0,"numTodoTests":0}' > "\${arg#*=}" ;;
+      printf '{"numPassedTests":%s,"numFailedTests":0,"numPendingTests":%s,"numTodoTests":%s}' "$passed" "$pending" "$todo" > "\${arg#*=}" ;;
     esac
   done
   if [[ "$MODE" == vitest && "$*" == *"test/logger-db-error-params.test.ts"* ]]; then exit 7; fi
@@ -778,6 +785,61 @@ describe('the gated database probe', () => {
     );
     assert.equal(out.calls.trim().split('\n').length, gatedRows(gatedStep()) - 1);
     assert.doesNotMatch(out.calls, /test\/logger-db-error-params\.test\.ts/);
+  });
+});
+
+const GATED_GUARD_CASES = [
+  ['pending', 'did not run in full', 'r.numPendingTests > 0', 'false'],
+  ['todo', 'did not run in full', 'r.numTodoTests > 0', 'false'],
+  ['empty', 'did not run in full', '!(r.numPassedTests > 0)', 'false'],
+  [
+    'create',
+    'could not create db_error_params_test',
+    '|| { echo "::error::could not create $db"; failed=1; echo "::endgroup::"; continue; }',
+    '|| :',
+  ],
+  [
+    'migrate',
+    'migrate failed for db_error_params_test',
+    '|| { echo "::error::migrate failed for $db"; failed=1; echo "::endgroup::"; continue; }',
+    '|| :',
+  ],
+];
+
+function checkGatedGuard(out, mode, annotation) {
+  assert.equal(out.status, 1, out.output);
+  assert.ok(
+    out.output.includes(
+      `::error::${mode === 'create' || mode === 'migrate' ? '' : 'test/logger-db-error-params.test.ts '}${annotation}`,
+    ),
+    out.output,
+  );
+  const skipsRow = mode === 'create' || mode === 'migrate';
+  assert.equal(out.calls.trim().split('\n').length, gatedRows(gatedStep()) - Number(skipsRow));
+  if (skipsRow) assert.doesNotMatch(out.calls, /test\/logger-db-error-params\.test\.ts/);
+}
+
+describe('the gated row guards', () => {
+  for (const [mode, annotation, before, after] of GATED_GUARD_CASES) {
+    it(`counts ${mode} as a failure, annotates it and runs later rows`, (t) => {
+      checkGatedGuard(runGated(t, mode), mode, annotation);
+    });
+    it(`rejects a disabled ${mode} guard`, (t) => {
+      const script = gatedStep().run.replace(before, after);
+      assert.notEqual(script, gatedStep().run, 'the mutant must disable its guard');
+      assert.throws(
+        () => checkGatedGuard(runGated(t, mode, script), mode, annotation),
+        assert.AssertionError,
+      );
+    });
+  }
+  it('rejects a report failure that exits before the later rows', (t) => {
+    const script = gatedStep().run.replace("' || failed=1", "'");
+    assert.notEqual(script, gatedStep().run, 'the mutant must remove report failure accumulation');
+    assert.throws(
+      () => checkGatedGuard(runGated(t, 'pending', script), 'pending', 'did not run in full'),
+      assert.AssertionError,
+    );
   });
 });
 
