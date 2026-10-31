@@ -737,12 +737,34 @@ if [[ "$1" != scripts/gen-modules.mjs ]]; then exec "$REAL_NODE" "$@"; fi
   };
 }
 
+function checkGatedPass(out) {
+  assert.equal(out.status, 0, out.output);
+  assert.doesNotMatch(out.output, /::error::/);
+  assert.equal(out.calls.trim().split('\n').length, gatedRows(gatedStep()));
+}
+
+function checkGatedFailure(out) {
+  assert.equal(out.status, 1, out.output);
+  assert.match(out.output, /::error::test\/logger-db-error-params\.test\.ts failed/);
+  assert.equal(out.calls.trim().split('\n').length, gatedRows(gatedStep()));
+}
+
 describe('the gated loop verdict', () => {
+  it('passes without error annotations when every row passes', (t) => {
+    checkGatedPass(runGated(t, 'pass'));
+  });
   it('fails and annotates a failing vitest call while running all later rows', (t) => {
-    const out = runGated(t, 'vitest');
-    assert.equal(out.status, 1, out.output);
-    assert.match(out.output, /::error::test\/logger-db-error-params\.test\.ts failed/);
-    assert.equal(out.calls.trim().split('\n').length, gatedRows(gatedStep()));
+    checkGatedFailure(runGated(t, 'vitest'));
+  });
+  it('rejects a deleted verdict', (t) => {
+    const script = gatedStep().run.replace(/^exit "\$failed"$/m, '');
+    assert.notEqual(script, gatedStep().run, 'the mutant must remove the verdict');
+    assert.throws(() => checkGatedFailure(runGated(t, 'vitest', script)), assert.AssertionError);
+  });
+  it('rejects an unconditional failure verdict', (t) => {
+    const script = gatedStep().run.replace(/^exit "\$failed"$/m, 'exit 1');
+    assert.notEqual(script, gatedStep().run, 'the mutant must replace the verdict');
+    assert.throws(() => checkGatedPass(runGated(t, 'pass', script)), assert.AssertionError);
   });
 });
 
