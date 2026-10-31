@@ -309,8 +309,16 @@ describe('the state files', () => {
     git('rm', '-q', '--cached', FORMAT);
     const files = (await status()).files!;
     expect(files.filter((file) => file.path === FORMAT)).toEqual([
-      { path: FORMAT, change: 'deleted', staged: true },
+      { path: FORMAT, change: 'modified', staged: true },
     ]);
+  });
+
+  it('reads a staged addition removed from disk as added', async () => {
+    const rel = '.haive-data/state/added.json';
+    await put(rel);
+    git('add', rel);
+    await rm(path.join(root, rel));
+    expect((await status()).files).toContainEqual({ path: rel, change: 'added', staged: true });
   });
 
   it('reads an intent-to-add file as added and unstaged', async () => {

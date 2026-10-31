@@ -123,8 +123,8 @@ function describeChange(xy: string): Pick<HaiveDataFile, 'change' | 'staged'> {
   if (x === 'U' || y === 'U' || xy === 'AA' || xy === 'DD')
     return { change: 'modified', staged: false };
   const staged = x !== ' ';
-  if (x === 'D' || y === 'D') return { change: 'deleted', staged };
   if (x === 'A' || y === 'A') return { change: 'added', staged };
+  if (x === 'D' || y === 'D') return { change: 'deleted', staged };
   return { change: 'modified', staged };
 }
 
@@ -150,12 +150,20 @@ async function readFiles(repoPath: string): Promise<HaiveDataFile[] | null> {
     if (rel) files.set(rel, { path: rel, change: 'unchanged', staged: false });
   }
   for (const entry of changed.stdout.split('\0')) {
-    // `XY path`: a staged deletion whose file is back on disk is listed twice, and the entry that
-    // says something about the index wins over the untracked one, whichever git prints first.
+    // `XY path`: a staged deletion whose file is back on disk is listed twice. Together they
+    // describe a present, modified file with an index change, whichever git prints first.
     if (!entry) continue;
     const rel = entry.slice(3);
     const xy = entry.slice(0, 2);
-    if (xy === '??' && files.has(rel)) continue;
+    const prior = files.get(rel);
+    if (xy === '??' && prior) {
+      if (prior.change === 'deleted' && prior.staged) prior.change = 'modified';
+      continue;
+    }
+    if (xy === 'D ' && prior?.change === 'untracked') {
+      files.set(rel, { path: rel, change: 'modified', staged: true });
+      continue;
+    }
     files.set(rel, { path: rel, ...describeChange(xy) });
   }
   return [...files.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));

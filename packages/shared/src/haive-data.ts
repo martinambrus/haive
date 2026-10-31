@@ -137,7 +137,9 @@ export interface HaiveDataSaveResult {
 export type HaiveDataFileChange = 'unchanged' | 'modified' | 'added' | 'deleted' | 'untracked';
 
 /** One path under `.haive-data/plan.json`, `.haive-data/plan.md` or `.haive-data/state/`, tracked or
- *  not. `change` is how the working copy differs from HEAD; `staged` is whether the index does. */
+ *  not. `change` describes the working copy against HEAD, with staged additions labelled `added`
+ *  even if removed from disk. A staged deletion restored on disk is `modified`.
+ *  `staged` is whether the index differs from HEAD. */
 export interface HaiveDataFile {
   path: string;
   change: HaiveDataFileChange;
