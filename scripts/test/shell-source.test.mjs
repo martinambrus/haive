@@ -313,6 +313,55 @@ describe('syntax bash accepts that the lexer must not throw on', () => {
   }
 });
 
+describe('strings that a shell runs as code', () => {
+  for (const script of [
+    'bash -c "x || true"',
+    "sh -c 'x || true'",
+    "bash -ec 'x || true'",
+    "bash -o pipefail -c 'x || true'",
+    "sudo bash -c 'x || true'",
+    "eval 'x || true'",
+    'eval "x || true"',
+    "ssh host 'x || true'",
+    "su -c 'x || true'",
+    "docker exec c sh -c 'x || true'",
+    "docker compose -f a.yml exec -T w sh -c 'x || true'",
+    "printf '%s\\n' a | xargs -I{} sh -c 'x || true'",
+    'bash <<< "x || true"',
+    "echo 'x || true' | sh",
+    "printf '%s\\n' 'x || true' | sudo bash",
+    "echo 'x || true' |\n  sh",
+    "echo 'x || true' | bash -s",
+  ]) {
+    it(`sees a swallow in ${JSON.stringify(script)}`, () => {
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
+  it('sees errexit disabled in a string', () => rejects("bash -c 'set +e; pnpm test'", 'set +e'));
+  it('sees a bare true in a string', () => rejects("sh -c 'pnpm test; true'", 'true'));
+  for (const script of [
+    'echo "x || true"',
+    "printf '%s' 'set +e'",
+    'bash script.sh "x || true"',
+    'node -e "a || true"',
+    'python3 -c "a or True"',
+    'cat <<< "x || true"',
+    "read -r v <<< 'x || true'",
+    "echo 'x || true' | cat",
+    "echo 'x || true' | grep x",
+    'git commit -m "fix || true"',
+    "echo 'x || true'; echo hi | sh",
+    "echo 'x || true' || sh",
+    'bash -c "echo \\"a || true \\""',
+  ]) {
+    it(`keeps the string of ${JSON.stringify(script)} inert`, () => {
+      bashAccepts(script);
+      assert.equal(swallowedFailure(script), null);
+    });
+  }
+});
+
 describe('mutation-sensitive lexical branches (item 5)', () => {
   it('keeps a hash inside a word from hiding a later swallow', () =>
     rejects('echo x#tag; cmd || true'));

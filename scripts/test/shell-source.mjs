@@ -42,6 +42,18 @@ function kindOf(command) {
 // Whether the command being read runs its input as code.
 const readsCode = (text) => kindOf(commandOf(lastCommand(text))) === 'shell';
 
+// Whether the command being read runs its string arguments as code: bash -c, eval, ssh, su -c,
+// or a herestring fed to a shell.
+function readsStrings(text) {
+  const command = lastCommand(text);
+  const herestring = /<<<\s*$/.test(command);
+  const word = commandOf(command.replace(/<<<\s*$/, ''));
+  return (
+    kindOf(word) === 'shell' &&
+    (herestring || /^(?:eval|ssh)(?=\s|$)|\s-[a-zA-Z]*c[a-zA-Z]*(?=\s|$)/.test(word))
+  );
+}
+
 // Who reads a heredoc body: the command the operator belongs to and each command piped after it.
 // Only data sinks leave the body as data; whatever is not recognised is read as code.
 function heredocConsumer(header, line) {
@@ -145,11 +157,13 @@ export function shellSource(
     if (i === start) fail('heredoc delimiter');
     return { delimiter, quotedWord, end: i };
   };
+  const isPipe = (i) => source[i] === '|' && source[i - 1] !== '|' && source[i + 1] !== '|';
   const scan = (start, stop = null, parameter = false, code = false) => {
     let result = '';
     let i = start;
     const heredocs = [];
     const cases = [];
+    const strings = [];
     while (i < source.length) {
       const char = source[i];
       if (char === '\\') {
@@ -163,6 +177,11 @@ export function shellSource(
           substitutions.push(shellSource(source.slice(i + 1, end - 1), { maskQuotes, step }));
         const literal = source.slice(quoteStart + 1, end - 1);
         const commandName = literal === 'true' && /(?:\|\||&&)\s*$/.test(result);
+        if (maskQuotes && char !== '`') {
+          const text = char === '"' ? literal.replace(/\\([$`"\\])/g, '$1') : literal;
+          strings.push({ at: result.length, text });
+          if (readsStrings(result)) substitutions.push(shellSource(text, { maskQuotes, step }));
+        }
         result += maskQuotes ? (commandName ? literal : '_'.repeat(end - i)) : source.slice(i, end);
         i = end;
       } else if (source.startsWith('$((', i) || (!parameter && source.startsWith('((', i))) {
@@ -227,6 +246,19 @@ export function shellSource(
         if (cases.length) cases.at(-1).pattern = true;
         result += ';;';
         i += 2;
+      } else if (maskQuotes && !parameter && isPipe(i)) {
+        // The strings of the command before a pipe into a shell are the script that shell runs.
+        const [next] = source
+          .slice(i + 1)
+          .trimStart()
+          .split(/[;&|\n]/, 1);
+        if (kindOf(commandOf(next)) === 'shell') {
+          const from = result.length - lastCommand(result).length;
+          for (const { at, text } of strings)
+            if (at >= from) substitutions.push(shellSource(text, { maskQuotes, step }));
+        }
+        result += char;
+        i++;
       } else if (char === ')' && cases.at(-1)?.pattern) {
         cases.at(-1).pattern = false;
         result += char;
