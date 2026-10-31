@@ -602,6 +602,42 @@ describe('PlanMergePanel with a merge task', () => {
     expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
   });
 
+  it('keeps a cancellation quiet before the local Discard response arrives', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    const request = deferred<{ ok: boolean; cancelled: boolean }>();
+    net.discardPlanMerge.mockReturnValueOnce(request.promise);
+    await open(taskResponse(PLAN_MERGE_STEP_ID));
+    await press('Discard');
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status: 'cancelled' }));
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+    request.resolve({ ok: true, cancelled: true });
+    await settle();
+    expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+  });
+
+  it.each(['failure', 'not-cancelled'])(
+    'clears local Discard suppression after %s',
+    async (result) => {
+      vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+      const request = deferred<{ ok: boolean; cancelled: boolean }>();
+      net.discardPlanMerge.mockReturnValueOnce(request.promise);
+      await open(taskResponse(PLAN_MERGE_STEP_ID));
+      await press('Discard');
+      if (result === 'failure') request.reject(new Error('Discard failed'));
+      else request.resolve({ ok: true, cancelled: false });
+      await settle();
+      respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status: 'cancelled' }));
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(shown().find((el) => el.type === InlineMarkdown)?.props.body).toBe(
+        'This merge was cancelled elsewhere.',
+      );
+    },
+  );
+
   it('does not infer an outcome from a working task’s status message', async () => {
     const response = taskResponse(PLAN_MERGE_STEP_ID);
     response.steps[0]!.statusMessage = 'The merge failed, completed or was cancelled';

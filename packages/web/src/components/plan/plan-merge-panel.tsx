@@ -74,6 +74,7 @@ export function PlanMergePanel({
   const [pollRestart, setPollRestart] = useState(0);
   // Discard only queues the cancel, so the step still reads as parked until it lands.
   const [discardedTaskId, setDiscardedTaskId] = useState<string | null>(null);
+  const discardRequestedRef = useRef<string | null>(null);
   const [deadTaskId, setDeadTaskId] = useState<string | null>(null);
 
   // Poll the task only while it is working, and stop the moment it parks or reaches
@@ -117,7 +118,7 @@ export function PlanMergePanel({
         if (settled || (taskDead && !polledDead)) onChangedRef.current();
         if (settled) {
           if (ended) {
-            if (!discarding) {
+            if (discardRequestedRef.current !== taskId) {
               setNotice({
                 taskId,
                 text:
@@ -183,12 +184,14 @@ export function PlanMergePanel({
     setBusy(true);
     setError(null);
     setNotice(null);
+    discardRequestedRef.current = merge.taskId;
     try {
       const result = await discardPlanMerge(repositoryId, merge.taskId);
       if (displayedTaskIdRef.current !== merge.taskId) return;
       if (result.cancelled) {
         setDiscardedTaskId(taskId);
       } else {
+        if (discardRequestedRef.current === merge.taskId) discardRequestedRef.current = null;
         setNotice({
           taskId: merge.taskId,
           text: 'The merge is no longer open: it completed, was cancelled or failed. Nothing was discarded.',
@@ -196,6 +199,7 @@ export function PlanMergePanel({
       }
       onSettled();
     } catch (e) {
+      if (discardRequestedRef.current === merge.taskId) discardRequestedRef.current = null;
       if (displayedTaskIdRef.current !== merge.taskId) return;
       setError((e as ApiError).message ?? 'Could not discard the merge');
     } finally {
