@@ -30,6 +30,7 @@ import {
   normalizeContent,
   sha256Hex,
   unmanagedAgentsDir,
+  CLI_PROVIDER_CATALOG,
 } from '@haive/shared';
 import { agentFilePath } from '@haive/shared/project-state';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
@@ -47,7 +48,12 @@ import {
   shouldEmitAgentsReadme,
   stubCustomAgent,
 } from './_agent-templates.js';
-import { loadCliProviderMetadata, loadPreviousStepOutput } from './_helpers.js';
+import {
+  isAgentTargetDir,
+  isSkillPathId,
+  loadCliProviderMetadata,
+  loadPreviousStepOutput,
+} from './_helpers.js';
 import {
   buildRtkAwarenessBlock,
   buildRtkTemplateItems,
@@ -478,6 +484,20 @@ export async function findUnmanagedAgentFiles(
   return out;
 }
 
+// A stored group's names must have the shape detect can list for that directory.
+// Resolve the extension from the catalog, never from the untrusted stored target's format.
+const AGENT_EXTENSIONS_BY_DIR = new Map(
+  deriveRenderTargets(Object.keys(CLI_PROVIDER_CATALOG), []).agentTargets.map((target) => [
+    target.dir,
+    target.format === 'toml' ? '.toml' : '.md',
+  ]),
+);
+
+function isUnmanagedAgentFileName(dir: string, name: string): boolean {
+  const ext = AGENT_EXTENSIONS_BY_DIR.get(dir);
+  return ext !== undefined && isSkillPathId(name) && name.endsWith(ext);
+}
+
 /** Names are shown, not just counted: the choice is "are these still wanted", which
  *  nobody can answer from a number. */
 const UNMANAGED_NAMES_SHOWN = 12;
@@ -761,7 +781,13 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       detected.existingFiles.length > 0
         ? ` ${detected.existingFiles.length} existing file(s) may be overwritten if you enable overwrite.`
         : '';
-    const unmanaged = detected.unmanagedAgentFiles ?? [];
+    const unmanaged = (detected.unmanagedAgentFiles ?? [])
+      .filter((group) => isAgentTargetDir(group.dir))
+      .map((group) => ({
+        ...group,
+        files: group.files.filter((name) => isUnmanagedAgentFileName(group.dir, name)),
+      }))
+      .filter((group) => group.files.length > 0);
     const unmanagedCount = unmanaged.reduce((n, g) => n + g.files.length, 0);
     const fields: FormSchema['fields'] = [
       {
@@ -920,6 +946,16 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       );
     }
     for (const target of targets) {
+      if (!isAgentTargetDir(target.dir)) {
+        const refused = agents.map((agent) => agentFilePath(target, agent.id));
+        if (agents.length > 0 && shouldEmitAgentsReadme(target))
+          refused.push(`${target.dir}/README.md`);
+        for (const rel of refused) {
+          ctx.logger.warn({ rel }, 'did not write an agent file: not a catalog agent destination');
+          skippedFiles.push(rel);
+        }
+        continue;
+      }
       for (const agent of agents) {
         const content = buildAgentFileForTarget(agent, target);
         await writeIfAllowed(agentFilePath(target, agent.id), content);
@@ -934,9 +970,22 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     // deleted, and to a SIBLING dir rather than a subdirectory — see unmanagedAgentsDir.
     if (values.quarantineUnmanagedAgents === true) {
       for (const group of detected.unmanagedAgentFiles ?? []) {
+        if (!isAgentTargetDir(group.dir)) {
+          for (const name of group.files) {
+            const rel = `${group.dir}/${name}`;
+            ctx.logger.warn({ rel }, 'did not move an agent file: not a catalog agent destination');
+            skippedFiles.push(rel);
+          }
+          continue;
+        }
         const destDir = unmanagedAgentsDir(group.dir);
         for (const name of group.files) {
           const from = `${group.dir}/${name}`;
+          if (!isUnmanagedAgentFileName(group.dir, name)) {
+            ctx.logger.warn({ rel: from }, 'did not move an agent file: invalid agent filename');
+            skippedFiles.push(from);
+            continue;
+          }
           const to = `${destDir}/${name}`;
           // The group dir is from the stored detect payload too, and `to` is where the move lands.
           if (namesGitData(from) || namesGitData(to)) {

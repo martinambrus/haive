@@ -84,7 +84,7 @@ board. At session start, load the board's tasks you own or will work on into the
 - T270, T310, T318, T326 — design decisions (see each task).
 - T319 — go-ahead on the scope of set-aside batching (rewrites four helpers).
 - T323 item 4 — retention rule for `complete`/`consumed` upload rows.
-- T492, T493 — design decisions (see each task).
+- T492, T493, T497, T504 — design decisions (see each task).
 - T376 — strict sign-in rows: with `audit_events` unwritable nobody can sign in, the administrator included (no break-glass). Keep strict (recommended: a database that cannot write blocks sessions anyway) or make sign-in rows best-effort.
 
 ---
@@ -918,15 +918,6 @@ From the T466 review (2026-10-31). PRE-EXISTING, minor.
 
 Since T466 a row whose checkout is gone costs 3-5 statements a tick, but every held row still takes one of the 25 batch slots (worker project-state/refresh.ts ~:182-183, queues/plan-mirror-queue.ts ~:608-614, ~:637-645), so a newer healthy row waits floor(N/25) ticks behind N held rows (MEASURED: N = 30 gave tick 2, N = 125 tick 6), and the mirror sweep runs before the outbox sweep in one job (`sweepAll`), so a slow mirror sweep delays outbox rows (14 dead rows of 20,000 nodes: sweeps of 3.6-5.3 s). `plan-canvas-smoke` C4 pins the rotation as designed. Direction (a decision): scan past held rows without counting them, or run the two sweeps as separate jobs.
 
-### T478 · FNF[snapshot-error-paths] · the plan page shows a raw filesystem error, with the server's absolute path, as the snapshot error (+1)
-
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T12:30Z · last: 2026-10-31T12:30Z
-From the T466 review (2026-10-31). PRE-EXISTING, minor.
-
-`plan_mirror_state.last_error` stores the raw `err.message` of a failed flush (worker plan/mirror.ts ~:1714-1733; `safeErrorMessage`, shared logger/errors.ts ~:62-65, redacts only database query errors), and `GET /repositories/:id/plan/snapshot` serves it (api routes/plan.ts ~:429), so any filesystem error other than the held reasons shows an absolute path under the repository storage on the plan page (T466 replaced only the gone-checkout one). Direction: store a reason from a closed set (or the error class and the path relative to the repository) and log the full error.
-
-Also (T459 fix round, 2026-10-31; PRE-EXISTING, minor): `DELETE /repositories/:id/plan` (api routes/plan.ts ~:1038) calls `applyPlanPatch` outside the `try`/`planError` mapping, so a repository deleted meanwhile answers 500 instead of 404; and the header of shared plan/errors.ts (~:1-6) still says a worker step turns `invalid` into a `RetryableParseError`, which `_plan-prompt.ts` (~:274-285) no longer does.
-
 ### T480 · FNF[git-data-stored-dirs-2] · the KB path validator accepts a git-data name; 09_5, 09_5b and 11d still dispatch agents for a stored git-data dir (+4)
 
 status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:23Z · last: 2026-10-31T13:23Z
@@ -1012,9 +1003,11 @@ From the T474 review (2026-10-31). Latent, consequential once it bites.
 
 Since T474 the smokes job has a 45-minute limit and the gated step 25 minutes, with a pin that models a green run as 907 s plus 7.5 s per GATED row and fails at 134 rows (step) and 160 rows (job margin); the list had 79 rows on 2026-10-30 and 98 on 2026-10-31. Options: give the gated tests their own job (the critical path falls toward the next job's 579-1017 s; main is not protected, so a rename is free), run the gated files in parallel, or put each file under its own limit; a final step that warns when the elapsed time is within 600 s of the limit would make the budget self-monitoring.
 
+Update (T489 review, 2026-10-31): with the worker smokes step now limited to 15 min the crowding rule `907 + 7.5 x rows + 900 <= 2700` trips at 120 GATED rows (103 on 2026-10-31, growing about 4.5 a day), so the pin fires within days; raise the job limit or split the job when it does.
+
 ### T489 · FNF[ci-step-independence-3] · the gated loop's verdict is unpinned; unguarded steps and jobs with no limits (+5)
 
-status: open
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T17:00Z · last: 2026-10-31T17:00Z
 From the T474 review (2026-10-31). PRE-EXISTING unless stated; minor to moderate.
 
 1. Moderate: the gated loop's verdict `exit "$failed"` (ci.yml ~:378) is unpinned; deleting it turns every failing gated test green. A stub-based pin that fails one vitest call would cover it.
@@ -1038,7 +1031,7 @@ From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErr
 
 ### T491 · FNF[plan-panel-outcomes] · a plan merge that ends by its own poll vanishes without a word; PlanChat keeps its draft across nodes (+3)
 
-status: open
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T16:25Z · last: 2026-10-31T16:25Z
 From the T476 follow-up review (2026-10-31). Minor (UX); PRE-EXISTING unless stated.
 
 1. A panel whose merge ends by its own poll (completed, cancelled elsewhere, or FAILED) vanishes with no word: plan-merge-panel.tsx ~:108-112 calls `onSettled`, the refresh gets `merge: null` (the route lists open merges only, api plan.ts ~:447-459), and the panel renders nothing. For a FAILED merge it matters: it keeps its worktree for a Retry (plan-canvas.md), `plan_merge` tasks are hidden from the task list (api routes/tasks/index.ts ~:289-292), and the plan page shows no other trace. Direction: set the same task-tagged notice from the poll when it ends, with a failed-specific line naming Retry.
@@ -1056,8 +1049,107 @@ Split out of T376 (item 6) on 2026-10-31. A content PATCH clears `enforcedHash` 
 status: open
 From the T376 review (2026-10-31, C1). `GET /admin/audit` runs `count(*)` and two `SELECT DISTINCT` over the whole table on every page view (api admin.ts ~:191-261), and `audit_events` keeps every row forever; since T376 every sign-in attempt writes one (throttled ones bounded per window). Decide a retention period (delete or archive), and bound the page's counts (an estimate, or indexed filters).
 
+### T494 · FNF[stored-targets-leftovers] · 07's quarantine checks a name's shape, not its membership; T480's leftover pins (+5)
+
+status: open
+From the T480 reviews (2026-10-31). PRE-EXISTING and minor unless stated (each needs a hand-edited 07 detect payload).
+
+1. 07's quarantine accepts any one-segment name with the catalog extension, so `files: ['README.md']` moves the index 07 just wrote to `<dir>-legacy/README.md`, overwrites it with the legacy README, and 12 records an `agents-index` row for a file that is gone (worker 07-generate-files.ts ~:459-483 lists, ~:496-499 accepts, ~:1017-1027 moves). Skip `README.md` and the names of the agents just written; claimed paths need a ledger read.
+2. 12's refusal of a stored skills directory is only logged (12-post-onboarding.ts ~:329-334), while a refused agent directory shows in its warnings.
+3. `recordable` (12 ~:298-302) is now a dead backstop with no control: no input reaches it with a git-data path since T480. Pin it with a direct unit test or delete it.
+4. The quarantine's extension comes from the catalog, never the stored target's format (07 ~:487-488), but no test pins it: a stored `{ dir: '.codex/agents', format: 'markdown' }` beside an `x.md` name would.
+5. [verify-first] The upgrade path passes stored agent targets through `originAgentTargets` unfiltered when the 07 payload records neither `cliTargets` nor `enabledCliProviders` (worker _upgrade-render.ts ~:314-330, shared render-targets.ts ~:223-226), and 02's `safeDiskRel` does not refuse an off-catalog canonical dir; trace whether such a target reaches a write.
+6. Test hygiene from the first T480 review: repository-skill-empty-targets.test.ts ~:298-314 pins nothing new; 09_6-skill-verification.ts ~:147 hides a skill directory whose name holds `\`.
+
+### T495 · FNF[failed-read-answers-2] · more git reads read a failure as "absent" (+4)
+
+status: open
+From the T397 review (2026-10-31). Same class as T397 (git's exit code, never its wording); PRE-EXISTING, minor. See also T379 (git-tree readers).
+
+1. 03-upgrade-commit.ts ~:91 (`headLacksImport`) and ~:114 (`agentsRulesVerdict`): any non-zero `rev-parse --verify -q HEAD` except no-answer reads as "no HEAD" and stages the whole file, taking unrelated edits; only exit 1 means no HEAD.
+2. 10-gate-3-commit.ts ~:200: a failed `show --name-only` (non-zero, not no-answer) yields `[]`, so `task.changedPaths` silently misses the commit's files.
+3. [verify-first] _dependency-policy.ts ~:159 and ~:214: `git show <base>:<file>` exit 128 means absent or failed; a failure drops the baseline Drupal protection and `ownedPaths`. `rev-parse -q --verify <base>:<path>` (exit 1) tells absent apart.
+4. [verify-first] project-state/set-aside.ts ~:264-267 (`headOid`) and ~:1147-1152 (`headEntry`): a failed read reads as "HEAD lacks the path" (used for `untracked` ~:519 and in `putBackIndex` ~:1251); guarded by earlier successful reads in the same transaction.
+5. [verify-first] plan/projection-merge.ts ~:34-37 `readBlob` returns null for every failure, and set-aside.ts ~:621 (`restoreFromHead`) and ~:1038 (`putBackProjections`) read null as "HEAD lacks the path": a failed `cat-file` removes the pending working file instead of restoring HEAD's bytes, and the put-back's create-exclusive hits EEXIST (swallowed). The raised marks let the sweep reconcile. From the T397 follow-up review.
+
+### T496 · FNF[vendor-call-deadlines] · the worker's usage poll awaits vendor calls with no deadline (+1)
+
+status: open
+From the T376 follow-up review (2026-10-31). PRE-EXISTING, moderate; the same class as the 15 s deadline T376 gives `postToken`.
+
+1. The Grok token refresh (worker grok-oauth.ts ~:130) is awaited ahead of the poll (usage-poll-queue.ts ~:693) on a `concurrency: 1` worker (~:698), and the usage fetchers (claude-code.ts ~:43, codex.ts ~:72, zai.ts ~:71, gemini.ts ~:40, awaited per batch through `cfg.fetch` ~:340) pass no `signal`; the only bound is the HTTP client's default. A stalled endpoint holds the tick, the provider-outage watch behind it and the Claude refresh. Give each an `AbortSignal.timeout` and pin it.
+2. The Grok refresh reads a permanent rejection from the message text (credential-refresh.ts ~:141 `msg.includes('invalid_grant')`, relying on grok-oauth.ts ~:144-146); the Claude twin has a typed `ClaudeOauthError.code`. Key it on a code.
+
+### T497 · FNF[plan-merge-failed-visibility] [design] · after a reload a failed plan merge leaves no trace on the plan page
+
+status: open
+From the T491 review (2026-10-31). `GET /plan/merge` lists open merges only (api plan.ts ~:447-459) and `plan_merge` tasks are hidden from the task list (tasks/index.ts ~:289-292), so once the page that saw the failure is gone, a FAILED merge (which keeps its worktree for a Retry) cannot be found from the plan page. Options: the route also returns the newest failed merge not followed by a successful one, shown with its Retry link; or a plan-page notice from the task events. Recommended: the first.
+
+### T498 · FNF[stalled-redrive-2] · a waiting_cli row whose continuation add was lost is recovered only at boot (+3)
+
+status: open
+From the T385/T348 driver (2026-10-31), verified at 163cff3a3. Connected to the stalled sweep; PRE-EXISTING.
+
+1. Consequential (every CLI end produces one): a `waiting_cli` row whose runs all ended, with the continuation add lost (worker cli-exec/resolvers.ts ~:1125 has no `attempts`; caller `resumeStepIfLinked` ~:1071 from handlers.ts ~:501, ~:574), is never taken by the sweep (stalled-redrive.ts ~:188 `stalledRow` has no `waiting_cli`; the run-recovery arm ~:378 needs an old unstarted run); only boot recovers it (task-queue.ts ~:3792-3821). Same fences as the T348 shape.
+2. The `waiting_cli` run-recovery arm bumps the epoch with no in-process hold check (stalled-redrive.ts ~:479-497 -> `recoverParkedStep` task-queue.ts ~:3626), the sibling of T348's F2 guard. Minor.
+3. A `running` row whose only run is orphaned (its cli-exec job lost) is never recovered between boots: `liveRun` (~:182) counts it and the recovery arm takes `waiting_cli` rows only; boot pass 2 is task-queue.ts ~:3829-3888. Minor.
+4. The usage-poll auto-resume advance carries no epoch (usage-poll-queue.ts ~:614-625), so it is exempt from the stale-epoch drop and serialised only by `holdStepAdvance`. Minor.
+
+### T499 · FNF[parks-accounting] · a Retry's re-offered form keeps its started_at and books its wait to idle_ms (+4)
+
+status: open
+From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor.
+
+1. `reofferParkedSteps` (api task-control.ts ~:167-194) books a re-offered `waiting_form` row's wait to `idle_ms` and keeps its `started_at`; the next claim restamps `started_at` (worker step-runner.ts ~:2866), so the wait predates the new span and clamps its work. Book every re-offered row to `carried_idle_ms` and change the pin in park-fold-db.test.ts.
+2. The worker's `autoResumeFailedStep` (_step-reset.ts ~:338-350) re-opens a row without `startIfNeverStarted`; the helper would move into @haive/database first. Not reachable in practice.
+3. Other writers still book a pre-run park the old way (terminal rows, nothing mis-billed): api lib/cancel-task.ts ~:92, worker task-queue.ts ~:3993, api task-control.ts ~:207-215 `settleActiveStepsIn`.
+4. A parked current row beside another `running`, `waiting_cli` or `waiting_form` row: every advance is dropped by the other-step guard (task-queue.ts ~:2813-2859), `foldAbandonedPark` unparks the row and the sweep re-drives it every 5 minutes with an epoch bump (T385 adds an overdue park as one more way in). See also T393/T394.
+5. Cosmetic: slot-wait-badge.tsx ~:40 unreachable fallback "Queued for a slot"; the "Waiting for slot" filter wording now also lists module-setup parks (web tasks/page.tsx ~:498, shared schemas/tasks.ts ~:440-441, api tasks/index.ts ~:250); cli-park-timing.ts ~:15 still calls the marker the runtime park's signature; stalled-redrive.test.ts ~:463-469 titles read as sweep rules though they test `redrivableRow`; the handleResult 'deferred' enqueue is pinned by no control (it must stay free of the dedup id); a module step that declared `needsRuntime` reads as module (slot-wait.ts ~:126).
+
+### T500 · FNF[handoff-silent-writes] · three handleResult neighbours write silently or re-fail a stopped task (+2)
+
+status: open
+From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor. Same family as T385 item 6 (the lost hand-off log).
+
+1. `markTaskDeadOnStep` (worker task-queue.ts ~:812-829) does not log a lost write.
+2. The revise selfLoop `markTaskFailed` (~:2323-2330) ignores its return.
+3. `routableFixLoopTarget` (~:882-905) calls `writeTaskFailed` (~:670), which is epoch-fenced only; a Stop fails a task without moving the epoch, so a source row left `done` lets it re-fail a Stop-failed task and rewrite `error_message` and `completed_at`.
+
+### T501 · FNF[redrive-apply-idempotence] [verify-first] · is apply() idempotent for a re-driven running deterministic step?
+
+status: open
+From the T385/T348 driver (2026-10-31). Unaudited: the stalled sweep (T348), BullMQ stalled redelivery and the boot reset can all run a deterministic step's `apply()` a second time. Audit the steps whose apply writes files, commits or external state, and record which are safe; fix or fence the rest.
+
+### T502 · FNF[ci-step-limits-rest] · six more CI jobs bound a hang only by their job limit; helper scripts are not scanned for swallowed failures (+2)
+
+status: open
+From the T489 review (2026-10-31). PRE-EXISTING, minor to moderate.
+
+1. No step-level `timeout-minutes` in lint-typecheck-test (ci.yml ~:35, 20 min), browser-runtime (~:114, 20), compose-boot (~:581, 30), e2e (~:721, 45), cli-adapters-arm64 (platform-checks.yml ~:39, 60) and macos-boot (~:116, 45): a hang costs the job limit. Size each from measured run times, as T489 did for four jobs, and extend the pin.
+2. The swallowed-failure pin reads workflow `run` texts only; the helper scripts they call (packages/database/scripts/schema-parity.sh, scripts/ci-retry.sh, scripts/check-web-image.mjs) are never scanned (schema-parity.sh ~:34 has a legitimate `|| true` in an EXIT trap, so a scan needs an allowance).
+3. Redis pub/sub is not database-scoped, so T489's database split does not isolate channels: module-activation-watch.test.ts ~:85, ~:93 publishes `haive:module-activated` in a later step and api modules/loader.ts ~:79 publishes it from app code a gated row may reach. Use a per-run channel prefix in tests, or check no gated row publishes it. From the T489 reviews.
+
+### T503 · FNF[plan-chat-start-race] · a chat remounted during a pending start stays blind to the conversation it started
+
+status: open
+From the T491 follow-up review (2026-10-31). PRE-EXISTING, minor (needs a node switch and back inside the POST). The old instance's post-send reload updates only its own unmounted state (web plan-chat.tsx ~:347 against the guard ~:160-167) and `onPatched` refreshes the page, not the chat; the start route has no guard against a second live conversation for the node (api plan.ts ~:1406-1450, lib/spawn-plan-task.ts), so a second Send can start another. Fix: re-read the node's conversations when the remounted chat sees a send in flight, and refuse a second live start for the node.
+
+### T504 · FNF[audit-imported-settings] [design] · audited repository settings that arrive with the checkout or an import leave no audit row
+
+status: open
+From the T376 third review (2026-10-31). PRE-EXISTING; moderate for the agent rules, minor for the scope list. T376 audits `agentRulesOverride` (`repository.security.update`) and `scopeExcludeGlobs` (`repository.scope.update`) at their api routes only. The worker's project-state sync writes both from the checkout's portable settings (worker project-state/sync.ts ~:909-920, `mergePortable` ~:522; shared project-state/settings.ts ~:20-29, ~:135-145), a "take theirs" answer to a project-state question writes them (api project-state-conflicts.ts ~:140-151, worker project-state/resolve.ts ~:564, ~:583-588), 09_7-rag-source-selection.ts ~:218-224 persists the scope choice and the clone import (repo/clone.ts ~:188-199) fills the scope list; the worker has no audit writer at all. So a change of the agent rules (prepended to every prompt) that arrives with a pull leaves no row. Decide: record a row in the same transaction as the column write (sync and resolve already hold one) with `source: 'project_state'` and an actor for imports, or document that imports are unaudited.
+
+### T505 · FNF[gate4-remote-writer] · Gate 4's push writes the repository's remote and credential binding with no audit row, lock or restore (+1)
+
+status: open
+From the T376 third review (2026-10-31). PRE-EXISTING, minor to moderate.
+
+1. With no origin in the worktree, 11a-gate-4-push.ts ~:308-331 runs `ensureOrigin` (the worktree shares the repository's config) and then a plain `ctx.db.update(schema.repositories)` of `remoteUrl` and `credentialsSecretId`: the change T376 audits in `POST /:id/remote`, with no row lock and no restore. Ownership and fit are checked first (git-push.ts ~:132-142), so no leak. The audit part waits on T504's decision (the worker has no audit writer).
+2. A failed row update leaves the checkout ahead of the column, and a Retry does not repair it: the persist sits behind `if (!hasOrigin)` (~:308) and the origin now exists, so the row keeps `remoteUrl` null while pushes go to the origin. Key the persist on the row, not on `hasOrigin`, and take the `/remote` shape (row lock, restore on failure).
+
 ## Done
 
+- T478 — git and filesystem errors reach the plan page, the api's Save and Pull 409 bodies, repositories.status_message and 12's warnings without the server's absolute paths: one shared scrubber (`scrubErrorPaths`) hides absolute POSIX, drive and UNC paths and keeps the diagnosis and URLs (linear, one alternative per quote kind: CodeQL clean); convergent boot repairs rewrite stored mirror errors and errored repositories' messages (compare-and-swap, logged with counts and ids); one warn per sweep tick for a stuck row — PR #969 (f193c6b78), 2026-10-31; main CI green; delivered with codex-sonnet (2 fix rounds, session CodeQL fix); follow-up T490
 - T476 — the plan merge panel reads the DELETE's `cancelled` answer: a discard that cancelled nothing keeps a neutral status notice (completed, cancelled or failed; nothing discarded) that survives the refresh, is cleared by the next merge, Discard or answer, and Discard stays disabled while its own discard settles; the panel sends the displayed task id (`?taskId=`) and the route cancels nothing when a different merge is open — PR #968 (0177599c3), 2026-10-31; main CI green; delivered with codex-sonnet (1 fix round, session Direct guard); follow-up T491
 - T479 — an archive extract whose swap fails restores the previous destination tree before the stage is removed (the old tree was deleted with the stage); a failed restore keeps the stage and logs the absolute path of the kept tree; a failed stage removal after a good swap warns instead of failing silently; the comment says what a crash between the two renames leaves — PR #966 (a1a74f596), 2026-10-31; main CI green; delivered with codex-sonnet (1 fix round); follow-ups T486, T487
 - T474 — schema-parity, the web checks of production-images and macos-preflight run each check on !cancelled() && steps.<setup>.conclusion == 'success'; the smokes job's gated step and Redis-script steps have their own limits (25, 10, 5 minutes) and the job 45 minutes, pinned by a budget model of the GATED list (907 s plus 7.5 s a row; fails at 134 and 160 rows); the gated step's errexit comes from the runner's bash -e (comment only) — PR #967 (6bad0f036), 2026-10-31; main CI green with every guarded check run (PR run and main); ci-smokes.md; follow-ups T488, T489, T475 notes

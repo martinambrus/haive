@@ -45,7 +45,7 @@ import {
   inheritCliMembership,
 } from '../../../project-state/write.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
-import { loadPreviousStepOutput } from './_helpers.js';
+import { loadPreviousStepOutput, filterCatalogSkillDirs, isAgentTargetDir } from './_helpers.js';
 import {
   collectOnboardingStagePaths,
   commitRecorded,
@@ -300,7 +300,22 @@ async function recordOnboardingArtifacts(
     warnings.push(`onboarding-artifacts: did not record ${r.diskPath}: it names git data`);
     return false;
   };
-  const haiveExpanded = expandManifestFor(renderedCtx, manifest).filter(recordable);
+  const refusedAgentDirs = new Set<string>();
+  const agentTargetsForRecord = (targets: TemplateRenderContext['agentTargets']) =>
+    targets.filter(({ dir }) => {
+      if (isAgentTargetDir(dir)) return true;
+      if (!refusedAgentDirs.has(dir)) {
+        refusedAgentDirs.add(dir);
+        warnings.push(
+          `onboarding-artifacts: did not record agent destination ${dir}: not a catalog agent destination`,
+        );
+      }
+      return false;
+    });
+  const haiveExpanded = expandManifestFor(
+    { ...renderedCtx, agentTargets: agentTargetsForRecord(renderedCtx.agentTargets) },
+    manifest,
+  ).filter(recordable);
 
   // Custom-bundle expansion runs in parallel with manifest expansion; the two
   // are concatenated and de-duped on diskPath (Haive items win on collision —
@@ -311,11 +326,15 @@ async function recordOnboardingArtifacts(
   // Membership can have changed since 09_5 ran. Match that writer's missing-field compatibility
   // default and preserve an explicit [] rather than expanding into today's maintained targets.
   const generatedSkills = await loadPreviousStepOutput(ctx.db, ctx.taskId, '09_5-skill-generation');
-  const skillTargets = (generatedSkills?.detect as { skillTargetDirs?: string[] } | null)
-    ?.skillTargetDirs ?? ['.claude/skills'];
+  const skillTargets = filterCatalogSkillDirs(
+    (generatedSkills?.detect as { skillTargetDirs?: string[] } | null)?.skillTargetDirs ?? [
+      '.claude/skills',
+    ],
+    ctx.logger,
+  );
   const customExpanded = expandCustomBundlesFor(
     bundlesForInstall,
-    detect.agentTargets,
+    agentTargetsForRecord(detect.agentTargets),
     skillTargets,
   ).filter(recordable);
   const expanded: ExpandedRendering[] = [];
