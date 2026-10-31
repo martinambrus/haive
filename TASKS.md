@@ -148,7 +148,7 @@ status: parked · reason: needs a fresh onboarding run (see T300)
 status: open
 A file under `.haive/worktrees` sharing an inode with a name in the writable checkout stays writable through the alias. Fix: a one-time background sweep (recorded per repository) that copy-replaces files whose st_nlink exceeds their names under that tree, via fs-safe. Measure the walk on a large repo first.
 
-### T309 · FNF[cancel-cap-2] · a capped cancel with no claim row never finishes (+7)
+### T309 · FNF[cancel-cap-2] · a capped cancel with no claim row never finishes (+8)
 
 status: open
 All PRE-EXISTING, low.
@@ -161,6 +161,7 @@ All PRE-EXISTING, low.
 6. No real-DB coverage for the refund on a refused enqueue or the sandbox guard; ~25 lines in stalled-redrive-smoke.ts.
 7. merge-resolver `halt` keys "own merge" on ref/sha, so a cancelled task's same-ref open merge reads as this step's (area: modular-haive-plan).
 8. (T458 review, 2026-10-31) PRE-EXISTING, minor: `runTaskJob`'s catch (worker task-queue.ts ~:4164) fails the open task of any job that throws, a CANCEL included, so a transient error in `markTaskCancelled` fails the task it was cancelling instead of leaving it for the cancel re-drive.
+9. (T458 fix round, 2026-10-31) PRE-EXISTING, minor: the Cancel action, the step abort and `DELETE /plan/merge` clear the pause after the cancel commits and before they queue the CANCEL job (api routes/tasks/index.ts ~:1297, steps.ts, plan.ts), so a database error in `clearTaskPause` answers 500 with the task cancelled, no job queued and, for the abort, no `step.abort` event; the stalled sweep queues the lost teardown five minutes later.
 
 ### T312 · FNF[rag-own-paths][verify-first] · customCodePaths can name missing directories
 
@@ -896,6 +897,7 @@ status: open
 From the T349 review (2026-10-31). PRE-EXISTING. A failed task whose repository was deleted still passes `checkRevive` (database repository-task-lock.ts ~:109), while the repository delete's `cancelOpenTasksForRepo` (api lib/cancel-task.ts ~:130) skips failed tasks; a Retry then sets it `running` with no repository and the worker's next advance throws. Decide: refuse that Retry (say why on the page), or have the delete cancel failed tasks too. Cross-reference T393, T394, T409.
 
 Also (T349 fix-round review, 2026-10-31, reasoned from the code, not reproduced): since T349 the delete takes the task-creation key a Retry takes, but a Retry already waiting on the key when the delete commits goes on: `checkRevive` returns null after the wait without reading the repository again (database repository-task-lock.ts ~:109-113), so the task is revived to `running` with a NULL repository. Whichever way this is decided, the Retry must read the repository again after its wait.
+Note (T458 fix round, 2026-10-31): the repository delete's cancel (`cancelOpenTasksForRepo`, api routes/repos.ts ~:3384) clears no pause, while Cancel, abort and the plan merge discard now do; if a revival of such a task stays possible, it would be parked again by the stale `paused_at`.
 
 ### T462 · FNF[project-state-notices] [design] · the repository page cannot say a sync replaced or refused a value (+3)
 
