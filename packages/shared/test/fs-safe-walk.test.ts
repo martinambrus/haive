@@ -117,6 +117,14 @@ it('closes every held directory when the loop body throws', async () => {
   await expect(failing()).rejects.toThrow('at a/b/c/one');
   expect(openFds()).toBe(before);
 });
+it('has no strict mode: a refused root lists nothing', async () => {
+  await fixture();
+  // @ts-expect-error `strict` belongs to the single-path primitives; the walk only has the lenient rule
+  const walk = walkFilesNoFollow(root, 'tree/linked-dir', { strict: true });
+  const found = [];
+  for await (const entry of walk) found.push(entry);
+  expect(found).toEqual([]);
+});
 it('rejects invalid relative paths', async () => {
   await fixture();
   await expect(walkFilesNoFollow(root, '../outside').next()).rejects.toMatchObject({
