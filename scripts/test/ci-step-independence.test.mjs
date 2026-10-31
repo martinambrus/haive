@@ -17,6 +17,23 @@ const JOBS = [
     prerequisite: 'migrate',
     // Every check is cut by its own time limit (see RUN_SMOKES), not only by the job's.
     bounded: true,
+    // MEASURED, volatile (59 green runs from 2026-10-30 through main run 41198565486): a green run
+    // spent at most 907 s outside the gated step, which took about 7.5 s a row of its GATED list
+    // on the slowest runners. A green run is modelled as that: 907 s plus 7.5 s a row. The job's
+    // limit keeps `marginSeconds` over it, so that a slower runner does not cancel a green run, and
+    // stays within twice it, so that a hung run still ends soon. A check that hangs to its limit
+    // leaves the checks after it room: its limit on top of everything else a green run spends
+    // (907 s for the gated step, a whole green run for any other check). The gated step's limit
+    // stays `slowRunnerFactor` times its modelled time. The list keeps growing, so these fail at a
+    // row count: measure again, then raise the limits or split the gated tests into their own job.
+    // Only the list is modelled: the 907 s grew from 629 s in the week to 2026-10-31 (the worker
+    // smokes and the auth throttle script), so measure it again whenever a green run nears the limit.
+    budget: {
+      outsideGatedSeconds: 907,
+      secondsPerRow: 7.5,
+      slowRunnerFactor: 1.5,
+      marginSeconds: 600,
+    },
     // The setup in order, ending at the step with the id above. A check placed in it would stop
     // all the others when it failed, so a new setup step is added here on purpose.
     setup: [
@@ -62,6 +79,27 @@ const JOBS = [
 // check burns the job's whole limit and cancels every check after it.
 const RUN_SMOKES = /^pnpm --filter @haive\/[\w-]+ smoke:ci$/;
 const WHOLE_MINUTES = /^[1-9]\d*$/;
+
+// The rows of the GATED list of a check that holds one, or null.
+const gatedRows = (check) => {
+  const list = /<<'GATED'\n([\s\S]+?)\nGATED(?:\n|$)/.exec(check.run ?? '')?.[1];
+  return list === undefined ? null : list.split('\n').filter(Boolean).length;
+};
+
+// What a green run of the job is modelled to take: everything outside the gated step, plus
+// secondsPerRow for each row of the list that step loops over.
+function model(checks, { outsideGatedSeconds, secondsPerRow }) {
+  const gatedChecks = checks.filter((check) => gatedRows(check) !== null);
+  assert.equal(gatedChecks.length, 1, "the job has exactly one check with a <<'GATED' list");
+  const [gated] = gatedChecks;
+  const rows = gatedRows(gated);
+  return {
+    gated,
+    rows,
+    gatedSeconds: rows * secondsPerRow,
+    greenSeconds: outsideGatedSeconds + rows * secondsPerRow,
+  };
+}
 
 const guard = ({ prerequisite, leg }) =>
   `\${{ !cancelled() && steps.${prerequisite}.conclusion == 'success'${leg ? ` && ${leg}` : ''} }}`;
@@ -150,6 +188,40 @@ function checkJob(job, spec) {
       unbounded.length,
       0,
       `a check is a smoke:ci chain or has a timeout-minutes of whole minutes, so that a hang ends it and not the job: ${unbounded.map(label).join('; ')}`,
+    );
+  }
+  if (spec.budget) {
+    const { outsideGatedSeconds, slowRunnerFactor, marginSeconds } = spec.budget;
+    const { gated, rows, gatedSeconds, greenSeconds } = model(checks, spec.budget);
+    assert.match(
+      job['timeout-minutes'] ?? '',
+      WHOLE_MINUTES,
+      'the job has a timeout-minutes of whole minutes, or it runs for the default six hours',
+    );
+    const limit = Number(job['timeout-minutes']) * 60;
+    assert.ok(
+      limit >= greenSeconds + marginSeconds,
+      `the job's limit of ${limit} s leaves ${limit - greenSeconds} s over a green run (${greenSeconds} s modelled for ${rows} gated rows), not the ${marginSeconds} s a slower runner needs`,
+    );
+    assert.ok(
+      limit <= 2 * greenSeconds,
+      `the job's limit of ${limit} s is over twice a green run (${greenSeconds} s modelled), so a hung run would be cancelled late`,
+    );
+    const crowding = checks.filter(
+      (check) =>
+        check['timeout-minutes'] !== undefined &&
+        limit <
+          (check === gated ? outsideGatedSeconds : greenSeconds) +
+            Number(check['timeout-minutes']) * 60,
+    );
+    assert.equal(
+      crowding.length,
+      0,
+      `a check that runs to its limit leaves the checks after it too little of the job's ${limit} s: ${crowding.map(label).join('; ')}`,
+    );
+    assert.ok(
+      Number(gated['timeout-minutes']) * 60 >= slowRunnerFactor * gatedSeconds,
+      `the gated step's limit of ${Number(gated['timeout-minutes']) * 60} s is under ${slowRunnerFactor} times the ${gatedSeconds} s its ${rows} rows are modelled to take, so a slower runner would end a green run`,
     );
   }
 }
@@ -306,6 +378,105 @@ const MUTANTS = [
       chain['timeout-minutes'] = '0';
     },
     (spec) => spec.bounded,
+  ],
+  ...[
+    [
+      'a job limit that leaves too little over a green run',
+      ({ greenSeconds }, { marginSeconds }) => Math.ceil((greenSeconds + marginSeconds) / 60) - 1,
+    ],
+    [
+      'a job limit above twice a green run',
+      ({ greenSeconds }) => Math.floor((2 * greenSeconds) / 60) + 1,
+    ],
+    ['a job limit that is not whole minutes', () => '40.5'],
+    ['a job limit that is an expression', () => '${{ vars.LIMIT }}'],
+  ].map(([name, limit]) => [
+    name,
+    (job, last, spec) => {
+      const modelled = model(job.steps.slice(last + 1), spec.budget);
+      job['timeout-minutes'] = String(limit(modelled, spec.budget));
+    },
+    (spec) => spec.budget,
+  ]),
+  [
+    'a job with no limit of its own',
+    (job) => {
+      delete job['timeout-minutes'];
+    },
+    (spec) => spec.budget,
+  ],
+  [
+    'a gated step limit one minute over what the job limit absorbs',
+    (job, last, spec) => {
+      const { gated } = model(job.steps.slice(last + 1), spec.budget);
+      const room = Number(job['timeout-minutes']) * 60 - spec.budget.outsideGatedSeconds;
+      gated['timeout-minutes'] = String(Math.floor(room / 60) + 1);
+    },
+    (spec) => spec.budget,
+  ],
+  [
+    'another check limit one minute over what the job limit absorbs',
+    (job, last, spec) => {
+      const checks = job.steps.slice(last + 1);
+      const { gated, greenSeconds } = model(checks, spec.budget);
+      const other = checks.find(
+        (check) => check !== gated && check['timeout-minutes'] !== undefined,
+      );
+      other['timeout-minutes'] = String(
+        Math.floor((Number(job['timeout-minutes']) * 60 - greenSeconds) / 60) + 1,
+      );
+    },
+    (spec) => spec.budget,
+  ],
+  [
+    'a job limit under the margin when no step limit crowds it',
+    (job, last, spec) => {
+      const checks = job.steps.slice(last + 1);
+      const { gated, gatedSeconds, greenSeconds } = model(checks, spec.budget);
+      for (const check of checks) {
+        if (check['timeout-minutes'] !== undefined) check['timeout-minutes'] = '1';
+      }
+      gated['timeout-minutes'] = String(
+        Math.ceil((spec.budget.slowRunnerFactor * gatedSeconds) / 60),
+      );
+      job['timeout-minutes'] = String(
+        Math.ceil((greenSeconds + spec.budget.marginSeconds) / 60) - 1,
+      );
+    },
+    (spec) => spec.budget,
+  ],
+  [
+    'a second check with a GATED list',
+    ({ steps }, last, spec) => {
+      const { gated } = model(steps.slice(last + 1), spec.budget);
+      steps.push({ ...gated, name: 'Second gated tests' });
+    },
+    (spec) => spec.budget,
+  ],
+  [
+    'a gated step limit under its modelled time on a slower runner',
+    (job, last, spec) => {
+      const { gated, gatedSeconds } = model(job.steps.slice(last + 1), spec.budget);
+      gated['timeout-minutes'] = String(
+        Math.ceil((spec.budget.slowRunnerFactor * gatedSeconds) / 60) - 1,
+      );
+    },
+    (spec) => spec.budget,
+  ],
+  [
+    'a GATED list that has outgrown the step limit',
+    (job, last, spec) => {
+      const { gated, rows } = model(job.steps.slice(last + 1), spec.budget);
+      const { secondsPerRow, slowRunnerFactor } = spec.budget;
+      const capacity = Math.floor(
+        (Number(gated['timeout-minutes']) * 60) / (slowRunnerFactor * secondsPerRow),
+      );
+      gated.run = gated.run.replace(
+        /\nGATED(\n|$)/,
+        `${'\nx'.repeat(capacity + 1 - rows)}\nGATED$1`,
+      );
+    },
+    (spec) => spec.budget,
   ],
   [
     'a new check that is not a smoke chain and has no time limit',

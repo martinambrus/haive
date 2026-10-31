@@ -141,7 +141,12 @@ jobs:
   smokes:
     name: End-to-end smokes
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The longest of the CI jobs, and it grows with every gated test (about 7.5 s a row of the GATED
+    # list). 45 minutes keeps more than 600 s over a green run and room for a run in which the gated
+    # tests end at their 25 minutes, so the checks after a hung step still run. The budget in
+    # scripts/test/ci-step-independence.test.mjs fails when the list outgrows these limits;
+    # docs/architecture/ci-smokes.md (Limits) has the measurements.
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:18-alpine
@@ -373,7 +378,7 @@ jobs:
           exit "$failed"
 
       # api smokes first: they are seconds each, so a broken route surfaces before the
-      # worker suite spends most of the job's 30-minute budget. smoke:terminal is
+      # worker suite spends most of the job's budget. smoke:terminal is
       # excluded from smoke:ci — it needs a docker daemon and pulls an image, the same
       # reason the worker job leaves smoke:sub-agent out of its own smoke:ci.
       # Every smoke:ci runs its smokes through scripts/run-smokes.mjs: each smoke has its own time
