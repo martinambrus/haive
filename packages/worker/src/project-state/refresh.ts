@@ -1,4 +1,4 @@
-import type { NamedCheckout } from '../repo/checkout-head.js';
+import { checkoutMissing, type NamedCheckout } from '../repo/checkout-head.js';
 import { and, asc, eq, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { schema, type Database } from '@haive/database';
 import { logger } from '@haive/shared';
@@ -19,6 +19,8 @@ const SWEEP_BATCH = 25;
 const NOT_WRITTEN = {
   deferred: 'an onboarding, an upgrade or a reset holds the checkout',
   superseded: 'the repository changed while its record was being read',
+  missing:
+    "the repository's checkout directory is missing; nothing was written. The record is written again once it is back.",
 } as const;
 
 async function setOutboxError(
@@ -76,7 +78,13 @@ export async function refreshProjectState(
     .where(eq(schema.repositories.id, repositoryId))
     .limit(1);
   const repoPath = repo?.storagePath ?? repo?.localPath ?? null;
-  if (!repoPath || (await gitOperationInProgress(repoPath))) return false;
+  if (!repoPath) return false;
+  // The row stays dirty: that is the signal to write the record once the checkout is back.
+  if (await checkoutMissing(repoPath)) {
+    await setOutboxError(db, repositoryId, NOT_WRITTEN.missing, true);
+    return false;
+  }
+  if (await gitOperationInProgress(repoPath)) return false;
 
   try {
     await recoverProjectStateWrite(db, repositoryId, repoPath, expectedCheckout);
