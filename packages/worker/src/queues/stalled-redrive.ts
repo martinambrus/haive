@@ -497,6 +497,9 @@ export async function redriveStalledTasks(
   const owed = await deps.queuedInvocationIds();
   if (owed === null) return redriven;
   for (const p of lostRuns) {
+    // A pass of this process whose job Redis lost is still on the step, perhaps setting up the run it
+    // recorded: ending that run and bumping the epoch would abort the pass at its next poll.
+    if ((deps.stepHeld ?? stepAdvanceHeld)(p.taskId, p.stepId, p.round)) continue;
     try {
       const recorded = await db
         .select({ id: schema.cliInvocations.id })

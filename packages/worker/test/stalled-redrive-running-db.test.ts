@@ -1447,4 +1447,69 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
       ).toHaveLength(1);
     });
   });
+
+  describe('the run recovery of a parked step, beside a pass of this process', () => {
+    /** The T385 arm: a parked step whose recorded run no cli-exec job owes any more. */
+    const lostRun = async () => {
+      const { taskId, rowId } = await parkedOnCli();
+      const runId = await seedRun(taskId, rowId, {});
+      return { taskId, rowId, runId };
+    };
+    const hold = (taskId: string) =>
+      holdStepAdvance(
+        {
+          id: randomUUID(),
+          data: { taskId, userId, stepId: S, round: ROUND },
+          moveToDelayed: async () => undefined,
+        },
+        undefined,
+      );
+    const runOf = async (runId: string) =>
+      (
+        await db.select().from(schema.cliInvocations).where(eq(schema.cliInvocations.id, runId))
+      )[0]!;
+
+    it('A1 (control): recovers the step when no pass holds it: the lost run is ended and the step re-driven at the next epoch', async () => {
+      const { taskId, runId } = await lostRun();
+      const { deps, advances } = rig();
+      await expect(
+        redriveStalledTasks(db, deps, { staleMs: STALE_MS }),
+        'the arm took the step whose run no job owes',
+      ).resolves.toBe(1);
+      expect((await runOf(runId)).endedAt, 'the never-queued run was ended').not.toBeNull();
+      expect(await epochOf(taskId)).toBe(E + 1);
+      expect(advances).toEqual([{ taskId, userId, stepId: S, round: ROUND, epoch: E + 1 }]);
+    });
+
+    it('A2: leaves the step alone while a pass of this process holds it, whose job Redis lost: no run ended, no bump, no advance', async () => {
+      const { taskId, runId } = await lostRun();
+      const before = await state(taskId);
+      const release = await hold(taskId);
+      try {
+        const { deps, advances } = rig();
+        await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(0);
+        expect((await runOf(runId)).endedAt, 'the pass would have lost the run').toBeNull();
+        expect(await epochOf(taskId), 'and been aborted at its next poll by a bump').toBe(E);
+        expect(advances).toEqual([]);
+        expect(await state(taskId), 'and nothing was written').toEqual(before);
+      } finally {
+        release!();
+      }
+    });
+
+    it('A3: recovers the step once the pass lets go', async () => {
+      const { taskId, runId } = await lostRun();
+      const release = await hold(taskId);
+      const held = rig();
+      await expect(redriveStalledTasks(db, held.deps, { staleMs: STALE_MS })).resolves.toBe(0);
+      release!();
+      const free = rig();
+      await expect(redriveStalledTasks(db, free.deps, { staleMs: STALE_MS })).resolves.toBe(1);
+      expect(
+        (await runOf(runId)).endedAt,
+        'the hold, not the run, was what protected it',
+      ).not.toBeNull();
+      expect(free.advances).toHaveLength(1);
+    });
+  });
 });
