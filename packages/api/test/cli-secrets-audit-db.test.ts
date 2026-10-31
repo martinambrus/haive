@@ -88,6 +88,16 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     await cleanActor(db, h.actor);
     vi.restoreAllMocks();
   });
+  for (const refused of [false, true])
+    it(`no-op usage disconnect ${refused ? 'with refusing audit' : 'without token'} returns disconnected without a deletion row`, async () => {
+      if (refused) await refuseAudit(db);
+      const res = await send('DELETE', 'usage-auth');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ connected: false });
+      expect(await audits(db)).toEqual([]);
+      expect((await send('DELETE', 'usage-auth')).status).toBe(200);
+      expect(await audits(db)).toEqual([]);
+    });
   const cases = [
     ['set', 'POST', 'secrets', { secretName: 'API_KEY', value: 'synthetic-secret' }],
     ['usage connect', 'POST', 'usage-auth/complete', { code: 'code#state' }],

@@ -1054,23 +1054,25 @@ cliProviderRoutes.delete('/:providerId/usage-auth', async (c) => {
     targetId: providerId,
     metadata: { source: 'usage_oauth' },
   };
-  await db.transaction(async (tx) => {
-    await insertAuditEvent(tx, event);
-    await tx
+  const deleted = await db.transaction(async (tx) => {
+    const rows = await tx
       .delete(schema.cliProviderSecrets)
       .where(
         and(
           eq(schema.cliProviderSecrets.providerId, providerId),
           eq(schema.cliProviderSecrets.secretName, CLAUDE_USAGE_OAUTH_SECRET),
         ),
-      );
+      )
+      .returning({ id: schema.cliProviderSecrets.id });
+    if (rows.length > 0) await insertAuditEvent(tx, event);
     // Drop the last usage snapshot too: with no token the poller will never touch this row
     // again, so a stale meter / needs_reconnect chip would otherwise linger indefinitely.
     await tx
       .delete(schema.usageWindowSnapshots)
       .where(eq(schema.usageWindowSnapshots.providerId, providerId));
+    return rows.length > 0;
   });
-  logAuditEvent(event);
+  if (deleted) logAuditEvent(event);
   return c.json({ connected: false });
 });
 
