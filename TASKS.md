@@ -874,7 +874,7 @@ Before React attaches `handleSubmit`, a click on Sign in (web components/auth-fo
 
 ### T454 · FNF[ssr-form-prehydration-values] · server-rendered controlled forms lose text typed before hydration
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T01:06Z · last: 2026-10-31T01:06Z
 From the T449 review (2026-10-30). PRE-EXISTING, minor (signed-in pages; only a hard load exposes it).
 
 1. web components/new-repo-form.tsx ~:116 keeps the repository name in a controlled `useState('')` and ~:239 renders `<form onSubmit>` with no `method`: text typed into `/repos/new` before hydration is reset to '' by the first re-render, and a submit before hydration is a GET reload of the same page (the input has no `name`, so nothing reaches the URL). The fix class is T449's: uncontrolled inputs read with `new FormData(event.currentTarget)` at submit.
