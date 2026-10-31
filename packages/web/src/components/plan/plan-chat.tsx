@@ -267,9 +267,7 @@ export function PlanChat({
         if (settled) return;
         polledDead = taskDead;
       } catch {
-        // A task that cannot be read is not a reason to spin; the next user
-        // action re-reads everything anyway.
-        return;
+        // Retry transient read failures at the same cadence while the task is displayed.
       }
       if (!cancelled) timer = setTimeout(() => void poll(), polledDead ? DEAD_POLL_MS : POLL_MS);
     };

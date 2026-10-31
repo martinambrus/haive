@@ -258,6 +258,24 @@ describe('PlanChat with a live conversation', () => {
     expect(onPatched).not.toHaveBeenCalled();
   });
 
+  it('retries a failed chat poll on its normal cadence and unlocks the next turn', async () => {
+    await open(taskResponse(PLAN_CHAT_STEP_ID));
+    net.get.mockRejectedValueOnce(new Error('Temporary read failure'));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(taskFetches()).toBe(2);
+    expect(host('textarea')?.props.disabled).toBe(true);
+    expect(labelled('End conversation')).toBeUndefined();
+    respondWith(taskResponse(PLAN_CHAT_STEP_ID, { parked: true }));
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(taskFetches()).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(taskFetches()).toBe(3);
+    expect(host('textarea')?.props.disabled).toBe(false);
+    expect(labelled('End conversation')).toBeDefined();
+    expect(onPatched).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each(TERMINAL)(
     'stops polling for good once the task is $status (dead_at set: $dead)',
     async ({ status, dead }) => {
