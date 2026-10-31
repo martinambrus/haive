@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { lstatNoFollow, relUnder, toSafeRel } from '@haive/shared/fs-safe';
 import { KB_DIR, LEGACY_KNOWLEDGE_MIGRATIONS } from '@haive/shared/knowledge-paths';
+import { namesGitData } from '@haive/shared/project-state';
 import { LEGACY_IMPORT_SUBDIR } from './_kb-legacy.js';
 import type { Database } from '@haive/database';
 import { GIT_MAX_BUFFER, gitExec, gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
@@ -30,12 +31,14 @@ function list(raw: unknown): unknown[] {
   return Array.isArray(raw) ? raw : [];
 }
 
-/** A persisted step output is replayed, so every path in it is validated again. */
+/** A persisted step output is replayed, so every path in it is validated again. One naming git
+ *  data is refused: a record from before the writers refused it may hold one, and git fails the
+ *  whole `add` on an alias spelling such as `.GIT./x`. */
 function repoRel(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
   try {
     const rel = toSafeRel(raw);
-    return rel === '' ? null : rel;
+    return rel === '' || namesGitData(rel) ? null : rel;
   } catch {
     return null;
   }

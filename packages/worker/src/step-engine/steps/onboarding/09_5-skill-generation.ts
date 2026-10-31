@@ -10,6 +10,7 @@ import {
   listFilesMatching,
   loadPreviousStepOutput,
   resolveTaskSkillTargetDirs,
+  withoutGitDataDirs,
 } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
@@ -1277,7 +1278,10 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const maxSkills = clampMaxSkills(values.maxSkills);
 
     const detected = args.detected as SkillGenDetect;
-    const targetDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    const targetDirs = withoutGitDataDirs(
+      detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
+      ctx.logger,
+    );
     if (targetDirs.length === 0)
       return {
         summary: 'The repository maintains no skill destinations.',

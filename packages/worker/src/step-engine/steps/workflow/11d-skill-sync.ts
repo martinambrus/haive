@@ -4,6 +4,7 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
+import { namesGitData } from '@haive/shared/project-state';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { DetectResult, SkillEntry } from '@haive/shared';
 import { mapWithConcurrency } from '@haive/shared';
@@ -16,7 +17,11 @@ import {
 } from '../../mining-failure.js';
 import { resolveGitEnv } from '../../../secrets/user-git-identity.js';
 import type { KbFileSummary } from '../onboarding/09-qa.js';
-import { loadPreviousStepOutput, resolveTaskSkillTargetDirs } from '../onboarding/_helpers.js';
+import {
+  loadPreviousStepOutput,
+  resolveTaskSkillTargetDirs,
+  withoutGitDataDirs,
+} from '../onboarding/_helpers.js';
 import { buildSkillContractBlocks } from '../onboarding/_skill-prompt.js';
 import {
   loadMiningScopeExcludeGlobs,
@@ -419,7 +424,10 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
   async apply(ctx, args): Promise<SkillSyncApply> {
     const detected = args.detected as SkillSyncDetect;
     const worktree = detected.worktreePath;
-    const targetDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    const targetDirs = withoutGitDataDirs(
+      detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
+      ctx.logger,
+    );
     if (targetDirs.length === 0)
       return {
         generated: [],
@@ -439,6 +447,21 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     const outcomes: MinedAgentOutcome[] = [];
 
     for (const target of detected.targets) {
+      // The id is a directory name below, removed and rewritten: a stored one may name git data.
+      if (namesGitData(target.skillId)) {
+        ctx.logger.warn(
+          { skillId: target.skillId },
+          'did not write a skill whose name names git data',
+        );
+        skipped.push(target.skillId);
+        outcomes.push({
+          agentId: target.skillId,
+          agentTitle: null,
+          status: 'failed',
+          errorMessage: 'its name names git data',
+        });
+        continue;
+      }
       const res = results.find((r) => r.agentId === target.skillId.slice(0, 120));
       const entries =
         res && res.status === 'done' ? parseSkillEntries(res.output ?? res.rawOutput) : [];
@@ -470,6 +493,11 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
 
     const removed: string[] = [];
     for (const skillId of detected.removals) {
+      // Same reason as the targets above: the id is removed recursively as a directory name.
+      if (namesGitData(skillId)) {
+        ctx.logger.warn({ skillId }, 'did not remove a skill whose name names git data');
+        continue;
+      }
       for (const dir of targetDirs) {
         const parts = dir.split('/').filter((p) => p.length > 0);
         const wa = workspaceAnchor(worktree);
