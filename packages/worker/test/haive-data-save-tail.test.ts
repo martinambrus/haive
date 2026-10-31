@@ -1,12 +1,13 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { createFakeDb } from '@haive/database/testing';
 import { schema } from '@haive/database';
+import { logger } from '@haive/shared';
 import { eq } from 'drizzle-orm';
 import { cleanup, h, payload, REPO, USER, setup } from './support/plan-mirror-failure.js';
-const calls = vi.hoisted(() => ({ commit: vi.fn(), refresh: vi.fn() }));
+const calls = vi.hoisted(() => ({ commit: vi.fn(), refresh: vi.fn(), lstat: vi.fn() }));
 vi.mock('@haive/shared/fs-safe', async (original) => ({
   ...(await original<object>()),
-  lstatNoFollow: async () => null,
+  lstatNoFollow: (...args: unknown[]) => calls.lstat(...args),
 }));
 vi.mock('../src/repo/checkout-head.js', () => ({ checkoutMissing: async () => false }));
 vi.mock('../src/project-state/refresh.js', () => ({
@@ -27,6 +28,7 @@ import { saveHaiveData } from '../src/project-state/save.js';
 let fake: ReturnType<typeof createFakeDb>;
 beforeEach(() => {
   setup();
+  calls.lstat.mockResolvedValue(null);
   calls.refresh.mockResolvedValue({ outcome: 'written' });
   fake = createFakeDb({
     repositories: schema.repositories,
@@ -472,3 +474,30 @@ it('maps an unreadable checkout parent to a read hold rather than a missing chec
   expect(h.flush).not.toHaveBeenCalled();
   expect(calls.commit).not.toHaveBeenCalled();
 });
+
+const unreadable = new Error('stat unreadable');
+it.each([
+  ['a stat that throws', () => calls.lstat.mockRejectedValue(unreadable), unreadable],
+  [
+    'a directory standing at plan.json',
+    () => calls.lstat.mockResolvedValue({ kind: 'directory' }),
+    expect.any(Error),
+  ],
+])(
+  'logs the cause and refuses with record_unreadable for %s before any flush',
+  async (_site, arrange, err) => {
+    arrange();
+    const warning = vi.spyOn(logger, 'warn');
+    expect(await saveHaiveData({ ...payload, push: false })).toMatchObject({
+      outcome: 'refused',
+      committed: false,
+      refusal: { code: 'record_unreadable' },
+    });
+    expect(warning).toHaveBeenCalledWith(
+      expect.objectContaining({ err, repositoryId: REPO }),
+      expect.any(String),
+    );
+    expect(h.flush).not.toHaveBeenCalled();
+    expect(calls.commit).not.toHaveBeenCalled();
+  },
+);

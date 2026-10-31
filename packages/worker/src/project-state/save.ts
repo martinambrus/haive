@@ -42,6 +42,12 @@ function fail(refusal: HaiveDataRefusal): never {
   throw new PlanMirrorRefusal(refusal.code, refusal);
 }
 
+/** The refusal keeps its cause in the log, as commit.ts does for the same read. */
+function planFileUnreadable(err: unknown, repositoryId: string): never {
+  logger.warn({ err, repositoryId }, 'Haive data plan file read failed');
+  return fail({ code: 'record_unreadable' });
+}
+
 async function branchAt(repoPath: string): Promise<string | null> {
   const branch = await gitRun(repoPath, ['branch', '--show-current']);
   if (branch.code !== 0) throw new Error('could not read the checkout branch');
@@ -215,10 +221,11 @@ async function saveHaiveDataInScope(payload: HaiveDataSavePayload): Promise<Haiv
       let entry;
       try {
         entry = await lstatNoFollow((repo.storagePath ?? repo.localPath)!, rel, { strict: true });
-      } catch {
-        fail({ code: 'record_unreadable' });
+      } catch (err) {
+        planFileUnreadable(err, repo.id);
       }
-      if (entry && entry.kind !== 'file') fail({ code: 'record_unreadable' });
+      if (entry && entry.kind !== 'file')
+        planFileUnreadable(new Error(`${rel} is not a regular file`), repo.id);
     }
     try {
       await flushCurrentPlanMirror(repo.id);
