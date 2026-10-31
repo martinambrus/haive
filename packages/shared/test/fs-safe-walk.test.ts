@@ -28,9 +28,14 @@ async function fixture() {
   // Entries that are neither a regular file nor a directory, and links below the first level: a
   // FIFO opened for reading would block the walk, and only a link at the root was ever planted.
   await run('mkfifo', [path.join(root, 'tree/pipe')]);
+  // A socket path is limited to about 100 bytes and the tree's own can be longer, so it is bound
+  // under a short name and moved in.
+  const bound = await mkdtemp(path.join(tmpdir(), 's-'));
   const socket = createServer();
   sockets.push(socket);
-  await new Promise<void>((listening) => socket.listen(path.join(root, 'tree/sock'), listening));
+  await new Promise<void>((listening) => socket.listen(path.join(bound, 'sock'), listening));
+  await rename(path.join(bound, 'sock'), path.join(root, 'tree/sock'));
+  await rm(bound, { recursive: true, force: true });
   await symlink(path.join(root, 'outside/secret'), path.join(root, 'tree/a/linked-nested-file'));
   await symlink(path.join(root, 'outside'), path.join(root, 'tree/a/deep/linked-nested-dir'));
 }

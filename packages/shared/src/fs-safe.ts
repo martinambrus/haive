@@ -586,10 +586,10 @@ export function isWalkDepthError(err: unknown): err is WalkDepthError {
  * reading its entries instead of resolving each file from the anchor. Links, FIFOs, sockets and
  * devices are never opened and cost no syscall; a missing or refused directory contributes nothing
  * (there is no strict mode). Each directory or file examined is first checked to still sit where the
- * walk expects it. A listing is never silently short: running out of descriptors (EMFILE, ENFILE) and
- * a directory deeper than WALK_MAX_DEPTH levels (a WalkDepthError) are thrown. Drive it with
- * `for await` or call `return()`: breaking out of it, or a throw in the loop body, closes every
- * held descriptor, but a generator dropped after a manual `next()` keeps them. */
+ * walk expects it. A listing is never short because of a resource limit: running out of descriptors
+ * (EMFILE, ENFILE) and a directory deeper than WALK_MAX_DEPTH levels (a WalkDepthError) are thrown.
+ * Drive it with `for await` or call `return()`: breaking out of it, or a throw in the loop body,
+ * closes every held descriptor, but a generator dropped after a manual `next()` keeps them. */
 export async function* walkFilesNoFollow(
   anchor: string,
   relDir: string,

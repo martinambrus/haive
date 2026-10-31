@@ -102,7 +102,7 @@ it('lists a workspace directory with the entries, sizes and order it always had'
       entry('.hidden', false, 3),
       entry('a.txt', false, 5),
       entry('B.md', false, 0),
-      // A link, a FIFO: neither file nor directory, and a link reports its own size, not its target's.
+      // A link, a FIFO: neither file nor directory, so no size (a link's target is never read).
       entry('link-dir', false, null),
       entry('link-file', false, null),
       entry('pipe', false, null),
