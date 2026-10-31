@@ -918,15 +918,6 @@ From the T466 review (2026-10-31). PRE-EXISTING, minor.
 
 Since T466 a row whose checkout is gone costs 3-5 statements a tick, but every held row still takes one of the 25 batch slots (worker project-state/refresh.ts ~:182-183, queues/plan-mirror-queue.ts ~:608-614, ~:637-645), so a newer healthy row waits floor(N/25) ticks behind N held rows (MEASURED: N = 30 gave tick 2, N = 125 tick 6), and the mirror sweep runs before the outbox sweep in one job (`sweepAll`), so a slow mirror sweep delays outbox rows (14 dead rows of 20,000 nodes: sweeps of 3.6-5.3 s). `plan-canvas-smoke` C4 pins the rotation as designed. Direction (a decision): scan past held rows without counting them, or run the two sweeps as separate jobs.
 
-### T478 · FNF[snapshot-error-paths] · the plan page shows a raw filesystem error, with the server's absolute path, as the snapshot error (+1)
-
-status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T12:30Z · last: 2026-10-31T12:30Z
-From the T466 review (2026-10-31). PRE-EXISTING, minor.
-
-`plan_mirror_state.last_error` stores the raw `err.message` of a failed flush (worker plan/mirror.ts ~:1714-1733; `safeErrorMessage`, shared logger/errors.ts ~:62-65, redacts only database query errors), and `GET /repositories/:id/plan/snapshot` serves it (api routes/plan.ts ~:429), so any filesystem error other than the held reasons shows an absolute path under the repository storage on the plan page (T466 replaced only the gone-checkout one). Direction: store a reason from a closed set (or the error class and the path relative to the repository) and log the full error.
-
-Also (T459 fix round, 2026-10-31; PRE-EXISTING, minor): `DELETE /repositories/:id/plan` (api routes/plan.ts ~:1038) calls `applyPlanPatch` outside the `try`/`planError` mapping, so a repository deleted meanwhile answers 500 instead of 404; and the header of shared plan/errors.ts (~:1-6) still says a worker step turns `invalid` into a `RetryableParseError`, which `_plan-prompt.ts` (~:274-285) no longer does.
-
 ### T480 · FNF[git-data-stored-dirs-2] · the KB path validator accepts a git-data name; 09_5, 09_5b and 11d still dispatch agents for a stored git-data dir (+4)
 
 status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T13:23Z · last: 2026-10-31T13:23Z
@@ -1080,6 +1071,7 @@ From the T397 review (2026-10-31). Same class as T397 (git's exit code, never it
 
 ## Done
 
+- T478 — git and filesystem errors reach the plan page, the api's Save and Pull 409 bodies, repositories.status_message and 12's warnings without the server's absolute paths: one shared scrubber (`scrubErrorPaths`) hides absolute POSIX, drive and UNC paths and keeps the diagnosis and URLs (linear, one alternative per quote kind: CodeQL clean); convergent boot repairs rewrite stored mirror errors and errored repositories' messages (compare-and-swap, logged with counts and ids); one warn per sweep tick for a stuck row — PR #969 (f193c6b78), 2026-10-31; main CI green; delivered with codex-sonnet (2 fix rounds, session CodeQL fix); follow-up T490
 - T476 — the plan merge panel reads the DELETE's `cancelled` answer: a discard that cancelled nothing keeps a neutral status notice (completed, cancelled or failed; nothing discarded) that survives the refresh, is cleared by the next merge, Discard or answer, and Discard stays disabled while its own discard settles; the panel sends the displayed task id (`?taskId=`) and the route cancels nothing when a different merge is open — PR #968 (0177599c3), 2026-10-31; main CI green; delivered with codex-sonnet (1 fix round, session Direct guard); follow-up T491
 - T479 — an archive extract whose swap fails restores the previous destination tree before the stage is removed (the old tree was deleted with the stage); a failed restore keeps the stage and logs the absolute path of the kept tree; a failed stage removal after a good swap warns instead of failing silently; the comment says what a crash between the two renames leaves — PR #966 (a1a74f596), 2026-10-31; main CI green; delivered with codex-sonnet (1 fix round); follow-ups T486, T487
 - T474 — schema-parity, the web checks of production-images and macos-preflight run each check on !cancelled() && steps.<setup>.conclusion == 'success'; the smokes job's gated step and Redis-script steps have their own limits (25, 10, 5 minutes) and the job 45 minutes, pinned by a budget model of the GATED list (907 s plus 7.5 s a row; fails at 134 and 160 rows); the gated step's errexit comes from the runner's bash -e (comment only) — PR #967 (6bad0f036), 2026-10-31; main CI green with every guarded check run (PR run and main); ci-smokes.md; follow-ups T488, T489, T475 notes
