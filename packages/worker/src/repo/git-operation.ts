@@ -27,8 +27,10 @@ export async function gitOperationInProgress(repoPath: string): Promise<boolean>
     const path = located.stdout.trim();
     if (!path) continue;
     const rel = isAbsolute(path) ? relative(repoPath, path) : path;
-    // A git dir outside the checkout cannot be read from its anchor; treat it as open, which writes nothing.
-    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return true;
+    // The checkout anchor cannot inspect state outside it; that proves no operation either way.
+    if (rel === '' || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
+      throw new GitOperationUnreadableError(`${ref} is outside the checkout anchor in ${repoPath}`);
+    }
     try {
       if ((await lstatNoFollow(repoPath, rel, { strict: true })) !== null) return true;
     } catch (err) {
