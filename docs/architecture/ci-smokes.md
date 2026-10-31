@@ -28,6 +28,15 @@ out falsely, and Ctrl-C works there.
 
 ## CI steps
 
-In `.github/workflows/ci.yml` the worker and migration smoke steps run after a failed api smoke step, but not after a
-failed install, build or migrate step and not when the job is cancelled. `scripts/test/run-smokes.test.mjs` pins the
-runner and that every `smoke:ci` goes through it.
+In the `smokes` job of `.github/workflows/ci.yml` every step up to `Apply database migrations` (id `migrate`) is setup
+and keeps the default condition, so a failed one skips everything after it. Every step after it is an independent
+check, run on `if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}`: a failed check (the Postgres-gated
+tests, an api smoke, a Redis script) does not skip the others, the job still fails with it, and a run cancelled by a
+newer push stops. A check names `migrate` and never a sibling; a step the checks need goes above `migrate`. A
+mistyped step id reads as empty and a mistyped status never matches; either skips the check with the job still green. A
+red run no longer ends early, so it takes about as long as a green one.
+
+`scripts/test/ci-step-independence.test.mjs` pins the setup steps (a new one is added to its `SETUP` list), the exact
+guard on every check, and that nothing in the job sets `continue-on-error`, which would leave a failed step green or let
+the checks run after a failed setup step. `scripts/test/run-smokes.test.mjs` pins the runner and that every `smoke:ci`
+goes through it.
