@@ -32,7 +32,7 @@ function mergeOutcome(taskId: string, task: Task): MergeNotice | null {
       task.status === 'completed'
         ? 'The remote was merged into your checkout and pushed.'
         : task.status === 'cancelled'
-          ? 'This merge was cancelled elsewhere. Its scratch worktree was discarded and your checkout did not move.'
+          ? 'This merge was cancelled elsewhere. Its scratch worktree may be discarded unless another merge holds it. This does not undo changes already merged into your checkout.'
           : 'The merge failed. Retry on its task resumes it while its scratch worktree is still there. A Save or Pull may discard it.',
     retry: task.status === 'failed',
   };
@@ -213,7 +213,11 @@ export function PlanMergePanel({
 
   async function discard(): Promise<void> {
     if (!merge) return;
-    if (!window.confirm('Discard this merge? Your checkout has not moved, so nothing is lost.'))
+    if (
+      !window.confirm(
+        'Discard this merge? Its scratch worktree may be removed. Changes already merged into your checkout will remain.',
+      )
+    )
       return;
     setBusy(true);
     setError(null);
@@ -333,8 +337,8 @@ export function PlanMergePanel({
 
         <FormError message={error} />
         <p className="text-[11px] text-neutral-500">
-          Your checkout has not moved — the merge is in a scratch worktree until you confirm. The
-          conversation runs as a task,{' '}
+          The merge is prepared in a scratch worktree. Confirm merges it into your checkout and
+          pushes it. The conversation runs as a task,{' '}
           <Link
             href={`/tasks/${merge.taskId}`}
             onClick={() => rememberTaskOrigin(`/tasks/${merge.taskId}`, planOrigin(repositoryId))}

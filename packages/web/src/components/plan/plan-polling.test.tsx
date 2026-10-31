@@ -672,7 +672,7 @@ describe('PlanMergePanel with a merge task', () => {
     ['completed', 'The remote was merged into your checkout and pushed.'],
     [
       'cancelled',
-      'This merge was cancelled elsewhere. Its scratch worktree was discarded and your checkout did not move.',
+      'This merge was cancelled elsewhere. Its scratch worktree may be discarded unless another merge holds it. This does not undo changes already merged into your checkout.',
     ],
     [
       'failed',
@@ -846,7 +846,7 @@ describe('PlanMergePanel with a merge task', () => {
       respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status: 'cancelled' }));
       await vi.advanceTimersByTimeAsync(2000);
       expect(shown().find((el) => el.type === InlineMarkdown)?.props.body).toBe(
-        'This merge was cancelled elsewhere. Its scratch worktree was discarded and your checkout did not move.',
+        'This merge was cancelled elsewhere. Its scratch worktree may be discarded unless another merge holds it. This does not undo changes already merged into your checkout.',
       );
     },
   );
@@ -865,6 +865,25 @@ describe('PlanMergePanel with a merge task', () => {
     rerender(merge);
     await settle();
     expect(shown().find((el) => el.props.role === 'status')).toBeDefined();
+  });
+
+  it('confirms Discard without promising that the checkout has not moved', async () => {
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('window', { confirm });
+    await open(taskResponse(PLAN_MERGE_STEP_ID));
+    await press('Discard');
+    expect(confirm).toHaveBeenCalledWith(
+      'Discard this merge? Its scratch worktree may be removed. Changes already merged into your checkout will remain.',
+    );
+    expect(net.discardPlanMerge).not.toHaveBeenCalled();
+    const footer = shown()
+      .filter((el) => el.type === 'p')
+      .flatMap((el) => el.props.children)
+      .filter((child) => typeof child === 'string')
+      .join('');
+    expect(footer).toContain(
+      'The merge is prepared in a scratch worktree. Confirm merges it into your checkout and pushes it.',
+    );
   });
 
   it('does not infer an outcome from a working task’s status message', async () => {
