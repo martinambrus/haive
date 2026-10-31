@@ -28,7 +28,7 @@ const ENTITIES: Record<string, string> = {
   '&gt;': '>',
 };
 
-const textOf = (html: string) => html.replace(/<[^>]*>/g, '');
+const textOf = (html: string) => /<span class="truncate">([^<]*)<\/span>/.exec(html)?.[1];
 const titleOf = (html: string) =>
   /title="([^"]*)"/.exec(html)?.[1]?.replace(/&(?:quot|amp|#x27|lt|gt);/g, (e) => ENTITIES[e]!);
 const classOf = (html: string) => /class="([^"]*)"/.exec(html)?.[1];
