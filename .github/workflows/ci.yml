@@ -289,6 +289,7 @@ jobs:
           worker test/lock-tier-order-db.test.ts WORKER_LOCK_TIER_ORDER_TEST_URL worker_lock_tier_order_test pg
           worker test/stalled-redrive-parked-db.test.ts STALLED_PARKED_TEST_URL stalled_parked_test pg
           worker test/stalled-redrive-running-db.test.ts STALLED_RUNNING_TEST_URL stalled_running_test pg
+          worker test/handle-result-lost-db.test.ts HANDLE_RESULT_LOST_TEST_URL handle_result_lost_test pg
           api test/terminal-attach-db.test.ts TERMINAL_ATTACH_TEST_URL terminal_attach_test pg
           api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test pg
           api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test pg
