@@ -1061,7 +1061,7 @@ From the T480 reviews (2026-10-31). PRE-EXISTING and minor unless stated (each n
 5. [verify-first] The upgrade path passes stored agent targets through `originAgentTargets` unfiltered when the 07 payload records neither `cliTargets` nor `enabledCliProviders` (worker _upgrade-render.ts ~:314-330, shared render-targets.ts ~:223-226), and 02's `safeDiskRel` does not refuse an off-catalog canonical dir; trace whether such a target reaches a write.
 6. Test hygiene from the first T480 review: repository-skill-empty-targets.test.ts ~:298-314 pins nothing new; 09_6-skill-verification.ts ~:147 hides a skill directory whose name holds `\`.
 
-### T495 · FNF[failed-read-answers-2] · more git reads read a failure as "absent" (+3)
+### T495 · FNF[failed-read-answers-2] · more git reads read a failure as "absent" (+4)
 
 status: open
 From the T397 review (2026-10-31). Same class as T397 (git's exit code, never its wording); PRE-EXISTING, minor. See also T379 (git-tree readers).
@@ -1070,6 +1070,7 @@ From the T397 review (2026-10-31). Same class as T397 (git's exit code, never it
 2. 10-gate-3-commit.ts ~:200: a failed `show --name-only` (non-zero, not no-answer) yields `[]`, so `task.changedPaths` silently misses the commit's files.
 3. [verify-first] _dependency-policy.ts ~:159 and ~:214: `git show <base>:<file>` exit 128 means absent or failed; a failure drops the baseline Drupal protection and `ownedPaths`. `rev-parse -q --verify <base>:<path>` (exit 1) tells absent apart.
 4. [verify-first] project-state/set-aside.ts ~:264-267 (`headOid`) and ~:1147-1152 (`headEntry`): a failed read reads as "HEAD lacks the path" (used for `untracked` ~:519 and in `putBackIndex` ~:1251); guarded by earlier successful reads in the same transaction.
+5. [verify-first] plan/projection-merge.ts ~:34-37 `readBlob` returns null for every failure, and set-aside.ts ~:621 (`restoreFromHead`) and ~:1038 (`putBackProjections`) read null as "HEAD lacks the path": a failed `cat-file` removes the pending working file instead of restoring HEAD's bytes, and the put-back's create-exclusive hits EEXIST (swallowed). The raised marks let the sweep reconcile. From the T397 follow-up review.
 
 ### T496 · FNF[vendor-call-deadlines] · the worker's usage poll awaits vendor calls with no deadline (+1)
 
