@@ -14,7 +14,7 @@ import {
 import {
   loadPreviousStepOutput,
   resolveTaskSkillTargetDirs,
-  withoutGitDataDirs,
+  filterCatalogSkillDirs,
   isSkillPathId,
   withoutUnsafeSkillIds,
   skillTargetRefusalNote,
@@ -419,7 +419,9 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillRepairDetect;
-      const primary = withoutGitDataDirs(det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR])[0];
+      const primary = filterCatalogSkillDirs(
+        det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
+      )[0];
       if (primary === undefined) return [];
       const fileTree = det.__fileTree ?? '';
       return det.failingSkills
@@ -449,7 +451,7 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
     const detected = args.detected as SkillRepairDetect;
     const storedDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
     const storedIds = detected.failingSkills.map((f) => f.skillId);
-    const targetDirs = withoutGitDataDirs(storedDirs, ctx.logger);
+    const targetDirs = filterCatalogSkillDirs(storedDirs, ctx.logger);
     withoutUnsafeSkillIds(storedIds, ctx.logger);
     const refusalNote = skillTargetRefusalNote(storedDirs, storedIds);
     if (targetDirs.length === 0)

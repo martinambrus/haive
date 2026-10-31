@@ -10,7 +10,7 @@ import {
   listFilesMatching,
   loadPreviousStepOutput,
   resolveTaskSkillTargetDirs,
-  withoutGitDataDirs,
+  filterCatalogSkillDirs,
   isSkillPathId,
   withoutUnsafeSkillIds,
   skillTargetRefusalNote,
@@ -846,7 +846,9 @@ function buildSkillPrompt(
   truncationRetries = 0,
   targetCapability?: string,
 ): string {
-  const targetDirs = withoutGitDataDirs(detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR]);
+  const targetDirs = filterCatalogSkillDirs(
+    detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
+  );
   if (targetDirs.length === 0)
     return 'The repository maintains no skill destinations. Do not generate or write skills.';
   const values = formValues as { maxSkills?: number; domainHints?: string };
@@ -1158,7 +1160,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     // loop's gap-fill for any capability the parallel batch missed — let llm run then.
     // Discovery mode (no fixed list to parallelize) always runs llm.
     skipIf: ({ detected, formValues, iteration }) =>
-      withoutGitDataDirs(
+      filterCatalogSkillDirs(
         (detected as SkillGenDetect).skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
       ).length === 0 ||
       (computeDomainPlan(
@@ -1233,7 +1235,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     async selectAgents({ detected, formValues }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillGenDetect;
-      if (withoutGitDataDirs(det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR]).length === 0)
+      if (filterCatalogSkillDirs(det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR]).length === 0)
         return [];
       const fv = formValues as Record<string, unknown>;
       const maxSkills = clampMaxSkills((fv as { maxSkills?: number }).maxSkills);
@@ -1289,7 +1291,7 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     const storedDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
     // Iteration is structural loop state: the same persisted targets are read on every pass.
     const refusalLogger = args.iteration === 0 ? ctx.logger : undefined;
-    const targetDirs = withoutGitDataDirs(storedDirs, refusalLogger);
+    const targetDirs = filterCatalogSkillDirs(storedDirs, refusalLogger);
     const prior =
       (args.previousIterations.at(-1)?.applyOutput as SkillGenApply | undefined) ?? null;
     const storedIds = [

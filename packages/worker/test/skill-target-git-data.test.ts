@@ -10,7 +10,7 @@ import { skillGenerationStep } from '../src/step-engine/steps/onboarding/09_5-sk
 import { skillRepairStep } from '../src/step-engine/steps/onboarding/09_5b-skill-repair.js';
 import { listSkillDirs } from '../src/step-engine/steps/onboarding/09_6-skill-verification.js';
 import {
-  withoutGitDataDirs,
+  filterCatalogSkillDirs,
   withoutUnsafeSkillIds,
 } from '../src/step-engine/steps/onboarding/_helpers.js';
 import { skillSyncStep } from '../src/step-engine/steps/workflow/11d-skill-sync.js';
@@ -18,7 +18,8 @@ import { skillSyncStep } from '../src/step-engine/steps/workflow/11d-skill-sync.
 /**
  * `detected.skillTargetDirs` is read back from the STORED detect payload, so a legacy or
  * hand-edited one may name any string. The three steps that write (and, for two of them, remove)
- * under it must leave out a dir that names git data, and say so.
+ * under it must accept only catalog skill destinations and single-segment, non-git-data IDs.
+ * Dispatch, loop prompts, cumulative output and writes must omit refused values and report them.
  */
 
 const execFileP = promisify(execFile);
@@ -302,17 +303,17 @@ describe('11d skillSyncStep.apply with a stored git-data target dir', () => {
   });
 });
 
-describe('withoutGitDataDirs', () => {
+describe('filterCatalogSkillDirs', () => {
   it('keeps every skills dir a provider can declare, and logs nothing', () => {
     const log = recordingLogger();
     const dirs = Object.values(CLI_PROVIDER_CATALOG).map((p) => p.projectSkillsDir);
 
     expect(dirs.length).toBeGreaterThan(0);
-    expect(withoutGitDataDirs(dirs, asLogger(log))).toEqual(dirs);
+    expect(filterCatalogSkillDirs(dirs, asLogger(log))).toEqual(dirs);
     expect(log.warn).not.toHaveBeenCalled();
   });
 
-  it('drops exactly the git-data dirs from a mixed list, in order, naming each', () => {
+  it('keeps only catalog skills dirs from a mixed list, in order, naming each refusal', () => {
     const log = recordingLogger();
     const mixed = [
       '.claude/skills',
@@ -326,7 +327,7 @@ describe('withoutGitDataDirs', () => {
       '.github/x',
     ];
 
-    expect(withoutGitDataDirs(mixed, asLogger(log))).toEqual([
+    expect(filterCatalogSkillDirs(mixed, asLogger(log))).toEqual([
       '.claude/skills',
       '.gemini/skills',
       '.agents/skills',
@@ -607,7 +608,7 @@ describe('stored skill dispatch targets', () => {
       for (const dir of REFUSED) expect(agents[0]?.prompt).not.toContain(dir);
     },
   );
-  it('09_5 omits refused dirs and bundle ids from sequential and loop prompts', () => {
+  it('09_5 omits refused dirs and bundle ids from the sequential prompt', () => {
     const detected = { ...genDetect(STORED), bundleSkills: [skill('.git')] };
     const prompt = skillGenerationStep.llm!.buildPrompt({ detected, formValues: {} } as never);
     expect(prompt).toContain(ORDINARY);

@@ -8,7 +8,7 @@ import { namesGitData } from '@haive/shared/project-state';
 import { LEGACY_IMPORT_SUBDIR } from './_kb-legacy.js';
 import type { Database } from '@haive/database';
 import { GIT_MAX_BUFFER, gitExec, gitGaveNoAnswer, gitRun } from '../../../repo/git-exec.js';
-import { loadPreviousStepOutput, isSkillPathId, withoutGitDataDirs } from './_helpers.js';
+import { loadPreviousStepOutput, isSkillPathId, filterCatalogSkillDirs } from './_helpers.js';
 import { sanitizeKbRelPath } from './_kb-write.js';
 
 const DEFAULT_SKILLS_DIR = '.claude/skills';
@@ -181,7 +181,7 @@ export async function collectOnboardingStagePaths(
     const id = field(w, 'id');
     if (typeof id !== 'string' || !isSkillPathId(id)) continue;
     const slugs = strings(field(w, 'subSkillSlugs'));
-    for (const dir of withoutGitDataDirs(strings(field(w, 'mirroredDirs')))) {
+    for (const dir of filterCatalogSkillDirs(strings(field(w, 'mirroredDirs')))) {
       skillDirs.add(dir);
       add.add(`${dir}/${id}/SKILL.md`);
       for (const slug of slugs) add.add(`${dir}/${id}/sub-skills/${slug}.md`);
@@ -193,7 +193,7 @@ export async function collectOnboardingStagePaths(
   const repaired = strings(field(repair?.output, 'repaired')).filter(isSkillPathId);
   let repairDirs: string[] = [];
   if (repaired.length > 0) {
-    const targets = withoutGitDataDirs(strings(field(repair?.detect, 'skillTargetDirs')));
+    const targets = filterCatalogSkillDirs(strings(field(repair?.detect, 'skillTargetDirs')));
     repairDirs = Array.isArray(field(repair?.detect, 'skillTargetDirs'))
       ? targets
       : [DEFAULT_SKILLS_DIR];

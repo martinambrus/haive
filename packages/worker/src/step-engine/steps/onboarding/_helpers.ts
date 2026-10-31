@@ -170,7 +170,7 @@ export function isSkillPathId(id: string): boolean {
 
 /** Stored destinations are untrusted. An absent field gets its caller's legacy default;
  *  an explicit list only loses invalid entries and never acquires a fallback. */
-export function withoutGitDataDirs(
+export function filterCatalogSkillDirs(
   dirs: readonly string[],
   logger?: StepContext['logger'],
 ): string[] {

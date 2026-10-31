@@ -19,7 +19,7 @@ import type { KbFileSummary } from '../onboarding/09-qa.js';
 import {
   loadPreviousStepOutput,
   resolveTaskSkillTargetDirs,
-  withoutGitDataDirs,
+  filterCatalogSkillDirs,
   isSkillPathId,
   withoutUnsafeSkillIds,
   skillTargetRefusalNote,
@@ -404,7 +404,9 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillSyncDetect;
-      const primary = withoutGitDataDirs(det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR])[0];
+      const primary = filterCatalogSkillDirs(
+        det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
+      )[0];
       if (primary === undefined) return [];
       const fileTree = det.__fileTree ?? '';
       return det.targets
@@ -430,7 +432,7 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     const worktree = detected.worktreePath;
     const storedDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
     const storedIds = [...detected.targets.map((t) => t.skillId), ...detected.removals];
-    const targetDirs = withoutGitDataDirs(storedDirs, ctx.logger);
+    const targetDirs = filterCatalogSkillDirs(storedDirs, ctx.logger);
     withoutUnsafeSkillIds(storedIds, ctx.logger);
     const refusalNote = skillTargetRefusalNote(storedDirs, storedIds);
     if (targetDirs.length === 0)

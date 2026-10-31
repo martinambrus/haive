@@ -45,7 +45,7 @@ import {
   inheritCliMembership,
 } from '../../../project-state/write.js';
 import { gitWorkspaceStatus, requireUsableGit } from '../../../repo/git-workspace.js';
-import { loadPreviousStepOutput, withoutGitDataDirs } from './_helpers.js';
+import { loadPreviousStepOutput, filterCatalogSkillDirs } from './_helpers.js';
 import {
   collectOnboardingStagePaths,
   commitRecorded,
@@ -311,7 +311,7 @@ async function recordOnboardingArtifacts(
   // Membership can have changed since 09_5 ran. Match that writer's missing-field compatibility
   // default and preserve an explicit [] rather than expanding into today's maintained targets.
   const generatedSkills = await loadPreviousStepOutput(ctx.db, ctx.taskId, '09_5-skill-generation');
-  const skillTargets = withoutGitDataDirs(
+  const skillTargets = filterCatalogSkillDirs(
     (generatedSkills?.detect as { skillTargetDirs?: string[] } | null)?.skillTargetDirs ?? [
       '.claude/skills',
     ],
