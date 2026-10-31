@@ -3361,6 +3361,20 @@ const ABANDONED_RUN_MESSAGE =
  *  carried_work. iterations/output/detect are preserved, as in the runtime park. */
 async function requeueAbandonedOrphan(db: Database, taskStepId: string): Promise<void> {
   await db.transaction(async (tx) => {
+    // The row's open runs first and the row after, the order a Retry takes them in: a pass holds a
+    // run and then wants its row (writeLoginHint), so holding the row while waiting for a run is a
+    // cycle. Locked only here; they are ended below once the guarded flip has landed, so a row that
+    // is no longer waiting_cli or running keeps them.
+    const open = and(
+      eq(schema.cliInvocations.taskStepId, taskStepId),
+      isNull(schema.cliInvocations.endedAt),
+      isNull(schema.cliInvocations.supersededAt),
+    );
+    await tx
+      .select({ id: schema.cliInvocations.id })
+      .from(schema.cliInvocations)
+      .where(open)
+      .for('no key update');
     // Locked by this read and held to commit, so the row is current: a read before the tx would
     // predate the lock, and folding from it would overwrite a peer's carried_* or idle_ms change.
     const [row] = await tx
@@ -3400,13 +3414,7 @@ async function requeueAbandonedOrphan(db: Database, taskStepId: string): Promise
     await tx
       .update(schema.cliInvocations)
       .set({ supersededAt: now, endedAt: now, errorMessage: ABANDONED_RUN_MESSAGE })
-      .where(
-        and(
-          eq(schema.cliInvocations.taskStepId, taskStepId),
-          isNull(schema.cliInvocations.endedAt),
-          isNull(schema.cliInvocations.supersededAt),
-        ),
-      );
+      .where(open);
   });
 }
 
