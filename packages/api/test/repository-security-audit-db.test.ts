@@ -174,11 +174,13 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
           .returning();
         const before = await stored();
         if (failure === 'persist') {
+          // A prior interrupted run may have left the function and the trigger behind.
           await db.execute(
             sql.raw(
-              `CREATE FUNCTION refuse_remote_persist() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id = '${repository}'::uuid THEN RAISE EXCEPTION 'persist refused'; END IF; RETURN NEW; END $$`,
+              `CREATE OR REPLACE FUNCTION refuse_remote_persist() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id = '${repository}'::uuid THEN RAISE EXCEPTION 'persist refused'; END IF; RETURN NEW; END $$`,
             ),
           );
+          await db.execute(sql`DROP TRIGGER IF EXISTS refuse_remote_persist ON repositories`);
           await db.execute(
             sql`CREATE TRIGGER refuse_remote_persist BEFORE UPDATE ON repositories FOR EACH ROW EXECUTE FUNCTION refuse_remote_persist()`,
           );
@@ -193,6 +195,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
               `CREATE OR REPLACE FUNCTION refuse_remote_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.target_id = '${repository}'::uuid THEN RAISE EXCEPTION 'commit refused'; END IF; RETURN NEW; END $$`,
             ),
           );
+          await db.execute(sql`DROP TRIGGER IF EXISTS refuse_remote_commit ON audit_events`);
           await db.execute(
             sql`CREATE CONSTRAINT TRIGGER refuse_remote_commit AFTER INSERT ON audit_events DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_remote_commit()`,
           );

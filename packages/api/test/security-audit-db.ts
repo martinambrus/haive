@@ -37,6 +37,7 @@ export async function refuseAudit(db: Database, userId: string, scope: AuditScop
       RETURN NEW;
     END $$
   `);
+  await db.execute(sql`DROP TRIGGER IF EXISTS refuse_security_audit ON audit_events`);
   await db.execute(
     sql.raw(
       `CREATE TRIGGER refuse_security_audit BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION refuse_security_audit('${userId}', '${scope.anonymous ? 'anonymous' : ''}', '${registration}')`,
