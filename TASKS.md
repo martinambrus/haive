@@ -839,15 +839,6 @@ From the T119 review (2026-10-30). Introduced by T119, fails closed. worker onbo
 status: open
 From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `MAX_AGENT_RULES_BYTES` is 64 KiB, while codex reads only the first 32 KiB of AGENTS.md (the reason AGENTS.md itself is kept under 32 KiB), so a large override silently truncates what codex sees, and the rest of the file after the block with it. Decide: a 24-32 KiB cap, or a size hint on the Tooling editor.
 
-### T445 · FNF[first-import-visibility] · a first sync silently replaces a locally typed setting; a refused checkout value is only logged (+2)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T23:56Z · last: 2026-10-30T23:56Z
-From the T119 review (2026-10-30). PRE-EXISTING, minor. Cross-reference: T317 [design] (an RTK choice loses to the first record import).
-
-1. shared project-state merge.ts ~:29,46,58 computes `overwritten` (a local value an incoming one replaced) and nothing outside merge.ts reads it, so a first sync with no base replaces a locally typed value of every portable setting without a word. Surface it in the sync's answers or log it at warn with the unit names.
-2. worker project-state sync.ts ~:948: a checkout value that is refused (over its cap, holding a region marker) is only logged; the repository page never says the committed value was ignored.
-3. Nits: the doc comment about `{ v }` sides sits above `SETTING_LABELS` (shared project-state conflicts.ts ~:72) instead of above what it describes; the node-free guard test checks import specifiers only, so `Buffer.byteLength` in settings.ts ~:127 and limits.ts ~:23 goes unchecked (harmless unless the web calls them).
-
 ### T446 · FNF[bundle-descriptor-removal] [design] [parked: user] · an install removes a teammate's claim-less bundle descriptor, and its own upgrade commit can carry the removal
 
 status: open (parked: user decision)
@@ -946,6 +937,7 @@ From the T445 review (2026-10-31; was T445 item 2). PRE-EXISTING.
 
 ## Done
 
+- T445 — a project-state sync with no base logs one warn naming the units whose held value the checkout's replaced (at most ten, settings and environment first, never a value); the web-bundle guard also fails on Node globals read as values (Buffer.byteLength became TextEncoder); the conflict-sides comment moved onto conflictSide; item 2 (the page saying a value was refused or replaced) moved to T462 [design] — PR #950 (9d8c78f58), 2026-10-31; main CI green; docs also record T446's verdict; follow-ups T462, T364 item 25
 - T452 — the 150 ms Enter after a token paste is one of the login session's tracked one-shot timers and cleanupSession clears it; a chunk after cleanup starts no antigravity URL step or menu-advance timer — PR #949 (fc7789288), 2026-10-30; main CI green; follow-up T457
 - T447 — PATCH /repositories/:id/tooling answers 400 invalid_body for a JSON body that is not an object and invalid_json for one that is not JSON, writing nothing; refresh-tree reads only the eight repository columns it uses; an AGENTS.md rules override keeps its first line's indent while the default block stays byte-identical (no manifest bump) — PR #948 (8330687b8), 2026-10-30; main CI green; checked on the dev stack; follow-ups T455, T456
 - T119 — the AGENTS.md rules block is the repository's: repositories.agent_rules_override (migration 0215), settings/agent-rules.md in the project-state record, a Tooling page card with its own save, and buildRepoCliRulesBlock for 07, 12, 01 and the api's upgrade-status — PR #940 (5b6467e9c) and the editor fix PR #947 (1989f1f2a), 2026-10-30; main CI green; browser-checked at 1280, 768 and 375; follow-ups T443, T444, T445, T446, T447
