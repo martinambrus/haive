@@ -166,6 +166,44 @@ describe('unquoted heredoc bodies: only the expansions are code', () => {
     assert.equal(swallowedFailure("bash <<'EOF'\n# $(pnpm test || true)\nEOF"), null));
 });
 
+describe('syntax bash accepts that the lexer must not throw on', () => {
+  for (const script of [
+    'y=${x%%(*}',
+    'y=${x//(/_}',
+    'y=${x#*(}',
+    'y=${x//((/_}',
+    'x=$(echo case; for y in a; do :; done)',
+    'n=$(grep -rw case src | grep -c in)',
+    'echo "$(echo case; for y in a; do :; done)"',
+    'echo $[1<<2]',
+    'echo $[ $(echo 1) << 2 ]',
+    'echo ${x:-$[1<<2]}',
+  ]) {
+    it(`reads ${JSON.stringify(script)}`, () => {
+      bashAccepts(script);
+      rejects(`${script}; pnpm test || true`);
+      rejects(`${script}\nset +e`, 'set +e');
+      assert.ok(shellSource(`${script}\nexport X=${url}`, { step }).includes(url));
+    });
+  }
+  for (const word of [
+    '"$v"',
+    '$v',
+    '"${v%%.*}"',
+    '${v%%.*}',
+    '"$(uname -s)"',
+    '$(uname -s)',
+    "'lit'",
+    '"a b"',
+  ]) {
+    it(`still reads the case statement on ${word} inside a substitution`, () => {
+      const script = `echo "$(case ${word} in a) pnpm test || true ;; esac)"`;
+      bashAccepts(script);
+      rejects(script);
+    });
+  }
+});
+
 describe('mutation-sensitive lexical branches (item 5)', () => {
   it('keeps a hash inside a word from hiding a later swallow', () =>
     rejects('echo x#tag; cmd || true'));

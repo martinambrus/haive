@@ -15,6 +15,9 @@ function heredocConsumer(header) {
   return 'data';
 }
 
+// The head of a real case statement: the word `case` among another command's arguments is not one.
+const CASE = /^case\s+(?:"[^"]*"|'[^']*'|\$\([^)]*\)|[^\s;|&()<>"'])+\s+in\b/;
+
 // GitHub evaluates expressions before the shell sees the script. Preserve line boundaries.
 function withoutExpressions(source, step) {
   let result = '';
@@ -73,11 +76,10 @@ export function shellSource(
     }
     fail('quote');
   };
-  const arithmetic = (start) => {
-    let depth = 2;
+  const arithmetic = (start, open = '(', close = ')', depth = 2) => {
     for (let i = start; i < source.length; i++) {
-      if (source[i] === '(') depth++;
-      if (source[i] === ')' && --depth === 0) return i + 1;
+      if (source[i] === open) depth++;
+      if (source[i] === close && --depth === 0) return i + 1;
     }
     fail('arithmetic expression');
   };
@@ -122,15 +124,19 @@ export function shellSource(
         const commandName = literal === 'true' && /(?:\|\||&&)\s*$/.test(result);
         result += maskQuotes ? (commandName ? literal : '_'.repeat(end - i)) : source.slice(i, end);
         i = end;
-      } else if (source.startsWith('$((', i) || source.startsWith('((', i)) {
+      } else if (source.startsWith('$((', i) || (!parameter && source.startsWith('((', i))) {
         const end = arithmetic(i + (char === '$' ? 3 : 2));
+        result += source.slice(i, end);
+        i = end;
+      } else if (source.startsWith('$[', i)) {
+        const end = arithmetic(i + 2, '[', ']', 1);
         result += source.slice(i, end);
         i = end;
       } else if (source.startsWith('${', i)) {
         const nested = scan(i + 2, '}', true);
         result += '${' + nested.text + '}';
         i = nested.end;
-      } else if (source.startsWith('$(', i) || char === '(') {
+      } else if (source.startsWith('$(', i) || (!parameter && char === '(')) {
         const size = char === '$' ? 2 : 1;
         const nested = scan(i + size, ')');
         result += source.slice(i, i + size) + nested.text + ')';
@@ -187,7 +193,7 @@ export function shellSource(
         (i === 0 || /[\s;|&()]/.test(source[i - 1]))
       ) {
         const word = /^[a-zA-Z_][a-zA-Z_0-9]*/.exec(source.slice(i))[0];
-        if (word === 'case') cases.push({ pattern: false });
+        if (word === 'case' && CASE.test(source.slice(i))) cases.push({ pattern: false });
         if (word === 'in' && cases.length) cases.at(-1).pattern = true;
         if (word === 'esac') cases.pop();
         result += word;
@@ -207,8 +213,8 @@ export function shellSource(
     for (let i = 0; i < source.length;) {
       let end = i + 1;
       if (source[i] === '\\') end = i + 2;
-      else if (source.startsWith('$((', i)) {
-        end = arithmetic(i + 3);
+      else if (source.startsWith('$((', i) || source.startsWith('$[', i)) {
+        end = source[i + 1] === '[' ? arithmetic(i + 2, '[', ']', 1) : arithmetic(i + 3);
         result += '\n' + source.slice(i, end);
       } else if (source.startsWith('${', i)) {
         const nested = scan(i + 2, '}', true);
