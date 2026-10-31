@@ -10,6 +10,9 @@ const KNOWN_HOST_PROVIDERS = new Map<string, ForgeProviderName>([
   ['bitbucket.org', 'bitbucket_cloud'],
 ]);
 
+/** The public hosts whose forge is inferred, which is what a credential's "auto-detect" covers. */
+export const AUTO_DETECT_HOSTS: readonly string[] = [...KNOWN_HOST_PROVIDERS.keys()];
+
 /** The forge a well-known public host runs, or null for a self-hosted / unknown host. */
 export function inferForgeProviderFromHost(host: string): ForgeProviderName | null {
   return KNOWN_HOST_PROVIDERS.get(host.trim().toLowerCase()) ?? null;
