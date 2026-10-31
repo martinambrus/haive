@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import { decrypt, decryptDek, secretsService } from '@haive/shared';
-import { readForgeErrorExcerpt } from '@haive/shared/forge';
+import { readForgeErrorExcerpt, readForgeJson } from '@haive/shared/forge';
 import { VENDOR_CALL_TIMEOUT_MS } from '@haive/shared/integrations';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -113,7 +113,7 @@ githubOauthRoutes.get('/repos', async (c) => {
     }
     let batch: GithubRepoApi[];
     try {
-      const parsed: unknown = await res.json();
+      const parsed = await readForgeJson(res);
       if (!Array.isArray(parsed)) throw new Error('not a list');
       batch = parsed as GithubRepoApi[];
     } catch {

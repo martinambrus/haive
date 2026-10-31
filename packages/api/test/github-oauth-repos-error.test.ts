@@ -13,6 +13,7 @@ vi.mock('../src/middleware/auth.js', () => ({
 
 import { Hono } from 'hono';
 import { encrypt, encryptDek, generateDek, secretsService } from '@haive/shared';
+import { FORGE_RESPONSE_MAX_BYTES } from '@haive/shared/forge';
 import { githubOauthRoutes } from '../src/routes/github-oauth.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
@@ -79,4 +80,45 @@ it('bounds and redacts a 100 KB vendor error before the response or error can ex
   expect(cancel).toHaveBeenCalledOnce();
   expect(thrown?.message).toBe(body.error);
   expect(JSON.stringify({ err: thrown?.message })).not.toContain('gh-token');
+});
+
+it('refuses a repository page larger than the forge bound and stops reading it', async () => {
+  const chunk = 64 * 1024;
+  const seen = { pulls: 0, cancelled: false };
+  let sent = 0;
+  // Spaces and then `[]`: valid JSON, so an unbounded read would answer 200 with no repositories.
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>(
+            {
+              pull(controller) {
+                seen.pulls += 1;
+                if (sent > FORGE_RESPONSE_MAX_BYTES + chunk) return controller.close();
+                const last = sent === FORGE_RESPONSE_MAX_BYTES + chunk;
+                controller.enqueue(
+                  last ? new TextEncoder().encode('[]') : new Uint8Array(chunk).fill(0x20),
+                );
+                sent += last ? 1 : chunk;
+              },
+              cancel() {
+                seen.cancelled = true;
+              },
+            },
+            { highWaterMark: 0 },
+          ),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    ),
+  );
+
+  const res = await app.request(`/repos?credentialId=${CREDENTIAL}`);
+
+  expect(res.status).toBe(502);
+  expect(await res.json()).toMatchObject({
+    error: 'GitHub /user/repos answered something other than a repository list',
+  });
+  expect(seen).toEqual({ pulls: FORGE_RESPONSE_MAX_BYTES / chunk + 1, cancelled: true });
 });

@@ -173,6 +173,22 @@ export async function readForgeErrorExcerpt(
   }
 }
 
+/** A success body parsed as JSON, read up to `maxBytes` and then cancelled, so a vendor's answer cannot
+ *  grow without bound. Throws a ForgeError with a fixed message, never the body, for an answer over
+ *  the bound or one that is not JSON. */
+export async function readForgeJson(
+  res: Response,
+  maxBytes: number = FORGE_RESPONSE_MAX_BYTES,
+): Promise<unknown> {
+  const { text, truncated } = await readBounded(res, maxBytes);
+  if (truncated) throw new ForgeError(`response is larger than ${maxBytes} bytes`);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ForgeError('response is not JSON');
+  }
+}
+
 function mapHttpError(
   name: ForgeProviderName,
   status: number,
