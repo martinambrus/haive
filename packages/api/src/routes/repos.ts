@@ -2820,106 +2820,122 @@ repoRoutes.post('/:id/remote', async (c) => {
   // Keep the column aligned with Git: lock the repository row first, insert its
   // audit, change Git, then write the column. Callback-visible failures restore
   // Git while that row is still locked, before a queued relink can snapshot it.
-  // Only a COMMIT failure restores after the lock is released: a concurrent relink
-  // or an applied COMMIT with a lost acknowledgement can still race that fallback.
+  // COMMIT or connection-close failures may restore after the lock is released:
+  // a concurrent relink or a lost COMMIT acknowledgement can still race that fallback.
+  let callbackSettled: Promise<void> | undefined;
   try {
     await db.transaction(async (tx) => {
-      const [stored] = await tx
-        .select()
-        .from(schema.repositories)
-        .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
-        .for('update');
-      if (!stored) throw new HttpError(404, 'Repository not found');
-      await requireFittingCredential(tx, body.credentialsId ?? stored.credentialsSecretId);
-      const host = parseScpLikeGitUrl(body.remoteUrl)?.host ?? new URL(body.remoteUrl).hostname;
-      event = {
-        actorUserId: userId,
-        action: 'repository.remote.update',
-        targetType: 'repository',
-        targetId: id,
-        metadata: {
-          host,
-          credentialsChanged:
-            (body.credentialsId ?? stored.credentialsSecretId) !== stored.credentialsSecretId,
-          branchChanged: Boolean(body.branch && body.branch !== stored.branch),
-        },
-      };
-      await insertAuditEvent(tx, event);
+      let settle!: () => void;
+      callbackSettled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
       try {
-        // Exit 3 identifies an existing remote. Replace all fetch URLs and clear push URLs
-        // so both directions use the address being persisted to the repository row.
-        const added = await git(['remote', 'add', 'origin', body.remoteUrl]);
-        if (added.ok)
-          restore = async () => {
-            if (!(await git(['remote', 'remove', 'origin'])).ok)
-              throw new Error('remote restore failed');
-          };
-        if (!added.ok) {
-          if (added.code !== 3) {
-            throw new HttpError(409, `Could not add the remote: ${added.stderr || added.stdout}`);
-          }
-          const previous: [string, string[]][] = [];
-          for (const key of ['remote.origin.url', 'remote.origin.pushurl']) {
-            const read = await git(['config', '--local', '--get-all', key]);
-            if (!read.ok && read.code !== 1)
-              throw new HttpError(409, 'Could not read the previous remote');
-            previous.push([key, read.ok && read.stdout ? read.stdout.split('\n') : []]);
-          }
-          const restoreExisting = async () => {
-            for (const [key, values] of previous) {
-              const [first, ...rest] = values;
-              if (first === undefined) {
-                const cleared = await git(['config', '--local', '--unset-all', key]);
-                if (!cleared.ok && cleared.code !== 5) throw new Error('remote restore failed');
-              } else {
-                if (!(await git(['config', '--local', '--replace-all', key, first])).ok)
-                  throw new Error('remote restore failed');
-                for (const value of rest) {
-                  if (!(await git(['config', '--local', '--add', key, value])).ok)
+        const [stored] = await tx
+          .select()
+          .from(schema.repositories)
+          .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
+          .for('update');
+        if (!stored) throw new HttpError(404, 'Repository not found');
+        await requireFittingCredential(tx, body.credentialsId ?? stored.credentialsSecretId);
+        const host = parseScpLikeGitUrl(body.remoteUrl)?.host ?? new URL(body.remoteUrl).hostname;
+        event = {
+          actorUserId: userId,
+          action: 'repository.remote.update',
+          targetType: 'repository',
+          targetId: id,
+          metadata: {
+            host,
+            credentialsChanged:
+              (body.credentialsId ?? stored.credentialsSecretId) !== stored.credentialsSecretId,
+            branchChanged: Boolean(body.branch && body.branch !== stored.branch),
+          },
+        };
+        await insertAuditEvent(tx, event);
+        try {
+          // Exit 3 identifies an existing remote. Replace all fetch URLs and clear push URLs
+          // so both directions use the address being persisted to the repository row.
+          const added = await git(['remote', 'add', 'origin', body.remoteUrl]);
+          if (added.ok)
+            restore = async () => {
+              if (!(await git(['remote', 'remove', 'origin'])).ok)
+                throw new Error('remote restore failed');
+            };
+          if (!added.ok) {
+            if (added.code !== 3) {
+              throw new HttpError(409, `Could not add the remote: ${added.stderr || added.stdout}`);
+            }
+            const previous: [string, string[]][] = [];
+            for (const key of ['remote.origin.url', 'remote.origin.pushurl']) {
+              const read = await git(['config', '--local', '--get-all', key]);
+              if (!read.ok && read.code !== 1)
+                throw new HttpError(409, 'Could not read the previous remote');
+              previous.push([key, read.ok && read.stdout ? read.stdout.split('\n') : []]);
+            }
+            const restoreExisting = async () => {
+              for (const [key, values] of previous) {
+                const [first, ...rest] = values;
+                if (first === undefined) {
+                  const cleared = await git(['config', '--local', '--unset-all', key]);
+                  if (!cleared.ok && cleared.code !== 5) throw new Error('remote restore failed');
+                } else {
+                  if (!(await git(['config', '--local', '--replace-all', key, first])).ok)
                     throw new Error('remote restore failed');
+                  for (const value of rest) {
+                    if (!(await git(['config', '--local', '--add', key, value])).ok)
+                      throw new Error('remote restore failed');
+                  }
                 }
               }
+            };
+            const cleared = await git([
+              'config',
+              '--local',
+              '--unset-all',
+              'remote.origin.pushurl',
+            ]);
+            if (!cleared.ok && cleared.code !== 5) {
+              throw new HttpError(
+                409,
+                `Could not clear the remote's push URLs: ${cleared.stderr || cleared.stdout}`,
+              );
             }
-          };
-          const cleared = await git(['config', '--local', '--unset-all', 'remote.origin.pushurl']);
-          if (!cleared.ok && cleared.code !== 5) {
-            throw new HttpError(
-              409,
-              `Could not clear the remote's push URLs: ${cleared.stderr || cleared.stdout}`,
-            );
+            restore = restoreExisting;
+            const updated = await git([
+              'config',
+              '--local',
+              '--replace-all',
+              'remote.origin.url',
+              body.remoteUrl,
+            ]);
+            if (!updated.ok) {
+              throw new HttpError(
+                409,
+                `Could not update the remote: ${updated.stderr || updated.stdout}`,
+              );
+            }
           }
-          restore = restoreExisting;
-          const updated = await git([
-            'config',
-            '--local',
-            '--replace-all',
-            'remote.origin.url',
-            body.remoteUrl,
-          ]);
-          if (!updated.ok) {
-            throw new HttpError(
-              409,
-              `Could not update the remote: ${updated.stderr || updated.stdout}`,
-            );
-          }
-        }
 
-        await tx
-          .update(schema.repositories)
-          .set({
-            remoteUrl: body.remoteUrl,
-            ...(body.credentialsId ? { credentialsSecretId: body.credentialsId } : {}),
-            ...(body.branch ? { branch: body.branch } : {}),
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.repositories.id, id));
-      } catch (err) {
-        await restoreRemote(err);
+          await tx
+            .update(schema.repositories)
+            .set({
+              remoteUrl: body.remoteUrl,
+              ...(body.credentialsId ? { credentialsSecretId: body.credentialsId } : {}),
+              ...(body.branch ? { branch: body.branch } : {}),
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.repositories.id, id));
+        } catch (err) {
+          await restoreRemote(err);
+        }
+      } finally {
+        settle();
       }
     });
   } catch (err) {
-    // Only COMMIT failures reach here with a pending restore. A COMMIT whose
-    // acknowledgement is lost can have applied; restoration then remains ambiguous.
+    // postgres.js can reject on connection close while the callback still awaits Git.
+    // Let its last write and any in-callback restore finish before the fallback runs.
+    await callbackSettled;
+    // A COMMIT with a lost acknowledgement can have applied; restoration is ambiguous.
     await restoreRemote(err);
   }
   logAuditEvent(event!);

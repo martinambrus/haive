@@ -167,3 +167,87 @@ it('rechecks a retained credential binding changed between the initial and locke
   });
   expect(fake.rows(schema.auditEvents)).toEqual([]);
 });
+
+it('waits for a disconnected transaction callback before restoring the remote', async () => {
+  const old = 'https://old.test/r';
+  const next = 'https://example.test/r';
+  fake.patch(schema.repositories, REPO, { remoteUrl: old });
+  let checkout = old;
+  const events: string[] = [];
+  let reached!: () => void;
+  let release!: () => void;
+  let disconnect!: (error: Error) => void;
+  const atWrite = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const resume = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const dropped = new Promise<never>((_resolve, reject) => {
+    disconnect = reject;
+  });
+  const failure = new Error('connection closed');
+  let callback!: Promise<unknown>;
+  h.db = new Proxy(fake.db, {
+    get(target, key) {
+      if (key === 'transaction')
+        return (fn: (tx: any) => Promise<unknown>) => {
+          callback = target.transaction((tx) =>
+            fn(
+              new Proxy(tx, {
+                get(t, prop) {
+                  if (prop === 'update')
+                    return () => ({
+                      set: () => ({
+                        where: async () => {
+                          throw failure;
+                        },
+                      }),
+                    });
+                  const value = Reflect.get(t, prop);
+                  return typeof value === 'function' ? value.bind(t) : value;
+                },
+              }),
+            ),
+          );
+          // postgres.js can reject on connection close before its callback finishes.
+          return Promise.race([callback, dropped]);
+        };
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  h.git.mockImplementation(async (_command, args: string[]) => {
+    if (args.includes('rev-parse')) return { stdout: 'true', stderr: '' };
+    if (args.includes('remote') && args.includes('add')) throw fail(3, 'exists');
+    if (args.includes('--get-all')) {
+      if (args.at(-1) === 'remote.origin.url') return { stdout: checkout, stderr: '' };
+      throw fail(1, 'absent');
+    }
+    if (args.includes('--replace-all')) {
+      const value = args.at(-1)!;
+      if (value === next) {
+        reached();
+        await resume;
+      }
+      checkout = value;
+      events.push(value === next ? 'write finished' : 'restored');
+    }
+    return { stdout: '', stderr: '' };
+  });
+  const response = Promise.resolve(link());
+  try {
+    await atWrite;
+    disconnect(failure);
+    // Drain the rejection continuation while the git child remains held.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  } finally {
+    release();
+  }
+  await callback.catch(() => undefined);
+  expect((await response).status).toBe(500);
+  expect(events).toEqual(['write finished', 'restored']);
+  expect(checkout).toBe(old);
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});
