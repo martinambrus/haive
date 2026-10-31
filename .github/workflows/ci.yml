@@ -142,9 +142,9 @@ jobs:
     name: End-to-end smokes
     runs-on: ubuntu-latest
     # The longest CI job grows with the GATED list (about 7.5 s a row). Its 45 minutes must
-    # cover a modelled green run plus any one check reaching its limit: the gated step has
-    # 25 minutes and worker smokes 15. The budget pin accounts for both, so later checks still
-    # have room after a hang, and fails when the list outgrows these limits. Measure again
+    # cover a modelled green run plus a non-gated check's limit (worker smokes: 15 minutes).
+    # For the gated step, count its 25-minute limit plus the 907 s outside it. The budget pin
+    # leaves later checks room after either hang and fails when the list outgrows these limits. Measure again
     # before raising them; docs/architecture/ci-smokes.md (Limits) records the measurements.
     timeout-minutes: 45
     services:
@@ -240,8 +240,9 @@ jobs:
       # The database column is the name each file's own guard demands.
       #
       # Every step in smokes, schema-parity, production-images and macos-preflight has its own
-      # timeout-minutes, below its job's limit, so a hang ends the step while later checks can run.
-      # Limits retain slack above measured green runs (docs/architecture/ci-smokes.md).
+      # timeout-minutes below its job's limit. A timed-out check fails while later checks can run;
+      # a timed-out setup step stops its dependent checks by design.
+      # Limits retain slack above measured green runs.
       # scripts/test/ci-step-independence.test.mjs pins every step's limit and floor in these
       # four jobs, plus the smokes budget that leaves room for checks after a timed-out sibling.
       #
