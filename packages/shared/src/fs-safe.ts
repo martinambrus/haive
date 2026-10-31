@@ -297,6 +297,12 @@ const ABSENT = new Set(['ENOENT', 'ENOTDIR']);
  *  a listing that took it for absence would come back short without saying so. */
 const RESOURCE_LIMITS: ReadonlySet<string> = new Set(['EMFILE', 'ENFILE']);
 
+/** Whether `err` is the process running out of descriptors: a fact about this process, never a
+ *  fact about the path it was reading. */
+export function isResourceLimitError(err: unknown): boolean {
+  return RESOURCE_LIMITS.has(errno(err) ?? '');
+}
+
 /** The refusal rule for reads. `invalid-path` always throws; absence is `null`; a containment
  *  refusal is `null` unless `strict`, when it throws; any other errno is `null` when lenient and
  *  rethrown when strict, and an errno in `rethrow` is thrown in either mode. Mutations (later

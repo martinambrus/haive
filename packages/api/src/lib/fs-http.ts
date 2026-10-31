@@ -1,4 +1,4 @@
-import { errno, isPathContainmentError } from '@haive/shared/fs-safe';
+import { isPathContainmentError, isResourceLimitError } from '@haive/shared/fs-safe';
 import { HttpError } from '../context.js';
 
 /**
@@ -29,6 +29,6 @@ export function containmentHttpError(
   if (isPathContainmentError(err)) throw new HttpError(403, outside);
   if (err instanceof HttpError) throw err;
   // A process out of descriptors is not a bad path: the api's 500, and its error log, answer for it.
-  if (['EMFILE', 'ENFILE'].includes(errno(err) ?? '')) throw err;
+  if (isResourceLimitError(err)) throw err;
   throw new HttpError(400, 'Path cannot be read');
 }
