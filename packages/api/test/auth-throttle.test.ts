@@ -12,6 +12,7 @@ const h = vi.hoisted(() => {
       throw new Error('Redis not initialized');
     }) as () => unknown,
     warn,
+    error: vi.fn(),
   };
 });
 
@@ -37,6 +38,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
     {
       get: (_target, prop) => {
         if (prop === 'warn') return h.warn;
+        if (prop === 'error') return h.error;
         if (prop === 'child') return () => log;
         return () => undefined;
       },
@@ -54,6 +56,7 @@ vi.mock('@haive/shared', async (importOriginal) => {
   };
 });
 
+import { serializeError } from '@haive/shared/logger';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { computeEmailBlindIndex, encryptEmail, secretsService } from '@haive/shared';
@@ -214,6 +217,7 @@ beforeEach(() => {
   reg.mode = 'closed';
   installDb();
   h.warn.mockClear();
+  h.error.mockClear();
 });
 
 afterEach(() => {
@@ -352,19 +356,48 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
         set.mockRestore();
       }
     });
-    it('preserves 429 when the admitted audit lookup fails', async () => {
-      const email = mail('audit-lookup-error');
-      for (let i = 0; i < 10; i++) await login(email, WRONG);
-      const lookup = vi
-        .spyOn((h.db as any).query.users, 'findFirst')
-        .mockRejectedValue(new Error('lookup unavailable'));
-      try {
-        await expectRefused(() => login(email, WRONG), 60);
-      } finally {
-        lookup.mockRestore();
-      }
-      expect(throttled()).toEqual([]);
-    });
+    it.each(['lookup', 'insert'])(
+      'logs one structured error and preserves 429 when the admitted audit %s fails',
+      async (stage) => {
+        const email = mail(`audit-error-${stage}`);
+        for (let i = 0; i < 10; i++) await login(email, WRONG);
+        const failure = Object.assign(new Error('bound synthetic-audit-secret'), {
+          query:
+            stage === 'lookup'
+              ? 'select id from users where email_blind_index = $1'
+              : 'insert into audit_events values ($1)',
+          params: ['synthetic-audit-secret'],
+        });
+        const blocked =
+          stage === 'lookup'
+            ? vi.spyOn((h.db as any).query.users, 'findFirst').mockRejectedValue(failure)
+            : vi.spyOn(h.db as any, 'insert').mockReturnValue({
+                values: async () => {
+                  throw failure;
+                },
+              });
+        try {
+          await expectRefused(() => login(email, WRONG), 60);
+          await vi.waitFor(() => expect(h.error).toHaveBeenCalledTimes(1), { timeout: 15_000 });
+          expect(h.error).toHaveBeenCalledWith(
+            stage === 'lookup'
+              ? { err: failure }
+              : { err: failure, action: 'auth.login.throttled' },
+            stage === 'lookup'
+              ? 'failed to audit throttled sign-in'
+              : 'failed to write audit event',
+          );
+          const [fields] = h.error.mock.calls[0]!;
+          const diagnostic = JSON.stringify({ ...fields, err: serializeError(fields.err) });
+          expect(diagnostic).not.toContain('synthetic-audit-secret');
+          expect(diagnostic).not.toContain(email);
+          expect(diagnostic).not.toContain(WRONG);
+          expect(throttled()).toEqual([]);
+        } finally {
+          blocked.mockRestore();
+        }
+      },
+    );
     it.each(['lookup', 'insert'])(
       'answers 429 promptly when the audit %s never settles',
       async (stall) => {
