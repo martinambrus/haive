@@ -64,8 +64,11 @@ const holdingRefusal = (holding: number): string =>
 const whyNoAnswer = (res: GitRunResult): string =>
   res.noExit ?? (res.code === GIT_TIMED_OUT ? 'timed out' : `git exited ${res.code}`);
 
-/** A git work tree whose top level is `dest` itself and that has a commit to stand on. A git run
- *  that gave no answer is `unknown`, which must not read as "not usable": a rebuild moves the folder. */
+/** A git work tree whose top level is `dest` itself and that has a commit to stand on.
+ *  Failed or timed-out runs, failed top-level reads without structural proof of a dead checkout,
+ *  unreadable or external metadata, and HEAD reads other than exit 0 or 1 are `unknown`.
+ *  Missing .git, a missing HEAD or contained gitdir proven by strict no-follow reads, a different
+ *  top level, and HEAD exit 1 are `unusable`. Unknown must never trigger a rebuild: it moves the folder. */
 export async function usableCheckout(
   dest: string,
 ): Promise<'usable' | 'unusable' | { unknown: string }> {
@@ -79,6 +82,8 @@ export async function usableCheckout(
     }
   }
   if (cdup.code !== 0) {
+    // Exit codes cannot distinguish corrupt config from a dead .git. Rebuild only when
+    // strict no-follow reads prove missing structure; everything else stays unknown.
     try {
       const entry = await lstatNoFollow(dest, '.git', { strict: true });
       if (entry === null) return 'unusable';
