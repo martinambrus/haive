@@ -9,11 +9,35 @@ import {
   type Renderer,
 } from '../../test/render-tree';
 
-// No DOM in this package: the composer runs through test/render-tree.ts, and the network is a stub of fetch.
-vi.mock('react', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('react')>()),
-  ...(await import('../../test/render-tree')).reactHooks,
-}));
+const updaterReplay = vi.hoisted(() => ({ enabled: false }));
+
+// No DOM in this package: render-tree keeps the hooks and fetch supplies the network.
+vi.mock('react', async (importOriginal) => {
+  const { reactHooks } = await import('../../test/render-tree');
+  return {
+    ...(await importOriginal<typeof import('react')>()),
+    ...reactHooks,
+    useState(initial: unknown) {
+      const [value, set] = reactHooks.useState(initial);
+      const setState = set as (update: unknown) => void;
+      return [
+        value,
+        (update: unknown) => {
+          if (updaterReplay.enabled && typeof update === 'function') {
+            // Replay the updater with the same input, as StrictMode may do. This
+            // pins updater purity; the harness does not render React StrictMode.
+            setState((previous: unknown) => {
+              update(previous);
+              return update(previous);
+            });
+          } else {
+            setState(update);
+          }
+        },
+      ];
+    },
+  };
+});
 
 const reply = (body: unknown) => ({
   ok: true,
@@ -88,6 +112,7 @@ beforeAll(() => {
 });
 afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
+  updaterReplay.enabled = false;
   bundleState = 'active';
   bundleSource = 'zip';
   filesQueue = [];
@@ -350,3 +375,22 @@ describe('file listings follow the final synced tree', () => {
     expect(live.text()).toContain('replacement.md');
   });
 });
+
+it.each(['first expand', 'retry'] as const)(
+  'starts one file fetch on %s even when state updaters are replayed',
+  async (opening) => {
+    const live = await mountLive();
+    if (opening === 'retry') {
+      filesFailure = { ok: false, status: 500, json: async () => ({ error: 'Try again' }) };
+      await live.click('docs');
+      expect(live.text()).toContain('Try again');
+      await live.click('docs');
+      filesFailure = null;
+    }
+    const before = filesFetches;
+    updaterReplay.enabled = true;
+    await live.click('docs');
+    expect(filesFetches).toBe(before + 1);
+    expect(live.text()).toContain('a.md');
+  },
+);

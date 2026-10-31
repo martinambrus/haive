@@ -213,19 +213,20 @@ export function BundleComposer({
   };
 
   const toggleExpanded = (bundleId: string): void => {
+    const opening = !expandedIds.has(bundleId);
     setExpandedIds((prev) => {
       const next = new Set(prev);
       if (next.has(bundleId)) {
         next.delete(bundleId);
       } else {
         next.add(bundleId);
-        // A listing that failed is asked again rather than kept until a reload.
-        if (!filesByBundle[bundleId] || filesByBundle[bundleId].error) {
-          void loadBundleFiles(bundleId);
-        }
       }
       return next;
     });
+    // A listing that failed is asked again rather than kept until a reload.
+    if (opening && (!filesByBundle[bundleId] || filesByBundle[bundleId].error)) {
+      void loadBundleFiles(bundleId);
+    }
   };
 
   // Hydrate the initial value once when the field mounts and the form's
