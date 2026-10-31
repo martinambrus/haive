@@ -783,7 +783,58 @@ describe.skipIf(!url)(
       },
     );
 
-    // C1-C4: another closer takes a parked form between the submit's or the clarification's read of the row and
+    // K1-K3: a form parked longer than idle_ms can hold (an integer: about 24.8 days) is still answered, and idle_ms
+    // saturates at its maximum. Written back as an unclamped sum, the same park made the update raise "integer out of
+    // range" and the route answer 500, so the form could not be submitted, clarified or skipped (one install holds
+    // forms parked 40 days).
+    const PARKED_PAST_INT4_MS = 30 * 24 * 60 * 60_000;
+    const INT4_MAX = 2_147_483_647;
+
+    it.each([
+      [
+        'K1: the form submit',
+        STEP,
+        (taskId: string) =>
+          post(`/tasks/${taskId}/steps/${STEP.stepId}/submit`, { values: { answer: 'yes' } }),
+      ],
+      [
+        'K2: the merge clarification answer',
+        STEP,
+        (taskId: string) =>
+          post(`/tasks/${taskId}/steps/${STEP.stepId}/clarify`, { answer: 'keep both' }),
+      ],
+      [
+        'K3: Skip',
+        SKIPPABLE,
+        (taskId: string) =>
+          post(`/tasks/${taskId}/steps/${SKIPPABLE.stepId}/action`, { action: 'skip' }),
+      ],
+    ] as const)(
+      '%s of a form parked past the int4 range saturates idle_ms instead of failing',
+      async (_label, which, run) => {
+        const taskId = await seedTask('running', { currentStepId: which.stepId });
+        await seedStep(
+          taskId,
+          {
+            status: 'waiting_form',
+            startedAt: new Date(Date.now() - PARKED_PAST_INT4_MS - 60_000),
+            waitingStartedAt: new Date(Date.now() - PARKED_PAST_INT4_MS),
+          },
+          which,
+        );
+
+        const response = await run(taskId);
+
+        expect(response).toMatchObject({ status: 200, body: { ok: true } });
+        expect(await wholeRow(which.id)).toMatchObject({
+          waitingStartedAt: null,
+          idleMs: INT4_MAX,
+        });
+      },
+      TEST_TIMEOUT,
+    );
+
+    // C1 and C2: another closer takes a parked form between the submit's or the clarification's read of the row and
     // its UPDATE: a pass takes it up, Skip skips it, a Retry resets it, or the PR poller closes its wait. Both
     // updated the row by id alone, so they wrote their answer onto a row that had moved on and queued a second
     // advance. They answer the 409 they give a form that is not waiting, and write and queue nothing.
