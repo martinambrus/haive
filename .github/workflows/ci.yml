@@ -226,8 +226,15 @@ jobs:
 
       # A gated file skips green when its URL is unset, so each must report tests run and none skipped.
       # The database column is the name each file's own guard demands.
+      #
+      # This step and the six Redis script steps below carry a timeout-minutes, so that one that
+      # hangs ends at its own limit and the checks after it still run, instead of burning the job's
+      # limit and cancelling them. Each limit is well above the step's slowest green run (the
+      # measurements are in docs/architecture/ci-smokes.md). scripts/test/ci-step-independence.test.mjs
+      # pins that every check that is not a smoke:ci chain has one.
       - name: Postgres-gated tests
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 25
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
@@ -378,36 +385,42 @@ jobs:
 
       - name: Agent pool script on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
         run: pnpm --filter @haive/worker exec vitest run src/queues/cli-exec/agent-lease.test.ts
         env:
           HAIVE_LEASE_TEST_REDIS_URL: redis://localhost:6379/15
 
       - name: CLI job retention on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
         run: pnpm --filter @haive/worker exec vitest run test/cli-job-retention.test.ts
         env:
           CLI_JOB_RETENTION_TEST_REDIS_URL: redis://localhost:6379/9
 
       - name: RAG sync lock on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
         run: pnpm --filter @haive/shared exec vitest run test/rag-sync-lock.test.ts
         env:
           HAIVE_RAG_LOCK_TEST_REDIS_URL: redis://localhost:6379/14
 
       - name: Usage-auth stash script on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
         run: pnpm --filter @haive/api exec vitest run test/cli-providers-usage-auth.test.ts
         env:
           USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/12
 
       - name: Module activation watch on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
         run: pnpm --filter @haive/worker exec vitest run test/module-activation-watch.test.ts
         env:
           MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/11
 
       - name: Auth throttle script on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 10
         run: pnpm --filter @haive/api exec vitest run test/auth-throttle.test.ts
         env:
           AUTH_THROTTLE_TEST_REDIS_URL: redis://localhost:6379/10

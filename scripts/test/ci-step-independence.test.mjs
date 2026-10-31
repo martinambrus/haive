@@ -15,6 +15,8 @@ const JOBS = [
     file: 'ci.yml',
     id: 'smokes',
     prerequisite: 'migrate',
+    // Every check is cut by its own time limit (see RUN_SMOKES), not only by the job's.
+    bounded: true,
     // The setup in order, ending at the step with the id above. A check placed in it would stop
     // all the others when it failed, so a new setup step is added here on purpose.
     setup: [
@@ -54,6 +56,12 @@ const JOBS = [
     setup: ['actions/checkout'],
   },
 ];
+
+// A smoke:ci chain is bounded by scripts/run-smokes.mjs, which gives each smoke its own limit and
+// names the one that hangs. Any other check of a bounded job needs a timeout-minutes, or one hung
+// check burns the job's whole limit and cancels every check after it.
+const RUN_SMOKES = /^pnpm --filter @haive\/[\w-]+ smoke:ci$/;
+const WHOLE_MINUTES = /^[1-9]\d*$/;
 
 const guard = ({ prerequisite, leg }) =>
   `\${{ !cancelled() && steps.${prerequisite}.conclusion == 'success'${leg ? ` && ${leg}` : ''} }}`;
@@ -131,6 +139,19 @@ function checkJob(job, spec) {
     0,
     `a check runs on ${expected}, so that a failed sibling neither skips it nor does it wait on one: ${notGuarded.map(label).join('; ')}`,
   );
+  if (spec.bounded) {
+    // A limit that is there has to be readable; without one the check has to be a smoke:ci chain.
+    const unbounded = checks.filter((step) =>
+      step['timeout-minutes'] === undefined
+        ? !RUN_SMOKES.test(step.run?.trim() ?? '')
+        : !WHOLE_MINUTES.test(step['timeout-minutes']),
+    );
+    assert.equal(
+      unbounded.length,
+      0,
+      `a check is a smoke:ci chain or has a timeout-minutes of whole minutes, so that a hang ends it and not the job: ${unbounded.map(label).join('; ')}`,
+    );
+  }
 }
 
 // Each mutant breaks one rule of a job that passes, and checkJob has to refuse it. They are
@@ -259,6 +280,43 @@ const MUTANTS = [
     (job) => {
       job['continue-on-error'] = 'true';
     },
+  ],
+  [
+    'a check with no time limit',
+    ({ steps }, last) => {
+      delete steps.slice(last + 1).find((step) => step['timeout-minutes'] !== undefined)[
+        'timeout-minutes'
+      ];
+    },
+    (spec) => spec.bounded,
+  ],
+  ...['0', '-5', '2.5', 'five', '${{ vars.LIMIT }}'].map((limit) => [
+    `a time limit of ${limit}`,
+    ({ steps }, last) => {
+      steps.slice(last + 1).find((step) => step['timeout-minutes'] !== undefined)[
+        'timeout-minutes'
+      ] = limit;
+    },
+    (spec) => spec.bounded,
+  ]),
+  [
+    'a smoke chain with a time limit that is not whole minutes',
+    ({ steps }, last) => {
+      const chain = steps.slice(last + 1).find((step) => RUN_SMOKES.test(step.run?.trim() ?? ''));
+      chain['timeout-minutes'] = '0';
+    },
+    (spec) => spec.bounded,
+  ],
+  [
+    'a new check that is not a smoke chain and has no time limit',
+    ({ steps }, last, spec) => {
+      steps.push({
+        name: 'New check',
+        if: guard(spec),
+        run: 'pnpm --filter @haive/api smoke:ci && sleep 9999',
+      });
+    },
+    (spec) => spec.bounded,
   ],
 ];
 
