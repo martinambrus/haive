@@ -528,7 +528,7 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+22)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+23)
 
 status: open · was modular #211
 
@@ -555,6 +555,7 @@ status: open · was modular #211
 21. (T119 fix review, 2026-10-30) PRE-EXISTING, minor: api test/repo-artifact-reset.test.ts ~:1829,1849 create temp dirs under `os.tmpdir()` and never remove them; clean them up in an `afterEach`.
 22. (T448 review, 2026-10-30) PRE-EXISTING, minor: the UI-login e2e specs click submit right after `fill` with no hydration signal (tests/e2e/auth/forms.spec.ts ~:32,69,99,124 and harness/session-recovery/session-ordering.spec.ts); a click that beats hydration is a native navigation (a POST since T448), so the race remains. Wait for a hydration marker before submitting. Since T449 (PR #946) only a click that beats hydration remains, and its helpers `holdScripts`, `reactAttached` and `waitForReact` (tests/e2e/auth/prehydration-submit.spec.ts ~:89-107) can move to tests/e2e/helpers for this fix.
 23. (main CI on 02a25e357, 2026-10-30) PRE-EXISTING since T118, flaky: worker test/onboarding-recorded-membership.test.ts `tree()` (~:287) reads every file under the fixture repository, `.git` included, right after the fixture's `git commit` (~:340-345, ~:442-445), and the detached `git maintenance run --auto` that commit starts creates and removes `.git/objects/maintenance.lock` in between: `ENOENT ... open '.../.git/objects/maintenance.lock'` (run 41136606433). Give the fixture's git calls `-c maintenance.auto=false` (or skip that lock in the walk), and grep the other tests that walk a git fixture after a commit for the same race.
+24. (T349 review, 2026-10-31) PRE-EXISTING, minor: of the four step actions that write the clicked row before they move the task (loop Resume, `retry_ai`, the CLI switch, Skip), only Skip has a committed lock-order control; no case tells `cancelStillOpen` locking every row of the task from locking only the open ones; and the cancel route's control (K7) now passes from the Stop batch alone, so the step abort's (K8) is the only one that pins `cancelStillOpen`.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -839,7 +840,7 @@ From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `M
 
 ### T445 · FNF[first-import-visibility] · a first sync silently replaces a locally typed setting; a refused checkout value is only logged (+2)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T23:56Z · last: 2026-10-30T23:56Z
 From the T119 review (2026-10-30). PRE-EXISTING, minor. Cross-reference: T317 [design] (an RTK choice loses to the first record import).
 
 1. shared project-state merge.ts ~:29,46,58 computes `overwritten` (a local value an incoming one replaced) and nothing outside merge.ts reads it, so a first sync with no base replaces a locally typed value of every portable setting without a word. Surface it in the sync's answers or log it at warn with the unit names.
@@ -853,15 +854,6 @@ From the T119 review (2026-10-30). Verified 2026-10-31 by the T446 driver (evide
 
 Question for the owner: keep the rule (recommended, adding to the docs that 12 and 03 stage the removal when their commit box is ticked), or make a claim-less descriptor team-wide. Option 2: a descriptor exists only while a claim names its source. Option 3: the sync adds a checkout descriptor to the base only if a local bundle, a claim or the previous base names it. The flip lists are in the driver report. If flipped, also make the two-install smoke assert the rule across installs: it commits B's deletion (~:2477) and `treesDiffer` skips `bundles/` (~:2879).
 
-### T447 · FNF[tooling-api-edges] · PATCH tooling answers 500 for a JSON null body and 200 for a malformed one; refresh-tree reads the whole row; an override's first-line indent is trimmed (+2)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T22:16Z · last: 2026-10-30T22:16Z
-From the T119 review (2026-10-30). PRE-EXISTING, minor.
-
-1. api routes/tooling-upgrades.ts ~:743: PATCH `/repositories/:id/tooling` answers 500 for a JSON `null` body, and a malformed body is a silent 200 no-op (~:714). Answer 400 for both.
-2. api routes/repos.ts ~:3334: the `refresh-tree` handler reads the whole repository row, including the up-to-64 KiB `agent_rules_override` it never uses; select the columns it needs.
-3. (T119 fix review, 2026-10-30) Minor: an override that opens with an indented line (an indented code block) loses that first line's indent, because the rules block shaping trims the whole text (shared templates/cli-rules.ts `shapeRulesText`; check whether `normalizeAgentRulesOverride` also trims it at write). The old provider path did the same. Trim leading newlines only, for overrides, keeping the default path byte-identical.
-
 ### T450 · FNF[install-ownership-of-runners] · the runtime-runner reaper removes runners this install's database does not know, volumes included
 
 status: open
@@ -871,14 +863,6 @@ From the T441 review (2026-10-30). PRE-EXISTING, consequential on a host whose D
 
 status: open
 From the T441 review (2026-10-30). PRE-EXISTING, minor. `isRunning` and `containerExists` read a failed `docker inspect` as "not running" or "absent" (worker sandbox ide-runner.ts ~:87-105, app-runner.ts ~:76-93, the same shape in ddev-runner.ts ~:888, callers not traced), and `startIdeRunner` (ide-runner.ts ~:259) and `startAppRunner` (app-runner.ts ~:154) open with an unconditional `docker rm -f -v`, so a transient failure of that first probe still recreates a live runner. T441 closed only the workspace-label probe. Needs a tri-state existence read and a decision per call site. Cross-reference: T371 [design] FNF[docker-spawn-dedup].
-
-### T452 · FNF[cli-login-banner-timers] · the token-submit Enter timer is untracked; the menu-advance timer is armed after cleanup (+1)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T22:59Z · last: 2026-10-30T22:59Z
-From the T438 review (2026-10-30). Minor. api routes/cli-login-banner.ts.
-
-1. PRE-EXISTING: the 150 ms `setTimeout` that sends Enter after a token paste (~:615-621) is not tracked, so it can write to a stream that has already ended; track it with the session's other timers and clear it in `cleanupSession`.
-2. T433 regression, harmless: a chunk that arrives after cleanup still arms antigravity's 1.5 s menu-advance timer (~:811), whose callback only returns; skip arming it once the session is cleaned up.
 
 ### T453 · FNF[auth-prehydration-click] [design] · a click or Enter on the sign-in form before React attaches drops what was typed
 
@@ -897,7 +881,7 @@ From the T449 review (2026-10-30). PRE-EXISTING, minor (signed-in pages; only a 
 
 ### T455 · FNF[api-body-shape] · a JSON `null` body is a 500 in twelve api handlers; wrongly typed fields in the tooling PATCH are a 500 (+1)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T00:38Z · last: 2026-10-31T00:38Z
 From the T447 review (2026-10-30). PRE-EXISTING, minor. Line numbers as of main 8c655fc81.
 
 1. A JSON `null` body is read as an object, so the handler throws a TypeError and answers 500: api routes/plan.ts ~:1008-1010 (DELETE plan, `body.confirm`), tasks/index.ts ~:1522-1527 (steer), tooling.ts ~:19-20, ~:59-64, ~:150-151, ~:340-341 and ~:218 (SSE: an empty 200 stream plus a console error, not a 500), user-settings.ts ~:244-245, ~:280-281, ~:312-313, bundles.ts ~:757-762, and tooling-upgrades.ts ~:250-256 (POST tooling-upgrade: `null` survives its try/catch, then `parsed.components` throws). T447 (PR #948) guarded the tooling PATCH alone. Fix: one shared guard (a body must be a JSON object, else 400 `invalid_body`), one control per route.
@@ -917,8 +901,40 @@ From the T452 review (2026-10-31). PRE-EXISTING, minor; reachable only when outp
 
 In api routes/cli-login-banner.ts `onStreamData` (~:876-882), a success or error line in a chunk that arrives after `cleanupSession` still reaches `detectAuthResult` and starts `runProbeAndSave`, which queues a probe job for a session that is gone: `canDetectAuth` (~:666) has no `cleanedUp` check, while `captureClaudeOauthToken` and `offerAuthUrl` do. Codex, grok and amp take this branch (grok measured by the T452 driver with a scratch test: probe jobs 0 -> 1 after `ws.close()` and a "Signed in" chunk). Decide whether a login that completes during teardown should still be verified (the CLI has stored its credentials either way, so a skipped probe leaves Haive's provider state stale until the next check). If not, one `if (session.cleanedUp) return;` at the top of `onStreamData` closes it and makes T452's gate on the antigravity URL step redundant.
 
+### T458 · FNF[cancel-status-guard] · the worker's CANCEL marks a task cancelled whatever its status; the plan merge's DELETE queues a CANCEL unchecked
+
+status: open
+From the T349 review (2026-10-31). PRE-EXISTING, consequential. Cross-reference: T309 FNF[cancel-cap-2].
+
+1. worker queues/task-queue.ts `handleCancelTask` (~:3760-3773) sets `status = 'cancelled'` where only the id matches, so a CANCEL job that lands after the task completed (queued before the completion, or by a caller that never checked) turns a completed task into a cancelled one. T349 (PR pending) guards the api's single cancel and step abort (`cancelTaskIfOpen`: completed and cancelled are terminal, failed stays cancellable); the worker needs the same guard, with the decision made under the task row's lock.
+2. api routes/plan.ts `DELETE /plan/merge` (~:1379) queues a CANCEL with no check of the task's status when it runs. Route it through the same decision.
+
+### T459 · FNF[lock-order-leftovers] · writers that still lock step, run or mining rows in scan order or against the Retry's order (+5)
+
+status: open
+From the T349 review (2026-10-31). PRE-EXISTING; narrow windows unless stated. T349 makes every multi-row step writer take its rows through `lockStepRows` (one id-ordered batch after the run, mining and DAG statements); these sites were left.
+
+1. worker queues/task-queue.ts `requeueAbandonedOrphan` (~:3309-3355) updates the step row and then its runs, the reverse of a Retry (runs, then step rows); reachable from boot reconcile and the stalled sweep. Swap the two statements.
+2. Multi-row `cli_invocations` and `task_step_agent_minings` statements lock in scan order: api `sweepRunsOf` (routes/tasks/steps.ts), worker `_step-reset.ts`, `releaseStepAgents` (step-runner.ts ~:2353-2370) and `recoverParkedStep` (task-queue.ts ~:3457, ~:3492); the fan-out Resume also writes minings before runs (steps.ts ~:1198 vs ~:1203). Give them the same id-ordered batch, runs before minings.
+3. `resetRowsForRerun(late, { rowsHeld: true })` sweeps the runs of rows activated meanwhile while holding those step rows; a pass holding a run of such a row that then wants it (`writeLoginHint`, worker cli-exec/handlers.ts ~:193) can deadlock with the sweep. The code before T349 locked those rows before the sweep too.
+4. Minor: unordered single-statement bulk step writers with no realistic peer today: task-queue.ts ~:3779 and ~:3743, step-engine/left-open-merge.ts ~:520-528, data-migrations.ts ~:771.
+5. [verify-first] A possible cycle: shared plan/apply-patch.ts `applyPlanPatch` (~:186-199) writes plan_nodes rows and then upserts `plan_mirror_state`, which needs the repositories row; a repository delete holds that row FOR UPDATE and cascades into plan_nodes. Not traced to the end. Cross-reference T270 and T318 item 5 (the advisory start's plan_nodes lock still waits unbounded).
+6. Minor cost: the four left-active moves (loop Resume, `retry_ai`, Skip, CLI switch) take the whole-task step batch twice (`lockRowsForMove`, then `resetRowsForRerun`); the second is a no-wait re-lock.
+
+### T460 · FNF[retry-repo-deleted] [design] · a Retry revives a failed task whose repository was deleted
+
+status: open
+From the T349 review (2026-10-31). PRE-EXISTING. A failed task whose repository was deleted still passes `checkRevive` (database repository-task-lock.ts ~:109), while the repository delete's `cancelOpenTasksForRepo` (api lib/cancel-task.ts ~:130) skips failed tasks; a Retry then sets it `running` with no repository and the worker's next advance throws. Decide: refuse that Retry (say why on the page), or have the delete cancel failed tasks too. Cross-reference T393, T394, T409.
+
+### T461 · FNF[stale-preread-fold] · two folds add to values read before their transaction
+
+status: open
+From the T349 review (2026-10-31). PRE-EXISTING, minor. The `carried_*` fold in `resetRowsForRerun` (api routes/tasks/steps.ts ~:211) and the provider-switch loop (routes/tasks/index.ts ~:1813) add to values read before the transaction, so a fold that interleaves loses an update. Read the values under the row lock, or fold in SQL (`col = col + delta`).
+
 ## Done
 
+- T452 — the 150 ms Enter after a token paste is one of the login session's tracked one-shot timers and cleanupSession clears it; a chunk after cleanup starts no antigravity URL step or menu-advance timer — PR #949 (fc7789288), 2026-10-30; main CI green; follow-up T457
+- T447 — PATCH /repositories/:id/tooling answers 400 invalid_body for a JSON body that is not an object and invalid_json for one that is not JSON, writing nothing; refresh-tree reads only the eight repository columns it uses; an AGENTS.md rules override keeps its first line's indent while the default block stays byte-identical (no manifest bump) — PR #948 (8330687b8), 2026-10-30; main CI green; checked on the dev stack; follow-ups T455, T456
 - T119 — the AGENTS.md rules block is the repository's: repositories.agent_rules_override (migration 0215), settings/agent-rules.md in the project-state record, a Tooling page card with its own save, and buildRepoCliRulesBlock for 07, 12, 01 and the api's upgrade-status — PR #940 (5b6467e9c) and the editor fix PR #947 (1989f1f2a), 2026-10-30; main CI green; browser-checked at 1280, 768 and 375; follow-ups T443, T444, T445, T446, T447
 - T449 — values typed or autofilled into the sign-in form (login, register, setup) before React attaches are what gets submitted: the inputs are uncontrolled and read with FormData before the first await — PR #946 (6d9f6daf3), 2026-10-30; main CI green; item 2 moved to T453 [design]; follow-ups T454, T364 item 22 note
 - T438 — the login frame of a device-code provider waits, within the one settle deadline, for its code and what ends it; an escape with intermediate bytes such as ESC ( B is stripped whole; the dead terminal oauth_prompt scanner is removed; cleanupSession clears antigravity's two resize timers; item 3 (a wrapped URL's last piece sharing its line with text) is left as is, since no rule tells it from prose without reopening T433's terminator rules and no measured banner prints it — PR #945 (02a25e357), 2026-10-30; main CI green after one rerun of the T364 item 23 flake; follow-ups T452, T439 note
