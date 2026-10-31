@@ -4942,3 +4942,29 @@ it('merge_remove completes locally without any origin transport when detect refu
     await rm(parent, { recursive: true, force: true });
   }
 });
+
+it('T397 a failed pre-push count fails without pushing or opening a sync round', async () => {
+  const { parent, wt } = await setupWorktree();
+  const bare = await pushParentMainToOrigin(parent);
+  try {
+    fetchProbe.intercept = (argv) =>
+      argv[0] === 'rev-list' && argv[1] === '--count'
+        ? { code: 128, stdout: '', stderr: 'fatal: missing object' }
+        : null;
+    const h = makeDb();
+    await expect(
+      resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove', pushBase: true }),
+        mkCtx(parent, h.db),
+        mkParams(h.db),
+      ),
+    ).rejects.toThrow(/git rev-list.*failed.*missing object/);
+    expect(fetchProbe.pushes).toEqual([]);
+    expect(h.getState()?.baseSyncRounds ?? 0).toBe(0);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+    await rm(bare, { recursive: true, force: true, maxRetries: 5 });
+  }
+});

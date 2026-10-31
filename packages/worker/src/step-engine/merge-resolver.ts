@@ -709,9 +709,13 @@ async function fetchForSync(
 
 async function countAhead(cwd: string, range: string): Promise<number> {
   const res = await gitRun(cwd, ['rev-list', '--count', range]);
-  if (res.code !== 0) return 0;
-  const n = Number.parseInt(res.stdout.trim() || '0', 10);
-  return Number.isFinite(n) ? n : 0;
+  const n = Number(res.stdout.trim());
+  if (res.code !== 0 || res.stdout.trim() === '' || !Number.isSafeInteger(n) || n < 0) {
+    throw new Error(
+      `git rev-list --count ${range} failed in ${cwd}: ${(res.stderr || res.stdout).trim()}`,
+    );
+  }
+  return n;
 }
 
 /** Pre-push: bring the base up to date with origin before pushing, so the push is a
