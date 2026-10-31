@@ -941,7 +941,7 @@ api routes/repos.ts `resetOnboardingArtifacts` (~:2615-2625, the claim-file loop
 
 ### T474 · FNF[ci-step-independence-2] · other CI jobs still skip independent checks after a failed one; the smokes job has no per-step limits and about 275 s of headroom (+3)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T11:06Z · last: 2026-10-31T11:06Z
 From the T470 review (2026-10-31). PRE-EXISTING, minor to moderate (the T470 hiding class in other jobs).
 
 1. A failed check skips an independent one after it: `schema-parity` "Compare migration corpus against push --force" (ci.yml ~:465) skips "Migration corpus reaches the production image" (~:475); `production-images` web leg ~:500 skips ~:505; platform-checks.yml `macos-preflight` ~:80 skips ~:88 (`compose-boot` ~:609-:630 is arguable). Give each the `!cancelled() && steps.<setup>.conclusion == 'success'` guard T470 gave the smokes job, with a pin in scripts/test/.
