@@ -101,7 +101,8 @@ async function main(): Promise<void> {
       opts: {
         taskStatus?: 'running' | 'waiting_user' | 'waiting_pr' | 'queued' | 'created';
         taskUpdatedAt?: Date;
-        stepStatus?: 'pending' | 'waiting_cli' | 'waiting_form' | 'done' | 'skipped' | 'failed';
+        stepStatus?:
+          'pending' | 'running' | 'waiting_cli' | 'waiting_form' | 'done' | 'skipped' | 'failed';
         stepUpdatedAt?: Date;
         waitingStartedAt?: Date | null;
         noStepRow?: boolean;
@@ -317,6 +318,14 @@ async function main(): Promise<void> {
     ];
     const miningOwedId = await addRun(miningTaskId, { mining: true });
 
+    // A step re-opened as running (a Resume, retry_ai, the allowance auto-resume) whose advance never
+    // reached the queue; one with a run still to wait for; one a START is queued for (it runs the
+    // first step inside the job).
+    const reopenedTaskId = await makeTask('reopened', { stepStatus: 'running' });
+    const reopenedRunTaskId = await makeTask('reopened-run', { stepStatus: 'running' });
+    await addRun(reopenedRunTaskId);
+    const reopenedStartTaskId = await makeTask('reopened-start', { stepStatus: 'running' });
+
     const epochOf = async (id: string) =>
       (
         await db
@@ -428,7 +437,11 @@ async function main(): Promise<void> {
             waitingUserAnsweredQueuedTaskId,
             waitingPrAnsweredQueuedTaskId,
           ]),
-          starts: new Set([startQueuedTaskId, ...starts.map((st) => st.taskId)]),
+          starts: new Set([
+            startQueuedTaskId,
+            reopenedStartTaskId,
+            ...starts.map((st) => st.taskId),
+          ]),
         };
       },
     };
@@ -461,6 +474,15 @@ async function main(): Promise<void> {
     check(
       'a parked pending row whose poll chain is still ticking is left alone',
       (await epochOf(tickingParkTaskId)) === 3,
+    );
+    check(
+      'a running row no job drives and no run waits on is re-driven',
+      (await epochOf(reopenedTaskId)) === 4,
+    );
+    check('a running row with a live run is left alone', (await epochOf(reopenedRunTaskId)) === 3);
+    check(
+      'a running row the queue holds a START for is left alone',
+      (await epochOf(reopenedStartTaskId)) === 3,
     );
     check('a stale waiting_cli row is left alone', (await epochOf(waitingCliTaskId)) === 3);
     check(

@@ -641,6 +641,29 @@ describe('the tasks the sweep takes, by task status and current row', () => {
     });
   });
 
+  describe('a running task on a running row, re-opened by a Resume whose advance never reached the queue', () => {
+    const reopened = { status: 'running' };
+
+    it('re-drives it once the row has been idle longer than the cutoff', async () => {
+      expect(await advancedBy([seed('task', 'running', reopened)])).toEqual([
+        { taskId: 'task', epoch: 4 },
+      ]);
+    });
+
+    it('leaves a row written since the cutoff to the pass that wrote it', async () => {
+      const written = { ...reopened, updatedAt: new Date() };
+      expect(await advancedBy([seed('task', 'running', written)])).toEqual([]);
+    });
+
+    it('leaves it when the task queue still owes the task a job', async () => {
+      expect(await advancedBy([seed('task', 'running', reopened)], ['task'])).toEqual([]);
+    });
+
+    it('leaves it to a START the queue holds for the task, which runs the first step itself', async () => {
+      expect(await advancedBy([seed('task', 'running', reopened)], [], ['task'])).toEqual([]);
+    });
+  });
+
   it('still leaves a running task that moved since the cutoff to the pass that moved it', async () => {
     expect(await advancedBy([seed('task', 'running', answered, new Date())])).toEqual([]);
   });
