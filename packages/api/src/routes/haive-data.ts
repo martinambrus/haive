@@ -1,9 +1,13 @@
 import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { schema } from '@haive/database';
+import { haiveDataSaveRequestSchema } from '@haive/shared/haive-data';
+import { scrubErrorPaths } from '@haive/shared/logger';
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { readHaiveDataStatus } from '../lib/haive-data-status.js';
+import { requireJsonObject } from '../lib/json-object.js';
+import { saveHaiveData } from '../lib/plan-mirror.js';
 import { requireAuth } from '../middleware/auth.js';
 
 export const haiveDataRoutes = new Hono<AppEnv>();
@@ -39,4 +43,26 @@ async function requireOwnedRepo(c: {
 haiveDataRoutes.get('/:id/haive-data', async (c) => {
   const repo = await requireOwnedRepo(c);
   return c.json(await readHaiveDataStatus(getDb(), repo));
+});
+
+/** Save, or Save and push, the Haive data. Synchronous: it answers when the worker has, with the
+ *  result of every outcome, a refusal and a failure included. Whether the Save may go ahead is
+ *  decided by the worker's locked check alone, not here. */
+haiveDataRoutes.post('/:id/haive-data/save', async (c) => {
+  const repo = await requireOwnedRepo(c);
+  // Not caught: a body that is not JSON is answered 400 by `jsonBodyErrors`, where `{}` would be a
+  // Save nobody asked for (T456).
+  const body = haiveDataSaveRequestSchema.parse(requireJsonObject(await c.req.json()));
+  try {
+    return c.json(
+      await saveHaiveData({
+        repositoryId: repo.id,
+        userId: c.get('userId'),
+        push: body.push,
+        ...(body.commitMessage ? { commitMessage: body.commitMessage } : {}),
+      }),
+    );
+  } catch (err) {
+    throw new HttpError(409, scrubErrorPaths(err), 'haive_data_save_failed');
+  }
 });
