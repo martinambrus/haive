@@ -18,6 +18,7 @@ import {
   settingNameOfFile,
   type ProjectStateRecord,
 } from '@haive/shared/project-state';
+import { logger } from '@haive/shared/logger';
 import { gitRun } from '../repo/git-exec.js';
 import { unmergedPaths } from '../step-engine/git-merge.js';
 
@@ -44,12 +45,21 @@ async function readStages(worktreePath: string, path: string): Promise<Map<Stage
     BYTES,
   );
   const stages = new Map<Stage, Buffer>();
-  if (listing.code !== 0) return stages;
+  if (listing.code !== 0)
+    throw new Error(
+      `git ls-files -u failed in ${worktreePath}: ${(listing.stderr || listing.stdout).trim()}`,
+    );
   for (const entry of listing.stdout.split('\0')) {
     const m = /^\d+ ([0-9a-f]+) ([123])\t/.exec(entry);
     if (!m) continue;
     const blob = await gitRun(worktreePath, ['cat-file', 'blob', m[1]!], undefined, BYTES);
-    if (blob.code !== 0) return new Map();
+    if (blob.code !== 0) {
+      logger.warn(
+        { worktreePath, path, detail: (blob.stderr || blob.stdout).trim() },
+        'projection merge blob could not be read; leaving the path unmerged',
+      );
+      return new Map();
+    }
     stages.set(Number(m[2]) as Stage, Buffer.from(blob.stdout, 'latin1'));
   }
   return stages;

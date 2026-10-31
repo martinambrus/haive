@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   PROJECT_STATE_DIR,
   emptyProjectState,
@@ -13,6 +13,9 @@ import type { ProjectStateRecord } from '@haive/shared/project-state';
 import { killGit, type KilledGit } from '../../test/support/kill-git.js';
 import { conflictedPaths, ensurePlanMergeWorktree, mergeOriginInto } from './merge.js';
 import { resolveHaiveProjectionConflicts } from './projection-merge.js';
+
+import { failGit } from '../../test/support/fake-git.js';
+import { logger } from '@haive/shared/logger';
 
 const exec = promisify(execFile);
 const IDENT = {
@@ -28,6 +31,7 @@ const dirs: string[] = [];
 let shim: KilledGit | null = null;
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await shim?.restore();
   shim = null;
   for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
@@ -179,4 +183,31 @@ it('T397 a failed remaining-state listing cannot answer no conflicts', async () 
   await openConflict(wt);
   shim = await killGit(DIFF_U, { after: 1 });
   await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(/git diff.*failed/);
+});
+
+it('T397 fix6a a failed plan stage listing throws instead of returning no stages', async () => {
+  const wt = await divergedPair(...planSides());
+  await openConflict(wt);
+  shim = await failGit(['ls-files', '-u', '-z', '--', PLAN_JSON]);
+  await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(
+    /git ls-files.*failed.*simulated failure/,
+  );
+});
+it('T397 fix6a a failed blob warns and keeps the plan unmerged', async () => {
+  const wt = await divergedPair(...planSides());
+  await openConflict(wt);
+  const warning = vi.spyOn(logger, 'warn');
+  shim = await failGit(['cat-file', 'blob']);
+  const out = await resolveHaiveProjectionConflicts(wt);
+  expect(out.resolved).not.toContain(PLAN_JSON);
+  expect(warning).toHaveBeenCalledWith(
+    expect.objectContaining({
+      path: PLAN_JSON,
+      detail: expect.stringContaining('simulated failure'),
+    }),
+    expect.stringMatching(/blob.*could not be read/),
+  );
+  await shim.restore();
+  shim = null;
+  expect((await git(wt, ['ls-files', '-u', '--', PLAN_JSON])).trim()).not.toBe('');
 });
