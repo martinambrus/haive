@@ -43,20 +43,21 @@ const RECORD_PATHSPECS = [
 async function gitRaw(
   cwd: string,
   args: string[],
-): Promise<{ ok: boolean; stdout: string; code: number | null }> {
+): Promise<{ ok: boolean; stdout: Buffer; code: number | null }> {
   try {
     const { stdout } = await exec('git', hardenGitArgs(args), {
       cwd,
+      encoding: 'buffer',
       timeout: 5_000,
       maxBuffer: GIT_READ_MAX_BUFFER,
       env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(cwd) },
     });
-    return { ok: true, stdout: stdout.toString(), code: 0 };
+    return { ok: true, stdout, code: 0 };
   } catch (err) {
-    const e = err as { stdout?: string; code?: unknown };
+    const e = err as { stdout?: Buffer; code?: unknown };
     return {
       ok: false,
-      stdout: (e.stdout ?? '').toString(),
+      stdout: e.stdout ?? Buffer.alloc(0),
       code: typeof e.code === 'number' ? e.code : null,
     };
   }
@@ -70,7 +71,8 @@ async function hasUsableGit(repoPath: string): Promise<boolean> {
   if (entry === null) return false;
   if (entry.kind === 'symlink') throw new Error('.git is a symbolic link');
   const inside = await gitRaw(repoPath, ['rev-parse', '--is-inside-work-tree']);
-  if (!inside.ok || inside.stdout.trim() !== 'true') throw new Error('git does not accept .git');
+  if (!inside.ok || inside.stdout.toString().trim() !== 'true')
+    throw new Error('git does not accept .git');
   return true;
 }
 
@@ -80,7 +82,7 @@ async function gitOperationOpen(repoPath: string): Promise<boolean> {
   for (const entry of GIT_OPERATION_STATE_ENTRIES) {
     const located = await gitRaw(repoPath, ['rev-parse', '--git-path', entry]);
     if (!located.ok) throw new Error(`git rev-parse --git-path ${entry} failed`);
-    const where = located.stdout.trim();
+    const where = located.stdout.toString().trim();
     if (!where) continue;
     const rel = path.isAbsolute(where) ? path.relative(repoPath, where) : where;
     if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return true;
@@ -92,7 +94,7 @@ async function gitOperationOpen(repoPath: string): Promise<boolean> {
 async function currentBranch(repoPath: string): Promise<string | null> {
   const branch = await gitRaw(repoPath, ['branch', '--show-current']);
   if (!branch.ok) throw new Error('could not read the checkout branch');
-  return branch.stdout.trim() || null;
+  return branch.stdout.toString().trim() || null;
 }
 
 /** `detectOrigin` (worker repo/git-push.ts): exit 2 on the fetch read alone is "no origin", and
@@ -108,7 +110,7 @@ async function hasOrigin(repoPath: string): Promise<boolean> {
     ]);
     if (!push && read.code === 2) return false;
     if (!read.ok) throw new Error('could not read the origin');
-    for (const url of read.stdout.trim().split('\n')) {
+    for (const url of read.stdout.toString().trim().split('\n')) {
       if (!isAllowedGitRemoteUrl(url)) throw new Error('the origin address is not allowed');
     }
   }
@@ -128,6 +130,23 @@ function describeChange(xy: string): Pick<HaiveDataFile, 'change' | 'staged'> {
   return { change: 'modified', staged };
 }
 
+/** Split before decoding: invalid filename bytes would otherwise collapse distinct names onto
+ *  the same replacement character and Map key. Refuse the whole listing rather than invent names. */
+function listingEntries(output: Buffer): string[] | null {
+  const entries: string[] = [];
+  let start = 0;
+  while (start < output.length) {
+    const end = output.indexOf(0, start);
+    if (end === -1) return null;
+    const bytes = output.subarray(start, end);
+    const entry = bytes.toString('utf8');
+    if (!Buffer.from(entry, 'utf8').equals(bytes)) return null;
+    if (entry) entries.push(entry);
+    start = end + 1;
+  }
+  return entries;
+}
+
 /** One entry per path under the plan files and the state directory, from the index (`ls-files`)
  *  and the working copy (`status`), or null when git could not list them. */
 async function readFiles(repoPath: string): Promise<HaiveDataFile[] | null> {
@@ -145,11 +164,14 @@ async function readFiles(repoPath: string): Promise<HaiveDataFile[] | null> {
     ]),
   ]);
   if (!tracked.ok || !changed.ok) return null;
+  const trackedEntries = listingEntries(tracked.stdout);
+  const changedEntries = listingEntries(changed.stdout);
+  if (trackedEntries === null || changedEntries === null) return null;
   const files = new Map<string, HaiveDataFile>();
-  for (const rel of tracked.stdout.split('\0')) {
+  for (const rel of trackedEntries) {
     if (rel) files.set(rel, { path: rel, change: 'unchanged', staged: false });
   }
-  for (const entry of changed.stdout.split('\0')) {
+  for (const entry of changedEntries) {
     // `XY path`: a staged deletion whose file is back on disk is listed twice. Together they
     // describe a present, modified file with an index change, whichever git prints first.
     if (!entry) continue;

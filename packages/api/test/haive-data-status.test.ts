@@ -336,6 +336,7 @@ describe('the state files', () => {
       '.haive-data/state/trail.json ',
       '.haive-data/state/two\nlines.json',
       '.haive-data/state/été.json',
+      '.haive-data/state/replacement-�.json',
       '.haive-data/state/"quoted".json',
     ];
     for (const rel of names) await put(rel);
@@ -343,6 +344,25 @@ describe('the state files', () => {
     expect(files.filter((file) => file.change === 'untracked').map((file) => file.path)).toEqual(
       [...names].sort(),
     );
+  });
+
+  it.each([false, true])('refuses lossy filename decoding (tracked: %s)', async (tracked) => {
+    for (const byte of [0x80, 0x81]) {
+      const name = Buffer.concat([
+        Buffer.from(`${root}/.haive-data/state/invalid-`),
+        Buffer.from([byte]),
+        Buffer.from('.json'),
+      ]);
+      await writeFile(name, '{}\n');
+    }
+    if (tracked) {
+      git('add', '-f', '.haive-data/state');
+      git('commit', '-q', '-m', 'byte names');
+    }
+    const body = await status();
+    expect(body.files).toBeNull();
+    expect(body.checkout).toBe('ready');
+    expect(body.holds).toEqual(CLEAN_HOLDS);
   });
 
   it('keeps a modified tracked name that starts or ends with a space', async () => {
