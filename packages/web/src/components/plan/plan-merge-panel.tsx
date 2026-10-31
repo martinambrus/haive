@@ -58,7 +58,11 @@ export function PlanMergePanel({
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ taskId: string; text: string } | null>(null);
+  const [notice, setNotice] = useState<{
+    taskId: string;
+    text: string;
+    retry?: boolean;
+  } | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   // Refs, not poll dependencies: the page passes both inline and the poll calls them when it
   // settles, so depending on them would re-poll a parked merge on every page render.
@@ -109,7 +113,21 @@ export function PlanMergePanel({
         const settled = !taskDead && ((!discarding && isAwaitingFormInput(step)) || ended);
         if (settled || (taskDead && !polledDead)) onChangedRef.current();
         if (settled) {
-          if (ended) onSettledRef.current();
+          if (ended) {
+            if (!discarding) {
+              setNotice({
+                taskId,
+                text:
+                  res.task.status === 'completed'
+                    ? 'The remote was merged into your checkout and pushed.'
+                    : res.task.status === 'cancelled'
+                      ? 'This merge was cancelled elsewhere.'
+                      : 'The merge failed. Its scratch worktree is kept so Retry on the task can resume it.',
+                retry: res.task.status === 'failed',
+              });
+            }
+            onSettledRef.current();
+          }
           return;
         }
         polledDead = taskDead;
@@ -185,6 +203,15 @@ export function PlanMergePanel({
         className="rounded-md border border-neutral-800 px-3 py-2 text-xs text-neutral-400"
       >
         <InlineMarkdown body={notice.text} />
+        {notice.retry && (
+          <Link
+            href={`/tasks/${notice.taskId}`}
+            onClick={() => rememberTaskOrigin(`/tasks/${notice.taskId}`, planOrigin(repositoryId))}
+            className="text-indigo-300 underline"
+          >
+            Open the task to retry
+          </Link>
+        )}
       </div>
     ) : null;
   if (!merge) return outcome;

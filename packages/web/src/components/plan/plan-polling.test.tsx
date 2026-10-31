@@ -5,6 +5,8 @@ import { PlanChat } from './plan-chat';
 import { PlanMergePanel } from './plan-merge-panel';
 import { FormError } from '@/components/ui';
 import { InlineMarkdown } from '@/components/markdown/inline-markdown';
+import Link from 'next/link';
+import { planOrigin, taskOrigin } from '@/lib/task-origin';
 
 // Hooks on a plain slot list, as in toast-stack.test.tsx: this package has no DOM environment.
 const rt = vi.hoisted(() => {
@@ -428,6 +430,62 @@ describe('PlanMergePanel with a merge task', () => {
     'The merge is no longer open: it completed, was cancelled or failed. Nothing was discarded.';
   const hasNotice = () =>
     shown().some((el) => el.props.message === NOTICE || el.props.body === NOTICE);
+
+  it.each([
+    ['completed', 'The remote was merged into your checkout and pushed.'],
+    ['cancelled', 'This merge was cancelled elsewhere.'],
+    [
+      'failed',
+      'The merge failed. Its scratch worktree is kept so Retry on the task can resume it.',
+    ],
+  ])('keeps the polled %s outcome after the page removes the merge', async (status, text) => {
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID));
+    onSettled.mockImplementationOnce(() => rerender(null));
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status }));
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const outcome = shown().find((el) => el.props.role === 'status');
+    expect(outcome).toBeDefined();
+    expect(shownIn(outcome).find((el) => el.type === InlineMarkdown)?.props.body).toBe(text);
+    expect(labelled('Discard')).toBeUndefined();
+    if (status === 'failed') {
+      const link = shownIn(outcome).find((el) => el.type === Link);
+      expect(link?.props.href).toBe('/tasks/task-1');
+      (link?.props.onClick as () => void)();
+      expect(taskOrigin('/tasks/task-1')).toEqual(planOrigin('repo-1'));
+    } else {
+      expect(shownIn(outcome).find((el) => el.type === Link)).toBeUndefined();
+    }
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    rerender({ ...merge, taskId: 'task-2' });
+    await settle();
+    rerender(null);
+    expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+  });
+
+  it('keeps a locally requested discard quiet when the poll observes cancellation', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: true, taskId: 'task-1' });
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    await press('Discard');
+    onSettled.mockImplementationOnce(() => rerender(null));
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status: 'cancelled' }));
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(onSettled).toHaveBeenCalledTimes(2);
+    expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+  });
+
+  it('does not infer an outcome from a working task’s status message', async () => {
+    const response = taskResponse(PLAN_MERGE_STEP_ID);
+    response.steps[0]!.statusMessage = 'The merge failed, completed or was cancelled';
+    await open(response);
+    expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+    expect(onSettled).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+  });
 
   it('keeps the already-ended notice after the page refresh removes the merge', async () => {
     vi.stubGlobal('window', { confirm: vi.fn(() => true) });
