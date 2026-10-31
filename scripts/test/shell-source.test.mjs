@@ -114,8 +114,35 @@ describe('mutation-sensitive lexical branches (item 5)', () => {
     rejects("cat <<-'EOF'\n\tset +e\n\tEOF\ncmd || true"));
   for (const prefix of ['then', 'else']) {
     it(`checks errexit after ${prefix}`, () =>
-      rejects(`if check; then echo ready; ${prefix} set +e; fi`, 'set +e'));
+      rejects(
+        prefix === 'then'
+          ? 'if check; then set +e; fi'
+          : 'if check; then echo ready; else set +e; fi',
+        'set +e',
+      ));
   }
   it('does not confuse an option prefix with set +e', () =>
     assert.equal(swallowedFailure('set +e_not_an_option'), null));
+});
+
+describe('remaining failure masks (item 6)', () => {
+  for (const [script, matched] of [
+    ['cmd || "true"', '|| true'],
+    ["cmd || 'true'", '|| true'],
+    ['cmd || /bin/true', '|| /bin/true'],
+    ['cmd || (exit 0)', '|| (exit 0)'],
+    ['cmd; :', ':'],
+    ['cmd; :\necho after', ':'],
+    ['set +eu', 'set +eu'],
+    ['set +o errexit', 'set +o errexit'],
+    ['cmd && set +e', 'set +e'],
+    ['{ set +e; cmd; }', 'set +e'],
+    ['while check; do set +e; done', 'set +e'],
+    ['case "$v" in a) set +e ;; esac', 'set +e'],
+    ['case "$v" in\na) set +e ;;\nesac', 'set +e'],
+    ['cmd && true\necho after', '&& true'],
+    ['cmd && true; echo after', '&& true'],
+  ]) {
+    it(`rejects ${JSON.stringify(script)}`, () => rejects(script, matched));
+  }
 });

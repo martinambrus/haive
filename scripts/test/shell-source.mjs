@@ -85,7 +85,9 @@ export function shellSource(source, { maskQuotes = false, step = 'shell script' 
         const end = quoted(quoteStart, source[quoteStart], ansi);
         if (char === '`')
           substitutions.push(shellSource(source.slice(i + 1, end - 1), { maskQuotes, step }));
-        result += maskQuotes ? '_'.repeat(end - i) : source.slice(i, end);
+        const literal = source.slice(quoteStart + 1, end - 1);
+        const commandName = literal === 'true' && /(?:\|\||&&)\s*$/.test(result);
+        result += maskQuotes ? (commandName ? literal : '_'.repeat(end - i)) : source.slice(i, end);
         i = end;
       } else if (source.startsWith('$((', i) || source.startsWith('((', i)) {
         const end = arithmetic(i + (char === '$' ? 3 : 2));
@@ -171,22 +173,31 @@ export function shellSource(source, { maskQuotes = false, step = 'shell script' 
 
 export function swallowedFailure(source, options = {}) {
   const script = shellSource(source, { ...options, maskQuotes: true });
-  const fallback = /\|\|\s*(?:true(?=[\s;|&)}]|$)|:(?=[\s;|&)}]|$)|exit\s+0(?=[\s;|&)}]|$))/.exec(
-    script,
-  );
+  const fallback =
+    /\|\|\s*(?:(?:\/(?:usr\/)?bin\/)?true(?=[\s;|&)}]|$)|:(?=[\s;|&)}]|$)|exit\s+0(?=[\s;|&)}]|$)|\(\s*exit\s+0\s*\)(?=[\s;|&)}]|$))/.exec(
+      script,
+    );
   if (fallback) return fallback[0].replace(/\s+/g, ' ').trim();
+  const colon = /;\s*:(?=[ \t]*(?:\n|$))/.exec(script);
+  if (colon) return ':';
+  const continued = /&&\s*true(?=[\s;|&)}]|$)(?=[ \t]*(?:;|\n)[\s\S]*\S)/.exec(script);
+  if (continued) return continued[0].replace(/\s+/g, ' ').trim();
   let branches = 0;
   let cases = 0;
-  for (let command of script.split(/[;\n]/)) {
-    command = command.trim();
+  for (let command of script.replace(/&&\s*true\s*$/, '&& _').split(/&&|\|\||[;\n]/)) {
+    command = command.trim().replace(/^[({]\s*/, '');
     if (/^case\b/.test(command)) cases++;
     if (/^esac\b/.test(command)) cases = Math.max(0, cases - 1);
     if (/^fi\b/.test(command)) branches = Math.max(0, branches - 1);
     if (/^if\b/.test(command)) branches++;
     // A true branch is a conventional empty conditional body. A case pattern `true)`
     // and an argument containing true are not standalone success commands either.
-    command = command.replace(/^(?:then|else)\s*/, '');
-    const disabled = /^set\s+\+e(?=\s|$)/.exec(command);
+    command = command.replace(/^(?:then|else|do)\b\s*/, '');
+    if (cases) command = command.replace(/^(?:case\b.*?\bin\s+)?[^)]*\)\s*/, '');
+    const disabled =
+      /^set\s+(?:\+(?=[abefhkmnptuvxBCEHPT]*e)[abefhkmnptuvxBCEHPT]+(?=\s|$)|\+o\s+errexit(?=\s|$))/.exec(
+        command,
+      );
     if (disabled) return disabled[0];
     if (branches === 0 && !(cases && /^true\)/.test(command)) && /^true(?=\s|[)}]|$)/.test(command))
       return 'true';
