@@ -125,10 +125,15 @@ async function requireOwnedRepo(c: {
 
 /** Map the shared applier's typed refusal onto HTTP. `conflict` is a 409 the UI
  *  must SHOW: a silent refetch would discard the loser's edit without telling
- *  anyone it happened. */
+ *  anyone it happened. A repository deleted meanwhile is a 404 like a missing node. */
 function planError(err: unknown): never {
   if (err instanceof PlanPatchError) {
-    const status = err.kind === 'conflict' ? 409 : err.kind === 'not_found' ? 404 : 400;
+    const status =
+      err.kind === 'conflict'
+        ? 409
+        : err.kind === 'not_found' || err.kind === 'repository_gone'
+          ? 404
+          : 400;
     throw new HttpError(status, err.message, `plan_${err.kind}`);
   }
   throw err;
