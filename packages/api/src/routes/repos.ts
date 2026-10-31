@@ -2689,6 +2689,13 @@ export async function resetOnboardingArtifacts(
  *  a second copy of this would be a second place for the storage/local
  *  fallback to drift. */
 const execGit = promisify(execFile);
+// A relink's git child still running after GIT_DEADLINE_MS gets SIGTERM, and SIGKILL only if it is
+// still running GIT_KILL_GRACE_MS later. SIGTERM lets git remove the lock file it holds (MEASURED on
+// a config write held inside its lock window: gone 1-3 ms after the signal), while SIGKILL leaves
+// `.git/config.lock` behind and fails the restore and every later relink. So SIGKILL is for a child
+// that ignores SIGTERM, after a grace that is wide for git's cleanup and short for a waiting request.
+const GIT_DEADLINE_MS = 10_000;
+const GIT_KILL_GRACE_MS = 2_000;
 
 /**
  * Bind a repository that has no origin to one.
@@ -2749,14 +2756,18 @@ repoRoutes.post('/:id/remote', async (c) => {
   const git = async (
     args: string[],
   ): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> => {
+    let deadline: NodeJS.Timeout | undefined;
+    let grace: NodeJS.Timeout | undefined;
     try {
-      const { stdout, stderr } = await execGit('git', hardenGitArgs(args), {
+      const run = execGit('git', hardenGitArgs(args), {
         cwd: root,
         env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(root) },
-        timeout: 10_000,
-        // A child that ignores the default SIGTERM would hold the request and the restore.
-        killSignal: 'SIGKILL',
       });
+      deadline = setTimeout(() => {
+        run.child.kill('SIGTERM');
+        grace = setTimeout(() => run.child.kill('SIGKILL'), GIT_KILL_GRACE_MS);
+      }, GIT_DEADLINE_MS);
+      const { stdout, stderr } = await run;
       return {
         ok: true,
         code: 0,
@@ -2771,6 +2782,9 @@ repoRoutes.post('/:id/remote', async (c) => {
         stdout: (e.stdout ?? '').toString().trim(),
         stderr: (e.stderr || e.message || '').toString().trim(),
       };
+    } finally {
+      clearTimeout(deadline);
+      clearTimeout(grace);
     }
   };
 
