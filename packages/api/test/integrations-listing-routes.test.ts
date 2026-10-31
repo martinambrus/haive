@@ -36,6 +36,7 @@ function setup() {
     integrationUserSettings: schema.integrationUserSettings,
     integrationProviderConfigs: schema.integrationProviderConfigs,
     integrationCategoryPreferences: schema.integrationCategoryPreferences,
+    integrationConnections: schema.integrationConnections,
   });
   for (const { id, role } of [USER, OTHER, ADMIN]) {
     fake.insert(schema.users, { id, role, status: 'active', tokenVersion: 0 });
@@ -99,6 +100,39 @@ describe('integration listing routes', () => {
 
       expect((await get('/integrations/defaults', USER)).status).toBe(200);
       expect((await get('/integrations/defaults')).status).toBe(401);
+    });
+  });
+
+  describe('GET /integrations/connections', () => {
+    it('carries when the provider last refused a refresh, and null while it has not', async () => {
+      const { fake } = setup();
+      const connection = (accountLabel: string, over: Record<string, unknown> = {}) =>
+        fake.insert(schema.integrationConnections, {
+          providerId: 'github',
+          scope: 'user',
+          ownerUserId: USER.id,
+          accountLabel,
+          authMethod: 'oauth2',
+          grantedScopes: [],
+          status: 'connected',
+          ...over,
+        });
+      const refusal = "The provider refused this connection's OAuth client (invalid_client).";
+      connection('healthy');
+      connection('refused', {
+        lastError: refusal,
+        refreshRefusedAt: new Date('2026-03-01T10:00:00Z'),
+      });
+
+      const reply = await get('/integrations/connections', USER);
+
+      expect(reply.status).toBe(200);
+      expect(
+        reply.body.connections.map((c: any) => [c.accountLabel, c.lastError, c.refreshRefusedAt]),
+      ).toEqual([
+        ['healthy', null, null],
+        ['refused', refusal, '2026-03-01T10:00:00.000Z'],
+      ]);
     });
   });
 

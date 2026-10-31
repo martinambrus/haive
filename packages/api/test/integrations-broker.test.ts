@@ -1768,6 +1768,7 @@ describe.skipIf(!url || !redisUrl)('integration broker routes on Postgres and Re
         'id',
         'lastError',
         'providerId',
+        'refreshRefusedAt',
         'repoCredentialId',
         'status',
         'updatedAt',

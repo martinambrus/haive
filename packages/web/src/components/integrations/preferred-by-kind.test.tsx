@@ -95,6 +95,7 @@ const connection = (
   grantedScopes: [],
   status: 'connected',
   lastError: null,
+  refreshRefusedAt: null,
   repoCredentialId: null,
   expiresAt: null,
   createdAt: '2026-10-14T10:00:00.000Z',

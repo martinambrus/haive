@@ -214,6 +214,7 @@ async function refreshLocked(
           .update(schema.integrationConnections)
           .set({
             lastError: `The provider refused this connection's OAuth client (${err.code}); its client secret may be missing or wrong.`,
+            refreshRefusedAt: new Date(now()),
             updatedAt: new Date(now()),
           })
           .where(eq(schema.integrationConnections.id, connectionId));
@@ -236,6 +237,8 @@ async function refreshLocked(
         ),
         expiresAt: fresh.expiresAt,
         grantedScopes: fresh.scopes ?? row.grantedScopes,
+        lastError: null,
+        refreshRefusedAt: null,
         updatedAt: new Date(now()),
       })
       .where(eq(schema.integrationConnections.id, connectionId));

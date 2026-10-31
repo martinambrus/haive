@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { eq, and, desc } from 'drizzle-orm';
-import { schema } from '@haive/database';
+import { eq, and, desc, isNotNull } from 'drizzle-orm';
+import { isLockNotAvailable, schema, type DbTx } from '@haive/database';
 import {
   encrypt,
   generateDek,
@@ -11,7 +11,8 @@ import {
   forgeProviderSchema,
   secretsService,
 } from '@haive/shared';
-import { apiBaseFits } from '@haive/shared/forge';
+import { apiBaseFits, credentialForgeProvider } from '@haive/shared/forge';
+import { getIntegrationProvider } from '@haive/shared/integrations';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -107,6 +108,40 @@ const updateCredentialSchema = z
   })
   .refine(identityIsWhole, { message: BOTH_OR_NEITHER, path: ['gitEmail'] });
 
+/** The connection that points at a credential of this user, its row locked. A reconnect locks its
+ *  connection before its credential, so the writers here take the two in that order as well. */
+const lockConnectionOf = (tx: DbTx, credentialId: string, userId: string, noWait = false) =>
+  tx
+    .select({
+      id: schema.integrationConnections.id,
+      providerId: schema.integrationConnections.providerId,
+      authMethod: schema.integrationConnections.authMethod,
+      accountLabel: schema.integrationConnections.accountLabel,
+    })
+    .from(schema.integrationConnections)
+    .where(
+      and(
+        eq(schema.integrationConnections.repoCredentialId, credentialId),
+        eq(schema.integrationConnections.ownerUserId, userId),
+      ),
+    )
+    .for('update', noWait ? { noWait: true } : {});
+
+/** The connection a link committed while the request waited for the credential row, which it holds
+ *  by now. A reconnect holds its connection and queues for the credential, so waiting for the row
+ *  here would be the reverse order and deadlock with it: a row someone holds answers 503 instead,
+ *  and the request can be sent again. */
+const lockLateConnectionOf = async (tx: DbTx, credentialId: string, userId: string) => {
+  try {
+    return (await lockConnectionOf(tx, credentialId, userId, true))[0];
+  } catch (err) {
+    if (isLockNotAvailable(err)) {
+      throw new HttpError(503, "This Git credential's connection is being changed; try again");
+    }
+    throw err;
+  }
+};
+
 export const repoCredentialsRoutes = new Hono<AppEnv>();
 repoCredentialsRoutes.use('*', requireAuth);
 
@@ -128,7 +163,39 @@ repoCredentialsRoutes.get('/', async (c) => {
       updatedAt: true,
     },
   });
-  return c.json({ credentials: rows });
+  const connections = await db
+    .select({
+      repoCredentialId: schema.integrationConnections.repoCredentialId,
+      id: schema.integrationConnections.id,
+      providerId: schema.integrationConnections.providerId,
+      accountLabel: schema.integrationConnections.accountLabel,
+    })
+    .from(schema.integrationConnections)
+    .where(
+      and(
+        eq(schema.integrationConnections.scope, 'user'),
+        eq(schema.integrationConnections.ownerUserId, userId),
+        isNotNull(schema.integrationConnections.repoCredentialId),
+      ),
+    );
+  const byCredential = new Map(connections.map((row) => [row.repoCredentialId, row]));
+  return c.json({
+    credentials: rows.map((row) => {
+      const connection = byCredential.get(row.id);
+      return {
+        ...row,
+        connection: connection
+          ? {
+              id: connection.id,
+              providerId: connection.providerId,
+              providerName:
+                getIntegrationProvider(connection.providerId)?.displayName ?? connection.providerId,
+              accountLabel: connection.accountLabel,
+            }
+          : null,
+      };
+    }),
+  });
 });
 
 repoCredentialsRoutes.post('/', async (c) => {
@@ -199,6 +266,7 @@ repoCredentialsRoutes.put('/:id', async (c) => {
     gitEmail?: string | null;
     provider?: string | null;
     apiBaseUrl?: string | null;
+    signInAccountId?: null;
     updatedAt: Date;
   } = { label: body.label, host: body.host, updatedAt: new Date() };
   // Absent = keep; '' = auto-detect (null); a value = pin. Same keep-on-omit rule as
@@ -236,9 +304,12 @@ repoCredentialsRoutes.put('/:id', async (c) => {
 
   // One lock from read to write, so an overlapping edit cannot change the row the check judged.
   const updated = await db.transaction(async (tx) => {
+    let [connection] = await lockConnectionOf(tx, id, userId);
     const [existing] = await tx
       .select({
         encryptedDek: schema.repoCredentials.encryptedDek,
+        label: schema.repoCredentials.label,
+        host: schema.repoCredentials.host,
         provider: schema.repoCredentials.provider,
         apiBaseUrl: schema.repoCredentials.apiBaseUrl,
       })
@@ -252,10 +323,34 @@ repoCredentialsRoutes.put('/:id', async (c) => {
       apiBaseUrl: body.apiBaseUrl ?? existing.apiBaseUrl,
     });
 
+    // A connection a link committed while this request waited for the credential.
+    connection ??= await lockLateConnectionOf(tx, id, userId);
+    if (connection) {
+      const nextProvider = body.provider === undefined ? existing.provider : body.provider || null;
+      const existingForge = credentialForgeProvider(existing.provider, existing.host);
+      const nextForge = credentialForgeProvider(nextProvider, body.host);
+      if (
+        existing.host.toLowerCase() !== body.host ||
+        (nextForge !== existingForge && nextForge !== connection.providerId)
+      ) {
+        const providerName =
+          getIntegrationProvider(connection.providerId)?.displayName ?? connection.providerId;
+        throw new HttpError(
+          409,
+          `This Git credential is the connection to ${connection.accountLabel} on ${providerName}, so its host and forge provider cannot be changed; disconnect the connection first`,
+          'credential-backs-connection',
+        );
+      }
+    }
+
     if (masterKek !== null) {
       const dekHex = decryptDek(existing.encryptedDek, masterKek);
       if (newUsername) update.usernameEncrypted = encrypt(newUsername, dekHex);
-      if (newSecret !== null) update.secretEncrypted = encrypt(newSecret, dekHex);
+      if (newSecret !== null) {
+        update.secretEncrypted = encrypt(newSecret, dekHex);
+        // A secret the user typed is theirs: a later sign-in must not take the credential back and replace it.
+        update.signInAccountId = null;
+      }
     }
 
     const rows = await tx
@@ -273,6 +368,12 @@ repoCredentialsRoutes.put('/:id', async (c) => {
         createdAt: schema.repoCredentials.createdAt,
         updatedAt: schema.repoCredentials.updatedAt,
       });
+    if (connection?.authMethod === 'token' && body.label !== existing.label) {
+      await tx
+        .update(schema.integrationConnections)
+        .set({ accountLabel: body.label, updatedAt: new Date() })
+        .where(eq(schema.integrationConnections.id, connection.id));
+    }
     await insertAuditEvent(tx, audit);
     return rows;
   });
@@ -284,19 +385,32 @@ repoCredentialsRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
-  const audit: AuditEvent = {
-    actorUserId: userId,
-    action: 'credential.delete',
-    targetType: 'repo_credential',
-    targetId: id,
-  };
-  await db.transaction(async (tx) => {
-    const result = await tx
-      .delete(schema.repoCredentials)
+  const audit = await db.transaction(async (tx) => {
+    // Locked, not just read: a disconnect running now removes the connection itself, and the audit
+    // row names only what this delete took.
+    let [connection] = await lockConnectionOf(tx, id, userId);
+    const [locked] = await tx
+      .select({ id: schema.repoCredentials.id })
+      .from(schema.repoCredentials)
       .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
-      .returning({ id: schema.repoCredentials.id });
-    if (result.length === 0) throw new HttpError(404, 'Credential not found');
-    await insertAuditEvent(tx, audit);
+      .for('update');
+    if (!locked) throw new HttpError(404, 'Credential not found');
+    // A connection a link committed while this request waited for the credential.
+    connection ??= await lockLateConnectionOf(tx, id, userId);
+    await tx
+      .delete(schema.repoCredentials)
+      .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)));
+    const event: AuditEvent = {
+      actorUserId: userId,
+      action: 'credential.delete',
+      targetType: 'repo_credential',
+      targetId: id,
+      ...(connection && {
+        metadata: { connectionId: connection.id, providerId: connection.providerId },
+      }),
+    };
+    await insertAuditEvent(tx, event);
+    return event;
   });
   logAuditEvent(audit);
   return c.json({ ok: true });

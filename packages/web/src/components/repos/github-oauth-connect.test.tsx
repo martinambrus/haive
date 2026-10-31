@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { GithubOauthConnect } from './github-oauth-connect';
+import { GithubOauthConnect, findGithubOauthCredential } from './github-oauth-connect';
 import { buttons, createRenderer, fire, textOf } from '../../../test/render-tree';
 
 vi.mock('react', async (importOriginal) => ({
@@ -226,4 +226,17 @@ describe('GitHub device sign-in attempts', () => {
       expect(t.onError.mock.calls.filter(([message]) => message !== null)).toEqual([]);
     },
   );
+});
+
+describe('findGithubOauthCredential', () => {
+  const stored = (host: string) => ({ id: 'credential-2', label: 'GitHub OAuth (octo)', host });
+
+  it('finds the sign-in credential whatever case its host was stored in', () => {
+    const mixedCase = stored('GitHub.com');
+    expect(findGithubOauthCredential([stored('gitlab.com'), mixedCase])).toBe(mixedCase);
+  });
+
+  it('does not take another host that merely starts with github.com', () => {
+    expect(findGithubOauthCredential([stored('github.com.evil.example')])).toBeUndefined();
+  });
 });
