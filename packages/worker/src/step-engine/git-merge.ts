@@ -59,14 +59,18 @@ function nulPaths(out: string): string[] {
 
 /** The paths still unmerged in `dir`, or null when git could not list them. Read with `-z`: without
  *  it git quotes a name holding a quote or a non-ASCII byte, and the quoted form names no file. */
-export async function unmergedPaths(dir: string): Promise<string[] | null> {
+export function unmergedPaths(dir: string, required: true): Promise<string[]>;
+export function unmergedPaths(dir: string, required?: false): Promise<string[] | null>;
+export async function unmergedPaths(dir: string, required = false): Promise<string[] | null> {
   const res = await gitRun(
     dir,
     ['diff', '--name-only', '--diff-filter=U', '-z'],
     undefined,
     LISTING_BUFFER,
   );
-  return res.code === 0 ? nulPaths(res.stdout) : null;
+  if (res.code === 0) return nulPaths(res.stdout);
+  if (required) throw new Error(`git diff --diff-filter=U failed in ${dir}: ${gitDetail(res)}`);
+  return null;
 }
 
 export async function revParse(dir: string, spec: string): Promise<string | null> {

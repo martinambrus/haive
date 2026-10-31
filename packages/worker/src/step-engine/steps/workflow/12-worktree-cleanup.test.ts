@@ -4968,3 +4968,29 @@ it('T397 a failed pre-push count fails without pushing or opening a sync round',
     await rm(bare, { recursive: true, force: true, maxRetries: 5 });
   }
 });
+it('T397 a failed conflict listing never dispatches a fixer with no paths', async () => {
+  const { parent, wt } = await setupWorktree();
+  try {
+    // Make the feature collide with the parent, then fail the listing after git opens the merge.
+    await writeFile(path.join(wt, 'base.txt'), 'feature conflict\n');
+    await git(wt, ['commit', '-am', 'feature conflict']);
+    await writeFile(path.join(parent, 'base.txt'), 'parent conflict\n');
+    await git(parent, ['commit', '-am', 'parent conflict']);
+    fetchProbe.intercept = (argv) =>
+      argv[0] === 'diff' && argv.includes('--diff-filter=U')
+        ? { code: 128, stdout: '', stderr: 'fatal: unreadable index' }
+        : null;
+    const h = makeDb();
+    await expect(
+      resolveMergePhase(
+        h.db as never,
+        step,
+        mkCurrent(det(wt), { action: 'merge_remove' }),
+        mkCtx(parent, h.db),
+        mkParams(h.db),
+      ),
+    ).rejects.toThrow(/git diff.*failed/);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});

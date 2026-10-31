@@ -247,9 +247,9 @@ async function readStageNumbers(worktreePath: string, path: string): Promise<Set
   return stages;
 }
 
-async function unmergedInState(worktreePath: string): Promise<string[] | null> {
-  const all = await unmergedPaths(worktreePath);
-  return all === null ? null : all.filter((p) => p.startsWith(STATE_PREFIX));
+async function unmergedInState(worktreePath: string): Promise<string[]> {
+  const all = await unmergedPaths(worktreePath, true);
+  return all.filter((p) => p.startsWith(STATE_PREFIX));
 }
 
 async function indexedInState(worktreePath: string): Promise<string[]> {
@@ -326,7 +326,7 @@ export async function resolveHaiveProjectionConflicts(
   worktreePath: string,
 ): Promise<ProjectionResolution> {
   const out: ProjectionResolution = { resolved: [], warnings: [] };
-  const conflicted = new Set((await unmergedPaths(worktreePath)) ?? []);
+  const conflicted = new Set(await unmergedPaths(worktreePath, true));
   const jsonPath = HAIVE_DATA_FILES.plan;
   const mdPath = HAIVE_DATA_FILES.planMarkdown;
   let plan: PlanMirrorPayload | null = null;
@@ -346,7 +346,7 @@ export async function resolveHaiveProjectionConflicts(
     } catch (err) {
       why = err instanceof Error ? err.message : String(err);
     }
-    for (const left of (await unmergedInState(worktreePath)) ?? []) {
+    for (const left of await unmergedInState(worktreePath)) {
       why ??= 'the record was left unmerged';
       if (!(await takeIncoming(worktreePath, left))) {
         out.warnings.push(`${left}: could not be resolved`);
@@ -356,7 +356,7 @@ export async function resolveHaiveProjectionConflicts(
       out.warnings.push(`${PROJECT_STATE_DIR}: ${why}; took the incoming side`);
     }
     const left = await unmergedInState(worktreePath);
-    if (left !== null && left.length === 0) out.resolved.push(...inState);
+    if (left.length === 0) out.resolved.push(...inState);
   }
 
   if (conflicted.has(jsonPath)) {

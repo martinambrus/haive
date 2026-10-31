@@ -160,11 +160,23 @@ describe('resolveHaiveProjectionConflicts on state reads that gave no answer', (
     expect(warning).toMatch(/took the incoming side/);
   });
 
-  it('does not claim the state files merged when the final listing failed', async () => {
+  it('fails when the final state conflict listing could not be read', async () => {
     const wt = await divergedPair(...stateSides());
     await openConflict(wt);
     shim = await killGit(DIFF_U, { after: 2 });
-    const out = await resolveHaiveProjectionConflicts(wt);
-    expect(out.resolved.filter((p) => p.startsWith(STATE_PREFIX))).toEqual([]);
+    await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(/git diff.*failed/);
   });
+});
+
+it('T397 a failed initial conflict listing cannot answer no conflicts', async () => {
+  const wt = await divergedPair(...planSides());
+  await openConflict(wt);
+  shim = await killGit(DIFF_U);
+  await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(/git diff.*failed/);
+});
+it('T397 a failed remaining-state listing cannot answer no conflicts', async () => {
+  const wt = await divergedPair(...stateSides());
+  await openConflict(wt);
+  shim = await killGit(DIFF_U, { after: 1 });
+  await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(/git diff.*failed/);
 });

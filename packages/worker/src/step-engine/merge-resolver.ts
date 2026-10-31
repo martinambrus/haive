@@ -824,9 +824,9 @@ async function settleOwnFiles(
 ): Promise<{ merged: boolean; warnings: string[] }> {
   const { resolved, warnings } = await resolveHaiveProjectionConflicts(dir);
   if (resolved.length === 0) return { merged: false, warnings };
-  const left = await unmergedPaths(dir);
+  const left = await unmergedPaths(dir, true);
   return {
-    merged: left?.length === 0 && (await completeMergeHostSide(dir, env, feature)),
+    merged: left.length === 0 && (await completeMergeHostSide(dir, env, feature)),
     warnings,
   };
 }
@@ -849,7 +849,7 @@ async function noteOwnFileFallbacks(
 
 /** Unmerged paths in a mid-merge worktree (for the fix prompt). */
 async function conflictFiles(mergeDir: string): Promise<string[]> {
-  return (await unmergedPaths(mergeDir)) ?? [];
+  return unmergedPaths(mergeDir, true);
 }
 
 /** Outcome of dispatching the conflict-resolution agent. `already_live` means a
