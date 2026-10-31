@@ -168,7 +168,8 @@ function unusable(result: AgentMiningResult, finalAttempt: boolean, reason: stri
 }
 
 /** Folds a planner reply, turning a refused patch into a re-roll. A version conflict is not one:
- *  a person edited the plan meanwhile, and a Retry sends the planner the plan as it is now. */
+ *  a person edited the plan meanwhile, and a Retry sends the planner the plan as it is now. Nor is
+ *  a repository deleted meanwhile: no reply can land in it, so the step fails at once. */
 async function foldPatch(
   result: AgentMiningResult,
   finalAttempt: boolean,
@@ -182,6 +183,9 @@ async function foldPatch(
       throw new Error(
         'The plan was edited while the planner was working on it. Retry this step to fold the answers into the plan as it is now.',
       );
+    }
+    if (err.kind === 'repository_gone') {
+      throw new Error('The repository was deleted while the planner was working on it.');
     }
     unusable(result, finalAttempt, `the plan patch was refused: ${err.message}`);
   }

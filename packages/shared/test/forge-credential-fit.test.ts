@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { credentialApiHost, credentialUsableForPr, hostFromRemote } from '../src/forge/index.js';
+import {
+  connectionCredentialFits,
+  credentialApiHost,
+  credentialUsableForPr,
+  hostFromRemote,
+} from '../src/forge/index.js';
 
 const PROVIDERS = [
   null,
@@ -216,6 +221,84 @@ describe('credentialUsableForPr: a token goes only to the host it belongs to', (
     'still takes a self-hosted gitea credential on git.corp:3000 for %s',
     (remote) => {
       expect(fits('gitea', 'git.corp:3000', remote)).toBe(true);
+    },
+  );
+});
+
+describe('connectionCredentialFits', () => {
+  const SELF_REMOTE = 'https://git.example.com/acme/app.git';
+  const credentialFits = (
+    providerId: string,
+    provider: string | null,
+    host: string,
+    remote: string | null,
+  ) => connectionCredentialFits(providerId, { provider, host }, remote);
+
+  it.each([
+    ['github', 'github', 'github.com', 'https://github.com/acme/app.git'],
+    ['github', null, 'github.com', 'git@github.com:acme/app.git'],
+    ['gitlab', null, 'gitlab.com', 'https://gitlab.com/group/sub/app.git'],
+    ['github', 'github', 'ghe.example.com', 'https://ghe.example.com/acme/app.git'],
+    ['gitea', 'gitea', 'git.example.com', SELF_REMOTE],
+    ['gitea', 'gitea', 'git.example.com', 'git@git.example.com:acme/app.git'],
+  ])(
+    'takes a %s connection whose credential (provider %j) on %s is of that forge, for %s',
+    (providerId, provider, host, remote) => {
+      expect(credentialFits(providerId, provider, host, remote)).toBe(true);
+    },
+  );
+
+  it.each([
+    ['github', 'gitea', 'git.example.com', SELF_REMOTE],
+    ['gitea', 'github', 'git.example.com', SELF_REMOTE],
+    ['gitlab', null, 'github.com', 'https://github.com/acme/app.git'],
+    ['github', 'gitlab', 'gitlab.com', 'https://gitlab.com/group/app.git'],
+  ])(
+    'refuses a %s connection whose credential is now of another forge (provider %j on %s), though the remote %s takes that credential',
+    (providerId, provider, host, remote) => {
+      expect(credentialUsableForPr({ provider, host }, remote)).toBe(true);
+      expect(credentialFits(providerId, provider, host, remote)).toBe(false);
+    },
+  );
+
+  it.each(['github', 'gitea', 'gitlab'])(
+    'refuses a %s connection whose self-hosted credential names no provider',
+    (providerId) => {
+      expect(credentialFits(providerId, null, 'git.example.com', SELF_REMOTE)).toBe(false);
+      expect(credentialFits(providerId, '', 'git.example.com', SELF_REMOTE)).toBe(false);
+    },
+  );
+
+  it.each([
+    ['github', 'github', 'github.com', 'https://gitlab.com/group/app.git'],
+    ['github', 'github', 'git.example.com', 'https://github.com/acme/app.git'],
+    ['gitea', 'gitea', 'git.example.com', 'https://codeberg.org/acme/app.git'],
+    ['gitea', 'gitea', 'git.other.example', SELF_REMOTE],
+  ])(
+    'refuses a %s connection whose credential (provider %j on %s) is of the forge but not for the remote %s',
+    (providerId, provider, host, remote) => {
+      expect(credentialFits(providerId, provider, host, remote)).toBe(false);
+    },
+  );
+
+  it('judges a connection of a provider that is no forge by the remote alone', () => {
+    // No Git credential has a module provider as its forge; a connection that still holds one is the
+    // engine's to route (the worker's module-provider stamping tests do), not this comparison's.
+    expect(
+      credentialFits('module.fx.crm', 'github', 'github.com', 'https://github.com/acme/app.git'),
+    ).toBe(true);
+    expect(credentialFits('module.fx.crm', 'gitea', 'git.example.com', SELF_REMOTE)).toBe(true);
+    expect(credentialFits('module.fx.crm', null, 'git.example.com', SELF_REMOTE)).toBe(false);
+    expect(
+      credentialFits('module.fx.crm', 'github', 'github.com', 'https://gitlab.com/g/app.git'),
+    ).toBe(false);
+  });
+
+  it.each([[null], [''], ['file:///srv/git/app.git']])(
+    'fits no connection to the remote %j',
+    (remote) => {
+      expect(credentialFits('github', 'github', 'github.com', remote)).toBe(false);
+      expect(credentialFits('gitea', 'gitea', 'git.example.com', remote)).toBe(false);
     },
   );
 });

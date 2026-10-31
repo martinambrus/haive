@@ -5,6 +5,7 @@ import { PlanPatchError } from '@haive/shared/plan';
 import { UNTRUSTED_OPEN } from '../_untrusted-repo.js';
 import type { PlanNodeSkeleton } from '@haive/shared/plan';
 import { computeFrontier } from './01-plan-build.js';
+import { applyAgentPatch } from './_plan-prompt.js';
 import type { AgentMiningResult, StepContext } from '../../step-definition.js';
 import { MiningRetryError, MiningWaveError, ReopenStepFormError } from '../../step-definition.js';
 import type { PlanBuildDetect } from './01-plan-build.js';
@@ -103,6 +104,8 @@ function setup({ ownOutline = true } = {}) {
     taskStepAgentMinings: schema.taskStepAgentMinings,
     planClarifyRounds: schema.planClarifyRounds,
     planNodes: schema.planNodes,
+    // No row: the repository is gone, which only a test that reaches the shared applier notices.
+    repositories: schema.repositories,
   });
   // A root that exists before a test starts is this task's own outline unless the test says not.
   if (plan.root && ownOutline) {
@@ -179,6 +182,13 @@ async function thrown(p: Promise<unknown>): Promise<unknown> {
     },
     (err: unknown) => err,
   );
+}
+
+/** The next fold runs the shared applier instead of the stub, so its patch meets the repository
+ *  table as a real one does. */
+async function useSharedApplier(): Promise<void> {
+  const real = await vi.importActual<typeof import('./_plan-prompt.js')>('./_plan-prompt.js');
+  vi.mocked(applyAgentPatch).mockImplementationOnce(real.applyAgentPatch);
 }
 
 beforeEach(() => {
@@ -350,6 +360,43 @@ describe('00b-plan-clarify apply', () => {
     const err = (await thrown(apply([reply], {}, false))) as Error;
     expect(err).not.toBeInstanceOf(MiningRetryError);
     expect(err.message).toContain('Retry this step');
+  });
+
+  // No planner reply can land in a repository that was deleted meanwhile, so a re-roll only spends
+  // the planner again until its budget ends.
+  it('fails an outline at once when its repository was deleted', async () => {
+    const { mined, apply } = setup();
+    await useSharedApplier();
+    const outline = mined(
+      'clarify-outline',
+      json({
+        summary: 'outline',
+        ops: [{ op: 'upsert', nodeRef: 'tmp-root', parentRef: null, title: 'Clubs' }],
+      }),
+    );
+    const err = (await thrown(apply([outline], {}, false))) as Error;
+    expect(err).not.toBeInstanceOf(MiningRetryError);
+    expect(err.message).toContain('repository was deleted');
+  });
+
+  it('fails folded answers at once when their repository was deleted', async () => {
+    plan.root = { id: ROOT };
+    const { mined, apply } = setup();
+    await thrown(apply([mined('clarify-ask-r1', questions)]));
+    await thrown(
+      apply([], { [answerFieldId(1, 'payments')]: 'Stripe', [actionFieldId(1)]: 'continue' }),
+    );
+    await useSharedApplier();
+    const reply = mined(
+      'clarify-integrate-r1',
+      json({
+        summary: 's',
+        ops: [{ op: 'upsert', nodeRef: 'tmp-pay', parentRef: ROOT, title: 'Payments' }],
+      }),
+    );
+    const err = (await thrown(apply([reply], {}, false))) as Error;
+    expect(err).not.toBeInstanceOf(MiningRetryError);
+    expect(err.message).toContain('repository was deleted');
   });
 
   it('refuses a plan another build or a person created before this task started', async () => {

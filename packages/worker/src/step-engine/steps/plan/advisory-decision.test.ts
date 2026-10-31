@@ -14,7 +14,10 @@ function fixture(version = 1, body = 'Original question', status = 'todo') {
   const fake = createFakeDb({
     planNodes: schema.planNodes,
     planMirrorState: schema.planMirrorState,
+    repositories: schema.repositories,
   });
+  // A patch that finds no mirror row may insert one, so it locks the repository row first.
+  fake.insert(schema.repositories, { id: REPO });
   fake.insert(schema.planNodes, {
     id: NODE,
     repositoryId: REPO,

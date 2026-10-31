@@ -18,7 +18,11 @@ function fakeDb(version: number, afterUpdate?: (row: Record<string, unknown>) =>
       from: () => ({
         where: () => {
           const rows = [{ ...row }];
-          return Object.assign(Promise.resolve(rows), { limit: async () => rows });
+          // `for` is the repository row a patch that creates a node locks first.
+          return Object.assign(Promise.resolve(rows), {
+            limit: async () => rows,
+            for: async () => rows,
+          });
         },
       }),
     }),

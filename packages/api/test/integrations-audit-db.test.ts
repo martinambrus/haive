@@ -581,6 +581,28 @@ describe.skipIf(!url || !redisUrl)(
         expect(rows[0]).toMatchObject({ action: 'integration.connection.reconnect' });
       });
 
+      it('F4b reconnect takes back the refusal a refresh recorded: lastError and refreshRefusedAt are null', async () => {
+        expect((await completeSignIn()).status).toBe(200);
+        const [connection] = await connectionRows();
+        await db
+          .update(schema.integrationConnections)
+          .set({
+            lastError:
+              "The provider refused this connection's OAuth client (invalid_client); its client secret may be missing or wrong.",
+            refreshRefusedAt: new Date('2026-01-01T00:00:00Z'),
+          })
+          .where(eq(schema.integrationConnections.id, connection!.id));
+        token = 'tok-B';
+        expect((await completeSignIn()).status).toBe(200);
+        const [after] = await connectionRows();
+        expect(after).toMatchObject({
+          id: connection!.id,
+          status: 'connected',
+          lastError: null,
+          refreshRefusedAt: null,
+        });
+      });
+
       describe('a provider that is not a forge', () => {
         const client: ResolvedOauthClient = {
           clientId: 'stub-client',

@@ -10,6 +10,9 @@ const KNOWN_HOST_PROVIDERS = new Map<string, ForgeProviderName>([
   ['bitbucket.org', 'bitbucket_cloud'],
 ]);
 
+/** The public hosts whose forge is inferred, which is what a credential's "auto-detect" covers. */
+export const AUTO_DETECT_HOSTS: readonly string[] = [...KNOWN_HOST_PROVIDERS.keys()];
+
 /** The forge a well-known public host runs, or null for a self-hosted / unknown host. */
 export function inferForgeProviderFromHost(host: string): ForgeProviderName | null {
   return KNOWN_HOST_PROVIDERS.get(host.trim().toLowerCase()) ?? null;
@@ -126,6 +129,22 @@ export function credentialUsableForPr(
   // An ssh or git remote names no forge port, so a credential's :port (its API's) is not compared.
   const credHost = /^https?:\/\//i.test(originUrl.trim()) ? c.host : c.host.replace(/:\d+$/, '');
   return credHost.toLowerCase() === originHost.toLowerCase() && isForgeProviderName(c.provider);
+}
+
+/** A forge connection's credential must still be of the connection's own forge, and usable for the
+ *  origin; a provider that is no forge has no forge to compare and is judged by the origin alone. */
+export function connectionCredentialFits(
+  providerId: string,
+  c: { provider: string | null; host: string },
+  originUrl: string | null,
+): boolean {
+  if (
+    isForgeProviderName(providerId) &&
+    credentialForgeProvider(c.provider, c.host) !== providerId
+  ) {
+    return false;
+  }
+  return credentialUsableForPr(c, originUrl);
 }
 
 type ApiBaseTarget = { host: string; provider?: string | null; apiBaseUrl?: string | null };

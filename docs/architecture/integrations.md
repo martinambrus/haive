@@ -92,7 +92,8 @@ reader — the listing, disconnect, ownership checks and the resolver — filter
 owner = caller`; shared connections are deferred to the module providers. Only the refresh writes
 `needs_reauth`; `revoked` and `provider_unavailable` are declared and never written. The browser sees
 `toConnectionSummary`, never a token column. UI keys on `status`; `last_error` is only the words,
-following the message-column rule in AGENTS.md.
+following the message-column rule in AGENTS.md, so a `connected` row shows it only while
+`refresh_refused_at` is set.
 
 ### A forge account is a Git credential
 
@@ -105,21 +106,50 @@ connections would have been a destructive migration. Consequences, all deliberat
   refused.
 - Signing in again to the same account updates the connection and its credential's secret in place,
   under `pg_advisory_xact_lock(integration-account:<user>:<provider>:<externalId>)` and `FOR UPDATE`,
-  keeping the credential's label, host and provider. A vendor that sends no new refresh token leaves the
+  keeping the credential's label, host and provider. It writes a credential only while that is still
+  on the sign-in endpoint's host and still the provider's forge; one that moved is left as it is and
+  the connection is pointed at another credential, the one an earlier sign-in of the account left or a
+  new one. A vendor that sends no new refresh token leaves the
   stored one in place when the sign-in used the row's own method and OAuth client (re-encrypted with the new access
   token; an unreadable one counts as none); under another method or client it is dropped, since a refresh would send
   it with that issuer's credentials. A first forge sign-in creates a credential
   labelled `<Provider> OAuth (<login>)` on the sign-in endpoint's host.
+- A credential a sign-in wrote records the vendor's account id (`repo_credentials.sign_in_account_id`,
+  0216), and after a disconnect the next sign-in of that account takes it back instead of adding a
+  second one. The key is the user, the host and that id, never the username or the label: the oldest
+  credential of the user with that id that is on the sign-in's host, still the provider's forge, backs
+  no connection and can be decrypted (one stored under a replaced key is skipped). It keeps its id,
+  which connections and repositories reference. A second account on the same host gets its own. A
+  credential typed by hand has no id and is never taken, and neither is one whose secret the user
+  replaced in the edit form, which clears the id. Credentials a disconnect left behind before 0216 are
+  unmarked and look hand-typed: the next sign-in adds one more, marked, and later ones reuse it.
 - "Use as connection" (`POST /integrations/providers/:id/link-credential`) turns an existing
   credential into a connection: forge only, provider enabled, own credential, the credential's forge
   must be this provider, one connection per credential (0202's unique key).
 - Disconnecting a credential-backed connection removes only the pointer; the credential and every
-  repository bound to it stay, and nothing is revoked.
-- Deleting the Git credential deletes its connection (the cascade).
-- A credential can be edited after linking. Both credential readers throw
-  `CredentialProviderMismatchError` once the credential's forge (explicit provider, else inferred from
-  its host) is no longer the connection's provider, so an adapter is never paired with another forge's
-  secret.
+  repository bound to it stay, and nothing is revoked. The next sign-in of that account takes the
+  credential back (above).
+- Deleting the Git credential deletes its connection (the cascade). The credentials page asks for a
+  confirmation that names the connection (`GET /repo-credentials` carries each row's `connection`),
+  and the `credential.delete` audit row holds `{connectionId, providerId}` of the connection that went
+  with it, written in the delete's transaction; a credential no connection backed has neither key.
+  Delete and edit lock the connection row, then the credential row (the order a reconnect uses), and
+  look the connection up once more after the credential lock, for one linked meanwhile. That second
+  lookup never waits (`FOR UPDATE NOWAIT`): waiting for the row with the credential held would
+  deadlock with a sign-in of that account, so a row someone holds answers 503 and the request can be
+  sent again.
+- A credential can be edited after linking, but not moved. While a connection backs it,
+  `PUT /repo-credentials/:id` answers 409 `credential-backs-connection` when the host changes
+  (compared case-insensitively) or the forge (explicit provider, else inferred from the host) changes
+  to something other than the connection's provider. The label, secret, username, commit identity and
+  API base stay editable, and a rename follows into `account_label` of a connection made with "Use as
+  connection" (`auth_method` `token`; a sign-in connection keeps the vendor's account name). A
+  credential that already drifted can still be renamed or moved back to the connection's forge.
+  link-credential reads the credential `FOR UPDATE` before it judges its forge, so an edit committed
+  while the link waited is the one judged. Both credential readers still throw
+  `CredentialProviderMismatchError` once the credential's forge is no longer the connection's
+  provider (a row edited before the refusal existed), so an adapter is never paired with another
+  forge's secret.
 
 ### Signing in
 
@@ -194,11 +224,13 @@ can come back. A connection with no recorded client (`oauth_client_id` NULL, e.g
 before 0202) refreshes with whichever client currently ranks first, so replacing a client does not
 move such a row to `needs_reauth`. `invalid_grant` (and GitHub's `bad_refresh_token`) means
 `needs_reauth`, written inside the transaction and thrown after it commits; `invalid_client` keeps
-the status and the tokens and records `last_error`, since fixing the client heals every connection
-(GitHub's `incorrect_client_credentials` likewise); a connection that holds no refresh token becomes
-`needs_reauth`; a network error, a 5xx or a timeout writes nothing. A successful refresh writes both
-tokens under a new DEK, keeps the old refresh token when the vendor does not rotate it, and keeps the
-granted scopes when none are sent.
+the status and the tokens and records `last_error` and stamps `refresh_refused_at`, since fixing the
+client heals every connection (GitHub's `incorrect_client_credentials` likewise); a connection that
+holds no refresh token becomes `needs_reauth`; a network error, a 5xx or a timeout writes nothing. A
+successful refresh writes both tokens under a new DEK, keeps the old refresh token when the vendor
+does not rotate it, keeps the granted scopes when none are sent, and clears `last_error` and
+`refresh_refused_at`; so does a sign-in. The flag, not the words, is what makes the page show a
+refusal on a `connected` row.
 
 `getConnectionCredential` adds the credential's username and API base for a forge call (Bitbucket
 Cloud app passwords need Basic auth); an OAuth connection answers `username` and `apiBaseUrl` null.
@@ -243,7 +275,8 @@ forge `no-repository` and `no-remote` — and `candidates`, the connection ids a
 
 Candidates are the task owner's scope-user connections of a provider that serves the category (or the
 pinned provider), with the provider enabled; for `forge` the linked credential must fit the
-repository's `remote_url` (`credentialUsableForPr`), then the repository allow-list applies.
+repository's `remote_url` (`credentialUsableForPr`) and, for a forge provider, still be that
+provider's forge (`connectionCredentialFits`), then the repository allow-list applies.
 
 The rules that look odd and are deliberate:
 
@@ -322,11 +355,12 @@ the restriction when the last allowed account goes. Restricted with no entries a
 the preference when `remember`, and the event `task.integration_choice_changed`; DELETE also removes
 that category's task grant. Refusals (`api/src/lib/integration-choice.ts`): unknown category,
 unknown provider, a provider that does not serve the category, an account of another provider, a
-forge account that does not fit the task's repository and an account outside a restricted repository's
-allow-list are 400; a disabled provider is 409 (403 on sign-in and link — both pinned by tests); a
-connection that is not the caller's is 404, missing and foreign alike; a completed or cancelled task is
-409 (a failed one can still change) and a dead one 409 `task_dead`. Admins get no override on another
-user's preferences, repositories or tasks.
+forge account whose credential does not fit the task's repository (`connectionCredentialFits`: not
+that remote, or no longer its provider's forge; one answer for both) and an account outside a
+restricted repository's allow-list are 400; a disabled provider is 409 (403 on sign-in and link —
+both pinned by tests); a connection that is not the caller's is 404, missing and foreign alike; a
+completed or cancelled task is 409 (a failed one can still change) and a dead one 409 `task_dead`.
+Admins get no override on another user's preferences, repositories or tasks.
 
 ## Forges
 
@@ -367,7 +401,13 @@ and strips Bitbucket Server's `/scm/`. `credentialUsableForPr`: for a public hos
 must be that host's and the credential's own host (port dropped) must infer the same forge, so a
 self-hosted credential of the same forge never fits a public remote; a self-hosted host needs a host
 match and an explicit provider; for an ssh/git remote the credential's port is not compared;
-comparisons ignore case. `credentialApiHost`: for an ssh/git remote
+comparisons ignore case. `connectionCredentialFits(providerId, credential, origin)` is what a
+connection's credential must pass: for the five forge providers the credential's own forge
+(`credentialForgeProvider`) must also be the connection's provider, then `credentialUsableForPr`
+applies; any other provider is judged by the origin alone. The resolver's `fits` and the choice route
+both ask it, so a connection whose credential was moved to another forge by an edit made before the
+refusal existed is never resolved or chosen, while its readers keep throwing
+(`CredentialProviderMismatchError`). `credentialApiHost`: for an ssh/git remote
 on the credential's host, the default API base keeps the credential's port (a token for
 `git.example.com:8443` used to go to `https://git.example.com/api/v1`); an http(s) remote's host stays
 authoritative.
@@ -381,9 +421,11 @@ forges on a private network are legitimate, and the host is set by the user, nev
 API base must be `https:`, carry no user or password, contain no `?` or `#` (endpoint paths are
 appended to the stored text), and sit on the credential's host (port included) or on the host of the
 forge's default API base (api.github.com, api.bitbucket.org). An edit reads, checks and writes under
-the row's lock, judging the value that will be stored against the new host. A plain-http self-hosted
-forge therefore cannot be given an http API base, and its default base is https, so its pull-request
-calls cannot reach it. The rule runs on create and edit; a row stored before it may still hold another
+the row's lock, judging the value that will be stored against the new host. An edit also refuses a
+host or forge change while a connection backs the credential (409 `credential-backs-connection`; see
+A forge account is a Git credential). A plain-http self-hosted forge therefore cannot be given an
+http API base, and its default base is https, so its pull-request calls cannot reach it. The rule
+runs on create and edit; a row stored before it may still hold another
 base, so `resolveForgeContext` (worker, PR open and poll) re-checks every use: before the token is
 decrypted it refuses, with a ForgeError naming the fix, a credential that does not fit the repository's
 remote (`credentialUsableForPr`) and a stored base that fails `apiBaseFits`. It reads the row once and
@@ -533,7 +575,11 @@ per credential). 0206 added `task_integration_choices`, a preference's `connecti
 PostgreSQL truncates three integration foreign-key names over 63 characters (one in 0192, two in 0206)
 with a NOTICE, which is harmless and still caught by the guard on a re-run. 0207 added the `running`
 outcome (an enum value cannot be dropped, so an undo would have to leave it; the file states no undo),
-`reason`, `duration_ms`, the invocation index and the stamp column. The admin-default row is a
+`reason`, `duration_ms`, the invocation index and the stamp column. 0216 added
+`repo_credentials.sign_in_account_id`, backfilled from the sign-in connections that back a
+credential (one a disconnect left earlier stays unmarked), and 0217
+`integration_connections.refresh_refused_at`; each is additive, and its header states the DROP COLUMN
+that undoes it. The admin-default row is a
 preference with `user_id` NULL, unique with `NULLS NOT DISTINCT`; drizzle 0.45.2 has no such
 uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
 
@@ -546,8 +592,8 @@ uniqueIndex option, hence a `unique(...).nullsNotDistinct()` constraint.
    again.
 3. The allow-list fails closed on `integrations_restricted`, never on entry existence.
 4. Refresh: row lock, re-check, single flight, under the issuing client (the current top client for a
-   row that recorded none); a client refusal keeps the status; a replaced issuing client writes
-   `needs_reauth`; no configured client writes nothing.
+   row that recorded none); a client refusal keeps the status and stamps `refresh_refused_at`; a
+   replaced issuing client writes `needs_reauth`; no configured client writes nothing.
 5. Branch on the OAuth `error` code, never on text; known codes pass whole.
 6. Forge connections point at a credential and never copy its token; no expiring forge tokens; a
    disconnect removes only the pointer.

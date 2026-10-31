@@ -301,6 +301,7 @@ jobs:
           worker test/step-row-lock-order-db.test.ts WORKER_STEP_ROW_LOCK_ORDER_TEST_URL worker_step_row_lock_order_test pg
           worker test/task-cancel-guard-db.test.ts WORKER_TASK_CANCEL_GUARD_TEST_URL worker_task_cancel_guard_test pg
           worker test/step-fold-preread-db.test.ts WORKER_STEP_FOLD_PREREAD_TEST_URL worker_step_fold_preread_test pg
+          worker test/lock-tier-order-db.test.ts WORKER_LOCK_TIER_ORDER_TEST_URL worker_lock_tier_order_test pg
           api test/terminal-attach-db.test.ts TERMINAL_ATTACH_TEST_URL terminal_attach_test pg
           api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test pg
           api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test pg
@@ -322,6 +323,7 @@ jobs:
           shared test/integrations-resolution-db.test.ts INTEGRATIONS_RESOLUTION_TEST_URL integrations_resolution_test pg
           shared test/rtk-converge-db.test.ts RTK_CONVERGE_TEST_URL rtk_converge_test pg
           database test/integration-connection-keys.test.ts INTEGRATION_KEYS_TEST_URL integration_keys_test pg
+          database test/repo-credential-sign-in-account.test.ts REPO_CREDENTIAL_SIGN_IN_ACCOUNT_TEST_URL repo_credential_sign_in_account_test pg
           api test/admin-integrations-db.test.ts ADMIN_INTEGRATIONS_TEST_URL admin_integrations_test pg
           api test/refresh-rotation-db.test.ts AUTH_HARDENING_TEST_URL auth_hardening_test pg
           api test/password-change-cas-db.test.ts AUTH_HARDENING_TEST_URL auth_hardening_test pg
@@ -348,10 +350,15 @@ jobs:
           api test/plan-merge-cancel-db.test.ts PLAN_MERGE_CANCEL_TEST_URL plan_merge_cancel_test pg
           api test/step-row-lock-order-db.test.ts STEP_ROW_LOCK_ORDER_TEST_URL step_row_lock_order_test pg
           api test/step-fold-preread-db.test.ts STEP_FOLD_PREREAD_TEST_URL step_fold_preread_test pg
+          api test/lock-tier-order-db.test.ts LOCK_TIER_ORDER_TEST_URL lock_tier_order_test pg
           api test/plan-advisory-delete-db.test.ts PLAN_ADVISORY_DELETE_TEST_URL plan_advisory_delete_test pg
           api test/admin-config-pool-db.test.ts ADMIN_CONFIG_POOL_TEST_URL admin_config_pool_test pg
           api test/admin-security-audit-db.test.ts ADMIN_SECURITY_AUDIT_TEST_URL admin_security_audit_test pg
           api test/repo-credentials-audit-db.test.ts REPO_CREDENTIALS_AUDIT_TEST_URL repo_credentials_audit_test pg
+          api test/repo-credentials-delete-db.test.ts REPO_CREDENTIALS_DELETE_TEST_URL repo_credentials_delete_test pg
+          api test/repo-credentials-backing-edit-db.test.ts REPO_CREDENTIALS_BACKING_EDIT_TEST_URL repo_credentials_backing_edit_test pg
+          api test/repo-credentials-late-link-db.test.ts REPO_CREDENTIALS_LATE_LINK_TEST_URL repo_credentials_late_link_test pg
+          api test/integration-sign-in-reuse-db.test.ts INTEGRATION_SIGN_IN_REUSE_TEST_URL integration_sign_in_reuse_test pg
           api test/global-kb-config-audit-db.test.ts GLOBAL_KB_CONFIG_AUDIT_TEST_URL global_kb_config_audit_test pg
           worker test/step-integrations-stamp-db.test.ts STEP_INTEGRATIONS_STAMP_TEST_URL step_integrations_stamp_test pg
           worker test/step-integrations-dispatch-db.test.ts STEP_INTEGRATIONS_DISPATCH_TEST_URL step_integrations_dispatch_test pg
@@ -364,6 +371,7 @@ jobs:
           api test/task-integration-lock-routes-db.test.ts TASK_INTEGRATION_LOCK_TEST_URL task_integration_lock_test pg
           shared test/integrations-task-lock-db.test.ts INTEGRATIONS_TASK_LOCK_TEST_URL integrations_task_lock_test pg
           shared test/module-integrations-state-db.test.ts MODULE_INTEGRATIONS_STATE_TEST_URL module_integrations_state_test pg
+          shared test/plan-patch-repo-delete-db.test.ts PLAN_PATCH_REPO_DELETE_TEST_URL plan_patch_repo_delete_test pg
           api test/module-integrations-routes-db.test.ts MODULE_INTEGRATIONS_ROUTES_TEST_URL module_integrations_routes_test pg
           api test/integrations-audit-db.test.ts INTEGRATIONS_AUDIT_TEST_URL integrations_audit_test pg
           api test/malformed-id-routes-db.test.ts MALFORMED_ID_ROUTES_TEST_URL malformed_id_routes_test pg

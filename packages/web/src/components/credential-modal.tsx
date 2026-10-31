@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, type FormEvent } from 'react';
+import { AUTO_DETECT_HOSTS } from '@haive/shared/forge';
 import { api, type ApiError } from '@/lib/api-client';
 import { Button, FormError, Input, Label } from '@/components/ui';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/dialog';
@@ -184,9 +185,11 @@ export function CredentialModal({
                 ))}
               </select>
               <p className="text-xs text-neutral-500">
-                Only used to open pull requests at task close. Auto-detect covers github.com,
-                gitlab.com, codeberg.org and bitbucket.org; pick the software explicitly for a
-                self-hosted forge.
+                Only used to open pull requests at task close. Auto-detect covers{' '}
+                {new Intl.ListFormat('en-GB').format(AUTO_DETECT_HOSTS)}; pick the software
+                explicitly for a self-hosted forge. An API base override must be an https URL on the
+                credential&apos;s host or on its forge&apos;s API host, with no user, query or
+                fragment.
               </p>
               {provider && (
                 <Input
