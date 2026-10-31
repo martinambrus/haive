@@ -78,7 +78,7 @@ export abstract class BaseForgeProvider implements ForgeProvider {
     }
 
     if (!res.ok) {
-      const detail = await readBodyText(res, wireSecrets(ctx.token, auth));
+      const detail = await readForgeErrorExcerpt(res, ctx.token, auth);
       throw mapHttpError(this.name, res.status, res.headers, detail, method, path);
     }
 
@@ -156,7 +156,14 @@ function redactSecrets(text: string, secrets: readonly string[], cut: boolean): 
   return out;
 }
 
-async function readBodyText(res: Response, secrets: readonly string[]): Promise<string> {
+/** A bounded vendor error excerpt, scrubbed before truncation so an echoed credential cannot
+ * enter a response or a logged error. Also removes a partial secret at the read boundary. */
+export async function readForgeErrorExcerpt(
+  res: Response,
+  token: string,
+  auth: Record<string, string> = {},
+): Promise<string> {
+  const secrets = wireSecrets(token, auth);
   try {
     const { text, truncated } = await readBounded(res, ERROR_BODY_MAX_BYTES);
     const t = redactSecrets(text, secrets, truncated).trim();
