@@ -70,7 +70,7 @@ const GITFILE_PREFIX = Buffer.from('gitdir: ');
 /** Said when git answered with an exit status of its own and no structure proves the checkout dead:
  *  another Retry reads the same bytes and gets the same answer. */
 const REPAIR_ADVICE =
-  'Retry cannot help until the checkout is repaired; removing and re-adding the repository rebuilds it from its source.';
+  'Retry cannot help until the checkout is repaired. Removing the repository deletes this checkout, including any commit that was never pushed.';
 
 /** A git work tree whose top level is `dest` itself and that has a commit to stand on.
  *  `unusable`: a different top level, HEAD exit 1, `dest` itself absent or not a directory when git

@@ -149,7 +149,7 @@ it('an unknown checkout fails through the queue without detection, import or reb
   const before = await git(dest, ['rev-parse', 'HEAD']);
   shim = await failGit(['rev-parse', '--show-cdup']);
   await expect(runRefresh(payload)).rejects.toThrow(
-    /^Not refreshed: the checkout could not be examined \(.*\)\. Nothing was moved\. Retry cannot help until the checkout is repaired; removing and re-adding the repository rebuilds it from its source\.$/,
+    /^Not refreshed: the checkout could not be examined \(.*\)\. Nothing was moved\. Retry cannot help until the checkout is repaired\. Removing the repository deletes this checkout, including any commit that was never pushed\.$/,
   );
   expect(h.persist).not.toHaveBeenCalled();
   expect(h.seed).not.toHaveBeenCalled();
