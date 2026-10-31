@@ -92,6 +92,7 @@ export interface DataMigration {
  *  question that was previously answered by whichever function happened to hold a raw DELETE. */
 export const DATA_MIGRATIONS: DataMigration[] = [
   { id: 'scrubPlanMirrorErrors', kind: 'convergent', run: scrubPlanMirrorErrors },
+  { id: 'scrubRepositoryErrors', kind: 'convergent', run: scrubRepositoryErrors },
   { id: 'supersedeRemovedRtkArtifacts', kind: 'convergent', run: supersedeRemovedRtkArtifacts },
   { id: 'skipRemovedSteps', kind: 'convergent', run: skipRemovedSteps },
   { id: 'supersedePhantomAgentArtifacts', kind: 'convergent', run: supersedePhantomAgentArtifacts },
@@ -203,6 +204,38 @@ export async function scrubPlanMirrorErrors(db: Database): Promise<void> {
   }
   if (repaired.length > 0) {
     log.info({ count: repaired.length, ids: repaired }, 'scrubbed stored plan mirror errors');
+  }
+}
+
+/** Repair historical repository failure copy only while the repository is still in error.
+ *  Compare the text read so a newer failure or recovery wins. Reverting this entry stops
+ *  future repairs; the removed paths cannot be restored, and retries replace the copy. */
+export async function scrubRepositoryErrors(db: Database): Promise<void> {
+  const rows = await db
+    .select({ id: schema.repositories.id, statusMessage: schema.repositories.statusMessage })
+    .from(schema.repositories)
+    .where(
+      and(eq(schema.repositories.status, 'error'), isNotNull(schema.repositories.statusMessage)),
+    );
+  const repaired: string[] = [];
+  for (const row of rows) {
+    const message = scrubErrorPaths(row.statusMessage);
+    if (message === row.statusMessage) continue;
+    const updated = await db
+      .update(schema.repositories)
+      .set({ statusMessage: message })
+      .where(
+        and(
+          eq(schema.repositories.id, row.id),
+          eq(schema.repositories.status, 'error'),
+          eq(schema.repositories.statusMessage, row.statusMessage!),
+        ),
+      )
+      .returning({ id: schema.repositories.id });
+    repaired.push(...updated.map((row) => row.id));
+  }
+  if (repaired.length > 0) {
+    log.info({ count: repaired.length, ids: repaired }, 'scrubbed stored repository errors');
   }
 }
 
