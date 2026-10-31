@@ -322,6 +322,13 @@ describe('unquoted heredoc bodies: only the expansions are code', () => {
       rejects(script);
     });
   }
+  for (const [after, matched] of [
+    ['set +e', 'set +e'],
+    ['true', 'true'],
+  ]) {
+    it(`keeps ${after} visible as the command after an unquoted body`, () =>
+      rejects(`cat <<EOF\n$(date)\nEOF\n${after}`, matched));
+  }
   it('keeps a swallow written as prose beside an expansion inert', () =>
     assert.equal(swallowedFailure('cat <<EOF\nretry with cmd || true: $(date)\nEOF'), null));
   it('keeps an escaped expansion inert', () =>

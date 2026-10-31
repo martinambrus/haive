@@ -273,7 +273,8 @@ export function shellSource(
           }
           if (!terminated) fail(`heredoc ${JSON.stringify(delimiter)}`);
           // Bash expands an unquoted body before its consumer reads it: those expansions run here.
-          if (!quotedWord) result += '\n' + shellSource(body, { maskQuotes, step, prose: true });
+          if (!quotedWord)
+            result += '\n' + shellSource(body, { maskQuotes, step, prose: true }) + '\n';
           if (consumer === 'code') result += '\n' + shellSource(body, { maskQuotes, step }) + '\n';
           else if (consumer === 'interpreter' && !maskQuotes) result += '\n' + body + '\n';
         }
