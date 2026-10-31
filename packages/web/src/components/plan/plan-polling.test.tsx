@@ -864,6 +864,50 @@ describe('PlanMergePanel with a merge task', () => {
     await settle();
   });
 
+  it.each(['cancelled', 'running', 'unreadable'] as const)(
+    'recovers after a failed Discard when the page removed the merge and its task is %s',
+    async (status) => {
+      vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+      const request = deferred<{ ok: boolean; cancelled: boolean }>();
+      net.discardPlanMerge.mockReturnValueOnce(request.promise);
+      const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+      await press('Discard');
+      rerender(null);
+      await settle();
+      expect(taskFetches()).toBe(1);
+      expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+
+      if (status === 'unreadable') net.get.mockRejectedValue(new Error('Recovery unavailable'));
+      else respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status }));
+      request.reject(new Error('Discard request failed'));
+      await settle();
+
+      const outcome = shown().find((el) => el.props.role === 'status');
+      if (status === 'cancelled') {
+        expect(shownIn(outcome).find((el) => el.type === InlineMarkdown)?.props.body).toBe(
+          'This merge was cancelled elsewhere. Its scratch worktree may be discarded unless another merge holds it. This does not undo changes already merged into your checkout.',
+        );
+        expect(onSettled).toHaveBeenCalledTimes(1);
+      } else {
+        expect(outcome).toBeUndefined();
+        expect(onSettled).not.toHaveBeenCalled();
+      }
+      expect(shown().find((el) => el.type === FormError)?.props.message).toBe(
+        'Discard request failed',
+      );
+      expect(taskFetches()).toBe(2);
+      expect(labelled('Discard')).toBeUndefined();
+      expect(host('textarea')).toBeUndefined();
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(taskFetches()).toBe(status === 'unreadable' ? 4 : 2);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(shown().find((el) => el.type === FormError)?.props.message).toBe(
+        'Discard request failed',
+      );
+    },
+  );
+
   it('keeps a locally requested discard quiet when the poll observes cancellation', async () => {
     vi.stubGlobal('window', { confirm: vi.fn(() => true) });
     net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: true, taskId: 'task-1' });

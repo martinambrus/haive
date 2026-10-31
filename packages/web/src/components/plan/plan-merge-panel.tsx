@@ -256,6 +256,9 @@ export function PlanMergePanel({
       if (discardRequestedRef.current === merge.taskId) discardRequestedRef.current = null;
       if (isStaleReply(merge.taskId)) return;
       setError((e as ApiError).message ?? 'Could not discard the merge');
+      // The page may have removed the merge while recovery was suppressed by this request.
+      // Clearing the ref alone does not re-run that effect.
+      if (displayedTaskIdRef.current === null) setPollRestart((n) => n + 1);
     } finally {
       if (!isStaleReply(merge.taskId)) setBusy(false);
     }
@@ -279,7 +282,13 @@ export function PlanMergePanel({
         )}
       </div>
     ) : null;
-  if (!merge) return outcome;
+  if (!merge)
+    return (
+      <>
+        {outcome}
+        <FormError message={error} />
+      </>
+    );
 
   return (
     <>
