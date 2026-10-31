@@ -384,6 +384,7 @@ jobs:
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
           api test/cli-secrets-audit-db.test.ts SECURITY_AUDIT_TEST_URL t376_audit_test pg
           api test/account-security-audit-db.test.ts SECURITY_AUDIT_TEST_URL t376_audit_test pg
+          api test/login-audit-db.test.ts SECURITY_AUDIT_TEST_URL t376_audit_test pg
           GATED
           exit "$failed"
 

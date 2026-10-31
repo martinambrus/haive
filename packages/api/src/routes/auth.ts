@@ -15,7 +15,12 @@ import {
   secretsService,
 } from '@haive/shared';
 import { getDb } from '../db.js';
-import { insertAuditEvent, logAuditEvent } from '../lib/audit.js';
+import {
+  ANONYMOUS_AUDIT_ACTOR,
+  insertAuditEvent,
+  logAuditEvent,
+  type AuditEvent,
+} from '../lib/audit.js';
 import { hashPassword, verifyPassword } from '../auth/password.js';
 import {
   signAccessToken,
@@ -253,6 +258,17 @@ authRoutes.post('/login', async (c) => {
   });
   const ok = await verifyPassword(body.password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
   if (!user || user.status !== 'active' || !ok) {
+    const event: AuditEvent = {
+      actorUserId: ANONYMOUS_AUDIT_ACTOR,
+      action: 'auth.login.failure',
+      targetType: 'user',
+      targetId: user?.id ?? null,
+      metadata: { reason: 'invalid_credentials' },
+    };
+    await db.transaction(async (tx) => {
+      await insertAuditEvent(tx, event);
+    });
+    logAuditEvent(event);
     throw new HttpError(401, 'Invalid credentials');
   }
 
@@ -261,11 +277,21 @@ authRoutes.post('/login', async (c) => {
     user.role,
     user.tokenVersion,
   );
-  await db.insert(schema.refreshTokens).values({
-    userId: user.id,
-    tokenHash: hashRefreshToken(refreshToken),
-    expiresAt,
+  const event: AuditEvent = {
+    actorUserId: user.id,
+    action: 'auth.login.success',
+    targetType: 'user',
+    targetId: user.id,
+  };
+  await db.transaction(async (tx) => {
+    await tx.insert(schema.refreshTokens).values({
+      userId: user.id,
+      tokenHash: hashRefreshToken(refreshToken),
+      expiresAt,
+    });
+    await insertAuditEvent(tx, event);
   });
+  logAuditEvent(event);
   setAuthCookies(c, accessToken, refreshToken);
   await attempt.refund();
 
