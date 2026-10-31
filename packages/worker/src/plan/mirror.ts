@@ -100,7 +100,7 @@ const hashBytes = (bytes: string | Buffer): string =>
 const ABSENT_HASH = 'absent';
 
 const HELD_GIT_OPERATION =
-  'a merge or rebase is open in the checkout; nothing was written. The plan is written again once it finishes.';
+  'a merge, rebase, cherry-pick or revert is open in the checkout; nothing was written. The plan is written again once it finishes.';
 const HELD_NO_CHECKOUT =
   "the repository's checkout directory is missing; nothing was written. The plan is written again once it is back.";
 const HELD_NO_BASE =
