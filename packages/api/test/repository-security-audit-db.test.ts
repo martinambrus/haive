@@ -18,7 +18,24 @@ import {
 const url = process.env.REPOSITORY_SECURITY_AUDIT_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/repository_security_audit_test'))
   throw new Error('Use a dedicated repository_security_audit_test database');
-const h = vi.hoisted(() => ({ db: undefined as any, actor: '' }));
+const h = vi.hoisted(() => ({
+  db: undefined as any,
+  actor: '',
+  gitHook: undefined as ((args: string[]) => Promise<void>) | undefined,
+}));
+vi.mock('node:child_process', async (original) => {
+  const actual = await original<typeof import('node:child_process')>();
+  const { promisify } = await import('node:util');
+  return {
+    ...actual,
+    execFile: Object.assign(vi.fn(), {
+      [promisify.custom]: async (command: string, args: string[], options: any) => {
+        await h.gitHook?.(args);
+        return promisify(actual.execFile)(command, args, options);
+      },
+    }),
+  };
+});
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', async (original) => ({
   ...(await original<any>()),
@@ -91,6 +108,8 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     connection = row!.id;
   });
   afterEach(async () => {
+    h.db = db;
+    h.gitHook = undefined;
     await allowAudit(db);
     await db.execute(sql`DROP TRIGGER IF EXISTS refuse_remote_persist ON repositories`);
     await db.execute(sql`DROP FUNCTION IF EXISTS refuse_remote_persist()`);
@@ -343,6 +362,60 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     } finally {
       h.db = db;
     }
+  }, 30_000);
+  it('allows a task insert while a relink is held inside Git', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'remote-fk-'));
+    roots.push(root);
+    await git(root, ['init']);
+    await git(root, ['remote', 'add', 'origin', 'https://old.test/r']);
+    await db
+      .update(schema.repositories)
+      .set({ localPath: root, remoteUrl: 'https://old.test/r' })
+      .where(eq(schema.repositories.id, repository));
+    let reached = false;
+    let finished = false;
+    let release!: () => void;
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.gitHook = async (args) => {
+      if (args.includes('--replace-all') && args.at(-1) === 'https://new.test/r') {
+        reached = true;
+        await resume;
+        finished = true;
+      }
+    };
+    const request = Promise.resolve(
+      app.request(`/repos/${repository}/remote`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ remoteUrl: 'https://new.test/r' }),
+      }),
+    );
+    try {
+      await vi.waitFor(() => expect(reached).toBe(true), { timeout: 15_000 });
+      const [task] = await db.transaction(async (tx) => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '500ms'`);
+        return tx
+          .insert(schema.tasks)
+          .values({
+            userId: h.actor,
+            repositoryId: repository,
+            type: 'workflow',
+            title: 'concurrent task',
+          })
+          .returning();
+      });
+      expect(task!.repositoryId).toBe(repository);
+      expect(finished).toBe(false);
+    } finally {
+      release();
+      await request;
+      h.gitHook = undefined;
+    }
+    expect((await request).status).toBe(200);
+    expect((await stored())!.remoteUrl).toBe('https://new.test/r');
+    expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://new.test/r');
   }, 30_000);
   const sendSetting = (suffix: string, body: unknown, method = 'PATCH') =>
     app.request(`${suffix === 'exclusions' ? '/repos' : '/repositories'}/${repository}/${suffix}`, {

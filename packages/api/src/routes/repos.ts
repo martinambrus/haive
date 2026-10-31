@@ -2834,7 +2834,7 @@ repoRoutes.post('/:id/remote', async (c) => {
           .select()
           .from(schema.repositories)
           .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
-          .for('update');
+          .for('no key update');
         if (!stored) throw new HttpError(404, 'Repository not found');
         await requireFittingCredential(tx, body.credentialsId ?? stored.credentialsSecretId);
         const host = parseScpLikeGitUrl(body.remoteUrl)?.host ?? new URL(body.remoteUrl).hostname;
