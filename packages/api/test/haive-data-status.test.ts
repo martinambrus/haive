@@ -282,6 +282,38 @@ describe('GET /repositories/:id/haive-data', () => {
     ]);
   });
 
+  it('passes only PATH and the ceiling to every git child', async () => {
+    await writeFile(
+      path.join(shimDir, 'git'),
+      `#!${process.execPath}
+const { appendFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
+appendFileSync(${JSON.stringify(logFile)}, JSON.stringify(Object.keys(process.env).sort()) + '\\n');
+const result = spawnSync(${JSON.stringify(REAL_GIT)}, process.argv.slice(2), { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`,
+    );
+    await chmod(path.join(shimDir, 'git'), 0o755);
+    process.env.PATH = `${shimDir}:${savedPath}`;
+    try {
+      const res = await app.request(`/repositories/${REPO}/haive-data`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        checkout: 'ready',
+        branch: 'main',
+        holds: CLEAN_HOLDS,
+      });
+      const environments = (await readFile(logFile, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(environments.length).toBeGreaterThan(0);
+      for (const keys of environments) expect(keys).toEqual(['GIT_CEILING_DIRECTORIES', 'PATH']);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
   it('reads with the hardened argv and without taking the index lock', async () => {
     await status();
     const calls = await gitCalls();
