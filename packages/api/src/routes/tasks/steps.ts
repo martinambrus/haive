@@ -122,8 +122,8 @@ function refuseLiveFanout(count: number): void {
 }
 
 /** An open wait must still have the marker read by the handler: a closer or a re-park took that wait.
- *  A NULL marker can also be a fresh merge-resolver park, before handleResult stamps it, so only the
- *  status is checked there. This keeps accepting a duplicate read after an answer closed the wait. */
+ *  A NULL marker can be an already answered wait (or a legacy unmarked park), so only the status
+ *  is checked there. This keeps accepting a duplicate read after an answer closed the wait. */
 function stillParkedAsRead(step: { id: string; waitingStartedAt: Date | null }) {
   return and(
     eq(schema.taskSteps.id, step.id),

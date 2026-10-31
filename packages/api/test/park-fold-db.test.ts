@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 
 const url = process.env.PARK_FOLD_TEST_URL;
@@ -247,6 +247,8 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
     h.jobs.length = 0;
     await db.delete(schema.tasks).where(eq(schema.tasks.userId, USER));
   });
+
+  afterEach(() => vi.restoreAllMocks());
 
   afterAll(async () => {
     await db.delete(schema.users).where(eq(schema.users.emailBlindIndex, BLIND_INDEX));
@@ -546,4 +548,220 @@ describe.skipIf(!url)('the park wait folded by a Retry re-offer and by a Stop, o
     },
     30_000,
   );
+
+  describe('B: a form park has one marker across the result hand-off', () => {
+    const parkedForm = async (merge = false) => {
+      const task = await seedTask('running');
+      const row = await seedRow(task.id);
+      const stepDef = {
+        metadata: {
+          id: STEP,
+          workflowType: 'workflow',
+          index: 8.5,
+          title: 'stamp trace',
+          description: 'stamp trace',
+          requiresCli: false,
+        },
+        detect: async () => ({}),
+        form: () => ({
+          title: 'Answer',
+          fields: [{ name: 'answer', type: 'text', label: 'Answer' }],
+        }),
+        apply: async () => ({}),
+      };
+      const runnerPath = new URL('../../worker/src/step-engine/step-runner.ts', import.meta.url)
+        .pathname;
+      const registryPath = new URL('../../worker/src/step-engine/registry.ts', import.meta.url)
+        .pathname;
+      const queuePath = new URL('../../worker/src/queues/task-queue.ts', import.meta.url).pathname;
+      (await import(registryPath)).stepRegistry.override(stepDef);
+      let result = await (
+        await import(runnerPath)
+      ).advanceStep({
+        db,
+        taskId: task.id,
+        userId: USER,
+        repoPath: '/tmp',
+        workspacePath: '/tmp',
+        cliProviderId: null,
+        moduleDeactivation: null,
+        round: row.round,
+        runSeq: row.runSeq,
+        stepDef,
+      });
+      expect(result.status).toBe('waiting_form');
+      const reparkMerge = async () => {
+        const mergePath = new URL('../../worker/src/step-engine/merge-resolver.ts', import.meta.url)
+          .pathname;
+        const resolver = await import(mergePath);
+        await resolver.recordMergeQuestion(db, task.id, row.id, 'Which side?');
+        const fresh = await rowOf(row.id);
+        const outcome = await resolver.resolveMergePhase(
+          db,
+          {
+            ...stepDef,
+            mergeResolve: {
+              selectedMerge: () => true,
+              buildClarificationForm: () => ({ title: 'Merge', fields: [] }),
+            },
+          },
+          {
+            ...fresh,
+            mergeResolveState: {
+              mode: 'same-branch',
+              phase: 'awaiting-guidance',
+              baseBranch: 'main',
+              featureBranch: 'feature',
+              mergeDir: process.env.TMPDIR,
+              sandboxMergeDir: process.env.TMPDIR,
+              fixInvocationId: null,
+              conflictRetries: 0,
+              pendingQuestion: { uncertainty: 'Which side?' },
+              pushAfterMerge: false,
+              merged: false,
+              pushed: false,
+              skipReason: null,
+            },
+          },
+          { userId: USER, taskId: task.id },
+          { taskId: task.id, userId: USER, epoch: 3 },
+        );
+        expect(outcome.resolved).toBe(false);
+        return outcome.result;
+      };
+      if (merge) {
+        await db
+          .update(schema.taskSteps)
+          .set({ waitingStartedAt: null })
+          .where(eq(schema.taskSteps.id, row.id));
+        result = await reparkMerge();
+      }
+      const hand = () =>
+        import(queuePath).then(({ handleResult }) =>
+          handleResult(
+            db,
+            {
+              taskId: task.id,
+              userId: USER,
+              workflowType: 'workflow',
+              repoPath: '/tmp',
+              workspacePath: '/tmp',
+              cliProviderId: null,
+              ignoreSavedStepClis: false,
+              executionPath: null,
+              metadata: null,
+              orchestrationEpoch: 3,
+              currentStepId: STEP,
+              currentRound: row.round,
+              status: 'running',
+              completedAt: null,
+              runListStrategy: 'static',
+              runListSnapshot: [STEP],
+              customSteps: {},
+              fixLoop: null,
+              deadAt: null,
+            },
+            STEP,
+            result,
+          ),
+        );
+      return { task, row: result.row as typeof row, hand, reparkMerge };
+    };
+    const answer = (taskId: string, route: 'submit' | 'clarify') =>
+      post(
+        `/tasks/${taskId}/steps/${STEP}/${route}`,
+        route === 'submit' ? { values: { answer: 'yes' } } : { answer: 'keep both' },
+      );
+    const afterAnswerRead = (landed: () => Promise<unknown>) => {
+      const select = db.select.bind(db);
+      let fired = false;
+      vi.spyOn(db, 'select').mockImplementation(((...args: unknown[]) => {
+        const builder = select(...(args as []));
+        const from = builder.from.bind(builder);
+        builder.from = ((table: never) => {
+          const query = from(table);
+          if (table === schema.taskSteps) {
+            const limit = query.limit.bind(query);
+            query.limit = ((n: number) =>
+              Promise.resolve(limit(n)).then(async (rows) => {
+                if (!fired) {
+                  fired = true;
+                  await landed();
+                }
+                return rows;
+              })) as never;
+          }
+          return query;
+        }) as never;
+        return builder;
+      }) as never);
+    };
+
+    it.each(['submit', 'clarify'] as const)(
+      '%s accepts an answer read between the standard park and handleResult',
+      async (route) => {
+        const { task, row, hand } = await parkedForm();
+        afterAnswerRead(async () => {
+          // Separate M1 and the old M2 deterministically even on a fast database.
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          await hand();
+          expect.soft((await rowOf(row.id)).waitingStartedAt).toEqual(row.waitingStartedAt);
+        });
+        const response = await answer(task.id, route);
+        expect(response.status, JSON.stringify(await response.clone().json())).toBe(200);
+        expect((await rowOf(row.id)).waitingStartedAt).toBeNull();
+      },
+      30_000,
+    );
+    it.each(['submit', 'clarify'] as const)(
+      '%s still refuses a real re-park after an answer cleared the old marker',
+      async (route) => {
+        const { task, row } = await parkedForm();
+        afterAnswerRead(async () => {
+          expect((await answer(task.id, route)).status).toBe(200);
+          await db
+            .update(schema.taskSteps)
+            .set({
+              waitingStartedAt: new Date(Date.now() + 1000),
+              formValues: null,
+            })
+            .where(eq(schema.taskSteps.id, row.id));
+        });
+        const response = await answer(task.id, route);
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ code: 'step_form_not_waiting' });
+        expect((await rowOf(row.id)).waitingStartedAt).not.toEqual(row.waitingStartedAt);
+      },
+      30_000,
+    );
+    it.each([
+      ['standard', false, 'submit'],
+      ['standard', false, 'clarify'],
+      ['merge resolver', true, 'submit'],
+      ['merge resolver', true, 'clarify'],
+    ] as const)(
+      '%s (merge=%s, answer=%s): the hand-off does not reopen an answered marker',
+      async (_kind, merge, route) => {
+        const { task, row, hand } = await parkedForm(merge);
+        expect((await answer(task.id, route)).status).toBe(200);
+        expect((await rowOf(row.id)).waitingStartedAt).toBeNull();
+        await hand();
+        expect((await rowOf(row.id)).waitingStartedAt).toBeNull();
+      },
+      30_000,
+    );
+    it('the merge resolver stamps a legitimate new wait after an answer cleared the marker', async () => {
+      const { task, row, hand, reparkMerge } = await parkedForm(true);
+      expect.soft(row.waitingStartedAt, 'the merge park UPDATE stamps M1').toBeInstanceOf(Date);
+      expect((await answer(task.id, 'clarify')).status).toBe(200);
+      await hand();
+      expect
+        .soft((await rowOf(row.id)).waitingStartedAt, 'the stale hand-off leaves the answer closed')
+        .toBeNull();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const next = await reparkMerge();
+      expect(next.row.waitingStartedAt).toBeInstanceOf(Date);
+      expect(next.row.waitingStartedAt).not.toEqual(row.waitingStartedAt);
+    }, 30_000);
+  });
 });

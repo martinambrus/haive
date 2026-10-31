@@ -227,7 +227,13 @@ async function setStepStatusForm(
   formSchema: FormSchema,
   statusMessage: string,
 ): Promise<TaskStepRow> {
-  return updateOwnedStep(db, stepRowId, { status: 'waiting_form', formSchema, statusMessage });
+  return updateOwnedStep(db, stepRowId, {
+    status: 'waiting_form',
+    formSchema,
+    statusMessage,
+    // Stamp with the park, as the step runner does, before an answer can see it.
+    waitingStartedAt: new Date(),
+  });
 }
 
 async function parkForGuidance(

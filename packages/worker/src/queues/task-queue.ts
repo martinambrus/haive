@@ -2004,9 +2004,10 @@ export async function handleResult(
       return;
     }
     case 'waiting_form': {
-      // Stamp the start of the idle (waiting-for-input) period so the step's
-      // active-work timer can exclude it. Folded into idle_ms on form submit.
-      if (!(await writeOwnedRow(db, result.row.id, { waitingStartedAt: new Date() }))) {
+      // Every form producer stamps the wait in its park UPDATE. Keep that marker:
+      // moving it here refuses answers read during the hand-off, or reopens a wait
+      // an answer already closed. Still check ownership before handing the task off.
+      if (!(await writeOwnedRow(db, result.row.id, {}))) {
         await logLost('waiting_form_row');
         return;
       }
