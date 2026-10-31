@@ -501,7 +501,9 @@ describe.skipIf(!url)(
       }
 
       let underTestEnded = false;
-      const underTest = settle(codeUnderTest());
+      // Through a promise, so a code under test that throws before it awaits (a missing function) fails
+      // this case instead of leaving the peer's transaction open for the cases after it.
+      const underTest = settle(Promise.resolve().then(codeUnderTest));
       void underTest.then(() => (underTestEnded = true));
 
       let heldWhileWaiting: string[] = [];

@@ -186,6 +186,16 @@ const writeLoginHint =
 const retryOrderPeer = { first: lockRun(RUN), second: lockMining(MINING) };
 /** A pass's order: it holds the run, then wants its step row. */
 const passPeer = { first: lockRun(RUN, 'update'), second: writeLoginHint(STEP.id) };
+/** What a pass does once it holds an agent row (`holdReopenedForm`, worker step-runner.ts): it wants its step row. */
+const AGENT_ROW_HOLDER = 'a pass holding an agent row';
+const agentRowPassPeer = {
+  first: lockMining(MINING),
+  second: (tx: Tx) =>
+    tx
+      .update(schema.taskSteps)
+      .set({ statusMessage: AGENT_ROW_HOLDER, updatedAt: new Date() })
+      .where(eq(schema.taskSteps.id, STEP.id)),
+};
 /** A Stop's order: its first sweep ends the live runs of the task, then it takes the step rows. */
 const stopPeer = (taskId: string) => ({
   first: (tx: Tx) => cancelLiveRuns(tx, taskId, 'user', new Date()),
@@ -396,7 +406,9 @@ describe.skipIf(!url)(
       const startedAt = Date.now();
       let endedAt = 0;
       let underTestEnded = false;
-      const underTest = settle(codeUnderTest());
+      // Through a promise, so a code under test that throws before it awaits (a missing function) fails
+      // this case instead of leaving the peer's transaction open for the cases after it.
+      const underTest = settle(Promise.resolve().then(codeUnderTest));
       void underTest.then(() => {
         underTestEnded = true;
         endedAt = Date.now();
@@ -768,6 +780,30 @@ describe.skipIf(!url)(
           TEST_TIMEOUT,
         );
       }
+
+      it(
+        'A7e: refuses at once instead of waiting for the agent row a pass holds, so the pass that then wants the step row does not deadlock it',
+        async () => {
+          const { taskId, step } = await seedLateRow('live');
+          await seedMining({ status: 'running' });
+
+          const run = await interleave(
+            () => lateSweep(taskId, step),
+            agentRowPassPeer,
+            lateProbes(taskId),
+            { mayRefuseAtOnce: true },
+          );
+
+          expectRefusedAtOnce(run);
+          expect((await rowOf(STEP.id)).statusMessage, 'the pass wrote its step row').toBe(
+            AGENT_ROW_HOLDER,
+          );
+          expect(await db.$count(schema.taskStepAgentMinings), 'the agent row').toBe(1);
+          expect((await runOf(RUN)).supersededAt, 'R after the refused sweep').toBeNull();
+          expect((await taskOf(taskId)).orchestrationEpoch, 'epoch after the rollback').toBe(3);
+        },
+        TEST_TIMEOUT,
+      );
 
       it(
         'A7c: refuses at once instead of waiting for the live run a Stop has ended, so the Stop that then wants the step rows finishes',
