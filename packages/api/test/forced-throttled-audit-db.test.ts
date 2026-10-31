@@ -130,7 +130,7 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
             'account',
           ),
         );
-        // Exercise a completion beyond expect.poll's default one-second budget.
+        // The 5.5 s delay exceeds the 5 s default test timeout; the 30 s timeout below replaces it.
         h.auditDelayMs = known && !refused ? 5500 : 0;
         if (refused) await refuseAudit(db, h.actor, { anonymous: true });
         const res = await send('/auth/login', {
