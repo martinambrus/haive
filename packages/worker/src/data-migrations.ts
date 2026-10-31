@@ -185,10 +185,11 @@ export async function scrubPlanMirrorErrors(db: Database): Promise<void> {
     })
     .from(schema.planMirrorState)
     .where(isNotNull(schema.planMirrorState.lastError));
+  const repaired: string[] = [];
   for (const row of rows) {
     const message = scrubErrorPaths(row.lastError);
     if (message === row.lastError) continue;
-    await db
+    const updated = await db
       .update(schema.planMirrorState)
       .set({ lastError: message })
       .where(
@@ -196,7 +197,12 @@ export async function scrubPlanMirrorErrors(db: Database): Promise<void> {
           eq(schema.planMirrorState.repositoryId, row.repositoryId),
           eq(schema.planMirrorState.lastError, row.lastError!),
         ),
-      );
+      )
+      .returning({ repositoryId: schema.planMirrorState.repositoryId });
+    repaired.push(...updated.map((row) => row.repositoryId));
+  }
+  if (repaired.length > 0) {
+    log.info({ count: repaired.length, ids: repaired }, 'scrubbed stored plan mirror errors');
   }
 }
 

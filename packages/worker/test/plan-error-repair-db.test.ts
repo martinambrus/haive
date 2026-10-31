@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '@haive/shared/logger';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { eq, sql } from 'drizzle-orm';
 import { DATA_MIGRATIONS } from '../src/data-migrations.js';
@@ -12,6 +13,18 @@ if (url && !new URL(url).pathname.startsWith('/t478_plan_error_test')) {
 describe.skipIf(!url)('boot repair of stored plan error paths', () => {
   let db: Database;
   const userId = randomUUID();
+  const lines: string[] = [];
+  beforeEach(() => {
+    lines.length = 0;
+    const key = Object.getOwnPropertySymbols(logger).find(
+      (key) => key.description === 'pino.stream',
+    )!;
+    const stream = (logger as unknown as Record<symbol, { write: (line: string) => void }>)[key]!;
+    vi.spyOn(stream, 'write').mockImplementation((line) => {
+      lines.push(line);
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
   beforeAll(async () => {
     db = createDatabase(url!);
     await db.insert(schema.users).values({
@@ -67,6 +80,14 @@ describe.skipIf(!url)('boot repair of stored plan error paths', () => {
     const repaired = await rows();
     expect(repaired.find((r) => r.id === ids[0])?.error).toBe("EACCES: open '[path]'");
     expect(migrations).toHaveLength(1);
+    expect(lines.map((line) => JSON.parse(line))).toContainEqual(
+      expect.objectContaining({
+        level: 30,
+        count: 1,
+        ids: [ids[0]],
+        msg: 'scrubbed stored plan mirror errors',
+      }),
+    );
     expect(migrations[0]?.kind).toBe('convergent');
     for (const row of repaired) {
       expect(row).toMatchObject({ revision: 7, written: 4, updated: before });
@@ -74,7 +95,9 @@ describe.skipIf(!url)('boot repair of stored plan error paths', () => {
       if (row.id !== ids[0]) expect(row).toEqual(prior);
       else expect(row.xmin).not.toBe(prior.xmin);
     }
+    lines.length = 0;
     for (const migration of migrations) await migration.run(db);
     expect(await rows()).toEqual(repaired);
+    expect(lines).toEqual([]);
   });
 });
