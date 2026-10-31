@@ -1025,7 +1025,7 @@ From the T474 review (2026-10-31). PRE-EXISTING unless stated; minor to moderate
 6. release.yml: no job has `timeout-minutes` (default 360 min), and a hung one holds the `release-<ref>` concurrency group (~:19-20).
 7. Known pin survivors: `|| true` inside a check's `run`, `fail-fast: true` on production-images (~:522), a job `defaults.run.shell`, a job `if: false`; step limits have no floor.
 
-### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+3)
+### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+4)
 
 status: open
 From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErrorPaths` (@haive/shared logger) and passed the plan snapshot error, the plan Save/Pull 409 bodies, `repositories.status_message` and 12's plan-mirror warning through it.
@@ -1034,6 +1034,7 @@ From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErr
 2. Other step failure and warning sinks keep paths: worker step-engine/step-runner.ts ~:3722 and 12-post-onboarding.ts ~:808; found from source, not exercised.
 3. Stored 12 warnings in `task_steps.output` from before T478 keep their paths (not repaired; the task page shows them behind "Show output").
 4. The scrubber's known misses (errors.ts ~:73): it replaces `/proc/self/fd` in fs-safe's refusal text, HTTP route paths and glob tails, drops a sentence's final period with an unquoted path, and leaks the tail of an unquoted path with a space and a second path directly after a colon. Accepted for T478; revisit if a surface shows one.
+5. (T478 review 3) READY repositories keep server paths in `repositories.status_message`: the refresh job stores its refusal text with `status: 'ready'` (`persistDetection`, repo/clone.ts ~:251, called at repo/refresh.ts ~:306, ~:328, ~:341, ~:359): `git remote get-url origin failed in <checkout path>`, a HEAD read's git stderr, `... it was kept at <absolute aside path>.` (deliberate, so scrubbing it is a product decision) and `the checkout could not be examined (...)`; the repos page renders the column for every status. Item 1 is now verified by reading (repos.ts ~:2688-2795: `lstat` text and `git rev-parse`, `git remote add` and `git config` stderr in the 409).
 
 ### T491 · FNF[plan-panel-outcomes] · a plan merge that ends by its own poll vanishes without a word; PlanChat keeps its draft across nodes (+3)
 
