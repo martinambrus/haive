@@ -19,6 +19,7 @@ import {
 import type { PgUpdateSetSource } from 'drizzle-orm/pg-core';
 import {
   isUniqueViolationOf,
+  lockStepRows,
   ONE_LIVE_UPGRADE_INDEX,
   CLEAR_STEP_USAGE_STAMP,
   schema,
@@ -3835,29 +3836,35 @@ async function handleCancelTask(db: Database, payload: TaskJobPayload): Promise<
   // shows a live form on a cancelled task. step_status has no 'cancelled' value,
   // so mark them failed (mirrors the Stop path) with a clear reason. Only
   // non-terminal rows are touched, so re-running this is a no-op.
-  await db
-    .update(schema.taskSteps)
-    .set({
-      status: 'failed',
-      errorMessage: 'Task cancelled',
-      ...CLEAR_STEP_USAGE_STAMP,
-      endedAt: now,
-      // Mirror of the fold in cancelTaskRow (api/lib/cancel-task.ts): stamping ended_at over a
-      // live waiting_started_at would turn the whole recorded park back into work, because
-      // computeStepContribution only counts an open wait while ended_at is null. Clearing the
-      // marker in the same statement keeps this idempotent — the api path usually folded it
-      // already, and a second pass adds 0 because GREATEST ignores the NULL marker.
-      idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
+  const open = and(
+    eq(schema.taskSteps.taskId, payload.taskId),
+    inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
+  );
+  // The rows go through `lockStepRows` first, in id order like every other writer of several rows
+  // of one task: a bulk UPDATE alone locks them in scan order and meets a batch taker halfway
+  // (40P01). No task row is held here (markTaskCancelled committed above), so this waits for
+  // nothing a pass wants. The UPDATE keeps the predicate, so a row opened since the batch is ended too.
+  await db.transaction(async (tx) => {
+    await lockStepRows(tx, open);
+    await tx
+      .update(schema.taskSteps)
+      .set({
+        status: 'failed',
+        errorMessage: 'Task cancelled',
+        ...CLEAR_STEP_USAGE_STAMP,
+        endedAt: now,
+        // Mirror of the fold in cancelTaskRow (api/lib/cancel-task.ts): stamping ended_at over a
+        // live waiting_started_at would turn the whole recorded park back into work, because
+        // computeStepContribution only counts an open wait while ended_at is null. Clearing the
+        // marker in the same statement keeps this idempotent — the api path usually folded it
+        // already, and a second pass adds 0 because GREATEST ignores the NULL marker.
+        idleMs: sql`${schema.taskSteps.idleMs} + least(2147483647 - ${schema.taskSteps.idleMs},
         greatest(0, floor(extract(epoch from (now() - ${schema.taskSteps.waitingStartedAt})) * 1000)))::int`,
-      waitingStartedAt: null,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(schema.taskSteps.taskId, payload.taskId),
-        inArray(schema.taskSteps.status, ['pending', 'running', 'waiting_form', 'waiting_cli']),
-      ),
-    );
+        waitingStartedAt: null,
+        updatedAt: now,
+      })
+      .where(open);
+  });
   // Before the kill and the listing: a run still queued reads this right before it creates its sandbox.
   await supersedeTaskRuns(db, payload.taskId);
   await cleanupTaskContainers(db, payload.taskId, 'cancelled');
