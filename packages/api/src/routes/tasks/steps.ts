@@ -98,6 +98,24 @@ async function admitAnswer(tx: DbHandle, taskId: string): Promise<boolean> {
   return true;
 }
 
+/** The 409 for a form that is not waiting for an answer. The plan chat and the merge panel key on its code. */
+function formNotWaiting(what: 'form submission' | 'clarification', stepId: string): HttpError {
+  return new HttpError(409, `No step awaiting ${what} for id ${stepId}`, 'step_form_not_waiting');
+}
+
+/** The parked row a handler read, still parked as it read it: waiting on its form, with its wait open or closed
+ *  as it was. The status alone misses a closer that leaves the row `waiting_form` (another submit, the PR
+ *  poller's auto-finalize); the wait's state catches it, as in the poller's own guard (`advancePrWaitStep`). */
+function stillParkedAsRead(step: { id: string; waitingStartedAt: Date | null }) {
+  return and(
+    eq(schema.taskSteps.id, step.id),
+    eq(schema.taskSteps.status, 'waiting_form'),
+    step.waitingStartedAt
+      ? isNotNull(schema.taskSteps.waitingStartedAt)
+      : isNull(schema.taskSteps.waitingStartedAt),
+  );
+}
+
 /** An admitted answer makes the task live in its own transaction, where a drain's count sees it. */
 async function reopenFailedTask(tx: DbHandle, taskId: string, now: Date): Promise<void> {
   await tx
@@ -825,19 +843,14 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const step = stepRows[0];
-  if (!step)
-    throw new HttpError(
-      409,
-      `No step awaiting form submission for id ${stepId}`,
-      'step_form_not_waiting',
-    );
+  if (!step) throw formNotWaiting('form submission', stepId);
   const normalized = normalizeStepFormValues(stepId, body.values);
   if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
   const values = normalized.data;
 
   const now = new Date();
   const writeAnswer = async (tx: DbHandle) => {
-    await tx
+    const answered = await tx
       .update(schema.taskSteps)
       .set({
         formValues: values,
@@ -847,7 +860,11 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
         waitingStartedAt: null,
         updatedAt: now,
       })
-      .where(eq(schema.taskSteps.id, step.id));
+      .where(stillParkedAsRead(step))
+      .returning({ id: schema.taskSteps.id });
+    // Another closer took the row after it was read (a pass, Skip, a Retry, the PR poller): the answer, its
+    // event and the advance are not this one's to add, and the throw rolls the transaction back.
+    if (answered.length === 0) throw formNotWaiting('form submission', stepId);
 
     await appendTaskEvent(tx, id, step.id, 'step.form_submitted', {
       stepId,
@@ -911,12 +928,7 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const step = stepRows[0];
-  if (!step)
-    throw new HttpError(
-      409,
-      `No step awaiting clarification for id ${stepId}`,
-      'step_form_not_waiting',
-    );
+  if (!step) throw formNotWaiting('clarification', stepId);
 
   const now = new Date();
   await db.transaction(async (tx) => {
@@ -929,10 +941,13 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
       eventType: MERGE_CLARIFICATION_ANSWERED_EVENT,
       payload: { answer: body.answer },
     });
-    await tx
+    const answered = await tx
       .update(schema.taskSteps)
       .set({ idleMs: OPEN_WAIT_INTO_IDLE_MS, waitingStartedAt: null, updatedAt: now })
-      .where(eq(schema.taskSteps.id, step.id));
+      .where(stillParkedAsRead(step))
+      .returning({ id: schema.taskSteps.id });
+    // As in the submit: a row another closer took is refused, and the throw rolls back the answer event above.
+    if (answered.length === 0) throw formNotWaiting('clarification', stepId);
 
     await appendTaskEvent(tx, id, step.id, 'step.clarified', { stepId });
     if (!reopens) return;

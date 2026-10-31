@@ -783,6 +783,91 @@ describe.skipIf(!url)(
       },
     );
 
+    // C1-C4: another closer takes a parked form between the submit's or the clarification's read of the row and
+    // its UPDATE: a pass takes it up, Skip skips it, a Retry resets it, or the PR poller closes its wait. Both
+    // updated the row by id alone, so they wrote their answer onto a row that had moved on and queued a second
+    // advance. They answer the 409 they give a form that is not waiting, and write and queue nothing.
+    const closers = [
+      ['a pass took the row up', sql`status = 'running'`],
+      [
+        'Skip skipped the row',
+        sql`status = 'skipped', waiting_started_at = null, ended_at = now()`,
+      ],
+      ['a Retry reset the row', sql`status = 'pending', waiting_started_at = null`],
+      [
+        'the PR poller closed its wait',
+        sql`form_values = '{}'::jsonb, waiting_started_at = null, idle_ms = idle_ms + ${PEER_IDLE_MS}`,
+      ],
+    ] as const;
+    const formNotWaiting = (what: string) => ({
+      status: 409,
+      code: 'step_form_not_waiting',
+      message: `No step awaiting ${what} for id ${STEP.stepId}`,
+    });
+
+    it.each(closers)(
+      'C1: the form submit that lost the row because %s answers 409 and writes and queues nothing',
+      async (_who, set) => {
+        const taskId = await seedTask('running');
+        await seedParkedForm(taskId);
+
+        const outcome = await settle(
+          besidePeer(
+            () =>
+              post(`/tasks/${taskId}/steps/${STEP.stepId}/submit`, { values: { answer: 'yes' } }),
+            peerSets(STEP.id, set),
+          ),
+        );
+
+        expect.soft(outcome).toMatchObject({ ok: false, error: formNotWaiting('form submission') });
+        expect.soft((await wholeRow()).formValues, 'form_values').not.toEqual({ answer: 'yes' });
+        expect.soft(await eventTypes(taskId), 'task_events').toEqual([]);
+        expect.soft(h.jobs, 'queued jobs').toEqual([]);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it.each(closers)(
+      'C2: the clarification answer that lost the row because %s answers 409 and writes and queues nothing',
+      async (_who, set) => {
+        const taskId = await seedTask('running');
+        await seedParkedForm(taskId);
+
+        const outcome = await settle(
+          besidePeer(
+            () => post(`/tasks/${taskId}/steps/${STEP.stepId}/clarify`, { answer: 'keep both' }),
+            peerSets(STEP.id, set),
+          ),
+        );
+
+        expect.soft(outcome).toMatchObject({ ok: false, error: formNotWaiting('clarification') });
+        expect.soft(await eventTypes(taskId), 'task_events').toEqual([]);
+        expect.soft(h.jobs, 'queued jobs').toEqual([]);
+      },
+      TEST_TIMEOUT,
+    );
+
+    // The guard compares the wait with what the handler read, as the poller's does: a row whose wait was already
+    // closed when it was read (the submit route leaves it so until the worker picks the form up) is still answered.
+    it.each([
+      ['the form submit', 'submit', { values: { answer: 'yes' } }],
+      ['the clarification answer', 'clarify', { answer: 'keep both' }],
+    ] as const)(
+      'C3: %s still answers a form whose wait was closed before it was read',
+      async (_what, route, body) => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, { status: 'waiting_form', waitingStartedAt: null });
+
+        const response = await post(`/tasks/${taskId}/steps/${STEP.stepId}/${route}`, body);
+
+        expect(response).toMatchObject({ status: 200, body: { ok: true, queued: true } });
+        expect(h.jobs).toHaveLength(1);
+        expect(await eventTypes(taskId)).toContain(
+          route === 'submit' ? 'step.form_submitted' : 'step.clarified',
+        );
+      },
+    );
+
     // S1 and S2: a pass activates the clicked row between Skip's read of its status and the row lock. Skip
     // decides from its first read that the row is failed or parked, and marked it skipped by id: the pass's row
     // became skipped, and as the clicked row is in neither `leftActive` nor the rows activated meanwhile, nobody
