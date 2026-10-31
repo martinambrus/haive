@@ -662,19 +662,19 @@ describe('the tasks the sweep takes, by task status and current row', () => {
   describe('a running task on a running row, re-opened by a Resume whose advance never reached the queue', () => {
     const reopened = { status: 'running' };
 
-    it.each([null, idle])(
-      'F7: excludes a row with a live run started at %s from candidates',
-      async (startedAt) => {
-        const task = { ...seed('task', 'running', reopened), runs: [{ startedAt }] };
-        expect(await candidatesAmong([task])).toEqual([]);
-      },
-    );
+    it.each([
+      { label: 'unstarted', startedAt: null },
+      { label: 'started', startedAt: idle },
+    ])('excludes a row with a live $label run from candidates', async ({ startedAt }) => {
+      const task = { ...seed('task', 'running', reopened), runs: [{ startedAt }] };
+      expect(await candidatesAmong([task])).toEqual([]);
+    });
 
     it.each([
-      { endedAt: idle },
-      { supersededAt: idle },
-      { taskStepId: '00000000-0000-4000-8000-000000000099' },
-    ])('still takes a row whose only run does not hold it: %j', async (run) => {
+      { label: 'ended', run: { endedAt: idle } },
+      { label: 'superseded', run: { supersededAt: idle } },
+      { label: 'another step', run: { taskStepId: '00000000-0000-4000-8000-000000000099' } },
+    ])('still takes a row whose only run does not hold it: $label', async ({ run }) => {
       const task = { ...seed('task', 'running', reopened), runs: [run] };
       expect(await candidatesAmong([task])).toHaveLength(1);
     });
