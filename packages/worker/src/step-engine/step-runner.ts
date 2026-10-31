@@ -1926,6 +1926,26 @@ export async function consumeFoldedMiningRows(
     );
 }
 
+/** The reopened form's hold and the consumed agent rows, in one transaction. The row is written
+ *  first and only while the pass owns it, so a Retry's reset keeps its own hold and the agent rows
+ *  are left as the reset left them. Exported for the lock-order test. */
+export async function holdReopenedForm(
+  db: Database,
+  taskStepId: string,
+  folded: readonly AgentMiningResult[] | undefined,
+  at: Date,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await updateOwnedStep(tx, taskStepId, {
+      detectOutput: null,
+      formSchema: null,
+      formValues: null,
+      pauseFormOnRetry: true,
+    });
+    await consumeFoldedMiningRows(tx, taskStepId, folded, at);
+  });
+}
+
 /** Rows per reservation statement; each carries a whole prompt. */
 const RESERVE_CHUNK = 50;
 
@@ -3330,16 +3350,7 @@ export async function advanceStep(params: AdvanceStepParams): Promise<AdvanceSte
           // below re-detects and stops at the form rather than re-sending the answered items. The
           // row is written first and only while the pass owns it, so a Retry's reset keeps its own
           // hold and the agent rows are left as the reset left them.
-          const reopenedAt = new Date();
-          await db.transaction(async (tx) => {
-            await updateOwnedStep(tx, current.id, {
-              detectOutput: null,
-              formSchema: null,
-              formValues: null,
-              pauseFormOnRetry: true,
-            });
-            await consumeFoldedMiningRows(tx, current.id, applyArgs.agentMiningResults, reopenedAt);
-          });
+          await holdReopenedForm(db, current.id, applyArgs.agentMiningResults, new Date());
           const refreshedDetected = await stepDef.detect(ctx);
           if (stepDef.prepareForm) {
             await stepDef.prepareForm(ctx, refreshedDetected, llmOutput);
