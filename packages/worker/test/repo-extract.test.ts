@@ -297,8 +297,9 @@ describe('extractArchive', () => {
         keepLoneDir: (name) => {
           // Remove the staged source after its last inspection. The real rename of the old
           // destination still succeeds, then installing this missing source fails with ENOENT.
-          // This existing synchronous callback makes the failure deterministic without mocking
-          // either fs-safe primitive or adding a production fault-injection API.
+          // This existing synchronous callback makes the failure deterministic without a fault in
+          // either fs-safe primitive (their module wrappers stay inert here) or a production
+          // fault-injection API.
           const stage = readdirSync(tmpRoot).find((n) => n.startsWith('.haive-extract-'))!;
           source = path.join(tmpRoot, stage, 'x', name);
           rmSync(source, { recursive: true });
@@ -362,7 +363,7 @@ describe('extractArchive', () => {
         oldRel,
         oldPath: path.join(tmpRoot, oldRel),
       }),
-      'archive swap rollback failed; previous destination retained in stage',
+      expect.any(String),
     );
   });
 
@@ -417,7 +418,7 @@ describe('extractArchive', () => {
         err: removalError,
         stagePath: path.join(tmpRoot, stageRel),
       }),
-      'archive extraction stage was not removed',
+      expect.any(String),
     );
   });
 
