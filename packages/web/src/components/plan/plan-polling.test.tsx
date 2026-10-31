@@ -22,6 +22,7 @@ const rt = vi.hoisted(() => {
     queued: [] as { deps: unknown[] | undefined; run: () => unknown }[],
     ran: [] as { deps: unknown[] | undefined; cleanup: unknown }[],
     dirty: false,
+    stateWrites: 0,
     rendering: false,
     redraw: () => {},
     tree: undefined as unknown,
@@ -37,6 +38,7 @@ vi.mock('react', async (importOriginal) => ({
       rt.slots[at] = typeof initial === 'function' ? (initial as () => unknown)() : initial;
     }
     const set = (update: unknown) => {
+      rt.stateWrites++;
       if (slots !== rt.slots) return; // React ignores state writes from an unmounted instance.
       const next =
         typeof update === 'function' ? (update as (v: unknown) => unknown)(rt.slots[at]) : update;
@@ -828,6 +830,23 @@ describe('PlanMergePanel with a merge task', () => {
     await settle();
     expect(onSettled).not.toHaveBeenCalled();
     expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+  });
+
+  it('does not set state or notify the page when recovery resolves after unmount', async () => {
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    const recovery = deferred<unknown>();
+    net.get.mockReturnValueOnce(recovery.promise);
+    rerender(null);
+    await settle();
+    unmount();
+    unmount = () => {};
+    const writes = rt.stateWrites;
+    recovery.resolve(taskResponse(PLAN_MERGE_STEP_ID, { status: 'failed' }));
+    await settle();
+    expect(rt.stateWrites).toBe(writes);
+    expect(onSettled).not.toHaveBeenCalled();
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('does not recover an outcome while a local Discard is pending', async () => {
