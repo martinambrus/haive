@@ -809,12 +809,6 @@ status: open · kind: design · scope: queued broader finding, not approved impl
 
 PRE-EXISTING, rechecked during T423 integration review. F1: dormant worker helpers in `packages/worker/src/sandbox/container-manager.ts:194,204` still read then write attachment counts and have no callers. F3: API process death leaves `containers.attached_ws_count` stale, and there is no boot reconciliation or operational consumer (live uses are the API writers plus a web type). Decide whether the count should be retained with a lifecycle contract, or removed with the unused helpers; make dormant helpers atomic before any reuse. This does not undo T423's live API atomic-write and cleanup correction. Evidence: `.claude/tmp/board-run/T423/codex-review-integrated.md` F1/F3. No implementation started; separate design decision.
 
-### T437 · FNF[legacy-repository-responses] · exclusions PATCH returns a legacy credentialed remote unchanged
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T00:45Z · last: 2026-10-31T00:45Z
-
-PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
-
 ### T439 · FNF[auth-url-resend] [design] · a pause of 1 s or more inside the login URL still sends its head
 
 status: open
@@ -967,6 +961,7 @@ Decide whether the class is worth a general mechanism (copy DOM values into stat
 
 ## Done
 
+- T437 — repository responses carry no credential: the create and exclusions PATCH responses answer redactEditableGitUrl(remote) like list and detail, and no repository response (list, detail, create, upload, upload-complete, exclusions) carries the onboarding tooling or environment mirror, which held the RAG connection string with its password and MCP env values; a failed clone or refresh was already stored redacted (pinned) — PR #952 (52985ee80), 2026-10-31; main CI green; checked on the dev stack (78 list rows, detail)
 - T445 — a project-state sync with no base logs one warn naming the units whose held value the checkout's replaced (at most ten, settings and environment first, never a value); the web-bundle guard also fails on Node globals read as values (Buffer.byteLength became TextEncoder); the conflict-sides comment moved onto conflictSide; item 2 (the page saying a value was refused or replaced) moved to T462 [design] — PR #950 (9d8c78f58), 2026-10-31; main CI green; docs also record T446's verdict; follow-ups T462, T364 item 25
 - T452 — the 150 ms Enter after a token paste is one of the login session's tracked one-shot timers and cleanupSession clears it; a chunk after cleanup starts no antigravity URL step or menu-advance timer — PR #949 (fc7789288), 2026-10-30; main CI green; follow-up T457
 - T447 — PATCH /repositories/:id/tooling answers 400 invalid_body for a JSON body that is not an object and invalid_json for one that is not JSON, writing nothing; refresh-tree reads only the eight repository columns it uses; an AGENTS.md rules override keeps its first line's indent while the default block stays byte-identical (no manifest bump) — PR #948 (8330687b8), 2026-10-30; main CI green; checked on the dev stack; follow-ups T455, T456
