@@ -424,7 +424,8 @@ describe('PlanMergePanel with a merge task', () => {
   });
 
   const CONFIRM = 'Confirm — merge in and push';
-  const NOTICE = 'The merge has already completed or closed. Nothing was discarded.';
+  const NOTICE =
+    'The merge is no longer open: it completed, was cancelled or failed. Nothing was discarded.';
   const hasNotice = () =>
     shown().some((el) => el.props.message === NOTICE || el.props.body === NOTICE);
 

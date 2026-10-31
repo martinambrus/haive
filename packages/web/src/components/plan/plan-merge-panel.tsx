@@ -50,7 +50,8 @@ export function PlanMergePanel({
   merge: PlanMergeState | null;
   /** Re-read the merge (new turns in the transcript). */
   onChanged: () => void;
-  /** Called when the merge lands or is discarded, so the page can refresh. */
+  /** Called when the merge lands or a discard settles (including when nothing was discarded),
+   *  so the page can refresh. */
   onSettled: () => void;
 }) {
   const [liveStep, setLiveStep] = useState<TaskStep | null>(null);
@@ -166,7 +167,7 @@ export function PlanMergePanel({
       } else {
         setNotice({
           taskId: merge.taskId,
-          text: 'The merge has already completed or closed. Nothing was discarded.',
+          text: 'The merge is no longer open: it completed, was cancelled or failed. Nothing was discarded.',
         });
       }
       onSettled();
