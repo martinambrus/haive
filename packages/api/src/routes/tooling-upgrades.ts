@@ -48,6 +48,7 @@ import {
 } from '@haive/shared/review';
 import { getDb } from '../db.js';
 import { boundedLockWait } from '../lib/repository-busy.js';
+import { requireJsonObject } from '../lib/json-object.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -247,12 +248,13 @@ toolingUpgradeRoutes.post('/:id/tooling-upgrade', async (c) => {
   if (!repo) throw new HttpError(404, 'Repository not found');
 
   // Optional { components: string[] } restricts which to upgrade; absent = all.
-  let parsed: { components?: string[] } = {};
+  let raw: unknown = {};
   try {
-    parsed = (await c.req.json()) as { components?: string[] };
+    raw = await c.req.json();
   } catch {
     // empty body → upgrade everything upgradeable
   }
+  const parsed = requireJsonObject<{ components?: string[] }>(raw);
   const requested = Array.isArray(parsed.components) ? new Set(parsed.components) : null;
 
   const versionMap = await loadToolVersions(db);
@@ -713,11 +715,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
 
   // Not caught: a body that is not JSON is answered 400 by `jsonBodyErrors`, where `{}` would be a
   // save of nothing that reports success.
-  const raw: unknown = await c.req.json();
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new HttpError(400, 'The request body must be a JSON object', 'invalid_body');
-  }
-  const body = raw as {
+  const body = requireJsonObject<{
     rtkEnabled?: boolean;
     rtkVersion?: string | null;
     lspServers?: string[];
@@ -744,7 +742,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
      *  returned by the GET above. */
     appAuthUsername?: string;
     appAuthPassword?: string;
-  };
+  }>(await c.req.json());
 
   if (body.repoMcpServersAction === 'accept' || body.repoMcpServersAction === 'discard') {
     if (Object.keys(body).length > 1) {
