@@ -508,8 +508,8 @@ class MissingArchiveError extends Error {
  * 4. The staged tree is walked and offending members are unlinked and named.
  * 5. Only then is it swapped into place: the old `dest` is moved aside inside the stage, the new tree
  *    renamed in, and the stage removed — so `dest` is never a half-extracted tree. Failures before
- *    the swap leave its previous contents untouched; a failed install restores the old `dest`.
- *    If restoration also fails, the old tree is retained at the logged stage path instead of deleted.
+ *    the swap leave its previous contents untouched; if the new tree cannot be renamed in, `dest` is restored.
+ *    If restoration also fails, the old tree is retained at the logged absolute `oldPath` instead of deleted.
  *    A crash between the two renames leaves `dest` absent and the old tree in the sibling
  *    `.haive-extract-<pid>-<uuid>/old`; in-process rollback cannot run after a crash.
  *
@@ -619,7 +619,13 @@ export async function extractArchive(
           } catch (restoreErr) {
             preserveStage = true;
             logger.error(
-              { err: restoreErr, anchor, dest: dest.rel, oldRel },
+              {
+                err: restoreErr,
+                anchor,
+                dest: dest.rel,
+                oldRel,
+                oldPath: path.join(anchor, oldRel),
+              },
               'archive swap rollback failed; previous destination retained in stage',
             );
           }

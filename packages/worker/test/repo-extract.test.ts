@@ -351,7 +351,12 @@ describe('extractArchive', () => {
     const oldRel = `${stages[0]}/old`;
     expect(await readFile(path.join(tmpRoot, oldRel, 'previous.txt'), 'utf8')).toBe('old\n');
     expect(errorLog).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ err: restoreError, anchor: tmpRoot, oldRel }),
+      expect.objectContaining({
+        err: restoreError,
+        anchor: tmpRoot,
+        oldRel,
+        oldPath: path.join(tmpRoot, oldRel),
+      }),
       'archive swap rollback failed; previous destination retained in stage',
     );
   });
