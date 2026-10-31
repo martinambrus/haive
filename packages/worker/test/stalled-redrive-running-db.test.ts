@@ -1033,6 +1033,18 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
       await expectRedriven(taskId, before, advances);
     });
 
+    it('W6b: is re-driven at boot (staleMs 0) though its last run ended seconds ago, since boot has no worker to hand it back', async () => {
+      const { taskId, rowId } = await parkedOnCli(
+        { updatedAt: ago(5_000) },
+        { updatedAt: ago(5_000) },
+      );
+      await endedRun(taskId, rowId, { endedAt: ago(5_000) });
+      const before = await state(taskId);
+      const { deps, advances } = rig();
+      await expect(redriveStalledTasks(db, deps, { staleMs: 0 })).resolves.toBe(1);
+      await expectRedriven(taskId, before, advances);
+    });
+
     it('WP1: leaves a row whose last run just ended to its continuation, since the end of a run stamps the row', async () => {
       const { taskId, rowId } = await parkedOnCli({}, { waitingStartedAt: null });
       await endedRun(taskId, rowId, { endedAt: new Date() });
@@ -1048,6 +1060,46 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
       expect(advances).toEqual([]);
       expect(await state(taskId), 'and nothing was written').toEqual(before);
     });
+
+    // The handler stamps the row as a side effect of the run's end (WP1), after the end commits and
+    // not at all when the marker is already set or the stamp throws. The cutoff must not rest on it:
+    // it counts from the end of the row's last run too.
+    it.each([
+      { what: 'ended', run: { endedAt: new Date() }, aged: { endedAt: ago(OVERDUE) } },
+      {
+        what: 'was superseded',
+        run: { endedAt: ago(OVERDUE), supersededAt: new Date() },
+        aged: { supersededAt: ago(OVERDUE) },
+      },
+    ])(
+      'WP2: leaves a row whose last run just $what to its continuation, though nothing has stamped the row yet',
+      async ({ run, aged }) => {
+        const { taskId, rowId } = await parkedOnCli();
+        const runId = await endedRun(taskId, rowId, run);
+        const before = await state(taskId);
+        expect(
+          ms(before.steps[0]!.updatedAt),
+          'the row was not stamped as the run ended: its own stamp is overdue',
+        ).toBeLessThan(Date.now() - STALE_MS);
+        const { deps, advances, seen } = rig();
+        await expect(
+          redriveStalledTasks(db, deps, { staleMs: STALE_MS }),
+          'the sweep left the row to the continuation that is on its way',
+        ).resolves.toBe(0);
+        expect(seen.seam, 'the candidate read already left it: the queue was never read').toBe(0);
+        expect(advances).toEqual([]);
+        expect(await state(taskId), 'and nothing was written').toEqual(before);
+
+        // It only waits: a run that ended (or was superseded) before the cutoff is a lost continuation.
+        await db.update(schema.cliInvocations).set(aged).where(eq(schema.cliInvocations.id, runId));
+        const later = rig();
+        await expect(
+          redriveStalledTasks(db, later.deps, { staleMs: STALE_MS }),
+          'the sweep took the row once the run ended before the cutoff',
+        ).resolves.toBe(1);
+        expect(later.advances).toHaveLength(1);
+      },
+    );
 
     it('W7: is what a refused continuation add leaves behind, and the sweep takes it', async () => {
       const { taskId, rowId } = await parkedOnCli();
@@ -1354,6 +1406,24 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
         epoch: E,
         mutate: (taskId) =>
           db.update(schema.tasks).set({ deadAt: new Date() }).where(onTask(taskId)),
+      },
+      {
+        id: 'WQ10',
+        what: 'a run of the row ends and the handler has not stamped the row yet',
+        epoch: E,
+        mutate: async (taskId, rowId) => {
+          await seedRun(taskId, rowId, { startedAt: ago(MIN), endedAt: new Date() });
+        },
+      },
+      {
+        id: 'WQ11',
+        what: 'a run of the row is superseded',
+        epoch: E,
+        mutate: (_t, rowId) =>
+          db
+            .update(schema.cliInvocations)
+            .set({ supersededAt: new Date() })
+            .where(eq(schema.cliInvocations.taskStepId, rowId)),
       },
     ];
 

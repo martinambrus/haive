@@ -741,6 +741,26 @@ describe('the tasks the sweep takes, by task status and current row', () => {
       expect(await candidatesAmong([task])).toEqual([]);
     });
 
+    // The cli-exec handler stamps the row only after a run's end has committed, so the row's own
+    // stamp cannot say that the continuation of a run that just ended is still on its way.
+    it.each([
+      { label: 'one that just ended', runs: [{ endedAt: new Date() }] },
+      {
+        label: 'one that was just superseded',
+        runs: [{ endedAt: idle, supersededAt: new Date() }],
+      },
+      {
+        label: 'two, the last of which just ended',
+        runs: [{ endedAt: idle }, { endedAt: new Date() }],
+      },
+    ])(
+      'excludes a row with $label, since the cutoff counts from the last run too',
+      async ({ runs }) => {
+        const task = { ...seed('task', 'running', parkedOnCli), runs };
+        expect(await candidatesAmong([task])).toEqual([]);
+      },
+    );
+
     it('re-drives it once the row has been idle longer than the cutoff, at the bumped epoch', async () => {
       const task = { ...seed('task', 'running', parkedOnCli), runs: [{ endedAt: idle }] };
       expect(await advancedBy([task])).toEqual([{ taskId: 'task', epoch: 4 }]);

@@ -10,9 +10,10 @@ import { getTableConfig, PgJsonb, PgUUID, type PgTable } from 'drizzle-orm/pg-co
  * It evaluates `where` rather than ignoring it, because the code under test rides on it: a
  * children lookup that ignored its filter would hand back a sibling archive's row and delete the
  * wrong folder. It supports exactly the conditions callers build — `and` and `or` of `eq` / `ne` /
- * `gt` / `lt` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL never matching the last five,
+ * `gt` / `gte` / `lt` / `inArray` / `notInArray` / `isNull` / `isNotNull`, a NULL matching only `isNull`,
  * a jsonb column's key that holds a string (`jsonb_typeof(column -> 'key') = 'string'`),
- * and `not(EXISTS (SELECT 1 FROM table WHERE inner_uuid = outer_uuid AND a IS NULL AND b IS NULL))` —
+ * and `not(EXISTS (SELECT 1 FROM table WHERE inner_uuid = outer_uuid AND a IS NULL AND b IS NULL))`
+ * or the same with `AND (a >= value OR b >= value)` in place of the two IS NULL tests —
  * and throws on anything else, so a drizzle upgrade or a new query shape fails loudly instead of
  * matching every row. Of an update's SQL values it evaluates `<column> + <integer>` and
  * `greatest(<column> + <integer>, 0)` and stores any other as it is. The foreign-key cascade is
@@ -261,6 +262,37 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
               );
           }
         }
+        // The same correlation with the two IS NULL tests replaced by `(a >= $ OR b >= $)`.
+        if (
+          sub.length === 11 &&
+          text(sub[0]) === 'EXISTS (SELECT 1 FROM ' &&
+          list.includes(inner as PgTable) &&
+          /^\s+WHERE $/.test(text(sub[2]) ?? '') &&
+          is(sub[3], PgUUID) &&
+          text(sub[4]) === ' = ' &&
+          is(sub[5], PgUUID) &&
+          /^\s+AND \($/.test(text(sub[6]) ?? '') &&
+          is(sub[7], SQL) &&
+          /^\s+OR $/.test(text(sub[8]) ?? '') &&
+          is(sub[9], SQL) &&
+          text(sub[10]) === '))'
+        ) {
+          const matchColumn = sub[3];
+          const matchKey = columnKeys(inner as PgTable).get(sub[3]);
+          const outerKey = keyOf.get(sub[5]);
+          if (matchKey !== undefined && outerKey !== undefined) {
+            const either = [sub[7], sub[9]].map((c) => compileWhere(inner as PgTable, c));
+            return (row) =>
+              !tableRows(inner as PgTable).some(
+                (r) =>
+                  r[matchKey] != null &&
+                  row[outerKey] != null &&
+                  comparisonValue(matchColumn, r[matchKey]) ===
+                    comparisonValue(matchColumn, row[outerKey]) &&
+                  either.some((holds) => holds(r)),
+              );
+          }
+        }
         return refuse();
       }
       if (
@@ -319,20 +351,26 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
         }
         if (
           ch.length === 3 &&
-          (text(op) === ' <> ' || text(op) === ' > ' || text(op) === ' < ') &&
+          (text(op) === ' <> ' ||
+            text(op) === ' > ' ||
+            text(op) === ' >= ' ||
+            text(op) === ' < ') &&
           is(val, Param)
         ) {
           const v = checkValue(col, val.value);
           const above = text(op) === ' > ';
+          const atLeast = text(op) === ' >= ';
           const below = text(op) === ' < ';
           return (row) =>
             row[key] != null &&
             v != null &&
             (above
               ? (comparisonValue(col, row[key]) as number) > (v as number)
-              : below
-                ? (comparisonValue(col, row[key]) as number) < (v as number)
-                : comparisonValue(col, row[key]) !== v);
+              : atLeast
+                ? (comparisonValue(col, row[key]) as number) >= (v as number)
+                : below
+                  ? (comparisonValue(col, row[key]) as number) < (v as number)
+                  : comparisonValue(col, row[key]) !== v);
         }
         if (
           ch.length === 3 &&

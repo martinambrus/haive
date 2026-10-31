@@ -190,16 +190,27 @@ function idleRunningRow(cutoff: Date) {
   )!;
 }
 
+/** A run of the row that ended, or was superseded, at or after `cutoff`. */
+function runEndedSince(cutoff: Date) {
+  return sql`EXISTS (SELECT 1 FROM ${schema.cliInvocations}
+  WHERE ${schema.cliInvocations.taskStepId} = ${schema.taskSteps.id}
+    AND (${gte(schema.cliInvocations.endedAt, cutoff)}
+      OR ${gte(schema.cliInvocations.supersededAt, cutoff)}))`;
+}
+
 /** A row parked on its CLI whose runs have all ended: the run that ended last queued the step's
  *  continuation (`resumeStepIfLinked`), and a queue that refused it, or a Redis restored without it,
  *  left a parked step with nothing to wait for and no job. The same `liveRun` rule as above keeps a
  *  row with queued or running agents out; a queued run no cli-exec job owes any more is the run
- *  recovery's below. */
+ *  recovery's below. The cutoff counts from the end of the last run as well as from the row's own
+ *  stamp: the cli-exec handler stamps the row (`markCliParkBegin`) only after the end has committed,
+ *  and not at all when the park marker is already set or the stamp throws. */
 function idleWaitingCliRow(cutoff: Date) {
   return and(
     lt(schema.taskSteps.updatedAt, cutoff),
     eq(schema.taskSteps.status, 'waiting_cli'),
     not(liveRun),
+    not(runEndedSince(cutoff)),
   )!;
 }
 
