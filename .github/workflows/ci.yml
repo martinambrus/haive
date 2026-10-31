@@ -422,6 +422,7 @@ jobs:
 
       - name: Recovery re-drive advance ids on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
         run: pnpm --filter @haive/worker exec vitest run test/advance-dedup-redis.test.ts
         env:
           ADVANCE_DEDUP_TEST_REDIS_URL: redis://localhost:6379/8
