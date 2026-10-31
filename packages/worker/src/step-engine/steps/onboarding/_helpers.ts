@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { inventoryDirsFromCatalog } from '@haive/shared/stats-server';
 import { readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext } from '../../step-definition.js';
@@ -153,15 +154,40 @@ export async function resolveTaskSkillTargetDirs(
   return resolveSkillTargetDirs(ctx.db, ctx.userId, fallback, task?.repositoryId);
 }
 
-/** Stored skill target dirs may be legacy or hand-edited, so one that names git data is left out
- *  before anything is written, removed or staged under it. */
+/** The reset and these writers share the catalog's exact directory inventory. */
+export function isSkillTargetDir(dir: string): boolean {
+  return (
+    !namesGitData(dir) &&
+    inventoryDirsFromCatalog().some((entry) => entry.kind === 'skill' && entry.dir === dir)
+  );
+}
+
+/** A stored ID names one directory, never a path or git data. Do not normalize it:
+ *  repair and sync must leave the original directory alone when its ID is refused. */
+export function isSkillPathId(id: string): boolean {
+  return id.length > 0 && id !== '.' && id !== '..' && !/[\\/\0]/.test(id) && !namesGitData(id);
+}
+
+/** Stored destinations are untrusted. An absent field gets its caller's legacy default;
+ *  an explicit list only loses invalid entries and never acquires a fallback. */
 export function withoutGitDataDirs(
   dirs: readonly string[],
   logger?: StepContext['logger'],
 ): string[] {
   return dirs.filter((dir) => {
-    if (!namesGitData(dir)) return true;
-    logger?.warn({ dir }, 'did not use a skills directory: its path names git data');
+    if (isSkillTargetDir(dir)) return true;
+    logger?.warn({ dir }, 'did not use a skills directory: not a catalog skills destination');
+    return false;
+  });
+}
+
+export function withoutUnsafeSkillIds(
+  ids: readonly string[],
+  logger?: StepContext['logger'],
+): string[] {
+  return ids.filter((skillId) => {
+    if (isSkillPathId(skillId)) return true;
+    logger?.warn({ skillId }, 'did not use a skill ID: not a single non-git-data path segment');
     return false;
   });
 }

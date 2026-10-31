@@ -1,5 +1,4 @@
 import { readTextNoFollow, removeNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
-import { namesGitData } from '@haive/shared/project-state';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import type { DetectResult, SkillEntry } from '@haive/shared';
@@ -16,6 +15,7 @@ import {
   loadPreviousStepOutput,
   resolveTaskSkillTargetDirs,
   withoutGitDataDirs,
+  isSkillPathId,
 } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { buildSkillContractBlocks } from './_skill-prompt.js';
@@ -421,7 +421,7 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
       if (primary === undefined) return [];
       const fileTree = det.__fileTree ?? '';
       return det.failingSkills
-        .filter((entry) => !namesGitData(entry.skillId))
+        .filter((entry) => isSkillPathId(entry.skillId))
         .map((f) => ({
           agentId: f.skillId.slice(0, 120),
           agentTitle: f.skillId,
@@ -470,17 +470,17 @@ export const skillRepairStep: StepDefinition<SkillRepairDetect, SkillRepairApply
 
     for (const failing of detected.failingSkills) {
       // The id is a directory name below, removed and rewritten: a stored one may name git data.
-      if (namesGitData(failing.skillId)) {
+      if (!isSkillPathId(failing.skillId)) {
         ctx.logger.warn(
           { skillId: failing.skillId },
-          'did not repair a skill whose name names git data',
+          'did not repair a skill with an invalid path ID',
         );
         stillFailing.push(failing.skillId);
         outcomes.push({
           agentId: failing.skillId,
           agentTitle: null,
           status: 'failed',
-          errorMessage: 'its name names git data',
+          errorMessage: 'its ID is not a single non-git-data path segment',
         });
         continue;
       }

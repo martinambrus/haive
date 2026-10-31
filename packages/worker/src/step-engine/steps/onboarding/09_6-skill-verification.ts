@@ -1,5 +1,5 @@
+import { isSkillPathId } from './_helpers.js';
 import { lstatNoFollow, readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
-import { namesGitData } from '@haive/shared/project-state';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -145,7 +145,7 @@ export async function listSkillDirs(repo: string, skillsDir: string): Promise<st
   if (entries === null) return [];
   // A nested repository's own `.git` is no skill, and 09_5b would delete it to repair it.
   return entries
-    .filter((e) => e.isDirectory() && !namesGitData(e.name))
+    .filter((e) => e.isDirectory() && isSkillPathId(e.name))
     .map((e) => e.name)
     .sort();
 }

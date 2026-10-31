@@ -9,7 +9,10 @@ import type { AgentMiningResult, StepContext } from '../src/step-engine/step-def
 import { skillGenerationStep } from '../src/step-engine/steps/onboarding/09_5-skill-generation.js';
 import { skillRepairStep } from '../src/step-engine/steps/onboarding/09_5b-skill-repair.js';
 import { listSkillDirs } from '../src/step-engine/steps/onboarding/09_6-skill-verification.js';
-import { withoutGitDataDirs } from '../src/step-engine/steps/onboarding/_helpers.js';
+import {
+  withoutGitDataDirs,
+  withoutUnsafeSkillIds,
+} from '../src/step-engine/steps/onboarding/_helpers.js';
 import { skillSyncStep } from '../src/step-engine/steps/workflow/11d-skill-sync.js';
 
 /**
@@ -328,9 +331,14 @@ describe('withoutGitDataDirs', () => {
       '.gemini/skills',
       '.agents/skills',
       '.grok/skills',
+    ]);
+    expect(warnedDirs(log)).toEqual([
+      '.git/hooks',
+      '.GIT./hooks',
+      'sub/.git',
+      'git~1/hooks',
       '.github/x',
     ]);
-    expect(warnedDirs(log)).toEqual(['.git/hooks', '.GIT./hooks', 'sub/.git', 'git~1/hooks']);
   });
 });
 
@@ -605,5 +613,105 @@ describe('stored skill dispatch targets', () => {
     expect(prompt).toContain(ORDINARY);
     for (const dir of REFUSED) expect(prompt).not.toContain(dir);
     expect(prompt).not.toContain('- .git');
+  });
+});
+describe('stored skill positive path validation', () => {
+  beforeEach(() => vi.stubEnv('HAIVE_TEST_BYPASS_LLM', '0'));
+  afterEach(() => vi.unstubAllEnvs());
+  it('accepts only a single non-git-data ID segment', () => {
+    expect(
+      withoutUnsafeSkillIds([
+        'alpha',
+        '.github',
+        '',
+        '.',
+        '..',
+        'a/b',
+        String.raw`a\b`,
+        '\0',
+        ...GIT_IDS,
+      ]),
+    ).toEqual(['alpha', '.github']);
+  });
+  it.each(['', '.', 'other/skills'])(
+    'does not dispatch to a noncatalog directory %j',
+    async (dir) => {
+      const generation = { ...genDetect([dir]), requiredDomains: ['Billing', 'Search', 'Orders'] };
+      expect(
+        skillGenerationStep.llm!.skipIf!({
+          detected: generation,
+          formValues: {},
+          iteration: 1,
+        } as never),
+      ).toBe(true);
+      for (const [step, detected] of [
+        [skillGenerationStep, generation],
+        [skillRepairStep, repairDetect([dir])],
+        [skillSyncStep, syncDetect([dir])],
+      ] as const) {
+        expect(await step.agentMining!.selectAgents({ detected, formValues: {} } as never)).toEqual(
+          [],
+        );
+      }
+    },
+  );
+  it.each(['a/b', String.raw`a\b`, '', '.', '..'])('does not dispatch a path ID %j', async (id) => {
+    for (const [step, detected] of [
+      [skillRepairStep, repairDetect([ORDINARY], [id])],
+      [skillSyncStep, syncDetect([ORDINARY], [id])],
+    ] as const) {
+      expect(await step.agentMining!.selectAgents({ detected, formValues: {} } as never)).toEqual(
+        [],
+      );
+    }
+  });
+  it.each(['', '.', 'other/skills', '.claude/skills/../skills'])(
+    'refuses noncatalog directory %j',
+    async (dir) => {
+      for (const [step, detected] of [
+        [skillGenerationStep, genDetect([dir])],
+        [skillRepairStep, repairDetect([dir])],
+        [skillSyncStep, syncDetect([dir], ['conventions'], ['old'])],
+      ] as const) {
+        const log = recordingLogger();
+        await step.apply(ctxFor(log), applyArgs(detected) as never);
+        expect(await readdir(repo)).toEqual([]);
+        expect(log.warn).toHaveBeenCalled();
+      }
+    },
+  );
+  it('refuses multi-segment bundle IDs before generation writes', async () => {
+    const log = recordingLogger();
+    const out = await skillGenerationStep.apply(
+      ctxFor(log),
+      applyArgs({ ...genDetect([ORDINARY]), bundleSkills: [skill('a/b'), skill('.git')] }) as never,
+    );
+    expect(out.written.map((w) => w.id)).toEqual(['conventions']);
+    expect(await exists(`${ORDINARY}/a`)).toBe(false);
+    expect(await exists(`${ORDINARY}/.git`)).toBe(false);
+    expect(warnedSkillIds(log)).toEqual(['a/b', '.git']);
+  });
+  it('repair preserves a multi-segment ID tree', async () => {
+    await put(`${ORDINARY}/a/b/keep.txt`, KEEP);
+    const log = recordingLogger();
+    const out = await skillRepairStep.apply(
+      ctxFor(log),
+      applyArgs(repairDetect([ORDINARY], ['a/b'])) as never,
+    );
+    expect(await readFile(path.join(repo, ORDINARY, 'a/b/keep.txt'), 'utf8')).toBe(KEEP);
+    expect(out.repaired).toEqual([]);
+    expect(warnedSkillIds(log)).toEqual(['a/b']);
+  });
+  it('sync preserves a multi-segment ID for writes and removals', async () => {
+    await put(`${ORDINARY}/a/b/keep.txt`, KEEP);
+    const log = recordingLogger();
+    const out = await skillSyncStep.apply(
+      ctxFor(log),
+      applyArgs(syncDetect([ORDINARY], ['a/b'], ['a/b'])) as never,
+    );
+    expect(await readFile(path.join(repo, ORDINARY, 'a/b/keep.txt'), 'utf8')).toBe(KEEP);
+    expect(out.generated).toEqual([]);
+    expect(out.removed).toEqual([]);
+    expect(out.committed).toBe(false);
   });
 });

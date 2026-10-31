@@ -1,4 +1,3 @@
-import { namesGitData } from '@haive/shared/project-state';
 import { readdirNoFollow, readTextNoFollow, writeFileNoFollow } from '@haive/shared/fs-safe';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
@@ -12,6 +11,8 @@ import {
   loadPreviousStepOutput,
   resolveTaskSkillTargetDirs,
   withoutGitDataDirs,
+  isSkillPathId,
+  withoutUnsafeSkillIds,
 } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import { extractFencedJsonObjects, parseJsonLoose } from '../_fenced-json.js';
@@ -828,8 +829,8 @@ function coveredSkillIds(
 ): string[] {
   const last = previousIterations.at(-1)?.applyOutput as SkillGenApply | undefined;
   if (last?.written && last.written.length > 0)
-    return last.written.map((w) => w.id).filter((id) => !namesGitData(id));
-  return bundleSkills.map((s) => s.id).filter((id) => !namesGitData(id));
+    return last.written.map((w) => w.id).filter(isSkillPathId);
+  return bundleSkills.map((s) => s.id).filter(isSkillPathId);
 }
 
 /** Per-skill prompt. Each loop pass asks for EXACTLY ONE new skill so the output
@@ -902,9 +903,7 @@ function buildSkillPrompt(
     targetDirs.length > 1
       ? ` (mirrored to ${targetDirs.map((d) => `\`${d}/\``).join(', ')} so every enabled CLI sees the same skills)`
       : '';
-  const bundleSkillIds = (detected.bundleSkills ?? [])
-    .map((s) => s.id)
-    .filter((id) => !namesGitData(id));
+  const bundleSkillIds = (detected.bundleSkills ?? []).map((s) => s.id).filter(isSkillPathId);
   const reservedSection =
     bundleSkillIds.length > 0
       ? [
@@ -1317,14 +1316,26 @@ export const skillGenerationStep: StepDefinition<SkillGenDetect, SkillGenApply> 
     // LAST, not first, is what keeps it behaviour-preserving on disk: the later write is the one
     // whose bytes survived the overwrite, so the tree is byte-identical and the index now names
     // the entry that is actually there.
-    const bundleSkills = [...new Map((detected.bundleSkills ?? []).map((s) => [s.id, s])).values()];
+    const allowedBundleIds = new Set(
+      withoutUnsafeSkillIds(
+        (detected.bundleSkills ?? []).map((s) => s.id),
+        ctx.logger,
+      ),
+    );
+    const bundleSkills = [
+      ...new Map(
+        (detected.bundleSkills ?? [])
+          .filter((s) => allowedBundleIds.has(s.id))
+          .map((s) => [s.id, s]),
+      ).values(),
+    ];
     const plan = computeDomainPlan(detected, maxSkills);
 
     // Prior cumulative state — each loop pass extends the previous one so the
     // loop's final output is the complete library. Iteration 0 has no prior.
     const prior =
       (args.previousIterations.at(-1)?.applyOutput as SkillGenApply | undefined) ?? null;
-    const priorWritten = prior?.written ?? [];
+    const priorWritten = (prior?.written ?? []).filter((w) => isSkillPathId(w.id));
 
     // Ids already on disk: bundle ids + everything prior passes wrote.
     const seenIds = new Set<string>([

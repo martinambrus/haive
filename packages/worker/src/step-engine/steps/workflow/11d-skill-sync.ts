@@ -4,7 +4,6 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { namesGitData } from '@haive/shared/project-state';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { DetectResult, SkillEntry } from '@haive/shared';
 import { mapWithConcurrency } from '@haive/shared';
@@ -21,6 +20,7 @@ import {
   loadPreviousStepOutput,
   resolveTaskSkillTargetDirs,
   withoutGitDataDirs,
+  isSkillPathId,
 } from '../onboarding/_helpers.js';
 import { buildSkillContractBlocks } from '../onboarding/_skill-prompt.js';
 import {
@@ -406,7 +406,7 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
       if (primary === undefined) return [];
       const fileTree = det.__fileTree ?? '';
       return det.targets
-        .filter((entry) => !namesGitData(entry.skillId))
+        .filter((entry) => isSkillPathId(entry.skillId))
         .map((target) => ({
           agentId: target.skillId.slice(0, 120),
           agentTitle: target.skillId,
@@ -450,17 +450,17 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
 
     for (const target of detected.targets) {
       // The id is a directory name below, removed and rewritten: a stored one may name git data.
-      if (namesGitData(target.skillId)) {
+      if (!isSkillPathId(target.skillId)) {
         ctx.logger.warn(
           { skillId: target.skillId },
-          'did not write a skill whose name names git data',
+          'did not write a skill with an invalid path ID',
         );
         skipped.push(target.skillId);
         outcomes.push({
           agentId: target.skillId,
           agentTitle: null,
           status: 'failed',
-          errorMessage: 'its name names git data',
+          errorMessage: 'its ID is not a single non-git-data path segment',
         });
         continue;
       }
@@ -496,8 +496,8 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     const removed: string[] = [];
     for (const skillId of detected.removals) {
       // Same reason as the targets above: the id is removed recursively as a directory name.
-      if (namesGitData(skillId)) {
-        ctx.logger.warn({ skillId }, 'did not remove a skill whose name names git data');
+      if (!isSkillPathId(skillId)) {
+        ctx.logger.warn({ skillId }, 'did not remove a skill with an invalid path ID');
         continue;
       }
       for (const dir of targetDirs) {

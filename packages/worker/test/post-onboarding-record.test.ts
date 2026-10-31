@@ -871,3 +871,43 @@ describe('12 retires the legacy environment, exclusions and tooling mirrors', ()
     },
   );
 });
+
+it('records bundled skills only at catalog destinations from the stored generation', async () => {
+  const s = await setup('none');
+  const bundleId = '00000000-0000-4000-8000-0000000000e2';
+  s.fake.insert(schema.customBundles, {
+    id: bundleId,
+    userId: USER,
+    repositoryId: REPO,
+    name: 'skills',
+    sourceType: 'zip',
+    storageRoot: '/bundles/skills',
+  });
+  s.fake.insert(schema.customBundleItems, {
+    bundleId,
+    kind: 'skill',
+    sourceFormat: 'skill-md',
+    sourcePath: 'skills/kept/SKILL.md',
+    normalizedSpec: {
+      id: 'kept',
+      title: 'Kept',
+      description: 'A skill',
+      overview: 'Overview',
+      subSkills: [],
+    },
+    contentHash: 'c'.repeat(64),
+    schemaVersion: 1,
+  });
+  s.fake.insert(schema.taskSteps, {
+    taskId: TASK,
+    stepId: '09_5-skill-generation',
+    round: 0,
+    detectOutput: { skillTargetDirs: ['', '.', 'other/skills', '.claude/skills'] },
+  });
+  await recordWritten(s.apply());
+  const skillPaths = s.fake
+    .rows(schema.onboardingArtifacts)
+    .filter((r) => r.templateKind === 'custom-skill')
+    .map((r) => r.diskPath);
+  expect(skillPaths).toEqual(['.claude/skills/kept/SKILL.md']);
+});
