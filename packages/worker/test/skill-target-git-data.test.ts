@@ -8,6 +8,7 @@ import { CLI_PROVIDER_CATALOG } from '@haive/shared';
 import type { AgentMiningResult, StepContext } from '../src/step-engine/step-definition.js';
 import { skillGenerationStep } from '../src/step-engine/steps/onboarding/09_5-skill-generation.js';
 import { skillRepairStep } from '../src/step-engine/steps/onboarding/09_5b-skill-repair.js';
+import { listSkillDirs } from '../src/step-engine/steps/onboarding/09_6-skill-verification.js';
 import { withoutGitDataDirs } from '../src/step-engine/steps/onboarding/_helpers.js';
 import { skillSyncStep } from '../src/step-engine/steps/workflow/11d-skill-sync.js';
 
@@ -330,5 +331,201 @@ describe('withoutGitDataDirs', () => {
       '.github/x',
     ]);
     expect(warnedDirs(log)).toEqual(['.git/hooks', '.GIT./hooks', 'sub/.git', 'git~1/hooks']);
+  });
+});
+
+/**
+ * A skill ID is a directory name read from disk (09_5b, 11d) or from a stored payload, so it may
+ * name git data too: a skills repository cloned into a skills dir lists as a `.git` skill.
+ */
+const GIT_IDS = ['.git', '.GIT.', 'git~1'];
+
+const warnedSkillIds = (log: RecordingLogger): string[] =>
+  log.warn.mock.calls.flatMap(([fields]) => {
+    const skillId = (fields as { skillId?: string } | undefined)?.skillId;
+    return skillId === undefined ? [] : [skillId];
+  });
+
+const failing = (skillId: string) => ({
+  skillId,
+  issues: ['no sub-skills'],
+  skillMdExcerpt: null,
+  maxSub: 8,
+  bodyLen: '100-250',
+  shrunk: false,
+});
+
+describe('listSkillDirs with an entry that names git data', () => {
+  it('lists the ordinary skill dirs and no git-data dir', async () => {
+    for (const name of ['alpha', '.github', ...GIT_IDS]) {
+      await put(`${ORDINARY}/${name}/keep.txt`, KEEP);
+    }
+
+    expect(await listSkillDirs(repo, ORDINARY)).toEqual(['.github', 'alpha']);
+  });
+});
+
+describe('09_5b skillRepairStep.apply with a failing skill id that names git data', () => {
+  it('repairs only the ordinary skill, leaves each git-data dir as it was, and names each id', async () => {
+    for (const id of GIT_IDS) await put(`${ORDINARY}/${id}/keep.txt`, KEEP);
+    await put(`${ORDINARY}/conventions/SKILL.md`, '# Conventions\n\n(no overview)\n');
+    await put(`${ORDINARY}/conventions/sub-skills/stale.md`, 'not a real sub-skill');
+    const ids = ['conventions', ...GIT_IDS];
+    const log = recordingLogger();
+
+    const out = await skillRepairStep.apply(ctxFor(log), {
+      detected: {
+        failingSkills: ids.map(failing),
+        skillTargetDirs: [ORDINARY],
+        framework: null,
+        language: null,
+        kbFiles: [],
+      },
+      formValues: {},
+      agentMiningResults: ids.map(mined),
+      iteration: 0,
+      previousIterations: [],
+    } as unknown as Parameters<typeof skillRepairStep.apply>[1]);
+
+    for (const id of GIT_IDS) {
+      expect(await readFile(path.join(repo, ORDINARY, id, 'keep.txt'), 'utf8')).toBe(KEEP);
+      expect(await readdir(path.join(repo, ORDINARY, id))).toEqual(['keep.txt']);
+    }
+
+    expect(await exists(`${ORDINARY}/conventions/sub-skills/stale.md`)).toBe(false);
+    expect(await readFile(path.join(repo, ORDINARY, 'conventions', 'SKILL.md'), 'utf8')).toContain(
+      'conventions title',
+    );
+    expect(await exists(`${ORDINARY}/conventions/sub-skills/alpha.md`)).toBe(true);
+    expect(out.repaired).toEqual(['conventions']);
+    expect(out.stillFailing).toEqual(GIT_IDS);
+    expect(out.degradedNote).toBeDefined();
+    expect(warnedSkillIds(log)).toEqual(GIT_IDS);
+  });
+});
+
+describe('11d skillSyncStep.apply with a skill id that names git data', () => {
+  it('generates and removes only ordinary skills, and names each id it refused', async () => {
+    await execFileP('git', ['-C', repo, 'init', '-q']);
+    await put(`${ORDINARY}/.git/keep.txt`, KEEP);
+    await put(`${ORDINARY}/old/SKILL.md`, '# Old\n');
+    const log = recordingLogger();
+
+    const settled = await settle(
+      skillSyncStep.apply(
+        ctxFor(log, {
+          userId: 'u',
+          db: { query: { users: { findFirst: async () => null } } },
+        }),
+        {
+          detected: {
+            targets: ['conventions', '.git'].map((skillId) => ({
+              kind: 'new',
+              skillId,
+              capability: 'Conventions',
+              rationale: 'what it does',
+              skillMdExcerpt: null,
+            })),
+            removals: ['old', '.git'],
+            skillTargetDirs: [ORDINARY],
+            worktreePath: repo,
+            framework: 'general',
+            language: 'php',
+            kbFiles: [],
+            __fileTree: '(tree)',
+            __scopeExclude: [],
+          },
+          formValues: {},
+          agentMiningResults: [mined('conventions'), mined('.git')],
+          iteration: 0,
+          previousIterations: [],
+        } as unknown as Parameters<typeof skillSyncStep.apply>[1],
+      ),
+    );
+
+    // The disk comes first: a step that threw part-way has already written and removed.
+    expect(await readFile(path.join(repo, ORDINARY, '.git', 'keep.txt'), 'utf8')).toBe(KEEP);
+    expect(await readdir(path.join(repo, ORDINARY, '.git'))).toEqual(['keep.txt']);
+    expect(await exists(`${ORDINARY}/conventions/SKILL.md`)).toBe(true);
+    expect(await exists(`${ORDINARY}/old`)).toBe(false);
+    // Once as a target, once as a removal.
+    expect(warnedSkillIds(log)).toEqual(['.git', '.git']);
+
+    if ('error' in settled) throw settled.error;
+    const out = settled.value;
+    expect(out.generated).toEqual(['conventions']);
+    expect(out.removed).toEqual(['old']);
+    expect(out.skipped).toEqual(['.git']);
+    expect(out.degradedNote).toBeDefined();
+  });
+});
+
+describe('09_5b and 11d apply when every stored skills dir names git data', () => {
+  it('09_5b repairs nothing and creates nothing', async () => {
+    await put('.git/hooks/pre-commit', HOOK);
+    await put('.git/hooks/conventions/keep.txt', KEEP);
+    const before = await snapshot('.git');
+    const log = recordingLogger();
+
+    const out = await skillRepairStep.apply(ctxFor(log), {
+      detected: {
+        failingSkills: [failing('conventions')],
+        skillTargetDirs: ['.git/hooks'],
+        framework: null,
+        language: null,
+        kbFiles: [],
+      },
+      formValues: {},
+      agentMiningResults: [mined('conventions')],
+      iteration: 0,
+      previousIterations: [],
+    } as unknown as Parameters<typeof skillRepairStep.apply>[1]);
+
+    expect(out.repaired).toEqual([]);
+    expect(out.attempted).toBe(0);
+    expect(await readdir(repo)).toEqual(['.git']);
+    expect(await snapshot('.git')).toEqual(before);
+    expect(warnedDirs(log)).toEqual(['.git/hooks']);
+  });
+
+  it('11d generates, removes and commits nothing, and creates nothing', async () => {
+    await put('.git/hooks/pre-commit', HOOK);
+    await put('.git/hooks/old/keep.txt', KEEP);
+    await put('.git/hooks/conventions/keep.txt', KEEP);
+    const before = await snapshot('.git');
+    const log = recordingLogger();
+
+    const out = await skillSyncStep.apply(ctxFor(log), {
+      detected: {
+        targets: [
+          {
+            kind: 'new',
+            skillId: 'conventions',
+            capability: 'Conventions',
+            rationale: 'what it does',
+            skillMdExcerpt: null,
+          },
+        ],
+        removals: ['old'],
+        skillTargetDirs: ['.git/hooks'],
+        worktreePath: repo,
+        framework: 'general',
+        language: 'php',
+        kbFiles: [],
+        __fileTree: '(tree)',
+        __scopeExclude: [],
+      },
+      formValues: {},
+      agentMiningResults: [mined('conventions')],
+      iteration: 0,
+      previousIterations: [],
+    } as unknown as Parameters<typeof skillSyncStep.apply>[1]);
+
+    expect(out.generated).toEqual([]);
+    expect(out.removed).toEqual([]);
+    expect(out.committed).toBe(false);
+    expect(await readdir(repo)).toEqual(['.git']);
+    expect(await snapshot('.git')).toEqual(before);
+    expect(warnedDirs(log)).toEqual(['.git/hooks']);
   });
 });
