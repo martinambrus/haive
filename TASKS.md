@@ -932,16 +932,6 @@ From the T463 review (2026-10-31). PRE-EXISTING, minor to moderate. `POST /repos
 status: open
 From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. worker/api onboarding-admission.ts `ledgerImportedSince` (~:128-144) counts every import marker imported after an upgrade, path-blind and including the superseded ones, so a marker at a git-data path that T421's boot migration retired still blocks that upgrade's rollback. Decide whether a retired git-data marker should count (it was never a real import) or the conservative block stays.
 
-### T470 · FNF[ci-step-independence] · a failed CI step still skips the independent checks after it (+1)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T05:58Z · last: 2026-10-31T05:58Z
-From the T465 review (2026-10-31). PRE-EXISTING, minor to moderate (the same hiding class as T465, for non-smoke checks).
-
-1. .github/workflows/ci.yml, the "Postgres-gated tests" step (~:221-340, ends `exit "$failed"`) has no successor guard, so a failed gated test skips "Run api smokes" (~:348) and with it every smoke.
-2. The six steps from "Agent pool script on a real Redis" through "Auth throttle script on a real Redis" (~:359-390) have no `if:`, so a failed smoke step skips them.
-
-Give each independent check the `if: ${{ !cancelled() && <its prerequisites succeeded> }}` T465 gave the worker smokes, so one red step no longer hides the others; keep install/build/migrate failures stopping the rest.
-
 ### T471 · FNF[stale-preread-fold-2] · idle_ms writes add to a value read before the write; the per-step switch decides on a pre-transaction status (+1)
 
 status: open
@@ -983,6 +973,7 @@ From the T470 review (2026-10-31). PRE-EXISTING, minor to moderate.
 
 ## Done
 
+- T470 — every check of the smokes job (the Postgres-gated tests, the api, worker and migration smokes, the six Redis scripts) runs on !cancelled() && steps.migrate.conclusion == 'success', so one red check no longer skips the others while a failed setup step or a cancel still stops them; pinned by scripts/test/ci-step-independence.test.mjs; ci-smokes.md CI steps and Limits (about 275 s of headroom) updated — PR #960 (09c9d725a), 2026-10-31; main CI green, every check ran (PR run 41178244171, main run 41180026196); follow-ups T474, T475
 - T469 — the onboarding reset also takes back a git-data claim file only the sync base names (baseGitDataPaths; left behind, the record read refused and the next record write threw); 12, 01's lazy backfill and the manual bundle helper refuse a path that names git data — PR #959 (68af9d174), 2026-10-31; main CI green; follow-ups T472, T473
 - T461 — every carried_* fold reads the row after it holds it and folds from that read (a delta computed from a pre-transaction read lost a concurrent fold or idle write): resetRowsForRerun, the per-step and the task-level provider switch (now one transaction under T349's batch), resetStepAndDownstream, requeueAbandonedOrphan and writeFencedPark's first park — PR #958 (ffa1c2d0c), 2026-10-31; main CI green; follow-ups T471, T459 note, T364 item 28
 - T465 — smoke:ci of api, worker and database runs through scripts/run-smokes.mjs: each smoke in its own process group under its own limit (default 120 s; repo-refresh 480, two-install 240, from 8 green main runs), a hung one killed and named, the chain going on with a summary and exit 1; the worker and migration smoke steps run after a failed api smoke — PR #957 (1d14f60cf), 2026-10-31; main CI green with the runner on a real Actions run; docs/architecture/ci-smokes.md; follow-up T470
