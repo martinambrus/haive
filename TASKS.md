@@ -939,6 +939,11 @@ From the T349 fix-round review (2026-10-31). PRE-EXISTING, unsure, not traced. W
 status: open
 From the T463 review (2026-10-31). PRE-EXISTING, minor to moderate. `POST /repos/upload` (api routes/repos.ts ~:575, size check ~:592, default cap 2 GiB) and the notification sound upload (routes/user-settings.ts ~:386, check ~:390, cap 2 MiB) call `c.req.formData()`, which reads the whole body into memory before the route's own size check runs, and neither route sets a `bodyLimit`. `/repos/upload` is a documented route (docs/architecture/repository-refresh.md ~:34) with no web caller: decide whether to cap it with a streaming limit or retire it; the sound upload needs a `bodyLimit` at its own cap.
 
+### T468 · FNF[ledger-imported-since-path] [design] · a retired git-data import marker still blocks an upgrade's rollback
+
+status: open
+From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. worker/api onboarding-admission.ts `ledgerImportedSince` (~:128-144) counts every import marker imported after an upgrade, path-blind and including the superseded ones, so a marker at a git-data path that T421's boot migration retired still blocks that upgrade's rollback. Decide whether a retired git-data marker should count (it was never a real import) or the conservative block stays.
+
 ## Done
 
 - T463 — a form read of a request that is not a form answers 400 invalid_form (formBodyErrors maps the TypeError class), the CLI login banner ignores a WebSocket frame that is not a JSON object, PUT /user-settings/ide and /ui-prefs refuse a settingsJson that is not an object, and five sources added 100755 are 100644 — PR #955 (98e0f3762), 2026-10-31; main CI green; follow-ups T467, T364 item 26 note
