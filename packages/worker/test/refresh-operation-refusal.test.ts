@@ -1,5 +1,14 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -47,7 +56,7 @@ vi.mock('bullmq', () => ({
 vi.mock('../src/db.js', () => ({ getDb: () => db }));
 vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
 import { startRepoWorker } from '../src/queues/repo-queue.js';
-import { handleRefresh } from '../src/repo/refresh.js';
+import { handleRefresh, usableCheckout } from '../src/repo/refresh.js';
 
 const exec = promisify(execFile);
 const git = async (cwd: string, args: string[]) =>
@@ -294,6 +303,115 @@ it('a source folder that is gone leaves the unusable checkout where it was', asy
   expect((err as Error).message).toBe(
     `Not refreshed: the folder this repository was imported from (${payload.localPath}) is gone. Nothing was moved.`,
   );
+});
+
+const gitfile = (text: string | Buffer) => async (dir: string) => {
+  await rm(path.join(dir, '.git'), { recursive: true });
+  await writeFile(path.join(dir, '.git'), text);
+};
+/** The ways a `.git` stops being what git requires that refresh-usable-checkout.test.ts reads as
+ *  unusable, applied here to the folder a repository was imported from. */
+const deadGit: Array<[string, (dir: string) => Promise<void>]> = [
+  ['no .git', (dir) => rm(path.join(dir, '.git'), { recursive: true })],
+  ['no HEAD', (dir) => rm(path.join(dir, '.git/HEAD'))],
+  [
+    'an empty .git directory',
+    async (dir) => {
+      await rm(path.join(dir, '.git'), { recursive: true });
+      await mkdir(path.join(dir, '.git'));
+    },
+  ],
+  ['no objects/', (dir) => rm(path.join(dir, '.git/objects'), { recursive: true })],
+  ['no refs/', (dir) => rm(path.join(dir, '.git/refs'), { recursive: true })],
+  ['an empty HEAD', (dir) => writeFile(path.join(dir, '.git/HEAD'), '')],
+  ['a zero-filled HEAD', (dir) => writeFile(path.join(dir, '.git/HEAD'), Buffer.alloc(21))],
+  [
+    'a HEAD of 39 hex digits',
+    async (dir) => {
+      const oid = await git(dir, ['rev-parse', 'HEAD']);
+      await writeFile(path.join(dir, '.git/HEAD'), `${oid.slice(0, 39)}\n`);
+    },
+  ],
+  [
+    'a HEAD that is neither a ref nor an object id',
+    (dir) => writeFile(path.join(dir, '.git/HEAD'), 'garbage\n'),
+  ],
+  ['an empty .git file', gitfile('')],
+  ['a .git file that is not a gitfile', gitfile('garbage\n')],
+  ['a .git file with no space after gitdir:', gitfile('gitdir:meta.git\n')],
+  [
+    'a .git file behind a byte-order mark',
+    gitfile(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('gitdir: meta.git\n')])),
+  ],
+  ['a .git file naming a missing relative gitdir', gitfile('gitdir: missing.git\n')],
+  [
+    'a .git file naming a missing absolute gitdir',
+    (dir) => gitfile(`gitdir: ${path.join(dir, 'missing.git')}\n`)(dir),
+  ],
+];
+
+it.each(deadGit)(
+  'a source folder with %s is refused before anything moves, however often it is refreshed',
+  async (_shape, breakGit) => {
+    const { dest, payload } = await fixture();
+    await rm(path.join(dest, '.git/HEAD'));
+    await breakGit(payload.localPath!);
+    // The control means something only while both the checkout and its source read as dead.
+    expect(await usableCheckout(dest)).toBe('unusable');
+    expect(await usableCheckout(payload.localPath!)).toBe('unusable');
+    for (let refresh = 1; refresh <= 3; refresh++) {
+      await expect(runRefresh(payload)).rejects.toThrow(
+        /^Not refreshed: the folder this repository was imported from \(.*\) is not a usable git checkout\. Nothing was moved\.$/,
+      );
+      expect(row.status).toBe('error');
+      expect(row.statusMessage).toMatch(/is not a usable git checkout\. Nothing was moved\.$/);
+      await untouched(dest);
+    }
+  },
+);
+
+it('a source folder git gave no answer in is refused with that, and without repair advice', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  // The first --show-cdup read is the checkout's own; the second is the folder's.
+  shim = await killGit(['rev-parse', '--show-cdup'], { after: 1 });
+  await expect(runRefresh(payload)).rejects.toThrow(
+    /^Not refreshed: the folder this repository was imported from \(.*\) could not be examined \(.*SIGKILL.*\)\. Nothing was moved\.$/,
+  );
+  expect(row.status).toBe('error');
+  await untouched(dest);
+});
+
+it('a source folder git exited over without proof it is dead is refused with the repair advice', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  // A link standing where .git should be: no structural read can call it dead, and git exits 128.
+  const source = payload.localPath!;
+  await rm(path.join(source, '.git'), { recursive: true });
+  await mkdir(path.join(source, 'metadata'));
+  await symlink('metadata', path.join(source, '.git'));
+  expect(await usableCheckout(source)).toEqual({ unknown: 'git exited 128', repairNeeded: true });
+  for (let refresh = 1; refresh <= 3; refresh++) {
+    await expect(runRefresh(payload)).rejects.toThrow(
+      /^Not refreshed: the folder this repository was imported from \(.*\) could not be examined \(git exited 128\)\. Nothing was moved\. Retry cannot help until that folder is repaired\.$/,
+    );
+    expect(row.status).toBe('error');
+    await untouched(dest);
+  }
+});
+
+it('a usable source folder is still copied over an unusable checkout', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  await runRefresh(payload);
+  const asides = (await readdir(path.dirname(dest))).filter((entry) =>
+    entry.startsWith('r1.aside-'),
+  );
+  expect(asides).toHaveLength(1);
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(
+    await git(payload.localPath!, ['rev-parse', 'HEAD']),
+  );
+  expect(row.status).toBe('ready');
 });
 
 it('the credential built before the move reaches the clone that follows it', async () => {

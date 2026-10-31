@@ -443,6 +443,22 @@ async function rebuild(
       `Not refreshed: the folder this repository was imported from (${fromFolder}) is gone. Nothing was moved.`,
     );
   }
+  // A folder whose own .git is dead copies to a tree that is dead too, and the next refresh
+  // would move that aside once more: one full-size folder per refresh, for good.
+  if (fromFolder) {
+    const source = await usableCheckout(fromFolder);
+    if (source === 'unusable') {
+      throw new Error(
+        `Not refreshed: the folder this repository was imported from (${fromFolder}) is not a usable git checkout. Nothing was moved.`,
+      );
+    }
+    if (source !== 'usable') {
+      throw new Error(
+        `Not refreshed: the folder this repository was imported from (${fromFolder}) could not be examined (${source.unknown}). Nothing was moved.` +
+          (source.repairNeeded ? ' Retry cannot help until that folder is repaired.' : ''),
+      );
+    }
+  }
   const auth =
     fromRemote && payload.credentialsId
       ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, payload.remoteUrl)
