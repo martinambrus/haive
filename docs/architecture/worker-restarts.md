@@ -42,8 +42,9 @@ made it. A move never counts toward
   was.
 
 **A running task that nothing drives is taken over.** A `running` task whose current step row is
-missing, `pending` and not parked, or finished (`done`/`skipped`) with nothing after it, while the
-task queue holds no job for it, is re-driven by `redriveStalledTasks` (`queues/stalled-redrive.ts`):
+missing, `pending` and not parked, parked with a heartbeat older than the cutoff, `running` with no
+run left to wait for, or finished (`done`/`skipped`) with nothing after it, while the task queue holds
+no job for it, is re-driven by `redriveStalledTasks` (`queues/stalled-redrive.ts`):
 once at boot after the reconcile, whose own re-drive enqueue can still be lost, and every minute for
 a task idle five minutes, for a hand-off lost between boots. It bumps the epoch under the task row's
 lock and re-checks the row in the same statement, so a step a pass claimed since the candidate read
@@ -56,9 +57,53 @@ failure's hint, arms its allowance watch and logs `step.failed`. An advance that
 first does the same rather than running it, since every reopen (a step Retry, both Resumes,
 `retry_ai`, a CLI switch, the allowance auto-resume) resets the row first; `advanceStep` hands a
 failed row back as its failure, as it hands back a done or skipped one. A
-START on the queue is no such job (`taskQueueOwed`): it only claims a task still waiting to
-start, so one a dead worker left `active` under its 30-minute lock would otherwise hold a claimed
-task for that long and then do nothing.
+START on the queue is no such job for a task still waiting to start (`taskQueueOwed`): it only claims
+such a task, so one a dead worker left `active` under its 30-minute lock would otherwise hold a claimed
+task for that long and then do nothing. It does hold a task parked or running on its first step,
+since it runs that step inside the job (below).
+
+**A park whose poll chain was lost is re-driven.** A parked row (`pending` with
+`waiting_started_at`: a runtime slot, a pause or a module's schema setup) is driven by a chain of
+delayed advances, each queueing the next and rewriting the row's `updated_at` (15 s, 30 s, 5 s). A
+chain whose job was lost (Redis restored without it, a queue cleaned by hand) leaves the row parked
+with a stale stamp, and the sweep takes it once the ROW's stamp is older than the cutoff. The task's
+stamp cannot tell a dead chain from a live one, since a tick that finds the pointer right never
+writes the task row; it stays the throttle (the fence stamps it). Boot (`staleMs: 0`) takes a park
+whose tick was lost with Redis the same way. The re-driven advance re-enters the park: pause and
+module setup refresh the heartbeat and queue the next tick with the marker kept, and the runtime park
+asks admission again and re-joins its FIFO at the tail if its ticket was lost.
+
+**A running row with no run left to wait for is re-driven.** It is a step re-opened by the allowance
+auto-resume, a loop or fan-out Resume or `retry_ai`, which commit the re-open before they queue the
+advance: a rejected add leaves the row as it is and, for the auto-resume, with the watch already
+cleared. The sweep takes it when row and task are older than the cutoff, the queue holds no job and no
+START for the task, and the row has no run that is neither ended nor superseded (started or not: a fan-out
+behind queued agents sits idle on its own). The candidate query and the fence share one live-run definition, so a
+stale row with a live run is never a candidate and takes no task-row lock, and the fence re-reads it
+in the statement that bumps the epoch. A START counts because it runs the first step inside the job,
+so its row is `running`, `taskQueueOwed` files it under `starts`, and an apply that writes nothing can
+idle past the cutoff. The sweep also leaves a candidate whose task, step and round a pass of this
+process holds (`stepAdvanceHeld`, a read-only view of the set `holdStepAdvance` and the START take):
+the queue read cannot see a pass whose job Redis lost (a flush, or a restore older than the job)
+while its handler goes on, and re-driving it would abort the live pass at its next 2 s poll, discard
+its result and run the step a second time. The hold lives exactly as long as the handler and is
+empty at boot; a second worker process is not covered, since the hold is per process. A re-drive of a
+running or parked row is an epoch bump and an advance, never a reset and never a write to the row
+(the producers it repairs rely on the passes, agent rows and fix context the row keeps): the epoch
+stales a stamped job queued earlier, while an unstamped one (a form submit, the usage poller's own) is
+serialised by `holdStepAdvance` and re-enters by status. The "redrove a stalled task" line carries
+`shape`: `parked`, `running` or `handoff`. A `waiting_cli` row whose runs all ended with the
+continuation's add lost (`resumeStepIfLinked`, `cli-exec/resolvers.ts`) is still recovered only at
+boot.
+
+**Every recovery re-drive carries a deduplication id**, `advance-<task>-<step>-<round>-<epoch>`
+(`enqueueRedrive`, the default enqueue of the sweep, the boot reconcile and a dead task's revival):
+one live job per bumped epoch, so an add retried after a lost reply collapses onto the first. BullMQ
+frees a deduplication id when its job completes, fails or is removed (MEASURED on 6.3.12), while a
+plain custom jobId stays with a completed job (`removeOnComplete: 100`) and silently drops a later add
+of it. Park ticks, continuations and the forward hand-off carry none: they share one epoch, and a
+successor added while its predecessor is active would collapse onto it (BullMQ collapses onto an
+active job) and end the chain or lose a fan-out agent's wake-up.
 
 **An answer whose advance was lost is re-driven.** The submit route saves a form's answers, clears
 its `waiting_started_at` and queues the advance; when that advance never reaches the queue, the row
@@ -341,7 +386,11 @@ the epoch it moved to; a CLI switch on a `pending` row only invalidates its cach
 the task has either not reached that row or already queued the advance that claims it. Those four,
 the step Retry and the fan-out Resume refuse a `cancelled` or `completed` task with a 409 inside
 their transaction, before anything is reset or killed: the task page offers no step action on
-either, and a failed task stays fully recoverable.
+either, and a failed task stays fully recoverable. A row that never started (a Stop failed it while
+parked) gets its `started_at` stamped there, and its `idle_ms` and the closed gap move to
+`carried_idle_ms` (`startIfNeverStarted`): the loop Resume, the fan-out Resume and `retry_ai` all do
+it, and `api/test/resume-fold.test.ts` pins the call after each of the three api re-open sites. The
+worker's allowance auto-resume does not, since it takes a step that ran.
 A task Retry re-runs the step the task stopped on, at its round (`retryTaskAtStep`), rather than
 replaying the task from START, which re-derives every stored loop_back and pays each fix round
 again. One transaction ends the task's live runs, re-offers a parked row as it was (a form keeps its
@@ -349,7 +398,10 @@ schema and answers except a fix-loop gate's, which loses its saved answer and as
 park its detection), resets the failed or live row, its downstream
 and any other live row, and moves the task back through `moveTaskToStep` under a bump fenced on
 `failed`, so a Cancel that landed first stands (409) and nothing is reset. A `done` or `skipped`
-row is left as it is: its advance re-drives the hand-off it finished with. A task that never
+row is left as it is: its advance re-drives the hand-off it finished with. A park's wait is booked
+where the worker's `foldPark` books it: to `carried_idle_ms` when the row has no `started_at` (a park
+before the run), else to `idle_ms`, which may only hold a wait inside the current run; the Retry's
+re-offer of a parked row and a Stop do the same. A task that never
 reached a step still restarts through START, and settles its rows again after its bump, since
 answering a parked form revives the task and can open a row in between. That settle locks every
 step row of the task, in id order, before it writes (`settleActiveSteps`): a pass that got in before the bump can still
@@ -366,6 +418,11 @@ epoch the pass ran under: `handleResult` does nothing once the task has moved on
 makes to the task carries that epoch and refuses a task a Stop failed meanwhile, so a Retry or a Stop
 landing after that check stands: pointing the task at the next step, parking it on a form, a run or a
 fix-loop gate, and completing or failing it, the last two also reaping the task's containers.
+A hand-off write that loses its row or the task logs a `step hand-off not applied` line naming the
+site and the reason; its level comes from the columns: `info` when a Retry, Skip, Stop, Cancel or dead
+mark took it (the row reads `pending`, `skipped` or `failed`, or the task is at another epoch, failed,
+cancelled, completed or dead), `warn` for a row or task that no longer exists or for nothing that
+explains it.
 The allowance watch a failure arms is fenced the same way, and only while the task still reads
 `failed`: the teardown before it can outlast a Retry clicked on that failure, which clears the
 watch as every other exit from `failed` does. The hint it leaves on the row (`writeStepHint`) lands
