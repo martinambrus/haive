@@ -145,7 +145,7 @@ function value(node) {
 }
 
 const workflows = Object.fromEntries(
-  [...new Set(JOBS.map(({ file }) => file))].map((file) => {
+  [...new Set([...JOBS.map(({ file }) => file), 'release.yml'])].map((file) => {
     const ast = parsers.yaml.parse(
       readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), 'utf8'),
     );
@@ -686,5 +686,35 @@ describe('gated Redis isolation', () => {
       ),
     };
     assert.throws(() => checkRedisIsolation(mutant), assert.AssertionError);
+  });
+});
+
+function checkReleaseLimits(workflow) {
+  for (const [id, job] of Object.entries(workflow.jobs)) {
+    assert.match(job['timeout-minutes'] ?? '', WHOLE_MINUTES, `${id} has no job limit`);
+  }
+  for (const [id, minutes] of Object.entries({ build: '40', merge: '10', release: '15' })) {
+    assert.equal(
+      workflow.jobs[id]?.['timeout-minutes'],
+      minutes,
+      `${id} keeps its measured budget`,
+    );
+  }
+}
+
+describe('release job limits', () => {
+  const release = workflows['release.yml'];
+  it('bounds every job holding the release concurrency group', () => checkReleaseLimits(release));
+  for (const id of ['build', 'merge', 'release']) {
+    it(`rejects an unbounded ${id} job`, () => {
+      const mutant = structuredClone(release);
+      delete mutant.jobs[id]['timeout-minutes'];
+      assert.throws(() => checkReleaseLimits(mutant), assert.AssertionError);
+    });
+  }
+  it('rejects a newly added job with no limit', () => {
+    const mutant = structuredClone(release);
+    mutant.jobs.new = { 'runs-on': 'ubuntu-latest', steps: [] };
+    assert.throws(() => checkReleaseLimits(mutant), assert.AssertionError);
   });
 });
