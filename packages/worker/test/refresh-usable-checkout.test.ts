@@ -3,10 +3,31 @@ import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { usableCheckout } from '../src/repo/refresh.js';
 import { failGit, noGit, type FakeGit } from './support/fake-git.js';
 import { killGit } from './support/kill-git.js';
+
+/** Reads that fail with EIO. fs-safe's rule for an errno other than absence: null from a lenient
+ *  read, a throw from a strict one. Root cannot make a real EACCES, so this stands in for it. */
+const eio = vi.hoisted(() => ({
+  lstat: null as null | ((anchor: string, rel: string) => boolean),
+  read: null as null | ((anchor: string, rel: string) => boolean),
+}));
+vi.mock('@haive/shared/fs-safe', async (original) => {
+  const real = await original<typeof import('@haive/shared/fs-safe')>();
+  const fail = (strict: boolean | undefined): null => {
+    if (strict) throw Object.assign(new Error('simulated EIO'), { code: 'EIO' });
+    return null;
+  };
+  return {
+    ...real,
+    lstatNoFollow: async (...args: Parameters<typeof real.lstatNoFollow>) =>
+      eio.lstat?.(args[0], args[1]) ? fail(args[2]?.strict) : real.lstatNoFollow(...args),
+    readFileNoFollow: async (...args: Parameters<typeof real.readFileNoFollow>) =>
+      eio.read?.(args[0], args[1]) ? fail(args[2]?.strict) : real.readFileNoFollow(...args),
+  };
+});
 
 const exec = promisify(execFile);
 const GIT_ENV = {
@@ -35,6 +56,8 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
   const dirs: string[] = [];
   let shim: FakeGit | null = null;
   afterEach(async () => {
+    eio.lstat = null;
+    eio.read = null;
     await shim?.restore();
     shim = null;
     for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true });
@@ -240,6 +263,76 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     await symlink('metadata', path.join(dir, '.git'));
     expect(await usableCheckout(dir)).toEqual(needsRepair);
   });
+
+  const corruptConfig = (dir: string) => writeFile(path.join(dir, '.git/config'), '[core\n');
+
+  it('a gitdir behind a link is unknown, not absent', async () => {
+    const dir = await intact();
+    await mkdir(path.join(dir, 'real'));
+    await rename(path.join(dir, '.git'), path.join(dir, 'real/meta.git'));
+    await symlink('real', path.join(dir, 'link'));
+    await writeFile(path.join(dir, '.git'), 'gitdir: link/meta.git\n');
+    expect(await cdupExit(dir)).toBe(0);
+    await writeFile(path.join(dir, 'real/meta.git/config'), '[core\n');
+    expect(await cdupExit(dir)).toBe(128);
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
+  });
+
+  it('a HEAD that is a link is unknown, not absent', async () => {
+    const dir = await intact();
+    await rm(path.join(dir, '.git/HEAD'));
+    await symlink('refs/heads/main', path.join(dir, '.git/HEAD'));
+    expect(await cdupExit(dir)).toBe(0);
+    await corruptConfig(dir);
+    expect(await cdupExit(dir)).toBe(128);
+    expect(await usableCheckout(dir)).toEqual(needsRepair);
+  });
+
+  it('an unreadable checkout directory is unknown when git gave no answer', async () => {
+    const dir = await intact();
+    shim = await killGit(['rev-parse', '--show-cdup']);
+    eio.lstat = (anchor, rel) => anchor === path.dirname(dir) && rel === path.basename(dir);
+    expect(await usableCheckout(dir)).toEqual({ unknown: expect.stringContaining('SIGKILL') });
+  });
+
+  // Each row makes one strict read fail with EIO in a checkout that read as dead or as unproven
+  // without the failure; a lenient read would have turned the failure into "absent".
+  const gitfileToMissing = async (): Promise<string> => {
+    const dir = await intact();
+    await replaceGit(dir, 'gitdir: missing.git\n');
+    return dir;
+  };
+  const commondirLayout = async (): Promise<string> => {
+    const main = await intact();
+    const dir = await tmp();
+    await mkdir(path.join(dir, '.git'));
+    await writeFile(path.join(dir, '.git/HEAD'), 'ref: refs/heads/main\n');
+    await writeFile(path.join(dir, '.git/commondir'), `${path.join(main, '.git')}\n`);
+    await corruptConfig(main);
+    return dir;
+  };
+  const brokenConfig = async (): Promise<string> => {
+    const dir = await intact();
+    await corruptConfig(dir);
+    return dir;
+  };
+  const unreadable: Array<[string, 'lstat' | 'read', string, () => Promise<string>]> = [
+    ['.git', 'lstat', '.git', brokenConfig],
+    ['HEAD', 'read', '.git/HEAD', brokenConfig],
+    ['commondir', 'lstat', '.git/commondir', commondirLayout],
+    ['objects/', 'lstat', '.git/objects', brokenConfig],
+    ['refs/', 'lstat', '.git/refs', brokenConfig],
+    ['gitfile', 'read', '.git', gitfileToMissing],
+    ['gitdir named by a gitfile', 'lstat', 'missing.git', gitfileToMissing],
+  ];
+  it.each(unreadable)(
+    'an unreadable %s is unknown, not absent',
+    async (_site, kind, rel, arrange) => {
+      const dir = await arrange();
+      eio[kind] = (anchor, at) => anchor === dir && at === rel;
+      expect(await usableCheckout(dir)).toEqual(needsRepair);
+    },
+  );
 
   it('an empty folder is unusable', async () => {
     expect(await usableCheckout(await tmp())).toBe('unusable');
