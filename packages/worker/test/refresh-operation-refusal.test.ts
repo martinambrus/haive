@@ -4,11 +4,19 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { REPO_JOB_NAMES } from '@haive/shared';
+import type { Job, Processor } from 'bullmq';
+import { schema } from '@haive/database';
 import type { Database } from '@haive/database';
 import type { RepoJobPayload } from '@haive/shared';
 import { failGit, type FakeGit } from './support/fake-git.js';
 
-const h = vi.hoisted(() => ({ persist: vi.fn(), seed: vi.fn() }));
+const h = vi.hoisted(() => ({
+  persist: vi.fn(),
+  seed: vi.fn(),
+  holding: 0,
+  processor: null as Processor | null,
+}));
 vi.mock('../src/repo/clone.js', async (original) => ({
   ...(await original<typeof import('../src/repo/clone.js')>()),
   withRootClaim: async (_db: unknown, _id: string, fn: () => Promise<void>) => fn(),
@@ -18,6 +26,17 @@ vi.mock('../src/plan/mirror.js', async (original) => ({
   ...(await original<typeof import('../src/plan/mirror.js')>()),
   seedPlanBaseFromCheckout: h.seed,
 }));
+vi.mock('bullmq', () => ({
+  Worker: class {
+    constructor(_name: string, processor: Processor) {
+      h.processor = processor;
+    }
+    on() {}
+  },
+}));
+vi.mock('../src/db.js', () => ({ getDb: () => db }));
+vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
+import { startRepoWorker } from '../src/queues/repo-queue.js';
 import { handleRefresh } from '../src/repo/refresh.js';
 
 const exec = promisify(execFile);
@@ -39,14 +58,23 @@ let shim: FakeGit | null = null;
 const row: { status: string; statusMessage?: string } = { status: 'ready' };
 const db = {
   execute: async () => {},
-  query: { tasks: { findMany: async () => [] } },
+  query: {
+    tasks: { findMany: async () => Array.from({ length: h.holding }, () => ({ id: 'holder' })) },
+  },
   transaction: async (fn: (tx: unknown) => unknown) => fn(db),
-  select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
+  select: () => ({
+    from: (table: unknown) => ({
+      where: () => ({ limit: async () => (table === schema.planNodes ? [{ id: 'node' }] : []) }),
+    }),
+  }),
+  insert: () => ({ values: () => ({ onConflictDoUpdate: async () => {} }) }),
   update: () => ({ set: (values: object) => ({ where: async () => Object.assign(row, values) }) }),
 } as unknown as Database;
 beforeEach(async () => {
   vi.clearAllMocks();
-  row.status = 'ready';
+  row.status = 'cloning';
+  h.holding = 0;
+  h.seed.mockResolvedValue(undefined);
   delete row.statusMessage;
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
     row.status = 'ready';
@@ -103,12 +131,13 @@ it.each(['failed git-path', 'external git-dir'])(
   },
 );
 
-it('T397 fix5 an unknown checkout preserves its status without detection, import or rebuild', async () => {
+it('T397 D1 an unknown checkout fails through the queue without detection, import or rebuild', async () => {
   const { dest, payload } = await fixture();
-  row.status = 'error';
   const before = await git(dest, ['rev-parse', 'HEAD']);
   shim = await failGit(['rev-parse', '--show-cdup']);
-  await handleRefresh(payload, db, root);
+  await expect(runRefresh(payload)).rejects.toThrow(
+    /^Not refreshed: the checkout could not be examined \(.*\)\. Nothing was moved\.$/,
+  );
   expect(h.persist).not.toHaveBeenCalled();
   expect(h.seed).not.toHaveBeenCalled();
   expect(row.status).toBe('error');
@@ -118,3 +147,23 @@ it('T397 fix5 an unknown checkout preserves its status without detection, import
   expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
   expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
 });
+
+async function runRefresh(payload: RepoJobPayload) {
+  startRepoWorker(root);
+  return h.processor!({ name: REPO_JOB_NAMES.REFRESH, data: payload } as Job);
+}
+
+it.each(['usable', 'unusable', 'unknown', 'holding', 'refused'] as const)(
+  'T397 D1 refresh %s reaches a terminal repository status',
+  async (kind) => {
+    const { dest, payload } = await fixture();
+    if (kind === 'usable') await git(payload.localPath!, ['reset', '--hard', 'HEAD^']);
+    if (kind === 'unusable') await rm(path.join(dest, '.git'), { recursive: true });
+    if (kind === 'unknown') shim = await failGit(['rev-parse', '--show-cdup']);
+    if (kind === 'holding') h.holding = 1;
+    if (kind === 'refused') await git(dest, ['checkout', '--detach']);
+    await runRefresh(payload).catch(() => undefined);
+    expect(row.status).toBe(kind === 'unknown' ? 'error' : 'ready');
+    expect(['ready', 'error']).toContain(row.status);
+  },
+);

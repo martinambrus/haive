@@ -359,16 +359,11 @@ export async function handleRefresh(
     async () => {
       const state = await usableCheckout(dest);
       if (typeof state === 'object') {
-        // Exit codes cannot distinguish corrupt config from a dead .git. Keep the
-        // checkout and its status until it can be examined; detection imports its mirror.
-        await db
-          .update(schema.repositories)
-          .set({
-            statusMessage: `Not refreshed: the checkout could not be examined (${state.unknown}). Nothing was moved.`,
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.repositories.id, payload.repositoryId));
-        return;
+        // The queue starts at cloning. Throw so its catch records error and offers Retry;
+        // detection would import a mirror from a checkout we could not examine.
+        throw new Error(
+          `Not refreshed: the checkout could not be examined (${state.unknown}). Nothing was moved.`,
+        );
       }
       const usable = state === 'usable';
       const holding = await checkoutHoldingTasks(db, payload.repositoryId);
