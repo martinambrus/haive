@@ -419,15 +419,23 @@ async function rebuild(
     throw new Error('Nothing to refresh from: this repository has no remote.');
   }
   if (fromRemote) assertCloneUrl(fromRemote, 'refresh');
+  // Everything the new tree comes from is proved before the old one is moved: a failure here
+  // leaves the checkout where it was.
+  if (fromFolder && !(await lstatNoFollow(fromFolder, '', { strict: true }))) {
+    throw new Error(
+      `Not refreshed: the folder this repository was imported from (${fromFolder}) is gone. Nothing was moved.`,
+    );
+  }
+  const auth =
+    fromRemote && payload.credentialsId
+      ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, payload.remoteUrl)
+      : undefined;
   const aside = await moveAside(repoStorageRoot, rel);
   if (fromFolder) {
     await ensureDirNoFollow(repoStorageRoot, rel);
     await copyTree(fromFolder, dest);
   } else {
     await ensureDirNoFollow(repoStorageRoot, payload.userId);
-    const auth = payload.credentialsId
-      ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, payload.remoteUrl)
-      : undefined;
     await gitClone(fromRemote!, dest, payload.branch, auth);
   }
   await persistDetection(

@@ -17,6 +17,8 @@ import { killGit } from './support/kill-git.js';
 const h = vi.hoisted(() => ({
   persist: vi.fn(),
   seed: vi.fn(),
+  helper: vi.fn(),
+  clone: vi.fn(),
   holding: 0,
   processor: null as Processor | null,
 }));
@@ -24,6 +26,11 @@ vi.mock('../src/repo/clone.js', async (original) => ({
   ...(await original<typeof import('../src/repo/clone.js')>()),
   withRootClaim: async (_db: unknown, _id: string, fn: () => Promise<void>) => fn(),
   persistDetection: h.persist,
+  gitClone: h.clone,
+}));
+vi.mock('../src/repo/git-push.js', async (original) => ({
+  ...(await original<typeof import('../src/repo/git-push.js')>()),
+  buildCredentialHelper: h.helper,
 }));
 vi.mock('../src/plan/mirror.js', async (original) => ({
   ...(await original<typeof import('../src/plan/mirror.js')>()),
@@ -251,6 +258,59 @@ it.each(['.git/HEAD', '.git/objects'])(
     expect(row.statusMessage).toContain(aside);
   },
 );
+
+/** A remote-sourced payload for the same repository the fixture cloned from a folder. */
+const remotePayload = {
+  source: 'git_https',
+  remoteUrl: 'https://git.example.test/r1.git',
+  credentialsId: 'cred-1',
+  branch: 'main',
+  userId: 'u1',
+  repositoryId: 'r1',
+} as RepoJobPayload;
+
+async function untouched(dest: string): Promise<void> {
+  expect(await readdir(path.dirname(dest))).toEqual(['r1']);
+  expect(await readFile(path.join(dest, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+  expect(h.persist).not.toHaveBeenCalled();
+}
+
+it('a credential that cannot be built leaves the unusable checkout where it was', async () => {
+  const { dest } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  h.helper.mockRejectedValueOnce(new Error('the stored credential could not be read'));
+  const err = await handleRefresh(remotePayload, db, root).catch((e: unknown) => e);
+  await untouched(dest);
+  expect(h.clone).not.toHaveBeenCalled();
+  expect((err as Error).message).toBe('the stored credential could not be read');
+});
+
+it('a source folder that is gone leaves the unusable checkout where it was', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  await rm(payload.localPath!, { recursive: true });
+  const err = await handleRefresh(payload, db, root).catch((e: unknown) => e);
+  await untouched(dest);
+  expect((err as Error).message).toBe(
+    `Not refreshed: the folder this repository was imported from (${payload.localPath}) is gone. Nothing was moved.`,
+  );
+});
+
+it('the credential built before the move reaches the clone that follows it', async () => {
+  const { dest } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  const auth = { argv: ['-c', 'credential.helper=x'], env: { GIT_HAIVE_USER: 'u' }, secret: 's' };
+  h.helper.mockResolvedValueOnce(auth);
+  h.clone.mockImplementationOnce(async () => {
+    const siblings = await readdir(path.dirname(dest));
+    expect(siblings.filter((entry) => entry.startsWith('r1.aside-'))).toHaveLength(1);
+    expect(siblings).not.toContain('r1');
+  });
+  await handleRefresh(remotePayload, db, root);
+  expect(h.helper).toHaveBeenCalledWith(db, 'cred-1', 'u1', 'https://git.example.test/r1.git');
+  expect(h.clone).toHaveBeenCalledWith('https://git.example.test/r1.git', dest, 'main', auth);
+  expect(row.status).toBe('ready');
+});
 
 it('an unreadable first gate after a retry puts pending bytes and index back', async () => {
   const { dest, payload } = await fixture();
