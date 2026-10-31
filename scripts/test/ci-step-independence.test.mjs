@@ -284,6 +284,16 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
 // Each mutant breaks one rule of a job that passes, and checkJob has to refuse it. They are
 // written against the position of the prerequisite step (last), so they fit every job above.
 const MUTANTS = [
+  ...['deleted', 'expression'].map((kind) => [
+    `a whole-minute job limit ${kind}`,
+    (job) => {
+      if (kind === 'deleted') delete job['timeout-minutes'];
+      else job['timeout-minutes'] = '${{ vars.LIMIT }}';
+    },
+    (spec) => spec.allStepsBounded && !spec.budget,
+    /the job needs a whole-minute limit/,
+  ]),
+
   [
     'a matrix defaulting to fail-fast',
     (job) => {
@@ -684,7 +694,7 @@ for (const spec of JOBS) {
       assert.throws(() => checkJob(mutant.jobs[spec.id], spec, mutant), assert.AssertionError);
     });
 
-    for (const [name, mutate, applies] of MUTANTS) {
+    for (const [name, mutate, applies, expectedError] of MUTANTS) {
       if (applies && !applies(spec)) continue;
       it(`rejects ${name}`, () => {
         checkJob(job, spec);
@@ -694,7 +704,7 @@ for (const spec of JOBS) {
           mutant.steps.findIndex((step) => step.id === spec.prerequisite),
           spec,
         );
-        assert.throws(() => checkJob(mutant, spec), assert.AssertionError);
+        assert.throws(() => checkJob(mutant, spec), expectedError ?? assert.AssertionError);
       });
     }
   });
