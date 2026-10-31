@@ -2,7 +2,8 @@ import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { namesGitData } from '@haive/shared/project-state';
+import { AGENT_DIRECTORIES, CLI_PROVIDER_CATALOG } from '@haive/shared';
+import { deriveRenderTargets, namesGitData } from '@haive/shared/project-state';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import type { AgentRenderTarget } from '../src/step-engine/steps/onboarding/_agent-templates.js';
 import { RULES_TASK, RULES_USER, rulesOverrideDb } from './support/rules-override-db.js';
@@ -186,6 +187,51 @@ describe('07 stored agent destinations must be catalog directories', () => {
     expect(field?.description).toContain('ordinary.md');
     expect(field?.description).not.toContain('refused.md');
   });
+});
+
+describe('07 accepts every catalog agent destination', () => {
+  const targets = deriveRenderTargets(Object.keys(CLI_PROVIDER_CATALOG), []).agentTargets;
+
+  it.each(AGENT_DIRECTORIES)(
+    'writes, quarantines and offers the real format at %s',
+    async (dir) => {
+      const target = targets.find((candidate) => candidate.dir === dir);
+      expect(target).toBeDefined();
+      const ext = target!.format === 'toml' ? 'toml' : 'md';
+      const old = `old.${ext}`;
+      const legacy = `${dir}-legacy`;
+      await seed(`${dir}/${old}`, 'legacy body');
+      const detected = detect([target!], {
+        acceptedAgentIds: ['code-reviewer'],
+        plannedAgents: ['code-reviewer'],
+        unmanagedAgentFiles: [{ dir, files: [old] }],
+      });
+
+      const form = await generateFilesStep.form!({} as StepContext, detected);
+      const field = form!.fields.find((f) => f.id === 'quarantineUnmanagedAgents');
+      expect(field?.label).toContain('Move 1 unmanaged');
+      expect(field?.description).toContain(dir);
+      expect(field?.description).toContain(old);
+
+      const { out, warn } = await applyWith(detected, { quarantineUnmanagedAgents: true });
+
+      const written = [`${dir}/code-reviewer.${ext}`, `${legacy}/README.md`];
+      // Gemini parses every Markdown file as an agent; an index breaks its loader.
+      if (dir !== '.gemini/agents') written.push(`${dir}/README.md`);
+      for (const rel of written) expect(await exists(rel), rel).toBe(true);
+      expect(out.wroteFiles).toEqual(expect.arrayContaining(written));
+      expect(Object.keys(out.wroteFileHashes ?? {})).toEqual(expect.arrayContaining(written));
+      if (dir === '.gemini/agents') expect(await exists(`${dir}/README.md`)).toBe(false);
+      else expect(await read(`${dir}/README.md`)).toContain(`code-reviewer.${ext}`);
+      expect(await exists(`${dir}/${old}`)).toBe(false);
+      expect(await read(`${legacy}/${old}`)).toBe('legacy body');
+      expect(out.quarantinedAgentFiles).toEqual([
+        { from: `${dir}/${old}`, to: `${legacy}/${old}` },
+      ]);
+      expect(out.skippedFiles).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
 });
 
 /** 07 takes these paths from the stored detect payload, which nothing validated, so a legacy or
