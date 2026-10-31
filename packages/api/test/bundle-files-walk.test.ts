@@ -1,6 +1,9 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, expect, it, vi } from 'vitest';
 
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
@@ -24,9 +27,12 @@ import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
 const BUNDLE = '00000000-0000-4000-8000-0000000000c1';
+const run = promisify(execFile);
 let storage: string | undefined;
+const sockets: Server[] = [];
 const saved = process.env.BUNDLE_STORAGE_ROOT;
 afterEach(async () => {
+  await Promise.all(sockets.splice(0).map((socket) => new Promise((done) => socket.close(done))));
   if (saved === undefined) delete process.env.BUNDLE_STORAGE_ROOT;
   else process.env.BUNDLE_STORAGE_ROOT = saved;
   if (storage) await rm(storage, { recursive: true, force: true });
@@ -55,6 +61,17 @@ it('lists 5000 nested files identically without resolving each file from the anc
   await symlink(outside, path.join(tree, 'linked-directory'));
   await symlink(path.join(outside, 'secret'), path.join(tree, 'linked-file'));
   await symlink('missing', path.join(tree, 'dangling'));
+  // Neither a regular file nor a directory, and a link below the first level. A socket path is
+  // limited to about 100 bytes and the tree's own is longer, so it is bound under a short name and
+  // moved in.
+  await run('mkfifo', [path.join(tree, 'pipe')]);
+  const bound = await mkdtemp(path.join(tmpdir(), 's-'));
+  const socket = createServer();
+  sockets.push(socket);
+  await new Promise<void>((listening) => socket.listen(path.join(bound, 'sock'), listening));
+  await rename(path.join(bound, 'sock'), path.join(tree, 'sock'));
+  await rm(bound, { recursive: true, force: true });
+  await symlink(path.join(outside, 'secret'), path.join(tree, 'd0', 'linked-nested-file'));
   h.db = {
     query: {
       customBundles: { findFirst: async () => ({ id: BUNDLE, userId: USER, storageRoot: tree }) },
