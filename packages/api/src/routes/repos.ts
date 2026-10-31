@@ -546,7 +546,15 @@ repoRoutes.post('/', requireNewWorkAllowed, async (c) => {
   );
 
   const { agentRulesOverride: _rules, ...rest } = repo;
-  return c.json({ repository: rest }, 201);
+  return c.json(
+    {
+      repository: {
+        ...rest,
+        remoteUrl: rest.remoteUrl ? redactEditableGitUrl(rest.remoteUrl) : null,
+      },
+    },
+    201,
+  );
 });
 
 repoRoutes.post('/upload', requireNewWorkAllowed, async (c) => {
@@ -1086,7 +1094,12 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
     agentRulesOverride: _rules,
     ...rest
   } = updated[0]!;
-  return c.json({ repository: rest });
+  return c.json({
+    repository: {
+      ...rest,
+      remoteUrl: rest.remoteUrl ? redactEditableGitUrl(rest.remoteUrl) : null,
+    },
+  });
 });
 
 /**
