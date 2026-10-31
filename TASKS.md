@@ -942,7 +942,7 @@ From the T421 fix-round review (2026-10-31). PRE-EXISTING, minor.
 
 ### T470 · FNF[ci-step-independence] · a failed CI step still skips the independent checks after it (+1)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T05:58Z · last: 2026-10-31T05:58Z
 From the T465 review (2026-10-31). PRE-EXISTING, minor to moderate (the same hiding class as T465, for non-smoke checks).
 
 1. .github/workflows/ci.yml, the "Postgres-gated tests" step (~:221-340, ends `exit "$failed"`) has no successor guard, so a failed gated test skips "Run api smokes" (~:348) and with it every smoke.
