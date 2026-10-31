@@ -34,7 +34,7 @@ async function setup(nested = false) {
   dirs.push(root);
   await git(root, ['init']);
   await git(root, ['remote', 'add', 'origin', 'https://old.test/r']);
-  const fake = createFakeDb({ repositories: schema.repositories });
+  const fake = createFakeDb({ repositories: schema.repositories, auditEvents: schema.auditEvents });
   if (nested) await ensureDirNoFollow(root, 'nested');
   fake.insert(schema.repositories, {
     id: REPO,

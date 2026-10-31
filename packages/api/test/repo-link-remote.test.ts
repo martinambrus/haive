@@ -32,6 +32,7 @@ let fake: ReturnType<typeof createFakeDb>;
 beforeEach(() => {
   fake = createFakeDb({
     repositories: schema.repositories,
+    auditEvents: schema.auditEvents,
     repoCredentials: schema.repoCredentials,
   });
   fake.insert(schema.repositories, {
@@ -57,10 +58,12 @@ describe('link origin uses git exit codes', () => {
   it('updates after exit 3 regardless of human wording', async () => {
     h.git
       .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
-      .mockRejectedValueOnce(fail(3, 'different language'));
+      .mockRejectedValueOnce(fail(3, 'different language'))
+      .mockResolvedValueOnce({ stdout: 'https://old.test/r', stderr: '' })
+      .mockRejectedValueOnce(fail(1, 'no push URL'));
     expect((await link()).status).toBe(200);
-    expect(h.git.mock.calls[2]![1]).toContain('--unset-all');
-    expect(h.git.mock.calls[3]![1]).toContain('--replace-all');
+    expect(h.git.mock.calls[4]![1]).toContain('--unset-all');
+    expect(h.git.mock.calls[5]![1]).toContain('--replace-all');
     expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe('https://example.test/r');
   });
   it('does not mistake an unrelated failure with already-exists words for exit 3', async () => {
@@ -75,6 +78,8 @@ describe('link origin uses git exit codes', () => {
     h.git
       .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
       .mockRejectedValueOnce(fail(3, 'remote origin already exists'))
+      .mockResolvedValueOnce({ stdout: 'https://old.test/r', stderr: '' })
+      .mockRejectedValueOnce(fail(1, 'no push URL'))
       .mockResolvedValueOnce({ stdout: '', stderr: '' })
       .mockRejectedValueOnce(fail(128, 'broken config'));
     const res = await link();
@@ -86,10 +91,12 @@ describe('link origin uses git exit codes', () => {
 it.each([0, 5])('accepts push URL cleanup exit %s', async (code) => {
   h.git
     .mockResolvedValueOnce({ stdout: 'true\n', stderr: '' })
-    .mockRejectedValueOnce(fail(3, 'different language'));
+    .mockRejectedValueOnce(fail(3, 'different language'))
+    .mockResolvedValueOnce({ stdout: 'https://old.test/r', stderr: '' })
+    .mockRejectedValueOnce(fail(1, 'no push URL'));
   if (code === 5) h.git.mockRejectedValueOnce(fail(5, 'missing key'));
   expect((await link()).status).toBe(200);
-  expect(h.git.mock.calls[2]![1]).toContain('--unset-all');
+  expect(h.git.mock.calls[4]![1]).toContain('--unset-all');
 });
 it('does not persist a relink whose push URL cleanup failed', async () => {
   h.git

@@ -1,5 +1,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { Hono } from 'hono';
 import {
   allowAudit,
@@ -36,6 +41,9 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
   let db: ReturnType<typeof createDatabase>;
   let repository: string;
   let connection: string;
+  const roots: string[] = [];
+  const git = async (root: string, args: string[]) =>
+    (await promisify(execFile)('git', args, { cwd: root })).stdout.trim();
   const app = new Hono<AppEnv>()
     .onError(errorHandler)
     .route('/repositories', toolingUpgradeRoutes)
@@ -84,8 +92,89 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
   });
   afterEach(async () => {
     await allowAudit(db);
+    await db.execute(sql`DROP TRIGGER IF EXISTS refuse_remote_persist ON repositories`);
+    await db.execute(sql`DROP FUNCTION IF EXISTS refuse_remote_persist()`);
+    for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
     await cleanActor(db, h.actor);
   });
+  for (const failure of ['none', 'persist', 'audit'] as const)
+    for (const existing of [false, true])
+      it(`remote ${existing ? 'relink' : 'link'}: ${failure} failure preserves checkout and binding`, async () => {
+        const root = await mkdtemp(path.join(tmpdir(), 'remote-audit-'));
+        roots.push(root);
+        await git(root, ['init']);
+        if (existing) {
+          await git(root, ['remote', 'add', 'origin', 'https://old.test/r']);
+          await git(root, ['config', '--add', 'remote.origin.url', 'https://extra.test/r']);
+          await git(root, ['config', '--add', 'remote.origin.pushurl', 'https://push.test/r']);
+        }
+        await db
+          .update(schema.repositories)
+          .set({
+            localPath: root,
+            remoteUrl: existing ? 'https://old.test/r' : null,
+            branch: 'main',
+          })
+          .where(eq(schema.repositories.id, repository));
+        const [cred] = await db
+          .insert(schema.repoCredentials)
+          .values({
+            userId: h.actor,
+            host: 'new.test',
+            label: 'test',
+            usernameEncrypted: 'synthetic',
+            secretEncrypted: 'synthetic',
+            encryptedDek: 'synthetic',
+          })
+          .returning();
+        const before = await stored();
+        if (failure === 'persist') {
+          await db.execute(
+            sql.raw(
+              `CREATE FUNCTION refuse_remote_persist() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id = '${repository}'::uuid THEN RAISE EXCEPTION 'persist refused'; END IF; RETURN NEW; END $$`,
+            ),
+          );
+          await db.execute(
+            sql`CREATE TRIGGER refuse_remote_persist BEFORE UPDATE ON repositories FOR EACH ROW EXECUTE FUNCTION refuse_remote_persist()`,
+          );
+        }
+        if (failure === 'audit') await refuseAudit(db);
+        const res = await app.request(`/repos/${repository}/remote`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            remoteUrl: 'https://user:synthetic-password@new.test/r',
+            credentialsId: cred!.id,
+            branch: 'next',
+          }),
+        });
+        expect(res.status).toBe(failure === 'none' ? 200 : 500);
+        const config = await git(root, ['config', '--local', '--list']);
+        if (failure !== 'none') {
+          expect(await stored()).toEqual(before);
+          if (existing) {
+            expect(await git(root, ['config', '--get-all', 'remote.origin.url'])).toBe(
+              'https://old.test/r\nhttps://extra.test/r',
+            );
+            expect(await git(root, ['config', '--get-all', 'remote.origin.pushurl'])).toBe(
+              'https://push.test/r',
+            );
+          } else expect(config).not.toContain('remote.origin.');
+          expect(await audits(db)).toEqual([]);
+        } else {
+          expect(await stored()).toMatchObject({
+            remoteUrl: 'https://new.test/r',
+            credentialsSecretId: cred!.id,
+            branch: 'next',
+          });
+          expect((await audits(db))[0]).toMatchObject({
+            action: 'repository.remote.update',
+            targetId: repository,
+            metadata: { host: 'new.test', credentialsChanged: true, branchChanged: true },
+          });
+          expect(JSON.stringify(await audits(db))).not.toMatch(/synthetic-password|user:|https:/);
+        }
+      });
   const changes = [
     [
       'mask',
