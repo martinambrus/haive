@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { UnrecoverableError } from 'bullmq';
 import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import {
   ensureDirNoFollow,
@@ -422,6 +423,21 @@ async function moveAside(anchor: string, rel: string): Promise<string | null> {
   return path.join(anchor, asideRel);
 }
 
+/** How a rebuild ends once the old folder has been moved aside. BullMQ runs a job that throws again,
+ *  `attempts` times, and each run would find what this one left at the checkout and move that
+ *  aside once more; an unrecoverable error ends the job, and a person's Retry starts a new one. */
+function failedAfterMove(
+  problem: string,
+  aside: string | null,
+  cause?: unknown,
+): UnrecoverableError {
+  const err = new UnrecoverableError(
+    `Not refreshed: ${aside ? `the previous folder was kept at ${aside}, but ` : ''}${problem}.`,
+  );
+  if (cause !== undefined) err.cause = cause;
+  return err;
+}
+
 /** A repository whose checkout is not usable: clone or copy it again, the old folder kept. */
 async function rebuild(
   db: Database,
@@ -464,12 +480,29 @@ async function rebuild(
       ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, payload.remoteUrl)
       : undefined;
   const aside = await moveAside(repoStorageRoot, rel);
-  if (fromFolder) {
-    await ensureDirNoFollow(repoStorageRoot, rel);
-    await copyTree(fromFolder, dest);
-  } else {
-    await ensureDirNoFollow(repoStorageRoot, payload.userId);
-    await gitClone(fromRemote!, dest, payload.branch, auth);
+  try {
+    if (fromFolder) {
+      await ensureDirNoFollow(repoStorageRoot, rel);
+      await copyTree(fromFolder, dest);
+    } else {
+      await ensureDirNoFollow(repoStorageRoot, payload.userId);
+      await gitClone(fromRemote!, dest, payload.branch, auth);
+    }
+  } catch (err) {
+    throw failedAfterMove(
+      `the new checkout could not be built (${(err instanceof Error ? err.message : String(err)).trim()})`,
+      aside,
+      err,
+    );
+  }
+  const built = await usableCheckout(dest);
+  if (built !== 'usable') {
+    throw failedAfterMove(
+      built === 'unusable'
+        ? 'the rebuilt checkout is not usable'
+        : `the rebuilt checkout could not be examined (${built.unknown})`,
+      aside,
+    );
   }
   await persistDetection(
     db,

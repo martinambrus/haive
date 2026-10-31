@@ -14,7 +14,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { REPO_JOB_NAMES } from '@haive/shared';
-import type { Job, Processor } from 'bullmq';
+import { UnrecoverableError, type Job, type Processor } from 'bullmq';
 import { schema } from '@haive/database';
 import { restoreFaults } from '../src/project-state/set-aside.js';
 import * as projections from '../src/project-state/set-aside.js';
@@ -28,15 +28,22 @@ const h = vi.hoisted(() => ({
   seed: vi.fn(),
   helper: vi.fn(),
   clone: vi.fn(),
+  /** Stands in for the copy that follows the move; null runs the real one. */
+  copyFault: null as null | ((src: string, dest: string) => Promise<void>),
   holding: 0,
   processor: null as Processor | null,
 }));
-vi.mock('../src/repo/clone.js', async (original) => ({
-  ...(await original<typeof import('../src/repo/clone.js')>()),
-  withRootClaim: async (_db: unknown, _id: string, fn: () => Promise<void>) => fn(),
-  persistDetection: h.persist,
-  gitClone: h.clone,
-}));
+vi.mock('../src/repo/clone.js', async (original) => {
+  const real = await original<typeof import('../src/repo/clone.js')>();
+  return {
+    ...real,
+    withRootClaim: async (_db: unknown, _id: string, fn: () => Promise<void>) => fn(),
+    persistDetection: h.persist,
+    gitClone: h.clone,
+    copyTree: (src: string, dest: string) =>
+      h.copyFault ? h.copyFault(src, dest) : real.copyTree(src, dest),
+  };
+});
 vi.mock('../src/repo/git-push.js', async (original) => ({
   ...(await original<typeof import('../src/repo/git-push.js')>()),
   buildCredentialHelper: h.helper,
@@ -45,7 +52,8 @@ vi.mock('../src/plan/mirror.js', async (original) => ({
   ...(await original<typeof import('../src/plan/mirror.js')>()),
   seedPlanBaseFromCheckout: h.seed,
 }));
-vi.mock('bullmq', () => ({
+vi.mock('bullmq', async (original) => ({
+  ...(await original<typeof import('bullmq')>()),
   Worker: class {
     constructor(_name: string, processor: Processor) {
       h.processor = processor;
@@ -93,6 +101,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   row.status = 'cloning';
   h.holding = 0;
+  h.copyFault = null;
   h.seed.mockResolvedValue(undefined);
   delete row.statusMessage;
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
@@ -414,6 +423,114 @@ it('a usable source folder is still copied over an unusable checkout', async () 
   expect(row.status).toBe('ready');
 });
 
+const asidesOf = async (dest: string) =>
+  (await readdir(path.dirname(dest)))
+    .filter((entry) => entry.startsWith('r1.aside-'))
+    .map((entry) => path.join(path.dirname(dest), entry));
+
+/** Stands the copy or clone that follows the move in for one that leaves half a tree behind and throws. */
+function failBuilding(kind: 'copy' | 'clone', cause: Error) {
+  const leaveHalf = async (to: string) => {
+    await mkdir(to, { recursive: true });
+    await writeFile(path.join(to, 'half.txt'), 'x\n');
+    throw cause;
+  };
+  if (kind === 'copy') h.copyFault = (_src, to) => leaveHalf(to);
+  else h.clone.mockImplementationOnce((_url: string, to: string) => leaveHalf(to));
+}
+/** A tree the copy or clone finished that is not a checkout: the copy leaves a file, the clone nothing. */
+function buildNoCheckout(kind: 'copy' | 'clone') {
+  if (kind === 'copy')
+    h.copyFault = async (_src, to) => {
+      await writeFile(path.join(to, 'notes.md'), 'no .git\n');
+    };
+}
+/** The payload each kind of rebuild comes from; the fixture's folder is a usable source for `copy`. */
+const rebuildFrom = { copy: (payload: RepoJobPayload) => payload, clone: () => remotePayload };
+
+it.each(['copy', 'clone'] as const)(
+  'a %s that throws after the move ends the job unrecoverably, naming the aside and keeping the cause',
+  async (kind) => {
+    const { dest, payload } = await fixture();
+    await rm(path.join(dest, '.git/HEAD'));
+    const cause = new Error(`${kind} failed: simulated`);
+    failBuilding(kind, cause);
+    const err = await runRefresh(rebuildFrom[kind](payload)).catch((e: unknown) => e);
+    const [aside, ...more] = await asidesOf(dest);
+    expect(more).toEqual([]);
+    expect(err).toBeInstanceOf(UnrecoverableError);
+    expect((err as Error).message).toContain(aside);
+    expect((err as Error).message).toContain(cause.message);
+    expect((err as Error).cause).toBe(cause);
+    expect(row.status).toBe('error');
+    expect(row.statusMessage).toBe((err as Error).message);
+    expect(h.persist).not.toHaveBeenCalled();
+    expect(await readFile(path.join(aside!, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+  },
+);
+
+it.each(['copy', 'clone'] as const)(
+  'a %s that builds a tree that is not usable ends the job unrecoverably, naming the aside',
+  async (kind) => {
+    const { dest, payload } = await fixture();
+    await rm(path.join(dest, '.git/HEAD'));
+    buildNoCheckout(kind);
+    const err = await runRefresh(rebuildFrom[kind](payload)).catch((e: unknown) => e);
+    const [aside, ...more] = await asidesOf(dest);
+    expect(more).toEqual([]);
+    expect(err).toBeInstanceOf(UnrecoverableError);
+    expect((err as Error).message).toContain(aside);
+    expect((err as Error).message).toMatch(/the rebuilt checkout is not usable\.$/);
+    expect(row.status).toBe('error');
+    expect(row.statusMessage).toBe((err as Error).message);
+    expect(h.persist).not.toHaveBeenCalled();
+    expect(await readFile(path.join(aside!, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+  },
+);
+
+it('a rebuilt tree git gave no answer about ends the job unrecoverably too, and says why', async () => {
+  const { dest } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  // The first --show-cdup read is the checkout's own; the second is the rebuilt tree's.
+  shim = await killGit(['rev-parse', '--show-cdup'], { after: 1 });
+  h.clone.mockImplementationOnce((_url: string, to: string) => mkdir(to, { recursive: true }));
+  const err = await runRefresh(remotePayload).catch((e: unknown) => e);
+  const [aside] = await asidesOf(dest);
+  expect(err).toBeInstanceOf(UnrecoverableError);
+  expect((err as Error).message).toContain(aside);
+  expect((err as Error).message).toMatch(
+    /the rebuilt checkout could not be examined \(.*SIGKILL.*\)\.$/,
+  );
+  expect(row.status).toBe('error');
+  expect(h.persist).not.toHaveBeenCalled();
+});
+
+it.each(['throws', 'builds no checkout'] as const)(
+  'a clone that %s after nothing was set aside ends the job unrecoverably and names no folder',
+  async (how) => {
+    const { dest } = await fixture();
+    await rm(dest, { recursive: true });
+    const cause = new Error('clone failed: simulated');
+    if (how === 'throws') failBuilding('clone', cause);
+    const err = await runRefresh(remotePayload).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UnrecoverableError);
+    expect((err as Error).cause).toBe(how === 'throws' ? cause : undefined);
+    expect((err as Error).message).not.toContain('previous folder');
+    expect(await asidesOf(dest)).toEqual([]);
+    expect(row.status).toBe('error');
+  },
+);
+
+it('a refusal before the move stays an ordinary error, which nothing makes final', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  await rm(payload.localPath!, { recursive: true });
+  const err = await runRefresh(payload).catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err).not.toBeInstanceOf(UnrecoverableError);
+  await untouched(dest);
+});
+
 it('the credential built before the move reaches the clone that follows it', async () => {
   const { dest } = await fixture();
   await rm(path.join(dest, '.git/HEAD'));
@@ -423,6 +540,8 @@ it('the credential built before the move reaches the clone that follows it', asy
     const siblings = await readdir(path.dirname(dest));
     expect(siblings.filter((entry) => entry.startsWith('r1.aside-'))).toHaveLength(1);
     expect(siblings).not.toContain('r1');
+    // What a real clone leaves, since the rebuild reads what it built.
+    await git(root, ['clone', path.join(root, 'source'), dest]);
   });
   await handleRefresh(remotePayload, db, root);
   expect(h.helper).toHaveBeenCalledWith(db, 'cred-1', 'u1', 'https://git.example.test/r1.git');

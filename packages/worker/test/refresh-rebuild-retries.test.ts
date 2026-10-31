@@ -21,12 +21,23 @@ const h = vi.hoisted(() => ({
   redis: null as unknown,
   persist: vi.fn(),
   seed: vi.fn(),
+  /** Stand in for the copy and the clone that follow the move. Null runs the real copy; the clone
+   *  is never real, and with no stand-in it finishes and leaves nothing. */
+  copyFault: null as null | ((src: string, dest: string) => Promise<void>),
+  cloneFault: null as null | ((url: string, dest: string) => Promise<void>),
 }));
-vi.mock('../src/repo/clone.js', async (original) => ({
-  ...(await original<typeof import('../src/repo/clone.js')>()),
-  withRootClaim: async (_db: unknown, _id: string, fn: () => Promise<void>) => fn(),
-  persistDetection: h.persist,
-}));
+vi.mock('../src/repo/clone.js', async (original) => {
+  const real = await original<typeof import('../src/repo/clone.js')>();
+  return {
+    ...real,
+    withRootClaim: async (_db: unknown, _id: string, fn: () => Promise<void>) => fn(),
+    persistDetection: h.persist,
+    copyTree: (src: string, dest: string) =>
+      h.copyFault ? h.copyFault(src, dest) : real.copyTree(src, dest),
+    gitClone: (url: string, dest: string) =>
+      h.cloneFault ? h.cloneFault(url, dest) : Promise.resolve(),
+  };
+});
 vi.mock('../src/plan/mirror.js', async (original) => ({
   ...(await original<typeof import('../src/plan/mirror.js')>()),
   seedPlanBaseFromCheckout: h.seed,
@@ -65,6 +76,8 @@ beforeEach(async () => {
   vi.clearAllMocks();
   row.status = 'cloning';
   delete row.statusMessage;
+  h.copyFault = null;
+  h.cloneFault = null;
   h.seed.mockResolvedValue(undefined);
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
     row.status = 'ready';
@@ -106,6 +119,14 @@ async function fixture() {
   };
 }
 
+const remote = {
+  source: 'git_https',
+  remoteUrl: 'https://git.example.test/r1.git',
+  branch: 'main',
+  userId: 'u1',
+  repositoryId: 'r1',
+} as RepoJobPayload;
+
 /** Adds the refresh job the way the route does, with its attempts and a backoff short enough to wait out. */
 async function refreshJob(payload: RepoJobPayload): Promise<Job> {
   worker = startRepoWorker(root);
@@ -124,6 +145,38 @@ async function refreshJob(payload: RepoJobPayload): Promise<Job> {
 const asides = async (dest: string) =>
   (await readdir(path.dirname(dest))).filter((entry) => entry.startsWith('r1.aside-'));
 
+/** The copy or clone that follows the move leaves half a tree behind and throws, on every attempt,
+ *  as an interrupted `cp -a` does. */
+function failBuilding(kind: 'copy' | 'clone', cause: Error) {
+  const leaveHalf = async (to: string) => {
+    await mkdir(to, { recursive: true });
+    await writeFile(path.join(to, 'half.txt'), 'x\n');
+    throw cause;
+  };
+  if (kind === 'copy') h.copyFault = (_src, to) => leaveHalf(to);
+  else h.cloneFault = (_url, to) => leaveHalf(to);
+}
+/** The copy finishes with a file and no checkout; a clone with no stand-in finishes with nothing. */
+function buildNoCheckout(kind: 'copy' | 'clone') {
+  if (kind === 'copy')
+    h.copyFault = async (_src, to) => {
+      await writeFile(path.join(to, 'notes.md'), 'no .git\n');
+    };
+}
+/** BullMQ stopped after the first attempt: one run of the processor, one aside, and the row and the
+ *  failure BullMQ stored both name where the old folder is. */
+async function endedAfterOneRun(job: Job, dest: string) {
+  expect(await job.getState()).toBe('failed');
+  expect(job.attemptsMade).toBe(1);
+  expect(h.seed).toHaveBeenCalledTimes(1);
+  const found = await asides(dest);
+  expect(found).toHaveLength(1);
+  expect(h.persist).not.toHaveBeenCalled();
+  expect(row.status).toBe('error');
+  expect(row.statusMessage).toContain(path.join(path.dirname(dest), found[0]!));
+  expect(job.failedReason).toBe(row.statusMessage);
+}
+
 describe.skipIf(!redisUrl)('a refresh job with attempts: 3 on a real queue', () => {
   it('a dead folder source leaves the checkout where it was, whichever attempt runs', async () => {
     const { source, dest, payload } = await fixture();
@@ -136,4 +189,22 @@ describe.skipIf(!redisUrl)('a refresh job with attempts: 3 on a real queue', () 
     expect(row.statusMessage).toMatch(/is not a usable git checkout\. Nothing was moved\.$/);
     expect(await job.getState()).toBe('failed');
   });
+
+  it.each(['copy', 'clone'] as const)(
+    'a %s that throws after the move ends the job on its first attempt',
+    async (kind) => {
+      const { dest, payload } = await fixture();
+      failBuilding(kind, new Error(`${kind} failed: simulated`));
+      await endedAfterOneRun(await refreshJob(kind === 'copy' ? payload : remote), dest);
+    },
+  );
+
+  it.each(['copy', 'clone'] as const)(
+    'a %s that builds a tree that is not usable ends the job on its first attempt',
+    async (kind) => {
+      const { dest, payload } = await fixture();
+      buildNoCheckout(kind);
+      await endedAfterOneRun(await refreshJob(kind === 'copy' ? payload : remote), dest);
+    },
+  );
 });
