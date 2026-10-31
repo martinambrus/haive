@@ -162,7 +162,12 @@ interface RefusedBody {
   retryAfterSeconds: number;
 }
 
-async function expectRefused(send: () => Promise<Response>, seconds?: number): Promise<number> {
+async function expectRefused(
+  send: () => Promise<Response>,
+  seconds?: number,
+  scope: Scope = 'login',
+): Promise<number> {
+  const before = fake.rows(schema.auditEvents).length;
   h.getDb.mockClear();
   vi.mocked(verifyPassword).mockClear();
   vi.mocked(hashPassword).mockClear();
@@ -175,11 +180,16 @@ async function expectRefused(send: () => Promise<Response>, seconds?: number): P
   expect(body.retryAfterSeconds).toBe(Number(header));
   expect(body.error).toContain(String(body.retryAfterSeconds));
   expect(res.headers.get('set-cookie')).toBeNull();
-  if (h.getDb.mock.calls.length > 0)
-    expect(fake.rows(schema.auditEvents).at(-1)).toMatchObject({
-      action: 'auth.login.failure',
-      metadata: { reason: 'throttled' },
-    });
+  if (scope === 'register') expect(h.getDb).not.toHaveBeenCalled();
+  else {
+    const added = fake.rows(schema.auditEvents).slice(before);
+    expect(added.length).toBeLessThanOrEqual(1);
+    for (const row of added)
+      expect(row).toMatchObject({
+        action: 'auth.login.throttled',
+        metadata: { reason: 'throttled' },
+      });
+  }
   expect(verifyPassword).not.toHaveBeenCalled();
   expect(hashPassword).not.toHaveBeenCalled();
   if (seconds !== undefined) expect(body.retryAfterSeconds).toBe(seconds);
@@ -236,6 +246,68 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
     T0 = Math.floor(Date.now() / 1000) * 1000 + 250;
     vi.useFakeTimers({ toFake: ['Date'] });
     at(0);
+  });
+
+  describe('audit bound', () => {
+    const throttled = () =>
+      fake.rows(schema.auditEvents).filter((r) => r.action === 'auth.login.throttled');
+    it('writes one row and does one lookup for a parallel burst on the rejected account key', async () => {
+      const email = mail('audit-account');
+      for (let i = 0; i < 10; i++) await login(email, WRONG);
+      const lookup = vi.spyOn((h.db as any).query.users, 'findFirst');
+      lookup.mockClear();
+      const got = await statuses(Array.from({ length: 20 }, () => login(email, WRONG)));
+      expect(got).toEqual(Array(20).fill(429));
+      expect(throttled()).toHaveLength(1);
+      expect(lookup).toHaveBeenCalledTimes(1);
+      const gate = `${acctKey('login', email)}:audit`;
+      expect(await client.get(gate)).toBe('1');
+      expect(await client.pttl(gate)).toBeGreaterThan(0);
+      expect(await client.pttl(gate)).toBeLessThanOrEqual(60_000);
+      await client.del(gate);
+      at(61_000);
+      for (let i = 0; i < 10; i++) await login(email, WRONG);
+      await expectRefused(() => login(email, WRONG));
+      expect(throttled()).toHaveLength(2);
+    });
+    it('uses the rejected address key even for distinct login identifiers', async () => {
+      for (let i = 0; i < 30; i++) await login(mail(`audit-ip-${i}`), WRONG, { peer: peer(1) });
+      for (let i = 0; i < 20; i++)
+        await expectRefused(() => login(mail(`audit-new-${i}`), WRONG, { peer: peer(1) }));
+      expect(throttled()).toHaveLength(1);
+      expect(await client.get(`${ipKey('login', peer(1))}:audit`)).toBe('1');
+    });
+    it('preserves 429 and skips the database when the Redis audit gate fails', async () => {
+      const email = mail('audit-gate-error');
+      for (let i = 0; i < 10; i++) await login(email, WRONG);
+      const set = vi.spyOn(client, 'set').mockRejectedValue(new Error('gate unavailable'));
+      h.getDb.mockClear();
+      try {
+        await expectRefused(() => login(email, WRONG), 60);
+        expect(h.getDb).not.toHaveBeenCalled();
+        expect(throttled()).toEqual([]);
+      } finally {
+        set.mockRestore();
+      }
+    });
+    it('preserves 429 when the admitted audit lookup fails', async () => {
+      const email = mail('audit-lookup-error');
+      for (let i = 0; i < 10; i++) await login(email, WRONG);
+      const lookup = vi
+        .spyOn((h.db as any).query.users, 'findFirst')
+        .mockRejectedValue(new Error('lookup unavailable'));
+      try {
+        await expectRefused(() => login(email, WRONG), 60);
+      } finally {
+        lookup.mockRestore();
+      }
+      expect(throttled()).toEqual([]);
+    });
+    it('register throttle never opens the database', async () => {
+      const email = mail('register-no-db');
+      for (let i = 0; i < 10; i++) await register(email);
+      await expectRefused(() => register(email), 60, 'register');
+    });
   });
 
   describe('TH-1 per account', () => {
@@ -381,7 +453,7 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       for (let i = 5; i < 10; i++)
         expect((await register(email, { peer: peer(i) })).status).toBe(409);
       reg.existing = false;
-      await expectRefused(() => register(email, { peer: peer(10) }));
+      await expectRefused(() => register(email, { peer: peer(10) }), undefined, 'register');
       expect(await client.zcard(acctKey('register', email))).toBe(10);
       expect((await login(email, WRONG, { peer: peer(11) })).status).toBe(401);
       expect(await client.zcard(acctKey('login', email))).toBe(1);
@@ -518,7 +590,9 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
           { incoming: { socket: {} } },
         ),
       );
-      expect(await keys()).toEqual([acctKey('login', email)]);
+      expect(await keys()).toEqual(
+        [acctKey('login', email), `${acctKey('login', email)}:audit`].sort(),
+      );
     });
   });
 
