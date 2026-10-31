@@ -19,6 +19,7 @@ import { getDb } from '../db.js';
 import {
   ANONYMOUS_AUDIT_ACTOR,
   insertAuditEvent,
+  recordAuditEvent,
   logAuditEvent,
   type AuditEvent,
 } from '../lib/audit.js';
@@ -32,7 +33,7 @@ import {
 import { setAuthCookies, clearAuthCookies, getRefreshCookie } from '../auth/cookies.js';
 import { checkInvite, hashInviteToken } from '../lib/invites.js';
 import { decideRegistration } from '../lib/registration.js';
-import { reserveAuthAttempt } from '../lib/auth-throttle.js';
+import { AuthThrottleError, reserveAuthAttempt } from '../lib/auth-throttle.js';
 import { requireAuthAllowingPasswordChange } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -251,30 +252,33 @@ authRoutes.post('/login', async (c) => {
   const fieldKey = await configService.getEncryptionKey();
   const pepper = await secretsService.getEmailBlindIndexPepper();
   const blindIndex = computeEmailBlindIndex(body.email, pepper);
-  const db = getDb();
   let attempt;
   try {
     attempt = await reserveAuthAttempt(c, 'login', blindIndex);
   } catch (err) {
     if (!(err instanceof HTTPException) || err.status !== 429) throw err;
-    const existing = await db.query.users.findFirst({
-      where: eq(schema.users.emailBlindIndex, blindIndex),
-      columns: { id: true },
-    });
-    const event: AuditEvent = {
-      actorUserId: ANONYMOUS_AUDIT_ACTOR,
-      action: 'auth.login.failure',
-      targetType: 'user',
-      targetId: existing?.id ?? null,
-      metadata: { reason: 'throttled' },
-    };
-    await db.transaction(async (tx) => {
-      await insertAuditEvent(tx, event);
-    });
-    logAuditEvent(event);
+    if (err instanceof AuthThrottleError && err.auditAllowed) {
+      try {
+        const db = getDb();
+        const existing = await db.query.users.findFirst({
+          where: eq(schema.users.emailBlindIndex, blindIndex),
+          columns: { id: true },
+        });
+        await recordAuditEvent(db, {
+          actorUserId: ANONYMOUS_AUDIT_ACTOR,
+          action: 'auth.login.throttled',
+          targetType: 'user',
+          targetId: existing?.id ?? null,
+          metadata: { reason: 'throttled' },
+        });
+      } catch (auditError) {
+        log.error({ err: auditError }, 'failed to audit throttled sign-in');
+      }
+    }
     throw err;
   }
 
+  const db = getDb();
   const user = await db.query.users.findFirst({
     where: eq(schema.users.emailBlindIndex, blindIndex),
   });
@@ -287,9 +291,7 @@ authRoutes.post('/login', async (c) => {
       targetId: user?.id ?? null,
       metadata: { reason: 'invalid_credentials' },
     };
-    await db.transaction(async (tx) => {
-      await insertAuditEvent(tx, event);
-    });
+    await insertAuditEvent(db, event);
     logAuditEvent(event);
     throw new HttpError(401, 'Invalid credentials');
   }

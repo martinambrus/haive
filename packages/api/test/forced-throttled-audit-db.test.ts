@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { HTTPException } from 'hono/http-exception';
+import { AuthThrottleError } from '../src/lib/auth-throttle.js';
 import {
   allowAudit,
   audits,
@@ -23,7 +23,10 @@ const h = vi.hoisted(() => ({
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/lib/user-sockets.js', () => ({ closeUserSockets: h.close }));
-vi.mock('../src/lib/auth-throttle.js', () => ({ reserveAuthAttempt: h.throttle }));
+vi.mock('../src/lib/auth-throttle.js', async (original) => ({
+  ...(await original<any>()),
+  reserveAuthAttempt: h.throttle,
+}));
 vi.mock('../src/auth/password.js', () => ({
   hashPassword: async () => 'next-hash',
   verifyPassword: async (password: string) => password === 'synthetic-password',
@@ -93,28 +96,30 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
   });
   for (const refused of [false, true]) {
     for (const known of [true, false])
-      it(`throttled ${known ? 'known' : 'unknown'} login: ${refused ? 'refused audit fails request' : 'writes safe row before 429'}`, async () => {
+      it(`throttled ${known ? 'known' : 'unknown'} login: ${refused ? 'refused audit preserves 429' : 'writes safe row before 429'}`, async () => {
         h.throttle.mockRejectedValue(
-          new HTTPException(429, {
-            res: Response.json(
+          new AuthThrottleError(
+            Response.json(
               { code: 'rate_limited' },
               { status: 429, headers: { 'Retry-After': '60' } },
             ),
-          }),
+            true,
+          ),
         );
         if (refused) await refuseAudit(db);
         const res = await send('/auth/login', {
           email: known ? 'known@example.test' : 'absent@example.test',
           password: 'synthetic-password',
         });
-        expect(res.status).toBe(refused ? 500 : 429);
+        expect(res.status).toBe(429);
+        expect(res.headers.get('Retry-After')).toBe('60');
         const rows = await audits(db);
         expect(rows).toHaveLength(refused ? 0 : 1);
         expect(await sessions()).toEqual([]);
         if (!refused) {
           expect(res.headers.get('Retry-After')).toBe('60');
           expect(rows[0]).toMatchObject({
-            action: 'auth.login.failure',
+            action: 'auth.login.throttled',
             targetId: known ? h.actor : null,
             metadata: { reason: 'throttled' },
           });
