@@ -224,7 +224,7 @@ export function BundleComposer({
       return next;
     });
     // A listing that failed is asked again rather than kept until a reload.
-    if (opening && (!filesByBundle[bundleId] || filesByBundle[bundleId].error)) {
+    if (opening && (!filesByBundle[bundleId] || filesByBundle[bundleId].error !== null)) {
       void loadBundleFiles(bundleId);
     }
   };
@@ -613,10 +613,10 @@ export function BundleComposer({
                     {fileState?.loading && (
                       <p className="text-xs text-neutral-500">Loading files…</p>
                     )}
-                    {fileState?.error && (
+                    {fileState && fileState.error !== null && (
                       <p className="text-xs text-red-400">Error: {fileState.error}</p>
                     )}
-                    {fileState && !fileState.loading && !fileState.error && (
+                    {fileState && !fileState.loading && fileState.error === null && (
                       <>
                         {fileState.files.length === 0 ? (
                           <p className="text-xs text-neutral-500">

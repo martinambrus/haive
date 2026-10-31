@@ -50,6 +50,7 @@ let filesFailure: { ok: false; status: number; json: () => Promise<unknown> } | 
 let filesFetches = 0;
 type StubResponse = { ok: boolean; status: number; json: () => Promise<unknown> };
 let filesQueue: Array<() => Promise<StubResponse>> = [];
+let syncFailure: StubResponse | null = null;
 let bundleState: 'active' | 'syncing' | 'failed' = 'active';
 let bundleSource: 'zip' | 'git' = 'zip';
 let poll: () => void;
@@ -89,6 +90,7 @@ async function fakeFetch(input: unknown) {
     return filesQueue.length > 0 ? filesQueue.shift()!() : (filesFailure ?? reply(filesBody));
   }
   if (url.pathname.endsWith('/bundles/b1/sync')) {
+    if (syncFailure) return syncFailure;
     bundleState = 'syncing';
     return reply({});
   }
@@ -116,6 +118,7 @@ beforeEach(() => {
   bundleState = 'active';
   bundleSource = 'zip';
   filesQueue = [];
+  syncFailure = null;
   syncError = null;
   filesFailure = null;
   filesFetches = 0;
@@ -394,3 +397,49 @@ it.each(['first expand', 'retry'] as const)(
     expect(live.text()).toContain('a.md');
   },
 );
+
+it('keeps a successful listing across collapse and expand without fetching again', async () => {
+  const live = await mountLive();
+  await live.click('docs');
+  expect(filesFetches).toBe(1);
+  expect(live.text()).toContain('a.md');
+  await live.click('docs');
+  expect(live.text()).not.toContain('a.md');
+  await live.click('docs');
+  expect(filesFetches).toBe(1);
+  expect(live.text()).toContain('a.md');
+});
+
+it('keeps the cached listing after a failed Resync, including when reopened', async () => {
+  bundleSource = 'git';
+  const live = await mountLive();
+  await live.click('docs');
+  syncFailure = { ok: false, status: 409, json: async () => ({}) };
+  await live.click('Resync');
+  expect(live.text()).toContain('resync failed (409)');
+  expect(live.text()).toContain('a.md');
+  expect(filesFetches).toBe(1);
+  await live.click('docs');
+  await live.click('docs');
+  expect(filesFetches).toBe(1);
+  expect(live.text()).toContain('a.md');
+});
+
+it('renders empty-string failures in the error branch', async () => {
+  filesQueue.push(() => Promise.reject(''));
+  const live = await mountLive();
+  await live.click('docs');
+  expect(live.text()).toContain('Error:');
+  expect(live.text()).not.toContain('bundle is empty');
+});
+
+it('retries an empty-string failure when reopened', async () => {
+  filesQueue.push(() => Promise.reject(''));
+  const live = await mountLive();
+  await live.click('docs');
+  await live.click('docs');
+  await live.click('docs');
+  expect(filesFetches).toBe(2);
+  expect(live.text()).toContain('a.md');
+  expect(live.text()).not.toContain('Error:');
+});
