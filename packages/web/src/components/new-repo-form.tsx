@@ -20,6 +20,7 @@ import {
 } from './repos/github-oauth-connect';
 import { CredentialModal } from './credential-modal';
 import { FilesystemBrowser } from './filesystem-browser';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 type Source = 'local_path' | 'git_https' | 'github_oauth' | 'upload' | 'blank';
 
@@ -349,29 +350,39 @@ export function NewRepoForm() {
                             <div className="px-3 py-2 text-xs text-neutral-500">No matches.</div>
                           );
                         }
-                        return filtered.slice(0, 100).map((r) => (
-                          <button
-                            key={r.fullName}
-                            type="button"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => {
-                              setRemoteUrl(r.cloneUrl);
-                              setRepoFilter(r.fullName);
-                              setRepoListOpen(false);
-                              const field = branchRef.current;
-                              if (field && !branchTouched && !field.value)
-                                field.value = r.defaultBranch;
-                            }}
-                            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs text-neutral-200 hover:bg-neutral-800"
-                          >
-                            <span className="font-mono">{r.fullName}</span>
-                            {r.private && (
-                              <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-amber-300">
-                                private
-                              </span>
+                        return (
+                          <>
+                            {filtered.length > 100 && (
+                              <InlineMarkdown
+                                className="px-3 py-2 text-xs text-neutral-500"
+                                body={`Showing 100 of ${filtered.length} matches. Type to narrow the list.`}
+                              />
                             )}
-                          </button>
-                        ));
+                            {filtered.slice(0, 100).map((r) => (
+                              <button
+                                key={r.fullName}
+                                type="button"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => {
+                                  setRemoteUrl(r.cloneUrl);
+                                  setRepoFilter(r.fullName);
+                                  setRepoListOpen(false);
+                                  const field = branchRef.current;
+                                  if (field && !branchTouched && !field.value)
+                                    field.value = r.defaultBranch;
+                                }}
+                                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs text-neutral-200 hover:bg-neutral-800"
+                              >
+                                <span className="font-mono">{r.fullName}</span>
+                                {r.private && (
+                                  <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-amber-300">
+                                    private
+                                  </span>
+                                )}
+                              </button>
+                            ))}
+                          </>
+                        );
                       })()}
                     </div>
                   )}

@@ -93,3 +93,31 @@ describe('GitHub repository picker truncation note', () => {
     expect(textOf(root())).not.toContain('most recently pushed');
   });
 });
+
+describe('GitHub picker visible result limit', () => {
+  it('shows the matched count above 100 and removes the note when typing narrows it', async () => {
+    reposBody = {
+      repos: Array.from({ length: 137 }, (_, i) => ({
+        fullName: `acme/r${String(i).padStart(3, '0')}`,
+        cloneUrl: `https://github.com/acme/r${i}.git`,
+        defaultBranch: 'main',
+        private: false,
+      })),
+      truncated: false,
+    };
+    const { view, root } = await mountOauth();
+    const picker = () => findAll(root(), (h) => h.props.id === 'repo-picker')[0]!;
+    (picker().props.onFocus as () => void)();
+    view.draw();
+    expect(
+      findAll(root(), (h) => h.tag === 'button' && textOf(h).startsWith('acme/r')),
+    ).toHaveLength(100);
+    expect(textOf(root())).toContain('Showing 100 of 137 matches. Type to narrow the list.');
+    fire.type(picker(), 'r13');
+    view.draw();
+    expect(
+      findAll(root(), (h) => h.tag === 'button' && textOf(h).startsWith('acme/r')),
+    ).toHaveLength(7);
+    expect(textOf(root())).not.toContain('Type to narrow the list.');
+  });
+});
