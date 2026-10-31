@@ -340,9 +340,9 @@ export async function commitMerge(
 /** HEAD's commit; a failed read throws, since an empty answer reads as a HEAD that moved. */
 export async function headCommit(repoPath: string): Promise<string> {
   const res = await gitRun(repoPath, ['rev-parse', 'HEAD']);
-  if (res.code !== 0) {
+  if (res.code !== 0 || !res.stdout.trim()) {
     throw new Error(
-      `git rev-parse HEAD failed in ${repoPath}: ${(res.stderr || res.stdout).trim()}`,
+      `git rev-parse HEAD failed in ${repoPath}: ${res.code === 0 ? 'empty answer' : (res.stderr || res.stdout).trim()}`,
     );
   }
   return res.stdout.trim();

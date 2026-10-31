@@ -1349,3 +1349,9 @@ describe.runIf(process.getuid?.() === 0)(
     });
   },
 );
+
+it('T397 fix7 commitMerge rejects an empty post-commit HEAD answer', async () => {
+  const { wt } = await openMerge();
+  shim = await failGit(['rev-parse', 'HEAD'], { exit: 0 });
+  await expect(commitMerge(wt, 'msg', COMMIT_ENV)).rejects.toThrow(/HEAD.*empty answer/);
+});

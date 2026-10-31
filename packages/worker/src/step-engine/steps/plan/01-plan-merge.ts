@@ -629,7 +629,6 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
       repositoryId: d.repositoryId,
     });
     const sha = await commitMerge(d.worktreePath, `Merge origin/${d.branch}`, identity);
-    if (!sha) throw new Error('the merge produced no commit to fast-forward onto');
     await seedPlanBaseFromCheckout(ctx.db, d.repositoryId, ctx.repoPath);
 
     const repositoryId = d.repositoryId;

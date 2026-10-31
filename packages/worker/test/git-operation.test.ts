@@ -89,7 +89,7 @@ describe('gitOperationInProgress', () => {
     }
   });
 
-  it('keeps reading a folder with no .git inside a parent repository as an open operation', async () => {
+  it('rejects an operation check whose git directory is outside the checkout anchor', async () => {
     mkdirSync(join(repo, 'nested'));
     await expect(gitOperationInProgress(join(repo, 'nested'))).rejects.toMatchObject({
       name: 'GitOperationUnreadableError',

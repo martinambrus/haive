@@ -38,7 +38,8 @@ import { REPO_IS_DATA_MERGE_LINES, safeRef, safeTitle } from './steps/_untrusted
 // and commits.
 
 /** True once `branch` is merged into `worktreePath`'s HEAD: an aborted merge also leaves no
- *  MERGE_HEAD and nothing unmerged, so what marks a commit is that the branch is in HEAD. */
+ *  MERGE_HEAD and nothing unmerged, so what marks a commit is that the branch is in HEAD. A missing
+ *  directory is not committed; a failed git read in an existing directory throws. */
 export async function mergeCommitted(worktreePath: string, branch: string): Promise<boolean> {
   const head = await revParse(worktreePath, 'MERGE_HEAD');
   if (head !== null) return false; // merge still open (not committed)
@@ -62,7 +63,8 @@ function nulPaths(out: string): string[] {
   return [...new Set(out.split('\0').filter(Boolean))];
 }
 
-/** The paths still unmerged in `dir`, or null when git could not list them. Read with `-z`: without
+/** The paths still unmerged in `dir`. A failed listing throws with `required: true`, otherwise it
+ *  returns null for telemetry callers. Read with `-z`: without
  *  it git quotes a name holding a quote or a non-ASCII byte, and the quoted form names no file. */
 export function unmergedPaths(dir: string, required: true): Promise<string[]>;
 export function unmergedPaths(dir: string, required?: false): Promise<string[] | null>;
@@ -1305,7 +1307,8 @@ export function buildMergeFixPrompt(
  *  files. The agent cannot run git (the worktree's absolute gitdir path does not
  *  exist inside the sandbox), so the host verifies no conflict markers remain in
  *  the previously-unmerged paths, stages, and commits. Returns true when the merge
- *  commit landed. */
+ *  commit landed. Returns false for an incomplete or containment-refused resolution, or a merge
+ *  no longer open. Failed git reads, writes and genuine IO errors throw. */
 export async function completeMergeHostSide(
   worktreePath: string,
   gitEnv: Record<string, string>,
