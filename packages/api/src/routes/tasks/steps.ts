@@ -1200,6 +1200,11 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       const activatedMeanwhile = await db.transaction(async (tx) => {
         await admitNewWork(tx);
         await refuseReviveBesideLive(tx, id);
+        // Clear the step's OWN blocker before handing back to the worker; without it the marker
+        // written below is never even read. See the helper for why. It goes first, ahead of the agent
+        // rows: a Retry's sweep takes the runs and then deletes the agent rows, so holding an agent
+        // row while waiting for a run closes a cycle with it.
+        await supersedeBlockingInvocation(tx, step.id, now);
         await tx
           .update(schema.taskStepAgentMinings)
           .set({ userRetryRequestedAt: now, updatedAt: now })
@@ -1209,9 +1214,6 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
               failedAgents.map((a) => a.id),
             ),
           );
-        // Clear the step's OWN blocker before handing back to the worker; without it the
-        // marker written above is never even read. See the helper for why.
-        await supersedeBlockingInvocation(tx, step.id, now);
         // Downstream ONLY. The clicked step keeps its detectOutput / formSchema / formValues /
         // iterations / output and — the whole point — the `done` rows of the agents that
         // succeeded, which resetRowsForRerun would have deleted. A row still active outside that
