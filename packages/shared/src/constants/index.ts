@@ -111,6 +111,7 @@ export const QUEUE_NAMES = {
 export const PLAN_MIRROR_JOB_NAMES = {
   REFRESH: 'refresh-plan-mirror',
   SAVE: 'save-plan-mirror',
+  SAVE_HAIVE_DATA: 'save-haive-data',
   SWEEP: 'sweep-plan-mirrors',
   SYNC_CHECKOUT: 'sync-checkout',
   SWEEP_CHECKOUTS: 'sweep-checkouts',
