@@ -659,7 +659,7 @@ refresh's own claim does not stop it, since they call it. The applicable set is 
 ledger and the settings have moved, whenever the column or the ledger did (a flip of the RTK flag
 is a column move), so it renders the live RTK switch as the sync leaves it.
 
-**A bundle's source travels as a descriptor, and is never merged.** The record also carries one
+**A bundle's source travels as a descriptor, and the sync never merges it.** The record also carries one
 `bundles/<bundleFileName(source)>` file per portable bundle source (`{source, name}`), so another
 install can name a source a claim points at (`bundleDescriptors`, shared). Two local bundles at one
 source (`custom_bundles` has no unique index on it) collapse to the smallest name in code-unit order,
@@ -668,7 +668,11 @@ previous `base_snapshot` that no local bundle holds is kept while a claim's temp
 `custom:<encodeURIComponent(source)>:`, and removed (reported in `removed`) once none does; a
 descriptor file the base never named is not touched, like a claim file. A descriptor for a bundle
 that has no installed item can flap across pushes between two installs that disagree on holding the
-bundle: each write adds or removes it. The ledger is unaffected. The sync reads the descriptors
+bundle: each write adds or removes it. The removal is reported in `removed` like any other, so 12
+and 03 stage it when their commit box is ticked (the sweep and the checkout watcher never commit), and
+the install that holds the bundle writes the file again only at its next record write. The ledger is
+unaffected. A git conflict in the state directory is another matter: the conflict resolver merges
+descriptors three-way by source (`projection-merge.ts`). The sync reads the descriptors
 into the base as the checkout holds them and leaves them out of the merge: a conflict row on one could
 not be answered by anybody, and `upgradeAdmission` would hold every upgrade for it.
 
@@ -1046,7 +1050,10 @@ holds no setting and no environment (no sync row, or one written before the reco
 carried them) merges them as no base at all**: the checkout's value wins over a column nobody chose
 (`rtk_enabled` is NOT NULL default true, and would otherwise push B's default back over A's choice on
 B's first sync), except a switched `rtk-enabled` on an existing sync row, as above, and a set joins
-both lists. An RTK-off import closes the RTK question as converged
+both lists. What such a merge replaces is logged, not silent: a sync with no base logs one warn once
+its sync row is written, with `count` and at most ten `units` (unit names, settings and environment
+first, never a value); a sync that rolls back before that logs nothing. An RTK-off import closes the
+RTK question as converged
 (`convergeRtkQuestion`); the sync's own converge pass skips that question, whose base equals its local
 side (`isRtkQuestion`), since no merge contests that unit (a boolean cannot differ from base and both
 sides). When the merge leaves a value the checkout's file does not hold, the repository is marked dirty

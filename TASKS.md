@@ -528,7 +528,7 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+22)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+24)
 
 status: open · was modular #211
 
@@ -555,6 +555,8 @@ status: open · was modular #211
 21. (T119 fix review, 2026-10-30) PRE-EXISTING, minor: api test/repo-artifact-reset.test.ts ~:1829,1849 create temp dirs under `os.tmpdir()` and never remove them; clean them up in an `afterEach`.
 22. (T448 review, 2026-10-30) PRE-EXISTING, minor: the UI-login e2e specs click submit right after `fill` with no hydration signal (tests/e2e/auth/forms.spec.ts ~:32,69,99,124 and harness/session-recovery/session-ordering.spec.ts); a click that beats hydration is a native navigation (a POST since T448), so the race remains. Wait for a hydration marker before submitting. Since T449 (PR #946) only a click that beats hydration remains, and its helpers `holdScripts`, `reactAttached` and `waitForReact` (tests/e2e/auth/prehydration-submit.spec.ts ~:89-107) can move to tests/e2e/helpers for this fix.
 23. (main CI on 02a25e357, 2026-10-30) PRE-EXISTING since T118, flaky: worker test/onboarding-recorded-membership.test.ts `tree()` (~:287) reads every file under the fixture repository, `.git` included, right after the fixture's `git commit` (~:340-345, ~:442-445), and the detached `git maintenance run --auto` that commit starts creates and removes `.git/objects/maintenance.lock` in between: `ENOENT ... open '.../.git/objects/maintenance.lock'` (run 41136606433). Give the fixture's git calls `-c maintenance.auto=false` (or skip that lock in the walk), and grep the other tests that walk a git fixture after a commit for the same race.
+24. (T349 review, 2026-10-31) PRE-EXISTING, minor: of the four step actions that write the clicked row before they move the task (loop Resume, `retry_ai`, the CLI switch, Skip), only Skip has a committed lock-order control; no case tells `cancelStillOpen` locking every row of the task from locking only the open ones; and the cancel route's control (K7) now passes from the Stop batch alone, so the step abort's (K8) is the only one that pins `cancelStillOpen`.
+25. (T445 review, 2026-10-31) PRE-EXISTING, minor: since T445 the node-free guard fails on Node globals read as values, but it covers only the project-state subpath the web imports; shared naming/index.ts ~:63 (`process.env` as a default parameter) and forge/bitbucket-cloud.ts ~:33 (`Buffer.from`) are unguarded. The web never calls them today. Extend the guard to every shared subpath the web bundles.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+3)
 
@@ -806,7 +808,7 @@ PRE-EXISTING, rechecked during T423 integration review. F1: dormant worker helpe
 
 ### T437 · FNF[legacy-repository-responses] · exclusions PATCH returns a legacy credentialed remote unchanged
 
-status: open · scope: queued broader finding, not approved implementation
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T00:45Z · last: 2026-10-31T00:45Z
 
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
@@ -837,15 +839,6 @@ From the T119 review (2026-10-30). Introduced by T119, fails closed. worker onbo
 status: open
 From the T119 review (2026-10-30). Minor. shared project-state limits.ts ~:12 `MAX_AGENT_RULES_BYTES` is 64 KiB, while codex reads only the first 32 KiB of AGENTS.md (the reason AGENTS.md itself is kept under 32 KiB), so a large override silently truncates what codex sees, and the rest of the file after the block with it. Decide: a 24-32 KiB cap, or a size hint on the Tooling editor.
 
-### T445 · FNF[first-import-visibility] · a first sync silently replaces a locally typed setting; a refused checkout value is only logged (+2)
-
-status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-30T23:56Z · last: 2026-10-30T23:56Z
-From the T119 review (2026-10-30). PRE-EXISTING, minor. Cross-reference: T317 [design] (an RTK choice loses to the first record import).
-
-1. shared project-state merge.ts ~:29,46,58 computes `overwritten` (a local value an incoming one replaced) and nothing outside merge.ts reads it, so a first sync with no base replaces a locally typed value of every portable setting without a word. Surface it in the sync's answers or log it at warn with the unit names.
-2. worker project-state sync.ts ~:948: a checkout value that is refused (over its cap, holding a region marker) is only logged; the repository page never says the committed value was ignored.
-3. Nits: the doc comment about `{ v }` sides sits above `SETTING_LABELS` (shared project-state conflicts.ts ~:72) instead of above what it describes; the node-free guard test checks import specifiers only, so `Buffer.byteLength` in settings.ts ~:127 and limits.ts ~:23 goes unchecked (harmless unless the web calls them).
-
 ### T446 · FNF[bundle-descriptor-removal] [design] [parked: user] · an install removes a teammate's claim-less bundle descriptor, and its own upgrade commit can carry the removal
 
 status: open (parked: user decision)
@@ -872,7 +865,7 @@ Before React attaches `handleSubmit`, a click on Sign in (web components/auth-fo
 
 ### T454 · FNF[ssr-form-prehydration-values] · server-rendered controlled forms lose text typed before hydration
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T01:06Z · last: 2026-10-31T01:06Z
 From the T449 review (2026-10-30). PRE-EXISTING, minor (signed-in pages; only a hard load exposes it).
 
 1. web components/new-repo-form.tsx ~:116 keeps the repository name in a controlled `useState('')` and ~:239 renders `<form onSubmit>` with no `method`: text typed into `/repos/new` before hydration is reset to '' by the first re-render, and a submit before hydration is a GET reload of the same page (the input has no `name`, so nothing reaches the URL). The fix class is T449's: uncontrolled inputs read with `new FormData(event.currentTarget)` at submit.
@@ -880,7 +873,7 @@ From the T449 review (2026-10-30). PRE-EXISTING, minor (signed-in pages; only a 
 
 ### T455 · FNF[api-body-shape] · a JSON `null` body is a 500 in twelve api handlers; wrongly typed fields in the tooling PATCH are a 500 (+1)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T00:38Z · last: 2026-10-31T00:38Z
 From the T447 review (2026-10-30). PRE-EXISTING, minor. Line numbers as of main 8c655fc81.
 
 1. A JSON `null` body is read as an object, so the handler throws a TypeError and answers 500: api routes/plan.ts ~:1008-1010 (DELETE plan, `body.confirm`), tasks/index.ts ~:1522-1527 (steer), tooling.ts ~:19-20, ~:59-64, ~:150-151, ~:340-341 and ~:218 (SSE: an empty 200 stream plus a console error, not a 500), user-settings.ts ~:244-245, ~:280-281, ~:312-313, bundles.ts ~:757-762, and tooling-upgrades.ts ~:250-256 (POST tooling-upgrade: `null` survives its try/catch, then `parsed.components` throws). T447 (PR #948) guarded the tooling PATCH alone. Fix: one shared guard (a body must be a JSON object, else 400 `invalid_body`), one control per route.
@@ -900,8 +893,51 @@ From the T452 review (2026-10-31). PRE-EXISTING, minor; reachable only when outp
 
 In api routes/cli-login-banner.ts `onStreamData` (~:876-882), a success or error line in a chunk that arrives after `cleanupSession` still reaches `detectAuthResult` and starts `runProbeAndSave`, which queues a probe job for a session that is gone: `canDetectAuth` (~:666) has no `cleanedUp` check, while `captureClaudeOauthToken` and `offerAuthUrl` do. Codex, grok and amp take this branch (grok measured by the T452 driver with a scratch test: probe jobs 0 -> 1 after `ws.close()` and a "Signed in" chunk). Decide whether a login that completes during teardown should still be verified (the CLI has stored its credentials either way, so a skipped probe leaves Haive's provider state stale until the next check). If not, one `if (session.cleanedUp) return;` at the top of `onStreamData` closes it and makes T452's gate on the antigravity URL step redundant.
 
+### T458 · FNF[cancel-status-guard] · the worker's CANCEL marks a task cancelled whatever its status; the plan merge's DELETE queues a CANCEL unchecked (+1)
+
+status: open
+From the T349 review (2026-10-31). PRE-EXISTING, consequential. Cross-reference: T309 FNF[cancel-cap-2].
+
+1. worker queues/task-queue.ts `handleCancelTask` (~:3760-3773) sets `status = 'cancelled'` where only the id matches, so a CANCEL job that lands after the task completed (queued before the completion, or by a caller that never checked) turns a completed task into a cancelled one. T349 (PR pending) guards the api's single cancel and step abort (`cancelTaskIfOpen`: completed and cancelled are terminal, failed stays cancellable); the worker needs the same guard, with the decision made under the task row's lock.
+2. api routes/plan.ts `DELETE /plan/merge` (~:1379) queues a CANCEL with no check of the task's status when it runs. Route it through the same decision.
+3. Minor (T349 fix-round review): the step action `abort` cancels without the Stop that the Cancel action runs first (api routes/tasks/steps.ts ~:1565 vs routes/tasks/index.ts ~:1288), so a live CLI of the task is not stopped by it; check whether the web offers abort on a live step (web app/(app)/tasks/[id]/page.tsx ~:1354).
+
+### T459 · FNF[lock-order-leftovers] · writers that still lock step, run or mining rows in scan order or against the Retry's order (+5)
+
+status: open
+From the T349 review (2026-10-31). PRE-EXISTING; narrow windows unless stated. T349 makes every multi-row step writer take its rows through `lockStepRows` (one id-ordered batch after the run, mining and DAG statements); these sites were left.
+
+1. worker queues/task-queue.ts `requeueAbandonedOrphan` (~:3309-3355) updates the step row and then its runs, the reverse of a Retry (runs, then step rows); reachable from boot reconcile and the stalled sweep. Swap the two statements.
+2. Multi-row `cli_invocations` and `task_step_agent_minings` statements lock in scan order: api `sweepRunsOf` (routes/tasks/steps.ts), worker `_step-reset.ts`, `releaseStepAgents` (step-runner.ts ~:2353-2370) and `recoverParkedStep` (task-queue.ts ~:3457, ~:3492); the fan-out Resume also writes minings before runs (steps.ts ~:1198 vs ~:1203). Give them the same id-ordered batch, runs before minings.
+3. `resetRowsForRerun(late, { rowsHeld: true })` sweeps the runs of rows activated meanwhile while holding those step rows; a pass holding a run of such a row that then wants it (`writeLoginHint`, worker cli-exec/handlers.ts ~:193) can deadlock with the sweep. The code before T349 locked those rows before the sweep too.
+4. Minor: unordered single-statement bulk step writers with no realistic peer today: task-queue.ts ~:3779 and ~:3743, step-engine/left-open-merge.ts ~:520-528, data-migrations.ts ~:771.
+5. [verify-first] A possible cycle: shared plan/apply-patch.ts `applyPlanPatch` (~:186-199) writes plan_nodes rows and then upserts `plan_mirror_state`, which needs the repositories row; a repository delete holds that row FOR UPDATE and cascades into plan_nodes. Not traced to the end. Cross-reference T270 and T318 item 5 (the advisory start's plan_nodes lock still waits unbounded).
+6. Minor cost: the four left-active moves (loop Resume, `retry_ai`, Skip, CLI switch) take the whole-task step batch twice (`lockRowsForMove`, then `resetRowsForRerun`); the second is a no-wait re-lock.
+
+### T460 · FNF[retry-repo-deleted] [design] · a Retry revives a failed task whose repository was deleted (+1)
+
+status: open
+From the T349 review (2026-10-31). PRE-EXISTING. A failed task whose repository was deleted still passes `checkRevive` (database repository-task-lock.ts ~:109), while the repository delete's `cancelOpenTasksForRepo` (api lib/cancel-task.ts ~:130) skips failed tasks; a Retry then sets it `running` with no repository and the worker's next advance throws. Decide: refuse that Retry (say why on the page), or have the delete cancel failed tasks too. Cross-reference T393, T394, T409.
+
+Also (T349 fix-round review, 2026-10-31, reasoned from the code, not reproduced): since T349 the delete takes the task-creation key a Retry takes, but a Retry already waiting on the key when the delete commits goes on: `checkRevive` returns null after the wait without reading the repository again (database repository-task-lock.ts ~:109-113), so the task is revived to `running` with a NULL repository. Whichever way this is decided, the Retry must read the repository again after its wait.
+
+### T461 · FNF[stale-preread-fold] · two folds add to values read before their transaction
+
+status: open
+From the T349 review (2026-10-31). PRE-EXISTING, minor. The `carried_*` fold in `resetRowsForRerun` (api routes/tasks/steps.ts ~:211) and the provider-switch loop (routes/tasks/index.ts ~:1813) add to values read before the transaction, so a fold that interleaves loses an update. Read the values under the row lock, or fold in SQL (`col = col + delta`).
+
+### T462 · FNF[project-state-notices] [design] · the repository page cannot say a sync replaced or refused a value (+2)
+
+status: open
+From the T445 review (2026-10-31; was T445 item 2). PRE-EXISTING.
+
+1. A checkout value the sync refuses (over its cap, holding a region marker) is only logged (worker project-state/sync.ts ~:953, names only); since T445 a first sync's replaced units are only logged too. No api route serves `project_state_sync`, and project-state-conflicts.ts (~:59-77) lists pending two-answer questions only. Proposed by the T445 driver: one nullable jsonb column, declared last, on `project_state_sync` holding the refused units with their reasons (from `SettingCheck.reason`, which `intakeSettings`, shared settings.ts ~:253-286, drops today), written in the sync's own upsert (~:983-1004) and cleared by the next clean sync, served beside `conflicts` and shown as one banner gated on the array being non-empty. A replaced value is an event rather than a state, so it may stay log-only unless an acknowledged notice is wanted. Needs a migration, api and web tests and wording.
+2. Minor: the sync's warns (~:933, ~:953, and T445's first-sync warn) are emitted before the writer that called the sync may roll back (worker project-state/write.ts ~:818, throws at ~:848 and ~:850): one extra line for a sync that did not commit, repeated by the retry. A stored notice would replace them.
+3. Minor: shared plan/projection-merge.ts ~:289, the other `mergeProjectState` caller, drops `merge.overwritten` for a plan merge with no merge base (`--allow-unrelated-histories`, plan/merge.ts ~:232), per that resolver's documented "takes theirs" rule.
+
 ## Done
 
+- T445 — a project-state sync with no base logs one warn naming the units whose held value the checkout's replaced (at most ten, settings and environment first, never a value); the web-bundle guard also fails on Node globals read as values (Buffer.byteLength became TextEncoder); the conflict-sides comment moved onto conflictSide; item 2 (the page saying a value was refused or replaced) moved to T462 [design] — PR #950 (9d8c78f58), 2026-10-31; main CI green; docs also record T446's verdict; follow-ups T462, T364 item 25
 - T452 — the 150 ms Enter after a token paste is one of the login session's tracked one-shot timers and cleanupSession clears it; a chunk after cleanup starts no antigravity URL step or menu-advance timer — PR #949 (fc7789288), 2026-10-30; main CI green; follow-up T457
 - T447 — PATCH /repositories/:id/tooling answers 400 invalid_body for a JSON body that is not an object and invalid_json for one that is not JSON, writing nothing; refresh-tree reads only the eight repository columns it uses; an AGENTS.md rules override keeps its first line's indent while the default block stays byte-identical (no manifest bump) — PR #948 (8330687b8), 2026-10-30; main CI green; checked on the dev stack; follow-ups T455, T456
 - T119 — the AGENTS.md rules block is the repository's: repositories.agent_rules_override (migration 0215), settings/agent-rules.md in the project-state record, a Tooling page card with its own save, and buildRepoCliRulesBlock for 07, 12, 01 and the api's upgrade-status — PR #940 (5b6467e9c) and the editor fix PR #947 (1989f1f2a), 2026-10-30; main CI green; browser-checked at 1280, 768 and 375; follow-ups T443, T444, T445, T446, T447
