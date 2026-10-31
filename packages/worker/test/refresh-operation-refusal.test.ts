@@ -8,6 +8,7 @@ import { REPO_JOB_NAMES } from '@haive/shared';
 import type { Job, Processor } from 'bullmq';
 import { schema } from '@haive/database';
 import { restoreFaults } from '../src/project-state/set-aside.js';
+import * as projections from '../src/project-state/set-aside.js';
 import type { Database } from '@haive/database';
 import type { RepoJobPayload } from '@haive/shared';
 import { failGit, type FakeGit } from './support/fake-git.js';
@@ -84,6 +85,7 @@ beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'refresh-operation-'));
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   delete restoreFaults.afterRestore;
   delete restoreFaults.beforePutBack;
   await shim?.restore();
@@ -229,4 +231,33 @@ it('refresh keeps a checkout with no HEAD aside and clones a usable replacement'
   );
   expect(row.status).toBe('ready');
   expect(row.statusMessage).toContain(aside);
+});
+
+it('an unreadable first gate after a retry puts pending bytes and index back', async () => {
+  const { dest, payload } = await fixture();
+  const file = '.haive-data/plan.md';
+  await git(dest, ['add', '--', file]);
+  const staged = await git(dest, ['ls-files', '-s', '--', file]);
+  const before = await git(dest, ['rev-parse', 'HEAD']);
+  const aside = vi.spyOn(projections, 'setAsideHaiveProjections');
+  const restore = vi
+    .spyOn(projections, 'restoreProjectionsInTx')
+    .mockImplementationOnce(async () => {
+      await expect(readFile(path.join(dest, file))).rejects.toHaveProperty('code', 'ENOENT');
+      expect(await git(dest, ['ls-files', '-s', '--', file])).toBe('');
+      await writeFile(path.join(dest, '.haive-data/plan.json'), '{}\n');
+      shim = await failGit(['rev-parse', '--git-path']);
+      return { outcome: 'retry' };
+    });
+  await handleRefresh(payload, db, root);
+  expect(restore).toHaveBeenCalledOnce();
+  expect(aside).toHaveBeenCalledTimes(2);
+  await expect(aside.mock.results[1]!.value).rejects.toHaveProperty(
+    'name',
+    'GitOperationUnreadableError',
+  );
+  expect(row.statusMessage).toMatch(/could not be checked.*The checkout was not moved/);
+  expect(await readFile(path.join(dest, file), 'utf8')).toBe('pending\n');
+  expect(await git(dest, ['ls-files', '-s', '--', file])).toBe(staged);
+  expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
 });
