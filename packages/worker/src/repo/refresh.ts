@@ -264,9 +264,15 @@ export async function fastForward(
       const { again, merge: merged, after } = moved;
       if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
       if (after !== null && after !== before) {
-        await handBackAfterMove(dest, before);
-        await resyncHaiveProjections(db, payload.repositoryId, dest);
-        await restoreKeptMetadata(dest, kept);
+        try {
+          await handBackAfterMove(dest, before);
+        } finally {
+          try {
+            await resyncHaiveProjections(db, payload.repositoryId, dest);
+          } finally {
+            await restoreKeptMetadata(dest, kept);
+          }
+        }
       } else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
       if (again.outcome === 'refused') {
         return `Not refreshed: ${again.reason}. The checkout was not moved.`;

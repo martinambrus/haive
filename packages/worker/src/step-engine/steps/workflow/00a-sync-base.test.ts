@@ -20,6 +20,7 @@ const projections = vi.hoisted(() => ({
   putBack: vi.fn(),
   restore: vi.fn(),
   seed: vi.fn(),
+  metadata: vi.fn(),
 }));
 // What a merge section asked of the database, in order.
 const trace = vi.hoisted(() => ({ order: [] as string[] }));
@@ -45,7 +46,7 @@ vi.mock('../../../project-state/set-aside.js', () => ({
     await projections.putBack(...args.slice(0, 4));
     throw args[5];
   },
-  restoreKeptMetadata: async () => undefined,
+  restoreKeptMetadata: projections.metadata,
   restoreProjectionsInTx: projections.restore,
   MOVE_ATTEMPTS: 3,
 }));
@@ -1757,6 +1758,43 @@ it('T397 a failed ff that moved HEAD fails after re-sync, without putting old pr
     expect(projections.putBack).not.toHaveBeenCalled();
   } finally {
     await shim?.restore();
+    for (const dir of [bare, seed, local])
+      await rm(dir, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
+
+it('T397 fix3 sync finishes projection bookkeeping when hand-back throws after a move', async () => {
+  const { bare, seed } = await seedOrigin();
+  const local = await cloneLocal(bare);
+  let shim: Awaited<ReturnType<typeof failGit>> | null = null;
+  const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
+  projections.metadata.mockClear();
+  try {
+    await advanceOrigin(seed, 'b.txt');
+    projections.setAside.mockResolvedValue({ outcome: 'set-aside', paths: [], kept: new Map() });
+    const ctx = mkCtx(local, 'repo-1');
+    const d = await syncBaseStep.detect!(ctx);
+    const before = await git(local, ['rev-parse', 'HEAD']);
+    shim = await failGit([
+      'diff',
+      '--no-ext-diff',
+      '--no-textconv',
+      '--name-only',
+      '-z',
+      '--no-renames',
+    ]);
+    await expect(syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }))).rejects.toThrow(
+      /git diff.*failed/,
+    );
+    await shim.restore();
+    shim = null;
+    expect(await git(local, ['rev-parse', 'HEAD'])).not.toBe(before);
+    expect(projections.resync).toHaveBeenCalledOnce();
+    expect(projections.metadata).toHaveBeenCalledWith(local, expect.any(Map));
+    expect(projections.putBack).not.toHaveBeenCalled();
+  } finally {
+    await shim?.restore();
+    asRoot.mockRestore();
     for (const dir of [bare, seed, local])
       await rm(dir, { recursive: true, force: true, maxRetries: 5 });
   }

@@ -8,14 +8,19 @@ import { failGit, type FakeGit } from './support/fake-git.js';
 import type { Database } from '@haive/database';
 import type { RepoJobPayload } from '@haive/shared';
 
-const h = vi.hoisted(() => ({ putBack: vi.fn(), resync: vi.fn(), handBack: vi.fn() }));
+const h = vi.hoisted(() => ({
+  putBack: vi.fn(),
+  resync: vi.fn(),
+  handBack: vi.fn(),
+  metadata: vi.fn(),
+}));
 vi.mock('../src/project-state/set-aside.js', async (original) => ({
   ...(await original<typeof import('../src/project-state/set-aside.js')>()),
   setAsideHaiveProjections: async () => ({ outcome: 'set-aside', kept: new Map() }),
   restoreProjectionsInTx: async () => ({ outcome: 'clean' }),
   putBackProjections: h.putBack,
   resyncHaiveProjections: h.resync,
-  restoreKeptMetadata: async () => {},
+  restoreKeptMetadata: h.metadata,
 }));
 vi.mock('../src/step-engine/git-merge.js', async (original) => ({
   ...(await original<typeof import('../src/step-engine/git-merge.js')>()),
@@ -117,4 +122,15 @@ it('T397 a refused fast-forward at the same HEAD restores projections', async ()
   );
   expect(h.putBack).toHaveBeenCalledOnce();
   expect(h.resync).not.toHaveBeenCalled();
+});
+
+it('T397 fix3 refresh finishes projection bookkeeping when hand-back throws after a move', async () => {
+  const { dest, payload } = await fixture();
+  const before = await git(dest, ['rev-parse', 'HEAD']);
+  h.handBack.mockRejectedValueOnce(new Error('git diff hand-back failed'));
+  await expect(fastForward(db, payload, dest)).rejects.toThrow(/hand-back failed/);
+  expect(await git(dest, ['rev-parse', 'HEAD'])).not.toBe(before);
+  expect(h.resync).toHaveBeenCalledOnce();
+  expect(h.metadata).toHaveBeenCalledWith(dest, expect.any(Map));
+  expect(h.putBack).not.toHaveBeenCalled();
 });

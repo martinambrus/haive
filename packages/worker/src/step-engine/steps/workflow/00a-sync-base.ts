@@ -647,10 +647,18 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
         throw err;
       }
       const headMoved = onCurrent && !res.unmoved && res.after !== before;
-      if (headMoved) await handBackAfterMove(ctx.repoPath, before);
-      if (repositoryId && headMoved) {
-        await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
-        await restoreKeptMetadata(ctx.repoPath, kept);
+      if (headMoved) {
+        try {
+          await handBackAfterMove(ctx.repoPath, before);
+        } finally {
+          if (repositoryId) {
+            try {
+              await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+            } finally {
+              await restoreKeptMetadata(ctx.repoPath, kept);
+            }
+          }
+        }
       } else if (repositoryId && asided) {
         await putBackProjections(ctx.db, repositoryId, ctx.repoPath, kept, putBackSection);
       }
