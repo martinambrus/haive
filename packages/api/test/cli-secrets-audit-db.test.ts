@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
@@ -11,9 +12,9 @@ import {
   refuseAudit,
   schema,
 } from './security-audit-db.js';
-const url = process.env.SECURITY_AUDIT_TEST_URL;
-if (url && !new URL(url).pathname.startsWith('/t376_audit_test'))
-  throw new Error('Use a dedicated t376_audit_test database');
+const url = process.env.CLI_SECRETS_AUDIT_TEST_URL;
+if (url && !new URL(url).pathname.startsWith('/cli_secrets_audit_test'))
+  throw new Error('Use a dedicated cli_secrets_audit_test database');
 const h = vi.hoisted(() => ({
   db: undefined as any,
   actor: '',
@@ -106,9 +107,38 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     await cleanActor(db, h.actor);
     vi.restoreAllMocks();
   });
+  it('audit refusal is scoped to this test actor', async () => {
+    await refuseAudit(db, h.actor);
+    let id: string | undefined;
+    try {
+      const [row] = await db
+        .insert(schema.auditEvents)
+        .values({ actorUserId: randomUUID(), action: 'unrelated.audit', targetType: 'user' })
+        .returning();
+      id = row!.id;
+      expect(id).toBeDefined();
+    } finally {
+      await allowAudit(db);
+      if (id) await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, id));
+    }
+  });
+  it('actor cleanup preserves unrelated audit rows', async () => {
+    const [row] = await db
+      .insert(schema.auditEvents)
+      .values({ actorUserId: randomUUID(), action: 'unrelated.audit', targetType: 'user' })
+      .returning();
+    try {
+      await cleanActor(db, h.actor);
+      expect(
+        await db.query.auditEvents.findFirst({ where: eq(schema.auditEvents.id, row!.id) }),
+      ).toBeDefined();
+    } finally {
+      await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, row!.id));
+    }
+  });
   for (const refused of [false, true])
     it(`no-op usage disconnect ${refused ? 'with refusing audit' : 'without token'} returns disconnected without a deletion row`, async () => {
-      if (refused) await refuseAudit(db);
+      if (refused) await refuseAudit(db, h.actor);
       const res = await send('DELETE', 'usage-auth');
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ connected: false });
@@ -133,7 +163,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
             encryptedDek: 'before',
           });
         const before = await secrets();
-        if (refuse) await refuseAudit(db);
+        if (refuse) await refuseAudit(db, h.actor);
         const res = await send(method, path, body);
         expect(res.status).toBe(refuse ? 500 : label === 'set' ? 201 : 200);
         if (refuse) expect(await secrets()).toEqual(before);
@@ -165,7 +195,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
         });
         const before = await db.select().from(schema.cliProviders);
         const beforeSecrets = await secrets();
-        if (refused) await refuseAudit(db);
+        if (refused) await refuseAudit(db, h.actor);
         const envVars = { ANTHROPIC_API_KEY: 'synthetic-secret' };
         const res = await app.request(
           operation === 'create'
@@ -209,7 +239,7 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
       const before = await db.query.cliProviders.findFirst({
         where: eq(schema.cliProviders.id, provider),
       });
-      if (refused) await refuseAudit(db);
+      if (refused) await refuseAudit(db, h.actor);
       const save = saveCliLoginSecret(db, h.actor, provider, 'synthetic-token');
       if (refused) {
         await expect(save).rejects.toThrow();

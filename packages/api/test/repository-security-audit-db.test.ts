@@ -15,9 +15,9 @@ import {
   refuseAudit,
   schema,
 } from './security-audit-db.js';
-const url = process.env.SECURITY_AUDIT_TEST_URL;
-if (url && !new URL(url).pathname.startsWith('/t376_audit_test'))
-  throw new Error('Use a dedicated t376_audit_test database');
+const url = process.env.REPOSITORY_SECURITY_AUDIT_TEST_URL;
+if (url && !new URL(url).pathname.startsWith('/repository_security_audit_test'))
+  throw new Error('Use a dedicated repository_security_audit_test database');
 const h = vi.hoisted(() => ({ db: undefined as any, actor: '' }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/middleware/auth.js', async (original) => ({
@@ -138,7 +138,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
             sql`CREATE TRIGGER refuse_remote_persist BEFORE UPDATE ON repositories FOR EACH ROW EXECUTE FUNCTION refuse_remote_persist()`,
           );
         }
-        if (failure === 'audit') await refuseAudit(db);
+        if (failure === 'audit') await refuseAudit(db, h.actor);
         const res = await app.request(`/repos/${repository}/remote`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -253,7 +253,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       it(`security field ${field}: ${refused ? 'refused row rolls back' : 'names only the actual field and its new safe value'}`, async () => {
         const before = await stored();
         const outboxBefore = await db.select().from(schema.projectStateOutbox);
-        if (refused) await refuseAudit(db);
+        if (refused) await refuseAudit(db, h.actor);
         const res = await sendSetting('tooling', { [field]: value });
         expect(res.status).toBe(refused ? 500 : 200);
         const rows = await audits(db);
@@ -306,7 +306,7 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       it(`${label}: ${refused ? 'audit refusal undoes the change and fails' : 'success writes safe audit'}`, async () => {
         const before = await stored();
         const outboxBefore = await db.select().from(schema.projectStateOutbox);
-        if (refused) await refuseAudit(db);
+        if (refused) await refuseAudit(db, h.actor);
         const body =
           label === 'integrations' ? { restricted: true, connectionIds: [connection] } : raw;
         const path =

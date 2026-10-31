@@ -11,9 +11,9 @@ import {
   refuseAudit,
   schema,
 } from './security-audit-db.js';
-const url = process.env.SECURITY_AUDIT_TEST_URL;
-if (url && !new URL(url).pathname.startsWith('/t376_audit_test'))
-  throw new Error('Use a dedicated t376_audit_test database');
+const url = process.env.LOGIN_AUDIT_TEST_URL;
+if (url && !new URL(url).pathname.startsWith('/login_audit_test'))
+  throw new Error('Use a dedicated login_audit_test database');
 const h = vi.hoisted(() => ({
   db: undefined as any,
   actor: '',
@@ -77,16 +77,15 @@ describe.skipIf(!url)('Login audit on Postgres', () => {
   });
   afterEach(async () => {
     await allowAudit(db);
-    await db.delete(schema.userInvites);
-    await db
-      .delete(schema.users)
-      .where(
-        eq(
-          schema.users.emailBlindIndex,
-          computeEmailBlindIndex('new@example.test', 'ef'.repeat(32)),
-        ),
-      );
-    await cleanActor(db, h.actor);
+    await db.delete(schema.userInvites).where(eq(schema.userInvites.createdBy, h.actor));
+    const registered = await db.query.users.findFirst({
+      where: eq(
+        schema.users.emailBlindIndex,
+        computeEmailBlindIndex('new@example.test', 'ef'.repeat(32)),
+      ),
+    });
+    if (registered) await cleanActor(db, registered.id);
+    await cleanActor(db, h.actor, { anonymous: true });
     vi.restoreAllMocks();
   });
   for (const kind of ['success', 'wrong-password', 'unknown', 'deactivated'] as const) {
@@ -97,7 +96,7 @@ describe.skipIf(!url)('Login audit on Postgres', () => {
             .update(schema.users)
             .set({ status: 'deactivated' })
             .where(eq(schema.users.id, h.actor));
-        if (refused) await refuseAudit(db);
+        if (refused) await refuseAudit(db, h.actor, { anonymous: true });
         const res = await send('/auth/login', {
           email: kind === 'unknown' ? 'absent@example.test' : 'known@example.test',
           password: kind === 'wrong-password' ? 'wrong-password' : 'synthetic-password',
@@ -124,7 +123,7 @@ describe.skipIf(!url)('Login audit on Postgres', () => {
       password: 'synthetic-password',
     });
     expect(signed.status).toBe(200);
-    await db.delete(schema.auditEvents);
+    await db.delete(schema.auditEvents).where(eq(schema.auditEvents.actorUserId, h.actor));
     const cookies = (response: Response) =>
       response.headers
         .getSetCookie()

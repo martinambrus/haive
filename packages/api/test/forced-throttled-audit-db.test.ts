@@ -12,9 +12,9 @@ import {
   refuseAudit,
   schema,
 } from './security-audit-db.js';
-const url = process.env.SECURITY_AUDIT_TEST_URL;
-if (url && !new URL(url).pathname.startsWith('/t376_audit_test'))
-  throw new Error('Use a dedicated t376_audit_test database');
+const url = process.env.FORCED_THROTTLED_AUDIT_TEST_URL;
+if (url && !new URL(url).pathname.startsWith('/forced_throttled_audit_test'))
+  throw new Error('Use a dedicated forced_throttled_audit_test database');
 const h = vi.hoisted(() => ({
   db: undefined as any,
   actor: '',
@@ -82,16 +82,15 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
   });
   afterEach(async () => {
     await allowAudit(db);
-    await db.delete(schema.userInvites);
-    await db
-      .delete(schema.users)
-      .where(
-        eq(
-          schema.users.emailBlindIndex,
-          computeEmailBlindIndex('new@example.test', 'ef'.repeat(32)),
-        ),
-      );
-    await cleanActor(db, h.actor);
+    await db.delete(schema.userInvites).where(eq(schema.userInvites.createdBy, h.actor));
+    const registered = await db.query.users.findFirst({
+      where: eq(
+        schema.users.emailBlindIndex,
+        computeEmailBlindIndex('new@example.test', 'ef'.repeat(32)),
+      ),
+    });
+    if (registered) await cleanActor(db, registered.id);
+    await cleanActor(db, h.actor, { anonymous: true });
     vi.restoreAllMocks();
   });
   for (const refused of [false, true]) {
@@ -106,7 +105,7 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
             true,
           ),
         );
-        if (refused) await refuseAudit(db);
+        if (refused) await refuseAudit(db, h.actor, { anonymous: true });
         const res = await send('/auth/login', {
           email: known ? 'known@example.test' : 'absent@example.test',
           password: 'synthetic-password',
@@ -132,7 +131,7 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
         .set({ mustChangePassword: true })
         .where(eq(schema.users.id, h.actor));
       const before = await user();
-      if (refused) await refuseAudit(db);
+      if (refused) await refuseAudit(db, h.actor, { anonymous: true });
       const res = await send('/user-settings/password', {
         currentPassword: 'synthetic-password',
         newPassword: 'synthetic-next-password',

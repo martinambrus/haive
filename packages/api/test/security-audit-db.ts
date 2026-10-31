@@ -1,10 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, inArray, or, sql } from 'drizzle-orm';
 import { createDatabase, schema, type Database } from '@haive/database';
 
-export const url = process.env.SECURITY_AUDIT_TEST_URL;
-if (url && !new URL(url).pathname.startsWith('/t376_audit_test'))
-  throw new Error('Use a dedicated t376_audit_test database');
 export { createDatabase, schema };
 export const KEK = 'ab'.repeat(32);
 export async function makeActor(db: Database) {
@@ -19,25 +16,55 @@ export async function makeActor(db: Database) {
     .returning();
   return user!;
 }
-export async function refuseAudit(db: Database, table = 'audit_events') {
-  if (!['audit_events', 'global_kb_audit_events'].includes(table)) throw new Error('Bad table');
+interface AuditScope {
+  anonymous?: boolean;
+  registrationBlindIndex?: string;
+}
+export async function refuseAudit(db: Database, userId: string, scope: AuditScope = {}) {
+  if (!/^[a-f0-9-]{36}$/.test(userId)) throw new Error('Invalid test actor');
+  const registration = scope.registrationBlindIndex ?? '';
+  if (registration && !/^[a-f0-9]{64}$/.test(registration))
+    throw new Error('Invalid test registration');
+  await db.execute(sql`
+    CREATE OR REPLACE FUNCTION refuse_security_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.actor_user_id = TG_ARGV[0]::uuid OR NEW.target_id = TG_ARGV[0]::uuid
+        OR (TG_ARGV[1] = 'anonymous' AND NEW.actor_user_id = '00000000-0000-0000-0000-000000000000'::uuid
+          AND NEW.target_id IS NULL AND NEW.action IN ('auth.login.failure', 'auth.login.throttled'))
+        OR (TG_ARGV[2] <> '' AND NEW.action = 'user.register' AND EXISTS (
+          SELECT 1 FROM users WHERE id = NEW.target_id AND email_blind_index = TG_ARGV[2]))
+      THEN RAISE EXCEPTION 'audit insert refused'; END IF;
+      RETURN NEW;
+    END $$
+  `);
   await db.execute(
     sql.raw(
-      "CREATE OR REPLACE FUNCTION refuse_t376_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'audit insert refused'; END $$",
-    ),
-  );
-  await db.execute(
-    sql.raw(
-      `CREATE TRIGGER refuse_t376_audit BEFORE INSERT ON ${table} FOR EACH ROW EXECUTE FUNCTION refuse_t376_audit()`,
+      `CREATE TRIGGER refuse_security_audit BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION refuse_security_audit('${userId}', '${scope.anonymous ? 'anonymous' : ''}', '${registration}')`,
     ),
   );
 }
-export async function allowAudit(db: Database, table = 'audit_events') {
-  await db.execute(sql.raw(`DROP TRIGGER IF EXISTS refuse_t376_audit ON ${table}`));
-  await db.execute(sql.raw('DROP FUNCTION IF EXISTS refuse_t376_audit()'));
+export async function allowAudit(db: Database) {
+  await db.execute(sql`DROP TRIGGER IF EXISTS refuse_security_audit ON audit_events`);
+  await db.execute(sql`DROP FUNCTION IF EXISTS refuse_security_audit()`);
 }
 export const audits = (db: Database) => db.select().from(schema.auditEvents);
-export async function cleanActor(db: Database, userId: string) {
-  await db.delete(schema.auditEvents);
+export async function cleanActor(db: Database, userId: string, scope: AuditScope = {}) {
+  await db
+    .delete(schema.auditEvents)
+    .where(
+      or(
+        eq(schema.auditEvents.actorUserId, userId),
+        eq(schema.auditEvents.targetId, userId),
+        ...(scope.anonymous
+          ? [
+              and(
+                eq(schema.auditEvents.actorUserId, '00000000-0000-0000-0000-000000000000'),
+                isNull(schema.auditEvents.targetId),
+                inArray(schema.auditEvents.action, ['auth.login.failure', 'auth.login.throttled']),
+              ),
+            ]
+          : []),
+      ),
+    );
   await db.delete(schema.users).where(eq(schema.users.id, userId));
 }
