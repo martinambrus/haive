@@ -2375,7 +2375,11 @@ export const knowledgeAcquisitionStep: StepDefinition<KnowledgeDetect, Knowledge
       // never overwriting an existing/re-placed file.
       const routed = routeEntries(localChosen);
       for (const r of routed) {
-        if (!sanitizeKbRelPath(r.relPath).ok) continue;
+        const checked = sanitizeKbRelPath(r.relPath);
+        if (!checked.ok) {
+          ctx.logger.warn({ relPath: r.relPath, reason: checked.reason }, 'kb gap entry refused');
+          continue;
+        }
         const filePath = path.join(kbDir, r.relPath);
         // `create-exclusive` IS the "preserve an existing file" rule — race-free, no separate probe,
         // and EEXIST covers a DANGLING link, which the `pathExists` probe read as absent and then

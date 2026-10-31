@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '@haive/database';
 import { logger } from '@haive/shared';
 import type { StepContext } from '../src/step-engine/step-definition.js';
@@ -205,6 +205,33 @@ describe('parseKbEntries', () => {
 });
 
 describe('knowledgeAcquisitionStep.apply', () => {
+  it('refuses and logs a selected topic entry whose raw model ID names git data', async () => {
+    const ctx = makeCtx(tmpRoot);
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {});
+    const refusedId = '.git/hooks/x';
+    const out = await knowledgeAcquisitionStep.apply(ctx, {
+      iteration: 0,
+      previousIterations: [],
+      detected: detectedStack(null, null),
+      formValues: { selectedTopics: [refusedId, 'safe-topic'] },
+      llmOutput: {
+        entries: [refusedId, 'safe-topic'].map((id) => ({
+          id,
+          title: id,
+          sections: [{ heading: 'Topic', body: 'Model supplied content.' }],
+        })),
+      },
+    });
+    expect.soft(out.written.map((w) => w.id)).toEqual(['safe-topic']);
+    await expect(
+      stat(path.join(tmpRoot, '.haive-data/knowledge_base', `${refusedId}.md`)),
+    ).rejects.toThrow();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ relPath: `${refusedId}.md` }),
+      expect.any(String),
+    );
+  });
+
   it('does not update or move existing KB paths that name git data', async () => {
     const rel = '.GIT./hooks/keep.md';
     await mkdir(path.join(tmpRoot, '.haive-data/knowledge_base/.GIT./hooks'), { recursive: true });
