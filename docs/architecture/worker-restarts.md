@@ -400,7 +400,8 @@ every other writer but not with the KEY SHARE a pass's run insert holds on the r
 `resetRowsForRerun` (the whole task), `retryTaskAtStep`, a Stop (`supersedeLiveRuns`), `settleActiveSteps`,
 `reofferParkedSteps` (its parked rows), the loop Resume, `retry_ai`, Skip and a CLI switch when a row is left
 active (`lockRowsForMove`: the sweep and the DAG reset, then the batch, before the clicked row is written), the
-cancel core below, and on the worker `resetStepAndDownstream` (its reset rows) and `foldOtherTaskParks` (its
+task-level provider switch (`PATCH /tasks/:id/cli-provider`: its provider-sensitive open rows, read and folded in
+the one transaction), the cancel core below, and on the worker `resetStepAndDownstream` (its reset rows) and `foldOtherTaskParks` (its
 parked rows, in a transaction opened only when a plain read finds one). The batch goes behind the
 transaction's sweeps of runs and agent rows and its DAG reset, since a pass holds a run and then wants its step
 row, and before its first step write. The rows stay held until the action commits, so a pass that goes to flip
@@ -413,7 +414,13 @@ is an upgrade that conflicts with that run insert. The 503 of that NOWAIT is the
 after the batch that a pass has activated and still writes when the bump lands, and to an action that took no
 batch (a fan-out Resume with nothing to reset, the loop Resume, `retry_ai`, Skip or a CLI switch with no row
 left active), which holds only the rows it writes itself; the `step-retry-claim-race` smoke pins both
-(scenarios 5 and 5b). The worker's single-statement bulk updates (`handleCancelTask`,
+(scenarios 5 and 5b). A writer that folds a row's run into `carried_*` (`resetRowsForRerun`, the per-step and
+task-level provider switches, `resetStepAndDownstream`, the first park of `writeFencedPark` (`foldRun`),
+`requeueAbandonedOrphan`) reads the row after it holds it and folds from that read: its caller's earlier read
+predates the lock, and a fold or idle write that landed since would be written over. The contribution comes from
+the stored row (`computeFoldContribution`), so adding a stale delta in SQL would only trade the lost update for a
+double count; the SQL folds in `cli-park-timing.ts` are single statements and need no read. The worker's
+single-statement bulk updates (`handleCancelTask`,
 `takeLeftOpenKept`, `skipRemovedSteps`, the `run_seq` backfill) take no batch.
 
 **A cancel ends only the step rows it locked.** Every task cancel the api commits goes through one core
