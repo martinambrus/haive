@@ -2,7 +2,12 @@ import { safeErrorMessage } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { ollamaEmbed } from '@haive/shared/rag';
-import { INVALID_BODY_MESSAGE, isJsonObject, requireJsonObject } from '../lib/json-object.js';
+import {
+  INVALID_BODY_CODE,
+  INVALID_BODY_MESSAGE,
+  isJsonObject,
+  requireJsonObject,
+} from '../lib/json-object.js';
 import { probeEgressFor } from '../lib/probe-hosts.js';
 import { requireAuth } from '../middleware/auth.js';
 import type { AppEnv } from '../context.js';
@@ -227,7 +232,7 @@ tooling.post('/pull-ollama-model', async (c) => {
     // An event, not a throw: a thrown HttpError inside streamSSE only closes an empty stream.
     if (!isJsonObject(raw)) {
       await stream.writeSSE({
-        data: JSON.stringify({ error: INVALID_BODY_MESSAGE, code: 'invalid_body' }),
+        data: JSON.stringify({ error: INVALID_BODY_MESSAGE, code: INVALID_BODY_CODE }),
         event: 'error',
       });
       return;
