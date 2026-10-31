@@ -2763,8 +2763,13 @@ repoRoutes.post('/:id/remote', async (c) => {
         env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(root) },
       });
       deadline = setTimeout(() => {
-        run.child.kill('SIGTERM');
-        grace = setTimeout(() => run.child.kill('SIGKILL'), GIT_KILL_GRACE_MS);
+        // As execFile's own timeout does: close both pipes before the signal, so a grandchild that
+        // still holds them cannot keep the call pending once git is gone. `child` is read with `?.`
+        // because a stubbed execFile has none.
+        run.child?.stdout?.destroy();
+        run.child?.stderr?.destroy();
+        run.child?.kill('SIGTERM');
+        grace = setTimeout(() => run.child?.kill('SIGKILL'), GIT_KILL_GRACE_MS);
       }, GIT_DEADLINE_MS);
       const { stdout, stderr } = await run;
       return {

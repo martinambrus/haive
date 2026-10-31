@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -121,6 +121,13 @@ const startChild = (command: string, args: string[], options: ExecFileOptions, c
   return run;
 };
 const alive = (c: ChildProcess) => c.exitCode === null && c.signalCode === null;
+const running = (pid: number) => {
+  try {
+    return process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+};
 
 describe('link origin uses git exit codes', () => {
   it('updates after exit 3 regardless of human wording', async () => {
@@ -385,6 +392,54 @@ it('kills a git child that traps SIGTERM once the grace after the deadline is ov
   await vi.advanceTimersByTimeAsync(1);
   expect((await answeredWithin(3_000, response)).status).toBe(409);
   expect(child!.signalCode).toBe('SIGKILL');
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('answers at the deadline although a grandchild still holds the git output pipes', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'relink-pipes-'));
+  dirs.push(dir);
+  const pidFile = path.join(dir, 'grandchild-pid');
+  const ready = path.join(dir, 'ready');
+  // A git that leaves a background process holding its output pipes, then waits to be stopped.
+  const script = `sleep 30 & echo $! > "$1"; : > "$2"; exec sleep 100`;
+  h.git.mockImplementation((_command, args: string[], options: ExecFileOptions) =>
+    args.includes('rev-parse')
+      ? Promise.resolve({ stdout: 'true', stderr: '' })
+      : startChild('sh', ['-c', script, 'sh', pidFile, ready], options, dir),
+  );
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const response = Promise.resolve(link());
+  let grandchild = 0;
+  try {
+    await until('the grandchild took the pipes', () => existsSync(ready));
+    grandchild = Number(readFileSync(pidFile, 'utf8'));
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS);
+    expect((await answeredWithin(3_000, response)).status).toBe(409);
+    expect(running(grandchild)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    if (grandchild) process.kill(grandchild, 'SIGKILL');
+    child?.kill('SIGKILL');
+    await response;
+  }
+});
+
+it('lets a git call without a child process run past the deadline and the grace untouched', async () => {
+  let finish!: (result: { stdout: string; stderr: string }) => void;
+  h.git.mockResolvedValueOnce({ stdout: 'true\n', stderr: '' }).mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const response = Promise.resolve(link());
+  try {
+    await until('the remote add started', () => h.git.mock.calls.length === 2);
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS + GRACE_MS);
+  } finally {
+    finish({ stdout: '', stderr: '' });
+  }
+  expect((await answeredWithin(3_000, response)).status).toBe(200);
   expect(vi.getTimerCount()).toBe(0);
 });
 
