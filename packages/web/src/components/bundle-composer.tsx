@@ -166,9 +166,9 @@ export function BundleComposer({
         // The api says why in `error` (a bundle nested too deeply to list, for one); the status is
         // the fallback for an answer that names nothing.
         const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
-        throw new Error(
-          typeof body?.error === 'string' ? body.error : `files fetch failed (${res.status})`,
-        );
+        // An empty reason would store a falsy error and render the listing as an empty bundle.
+        const reason = typeof body?.error === 'string' ? body.error.trim() : '';
+        throw new Error(reason || `files fetch failed (${res.status})`);
       }
       const data = (await res.json()) as {
         files: BundleFileEntry[];
@@ -206,7 +206,10 @@ export function BundleComposer({
         next.delete(bundleId);
       } else {
         next.add(bundleId);
-        if (!filesByBundle[bundleId]) void loadBundleFiles(bundleId);
+        // A listing that failed is asked again rather than kept until a reload.
+        if (!filesByBundle[bundleId] || filesByBundle[bundleId].error) {
+          void loadBundleFiles(bundleId);
+        }
       }
       return next;
     });
@@ -320,6 +323,12 @@ export function BundleComposer({
       });
       if (!res.ok) throw new Error(`resync failed (${res.status})`);
       onChange(value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing' } : v)));
+      // A resync can change the tree, as Replace ZIP does: re-fetch the listing on next expand.
+      setFilesByBundle((prev) => {
+        const next = { ...prev };
+        delete next[entry.id];
+        return next;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

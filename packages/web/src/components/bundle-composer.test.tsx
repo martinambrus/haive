@@ -23,6 +23,7 @@ const reply = (body: unknown) => ({
 
 let filesBody: unknown = { files: [], truncated: false, cap: 37 };
 let filesFailure: { ok: false; status: number; json: () => Promise<unknown> } | null = null;
+let filesFetches = 0;
 let bundleState: 'active' | 'failed' = 'active';
 let syncError: string | null = null;
 
@@ -42,7 +43,11 @@ async function fakeFetch(input: unknown) {
       ],
     });
   }
-  if (url.pathname.endsWith('/bundles/b1/files')) return filesFailure ?? reply(filesBody);
+  if (url.pathname.endsWith('/bundles/b1/files')) {
+    filesFetches += 1;
+    return filesFailure ?? reply(filesBody);
+  }
+  if (url.pathname.endsWith('/bundles/b1/sync')) return reply({});
   return { ok: false, status: 404, json: async () => ({}) };
 }
 
@@ -52,6 +57,7 @@ beforeEach(() => {
   bundleState = 'active';
   syncError = null;
   filesFailure = null;
+  filesFetches = 0;
   filesBody = { files: [{ path: 'a.md', size: 1 }], truncated: true, cap: 37 };
 });
 
@@ -132,10 +138,55 @@ describe('a refused file listing shows why', () => {
       },
       async () => null,
       async () => ({ error: 42 }),
+      async () => ({ error: '' }),
+      async () => ({ error: '   ' }),
     ]) {
       filesFailure = { ok: false, status: 500, json };
       const { root } = await mountExpanded();
       expect(textOf(root())).toContain('files fetch failed (500)');
+      expect(textOf(root())).not.toContain('bundle is empty');
     }
   });
+
+  it('asks again on the next expand instead of keeping the failure', async () => {
+    filesFailure = { ok: false, status: 500, json: async () => ({ error: 'Try again' }) };
+    const { view, root } = await mountExpanded();
+    expect(textOf(root())).toContain('Try again');
+    filesFailure = null;
+    const expand = () =>
+      findAll(view.tree(), (h) => h.tag === 'button' && textOf(h).includes('docs'))[0]!;
+    fire.click(expand());
+    for (let i = 0; i < 3; i += 1) await view.flush();
+    fire.click(expand());
+    for (let i = 0; i < 3; i += 1) await view.flush();
+    expect(textOf(root())).not.toContain('Try again');
+    expect(textOf(root())).toContain('a.md');
+  });
+});
+
+it('a git Resync drops the cached file listing, so the next expand asks again', async () => {
+  const view = createRenderer(() => (
+    <BundleComposer
+      initialBundles={[]}
+      allowAddZip={false}
+      allowAddGit={false}
+      credentialOptions={[]}
+      repositoryId="r1"
+      value={[{ id: 'b1', name: 'docs', sourceType: 'git', status: 'active', itemCount: 1 }]}
+      onChange={() => {}}
+    />
+  ));
+  for (let i = 0; i < 3; i += 1) await view.flush();
+  const button = (label: string) =>
+    findAll(view.tree(), (h) => h.tag === 'button' && textOf(h).includes(label))[0]!;
+  fire.click(button('docs'));
+  for (let i = 0; i < 3; i += 1) await view.flush();
+  expect(filesFetches).toBe(1);
+  fire.click(button('Resync'));
+  for (let i = 0; i < 3; i += 1) await view.flush();
+  fire.click(button('docs'));
+  for (let i = 0; i < 3; i += 1) await view.flush();
+  fire.click(button('docs'));
+  for (let i = 0; i < 3; i += 1) await view.flush();
+  expect(filesFetches).toBe(2);
 });
