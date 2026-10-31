@@ -648,12 +648,19 @@ export const syncBaseStep: StepDefinition<SyncBaseDetect, SyncBaseApply> = {
       }
       const headMoved = onCurrent && !res.unmoved && res.after !== before;
       if (headMoved) {
+        let handBackFailed = false;
         try {
           await handBackAfterMove(ctx.repoPath, before);
+        } catch (err) {
+          handBackFailed = true;
+          throw err;
         } finally {
           if (repositoryId) {
             try {
               await resyncHaiveProjections(ctx.db, repositoryId, ctx.repoPath);
+            } catch (err) {
+              if (!handBackFailed) throw err;
+              ctx.logger.warn({ err }, 'projection resync failed after hand-back failure');
             } finally {
               await restoreKeptMetadata(ctx.repoPath, kept);
             }

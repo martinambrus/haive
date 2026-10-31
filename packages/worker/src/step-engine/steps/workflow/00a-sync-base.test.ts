@@ -1799,3 +1799,41 @@ it('T397 fix3 sync finishes projection bookkeeping when hand-back throws after a
       await rm(dir, { recursive: true, force: true, maxRetries: 5 });
   }
 });
+
+it('T397 D5 sync preserves hand-back failure when resync also throws', async () => {
+  const { bare, seed } = await seedOrigin();
+  const local = await cloneLocal(bare);
+  let shim: Awaited<ReturnType<typeof failGit>> | null = null;
+  const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
+  projections.metadata.mockClear();
+  try {
+    await advanceOrigin(seed, 'b.txt');
+    projections.setAside.mockResolvedValue({ outcome: 'set-aside', paths: [], kept: new Map() });
+    const ctx = mkCtx(local, 'repo-1');
+    const warning = vi.spyOn(ctx.logger, 'warn');
+    const d = await syncBaseStep.detect!(ctx);
+    const secondary = new Error('secondary resync failure');
+    projections.resync.mockRejectedValueOnce(secondary);
+    shim = await failGit([
+      'diff',
+      '--no-ext-diff',
+      '--no-textconv',
+      '--name-only',
+      '-z',
+      '--no-renames',
+    ]);
+    await expect(syncBaseStep.apply(ctx, applyArgs(d, { base: 'main' }))).rejects.toThrow(
+      /git diff.*failed/,
+    );
+    expect(warning).toHaveBeenCalledWith(
+      expect.objectContaining({ err: secondary }),
+      expect.stringMatching(/resync/),
+    );
+    expect(projections.metadata).toHaveBeenCalledWith(local, expect.any(Map));
+  } finally {
+    await shim?.restore();
+    asRoot.mockRestore();
+    for (const dir of [bare, seed, local])
+      await rm(dir, { recursive: true, force: true, maxRetries: 5 });
+  }
+});

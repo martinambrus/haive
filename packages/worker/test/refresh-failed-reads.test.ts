@@ -28,6 +28,7 @@ vi.mock('../src/step-engine/git-merge.js', async (original) => ({
   handBackAfterMove: h.handBack,
 }));
 import { GitOperationUnreadableError } from '../src/repo/git-operation.js';
+import { logger } from '@haive/shared/logger';
 import { fastForward } from '../src/repo/refresh.js';
 
 const exec = promisify(execFile);
@@ -183,4 +184,23 @@ it('T397 D4 an unreadable operation error after the move is not an unmoved refus
   h.handBack.mockRejectedValueOnce(err);
   await expect(fastForward(db, payload, dest)).rejects.toBe(err);
   expect(await git(dest, ['rev-parse', 'HEAD'])).not.toBe(before);
+});
+it('T397 D5 refresh preserves hand-back failure when resync fails too', async () => {
+  const { dest, payload } = await fixture();
+  const err = new Error('primary hand-back failure');
+  const secondary = new Error('secondary resync failure');
+  h.handBack.mockRejectedValueOnce(err);
+  h.resync.mockRejectedValueOnce(secondary);
+  const warning = vi.spyOn(logger, 'warn');
+  try {
+    await expect(fastForward(db, payload, dest)).rejects.toBe(err);
+    expect(warning).toHaveBeenCalledWith(
+      expect.objectContaining({ err: secondary }),
+      expect.stringMatching(/resync/),
+    );
+    expect(h.metadata).toHaveBeenCalledWith(dest, expect.any(Map));
+    expect(h.putBack).not.toHaveBeenCalled();
+  } finally {
+    warning.mockRestore();
+  }
 });

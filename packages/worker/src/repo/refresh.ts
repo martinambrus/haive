@@ -287,11 +287,21 @@ export async function fastForward(
     const { again, merge: merged, after } = moved;
     if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
     if (after !== null && after !== before) {
+      let handBackFailed = false;
       try {
         await handBackAfterMove(dest, before);
+      } catch (err) {
+        handBackFailed = true;
+        throw err;
       } finally {
         try {
           await resyncHaiveProjections(db, payload.repositoryId, dest);
+        } catch (err) {
+          if (!handBackFailed) throw err;
+          logger.warn(
+            { err, repositoryId: payload.repositoryId },
+            'projection resync failed after hand-back failure',
+          );
         } finally {
           await restoreKeptMetadata(dest, kept);
         }
