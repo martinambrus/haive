@@ -342,6 +342,7 @@ jobs:
           api test/integrations-audit-db.test.ts INTEGRATIONS_AUDIT_TEST_URL integrations_audit_test pg
           api test/malformed-id-routes-db.test.ts MALFORMED_ID_ROUTES_TEST_URL malformed_id_routes_test pg
           api test/must-change-password-gate-db.test.ts MUST_CHANGE_PASSWORD_TEST_URL must_change_password_test pg
+          worker test/git-data-ledger-rows-db.test.ts GIT_DATA_LEDGER_TEST_URL git_data_ledger_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
@@ -352,10 +353,17 @@ jobs:
       # worker suite spends most of the job's 30-minute budget. smoke:terminal is
       # excluded from smoke:ci — it needs a docker daemon and pulls an image, the same
       # reason the worker job leaves smoke:sub-agent out of its own smoke:ci.
+      # Every smoke:ci runs its smokes through scripts/run-smokes.mjs: each smoke has its own time
+      # limit, a hung one is killed and named, and the rest still run.
       - name: Run api smokes
+        id: api-smokes
         run: pnpm --filter @haive/api smoke:ci
 
+      # A failed api smoke must not hide the worker smokes. This step runs unless the api smokes
+      # were skipped (an earlier step failed, so nothing here could pass either) or the job was
+      # cancelled; the job still fails with the api step.
       - name: Run worker smokes
+        if: ${{ !cancelled() && steps.api-smokes.conclusion != 'skipped' }}
         run: pnpm --filter @haive/worker smoke:ci
 
       - name: Agent pool script on a real Redis
@@ -388,10 +396,12 @@ jobs:
         env:
           AUTH_THROTTLE_TEST_REDIS_URL: redis://localhost:6379/10
 
-      # The migration runner's live-database coverage. Not part of smoke:ci, which is
-      # worker-scoped; this package had no smoke of its own before.
+      # The migration runner's live-database coverage. Its own smoke:ci, since the worker's is
+      # worker-scoped; this package had no smoke of its own before. It runs on the same condition
+      # as the worker smokes.
       - name: Run migration smokes
-        run: pnpm --filter @haive/database smoke:migrate
+        if: ${{ !cancelled() && steps.api-smokes.conclusion != 'skipped' }}
+        run: pnpm --filter @haive/database smoke:ci
 
   schema-parity:
     name: Schema parity (migrations == push)

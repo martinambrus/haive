@@ -26,7 +26,7 @@
     "smoke:upgrade-single-live": "tsx test/upgrade-single-live-smoke.ts",
     "smoke:upload-chunk-lock": "tsx test/upload-chunk-lock-smoke.ts",
     "smoke:all": "pnpm smoke:first-admin-race && pnpm smoke:house-rules-storage && pnpm smoke:house-rules-enforcement && pnpm smoke:reset-provenance && pnpm smoke:step-retry-skip && pnpm smoke:step-retry-claim-race && pnpm smoke:task-retry-parked && pnpm smoke:upgrade-single-live && pnpm smoke:multi-user-isolation && pnpm smoke:plan-chat-surfaces && pnpm smoke:upload-chunk-lock && pnpm smoke:terminal",
-    "smoke:ci": "pnpm smoke:first-admin-race && pnpm smoke:house-rules-storage && pnpm smoke:house-rules-enforcement && pnpm smoke:reset-provenance && pnpm smoke:step-retry-skip && pnpm smoke:step-retry-claim-race && pnpm smoke:task-retry-parked && pnpm smoke:upgrade-single-live && pnpm smoke:multi-user-isolation && pnpm smoke:plan-chat-surfaces && pnpm smoke:upload-chunk-lock",
+    "smoke:ci": "node ../../scripts/run-smokes.mjs smoke:first-admin-race smoke:house-rules-storage smoke:house-rules-enforcement smoke:reset-provenance smoke:step-retry-skip smoke:step-retry-claim-race smoke:task-retry-parked smoke:upgrade-single-live smoke:multi-user-isolation smoke:plan-chat-surfaces smoke:upload-chunk-lock",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {

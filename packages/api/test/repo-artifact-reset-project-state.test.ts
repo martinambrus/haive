@@ -150,6 +150,27 @@ describe('the reset takes back the claim files of the rows it supersedes', () =>
     },
   );
 
+  // The boot migration `supersedeGitDataArtifacts` retires a ledger row recorded at a git-data
+  // path, so no live row names the claim file an earlier release wrote for it. Left behind, that
+  // file stands in `.haive-data/state` without `format.json`, which the sync and the writer both
+  // refuse as a record.
+  it.each(['.git/config', '.git./config'])(
+    'removes the claim file of a retired row at git-data path %j, and the directories around it',
+    async (legacy) => {
+      const root = await repoRoot({ [claimFile(legacy)]: '{}\n' });
+
+      const { removed } = await resetOnboardingArtifacts(root, {
+        ...provenance(),
+        supersededGitDataPaths: [legacy],
+      });
+
+      for (const rel of [claimFile(legacy), ARTIFACTS_DIR, STATE_DIR]) {
+        expect(await exists(root, rel), rel).toBe(false);
+        expect(removed, rel).toContain(rel);
+      }
+    },
+  );
+
   it('leaves a claim file no live row names, and the directory around it', async () => {
     const teammate = '.claude/agents/teammate.md';
     const root = await repoRoot({
@@ -382,6 +403,64 @@ describe('resetting a repository through the route', () => {
     expect(await exists(root, claimFile(AGENT))).toBe(false);
     expect(await exists(root, ARTIFACTS_DIR)).toBe(false);
     expect(await exists(root, STATE_DIR)).toBe(false);
+  });
+
+  /** A ledger row as the sync's import records one (no task): live, or retired when given a date. */
+  const marker = (repositoryId: string, diskPath: string, supersededAt: Date | null = null) => ({
+    userId: USER,
+    repositoryId,
+    taskId: null,
+    diskPath,
+    templateId: 'agent.code-reviewer',
+    templateKind: 'agent',
+    templateSchemaVersion: 1,
+    templateContentHash: 'a'.repeat(64),
+    writtenHash: 'b'.repeat(64),
+    sourceStepId: 'project-state-import',
+    source: 'backfill',
+    importedAt: new Date(1),
+    supersededAt,
+  });
+
+  it('takes the claim file of a row retired at a git-data path off the checkout, so the record reads as reset', async () => {
+    const legacy = '.git/hooks/pre-commit';
+    const root = await repoRoot({ [claimFile(legacy)]: '{}\n' });
+    const fake = await setup(root);
+    fake.insert(schema.onboardingArtifacts, marker(REPO, legacy, new Date(2)));
+
+    expect((await reset()).status).toBe(200);
+
+    expect(await exists(root, claimFile(legacy))).toBe(false);
+    expect(await exists(root, ARTIFACTS_DIR)).toBe(false);
+    expect(await exists(root, STATE_DIR)).toBe(false);
+  });
+
+  it('leaves the claim file of any other retired row: an ordinary path, and another repository’s git-data path', async () => {
+    const legacy = '.git/hooks/pre-commit';
+    const replaced = '.claude/agents/replaced.md';
+    const theirs = '.git/config';
+    const root = await repoRoot({
+      [claimFile(AGENT)]: '{}\n',
+      [claimFile(legacy)]: '{}\n',
+      [claimFile(replaced)]: '{"unsynced":true}\n',
+      [claimFile(theirs)]: '{"unsynced":true}\n',
+    });
+    const fake = await setup(root);
+    fake.insert(schema.onboardingArtifacts, marker(REPO, AGENT));
+    fake.insert(schema.onboardingArtifacts, marker(REPO, legacy, new Date(2)));
+    fake.insert(schema.onboardingArtifacts, marker(REPO, replaced, new Date(2)));
+    fake.insert(schema.onboardingArtifacts, marker(OTHER, theirs, new Date(2)));
+
+    expect((await reset()).status).toBe(200);
+
+    expect(await exists(root, claimFile(AGENT))).toBe(false);
+    expect(await exists(root, claimFile(legacy))).toBe(false);
+    for (const file of [replaced, theirs]) {
+      expect(await readFile(path.join(root, claimFile(file)), 'utf8'), file).toBe(
+        '{"unsynced":true}\n',
+      );
+    }
+    expect(await exists(root, ARTIFACTS_DIR)).toBe(true);
   });
 
   it('takes the descriptors of the sync base and of its local bundles off the checkout', async () => {

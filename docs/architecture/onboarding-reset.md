@@ -11,8 +11,13 @@ directories only once empty, and the same transaction that clears `onboarded_at`
 import the context onboarding was reset from. The ledger goes the same way: the reset supersedes
 every live row of the repository, import markers included (they carry no task, and the supersede
 filters on none), and removes `artifacts/<claimFileName(path)>` for each, with `artifacts/` before
-`state/` in the empty-directory sweep. It removes `bundles/<bundleFileName(source)>` for the sources of
-the sync base's descriptors (read before that transaction deletes the sync row) and of the
+`state/` in the empty-directory sweep. It removes the claim file of a superseded row at a path that
+names git data too (`supersededGitDataPaths`, read beside the live rows and never part of
+`writtenHashes`, which decides what a FILE claim is): the boot migration `supersedeGitDataArtifacts`
+retires such a row, so no live row names the file an earlier release wrote for it. Left behind, it
+stands in `state/` without `format.json`, which the sync reads as refused and the record writer
+refuses to write over, so no later write removes it. It removes `bundles/<bundleFileName(source)>`
+for the sources of the sync base's descriptors (read before that transaction deletes the sync row) and of the
 repository's custom bundles, with `bundles/` swept the same way. It removes `project/environment.json`
 and `settings/<name>.json` for every name this release writes (`PORTABLE_SETTING_NAMES`, whose
 `agent-rules` is the one Markdown file, `settings/agent-rules.md`) and every

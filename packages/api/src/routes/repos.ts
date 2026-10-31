@@ -3,7 +3,20 @@ import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
-import { eq, and, asc, desc, gt, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
+import {
+  eq,
+  and,
+  asc,
+  desc,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  notInArray,
+  or,
+  sql,
+} from 'drizzle-orm';
 import {
   schema,
   acquireRootClaim,
@@ -82,6 +95,7 @@ import {
   claimFileName,
   isCanonicalRepoPath,
   isRecordName,
+  namesGitData,
   parsePlanConflictUnit,
   portableBundleSource,
   readRenderContextColumn,
@@ -2119,6 +2133,12 @@ export interface OnboardingResetProvenance {
   settingNames?: readonly string[];
   /** CLI member files named by the valid current explicit context or the recorded sync base. */
   cliNames?: readonly string[];
+  /** The disk paths of the repository's SUPERSEDED ledger rows that name git data. An earlier
+   *  release recorded a row there and wrote a claim file for it; `supersedeGitDataArtifacts` retires
+   *  such a row at boot, so no live row names that file and `writtenHashes` no longer lists it.
+   *  Only the claim file is taken back. These paths never reach `writtenHashes`, which decides what
+   *  a FILE claim is. */
+  supersededGitDataPaths?: readonly string[];
 }
 
 /**
@@ -2588,7 +2608,11 @@ export async function resetOnboardingArtifacts(
   }
 
   for (const rel of ONBOARDING_RESET_FILES) await remove(rel, false);
-  for (const diskPath of writtenHashes.keys()) {
+  // The claim file of a row retired at a git-data path too: no live row names it any more.
+  for (const diskPath of new Set([
+    ...writtenHashes.keys(),
+    ...(provenance.supersededGitDataPaths ?? []),
+  ])) {
     if (isCanonicalRepoPath(diskPath))
       await remove(`${PROJECT_STATE_DIR}/${claimFileName(diskPath)}`, false);
   }
@@ -3085,6 +3109,24 @@ async function runOnboardingArtifactReset(
       ),
     );
 
+  // Read BEFORE the reset too, and after `live`: a row `supersedeGitDataArtifacts` retires between the
+  // two reads is in both. It is no longer live once retired, yet the claim file an earlier release
+  // wrote for it is still in the checkout. Told apart by `namesGitData`, the rule that migration
+  // retires by, not by a SQL pattern.
+  const supersededGitDataPaths = (
+    await db
+      .select({ diskPath: schema.onboardingArtifacts.diskPath })
+      .from(schema.onboardingArtifacts)
+      .where(
+        and(
+          eq(schema.onboardingArtifacts.repositoryId, id),
+          isNotNull(schema.onboardingArtifacts.supersededAt),
+        ),
+      )
+  )
+    .map((row) => row.diskPath)
+    .filter(namesGitData);
+
   const epoch = repoRow?.onboardingResetAt ?? null;
   const onboardingSteps = await loadProvenanceSteps(db, id, epoch);
   const written = collectWrittenCliContent(
@@ -3142,6 +3184,7 @@ async function runOnboardingArtifactReset(
       bundleSources: [...bundleSources],
       settingNames,
       cliNames: [...cliNames],
+      supersededGitDataPaths,
     },
   );
 
