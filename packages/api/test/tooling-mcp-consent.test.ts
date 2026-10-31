@@ -83,7 +83,11 @@ describe('deciding the MCP servers held from an imported mirror', () => {
   });
 
   it('decides only in a request of its own', async () => {
-    for (const other of [{ reviewDimensions: [] }, { ragEmbedAction: 'rebuild_index' }]) {
+    for (const other of [
+      { reviewDimensions: [] },
+      { ragEmbedAction: 'rebuild_index' },
+      { somethingElse: 1 },
+    ]) {
       const fake = setup();
       const res = await patch({ repoMcpServersAction: 'accept', ...other });
       expect(res.status).toBe(400);

@@ -1528,6 +1528,8 @@ describe('I1: a chunked upload repository takes the session id', () => {
     const { repository: shipped } = (await res.json()) as { repository: { id: string } };
     expect(shipped.id).toBe(SESSION);
     expect(shipped).not.toHaveProperty('agentRulesOverride');
+    expect(shipped).not.toHaveProperty('onboardingTooling');
+    expect(shipped).not.toHaveProperty('onboardingEnvironment');
     expect(await exists(absolute(repos, `_uploads/${USER}/${SESSION}.zip`))).toBe(true);
     expect((queue.jobs[0]!.data as { archivePath: string }).archivePath).toMatch(
       new RegExp(`/${repository!.id}\\.zip$`),

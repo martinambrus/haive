@@ -69,8 +69,6 @@ export const blocksUpgrade = (unit: string): boolean =>
 export const isRtkQuestion = (row: { unit: string; base: unknown; local: unknown }): boolean =>
   row.unit === RTK_ENABLED_UNIT && sameValue(row.base, row.local);
 
-/** A conflict side as the `project_state_conflicts` columns hold it: `{ v }`, so a JSON null is a
- *  value, and NULL for a side that has no such unit. */
 const SETTING_LABELS = {
   'scope-exclude-globs': 'Paths left out of the project scope',
   'rtk-enabled': 'RTK command compression',
@@ -111,6 +109,8 @@ export function conflictUnitLabel(unit: string, claimPath?: string | null): stri
   return CONFLICT_KEY_LABELS[key] ?? key;
 }
 
+/** A conflict side as the `project_state_conflicts` columns hold it: `{ v }`, so a JSON null is a
+ *  value, and NULL for a side that has no such unit. */
 export const conflictSide = (value: unknown): { v: unknown } | null =>
   value === undefined ? null : { v: value };
 

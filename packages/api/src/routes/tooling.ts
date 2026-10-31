@@ -2,6 +2,12 @@ import { safeErrorMessage } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { ollamaEmbed } from '@haive/shared/rag';
+import {
+  INVALID_BODY_CODE,
+  INVALID_BODY_MESSAGE,
+  isJsonObject,
+  requireJsonObject,
+} from '../lib/json-object.js';
 import { probeEgressFor } from '../lib/probe-hosts.js';
 import { requireAuth } from '../middleware/auth.js';
 import type { AppEnv } from '../context.js';
@@ -16,7 +22,7 @@ tooling.use('*', requireAuth);
 /* ------------------------------------------------------------------ */
 
 tooling.post('/test-postgres', async (c) => {
-  const body = (await c.req.json()) as { connectionString?: string };
+  const body = requireJsonObject<{ connectionString?: string }>(await c.req.json());
   const connStr = body.connectionString;
   if (!connStr || typeof connStr !== 'string') {
     return c.json({ ok: false, error: 'connectionString is required' }, 400);
@@ -56,11 +62,11 @@ tooling.post('/test-postgres', async (c) => {
 /* ------------------------------------------------------------------ */
 
 tooling.post('/test-ollama', async (c) => {
-  const body = (await c.req.json()) as {
+  const body = requireJsonObject<{
     ollamaUrl?: string;
     model?: string;
     dimensions?: number;
-  };
+  }>(await c.req.json());
   const url = body.ollamaUrl;
   if (!url || typeof url !== 'string') {
     return c.json({ ok: false, error: 'ollamaUrl is required' }, 400);
@@ -147,7 +153,7 @@ tooling.post('/test-ollama', async (c) => {
  *  Degrades like /test-ollama: an unreachable daemon or an unknown model answers
  *  `found:false` with a null verdict rather than failing the request. */
 tooling.post('/ollama-model-capabilities', async (c) => {
-  const body = (await c.req.json()) as { ollamaUrl?: string; model?: string };
+  const body = requireJsonObject<{ ollamaUrl?: string; model?: string }>(await c.req.json());
   const url = body.ollamaUrl;
   const model = body.model;
   if (!url || typeof url !== 'string' || !model || typeof model !== 'string') {
@@ -213,9 +219,9 @@ tooling.post('/pull-ollama-model', async (c) => {
   const pullId = crypto.randomUUID();
 
   return streamSSE(c, async (stream) => {
-    let body: { ollamaUrl?: string; model?: string };
+    let raw: unknown;
     try {
-      body = await c.req.json();
+      raw = await c.req.json();
     } catch {
       await stream.writeSSE({
         data: JSON.stringify({ error: 'Invalid JSON body' }),
@@ -223,6 +229,15 @@ tooling.post('/pull-ollama-model', async (c) => {
       });
       return;
     }
+    // An event, not a throw: a thrown HttpError inside streamSSE only closes an empty stream.
+    if (!isJsonObject(raw)) {
+      await stream.writeSSE({
+        data: JSON.stringify({ error: INVALID_BODY_MESSAGE, code: INVALID_BODY_CODE }),
+        event: 'error',
+      });
+      return;
+    }
+    const body = raw as { ollamaUrl?: string; model?: string };
 
     const url = body.ollamaUrl;
     const model = body.model;
@@ -337,7 +352,7 @@ tooling.post('/pull-ollama-model', async (c) => {
 });
 
 tooling.post('/cancel-pull', async (c) => {
-  const body = (await c.req.json()) as { pullId?: string };
+  const body = requireJsonObject<{ pullId?: string }>(await c.req.json());
   if (!body.pullId) {
     return c.json({ ok: false, error: 'pullId required' }, 400);
   }

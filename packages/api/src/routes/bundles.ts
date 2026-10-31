@@ -34,6 +34,7 @@ import {
 import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
 import { writeBodyToHeld } from '../lib/held-write.js';
+import { requireJsonObject } from '../lib/json-object.js';
 import { withUploadChunkLock } from '../lib/upload-chunk-lock.js';
 import {
   cancelUploadSession,
@@ -754,11 +755,11 @@ bundleRoutes.post('/:id/replace/init', async (c) => {
     throw new HttpError(400, 'only zip-source bundles support archive replace');
   }
   const db = getDb();
-  const body = (await c.req.json()) as {
+  const body = requireJsonObject<{
     filename?: unknown;
     totalSize?: unknown;
     chunkSize?: unknown;
-  };
+  }>(await c.req.json());
   if (typeof body.filename !== 'string' || body.filename.length === 0) {
     throw new HttpError(400, 'filename is required');
   }

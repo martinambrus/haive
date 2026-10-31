@@ -685,21 +685,33 @@ describe('saving or clearing the app-login credentials of a repository', () => {
     expect(auditLines()).toEqual([]);
   });
 
-  it.each([[{ rtkEnabled: false }], [{ appAuthUsername: null, appAuthPassword: 7 }]])(
-    'records no event when the request sets or clears neither field: %j',
-    async (body) => {
-      const fake = setup(STORE);
-      const { set, remove } = spySecrets();
+  it('records no event when the request sets or clears neither field', async () => {
+    const fake = setup(STORE);
+    const { set, remove } = spySecrets();
 
-      const res = await patch(body);
+    const res = await patch({ rtkEnabled: false });
 
-      expect(res.status).toBe(200);
-      expect(set).not.toHaveBeenCalled();
-      expect(remove).not.toHaveBeenCalled();
-      expect(fake.rows(schema.auditEvents)).toEqual([]);
-      expect(auditLines()).toEqual([]);
-    },
-  );
+    expect(res.status).toBe(200);
+    expect(set).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(auditLines()).toEqual([]);
+  });
+
+  it('refuses a credential of the wrong type, writing no secret and recording no event', async () => {
+    const fake = setup(STORE);
+    const before = structuredClone(fake.rows(schema.repositories));
+    const { set, remove } = spySecrets();
+
+    const res = await patch({ appAuthUsername: null, appAuthPassword: 7 });
+
+    expect(res.status).toBe(400);
+    expect(fake.rows(schema.repositories)).toEqual(before);
+    expect(set).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(auditLines()).toEqual([]);
+  });
 
   const refusals: Array<[string, number, () => void]> = [
     ['the sync lock is held', 409, () => fakeLock.state.held.add(REPO)],
