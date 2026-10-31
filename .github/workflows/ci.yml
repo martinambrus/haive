@@ -213,12 +213,21 @@ jobs:
 
       # The same applier every install uses. On CI's empty database this exercises the FRESH
       # path — baseline plus every later migration — on every run.
+      #
+      # The last setup step: every step up to here keeps the default condition, so one that fails
+      # skips everything after it, and this one succeeds only if all of them did. Each check below
+      # runs on `!cancelled() && steps.migrate.conclusion == 'success'`: a failed check no longer
+      # skips the others (the job still fails with it), a failed setup step still stops them, and
+      # a run cancelled by a newer push stops. A check names this step and never a sibling; a step
+      # the checks need goes above this one. scripts/test/ci-step-independence.test.mjs pins it.
       - name: Apply database migrations
+        id: migrate
         run: pnpm --filter @haive/database migrate
 
       # A gated file skips green when its URL is unset, so each must report tests run and none skipped.
       # The database column is the name each file's own guard demands.
       - name: Postgres-gated tests
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           PGVECTOR_CONTAINER: ${{ job.services.pgvector.id }}
@@ -276,6 +285,7 @@ jobs:
           worker test/upload-reaper-db.test.ts UPLOAD_REAPER_TEST_URL upload_reaper_test pg
           worker test/step-row-lock-order-db.test.ts WORKER_STEP_ROW_LOCK_ORDER_TEST_URL worker_step_row_lock_order_test pg
           worker test/task-cancel-guard-db.test.ts WORKER_TASK_CANCEL_GUARD_TEST_URL worker_task_cancel_guard_test pg
+          worker test/step-fold-preread-db.test.ts WORKER_STEP_FOLD_PREREAD_TEST_URL worker_step_fold_preread_test pg
           api test/terminal-attach-db.test.ts TERMINAL_ATTACH_TEST_URL terminal_attach_test pg
           api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test pg
           api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test pg
@@ -322,6 +332,7 @@ jobs:
           api test/task-cancel-late-row-db.test.ts TASK_CANCEL_LATE_ROW_TEST_URL task_cancel_late_row_test pg
           api test/plan-merge-cancel-db.test.ts PLAN_MERGE_CANCEL_TEST_URL plan_merge_cancel_test pg
           api test/step-row-lock-order-db.test.ts STEP_ROW_LOCK_ORDER_TEST_URL step_row_lock_order_test pg
+          api test/step-fold-preread-db.test.ts STEP_FOLD_PREREAD_TEST_URL step_fold_preread_test pg
           api test/plan-advisory-delete-db.test.ts PLAN_ADVISORY_DELETE_TEST_URL plan_advisory_delete_test pg
           api test/admin-config-pool-db.test.ts ADMIN_CONFIG_POOL_TEST_URL admin_config_pool_test pg
           api test/admin-security-audit-db.test.ts ADMIN_SECURITY_AUDIT_TEST_URL admin_security_audit_test pg
@@ -342,6 +353,7 @@ jobs:
           api test/integrations-audit-db.test.ts INTEGRATIONS_AUDIT_TEST_URL integrations_audit_test pg
           api test/malformed-id-routes-db.test.ts MALFORMED_ID_ROUTES_TEST_URL malformed_id_routes_test pg
           api test/must-change-password-gate-db.test.ts MUST_CHANGE_PASSWORD_TEST_URL must_change_password_test pg
+          worker test/git-data-ledger-rows-db.test.ts GIT_DATA_LEDGER_TEST_URL git_data_ledger_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
@@ -352,46 +364,57 @@ jobs:
       # worker suite spends most of the job's 30-minute budget. smoke:terminal is
       # excluded from smoke:ci — it needs a docker daemon and pulls an image, the same
       # reason the worker job leaves smoke:sub-agent out of its own smoke:ci.
+      # Every smoke:ci runs its smokes through scripts/run-smokes.mjs: each smoke has its own time
+      # limit, a hung one is killed and named, and the rest still run.
       - name: Run api smokes
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/api smoke:ci
 
       - name: Run worker smokes
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/worker smoke:ci
 
       - name: Agent pool script on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/worker exec vitest run src/queues/cli-exec/agent-lease.test.ts
         env:
           HAIVE_LEASE_TEST_REDIS_URL: redis://localhost:6379/15
 
       - name: CLI job retention on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/worker exec vitest run test/cli-job-retention.test.ts
         env:
           CLI_JOB_RETENTION_TEST_REDIS_URL: redis://localhost:6379/9
 
       - name: RAG sync lock on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/shared exec vitest run test/rag-sync-lock.test.ts
         env:
           HAIVE_RAG_LOCK_TEST_REDIS_URL: redis://localhost:6379/14
 
       - name: Usage-auth stash script on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/api exec vitest run test/cli-providers-usage-auth.test.ts
         env:
           USAGE_AUTH_TEST_REDIS_URL: redis://localhost:6379/12
 
       - name: Module activation watch on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/worker exec vitest run test/module-activation-watch.test.ts
         env:
           MODULE_ACTIVATION_WATCH_TEST_REDIS_URL: redis://localhost:6379/11
 
       - name: Auth throttle script on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
         run: pnpm --filter @haive/api exec vitest run test/auth-throttle.test.ts
         env:
           AUTH_THROTTLE_TEST_REDIS_URL: redis://localhost:6379/10
 
-      # The migration runner's live-database coverage. Not part of smoke:ci, which is
+      # The migration runner's live-database coverage. Its own smoke:ci, since the worker's is
       # worker-scoped; this package had no smoke of its own before.
       - name: Run migration smokes
-        run: pnpm --filter @haive/database smoke:migrate
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        run: pnpm --filter @haive/database smoke:ci
 
   schema-parity:
     name: Schema parity (migrations == push)

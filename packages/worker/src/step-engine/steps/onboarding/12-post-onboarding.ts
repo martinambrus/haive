@@ -2,6 +2,7 @@ import {
   sameValue,
   readRenderContextColumn,
   recoverCliMembership,
+  namesGitData,
 } from '@haive/shared/project-state';
 import { skillTargetDirs } from '@haive/shared/project-state';
 import { isRtkChoiceRecorded } from '@haive/shared/project-state';
@@ -294,7 +295,12 @@ async function recordOnboardingArtifacts(
   }
 
   const manifest = getTemplateManifest();
-  const haiveExpanded = expandManifestFor(renderedCtx, manifest);
+  const recordable = (r: ExpandedRendering): boolean => {
+    if (!namesGitData(r.diskPath)) return true;
+    warnings.push(`onboarding-artifacts: did not record ${r.diskPath}: it names git data`);
+    return false;
+  };
+  const haiveExpanded = expandManifestFor(renderedCtx, manifest).filter(recordable);
 
   // Custom-bundle expansion runs in parallel with manifest expansion; the two
   // are concatenated and de-duped on diskPath (Haive items win on collision —
@@ -311,7 +317,7 @@ async function recordOnboardingArtifacts(
     bundlesForInstall,
     detect.agentTargets,
     skillTargets,
-  );
+  ).filter(recordable);
   const expanded: ExpandedRendering[] = [];
   const seenDiskPaths = new Set<string>();
   for (const r of haiveExpanded) {

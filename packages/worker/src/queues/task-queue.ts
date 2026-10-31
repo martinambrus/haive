@@ -23,6 +23,7 @@ import {
   CLEAR_STEP_USAGE_STAMP,
   schema,
   type Database,
+  type DbTx,
 } from '@haive/database';
 import {
   archiveFormatSchema,
@@ -520,17 +521,20 @@ class ParkOvertaken extends Error {}
  *  the task, for a tick whose pointer is right), both under the job's fence and rolled back
  *  together when it no longer holds. A stale advance that parked a row a Retry reset would leave
  *  the park signature the Retry's own advance reads as a live loop, and drops itself behind.
- *  The row first, as a Retry takes rows before the task. */
+ *  The row first, as a Retry takes rows before the task. `foldRun`, for a step's first park, adds the
+ *  run the row holds to its carried_* first (`foldRunIntoCarried`), in the same transaction. */
 async function writeFencedPark(
   db: Database,
   ctx: ResolvedTaskContext,
   rowId: string,
   patch: PgUpdateSetSource<typeof schema.taskSteps>,
   pointer: { stepId: string; stepIndex: number; round: number } | null,
+  opts: { foldRun?: boolean } = {},
 ): Promise<boolean> {
   const fence = { epoch: ctx.orchestrationEpoch };
   try {
     await db.transaction(async (tx) => {
+      if (opts.foldRun) await foldRunIntoCarried(tx, rowId);
       await tx.update(schema.taskSteps).set(patch).where(eq(schema.taskSteps.id, rowId));
       const holds = pointer
         ? await markTaskRunningWithStep(
@@ -555,6 +559,26 @@ async function writeFencedPark(
     if (err instanceof ParkOvertaken) return false;
     throw err;
   }
+}
+
+async function foldRunIntoCarried(tx: DbTx, rowId: string): Promise<void> {
+  // Locked by this read and held to commit, so the row is current: the caller's read predates the
+  // lock, and a fold from it would overwrite what a peer added to carried_* or idle_ms in between.
+  const [held] = await tx
+    .select()
+    .from(schema.taskSteps)
+    .where(eq(schema.taskSteps.id, rowId))
+    .for('no key update');
+  if (!held) return;
+  const fold = computeFoldContribution(held, Date.now());
+  await tx
+    .update(schema.taskSteps)
+    .set({
+      carriedWorkMs: held.carriedWorkMs + fold.workMs,
+      carriedIdleMs: held.carriedIdleMs + fold.idleMs,
+      carriedUserActiveMs: held.carriedUserActiveMs + fold.userActiveMs,
+    })
+    .where(eq(schema.taskSteps.id, rowId));
 }
 
 /** Complete the task, only while the fence of the pass that finished it holds: a Retry that moved
@@ -2932,7 +2956,6 @@ async function handleAdvanceStep(
       // idle, so a step interrupted mid-run cannot bill the hold as work), reset the live timing
       // and open the marker. iterations/output/detect are PRESERVED — a pause is a hold, not a
       // reset, so the step resumes rather than re-running from scratch.
-      const fold = computeFoldContribution(row, Date.now());
       holds = await writeFencedPark(
         db,
         ctx,
@@ -2944,13 +2967,11 @@ async function handleAdvanceStep(
           idleMs: 0,
           waitingStartedAt: new Date(),
           userActiveMs: 0,
-          carriedWorkMs: row.carriedWorkMs + fold.workMs,
-          carriedIdleMs: row.carriedIdleMs + fold.idleMs,
-          carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
           statusMessage: message,
           updatedAt: new Date(),
         },
         pointer,
+        { foldRun: true },
       );
     }
     if (!holds) {
@@ -3093,7 +3114,6 @@ async function handleAdvanceStep(
         // marker. iterations/output/detect are PRESERVED so it RESUMES when a slot frees — a
         // park is a transient resource wait, not a reset (the pending->running re-run folds the
         // park into carried_idle_ms and stamps a fresh started_at, step-runner.ts).
-        const fold = computeFoldContribution(row, Date.now());
         // A parked step IS what the task is working on, so point current_step_id/current_round at
         // it. Only a step that RUNS stamped them before, which left the pointer addressing an
         // earlier step for the whole park — that stale pointer is what the drop rule above and
@@ -3111,13 +3131,11 @@ async function handleAdvanceStep(
             idleMs: 0,
             waitingStartedAt: new Date(),
             userActiveMs: 0,
-            carriedWorkMs: row.carriedWorkMs + fold.workMs,
-            carriedIdleMs: row.carriedIdleMs + fold.idleMs,
-            carriedUserActiveMs: row.carriedUserActiveMs + fold.userActiveMs,
             statusMessage: parkMessage,
             updatedAt: new Date(),
           },
           pointer,
+          { foldRun: true },
         );
       }
       if (!holds) {
@@ -3342,15 +3360,17 @@ const ABANDONED_RUN_MESSAGE =
  *  reclassifies the open (never-closed) run as idle, so the crash downtime does not land in
  *  carried_work. iterations/output/detect are preserved, as in the runtime park. */
 async function requeueAbandonedOrphan(db: Database, taskStepId: string): Promise<void> {
-  const rows = await db
-    .select()
-    .from(schema.taskSteps)
-    .where(eq(schema.taskSteps.id, taskStepId))
-    .limit(1);
-  const row = rows[0];
-  if (!row) return;
-  const fold = computeFoldContribution(row, Date.now());
   await db.transaction(async (tx) => {
+    // Locked by this read and held to commit, so the row is current: a read before the tx would
+    // predate the lock, and folding from it would overwrite a peer's carried_* or idle_ms change.
+    const [row] = await tx
+      .select()
+      .from(schema.taskSteps)
+      .where(eq(schema.taskSteps.id, taskStepId))
+      .limit(1)
+      .for('no key update');
+    if (!row) return;
+    const fold = computeFoldContribution(row, Date.now());
     const [requeued] = await tx
       .update(schema.taskSteps)
       .set({

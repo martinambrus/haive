@@ -1166,6 +1166,92 @@ describe('a claim question', () => {
   });
 });
 
+// A question raised before the rule that no claim names git data can still be pending: the sync
+// closes it at its next run, and until then an answer must not record the path in the ledger.
+describe('a claim question at a path no claim may name', () => {
+  const claimAt = (path: string, writtenHash: string) => ({
+    path,
+    templateId: 'workflow-config',
+    kind: 'workflow-config',
+    schemaVersion: 1,
+    templateHash: 'c'.repeat(64),
+    writtenHash,
+    haiveVersion: '1.2.3',
+  });
+  const fileText = (c: unknown): string => `${JSON.stringify(c, null, 2)}\n`;
+
+  async function questionAt(path: string) {
+    const unit = claimFileName(path);
+    const rel = `${STATE_DIR}/${unit}`;
+    const theirs = claimAt(path, '3'.repeat(64));
+    const s = await setup({ rows: {} });
+    const id = randomUUID();
+    s.fake.insert(schema.projectStateConflicts, {
+      id,
+      repositoryId: REPO,
+      unit,
+      base: conflictSide(claimAt(path, '1'.repeat(64))),
+      local: conflictSide(claimAt(path, '2'.repeat(64))),
+      incoming: conflictSide(theirs),
+      detectedAt: new Date(2000),
+      resolution: null,
+      resolvedAt: null,
+      resolvedBy: null,
+    });
+    s.fake.insert(schema.onboardingArtifacts, {
+      id: randomUUID(),
+      userId: OWNER,
+      repositoryId: REPO,
+      taskId: ONBOARDING,
+      diskPath: path,
+      templateId: 'workflow-config',
+      templateKind: 'workflow-config',
+      templateSchemaVersion: 1,
+      templateContentHash: 'c'.repeat(64),
+      writtenHash: '2'.repeat(64),
+      userModified: false,
+      sourceStepId: '12-post-onboarding',
+      source: 'onboarding',
+      haiveVersion: '1.2.3',
+      generatedAt: new Date(5000),
+      supersededAt: null,
+    });
+    await mkdir(dirname(join(s.root, rel)), { recursive: true });
+    await writeFile(join(s.root, rel), fileText(theirs));
+    const ledger = () => s.fake.rows(schema.onboardingArtifacts) as Record<string, unknown>[];
+    return { ...s, id, ledger, claimFileText: () => readFile(join(s.root, rel), 'utf8') };
+  }
+
+  it('takes theirs for a path outside git data, which records the marker', async () => {
+    const s = await questionAt('docs/other.md');
+
+    expect(await s.answer('take_theirs', s.id)).toMatchObject({ kind: 'resolved' });
+
+    expect(s.ledger().filter((r) => r.supersededAt == null && r.taskId == null)).toHaveLength(1);
+  });
+
+  const refused = ['.git/hooks/pre-commit', '.git./config', '.GIT/info/exclude'].flatMap((path) =>
+    (['take_theirs', 'keep_mine'] as const).map((answer) => [path, answer] as const),
+  );
+  it.each(refused)(
+    'refuses %j answered %s as invalid and changes nothing',
+    async (path, answer) => {
+      const s = await questionAt(path);
+      const before = s.dump();
+      const ledgerBefore = json(s.ledger());
+      const fileBefore = await s.claimFileText();
+
+      expect(await s.answer(answer, s.id)).toEqual({ kind: 'invalid' });
+
+      expect(json(s.ledger())).toEqual(ledgerBefore);
+      expect(s.ledger().filter((r) => r.supersededAt == null && r.taskId == null)).toEqual([]);
+      expect(s.dump()).toEqual(before);
+      expect(await s.claimFileText()).toBe(fileBefore);
+      expect(s.rowOf(s.id).resolvedAt).toBeNull();
+    },
+  );
+});
+
 it('fix4 sanitizes both failures when resolving and putting back fail', async () => {
   const s = await setup();
   const secret = randomBytes(24).toString('base64url');

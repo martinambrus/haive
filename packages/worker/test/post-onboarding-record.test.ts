@@ -16,6 +16,7 @@ import {
   normalizeContent,
   sha256Hex,
 } from '@haive/shared';
+import { namesGitData } from '@haive/shared/project-state';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
 import { REFERENCE_CONTEXT } from '../src/step-engine/template-manifest.js';
@@ -248,6 +249,75 @@ describe('12 records the cli-rules region from the override 07 wrote it from', (
 
     expect(out.artifactRowsWritten).toBeGreaterThan(0);
     expect(cliRulesRows(s)).toEqual([]);
+  });
+});
+
+describe('12 records no artifact row at a path that names git data', () => {
+  const BUNDLE = '00000000-0000-4000-8000-0000000000e1';
+  const BUNDLE_AGENT = {
+    id: 'billing',
+    title: 'Billing',
+    description: 'Billing agent',
+    color: 'blue',
+    field: 'billing',
+    tools: [],
+    coreMission: 'Bill',
+    responsibilities: [],
+    whenInvoked: [],
+    executionSteps: [],
+    outputFormat: '',
+    qualityCriteria: [],
+    antiPatterns: [],
+  };
+
+  it('records no row at a git-data agent target, says so, and still records the ordinary ones', async () => {
+    const s = await setup('none', {
+      ...DETECT,
+      agentTargets: [
+        { dir: '.git/hooks', format: 'markdown', supportsLsp: true },
+        ...REFERENCE_CONTEXT.agentTargets,
+      ],
+    });
+    s.fake.insert(schema.customBundles, {
+      id: BUNDLE,
+      userId: USER,
+      repositoryId: REPO,
+      name: 'acme-kit',
+      sourceType: 'zip',
+      storageRoot: '/bundles/acme-kit',
+    });
+    s.fake.insert(schema.customBundleItems, {
+      bundleId: BUNDLE,
+      kind: 'agent',
+      sourceFormat: 'claude-md',
+      sourcePath: 'agents/billing.md',
+      normalizedSpec: BUNDLE_AGENT,
+      contentHash: 'c'.repeat(64),
+      schemaVersion: 1,
+    });
+
+    const out = await recordWritten(s.apply());
+
+    const paths = s.fake.rows(schema.onboardingArtifacts).map((r) => r.diskPath as string);
+    expect(paths.filter(namesGitData)).toEqual([]);
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        '.claude/agents/code-reviewer.md',
+        '.claude/agents/README.md',
+        '.claude/agents/billing.md',
+      ]),
+    );
+    expect(out.artifactRowsWritten).toBe(paths.length);
+    for (const refused of [
+      '.git/hooks/code-reviewer.md',
+      '.git/hooks/README.md',
+      '.git/hooks/billing.md',
+    ]) {
+      expect(
+        out.warnings.some((w) => w.includes(refused)),
+        refused,
+      ).toBe(true);
+    }
   });
 });
 

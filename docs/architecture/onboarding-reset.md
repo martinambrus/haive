@@ -11,8 +11,8 @@ directories only once empty, and the same transaction that clears `onboarded_at`
 import the context onboarding was reset from. The ledger goes the same way: the reset supersedes
 every live row of the repository, import markers included (they carry no task, and the supersede
 filters on none), and removes `artifacts/<claimFileName(path)>` for each, with `artifacts/` before
-`state/` in the empty-directory sweep. It removes `bundles/<bundleFileName(source)>` for the sources of
-the sync base's descriptors (read before that transaction deletes the sync row) and of the
+`state/` in the empty-directory sweep. It removes the claim file at a path that names git data too, from two sources that never reach `writtenHashes` (which decides what a FILE claim is): a superseded row (`supersededGitDataPaths`, read beside the live rows: the boot migration `supersedeGitDataArtifacts` retires such a row, so no live row names the file an earlier release wrote for it) and a claim only the sync base names (`baseGitDataPaths`, read with the rest of the base before that transaction deletes the sync row: the sync keeps a teammate's older-release claim file in the base apart from the record and never makes a row for it, so no row, live or retired, names it). Left behind, either file stands in `state/` without `format.json`, which the sync reads as refused and the record writer refuses to write over, so no later write removes it. A base claim at any other path is a real claim: the reset takes its file back only when a live row names it. A git-data claim file that reached the checkout after the last sync is in neither source, so it stays, as does any file in `state/` the reset does not name, and the record reads refused until it is removed by hand. It removes `bundles/<bundleFileName(source)>`
+for the sources of the sync base's descriptors (read before that transaction deletes the sync row) and of the
 repository's custom bundles, with `bundles/` swept the same way. It removes `project/environment.json`
 and `settings/<name>.json` for every name this release writes (`PORTABLE_SETTING_NAMES`, whose
 `agent-rules` is the one Markdown file, `settings/agent-rules.md`) and every
@@ -107,8 +107,7 @@ rule would quarantine every upgraded repository's own files.
 **`edited` is a claim about AUTHORSHIP and is only made where authorship is PROVEN.** A step
 hash proves it alone, because one exists only for a path that step WROTE — `writeIfAllowed`
 skips a pre-existing file and records nothing for it, and that absence is load-bearing rather
-than an omission. A row does NOT prove it: `recordOnboardingArtifacts` inserts one per manifest
-RENDERING, so a file apply skipped carries a row too, holding what Haive WOULD have written. A
+than an omission. A row does NOT prove it: `recordOnboardingArtifacts` inserts one per manifest RENDERING (bar one that names git data), so a file apply skipped carries a row too, holding what Haive WOULD have written. A
 row that no longer matches is therefore two different stories — "Haive wrote it and you changed
 it" and "this was always yours" — and only the step record separates them. Getting this wrong
 tells a person their own untouched file was "edited since Haive wrote it"; the skipped-file case
@@ -176,7 +175,7 @@ again with a longer life. So this is clutter, in the direction that loses nothin
 bargain `11d-skill-sync`'s exclusion already strikes.
 
 **A live artifact row puts a directory in scope but never claims a file on its own.**
-`recordOnboardingArtifacts` inserts one row per manifest RENDERING without consulting
+`recordOnboardingArtifacts` inserts one row per manifest RENDERING (bar one that names git data) without consulting
 `wroteFiles`, so the file apply SKIPPED has a row too, carrying the hash of what Haive WOULD
 have written rather than what is on disk — claiming by row would hand the user's own definition
 straight to the deletion the quarantine exists to prevent. The entry-level claim for a row is

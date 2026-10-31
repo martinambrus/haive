@@ -960,6 +960,12 @@ export const upgradeRollbackStep: StepDefinition<RollbackDetect, RollbackOutput>
         ).map((r) => r.diskPath),
       );
       for (const row of untrackedRows) {
+        // The other writes here refuse a git-data path (`safeDiskRel`). An upgrade run before that
+        // rule may have untracked a row recorded at one, and a live row there is only ever counted.
+        if (namesGitData(row.diskPath)) {
+          warnings.push(`did not put back the row for ${row.diskPath}: it names git data`);
+          continue;
+        }
         if (standing.has(row.diskPath) || rowsToInsert.some((r) => r.diskPath === row.diskPath)) {
           warnings.push(
             `did not put back the row for ${row.diskPath}: another row records that path now`,

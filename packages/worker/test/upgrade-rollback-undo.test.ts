@@ -553,3 +553,55 @@ describe('rolling back what an upgrade removed', () => {
     );
   });
 });
+
+describe('rolling back an upgrade that untracked rows', () => {
+  const ORDINARY = '.claude/agents/mine.md';
+  // An upgrade run before the rule that no claim names git data may have untracked a row recorded there.
+  const GIT_DATA = '.git/hooks/pre-commit';
+
+  /** A row the upgrade untracked: retired, its file left where it stood. */
+  const untracked = (fake: Awaited<ReturnType<typeof setup>>['fake'], diskPath: string) =>
+    fake.insert(schema.onboardingArtifacts, {
+      userId: USER,
+      repositoryId: REPO,
+      taskId: PRIOR_TASK,
+      diskPath,
+      templateId: 'agent.mine',
+      templateKind: 'agent',
+      templateSchemaVersion: 1,
+      templateContentHash: sha256Hex(normalizeContent('MINE\n')),
+      writtenHash: sha256Hex(normalizeContent('MINE\n')),
+      writtenContent: 'MINE\n',
+      source: 'onboarding',
+      supersededAt: new Date(),
+    });
+
+  async function rollBack(...paths: string[]) {
+    const { fake, ctx, detected } = await setup();
+    const ids = paths.map((diskPath) => untracked(fake, diskPath).id as string);
+    const out = await recordWritten(
+      upgradeRollbackStep.apply(ctx, {
+        detected: { ...detected, newArtifactsToUndo: [], untrackedRowIds: ids },
+      } as never),
+    );
+    const live = fake
+      .rows(schema.onboardingArtifacts)
+      .filter((r) => r.supersededAt == null)
+      .map((r) => r.diskPath);
+    return { out, live };
+  }
+
+  it('puts the row at an ordinary path back live', async () => {
+    const { out, live } = await rollBack(ORDINARY);
+    expect(live).toContain(ORDINARY);
+    expect(out.revertedCount).toBe(1);
+  });
+
+  it('records no row at a path that names git data, and says so, beside the row it does put back', async () => {
+    const { out, live } = await rollBack(ORDINARY, GIT_DATA);
+    expect(live).toContain(ORDINARY);
+    expect(live).not.toContain(GIT_DATA);
+    expect(out.revertedCount).toBe(1);
+    expect(out.warnings.some((warning) => warning.includes(GIT_DATA))).toBe(true);
+  });
+});
