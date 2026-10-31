@@ -23,6 +23,7 @@ import {
 } from '../project-state/set-aside.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
+import { gitWorkspaceStatus } from './git-workspace.js';
 import { GIT_TIMED_OUT, gitGaveNoAnswer, type GitRunResult } from './git-exec.js';
 import {
   buildCredentialHelper,
@@ -71,7 +72,12 @@ export async function usableCheckout(
     const there = await lstatNoFollow(path.dirname(dest), path.basename(dest));
     return there?.kind === 'directory' ? { unknown: whyNoAnswer(cdup) } : 'unusable';
   }
-  if (cdup.code !== 0 || cdup.stdout.trim() !== '') return 'unusable';
+  if (cdup.code !== 0) {
+    return (await gitWorkspaceStatus(dest)) === 'absent'
+      ? 'unusable'
+      : { unknown: whyNoAnswer(cdup) };
+  }
+  if (cdup.stdout.trim() !== '') return 'unusable';
   const head = await gitRun(dest, ['rev-parse', '--verify', '--quiet', 'HEAD']);
   if (head.code === 0) return 'usable';
   return head.code === 1 ? 'unusable' : { unknown: whyNoAnswer(head) };

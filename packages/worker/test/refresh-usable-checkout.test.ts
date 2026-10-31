@@ -75,6 +75,12 @@ describe('usableCheckout tells "not usable" from "git gave no answer"', () => {
     expect(await usableCheckout(dir)).toBe('unusable');
   });
 
+  it('T397 a corrupt config is unknown rather than a reason to rebuild', async () => {
+    const dir = await intact();
+    await writeFile(path.join(dir, '.git', 'config'), '[core\n');
+    expect(await usableCheckout(dir)).toEqual({ unknown: expect.any(String) });
+  });
+
   it('an empty folder is unusable', async () => {
     expect(await usableCheckout(await tmp())).toBe('unusable');
   });
