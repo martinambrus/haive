@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
   thrown: undefined as unknown,
   /** What the task queue was asked to enqueue. */
   jobs: [] as { name: string; data: unknown }[],
+  kills: [] as string[],
 }));
 
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
@@ -31,7 +32,12 @@ vi.mock('../src/queues.js', () => {
     getUsagePollQueue: queue,
   };
 });
-vi.mock('../src/lib/sandbox-kill.js', () => ({ killTaskSandboxes: async () => 0 }));
+vi.mock('../src/lib/sandbox-kill.js', () => ({
+  killTaskSandboxes: async (id: string) => {
+    h.kills.push(id);
+    return 0;
+  },
+}));
 vi.mock('../src/middleware/auth.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/middleware/auth.js')>()),
   requireAuth: async (c: { set: (key: string, value: string) => void }, next: () => unknown) => {
@@ -150,6 +156,7 @@ describe.skipIf(!url)(
 
     beforeEach(async () => {
       h.jobs.length = 0;
+      h.kills.length = 0;
       await db.delete(schema.tasks).where(eq(schema.tasks.userId, USER));
     });
 
@@ -956,6 +963,265 @@ describe.skipIf(!url)(
     // became skipped, and as the clicked row is in neither `leftActive` nor the rows activated meanwhile, nobody
     // killed its sandbox. Skip must refuse it as it refuses a row it read running, and change nothing.
     const peerRuns = (id: string) => peerSets(id, sql`status = 'running', started_at = now()`);
+
+    // R controls: the route sees a failed row, but a peer takes it on before the batch locks it.
+    // The refusal must roll back its run sweep and any resets, and must not kill or queue work.
+    const notResumable = {
+      status: 409,
+      code: 'not_resumable',
+      message: 'Resume is only available for a multi-iteration step — use Retry instead',
+    };
+
+    it.each([
+      ['R1', 'retry_ai', 'running'],
+      ['R1', 'retry_ai', 'done'],
+      ['R2', 'resume', 'running'],
+      ['R2', 'resume', 'done'],
+    ] as const)(
+      '%s: %s refuses a failed row a pass has taken to %s, with every other row and run kept',
+      async (_label, action, status) => {
+        const taskId = await seedTask('running', { currentStepId: STEP.stepId });
+        await seedStep(taskId, { status: 'failed', iterationCount: 1, errorMessage: 'old error' });
+        const other = await seedStep(taskId, { status: 'waiting_cli' }, OTHER);
+        const [run] = await db
+          .insert(schema.cliInvocations)
+          .values({
+            taskId,
+            taskStepId: STEP.id,
+            mode: 'cli',
+            prompt: 'failed pass',
+            endedAt: new Date(),
+            exitCode: 1,
+          })
+          .returning();
+        let expected: typeof schema.taskSteps.$inferSelect | undefined;
+
+        const outcome = await settle(
+          besidePeer(
+            () => post(`/tasks/${taskId}/steps/${STEP.stepId}/action`, { action }),
+            async (tx) => {
+              await peerSets(
+                STEP.id,
+                status === 'running'
+                  ? sql`status = 'running', error_message = null`
+                  : sql`status = 'done', ended_at = now(), output = '{"peer":"complete"}'::jsonb`,
+              )(tx);
+              [expected] = await tx
+                .select()
+                .from(schema.taskSteps)
+                .where(eq(schema.taskSteps.id, STEP.id));
+            },
+          ),
+        );
+
+        expect.soft(outcome).toMatchObject({
+          ok: false,
+          error:
+            action === 'retry_ai'
+              ? { status: 409, message: 'retry_ai is only available on a failed step' }
+              : notResumable,
+        });
+        expect.soft(await wholeRow()).toEqual(expected);
+        expect.soft(await wholeRow(OTHER.id)).toEqual(other);
+        expect
+          .soft(
+            await db.query.cliInvocations.findFirst({
+              where: eq(schema.cliInvocations.id, run!.id),
+            }),
+          )
+          .toEqual(run);
+        expect.soft((await taskRow(taskId)).orchestrationEpoch).toBe(3);
+        expect.soft(await eventTypes(taskId)).toEqual([]);
+        expect.soft(h.jobs).toEqual([]);
+        expect.soft(h.kills).toEqual([]);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'R3: loop Resume refuses a non-loop row whose completed iterations were reset before its lock',
+      async () => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, { status: 'failed', iterationCount: 1 });
+        const outcome = await settle(
+          besidePeer(
+            () => post(`/tasks/${taskId}/steps/${STEP.stepId}/action`, { action: 'resume' }),
+            peerSets(STEP.id, sql`iteration_count = 0, iterations = '[]'::jsonb`),
+          ),
+        );
+        expect.soft(outcome).toMatchObject({ ok: false, error: notResumable });
+        expect.soft(await wholeRow()).toMatchObject({ status: 'failed', iterationCount: 0 });
+        expect.soft((await taskRow(taskId)).orchestrationEpoch).toBe(3);
+        expect.soft(await eventTypes(taskId)).toEqual([]);
+        expect.soft(h.jobs).toEqual([]);
+        expect.soft(h.kills).toEqual([]);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it.each([
+      ['R4', 'failed', 'running', 'failed'],
+      ['R4', 'done', 'running', 'failed'],
+      ['R5', 'done', 'done', 'running'],
+      ['R6', 'done', 'done', 'done'],
+    ] as const)(
+      '%s: fan-out Resume rechecks a %s row now %s with its failed agent now %s',
+      async (_label, readAs, status, agentStatus) => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, { status: readAs });
+        const other = await seedStep(taskId, { status: 'waiting_cli' }, OTHER);
+        const [agent] = await db
+          .insert(schema.taskStepAgentMinings)
+          .values({
+            taskStepId: STEP.id,
+            agentId: 'peer-reviewer',
+            status: 'failed',
+          })
+          .returning();
+        const [kept] = await db
+          .insert(schema.taskStepAgentMinings)
+          .values({
+            taskStepId: STEP.id,
+            agentId: 'kept-reviewer',
+            status: 'done',
+          })
+          .returning();
+        let expected: typeof schema.taskSteps.$inferSelect | undefined;
+        let expectedAgent: typeof schema.taskStepAgentMinings.$inferSelect | undefined;
+        const outcome = await settle(
+          besidePeer(
+            () => post(`/tasks/${taskId}/steps/${STEP.stepId}/action`, { action: 'resume' }),
+            async (tx) => {
+              await tx
+                .update(schema.taskSteps)
+                .set({ status })
+                .where(eq(schema.taskSteps.id, STEP.id));
+              [expectedAgent] = await tx
+                .update(schema.taskStepAgentMinings)
+                .set({ status: agentStatus })
+                .where(eq(schema.taskStepAgentMinings.id, agent!.id))
+                .returning();
+              [expected] = await tx
+                .select()
+                .from(schema.taskSteps)
+                .where(eq(schema.taskSteps.id, STEP.id));
+            },
+          ),
+        );
+        expect.soft(outcome).toMatchObject({
+          ok: false,
+          error:
+            agentStatus === 'running'
+              ? {
+                  status: 409,
+                  code: 'fanout_in_flight',
+                  message:
+                    '1 terminal(s) are still running — wait for the fan-out to finish, or use Stop & retry to reset the whole step',
+                }
+              : notResumable,
+        });
+        expect.soft(await wholeRow()).toEqual(expected);
+        expect.soft(await wholeRow(OTHER.id)).toEqual(other);
+        expect
+          .soft(
+            await db.query.taskStepAgentMinings.findFirst({
+              where: eq(schema.taskStepAgentMinings.id, agent!.id),
+            }),
+          )
+          .toEqual(expectedAgent);
+        expect
+          .soft(
+            await db.query.taskStepAgentMinings.findFirst({
+              where: eq(schema.taskStepAgentMinings.id, kept!.id),
+            }),
+          )
+          .toEqual(kept);
+        expect.soft((await taskRow(taskId)).orchestrationEpoch).toBe(3);
+        expect.soft(await eventTypes(taskId)).toEqual([]);
+        expect.soft(h.jobs).toEqual([]);
+        expect.soft(h.kills).toEqual([]);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it.each(['resume', 'retry_ai'] as const)(
+      'R7: %s uses the failure and iteration from the held row when it remains eligible',
+      async (action) => {
+        const taskId = await seedTask('failed');
+        await seedStep(taskId, {
+          status: 'failed',
+          iterationCount: 1,
+          errorMessage: 'old error',
+          formValues: { answer: 'kept' },
+          detectOutput: { detected: true },
+        });
+        const response = await besidePeer(
+          () => post(`/tasks/${taskId}/steps/${STEP.stepId}/action`, { action }),
+          peerSets(STEP.id, sql`iteration_count = 2, error_message = 'latest error'`),
+        );
+        expect(response).toMatchObject({ status: 200, body: { ok: true, status: 'running' } });
+        const row = await wholeRow();
+        expect(row).toMatchObject({
+          status: 'running',
+          iterationCount: 2,
+          formValues: { answer: 'kept' },
+          detectOutput: { detected: true },
+        });
+        if (action === 'resume') {
+          expect(response.body).toMatchObject({ resumedFromIteration: 2 });
+          const event = await db.query.taskEvents.findFirst({
+            where: eq(schema.taskEvents.taskId, taskId),
+          });
+          expect(event?.payload).toMatchObject({ fromIteration: 2 });
+        } else expect(row.aiFixContext).toMatchObject({ priorError: 'latest error' });
+        expect(h.jobs).toHaveLength(1);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'R8: fan-out Resume keeps a degraded done row resumable and marks only agents still failed',
+      async () => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, { status: 'done', output: { verdict: 'degraded' } });
+        const [failed, completed] = await db
+          .insert(schema.taskStepAgentMinings)
+          .values([
+            { taskStepId: STEP.id, agentId: 'failed-reviewer', status: 'failed' },
+            { taskStepId: STEP.id, agentId: 'completed-reviewer', status: 'failed' },
+          ])
+          .returning();
+        const response = await besidePeer(
+          () => post(`/tasks/${taskId}/steps/${STEP.stepId}/action`, { action: 'resume' }),
+          async (tx) => {
+            await peerSets(STEP.id, sql`output = '{"verdict":"degraded"}'::jsonb`)(tx);
+            await tx
+              .update(schema.taskStepAgentMinings)
+              .set({ status: 'done' })
+              .where(eq(schema.taskStepAgentMinings.id, completed!.id));
+          },
+        );
+        expect(response).toMatchObject({ status: 200, body: { retriedAgents: 1 } });
+        expect(await wholeRow()).toMatchObject({
+          status: 'running',
+          output: { verdict: 'degraded' },
+        });
+        expect(
+          await db.query.taskStepAgentMinings.findFirst({
+            where: eq(schema.taskStepAgentMinings.id, completed!.id),
+          }),
+        ).toMatchObject({ status: 'done', userRetryRequestedAt: null });
+        expect(
+          (
+            await db.query.taskStepAgentMinings.findFirst({
+              where: eq(schema.taskStepAgentMinings.id, failed!.id),
+            })
+          )?.userRetryRequestedAt,
+        ).toBeInstanceOf(Date);
+        expect(h.jobs).toHaveLength(1);
+      },
+      TEST_TIMEOUT,
+    );
 
     it.each(['waiting_form', 'failed'] as const)(
       'S1: Skip refuses a %s row that a pass activated after the status was read',
