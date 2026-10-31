@@ -1007,7 +1007,9 @@ returns `agentRulesOverride` (NULL follows the default), and the card's save sen
 the tooling PATCH: text, `''` included, or null to follow the default again, the key absent leaving
 it. The PATCH validates the text before any write (`normalizeAgentRulesOverride`, a 400 with the
 reason otherwise; a body that is not a JSON object is refused 400 `invalid_body`, and one that is
-not JSON `invalid_json`, before any field is read), stores the normalised text, marks the outbox in the same transaction and answers
+not JSON `invalid_json`, before any field is read; a field of the wrong type, an unknown
+`ragEmbedAction` or an unknown `repoMcpServersAction` is refused 400 `Validation failed` with the field
+in `issues[].path`, before any lock or write), stores the normalised text, marks the outbox in the same transaction and answers
 with what it stored. "Save tooling" never sends the key, so an unrelated save can neither pin the
 default text as an override nor erase one. Choosing Override starts from the default text rather
 than an empty editor, since an empty override is a choice that writes no block (the card says so),

@@ -57,6 +57,7 @@ import {
   loadPlanEdges,
   loadPlanSkeletons,
 } from '@haive/shared/plan';
+import { requireJsonObject } from '../../lib/json-object.js';
 import { markPlanNodesTaskable } from '../../lib/mark-plan-node-taskable.js';
 import { loadStepFlags, loadTaskStepFlags } from '../../lib/step-flags.js';
 import {
@@ -1519,11 +1520,11 @@ const STEER_TEXT_MAX = 8192;
 taskRoutes.post('/:id/steer-active-cli', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
-  const body = (await c.req.json().catch(() => ({}))) as {
+  const body = requireJsonObject<{
     text?: unknown;
     invocationId?: unknown;
     steerId?: unknown;
-  };
+  }>(await c.req.json().catch(() => ({})));
   const text = typeof body.text === 'string' ? body.text.trim() : '';
   // Client-generated id, echoed back on the consumed frame so the viewer ticks
   // the exact list row (correlates by id, not text — so duplicate-text steers

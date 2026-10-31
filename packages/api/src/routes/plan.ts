@@ -56,6 +56,7 @@ import {
 import { getDb } from '../db.js';
 import { appendPlanAnswer, humanPlanAction } from '@haive/shared/plan-resolution';
 import { resolveRepoRoot } from './repos.js';
+import { requireJsonObject } from '../lib/json-object.js';
 import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
 import { requireAuth } from '../middleware/auth.js';
 import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
@@ -1005,7 +1006,7 @@ planRoutes.delete('/:id/plan', async (c) => {
       ),
     );
 
-  const body = (await c.req.json().catch(() => ({}))) as { confirm?: unknown };
+  const body = requireJsonObject<{ confirm?: unknown }>(await c.req.json().catch(() => ({})));
   const refusal = planDeleteRefusal({
     confirm: body.confirm,
     repoName: repo.name,
