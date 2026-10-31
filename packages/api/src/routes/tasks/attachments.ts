@@ -158,9 +158,9 @@ function safeUploadPath(raw: string): string {
 /** How an upload answers a path the containment walk refused, instead of an unhandled 500.
  *  Not `containmentHttpError` as it stands: its fallback reports every other error but running
  *  out of descriptors as a 400 and its `not-directory` answer is "File not found", both wrong for
- *  a write. A file standing where
- *  the upload needs a folder is a conflict the user can resolve; any other refusal gets the read
- *  routes' answer; anything that is not a refusal (a full disk) stays a 500. */
+ *  a write. A file standing where the upload needs a folder is a conflict the user can resolve;
+ *  any other refusal gets the read routes' answer; anything that is not a refusal (a full disk)
+ *  stays a 500. */
 function uploadPathError(err: unknown): never {
   if (isPathContainmentError(err, 'not-directory')) {
     throw new HttpError(409, 'A file already has the name of a folder in that path');
