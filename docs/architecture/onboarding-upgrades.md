@@ -525,7 +525,7 @@ and payloads without the old fence compatible. The
 complete raw watermark, journal and final checkout checks are unchanged. 12 and 03 consume the
 writer's reported paths for scoped staging.
 
-For bundled skills, 12 records main and sub-skill claims at the destinations saved by 09_5's
+For bundled skills, 12 records main and sub-skill claims (bar a path that names git data) at the destinations saved by 09_5's
 generation detect, preserving an explicit empty list and the legacy Claude default only when the
 destination field is absent. Completing repository membership does not claim files at additional
 destinations; an ordinary upgrade can offer missing maintained bundle paths later.
@@ -625,16 +625,12 @@ kind, schema version, template and written hashes, Haive version), written by 12
 `.git` (`isClaimablePath` through `namesGitData`, which mirrors git's NTFS and HFS+ checks: `.git`
 or `git~1` in any ASCII letter case, followed only by dots and spaces or by a `:` stream name, and
 `.git` with HFS+'s ignorable code points; a `\` separates segments as `/` does, and the check is linear in
-the path's length): a record never imports a claim to git data, 02's `safeDiskRel` refuses such a
-path as a backstop (so do 04's restore and undo, its put-back of an untracked row skips one, and an
-answer to a claim question at one is `invalid`), and 01 neither lists nor reads a ledger row imported
-before the rule. The convergent boot data migration `supersedeGitDataArtifacts` (`data-migrations.ts`)
+the path's length): a record never imports a claim to git data and no writer records a ledger row there: 12 skips such a rendering and names it in its warnings, 01's lazy backfill skips it with a logged warning before it reads the path, and the manual helper `scripts/reset-bundle-to-commit.ts` throws before it writes. 02's `safeDiskRel` refuses such a path as a backstop (so do 04's restore and undo, its put-back of an untracked row skips one, and an answer to a claim question at one is `invalid`), and 01 neither lists nor reads a ledger row imported before the rule. The convergent boot data migration `supersedeGitDataArtifacts` (`data-migrations.ts`)
 retires every live row at such a path at every boot (`superseded_at` and `updated_at` only, so
 `ledgerImportedSince` still counts an imported marker), so none counts in the banner, the onboarded
 and admission verdicts or the CLI membership seed. A claim file at such a path that an earlier
 release wrote, under its own file name, does not
-refuse the record: the codec reads it apart (`gitDataClaims`), the sync keeps it in the base for the
-writer to remove at the next write (and marks the record due), and no merge, import or set-aside
+refuse the record: the codec reads it apart (`gitDataClaims`), the sync keeps it in the base for the writer to remove at the next write or for the onboarding reset to take back (and marks the record due), and no merge, import or set-aside
 check reads it as a claim. Any other claim at a path no claim may name still refuses the whole
 record. The writer removes only a claim file the previous `base_snapshot` named
 and the new render no longer produces, so a teammate's unsynced file is never touched, and it
