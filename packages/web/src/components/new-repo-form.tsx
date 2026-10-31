@@ -20,7 +20,6 @@ import {
 } from './repos/github-oauth-connect';
 import { CredentialModal } from './credential-modal';
 import { FilesystemBrowser } from './filesystem-browser';
-import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 type Source = 'local_path' | 'git_https' | 'github_oauth' | 'upload' | 'blank';
 
@@ -33,6 +32,8 @@ interface GithubRepo {
 }
 
 const UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024; // 5 MiB
+/** Most repositories the picker lists at once; the rest are reached by typing. */
+const REPO_LIST_LIMIT = 100;
 
 interface UploadSession {
   id: string;
@@ -353,13 +354,12 @@ export function NewRepoForm() {
                         }
                         return (
                           <>
-                            {filtered.length > 100 && (
-                              <InlineMarkdown
-                                className="px-3 py-2 text-xs text-neutral-500"
-                                body={`Showing 100 of ${filtered.length} matches. Type to narrow the list.`}
-                              />
+                            {filtered.length > REPO_LIST_LIMIT && (
+                              <span className="block px-3 py-2 text-xs text-neutral-500">
+                                {`Showing ${Math.min(filtered.length, REPO_LIST_LIMIT)} of ${filtered.length} matches. Type to narrow the list.`}
+                              </span>
                             )}
-                            {filtered.slice(0, 100).map((r) => (
+                            {filtered.slice(0, REPO_LIST_LIMIT).map((r) => (
                               <button
                                 key={r.fullName}
                                 type="button"
