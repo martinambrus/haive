@@ -62,17 +62,17 @@ repositoryIntegrationRoutes.put('/:id/integrations', async (c) => {
     metadata: { restricted: body.restricted, added, removed },
   });
   await db.transaction(async (tx) => {
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`integration-allow-list:${repositoryId}`}, 0))`,
-    );
-    // A relink holds this row through its git work: give up with 409 busy rather than queue behind it.
-    const [stored] = await boundedLockWait(tx, () =>
-      tx
+    // Bound the advisory key too: a concurrent save may hold it while waiting on a relink's row.
+    const [stored] = await boundedLockWait(tx, async () => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`integration-allow-list:${repositoryId}`}, 0))`,
+      );
+      return tx
         .select({ restricted: schema.repositories.integrationsRestricted })
         .from(schema.repositories)
         .where(eq(schema.repositories.id, repositoryId))
-        .for('update'),
-    );
+        .for('update');
+    });
     if (!stored) throw new HttpError(404, 'Repository not found');
     const current = new Set(
       (

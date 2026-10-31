@@ -582,7 +582,9 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       expect(await writtenRows()).toEqual(before);
     } finally {
       release();
-      await Promise.all([relink, writer]);
+      // A failing writer assertion must still wait for the released relink to commit
+      // before afterEach deletes the actor and that actor's audit rows.
+      await Promise.allSettled([relink, writer]);
       h.gitHook = undefined;
     }
     expect((await relink).status).toBe(200);
@@ -698,6 +700,42 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       answeredBusyBehindRelink(() =>
         sendSetting('integrations', { restricted: true, connectionIds: [connection] }, 'PUT'),
       ),
+    30_000,
+  );
+  it(
+    'bounds both concurrent allow-list PUTs behind a held relink, including the advisory waiter',
+    () =>
+      answeredBusyBehindRelink(async () => {
+        // Keep the first PUT on the row longer than the second PUT's advisory budget.
+        // Equal deadlines can let the second win the key at the exact timeout turn.
+        h.lockTimeoutMs = 2_000;
+        const body = { restricted: true, connectionIds: [connection] };
+        const first = Promise.resolve(sendSetting('integrations', body, 'PUT'));
+        let second: Promise<Response> | undefined;
+        try {
+          await expect
+            .poll(
+              async () =>
+                (
+                  await db.execute(sql`
+          select 1 from pg_stat_activity a join pg_locks l on l.pid = a.pid
+          where a.datname = current_database() and not l.granted
+            and a.query like 'select %"repositories"%'
+        `)
+                ).length,
+              { timeout: 3_000 },
+            )
+            .toBeGreaterThan(0);
+          h.lockTimeoutMs = 300;
+          second = Promise.resolve(sendSetting('integrations', body, 'PUT'));
+          const answer = await answeredWithin(1_000, second);
+          expect(answer.status).toBe(409);
+          expect(await answer.json()).toEqual({ error: REPOSITORY_BUSY, code: null });
+          return await answeredWithin(3_000, first);
+        } finally {
+          await Promise.all([first, second]);
+        }
+      }),
     30_000,
   );
   it(
