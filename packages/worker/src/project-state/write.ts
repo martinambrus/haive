@@ -567,7 +567,7 @@ export async function writeProjectStateColumn(
     column: RenderContextColumn;
     /** The column is what it was before the write, so a failure leaves it rather than clearing it. */
     keepColumnOnFailure?: boolean;
-    /** A merge or rebase open in the checkout refuses the write, as the sweep refuses to start one. */
+    /** A merge, rebase, cherry-pick or revert open in the checkout refuses the write, as the sweep refuses to start one. */
     refuseDuringGitOperation?: boolean;
   },
 ): Promise<ProjectStateWriteResult> {

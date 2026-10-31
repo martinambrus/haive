@@ -624,7 +624,7 @@ export async function syncProjectStateFromCheckout(
   }: {
     repositoryId: string;
     repoPath: string;
-    /** An open merge or rebase holds the read. A checkout that changed since its first read always holds it. */
+    /** An open merge, rebase, cherry-pick or revert holds the read. A checkout that changed since its first read always holds it. */
     refuseDuringGitOperation?: boolean;
     expectedCheckout?: NamedCheckout;
   },

@@ -794,8 +794,9 @@ export async function reconcilePlanFromCheckout(
   });
 }
 
-/** The lock does not hold git off the checkout: what was read must still be there, and no merge or
- *  rebase may have opened since, or the bytes read in may be ones an abort takes back. */
+/** The lock does not hold git off the checkout: what was read must still be there, and no merge,
+ *  rebase, cherry-pick or revert may have opened since, or the bytes read in may be ones an abort
+ *  takes back. */
 async function assertCheckoutStillHolds(
   repoPath: string,
   bytes: Buffer,
