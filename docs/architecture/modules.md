@@ -97,7 +97,8 @@ the module loads again.
   attempts below are spent; a delayed advance every `MODULE_SCHEMA_POLL_MS` (5 s) looks again, so the
   step starts by itself once an ensure has succeeded, and no row fails and nothing needs a Retry. It
   is the pause park (`handleAdvanceStep`, see [Worker restarts](worker-restarts.md)), and a pause wins
-  over it. A step already past its start (a form answer, a finished CLI run, a fan-out continuation)
+  over it. The task's badge reads `waiting: module setup` (told apart by the module step id, never by
+  the line), and a park whose tick was lost is re-driven by the stalled sweep. A step already past its start (a form answer, a finished CLI run, a fan-out continuation)
   keeps its row as it is, and only its advance is put off by the same delayed job; a START hands its
   first step to the advance path so the park is written there. The park has no time bound, but
   it ends when the setup is spent (the flag reads `failed`, attempts used up): the next poll, or a

@@ -13,6 +13,7 @@ import {
   startPlanChat,
   submitPlanChatTurn,
   PLAN_CHAT_STEP_ID,
+  type ApiError,
   type CliProvider,
   type CliProvidersResponse,
   type PlanConversation,
@@ -64,6 +65,9 @@ const DEAD_POLL_MS = 30_000;
  *  chatted about for weeks would otherwise open as a wall of folded boxes. */
 const HISTORY_PREVIEW = 3;
 
+// Notify the currently mounted chat when an older instance settles its send.
+const draftListeners = new WeakMap<Map<string, string>, Set<() => void>>();
+
 /** How a conversation that can no longer take a turn ENDED. A plain completion
  *  needs no word — the date says everything — but a cancelled or failed one is
  *  a different fact about the same transcript and has to say so. */
@@ -78,6 +82,7 @@ export function PlanChat({
   onPatched,
   onRead,
   unreadCount = 0,
+  drafts: savedDrafts,
 }: {
   repositoryId: string;
   nodeId: string;
@@ -90,10 +95,34 @@ export function PlanChat({
   /** Unread replies on this node at the moment it was opened — where the
    *  "new" divider goes. */
   unreadCount?: number;
+  /** Page-owned drafts survive the detail panel's loading, tab and selection unmounts.
+   *  Keys include the repository as well as the node. */
+  drafts?: Map<string, string>;
 }) {
   const [messages, setMessages] = useState<PlanMessage[]>([]);
   const [conversations, setConversations] = useState<PlanConversation[]>([]);
-  const [draft, setDraft] = useState('');
+  const localDrafts = useRef(new Map<string, string>());
+  const drafts = savedDrafts ?? localDrafts.current;
+  const draftKey = `${repositoryId}:${nodeId}`;
+  const draft = drafts.get(draftKey) ?? '';
+  const [, setDraftRevision] = useState(0);
+  function setDraft(text: string): void {
+    if (text) drafts.set(draftKey, text);
+    else drafts.delete(draftKey);
+    draftListeners.get(drafts)?.forEach((redraw) => redraw());
+  }
+  useEffect(() => {
+    let listeners = draftListeners.get(drafts);
+    if (!listeners) {
+      listeners = new Set();
+      draftListeners.set(drafts, listeners);
+    }
+    const redraw = () => setDraftRevision((n) => n + 1);
+    listeners.add(redraw);
+    return () => {
+      listeners.delete(redraw);
+    };
+  }, [drafts]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [providers, setProviders] = useState<CliProvider[]>([]);
@@ -128,8 +157,11 @@ export function PlanChat({
   // re-render cannot re-send the same read.
   const markedRef = useRef<string | null>(null);
 
+  const displayedNodeRef = useRef(draftKey);
+  displayedNodeRef.current = draftKey;
   const reloadMessages = useCallback(async (): Promise<void> => {
     const res = await getPlanMessages(repositoryId, nodeId);
+    if (displayedNodeRef.current !== `${repositoryId}:${nodeId}`) return;
     setMessages(res.messages);
     setConversations(res.conversations);
   }, [repositoryId, nodeId]);
@@ -235,9 +267,7 @@ export function PlanChat({
         if (settled) return;
         polledDead = taskDead;
       } catch {
-        // A task that cannot be read is not a reason to spin; the next user
-        // action re-reads everything anyway.
-        return;
+        // Retry transient read failures at the same cadence while the task is displayed.
       }
       if (!cancelled) timer = setTimeout(() => void poll(), polledDead ? DEAD_POLL_MS : POLL_MS);
     };
@@ -295,6 +325,8 @@ export function PlanChat({
     if (!message) return;
     setSending(true);
     setError(null);
+    setDraft('');
+    let sent = false;
     try {
       if (liveTaskId && parked) {
         // The STEP writes this turn into the transcript. Sending it here as
@@ -306,16 +338,19 @@ export function PlanChat({
           ...(providerId ? { cliProviderId: providerId } : {}),
         });
       }
+      sent = true;
+      // Clear only the submitted node, even if a different node is now open.
       setDraft('');
       setPollRestart((n) => n + 1);
       await reloadMessages();
       onPatched();
     } catch (err) {
+      if (!sent && !drafts.has(draftKey)) setDraft(draft);
       const text = err instanceof Error ? err.message : 'Failed to send';
       // 409 from the submit route means the step is no longer holding a form —
       // the conversation ended under us. Re-read so the next attempt starts a
       // fresh one instead of retrying into the same wall.
-      if (/awaiting form submission/i.test(text)) {
+      if ((err as ApiError)?.code === 'step_form_not_waiting') {
         await reloadMessages().catch(() => {});
         setError('That conversation has ended. Send again to start a new one.');
       } else {

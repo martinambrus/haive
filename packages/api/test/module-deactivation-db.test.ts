@@ -925,7 +925,7 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect(sorted(h.kills)).toEqual(sorted([a.id, c.id]));
     });
 
-    it('stops a task parked on a step of the module while its schema is set up, and folds the park as idle', async () => {
+    it('stops a task parked on a step of the module while its schema is set up, and folds the park into carried idle time', async () => {
       await db.delete(schema.tasks).where(eq(schema.tasks.id, a.id));
       const parked = await task({ title: 'Parked', runListSnapshot: ['module.alpha.x'] });
       await db
@@ -938,7 +938,8 @@ describe.skipIf(!url)('module deactivation on Postgres', () => {
       expect(body.stopped[0]!.id).toBe(parked.id);
       const [after] = await observe([parked.id]);
       expect(after!.steps).toMatchObject([{ status: 'failed', waitingStartedAt: null }]);
-      expect(after!.steps[0]!.idleMs).toBeGreaterThanOrEqual(89_000);
+      expect(after!.steps[0]!.idleMs).toBe(0);
+      expect(after!.steps[0]!.carriedIdleMs).toBeGreaterThanOrEqual(89_000);
       expect(after!.events.map((ev) => [ev.eventType, ev.payload])).toMatchObject([
         ['task.stopped', { reason: 'module_deactivated' }],
       ]);

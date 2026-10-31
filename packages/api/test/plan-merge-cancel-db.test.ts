@@ -596,6 +596,23 @@ describe.skipIf(!url)('DELETE /plan/merge beside a completion and a peer, on Pos
     expect(cancelJobs()).toHaveLength(1);
   });
 
+  it.each(['', 'not-a-uuid'])(
+    'P11: taskId=%j answers cancelled:false and leaves the open merge untouched',
+    async (taskId) => {
+      const current = await seedTask('running', ['running'], { pausedAt: new Date() });
+      await seedLiveRun(current.taskId, current.stepRowIds[0]!);
+      const before = await snapshot(current.taskId);
+
+      expect(await removeMerge(taskId)).toEqual({
+        status: 200,
+        body: { ok: true, cancelled: false },
+      });
+      expect(await snapshot(current.taskId)).toEqual(before);
+      expect(h.queued).toEqual([]);
+      expect(h.killed).toEqual([]);
+    },
+  );
+
   it(
     'P6: over two pending open rows B and A, waits for A without holding B and cancels the merge',
     async () => {

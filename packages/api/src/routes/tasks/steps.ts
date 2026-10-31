@@ -56,6 +56,7 @@ import {
   cancelLiveRuns,
   clearTaskPause,
   reofferParkedSteps,
+  startIfNeverStarted,
   stopActiveCliInvocations,
   withoutGateAnswer,
 } from '../../lib/task-control.js';
@@ -823,7 +824,12 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const step = stepRows[0];
-  if (!step) throw new HttpError(409, `No step awaiting form submission for id ${stepId}`);
+  if (!step)
+    throw new HttpError(
+      409,
+      `No step awaiting form submission for id ${stepId}`,
+      'step_form_not_waiting',
+    );
   const normalized = normalizeStepFormValues(stepId, body.values);
   if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
   const values = normalized.data;
@@ -907,7 +913,12 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const step = stepRows[0];
-  if (!step) throw new HttpError(409, `No step awaiting clarification for id ${stepId}`);
+  if (!step)
+    throw new HttpError(
+      409,
+      `No step awaiting clarification for id ${stepId}`,
+      'step_form_not_waiting',
+    );
 
   const now = new Date();
   const closedIdleMs = step.waitingStartedAt
@@ -1260,6 +1271,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
             updatedAt: now,
           })
           .where(eq(schema.taskSteps.id, step.id));
+        await startIfNeverStarted(tx, step.id);
         const bumped = await tx
           .update(schema.tasks)
           .set({
@@ -1381,6 +1393,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
+      await startIfNeverStarted(tx, step.id);
       const result = await moveTaskToStep(tx, id, step, leftActive, now);
       await tx.insert(schema.taskEvents).values({
         taskId: id,
@@ -1485,6 +1498,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           updatedAt: now,
         })
         .where(eq(schema.taskSteps.id, step.id));
+      await startIfNeverStarted(tx, step.id);
       const result = await moveTaskToStep(tx, id, step, leftActive, now);
       await tx.insert(schema.taskEvents).values({
         taskId: id,
