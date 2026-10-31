@@ -300,9 +300,10 @@ describe('data Save failure and race controls', () => {
   it.each([
     [{ outcome: 'missing' }, 'checkout_missing'],
     [{ outcome: 'refused', reason: 'record' }, 'record_refused'],
+    [{ outcome: 'refused', reason: 'context' }, 'render_context_refused'],
     [{ outcome: 'absent' }, 'record_absent'],
     [{ outcome: 'superseded' }, 'checkout_changed'],
-    [{ outcome: 'held', reason: 'checkout' }, 'checkout_held'],
+    [{ outcome: 'held', reason: 'checkout' }, 'checkout_changed'],
     [{ outcome: 'held', reason: 'recovery' }, 'write_pending'],
     [{ outcome: 'held', reason: 'sync', code: 'write_pending' }, 'write_pending'],
     [{ outcome: 'held', reason: 'sync', code: 'git_operation' }, 'git_operation'],

@@ -244,12 +244,14 @@ async function saveHaiveDataInScope(payload: HaiveDataSavePayload): Promise<Haiv
       case 'superseded':
         fail({ code: 'checkout_changed' });
       case 'refused':
-        fail({ code: 'record_refused' });
+        fail({
+          code: refreshed.reason === 'context' ? 'render_context_refused' : 'record_refused',
+        });
       case 'held': {
         const holds = holdsFor(await factsAt(db, repo, payload));
         const hold = holds[0];
         if (hold) fail(hold);
-        if (refreshed.reason === 'checkout') fail({ code: 'checkout_held', taskIds: [] });
+        if (refreshed.reason === 'checkout') fail({ code: 'checkout_changed' });
         fail({
           code:
             refreshed.code ??

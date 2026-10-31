@@ -68,6 +68,7 @@ export type HaiveDataRefusal =
         | 'record_absent'
         | 'record_unreadable'
         | 'record_refused'
+        | 'render_context_refused'
         | 'checkout_changed'
         | 'projections_changing'
         | 'plan_mirror_held'
