@@ -501,14 +501,20 @@ async function linkedMergeDir() {
 }
 it('T397 D3 a merge directory behind a link is unreadable, not vanished', async () => {
   const dir = await linkedMergeDir();
-  await expect(mergeCommitted(dir, 'feature/x')).rejects.toThrow();
+  await expect(mergeCommitted(dir, 'feature/x')).rejects.toHaveProperty(
+    'name',
+    'PathContainmentError',
+  );
 });
 it('T397 D7 a failed stat cannot silently skip hand-back before a merge', async () => {
   const asRoot = vi.spyOn(process, 'getuid').mockReturnValue(0);
   try {
     const dir = await linkedMergeDir();
     const before = await sha(dir);
-    await expect(openMerge(dir, 'feature/x', ['--no-edit'], IDENTITY)).rejects.toThrow();
+    await expect(openMerge(dir, 'feature/x', ['--no-edit'], IDENTITY)).rejects.toHaveProperty(
+      'name',
+      'PathContainmentError',
+    );
     expect(await sha(dir)).toBe(before);
   } finally {
     asRoot.mockRestore();
