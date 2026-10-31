@@ -361,6 +361,26 @@ describe('PlanChat with a live conversation', () => {
     expect(taskFetches()).toBe(4);
   });
 
+  it.each([
+    { code: 'step_form_not_waiting', message: 'The form has already moved on.', ended: true },
+    { code: undefined, message: 'No step awaiting form submission', ended: false },
+    { code: 'other_conflict', message: 'No step awaiting form submission', ended: false },
+  ])(
+    'classifies an ended form by code ($code), with copy: $message',
+    async ({ code, message, ended }) => {
+      await open(taskResponse(PLAN_CHAT_STEP_ID, { parked: true }));
+      net.submitPlanChatTurn.mockRejectedValueOnce(
+        Object.assign(new Error(message), { code, status: 409 }),
+      );
+      await typeDraft('Follow up');
+      await press('Send');
+      expect(shown().find((el) => el.type === FormError)?.props.message).toBe(
+        ended ? 'That conversation has ended. Send again to start a new one.' : message,
+      );
+      expect(host('textarea')?.props.value).toBe('Follow up');
+    },
+  );
+
   it('ends a parked conversation with the blank form answer', async () => {
     await open(taskResponse(PLAN_CHAT_STEP_ID, { parked: true }));
     await press('End conversation');

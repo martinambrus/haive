@@ -823,7 +823,12 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
     .orderBy(desc(schema.taskSteps.round))
     .limit(1);
   const step = stepRows[0];
-  if (!step) throw new HttpError(409, `No step awaiting form submission for id ${stepId}`);
+  if (!step)
+    throw new HttpError(
+      409,
+      `No step awaiting form submission for id ${stepId}`,
+      'step_form_not_waiting',
+    );
   const normalized = normalizeStepFormValues(stepId, body.values);
   if (!normalized.success) throw new HttpError(400, normalized.issues.join('; '));
   const values = normalized.data;

@@ -13,6 +13,7 @@ import {
   startPlanChat,
   submitPlanChatTurn,
   PLAN_CHAT_STEP_ID,
+  type ApiError,
   type CliProvider,
   type CliProvidersResponse,
   type PlanConversation,
@@ -348,7 +349,7 @@ export function PlanChat({
       // 409 from the submit route means the step is no longer holding a form —
       // the conversation ended under us. Re-read so the next attempt starts a
       // fresh one instead of retrying into the same wall.
-      if (/awaiting form submission/i.test(text)) {
+      if ((err as ApiError)?.code === 'step_form_not_waiting') {
         await reloadMessages().catch(() => {});
         setError('That conversation has ended. Send again to start a new one.');
       } else {
