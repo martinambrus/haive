@@ -341,16 +341,41 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       addUser(victim);
       const lookup = vi.spyOn((h.db as any).query.users, 'findFirst');
       lookup.mockClear();
-      await expectRefused(() => login(victim, WRONG, { peer: peer(1) }));
-      for (let i = 0; i < 19; i++)
-        await expectRefused(() => login(mail(`audit-new-${i}`), WRONG, { peer: peer(1) }));
-      expect(lookup).not.toHaveBeenCalled();
-      expect(throttled()[0]).toMatchObject({
-        targetId: null,
-        metadata: { reason: 'throttled', limiter: 'address' },
+      const insert = (h.db as any).insert;
+      let release!: () => void;
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
       });
-      expect(throttled()).toHaveLength(1);
-      expect(await client.get(`${ipKey('login', peer(1))}:audit`)).toBe('1');
+      const writes: Promise<unknown>[] = [];
+      const held = vi.spyOn(h.db as any, 'insert').mockImplementation((table) => {
+        const query = insert(table);
+        if (table !== schema.auditEvents) return query;
+        return {
+          values: (values: unknown) => {
+            const write = resume.then(() => query.values(values));
+            writes.push(write);
+            return write;
+          },
+        };
+      });
+      try {
+        await expectRefused(() => login(victim, WRONG, { peer: peer(1) }));
+        for (let i = 0; i < 19; i++)
+          await expectRefused(() => login(mail(`audit-new-${i}`), WRONG, { peer: peer(1) }));
+        release();
+        await vi.waitFor(() => expect(throttled()).toHaveLength(1), { timeout: 15_000 });
+        expect(lookup).not.toHaveBeenCalled();
+        expect(throttled()[0]).toMatchObject({
+          targetId: null,
+          metadata: { reason: 'throttled', limiter: 'address' },
+        });
+        expect(throttled()).toHaveLength(1);
+        expect(await client.get(`${ipKey('login', peer(1))}:audit`)).toBe('1');
+      } finally {
+        release();
+        await Promise.all(writes);
+        held.mockRestore();
+      }
     });
     it('preserves 429 and skips the database when the Redis audit gate fails', async () => {
       const email = mail('audit-gate-error');
