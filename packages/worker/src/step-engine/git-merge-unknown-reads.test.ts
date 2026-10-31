@@ -488,3 +488,18 @@ it('T397 fix4 a vanished merge directory is not committed', async () => {
   await rm(dir, { recursive: true, force: true });
   await expect(mergeCommitted(dir, 'feature/x')).resolves.toBe(false);
 });
+
+async function linkedMergeDir() {
+  const root = await clean();
+  const real = path.join(root, 'real');
+  await mkdir(real);
+  await mkdir(path.join(root, '.haive'));
+  const dir = path.join(real, 'merge');
+  await git(root, ['worktree', 'add', '-b', 'linked-base', dir, 'HEAD']);
+  await symlink(real, path.join(root, '.haive/worktrees'));
+  return path.join(root, '.haive/worktrees/merge');
+}
+it('T397 D3 a merge directory behind a link is unreadable, not vanished', async () => {
+  const dir = await linkedMergeDir();
+  await expect(mergeCommitted(dir, 'feature/x')).rejects.toThrow();
+});

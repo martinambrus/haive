@@ -44,7 +44,10 @@ export async function mergeCommitted(worktreePath: string, branch: string): Prom
   const head = await revParse(worktreePath, 'MERGE_HEAD');
   if (head !== null) return false; // merge still open (not committed)
   const location = workspaceAnchor(worktreePath);
-  if ((await lstatNoFollow(location.anchor, location.prefix.replace(/\/$/, ''))) === null)
+  if (
+    (await lstatNoFollow(location.anchor, location.prefix.replace(/\/$/, ''), { strict: true })) ===
+    null
+  )
     return false; // a removed merge worktree must be reopened by the resolver
 
   const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
