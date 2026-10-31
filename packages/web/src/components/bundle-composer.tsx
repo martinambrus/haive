@@ -153,7 +153,12 @@ export function BundleComposer({
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [filesByBundle, setFilesByBundle] = useState<Record<string, BundleFilesState>>({});
 
+  const fileGenerations = useRef<Record<string, number>>({});
+  const expandedIdsRef = useRef(expandedIds);
+  expandedIdsRef.current = expandedIds;
+
   const loadBundleFiles = async (bundleId: string): Promise<void> => {
+    const generation = fileGenerations.current[bundleId] ?? 0;
     setFilesByBundle((prev) => ({
       ...prev,
       [bundleId]: { loading: true, files: [], truncated: false, cap: 0, error: null },
@@ -175,27 +180,35 @@ export function BundleComposer({
         truncated: boolean;
         cap: number;
       };
-      setFilesByBundle((prev) => ({
-        ...prev,
-        [bundleId]: {
-          loading: false,
-          files: data.files,
-          truncated: data.truncated,
-          cap: data.cap,
-          error: null,
-        },
-      }));
+      setFilesByBundle((prev) =>
+        generation !== (fileGenerations.current[bundleId] ?? 0)
+          ? prev
+          : {
+              ...prev,
+              [bundleId]: {
+                loading: false,
+                files: data.files,
+                truncated: data.truncated,
+                cap: data.cap,
+                error: null,
+              },
+            },
+      );
     } catch (err) {
-      setFilesByBundle((prev) => ({
-        ...prev,
-        [bundleId]: {
-          loading: false,
-          files: [],
-          truncated: false,
-          cap: 0,
-          error: err instanceof Error ? err.message : String(err),
-        },
-      }));
+      setFilesByBundle((prev) =>
+        generation !== (fileGenerations.current[bundleId] ?? 0)
+          ? prev
+          : {
+              ...prev,
+              [bundleId]: {
+                loading: false,
+                files: [],
+                truncated: false,
+                cap: 0,
+                error: err instanceof Error ? err.message : String(err),
+              },
+            },
+      );
     }
   };
 
@@ -265,6 +278,22 @@ export function BundleComposer({
           itemCount: (b.itemCounts?.agent ?? 0) + (b.itemCounts?.skill ?? 0),
         }));
         const current = valueRef.current;
+        // Ingestion changes the tree after acceptance. Drop only when it becomes final,
+        // and fence out requests that started against the previous tree.
+        for (const bundle of next) {
+          if (
+            bundle.status !== 'syncing' &&
+            current.some((v) => v.id === bundle.id && v.status === 'syncing')
+          ) {
+            fileGenerations.current[bundle.id] = (fileGenerations.current[bundle.id] ?? 0) + 1;
+            setFilesByBundle((prev) => {
+              const remaining = { ...prev };
+              delete remaining[bundle.id];
+              return remaining;
+            });
+            if (expandedIdsRef.current.has(bundle.id)) void loadBundleFiles(bundle.id);
+          }
+        }
         const same =
           next.length === current.length &&
           next.every((n, i) => {
@@ -323,12 +352,6 @@ export function BundleComposer({
       });
       if (!res.ok) throw new Error(`resync failed (${res.status})`);
       onChange(value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing' } : v)));
-      // A resync can change the tree, as Replace ZIP does: re-fetch the listing on next expand.
-      setFilesByBundle((prev) => {
-        const next = { ...prev };
-        delete next[entry.id];
-        return next;
-      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -382,12 +405,6 @@ export function BundleComposer({
       onChange(
         value.map((v) => (v.id === entry.id ? { ...v, status: 'syncing', itemCount: 0 } : v)),
       );
-      // Drop cached file listing — it'll re-fetch on next expand.
-      setFilesByBundle((prev) => {
-        const next = { ...prev };
-        delete next[entry.id];
-        return next;
-      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
