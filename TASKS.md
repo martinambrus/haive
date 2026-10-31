@@ -936,7 +936,7 @@ From the T421 review (2026-10-31). PRE-EXISTING, minor, conservative direction. 
 
 ### T469 · FNF[git-data-ledger-rows-2] · a reset leaves a git-data claim file no ledger row names; three writers record ledger rows with no path check (+1)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T05:02Z · last: 2026-10-31T05:02Z
 From the T421 fix-round review (2026-10-31). PRE-EXISTING, minor.
 
 1. api routes/repos.ts (~:2568-2574): a git-data claim file named by no ledger row on this install (for example a teammate's older-release file the sync read into the base; it never creates a row) is still left by an onboarding reset, and the record then reads refused, so the next record write throws (confirmed by a one-off run). Direction: also remove base claims that name git data; `baseRecord` (~:3100) is already read there.
