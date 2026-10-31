@@ -58,3 +58,11 @@ it('replaces an artifact hardlink without rewriting the other inode name', async
   expect((await lstat(path.join(root, 'artifact'))).ino).not.toBe(before.ino);
   expect(await readFile(path.join(root, 'artifact'), 'utf8')).toBe('new artifact');
 });
+
+it.each(['.git/hooks/pre-commit', 'sub/.GIT/config', '.git./config'])(
+  'refuses %s, which names git data, and creates neither a file nor a directory',
+  async (rel) => {
+    await expect(writeRenderedBundleFile(root, rel, 'x')).rejects.toThrow();
+    expect(await readdir(root)).toEqual(['unrelated']);
+  },
+);

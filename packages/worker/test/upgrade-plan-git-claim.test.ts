@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '@haive/database';
+import { namesGitData } from '@haive/shared/project-state';
 import { upgradePlanStep } from '../src/step-engine/steps/onboarding-upgrade/01-upgrade-plan.js';
+import {
+  expandManifestFor,
+  type TemplateRenderContext,
+} from '../src/step-engine/template-manifest.js';
 import {
   PROVIDERS,
   REPO,
@@ -13,6 +18,7 @@ import {
   newDb,
   seedProviders,
   seedRepository,
+  type LoggerCalls,
 } from './support/upgrade-plan-fixtures.js';
 
 const COLUMN = {
@@ -73,4 +79,48 @@ describe('01 and a ledger row that names a path in git data', () => {
       expect(JSON.stringify(detected)).not.toContain('secret-token');
     },
   );
+});
+
+describe('01 backfills no row at a path that names git data', () => {
+  it('records no row at a git-data agent target of a column that names no CLIs, says so, and still records the ordinary one', async () => {
+    const { enabledCliProviders: _membership, ...unnamed } = COLUMN;
+    const column = {
+      ...unnamed,
+      agentTargets: [
+        { dir: '.git/hooks', format: 'markdown', supportsLsp: false },
+        ...COLUMN.agentTargets,
+      ],
+    };
+    const rendered = { ...column, enabledCliProviders: [] } as unknown as TemplateRenderContext;
+    for (const r of expandManifestFor(rendered)) {
+      if (r.templateId !== 'agent.code-reviewer') continue;
+      await mkdir(dirname(join(repo, r.diskPath)), { recursive: true });
+      await writeFile(join(repo, r.diskPath), r.content, 'utf8');
+    }
+    const fake = newDb();
+    seedProviders(fake, PROVIDERS);
+    seedRepository(fake, { source: 'git_https', rtkEnabled: false, renderContext: column });
+    const logs: LoggerCalls = { calls: [] };
+    const ctx = ctxFor(fake, repo, logs);
+
+    const detected = await upgradePlanStep.detect!(ctx);
+    expect(detected.ranBackfill).toBe(true);
+    expect(detected.renderCtxSnapshot.agentTargets).toContainEqual(
+      expect.objectContaining({ dir: '.git/hooks' }),
+    );
+    const out = await upgradePlanStep.apply(ctx, {
+      detected,
+      formValues: {},
+      iteration: 0,
+      previousIterations: [],
+    });
+
+    const paths = fake.rows(schema.onboardingArtifacts).map((r) => r.diskPath as string);
+    expect(paths.filter(namesGitData)).toEqual([]);
+    expect(paths).toContain('.claude/agents/code-reviewer.md');
+    expect(out.backfilledRows).toBe(paths.length);
+    expect(logs.calls.filter((c) => c.level === 'warn').map((c) => c.args[0])).toContainEqual(
+      expect.objectContaining({ diskPath: '.git/hooks/code-reviewer.md' }),
+    );
+  });
 });

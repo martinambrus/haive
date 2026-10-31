@@ -22,6 +22,7 @@ import {
   skillTargetDirs,
   foreignReason,
   isClaimablePath,
+  namesGitData,
   rtkBlockToRestore,
   rtkLeftoversToRemove,
   sameValue,
@@ -352,6 +353,13 @@ export const upgradePlanStep: StepDefinition<UpgradePlanDetect, UpgradePlanOutpu
       const haiveVersion = getHaiveVersion();
       for (const r of expanded) {
         if (offered.has(r.diskPath)) continue;
+        if (namesGitData(r.diskPath)) {
+          ctx.logger.warn(
+            { diskPath: r.diskPath, repositoryId: detected.repositoryId },
+            'upgrade-plan: backfill skipped a rendering that names git data',
+          );
+          continue;
+        }
         let recorded;
         if (r.templateKind === CLI_RULES_TEMPLATE_KIND) {
           // The region, never the whole file: a rollback writes this row's content into the region.
