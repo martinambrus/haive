@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import { mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -78,6 +79,43 @@ it('lists nothing from a child directory replaced by a link after its parent was
   const remaining = [];
   for await (const entry of walk) remaining.push(entry);
   expect(remaining).toEqual([]);
+});
+// A FileHandle that is reclaimed unclosed is fatal on Node 26, so a walk that is left early (a
+// `break`, a throw in the loop body) must still close every directory it holds, at every level.
+const openFds = () => readdirSync('/proc/self/fd').length;
+async function deepTree() {
+  root = await mkdtemp(path.join(tmpdir(), 'safe-walk-'));
+  await mkdir(path.join(root, 'deep/a/b/c'), { recursive: true });
+  await writeFile(path.join(root, 'deep/a/b/c/one'), '1');
+  await writeFile(path.join(root, 'deep/a/b/c/two'), '2');
+}
+it('closes every held directory when the walk runs to its end', async () => {
+  await deepTree();
+  const before = openFds();
+  const found = [];
+  for await (const entry of walkFilesNoFollow(root, 'deep')) found.push(entry.path);
+  expect(found).toEqual(['a/b/c/one', 'a/b/c/two']);
+  expect(openFds()).toBe(before);
+});
+it('closes every held directory when the loop breaks three levels down', async () => {
+  await deepTree();
+  const before = openFds();
+  for await (const entry of walkFilesNoFollow(root, 'deep')) {
+    expect(entry.path).toBe('a/b/c/one');
+    // The levels are held while the walk is suspended, so a count that never moved proves nothing.
+    expect(openFds()).toBeGreaterThan(before);
+    break;
+  }
+  expect(openFds()).toBe(before);
+});
+it('closes every held directory when the loop body throws', async () => {
+  await deepTree();
+  const before = openFds();
+  const failing = async () => {
+    for await (const entry of walkFilesNoFollow(root, 'deep')) throw new Error(`at ${entry.path}`);
+  };
+  await expect(failing()).rejects.toThrow('at a/b/c/one');
+  expect(openFds()).toBe(before);
 });
 it('rejects invalid relative paths', async () => {
   await fixture();
