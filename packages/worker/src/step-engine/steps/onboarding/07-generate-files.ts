@@ -30,7 +30,6 @@ import {
   normalizeContent,
   sha256Hex,
   unmanagedAgentsDir,
-  AGENT_DIRECTORIES,
 } from '@haive/shared';
 import { agentFilePath } from '@haive/shared/project-state';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
@@ -48,7 +47,7 @@ import {
   shouldEmitAgentsReadme,
   stubCustomAgent,
 } from './_agent-templates.js';
-import { loadCliProviderMetadata, loadPreviousStepOutput } from './_helpers.js';
+import { isAgentTargetDir, loadCliProviderMetadata, loadPreviousStepOutput } from './_helpers.js';
 import {
   buildRtkAwarenessBlock,
   buildRtkTemplateItems,
@@ -477,11 +476,6 @@ export async function findUnmanagedAgentFiles(
     if (files.length > 0) out.push({ dir: target.dir, files });
   }
   return out;
-}
-
-/** Stored targets must name an exact native agent destination from the provider catalog. */
-function isAgentTargetDir(dir: string): boolean {
-  return !namesGitData(dir) && AGENT_DIRECTORIES.includes(dir);
 }
 
 /** Names are shown, not just counted: the choice is "are these still wanted", which

@@ -6,6 +6,7 @@ import type { StepContext } from '../../step-definition.js';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import {
+  AGENT_DIRECTORIES,
   CLI_PROVIDER_CATALOG,
   type CliProviderMetadata,
   type CliProviderName,
@@ -152,6 +153,11 @@ export async function resolveTaskSkillTargetDirs(
     if (names.success && names.data !== undefined) return skillTargetDirs(names.data);
   }
   return resolveSkillTargetDirs(ctx.db, ctx.userId, fallback, task?.repositoryId);
+}
+
+/** Stored targets must name an exact native agent destination from the provider catalog. */
+export function isAgentTargetDir(dir: string): boolean {
+  return !namesGitData(dir) && AGENT_DIRECTORIES.includes(dir);
 }
 
 /** The reset and these writers share the catalog's exact directory inventory. */

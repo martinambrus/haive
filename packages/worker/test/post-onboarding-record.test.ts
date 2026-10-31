@@ -252,7 +252,7 @@ describe('12 records the cli-rules region from the override 07 wrote it from', (
   });
 });
 
-describe('12 records no artifact row at a path that names git data', () => {
+describe('12 records agent artifacts only at catalog destinations', () => {
   const BUNDLE = '00000000-0000-4000-8000-0000000000e1';
   const BUNDLE_AGENT = {
     id: 'billing',
@@ -270,55 +270,50 @@ describe('12 records no artifact row at a path that names git data', () => {
     antiPatterns: [],
   };
 
-  it('records no row at a git-data agent target, says so, and still records the ordinary ones', async () => {
-    const s = await setup('none', {
-      ...DETECT,
-      agentTargets: [
-        { dir: '.git/hooks', format: 'markdown', supportsLsp: true },
-        ...REFERENCE_CONTEXT.agentTargets,
-      ],
-    });
-    s.fake.insert(schema.customBundles, {
-      id: BUNDLE,
-      userId: USER,
-      repositoryId: REPO,
-      name: 'acme-kit',
-      sourceType: 'zip',
-      storageRoot: '/bundles/acme-kit',
-    });
-    s.fake.insert(schema.customBundleItems, {
-      bundleId: BUNDLE,
-      kind: 'agent',
-      sourceFormat: 'claude-md',
-      sourcePath: 'agents/billing.md',
-      normalizedSpec: BUNDLE_AGENT,
-      contentHash: 'c'.repeat(64),
-      schemaVersion: 1,
-    });
+  it.each(['.git/hooks', 'other/agents'])(
+    'records no agent rows at %s and keeps catalog rows',
+    async (dir) => {
+      const s = await setup('none', {
+        ...DETECT,
+        agentTargets: [
+          { dir, format: 'markdown', supportsLsp: true },
+          ...REFERENCE_CONTEXT.agentTargets,
+        ],
+      });
+      s.fake.insert(schema.customBundles, {
+        id: BUNDLE,
+        userId: USER,
+        repositoryId: REPO,
+        name: 'acme-kit',
+        sourceType: 'zip',
+        storageRoot: '/bundles/acme-kit',
+      });
+      s.fake.insert(schema.customBundleItems, {
+        bundleId: BUNDLE,
+        kind: 'agent',
+        sourceFormat: 'claude-md',
+        sourcePath: 'agents/billing.md',
+        normalizedSpec: BUNDLE_AGENT,
+        contentHash: 'c'.repeat(64),
+        schemaVersion: 1,
+      });
 
-    const out = await recordWritten(s.apply());
+      const out = await recordWritten(s.apply());
 
-    const paths = s.fake.rows(schema.onboardingArtifacts).map((r) => r.diskPath as string);
-    expect(paths.filter(namesGitData)).toEqual([]);
-    expect(paths).toEqual(
-      expect.arrayContaining([
-        '.claude/agents/code-reviewer.md',
-        '.claude/agents/README.md',
-        '.claude/agents/billing.md',
-      ]),
-    );
-    expect(out.artifactRowsWritten).toBe(paths.length);
-    for (const refused of [
-      '.git/hooks/code-reviewer.md',
-      '.git/hooks/README.md',
-      '.git/hooks/billing.md',
-    ]) {
-      expect(
-        out.warnings.some((w) => w.includes(refused)),
-        refused,
-      ).toBe(true);
-    }
-  });
+      const paths = s.fake.rows(schema.onboardingArtifacts).map((r) => r.diskPath as string);
+      expect(paths.filter(namesGitData)).toEqual([]);
+      expect(paths.filter((p) => p.startsWith(`${dir}/`))).toEqual([]);
+      expect(paths).toEqual(
+        expect.arrayContaining([
+          '.claude/agents/code-reviewer.md',
+          '.claude/agents/README.md',
+          '.claude/agents/billing.md',
+        ]),
+      );
+      expect(out.artifactRowsWritten).toBe(paths.length);
+      expect(out.warnings.filter((w) => w.includes(dir))).toHaveLength(1);
+    },
+  );
 });
 
 describe('12 reports what its record write did', () => {
