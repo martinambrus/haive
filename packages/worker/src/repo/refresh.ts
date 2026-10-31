@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { UnrecoverableError } from 'bullmq';
 import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import {
@@ -484,15 +485,34 @@ async function rebuild(
       ? await buildCredentialHelper(db, payload.credentialsId, payload.userId, payload.remoteUrl)
       : undefined;
   const aside = await moveAside(repoStorageRoot, rel);
+  // Publish a folder copy only after it finishes. A failed or interrupted copy must never
+  // leave a partial checkout that the next refresh could mistake for ready.
+  const stagingRel = fromFolder ? `${rel}.rebuild-${randomUUID()}` : null;
   try {
     if (fromFolder) {
-      await ensureDirNoFollow(repoStorageRoot, rel);
-      await copyTree(fromFolder, dest);
+      await ensureDirNoFollow(repoStorageRoot, stagingRel!);
+      await copyTree(fromFolder, path.join(repoStorageRoot, stagingRel!));
+      await renameNoFollow(repoStorageRoot, stagingRel!, rel, { noReplace: true });
     } else {
       await ensureDirNoFollow(repoStorageRoot, payload.userId);
       await gitClone(fromRemote!, dest, payload.branch, auth);
     }
   } catch (err) {
+    if (stagingRel) {
+      try {
+        await removeNoFollow(repoStorageRoot, stagingRel, { recursive: true });
+      } catch (cleanupErr) {
+        logger.warn(
+          { err: cleanupErr, stagingRel },
+          'unfinished refresh copy could not be removed',
+        );
+        throw failedAfterMove(
+          `the new checkout could not be built (${(err instanceof Error ? err.message : String(err)).trim()}); the unfinished copy was kept next to the checkout as ${path.basename(stagingRel)} because cleanup failed (${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)})`,
+          aside,
+          err,
+        );
+      }
+    }
     throw failedAfterMove(
       `the new checkout could not be built (${(err instanceof Error ? err.message : String(err)).trim()})`,
       aside,

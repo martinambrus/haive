@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import {
   mkdir,
+  lstat,
   mkdtemp,
   readFile,
   readdir,
@@ -22,6 +23,19 @@ import type { Database } from '@haive/database';
 import type { RepoJobPayload } from '@haive/shared';
 import { failGit, type FakeGit } from './support/fake-git.js';
 import { killGit } from './support/kill-git.js';
+
+const fsFaults = vi.hoisted(() => ({ remove: false }));
+vi.mock('@haive/shared/fs-safe', async (original) => {
+  const real = await original<typeof import('@haive/shared/fs-safe')>();
+  return {
+    ...real,
+    removeNoFollow: async (...args: Parameters<typeof real.removeNoFollow>) => {
+      if (fsFaults.remove && args[1].includes('.rebuild-'))
+        throw Object.assign(new Error('staging cleanup EIO'), { code: 'EIO' });
+      return real.removeNoFollow(...args);
+    },
+  };
+});
 
 const h = vi.hoisted(() => ({
   persist: vi.fn(),
@@ -102,6 +116,7 @@ beforeEach(async () => {
   row.status = 'cloning';
   h.holding = 0;
   h.copyFault = null;
+  fsFaults.remove = false;
   h.seed.mockResolvedValue(undefined);
   delete row.statusMessage;
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
@@ -580,4 +595,69 @@ it('an unreadable first gate after a retry puts pending bytes and index back', a
   expect(await readFile(path.join(dest, file), 'utf8')).toBe('pending\n');
   expect(await git(dest, ['ls-files', '-s', '--', file])).toBe(staged);
   expect(await git(dest, ['rev-parse', 'HEAD'])).toBe(before);
+});
+
+it('a copy that fails after copying valid Git metadata leaves no checkout for Retry to bless', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  const source = payload.localPath!;
+  await writeFile(path.join(source, 'complete.txt'), 'must be copied\n');
+  await git(source, ['add', 'complete.txt']);
+  await git(source, ['commit', '-m', 'tracked file']);
+  h.copyFault = async (src, to) => {
+    await git(root, ['clone', src, to]);
+    await rm(path.join(to, 'complete.txt'));
+    throw new Error('copy interrupted after Git metadata');
+  };
+  await expect(runRefresh(payload)).rejects.toBeInstanceOf(UnrecoverableError);
+  const [aside] = await asidesOf(dest);
+  expect.soft(await lstat(dest).catch(() => null)).toBeNull();
+  expect.soft(await readdir(path.dirname(dest))).toEqual([path.basename(aside!)]);
+  await runRefresh(payload).catch(() => undefined);
+  expect(row.status).toBe('error');
+  expect(h.persist).not.toHaveBeenCalled();
+  expect(await asidesOf(dest)).toEqual([aside]);
+  expect(await readFile(path.join(aside!, '.haive-data/plan.md'), 'utf8')).toBe('pending\n');
+});
+
+it('the checkout stays absent throughout a copy and appears complete only after the copy finishes', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  await writeFile(path.join(payload.localPath!, 'complete.txt'), 'all bytes\n');
+  let copyTarget: string | undefined;
+  const visible: boolean[] = [];
+  h.copyFault = async (src, to) => {
+    copyTarget = to;
+    visible.push((await lstat(dest).catch(() => null)) !== null);
+    await git(root, ['clone', src, to]);
+    await writeFile(path.join(to, 'complete.txt'), 'all bytes\n');
+    visible.push((await lstat(dest).catch(() => null)) !== null);
+  };
+  await runRefresh(payload);
+  expect(visible).toEqual([false, false]);
+  expect(path.dirname(copyTarget!)).toBe(path.dirname(dest));
+  expect(copyTarget).not.toBe(dest);
+  expect(await readFile(path.join(dest, 'complete.txt'), 'utf8')).toBe('all bytes\n');
+  expect(await lstat(copyTarget!).catch(() => null)).toBeNull();
+  expect(row.status).toBe('ready');
+});
+
+it('a refused staging cleanup keeps both the original aside and the unfinished copy named', async () => {
+  const { dest, payload } = await fixture();
+  await rm(path.join(dest, '.git/HEAD'));
+  fsFaults.remove = true;
+  const cause = new Error('copy interrupted');
+  failBuilding('copy', cause);
+  const err = await runRefresh(payload).catch((e: unknown) => e);
+  const siblings = await readdir(path.dirname(dest));
+  const aside = siblings.find((name) => name.startsWith('r1.aside-'))!;
+  const staging = siblings.find((name) => name.startsWith('r1.rebuild-'));
+  expect(staging).toBeDefined();
+  expect(err).toBeInstanceOf(UnrecoverableError);
+  expect((err as Error).cause).toBe(cause);
+  expect(row.statusMessage).toContain(aside);
+  expect(row.statusMessage).toContain(staging);
+  expect(row.statusMessage).toContain('staging cleanup EIO');
+  expect(await lstat(dest).catch(() => null)).toBeNull();
+  expect(h.persist).not.toHaveBeenCalled();
 });
