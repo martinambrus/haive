@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { parsers } from 'prettier/plugins/yaml';
 
@@ -515,3 +518,73 @@ for (const spec of JOBS) {
     }
   });
 }
+
+// Run the workflow's actual script with the runner's implicit errexit. Only external tools are
+// stubbed; its loop, reports and final verdict are the same code GitHub runs.
+const gatedStep = () =>
+  workflows['ci.yml'].jobs.smokes.steps.find((step) => gatedRows(step) !== null);
+function runGated(t, mode, script = gatedStep().run) {
+  const dir = mkdtempSync(join(tmpdir(), 'haive-gated-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const stub = (name, source) =>
+    writeFileSync(join(dir, name), '#!/bin/bash\n' + source, { mode: 0o755 });
+  stub(
+    'docker',
+    `
+if [[ "$*" == *"SELECT 1"* ]]; then
+  if [[ "$MODE" == probe && "$*" == *"db_error_params_test"* ]]; then exit 3; fi
+  echo 1
+fi
+`,
+  );
+  stub(
+    'pnpm',
+    `
+if [[ "$*" == *"exec vitest run"* ]]; then
+  echo "$*" >> "$CALLS"
+  for arg in "$@"; do
+    case "$arg" in --outputFile.json=*)
+      printf '%s' '{"numPassedTests":1,"numFailedTests":0,"numPendingTests":0,"numTodoTests":0}' > "\${arg#*=}" ;;
+    esac
+  done
+  if [[ "$MODE" == vitest && "$*" == *"test/logger-db-error-params.test.ts"* ]]; then exit 7; fi
+fi
+`,
+  );
+  stub(
+    'node',
+    `
+if [[ "$1" != scripts/gen-modules.mjs ]]; then exec "$REAL_NODE" "$@"; fi
+`,
+  );
+  const out = spawnSync('bash', ['-e', '-c', script], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      PATH: dir + ':' + process.env.PATH,
+      REAL_NODE: process.execPath,
+      RUNNER_TEMP: dir,
+      PG_CONTAINER: 'postgres-stub',
+      PGVECTOR_CONTAINER: 'pgvector-stub',
+      CALLS: join(dir, 'calls'),
+      MODE: mode,
+    },
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  assert.ifError(out.error);
+  return {
+    ...out,
+    calls: readFileSync(join(dir, 'calls'), 'utf8'),
+    output: out.stdout + out.stderr,
+  };
+}
+
+describe('the gated loop verdict', () => {
+  it('fails and annotates a failing vitest call while running all later rows', (t) => {
+    const out = runGated(t, 'vitest');
+    assert.equal(out.status, 1, out.output);
+    assert.match(out.output, /::error::test\/logger-db-error-params\.test\.ts failed/);
+    assert.equal(out.calls.trim().split('\n').length, gatedRows(gatedStep()));
+  });
+});
