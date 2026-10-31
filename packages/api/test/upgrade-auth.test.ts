@@ -568,20 +568,8 @@ describe('fix round admin controls', () => {
   for (const action of ['deactivate', 'reset_password']) {
     it(`uppercase id ${action} closes the selected user's socket`, async () => {
       const { sockets } = await openAll();
-      // The fake compares strings literally; PostgreSQL compares UUID values. Model that
-      // one lookup here, keeping the selected row's canonical id and the HTTP param distinct.
-      const findFirst = fake.db.query.users.findFirst.bind(fake.db.query.users);
-      vi.spyOn(fake.db.query.users, 'findFirst')
-        .mockImplementationOnce(findFirst)
-        .mockImplementationOnce((opts) => findFirst({ ...opts, where: eq(schema.users.id, USER) }));
-      const update = fake.db.update.bind(fake.db);
-      vi.spyOn(fake.db, 'update').mockImplementation((table) => {
-        const builder = update(table);
-        if (table !== schema.users) return builder;
-        return {
-          set: (values) => ({ where: () => builder.set(values).where(eq(schema.users.id, USER)) }),
-        };
-      });
+      // The fake compares UUID values as PostgreSQL does, so the upper-case param reaches the
+      // selected row and the sockets are closed by its canonical id.
       const response = await app.request(`/admin/users/${USER.toUpperCase()}/action`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', cookie: 'haive_access=admin-session' },

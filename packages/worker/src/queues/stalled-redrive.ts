@@ -32,8 +32,8 @@ import { recordLeftOpenMerges } from '../step-engine/left-open-merge.js';
 import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
 import { discardPlanMerge } from '../step-engine/steps/plan/01-plan-merge.js';
 import {
-  enqueueAdvance,
   enqueueCancel,
+  enqueueRedrive,
   enqueueRepoCleanup,
   enqueueStart,
   finishFailedStep,
@@ -42,13 +42,15 @@ import {
   recoverParkedStep,
   retrying,
   REDRIVE_RETRY_DELAYS_MS,
+  stepAdvanceHeld,
 } from './task-queue.js';
 
 /**
  * Catches what reconcileOrphanedSteps cannot: a step its own re-drive enqueue failed to queue,
  * or any hand-off lost between boots, left `pending`/missing/answered, finished with nothing after it, or
- * failed with the task still running; a task queued to start whose START was lost; and a step
- * parked on a run whose cli-exec job was; and a cancelled task whose teardown never finished.
+ * failed with the task still running; a park whose poll chain was lost; a step left `running` that
+ * no job drives; a task queued to start whose START was lost; and a step parked on a run whose
+ * cli-exec job was; and a cancelled task whose teardown never finished.
  */
 
 const log = logger.child({ module: 'stalled-redrive' });
@@ -76,14 +78,18 @@ export interface StalledRedriveDeps {
   queuedTaskJobs: () => Promise<TaskQueueOwed | null>;
   /** Every invocation a cli-exec job still owes a run, or null when the queue could not be read. */
   queuedInvocationIds: () => Promise<Set<string> | null>;
+  /** Whether a pass of this process is on the step; defaults to the task worker's own hold. */
+  stepHeld?: (taskId: string, stepId: string, round: number) => boolean;
   redriveRetryDelaysMs?: number[];
 }
 
 export interface TaskQueueOwed {
-  /** Tasks a job still owes a step. A START owes none: it only claims a task still waiting to
-   *  start, so one a dead worker left `active` under its lock must not hold a running task. */
+  /** Tasks a job still owes a step. A START owes none to a lost hand-off: it only claims a task
+   *  still waiting to start, so one a dead worker left `active` under its lock must not hold a
+   *  task whose hand-off was lost. */
   steps: Set<string>;
-  /** Tasks a START is still queued for. */
+  /** Tasks a START is still queued for. It does hold a task parked or running on its first step,
+   *  which the job runs itself or hands to an advance. */
   starts: Set<string>;
 }
 
@@ -117,7 +123,7 @@ async function readTaskQueueJobs(): Promise<TaskQueueOwed | null> {
 }
 
 export const defaultDeps: StalledRedriveDeps = {
-  enqueueAdvance,
+  enqueueAdvance: enqueueRedrive,
   failTask: (db, f) =>
     finishFailedStep(
       db,
@@ -152,6 +158,42 @@ function answeredFormRow(cutoff: Date) {
   return and(eq(schema.taskSteps.status, 'waiting_form'), redrivableRow(cutoff))!;
 }
 
+/** A park whose poll chain has stopped. The chain (15 s runtime slot, 30 s pause, 5 s module schema)
+ *  rewrites the row's updated_at on every tick, so a parked row idle since `cutoff` has no chain
+ *  behind it; the task's own stamp says nothing, since a tick that finds the pointer right never
+ *  writes it. */
+function overduePark(cutoff: Date) {
+  return and(
+    lt(schema.taskSteps.updatedAt, cutoff),
+    eq(schema.taskSteps.status, 'pending'),
+    isNotNull(schema.taskSteps.waitingStartedAt),
+  )!;
+}
+
+/** A run of the row that has neither ended nor been superseded, started or not: something to wait for. */
+const liveRun = sql`EXISTS (SELECT 1 FROM ${schema.cliInvocations}
+  WHERE ${schema.cliInvocations.taskStepId} = ${schema.taskSteps.id}
+    AND ${schema.cliInvocations.endedAt} IS NULL
+    AND ${schema.cliInvocations.supersededAt} IS NULL)`;
+
+/** A row re-opened as `running` (a Resume, retry_ai, the allowance auto-resume) whose advance never
+ *  reached the queue: the re-open commits before the add, so a rejected add leaves the row as it is
+ *  now. Idle since `cutoff` is not enough, since a fan-out behind queued agents sits idle too: the
+ *  candidate read and the fence rule those out with the same `liveRun` expression; the fence
+ *  re-reads it in the statement that bumps the epoch. */
+function idleRunningRow(cutoff: Date) {
+  return and(
+    lt(schema.taskSteps.updatedAt, cutoff),
+    eq(schema.taskSteps.status, 'running'),
+    not(liveRun),
+  )!;
+}
+
+/** The current rows the sweep takes for a `running` task, apart from a failed one. */
+function stalledRow(cutoff: Date) {
+  return or(redrivableRow(cutoff), overduePark(cutoff), idleRunningRow(cutoff))!;
+}
+
 /** Idle since `cutoff`, or waiting_pr, which the pull-request poller rewrites every few minutes. */
 function taskStale(cutoff: Date) {
   return or(lt(schema.tasks.updatedAt, cutoff), eq(schema.tasks.status, 'waiting_pr'))!;
@@ -164,6 +206,14 @@ interface StalledCandidate {
   stepId: string;
   round: number;
   epoch: number;
+  rowStatus?: (typeof schema.taskSteps.$inferSelect)['status'] | null;
+  rowWaitingStartedAt?: Date | null;
+}
+
+/** What a candidate's current row looks like. `running` and `parked` are what a live pass leaves. */
+function rowShape(c: Pick<StalledCandidate, 'rowStatus' | 'rowWaitingStartedAt'>) {
+  if (c.rowStatus === 'running') return 'running';
+  return c.rowStatus === 'pending' && c.rowWaitingStartedAt ? 'parked' : 'handoff';
 }
 
 /** Locks the rows (an answered form's first), then re-checks the whole candidate predicate before
@@ -213,7 +263,7 @@ async function redriveTask(
           taskStale(cutoff),
           answered
             ? exists(currentRow(answeredFormRow(cutoff)))
-            : not(exists(currentRow(not(redrivableRow(cutoff))))),
+            : not(exists(currentRow(not(stalledRow(cutoff))))),
         ),
       )
       .returning({ epoch: schema.tasks.orchestrationEpoch });
@@ -238,7 +288,7 @@ async function redriveTask(
     throw err;
   }
   log.info(
-    { taskId: c.taskId, stepId: c.stepId, round: c.round, epoch: fenced.epoch },
+    { taskId: c.taskId, stepId: c.stepId, round: c.round, epoch: fenced.epoch, shape: rowShape(c) },
     'redrove a stalled task',
   );
   return true;
@@ -255,7 +305,8 @@ function unstartedRun(taskStepId: SQLWrapper | string) {
 }
 
 /** One pass: re-drives each running task whose current step row is missing, pending and not
- *  parked, an answered form, or finished, and a task waiting on a person or a pull request whose
+ *  parked, parked with a heartbeat older than the cutoff, running with no run left to wait for,
+ *  an answered form, or finished, and a task waiting on a person or a pull request whose
  *  current form was answered; fails a running task whose current row failed; queues a START
  *  for a task still queued to start; and recovers a parked
  *  step whose recorded run no cli-exec job owes any more, as boot does. Each only while the task
@@ -276,6 +327,7 @@ export async function redriveStalledTasks(
       taskStatus: schema.tasks.status,
       rowId: schema.taskSteps.id,
       rowStatus: schema.taskSteps.status,
+      rowWaitingStartedAt: schema.taskSteps.waitingStartedAt,
       rowError: schema.taskSteps.errorMessage,
     })
     .from(schema.tasks)
@@ -297,7 +349,7 @@ export async function redriveStalledTasks(
             eq(schema.tasks.status, 'running'),
             or(
               isNull(schema.taskSteps.id),
-              redrivableRow(cutoff),
+              stalledRow(cutoff),
               and(eq(schema.taskSteps.status, 'failed'), lt(schema.taskSteps.updatedAt, cutoff)),
             ),
           ),
@@ -383,6 +435,11 @@ export async function redriveStalledTasks(
   for (const c of candidates) {
     if (c.stepId === null) continue; // excluded by isNotNull above; narrows the type
     if (queued.steps.has(c.taskId)) continue;
+    // A START in the queue owns a task's first step, which it runs itself (its row is `running`, and
+    // an apply that writes nothing can idle past the cutoff) or hands to an advance.
+    if (queued.starts.has(c.taskId) && rowShape(c) !== 'handoff') continue;
+    // And a pass of this process whose job Redis lost: the queue read cannot see it, the hold can.
+    if ((deps.stepHeld ?? stepAdvanceHeld)(c.taskId, c.stepId, c.round)) continue;
     try {
       if (c.rowStatus === 'failed' && c.rowId !== null) {
         // Its job died between failing the step and failing the task, and every write refuses a

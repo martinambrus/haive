@@ -302,6 +302,9 @@ jobs:
           worker test/task-cancel-guard-db.test.ts WORKER_TASK_CANCEL_GUARD_TEST_URL worker_task_cancel_guard_test pg
           worker test/step-fold-preread-db.test.ts WORKER_STEP_FOLD_PREREAD_TEST_URL worker_step_fold_preread_test pg
           worker test/lock-tier-order-db.test.ts WORKER_LOCK_TIER_ORDER_TEST_URL worker_lock_tier_order_test pg
+          worker test/stalled-redrive-parked-db.test.ts STALLED_PARKED_TEST_URL stalled_parked_test pg
+          worker test/stalled-redrive-running-db.test.ts STALLED_RUNNING_TEST_URL stalled_running_test pg
+          worker test/handle-result-lost-db.test.ts HANDLE_RESULT_LOST_TEST_URL handle_result_lost_test pg
           api test/terminal-attach-db.test.ts TERMINAL_ATTACH_TEST_URL terminal_attach_test pg
           api test/task-type-definition.test.ts TASK_TYPE_DEF_TEST_URL task_type_def_test pg
           api test/task-types-routes-db.test.ts TASK_TYPES_API_TEST_URL task_types_api_test pg
@@ -381,6 +384,8 @@ jobs:
           worker test/plan-mirror-gone-checkout-db.test.ts GONE_CHECKOUT_PLAN_TEST_URL gone_checkout_plan_test pg
           worker test/repo-error-repair-db.test.ts REPO_ERROR_REPAIR_TEST_URL repo_error_repair_test pg
           worker test/plan-error-repair-db.test.ts PLAN_ERROR_REPAIR_TEST_URL plan_error_repair_test pg
+          api test/park-fold-db.test.ts PARK_FOLD_TEST_URL park_fold_test pg
+          api test/resume-never-started-db.test.ts RESUME_NEVER_STARTED_TEST_URL resume_never_started_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
@@ -414,6 +419,13 @@ jobs:
         run: pnpm --filter @haive/worker exec vitest run test/cli-job-retention.test.ts
         env:
           CLI_JOB_RETENTION_TEST_REDIS_URL: redis://localhost:6379/9
+
+      - name: Recovery re-drive advance ids on a real Redis
+        if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
+        timeout-minutes: 5
+        run: pnpm --filter @haive/worker exec vitest run test/advance-dedup-redis.test.ts
+        env:
+          ADVANCE_DEDUP_TEST_REDIS_URL: redis://localhost:6379/8
 
       - name: RAG sync lock on a real Redis
         if: ${{ !cancelled() && steps.migrate.conclusion == 'success' }}
