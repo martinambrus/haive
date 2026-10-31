@@ -72,15 +72,18 @@ describe('removePlanJsonIfUnchanged', () => {
 });
 
 describe('a merge open when the file is judged', () => {
+  // The hold is told by its code, never by the sentence shown to the person.
+  const heldByOperation = { name: 'PlanMirrorHeldError', code: 'git_operation' };
+
   it('holds the write and the removal and keeps the bytes', async () => {
     const repo = await repoWith('{"synced":1}\n');
     execFileSync('git', ['init', '-q'], { cwd: repo });
     await writeFile(path.join(repo, '.git', 'MERGE_HEAD'), '0'.repeat(40) + '\n');
     await expect(
       writePlanJsonIfUnchanged(repo, '{"next":1}\n', b('{"synced":1}\n')),
-    ).rejects.toThrow(/merge, rebase, cherry-pick or revert/);
-    await expect(removePlanJsonIfUnchanged(repo, b('{"synced":1}\n'))).rejects.toThrow(
-      /merge, rebase, cherry-pick or revert/,
+    ).rejects.toMatchObject(heldByOperation);
+    await expect(removePlanJsonIfUnchanged(repo, b('{"synced":1}\n'))).rejects.toMatchObject(
+      heldByOperation,
     );
     expect(await onDisk(repo)).toBe('{"synced":1}\n');
   });
@@ -89,12 +92,10 @@ describe('a merge open when the file is judged', () => {
     const repo = await repoWith(null);
     execFileSync('git', ['init', '-q'], { cwd: repo });
     await writeFile(path.join(repo, '.git', 'MERGE_HEAD'), '0'.repeat(40) + '\n');
-    await expect(writePlanJsonIfUnchanged(repo, '{"next":1}\n', null)).rejects.toThrow(
-      /merge, rebase, cherry-pick or revert/,
+    await expect(writePlanJsonIfUnchanged(repo, '{"next":1}\n', null)).rejects.toMatchObject(
+      heldByOperation,
     );
-    await expect(removePlanJsonIfUnchanged(repo, null)).rejects.toThrow(
-      /merge, rebase, cherry-pick or revert/,
-    );
+    await expect(removePlanJsonIfUnchanged(repo, null)).rejects.toMatchObject(heldByOperation);
     await expect(access(path.join(repo, HAIVE_DATA_FILES.plan))).rejects.toThrow();
   });
 });

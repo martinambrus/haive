@@ -3036,14 +3036,14 @@ async function main(): Promise<void> {
     await edit.select().from(schema.planNodes).where(eq(schema.planNodes.id, pId)).for('update');
     duringMerge = arrive(retitled(theirs, pId, 'P while merging')).then(
       () => 'merged',
-      (err: Error) => err.message,
+      (err: Error & { code?: string }) => `${err.name}:${err.code}`,
     );
     await new Promise((resolve) => setTimeout(resolve, 500));
     await writeFile(path.join(sDir, '.git', 'MERGE_HEAD'), `${'0'.repeat(40)}\n`);
   });
   check(
     'three-way: a merge that opens during the reconcile holds it before it commits',
-    /merge, rebase, cherry-pick or revert/.test((await duringMerge) ?? '') &&
+    (await duringMerge) === 'PlanMirrorHeldError:git_operation' &&
       (await sNode(pId))?.title !== 'P while merging',
     { duringMerge: await duringMerge, title: (await sNode(pId))?.title },
   );
@@ -3343,7 +3343,7 @@ async function main(): Promise<void> {
     .returning();
   const mergingImport = await importPlanMirror(db, mergingRepo!.id, mergingDir).then(
     () => 'imported',
-    (err: Error) => err.message,
+    (err: Error & { code?: string }) => `${err.name}:${err.code}`,
   );
   const mergingNodes = await db
     .select({ id: schema.planNodes.id })
@@ -3351,7 +3351,7 @@ async function main(): Promise<void> {
     .where(eq(schema.planNodes.repositoryId, mergingRepo!.id));
   check(
     'an import while a merge is open reads nothing in',
-    /merge, rebase, cherry-pick or revert/.test(mergingImport) && mergingNodes.length === 0,
+    mergingImport === 'PlanMirrorHeldError:git_operation' && mergingNodes.length === 0,
     { mergingImport, nodes: mergingNodes.length },
   );
   await db.delete(schema.repositories).where(eq(schema.repositories.id, mergingRepo!.id));

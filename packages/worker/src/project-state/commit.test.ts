@@ -202,7 +202,7 @@ describe('commit read and repair controls', () => {
           err: expect.anything(),
           repositoryId: '00000000-0000-4000-8000-000000000001',
         }),
-        'Haive data projection read failed',
+        expect.any(String),
       );
     },
   );
