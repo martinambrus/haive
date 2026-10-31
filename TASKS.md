@@ -1056,6 +1056,28 @@ Split out of T376 (item 6) on 2026-10-31. A content PATCH clears `enforcedHash` 
 status: open
 From the T376 review (2026-10-31, C1). `GET /admin/audit` runs `count(*)` and two `SELECT DISTINCT` over the whole table on every page view (api admin.ts ~:191-261), and `audit_events` keeps every row forever; since T376 every sign-in attempt writes one (throttled ones bounded per window). Decide a retention period (delete or archive), and bound the page's counts (an estimate, or indexed filters).
 
+### T494 · FNF[stored-targets-leftovers] · 07's quarantine checks a name's shape, not its membership; T480's leftover pins (+5)
+
+status: open
+From the T480 reviews (2026-10-31). PRE-EXISTING and minor unless stated (each needs a hand-edited 07 detect payload).
+
+1. 07's quarantine accepts any one-segment name with the catalog extension, so `files: ['README.md']` moves the index 07 just wrote to `<dir>-legacy/README.md`, overwrites it with the legacy README, and 12 records an `agents-index` row for a file that is gone (worker 07-generate-files.ts ~:459-483 lists, ~:496-499 accepts, ~:1017-1027 moves). Skip `README.md` and the names of the agents just written; claimed paths need a ledger read.
+2. 12's refusal of a stored skills directory is only logged (12-post-onboarding.ts ~:329-334), while a refused agent directory shows in its warnings.
+3. `recordable` (12 ~:298-302) is now a dead backstop with no control: no input reaches it with a git-data path since T480. Pin it with a direct unit test or delete it.
+4. The quarantine's extension comes from the catalog, never the stored target's format (07 ~:487-488), but no test pins it: a stored `{ dir: '.codex/agents', format: 'markdown' }` beside an `x.md` name would.
+5. [verify-first] The upgrade path passes stored agent targets through `originAgentTargets` unfiltered when the 07 payload records neither `cliTargets` nor `enabledCliProviders` (worker _upgrade-render.ts ~:314-330, shared render-targets.ts ~:223-226), and 02's `safeDiskRel` does not refuse an off-catalog canonical dir; trace whether such a target reaches a write.
+6. Test hygiene from the first T480 review: repository-skill-empty-targets.test.ts ~:298-314 pins nothing new; 09_6-skill-verification.ts ~:147 hides a skill directory whose name holds `\`.
+
+### T495 · FNF[failed-read-answers-2] · more git reads read a failure as "absent" (+3)
+
+status: open
+From the T397 review (2026-10-31). Same class as T397 (git's exit code, never its wording); PRE-EXISTING, minor. See also T379 (git-tree readers).
+
+1. 03-upgrade-commit.ts ~:91 (`headLacksImport`) and ~:114 (`agentsRulesVerdict`): any non-zero `rev-parse --verify -q HEAD` except no-answer reads as "no HEAD" and stages the whole file, taking unrelated edits; only exit 1 means no HEAD.
+2. 10-gate-3-commit.ts ~:200: a failed `show --name-only` (non-zero, not no-answer) yields `[]`, so `task.changedPaths` silently misses the commit's files.
+3. [verify-first] _dependency-policy.ts ~:159 and ~:214: `git show <base>:<file>` exit 128 means absent or failed; a failure drops the baseline Drupal protection and `ownedPaths`. `rev-parse -q --verify <base>:<path>` (exit 1) tells absent apart.
+4. [verify-first] project-state/set-aside.ts ~:264-267 (`headOid`) and ~:1147-1152 (`headEntry`): a failed read reads as "HEAD lacks the path" (used for `untracked` ~:519 and in `putBackIndex` ~:1251); guarded by earlier successful reads in the same transaction.
+
 ## Done
 
 - T476 — the plan merge panel reads the DELETE's `cancelled` answer: a discard that cancelled nothing keeps a neutral status notice (completed, cancelled or failed; nothing discarded) that survives the refresh, is cleared by the next merge, Discard or answer, and Discard stays disabled while its own discard settles; the panel sends the displayed task id (`?taskId=`) and the route cancels nothing when a different merge is open — PR #968 (0177599c3), 2026-10-31; main CI green; delivered with codex-sonnet (1 fix round, session Direct guard); follow-up T491
