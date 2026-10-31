@@ -48,6 +48,7 @@ import {
 } from '@haive/shared/review';
 import { getDb } from '../db.js';
 import { boundedLockWait } from '../lib/repository-busy.js';
+import { requireJsonObject } from '../lib/json-object.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { getRedis } from '../redis.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -247,12 +248,13 @@ toolingUpgradeRoutes.post('/:id/tooling-upgrade', async (c) => {
   if (!repo) throw new HttpError(404, 'Repository not found');
 
   // Optional { components: string[] } restricts which to upgrade; absent = all.
-  let parsed: { components?: string[] } = {};
+  let raw: unknown = {};
   try {
-    parsed = (await c.req.json()) as { components?: string[] };
+    raw = await c.req.json();
   } catch {
     // empty body → upgrade everything upgradeable
   }
+  const parsed = requireJsonObject<{ components?: string[] }>(raw);
   const requested = Array.isArray(parsed.components) ? new Set(parsed.components) : null;
 
   const versionMap = await loadToolVersions(db);
@@ -695,6 +697,37 @@ const PORTABLE_SETTING_UPDATE_KEYS = [
   'agentRulesOverride',
 ] as const;
 
+/** The PATCH body. A field of the wrong type is a 400 `Validation failed` naming it, before any
+ *  lock or write. Loose on purpose: an unknown key survives the parse, because the MCP
+ *  decision below must travel with no other key and counts them. */
+const toolingPatchBodySchema = z.looseObject({
+  rtkEnabled: z.boolean().optional(),
+  rtkVersion: z.string().nullable().optional(),
+  lspServers: z.array(z.string()).optional(),
+  lspServerVersions: z.record(z.string(), z.string().nullable()).optional(),
+  chromeDevtoolsMcpVersion: z.string().nullable().optional(),
+  secretMaskEnabled: z.boolean().optional(),
+  secretMaskAllow: z.array(z.string()).optional(),
+  secretMaskDenyExtend: z.array(z.string()).optional(),
+  prWorkflowEnabled: z.boolean().optional(),
+  stepGuidanceEnabled: z.boolean().optional(),
+  reviewDimensions: z.array(z.string()).optional(),
+  verifyCommands: z.unknown().optional(),
+  /** Absent: leave it. null: follow Haive's default rules again (column NULL). Text, '' included:
+   *  the override. Typed unknown because anything else must be refused, not coerced. */
+  agentRulesOverride: z.unknown().optional(),
+  /** RAG embed-health action: a verb, not a settable field, since each is a decision with a side
+   *  effect that three booleans could combine into a meaningless state. */
+  ragEmbedAction: z.enum(['retry', 'accept_lexical_only', 'rebuild_index']).optional(),
+  /** Decides the MCP servers held when this repository's mirror was imported. */
+  repoMcpServersAction: z.enum(['accept', 'discard']).optional(),
+  appAuth: z.unknown().optional(),
+  /** Write-only. Stored in user_secrets, never on the repositories row and never returned by the
+   *  GET above. */
+  appAuthUsername: z.string().optional(),
+  appAuthPassword: z.string().optional(),
+});
+
 /** Update per-repo tooling: enable/disable RTK + LSP servers and pin versions.
  *  Only writes repo columns; the env image rebuilds on the next task (via
  *  01-declare-deps re-injection). Disabling RTK flips rtk_enabled; the upgrade
@@ -713,38 +746,7 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
 
   // Not caught: a body that is not JSON is answered 400 by `jsonBodyErrors`, where `{}` would be a
   // save of nothing that reports success.
-  const raw: unknown = await c.req.json();
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new HttpError(400, 'The request body must be a JSON object', 'invalid_body');
-  }
-  const body = raw as {
-    rtkEnabled?: boolean;
-    rtkVersion?: string | null;
-    lspServers?: string[];
-    lspServerVersions?: Record<string, string | null>;
-    chromeDevtoolsMcpVersion?: string | null;
-    secretMaskEnabled?: boolean;
-    secretMaskAllow?: string[];
-    secretMaskDenyExtend?: string[];
-    prWorkflowEnabled?: boolean;
-    stepGuidanceEnabled?: boolean;
-    reviewDimensions?: string[];
-    verifyCommands?: unknown;
-    /** Absent: leave it. null: follow Haive's default rules again (column NULL). Text, '' included:
-     *  the override. Typed unknown because anything else must be refused, not coerced. */
-    agentRulesOverride?: unknown;
-    /** RAG embed-health action. Not a settable field — each one is a decision with
-     *  a side effect, so it is expressed as a verb rather than as three booleans a
-     *  caller could combine into a meaningless state. */
-    ragEmbedAction?: 'retry' | 'accept_lexical_only' | 'rebuild_index';
-    /** Decides the MCP servers held when this repository's mirror was imported. */
-    repoMcpServersAction?: 'accept' | 'discard';
-    appAuth?: unknown;
-    /** Write-only. Stored in user_secrets, never on the repositories row and never
-     *  returned by the GET above. */
-    appAuthUsername?: string;
-    appAuthPassword?: string;
-  };
+  const body = toolingPatchBodySchema.parse(requireJsonObject(await c.req.json()));
 
   if (body.repoMcpServersAction === 'accept' || body.repoMcpServersAction === 'discard') {
     if (Object.keys(body).length > 1) {

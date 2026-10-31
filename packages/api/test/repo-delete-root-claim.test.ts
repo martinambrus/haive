@@ -98,4 +98,52 @@ describe('deleting a repository', () => {
       }),
     );
   });
+
+  // A Retry of a failed task takes this key, so the delete takes it too: a Retry that commits after
+  // the delete read its tasks would leave a running task whose repository the delete cleared.
+  it('takes the repository task-creation key', async () => {
+    const keys: string[] = [];
+    setup(null).hooks.beforeLock = (key) => {
+      keys.push(key);
+    };
+    const res = await app.request(`/${REPO}`, { method: 'DELETE' });
+    expect(res.status).toBe(200);
+    expect(keys).toEqual([`onboarding-upgrade:${REPO}`]);
+  });
+
+  it('answers 409 busy when the key wait times out, deleting nothing', async () => {
+    const fake = setup(null);
+    fake.hooks.beforeLock = () => {
+      throw Object.assign(new Error('Failed query'), {
+        cause: Object.assign(new Error('canceling statement due to lock timeout'), {
+          code: '55P03',
+        }),
+      });
+    };
+    const res = await app.request(`/${REPO}`, { method: 'DELETE' });
+    expect(res.status).toBe(409);
+    expect(fake.rows(schema.repositories)).toHaveLength(1);
+    expect(h.cleanup).not.toHaveBeenCalled();
+  });
+
+  it("answers 404 for another user's repository without queuing on its key", async () => {
+    const fake = setup(null);
+    const OTHERS = '00000000-0000-4000-8000-0000000000b2';
+    fake.insert(schema.repositories, {
+      id: OTHERS,
+      userId: '00000000-0000-4000-8000-0000000000a2',
+      name: 'theirs',
+      source: 'git',
+      status: 'ready',
+    });
+    const keys: string[] = [];
+    fake.hooks.beforeLock = (key) => {
+      keys.push(key);
+    };
+    const res = await app.request(`/${OTHERS}`, { method: 'DELETE' });
+    expect(res.status).toBe(404);
+    expect(keys).toEqual([]);
+    expect(fake.rows(schema.repositories)).toHaveLength(2);
+    expect(h.cleanup).not.toHaveBeenCalled();
+  });
 });

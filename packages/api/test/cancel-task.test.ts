@@ -13,7 +13,17 @@ interface Recorded {
   insertCalls: Array<{ table: unknown; values: Record<string, unknown> }>;
 }
 
-function makeFakeTx(selectReturn: Array<{ id: string }> = []): {
+/** `selectReturn` answers the task reads that lock their rows; `unlockedReturn` the reads that do
+ *  not, the same rows unless a test says otherwise; `lockedSteps` the step-row batch, one row per
+ *  task in `selectReturn` unless a test says otherwise. */
+function makeFakeTx(
+  selectReturn: Array<{ id: string }> = [],
+  unlockedReturn: unknown[] = selectReturn,
+  lockedSteps: Array<{ id: string; taskId: string }> = selectReturn.map((t) => ({
+    id: `step-of-${t.id}`,
+    taskId: t.id,
+  })),
+): {
   tx: never;
   recorded: Recorded;
 } {
@@ -30,11 +40,12 @@ function makeFakeTx(selectReturn: Array<{ id: string }> = []): {
     select: (cols: unknown) => ({
       from: (table: unknown) => ({
         where: (clause: unknown) => {
-          if (table === schema.taskSteps) return { orderBy: () => ({ for: async () => [] }) };
+          if (table === schema.taskSteps)
+            return { orderBy: () => ({ for: async () => lockedSteps }) };
           recorded.selectArgs = cols;
           recorded.fromArg = table;
           recorded.whereArg = clause;
-          return Object.assign(Promise.resolve(selectReturn), {
+          return Object.assign(Promise.resolve(unlockedReturn), {
             orderBy: () => ({ for: async () => selectReturn }),
           });
         },
@@ -64,6 +75,7 @@ vi.mock('../src/queues.js', () => ({
 
 const {
   cancelTaskRow,
+  cancelTaskIfOpen,
   enqueueCancelJob,
   cancelOpenTasksForRepo,
   collectInternalRagProjectNamesForRepo,
@@ -111,7 +123,7 @@ describe('cancelTaskRow', () => {
     vi.setSystemTime(fixedNow);
 
     const { tx, recorded } = makeFakeTx();
-    await cancelTaskRow(tx, 'task-1', { by: 'user-1' });
+    await cancelTaskRow(tx, 'task-1', { by: 'user-1' }, ['step-1']);
 
     expect(recorded.updateCalls).toHaveLength(2);
     expect(recorded.updateCalls[0]?.table).toBe(schema.tasks);
@@ -137,7 +149,7 @@ describe('cancelTaskRow', () => {
 
   it('appends a task.cancelled event with by-user payload', async () => {
     const { tx, recorded } = makeFakeTx();
-    await cancelTaskRow(tx, 'task-1', { by: 'user-1' });
+    await cancelTaskRow(tx, 'task-1', { by: 'user-1' }, ['step-1']);
 
     expect(recorded.insertCalls).toHaveLength(1);
     expect(recorded.insertCalls[0]?.table).toBe(schema.taskEvents);
@@ -151,7 +163,7 @@ describe('cancelTaskRow', () => {
 
   it('includes reason in the event payload when provided', async () => {
     const { tx, recorded } = makeFakeTx();
-    await cancelTaskRow(tx, 'task-1', { by: 'user-1', reason: 'repository_deleted' });
+    await cancelTaskRow(tx, 'task-1', { by: 'user-1', reason: 'repository_deleted' }, ['step-1']);
 
     expect(recorded.insertCalls[0]?.values.payload).toEqual({
       by: 'user-1',
@@ -175,9 +187,17 @@ describe('cancelTaskRow', () => {
         return (tx as any).insert(...args);
       },
     };
-    await cancelTaskRow(wrappedTx as never, 'task-1', { by: 'user-1' });
+    await cancelTaskRow(wrappedTx as never, 'task-1', { by: 'user-1' }, ['step-1']);
     // Two updates (task row, then non-terminal step rows) both precede the insert.
     expect(order).toEqual(['update', 'update', 'insert']);
+  });
+
+  it('updates no step row when the caller holds none, and still cancels the task', async () => {
+    const { tx, recorded } = makeFakeTx();
+    await cancelTaskRow(tx, 'task-1', { by: 'user-1' }, []);
+
+    expect(recorded.updateCalls.map((call) => call.table)).toEqual([schema.tasks]);
+    expect(recorded.insertCalls).toHaveLength(1);
   });
 });
 
@@ -217,6 +237,20 @@ describe('cancelOpenTasksForRepo', () => {
     }
   });
 
+  it('hands each task only the step rows locked for it', async () => {
+    const open = [{ id: 't1' }, { id: 't2' }];
+    // t2 has no row at the batch: its step update is skipped, t1's still runs.
+    const { tx, recorded } = makeFakeTx(open, open, [{ id: 's1', taskId: 't1' }]);
+
+    await cancelOpenTasksForRepo(tx, 'repo-1', 'user-1');
+
+    expect(recorded.updateCalls.map((call) => call.table)).toEqual([
+      schema.tasks,
+      schema.taskSteps,
+      schema.tasks,
+    ]);
+  });
+
   it('returns empty array and skips writes when no open tasks exist', async () => {
     const { tx, recorded } = makeFakeTx([]);
     const result = await cancelOpenTasksForRepo(tx, 'repo-1', 'user-1');
@@ -233,6 +267,46 @@ describe('cancelOpenTasksForRepo', () => {
     // the cancel + enqueue path.
     expect(recorded.selectArgs).toEqual({ id: schema.tasks.id });
     expect(recorded.fromArg).toBe(schema.tasks);
+  });
+});
+
+describe('cancelTaskIfOpen', () => {
+  it('cancels a task that is still open and says so', async () => {
+    const { tx, recorded } = makeFakeTx([{ id: 'task-1' }]);
+
+    const result = await cancelTaskIfOpen(tx, 'task-1', { by: 'user-1' });
+
+    expect(result).toEqual({ cancelled: true });
+    expect(recorded.updateCalls.map((call) => call.table)).toEqual([
+      schema.tasks,
+      schema.taskSteps,
+    ]);
+    expect(recorded.insertCalls).toHaveLength(1);
+    expect(recorded.insertCalls[0]?.values).toMatchObject({
+      taskId: 'task-1',
+      eventType: 'task.cancelled',
+      payload: { by: 'user-1' },
+    });
+  });
+
+  it('writes nothing for a task that ended while it waited, and reports the status it found', async () => {
+    const { tx, recorded } = makeFakeTx([], [{ status: 'completed' }]);
+
+    const result = await cancelTaskIfOpen(tx, 'task-1', { by: 'user-1' });
+
+    expect(result).toEqual({ cancelled: false, status: 'completed' });
+    expect(recorded.updateCalls).toEqual([]);
+    expect(recorded.insertCalls).toEqual([]);
+  });
+
+  it('reports no status for a task that is gone, and writes nothing', async () => {
+    const { tx, recorded } = makeFakeTx([], []);
+
+    const result = await cancelTaskIfOpen(tx, 'task-1', { by: 'user-1' });
+
+    expect(result).toEqual({ cancelled: false, status: undefined });
+    expect(recorded.updateCalls).toEqual([]);
+    expect(recorded.insertCalls).toEqual([]);
   });
 });
 

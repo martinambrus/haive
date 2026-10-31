@@ -21,6 +21,7 @@ import type { SQL } from 'drizzle-orm';
 import {
   schema,
   isLockNotAvailable,
+  lockStepRows,
   resetDagCurrentLevelForRetry,
   CLOSED_GAP_INTO_IDLE_MS,
   CLEAR_STEP_USAGE_STAMP,
@@ -52,7 +53,11 @@ import { admitNewWork, assertNewWorkAllowed } from '../../middleware/maintenance
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
 import { cancelLiveRuns, reofferParkedSteps, withoutGateAnswer } from '../../lib/task-control.js';
-import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
+import {
+  cancelTaskIfOpen,
+  enqueueCancelJob,
+  CLEAR_ALLOWANCE_WATCH,
+} from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
 import { refuseDeadTask } from '../../lib/task-dead.js';
@@ -99,6 +104,29 @@ async function reopenFailedTask(tx: DbHandle, taskId: string, now: Date): Promis
     .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.status, 'failed')));
 }
 
+/** Supersede the live invocations of the step rows `ids` and drop their agent minings. */
+async function sweepRunsOf(tx: DbHandle, ids: string[], now: Date): Promise<void> {
+  // Both halves of the step's spend: its own invocations AND the recap pass, whose
+  // task_step_id is deliberately NULL. Without the second arm a re-run leaves the prior
+  // recap's failure row live, and the step card keeps showing an error about a run that
+  // has been replaced.
+  await tx
+    .update(schema.cliInvocations)
+    .set({ supersededAt: now })
+    .where(
+      and(
+        or(
+          inArray(schema.cliInvocations.taskStepId, ids),
+          inArray(schema.cliInvocations.summaryForStepId, ids),
+        ),
+        isNull(schema.cliInvocations.supersededAt),
+      ),
+    );
+  await tx
+    .delete(schema.taskStepAgentMinings)
+    .where(inArray(schema.taskStepAgentMinings.taskStepId, ids));
+}
+
 /** Blank a set of step rows so the worker re-runs them from detect: supersede their live
  *  invocations, drop their agent minings, clear the wedged DAG level, and zero each row's
  *  live state after folding its finishing run into carried_*.
@@ -116,42 +144,34 @@ async function reopenFailedTask(tx: DbHandle, taskId: string, now: Date): Promis
  *  formValues is cleared so the user re-confirms inputs against the regenerated schema.
  *  computeFoldContribution counts a failed step's fail->retry wait as idle so wall-clock
  *  reconciles, and reclassifies an orphaned still-open run's span as idle rather than inflating
- *  carried work — per row, because each contributes differently. Exported for the unit test. */
+ *  carried work — per row, because each contributes differently.
+ *
+ *  Before it writes a row it locks every step row of the task in one id-ordered batch
+ *  (`lockStepRows`), not just `rows` in the caller's order: a peer that takes the same rows in
+ *  another order (a Stop's bulk update, the worker's reset, a repository delete) would otherwise
+ *  deadlock with the loop, and the statements a caller runs after it (re-offering parked rows,
+ *  clearing wait notes) update by predicate over rows outside `rows`. It comes after the sweeps and
+ *  the DAG reset because a pass holds a run and then wants its step row, so holding the step row
+ *  while waiting on that run would deadlock with it. `rowsHeld` skips it for a call made after the
+ *  task row was bumped, where `rowsActivatedMeanwhile` already holds the rows: a pass holding a step
+ *  row waits for the task row, so a batch that waited there would deadlock with it.
+ *  Exported for the unit test. */
 export async function resetRowsForRerun(
   tx: DbHandle,
   taskId: string,
   rows: (typeof schema.taskSteps.$inferSelect)[],
   now: Date,
+  opts: { rowsHeld?: boolean } = {},
 ): Promise<void> {
   if (rows.length === 0) return;
   const ids = rows.map((r) => r.id);
-  // Both halves of the step's spend: its own invocations AND the recap pass, whose
-  // task_step_id is deliberately NULL. Without the second arm a re-run leaves the prior
-  // recap's failure row live, and the step card keeps showing an error about a run that
-  // has been replaced.
-  const sweepRuns = async () => {
-    await tx
-      .update(schema.cliInvocations)
-      .set({ supersededAt: now })
-      .where(
-        and(
-          or(
-            inArray(schema.cliInvocations.taskStepId, ids),
-            inArray(schema.cliInvocations.summaryForStepId, ids),
-          ),
-          isNull(schema.cliInvocations.supersededAt),
-        ),
-      );
-    await tx
-      .delete(schema.taskStepAgentMinings)
-      .where(inArray(schema.taskStepAgentMinings.taskStepId, ids));
-  };
-  await sweepRuns();
+  await sweepRunsOf(tx, ids, now);
   // Re-running 06c-dag-execute (or any step whose set includes it) must also clear the wedged
   // DAG level: resetting task_steps alone leaves task_dag_issues failed_unrecoverable, so
   // resolveDagPhase re-derives the same failure and the step re-halts identically. No-op when
   // the task has no DAG / no stuck issue.
   await resetDagCurrentLevelForRetry(tx, taskId);
+  if (!opts.rowsHeld) await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
   for (const r of rows) {
     const contrib = computeFoldContribution(r, now.getTime());
     await tx
@@ -197,7 +217,7 @@ export async function resetRowsForRerun(
   }
   // A pass records a run only under its row's lock, so each write above waited for one it was
   // recording and every later one is refused: this finds whatever the first sweep missed.
-  await sweepRuns();
+  await sweepRunsOf(tx, ids, now);
 }
 
 const ACTIVE_STEP_STATUSES = ['running', 'waiting_cli', 'waiting_form'] as const;
@@ -229,7 +249,10 @@ async function rowsActivatedMeanwhile(tx: DbHandle, taskId: string, kept: readon
           ...(kept.length > 0 ? [notInArray(schema.taskSteps.id, [...kept])] : []),
         ),
       )
-      .for('update', { noWait: true });
+      // The rows are normally held by the id-ordered batch already, and FOR UPDATE on a row held
+      // FOR NO KEY UPDATE is an upgrade that conflicts with the KEY SHARE a pass's run insert holds
+      // on it: a 503 for a row this transaction holds itself.
+      .for('no key update', { noWait: true });
   } catch (err) {
     // The bump holds the task row, so a row a pass is still writing rolls the action back.
     if (isLockNotAvailable(err)) {
@@ -241,6 +264,26 @@ async function rowsActivatedMeanwhile(tx: DbHandle, taskId: string, kept: readon
 
 /** A row whose CLI may still be running in a sandbox. */
 const isLive = (r: { status: string }) => r.status === 'running' || r.status === 'waiting_cli';
+
+/** The id-ordered batch of the task's step rows for an action that resets `leftActive`, taken only
+ *  after those rows' runs are swept and the DAG level is cleared: a pass holds a run and then wants
+ *  its step row, so a batch held across the sweep `resetRowsForRerun` makes would deadlock with it.
+ *  That reset repeats the sweep and finds nothing. */
+async function lockRowsForMove(
+  tx: DbHandle,
+  taskId: string,
+  leftActive: readonly { id: string }[],
+  now: Date,
+): Promise<void> {
+  if (leftActive.length === 0) return;
+  await sweepRunsOf(
+    tx,
+    leftActive.map((r) => r.id),
+    now,
+  );
+  await resetDagCurrentLevelForRetry(tx, taskId);
+  await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
+}
 
 /** Take the task back to `step` for an action that re-runs it where it stands: reset the rows the
  *  task leaves active, point the task at the step under a new epoch, then reset what a pass
@@ -288,7 +331,7 @@ async function moveTaskToStep(
     await liftReadPause(tx, taskId, opts.liftPause.read, opts.liftPause.role);
   }
   const late = await rowsActivatedMeanwhile(tx, taskId, [step.id]);
-  await resetRowsForRerun(tx, taskId, late, now);
+  await resetRowsForRerun(tx, taskId, late, now, { rowsHeld: true });
   return { epoch: bumped.epoch, leftActive: [...leftActive, ...late] };
 }
 
@@ -332,6 +375,8 @@ export async function retryTaskAtStep(
     // Runs first and step rows after, the order a pass takes them in.
     const cancelled = await cancelLiveRuns(tx, taskId, 'user', now);
     await resetRowsForRerun(tx, taskId, reset, now);
+    // An empty `reset` takes no batch above; the statements below write rows outside it.
+    await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
     await reofferParkedSteps(
       tx,
       taskId,
@@ -1007,7 +1052,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       if (!bumped[0]) throw new HttpError(409, ENDED_TASK_MESSAGE);
       newEpoch = bumped[0].epoch;
       const late = await rowsActivatedMeanwhile(tx, id, []);
-      await resetRowsForRerun(tx, id, late, now);
+      await resetRowsForRerun(tx, id, late, now, { rowsHeld: true });
       await tx.insert(schema.taskEvents).values({
         taskId: id,
         taskStepId: step.id,
@@ -1195,7 +1240,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
         if (!bumped[0]) throw new HttpError(409, ENDED_TASK_MESSAGE);
         newEpoch = bumped[0].epoch;
         const late = await rowsActivatedMeanwhile(tx, id, [step.id]);
-        await resetRowsForRerun(tx, id, late, now);
+        await resetRowsForRerun(tx, id, late, now, { rowsHeld: true });
         await tx.insert(schema.taskEvents).values({
           taskId: id,
           taskStepId: step.id,
@@ -1277,6 +1322,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
             isNull(schema.cliInvocations.consumedAt),
           ),
         );
+      // The clicked row joins the rows it resets in one id-ordered batch.
+      await lockRowsForMove(tx, id, leftActive, now);
       // Preserve detectOutput / formSchema / formValues / iterations / iterationCount
       // / output so advanceStep skips detect + form and the loop resumes at
       // upcomingIteration = iterations.length with the now-selected provider.
@@ -1380,6 +1427,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
             isNull(schema.cliInvocations.consumedAt),
           ),
         );
+      // The clicked row joins the rows it resets in one id-ordered batch.
+      await lockRowsForMove(tx, id, leftActive, now);
       await tx
         .update(schema.taskSteps)
         .set({
@@ -1454,6 +1503,8 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     const moved = await db.transaction(async (tx) => {
       await admitNewWork(tx);
       await refuseReviveBesideLive(tx, id);
+      // The clicked row joins the rows it resets in one id-ordered batch.
+      await lockRowsForMove(tx, id, leftActive, now);
       await tx
         .update(schema.taskSteps)
         .set({
@@ -1509,8 +1560,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   if (body.action === 'abort') {
     // Give up on this step → cancel the task. The definitive teardown (incl. the
     // per-task DDEV runner, which survives a plain failure so recovery can reuse
-    // it). The step stays failed; the task goes terminal.
-    await cancelTaskRow(db, id, { by: userId });
+    // it). The step stays failed; the task goes terminal. A task that completed or was cancelled
+    // while the locks were awaited is left as it is: no second event, no second teardown.
+    const result = await db.transaction((tx) => cancelTaskIfOpen(tx, id, { by: userId }));
+    if (!result.cancelled) return c.json({ ok: true, status: result.status });
     await enqueueCancelJob(id, userId);
     await appendTaskEvent(db, id, step.id, 'step.abort', { stepId, note: body.note ?? null });
     return c.json({ ok: true, status: 'cancelled' });
@@ -1853,6 +1906,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       await tx
         .delete(schema.taskStepAgentMinings)
         .where(eq(schema.taskStepAgentMinings.taskStepId, step.id));
+      // The clicked row joins the rows it resets in one id-ordered batch; `leftActive` is empty
+      // unless the switch moves the task.
+      await lockRowsForMove(tx, id, leftActive, now);
       await tx
         .update(schema.taskSteps)
         .set({

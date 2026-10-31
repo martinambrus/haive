@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { isAllowedGitRemoteUrl, redactEditableGitUrl } from '@haive/shared/schemas';
 import { hardenGitArgs } from '@haive/shared/git-args';
 import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
-import { schema, type DbTx } from '@haive/database';
+import { lockRepositoryTasksKey, schema, type DbTx } from '@haive/database';
 import {
   CONFIG_KEYS,
   HAIVE_DATA_FILES,
@@ -56,6 +56,7 @@ import {
 import { getDb } from '../db.js';
 import { appendPlanAnswer, humanPlanAction } from '@haive/shared/plan-resolution';
 import { resolveRepoRoot } from './repos.js';
+import { requireJsonObject } from '../lib/json-object.js';
 import { planDeleteRefusal } from '../lib/plan-delete-refusal.js';
 import { requireAuth } from '../middleware/auth.js';
 import { admitNewWork, requireNewWorkAllowed } from '../middleware/maintenance.js';
@@ -1005,7 +1006,7 @@ planRoutes.delete('/:id/plan', async (c) => {
       ),
     );
 
-  const body = (await c.req.json().catch(() => ({}))) as { confirm?: unknown };
+  const body = requireJsonObject<{ confirm?: unknown }>(await c.req.json().catch(() => ({})));
   const refusal = planDeleteRefusal({
     confirm: body.confirm,
     repoName: repo.name,
@@ -1441,6 +1442,8 @@ planRoutes.post('/:id/plan/nodes/:nodeId/advisory', requireNewWorkAllowed, async
   const cliProviderId = await resolveProvider(userId, repositoryId, body.cliProviderId);
   const { taskId, created } = await getDb().transaction(async (tx) => {
     await admitNewWork(tx);
+    // Before the node row: a repository delete holds this key and cascades into plan_nodes.
+    await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, repositoryId));
     // Two clicks (including from two tabs) serialize on the node, so both
     // continue the same advisory. Its row commits before any queue delivery.
     const [locked] = await tx

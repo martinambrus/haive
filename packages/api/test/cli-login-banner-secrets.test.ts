@@ -1048,6 +1048,56 @@ describe('CLI login banner token paste', () => {
   );
 });
 
+// beforeEach fakes the global setImmediate; a real event-loop turn needs the original.
+const realSetImmediate = setImmediate;
+
+describe('CLI login banner client frames', () => {
+  // Valid JSON that is not an object: ignored, as text that is not JSON already is.
+  const FRAMES = ['null', '[]', '[{"type":"ping"}]', '"ping"', '5', 'true'];
+
+  it.each(FRAMES)(
+    'ignores %s: the listener resolves and the session is unchanged',
+    async (json) => {
+      await start();
+      const listeners = ws.listeners('message') as Array<(raw: Buffer) => Promise<void>>;
+      expect(listeners).toHaveLength(1);
+      const sent = ws.send.mock.calls.length;
+      const timers = vi.getTimerCount();
+      const write = vi.spyOn(stream, 'write');
+      await expect(listeners[0]!(Buffer.from(json))).resolves.toBeUndefined();
+      expect(ws.send).toHaveBeenCalledTimes(sent);
+      expect(write).not.toHaveBeenCalled();
+      expect(h.remove).not.toHaveBeenCalled();
+      expect(ws.readyState).toBe(1);
+      expect(vi.getTimerCount()).toBe(timers);
+    },
+  );
+
+  it.each(FRAMES)('ignores %s: no unhandled rejection through the socket', async (json) => {
+    await start();
+    const unhandled: unknown[] = [];
+    const collect = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', collect);
+    try {
+      ws.emit('message', Buffer.from(json));
+      await settle();
+      await new Promise((resolve) => realSetImmediate(resolve));
+    } finally {
+      process.off('unhandledRejection', collect);
+    }
+    expect(unhandled).toHaveLength(0);
+  });
+
+  it('keeps serving: after all of them a ping gets exactly one pong', async () => {
+    await start();
+    const sent = ws.send.mock.calls.length;
+    for (const json of [...FRAMES, '{"type":"ping"}']) ws.emit('message', Buffer.from(json));
+    await settle();
+    const frames = ws.send.mock.calls.slice(sent).map(([text]) => JSON.parse(text));
+    expect(JSON.stringify(frames) === '[{"type":"pong"}]').toBe(true);
+  });
+});
+
 describe('CLI login banner auth URL chunking', () => {
   // Synthetic, ~200 characters, hard-wrapped at 80 columns the way the CLI's PTY prints it.
   const CLAUDE_URL =

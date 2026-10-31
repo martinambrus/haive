@@ -26,6 +26,7 @@ import { requireAuth, requireAuthAllowingPasswordChange } from '../middleware/au
 import { getDb } from '../db.js';
 import { HttpError, type AppEnv } from '../context.js';
 import { containmentHttpError } from '../lib/fs-http.js';
+import { isJsonObject, requireJsonObject } from '../lib/json-object.js';
 import { closeUserSockets } from '../lib/user-sockets.js';
 import { ensureUploadsDir, uploadFileRel, uploadsRel, uploadsStorageRoot } from '../lib/uploads.js';
 
@@ -241,17 +242,19 @@ userSettingsRoutes.get('/ide', async (c) => {
 
 userSettingsRoutes.put('/ide', async (c) => {
   const userId = c.get('userId');
-  const body = (await c.req.json()) as { settingsJson?: unknown };
+  const body = requireJsonObject<{ settingsJson?: unknown }>(await c.req.json());
   const settingsJson = body.settingsJson;
   if (typeof settingsJson !== 'string') throw new HttpError(400, 'settingsJson must be a string');
   if (Buffer.byteLength(settingsJson, 'utf8') > MAX_IDE_SETTINGS_BYTES) {
     throw new HttpError(413, 'settings exceed the 64 KiB limit');
   }
+  let parsed: unknown;
   try {
-    JSON.parse(settingsJson);
+    parsed = JSON.parse(settingsJson);
   } catch {
     throw new HttpError(400, 'settingsJson must be valid JSON');
   }
+  if (!isJsonObject(parsed)) throw new HttpError(400, 'settingsJson must be a JSON object');
   const db = getDb();
   await db
     .insert(schema.userIdeSettings)
@@ -277,17 +280,19 @@ userSettingsRoutes.get('/ui-prefs', async (c) => {
 
 userSettingsRoutes.put('/ui-prefs', async (c) => {
   const userId = c.get('userId');
-  const body = (await c.req.json()) as { settingsJson?: unknown };
+  const body = requireJsonObject<{ settingsJson?: unknown }>(await c.req.json());
   const settingsJson = body.settingsJson;
   if (typeof settingsJson !== 'string') throw new HttpError(400, 'settingsJson must be a string');
   if (Buffer.byteLength(settingsJson, 'utf8') > MAX_IDE_SETTINGS_BYTES) {
     throw new HttpError(413, 'settings exceed the 64 KiB limit');
   }
+  let parsed: unknown;
   try {
-    JSON.parse(settingsJson);
+    parsed = JSON.parse(settingsJson);
   } catch {
     throw new HttpError(400, 'settingsJson must be valid JSON');
   }
+  if (!isJsonObject(parsed)) throw new HttpError(400, 'settingsJson must be a JSON object');
   const db = getDb();
   await db
     .insert(schema.userUiPrefs)
@@ -309,7 +314,7 @@ userSettingsRoutes.put('/ui-prefs', async (c) => {
  *  window to lose. */
 userSettingsRoutes.patch('/ui-prefs', async (c) => {
   const userId = c.get('userId');
-  const body = (await c.req.json()) as { settingsJson?: unknown };
+  const body = requireJsonObject<{ settingsJson?: unknown }>(await c.req.json());
   const settingsJson = body.settingsJson;
   if (typeof settingsJson !== 'string') throw new HttpError(400, 'settingsJson must be a string');
   if (Buffer.byteLength(settingsJson, 'utf8') > MAX_IDE_SETTINGS_BYTES) {
@@ -323,7 +328,7 @@ userSettingsRoutes.patch('/ui-prefs', async (c) => {
   }
   // Not merely a shape check: jsonb `||` CONCATENATES two arrays and REPLACES a scalar,
   // so a non-object patch would destroy the blob rather than merge into it.
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!isJsonObject(parsed)) {
     throw new HttpError(400, 'settingsJson must be a JSON object');
   }
   const db = getDb();

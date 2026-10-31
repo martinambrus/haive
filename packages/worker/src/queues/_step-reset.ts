@@ -1,6 +1,7 @@
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import {
   isUniqueViolationOf,
+  lockStepRows,
   ONE_LIVE_UPGRADE_INDEX,
   schema,
   resetDagCurrentLevelForRetry,
@@ -107,6 +108,17 @@ export async function resetStepAndDownstream(
       // the step re-halts with the identical error. Reset the current level's stuck issues too.
       // No-op when the task has no DAG / no stuck issue. Keep in sync with the API retry site.
       await resetDagCurrentLevelForRetry(tx, taskId);
+      const resetRows = [target, ...downstream.filter((r) => r.status !== 'pending')];
+      // The rows the loop writes, in id order: the loop takes the target first and the rest in the
+      // order of the unordered read above, while the api's writers (a Stop, a repository delete)
+      // take theirs by id. After the sweeps, since a pass holds a run and then wants its step row.
+      await lockStepRows(
+        tx,
+        inArray(
+          schema.taskSteps.id,
+          resetRows.map((r) => r.id),
+        ),
+      );
       // Clearing formSchema is essential: the runner only re-renders the form when the
       // persisted schema is null. formValues is cleared so the regenerated form re-decides.
       // Zero the live timing per row, but first fold the finishing run's work/idle/user
@@ -115,7 +127,6 @@ export async function resetStepAndDownstream(
       // counts a failed step's fail->retry dead-wait as idle so wall reconciles, and
       // reclassifies an orphaned still-open run's span as idle rather than inflating carried
       // work with it. Per-row (not a blanket update) because each row's contribution differs.
-      const resetRows = [target, ...downstream.filter((r) => r.status !== 'pending')];
       for (const r of resetRows) {
         const c = computeFoldContribution(r, now.getTime());
         await tx
