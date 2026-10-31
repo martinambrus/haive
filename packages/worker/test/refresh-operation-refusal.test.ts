@@ -24,11 +24,21 @@ import type { RepoJobPayload } from '@haive/shared';
 import { failGit, type FakeGit } from './support/fake-git.js';
 import { killGit } from './support/kill-git.js';
 
-const fsFaults = vi.hoisted(() => ({ remove: false }));
+const fsFaults = vi.hoisted(() => ({
+  remove: false,
+  stat: null as null | { anchor: string; rel: string },
+}));
 vi.mock('@haive/shared/fs-safe', async (original) => {
   const real = await original<typeof import('@haive/shared/fs-safe')>();
   return {
     ...real,
+    lstatNoFollow: async (...args: Parameters<typeof real.lstatNoFollow>) => {
+      if (fsFaults.stat?.anchor === args[0] && fsFaults.stat.rel === args[1]) {
+        if (args[2]?.strict) throw Object.assign(new Error('checkout stat EIO'), { code: 'EIO' });
+        return null;
+      }
+      return real.lstatNoFollow(...args);
+    },
     removeNoFollow: async (...args: Parameters<typeof real.removeNoFollow>) => {
       if (fsFaults.remove && args[1].includes('.rebuild-'))
         throw Object.assign(new Error('staging cleanup EIO'), { code: 'EIO' });
@@ -117,6 +127,7 @@ beforeEach(async () => {
   h.holding = 0;
   h.copyFault = null;
   fsFaults.remove = false;
+  fsFaults.stat = null;
   h.seed.mockResolvedValue(undefined);
   delete row.statusMessage;
   h.persist.mockImplementation(async (_db, _id, _dest, note) => {
@@ -661,3 +672,22 @@ it('a refused staging cleanup keeps both the original aside and the unfinished c
   expect(await lstat(dest).catch(() => null)).toBeNull();
   expect(h.persist).not.toHaveBeenCalled();
 });
+
+it.each(['copy', 'clone'] as const)(
+  'a failed checkout stat refuses the %s rebuild before anything is moved or built',
+  async (kind) => {
+    const { dest, payload } = await fixture();
+    await rm(path.join(dest, '.git/HEAD'));
+    // fs-safe folds non-ENOENT failures into null unless strict was requested.
+    fsFaults.stat = { anchor: root, rel: 'u1/r1' };
+    const copy = vi.fn(async () => undefined);
+    h.copyFault = copy;
+    const err = await runRefresh(rebuildFrom[kind](payload)).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'EIO', message: 'checkout stat EIO' });
+    expect(err).not.toBeInstanceOf(UnrecoverableError);
+    await untouched(dest);
+    expect(copy).not.toHaveBeenCalled();
+    expect(h.clone).not.toHaveBeenCalled();
+    expect(row.status).toBe('error');
+  },
+);

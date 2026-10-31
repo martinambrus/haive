@@ -417,7 +417,7 @@ export async function fastForward(
 
 /** Move what stands at `rel` out of the way, keeping it. An empty directory holds nothing to keep. */
 async function moveAside(anchor: string, rel: string): Promise<string | null> {
-  const info = await lstatNoFollow(anchor, rel);
+  const info = await lstatNoFollow(anchor, rel, { strict: true });
   if (!info) return null;
   if (info.kind === 'directory' && ((await readdirNoFollow(anchor, rel)) ?? []).length === 0) {
     await removeNoFollow(anchor, rel);
