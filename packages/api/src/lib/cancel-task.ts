@@ -1,5 +1,5 @@
-import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
-import { CLEAR_STEP_USAGE_STAMP, schema } from '@haive/database';
+import { and, eq, inArray, notInArray, sql, type SQL } from 'drizzle-orm';
+import { CLEAR_STEP_USAGE_STAMP, lockStepRows, schema, type DbTx } from '@haive/database';
 import {
   logger,
   TASK_JOB_NAMES,
@@ -30,6 +30,8 @@ export const CLEAR_ALLOWANCE_WATCH = {
   allowanceResetAt: null,
   allowanceReplenishedAt: null,
 };
+
+type TaskStatus = (typeof schema.tasks.$inferSelect)['status'];
 
 const OPEN_STEP_STATUSES = ['pending', 'running', 'waiting_form', 'waiting_cli'] as const;
 
@@ -120,7 +122,7 @@ export async function enqueueCancelJob(taskId: string, userId: string): Promise<
  *  of cancelled task ids so the caller can enqueue worker CANCEL jobs after
  *  the surrounding transaction commits. */
 export async function cancelOpenTasksForRepo(
-  tx: DbOrTx,
+  tx: DbTx,
   repoId: string,
   userId: string,
 ): Promise<Array<{ id: string }>> {
@@ -131,20 +133,51 @@ export async function cancelOpenTasksForRepo(
   );
   const seen = await tx.select({ id: schema.tasks.id }).from(schema.tasks).where(isOpen);
   if (seen.length === 0) return seen;
-  const ids = seen.map((t) => t.id);
-  // Step rows before task rows: the order every other transaction that writes both takes.
-  await tx
-    .select({ id: schema.taskSteps.id })
-    .from(schema.taskSteps)
-    .where(
-      and(
-        inArray(schema.taskSteps.taskId, ids),
-        inArray(schema.taskSteps.status, [...OPEN_STEP_STATUSES]),
-      ),
-    )
-    .orderBy(schema.taskSteps.id)
-    .for('no key update');
-  // The wait may have let a Stop or a completion end a task, so cancel only those still open.
+  return cancelStillOpen(
+    tx,
+    seen.map((t) => t.id),
+    isOpen,
+    { by: userId, reason: 'repository_deleted' },
+  );
+}
+
+/** Cancel one task unless a completion or another cancel already ended it. The decision is made
+ *  under the task's locks, not from a status the caller read earlier; a `failed` task stays
+ *  cancellable. On `cancelled: false` the caller writes no event and queues no teardown, since
+ *  another writer ended the task; `status` is what was found then (undefined for a task that is gone). */
+export async function cancelTaskIfOpen(
+  tx: DbTx,
+  taskId: string,
+  opts: { by: string; reason?: string },
+): Promise<{ cancelled: true } | { cancelled: false; status: TaskStatus | undefined }> {
+  const open = await cancelStillOpen(
+    tx,
+    [taskId],
+    notInArray(schema.tasks.status, ['completed', 'cancelled']),
+    opts,
+  );
+  if (open.length > 0) return { cancelled: true };
+  const [found] = await tx
+    .select({ status: schema.tasks.status })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, taskId));
+  return { cancelled: false, status: found?.status };
+}
+
+/** Lock every step row of the tasks, then cancel those of them that still satisfy `isOpen`.
+ *  Step rows before task rows, in id order: the order every other transaction that writes both
+ *  takes. All of the rows rather than the open ones, since the task row is held across
+ *  cancelTaskRow's bulk step update, and a row that opens before it (a Retry's commit) would be
+ *  locked there in scan order while a worker's claim holding it waits for the task row. The wait for
+ *  the rows may have let a Stop, a completion or another cancel end a task, so the tasks are read
+ *  again, locked, and only those still open are cancelled. */
+async function cancelStillOpen(
+  tx: DbTx,
+  ids: string[],
+  isOpen: SQL | undefined,
+  opts: { by: string; reason?: string },
+): Promise<Array<{ id: string }>> {
+  await lockStepRows(tx, inArray(schema.taskSteps.taskId, ids));
   const open = await tx
     .select({ id: schema.tasks.id })
     .from(schema.tasks)
@@ -152,7 +185,7 @@ export async function cancelOpenTasksForRepo(
     .orderBy(schema.tasks.id)
     .for('no key update');
   for (const t of open) {
-    await cancelTaskRow(tx, t.id, { by: userId, reason: 'repository_deleted' });
+    await cancelTaskRow(tx, t.id, opts);
   }
   return open;
 }

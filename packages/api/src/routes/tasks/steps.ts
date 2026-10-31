@@ -53,7 +53,11 @@ import { admitNewWork, assertNewWorkAllowed } from '../../middleware/maintenance
 import { killTaskSandboxes } from '../../lib/sandbox-kill.js';
 import { refuseBesideLiveUpgrade, refuseReviveBesideLive } from '../upgrades.js';
 import { cancelLiveRuns, reofferParkedSteps, withoutGateAnswer } from '../../lib/task-control.js';
-import { cancelTaskRow, enqueueCancelJob, CLEAR_ALLOWANCE_WATCH } from '../../lib/cancel-task.js';
+import {
+  cancelTaskIfOpen,
+  enqueueCancelJob,
+  CLEAR_ALLOWANCE_WATCH,
+} from '../../lib/cancel-task.js';
 import { getTaskQueue } from '../../queues.js';
 import { writeStepCliChoice } from '../../lib/step-cli-choice.js';
 import { refuseDeadTask } from '../../lib/task-dead.js';
@@ -1556,8 +1560,10 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   if (body.action === 'abort') {
     // Give up on this step → cancel the task. The definitive teardown (incl. the
     // per-task DDEV runner, which survives a plain failure so recovery can reuse
-    // it). The step stays failed; the task goes terminal.
-    await cancelTaskRow(db, id, { by: userId });
+    // it). The step stays failed; the task goes terminal. A task that completed or was cancelled
+    // while the locks were awaited is left as it is: no second event, no second teardown.
+    const result = await db.transaction((tx) => cancelTaskIfOpen(tx, id, { by: userId }));
+    if (!result.cancelled) return c.json({ ok: true, status: result.status });
     await enqueueCancelJob(id, userId);
     await appendTaskEvent(db, id, step.id, 'step.abort', { stepId, note: body.note ?? null });
     return c.json({ ok: true, status: 'cancelled' });

@@ -13,7 +13,12 @@ interface Recorded {
   insertCalls: Array<{ table: unknown; values: Record<string, unknown> }>;
 }
 
-function makeFakeTx(selectReturn: Array<{ id: string }> = []): {
+/** `selectReturn` answers the reads that lock their rows; `unlockedReturn` the reads that do not,
+ *  the same rows unless a test says otherwise. */
+function makeFakeTx(
+  selectReturn: Array<{ id: string }> = [],
+  unlockedReturn: unknown[] = selectReturn,
+): {
   tx: never;
   recorded: Recorded;
 } {
@@ -34,7 +39,7 @@ function makeFakeTx(selectReturn: Array<{ id: string }> = []): {
           recorded.selectArgs = cols;
           recorded.fromArg = table;
           recorded.whereArg = clause;
-          return Object.assign(Promise.resolve(selectReturn), {
+          return Object.assign(Promise.resolve(unlockedReturn), {
             orderBy: () => ({ for: async () => selectReturn }),
           });
         },
@@ -64,6 +69,7 @@ vi.mock('../src/queues.js', () => ({
 
 const {
   cancelTaskRow,
+  cancelTaskIfOpen,
   enqueueCancelJob,
   cancelOpenTasksForRepo,
   collectInternalRagProjectNamesForRepo,
@@ -233,6 +239,46 @@ describe('cancelOpenTasksForRepo', () => {
     // the cancel + enqueue path.
     expect(recorded.selectArgs).toEqual({ id: schema.tasks.id });
     expect(recorded.fromArg).toBe(schema.tasks);
+  });
+});
+
+describe('cancelTaskIfOpen', () => {
+  it('cancels a task that is still open and says so', async () => {
+    const { tx, recorded } = makeFakeTx([{ id: 'task-1' }]);
+
+    const result = await cancelTaskIfOpen(tx, 'task-1', { by: 'user-1' });
+
+    expect(result).toEqual({ cancelled: true });
+    expect(recorded.updateCalls.map((call) => call.table)).toEqual([
+      schema.tasks,
+      schema.taskSteps,
+    ]);
+    expect(recorded.insertCalls).toHaveLength(1);
+    expect(recorded.insertCalls[0]?.values).toMatchObject({
+      taskId: 'task-1',
+      eventType: 'task.cancelled',
+      payload: { by: 'user-1' },
+    });
+  });
+
+  it('writes nothing for a task that ended while it waited, and reports the status it found', async () => {
+    const { tx, recorded } = makeFakeTx([], [{ status: 'completed' }]);
+
+    const result = await cancelTaskIfOpen(tx, 'task-1', { by: 'user-1' });
+
+    expect(result).toEqual({ cancelled: false, status: 'completed' });
+    expect(recorded.updateCalls).toEqual([]);
+    expect(recorded.insertCalls).toEqual([]);
+  });
+
+  it('reports no status for a task that is gone, and writes nothing', async () => {
+    const { tx, recorded } = makeFakeTx([], []);
+
+    const result = await cancelTaskIfOpen(tx, 'task-1', { by: 'user-1' });
+
+    expect(result).toEqual({ cancelled: false, status: undefined });
+    expect(recorded.updateCalls).toEqual([]);
+    expect(recorded.insertCalls).toEqual([]);
   });
 });
 
