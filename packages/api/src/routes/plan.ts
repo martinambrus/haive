@@ -13,7 +13,6 @@ import {
   CONFIG_KEYS,
   HAIVE_DATA_FILES,
   PLAN_MERGE_MESSAGE_EVENT,
-  TASK_JOB_NAMES,
   configService,
   createPlanEdgeRequestSchema,
   createPlanNodeRequestSchema,
@@ -67,7 +66,8 @@ import { enqueueStart } from '../lib/task-start.js';
 import { loadUsableProvider, writeStepCliChoice } from '../lib/step-cli-choice.js';
 import { loadOpenPlanAdvisories, OPEN_PLAN_TASK_STATES } from '../lib/plan-advisories.js';
 import { enqueuePlanMirrorRefresh, pullPlanMirror, savePlanMirror } from '../lib/plan-mirror.js';
-import { getTaskQueue } from '../queues.js';
+import { cancelTaskIfOpen, enqueueCancelJob } from '../lib/cancel-task.js';
+import { stopActiveCliInvocations } from '../lib/task-control.js';
 
 const exec = promisify(execFile);
 
@@ -1381,13 +1381,13 @@ planRoutes.delete('/:id/plan/merge', async (c) => {
   const { userId, repositoryId } = await requireOwnedRepo(c);
   const task = await findOpenPlanMerge(repositoryId);
   if (!task) return c.json({ ok: true, cancelled: false });
-  await getTaskQueue().add(
-    TASK_JOB_NAMES.CANCEL,
-    { taskId: task.id, userId },
-    {
-      removeOnComplete: true,
-    },
-  );
+  const db = getDb();
+  // The Stop comes first, as in the Cancel action; the decision is then made under the task's
+  // locks, not from the read above.
+  await stopActiveCliInvocations(db, task.id, { failTask: false });
+  const result = await db.transaction((tx) => cancelTaskIfOpen(tx, task.id, { by: userId }));
+  if (!result.cancelled) return c.json({ ok: true, cancelled: false });
+  await enqueueCancelJob(task.id, userId);
   return c.json({ ok: true, cancelled: true, taskId: task.id });
 });
 
