@@ -970,12 +970,14 @@ From the T466 review (2026-10-31). PRE-EXISTING, minor.
 
 Since T466 a row whose checkout is gone costs 3-5 statements a tick, but every held row still takes one of the 25 batch slots (worker project-state/refresh.ts ~:182-183, queues/plan-mirror-queue.ts ~:608-614, ~:637-645), so a newer healthy row waits floor(N/25) ticks behind N held rows (MEASURED: N = 30 gave tick 2, N = 125 tick 6), and the mirror sweep runs before the outbox sweep in one job (`sweepAll`), so a slow mirror sweep delays outbox rows (14 dead rows of 20,000 nodes: sweeps of 3.6-5.3 s). `plan-canvas-smoke` C4 pins the rotation as designed. Direction (a decision): scan past held rows without counting them, or run the two sweeps as separate jobs.
 
-### T478 · FNF[snapshot-error-paths] · the plan page shows a raw filesystem error, with the server's absolute path, as the snapshot error
+### T478 · FNF[snapshot-error-paths] · the plan page shows a raw filesystem error, with the server's absolute path, as the snapshot error (+1)
 
 status: open
 From the T466 review (2026-10-31). PRE-EXISTING, minor.
 
 `plan_mirror_state.last_error` stores the raw `err.message` of a failed flush (worker plan/mirror.ts ~:1714-1733; `safeErrorMessage`, shared logger/errors.ts ~:62-65, redacts only database query errors), and `GET /repositories/:id/plan/snapshot` serves it (api routes/plan.ts ~:429), so any filesystem error other than the held reasons shows an absolute path under the repository storage on the plan page (T466 replaced only the gone-checkout one). Direction: store a reason from a closed set (or the error class and the path relative to the repository) and log the full error.
+
+Also (T459 fix round, 2026-10-31; PRE-EXISTING, minor): `DELETE /repositories/:id/plan` (api routes/plan.ts ~:1038) calls `applyPlanPatch` outside the `try`/`planError` mapping, so a repository deleted meanwhile answers 500 instead of 404; and the header of shared plan/errors.ts (~:1-6) still says a worker step turns `invalid` into a `RetryableParseError`, which `_plan-prompt.ts` (~:274-285) no longer does.
 
 ### T479 · FNF[extract-swap] · an archive extract that fails between its two renames loses the previous repository tree
 
@@ -1021,6 +1023,8 @@ status: open
 From the T459 review (2026-10-31). PRE-EXISTING, minor to consequential. Cross-reference T270 and T318 item 5.
 
 Since T459 a plan patch that may insert takes the repository row FOR KEY SHARE first, but an update-only patch takes no repository lock (a project-state write holds that row FOR UPDATE for 0.4-2 s, see T484), so it can still deadlock with a repository delete at the fresh-baseline cascade order, or when two node updates run opposite to the delete's scan; the same shape is in `answerPlanQuestion` (worker plan/answer.ts ~:48-132), `markPlanCodeLinksStaleForPaths` (worker plan/code-link-staleness.ts), the mirror reconcile and flush (plan/mirror.ts ~:1498, ~:1710) and the set-aside marks (set-aside.ts ~:607, ~:830, ~:933). Also: a Retry or revival of an onboarding or onboarding_upgrade task holds the repository row FOR UPDATE for its whole transaction (`repository-task-lock.ts` ~:31-49) and then deletes agent rows, while 10_8-plan-build's `applyAgentPatchOnce` (`_plan-prompt.ts` ~:330-359) holds a mining row and asks for the repository KEY SHARE (T459 moved that edge earlier). Options: the delete removes the plan rows itself, mirror row last; lock the mirror row first (serialises patches); or accept the 40P01 on a delete.
+
+Note (T459 fix round): 01-plan-build (~:882, and 10_8 with it), 02-plan-coverage (~:793), 03-plan-sequence (~:630) and 01-plan-chat (~:318) catch every fold error alike, so a repository deleted under them is stamped as a failed apply rather than failing at once; minor, since the repository delete cancels the task's open steps first.
 
 ### T484 · FNF[project-state-row-hold] [design] · the project-state writers hold the repository row FOR UPDATE across file and git work
 
