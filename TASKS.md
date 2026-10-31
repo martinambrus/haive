@@ -808,7 +808,7 @@ PRE-EXISTING, rechecked during T423 integration review. F1: dormant worker helpe
 
 ### T437 · FNF[legacy-repository-responses] · exclusions PATCH returns a legacy credentialed remote unchanged
 
-status: open · scope: queued broader finding, not approved implementation
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T00:45Z · last: 2026-10-31T00:45Z
 
 PRE-EXISTING, independently verified during T340 corrections. `packages/api/src/routes/repos.ts`, PATCH `/:id/exclusions`, returns the updated repository `rest` without sanitizing `remoteUrl`. A legacy HTTP password remains in the browser response even though GET list/detail sanitize it. The current exclusions UI ignores the mutation payload and reloads GET, so this does not seed the origin editor or regress T340's editable-response correction. Apply the guarded response policy to raw repository mutation responses with actual-route controls, preserving stored configuration. Evidence: `.claude/tmp/board-run/T340/editable-ssh-fix/exclusions-gap-probe.test.ts` / `.log` and `codex-review-scanner-editable.md`; parent checked the actual writer and ignored-response consumer. No implementation started; follow after the approved batch only with authorization.
 
@@ -874,7 +874,7 @@ Before React attaches `handleSubmit`, a click on Sign in (web components/auth-fo
 
 ### T454 · FNF[ssr-form-prehydration-values] · server-rendered controlled forms lose text typed before hydration
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T01:06Z · last: 2026-10-31T01:06Z
 From the T449 review (2026-10-30). PRE-EXISTING, minor (signed-in pages; only a hard load exposes it).
 
 1. web components/new-repo-form.tsx ~:116 keeps the repository name in a controlled `useState('')` and ~:239 renders `<form onSubmit>` with no `method`: text typed into `/repos/new` before hydration is reset to '' by the first re-render, and a submit before hydration is a GET reload of the same page (the input has no `name`, so nothing reaches the URL). The fix class is T449's: uncontrolled inputs read with `new FormData(event.currentTarget)` at submit.
@@ -902,13 +902,14 @@ From the T452 review (2026-10-31). PRE-EXISTING, minor; reachable only when outp
 
 In api routes/cli-login-banner.ts `onStreamData` (~:876-882), a success or error line in a chunk that arrives after `cleanupSession` still reaches `detectAuthResult` and starts `runProbeAndSave`, which queues a probe job for a session that is gone: `canDetectAuth` (~:666) has no `cleanedUp` check, while `captureClaudeOauthToken` and `offerAuthUrl` do. Codex, grok and amp take this branch (grok measured by the T452 driver with a scratch test: probe jobs 0 -> 1 after `ws.close()` and a "Signed in" chunk). Decide whether a login that completes during teardown should still be verified (the CLI has stored its credentials either way, so a skipped probe leaves Haive's provider state stale until the next check). If not, one `if (session.cleanedUp) return;` at the top of `onStreamData` closes it and makes T452's gate on the antigravity URL step redundant.
 
-### T458 · FNF[cancel-status-guard] · the worker's CANCEL marks a task cancelled whatever its status; the plan merge's DELETE queues a CANCEL unchecked
+### T458 · FNF[cancel-status-guard] · the worker's CANCEL marks a task cancelled whatever its status; the plan merge's DELETE queues a CANCEL unchecked (+1)
 
 status: open
 From the T349 review (2026-10-31). PRE-EXISTING, consequential. Cross-reference: T309 FNF[cancel-cap-2].
 
 1. worker queues/task-queue.ts `handleCancelTask` (~:3760-3773) sets `status = 'cancelled'` where only the id matches, so a CANCEL job that lands after the task completed (queued before the completion, or by a caller that never checked) turns a completed task into a cancelled one. T349 (PR pending) guards the api's single cancel and step abort (`cancelTaskIfOpen`: completed and cancelled are terminal, failed stays cancellable); the worker needs the same guard, with the decision made under the task row's lock.
 2. api routes/plan.ts `DELETE /plan/merge` (~:1379) queues a CANCEL with no check of the task's status when it runs. Route it through the same decision.
+3. Minor (T349 fix-round review): the step action `abort` cancels without the Stop that the Cancel action runs first (api routes/tasks/steps.ts ~:1565 vs routes/tasks/index.ts ~:1288), so a live CLI of the task is not stopped by it; check whether the web offers abort on a live step (web app/(app)/tasks/[id]/page.tsx ~:1354).
 
 ### T459 · FNF[lock-order-leftovers] · writers that still lock step, run or mining rows in scan order or against the Retry's order (+5)
 
@@ -922,10 +923,12 @@ From the T349 review (2026-10-31). PRE-EXISTING; narrow windows unless stated. T
 5. [verify-first] A possible cycle: shared plan/apply-patch.ts `applyPlanPatch` (~:186-199) writes plan_nodes rows and then upserts `plan_mirror_state`, which needs the repositories row; a repository delete holds that row FOR UPDATE and cascades into plan_nodes. Not traced to the end. Cross-reference T270 and T318 item 5 (the advisory start's plan_nodes lock still waits unbounded).
 6. Minor cost: the four left-active moves (loop Resume, `retry_ai`, Skip, CLI switch) take the whole-task step batch twice (`lockRowsForMove`, then `resetRowsForRerun`); the second is a no-wait re-lock.
 
-### T460 · FNF[retry-repo-deleted] [design] · a Retry revives a failed task whose repository was deleted
+### T460 · FNF[retry-repo-deleted] [design] · a Retry revives a failed task whose repository was deleted (+1)
 
 status: open
 From the T349 review (2026-10-31). PRE-EXISTING. A failed task whose repository was deleted still passes `checkRevive` (database repository-task-lock.ts ~:109), while the repository delete's `cancelOpenTasksForRepo` (api lib/cancel-task.ts ~:130) skips failed tasks; a Retry then sets it `running` with no repository and the worker's next advance throws. Decide: refuse that Retry (say why on the page), or have the delete cancel failed tasks too. Cross-reference T393, T394, T409.
+
+Also (T349 fix-round review, 2026-10-31, reasoned from the code, not reproduced): since T349 the delete takes the task-creation key a Retry takes, but a Retry already waiting on the key when the delete commits goes on: `checkRevive` returns null after the wait without reading the repository again (database repository-task-lock.ts ~:109-113), so the task is revived to `running` with a NULL repository. Whichever way this is decided, the Retry must read the repository again after its wait.
 
 ### T461 · FNF[stale-preread-fold] · two folds add to values read before their transaction
 

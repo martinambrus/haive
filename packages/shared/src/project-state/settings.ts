@@ -124,7 +124,7 @@ export function toolingUnitOf(column: unknown): Record<string, unknown> | null {
   if (typeof held === 'string' && typeof unit.mcpSettingsJson !== 'string') {
     unit.mcpSettingsJson = held;
   }
-  return Buffer.byteLength(canonicalJson(unit), 'utf8') > PROJECT_STATE_LIMITS.maxFileBytes
+  return new TextEncoder().encode(canonicalJson(unit)).length > PROJECT_STATE_LIMITS.maxFileBytes
     ? null
     : unit;
 }
