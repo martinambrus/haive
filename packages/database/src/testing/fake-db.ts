@@ -345,7 +345,12 @@ export function createFakeDb<const T extends Record<string, PgTable>>(tables: T)
   }
 
   function sortBy(table: PgTable, rows: FakeRow[], order: unknown): FakeRow[] {
-    const ch = is(order, SQL) ? order.queryChunks.filter((c) => text(c) !== '') : [];
+    // A bare column sorts ascending, as drizzle sends `orderBy(column)`.
+    const ch = is(order, Column)
+      ? [order, new StringChunk(' asc')]
+      : is(order, SQL)
+        ? order.queryChunks.filter((c) => text(c) !== '')
+        : [];
     const key = is(ch[0], Column) ? columnKeys(table).get(ch[0]) : undefined;
     const dir = text(ch[1]);
     if (ch.length !== 2 || key === undefined || (dir !== ' asc' && dir !== ' desc')) {

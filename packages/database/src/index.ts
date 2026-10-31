@@ -65,3 +65,4 @@ export {
   type ReviveRefusal,
   type ReviveTask,
 } from './repository-task-lock.js';
+export { lockStepRows } from './step-row-lock.js';

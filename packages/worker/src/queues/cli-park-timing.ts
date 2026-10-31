@@ -1,5 +1,5 @@
 import { and, eq, isNull, ne, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
-import { schema, type Database } from '@haive/database';
+import { lockStepRows, schema, type Database, type DbTx } from '@haive/database';
 
 // waiting_cli park accounting. A step in `waiting_cli` is normally the CLI actively running
 // = real work, so its span bills as work. But when the invocation(s) end and the step does
@@ -82,6 +82,10 @@ export async function foldAbandonedPark(
   );
 }
 
+/** A row that still holds a park marker or the park's display copy. A fold without
+ *  `requireMarker` writes only such rows, and `foldOtherTaskParks` locks exactly those. */
+const parkMarkerOrCopy = sql`(${schema.taskSteps.waitingStartedAt} IS NOT NULL OR ${schema.taskSteps.statusMessage} IS NOT NULL)`;
+
 /** One live park per task, marker AND banner. Called on every park tick: closes any OTHER
  *  pending row of the task still holding a marker or still carrying park copy. Those are loops
  *  that vanished without folding — a park's poll chain ends whenever its advance is skipped or
@@ -91,21 +95,33 @@ export async function foldAbandonedPark(
  *  guard existed: only one loop parks now, the rival drops itself, so leftovers clear once.
  *
  *  Scoped to `pending` rows, which hold no durable status_message — a park/queue note is the only
- *  thing they ever carry (see migration 0102), so clearing it discards nothing. */
+ *  thing they ever carry (see migration 0102), so clearing it discards nothing.
+ *
+ *  The one multi-row fold: the rows it will write are locked in id order first, since its statement
+ *  scans them in its own order and would meet the id-ordered writers (a Stop, a repository delete)
+ *  the wrong way round. A plain read looks first, as almost every tick matches no row and the
+ *  transaction would cost a BEGIN, a lock and a COMMIT for nothing. */
 export async function foldOtherTaskParks(
   db: Database,
   taskId: string,
   keepStepRowId: string,
 ): Promise<void> {
-  await foldPark(
-    db,
-    and(
-      eq(schema.taskSteps.taskId, taskId),
-      ne(schema.taskSteps.id, keepStepRowId),
-      eq(schema.taskSteps.status, 'pending'),
-    )!,
-    { clearMessage: true, requireMarker: false },
-  );
+  const others = and(
+    eq(schema.taskSteps.taskId, taskId),
+    ne(schema.taskSteps.id, keepStepRowId),
+    eq(schema.taskSteps.status, 'pending'),
+  )!;
+  const parked = and(others, parkMarkerOrCopy);
+  const [leftover] = await db
+    .select({ id: schema.taskSteps.id })
+    .from(schema.taskSteps)
+    .where(parked)
+    .limit(1);
+  if (!leftover) return;
+  await db.transaction(async (tx) => {
+    await lockStepRows(tx, parked);
+    await foldPark(tx, others, { clearMessage: true, requireMarker: false });
+  });
 }
 
 /** The one fold statement every caller shares: credit the elapsed park to idle time and clear the
@@ -122,13 +138,13 @@ export async function foldOtherTaskParks(
  *  its own progress line takes over (step-runner clears it in the same breath), and an
  *  invocation-start fold must not wipe a live progress line. */
 async function foldPark(
-  db: Database,
+  db: Database | DbTx,
   target: SQL | SQLWrapper,
   opts?: { clearMessage?: boolean; requireMarker?: boolean },
 ): Promise<void> {
   const hasSomethingToClear =
     opts?.requireMarker === false
-      ? sql`(${schema.taskSteps.waitingStartedAt} IS NOT NULL OR ${schema.taskSteps.statusMessage} IS NOT NULL)`
+      ? parkMarkerOrCopy
       : sql`${schema.taskSteps.waitingStartedAt} IS NOT NULL`;
   // WHICH column the park lands in is decided by whether the row has a span to subtract it from.
   // computeStepContribution reads work as `span - idle_ms`, so idle_ms may only ever hold a wait

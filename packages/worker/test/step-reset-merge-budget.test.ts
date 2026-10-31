@@ -32,7 +32,14 @@ describe('resetStepAndDownstream on a step whose merge retries ran out', () => {
     });
     const handle = {
       select: () => ({
-        from: () => ({ where: () => ({ ...thenable([]), limit: async () => [target] }) }),
+        from: () => ({
+          where: () => ({
+            ...thenable([]),
+            limit: async () => [target],
+            // The id-ordered lock of the rows the reset writes.
+            orderBy: () => ({ for: async () => [{ id: target.id }] }),
+          }),
+        }),
       }),
       update: (table: unknown) => ({
         set: (values: Record<string, unknown>) => {
