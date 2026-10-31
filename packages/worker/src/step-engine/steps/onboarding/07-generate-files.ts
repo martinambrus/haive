@@ -761,7 +761,9 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       detected.existingFiles.length > 0
         ? ` ${detected.existingFiles.length} existing file(s) may be overwritten if you enable overwrite.`
         : '';
-    const unmanaged = detected.unmanagedAgentFiles ?? [];
+    const unmanaged = (detected.unmanagedAgentFiles ?? []).filter(
+      (group) => !namesGitData(group.dir),
+    );
     const unmanagedCount = unmanaged.reduce((n, g) => n + g.files.length, 0);
     const fields: FormSchema['fields'] = [
       {

@@ -233,3 +233,31 @@ describe('generateFilesStep.apply — paths that name git data', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 });
+
+describe('07 quarantine form with stored git-data groups', () => {
+  it('counts and describes only groups apply can quarantine', async () => {
+    const form = await generateFilesStep.form!(
+      {} as StepContext,
+      detect([CLAUDE], {
+        unmanagedAgentFiles: [
+          { dir: '.git/hooks', files: ['private.md', 'other.md'] },
+          { dir: '.GIT./hooks', files: ['alias.md'] },
+          { dir: '.claude/agents', files: ['old.md'] },
+        ],
+      }),
+    );
+    const field = form!.fields.find((f) => f.id === 'quarantineUnmanagedAgents');
+    expect(field?.label).toContain('Move 1 unmanaged');
+    expect(field?.description).toContain('old.md');
+    expect(field?.description).not.toMatch(/private|alias|\.git|\.GIT/);
+  });
+  it('offers no quarantine checkbox for git-data-only groups', async () => {
+    const form = await generateFilesStep.form!(
+      {} as StepContext,
+      detect([CLAUDE], {
+        unmanagedAgentFiles: [{ dir: '.git/hooks', files: ['private.md'] }],
+      }),
+    );
+    expect(form!.fields.some((f) => f.id === 'quarantineUnmanagedAgents')).toBe(false);
+  });
+});
