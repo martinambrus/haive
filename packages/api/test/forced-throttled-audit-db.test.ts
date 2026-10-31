@@ -21,6 +21,8 @@ const h = vi.hoisted(() => ({
   throttle: vi.fn(),
   close: vi.fn(),
   auditDone: vi.fn(),
+  auditDelayMs: 0,
+  auditWork: undefined as Promise<void> | undefined,
 }));
 vi.mock('../src/db.js', () => ({ getDb: () => h.db }));
 vi.mock('../src/lib/user-sockets.js', () => ({ closeUserSockets: h.close }));
@@ -33,11 +35,15 @@ vi.mock('../src/lib/audit.js', async (original) => {
   return {
     ...real,
     recordAuditEvent: async (...args: Parameters<typeof real.recordAuditEvent>) => {
-      try {
-        await real.recordAuditEvent(...args);
-      } finally {
-        h.auditDone();
-      }
+      h.auditWork = (async () => {
+        try {
+          if (h.auditDelayMs) await new Promise((resolve) => setTimeout(resolve, h.auditDelayMs));
+          await real.recordAuditEvent(...args);
+        } finally {
+          h.auditDone();
+        }
+      })();
+      await h.auditWork;
     },
   };
 });
@@ -94,8 +100,11 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
     h.throttle.mockReset().mockResolvedValue({ refund: async () => {} });
     h.close.mockClear();
     h.auditDone.mockClear();
+    h.auditDelayMs = 0;
+    h.auditWork = undefined;
   });
   afterEach(async () => {
+    await h.auditWork;
     await allowAudit(db);
     await db.delete(schema.userInvites).where(eq(schema.userInvites.createdBy, h.actor));
     const registered = await db.query.users.findFirst({
@@ -121,6 +130,8 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
             'account',
           ),
         );
+        // Exercise a completion beyond expect.poll's default one-second budget.
+        h.auditDelayMs = known && !refused ? 1250 : 0;
         if (refused) await refuseAudit(db, h.actor, { anonymous: true });
         const res = await send('/auth/login', {
           email: known ? 'known@example.test' : 'absent@example.test',
@@ -128,7 +139,7 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
         });
         expect(res.status).toBe(429);
         expect(res.headers.get('Retry-After')).toBe('60');
-        await expect.poll(() => h.auditDone.mock.calls.length).toBe(1);
+        await expect.poll(() => h.auditDone.mock.calls.length, { timeout: 15_000 }).toBe(1);
         const rows = await audits(db);
         expect(rows).toHaveLength(refused ? 0 : 1);
         expect(await sessions()).toEqual([]);
