@@ -2,6 +2,9 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '@haive/shared';
+import * as stateReads from './sync.js';
+import * as safeFs from '@haive/shared/fs-safe';
 import { emptyProjectState, renderProjectState } from '@haive/shared/project-state';
 import { gitRun } from '../repo/git-exec.js';
 import * as gitCommands from '../repo/git-exec.js';
@@ -34,7 +37,12 @@ async function record(dir: string, settings: Record<string, unknown> = {}) {
   }
 }
 const save = (repoPath: string, message?: string) =>
-  commitHaiveProjections({ repoPath, identity, message });
+  commitHaiveProjections({
+    repositoryId: '00000000-0000-4000-8000-000000000001',
+    repoPath,
+    identity,
+    message,
+  });
 describe('commitHaiveProjections', () => {
   it('reports its own commit even when another commit lands before the index sync', async () => {
     const dir = await fixture();
@@ -151,7 +159,7 @@ describe('commit read and repair controls', () => {
     await expect(save(dir)).resolves.toMatchObject({ committed: true, indexSynced: true });
     expect((await gitRun(dir, ['rev-list', '--count', 'HEAD'])).stdout.trim()).toBe('1');
   });
-  it.each(['head', 'tree', 'blob', 'plan'] as const)(
+  it.each(['record', 'head', 'tree', 'blob', 'plan-stat', 'plan'] as const)(
     'classifies unreadable HEAD %s before committing',
     async (site) => {
       const dir = await fixture();
@@ -159,6 +167,17 @@ describe('commit read and repair controls', () => {
       await save(dir);
       await writeFile(join(dir, '.haive-data/state/format.json'), ' {"formatVersion": 1}');
       await record(dir, { 'rtk-version': 'changed' });
+      const warning = vi.spyOn(logger, 'warn');
+      if (site === 'record')
+        vi.spyOn(stateReads, 'readStateFiles').mockRejectedValue(new Error('record unreadable'));
+      if (site === 'plan-stat') {
+        const stat = safeFs.lstatNoFollow;
+        vi.spyOn(safeFs, 'lstatNoFollow').mockImplementation((anchor, rel, options) =>
+          rel === '.haive-data/plan.json'
+            ? Promise.reject(new Error('stat unreadable'))
+            : stat(anchor, rel, options),
+        );
+      }
       const run = gitCommands.gitRun;
       vi.spyOn(gitCommands, 'gitRun').mockImplementation(async (cwd, args, ...rest) => {
         const fails =
@@ -172,6 +191,13 @@ describe('commit read and repair controls', () => {
         return fails ? { code: 128, stdout: '', stderr: 'unreadable' } : run(cwd, args, ...rest);
       });
       await expect(save(dir)).rejects.toHaveProperty('refusal.code', 'record_unreadable');
+      expect(warning).toHaveBeenCalledWith(
+        expect.objectContaining({
+          err: expect.anything(),
+          repositoryId: '00000000-0000-4000-8000-000000000001',
+        }),
+        'Haive data projection read failed',
+      );
     },
   );
   it('skips deletions from a HEAD state directory holding only stray files', async () => {

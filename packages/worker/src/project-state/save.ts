@@ -285,7 +285,12 @@ async function saveHaiveDataInScope(payload: HaiveDataSavePayload): Promise<Haiv
         if (payload.push && facts.branch !== expectedBranch) fail({ code: 'checkout_changed' });
         if (facts.stateDirty || facts.mirrorDirty) return null;
         try {
-          const committed = await commitHaiveProjections({ repoPath, identity, message });
+          const committed = await commitHaiveProjections({
+            repositoryId: repo.id,
+            repoPath,
+            identity,
+            message,
+          });
           note(committed); // The Git commit survives even if the transaction commit fails.
           return committed;
         } catch (err) {

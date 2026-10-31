@@ -25,14 +25,17 @@ export interface HaiveProjectionCommit {
 /** Names from valid records only. Never give git a directory pathspec: unknown files beside
  * Haive's belong to their owner, including their staged blobs and tracked deletions. */
 export async function commitHaiveProjections(args: {
+  repositoryId: string;
   repoPath: string;
   identity: Record<string, string>;
   message?: string;
 }): Promise<HaiveProjectionCommit> {
-  const { repoPath } = args;
-  const current = await readStateFiles(repoPath, { boundedDirectoryReads: true }).catch(() => {
+  const { repoPath, repositoryId } = args;
+  const unreadable = (err: unknown): never => {
+    logger.warn({ err, repositoryId }, 'Haive data projection read failed');
     throw new HaiveProjectionRefusal({ code: 'record_unreadable' });
-  });
+  };
+  const current = await readStateFiles(repoPath, { boundedDirectoryReads: true }).catch(unreadable);
   if (!current?.size) throw new HaiveProjectionRefusal({ code: 'record_absent' });
   const parsed = parseProjectState(current);
   if (!parsed.ok) throw new HaiveProjectionRefusal({ code: 'record_refused' });
@@ -44,14 +47,14 @@ export async function commitHaiveProjections(args: {
       .map((rel) => `${PROJECT_STATE_DIR}/${rel}`),
     remove: [],
   };
-  const head = await gitRun(repoPath, ['rev-parse', '-q', '--verify', 'HEAD^{commit}']);
+  const head = await gitRun(repoPath, ['rev-parse', '-q', '--verify', 'HEAD^{commit}']).catch(
+    unreadable,
+  );
   if (head.code !== 0 && head.code !== 1)
-    throw new HaiveProjectionRefusal({ code: 'record_unreadable' });
+    unreadable(new Error(`git HEAD read failed: ${head.stderr || head.stdout}`));
   const parent = head.code === 0 ? head.stdout.trim() : null;
   if (parent) {
-    const previous = await readStateTree(repoPath, parent).catch(() => {
-      throw new HaiveProjectionRefusal({ code: 'record_unreadable' });
-    });
+    const previous = await readStateTree(repoPath, parent).catch(unreadable);
     if (previous.size) {
       const old = parseProjectState(previous);
       // An invalid old record proves no ownership of its deleted names.
@@ -69,15 +72,19 @@ export async function commitHaiveProjections(args: {
     }
   }
   for (const rel of [HAIVE_DATA_FILES.plan, HAIVE_DATA_FILES.planMarkdown]) {
-    const entry = await lstatNoFollow(repoPath, rel, { strict: true }).catch(() => {
-      throw new HaiveProjectionRefusal({ code: 'record_unreadable' });
-    });
-    if (entry && entry.kind !== 'file')
-      throw new HaiveProjectionRefusal({ code: 'record_unreadable' });
+    const entry = await lstatNoFollow(repoPath, rel, { strict: true }).catch(unreadable);
+    if (entry && entry.kind !== 'file') unreadable(new Error(`${rel} is not a regular file`));
     if (entry) plan.add.push(rel);
     else if (parent) {
-      const tree = await gitRun(repoPath, ['ls-tree', '-z', parent, '--', `:(literal)${rel}`]);
-      if (tree.code !== 0) throw new HaiveProjectionRefusal({ code: 'record_unreadable' });
+      const tree = await gitRun(repoPath, [
+        'ls-tree',
+        '-z',
+        parent,
+        '--',
+        `:(literal)${rel}`,
+      ]).catch(unreadable);
+      if (tree.code !== 0)
+        unreadable(new Error(`git plan entry read failed: ${tree.stderr || tree.stdout}`));
       if (tree.stdout) plan.remove.push(rel);
     }
   }
