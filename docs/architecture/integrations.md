@@ -349,7 +349,9 @@ the restriction when the last allowed account goes. Restricted with no entries a
 /admin/integrations/defaults[/:categoryId]` for an admin (`{providerId: null}` clears; audited
 `integration.category_default.update`, in the change's transaction). Repository: `GET|PUT
 /repositories/:id/integrations {restricted, connectionIds}` for its owner, diffed under
-`pg_advisory_xact_lock(integration-allow-list:<repo>)` so two saves never interleave. Task: `GET
+`pg_advisory_xact_lock(integration-allow-list:<repo>)` so two saves never interleave, with the repository
+row locked and the change audited in that transaction (`repository.integrations.update`: `restricted`,
+`added`, `removed`). Task: `GET
 /tasks/:id/integrations` (kept off the polled `GET /tasks/:id`), `PUT /tasks/:id/integrations/:category
 {providerId, connectionId?, remember?}` and `DELETE …?remember=1`: one transaction writes the choice,
 the preference when `remember`, and the event `task.integration_choice_changed`; DELETE also removes
@@ -558,8 +560,14 @@ They are the admin's provider save (`integration.provider_config.update`, the OA
 included) and category default (`integration.category_default.update`); the user's own GitHub client
 id (`integration.github_client.update`, whose user secret joins the transaction through the
 service's `executor`); "Use as connection" and every sign-in (`integration.connection.create`,
-`.reconnect`; a forge sign-in's Git credential, connection and row are one transaction); and the
-write switch (`integration.write_switch`).
+`.reconnect`; a forge sign-in's Git credential, connection and row are one transaction); the
+write switch (`integration.write_switch`); a repository's allow-list (`repository.integrations.update`);
+and a repository's remote and its credential binding (`repository.remote.update`). The relink holds the
+repository row `FOR NO KEY UPDATE`, which still serializes it with another relink and with the settings
+routes' `FOR UPDATE` but does not block a new task's foreign-key insert while its git calls run; it inserts
+the audit row, changes git, then writes the column, and puts git's remote back when the transaction fails, inside
+the transaction for a failure its callback sees and after the callback has settled for a failure at COMMIT
+or a lost connection, so exactly one restore runs after the last git write.
 
 Disconnect (`integration.connection.disconnect`) is the one exception, on purpose: its row follows
 the vendor revoke, which cannot be undone and whose outcome (`revoked`) the row records, so it stays
