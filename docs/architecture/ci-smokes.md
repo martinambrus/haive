@@ -70,16 +70,55 @@ the job's limit and cancels them.
 The gated step runs as the runner's default `bash -e {0}`: its `set -uo pipefail` adds -u and pipefail and leaves -e
 on, so a failed web-kit build, modules build or `gen-modules` ends the step before any gated file runs.
 
-Three more jobs have the same shape, with the id of their last setup step in the guard: `schema-parity` (`build`), the
-web checks of `production-images` (`build`; the guard also keeps `&& matrix.service == 'web'`) and `macos-preflight`
-in `.github/workflows/platform-checks.yml` (`checkout`). `compose-boot` and `e2e` are one pipeline ending in cleanup
-steps (`always()`, `failure()`), and `lint-typecheck-test` would hold its red verdict until its slowest check ends if
-guarded, so they keep the default condition.
+Four more jobs have the same shape, with the id of their last setup step in the guard: `compose-boot` (`runtime`; its
+three cleanup steps keep `always()`, `failure()`, `always()`), `schema-parity` (`build`), the web checks of
+`production-images` (`build`; the guard also keeps `&& matrix.service == 'web'`) and `macos-preflight` in
+`.github/workflows/platform-checks.yml` (`checkout`). Only `e2e` and `lint-typecheck-test` keep the default condition:
+`e2e` is one pipeline ending in cleanup steps, and `lint-typecheck-test` would hold its red verdict until its slowest
+check ends if guarded.
 
-`scripts/test/ci-step-independence.test.mjs` pins the setup steps of each of the four jobs (a new one is added to its
-`setup` list), the exact guard on every check, that the `production-images` matrix still has the `web` leg and no
-`exclude`, and that nothing in the jobs sets `continue-on-error`, which would leave a failed step green or let the
-checks run after a failed setup step. For the `smokes` job it also pins that every check that is not a `smoke:ci` chain
-has a `timeout-minutes` of whole minutes, and the job's limits (`budget`, see Limits): a modelled green run grows with
-the rows of the GATED list, so the pin fails when the list outgrows the gated step's limit or the job's.
-`scripts/test/run-smokes.test.mjs` pins the runner and that every `smoke:ci` goes through it.
+`scripts/test/ci-step-independence.test.mjs` pins the setup steps of each of the five jobs (a new one is added to its
+`setup` list), the exact guard on every check, the cleanup conditions of `compose-boot`, that the `production-images`
+matrix still has the `web` leg and no `exclude`, and that nothing in the jobs sets `continue-on-error`, which would
+leave a failed step green or let the checks run after a failed setup step. It also pins that no step of the five jobs
+(cleanup steps excepted) swallows a command failure (see Workflow scanners). For the `smokes` job it also pins that
+every check that is not a `smoke:ci` chain has a `timeout-minutes` of whole minutes, that the Redis databases do not
+clash, and the job's limits (`budget`, see Limits): a modelled green run grows with the rows of the GATED list, so the
+pin fails when the list outgrows the gated step's limit or the job's. `scripts/test/run-smokes.test.mjs` pins the
+runner and that every `smoke:ci` goes through it.
+
+## Workflow scanners
+
+`scripts/test/workflow.mjs` is the one YAML reader of the workflow pins (`ci-step-independence`, `ci-gated-loop`,
+`ci-browser-budget`). It uses Prettier's YAML parser, fails on a duplicate key and keeps scalars as strings, so
+indentation and comments cannot satisfy a pin. `ci-gated-loop.test.mjs` runs the real gated step script of `ci.yml`
+against stubbed `docker` and `pnpm` over a three-row fixture list.
+
+`scripts/test/shell-source.mjs` is a test-only lexical scan of a step's `run` script, used by `ci-step-independence`
+for two things: `swallowedFailure` (a command failure that does not fail the step) and `redisDatabases` (the Redis
+URLs a check uses). It is not a shell parser and it never runs the script.
+
+- It blanks `${{ }}` expressions and reads comments, quotes, `$()`, backticks, `${}` and arithmetic. Quoted text is
+  masked for the failure scan and visible to the Redis URL scan. Each substitution and each `sh -c` or `bash -c`
+  string is scanned as a code part of its own, because what ends a script is judged for each part.
+- A heredoc needs a quoted delimiter and is classified by the command that consumes it: `cat`, `tee`, `read` and
+  `done` take data (inert); `python3`, `node` and `psql` are interpreters (the body supplies Redis URLs only); `bash`,
+  `sh`, `dash`, `ksh` and `zsh` take code (scanned).
+- It throws, naming the step and the command, instead of guessing: an unquoted heredoc delimiter, a pipe after a
+  heredoc operator, an unclassified heredoc consumer, an unterminated quote, heredoc, expansion or expression, `eval`,
+  `ssh`, `source` or `.`, `su ... -c`, a pipe or here-string into a shell, and `case` inside a substitution. A new
+  workflow shape that trips one of these needs the scanner extended or the script reshaped, not a pin skipped.
+- It flags `|| true`, `|| :`, `|| exit 0`, `|| (exit 0)`, `; :`, `&& true` followed by more commands, `set +e`,
+  `set +o errexit` and a bare `true` outside the body of a construct.
+
+Limits, which the pins do not cover: a script written to a file and run later, a shell whose name is built at run time,
+shell text inside a `${{ 'literal' }}` expression, text returned to a shell (`bash -c "$(cat <<'EOF' ... EOF)"` or
+`bash < <(cat <<'EOF' ... EOF)`), `bash -ce` and `sh -ce` (a `c` followed by another flag), `su -lc`, `ssh` spelled
+with a path (`/usr/bin/ssh`), and an escaped space before `#` (read as a comment). No workflow script has any of these
+today.
+
+The Redis rule in `checkRedisIsolation`: the job-wide `REDIS_URL` (database 0), the databases of the gated step and
+each later check need distinct literal databases; a Redis URL whose database is not a literal number fails the pin. The
+databases are the `*_REDIS_URL` values in `ci.yml`; read them there. A clash fails the pin naming both steps (main's
+recovery re-drive script and the usage-auth script both sat on database 8 until it caught them), and a new Redis check
+takes a database no other step uses.
