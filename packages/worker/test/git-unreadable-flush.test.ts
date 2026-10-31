@@ -6,7 +6,7 @@ import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { HAIVE_DATA_FILES } from '@haive/shared';
+import { HAIVE_DATA_FILES, logger } from '@haive/shared';
 import { markPlanMirrorDirty } from '@haive/shared/plan';
 import { failGit, type FakeGit } from './support/fake-git.js';
 
@@ -22,6 +22,7 @@ const dirs: string[] = [];
 let shim: FakeGit | null = null;
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await shim?.restore();
   shim = null;
   await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
@@ -226,6 +227,25 @@ describe('a plan flush when git cannot be read', () => {
 });
 
 describe('the plan sweep when git cannot be read', () => {
+  it('logs the original error exactly once for one unreadable row in one tick', async () => {
+    const dir = await checkout({ git: true });
+    const { state } = setup([FIRST], [dir]);
+    shim = await failGit(['rev-parse', '--git-path']);
+    const warn = vi.spyOn(logger, 'warn');
+
+    expect(await sweepDirtyPlanMirrors()).toBe(0);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      {
+        err: expect.objectContaining({ message: expect.stringContaining(dir) }),
+        repositoryId: FIRST,
+      },
+      'dirty plan mirror refresh failed',
+    );
+    expect(state(FIRST).writtenRevision).toBeLessThan(state(FIRST).revision as number);
+  });
+
   it('keeps the unreadable row dirty with git text and still writes the healthy one', async () => {
     const first = await checkout({ git: true });
     const second = await checkout({ git: true });

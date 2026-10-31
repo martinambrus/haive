@@ -1,7 +1,7 @@
 import { lockRepositoryTasksKey } from '@haive/database';
 import { checkoutMatches, checkoutMissing, type NamedCheckout } from '../repo/checkout-head.js';
 import { admitWatchedCheckout } from '../project-state/watch-admission.js';
-import { safeErrorMessage, scrubErrorPaths } from '@haive/shared/logger';
+import { scrubErrorPaths } from '@haive/shared/logger';
 import { createHash } from 'node:crypto';
 import {
   readFileNoFollow,
@@ -1717,9 +1717,6 @@ export async function recordPlanMirrorError(
   err: unknown,
 ): Promise<void> {
   const message = scrubErrorPaths(err);
-  if (!(err instanceof PlanMirrorHeldError) && message !== safeErrorMessage(err)) {
-    logger.warn({ err, repositoryId }, 'plan snapshot error recorded');
-  }
   await db
     .insert(schema.planMirrorState)
     .values({

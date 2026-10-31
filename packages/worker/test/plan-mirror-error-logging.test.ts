@@ -11,7 +11,8 @@ it.each([
   new PlanMirrorHeldError(`cannot read '${SERVER_PATH}'`),
   new PlanMirrorHeldError('a merge or rebase is open'),
   new Error('a path-free failure'),
-])('does not warn for held or unchanged text: %s', async (err) => {
+  new Error(`cannot read '${SERVER_PATH}'`),
+])('leaves logging to callers for: %s', async (err) => {
   const fake = createFakeDb({
     repositories: schema.repositories,
     planMirrorState: schema.planMirrorState,

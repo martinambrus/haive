@@ -562,6 +562,7 @@ async function writeHaiveDataMirror(
   try {
     await writePlanMirror(ctx.db, repositoryId, ctx.repoPath, changes);
   } catch (err) {
+    ctx.logger.warn({ err }, 'plan mirror write failed (non-fatal)');
     warnings.push(`haive-data mirror: plan mirror failed (${scrubErrorPaths(err)})`);
   } finally {
     filesWritten.push(...changes.written);

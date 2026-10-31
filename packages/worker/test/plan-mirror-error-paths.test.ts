@@ -1,7 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { schema, type Database } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
-import { logger } from '@haive/shared/logger';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import {
   PlanMirrorHeldError,
@@ -21,7 +20,6 @@ beforeEach(() => {
   fake.insert(schema.repositories, { id: REPO });
   db = fake.db as unknown as Database;
 });
-afterEach(() => vi.restoreAllMocks());
 
 async function lastError() {
   const state = await db.query.planMirrorState.findFirst();
@@ -47,13 +45,6 @@ describe('person-facing plan snapshot errors', () => {
       }
     },
   );
-
-  it('keeps full diagnostics and repository identity in the warning', async () => {
-    const warn = vi.spyOn(logger, 'warn');
-    const err = Object.assign(new Error(`EACCES: open '${SERVER_PATH}'`), { code: 'EACCES' });
-    await recordPlanMirrorError(db, REPO, err);
-    expect(warn).toHaveBeenCalledWith({ err, repositoryId: REPO }, expect.any(String));
-  });
 
   it.each([
     [
