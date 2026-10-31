@@ -278,7 +278,31 @@ describe('GET /repositories/:id/haive-data', () => {
     ]);
   });
 
-  it('passes only PATH and the ceiling to every git child', async () => {
+  it('reads a tilde include through HOME and uses its origin setting', async () => {
+    git('remote', 'remove', 'origin');
+    expect(await status()).toMatchObject({
+      checkout: 'ready',
+      holds: { save: [], push: [{ code: 'no_origin' }] },
+    });
+    await writeFile(
+      path.join(home, 'included.cfg'),
+      '[remote "origin"]\n\turl = https://included.example.test/repo.git\n',
+    );
+    git('config', 'include.path', '~/included.cfg');
+    vi.stubEnv('HOME', home);
+    try {
+      expect(await status()).toMatchObject({
+        checkout: 'ready',
+        branch: 'main',
+        files: COMMITTED.map(unchanged),
+        holds: CLEAN_HOLDS,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('passes only PATH, HOME and the ceiling to every git child', async () => {
     await writeFile(
       path.join(shimDir, 'git'),
       `#!${process.execPath}
@@ -304,7 +328,8 @@ process.exit(result.status ?? 1);
         .split('\n')
         .map((line) => JSON.parse(line));
       expect(environments.length).toBeGreaterThan(0);
-      for (const keys of environments) expect(keys).toEqual(['GIT_CEILING_DIRECTORIES', 'PATH']);
+      for (const keys of environments)
+        expect(keys).toEqual(['GIT_CEILING_DIRECTORIES', 'HOME', 'PATH']);
     } finally {
       process.env.PATH = savedPath;
     }

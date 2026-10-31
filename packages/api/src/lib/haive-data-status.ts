@@ -51,7 +51,11 @@ async function gitRaw(
       encoding: 'buffer',
       timeout: 5_000,
       maxBuffer: GIT_READ_MAX_BUFFER,
-      env: { PATH: process.env.PATH, GIT_CEILING_DIRECTORIES: path.dirname(cwd) },
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        GIT_CEILING_DIRECTORIES: path.dirname(cwd),
+      },
     });
     return { ok: true, stdout, code: 0 };
   } catch (err) {

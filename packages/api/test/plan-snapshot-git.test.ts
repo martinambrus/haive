@@ -148,7 +148,37 @@ async function ran(sub: string): Promise<boolean> {
 }
 
 describe('the plan snapshot git state', () => {
-  it('passes only PATH and the ceiling to every git child', async () => {
+  it('reads a tilde include through HOME and uses its origin setting', async () => {
+    git('remote', 'remove', 'origin');
+    expect(await snapshot()).toMatchObject({
+      gitAvailable: true,
+      hasOrigin: false,
+      originUrl: null,
+    });
+    const home = path.join(base, 'home');
+    await mkdir(home);
+    await writeFile(
+      path.join(home, 'included.cfg'),
+      '[remote "origin"]\n\turl = https://included.example.test/repo.git\n',
+    );
+    git('config', 'include.path', '~/included.cfg');
+    vi.stubEnv('HOME', home);
+    try {
+      expect(await snapshot()).toMatchObject({
+        gitAvailable: true,
+        tracked: true,
+        uncommitted: false,
+        committed: true,
+        branch: 'main',
+        hasOrigin: true,
+        originUrl: 'https://included.example.test/repo.git',
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('passes only PATH, HOME and the ceiling to every git child', async () => {
     expect(await snapshot(null, true)).toMatchObject({
       gitAvailable: true,
       branch: 'main',
@@ -159,7 +189,8 @@ describe('the plan snapshot git state', () => {
       .split('\n')
       .map((line) => JSON.parse(line));
     expect(environments.length).toBeGreaterThan(0);
-    for (const keys of environments) expect(keys).toEqual(['GIT_CEILING_DIRECTORIES', 'PATH']);
+    for (const keys of environments)
+      expect(keys).toEqual(['GIT_CEILING_DIRECTORIES', 'HOME', 'PATH']);
   });
 
   it.each([

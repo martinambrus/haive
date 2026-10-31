@@ -161,7 +161,11 @@ async function gitRead(
     const { stdout } = await exec('git', hardenGitArgs(args), {
       cwd,
       timeout: 5_000,
-      env: { PATH: process.env.PATH, GIT_CEILING_DIRECTORIES: path.dirname(cwd) },
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        GIT_CEILING_DIRECTORIES: path.dirname(cwd),
+      },
     });
     return { ok: true, stdout: stdout.toString().trim(), code: 0 };
   } catch (err) {
