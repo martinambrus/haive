@@ -29,6 +29,7 @@
     "migrate": "node dist/migrate/index.js",
     "migrate:tsx": "tsx src/migrate/index.ts",
     "smoke:migrate": "tsx test/migrate-smoke.ts",
+    "smoke:ci": "node ../../scripts/run-smokes.mjs smoke:migrate",
     "studio": "drizzle-kit studio",
     "test": "vitest run --passWithNoTests",
     "clean": "rm -rf dist *.tsbuildinfo"
