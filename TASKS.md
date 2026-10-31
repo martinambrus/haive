@@ -604,7 +604,7 @@ Sites:
 
 ### T376 · FNF[audit-security-gaps-2] · CLI provider key/token changes, password change, registration, repo security settings, sign-ins write no audit row (+5)
 
-status: open · (T377 landed as PR #886) · was modular #252
+status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T14:13Z · last: 2026-10-31T14:13Z
 
 1. cli-providers.ts ~:856, :923, :998, :1019; cli-login-banner.ts ~:930.
 2. Password change (user-settings.ts ~:127-170) and registration (auth.ts ~:61-170).
