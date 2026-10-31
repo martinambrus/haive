@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
+import { namesGitData } from '@haive/shared/project-state';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StepContext } from '../src/step-engine/step-definition.js';
 import { postOnboardingStep } from '../src/step-engine/steps/onboarding/12-post-onboarding.js';
@@ -1239,5 +1240,100 @@ describe('a git read that gave no answer stops the commit instead of reading as 
     await expect(dropIgnoredRulesFiles(repo, ['CLAUDE.md'], checked)).rejects.toThrow(
       /could not check whether CLAUDE.md is ignored/,
     );
+  });
+});
+
+describe('the stage plan keeps a recorded path that names git data out of git', () => {
+  // A record from before the writers refused git data still holds these: git rejects the alias
+  // spellings outright and quietly adds nothing for the exact one.
+  const GIT_DATA = [
+    '.git/hooks/code-reviewer.md',
+    '.GIT./hooks/code-reviewer.md',
+    'git~1/hooks/code-reviewer.md',
+  ];
+
+  it('collectOnboardingStagePaths names none of them, whichever step output records it', async () => {
+    const repo = await repoWithAgents();
+    stepOutputs.current = {
+      '07-generate-files': {
+        output: {
+          wroteFiles: [...GIT_DATA, 'sub/.git/hooks/x.md', '.claude/agents/code-reviewer.md'],
+          quarantinedAgentFiles: [
+            { from: '.git/hooks/old.md', to: '.git/hooks-legacy/old.md' },
+            { from: 'sub/.git/old.md', to: 'sub/.git-legacy/old.md' },
+          ],
+        },
+      },
+      '08-knowledge-acquisition': {
+        output: {
+          written: [
+            { filePath: path.join(repo, '.GIT./hooks/kb.md') },
+            { filePath: path.join(repo, '.haive-data/knowledge_base/OVERVIEW.md') },
+          ],
+          removedPaths: [
+            '.git/hooks/moved.md',
+            '.GIT./moved.md',
+            '.haive-data/knowledge_base/moved.md',
+          ],
+          mergedRemoved: ['.git/OLD'],
+        },
+      },
+      '09_3-qa-review': { output: { kbWritten: [{ relPath: '.GIT./x' }, { relPath: 'ARCH' }] } },
+      '09_5-skill-generation': {
+        output: {
+          written: [
+            {
+              id: 's1',
+              mirroredDirs: ['.git/hooks', '.GIT./hooks', '.claude/skills'],
+              subSkillSlugs: ['x'],
+            },
+          ],
+        },
+      },
+      '09_5b-skill-repair': {
+        detect: { skillTargetDirs: ['git~1/hooks', '.claude/skills'] },
+        output: { repaired: ['s1'] },
+      },
+    };
+    const plan = await collectOnboardingStagePaths(repo, {} as never, 't1');
+    expect({ add: plan.add.sort(), remove: plan.remove.sort() }).toEqual({
+      add: [
+        '.claude/agents/code-reviewer.md',
+        '.claude/skills/README.md',
+        '.claude/skills/s1/SKILL.md',
+        '.claude/skills/s1/sub-skills/x.md',
+        '.haive-data/knowledge_base/ARCH.md',
+        '.haive-data/knowledge_base/INDEX.md',
+        '.haive-data/knowledge_base/OVERVIEW.md',
+      ].sort(),
+      remove: ['.haive-data/knowledge_base/moved.md'],
+    });
+    expect([...plan.add, ...plan.remove].filter(namesGitData)).toEqual([]);
+  });
+
+  it('12-post-onboarding commits the ordinary files when a record also names git data', async () => {
+    const repo = await repoWithAgents();
+    for (const rel of GIT_DATA) {
+      await mkdir(path.dirname(path.join(repo, rel)), { recursive: true });
+      await writeFile(path.join(repo, rel), 'x\n');
+    }
+    const out = await postOnboardingStep.apply(
+      mkCtx(repo, { wroteFiles: [...EXPECTED, ...GIT_DATA] }),
+      {
+        detected: { hasGit: true } as never,
+        formValues: { commit: true, commitMessage: 'chore: onboard' },
+        iteration: 0,
+        previousIterations: [],
+      },
+    );
+    expect(out.commitPerformed).toBe(true);
+    expect(out.stagedPaths.filter((p) => p.startsWith('.claude/')).sort()).toEqual(EXPECTED);
+    expect(out.stagedPaths.filter(namesGitData)).toEqual([]);
+    const tree = (await git(repo, ['ls-tree', '-r', '-z', '--name-only', 'HEAD']))
+      .split('\0')
+      .filter(Boolean);
+    expect(tree).not.toContain('.GIT./hooks/code-reviewer.md');
+    expect(tree).not.toContain('git~1/hooks/code-reviewer.md');
+    expect(tree.filter(namesGitData)).toEqual([]);
   });
 });
