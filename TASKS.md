@@ -1003,6 +1003,8 @@ From the T474 review (2026-10-31). Latent, consequential once it bites.
 
 Since T474 the smokes job has a 45-minute limit and the gated step 25 minutes, with a pin that models a green run as 907 s plus 7.5 s per GATED row and fails at 134 rows (step) and 160 rows (job margin); the list had 79 rows on 2026-10-30 and 98 on 2026-10-31. Options: give the gated tests their own job (the critical path falls toward the next job's 579-1017 s; main is not protected, so a rename is free), run the gated files in parallel, or put each file under its own limit; a final step that warns when the elapsed time is within 600 s of the limit would make the budget self-monitoring.
 
+Update (T489 review, 2026-10-31): with the worker smokes step now limited to 15 min the crowding rule `907 + 7.5 x rows + 900 <= 2700` trips at 120 GATED rows (103 on 2026-10-31, growing about 4.5 a day), so the pin fires within days; raise the job limit or split the job when it does.
+
 ### T489 · FNF[ci-step-independence-3] · the gated loop's verdict is unpinned; unguarded steps and jobs with no limits (+5)
 
 status: taken · owner: codex-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T17:00Z · last: 2026-10-31T17:00Z
@@ -1116,6 +1118,19 @@ From the T385/T348 driver (2026-10-31). PRE-EXISTING, minor. Same family as T385
 
 status: open
 From the T385/T348 driver (2026-10-31). Unaudited: the stalled sweep (T348), BullMQ stalled redelivery and the boot reset can all run a deterministic step's `apply()` a second time. Audit the steps whose apply writes files, commits or external state, and record which are safe; fix or fence the rest.
+
+### T502 · FNF[ci-step-limits-rest] · six more CI jobs bound a hang only by their job limit; helper scripts are not scanned for swallowed failures (+1)
+
+status: open
+From the T489 review (2026-10-31). PRE-EXISTING, minor to moderate.
+
+1. No step-level `timeout-minutes` in lint-typecheck-test (ci.yml ~:35, 20 min), browser-runtime (~:114, 20), compose-boot (~:581, 30), e2e (~:721, 45), cli-adapters-arm64 (platform-checks.yml ~:39, 60) and macos-boot (~:116, 45): a hang costs the job limit. Size each from measured run times, as T489 did for four jobs, and extend the pin.
+2. The swallowed-failure pin reads workflow `run` texts only; the helper scripts they call (packages/database/scripts/schema-parity.sh, scripts/ci-retry.sh, scripts/check-web-image.mjs) are never scanned (schema-parity.sh ~:34 has a legitimate `|| true` in an EXIT trap, so a scan needs an allowance).
+
+### T503 · FNF[plan-chat-start-race] · a chat remounted during a pending start stays blind to the conversation it started
+
+status: open
+From the T491 follow-up review (2026-10-31). PRE-EXISTING, minor (needs a node switch and back inside the POST). The old instance's post-send reload updates only its own unmounted state (web plan-chat.tsx ~:347 against the guard ~:160-167) and `onPatched` refreshes the page, not the chat; the start route has no guard against a second live conversation for the node (api plan.ts ~:1406-1450, lib/spawn-plan-task.ts), so a second Send can start another. Fix: re-read the node's conversations when the remounted chat sees a send in flight, and refuse a second live start for the node.
 
 ## Done
 
