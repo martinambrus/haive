@@ -478,6 +478,24 @@ describe.skipIf(!url)('editing a Git credential a connection points at, on Postg
     );
   });
 
+  describe('a credential the user takes over', () => {
+    it('E13 drops the sign-in marker when the secret is replaced, and keeps it for any other edit', async () => {
+      const credential = await makeCredential({ signInAccountId: '4242' });
+
+      const renamed = await edit(credential.id, { label: 'renamed', host: 'github.com' });
+      expect(renamed.status).toBe(200);
+      expect((await credentialRow(credential.id)).signInAccountId).toBe('4242');
+
+      const replaced = await edit(credential.id, {
+        label: 'renamed',
+        host: 'github.com',
+        secret: 'my-own-token',
+      });
+      expect(replaced.status).toBe(200);
+      expect((await credentialRow(credential.id)).signInAccountId).toBeNull();
+    });
+  });
+
   describe('the connection label follows the credential label', () => {
     it('E9a renames a token connection with its credential and advances its updated_at', async () => {
       const credential = await makeCredential();

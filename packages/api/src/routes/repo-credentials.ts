@@ -251,6 +251,7 @@ repoCredentialsRoutes.put('/:id', async (c) => {
     gitEmail?: string | null;
     provider?: string | null;
     apiBaseUrl?: string | null;
+    signInAccountId?: null;
     updatedAt: Date;
   } = { label: body.label, host: body.host, updatedAt: new Date() };
   // Absent = keep; '' = auto-detect (null); a value = pin. Same keep-on-omit rule as
@@ -330,7 +331,11 @@ repoCredentialsRoutes.put('/:id', async (c) => {
     if (masterKek !== null) {
       const dekHex = decryptDek(existing.encryptedDek, masterKek);
       if (newUsername) update.usernameEncrypted = encrypt(newUsername, dekHex);
-      if (newSecret !== null) update.secretEncrypted = encrypt(newSecret, dekHex);
+      if (newSecret !== null) {
+        update.secretEncrypted = encrypt(newSecret, dekHex);
+        // A secret the user typed is theirs: a later sign-in must not take the credential back and replace it.
+        update.signInAccountId = null;
+      }
     }
 
     const rows = await tx
