@@ -24,6 +24,7 @@ import {
 import { headCommit } from '../plan/merge.js';
 import { seedPlanBaseFromCheckout } from '../plan/mirror.js';
 import { handBackAfterMove } from '../step-engine/git-merge.js';
+import { GitOperationUnreadableError } from './git-operation.js';
 import { gitWorkspaceStatus } from './git-workspace.js';
 import { GIT_TIMED_OUT, gitGaveNoAnswer, type GitRunResult } from './git-exec.js';
 import {
@@ -220,62 +221,70 @@ export async function fastForward(
     return `Not refreshed: the checkout's HEAD could not be read (${firstLine(headRead.stderr || headRead.stdout)}).`;
   }
   const before = headRead.stdout.trim();
-  for (let attempt = 1; ; attempt++) {
-    let aside;
-    try {
-      aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
-    } catch (err) {
-      if (asided) await putBackAfterFailure(db, payload.repositoryId, dest, kept, err);
-      throw err;
-    }
-    if ((aside.outcome === 'refused' || aside.outcome === 'held') && asided) {
-      await putBackProjections(db, payload.repositoryId, dest, kept);
-    }
-    if (aside.outcome === 'refused') {
-      return `Not refreshed: ${aside.reason}. The checkout was not moved.`;
-    }
-    if (aside.outcome === 'held') return holdingRefusal(aside.holding);
-    if (aside.outcome === 'set-aside') {
-      asided = true;
-      for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
-    }
+  try {
+    for (let attempt = 1; ; attempt++) {
+      let aside;
+      try {
+        aside = await setAsideHaiveProjections(db, payload.repositoryId, dest, fence);
+      } catch (err) {
+        if (asided) await putBackAfterFailure(db, payload.repositoryId, dest, kept, err);
+        throw err;
+      }
+      if ((aside.outcome === 'refused' || aside.outcome === 'held') && asided) {
+        await putBackProjections(db, payload.repositoryId, dest, kept);
+      }
+      if (aside.outcome === 'refused') {
+        return `Not refreshed: ${aside.reason}. The checkout was not moved.`;
+      }
+      if (aside.outcome === 'held') return holdingRefusal(aside.holding);
+      if (aside.outcome === 'set-aside') {
+        asided = true;
+        for (const [file, was] of aside.kept) if (!kept.has(file)) kept.set(file, was);
+      }
 
-    let moved;
-    try {
-      moved = await db.transaction(async (tx) => {
-        // Every task's start and every revival take this lock, so none lands between the fence and the move.
-        await lockRepositoryTasksKey(tx, payload.repositoryId);
-        const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
-        if (check.outcome !== 'clean') return { again: check, merge: null, after: null };
-        if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {
-          return { again: check, merge: null, after: null };
-        }
-        const merge = await gitRun(dest, ['merge', '--ff-only', target]);
-        // A failed process may still have moved HEAD; only this read decides recovery.
-        return { again: check, merge, after: await headCommit(dest) };
-      });
-    } catch (err) {
-      if (asided) await recoverAfterMoveFailure(db, payload.repositoryId, dest, kept, before, err);
-      throw err;
+      let moved;
+      try {
+        moved = await db.transaction(async (tx) => {
+          // Every task's start and every revival take this lock, so none lands between the fence and the move.
+          await lockRepositoryTasksKey(tx, payload.repositoryId);
+          const check = await restoreProjectionsInTx(tx, payload.repositoryId, dest);
+          if (check.outcome !== 'clean') return { again: check, merge: null, after: null };
+          if ((await checkoutHoldingTasks(tx, payload.repositoryId)) > 0) {
+            return { again: check, merge: null, after: null };
+          }
+          const merge = await gitRun(dest, ['merge', '--ff-only', target]);
+          // A failed process may still have moved HEAD; only this read decides recovery.
+          return { again: check, merge, after: await headCommit(dest) };
+        });
+      } catch (err) {
+        if (asided)
+          await recoverAfterMoveFailure(db, payload.repositoryId, dest, kept, before, err);
+        throw err;
+      }
+      const { again, merge: merged, after } = moved;
+      if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
+      if (after !== null && after !== before) {
+        await handBackAfterMove(dest, before);
+        await resyncHaiveProjections(db, payload.repositoryId, dest);
+        await restoreKeptMetadata(dest, kept);
+      } else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
+      if (again.outcome === 'refused') {
+        return `Not refreshed: ${again.reason}. The checkout was not moved.`;
+      }
+      if (again.outcome === 'retry') {
+        return "Not refreshed: Haive's project files kept changing under the move. The checkout was not moved; refresh again.";
+      }
+      if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
+      if (merged.code !== 0) {
+        return after === before
+          ? `Not refreshed: git refused the fast-forward (${firstLine(merged.stderr || merged.stdout)}).`
+          : `Refresh failed: the fast-forward moved the checkout but failed (${firstLine(merged.stderr || merged.stdout)}).`;
+      }
+      break;
     }
-    const { again, merge: merged, after } = moved;
-    if (again.outcome === 'retry' && attempt < MOVE_ATTEMPTS) continue;
-    if (after !== null && after !== before) {
-      await handBackAfterMove(dest, before);
-      await resyncHaiveProjections(db, payload.repositoryId, dest);
-      await restoreKeptMetadata(dest, kept);
-    } else if (asided) await putBackProjections(db, payload.repositoryId, dest, kept);
-    if (again.outcome === 'refused') {
-      return `Not refreshed: ${again.reason}. The checkout was not moved.`;
-    }
-    if (again.outcome === 'retry') {
-      return "Not refreshed: Haive's project files kept changing under the move. The checkout was not moved; refresh again.";
-    }
-    if (merged === null) return 'Not refreshed: a task started using this repository meanwhile.';
-    if (merged.code !== 0) {
-      return `Refresh failed: the fast-forward${after !== before ? ' moved the checkout but failed' : ' failed'} (${firstLine(merged.stderr || merged.stdout)}).`;
-    }
-    break;
+  } catch (err) {
+    if (!(err instanceof GitOperationUnreadableError)) throw err;
+    return `Not refreshed: the checkout could not be checked for an open merge or rebase (${firstLine(err.message)}). The checkout was not moved.`;
   }
   logger.info(
     { repositoryId: payload.repositoryId, branch, commits: behind },

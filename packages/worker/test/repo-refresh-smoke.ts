@@ -67,6 +67,7 @@ import { claimMergeDir, releaseTaskMergeClaims } from '../src/step-engine/merge-
 import { abortLeftMerge, recordLeftOpenMerges } from '../src/step-engine/left-open-merge.js';
 import type { StepContext, StepDefinition } from '../src/step-engine/step-definition.js';
 import { failGit } from './support/fake-git.js';
+import { GitOperationUnreadableError } from '../src/repo/git-operation.js';
 
 const log = logger.child({ module: 'repo-refresh-smoke' });
 
@@ -4656,17 +4657,19 @@ async function main(): Promise<void> {
         restored = true;
       };
       const shim = await failGit(['rev-parse', '--git-path']);
-      let aside;
+      let unreadable: unknown;
       try {
-        aside = await setAsideHaiveProjections(db, id, c.dest);
+        await setAsideHaiveProjections(db, id, c.dest);
+      } catch (err) {
+        unreadable = err;
       } finally {
         await shim.restore();
         delete restoreFaults.beforeRestore;
       }
       check(
-        'M12: an unreadable `--git-path` refuses the set-aside as "could not be checked"',
-        aside.outcome === 'refused' && /could not be checked/.test(aside.reason),
-        aside,
+        'M12: an unreadable `--git-path` fails the set-aside with its own error',
+        unreadable instanceof GitOperationUnreadableError,
+        unreadable,
       );
       check(
         'M12: and nothing moved: the file and its staged entry are as they were',
@@ -4711,7 +4714,10 @@ async function main(): Promise<void> {
       const row = await statusOf(id);
       check(
         'M13: the repository stays ready and says it was not refreshed',
-        row.status === 'ready' && (row.statusMessage ?? '').startsWith('Not refreshed:'),
+        row.status === 'ready' &&
+          /^Not refreshed: .*could not be checked for an open merge or rebase .*The checkout was not moved\.$/.test(
+            row.statusMessage ?? '',
+          ),
         row,
       );
       check(

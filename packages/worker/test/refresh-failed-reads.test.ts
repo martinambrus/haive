@@ -112,7 +112,9 @@ it('T397 a failed post-merge HEAD read fails and never restores old projection b
 it('T397 a refused fast-forward at the same HEAD restores projections', async () => {
   const { dest, payload } = await fixture();
   shim = await failGit(['merge', '--ff-only']);
-  expect(await fastForward(db, payload, dest)).toMatch(/fast-forward/);
+  expect(await fastForward(db, payload, dest)).toMatch(
+    /^Not refreshed: git refused the fast-forward \(/,
+  );
   expect(h.putBack).toHaveBeenCalledOnce();
   expect(h.resync).not.toHaveBeenCalled();
 });
