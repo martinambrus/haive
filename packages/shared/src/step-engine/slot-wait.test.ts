@@ -176,6 +176,21 @@ describe('deriveSlotWait', () => {
       },
     );
 
+    // The park's copy is display text: the kind comes from the step id and nothing the row says.
+    it.each([
+      ['no copy at all', null],
+      ['the runtime park copy', step().statusMessage],
+    ])('reports the module kind whatever the park copy is: %s', (_name, statusMessage) => {
+      expect(deriveModule({}, [moduleStep({ statusMessage })])).toMatchObject({
+        kind: 'module',
+        message: statusMessage,
+      });
+    });
+
+    it('keeps the runtime kind for a core step that carries the schema copy', () => {
+      expect(derive({}, [step({ statusMessage: SCHEMA_MESSAGE })])?.kind).toBe('runtime');
+    });
+
     it('is null for a paused task', () => {
       expect(deriveModule()).not.toBeNull();
       expect(deriveModule({ paused: true })).toBeNull();

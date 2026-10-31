@@ -374,6 +374,14 @@ describe.skipIf(!url)('the stalled sweep and a park nothing drives, on Postgres'
       await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(1);
       await expectRedriven(taskId, before, advances);
     });
+
+    it('P16: is re-driven with no park copy on the row, since the marker and not the message makes it a park', async () => {
+      const { taskId } = await parked({}, { statusMessage: null });
+      const before = await state(taskId);
+      const { deps, advances } = rig();
+      await expect(redriveStalledTasks(db, deps, { staleMs: STALE_MS })).resolves.toBe(1);
+      await expectRedriven(taskId, before, advances);
+    });
   });
 
   describe('a park the sweep leaves alone', () => {
