@@ -154,7 +154,9 @@ async function sweepRunsOf(tx: DbHandle, ids: string[], now: Date): Promise<void
  *  the DAG reset because a pass holds a run and then wants its step row, so holding the step row
  *  while waiting on that run would deadlock with it. `rowsHeld` skips it for a call made after the
  *  task row was bumped, where `rowsActivatedMeanwhile` already holds the rows: a pass holding a step
- *  row waits for the task row, so a batch that waited there would deadlock with it.
+ *  row waits for the task row, so a batch that waited there would deadlock with it. The carried_*
+ *  fold reads each row again once it is held: `rows` was read before the transaction, and a fold or
+ *  idle write that landed since would otherwise be overwritten.
  *  Exported for the unit test. */
 export async function resetRowsForRerun(
   tx: DbHandle,
@@ -172,7 +174,10 @@ export async function resetRowsForRerun(
   // the task has no DAG / no stuck issue.
   await resetDagCurrentLevelForRetry(tx, taskId);
   if (!opts.rowsHeld) await lockStepRows(tx, eq(schema.taskSteps.taskId, taskId));
-  for (const r of rows) {
+  // This transaction holds the rows now (the batch above, or the caller's lock under rowsHeld), so
+  // this read is current; `rows` is the caller's read from before the transaction began.
+  const held = await tx.select().from(schema.taskSteps).where(inArray(schema.taskSteps.id, ids));
+  for (const r of held) {
     const contrib = computeFoldContribution(r, now.getTime());
     await tx
       .update(schema.taskSteps)
