@@ -13,6 +13,7 @@ import {
 } from '@haive/shared';
 import { lockPlanMerge } from '@haive/shared/plan';
 import { safeErrorForTransport } from '@haive/shared/logger';
+import type { HaiveDataRefusal } from '@haive/shared/haive-data';
 import type {
   ProjectStateResolvePayload,
   ProjectStateResolveResult,
@@ -102,6 +103,17 @@ export class PlanMirrorRefusal extends Error {
   override readonly name = 'PlanMirrorRefusal';
 }
 
+/** Keeps the plan Save's thrown-error contract, while the data scope can carry the same
+ * structural precondition across the queue as a result. No diagnostic text is classified. */
+export class SavePreconditionError extends Error {
+  constructor(
+    message: string,
+    readonly refusal: HaiveDataRefusal,
+  ) {
+    super(message);
+  }
+}
+
 async function requireOwnedRepository(repositoryId: string, userId?: string) {
   const repo = await getDb().query.repositories.findFirst({
     where: userId
@@ -171,11 +183,15 @@ async function flushCurrentPlanMirror(
     });
     if (state && state.revision === state.writtenRevision) return last;
   }
-  throw new Error('the plan changed repeatedly while its snapshot was being saved; try again');
+  throw new SavePreconditionError(
+    'the plan changed repeatedly while its snapshot was being saved; try again',
+    { code: 'projections_changing' },
+  );
 }
 
 async function requireGitCheckout(repoPath: string, refusal: string): Promise<void> {
-  if (!(await requireUsableGit(repoPath))) throw new Error(refusal);
+  if (!(await requireUsableGit(repoPath)))
+    throw new SavePreconditionError(refusal, { code: 'not_git_checkout' });
 }
 
 async function currentBranch(repoPath: string): Promise<string | null> {
@@ -338,14 +354,55 @@ async function mergeInScratch(
   }
 }
 
+type SaveRepository = Awaited<ReturnType<typeof requireOwnedRepository>>;
+export interface SaveScope {
+  repo: SaveRepository;
+  payload: PlanMirrorJobPayload;
+  repoPath: string;
+  message: string;
+  identity: Record<string, string>;
+}
+export interface SaveSeams {
+  prepare(
+    repo: SaveRepository,
+    payload: PlanMirrorJobPayload,
+  ): Promise<{ files: string[]; repoPath: string; message?: string }>;
+  commit(scope: SaveScope): Promise<{ committed: boolean; commitSha: string | null }>;
+  afterLanding(scope: SaveScope & { kept: KeptFiles }): Promise<void>;
+}
+
+const planSaveSeams: SaveSeams = {
+  async prepare(repo) {
+    const prepared = await flushCurrentPlanMirror(repo.id);
+    if (prepared.files.length === 0) throw new Error('the repository has no plan snapshot to save');
+    return prepared;
+  },
+  commit: ({ repoPath, message, identity }) =>
+    commitPlanSnapshotFiles({ repoPath, message, identity }),
+  async afterLanding({ repo, repoPath, message, identity, kept }) {
+    await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
+    await flushPlanMirrorForRepository(getDb(), repo.id);
+    await commitPlanSnapshotFiles({ repoPath, message, identity });
+    await resyncHaiveProjections(getDb(), repo.id, repoPath);
+    await restoreKeptMetadata(repoPath, kept);
+  },
+};
+
 export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJobResult> {
+  return saveCore(payload, planSaveSeams);
+}
+
+export async function saveCore(
+  payload: PlanMirrorJobPayload,
+  seams: SaveSeams,
+): Promise<PlanMirrorJobResult> {
   if (!payload.repositoryId || !payload.userId) throw new Error('repositoryId and userId required');
   const repo = await requireOwnedRepository(payload.repositoryId, payload.userId);
   let files: string[] = [];
   let repoPath = '';
   try {
-    ({ files, repoPath } = await flushCurrentPlanMirror(repo.id));
-    if (files.length === 0) throw new Error('the repository has no plan snapshot to save');
+    const prepared = await seams.prepare(repo, payload);
+    ({ files, repoPath } = prepared);
 
     await requireGitCheckout(
       repoPath,
@@ -357,12 +414,9 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
       repositoryId: repo.id,
     });
     const identity = Object.keys(resolved).length > 0 ? resolved : FALLBACK_GIT_IDENTITY;
-    const message = payload.commitMessage?.trim() || 'docs: save project plan';
-    const { committed, commitSha } = await commitPlanSnapshotFiles({
-      repoPath,
-      message,
-      identity,
-    });
+    const message = payload.commitMessage?.trim() || prepared.message || 'docs: save project plan';
+    const scope = { repo, payload, repoPath, message, identity };
+    const { committed, commitSha } = await seams.commit(scope);
 
     // The commit has landed: only a push needs the branch, so a failed read fails only a push.
     const branch = payload.push
@@ -370,9 +424,14 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
       : await currentBranch(repoPath).catch(() => null);
     let pushed = false;
     if (payload.push) {
-      if (!branch) throw new Error('cannot push a plan snapshot from a detached HEAD');
+      if (!branch)
+        throw new SavePreconditionError('cannot push a plan snapshot from a detached HEAD', {
+          code: 'detached_head',
+        });
       if (!(await detectOrigin(repoPath))) {
-        throw new Error('this repository has no origin remote to push to');
+        throw new SavePreconditionError('this repository has no origin remote to push to', {
+          code: 'no_origin',
+        });
       }
       const kept: KeptFiles = new Map();
       const before = await headCommit(repoPath);
@@ -411,11 +470,7 @@ export async function save(payload: PlanMirrorJobPayload): Promise<PlanMirrorJob
           // The merge brought in the other side's plan; fold it into the database and
           // rewrite the files, exactly as a pull does, so what is pushed is the union
           // rather than only this side.
-          await reconcilePlanFromCheckout(getDb(), repo.id, repoPath);
-          await flushPlanMirrorForRepository(getDb(), repo.id);
-          await commitPlanSnapshotFiles({ repoPath, message, identity });
-          await resyncHaiveProjections(getDb(), repo.id, repoPath);
-          await restoreKeptMetadata(repoPath, kept);
+          await seams.afterLanding({ ...scope, kept });
         }
       } catch (err) {
         return await recoverAfterMoveFailure(getDb(), repo.id, repoPath, kept, before, err);
