@@ -994,7 +994,7 @@ From the T474 review (2026-10-31). PRE-EXISTING unless stated; minor to moderate
 6. release.yml: no job has `timeout-minutes` (default 360 min), and a hung one holds the `release-<ref>` concurrency group (~:19-20).
 7. Known pin survivors: `|| true` inside a check's `run`, `fail-fast: true` on production-images (~:522), a job `defaults.run.shell`, a job `if: false`; step limits have no floor.
 
-### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+4)
+### T490 · FNF[error-text-paths-2] [verify-first] · other surfaces still show raw worker error text with server paths (+6)
 
 status: open
 From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErrorPaths` (@haive/shared logger) and passed the plan snapshot error, the plan Save/Pull 409 bodies, `repositories.status_message` and 12's plan-mirror warning through it.
@@ -1004,6 +1004,8 @@ From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErr
 3. Stored 12 warnings in `task_steps.output` from before T478 keep their paths (not repaired; the task page shows them behind "Show output").
 4. The scrubber's known misses (errors.ts ~:73): it replaces `/proc/self/fd` in fs-safe's refusal text, HTTP route paths and glob tails, drops a sentence's final period with an unquoted path, and leaks the tail of an unquoted path with a space and a second path directly after a colon. Accepted for T478; revisit if a surface shows one.
 5. (T478 review 3) READY repositories keep server paths in `repositories.status_message`: the refresh job stores its refusal text with `status: 'ready'` (`persistDetection`, repo/clone.ts ~:251, called at repo/refresh.ts ~:306, ~:328, ~:341, ~:359): `git remote get-url origin failed in <checkout path>`, a HEAD read's git stderr, `... it was kept at <absolute aside path>.` (deliberate, so scrubbing it is a product decision) and `the checkout could not be examined (...)`; the repos page renders the column for every status. Item 1 is now verified by reading (repos.ts ~:2688-2795: `lstat` text and `git rev-parse`, `git remote add` and `git config` stderr in the 409).
+6. (T365 review 4, by reading) Upload and import routes put a filesystem failure's own message into a 500 reply with no `scrubErrorPaths`: api routes/bundles.ts ~:576, ~:668, routes/repos.ts ~:674, ~:873, routes/db-dumps.ts ~:223, routes/tasks/attachments.ts ~:313, routes/user-settings.ts ~:419. error-diagnostics.md says a filesystem failure shown to a person goes through it. PRE-EXISTING, minor.
+7. (T365 review 4) The bundle composer's other failure branches (web components/bundle-composer.tsx ~:303, ~:321, ~:348, ~:364, ~:372, ~:414, ~:455, ~:471, ~:479) throw `<what> failed (<status>)` and drop the answer's reason, so "archive exceeds N bytes limit" (api bundles.ts ~:453, ~:776) reads "upload init failed (413)" and "an import of this bundle is already running" (~:956) reads "resync failed (409)". Show the reason as T365 does for the file listing (trimmed, status fallback), but only after item 6, so no unscrubbed path reaches the page. PRE-EXISTING, minor.
 
 ### T492 · FNF[house-rule-lapse-audit] [design] · a house rule's approval lapses with no audit row
 
