@@ -49,10 +49,10 @@ describe('unterminated syntax throws with the step name', () => {
     ['echo $((1 + 2', 'arithmetic expression'],
   ]) {
     it(`names the step for ${JSON.stringify(script)}`, () => {
-      assert.throws(
-        () => shellSource(script, { step }),
-        new RegExp(`^Error: scanner-control: unterminated ${what.replace(/"/g, '\\"')}$`),
-      );
+      assert.throws(() => shellSource(script, { step }), {
+        name: 'Error',
+        message: `${step}: unterminated ${what}`,
+      });
     });
   }
 });
@@ -211,6 +211,8 @@ describe('quoted strings after a shell word with -c are separate code parts', ()
     'ksh -c',
     'bash -ec',
     'bash -o pipefail -c',
+    'bash -O -x -c',
+    'bash -o - -c',
     'sudo bash -c',
     'docker exec c sh -c',
     'docker run --rm img sh -c',
@@ -232,6 +234,8 @@ describe('quoted strings after a shell word with -c are separate code parts', ()
   ])
     it(`reads one script word in ${JSON.stringify(script)}`, () =>
       assert.equal(swallowedFailure(script), null));
+  it('keeps a string after options with no -c as data', () =>
+    assert.equal(swallowedFailure("sh +O +! +O +! 'x || true'"), null));
   it('sees errexit disabled in a string', () => rejects("bash -c 'set +e; pnpm test'", 'set +e'));
   it('sees a bare true in a string', () => rejects("sh -c 'pnpm test; true'", 'true'));
   for (const script of [

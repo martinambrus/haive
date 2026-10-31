@@ -16,8 +16,11 @@ const lastCommand = (text) => {
   );
 };
 const SHELL = /(?:^|[\s/])(?:ba|da|z|k)?sh(?=\s|$)/;
+// An option's argument is a word that cannot stand as a flag on its own (`-` alone can), so each
+// word has one reading and a run of options cannot backtrack exponentially. A word that can is
+// read as the next flag, which matches the same commands.
 const SHELL_STRING =
-  /(?:^|[\s/])(?:ba|da|z|k)?sh(?:\s+(?:[-+]O\s+\S+|[-+]\w*o\s+\S+|[-+]\S+))*\s+-[a-zA-Z]*c$/;
+  /(?:^|[\s/])(?:ba|da|z|k)?sh(?:\s+(?:[-+]O\s+(?:[^\s+-]\S*|[-+](?=\s))|[-+]\w*o\s+(?:[^\s+-]\S*|[-+](?=\s))|[-+]\S+))*\s+-[a-zA-Z]*c$/;
 const atCommand = (text) =>
   /^(?:(?:if|then|elif|else|while|until|do)\s+|[({]\s*)*$/.test(lastCommand(text).trimStart());
 
