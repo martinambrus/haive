@@ -29,7 +29,7 @@ const JOBS = [
       'Apply database migrations (runs again under `up`, proving idempotence)',
       'Start api (populates shared node_modules volume)',
       'Probe api /health',
-      'Start worker, web',
+      'runtime',
     ],
   },
   {
@@ -65,7 +65,7 @@ const JOBS = [
       'Install dependencies',
       'Build shared + database',
       'Configure redis maxmemory-policy',
-      'Apply database migrations',
+      'migrate',
     ],
   },
   {
@@ -73,13 +73,7 @@ const JOBS = [
     id: 'schema-parity',
     allStepsBounded: true,
     prerequisite: 'build',
-    setup: [
-      'actions/checkout',
-      'Setup pnpm',
-      'Setup Node.js',
-      'Install dependencies',
-      'Build shared + database',
-    ],
+    setup: ['actions/checkout', 'Setup pnpm', 'Setup Node.js', 'Install dependencies', 'build'],
   },
   {
     file: 'ci.yml',
@@ -88,14 +82,14 @@ const JOBS = [
     prerequisite: 'build',
     // The checks run on the web leg of the matrix only; the worker leg is the build alone.
     leg: "matrix.service == 'web'",
-    setup: ['actions/checkout', 'Build the production stage'],
+    setup: ['actions/checkout', 'build'],
   },
   {
     file: 'platform-checks.yml',
     id: 'macos-preflight',
     allStepsBounded: true,
     prerequisite: 'checkout',
-    setup: ['actions/checkout'],
+    setup: ['checkout'],
   },
 ];
 
@@ -153,7 +147,17 @@ const workflows = Object.fromEntries(
   }),
 );
 
-const label = (node) => node.name ?? node.uses?.split('@')[0];
+const label = (node) => node.id ?? node.name ?? node.uses?.split('@')[0];
+
+// Floors retain slack above the latest measured maxima: worker smokes 624 s (at least 1.25x),
+// throttle 144 s (at least 1.5x), Docker builds 93 s (cold cache/retries), other steps 14 s.
+function minimumMinutes(step) {
+  const run = step.run?.trim() ?? '';
+  if (run === 'pnpm --filter @haive/worker smoke:ci') return 13;
+  if (/\bdocker build\b/.test(run)) return 5;
+  if (run.includes('test/auth-throttle.test.ts')) return 4;
+  return 2;
+}
 
 function checkJob(job, spec) {
   const steps = spec.cleanup ? job.steps.slice(0, -spec.cleanup.length) : job.steps;
@@ -165,6 +169,19 @@ function checkJob(job, spec) {
     );
   }
   const expected = guard(spec);
+  assert.equal(job.if, undefined, 'a job condition can skip all checks green');
+  assert.equal(job.defaults?.run?.shell, undefined, 'a job shell overrides runner errexit');
+  for (const step of steps) {
+    const script = (step.run ?? '')
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('#'))
+      .join('\n');
+    assert.doesNotMatch(
+      script,
+      /\|\|\s*(?:\\\s*)?(?:true\b|:(?:\s|$))/,
+      `${label(step)} swallows a command failure`,
+    );
+  }
   // A failure that does not fail its step leaves the job green, or lets the checks run after it.
   const swallowing = [job, ...steps].filter(
     (node) => (node['continue-on-error'] ?? 'false') !== 'false',
@@ -175,6 +192,7 @@ function checkJob(job, spec) {
     `continue-on-error hides a failure: ${swallowing.map(label).join('; ')}`,
   );
   if (spec.leg) {
+    assert.equal(job.strategy?.['fail-fast'], 'false', 'matrix fail-fast cancels unrelated legs');
     // The checks of a matrix leg never run, and the job stays green, when the matrix loses it.
     const [, key, leg] = /^matrix\.(\w+) == '([^']+)'$/.exec(spec.leg);
     assert.ok(
@@ -229,6 +247,10 @@ function checkJob(job, spec) {
         WHOLE_MINUTES,
         `${step.id ?? label(step)} needs a timeout-minutes of whole minutes`,
       );
+      assert.ok(
+        Number(step['timeout-minutes']) >= minimumMinutes(step),
+        `${label(step)} needs at least ${minimumMinutes(step)} minutes above measured runtimes`,
+      );
     }
   }
   if (spec.budget) {
@@ -270,6 +292,83 @@ function checkJob(job, spec) {
 // Each mutant breaks one rule of a job that passes, and checkJob has to refuse it. They are
 // written against the position of the prerequisite step (last), so they fit every job above.
 const MUTANTS = [
+  [
+    'a matrix defaulting to fail-fast',
+    (job) => {
+      delete job.strategy['fail-fast'];
+    },
+    (spec) => spec.leg !== undefined,
+  ],
+  [
+    'a prerequisite id replaced with a different id',
+    ({ steps }, last) => {
+      steps[last].id = 'wrong-setup';
+    },
+  ],
+  ...['0', '1'].map((limit) => [
+    `a setup step limit below the floor (${limit})`,
+    ({ steps }) => {
+      steps[0]['timeout-minutes'] = limit;
+    },
+    (spec) => spec.allStepsBounded,
+  ]),
+  [
+    'a worker smoke limit below measured slack',
+    ({ steps }) => {
+      steps.find((step) => step.run?.trim() === 'pnpm --filter @haive/worker smoke:ci')[
+        'timeout-minutes'
+      ] = '12';
+    },
+    (spec) => spec.id === 'smokes',
+  ],
+  [
+    'an auth throttle limit below measured slack',
+    ({ steps }) => {
+      steps.find((step) => step.run?.includes('test/auth-throttle.test.ts'))['timeout-minutes'] =
+        '3';
+    },
+    (spec) => spec.id === 'smokes',
+  ],
+  [
+    'a Docker build limit below cold-cache slack',
+    ({ steps }) => {
+      steps.find((step) => /\bdocker build\b/.test(step.run ?? ''))['timeout-minutes'] = '4';
+    },
+    (spec) => ['schema-parity', 'production-images'].includes(spec.id),
+  ],
+  [
+    'survivor: a check swallowing failure with || true',
+    ({ steps }, last) => {
+      const step = steps.slice(last + 1).find((step) => step.run && gatedRows(step) === null);
+      step.run = `(${step.run.trim()}) || true`;
+    },
+  ],
+  [
+    'survivor: matrix fail-fast enabled',
+    (job) => {
+      job.strategy['fail-fast'] = 'true';
+    },
+    (spec) => spec.leg !== undefined,
+  ],
+  [
+    'survivor: a job shell overriding runner errexit',
+    (job) => {
+      job.defaults = { run: { shell: 'bash {0}' } };
+    },
+  ],
+  [
+    'survivor: a job disabled with if false',
+    (job) => {
+      job.if = 'false';
+    },
+  ],
+  ...['0', '1'].map((limit) => [
+    `survivor: step limit below the floor (${limit})`,
+    ({ steps }, last) => {
+      steps[last + 1]['timeout-minutes'] = limit;
+    },
+    (spec) => spec.allStepsBounded && !spec.budget,
+  ]),
   [
     'a setup step with no time limit',
     ({ steps }) => {
@@ -553,6 +652,12 @@ for (const spec of JOBS) {
     it('runs every check after the setup whatever the other checks did', () => {
       assert.ok(job, `${spec.file} has no ${spec.id} job`);
       checkJob(job, spec);
+    });
+
+    it('identifies the prerequisite by id when its display name changes', () => {
+      const renamed = structuredClone(job);
+      renamed.steps.find((step) => step.id === spec.prerequisite).name = 'Different wording';
+      checkJob(renamed, spec);
     });
 
     for (const [name, mutate, applies] of MUTANTS) {
