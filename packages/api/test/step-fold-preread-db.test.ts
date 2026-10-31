@@ -849,6 +849,11 @@ describe.skipIf(!url)(
         'the PR poller closed its wait',
         sql`form_values = '{}'::jsonb, waiting_started_at = null, idle_ms = idle_ms + ${PEER_IDLE_MS}`,
       ],
+      [
+        'another submit closed its wait',
+        sql`form_values = '{"answer":"peer"}'::jsonb, waiting_started_at = null`,
+      ],
+      ['a new wait replaced its marker', sql`waiting_started_at = now()`],
     ] as const;
     const formNotWaiting = (what: string) => ({
       status: 409,
@@ -898,8 +903,8 @@ describe.skipIf(!url)(
       TEST_TIMEOUT,
     );
 
-    // The guard compares the wait with what the handler read, as the poller's does: a row whose wait was already
-    // closed when it was read (the submit route leaves it so until the worker picks the form up) is still answered.
+    // A row whose wait was already closed when read is still answered. It is also the shape of a merge
+    // resolver's fresh park, before handleResult stamps the wait: that stamp must not refuse the answer.
     it.each([
       ['the form submit', 'submit', { values: { answer: 'yes' } }],
       ['the clarification answer', 'clarify', { answer: 'keep both' }],
@@ -917,6 +922,33 @@ describe.skipIf(!url)(
           route === 'submit' ? 'step.form_submitted' : 'step.clarified',
         );
       },
+    );
+
+    it.each([
+      ['the form submit', 'submit', { values: { answer: 'yes' } }],
+      ['the clarification answer', 'clarify', { answer: 'keep both' }],
+    ] as const)(
+      'C4: %s accepts a wait stamped between its read of the unmarked park and its UPDATE',
+      async (_what, route, body) => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, { status: 'waiting_form', waitingStartedAt: null });
+
+        const response = await besidePeer(
+          () => post(`/tasks/${taskId}/steps/${STEP.stepId}/${route}`, body),
+          peerSets(STEP.id, sql`waiting_started_at = now()`),
+        );
+
+        expect(response).toMatchObject({ status: 200, body: { ok: true, queued: true } });
+        const row = await wholeRow();
+        expect(row).toMatchObject({ status: 'waiting_form', waitingStartedAt: null });
+        if (route === 'submit') expect(row.formValues).toEqual(body.values);
+        else expect(row.formValues).toBeNull();
+        expect(h.jobs).toHaveLength(1);
+        expect(await eventTypes(taskId)).toContain(
+          route === 'submit' ? 'step.form_submitted' : 'step.clarified',
+        );
+      },
+      TEST_TIMEOUT,
     );
 
     // S1 and S2: a pass activates the clicked row between Skip's read of its status and the row lock. Skip

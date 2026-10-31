@@ -103,16 +103,16 @@ function formNotWaiting(what: 'form submission' | 'clarification', stepId: strin
   return new HttpError(409, `No step awaiting ${what} for id ${stepId}`, 'step_form_not_waiting');
 }
 
-/** The parked row a handler read, still parked as it read it: waiting on its form, with its wait open or closed
- *  as it was. The status alone misses a closer that leaves the row `waiting_form` (another submit, the PR
- *  poller's auto-finalize); the wait's state catches it, as in the poller's own guard (`advancePrWaitStep`). */
+/** An open wait must still have the marker read by the handler: a closer or a re-park took that wait.
+ *  A NULL marker can also be a fresh merge-resolver park, before handleResult stamps it, so only the
+ *  status is checked there. This keeps accepting a duplicate read after an answer closed the wait. */
 function stillParkedAsRead(step: { id: string; waitingStartedAt: Date | null }) {
   return and(
     eq(schema.taskSteps.id, step.id),
     eq(schema.taskSteps.status, 'waiting_form'),
     step.waitingStartedAt
-      ? isNotNull(schema.taskSteps.waitingStartedAt)
-      : isNull(schema.taskSteps.waitingStartedAt),
+      ? eq(schema.taskSteps.waitingStartedAt, step.waitingStartedAt)
+      : undefined,
   );
 }
 
