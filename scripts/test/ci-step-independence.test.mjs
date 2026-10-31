@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { readWorkflow } from './workflow.mjs';
-import { swallowedFailure } from './shell-source.mjs';
+import { shellSource, swallowedFailure } from './shell-source.mjs';
 
 // A step with no `if` carries an implicit success(): it is skipped once ANY step before it failed.
 // In the smokes job that let one red check hide every check after it, and the same shape sat in
@@ -697,11 +697,11 @@ for (const spec of JOBS) {
 }
 
 function redisDatabases(step) {
-  const texts = [...Object.values(step.env ?? {}), step.run ?? ''];
+  const texts = [...Object.values(step.env ?? {}), shellSource(step.run ?? '')];
   return [
     ...new Set(
       texts.flatMap((text) =>
-        [...text.matchAll(/redis:\/\/[^\s"'`\\;|&)]+/g)].map(([raw]) => {
+        [...text.matchAll(/rediss?:\/\/[^\s"'`\\;|&)]+/g)].map(([raw]) => {
           const path = new URL(raw).pathname.replace(/^\//, '');
           assert.match(path, /^\d*$/, `Redis database must be a literal number: ${raw}`);
           return String(Number(path || '0'));
@@ -737,8 +737,8 @@ function redisFixture(job) {
   const gated = job.steps[index];
   const later = job.steps
     .slice(index + 1)
-    .filter((step) => Object.values(step.env ?? {}).some((url) => url.startsWith('redis://')));
-  const url = (step) => Object.values(step.env).find((value) => value.startsWith('redis://'));
+    .filter((step) => Object.values(step.env ?? {}).some((url) => /^rediss?:\/\//.test(url)));
+  const url = (step) => Object.values(step.env).find((value) => /^rediss?:\/\//.test(value));
   assert.ok(gated && later.length >= 2, 'the fixture needs gated and two later Redis steps');
   return { gated, later, url };
 }
@@ -825,6 +825,36 @@ describe('gated Redis isolation', () => {
       );
     }
   });
+  it('ignores Redis URLs in whole-line comments, trailing comments and heredoc bodies', () => {
+    const control = structuredClone(job);
+    const { gated, later, url } = redisFixture(control);
+    const shared = url(gated);
+    later[0].run += `\n# was ${shared} before\npnpm test # was ${shared.replace('redis:', 'rediss:')} before\ncat <<'BODY'\n${shared}\nBODY`;
+    checkRedisIsolation(control);
+  });
+  it('reads distinct rediss URLs in env and quoted inline commands', () => {
+    assert.deepEqual(
+      redisDatabases({
+        env: { REDIS_URL: 'rediss://localhost:6379/1' },
+        run: "export X='rediss://localhost:6379/2'",
+      }),
+      ['1', '2'],
+    );
+    const control = structuredClone(job);
+    const { later } = redisFixture(control);
+    later[0].run += "\nexport EXTRA_REDIS_URL='rediss://localhost:6379/1'";
+    checkRedisIsolation(control);
+  });
+  for (const location of ['env', 'run']) {
+    it(`rejects a rediss collision in ${location}`, () => {
+      const mutant = structuredClone(job);
+      const { gated, later, url } = redisFixture(mutant);
+      const shared = url(gated).replace('redis:', 'rediss:');
+      if (location === 'env') later[0].env.TEST_REDIS_URL = shared;
+      else later[0].run += `\nexport TEST_REDIS_URL='${shared}'`;
+      assert.throws(() => checkRedisIsolation(mutant), /shares Redis database/);
+    });
+  }
   for (const [name, mutate] of REDIS_MUTANTS) {
     it(`rejects ${name}`, () => {
       checkRedisIsolation(job);
