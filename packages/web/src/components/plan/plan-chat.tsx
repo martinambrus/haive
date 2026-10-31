@@ -157,8 +157,11 @@ export function PlanChat({
   // re-render cannot re-send the same read.
   const markedRef = useRef<string | null>(null);
 
+  const displayedNodeRef = useRef(draftKey);
+  displayedNodeRef.current = draftKey;
   const reloadMessages = useCallback(async (): Promise<void> => {
     const res = await getPlanMessages(repositoryId, nodeId);
+    if (displayedNodeRef.current !== `${repositoryId}:${nodeId}`) return;
     setMessages(res.messages);
     setConversations(res.conversations);
   }, [repositoryId, nodeId]);

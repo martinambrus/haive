@@ -72,6 +72,7 @@ const net = vi.hoisted(() => ({
   endPlanChat: vi.fn(),
   startPlanChat: vi.fn(),
   submitPlanChatTurn: vi.fn(),
+  getPlanMessages: vi.fn(),
   messages: undefined as unknown,
 }));
 vi.mock('@/lib/api-client', async (importOriginal) => ({
@@ -82,7 +83,7 @@ vi.mock('@/lib/api-client', async (importOriginal) => ({
   endPlanChat: net.endPlanChat,
   startPlanChat: net.startPlanChat,
   submitPlanChatTurn: net.submitPlanChatTurn,
-  getPlanMessages: async () => net.messages,
+  getPlanMessages: net.getPlanMessages,
   getPlanBuildClis: async () => ({ plannerCliProviderId: null }),
   markPlanNodeRead: async () => undefined,
 }));
@@ -203,6 +204,7 @@ let unmount = () => {};
 beforeEach(() => {
   vi.useFakeTimers();
   net.get.mockReset();
+  net.getPlanMessages.mockReset().mockImplementation(async () => net.messages);
   net.post.mockReset().mockResolvedValue(undefined);
   net.discardPlanMerge.mockReset();
   net.submitPlanMergeTurn.mockReset().mockResolvedValue(undefined);
@@ -486,6 +488,46 @@ describe('PlanChat drafts on different nodes', () => {
       expect(host('textarea')?.props.value).toBe(outcome === 'success' ? '' : 'Only for A');
     },
   );
+
+  it('drops a late transcript for A containing a live conversation after switching to B', async () => {
+    const transcript = deferred<unknown>();
+    const refreshedB = deferred<unknown>();
+    net.getPlanMessages
+      .mockReturnValueOnce(transcript.promise)
+      .mockResolvedValueOnce({ messages: [], conversations: [] })
+      .mockReturnValueOnce(refreshedB.promise);
+    respondWith(taskResponse(PLAN_CHAT_STEP_ID, { parked: true }));
+    const mounted = mount(PlanChat, props);
+    unmount = mounted;
+    await settle();
+    mounted.rerender({ ...props, nodeId: 'node-B' });
+    await settle();
+    transcript.resolve({
+      messages: [
+        {
+          id: 'message-A',
+          nodeId: 'node-A',
+          taskId: 'task-A',
+          role: 'user',
+          body: 'An active conversation for A',
+          patch: null,
+          cliLabel: null,
+          createdAt: '2026-10-14T08:00:00.000Z',
+        },
+      ],
+      conversations: [{ taskId: 'task-A', status: 'running', completedAt: null }],
+    });
+    await settle();
+    await typeDraft('Only for B');
+    await press('Send');
+    expect(net.submitPlanChatTurn).not.toHaveBeenCalled();
+    expect(net.startPlanChat).toHaveBeenCalledExactlyOnceWith('repo-1', 'node-B', {
+      message: 'Only for B',
+    });
+    expect(net.get.mock.calls.some(([path]) => path === '/tasks/task-A')).toBe(false);
+    refreshedB.resolve({ messages: [], conversations: [] });
+    await settle();
+  });
 
   it('empties the node after a successful send including edits during the request', async () => {
     const request = deferred<unknown>();
