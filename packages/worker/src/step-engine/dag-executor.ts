@@ -474,18 +474,27 @@ async function commitIssueWork(
   gitEnv: Record<string, string>,
 ): Promise<void> {
   await assertDependencyCommitSafe(ctx, worktreePath);
-  await gitRun(worktreePath, ['add', '-A']);
+  const add = await gitRun(worktreePath, ['add', '-A']);
+  if (add.code !== 0) {
+    throw new Error(
+      `git add failed for DAG issue ${issue.issueKey}: ${(add.stderr || add.stdout).trim()}`,
+    );
+  }
   const status = await gitRun(worktreePath, ['--no-optional-locks', 'status', '--porcelain']);
-  if (status.code === 0 && status.stdout.trim().length === 0) return;
+  if (status.code !== 0) {
+    throw new Error(
+      `git status failed for DAG issue ${issue.issueKey}: ${(status.stderr || status.stdout).trim()}`,
+    );
+  }
+  if (status.stdout.trim().length === 0) return;
   const res = await gitRun(
     worktreePath,
     ['commit', '-m', `${issue.issueKey}: ${issue.title}`],
     gitEnv,
   );
   if (res.code !== 0) {
-    ctx.logger.warn(
-      { issueKey: issue.issueKey, out: res.stderr || res.stdout },
-      'issue commit failed',
+    throw new Error(
+      `git commit failed for DAG issue ${issue.issueKey}: ${(res.stderr || res.stdout).trim()}`,
     );
   }
 }
