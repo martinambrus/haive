@@ -1087,6 +1087,21 @@ describe('commitRecorded commits what it staged in a private index', () => {
     expect(await git(repo, ['symbolic-ref', '--short', 'HEAD'])).toBe('main\n');
   });
 
+  it('commits nothing when the named files already match HEAD', async () => {
+    const repo = await seededRepo({ 'README.md': 'r\n' });
+    const before = await git(repo, ['rev-parse', 'HEAD']);
+    const staged = await git(repo, ['ls-files', '--stage']);
+    const done = await commitRecorded(
+      repo,
+      { add: ['README.md'], remove: ['absent.md'] },
+      'chore: none',
+      GIT_ENV,
+    );
+    expect(done).toEqual([]);
+    expect(await git(repo, ['rev-parse', 'HEAD'])).toBe(before);
+    expect(await git(repo, ['ls-files', '--stage'])).toBe(staged);
+  });
+
   it.each(['12-post-onboarding', '03-upgrade-commit'])(
     '%s no-op preserves the real index',
     async (step) => {
