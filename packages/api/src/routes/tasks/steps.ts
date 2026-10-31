@@ -1785,9 +1785,39 @@ stepRoutes.get('/:id/steps/:stepId/cli-invocations', async (c) => {
   return c.json({ invocations, historyTotal, totalCount: ranking.length });
 });
 
+const cannotSwitchWhile = (status: string) =>
+  new HttpError(409, `Cannot change provider while step is ${status}`);
+
 /** The switch resets the step's row, so it is refused while the step's CLI may still be running. */
 function refuseSwitchWhileLive(row: { status: string }): void {
-  if (isLive(row)) throw new HttpError(409, `Cannot change provider while step is ${row.status}`);
+  if (isLive(row)) throw cannotSwitchWhile(row.status);
+}
+
+/** What the switch does with a row. Only a row at its first pass (no loop iteration yet) that is pending, parked on
+ *  its form or failed has its cached detect/form invalidated, so the next advance re-detects against the
+ *  newly-preferred CLI's metadata (`reruns`). A finished row is left as it is, and so is a mid-loop one, so that
+ *  swapping the CLI before Resume keeps the completed passes and the form instead of restarting the step. A parked
+ *  or failed row is also re-run on the new CLI, which takes the task back to it as a Retry does (`movesTask`); a
+ *  pending one is only invalidated. */
+function switchActionOf(row: { status: string; iterationCount: number }) {
+  const reruns =
+    row.iterationCount === 0 &&
+    (row.status === 'pending' || row.status === 'waiting_form' || row.status === 'failed');
+  return { reruns, movesTask: reruns && row.status !== 'pending' };
+}
+
+/** The transaction's check of the row it holds against the handler's decision from its earlier read: a pass that
+ *  ran the row meanwhile (claimed it, took up its form, finished it, parked a form on it, ran its next iteration)
+ *  leaves it where that read would not have reset it. Refused as a live row is, since the reset would undo the
+ *  pass's work or leave a row no advance claims. A row that went from parked or failed back to pending is still
+ *  reset, and moves the task to it; one that was pending must still be, since a parked or failed row needs the move
+ *  the handler did not take. */
+function refuseSwitchOnChangedRow(
+  held: { status: string; iterationCount: number },
+  movesTask: boolean,
+): void {
+  const now = switchActionOf(held);
+  if (!now.reruns || (now.movesTask && !movesTask)) throw cannotSwitchWhile(held.status);
 }
 
 stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
@@ -1885,8 +1915,7 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
     return c.json({ ok: true, stepId, role, cliProviderId: body.cliProviderId });
   }
 
-  const movesTask =
-    step.iterationCount === 0 && (step.status === 'waiting_form' || step.status === 'failed');
+  const { reruns, movesTask } = switchActionOf(step);
   if (movesTask) await assertNewWorkAllowed();
 
   const saveChoice = async (handle: Database | DbHandle) => {
@@ -1902,13 +1931,6 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
       by: userId,
     });
   };
-  // Invalidate the step's cached detect/form so the next advance re-detects
-  // against the newly-preferred CLI's metadata. Skipped if step is terminal, and
-  // for a mid-loop step (iterationCount > 0) so swapping the CLI before Resume
-  // keeps the completed passes + the form instead of restarting the step.
-  const reruns =
-    step.iterationCount === 0 &&
-    (step.status === 'pending' || step.status === 'waiting_form' || step.status === 'failed');
   // A re-run saves the choice inside its transaction, after its check of the row it holds, so a
   // refused one changes nothing: a row that never enters the transaction saves it here.
   if (!reruns) await saveChoice(db);
@@ -1965,9 +1987,9 @@ stepRoutes.patch('/:id/steps/:stepId/cli-provider', async (c) => {
         .where(eq(schema.taskSteps.id, step.id))
         .for('no key update');
       if (!held) throw new HttpError(404, 'Step not found');
-      // A pass can activate the row between the handler's read of its status and this lock, by claiming
-      // a pending row or by taking up a form just answered. This read waited for it, so it sees it.
-      refuseSwitchWhileLive(held);
+      // A pass can run the row between the handler's read of it and this lock. This read waited for the
+      // pass, so it sees where it left the row.
+      refuseSwitchOnChangedRow(held, movesTask);
       const contrib = computeFoldContribution(held, now.getTime());
       await tx
         .update(schema.taskSteps)

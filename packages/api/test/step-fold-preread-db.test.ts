@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { eq, sql, type SQL } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 
@@ -683,6 +683,76 @@ describe.skipIf(!url)(
         carriedUserActiveMs: 50,
       });
     });
+
+    // H6-H8: a pass runs the row while the switch waits for its lock and leaves it where the handler's own read
+    // would not have re-run it that way: finished, parked on a form after a pending row was read, or in its next
+    // loop iteration. The reset the handler decided on from its first read would undo that work, or leave a row no
+    // advance claims, so the switch refuses with the 409 it gives a live row, and the row stays as the pass left it.
+    const peerSets = (id: string, set: SQL) => (tx: Tx) =>
+      tx.execute(sql`update task_steps set ${set} where id = ${id}`);
+
+    it.each([
+      ['H6', 'pending', 0, 'done', sql`status = 'done', ended_at = now()`],
+      [
+        'H7',
+        'pending',
+        0,
+        'waiting_form',
+        sql`status = 'waiting_form', waiting_started_at = now()`,
+      ],
+      ['H8', 'waiting_form', 1, 'waiting_form', sql`iteration_count = 1`],
+    ] as const)(
+      '%s: the per-step CLI switch refuses a %s row that a pass has since taken to iteration %s as %s',
+      async (_label, readAs, iterations, leftAs, set) => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, { status: readAs });
+
+        const outcome = await settle(
+          besidePeer(
+            () =>
+              patch(`/tasks/${taskId}/steps/${STEP.stepId}/cli-provider`, { cliProviderId: null }),
+            peerSets(STEP.id, set),
+          ),
+        );
+
+        expect.soft(outcome).toMatchObject({
+          ok: false,
+          error: { status: 409, message: `Cannot change provider while step is ${leftAs}` },
+        });
+        expect.soft(await wholeRow()).toMatchObject({
+          status: leftAs,
+          iterationCount: iterations,
+          idleMs: 4000,
+          userActiveMs: 800,
+          carriedWorkMs: 1000,
+          carriedIdleMs: 200,
+          carriedUserActiveMs: 50,
+        });
+        expect.soft(await choiceRows(taskId), 'task_step_cli_choices').toEqual([]);
+        expect.soft((await taskRow(taskId)).orchestrationEpoch, 'the task was not moved').toBe(3);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'H9: a peer that only resets a parked row to pending does not make the switch refuse',
+      async () => {
+        const taskId = await seedTask('running');
+        await seedStep(taskId, { status: 'waiting_form' });
+
+        const response = await besidePeer(
+          () =>
+            patch(`/tasks/${taskId}/steps/${STEP.stepId}/cli-provider`, { cliProviderId: null }),
+          peerSets(STEP.id, sql`status = 'pending', waiting_started_at = null`),
+        );
+
+        expect(response).toMatchObject({ status: 200, body: { ok: true } });
+        expect((await wholeRow()).status).toBe('pending');
+        expect(await choiceRows(taskId)).toEqual([{ stepId: STEP.stepId, cliProviderId: null }]);
+        expect((await taskRow(taskId)).orchestrationEpoch, 'the task moved to the step').toBe(4);
+      },
+      TEST_TIMEOUT,
+    );
 
     // A row the switch does not re-run takes the choice and nothing else, and does not enter the transaction.
     it.each([
