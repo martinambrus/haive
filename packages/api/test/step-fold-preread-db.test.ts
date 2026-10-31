@@ -69,9 +69,18 @@ const OTHER = {
   stepId: PROVIDER_SENSITIVE_STEP_IDS[1]!,
   index: 2,
 } as const;
+// The one step Skip accepts here: the static flags answer while step_catalog is empty, and list it as skippable.
+const SKIPPABLE = {
+  id: '00000000-0000-4000-8000-0000000000c1',
+  stepId: '11g-save-database',
+  index: 3,
+} as const;
 const BLIND_INDEX = 'step-fold-preread-test-user';
 const BLOCKED_WITHIN_MS = 10_000;
 const TEST_TIMEOUT = 30_000;
+// H cases: a form row parked this long, whose idle_ms a peer adds to while the writer waits for the row.
+const PARKED_FOR_MS = 10 * 60_000;
+const PEER_IDLE_MS = 20_000;
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 type Outcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
@@ -99,7 +108,7 @@ app.onError((err, c) => {
 });
 
 describe.skipIf(!url)(
-  'carried_* folds beside a peer that changes the row after the writer read it, on Postgres',
+  'step folds and the CLI switch beside a peer that changes the row after the writer read it, on Postgres',
   () => {
     let db: Database;
     let peer: Database;
@@ -149,7 +158,7 @@ describe.skipIf(!url)(
     const seedStep = async (
       taskId: string,
       over: StepInsert = {},
-      which: typeof STEP | typeof OTHER = STEP,
+      which: { id: string; stepId: string; index: number } = STEP,
     ) => {
       const [row] = await db
         .insert(schema.taskSteps)
@@ -264,6 +273,17 @@ describe.skipIf(!url)(
       h.thrown = undefined;
       const res = await app.request(path, {
         method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (h.thrown !== undefined) throw h.thrown;
+      return { status: res.status, body: (await res.json()) as unknown };
+    };
+
+    const post = async (path: string, body: Record<string, unknown>) => {
+      h.thrown = undefined;
+      const res = await app.request(path, {
+        method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       });
@@ -394,6 +414,116 @@ describe.skipIf(!url)(
         });
         expect((await finalRow(STEP.id)).status).toBe('done');
         expect((await finalRow(OTHER.id)).status).toBe('pending');
+      },
+      TEST_TIMEOUT,
+    );
+
+    // H1-H3 close a parked form's wait into idle_ms: the row is parked PARKED_FOR_MS with idle_ms 4000, and the
+    // peer adds PEER_IDLE_MS to idle_ms and holds the row. The final idle_ms is the seed, plus the peer's share,
+    // plus the wait up to the moment the writer ran (between `before` and `after`). A writer that adds the wait to
+    // the idle_ms it read before the peer committed writes 4000 plus the wait and takes the peer's share back.
+    const peerAddsIdle = (id: string) => (tx: Tx) =>
+      tx.execute(sql`update task_steps set idle_ms = idle_ms + ${PEER_IDLE_MS} where id = ${id}`);
+
+    const seedParkedForm = async (
+      taskId: string,
+      which: { id: string; stepId: string; index: number } = STEP,
+    ) => {
+      const parkedAt = new Date(Date.now() - PARKED_FOR_MS);
+      await seedStep(
+        taskId,
+        {
+          status: 'waiting_form',
+          startedAt: new Date(parkedAt.getTime() - 60_000),
+          waitingStartedAt: parkedAt,
+        },
+        which,
+      );
+      return parkedAt;
+    };
+
+    const wholeRow = async (id: string = STEP.id) => {
+      const [row] = await db.select().from(schema.taskSteps).where(eq(schema.taskSteps.id, id));
+      return row!;
+    };
+
+    const expectIdleIncludesPeer = (
+      idleMs: number,
+      parkedAt: Date,
+      window: { before: number; after: number },
+    ) => {
+      const seeded = 4000 + PEER_IDLE_MS;
+      expect(idleMs, 'idle_ms: the seed, the peer and the wait').toBeGreaterThanOrEqual(
+        seeded + (window.before - parkedAt.getTime()),
+      );
+      expect(idleMs, 'idle_ms: the seed, the peer and the wait').toBeLessThanOrEqual(
+        seeded + (window.after - parkedAt.getTime()),
+      );
+    };
+
+    it(
+      'H1: the form submit adds the wait to the idle_ms a peer left, not to the one it read first',
+      async () => {
+        const taskId = await seedTask('running');
+        const parkedAt = await seedParkedForm(taskId);
+
+        const before = Date.now();
+        const response = await besidePeer(
+          () => post(`/tasks/${taskId}/steps/${STEP.stepId}/submit`, { values: { answer: 'yes' } }),
+          peerAddsIdle(STEP.id),
+        );
+        const after = Date.now();
+
+        expect(response).toMatchObject({ status: 200, body: { ok: true, queued: true } });
+        const row = await wholeRow();
+        expect(row).toMatchObject({
+          status: 'waiting_form',
+          waitingStartedAt: null,
+          formValues: { answer: 'yes' },
+        });
+        expectIdleIncludesPeer(row.idleMs, parkedAt, { before, after });
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'H2: the merge clarification answer adds the wait to the idle_ms a peer left, not to the one it read first',
+      async () => {
+        const taskId = await seedTask('running');
+        const parkedAt = await seedParkedForm(taskId);
+
+        const before = Date.now();
+        const response = await besidePeer(
+          () => post(`/tasks/${taskId}/steps/${STEP.stepId}/clarify`, { answer: 'keep both' }),
+          peerAddsIdle(STEP.id),
+        );
+        const after = Date.now();
+
+        expect(response).toMatchObject({ status: 200, body: { ok: true, queued: true } });
+        const row = await wholeRow();
+        expect(row).toMatchObject({ status: 'waiting_form', waitingStartedAt: null });
+        expectIdleIncludesPeer(row.idleMs, parkedAt, { before, after });
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'H3: Skip adds the wait to the idle_ms a peer left, not to the one it read first',
+      async () => {
+        const taskId = await seedTask('running', { currentStepId: SKIPPABLE.stepId });
+        const parkedAt = await seedParkedForm(taskId, SKIPPABLE);
+
+        const before = Date.now();
+        const response = await besidePeer(
+          () => post(`/tasks/${taskId}/steps/${SKIPPABLE.stepId}/action`, { action: 'skip' }),
+          peerAddsIdle(SKIPPABLE.id),
+        );
+        const after = Date.now();
+
+        expect(response).toMatchObject({ status: 200, body: { ok: true, status: 'skipped' } });
+        const row = await wholeRow(SKIPPABLE.id);
+        expect(row).toMatchObject({ status: 'skipped', waitingStartedAt: null });
+        expectIdleIncludesPeer(row.idleMs, parkedAt, { before, after });
       },
       TEST_TIMEOUT,
     );

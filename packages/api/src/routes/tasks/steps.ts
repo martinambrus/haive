@@ -25,6 +25,7 @@ import {
   resetDagCurrentLevelForRetry,
   CLOSED_GAP_INTO_IDLE_MS,
   CLEAR_STEP_USAGE_STAMP,
+  OPEN_WAIT_INTO_IDLE_MS,
   type Database,
   ZERO_MERGE_RETRIES,
 } from '@haive/database';
@@ -835,17 +836,14 @@ stepRoutes.post('/:id/steps/:stepId/submit', async (c) => {
   const values = normalized.data;
 
   const now = new Date();
-  // Close the idle (waiting-for-input) period: fold the time since the step
-  // entered waiting_form into idle_ms so the active-work timer excludes it.
-  const closedIdleMs = step.waitingStartedAt
-    ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
-    : 0;
   const writeAnswer = async (tx: DbHandle) => {
     await tx
       .update(schema.taskSteps)
       .set({
         formValues: values,
-        idleMs: step.idleMs + closedIdleMs,
+        // Close the idle (waiting-for-input) period: fold the time since the step entered
+        // waiting_form into idle_ms so the active-work timer excludes it. In SQL, on the locked row.
+        idleMs: OPEN_WAIT_INTO_IDLE_MS,
         waitingStartedAt: null,
         updatedAt: now,
       })
@@ -921,9 +919,6 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     );
 
   const now = new Date();
-  const closedIdleMs = step.waitingStartedAt
-    ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
-    : 0;
   await db.transaction(async (tx) => {
     const reopens = await admitAnswer(tx, id);
     await refuseReviveBesideLive(tx, id);
@@ -936,7 +931,7 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
     });
     await tx
       .update(schema.taskSteps)
-      .set({ idleMs: step.idleMs + closedIdleMs, waitingStartedAt: null, updatedAt: now })
+      .set({ idleMs: OPEN_WAIT_INTO_IDLE_MS, waitingStartedAt: null, updatedAt: now })
       .where(eq(schema.taskSteps.id, step.id));
 
     await appendTaskEvent(tx, id, step.id, 'step.clarified', { stepId });
@@ -1552,9 +1547,6 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       [step.id],
     );
     const now = new Date();
-    const closedIdleMs = step.waitingStartedAt
-      ? Math.max(0, now.getTime() - step.waitingStartedAt.getTime())
-      : 0;
     const moved = await db.transaction(async (tx) => {
       await admitNewWork(tx);
       await refuseReviveBesideLive(tx, id);
@@ -1567,7 +1559,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
           ...CLEAR_STEP_USAGE_STAMP,
           errorMessage: null,
           endedAt: now,
-          idleMs: step.idleMs + closedIdleMs,
+          idleMs: OPEN_WAIT_INTO_IDLE_MS,
           waitingStartedAt: null,
           updatedAt: now,
         })
