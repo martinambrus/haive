@@ -930,9 +930,9 @@ describe('shell failure detection', () => {
   };
   const accepted = [
     "cat <<'BODY'\nset +e\nBODY",
-    'cat <<BODY\ntrue-positive.test.ts\nBODY',
-    'cat <<-BODY\n\tset +e\n\tBODY',
-    'cat <<ONE <<"TWO"\nset +e\nONE\n|| true\nTWO',
+    "cat <<'BODY'\ntrue-positive.test.ts\nBODY",
+    "cat <<-'BODY'\n\tset +e\n\tBODY",
+    'cat <<"ONE" <<"TWO"\nset +e\nONE\n|| true\nTWO',
     'echo "ready; true"',
     'case "$v" in\ntrue) echo ready ;;\nesac',
     'if check; then\ntrue\nelse\necho ready\nfi',
