@@ -78,9 +78,9 @@ describe('a merge open when the file is judged', () => {
     await writeFile(path.join(repo, '.git', 'MERGE_HEAD'), '0'.repeat(40) + '\n');
     await expect(
       writePlanJsonIfUnchanged(repo, '{"next":1}\n', b('{"synced":1}\n')),
-    ).rejects.toThrow(/merge or rebase/);
+    ).rejects.toThrow(/merge, rebase, cherry-pick or revert/);
     await expect(removePlanJsonIfUnchanged(repo, b('{"synced":1}\n'))).rejects.toThrow(
-      /merge or rebase/,
+      /merge, rebase, cherry-pick or revert/,
     );
     expect(await onDisk(repo)).toBe('{"synced":1}\n');
   });
@@ -90,9 +90,11 @@ describe('a merge open when the file is judged', () => {
     execFileSync('git', ['init', '-q'], { cwd: repo });
     await writeFile(path.join(repo, '.git', 'MERGE_HEAD'), '0'.repeat(40) + '\n');
     await expect(writePlanJsonIfUnchanged(repo, '{"next":1}\n', null)).rejects.toThrow(
-      /merge or rebase/,
+      /merge, rebase, cherry-pick or revert/,
     );
-    await expect(removePlanJsonIfUnchanged(repo, null)).rejects.toThrow(/merge or rebase/);
+    await expect(removePlanJsonIfUnchanged(repo, null)).rejects.toThrow(
+      /merge, rebase, cherry-pick or revert/,
+    );
     await expect(access(path.join(repo, HAIVE_DATA_FILES.plan))).rejects.toThrow();
   });
 });

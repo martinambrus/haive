@@ -212,7 +212,7 @@ describe('a plan flush when git cannot be read', () => {
     const row = state(FIRST);
     expect(row.writtenRevision).toBeLessThan(row.revision as number);
     expect(row.lastError).toMatch(/failed in/);
-    expect(row.lastError).not.toMatch(/merge or rebase is open/);
+    expect(row.lastError).not.toMatch(/merge, rebase, cherry-pick or revert is open/);
   });
 
   it('still writes plan.json and plan.md in a checkout with no .git', async () => {

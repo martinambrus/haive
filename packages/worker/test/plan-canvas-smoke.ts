@@ -3043,7 +3043,7 @@ async function main(): Promise<void> {
   });
   check(
     'three-way: a merge that opens during the reconcile holds it before it commits',
-    /merge or rebase/.test((await duringMerge) ?? '') &&
+    /merge, rebase, cherry-pick or revert/.test((await duringMerge) ?? '') &&
       (await sNode(pId))?.title !== 'P while merging',
     { duringMerge: await duringMerge, title: (await sNode(pId))?.title },
   );
@@ -3351,7 +3351,7 @@ async function main(): Promise<void> {
     .where(eq(schema.planNodes.repositoryId, mergingRepo!.id));
   check(
     'an import while a merge is open reads nothing in',
-    /merge or rebase/.test(mergingImport) && mergingNodes.length === 0,
+    /merge, rebase, cherry-pick or revert/.test(mergingImport) && mergingNodes.length === 0,
     { mergingImport, nodes: mergingNodes.length },
   );
   await db.delete(schema.repositories).where(eq(schema.repositories.id, mergingRepo!.id));
