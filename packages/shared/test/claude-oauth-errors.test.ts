@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   exchangeClaudeAuthCode,
   isClaudeRefreshRejected,
+  postToken,
   refreshClaudeToken,
 } from '../src/cli-providers/claude-oauth.js';
 
@@ -22,6 +23,7 @@ async function refusal(): Promise<unknown> {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('a refused Claude token refresh', () => {
@@ -57,6 +59,13 @@ describe('a refused Claude token refresh', () => {
 });
 
 describe('Claude OAuth token endpoint deadline', () => {
+  it('keeps the 15 second default for both unchanged grant callers', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    respond(200, JSON.stringify({ access_token: 'synthetic-access' }));
+    await refreshClaudeToken('synthetic-refresh');
+    await exchangeClaudeAuthCode('synthetic-code', 'synthetic-verifier', null);
+    expect(timeout.mock.calls).toEqual([[15_000], [15_000]]);
+  });
   it.each(['headers', 'body'])(
     'bounds a stalled %s response for both grants',
     async (stall) => {
@@ -80,17 +89,24 @@ describe('Claude OAuth token endpoint deadline', () => {
       const start = performance.now();
       try {
         const tokens = Promise.allSettled([
-          refreshClaudeToken('synthetic-refresh'),
-          exchangeClaudeAuthCode('synthetic-code', 'synthetic-verifier', null),
+          postToken({ grant_type: 'refresh_token', refresh_token: 'synthetic-refresh' }, 50),
+          postToken(
+            {
+              grant_type: 'authorization_code',
+              code: 'synthetic-code',
+              code_verifier: 'synthetic-verifier',
+            },
+            50,
+          ),
         ]);
         const result = await Promise.race([
           tokens,
           new Promise<typeof deadline>((resolve) => {
-            timer = setTimeout(() => resolve(deadline), 17_000);
+            timer = setTimeout(() => resolve(deadline), 1500);
           }),
         ]);
         expect(result).not.toBe(deadline);
-        expect(performance.now() - start).toBeLessThan(17_000);
+        expect(performance.now() - start).toBeLessThan(1500);
         expect(signals).toHaveLength(2);
         for (const signal of signals) expect(signal?.aborted).toBe(true);
         for (const outcome of result as PromiseSettledResult<unknown>[]) {
@@ -104,6 +120,6 @@ describe('Claude OAuth token endpoint deadline', () => {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
     },
-    20_000,
+    5000,
   );
 });

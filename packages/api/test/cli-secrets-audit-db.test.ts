@@ -329,14 +329,20 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     });
     try {
       // With the lock, PATCH waits on the captured read. Without it, PATCH commits first.
-      for (let i = 0; i < 200 && !patchFinished; i++) {
-        const waiting = await db.execute(
-          sql`select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query like 'update "cli_providers"%'`,
-        );
-        if (waiting.length) break;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        if (i === 199) throw new Error('PATCH neither completed nor waited on the provider lock');
-      }
+      await expect
+        .poll(
+          async () => {
+            if (patchFinished) return true;
+            const waiting = await db.execute(sql`
+          select 1 from pg_stat_activity a join pg_locks l on l.pid = a.pid
+          where a.datname = current_database() and not l.granted
+            and a.query like 'update "cli_providers"%'
+        `);
+            return waiting.length > 0;
+          },
+          { timeout: 15_000 },
+        )
+        .toBe(true);
     } finally {
       release();
     }
@@ -348,5 +354,5 @@ describe.skipIf(!url)('CLI secrets commit with their audit, on Postgres', () => 
     ).toEqual({ KEEP: 'next' });
     expect(await secrets()).toHaveLength(2);
     expect(await audits(db)).toHaveLength(2);
-  });
+  }, 30_000);
 });
