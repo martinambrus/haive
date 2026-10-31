@@ -245,6 +245,8 @@ export function BundleComposer({
   valueRef.current = value;
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const loadBundleFilesRef = useRef(loadBundleFiles);
+  loadBundleFilesRef.current = loadBundleFiles;
 
   useEffect(() => {
     let cancelled = false;
@@ -292,7 +294,7 @@ export function BundleComposer({
               delete remaining[bundle.id];
               return remaining;
             });
-            if (expandedIdsRef.current.has(bundle.id)) void loadBundleFiles(bundle.id);
+            if (expandedIdsRef.current.has(bundle.id)) void loadBundleFilesRef.current(bundle.id);
           }
         }
         const same =

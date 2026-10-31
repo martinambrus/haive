@@ -10,6 +10,7 @@ import {
 } from '../../test/render-tree';
 
 const updaterReplay = vi.hoisted(() => ({ enabled: false }));
+const loaderProbe = vi.hoisted(() => ({ enabled: false, render: 0, writes: [] as number[] }));
 
 // No DOM in this package: render-tree keeps the hooks and fetch supplies the network.
 vi.mock('react', async (importOriginal) => {
@@ -20,9 +21,20 @@ vi.mock('react', async (importOriginal) => {
     useState(initial: unknown) {
       const [value, set] = reactHooks.useState(initial);
       const setState = set as (update: unknown) => void;
+      const render = loaderProbe.render;
       return [
         value,
         (update: unknown) => {
+          if (loaderProbe.enabled && typeof update === 'function') {
+            const original = update;
+            update = (previous: Record<string, { loading?: boolean }>) => {
+              const next = original(previous);
+              // Setters are stable in React. This render-tagged wrapper is a sentry:
+              // a new loading entry identifies the render whose loader was called.
+              if (next?.b1?.loading && next.b1 !== previous?.b1) loaderProbe.writes.push(render);
+              return next;
+            };
+          }
           if (updaterReplay.enabled && typeof update === 'function') {
             // Replay the updater with the same input, as StrictMode may do. This
             // pins updater purity; the harness does not render React StrictMode.
@@ -141,6 +153,9 @@ beforeAll(() => {
 afterAll(() => vi.unstubAllGlobals());
 beforeEach(() => {
   updaterReplay.enabled = false;
+  loaderProbe.enabled = false;
+  loaderProbe.render = 0;
+  loaderProbe.writes = [];
   bundleState = 'active';
   bundleSource = 'zip';
   secondBundleState = null;
@@ -358,6 +373,21 @@ describe('file listings follow the final synced tree', () => {
     release();
     await settle(live.view);
     expect(filesFetches).toBe(1);
+  });
+
+  it('calls the current render’s file loader when a long-lived poll finishes syncing', async () => {
+    bundleState = 'syncing';
+    loaderProbe.enabled = true;
+    loaderProbe.render = 1;
+    const live = await mountLive();
+    await live.click('docs');
+    expect(loaderProbe.writes).toEqual([1, 1]);
+    loaderProbe.writes = [];
+    loaderProbe.render = 2;
+    live.view.draw();
+    await live.finishSync();
+    expect(filesFetches).toBe(2);
+    expect(loaderProbe.writes).toEqual([2, 2]);
   });
 
   it('keeps the expanded listing when Resync is accepted', async () => {
