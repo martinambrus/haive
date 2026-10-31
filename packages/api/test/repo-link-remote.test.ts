@@ -743,3 +743,51 @@ it.each(['exit', 'spawn', 'sync'])(
     expect(fake.rows(schema.auditEvents)).toEqual([]);
   },
 );
+
+it.each(['probe', 'add', 'snapshot', 'clear', 'update'])(
+  'redacts URL credentials from real child stderr at the relink %s stage',
+  async (stage) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'relink-stderr-'));
+    dirs.push(dir);
+    const old = 'https://old.test/r';
+    fake.patch(schema.repositories, REPO, { remoteUrl: old });
+    h.git.mockImplementation((_command, args: string[], options: ExecFileOptions) => {
+      const failing =
+        (stage === 'probe' && args.includes('rev-parse')) ||
+        (stage === 'add' && args.includes('remote') && args.includes('add')) ||
+        (stage === 'snapshot' && args.includes('--get-all')) ||
+        (stage === 'clear' && args.includes('--unset-all')) ||
+        (stage === 'update' &&
+          args.includes('--replace-all') &&
+          args.at(-1) === 'https://example.test/r');
+      if (failing)
+        return startChild(
+          'sh',
+          [
+            '-c',
+            `printf '%s\\n' "$1" >&2; exit 128`,
+            'sh',
+            "fatal: URL 'https://synthetic-user:synthetic-password@host/r?tok=synthetic-token#synthetic-fragment' uses plaintext credentials",
+          ],
+          options,
+          dir,
+        );
+      if (args.includes('rev-parse')) return Promise.resolve({ stdout: 'true', stderr: '' });
+      if (args.includes('remote') && args.includes('add')) return Promise.reject(fail(3, 'exists'));
+      if (args.includes('--get-all'))
+        return args.at(-1) === 'remote.origin.url'
+          ? Promise.resolve({ stdout: old, stderr: '' })
+          : Promise.reject(fail(1, 'absent'));
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    const answer = await link();
+    expect(answer.status).toBe(409);
+    const body = await answer.text();
+    expect(body).toContain("fatal: URL 'https://host/r' uses plaintext credentials");
+    expect(body).not.toMatch(
+      /synthetic-user|synthetic-password|synthetic-token|synthetic-fragment|tok=/,
+    );
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBe(old);
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);

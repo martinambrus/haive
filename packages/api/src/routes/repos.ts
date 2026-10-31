@@ -106,6 +106,7 @@ import {
   credentialFitsGitRemote,
   parseScpLikeGitUrl,
   redactEditableGitUrl,
+  redactGitText,
   redactGitUrl,
 } from '@haive/shared/schemas';
 import {
@@ -2810,6 +2811,10 @@ repoRoutes.post('/:id/remote', async (c) => {
     }
   };
 
+  // Keep snapshots intact for restoration; redact only text reported to the caller.
+  const gitFailureText = (result: { stderr: string; stdout: string }) =>
+    redactGitText(result.stderr || result.stdout || 'no answer');
+
   // Without its own .git entry, upward discovery would relink a parent checkout.
   const entry = await lstatNoFollow(root, '.git', { strict: true }).catch((err: unknown) => {
     throw new HttpError(
@@ -2825,7 +2830,7 @@ repoRoutes.post('/:id/remote', async (c) => {
   }
   const inside = await git(['rev-parse', '--is-inside-work-tree']);
   if (!inside.ok || !['true', 'false'].includes(inside.stdout)) {
-    const reason = inside.stderr || inside.stdout || 'no answer';
+    const reason = gitFailureText(inside);
     throw new HttpError(
       409,
       `This repository could not be examined: git rev-parse --is-inside-work-tree failed (exit ${inside.code}): ${reason}`,
@@ -2909,13 +2914,16 @@ repoRoutes.post('/:id/remote', async (c) => {
             };
           if (!added.ok) {
             if (added.code !== 3) {
-              throw new HttpError(409, `Could not add the remote: ${added.stderr || added.stdout}`);
+              throw new HttpError(409, `Could not add the remote: ${gitFailureText(added)}`);
             }
             const previous: [string, string[]][] = [];
             for (const key of ['remote.origin.url', 'remote.origin.pushurl']) {
               const read = await git(['config', '--local', '--get-all', key]);
               if (!read.ok && read.code !== 1)
-                throw new HttpError(409, 'Could not read the previous remote');
+                throw new HttpError(
+                  409,
+                  `Could not read the previous remote: ${gitFailureText(read)}`,
+                );
               previous.push([key, read.ok && read.stdout ? read.stdout.split('\n') : []]);
             }
             const restoreExisting = async () => {
@@ -2945,7 +2953,7 @@ repoRoutes.post('/:id/remote', async (c) => {
             if (!cleared.ok && cleared.code !== 5) {
               throw new HttpError(
                 409,
-                `Could not clear the remote's push URLs: ${cleared.stderr || cleared.stdout}`,
+                `Could not clear the remote's push URLs: ${gitFailureText(cleared)}`,
               );
             }
             const updated = await git([
@@ -2956,10 +2964,7 @@ repoRoutes.post('/:id/remote', async (c) => {
               body.remoteUrl,
             ]);
             if (!updated.ok) {
-              throw new HttpError(
-                409,
-                `Could not update the remote: ${updated.stderr || updated.stdout}`,
-              );
+              throw new HttpError(409, `Could not update the remote: ${gitFailureText(updated)}`);
             }
           }
 
