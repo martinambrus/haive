@@ -782,5 +782,72 @@ describe.skipIf(!url)(
         });
       },
     );
+
+    // S1 and S2: a pass activates the clicked row between Skip's read of its status and the row lock. Skip
+    // decides from its first read that the row is failed or parked, and marked it skipped by id: the pass's row
+    // became skipped, and as the clicked row is in neither `leftActive` nor the rows activated meanwhile, nobody
+    // killed its sandbox. Skip must refuse it as it refuses a row it read running, and change nothing.
+    const peerRuns = (id: string) => peerSets(id, sql`status = 'running', started_at = now()`);
+
+    it.each(['waiting_form', 'failed'] as const)(
+      'S1: Skip refuses a %s row that a pass activated after the status was read',
+      async (readAs) => {
+        const taskId = await seedTask('running', { currentStepId: SKIPPABLE.stepId });
+        await seedStep(taskId, { status: readAs }, SKIPPABLE);
+
+        const outcome = await settle(
+          besidePeer(
+            () => post(`/tasks/${taskId}/steps/${SKIPPABLE.stepId}/action`, { action: 'skip' }),
+            peerRuns(SKIPPABLE.id),
+          ),
+        );
+
+        expect.soft(outcome).toMatchObject({
+          ok: false,
+          error: { status: 409, message: 'Cannot skip step in status running' },
+        });
+        expect.soft((await wholeRow(SKIPPABLE.id)).status).toBe('running');
+        expect.soft(await eventTypes(taskId)).not.toContain('step.skip');
+        expect.soft((await taskRow(taskId)).orchestrationEpoch, 'the task was not moved').toBe(3);
+        expect.soft(h.jobs, 'no advance queued').toEqual([]);
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'S2: a refused Skip leaves the rows it would have reset beside the clicked one as they were',
+      async () => {
+        const taskId = await seedTask('running', { currentStepId: SKIPPABLE.stepId });
+        await seedStep(
+          taskId,
+          { status: 'running', startedAt: new Date(Date.now() - 60_000) },
+          OTHER,
+        );
+        await seedStep(taskId, { status: 'waiting_form' }, SKIPPABLE);
+
+        const outcome = await settle(
+          besidePeer(
+            () => post(`/tasks/${taskId}/steps/${SKIPPABLE.stepId}/action`, { action: 'skip' }),
+            peerRuns(SKIPPABLE.id),
+          ),
+        );
+
+        expect.soft(outcome).toMatchObject({
+          ok: false,
+          error: { status: 409, message: 'Cannot skip step in status running' },
+        });
+        expect.soft((await wholeRow(SKIPPABLE.id)).status).toBe('running');
+        expect.soft(await finalRow(OTHER.id)).toEqual({
+          status: 'running',
+          idleMs: 4000,
+          userActiveMs: 800,
+          carriedWorkMs: 1000,
+          carriedIdleMs: 200,
+          carriedUserActiveMs: 50,
+        });
+        expect.soft((await taskRow(taskId)).orchestrationEpoch, 'the task was not moved').toBe(3);
+      },
+      TEST_TIMEOUT,
+    );
   },
 );

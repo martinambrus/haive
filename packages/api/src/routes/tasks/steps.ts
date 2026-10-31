@@ -953,6 +953,13 @@ stepRoutes.post('/:id/steps/:stepId/clarify', async (c) => {
   return c.json({ ok: true, queued: true });
 });
 
+/** Skip applies to a row that is failed or parked on its form. */
+function refuseSkipOutsideParked(row: { status: string }): void {
+  if (row.status !== 'failed' && row.status !== 'waiting_form') {
+    throw new HttpError(409, `Cannot skip step in status ${row.status}`);
+  }
+}
+
 stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
@@ -1537,9 +1544,7 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
     if (!isStepSkippable(await loadTaskStepFlags(db, task), stepId, task)) {
       throw new HttpError(409, 'This step cannot be skipped');
     }
-    if (step.status !== 'failed' && step.status !== 'waiting_form') {
-      throw new HttpError(409, `Cannot skip step in status ${step.status}`);
-    }
+    refuseSkipOutsideParked(step);
     // The walk resumes after this step, so what the task leaves active elsewhere is reset as a
     // Retry resets it: kept active, it makes the worker refuse the advance queued below.
     const leftActive = rowsLeftActive(
@@ -1552,6 +1557,16 @@ stepRoutes.post('/:id/steps/:stepId/action', async (c) => {
       await refuseReviveBesideLive(tx, id);
       // The clicked row joins the rows it resets in one id-ordered batch.
       await lockRowsForMove(tx, id, leftActive, now);
+      // A pass can activate the clicked row between the handler's read of its status and this lock. This
+      // read waited for the pass, so it sees it: the row is neither in `leftActive` nor among the rows
+      // activated meanwhile, so a Skip that marked it skipped would leave its sandbox running.
+      const [held] = await tx
+        .select({ status: schema.taskSteps.status })
+        .from(schema.taskSteps)
+        .where(eq(schema.taskSteps.id, step.id))
+        .for('no key update');
+      if (!held) throw new HttpError(404, 'Step not found');
+      refuseSkipOutsideParked(held);
       await tx
         .update(schema.taskSteps)
         .set({
