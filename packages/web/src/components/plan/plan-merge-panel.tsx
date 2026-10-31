@@ -110,6 +110,7 @@ export function PlanMergePanel({
     setDeadTaskId(null);
     // An ended outcome survives the refresh to null, but belongs to no later conversation.
     if (taskId !== null) {
+      discardRequestedRef.current = null;
       lastTaskIdRef.current = taskId;
       setNotice(null);
     }

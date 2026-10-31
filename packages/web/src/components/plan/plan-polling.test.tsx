@@ -797,6 +797,24 @@ describe('PlanMergePanel with a merge task', () => {
     expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
   });
 
+  it('announces the next end after a locally discarded merge is revived', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: true });
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    await press('Discard');
+    rerender(null);
+    await settle();
+    expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID));
+    rerender(merge);
+    await settle();
+    onSettled.mockClear();
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status: 'failed' }));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(shown().find((el) => el.props.role === 'status')).toBeDefined();
+    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps a cancellation quiet before the local Discard response arrives', async () => {
     vi.stubGlobal('window', { confirm: vi.fn(() => true) });
     const request = deferred<{ ok: boolean; cancelled: boolean }>();
