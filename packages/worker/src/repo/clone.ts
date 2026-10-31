@@ -507,8 +507,11 @@ class MissingArchiveError extends Error {
  *    worker's by name, which is also why it never has to traverse the stage.
  * 4. The staged tree is walked and offending members are unlinked and named.
  * 5. Only then is it swapped into place: the old `dest` is moved aside inside the stage, the new tree
- *    renamed in, and the stage removed — so `dest` is never a half-extracted tree, and a failure
- *    anywhere above leaves the previous contents untouched.
+ *    renamed in, and the stage removed — so `dest` is never a half-extracted tree. Failures before
+ *    the swap leave its previous contents untouched; a failed install restores the old `dest`.
+ *    If restoration also fails, the old tree is retained at the logged stage path instead of deleted.
+ *    A crash between the two renames leaves `dest` absent and the old tree in the sibling
+ *    `.haive-extract-<pid>-<uuid>/old`; in-process rollback cannot run after a crash.
  *
  * A cap breach is deliberately NOT handled here: `expand-archives` measures its own limits after this
  * returns and inserts nothing when they are exceeded, because half a specification is worse than none.
@@ -539,6 +542,7 @@ export async function extractArchive(
     if (parentRel !== '') await ensureDirNoFollow(anchor, parentRel);
     const stageRel = within(`.haive-extract-${process.pid}-${randomUUID()}`);
     await ensureDirNoFollow(anchor, stageRel, { mode: 0o700 });
+    let preserveStage = false;
     try {
       const innerRel = `${stageRel}/x`;
       await ensureDirNoFollow(anchor, innerRel, { mode: 0o755 });
@@ -601,16 +605,35 @@ export async function extractArchive(
         );
       }
 
-      if ((await lstatNoFollow(anchor, dest.rel)) !== null) {
-        await renameNoFollow(anchor, dest.rel, `${stageRel}/old`);
+      const oldRel = `${stageRel}/old`;
+      const hadDest = (await lstatNoFollow(anchor, dest.rel)) !== null;
+      if (hadDest) {
+        await renameNoFollow(anchor, dest.rel, oldRel);
       }
-      await renameNoFollow(anchor, sourceRel, dest.rel);
+      try {
+        await renameNoFollow(anchor, sourceRel, dest.rel);
+      } catch (err) {
+        if (hadDest) {
+          try {
+            await renameNoFollow(anchor, oldRel, dest.rel);
+          } catch (restoreErr) {
+            preserveStage = true;
+            logger.error(
+              { err: restoreErr, anchor, dest: dest.rel, oldRel },
+              'archive swap rollback failed; previous destination retained in stage',
+            );
+          }
+        }
+        throw err;
+      }
       return { dropped, note: describeDrops(dropped) };
     } finally {
-      await removeNoFollow(anchor, stageRel, {
-        recursive: true,
-        repairPermissions: true,
-      }).catch(() => undefined);
+      if (!preserveStage) {
+        await removeNoFollow(anchor, stageRel, {
+          recursive: true,
+          repairPermissions: true,
+        }).catch(() => undefined);
+      }
     }
   } finally {
     await held.close();

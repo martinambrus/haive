@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { readdirSync, rmSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -263,6 +264,44 @@ describe('extractArchive', () => {
     expect(entries).toContain('README.md');
     expect(entries).not.toContain('previous.txt');
     // No stage left beside it.
+    expect((await readdir(tmpRoot)).filter((n) => n.startsWith('.haive-extract-'))).toEqual([]);
+  });
+
+  it('restores the previous destination when the new tree cannot be renamed in', async () => {
+    const dest = path.join(tmpRoot, 'out-restore');
+    await mkdir(path.join(dest, 'nested'), { recursive: true });
+    await writeFile(path.join(dest, 'previous.txt'), 'old\n');
+    await writeFile(path.join(dest, 'nested', 'keep.txt'), 'keep\n');
+    const previous = await stat(dest);
+    const previousFile = await stat(path.join(dest, 'nested', 'keep.txt'));
+
+    await buildFixtureSource(tmpRoot, 'fresh');
+    await run('tar', ['-czf', path.join(tmpRoot, 'fresh.tar.gz'), '-C', tmpRoot, 'fresh']);
+    let source: string | undefined;
+    await expect(
+      extractArchive(at('fresh.tar.gz'), 'tar.gz', at('out-restore'), {
+        keepLoneDir: (name) => {
+          // Remove the staged source after its last inspection. The real rename of the old
+          // destination still succeeds, then installing this missing source fails with ENOENT.
+          // This existing synchronous callback makes the failure deterministic without mocking
+          // either fs-safe primitive or adding a production fault-injection API.
+          const stage = readdirSync(tmpRoot).find((n) => n.startsWith('.haive-extract-'))!;
+          source = path.join(tmpRoot, stage, 'x', name);
+          rmSync(source, { recursive: true });
+          return false;
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'ENOENT',
+      syscall: 'lstat',
+      path: expect.stringMatching(/^\/proc\/self\/fd\/\d+\/fresh$/),
+    });
+    expect(source).toBeDefined();
+    expect(await readFile(path.join(dest, 'previous.txt'), 'utf8')).toBe('old\n');
+    expect(await readFile(path.join(dest, 'nested', 'keep.txt'), 'utf8')).toBe('keep\n');
+    expect((await stat(dest)).ino).toBe(previous.ino);
+    expect((await stat(path.join(dest, 'nested', 'keep.txt'))).ino).toBe(previousFile.ino);
+    expect((await readdir(dest)).sort()).toEqual(['nested', 'previous.txt']);
     expect((await readdir(tmpRoot)).filter((n) => n.startsWith('.haive-extract-'))).toEqual([]);
   });
 
