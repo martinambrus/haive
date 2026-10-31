@@ -520,7 +520,7 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+26)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+27)
 
 status: open · was modular #211
 
@@ -551,6 +551,7 @@ status: open · was modular #211
 25. (T445 review, 2026-10-31) PRE-EXISTING, minor: since T445 the node-free guard fails on Node globals read as values, but it covers only the project-state subpath the web imports; shared naming/index.ts ~:63 (`process.env` as a default parameter) and forge/bitbucket-cloud.ts ~:33 (`Buffer.from`) are unguarded. The web never calls them today. Extend the guard to every shared subpath the web bundles.
 26. (T455 review, 2026-10-31) PRE-EXISTING, hardening: nothing enforces T455's `requireJsonObject` guard, so a new `(await c.req.json()) as {...}` in an api route brings the `null`-body 500 back. A ratchet test over api routes (as `fs-ratchet.test.ts` does for path-based fs calls) would catch it; it should also cover WebSocket `message` listeners that read a field off a parsed frame (the CLI login banner's was one, fixed by T463).
 27. (T454 review, 2026-10-31) PRE-EXISTING, minor, dev hosts only: tests/e2e/repos/create.spec.ts ~:17 `findFirstGitDir` counts hidden git directories while the UI hides them, so the local_path case fails on a host with e.g. `~/.nvm` (identical before T454).
+28. (T461 review, 2026-10-31) PRE-EXISTING, minor: no test covers the 404 the per-step CLI switch answers for a step row that vanished (api routes/tasks/steps.ts ~:1914).
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+5)
 
@@ -885,6 +886,8 @@ From the T349 review (2026-10-31). PRE-EXISTING; narrow windows unless stated. T
 5. [verify-first] A possible cycle: shared plan/apply-patch.ts `applyPlanPatch` (~:186-199) writes plan_nodes rows and then upserts `plan_mirror_state`, which needs the repositories row; a repository delete holds that row FOR UPDATE and cascades into plan_nodes. Not traced to the end. Cross-reference T270 and T318 item 5 (the advisory start's plan_nodes lock still waits unbounded).
 6. Minor cost: the four left-active moves (loop Resume, `retry_ai`, Skip, CLI switch) take the whole-task step batch twice (`lockRowsForMove`, then `resetRowsForRerun`); the second is a no-wait re-lock.
 
+Also (T461 review, 2026-10-31): since T461 the task-level provider switch (api routes/tasks/index.ts ~:1781-1827) holds its rows in id order across statements, so it joins the peers of item 4's unordered single-statement updaters (`handleCancelTask`'s bulk UPDATE ~:3799-3820, `takeLeftOpenKept` left-open-merge.ts ~:504, `skipRemovedSteps`, data-migrations); and item 1's swap in `requeueAbandonedOrphan` (~:3327) now meets a locked read at the top of that transaction: move the runs sweep before the read and keep the fold reading the step row under its lock.
+
 ### T460 · FNF[retry-repo-deleted] [design] · a Retry revives a failed task whose repository was deleted (+1)
 
 status: open
@@ -951,6 +954,14 @@ From the T465 review (2026-10-31). PRE-EXISTING, minor to moderate (the same hid
 2. The six steps from "Agent pool script on a real Redis" through "Auth throttle script on a real Redis" (~:359-390) have no `if:`, so a failed smoke step skips them.
 
 Give each independent check the `if: ${{ !cancelled() && <its prerequisites succeeded> }}` T465 gave the worker smokes, so one red step no longer hides the others; keep install/build/migrate failures stopping the rest.
+
+### T471 · FNF[stale-preread-fold-2] · idle_ms writes add to a value read before the write; the per-step switch decides on a pre-transaction status (+1)
+
+status: open
+From the T461 review (2026-10-31). PRE-EXISTING, minor.
+
+1. `idle_ms = step.idleMs + closedIdleMs` from a read made before the transaction, so a concurrent SQL write to `idle_ms` in between is written over: api routes/tasks/steps.ts ~:808 (form submit), ~:894 (merge clarify), ~:1520 (Skip), and worker pr-poll-queue.ts ~:260 (`advancePrWaitStep`, whose guard compares status and `waiting_started_at` only). The delta depends on `waiting_started_at`, so fold it in one SQL statement like `handleCancelTask`'s (`idle_ms + greatest(0, floor(extract(epoch from (now() - waiting_started_at)) * 1000))`) or read the row under its lock, as T461 did for `carried_*`.
+2. The per-step switch decides on the status read before its transaction (api routes/tasks/steps.ts ~:1820, the 409 when running or waiting_cli; ~:1836, `movesTask` and iterationCount) although the transaction now holds the row (`held`, ~:1909) and could re-check it. Not checked whether a pass can activate the row in that gap (the ownership fence drops a pass whose row was reset).
 
 ## Done
 
