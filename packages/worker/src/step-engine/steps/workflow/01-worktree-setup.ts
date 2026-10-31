@@ -211,9 +211,16 @@ export const worktreeSetupStep: StepDefinition<WorktreeDetect, WorktreeApply> = 
       };
     }
     const branch = await gitRun(ctx.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    const currentBranchError = gitGaveNoAnswer(branch)
-      ? `could not read the checkout's current branch: ${(branch.stderr || branch.stdout).trim()}`
-      : null;
+    const unborn =
+      branch.code !== 0 &&
+      !gitGaveNoAnswer(branch) &&
+      (await gitRun(ctx.repoPath, ['rev-parse', '-q', '--verify', 'HEAD'])).code === 1;
+    if (branch.code !== 0 && !unborn) {
+      throw new Error(
+        `could not read the checkout's current branch: ${(branch.stderr || branch.stdout).trim()}`,
+      );
+    }
+    const currentBranchError = null;
     const status = await gitRun(ctx.repoPath, ['--no-optional-locks', 'status', '--porcelain']);
     // Never PROPOSE a name that already exists here. `git worktree add <path> <branch>`
     // adopts an existing branch and its commits instead of forking the base 00a-sync-base

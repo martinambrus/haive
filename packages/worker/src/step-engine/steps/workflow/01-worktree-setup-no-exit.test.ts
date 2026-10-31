@@ -10,6 +10,8 @@ import { worktreeSetupStep } from './01-worktree-setup.js';
 import type { StepApplyArgs, StepContext } from '../../step-definition.js';
 import { killGit, type KilledGit } from '../../../../test/support/kill-git.js';
 
+import { failGit } from '../../../../test/support/fake-git.js';
+
 const exec = promisify(execFile);
 const GIT_ENV = {
   ...process.env,
@@ -89,29 +91,16 @@ function notes(ctx: StepContext, d: Detect) {
 }
 
 describe('01 worktree setup: a branch read that gave no answer', () => {
-  it('records why and warns on the form when no earlier step recorded a base', async () => {
-    const root = await mkRepo(true);
-    shim = await killGit(['rev-parse', '--abbrev-ref', 'HEAD']);
-    const ctx = mkCtx(root);
-    const d = await worktreeSetupStep.detect!(ctx);
-    expect(d.currentBranch).toBeNull();
-    expect(d.currentBranchError).toMatch(/could not read the checkout's current branch/);
-    const found = notes(ctx, d);
-    expect(found).toHaveLength(1);
-    expect(found[0]!.type).toBe('note');
-    expect(found[0]!.variant).toBe('warning');
-    expect(found[0]!.body).toContain(d.currentBranchError!);
-  });
-
-  it('keeps the error in detect but shows no note when 00a recorded a base', async () => {
-    const root = await mkRepo(true);
-    shim = await killGit(['rev-parse', '--abbrev-ref', 'HEAD']);
-    const ctx = mkCtx(root, DEVELOP_ROW);
-    const d = await worktreeSetupStep.detect!(ctx);
-    expect(d.syncedBase).toBe('develop');
-    expect(d.currentBranchError).toMatch(/could not read the checkout's current branch/);
-    expect(notes(ctx, d)).toHaveLength(0);
-  });
+  it.each([{ rows: [] }, { rows: DEVELOP_ROW }])(
+    'fails a read with no exit status, including with a recorded base: %j',
+    async ({ rows }) => {
+      const root = await mkRepo(true);
+      shim = await killGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+      await expect(worktreeSetupStep.detect!(mkCtx(root, rows))).rejects.toThrow(
+        /could not read the checkout's current branch/,
+      );
+    },
+  );
 
   it('negative control: a healthy read has the branch, no error, no note', async () => {
     const root = await mkRepo(true);
@@ -235,11 +224,7 @@ describe('01 worktree setup apply: a base that cannot be told', () => {
   it('R3: a real unreadable detect, applied, refuses with the same text', async () => {
     const root = await mkRepo(true);
     shim = await killGit(['rev-parse', '--abbrev-ref', 'HEAD']);
-    const d = await worktreeSetupStep.detect!(mkCtx(root));
-    expect(d.currentBranchError).toBeTruthy();
-    await expect(
-      worktreeSetupStep.apply(mkApplyCtx(root), applyArgs(d as unknown as Record<string, unknown>)),
-    ).rejects.toThrow(/recorded no base branch/);
+    await expect(worktreeSetupStep.detect!(mkCtx(root))).rejects.toThrow(/current branch/);
     await expectNothingCreated(root);
   });
 
@@ -289,3 +274,15 @@ describe('01 worktree setup apply: a base that cannot be told', () => {
     expect(err).not.toMatch(/recorded no base branch/);
   });
 });
+
+it.each([{ rows: [] }, { rows: DEVELOP_ROW }])(
+  'T397 fix6c branch exit 128 fails setup even with a recorded base: %j',
+  async ({ rows }) => {
+    const root = await mkRepo(true);
+    shim = await failGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+    await expect(worktreeSetupStep.detect!(mkCtx(root, rows))).rejects.toThrow(
+      /current branch.*simulated failure/,
+    );
+    await expectNothingCreated(root);
+  },
+);
