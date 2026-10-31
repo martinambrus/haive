@@ -249,8 +249,12 @@ async function readStageNumbers(worktreePath: string, path: string): Promise<Set
     undefined,
     BYTES,
   );
+  if (listing.code !== 0)
+    throw new Error(
+      `git ls-files -u failed in ${worktreePath}: ${(listing.stderr || listing.stdout).trim()}`,
+    );
   const stages = new Set<number>();
-  for (const entry of listing.code === 0 ? listing.stdout.split('\0') : []) {
+  for (const entry of listing.stdout.split('\0')) {
     const m = /^\d+ [0-9a-f]+ ([123])\t/.exec(entry);
     if (m) stages.add(Number(m[1]));
   }

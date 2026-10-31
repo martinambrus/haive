@@ -211,3 +211,13 @@ it('T397 fix6a a failed blob warns and keeps the plan unmerged', async () => {
   shim = null;
   expect((await git(wt, ['ls-files', '-u', '--', PLAN_JSON])).trim()).not.toBe('');
 });
+
+it('T397 fix6b a failed fallback stage-number listing throws instead of answering no stages', async () => {
+  const wt = await divergedPair(...planSides());
+  await openConflict(wt);
+  // Invalid JSON sides enter the fallback; only its literal-path listing fails.
+  shim = await failGit(['ls-files', '-u', '-z', '--', `:(literal)${PLAN_JSON}`]);
+  await expect(resolveHaiveProjectionConflicts(wt)).rejects.toThrow(
+    /git ls-files.*failed.*simulated failure/,
+  );
+});
