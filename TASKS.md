@@ -871,7 +871,7 @@ In api routes/cli-login-banner.ts `onStreamData` (~:876-882), a success or error
 
 ### T458 · FNF[cancel-status-guard] · the worker's CANCEL marks a task cancelled whatever its status; the plan merge's DELETE queues a CANCEL unchecked (+1)
 
-status: open
+status: taken · owner: sonnet-sonnet@DESKTOP-IUBG9OP · since: 2026-10-31T03:22Z · last: 2026-10-31T03:22Z
 From the T349 review (2026-10-31). PRE-EXISTING, consequential. Cross-reference: T309 FNF[cancel-cap-2].
 
 1. worker queues/task-queue.ts `handleCancelTask` (~:3760-3773) sets `status = 'cancelled'` where only the id matches, so a CANCEL job that lands after the task completed (queued before the completion, or by a caller that never checked) turns a completed task into a cancelled one. T349 (PR pending) guards the api's single cancel and step abort (`cancelTaskIfOpen`: completed and cancelled are terminal, failed stays cancellable); the worker needs the same guard, with the decision made under the task row's lock.
