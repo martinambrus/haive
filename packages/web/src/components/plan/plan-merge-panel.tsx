@@ -84,6 +84,8 @@ export function PlanMergePanel({
   // An answer or discard can settle after the page switches to another conversation.
   const displayedTaskIdRef = useRef(taskId);
   displayedTaskIdRef.current = taskId;
+  const isStaleReply = (replyTaskId: string): boolean =>
+    displayedTaskIdRef.current !== null && displayedTaskIdRef.current !== replyTaskId;
   const discarding = taskId !== null && discardedTaskId === taskId;
   const dead = taskId !== null && deadTaskId === taskId;
   useEffect(() => {
@@ -164,16 +166,16 @@ export function PlanMergePanel({
         decision,
         ...(decision === 'revise' ? { message: draft.trim() } : {}),
       });
-      if (displayedTaskIdRef.current !== merge.taskId) return;
+      if (isStaleReply(merge.taskId)) return;
       setDraft('');
       setLiveStep(null);
       setPollRestart((n) => n + 1); // resume polling: the step is running again
       onChanged();
     } catch (e) {
-      if (displayedTaskIdRef.current !== merge.taskId) return;
+      if (isStaleReply(merge.taskId)) return;
       setError((e as ApiError).message ?? 'Could not send that');
     } finally {
-      if (displayedTaskIdRef.current === merge.taskId) setBusy(false);
+      if (!isStaleReply(merge.taskId)) setBusy(false);
     }
   }
 
@@ -187,11 +189,13 @@ export function PlanMergePanel({
     discardRequestedRef.current = merge.taskId;
     try {
       const result = await discardPlanMerge(repositoryId, merge.taskId);
-      if (displayedTaskIdRef.current !== merge.taskId) return;
+      if (!result.cancelled && discardRequestedRef.current === merge.taskId) {
+        discardRequestedRef.current = null;
+      }
+      if (isStaleReply(merge.taskId)) return;
       if (result.cancelled) {
         setDiscardedTaskId(taskId);
       } else {
-        if (discardRequestedRef.current === merge.taskId) discardRequestedRef.current = null;
         setNotice({
           taskId: merge.taskId,
           text: 'The merge is no longer open: it completed, was cancelled or failed. Nothing was discarded.',
@@ -200,10 +204,10 @@ export function PlanMergePanel({
       onSettled();
     } catch (e) {
       if (discardRequestedRef.current === merge.taskId) discardRequestedRef.current = null;
-      if (displayedTaskIdRef.current !== merge.taskId) return;
+      if (isStaleReply(merge.taskId)) return;
       setError((e as ApiError).message ?? 'Could not discard the merge');
     } finally {
-      if (displayedTaskIdRef.current === merge.taskId) setBusy(false);
+      if (!isStaleReply(merge.taskId)) setBusy(false);
     }
   }
 

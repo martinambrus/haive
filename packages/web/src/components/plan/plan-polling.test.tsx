@@ -638,6 +638,22 @@ describe('PlanMergePanel with a merge task', () => {
     },
   );
 
+  it('clears refused Discard suppression even after switching to another merge', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    const request = deferred<{ ok: boolean; cancelled: boolean }>();
+    net.discardPlanMerge.mockReturnValueOnce(request.promise);
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID));
+    await press('Discard');
+    rerender({ ...merge, taskId: 'task-2' });
+    await settle();
+    request.resolve({ ok: true, cancelled: false });
+    await settle();
+    respondWith(taskResponse(PLAN_MERGE_STEP_ID, { status: 'cancelled' }));
+    rerender(merge);
+    await settle();
+    expect(shown().find((el) => el.props.role === 'status')).toBeDefined();
+  });
+
   it('does not infer an outcome from a working task’s status message', async () => {
     const response = taskResponse(PLAN_MERGE_STEP_ID);
     response.steps[0]!.statusMessage = 'The merge failed, completed or was cancelled';
@@ -685,6 +701,34 @@ describe('PlanMergePanel with a merge task', () => {
     expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
     next.resolve({ ok: true, cancelled: false });
     await settle();
+  });
+
+  it.each([true, false])(
+    'settles Discard after the page removed the merge (cancelled: %s)',
+    async (cancelled) => {
+      vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+      const request = deferred<{ ok: boolean; cancelled: boolean }>();
+      net.discardPlanMerge.mockReturnValueOnce(request.promise);
+      const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+      await press('Discard');
+      rerender(null);
+      request.resolve({ ok: true, cancelled });
+      await settle();
+      expect(onSettled).toHaveBeenCalledTimes(1);
+      expect(hasNotice()).toBe(!cancelled);
+    },
+  );
+
+  it('accepts an answer that settles after the page removed the merge', async () => {
+    const request = deferred<unknown>();
+    net.submitPlanMergeTurn.mockReturnValueOnce(request.promise);
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    await press(CONFIRM);
+    const before = onChanged.mock.calls.length;
+    rerender(null);
+    request.resolve(undefined);
+    await settle();
+    expect(onChanged).toHaveBeenCalledTimes(before + 1);
   });
 
   it('keeps the already-ended notice after the page refresh removes the merge', async () => {
