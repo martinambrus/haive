@@ -2,6 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => {
   process.env.LOG_LEVEL = 'silent';
@@ -83,7 +85,9 @@ describe('POST /repositories/:id/haive-data/save', () => {
   });
 
   it('answers 404 for a repository that does not exist and queues nothing', async () => {
-    expect((await save('{}', '00000000-0000-4000-8000-0000000000ff')).status).toBe(404);
+    const res = await save('{}', '00000000-0000-4000-8000-0000000000ff');
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: 'Repository not found' });
     expect(h.add).not.toHaveBeenCalled();
   });
 

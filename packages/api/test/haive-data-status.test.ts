@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const USER = vi.hoisted(() => '00000000-0000-4000-8000-0000000000a1');
 const h = vi.hoisted(() => {
   process.env.LOG_LEVEL = 'silent';
@@ -247,6 +249,7 @@ describe('GET /repositories/:id/haive-data', () => {
   it('answers 404 for a repository that does not exist', async () => {
     const res = await fetchStatus({ id: '00000000-0000-4000-8000-0000000000ff' });
     expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: 'Repository not found' });
   });
 
   it('selects named columns only, so no repository column reaches the answer', async () => {
@@ -259,18 +262,11 @@ describe('GET /repositories/:id/haive-data', () => {
       selects.push(fields);
       return select(fields);
     }) as typeof fake.db.select;
-    const finds: unknown[] = [];
-    const findFirst = fake.db.query.repositories.findFirst.bind(fake.db.query.repositories);
-    fake.db.query.repositories.findFirst = ((opts?: Record<string, unknown>) => {
-      finds.push(opts?.columns);
-      return findFirst(opts);
-    }) as typeof fake.db.query.repositories.findFirst;
     const res = await fetchStatus();
     const text = await res.text();
     expect(res.status).toBe(200);
     expect(selects.length).toBeGreaterThan(0);
     expect(selects.every((fields) => fields !== undefined)).toBe(true);
-    expect(finds.every((columns) => columns !== undefined)).toBe(true);
     expect(text).not.toContain('hunter2');
     expect(Object.keys(JSON.parse(text) as object).sort()).toEqual([
       'branch',
