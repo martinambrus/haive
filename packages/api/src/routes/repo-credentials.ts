@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, desc, isNotNull } from 'drizzle-orm';
 import { schema } from '@haive/database';
 import {
   encrypt,
@@ -12,6 +12,7 @@ import {
   secretsService,
 } from '@haive/shared';
 import { apiBaseFits } from '@haive/shared/forge';
+import { getIntegrationProvider } from '@haive/shared/integrations';
 import { getDb } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
@@ -128,7 +129,39 @@ repoCredentialsRoutes.get('/', async (c) => {
       updatedAt: true,
     },
   });
-  return c.json({ credentials: rows });
+  const connections = await db
+    .select({
+      repoCredentialId: schema.integrationConnections.repoCredentialId,
+      id: schema.integrationConnections.id,
+      providerId: schema.integrationConnections.providerId,
+      accountLabel: schema.integrationConnections.accountLabel,
+    })
+    .from(schema.integrationConnections)
+    .where(
+      and(
+        eq(schema.integrationConnections.scope, 'user'),
+        eq(schema.integrationConnections.ownerUserId, userId),
+        isNotNull(schema.integrationConnections.repoCredentialId),
+      ),
+    );
+  const byCredential = new Map(connections.map((row) => [row.repoCredentialId, row]));
+  return c.json({
+    credentials: rows.map((row) => {
+      const connection = byCredential.get(row.id);
+      return {
+        ...row,
+        connection: connection
+          ? {
+              id: connection.id,
+              providerId: connection.providerId,
+              providerName:
+                getIntegrationProvider(connection.providerId)?.displayName ?? connection.providerId,
+              accountLabel: connection.accountLabel,
+            }
+          : null,
+      };
+    }),
+  });
 });
 
 repoCredentialsRoutes.post('/', async (c) => {
@@ -284,19 +317,34 @@ repoCredentialsRoutes.delete('/:id', async (c) => {
   const userId = c.get('userId');
   const id = c.req.param('id');
   const db = getDb();
-  const audit: AuditEvent = {
-    actorUserId: userId,
-    action: 'credential.delete',
-    targetType: 'repo_credential',
-    targetId: id,
-  };
-  await db.transaction(async (tx) => {
-    const result = await tx
-      .delete(schema.repoCredentials)
+  const audit = await db.transaction(async (tx) => {
+    const [locked] = await tx
+      .select({ id: schema.repoCredentials.id })
+      .from(schema.repoCredentials)
       .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)))
-      .returning({ id: schema.repoCredentials.id });
-    if (result.length === 0) throw new HttpError(404, 'Credential not found');
-    await insertAuditEvent(tx, audit);
+      .for('update');
+    if (!locked) throw new HttpError(404, 'Credential not found');
+    const [connection] = await tx
+      .select({
+        id: schema.integrationConnections.id,
+        providerId: schema.integrationConnections.providerId,
+      })
+      .from(schema.integrationConnections)
+      .where(eq(schema.integrationConnections.repoCredentialId, id));
+    await tx
+      .delete(schema.repoCredentials)
+      .where(and(eq(schema.repoCredentials.id, id), eq(schema.repoCredentials.userId, userId)));
+    const event: AuditEvent = {
+      actorUserId: userId,
+      action: 'credential.delete',
+      targetType: 'repo_credential',
+      targetId: id,
+      ...(connection && {
+        metadata: { connectionId: connection.id, providerId: connection.providerId },
+      }),
+    };
+    await insertAuditEvent(tx, event);
+    return event;
   });
   logAuditEvent(audit);
   return c.json({ ok: true });
