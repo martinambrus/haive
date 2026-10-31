@@ -44,8 +44,8 @@ interface WorktreeDetect {
   /** The proposal is this task's own branch from an earlier apply, so a Retry re-enters its
    *  worktree. Absent on a detect stored before the field existed. */
   proposalIsOwnBranch?: boolean;
-  /** Why the checkout's branch could not be read, when its git run gave no answer. Absent on a
-   *  detect stored before the field existed. */
+  /** Why the checkout's branch read failed, unless a separate HEAD probe proved the repository
+   *  unborn. Absent on a detect stored before the field existed. */
   currentBranchError?: string | null;
 }
 
