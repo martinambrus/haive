@@ -15,6 +15,8 @@ vi.mock('../src/middleware/auth.js', () => ({
   },
 }));
 import { Hono } from 'hono';
+import { logger } from '@haive/shared';
+import { serializeError } from '@haive/shared/logger';
 import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { hardenGitArgs } from '@haive/shared/git-args';
@@ -279,4 +281,71 @@ exec ${quote(real)} "$@"
   expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://old.test/r');
   expect(await git(root, ['remote', 'get-url', '--push', 'origin'])).toBe('https://planted.test/r');
   expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+});
+
+it('logs both errors when real git cannot restore a failed remote update', async () => {
+  const { root, link, fake } = await setup();
+  const original = Object.assign(new Error('bound synthetic-secret'), {
+    query: 'update repositories set remote_url = $1',
+    params: ['synthetic-secret'],
+  });
+  h.db = new Proxy(fake.db, {
+    get(target, key) {
+      if (key === 'transaction')
+        return (fn: (tx: any) => Promise<unknown>) =>
+          target.transaction((tx) =>
+            fn(
+              new Proxy(tx, {
+                get(t, prop) {
+                  if (prop === 'update')
+                    return () => ({
+                      set: () => ({
+                        where: async () => {
+                          throw original;
+                        },
+                      }),
+                    });
+                  const value = Reflect.get(t, prop);
+                  return typeof value === 'function' ? value.bind(t) : value;
+                },
+              }),
+            ),
+          );
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const shim = await mkdtemp(path.join(tmpdir(), 'remote-restore-fail-'));
+  dirs.push(shim);
+  const real = (await exec('sh', ['-c', 'command -v git'])).stdout.trim();
+  const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
+  await writeFile(
+    path.join(shim, 'git'),
+    `#!/bin/sh
+for arg in "$@"; do if [ "$arg" = --add ]; then exit 128; fi; done
+exec ${quote(real)} "$@"
+`,
+  );
+  await chmod(path.join(shim, 'git'), 0o755);
+  const saved = process.env.PATH;
+  const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
+  process.env.PATH = `${shim}:${saved}`;
+  try {
+    const response = await link();
+    expect(response.status).toBe(500);
+    expect(await response.text()).toContain('previous remote could not be restored');
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+    expect(await git(root, ['config', '--local', '--list'])).not.toContain('remote.origin.url=');
+    const diagnostics = errors.mock.calls.map(([fields]) => fields as { err?: unknown });
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics[0]!.err).toBe(original);
+    expect(diagnostics[1]!.err).toBeInstanceOf(Error);
+    expect(JSON.stringify(diagnostics.map(({ err }) => serializeError(err)))).not.toContain(
+      'synthetic-secret',
+    );
+  } finally {
+    process.env.PATH = saved;
+    errors.mockRestore();
+  }
 });
