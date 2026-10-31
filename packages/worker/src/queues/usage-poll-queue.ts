@@ -611,13 +611,22 @@ export async function checkProviderRecovery(db: Database): Promise<void> {
           continue;
         }
         if (resumed) {
-          // Stamped with the epoch the re-open left the task at, as every other advance is: a Retry
-          // or a re-drive that moves it on before the job is picked up then drops the job as stale,
-          // where an unstamped one is exempt from that drop and re-enters the step by its status.
-          const reopened = await db.query.tasks.findFirst({
-            where: eq(schema.tasks.id, task.id),
-            columns: { orchestrationEpoch: true },
-          });
+          // Stamped with the epoch the re-open left the task at, so that a Retry or a re-drive that
+          // moves it on before the job is picked up drops the job as stale; an unstamped one is
+          // exempt from that drop and re-enters the step by its status. A read that fails costs the
+          // stamp and never the advance: the re-open has committed and nothing else queues this job.
+          const reopened = await db.query.tasks
+            .findFirst({
+              where: eq(schema.tasks.id, task.id),
+              columns: { orchestrationEpoch: true },
+            })
+            .catch((err: unknown) => {
+              log.warn(
+                { taskId: task.id, providerId: task.providerId, err },
+                'provider recovered; the task epoch could not be read, so the auto-resume advance is queued without one',
+              );
+              return undefined;
+            });
           await getTaskQueue().add(
             TASK_JOB_NAMES.ADVANCE_STEP,
             {
