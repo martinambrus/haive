@@ -56,6 +56,7 @@ export function PlanMergePanel({
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ taskId: string; text: string } | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   // Refs, not poll dependencies: the page passes both inline and the poll calls them when it
   // settles, so depending on them would re-poll a parked merge on every page render.
@@ -122,6 +123,7 @@ export function PlanMergePanel({
     if (!merge) return;
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       await submitPlanMergeTurn(merge.taskId, {
         decision,
@@ -139,16 +141,21 @@ export function PlanMergePanel({
   }
 
   async function discard(): Promise<void> {
+    if (!merge) return;
     if (!window.confirm('Discard this merge? Your checkout has not moved, so nothing is lost.'))
       return;
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const result = await discardPlanMerge(repositoryId);
       if (result.cancelled) {
         setDiscardedTaskId(taskId);
       } else {
-        setError('The merge has already completed or closed. Nothing was discarded.');
+        setNotice({
+          taskId: merge.taskId,
+          text: 'The merge has already completed or closed. Nothing was discarded.',
+        });
       }
       onSettled();
     } catch (e) {
@@ -158,80 +165,89 @@ export function PlanMergePanel({
     }
   }
 
-  if (!merge) return null;
+  const outcome =
+    notice && (merge === null || merge.taskId === notice.taskId) ? (
+      <FormError message={notice.text} />
+    ) : null;
+  if (!merge) return outcome;
 
   return (
-    <div className="flex flex-col gap-2 rounded-md border border-amber-900 bg-amber-950/20 p-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-semibold text-amber-200">Resolving the merge with the remote</p>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void discard()}>
-          Discard
-        </Button>
-      </div>
-
-      {merge.messages.length > 0 && (
-        <div
-          style={{ height: '16rem' }}
-          className="min-h-24 resize-y overflow-y-auto rounded border border-neutral-800 bg-neutral-950 p-2"
-        >
-          {merge.messages.map((m) => (
-            <div key={m.id} className="mb-2">
-              <p className="text-[11px] uppercase tracking-wide text-indigo-300">
-                {m.role === 'user' ? 'You' : 'Agent'}
-              </p>
-              <MarkdownView body={m.body} className="max-h-none overflow-visible px-0 py-1" />
-            </div>
-          ))}
-          <div ref={endRef} />
+    <>
+      {outcome}
+      <div className="flex flex-col gap-2 rounded-md border border-amber-900 bg-amber-950/20 p-3">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-semibold text-amber-200">
+            Resolving the merge with the remote
+          </p>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void discard()}>
+            Discard
+          </Button>
         </div>
-      )}
 
-      {working && (
-        <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
-          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-          {liveStep?.statusMessage ?? 'Resolving…'}
-        </div>
-      )}
-
-      {parked && (
-        <>
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            rows={2}
-            disabled={busy}
-            placeholder="Optional — say what to do differently, then press Change something"
-            className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 disabled:opacity-50"
-          />
-          <div className="flex gap-2">
-            <Button size="sm" disabled={busy} onClick={() => void answer('confirm')}>
-              {busy ? 'Working…' : 'Confirm — merge in and push'}
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={busy || !draft.trim()}
-              onClick={() => void answer('revise')}
-            >
-              Change something
-            </Button>
+        {merge.messages.length > 0 && (
+          <div
+            style={{ height: '16rem' }}
+            className="min-h-24 resize-y overflow-y-auto rounded border border-neutral-800 bg-neutral-950 p-2"
+          >
+            {merge.messages.map((m) => (
+              <div key={m.id} className="mb-2">
+                <p className="text-[11px] uppercase tracking-wide text-indigo-300">
+                  {m.role === 'user' ? 'You' : 'Agent'}
+                </p>
+                <MarkdownView body={m.body} className="max-h-none overflow-visible px-0 py-1" />
+              </div>
+            ))}
+            <div ref={endRef} />
           </div>
-        </>
-      )}
+        )}
 
-      <FormError message={error} />
-      <p className="text-[11px] text-neutral-500">
-        Your checkout has not moved — the merge is in a scratch worktree until you confirm. The
-        conversation runs as a task,{' '}
-        <Link
-          href={`/tasks/${merge.taskId}`}
-          onClick={() => rememberTaskOrigin(`/tasks/${merge.taskId}`, planOrigin(repositoryId))}
-          className="text-indigo-300 underline"
-        >
-          open it
-        </Link>{' '}
-        to watch the agent work.
-      </p>
-    </div>
+        {working && (
+          <div className="flex items-center gap-2 rounded-md border border-indigo-900/50 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-300">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+            {liveStep?.statusMessage ?? 'Resolving…'}
+          </div>
+        )}
+
+        {parked && (
+          <>
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              rows={2}
+              disabled={busy}
+              placeholder="Optional — say what to do differently, then press Change something"
+              className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 disabled:opacity-50"
+            />
+            <div className="flex gap-2">
+              <Button size="sm" disabled={busy} onClick={() => void answer('confirm')}>
+                {busy ? 'Working…' : 'Confirm — merge in and push'}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy || !draft.trim()}
+                onClick={() => void answer('revise')}
+              >
+                Change something
+              </Button>
+            </div>
+          </>
+        )}
+
+        <FormError message={error} />
+        <p className="text-[11px] text-neutral-500">
+          Your checkout has not moved — the merge is in a scratch worktree until you confirm. The
+          conversation runs as a task,{' '}
+          <Link
+            href={`/tasks/${merge.taskId}`}
+            onClick={() => rememberTaskOrigin(`/tasks/${merge.taskId}`, planOrigin(repositoryId))}
+            className="text-indigo-300 underline"
+          >
+            open it
+          </Link>{' '}
+          to watch the agent work.
+        </p>
+      </div>
+    </>
   );
 }

@@ -103,7 +103,15 @@ function mount<P>(Component: (props: P) => ReactNode, props: P) {
   };
   rt.redraw = draw;
   draw();
-  return () => rt.ran.forEach((effect) => typeof effect.cleanup === 'function' && effect.cleanup());
+  return Object.assign(
+    () => rt.ran.forEach((effect) => typeof effect.cleanup === 'function' && effect.cleanup()),
+    {
+      rerender: (next: P) => {
+        props = next;
+        draw();
+      },
+    },
+  );
 }
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -355,8 +363,16 @@ describe('PlanMergePanel with a merge task', () => {
     onChanged.mockReset();
     onSettled.mockReset();
     respondWith(response);
-    unmount = mount(PlanMergePanel, { repositoryId: 'repo-1', merge, onChanged, onSettled });
+    const mounted = mount(PlanMergePanel, {
+      repositoryId: 'repo-1',
+      merge: merge as PlanMergeState | null,
+      onChanged,
+      onSettled,
+    });
+    unmount = mounted;
     await settle();
+    return (next: PlanMergeState | null) =>
+      mounted.rerender({ repositoryId: 'repo-1', merge: next, onChanged, onSettled });
   };
 
   it('keeps polling a merge that is still working', async () => {
@@ -404,6 +420,24 @@ describe('PlanMergePanel with a merge task', () => {
   });
 
   const CONFIRM = 'Confirm — merge in and push';
+  const NOTICE = 'The merge has already completed or closed. Nothing was discarded.';
+  const hasNotice = () =>
+    shown().some((el) => el.props.message === NOTICE || el.props.body === NOTICE);
+
+  it('keeps the already-ended notice after the page refresh removes the merge', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: false });
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    onSettled.mockImplementationOnce(() => rerender(null));
+
+    await press('Discard');
+
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(hasNotice()).toBe(true);
+    expect(labelled('Discard')).toBeUndefined();
+    expect(host('textarea')).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it('reports a merge that already ended without treating it as discarded', async () => {
     vi.stubGlobal('window', { confirm: vi.fn(() => true) });
