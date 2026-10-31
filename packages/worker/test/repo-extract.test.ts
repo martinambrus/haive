@@ -4,14 +4,18 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 
 import os from 'node:os';
 import path from 'node:path';
 import { logger } from '@haive/shared';
-import { renameNoFollow } from '@haive/shared/fs-safe';
+import { removeNoFollow, renameNoFollow } from '@haive/shared/fs-safe';
 import JSZip from 'jszip';
 import { describe, expect, it, afterEach, beforeEach, vi } from 'vitest';
 import { extractArchive } from '../src/repo/clone.js';
 
 vi.mock('@haive/shared/fs-safe', async (importOriginal) => {
   const real = await importOriginal<typeof import('@haive/shared/fs-safe')>();
-  return { ...real, renameNoFollow: vi.fn(real.renameNoFollow) };
+  return {
+    ...real,
+    renameNoFollow: vi.fn(real.renameNoFollow),
+    removeNoFollow: vi.fn(real.removeNoFollow),
+  };
 });
 
 /** Every argv a tool was started with, so a test can say what the child was told to resolve. */
@@ -71,6 +75,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.mocked(renameNoFollow).mockReset();
+  vi.mocked(removeNoFollow).mockReset();
   vi.restoreAllMocks();
   await rm(tmpRoot, { recursive: true, force: true });
 });
@@ -380,6 +385,40 @@ describe('extractArchive', () => {
     const entries = await readdir(tmpRoot);
     expect(entries).not.toContain('out-first-install');
     expect(entries.filter((n) => n.startsWith('.haive-extract-'))).toEqual([]);
+  });
+
+  it('warns with the stage path without failing a successful extract when stage removal fails', async () => {
+    const dest = path.join(tmpRoot, 'out-cleanup-fails');
+    await mkdir(dest);
+    await writeFile(path.join(dest, 'previous.txt'), 'old\n');
+    await buildFixtureSource(tmpRoot, 'fresh');
+    await run('tar', ['-czf', path.join(tmpRoot, 'fresh.tar.gz'), '-C', tmpRoot, 'fresh']);
+    const removalError = new Error('stage removal failed');
+    vi.mocked(removeNoFollow).mockRejectedValueOnce(removalError);
+    const warning = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    await expect(
+      extractArchive(at('fresh.tar.gz'), 'tar.gz', at('out-cleanup-fails')),
+    ).resolves.toEqual({ dropped: [], note: null });
+    expect(await readFile(path.join(dest, 'README.md'), 'utf8')).toBe('# fixture\n');
+    expect(await readdir(dest)).not.toContain('previous.txt');
+    const stages = (await readdir(tmpRoot)).filter((n) => n.startsWith('.haive-extract-'));
+    expect(stages).toHaveLength(1);
+    const stageRel = stages[0]!;
+    expect(await readFile(path.join(tmpRoot, stageRel, 'old', 'previous.txt'), 'utf8')).toBe(
+      'old\n',
+    );
+    expect(removeNoFollow).toHaveBeenCalledExactlyOnceWith(tmpRoot, stageRel, {
+      recursive: true,
+      repairPermissions: true,
+    });
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        err: removalError,
+        stagePath: path.join(tmpRoot, stageRel),
+      }),
+      'archive extraction stage was not removed',
+    );
   });
 
   it('rejects unsupported format', async () => {

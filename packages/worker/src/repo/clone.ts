@@ -638,7 +638,12 @@ export async function extractArchive(
         await removeNoFollow(anchor, stageRel, {
           recursive: true,
           repairPermissions: true,
-        }).catch(() => undefined);
+        }).catch((err: unknown) => {
+          logger.warn(
+            { err, anchor, stageRel, stagePath: path.join(anchor, stageRel) },
+            'archive extraction stage was not removed',
+          );
+        });
       }
     }
   } finally {
