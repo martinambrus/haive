@@ -148,7 +148,7 @@ status: parked · reason: needs a fresh onboarding run (see T300)
 status: open
 A file under `.haive/worktrees` sharing an inode with a name in the writable checkout stays writable through the alias. Fix: a one-time background sweep (recorded per repository) that copy-replaces files whose st_nlink exceeds their names under that tree, via fs-safe. Measure the walk on a large repo first.
 
-### T309 · FNF[cancel-cap-2] · a capped cancel with no claim row never finishes (+6)
+### T309 · FNF[cancel-cap-2] · a capped cancel with no claim row never finishes (+7)
 
 status: open
 All PRE-EXISTING, low.
@@ -160,6 +160,7 @@ All PRE-EXISTING, low.
 5. The abandon pass skips cleanupTaskContainers and cleanupTaskScratchWorkspace (task-queue.ts ~1012); verify a reaper doesn't cover it, then call them best-effort.
 6. No real-DB coverage for the refund on a refused enqueue or the sandbox guard; ~25 lines in stalled-redrive-smoke.ts.
 7. merge-resolver `halt` keys "own merge" on ref/sha, so a cancelled task's same-ref open merge reads as this step's (area: modular-haive-plan).
+8. (T458 review, 2026-10-31) PRE-EXISTING, minor: `runTaskJob`'s catch (worker task-queue.ts ~:4164) fails the open task of any job that throws, a CANCEL included, so a transient error in `markTaskCancelled` fails the task it was cancelling instead of leaving it for the cancel re-drive.
 
 ### T312 · FNF[rag-own-paths][verify-first] · customCodePaths can name missing directories
 
@@ -520,7 +521,7 @@ status: open · kind: design · was modular #203
 
 2. QUEUED broader finding, PRE-EXISTING; not authorized for T118 or the design fix above: at 375px on an onboarded repository, the New Task header with Re-run onboarding + Cancel overflows horizontally and squeezes the description into a narrow column. `packages/web/src/app/(app)/tasks/new/page.tsx:817` uses a non-wrapping header/action row. Fix direction: responsive stacking/wrapping with a viewport control for both actions. Source is byte-identical to main; evidence `.claude/tmp/board-run/T118/browser-reset-cli/before-reset-375.png` and `T118/fnf-mobile-header.json`. Leave queued when T118 pauses.
 
-### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+27)
+### T364 · FNF[test-coverage-gaps] · audit-failure blindness and missing gated cases (+28)
 
 status: open · was modular #211
 
@@ -552,6 +553,7 @@ status: open · was modular #211
 26. (T455 review, 2026-10-31) PRE-EXISTING, hardening: nothing enforces T455's `requireJsonObject` guard, so a new `(await c.req.json()) as {...}` in an api route brings the `null`-body 500 back. A ratchet test over api routes (as `fs-ratchet.test.ts` does for path-based fs calls) would catch it; it should also cover WebSocket `message` listeners that read a field off a parsed frame (the CLI login banner's was one, fixed by T463).
 27. (T454 review, 2026-10-31) PRE-EXISTING, minor, dev hosts only: tests/e2e/repos/create.spec.ts ~:17 `findFirstGitDir` counts hidden git directories while the UI hides them, so the local_path case fails on a host with e.g. `~/.nvm` (identical before T454).
 28. (T461 review, 2026-10-31) PRE-EXISTING, minor: no test covers the 404 the per-step CLI switch answers for a step row that vanished (api routes/tasks/steps.ts ~:1914).
+29. (T458 review, 2026-10-31) PRE-EXISTING, minor: no cancel-route case (api plan-merge-cancel-db.test.ts, task-cancel-guard-db.test.ts) for a `waiting_user` merge or task; packages/api/test/task-cancel-lock-order-db.test.ts ~:67-70 still describes the pre-T349 bulk UPDATE in the present tense.
 
 ### T365 · FNF[repo-picker-caps] · slow bundle file browser, picker 100-row cut, unbounded /user/repos error body, extra empty page (+5)
 
@@ -970,6 +972,13 @@ status: open
 From the T470 review (2026-10-31). PRE-EXISTING, minor to moderate.
 
 `lint-typecheck-test` (ci.yml ~:55-110) runs Format check, Typecheck, Unit tests, Module scripts, Shellcheck and Installer boot-failure paths with no `if:`, so a 41 s format error hides the 591 s unit tests, and shellcheck and the installer test need only the checkout. A guard there would hold the job's red verdict until the unit tests end; the alternative is giving Unit tests their own job, which renames a required check (a decision for the owner). The e2e job's "Typecheck the suite" (~:677) before the stack boot is deliberate and stays.
+
+### T476 · FNF[plan-merge-discard-result] · the plan merge panel reads a discard that cancelled nothing as discarded
+
+status: open
+From the T458 review (2026-10-31). PRE-EXISTING, minor (web).
+
+`DELETE /repositories/:id/plan/merge` answers `{ ok: true, cancelled: false }` when no merge is open or (since T458) when the merge completed while the request ran, but `discardPlanMerge` types its answer as `{ ok: boolean }` (web lib/api-client.ts ~:2293) and the panel's `discard` (components/plan/plan-merge-panel.tsx ~:141-155) hides the merge as discarded whatever it says, after a confirm that promises "nothing is lost". Direction: read `cancelled`; when false, say the merge had already ended and refresh the plan instead of reporting a discard.
 
 ## Done
 
