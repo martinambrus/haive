@@ -962,6 +962,8 @@ From the T473 review (2026-10-31). PRE-EXISTING, minor (stored legacy or hand-ed
 
 Since T469 and T473 no writer records or writes a path that names git data, but files an earlier release already wrote there (07's agent files under a stored `.git/hooks`-style target dir, skill trees under a stored skills dir) stay, nothing cleans them, and an alias spelling on disk (`.GIT./x`, `git~1/x`) still fails `git add -A` in 12's init branch (`12-post-onboarding.ts` ~:958) and any later whole-tree add with "invalid path". A cleanup removes files in the repository, so it needs a decision: find them (by the stored targets or a tree walk), report them, or remove them with an explicit confirmation.
 
+Note (T480 review, 2026-10-31): the KB walkers still list a git-data-named page into prompts while 08's `scanExistingKb` now skips it: 09-qa.ts ~:93-114 and 09_5-skill-generation.ts ~:296-322 (also feeding 09_5b ~:388 and 11d ~:371 through `listKbFiles`), so a prompt can name a KB page `applyKbWrites` then refuses; reachable only with such a page already inside the KB (this task's leftovers).
+
 ### T482 · FNF[lock-order-leftovers-2] · second sweeps wait holding step rows; the late sweep refuses a benign hold; planner-dependent id lists (+6)
 
 status: open
@@ -1049,6 +1051,16 @@ From the T478 fix rounds (2026-10-31). PRE-EXISTING, minor. T478 added `scrubErr
 2. Other step failure and warning sinks keep paths: worker step-engine/step-runner.ts ~:3722 and 12-post-onboarding.ts ~:808; found from source, not exercised.
 3. Stored 12 warnings in `task_steps.output` from before T478 keep their paths (not repaired; the task page shows them behind "Show output").
 4. The scrubber's known misses (errors.ts ~:73): it replaces `/proc/self/fd` in fs-safe's refusal text, HTTP route paths and glob tails, drops a sentence's final period with an unquoted path, and leaks the tail of an unquoted path with a space and a second path directly after a colon. Accepted for T478; revisit if a surface shows one.
+
+### T491 · FNF[plan-panel-outcomes] · a plan merge that ends by its own poll vanishes without a word; PlanChat keeps its draft across nodes (+3)
+
+status: open
+From the T476 follow-up review (2026-10-31). Minor (UX); PRE-EXISTING unless stated.
+
+1. A panel whose merge ends by its own poll (completed, cancelled elsewhere, or FAILED) vanishes with no word: plan-merge-panel.tsx ~:108-112 calls `onSettled`, the refresh gets `merge: null` (the route lists open merges only, api plan.ts ~:447-459), and the panel renders nothing. For a FAILED merge it matters: it keeps its worktree for a Retry (plan-canvas.md), `plan_merge` tasks are hidden from the task list (api routes/tasks/index.ts ~:289-292), and the plan page shows no other trace. Direction: set the same task-tagged notice from the poll when it ends, with a failed-specific line naming Retry.
+2. New with T476, test-only: nothing ties the two ends of the `?taskId=` contract (the web test mocks `discardPlanMerge`, the api test builds its own URL), so renaming the key on one side stays green; a malformed or empty id is untested (it cannot 500).
+3. A `discard` or `answer` for merge A that settles after the page switched to merge B writes its error under B and a notice tagged A that appears when B ends; a ref to the current task id checked after the await would drop it. Theoretical.
+4. PlanChat keeps its `draft` across a node switch (web plan-chat.tsx ~:96, not among the node-change resets ~:139-146; unkeyed at plan-detail-panel.tsx ~:1010), and `send` posts it to the newly selected node (~:293-310). Read, not run; intent unclear.
 
 ## Done
 
