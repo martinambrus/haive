@@ -309,11 +309,16 @@ written after the kill and a Retry that failed in between would otherwise read a
 loses takes back every write before it. While new work is refused it does nothing at all, whatever status it read — no write,
 no job, no attempt spent — and the next poll resumes the task once the state is normal again. When the state cannot be read
 under the fence, or the resume throws anything else, that task stays failed with its watch armed and
-the poll goes on to the next armed task (`checkProviderRecovery`). A repository delete cancels its open tasks the same way:
-it locks their open step rows (by id) before it writes any task row (`cancelOpenTasksForRepo`), since
-taking the task rows first deadlocked it with a step Retry or a worker's step claim; the wait for those
-rows can let a Stop or a completion end a task, so it then re-reads and locks the task rows and cancels
-only those still open. A pass a Stop cut off
+the poll goes on to the next armed task (`checkProviderRecovery`).
+A repository delete cancels its open tasks the same way, step rows before task rows, and takes what
+a Retry takes before that: a plain read that the repository is the caller's own (so a caller who
+owns nothing never queues on the key), the repository's task-creation key, then the repository row.
+The key is the one a Retry of a task that is not an onboarding or an upgrade takes in `checkRevive`
+(those two take it with the repository row), so a Retry that committed first has left a `running`
+task, which the delete finds among the open ones and cancels. The delete waits for the key at most
+30 s (`boundedLockWait`) and otherwise answers 409 `The repository is busy, try again` with nothing
+written. The plan advisory route takes the same key, before its plan node row, since the delete
+holds the key and cascades into the node rows. The cancel itself is described after this paragraph. A pass a Stop cut off
 mid-apply then releases what the failed task holds (`settleFailedTask`), as its own failure would
 have. The cancel poll also stops a
 pass whose task moved to a newer epoch. Either way the pass stops there, records no recap and
@@ -346,7 +351,7 @@ and any other live row, and moves the task back through `moveTaskToStep` under a
 row is left as it is: its advance re-drives the hand-off it finished with. A task that never
 reached a step still restarts through START, and settles its rows again after its bump, since
 answering a parked form revives the task and can open a row in between. That settle locks every
-active row before it writes (`settleActiveSteps`): a pass that got in before the bump can still
+step row of the task, in id order, before it writes (`settleActiveSteps`): a pass that got in before the bump can still
 move its row from a form to `running` between two unlocked writes and escape both. The recap goes to the ledger, or to a recap run,
 only after the outcome has landed and only while the row still reads `done`: the ledger entry is
 inserted by one statement that checks it, and a recap run is queued only once inserted and checked,
@@ -385,6 +390,40 @@ fix round's request and `started` event are written in the same transaction: a n
 to reset, so no swap is taken there, and a round a Retry overtook would otherwise count toward the
 cap. That transaction first locks the source row while it is still the pass's own
 (`lockOwnedStep`), since a Retry writes the steps before it moves the epoch.
+
+**Writers of several step rows of one task take them first, as one batch in id order.** `task_steps.id` is a
+random uuid, so two transactions that write overlapping rows in the order their caller lists them, or their
+statement scans them, each hold one row and want the other's (40P01). `lockStepRows` (`@haive/database`) is
+`select id, task_id ... order by id for no key update`: the lock an UPDATE takes anyway, which conflicts with
+every other writer but not with the KEY SHARE a pass's run insert holds on the row (a FOR UPDATE would). The takers are
+`resetRowsForRerun` (the whole task), `retryTaskAtStep`, a Stop (`supersedeLiveRuns`), `settleActiveSteps`,
+`reofferParkedSteps` (its parked rows), the loop Resume, `retry_ai`, Skip and a CLI switch when a row is left
+active (`lockRowsForMove`: the sweep and the DAG reset, then the batch, before the clicked row is written), the
+cancel core below, and on the worker `resetStepAndDownstream` (its reset rows) and `foldOtherTaskParks` (its
+parked rows, in a transaction opened only when a plain read finds one). The batch goes behind the
+transaction's sweeps of runs and agent rows and its DAG reset, since a pass holds a run and then wants its step
+row, and before its first step write. It is never a waiting statement once the task row has been written,
+since a pass holding a step row waits for the task row: the Retry, the fan-out Resume and `moveTaskToStep`
+reset what a pass activated meanwhile with the rows already held (`rowsActivatedMeanwhile` stays NOWAIT, and
+`resetRowsForRerun` takes `rowsHeld` there), and a FOR UPDATE on a row held FOR NO KEY UPDATE is an upgrade
+that conflicts with that run insert. The worker's single-statement bulk updates (`handleCancelTask`,
+`takeLeftOpenKept`, `skipRemovedSteps`, the `run_seq` backfill) take no batch.
+
+**A cancel ends only the step rows it locked.** Every task cancel the api commits goes through one core
+(`cancelStillOpen`, `api/src/lib/cancel-task.ts`): the Cancel action and the step `abort` through
+`cancelTaskIfOpen`, a repository delete through `cancelOpenTasksForRepo`. It takes every step row of the
+tasks, the open ones and the finished, in one id-ordered batch, then the task rows, re-read and locked in id
+order, since the wait for the step rows can let a Stop, a completion or another cancel end a task, and it
+cancels only the tasks still open. `cancelTaskRow` is handed, per task, the rows that batch locked and ends
+only those that are still open. A row created and committed after the batch is not held, and a bulk update
+that scanned it would lock it in scan order while a worker's claim of it (`openPendingStep`: the flip, then
+the task row FOR SHARE) holds it and waits for the task row the cancel holds (40P01). Such a row is left to
+the CANCEL job every cancel queues after its commit: `handleCancelTask` fails every open row of the task, and
+the stalled sweep queues a CANCEL that was lost. The Cancel action runs a Stop before `cancelTaskIfOpen`; the
+step `abort` does not. `cancelTaskIfOpen` cancels a task that is neither `completed` nor `cancelled` (a
+`failed` one stays cancellable), judged under those locks and not from the status the route read earlier. A
+cancel that did not apply answers the status it found, writes no event, queues no CANCEL job and, for the
+Cancel action, clears no pause.
 
 A form submit carries no epoch on purpose, so it cannot be fenced. `isStaleSubmit` drops one that
 lands on a form parked after the job was queued, such as a form a `ReopenStepFormError` reopened,
