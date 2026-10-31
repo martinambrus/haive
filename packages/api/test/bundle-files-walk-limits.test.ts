@@ -65,9 +65,10 @@ afterEach(async () => {
 });
 
 // A tree this deep is a property of the bundle, not a fault of the server: asking again cannot
-// help, and only replacing the bundle can. So it is a 422 that says so, kept apart from the 500s
-// below, which are the process's own condition, and it is a warning, not an unhandled error.
-it('answers a fixed 422 for a tree nested deeper than the walk allows, and logs a warning', async () => {
+// help, and only replacing the bundle can. So it is a 409 with a code that says so, kept apart
+// from the 500s below, which are the process's own condition, and it is a warning, not an
+// unhandled error.
+it('answers a fixed 409 for a tree nested deeper than the walk allows, and logs a warning', async () => {
   const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
   const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
   try {
@@ -76,7 +77,7 @@ it('answers a fixed 422 for a tree nested deeper than the walk allows, and logs 
 
     const res = await app.request(`/${BUNDLE}/files`);
 
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(409);
     expect(await res.json()).toEqual({
       error: 'This bundle is nested too deeply to list its files',
       code: 'bundle_too_deep',
