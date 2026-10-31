@@ -1,10 +1,12 @@
 import path from 'node:path';
+import { inventoryDirsFromCatalog } from '@haive/shared/stats-server';
 import { readdirNoFollow } from '@haive/shared/fs-safe';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { StepContext } from '../../step-definition.js';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { schema, type Database, type DbTx } from '@haive/database';
 import {
+  AGENT_DIRECTORIES,
   CLI_PROVIDER_CATALOG,
   type CliProviderMetadata,
   type CliProviderName,
@@ -153,17 +155,70 @@ export async function resolveTaskSkillTargetDirs(
   return resolveSkillTargetDirs(ctx.db, ctx.userId, fallback, task?.repositoryId);
 }
 
-/** Stored skill target dirs may be legacy or hand-edited, so one that names git data is left out
- *  before anything is written, removed or staged under it. */
-export function withoutGitDataDirs(
+/** Stored targets must name an exact native agent destination from the provider catalog. */
+export function isAgentTargetDir(dir: string): boolean {
+  return !namesGitData(dir) && AGENT_DIRECTORIES.includes(dir);
+}
+
+/** The reset and these writers share the catalog's exact directory inventory. */
+export function isSkillTargetDir(dir: string): boolean {
+  return (
+    !namesGitData(dir) &&
+    inventoryDirsFromCatalog().some((entry) => entry.kind === 'skill' && entry.dir === dir)
+  );
+}
+
+/** A stored ID names one directory, never a path or git data. Do not normalize it:
+ *  repair and sync must leave the original directory alone when its ID is refused. */
+export function isSkillPathId(id: string): boolean {
+  return id.length > 0 && id !== '.' && id !== '..' && !/[\\/\0]/.test(id) && !namesGitData(id);
+}
+
+/** Stored destinations are untrusted. An absent field gets its caller's legacy default;
+ *  an explicit list only loses invalid entries and never acquires a fallback. */
+export function filterCatalogSkillDirs(
   dirs: readonly string[],
-  logger: StepContext['logger'],
+  logger?: StepContext['logger'],
 ): string[] {
+  const warned = new Set<string>();
   return dirs.filter((dir) => {
-    if (!namesGitData(dir)) return true;
-    logger.warn({ dir }, 'did not use a skills directory: its path names git data');
+    if (isSkillTargetDir(dir)) return true;
+    if (warned.has(dir)) return false;
+    warned.add(dir);
+    logger?.warn({ dir }, 'did not use a skills directory: not a catalog skills destination');
     return false;
   });
+}
+
+export function withoutUnsafeSkillIds(
+  ids: readonly string[],
+  logger?: StepContext['logger'],
+): string[] {
+  const warned = new Set<string>();
+  return ids.filter((skillId) => {
+    if (isSkillPathId(skillId)) return true;
+    if (warned.has(skillId)) return false;
+    warned.add(skillId);
+    logger?.warn({ skillId }, 'did not use a skill ID: not a single non-git-data path segment');
+    return false;
+  });
+}
+
+/** A visible caveat alongside the existing mining/coverage note, including all-refused runs.
+ *  Counts keep untrusted stored names out of the Markdown banner; logs retain the names. */
+export function skillTargetRefusalNote(
+  dirs: readonly string[],
+  ids: readonly string[] = [],
+): string | undefined {
+  const droppedDirs = new Set(dirs.filter((dir) => !isSkillTargetDir(dir))).size;
+  const droppedIds = new Set(ids.filter((id) => !isSkillPathId(id))).size;
+  if (droppedDirs === 0 && droppedIds === 0) return undefined;
+  return (
+    `Skipped ${droppedDirs} invalid stored skill destination(s) and ${droppedIds} invalid stored skill ID(s). ` +
+    (dirs.length > 0 && dirs.every((dir) => !isSkillTargetDir(dir))
+      ? 'No skill operations were applied because every stored destination was refused.'
+      : 'Operations at those targets were left unapplied.')
+  );
 }
 
 export async function loadPreviousStepOutput(

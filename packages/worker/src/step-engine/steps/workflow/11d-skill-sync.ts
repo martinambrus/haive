@@ -4,7 +4,6 @@ import {
   removeNoFollow,
   writeFileNoFollow,
 } from '@haive/shared/fs-safe';
-import { namesGitData } from '@haive/shared/project-state';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 import type { DetectResult, SkillEntry } from '@haive/shared';
 import { mapWithConcurrency } from '@haive/shared';
@@ -20,7 +19,10 @@ import type { KbFileSummary } from '../onboarding/09-qa.js';
 import {
   loadPreviousStepOutput,
   resolveTaskSkillTargetDirs,
-  withoutGitDataDirs,
+  filterCatalogSkillDirs,
+  isSkillPathId,
+  withoutUnsafeSkillIds,
+  skillTargetRefusalNote,
 } from '../onboarding/_helpers.js';
 import { buildSkillContractBlocks } from '../onboarding/_skill-prompt.js';
 import {
@@ -402,38 +404,44 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     async selectAgents({ detected }): Promise<AgentMiningDispatch[]> {
       if (process.env.HAIVE_TEST_BYPASS_LLM === '1') return [];
       const det = detected as SkillSyncDetect;
-      const primary = (det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR])[0];
+      const primary = filterCatalogSkillDirs(
+        det.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
+      )[0];
       if (primary === undefined) return [];
       const fileTree = det.__fileTree ?? '';
-      return det.targets.map((target) => ({
-        agentId: target.skillId.slice(0, 120),
-        agentTitle: target.skillId,
-        prompt: buildSkillSyncPrompt({
-          target,
-          framework: det.framework,
-          language: det.language,
-          kbFiles: det.kbFiles,
-          fileTree,
-          scopeExclude: det.__scopeExclude ?? [],
-          skillsDir: primary,
-        }),
-      }));
+      return det.targets
+        .filter((entry) => isSkillPathId(entry.skillId))
+        .map((target) => ({
+          agentId: target.skillId.slice(0, 120),
+          agentTitle: target.skillId,
+          prompt: buildSkillSyncPrompt({
+            target,
+            framework: det.framework,
+            language: det.language,
+            kbFiles: det.kbFiles,
+            fileTree,
+            scopeExclude: det.__scopeExclude ?? [],
+            skillsDir: primary,
+          }),
+        }));
     },
   },
 
   async apply(ctx, args): Promise<SkillSyncApply> {
     const detected = args.detected as SkillSyncDetect;
     const worktree = detected.worktreePath;
-    const targetDirs = withoutGitDataDirs(
-      detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR],
-      ctx.logger,
-    );
+    const storedDirs = detected.skillTargetDirs ?? [DEFAULT_PROJECT_SKILLS_DIR];
+    const storedIds = [...detected.targets.map((t) => t.skillId), ...detected.removals];
+    const targetDirs = filterCatalogSkillDirs(storedDirs, ctx.logger);
+    withoutUnsafeSkillIds(storedIds, ctx.logger);
+    const refusalNote = skillTargetRefusalNote(storedDirs, storedIds);
     if (targetDirs.length === 0)
       return {
         generated: [],
         removed: [],
         indexRemovedDirs: [],
-        skipped: [],
+        skipped: storedDirs.length > 0 ? detected.targets.map((t) => t.skillId) : [],
+        ...(refusalNote ? { degradedNote: refusalNote } : {}),
         committed: false,
         commitSha: null,
       };
@@ -448,17 +456,13 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
 
     for (const target of detected.targets) {
       // The id is a directory name below, removed and rewritten: a stored one may name git data.
-      if (namesGitData(target.skillId)) {
-        ctx.logger.warn(
-          { skillId: target.skillId },
-          'did not write a skill whose name names git data',
-        );
+      if (!isSkillPathId(target.skillId)) {
         skipped.push(target.skillId);
         outcomes.push({
           agentId: target.skillId,
           agentTitle: null,
           status: 'failed',
-          errorMessage: 'its name names git data',
+          errorMessage: 'its ID is not a single non-git-data path segment',
         });
         continue;
       }
@@ -494,8 +498,7 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
     const removed: string[] = [];
     for (const skillId of detected.removals) {
       // Same reason as the targets above: the id is removed recursively as a directory name.
-      if (namesGitData(skillId)) {
-        ctx.logger.warn({ skillId }, 'did not remove a skill whose name names git data');
+      if (!isSkillPathId(skillId)) {
         continue;
       }
       for (const dir of targetDirs) {
@@ -569,7 +572,8 @@ export const skillSyncStep: StepDefinition<SkillSyncDetect, SkillSyncApply> = {
       { generated: generated.length, removed: removed.length, skipped: skipped.length, committed },
       'skill sync apply complete',
     );
-    const degradedNote = miningLossNote('skill', outcomes);
+    const degradedNote =
+      [refusalNote, miningLossNote('skill', outcomes)].filter(Boolean).join(' ') || undefined;
     return {
       generated,
       removed,

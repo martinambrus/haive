@@ -11,9 +11,11 @@ import {
   like,
   lt,
   ne,
+  not,
   notInArray,
   or,
   sql,
+  type Column,
 } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { schema, type Database } from '../src/index.js';
@@ -49,6 +51,133 @@ function setup() {
 }
 
 describe('the fake database', () => {
+  const runs = schema.cliInvocations;
+  const steps = schema.taskSteps;
+  const noLiveRun = (outer: Column = steps.id) =>
+    not(sql`EXISTS (SELECT 1 FROM ${runs}
+    WHERE ${runs.taskStepId} = ${outer}
+      AND ${runs.endedAt} IS NULL
+      AND ${runs.supersededAt} IS NULL)`);
+
+  it('evaluates a negated correlated EXISTS over current rows, including NULL correlations', () => {
+    const fake = createFakeDb({ taskSteps: steps, cliInvocations: runs });
+    const takes = fake.compileWhere(steps, noLiveRun());
+    expect(takes({ id: TASK })).toBe(true);
+    fake.insert(runs, { taskStepId: TASK2 });
+    fake.insert(runs, { taskStepId: null });
+    expect(takes({ id: TASK })).toBe(true);
+    expect(takes({ id: null })).toBe(true);
+    expect(takes({})).toBe(true);
+    expect(takes({ id: TASK2 })).toBe(false);
+    const live = fake.insert(runs, { taskStepId: TASK, startedAt: null });
+    expect(takes({ id: TASK })).toBe(false);
+    fake.patch(runs, live.id as string, { startedAt: new Date() });
+    expect(takes({ id: TASK })).toBe(false);
+    fake.patch(runs, live.id as string, { endedAt: new Date() });
+    expect(takes({ id: TASK })).toBe(true);
+    fake.patch(runs, live.id as string, { endedAt: null, supersededAt: new Date() });
+    expect(takes({ id: TASK })).toBe(true);
+    fake.insert(runs, { taskStepId: TASK });
+    expect(takes({ id: TASK })).toBe(false);
+  });
+
+  it.each([
+    { label: 'upper-case parameter', rowId: USER, value: USER.toUpperCase() },
+    { label: 'upper-case row', rowId: USER.toUpperCase(), value: USER },
+  ])('compares UUID values without case: $label', ({ rowId, value }) => {
+    const fake = createFakeDb({ taskSteps: steps });
+    const takes = (condition: unknown) => fake.compileWhere(steps, condition)({ id: rowId });
+    expect(takes(eq(steps.id, value))).toBe(true);
+    expect(takes(ne(steps.id, value))).toBe(false);
+    expect(takes(inArray(steps.id, [value]))).toBe(true);
+    expect(takes(notInArray(steps.id, [value]))).toBe(false);
+    expect(takes(eq(steps.id, TASK2))).toBe(false);
+    expect(fake.compileWhere(steps, eq(steps.title, 'TITLE'))({ title: 'title' })).toBe(false);
+  });
+
+  it('orders UUID values without case, as PostgreSQL does', () => {
+    const fake = createFakeDb({ taskSteps: steps });
+    const takes = (condition: unknown) =>
+      fake.compileWhere(steps, condition)({ id: 'F0000000-0000-4000-8000-000000000000' });
+    expect(takes(gt(steps.id, 'a0000000-0000-4000-8000-000000000000'))).toBe(true);
+    expect(takes(lt(steps.id, 'a0000000-0000-4000-8000-000000000000'))).toBe(false);
+  });
+
+  it.each([
+    { label: 'upper-case inner', innerId: USER.toUpperCase(), outerId: USER },
+    { label: 'upper-case outer', innerId: USER, outerId: USER.toUpperCase() },
+  ])('correlates UUID values without case: $label', ({ innerId, outerId }) => {
+    const fake = createFakeDb({ taskSteps: steps, cliInvocations: runs });
+    fake.insert(runs, { taskStepId: innerId });
+    const takes = fake.compileWhere(steps, noLiveRun());
+    expect(takes({ id: outerId })).toBe(false);
+    expect(takes({ id: TASK2 })).toBe(true);
+  });
+
+  it('composes the negated EXISTS with ordinary predicates', () => {
+    const fake = createFakeDb({ taskSteps: steps, cliInvocations: runs });
+    fake.insert(runs, { taskStepId: TASK });
+    const takes = fake.compileWhere(steps, and(eq(steps.status, 'running'), noLiveRun()));
+    expect(takes({ id: TASK, status: 'running' })).toBe(false);
+    expect(takes({ id: TASK2, status: 'running' })).toBe(true);
+    expect(takes({ id: TASK2, status: 'done' })).toBe(false);
+  });
+
+  it('refuses other negations, EXISTS shapes, and columns outside their scope', () => {
+    const fake = createFakeDb({ taskSteps: steps, cliInvocations: runs });
+    const unsupported = [
+      not(sql`EXISTS (SELECT 2 FROM ${runs}
+        WHERE ${runs.taskStepId} = ${steps.id}
+          AND ${runs.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        HAVING ${runs.taskStepId} = ${steps.id}
+          AND ${runs.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        WHERE ${runs.taskStepId} <> ${steps.id}
+          AND ${runs.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        WHERE ${runs.taskStepId} = ${steps.id}
+          AND ${runs.endedAt} IS NOT NULL
+          AND ${runs.supersededAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        WHERE ${runs.taskStepId} = ${steps.id}
+          AND ${runs.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NOT NULL)`),
+      not(eq(steps.status, 'running')),
+      sql`EXISTS (SELECT 1 FROM ${runs})`,
+      not(sql`EXISTS (SELECT 1 FROM ${runs})`),
+      noLiveRun(schema.tasks.id),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        WHERE ${runs.startedAt} = ${steps.startedAt}
+          AND ${runs.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        WHERE ${steps.taskId} = ${steps.id}
+          AND ${runs.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        WHERE ${runs.taskStepId} = ${steps.id}
+          AND ${steps.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        WHERE ${runs.taskStepId} = ${steps.id}
+          AND ${runs.endedAt} IS NULL
+          AND ${steps.endedAt} IS NULL)`),
+      not(sql`EXISTS (SELECT 1 FROM ${runs}
+        WHERE ${runs.taskStepId} = ${steps.id}
+          OR ${runs.endedAt} IS NULL
+          AND ${runs.supersededAt} IS NULL)`),
+    ];
+    for (const cond of unsupported) {
+      expect(() => fake.compileWhere(steps, cond)).toThrow(/unsupported condition/);
+    }
+    const missing = createFakeDb({ taskSteps: steps });
+    expect(() => missing.compileWhere(steps, noLiveRun())).toThrow(/unsupported condition/);
+  });
+
   it('stamps clock_timestamp() from the logical clock and stores any other SQL value as given', async () => {
     const e = schema.taskEvents;
     const fake = createFakeDb({ tasks: schema.tasks, taskEvents: e });

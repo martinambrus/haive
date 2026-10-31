@@ -1,5 +1,4 @@
 import { lstatNoFollow, readdirNoFollow, readTextNoFollow } from '@haive/shared/fs-safe';
-import { namesGitData } from '@haive/shared/project-state';
 import path from 'node:path';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@haive/database';
@@ -8,7 +7,7 @@ import { mapWithConcurrency, orderByDefaultPriority } from '@haive/shared';
 import type { StepContext, StepDefinition } from '../../step-definition.js';
 import { resolveParallelCap } from '../../_parallel-cap.js';
 import { readFrontmatterFields } from '../_yaml-scalar.js';
-import { resolveTaskSkillTargetDirs } from './_helpers.js';
+import { isSkillPathId, resolveTaskSkillTargetDirs } from './_helpers.js';
 import { workspaceAnchor } from '../../../repo/worktree-paths.js';
 
 /** Fallback skills dir when no enabled CLI declares one — passed explicitly to
@@ -145,7 +144,7 @@ export async function listSkillDirs(repo: string, skillsDir: string): Promise<st
   if (entries === null) return [];
   // A nested repository's own `.git` is no skill, and 09_5b would delete it to repair it.
   return entries
-    .filter((e) => e.isDirectory() && !namesGitData(e.name))
+    .filter((e) => e.isDirectory() && isSkillPathId(e.name))
     .map((e) => e.name)
     .sort();
 }

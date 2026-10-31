@@ -7,6 +7,13 @@ import type { SlotWait } from '@/lib/api-client';
 const KIND_LABEL: Record<SlotWait['kind'], string> = {
   runtime: 'runtime slot',
   agent: 'agent slot',
+  module: 'module setup',
+};
+
+const KIND_TITLE: Record<SlotWait['kind'], string> = {
+  runtime: 'Queued for a free runtime slot',
+  agent: 'Queued for a free agent slot',
+  module: "Waiting for its module's setup to finish",
 };
 
 const STALE_HINT =
@@ -14,10 +21,11 @@ const STALE_HINT =
   'is probably wedged rather than waiting. Check the worker, then Retry the step.';
 
 /**
- * Badge for a task that is `running` in the database but actually queued behind a capacity
- * cap. Shown INSTEAD of the plain `running` status badge: the whole point is that "running"
- * was indistinguishable from "waiting in line" on the tasks listing. The wait duration
- * re-renders on the caller's poll, so it ticks without a timer of its own.
+ * Badge for a task that is `running` in the database but actually parked: queued behind a
+ * capacity cap, or (module kind) waiting for its module's schema setup. Shown INSTEAD of the
+ * plain `running` status badge: the whole point is that "running" was indistinguishable from
+ * "waiting in line" on the tasks listing. The wait duration re-renders on the caller's poll,
+ * so it ticks without a timer of its own.
  */
 export function SlotWaitBadge({ slotWait, className }: { slotWait: SlotWait; className?: string }) {
   const sinceMs = slotWait.since ? new Date(slotWait.since).getTime() : null;
@@ -30,7 +38,7 @@ export function SlotWaitBadge({ slotWait, className }: { slotWait: SlotWait; cla
       title={
         slotWait.stale
           ? `${slotWait.message ?? 'Queued for a slot'}\n\n${STALE_HINT}`
-          : (slotWait.message ?? `Queued for a free ${KIND_LABEL[slotWait.kind]}`)
+          : (slotWait.message ?? KIND_TITLE[slotWait.kind])
       }
     >
       <span className="truncate">

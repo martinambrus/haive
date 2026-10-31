@@ -1,4 +1,4 @@
-import { safeErrorMessage } from '@haive/shared/logger';
+import { scrubErrorPaths } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { execFile } from 'node:child_process';
 import { access } from 'node:fs/promises';
@@ -488,7 +488,7 @@ planRoutes.post('/:id/plan/snapshot/save', async (c) => {
   } catch (err) {
     throw new HttpError(
       409,
-      err instanceof Error ? safeErrorMessage(err) : 'Could not save the plan snapshot',
+      err instanceof Error ? scrubErrorPaths(err) : 'Could not save the plan snapshot',
       'plan_snapshot_save_failed',
     );
   }
@@ -509,7 +509,7 @@ planRoutes.post('/:id/plan/snapshot/pull', async (c) => {
   } catch (err) {
     throw new HttpError(
       409,
-      err instanceof Error ? safeErrorMessage(err) : 'Could not pull the plan snapshot',
+      err instanceof Error ? scrubErrorPaths(err) : 'Could not pull the plan snapshot',
       'plan_snapshot_pull_failed',
     );
   }
@@ -1039,7 +1039,7 @@ planRoutes.delete('/:id/plan', async (c) => {
     db,
     { ops: [{ op: 'delete', nodeRef: root.id }] },
     { repositoryId, origin: 'user' },
-  );
+  ).catch(planError);
   await enqueuePlanMirrorRefresh(repositoryId, userId);
 
   // Mirror second: the database is the source of truth and these files are
@@ -1384,8 +1384,12 @@ planRoutes.get('/:id/plan/merge', async (c) => {
  *  live conversation holds it — the checkout has not moved, so there is nothing else to undo. */
 planRoutes.delete('/:id/plan/merge', async (c) => {
   const { userId, repositoryId } = await requireOwnedRepo(c);
+  const taskId = c.req.query('taskId');
   const task = await findOpenPlanMerge(repositoryId);
-  if (!task) return c.json({ ok: true, cancelled: false });
+  // A stale panel must not stop a newer conversation that opened since its last refresh.
+  if (!task || (taskId !== undefined && task.id !== taskId)) {
+    return c.json({ ok: true, cancelled: false });
+  }
   const db = getDb();
   // The Stop comes first, as in the Cancel action; the decision is then made under the task's
   // locks, not from the read above.

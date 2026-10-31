@@ -4,7 +4,7 @@
  *  ninth task status. Being derived, it is recomputed from the live step rows on every poll
  *  and cannot go stale the way a written-on-park / forgotten-on-resume column would.
  *
- *  Two waits exist, both bounded by an admin cap:
+ *  Three waits exist, the first two bounded by an admin cap:
  *    - runtime: the task-level runtime admission gate (MAX_CONCURRENT_RUNTIMES) parked the
  *      step before it could boot its DDEV/app runner. Only a step that will actually spawn one
  *      is gated — a task whose runtime classifies as 'none' never queues — so this wait always
@@ -13,12 +13,17 @@
  *    - agent:  the step's CLI invocation is enqueued but no worker slot has picked it up
  *      (MAX_PARALLEL_AGENTS) or it was deferred by the per-task cap
  *      (MAX_PARALLEL_AGENTS_PER_TASK).
+ *    - module: a module step is parked until its module's schema setup has finished on this
+ *      worker. No slot is involved. The park writes the same `pending` + `waiting_started_at`
+ *      row the runtime park does, so the step id (`module.<moduleId>.<step>`) tells them apart.
  *
- *  Both signals are structural — a step status plus a marker column, or the existence of an
- *  unstarted invocation row. The park's `status_message` is display copy only; never branch
- *  on its text. */
+ *  These signals are structural — a step status plus a marker column, the step id's grammar, or
+ *  the existence of an unstarted invocation row. The park's `status_message` is display copy
+ *  only; never branch on its text. */
 
-export type SlotWaitKind = 'runtime' | 'agent';
+import { isModuleStepId } from '../modularity/contracts.js';
+
+export type SlotWaitKind = 'runtime' | 'agent' | 'module';
 
 /** A task step reduced to the fields the derivation needs. Date fields accept a `Date`
  *  (server-side Drizzle rows) or an ISO string (web JSON), like `TaskTimingStep`. */
@@ -118,7 +123,7 @@ export function deriveSlotWait(args: {
 
   if (row.status === 'pending' && since !== null) {
     return {
-      kind: 'runtime',
+      kind: isModuleStepId(row.stepId) ? 'module' : 'runtime',
       since,
       stepId: row.stepId,
       message: row.statusMessage,

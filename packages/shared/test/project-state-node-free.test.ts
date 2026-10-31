@@ -108,6 +108,12 @@ function closureOf(entry: string): {
 }
 
 describe('the conflict unit helpers the web bundle reads', () => {
+  it('keeps the Haive data contract and its classifier node-free', () => {
+    const closure = closureOf('haive-data.ts');
+    expect(closure.nodeImports).toEqual([]);
+    expect(closure.nodeGlobals).toEqual([]);
+    expect(closure.files).toContain('project-state/conflicts.ts');
+  });
   it('reach no node module, however far down their imports go', () => {
     const { files, nodeImports } = closureOf('project-state/conflicts.ts');
     expect(files).toContain('project-state/settings.ts');

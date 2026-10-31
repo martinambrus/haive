@@ -743,7 +743,9 @@ export const planMergeStep: StepDefinition<PlanMergeDetect, PlanMergeApply> = {
     // Only now is the scratch worktree disposable. Removed on the success path only —
     // an abandoned conversation keeps it, which is what makes it resumable.
     await removePlanMergeWorktree(ctx.repoPath);
-    await writePlanMirror(ctx.db, d.repositoryId, ctx.repoPath).catch(() => undefined);
+    await writePlanMirror(ctx.db, d.repositoryId, ctx.repoPath).catch((err: unknown) => {
+      ctx.logger.warn({ err }, 'plan mirror write failed (non-fatal)');
+    });
 
     result.summary = `Merged origin/${d.branch} and pushed.`;
     await recordMessage(ctx.db, ctx.taskId, ctx.taskStepId, 'assistant', result.summary);

@@ -139,4 +139,87 @@ describe('deriveSlotWait', () => {
     expect(derive(queued, [row])?.kind).toBe('agent');
     expect(derive({ ...queued, paused: true }, [row])).toBeNull();
   });
+
+  describe('on a module step', () => {
+    const MODULE_STEP_ID = 'module.acme.rebuild';
+    const SCHEMA_MESSAGE =
+      "Module acme's schema is being set up on this worker, so step module.acme.rebuild starts when it is done.";
+
+    const moduleStep = (over: Partial<SlotWaitStep> = {}) =>
+      step({ id: 'row-module', stepId: MODULE_STEP_ID, statusMessage: SCHEMA_MESSAGE, ...over });
+    const deriveModule = (
+      over: Partial<Parameters<typeof deriveSlotWait>[0]> = {},
+      steps: SlotWaitStep[] = [moduleStep()],
+    ) => derive({ currentStepId: MODULE_STEP_ID, ...over }, steps);
+
+    it('reports the module kind for a pending row with a wait marker', () => {
+      expect(deriveModule()).toEqual({
+        kind: 'module',
+        since: agoMs(5 * 60_000),
+        stepId: MODULE_STEP_ID,
+        message: SCHEMA_MESSAGE,
+        stale: false,
+      });
+    });
+
+    it('flags a cold module park as stale, like a runtime park', () => {
+      const fresh = deriveModule({}, [moduleStep({ updatedAt: agoMs(STALE_PARK_MS) })]);
+      expect(fresh).toMatchObject({ kind: 'module', stale: false });
+      const cold = deriveModule({}, [moduleStep({ updatedAt: agoMs(STALE_PARK_MS + 1) })]);
+      expect(cold).toMatchObject({ kind: 'module', stale: true });
+    });
+
+    it.each(['07_7-secret-sweep', 'custom.acme.rebuild'])(
+      'keeps the runtime kind for the same park on the non-module step %s',
+      (stepId) => {
+        expect(derive({ currentStepId: stepId }, [step({ stepId })])?.kind).toBe('runtime');
+      },
+    );
+
+    // The park's copy is display text: the kind comes from the step id and nothing the row says.
+    it.each([
+      ['no copy at all', null],
+      ['the runtime park copy', step().statusMessage],
+    ])('reports the module kind whatever the park copy is: %s', (_name, statusMessage) => {
+      expect(deriveModule({}, [moduleStep({ statusMessage })])).toMatchObject({
+        kind: 'module',
+        message: statusMessage,
+      });
+    });
+
+    it('keeps the runtime kind for a core step that carries the schema copy', () => {
+      expect(derive({}, [step({ statusMessage: SCHEMA_MESSAGE })])?.kind).toBe('runtime');
+    });
+
+    it('is null for a paused task', () => {
+      expect(deriveModule()).not.toBeNull();
+      expect(deriveModule({ paused: true })).toBeNull();
+    });
+
+    it('keeps the agent kind for a waiting_cli step with a queued invocation', () => {
+      const row = moduleStep({ id: 'row-cli', status: 'waiting_cli', statusMessage: null });
+      expect(deriveModule({ queuedInvocationStepRowIds: new Set(['row-cli']) }, [row])).toEqual({
+        kind: 'agent',
+        since: agoMs(5 * 60_000),
+        stepId: MODULE_STEP_ID,
+        message: null,
+        stale: false,
+      });
+    });
+
+    it('is null for a step that holds no park', () => {
+      expect(deriveModule({}, [moduleStep({ waitingStartedAt: null })])).toBeNull();
+      expect(
+        deriveModule({}, [moduleStep({ status: 'running', waitingStartedAt: null })]),
+      ).toBeNull();
+    });
+
+    it.each(['failed', 'cancelled', 'completed', 'waiting_user', 'queued'])(
+      'is null for a %s task even with a parked row',
+      (taskStatus) => {
+        expect(deriveModule()).not.toBeNull();
+        expect(deriveModule({ taskStatus })).toBeNull();
+      },
+    );
+  });
 });

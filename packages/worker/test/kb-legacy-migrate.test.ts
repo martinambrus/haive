@@ -34,6 +34,18 @@ describe('migrateLegacyKnowledge', () => {
     await writeFile(abs, body);
   }
 
+  it('leaves git-data names in the legacy tree while moving ordinary knowledge', async () => {
+    await write(`${LEGACY_KB_DIR}/.git/hooks/x.md`, 'keep');
+    await write(`${LEGACY_KB_DIR}/.GIT./x.md`, 'alias');
+    await write(`${LEGACY_KB_DIR}/OK.md`, '# OK');
+    const r = await migrateLegacyKnowledge(dir);
+    expect(r.moved).toEqual([`${KB_DIR}/OK.md`]);
+    expect(r.skipped.sort()).toEqual(
+      [`${LEGACY_KB_DIR}/.git/hooks/x.md`, `${LEGACY_KB_DIR}/.GIT./x.md`].sort(),
+    );
+    expect(await readFile(path.join(dir, LEGACY_KB_DIR, '.git/hooks/x.md'), 'utf8')).toBe('keep');
+  });
+
   it('moves a legacy KB into the canonical dir, subdirectories included', async () => {
     await write(`${LEGACY_KB_DIR}/ARCHITECTURE.md`, '# Architecture\n');
     await write(`${LEGACY_KB_DIR}/TECH_PATTERNS/drupal7/INDEX.md`, '# D7\n');

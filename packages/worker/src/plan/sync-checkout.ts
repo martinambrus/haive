@@ -29,14 +29,18 @@ export async function syncPlanFromCheckout(
       requireStamp: true,
       expectedCheckout,
     }).catch(async (err: unknown) => {
-      await recordPlanReconcileFailure(db, repositoryId, err);
+      await recordPlanReconcileFailure(db, repositoryId, err).catch(() => undefined);
       throw err;
     });
     return;
   }
   const res = await importPlanMirror(db, repositoryId, repoPath, expectedCheckout);
   if (!res.imported && res.code === 'refused') {
-    await recordPlanMirrorError(db, repositoryId, `Plan snapshot not imported: ${res.reason}`);
+    await recordPlanMirrorError(
+      db,
+      repositoryId,
+      `Plan snapshot not imported: ${res.reason}`,
+    ).catch(() => undefined);
     logger.info({ repositoryId, reason: res.reason }, 'plan mirror not imported');
   }
 }
