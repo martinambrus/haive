@@ -1364,7 +1364,7 @@ export async function enqueueAdvance(
   stepId: string,
   round = 0,
   epoch?: number,
-  opts?: { delayMs?: number },
+  opts?: { delayMs?: number; deduplicate?: boolean },
 ): Promise<void> {
   const queue = getTaskQueue();
   await queue.add(
@@ -1376,9 +1376,27 @@ export async function enqueueAdvance(
       removeOnComplete: 100,
       removeOnFail: 100,
       ...(opts?.delayMs ? { delay: opts.delayMs } : {}),
+      ...(opts?.deduplicate
+        ? { deduplication: { id: `advance-${taskId}-${stepId}-${round}-${epoch}` } }
+        : {}),
     },
   );
 }
+
+/** The advance of a recovery re-drive (the stalled sweep, boot recovery, a dead task's revival):
+ *  each bumped the epoch for this one enqueue, so the id belongs to it alone, and an add retried
+ *  after the first one was lost on the way back collapses onto that job instead of queueing a
+ *  second. BullMQ frees a deduplication id when its job completes, fails or is removed. A plain
+ *  jobId would not: the completed job is kept (removeOnComplete) and an add of its id is dropped
+ *  silently. Not for a park tick, a continuation or a hand-off, which share one epoch: a successor
+ *  added while its predecessor is active would collapse onto it and end the chain. */
+export const enqueueRedrive = (
+  taskId: string,
+  userId: string,
+  stepId: string,
+  round: number,
+  epoch: number,
+): Promise<void> => enqueueAdvance(taskId, userId, stepId, round, epoch, { deduplicate: true });
 
 /** Queue a START as the api's task routes do; the claim makes a duplicate one a no-op. */
 export async function enqueueStart(taskId: string, userId: string): Promise<void> {
@@ -3655,7 +3673,10 @@ export async function recoverParkedStep(
 
 export async function reconcileOrphanedSteps(
   db: Database,
-  deps: ReconcileDeps = { enqueueAdvance, queuedInvocationIds: readQueuedInvocationIds },
+  deps: ReconcileDeps = {
+    enqueueAdvance: enqueueRedrive,
+    queuedInvocationIds: readQueuedInvocationIds,
+  },
 ): Promise<void> {
   const stuckCli = await db
     .select({

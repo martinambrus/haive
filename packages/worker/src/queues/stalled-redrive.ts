@@ -32,8 +32,8 @@ import { recordLeftOpenMerges } from '../step-engine/left-open-merge.js';
 import { releaseTaskMergeClaims } from '../step-engine/merge-dir-claim.js';
 import { discardPlanMerge } from '../step-engine/steps/plan/01-plan-merge.js';
 import {
-  enqueueAdvance,
   enqueueCancel,
+  enqueueRedrive,
   enqueueRepoCleanup,
   enqueueStart,
   finishFailedStep,
@@ -117,7 +117,7 @@ async function readTaskQueueJobs(): Promise<TaskQueueOwed | null> {
 }
 
 export const defaultDeps: StalledRedriveDeps = {
-  enqueueAdvance,
+  enqueueAdvance: enqueueRedrive,
   failTask: (db, f) =>
     finishFailedStep(
       db,
