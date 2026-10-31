@@ -162,7 +162,7 @@ export function swallowedFailure(source, options = {}) {
     if (/^case\b/.test(command)) cases++;
     if (/^esac\b/.test(command)) cases = Math.max(0, cases - 1);
     if (/^fi\b/.test(command)) branches = Math.max(0, branches - 1);
-    if (/^then\b/.test(command)) branches++;
+    if (/^if\b/.test(command)) branches++;
     // A true branch is a conventional empty conditional body. A case pattern `true)`
     // and an argument containing true are not standalone success commands either.
     command = command.replace(/^(?:then|else)\s*/, '');

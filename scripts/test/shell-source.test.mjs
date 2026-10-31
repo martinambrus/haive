@@ -56,3 +56,15 @@ describe('fallback shell separators (item 2)', () => {
       ));
   }
 });
+
+describe('conditional construct balance (item 3)', () => {
+  for (const script of [
+    'if a; then x; elif b; then y; fi\npnpm test\ntrue',
+    'if a; then x; elif b; then y; elif c; then z; else w; fi\ntrue',
+    'if a; then if b; then x; elif c; then y; fi; else z; fi\ntrue',
+  ]) {
+    it(`rejects a bare success after ${JSON.stringify(script)}`, () => rejects(script, 'true'));
+  }
+  it('keeps an empty elif branch valid', () =>
+    assert.equal(swallowedFailure('if a; then x; elif b; then true; else true; fi'), null));
+});
