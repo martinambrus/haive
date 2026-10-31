@@ -252,6 +252,7 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
     );
   }
   if (spec.allStepsBounded) {
+    assert.match(job['timeout-minutes'] ?? '', WHOLE_MINUTES, 'the job needs a whole-minute limit');
     for (const step of steps) {
       assert.match(
         step['timeout-minutes'] ?? '',
@@ -261,6 +262,10 @@ function checkJob(job, spec, workflow = workflows[spec.file]) {
       assert.ok(
         Number(step['timeout-minutes']) >= minimumMinutes(step),
         `${label(step)} needs at least ${minimumMinutes(step)} minutes above measured runtimes`,
+      );
+      assert.ok(
+        Number(step['timeout-minutes']) < Number(job['timeout-minutes']),
+        `${label(step)} needs a step limit below the job limit so a hang cannot consume the whole job`,
       );
     }
   }
@@ -323,6 +328,17 @@ const MUTANTS = [
     },
     (spec) => spec.allStepsBounded,
   ]),
+  ...['setup', 'check'].flatMap((kind) =>
+    [0, 1].map((extra) => [
+      `a ${kind} step limit ${extra ? 'above' : 'equal to'} its job limit`,
+      (job, last) => {
+        job.steps[kind === 'setup' ? 0 : last + 1]['timeout-minutes'] = String(
+          Number(job['timeout-minutes']) + extra,
+        );
+      },
+      (spec) => spec.allStepsBounded,
+    ]),
+  ),
   [
     'a worker smoke limit below measured slack',
     ({ steps }) => {
