@@ -125,6 +125,69 @@ const recorded = (out: GenerateFilesApply): string[] => [
   ...Object.keys(out.wroteFileHashes ?? {}),
 ];
 
+describe('07 stored agent destinations must be catalog directories', () => {
+  const invalidDirs = ['', '.', 'other/agents', '.claude/agents/../agents', '.claude/skills'];
+
+  it.each(invalidDirs)('refuses agent files and the index at %j', async (dir) => {
+    await seed('README.md', 'root README');
+    const { out, warn } = await applyWith(
+      detect([{ dir, format: 'markdown' }, CLAUDE], {
+        acceptedAgentIds: ['code-reviewer'],
+        plannedAgents: ['code-reviewer'],
+      }),
+      { overwrite: true },
+    );
+    expect.soft(await exists('code-reviewer.md')).toBe(false);
+    expect.soft(await read('README.md')).toBe('root README');
+    expect.soft(recorded(out)).not.toContain(`${dir}/code-reviewer.md`);
+    expect.soft(recorded(out)).not.toContain(`${dir}/README.md`);
+    expect(out.skippedFiles).toEqual(
+      expect.arrayContaining([`${dir}/code-reviewer.md`, `${dir}/README.md`]),
+    );
+    expect(warn).toHaveBeenCalled();
+    expect(await exists('.claude/agents/code-reviewer.md')).toBe(true);
+    expect(await exists('.claude/agents/README.md')).toBe(true);
+  });
+
+  it.each(invalidDirs)('refuses quarantine moves and their README at %j', async (dir) => {
+    await seed(`${dir}/old.md`, 'keep original');
+    await seed('.claude/agents/movable.md', 'move ordinary');
+    const { out, warn } = await applyWith(
+      detect([CLAUDE], {
+        unmanagedAgentFiles: [
+          { dir, files: ['old.md'] },
+          { dir: '.claude/agents', files: ['movable.md'] },
+        ],
+      }),
+      { quarantineUnmanagedAgents: true },
+    );
+    expect.soft(await read(`${dir}/old.md`)).toBe('keep original');
+    expect.soft(await exists(`${dir}-legacy/old.md`)).toBe(false);
+    expect(recorded(out)).not.toContain(`${dir}-legacy/README.md`);
+    expect(out.quarantinedAgentFiles).toEqual([
+      { from: '.claude/agents/movable.md', to: '.claude/agents-legacy/movable.md' },
+    ]);
+    expect(out.skippedFiles).toContain(`${dir}/old.md`);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('offers quarantine only for catalog groups', async () => {
+    const form = await generateFilesStep.form!(
+      {} as StepContext,
+      detect([CLAUDE], {
+        unmanagedAgentFiles: [
+          ...invalidDirs.map((dir) => ({ dir, files: ['refused.md'] })),
+          { dir: CLAUDE.dir, files: ['ordinary.md'] },
+        ],
+      }),
+    );
+    const field = form!.fields.find((f) => f.id === 'quarantineUnmanagedAgents');
+    expect(field?.label).toContain('Move 1 unmanaged');
+    expect(field?.description).toContain('ordinary.md');
+    expect(field?.description).not.toContain('refused.md');
+  });
+});
+
 /** 07 takes these paths from the stored detect payload, which nothing validated, so a legacy or
  *  hand-edited one can name git data. */
 describe('generateFilesStep.apply — paths that name git data', () => {

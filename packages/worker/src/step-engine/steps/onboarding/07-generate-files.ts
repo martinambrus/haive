@@ -30,6 +30,7 @@ import {
   normalizeContent,
   sha256Hex,
   unmanagedAgentsDir,
+  AGENT_DIRECTORIES,
 } from '@haive/shared';
 import { agentFilePath } from '@haive/shared/project-state';
 import { cliAdapterRegistry } from '../../../cli-adapters/registry.js';
@@ -478,6 +479,11 @@ export async function findUnmanagedAgentFiles(
   return out;
 }
 
+/** Stored targets must name an exact native agent destination from the provider catalog. */
+function isAgentTargetDir(dir: string): boolean {
+  return !namesGitData(dir) && AGENT_DIRECTORIES.includes(dir);
+}
+
 /** Names are shown, not just counted: the choice is "are these still wanted", which
  *  nobody can answer from a number. */
 const UNMANAGED_NAMES_SHOWN = 12;
@@ -761,8 +767,8 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       detected.existingFiles.length > 0
         ? ` ${detected.existingFiles.length} existing file(s) may be overwritten if you enable overwrite.`
         : '';
-    const unmanaged = (detected.unmanagedAgentFiles ?? []).filter(
-      (group) => !namesGitData(group.dir),
+    const unmanaged = (detected.unmanagedAgentFiles ?? []).filter((group) =>
+      isAgentTargetDir(group.dir),
     );
     const unmanagedCount = unmanaged.reduce((n, g) => n + g.files.length, 0);
     const fields: FormSchema['fields'] = [
@@ -922,6 +928,16 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
       );
     }
     for (const target of targets) {
+      if (!isAgentTargetDir(target.dir)) {
+        const refused = agents.map((agent) => agentFilePath(target, agent.id));
+        if (agents.length > 0 && shouldEmitAgentsReadme(target))
+          refused.push(`${target.dir}/README.md`);
+        for (const rel of refused) {
+          ctx.logger.warn({ rel }, 'did not write an agent file: not a catalog agent destination');
+          skippedFiles.push(rel);
+        }
+        continue;
+      }
       for (const agent of agents) {
         const content = buildAgentFileForTarget(agent, target);
         await writeIfAllowed(agentFilePath(target, agent.id), content);
@@ -936,6 +952,14 @@ export const generateFilesStep: StepDefinition<GenerateFilesDetect, GenerateFile
     // deleted, and to a SIBLING dir rather than a subdirectory — see unmanagedAgentsDir.
     if (values.quarantineUnmanagedAgents === true) {
       for (const group of detected.unmanagedAgentFiles ?? []) {
+        if (!isAgentTargetDir(group.dir)) {
+          for (const name of group.files) {
+            const rel = `${group.dir}/${name}`;
+            ctx.logger.warn({ rel }, 'did not move an agent file: not a catalog agent destination');
+            skippedFiles.push(rel);
+          }
+          continue;
+        }
         const destDir = unmanagedAgentsDir(group.dir);
         for (const name of group.files) {
           const from = `${group.dir}/${name}`;
