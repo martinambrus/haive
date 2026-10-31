@@ -3,6 +3,8 @@ import type { ReactNode } from 'react';
 import { PLAN_CHAT_STEP_ID, PLAN_MERGE_STEP_ID, type PlanMergeState } from '@/lib/api-client';
 import { PlanChat } from './plan-chat';
 import { PlanMergePanel } from './plan-merge-panel';
+import { FormError } from '@/components/ui';
+import { InlineMarkdown } from '@/components/markdown/inline-markdown';
 
 // Hooks on a plain slot list, as in toast-stack.test.tsx: this package has no DOM environment.
 const rt = vi.hoisted(() => {
@@ -61,12 +63,16 @@ vi.mock('react', async (importOriginal) => ({
 const net = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
+  discardPlanMerge: vi.fn(),
+  submitPlanMergeTurn: vi.fn(),
   endPlanChat: vi.fn(),
   messages: undefined as unknown,
 }));
 vi.mock('@/lib/api-client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api-client')>()),
   api: { get: net.get, post: net.post },
+  discardPlanMerge: net.discardPlanMerge,
+  submitPlanMergeTurn: net.submitPlanMergeTurn,
   endPlanChat: net.endPlanChat,
   getPlanMessages: async () => net.messages,
   getPlanBuildClis: async () => ({ plannerCliProviderId: null }),
@@ -100,7 +106,15 @@ function mount<P>(Component: (props: P) => ReactNode, props: P) {
   };
   rt.redraw = draw;
   draw();
-  return () => rt.ran.forEach((effect) => typeof effect.cleanup === 'function' && effect.cleanup());
+  return Object.assign(
+    () => rt.ran.forEach((effect) => typeof effect.cleanup === 'function' && effect.cleanup()),
+    {
+      rerender: (next: P) => {
+        props = next;
+        draw();
+      },
+    },
+  );
 }
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -173,12 +187,15 @@ beforeEach(() => {
   vi.useFakeTimers();
   net.get.mockReset();
   net.post.mockReset().mockResolvedValue(undefined);
+  net.discardPlanMerge.mockReset();
+  net.submitPlanMergeTurn.mockReset().mockResolvedValue(undefined);
   net.endPlanChat.mockReset().mockResolvedValue(undefined);
 });
 afterEach(() => {
   unmount();
   unmount = () => {};
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe('PlanChat with a live conversation', () => {
@@ -350,8 +367,16 @@ describe('PlanMergePanel with a merge task', () => {
     onChanged.mockReset();
     onSettled.mockReset();
     respondWith(response);
-    unmount = mount(PlanMergePanel, { repositoryId: 'repo-1', merge, onChanged, onSettled });
+    const mounted = mount(PlanMergePanel, {
+      repositoryId: 'repo-1',
+      merge: merge as PlanMergeState | null,
+      onChanged,
+      onSettled,
+    });
+    unmount = mounted;
     await settle();
+    return (next: PlanMergeState | null) =>
+      mounted.rerender({ repositoryId: 'repo-1', merge: next, onChanged, onSettled });
   };
 
   it('keeps polling a merge that is still working', async () => {
@@ -399,6 +424,110 @@ describe('PlanMergePanel with a merge task', () => {
   });
 
   const CONFIRM = 'Confirm — merge in and push';
+  const NOTICE =
+    'The merge is no longer open: it completed, was cancelled or failed. Nothing was discarded.';
+  const hasNotice = () =>
+    shown().some((el) => el.props.message === NOTICE || el.props.body === NOTICE);
+
+  it('keeps the already-ended notice after the page refresh removes the merge', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: false });
+    const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+    onSettled.mockImplementationOnce(() => rerender(null));
+
+    await press('Discard');
+
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(hasNotice()).toBe(true);
+    expect(shown().find((el) => el.props.role === 'status')).toBeDefined();
+    expect(labelled('Discard')).toBeUndefined();
+    expect(host('textarea')).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('reports a merge that already ended without treating it as discarded', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: false });
+    await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+
+    await press('Discard');
+
+    expect(net.discardPlanMerge).toHaveBeenCalledWith('repo-1', 'task-1');
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(labelled(CONFIRM)).toBeDefined();
+    expect(host('textarea')).toBeDefined();
+    expect(pulsing()).toBe(false);
+    expect(shown().find((el) => el.type === FormError)?.props.message).toBeNull();
+    const status = shown().find((el) => el.props.role === 'status');
+    expect(status).toBeDefined();
+    expect(shownIn(status).find((el) => el.type === InlineMarkdown)?.props.body).toBe(NOTICE);
+    expect(taskFetches()).toBe(1);
+  });
+
+  it.each(['notice', 'error'] as const)(
+    'resets the old %s and draft for a new merge task',
+    async (outcome) => {
+      vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+      if (outcome === 'notice')
+        net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: false });
+      else net.discardPlanMerge.mockRejectedValue({ message: 'Discard request failed' });
+      const rerender = await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+      await typeDraft('old merge instructions');
+      await press('Discard');
+      expect(
+        outcome === 'notice'
+          ? hasNotice()
+          : shown().some((el) => el.props.message === 'Discard request failed'),
+      ).toBe(true);
+
+      rerender(null);
+      rerender({ ...merge, taskId: 'task-2' });
+      await settle();
+
+      expect(hasNotice()).toBe(false);
+      expect(shown().find((el) => el.type === FormError)?.props.message).toBeNull();
+      expect(host('textarea')?.props.value).toBe('');
+    },
+  );
+
+  it.each(['answer', 'discard'] as const)(
+    'clears the previous outcome when trying to %s again',
+    async (action) => {
+      vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+      net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: false });
+      await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+      await press('Discard');
+      expect(hasNotice()).toBe(true);
+      net.discardPlanMerge.mockRejectedValue({ message: 'Next request failed' });
+      net.submitPlanMergeTurn.mockRejectedValue({ message: 'Next request failed' });
+
+      await press(action === 'answer' ? CONFIRM : 'Discard');
+
+      expect(hasNotice()).toBe(false);
+      expect(shown().find((el) => el.props.role === 'status')).toBeUndefined();
+      expect(shown().find((el) => el.type === FormError)?.props.message).toBe(
+        'Next request failed',
+      );
+    },
+  );
+
+  it('treats the merge as discarded only when DELETE cancelled it', async () => {
+    vi.stubGlobal('window', { confirm: vi.fn(() => true) });
+    net.discardPlanMerge.mockResolvedValue({ ok: true, cancelled: true, taskId: 'task-1' });
+    await open(taskResponse(PLAN_MERGE_STEP_ID, { parked: true }));
+
+    await press('Discard');
+
+    expect(net.discardPlanMerge).toHaveBeenCalledWith('repo-1', 'task-1');
+    expect(onSettled).toHaveBeenCalledTimes(1);
+    expect(labelled(CONFIRM)).toBeUndefined();
+    expect(host('textarea')).toBeUndefined();
+    expect(pulsing()).toBe(true);
+    expect(shown().find((el) => el.type === FormError)?.props.message).toBeNull();
+    expect(taskFetches()).toBe(2);
+    // A second press could only answer "nothing was discarded" about the discard that just happened.
+    expect(labelled('Discard')?.props.disabled).toBe(true);
+  });
 
   it('shows a working merge as working: pulse and nothing to answer', async () => {
     await open(taskResponse(PLAN_MERGE_STEP_ID));
