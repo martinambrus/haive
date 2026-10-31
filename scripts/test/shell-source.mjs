@@ -55,16 +55,24 @@ const atCommand = (text) => commandOf(lastCommand(text) + ' _') === '_';
 // Whether the command being read runs its input as code.
 const readsCode = (text) => kindOf(commandOf(lastCommand(text))) === 'shell';
 
+// Whether a command reads the script it runs from its standard input: a shell that is given no -c
+// string and no script file, or is told to read standard input with -s.
+function readsScript(command) {
+  const [shell, ...args] = command.replace(/\s[-+]\w*[oO]\s+\S+/g, '').split(/\s+/);
+  return (
+    /^(?:bash|sh|dash|ksh|zsh)$/.test(shell) &&
+    !args.some((arg) => /^-\w*c/.test(arg)) &&
+    (args.every((arg) => arg.startsWith('-')) || args.some((arg) => /^-\w*s/.test(arg)))
+  );
+}
+
 // Whether the command being read runs the string it is given as code: the string after bash -c
-// or su -c, any string after eval or ssh, or a herestring fed to a shell.
+// or su -c, any string after eval or ssh, or a herestring fed to a shell that reads its script.
 function readsStrings(text) {
   const command = lastCommand(text);
-  const herestring = /<<<\s*$/.test(command);
   const word = commandOf(command.replace(/<<<\s*$/, ''));
-  return (
-    kindOf(word) === 'shell' &&
-    (herestring || /^(?:eval|ssh)(?=\s|$)|\s-[a-zA-Z]*c[a-zA-Z]*$/.test(word))
-  );
+  if (/<<<\s*$/.test(command)) return readsScript(word);
+  return kindOf(word) === 'shell' && /^(?:eval|ssh)(?=\s|$)|\s-[a-zA-Z]*c[a-zA-Z]*$/.test(word);
 }
 
 // Who reads a heredoc body: the command the operator belongs to and each command piped after it.
@@ -279,7 +287,7 @@ export function shellSource(
           .slice(i + 1)
           .trimStart()
           .split(/[;&|\n]/, 1);
-        if (kindOf(commandOf(next)) === 'shell') {
+        if (readsScript(commandOf(next))) {
           const from = result.length - lastCommand(result).length;
           let end = 0;
           for (const { at, start } of strings)

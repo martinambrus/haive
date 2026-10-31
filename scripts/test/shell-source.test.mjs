@@ -427,6 +427,12 @@ describe('strings that a shell runs as code', () => {
     "printf '%s\\n' 'x || true' | sudo bash",
     "echo 'x || true' |\n  sh",
     "echo 'x || true' | bash -s",
+    "echo 'x || true' | bash -s -- arg",
+    "echo 'x || true' | bash -o pipefail",
+    "echo 'x || true' | bash --noprofile --norc -eo pipefail",
+    "echo 'x || true' | sh -e",
+    "bash -e <<< 'x || true'",
+    "bash -s <<< 'x || true'",
   ]) {
     it(`sees a swallow in ${JSON.stringify(script)}`, () => {
       bashAccepts(script);
@@ -451,6 +457,20 @@ describe('strings that a shell runs as code', () => {
     "sh -c 'x' _ 'y || true'",
   ]) {
     it(`reads the strings of ${JSON.stringify(script)} as words, not as code in pieces`, () => {
+      bashAccepts(script);
+      assert.equal(swallowedFailure(script, { step }), null);
+    });
+  }
+  for (const script of [
+    "echo \"it's\" | docker exec -i c sh -c 'cat > /f'",
+    "echo \"it's\" | sh -c 'cat'",
+    'echo "x || true" | bash script.sh',
+    "echo \"it's\" | ssh host 'cat > f'",
+    'echo "it\'s" | eval "$(echo ls)"',
+    "bash -c 'cat' <<< \"it's\"",
+    'bash script.sh <<< "x || true"',
+  ]) {
+    it(`keeps the data fed to the shell of ${JSON.stringify(script)} inert`, () => {
       bashAccepts(script);
       assert.equal(swallowedFailure(script, { step }), null);
     });
