@@ -716,3 +716,30 @@ it.each(['add', 'clear', 'restore', 'update'])(
     expect(vi.getTimerCount()).toBe(0);
   },
 );
+
+it.each(['exit', 'spawn', 'sync'])(
+  'reports only a safe exit fallback for an exec failure (%s)',
+  async (failure) => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'relink-exec-fallback-'));
+    dirs.push(dir);
+    const sensitive =
+      'https://synthetic-user:synthetic-password@example.test/r?tok=synthetic-token';
+    h.git.mockImplementation((_command, args: string[], options: ExecFileOptions) => {
+      if (args.includes('rev-parse')) return Promise.resolve({ stdout: 'true', stderr: '' });
+      if (failure === 'exit') return startChild('sh', ['-c', 'exit 23', sensitive], options, dir);
+      if (failure === 'spawn')
+        return startChild(path.join(dir, 'missing-git'), [sensitive], options, dir);
+      // execFile throws before returning a promise, and its message quotes this argument.
+      return startChild('git', ['remote', 'add', 'origin', sensitive + '\0argument'], options, dir);
+    });
+    const answer = await link();
+    expect(answer.status).toBe(409);
+    expect(await answer.json()).toEqual({
+      error: `Could not add the remote: exit ${failure === 'exit' ? 23 : -1}`,
+      code: null,
+    });
+    expect(h.git).toHaveBeenCalledTimes(2);
+    expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+    expect(fake.rows(schema.auditEvents)).toEqual([]);
+  },
+);
