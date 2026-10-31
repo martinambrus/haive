@@ -1050,7 +1050,7 @@ From the T480 reviews (2026-10-31). PRE-EXISTING and minor unless stated (each n
 5. [verify-first] The upgrade path passes stored agent targets through `originAgentTargets` unfiltered when the 07 payload records neither `cliTargets` nor `enabledCliProviders` (worker _upgrade-render.ts ~:314-330, shared render-targets.ts ~:223-226), and 02's `safeDiskRel` does not refuse an off-catalog canonical dir; trace whether such a target reaches a write.
 6. Test hygiene from the first T480 review: repository-skill-empty-targets.test.ts ~:298-314 pins nothing new; 09_6-skill-verification.ts ~:147 hides a skill directory whose name holds `\`.
 
-### T495 · FNF[failed-read-answers-2] · more git reads read a failure as "absent" (+4)
+### T495 · FNF[failed-read-answers-2] · more git reads read a failure as "absent" (+8)
 
 status: open
 From the T397 review (2026-10-31). Same class as T397 (git's exit code, never its wording); PRE-EXISTING, minor. See also T379 (git-tree readers).
@@ -1060,6 +1060,10 @@ From the T397 review (2026-10-31). Same class as T397 (git's exit code, never it
 3. [verify-first] _dependency-policy.ts ~:159 and ~:214: `git show <base>:<file>` exit 128 means absent or failed; a failure drops the baseline Drupal protection and `ownedPaths`. `rev-parse -q --verify <base>:<path>` (exit 1) tells absent apart.
 4. [verify-first] project-state/set-aside.ts ~:264-267 (`headOid`) and ~:1147-1152 (`headEntry`): a failed read reads as "HEAD lacks the path" (used for `untracked` ~:519 and in `putBackIndex` ~:1251); guarded by earlier successful reads in the same transaction.
 5. [verify-first] plan/projection-merge.ts ~:34-37 `readBlob` returns null for every failure, and set-aside.ts ~:621 (`restoreFromHead`) and ~:1038 (`putBackProjections`) read null as "HEAD lacks the path": a failed `cat-file` removes the pending working file instead of restoring HEAD's bytes, and the put-back's create-exclusive hits EEXIST (swallowed). The raised marks let the sweep reconcile. From the T397 follow-up review.
+6. git-merge.ts ~:256 `handBackWritten`: `lstatNoFollow(plan.anchor, rel).catch(() => null)` skips a changed path whose stat failed even when `strict` is true (project-state/branch-revert.ts ~:282, ~:476 pass `true`), while a failed chown throws; the same shape T397 removed from `handBackPlan`. From the T397 third review.
+7. git-merge.ts ~:970-973 (fixer leftovers): `lstatNoFollow(..., { strict: true }).catch(() => null)` leaves `owner` undefined, so the `if (owner)` branches (~:1090, ~:1101) skip giving restored files back to the sandbox user. From the T397 third review.
+8. plan/projection-merge.ts ~:415-416: a plan.md-only conflict reads `cat-file blob :.haive-data/plan.json` and treats any non-zero exit as "no plan" (exit 128 covers an absent entry and a failed read), so plan.md takes the incoming side with a warning that blames plan.json; an `ls-files` probe tells them apart. From the T397 third review.
+9. step-engine/steps/onboarding/_stage-paths.ts ~:336-337: `commitRecorded` keeps the loose HEAD read (any non-zero exit means unborn) and ~:330-335 its own ref-resolving MERGE_HEAD/CHERRY_PICK_HEAD probe, a second definition of "operation open" beside `gitOperationInProgress`; a misfiring HEAD read skips the index repair silently. T397 changes that HEAD read; re-check after it lands. From the T120 PR1a second review.
 
 ### T496 · FNF[vendor-call-deadlines] · the worker's usage poll awaits vendor calls with no deadline (+1)
 
