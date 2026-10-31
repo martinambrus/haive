@@ -275,6 +275,33 @@ describe.skipIf(!REDIS_URL)('auth throttle on a real Redis', () => {
       await expectRefused(() => login(email, WRONG));
       expect(throttled()).toHaveLength(2);
     });
+    it.each(['public peer', 'trusted proxy'])(
+      'targets the account on an account trip with a counted %s address',
+      async (source) => {
+        const email = mail(`account-with-address-${source.replaceAll(' ', '-')}`);
+        addUser(email);
+        const viaProxy = source === 'trusted proxy';
+        if (viaProxy) vi.stubEnv('HAIVE_TRUSTED_PROXIES', '10.1.2.3');
+        const address = viaProxy ? '10.5.5.5' : peer(7);
+        const opts = viaProxy
+          ? { peer: '10.1.2.3', headers: { 'x-forwarded-for': address } }
+          : { peer: address };
+        for (let i = 0; i < 10; i++) expect((await login(email, WRONG, opts)).status).toBe(401);
+        expect(await client.zcard(ipKey('login', address))).toBe(10);
+        const lookup = vi.spyOn((h.db as any).query.users, 'findFirst');
+        lookup.mockClear();
+        const response = await login(email, WRONG, opts);
+        expect(response.status).toBe(429);
+        await vi.waitFor(() => expect(throttled()).toHaveLength(1), { timeout: 15_000 });
+        expect(throttled()[0]).toMatchObject({
+          targetId: fake.rows(schema.users)[0]!.id,
+          metadata: { reason: 'throttled', limiter: 'account' },
+        });
+        expect(lookup).toHaveBeenCalledTimes(1);
+        expect(await client.get(`${acctKey('login', email)}:audit`)).toBe('1');
+        expect(await client.exists(`${ipKey('login', address)}:audit`)).toBe(0);
+      },
+    );
     it('uses the rejected address key even for distinct login identifiers', async () => {
       for (let i = 0; i < 30; i++) await login(mail(`audit-ip-${i}`), WRONG, { peer: peer(1) });
       const victim = mail('audit-victim');

@@ -170,7 +170,7 @@ export class AuthThrottleError extends HTTPException {
   constructor(
     res: Response,
     readonly auditAllowed: boolean,
-    readonly limiter: 'account' | 'address' = 'account',
+    readonly limiter: 'account' | 'address',
   ) {
     super(429, { res });
   }

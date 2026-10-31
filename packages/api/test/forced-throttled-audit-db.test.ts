@@ -118,6 +118,7 @@ describe.skipIf(!url)('Forced changes and throttled logins on Postgres', () => {
               { status: 429, headers: { 'Retry-After': '60' } },
             ),
             true,
+            'account',
           ),
         );
         if (refused) await refuseAudit(db, h.actor, { anonymous: true });
