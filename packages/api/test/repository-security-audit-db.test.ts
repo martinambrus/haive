@@ -141,14 +141,31 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
           );
         }
         if (failure === 'commit') {
+          // A prior interrupted run may have left the function behind.
+          await db.execute(
+            sql`CREATE OR REPLACE FUNCTION refuse_remote_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`,
+          );
           await db.execute(
             sql.raw(
-              `CREATE FUNCTION refuse_remote_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'commit refused'; END $$`,
+              `CREATE OR REPLACE FUNCTION refuse_remote_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.target_id = '${repository}'::uuid THEN RAISE EXCEPTION 'commit refused'; END IF; RETURN NEW; END $$`,
             ),
           );
           await db.execute(
             sql`CREATE CONSTRAINT TRIGGER refuse_remote_commit AFTER INSERT ON audit_events DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_remote_commit()`,
           );
+        }
+        if (failure === 'commit') {
+          // The trigger must allow other repositories' audit rows to commit.
+          const [unrelated] = await db
+            .insert(schema.auditEvents)
+            .values({
+              actorUserId: h.actor,
+              action: 'repository.remote.update',
+              targetType: 'repository',
+              targetId: h.actor,
+            })
+            .returning();
+          await db.delete(schema.auditEvents).where(eq(schema.auditEvents.id, unrelated!.id));
         }
         if (failure === 'audit') await refuseAudit(db, h.actor);
         const res = await app.request(`/repos/${repository}/remote`, {
