@@ -74,10 +74,10 @@
     "zod": "^4.6.6"
   },
   "devDependencies": {
-    "@types/dockerode": "^4.0.1",
+    "@types/dockerode": "^4.0.2",
     "jszip": "^3.10.2",
     "tsx": "^4.23.15",
     "typescript": "^5.7.3",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.5"
   }
 }
