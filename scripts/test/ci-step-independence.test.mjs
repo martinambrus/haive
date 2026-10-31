@@ -178,8 +178,13 @@ function checkJob(job, spec) {
       .join('\n');
     assert.doesNotMatch(
       script,
-      /\|\|\s*(?:\\\s*)?(?:true\b|:(?:\s|$))/,
+      /\|\|\s*(?:\\\s*)?(?:true\b|:(?:\s|$)|exit\s+0(?:\s|;|$))/,
       `${label(step)} swallows a command failure`,
+    );
+    assert.doesNotMatch(
+      script,
+      /(?:^|[;\n])\s*(?:true\b|set\s+\+e(?:\s|;|$))/,
+      `${label(step)} hides failures with a success command or disabled errexit`,
     );
   }
   // A failure that does not fail its step leaves the job green, or lets the checks run after it.
@@ -343,6 +348,15 @@ const MUTANTS = [
       step.run = `(${step.run.trim()}) || true`;
     },
   ],
+  ...['|| :', '|| exit 0', '; true', '\nset +e'].map((suffix) => [
+    `survivor: a check swallowing failure with ${suffix.trim()}`,
+    ({ steps }, last) => {
+      const step = steps.slice(last + 1).find((step) => step.run && gatedRows(step) === null);
+      step.run = suffix.includes('set +e')
+        ? `set +e\n${step.run}`
+        : `(${step.run.trim()}) ${suffix}`;
+    },
+  ]),
   [
     'survivor: matrix fail-fast enabled',
     (job) => {
