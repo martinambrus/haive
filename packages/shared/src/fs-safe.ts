@@ -293,14 +293,23 @@ async function walkDir(
 }
 
 const ABSENT = new Set(['ENOENT', 'ENOTDIR']);
+/** Running out of descriptors is the process's condition, not a fact about the entry being read, so
+ *  a listing that took it for absence would come back short without saying so. */
+const RESOURCE_LIMITS: ReadonlySet<string> = new Set(['EMFILE', 'ENFILE']);
 
 /** The refusal rule for reads. `invalid-path` always throws; absence is `null`; a containment
  *  refusal is `null` unless `strict`, when it throws; any other errno is `null` when lenient and
- *  rethrown when strict. Mutations (later primitives) always throw. */
-async function readResult<T>(strict: boolean | undefined, fn: () => Promise<T>): Promise<T | null> {
+ *  rethrown when strict, and an errno in `rethrow` is thrown in either mode. Mutations (later
+ *  primitives) always throw. */
+async function readResult<T>(
+  strict: boolean | undefined,
+  fn: () => Promise<T>,
+  rethrow?: ReadonlySet<string>,
+): Promise<T | null> {
   try {
     return await fn();
   } catch (err) {
+    if (rethrow?.has(errno(err) ?? '')) throw err;
     if (isPathContainmentError(err)) {
       if (strict || err.reason === 'invalid-path') throw err;
       return null;
@@ -524,11 +533,46 @@ export interface WalkFilesOptions {
   skipNames?: readonly string[];
 }
 
+/** The lenient rule for entries below a held directory, for a listing that must not come back short:
+ *  an entry that is absent or refused reads as `null`, but a resource limit is thrown. */
+const readListed = <T>(fn: () => Promise<T>): Promise<T | null> =>
+  readResult(false, fn, RESOURCE_LIMITS);
+
+/** Whether the held directory is still at the path it was opened at. */
+const stillHeld = (dir: HeldDir, anchor: string, dirRel: string): Promise<boolean> =>
+  assertHeldAt(dir.fh, dir.real, anchor, dirRel, dirRel).then(
+    () => true,
+    () => false,
+  );
+
+/** `lstat` of `name` below a held directory that is first verified to still sit at `dirRel`.
+ *  `undefined` when the directory has moved, so nothing below it can be trusted; `null` when the
+ *  entry is gone or refused. */
+async function lstatHeld(
+  dir: HeldDir,
+  anchor: string,
+  dirRel: string,
+  name: string,
+): Promise<Stats | null | undefined> {
+  if (!(await stillHeld(dir, anchor, dirRel))) return undefined;
+  return readListed(() => lstat(at(dir.fh.fd, name)));
+}
+
+/** How many levels below its start directory the walk enters (the start itself is level 0). It holds
+ *  one `O_PATH` descriptor per level, so the bound is also its descriptor budget: 128 levels is a
+ *  small part of even a 1024-descriptor soft limit, and nearly ten times the deepest directory in
+ *  this repository's checkout with `node_modules` (13 levels, measured). `PATH_MAX` would end a walk
+ *  near 2000 levels anyway, and only a tree built to exhaust descriptors comes close to this. */
+export const WALK_MAX_DEPTH = 128;
+
 /** Sorted depth-first regular files, relative to relDir, with sizes. Holds each directory while
- * reading its entries instead of resolving each file from the anchor. Links are never followed;
- * a missing or refused directory contributes nothing (there is no strict mode). Breaking
- * iteration closes every held descriptor. Each lookup verifies the parent's held inode is still
- * where expected. */
+ * reading its entries instead of resolving each file from the anchor. Links, FIFOs, sockets and
+ * devices are never opened and cost no syscall; a missing or refused directory contributes nothing
+ * (there is no strict mode). Each directory or file examined is first checked to still sit where the
+ * walk expects it. A listing is never silently short: running out of descriptors (EMFILE, ENFILE) and
+ * a directory deeper than WALK_MAX_DEPTH levels are thrown. Drive it with `for await` or call
+ * `return()`: breaking out of it, or a throw in the loop body, closes every held descriptor, but a
+ * generator dropped after a manual `next()` keeps them. */
 export async function* walkFilesNoFollow(
   anchor: string,
   relDir: string,
@@ -536,15 +580,16 @@ export async function* walkFilesNoFollow(
 ): AsyncGenerator<{ path: string; size: number }> {
   const safe = toSafeRel(relDir);
   const skip = new Set(opts.skipNames);
-  const root = await readResult(false, () => walkDir(anchor, safe, segments(safe)));
+  const root = await readListed(() => walkDir(anchor, safe, segments(safe)));
   if (root === null) return;
   async function* visit(
     dir: HeldDir,
     dirRel: string,
     outputRel: string,
+    depth: number,
   ): AsyncGenerator<{ path: string; size: number }> {
     try {
-      const entries = await readResult(false, async () => {
+      const entries = await readListed(async () => {
         await assertHeldAt(dir.fh, dir.real, anchor, dirRel, dirRel);
         return readdir(fdPath(dir.fh.fd), { withFileTypes: true });
       });
@@ -552,15 +597,16 @@ export async function* walkFilesNoFollow(
       entries.sort((a, b) => a.name.localeCompare(b.name));
       for (const entry of entries) {
         if (skip.has(entry.name)) continue;
-        const held = await readResult(false, async () => {
-          await assertHeldAt(dir.fh, dir.real, anchor, dirRel, dirRel);
-          return true;
-        });
-        if (held === null) return;
         const childRel = dirRel ? `${dirRel}/${entry.name}` : entry.name;
         const childOutput = outputRel ? `${outputRel}/${entry.name}` : entry.name;
         if (entry.isDirectory()) {
-          const child = await readResult(false, async () => {
+          if (depth >= WALK_MAX_DEPTH) {
+            throw new Error(
+              `Directory ${safe || '.'} nests deeper than the ${WALK_MAX_DEPTH}-level limit`,
+            );
+          }
+          if (!(await stillHeld(dir, anchor, dirRel))) return;
+          const child = await readListed(async () => {
             const fh = await open(at(dir.fh.fd, entry.name), O_PATH | O_DIRECTORY | O_NOFOLLOW);
             const real = below(dir.real, entry.name);
             try {
@@ -571,9 +617,10 @@ export async function* walkFilesNoFollow(
               throw err;
             }
           });
-          if (child !== null) yield* visit(child, childRel, childOutput);
+          if (child !== null) yield* visit(child, childRel, childOutput, depth + 1);
         } else if (entry.isFile()) {
-          const stats = await readResult(false, () => lstat(at(dir.fh.fd, entry.name)));
+          const stats = await lstatHeld(dir, anchor, dirRel, entry.name);
+          if (stats === undefined) return;
           if (stats?.isFile()) yield { path: childOutput, size: Number(stats.size) };
         }
       }
@@ -581,7 +628,7 @@ export async function* walkFilesNoFollow(
       await closeQuietly(dir.fh);
     }
   }
-  yield* visit(root, safe, '');
+  yield* visit(root, safe, '', 0);
 }
 
 export type EntryKind = 'file' | 'directory' | 'symlink' | 'other';
