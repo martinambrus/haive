@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { readdirSync, renameSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -33,7 +33,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
-import { WALK_MAX_DEPTH, walkFilesNoFollow } from '../src/fs-safe.js';
+import { readdirSizesNoFollow, WALK_MAX_DEPTH, walkFilesNoFollow } from '../src/fs-safe.js';
 
 const run = promisify(execFile);
 const errnoError = (code: string) => Object.assign(new Error(`${code}: injected`), { code });
@@ -147,5 +147,60 @@ describe('the held directory is verified only before an entry is opened or exami
     expect(await collect(walkFilesNoFollow(root, 'tree'))).toEqual(['f1', 'f2', 'f3']);
 
     expect(h.calls.readlink).toBe(withoutSkipped);
+  });
+});
+
+describe('the directory listing with sizes', () => {
+  const files = async () => {
+    await mkdir(path.join(root, 'tree'));
+    for (const name of ['f1', 'f2', 'f3']) await writeFile(path.join(root, 'tree', name), name);
+  };
+
+  it.each<[string, string, (call: string, target: string) => boolean]>([
+    ['EMFILE', 'the directory is read', (call) => call === 'readdir'],
+    [
+      'ENFILE',
+      'a file is examined',
+      (call, target) => call === 'lstat' && /\/fd\/\d+\/f2$/.test(target),
+    ],
+  ])('throws %s when %s, never a null size', async (code, _what, hits) => {
+    await files();
+    h.fault = (call, target) => (hits(call, target) ? errnoError(code) : undefined);
+    const before = openFds();
+
+    await expect(readdirSizesNoFollow(root, 'tree')).rejects.toMatchObject({ code });
+
+    expect(openFds()).toBe(before);
+  });
+
+  it('still reports no size for a file it is merely refused', async () => {
+    await files();
+    h.fault = (call, target) =>
+      call === 'lstat' && /\/fd\/\d+\/f2$/.test(target) ? errnoError('EACCES') : undefined;
+
+    const listed = await readdirSizesNoFollow(root, 'tree');
+
+    expect(listed?.map((entry) => [entry.name, entry.size]).sort()).toEqual([
+      ['f1', 2],
+      ['f2', null],
+      ['f3', 2],
+    ]);
+  });
+
+  it('verifies the held directory before each size: once it has moved, no size is read', async () => {
+    await files();
+    // The directory is renamed just before the first size is read, so the first file is the only
+    // one whose check ran while the directory was still in place.
+    h.fault = (call) => {
+      if (call === 'lstat' && h.calls.lstat === 1) {
+        renameSync(path.join(root, 'tree'), path.join(root, 'moved'));
+      }
+      return undefined;
+    };
+
+    const listed = await readdirSizesNoFollow(root, 'tree');
+
+    expect(listed).toHaveLength(3);
+    expect(listed?.filter((entry) => entry.size !== null)).toHaveLength(1);
   });
 });

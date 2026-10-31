@@ -631,6 +631,44 @@ export async function* walkFilesNoFollow(
   yield* visit(root, safe, '', 0);
 }
 
+export interface ListedEntry {
+  name: string;
+  isDirectory: boolean;
+  /** The size of a regular file; `null` for anything else (a link included, which is neither a file
+   *  nor a directory here), and for a file whose size was refused or that has gone. */
+  size: number | null;
+}
+
+/** The entries of the directory at `<anchor>/<relDir>` in directory order, one level, each regular
+ *  file with its size. The sizes are read through the held directory, each after checking it still
+ *  sits where it was opened, instead of resolving every file from the anchor again. Strict, like
+ *  `openDirNoFollow`: a link or a non-directory in the path throws and a missing directory is
+ *  `null`. Running out of descriptors (EMFILE, ENFILE) throws rather than reading as `size: null`. */
+export async function readdirSizesNoFollow(
+  anchor: string,
+  relDir: string,
+): Promise<ListedEntry[] | null> {
+  const safe = toSafeRel(relDir);
+  return readResult(true, async () => {
+    const dir = await walkDir(anchor, safe, segments(safe));
+    try {
+      const entries = await readdir(fdPath(dir.fh.fd), { withFileTypes: true });
+      const listed: ListedEntry[] = [];
+      for (const entry of entries) {
+        const stats = entry.isFile() ? await lstatHeld(dir, anchor, safe, entry.name) : null;
+        listed.push({
+          name: entry.name,
+          isDirectory: entry.isDirectory(),
+          size: stats?.isFile() ? stats.size : null,
+        });
+      }
+      return listed;
+    } finally {
+      await closeQuietly(dir.fh);
+    }
+  });
+}
+
 export type EntryKind = 'file' | 'directory' | 'symlink' | 'other';
 
 export interface EntryInfo {

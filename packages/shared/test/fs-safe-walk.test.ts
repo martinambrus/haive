@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, expect, it } from 'vitest';
-import { walkFilesNoFollow } from '../src/fs-safe.js';
+import { readdirSizesNoFollow, walkFilesNoFollow } from '../src/fs-safe.js';
 
 const run = promisify(execFile);
 let root: string;
@@ -128,6 +128,42 @@ it('has no strict mode: a refused root lists nothing', async () => {
 it('rejects invalid relative paths', async () => {
   await fixture();
   await expect(walkFilesNoFollow(root, '../outside').next()).rejects.toMatchObject({
+    reason: 'invalid-path',
+  });
+});
+
+const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name);
+it('lists a directory with the size of each regular file and no other size', async () => {
+  await fixture();
+  const listed = await readdirSizesNoFollow(root, 'tree');
+  expect(listed?.sort(byName)).toEqual([
+    { name: 'a', isDirectory: true, size: null },
+    { name: 'b', isDirectory: false, size: 5 },
+    { name: 'dangling', isDirectory: false, size: null },
+    { name: 'linked-dir', isDirectory: false, size: null },
+    { name: 'linked-file', isDirectory: false, size: null },
+    { name: 'pipe', isDirectory: false, size: null },
+    { name: 'sock', isDirectory: false, size: null },
+  ]);
+});
+it('lists the anchor itself for an empty path, one level only', async () => {
+  await fixture();
+  const names = (await readdirSizesNoFollow(root, ''))?.map((entry) => entry.name).sort();
+  expect(names).toEqual(['outside', 'tree']);
+});
+it('answers a missing directory with null and refuses a link or a file in its place', async () => {
+  await fixture();
+  expect(await readdirSizesNoFollow(root, 'missing')).toBeNull();
+  await expect(readdirSizesNoFollow(root, 'tree/linked-dir')).rejects.toMatchObject({
+    reason: 'link',
+  });
+  await expect(readdirSizesNoFollow(root, 'tree/linked-dir/sub')).rejects.toMatchObject({
+    reason: 'link',
+  });
+  await expect(readdirSizesNoFollow(root, 'tree/b')).rejects.toMatchObject({
+    reason: 'not-directory',
+  });
+  await expect(readdirSizesNoFollow(root, '../outside')).rejects.toMatchObject({
     reason: 'invalid-path',
   });
 });
