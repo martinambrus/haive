@@ -68,3 +68,41 @@ describe('conditional construct balance (item 3)', () => {
   it('keeps an empty elif branch valid', () =>
     assert.equal(swallowedFailure('if a; then x; elif b; then true; else true; fi'), null));
 });
+
+describe('executable heredocs (item 4)', () => {
+  for (const command of [
+    'bash',
+    'sh',
+    'ssh host',
+    'docker exec -i container sh',
+    '/bin/bash',
+    'env X=y bash',
+  ]) {
+    it(`sees a swallow fed to ${command}`, () =>
+      rejects(`${command} <<'EOF'\npnpm test || true\nEOF`));
+    it(`sees Redis fed to ${command}`, () =>
+      assert.ok(shellSource(`${command} <<'EOF'\nexport X=${url}\nEOF`).includes(url)));
+  }
+  for (const command of ['node', 'python', 'python3 -', 'psql']) {
+    it(`sees Redis fed to ${command}`, () =>
+      assert.ok(shellSource(`${command} <<'EOF'\nclient("${url}")\nEOF`).includes(url)));
+  }
+  for (const body of ['$(pnpm test || true)', '`pnpm test || true`']) {
+    it(`sees an unquoted substitution ${body}`, () => rejects(`cat <<EOF\n${body}\nEOF`));
+    it(`sees Redis in an unquoted substitution ${body}`, () =>
+      assert.ok(
+        shellSource(`cat <<EOF\n${body.replace('pnpm test || true', `echo ${url}`)}\nEOF`).includes(
+          url,
+        ),
+      ));
+  }
+  for (const command of ['cat', 'tee file', '>file']) {
+    it(`keeps quoted data for ${command} inert`, () => {
+      const script = `${command} <<'EOF'\nset +e\n$(cmd || true)\n${url}\nEOF`;
+      assert.equal(swallowedFailure(script), null);
+      assert.ok(!shellSource(script).includes(url));
+    });
+  }
+  it('keeps an interpreter name in an echo argument inert', () =>
+    assert.equal(swallowedFailure("echo bash <<'EOF'\ncmd || true\nEOF"), null));
+});

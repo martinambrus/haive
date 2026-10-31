@@ -1,5 +1,20 @@
 // Conservative lexical filter for workflow safety pins. Uncertain syntax fails closed.
 // Keep quoted strings for URL scans, and expose executable substitutions for command scans.
+function heredocConsumer(header) {
+  // Recognize the command, including common dispatch wrappers, rather than an argument to echo.
+  const command = header
+    .split(/[;|&\n]/)
+    .at(-1)
+    .trim()
+    .replace(/^(?:[A-Za-z_]\w*=\S+\s+|env\s+|command\s+|exec\s+)+/, '');
+  const shell = /^(?:['"]?(?:\/[^\s'"/]+)*\/?)?(?:bash|sh|dash|ksh|zsh|ssh)\b/;
+  if (shell.test(command) || /^docker\s+exec\b.*\s(?:bash|sh|dash|ksh|zsh)(?:\s|$)/.test(command))
+    return 'shell';
+  if (/^(?:['"]?(?:\/[^\s'"/]+)*\/?)?(?:node|python[\d.]*|psql|ruby|perl|php)\b/.test(command))
+    return 'interpreter';
+  return 'data';
+}
+
 export function shellSource(source, { maskQuotes = false, step = 'shell script' } = {}) {
   const fail = (what) => {
     throw new Error(`${step}: unterminated ${what}`);
@@ -95,12 +110,13 @@ export function shellSource(source, { maskQuotes = false, step = 'shell script' 
         let wordStart = i + 2 + Number(tabs);
         while (/[ \t]/.test(source[wordStart] ?? '')) wordStart++;
         const word = delimiterWord(wordStart);
-        heredocs.push({ ...word, tabs });
+        heredocs.push({ ...word, tabs, consumer: heredocConsumer(source.slice(start, i)) });
         result += maskQuotes ? '<<_' : source.slice(i, word.end);
         i = word.end;
       } else if (char === '\n') {
         result += source[i++];
-        for (const { delimiter, tabs } of heredocs.splice(0)) {
+        for (const { delimiter, tabs, quotedWord, consumer } of heredocs.splice(0)) {
+          let body = '';
           let terminated = false;
           while (i < source.length) {
             const end = source.indexOf('\n', i);
@@ -111,8 +127,12 @@ export function shellSource(source, { maskQuotes = false, step = 'shell script' 
               terminated = true;
               break;
             }
+            body += (tabs ? line.replace(/^\t+/, '') : line) + '\n';
           }
           if (!terminated) fail(`heredoc ${JSON.stringify(delimiter)}`);
+          if (consumer === 'shell' || (!quotedWord && /(?<!\\)(?:\$\(|`)/.test(body))) {
+            result += '\n' + shellSource(body, { maskQuotes, step }) + '\n';
+          } else if (consumer === 'interpreter' && !maskQuotes) result += '\n' + body + '\n';
         }
       } else if (!parameter && source.startsWith(';;', i)) {
         if (cases.length) cases.at(-1).pattern = true;
