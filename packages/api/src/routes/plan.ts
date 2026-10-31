@@ -1,4 +1,4 @@
-import { safeErrorMessage } from '@haive/shared/logger';
+import { scrubErrorPaths } from '@haive/shared/logger';
 import { Hono } from 'hono';
 import { execFile } from 'node:child_process';
 import { access } from 'node:fs/promises';
@@ -488,7 +488,7 @@ planRoutes.post('/:id/plan/snapshot/save', async (c) => {
   } catch (err) {
     throw new HttpError(
       409,
-      err instanceof Error ? safeErrorMessage(err) : 'Could not save the plan snapshot',
+      err instanceof Error ? scrubErrorPaths(err) : 'Could not save the plan snapshot',
       'plan_snapshot_save_failed',
     );
   }
@@ -509,7 +509,7 @@ planRoutes.post('/:id/plan/snapshot/pull', async (c) => {
   } catch (err) {
     throw new HttpError(
       409,
-      err instanceof Error ? safeErrorMessage(err) : 'Could not pull the plan snapshot',
+      err instanceof Error ? scrubErrorPaths(err) : 'Could not pull the plan snapshot',
       'plan_snapshot_pull_failed',
     );
   }
@@ -1039,7 +1039,7 @@ planRoutes.delete('/:id/plan', async (c) => {
     db,
     { ops: [{ op: 'delete', nodeRef: root.id }] },
     { repositoryId, origin: 'user' },
-  );
+  ).catch(planError);
   await enqueuePlanMirrorRefresh(repositoryId, userId);
 
   // Mirror second: the database is the source of truth and these files are

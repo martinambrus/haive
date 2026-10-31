@@ -379,6 +379,8 @@ jobs:
           worker test/git-data-ledger-rows-db.test.ts GIT_DATA_LEDGER_TEST_URL git_data_ledger_test pg
           worker test/project-state-gone-checkout-db.test.ts GONE_CHECKOUT_STATE_TEST_URL gone_checkout_state_test pg
           worker test/plan-mirror-gone-checkout-db.test.ts GONE_CHECKOUT_PLAN_TEST_URL gone_checkout_plan_test pg
+          worker test/repo-error-repair-db.test.ts REPO_ERROR_REPAIR_TEST_URL repo_error_repair_test pg
+          worker test/plan-error-repair-db.test.ts PLAN_ERROR_REPAIR_TEST_URL plan_error_repair_test pg
           shared test/global-kb-identifier-tsv.test.ts HAIVE_GKB_TEST_DB_URL gkb_identifier_tsv_test pgvector
           shared test/global-kb-ensure-bound.test.ts HAIVE_GKB_TEST_DB_URL gkb_ensure_bound_test pgvector
           worker test/rag-schema.test.ts HAIVE_GKB_TEST_DB_URL rag_schema_test pgvector
