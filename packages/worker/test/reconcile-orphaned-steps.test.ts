@@ -32,6 +32,11 @@ function tableNameOf(table: unknown): string {
   return '';
 }
 
+/** What `.limit()` hands back: awaited as it is, or locked with `.for()` (the requeue reads its row so). */
+function lockable<T>(rows: T[]) {
+  return Object.assign(Promise.resolve(rows), { for: async (_strength: string) => rows });
+}
+
 interface RecordedUpdate {
   table: string;
   set: Record<string, unknown>;
@@ -58,7 +63,7 @@ function makeDb(recorded: RecordedUpdate[]): Database {
       from: (_table: unknown) => {
         const whereFn = (_cond: unknown) => ({
           // requeueAbandonedOrphan's read of the step row — empty, so it returns early.
-          limit: async (_n: number) => [],
+          limit: (_n: number) => lockable([]),
           // The two reconcile passes await .where() directly. Pass 1 finds the stuck step,
           // pass 2 (steps left `running`) finds nothing.
           then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
@@ -74,6 +79,7 @@ function makeDb(recorded: RecordedUpdate[]): Database {
         },
       }),
     }),
+    transaction: async (fn: (tx: unknown) => unknown) => fn(db),
   } as unknown as Database;
   return db;
 }
@@ -160,7 +166,7 @@ function makeCurrentStepDb(recorded: RecordedUpdate[], scenario: CurrentStepScen
           return [];
         };
         const whereFn = (_cond: unknown) => ({
-          limit: async (_n: number) => limited(),
+          limit: (_n: number) => lockable(limited()),
           then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
             Promise.resolve(rows()).then(onOk, onErr),
         });
@@ -218,7 +224,7 @@ function makeAbandonedRunningDb(recorded: RecordedUpdate[], requeueLands = true)
     select: (_fields?: unknown) => ({
       from: (table: unknown) => {
         const whereFn = (_cond: unknown) => ({
-          limit: async (_n: number) => (tableNameOf(table) === 'task_steps' ? [stepRow] : []),
+          limit: (_n: number) => lockable(tableNameOf(table) === 'task_steps' ? [stepRow] : []),
           then: (onOk: (r: unknown) => unknown, onErr?: (e: unknown) => unknown) =>
             Promise.resolve(joinedReads++ === 1 ? [abandoned] : []).then(onOk, onErr),
         });

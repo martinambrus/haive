@@ -2,6 +2,7 @@ import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDatabase, schema, type Database } from '@haive/database';
 import { resetStepAndDownstream } from '../src/queues/_step-reset.js';
+import { reconcileOrphanedSteps } from '../src/queues/task-queue.js';
 
 const url = process.env.WORKER_STEP_FOLD_PREREAD_TEST_URL;
 if (url && !new URL(url).pathname.startsWith('/worker_step_fold_preread_test'))
@@ -19,6 +20,9 @@ const STEP_ID = '02-fold-preread';
 const BLIND_INDEX = 'worker-step-fold-preread-test-user';
 const BLOCKED_WITHIN_MS = 10_000;
 const TEST_TIMEOUT = 30_000;
+
+const OTHER_STEP_ID = '03-the-task-moved-here';
+const ORPHAN_AGE_MS = 10 * 60_000;
 
 const SEED = { work: 1000, idle: 200, user: 50, liveIdle: 4000, liveUser: 800 } as const;
 const PEER = { work: 7000, idle: 3000, user: 500, liveIdle: 2000 } as const;
@@ -210,6 +214,42 @@ describe.skipIf(!url)('worker step folds beside a peer that updates the row, on 
         idle: 9_200,
         user: 1_350,
       });
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'G2: requeueAbandonedOrphan folds the row the peer left, not the row it read before its transaction',
+    async () => {
+      const startedAt = new Date(Date.now() - ORPHAN_AGE_MS);
+      const taskId = await seedTask({ currentStepId: OTHER_STEP_ID, currentRound: 0 });
+      const rowId = await seedRow(taskId, { status: 'running', startedAt });
+
+      const before = Date.now();
+      await whilePeerHoldsRow(rowId, () =>
+        reconcileOrphanedSteps(db, {
+          enqueueAdvance: async () => undefined,
+          queuedInvocationIds: async () => new Set<string>(),
+        }),
+      );
+      const after = Date.now();
+
+      const row = await rowOf(rowId);
+      expect(row).toMatchObject({ status: 'pending', startedAt: null, idleMs: 0, userActiveMs: 0 });
+      const carried = carriedOf(row);
+      // The run is still open, so its whole span folds into idle and none into work: work is seed 1000 + peer
+      // 7000, user is seed 50 + peer 500 + the row's 800. The row read before the peer committed writes 1000 / 850.
+      expect(
+        { work: carried.work, user: carried.user },
+        'carried work and user after the peer and the fold',
+      ).toEqual({ work: 8_000, user: 1_350 });
+      // seed 200 + peer 3000 + the span from started_at to the fold, which ran between before and after.
+      const lowest = 3_200 + (before - startedAt.getTime());
+      const highest = 3_200 + (after - startedAt.getTime());
+      expect(carried.idle, 'carried idle after the peer and the fold').toBeGreaterThanOrEqual(
+        lowest,
+      );
+      expect(carried.idle, 'carried idle after the peer and the fold').toBeLessThanOrEqual(highest);
     },
     TEST_TIMEOUT,
   );

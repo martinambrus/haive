@@ -3307,15 +3307,17 @@ const ABANDONED_RUN_MESSAGE =
  *  reclassifies the open (never-closed) run as idle, so the crash downtime does not land in
  *  carried_work. iterations/output/detect are preserved, as in the runtime park. */
 async function requeueAbandonedOrphan(db: Database, taskStepId: string): Promise<void> {
-  const rows = await db
-    .select()
-    .from(schema.taskSteps)
-    .where(eq(schema.taskSteps.id, taskStepId))
-    .limit(1);
-  const row = rows[0];
-  if (!row) return;
-  const fold = computeFoldContribution(row, Date.now());
   await db.transaction(async (tx) => {
+    // Locked by this read and held to commit, so the row is current: a read before the tx would
+    // predate the lock, and folding from it would overwrite a peer's carried_* or idle_ms change.
+    const [row] = await tx
+      .select()
+      .from(schema.taskSteps)
+      .where(eq(schema.taskSteps.id, taskStepId))
+      .limit(1)
+      .for('no key update');
+    if (!row) return;
+    const fold = computeFoldContribution(row, Date.now());
     const [requeued] = await tx
       .update(schema.taskSteps)
       .set({
