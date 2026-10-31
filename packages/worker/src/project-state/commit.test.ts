@@ -165,7 +165,7 @@ describe('commit read and repair controls', () => {
     await expect(save(dir)).resolves.toMatchObject({ committed: true, indexSynced: true });
     expect((await gitRun(dir, ['rev-list', '--count', 'HEAD'])).stdout.trim()).toBe('1');
   });
-  it.each(['record', 'head', 'tree', 'blob', 'plan-stat', 'plan'] as const)(
+  it.each(['record', 'head', 'tree', 'blob', 'plan-stat', 'plan', 'index'] as const)(
     'classifies unreadable HEAD %s before committing',
     async (site) => {
       const dir = await fixture();
@@ -193,7 +193,9 @@ describe('commit read and repair controls', () => {
               ? args[0] === 'cat-file'
               : site === 'plan'
                 ? args[0] === 'ls-tree' && args.some((a) => a.includes('plan.json'))
-                : args[0] === 'ls-tree' && args.includes('-r');
+                : site === 'index'
+                  ? args[0] === 'diff-index'
+                  : args[0] === 'ls-tree' && args.includes('-r');
         return fails ? { code: 128, stdout: '', stderr: 'unreadable' } : run(cwd, args, ...rest);
       });
       await expect(save(dir)).rejects.toHaveProperty('refusal.code', 'record_unreadable');
@@ -244,6 +246,52 @@ describe('commit read and repair controls', () => {
     expect(await save(dir)).toMatchObject({ committed: false, indexSynced: true });
     expect((await gitRun(dir, ['diff', '--cached', '--name-only'])).stdout).toBe('');
   }, 15_000);
+  it('repairs a deleted projection after a locked sync without touching an unknown staged name', async () => {
+    const dir = await fixture();
+    await record(dir, { 'rtk-version': '1' });
+    await save(dir);
+    const removed = '.haive-data/state/settings/rtk-version.json';
+    const unknown = '.haive-data/state/settings/personal.txt';
+    await writeFile(join(dir, unknown), 'personal staged bytes\n');
+    expect((await gitRun(dir, ['add', unknown])).code).toBe(0);
+    const staged = (await gitRun(dir, ['ls-files', '--stage', '--', unknown])).stdout;
+    await rm(join(dir, unknown));
+    await rm(join(dir, removed));
+    const lock = join(dir, '.git/index.lock');
+    await writeFile(lock, 'held by another writer');
+    const waitForIndexRetry = async () => undefined;
+    expect(await save(dir, undefined, waitForIndexRetry)).toMatchObject({
+      committed: true,
+      files: [removed],
+      indexSynced: false,
+    });
+    const head = (await gitRun(dir, ['rev-parse', 'HEAD'])).stdout;
+    expect((await gitRun(dir, ['ls-tree', '-r', '--name-only', 'HEAD'])).stdout).not.toContain(
+      removed,
+    );
+    expect(
+      (await gitRun(dir, ['diff', '--cached', '--diff-filter=A', '--name-only'])).stdout,
+    ).toContain(removed);
+    expect(await save(dir, undefined, waitForIndexRetry)).toMatchObject({
+      committed: false,
+      commitSha: null,
+      indexSynced: false,
+    });
+    await rm(lock);
+    expect(await save(dir)).toMatchObject({
+      committed: false,
+      commitSha: null,
+      files: [],
+      indexSynced: true,
+    });
+    expect((await gitRun(dir, ['rev-parse', 'HEAD'])).stdout).toBe(head);
+    expect((await gitRun(dir, ['diff', '--cached', '--name-only'])).stdout.trim()).toBe(unknown);
+    expect((await gitRun(dir, ['ls-files', '--stage', '--', unknown])).stdout).toBe(staged);
+    expect((await gitRun(dir, ['commit', '-qm', 'personal'], identity)).code).toBe(0);
+    expect((await gitRun(dir, ['ls-tree', '-r', '--name-only', 'HEAD'])).stdout).not.toContain(
+      removed,
+    );
+  });
 });
 
 it('a clean no-op never writes the real index, even with a stale index.lock', async () => {
