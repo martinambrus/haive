@@ -1104,6 +1104,8 @@ describe.skipIf(!url)('the stalled sweep and a running row nothing drives, on Po
     it('W7: is what a refused continuation add leaves behind, and the sweep takes it', async () => {
       const { taskId, rowId } = await parkedOnCli();
       const runId = await endedRun(taskId, rowId);
+      // Every ask is refused, so the add's own retries (REDRIVE_RETRY_DELAYS_MS: 1 s, then 3 s) run
+      // out before the refusal reaches the caller.
       h.addRefused = true;
       await expect(
         resumeStepIfLinked(
