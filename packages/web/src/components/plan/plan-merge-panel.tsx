@@ -21,6 +21,23 @@ import { isTaskDead } from '@/lib/step-banners';
 
 const POLL_MS = 2000;
 const DEAD_POLL_MS = 30_000;
+const ENDED_MERGE_STATUSES = new Set<Task['status']>(['completed', 'cancelled', 'failed']);
+
+type MergeNotice = { taskId: string; text: string; retry?: boolean };
+
+function mergeOutcome(taskId: string, task: Task): MergeNotice | null {
+  if (!ENDED_MERGE_STATUSES.has(task.status)) return null;
+  return {
+    taskId,
+    text:
+      task.status === 'completed'
+        ? 'The remote was merged into your checkout and pushed.'
+        : task.status === 'cancelled'
+          ? 'This merge was cancelled elsewhere. Its scratch worktree may be discarded unless another merge holds it. This does not undo changes already merged into your checkout.'
+          : 'The merge failed. Retry on its task resumes it while its scratch worktree is still there. A Save or Pull may discard it.',
+    retry: task.status === 'failed',
+  };
+}
 
 /**
  * The merge conversation, answered here rather than on the task page.
@@ -50,15 +67,15 @@ export function PlanMergePanel({
   merge: PlanMergeState | null;
   /** Re-read the merge (new turns in the transcript). */
   onChanged: () => void;
-  /** Called when the merge lands or a discard settles (including when nothing was discarded),
-   *  so the page can refresh. */
+  /** Called when an end is polled or recovered, or a discard settles (including when
+   *  nothing was discarded), so the page can refresh. */
   onSettled: () => void;
 }) {
   const [liveStep, setLiveStep] = useState<TaskStep | null>(null);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{ taskId: string; text: string } | null>(null);
+  const [notice, setNotice] = useState<MergeNotice | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   // Refs, not poll dependencies: the page passes both inline and the poll calls them when it
   // settles, so depending on them would re-poll a parked merge on every page render.
@@ -70,12 +87,20 @@ export function PlanMergePanel({
   const [pollRestart, setPollRestart] = useState(0);
   // Discard only queues the cancel, so the step still reads as parked until it lands.
   const [discardedTaskId, setDiscardedTaskId] = useState<string | null>(null);
+  const discardRequestedRef = useRef<string | null>(null);
   const [deadTaskId, setDeadTaskId] = useState<string | null>(null);
 
   // Poll the task only while it is working, and stop the moment it parks or reaches
   // a terminal status — the same self-terminating shape the plan chat uses, so an
   // idle conversation costs nothing.
   const taskId = merge?.taskId ?? null;
+  // Retain the last displayed merge so its outcome can be recovered after the page removes it.
+  const lastTaskIdRef = useRef(taskId);
+  // An answer or discard can settle after the page switches to another conversation.
+  const displayedTaskIdRef = useRef(taskId);
+  displayedTaskIdRef.current = taskId;
+  const isStaleReply = (replyTaskId: string): boolean =>
+    displayedTaskIdRef.current !== null && displayedTaskIdRef.current !== replyTaskId;
   const discarding = taskId !== null && discardedTaskId === taskId;
   const dead = taskId !== null && deadTaskId === taskId;
   useEffect(() => {
@@ -86,13 +111,47 @@ export function PlanMergePanel({
     setDiscardedTaskId(null);
     setDeadTaskId(null);
     // An ended outcome survives the refresh to null, but belongs to no later conversation.
-    if (taskId !== null) setNotice(null);
+    if (taskId !== null) {
+      discardRequestedRef.current = null;
+      lastTaskIdRef.current = taskId;
+      setNotice(null);
+    }
   }, [taskId]);
 
   useEffect(() => {
     if (!taskId) {
       setLiveStep(null);
-      return;
+      const previousTaskId = lastTaskIdRef.current;
+      if (
+        !previousTaskId ||
+        notice?.taskId === previousTaskId ||
+        discardRequestedRef.current === previousTaskId
+      )
+        return;
+      // The page may see the end first, or the panel may have stopped at a form.
+      // Retry unreadable tasks twice; any answer ends this bounded recovery.
+      let cancelled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let attempts = 0;
+      const recover = async (): Promise<void> => {
+        attempts++;
+        try {
+          const res = await api.get<{ task: Task }>(`/tasks/${previousTaskId}`);
+          if (cancelled || isTaskDead(res.task)) return;
+          const outcome = mergeOutcome(previousTaskId, res.task);
+          if (outcome) {
+            setNotice(outcome);
+            onSettledRef.current();
+          }
+        } catch {
+          if (!cancelled && attempts < 3) timer = setTimeout(() => void recover(), POLL_MS);
+        }
+      };
+      void recover();
+      return () => {
+        cancelled = true;
+        if (timer) clearTimeout(timer);
+      };
     }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -105,16 +164,21 @@ export function PlanMergePanel({
         const taskDead = isTaskDead(res.task);
         setLiveStep(step);
         setDeadTaskId(taskDead ? taskId : null);
-        const ended = ['completed', 'cancelled', 'failed'].includes(res.task.status);
+        const ended = ENDED_MERGE_STATUSES.has(res.task.status);
         const settled = !taskDead && ((!discarding && isAwaitingFormInput(step)) || ended);
         if (settled || (taskDead && !polledDead)) onChangedRef.current();
         if (settled) {
-          if (ended) onSettledRef.current();
+          if (ended) {
+            if (discardRequestedRef.current !== taskId) {
+              setNotice(mergeOutcome(taskId, res.task));
+            }
+            onSettledRef.current();
+          }
           return;
         }
         polledDead = taskDead;
       } catch {
-        return;
+        // A transient read failure retries at the same cadence.
       }
       if (!cancelled) timer = setTimeout(() => void poll(), polledDead ? DEAD_POLL_MS : POLL_MS);
     };
@@ -142,26 +206,43 @@ export function PlanMergePanel({
         decision,
         ...(decision === 'revise' ? { message: draft.trim() } : {}),
       });
+      if (isStaleReply(merge.taskId)) return;
       setDraft('');
       setLiveStep(null);
       setPollRestart((n) => n + 1); // resume polling: the step is running again
       onChanged();
     } catch (e) {
-      setError((e as ApiError).message ?? 'Could not send that');
+      if (isStaleReply(merge.taskId)) return;
+      if ((e as ApiError).code === 'step_form_not_waiting') {
+        setError('That merge is no longer awaiting an answer. Refreshing its status.');
+        setLiveStep(null);
+        setPollRestart((n) => n + 1);
+      } else {
+        setError((e as ApiError).message ?? 'Could not send that');
+      }
     } finally {
-      setBusy(false);
+      if (!isStaleReply(merge.taskId)) setBusy(false);
     }
   }
 
   async function discard(): Promise<void> {
     if (!merge) return;
-    if (!window.confirm('Discard this merge? Your checkout has not moved, so nothing is lost.'))
+    if (
+      !window.confirm(
+        'Discard this merge? Its scratch worktree may be removed. Changes already merged into your checkout will remain.',
+      )
+    )
       return;
     setBusy(true);
     setError(null);
     setNotice(null);
+    discardRequestedRef.current = merge.taskId;
     try {
       const result = await discardPlanMerge(repositoryId, merge.taskId);
+      if (!result.cancelled && discardRequestedRef.current === merge.taskId) {
+        discardRequestedRef.current = null;
+      }
+      if (isStaleReply(merge.taskId)) return;
       if (result.cancelled) {
         setDiscardedTaskId(taskId);
       } else {
@@ -172,9 +253,14 @@ export function PlanMergePanel({
       }
       onSettled();
     } catch (e) {
+      if (discardRequestedRef.current === merge.taskId) discardRequestedRef.current = null;
+      if (isStaleReply(merge.taskId)) return;
       setError((e as ApiError).message ?? 'Could not discard the merge');
+      // The page may have removed the merge while recovery was suppressed by this request.
+      // Clearing the ref alone does not re-run that effect.
+      if (displayedTaskIdRef.current === null) setPollRestart((n) => n + 1);
     } finally {
-      setBusy(false);
+      if (!isStaleReply(merge.taskId)) setBusy(false);
     }
   }
 
@@ -185,9 +271,24 @@ export function PlanMergePanel({
         className="rounded-md border border-neutral-800 px-3 py-2 text-xs text-neutral-400"
       >
         <InlineMarkdown body={notice.text} />
+        {notice.retry && (
+          <Link
+            href={`/tasks/${notice.taskId}`}
+            onClick={() => rememberTaskOrigin(`/tasks/${notice.taskId}`, planOrigin(repositoryId))}
+            className="text-indigo-300 underline"
+          >
+            Open the task to retry
+          </Link>
+        )}
       </div>
     ) : null;
-  if (!merge) return outcome;
+  if (!merge)
+    return (
+      <>
+        {outcome}
+        <FormError message={error} />
+      </>
+    );
 
   return (
     <>
@@ -259,8 +360,8 @@ export function PlanMergePanel({
 
         <FormError message={error} />
         <p className="text-[11px] text-neutral-500">
-          Your checkout has not moved — the merge is in a scratch worktree until you confirm. The
-          conversation runs as a task,{' '}
+          The merge is prepared in a scratch worktree. Confirm merges it into your checkout and
+          pushes it. The conversation runs as a task,{' '}
           <Link
             href={`/tasks/${merge.taskId}`}
             onClick={() => rememberTaskOrigin(`/tasks/${merge.taskId}`, planOrigin(repositoryId))}
