@@ -1125,11 +1125,10 @@ repoRoutes.patch('/:id/exclusions', async (c) => {
 
   let event: AuditEvent | undefined;
   const updated = await db.transaction(async (tx) => {
-    const [stored] = await tx
-      .select()
-      .from(schema.repositories)
-      .where(eq(schema.repositories.id, id))
-      .for('update');
+    // A relink holds this row through its git work: give up with 409 busy rather than queue behind it.
+    const [stored] = await boundedLockWait(tx, () =>
+      tx.select().from(schema.repositories).where(eq(schema.repositories.id, id)).for('update'),
+    );
     if (!stored) throw new HttpError(404, 'Repository not found');
     const previous = new Set(stored.scopeExcludeGlobs ?? []);
     const wanted = new Set(scopeExcludeGlobs);
@@ -3483,19 +3482,22 @@ repoRoutes.delete('/:id', async (c) => {
     // would leave one `running` with the repository_id the delete cleared, and nothing cancels it.
     await boundedLockWait(tx, () => lockRepositoryTasksKey(tx, id));
     // Locked, so a clone or a reset that has not claimed the root yet claims it only after this
-    // commits, and finds no row: every writer of the root runs under that claim.
-    const repoRows = await tx
-      .select({
-        id: schema.repositories.id,
-        storagePath: schema.repositories.storagePath,
-        onboardingTooling: schema.repositories.onboardingTooling,
-        onboardingEnvironment: schema.repositories.onboardingEnvironment,
-        rootClaimedAt: schema.repositories.rootClaimedAt,
-        rootClaimKind: schema.repositories.rootClaimKind,
-      })
-      .from(schema.repositories)
-      .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
-      .for('update');
+    // commits, and finds no row: every writer of the root runs under that claim. The row's wait has
+    // its own bound: a relink holds the row through its git work, and the key above is held meanwhile.
+    const repoRows = await boundedLockWait(tx, () =>
+      tx
+        .select({
+          id: schema.repositories.id,
+          storagePath: schema.repositories.storagePath,
+          onboardingTooling: schema.repositories.onboardingTooling,
+          onboardingEnvironment: schema.repositories.onboardingEnvironment,
+          rootClaimedAt: schema.repositories.rootClaimedAt,
+          rootClaimKind: schema.repositories.rootClaimKind,
+        })
+        .from(schema.repositories)
+        .where(and(eq(schema.repositories.id, id), eq(schema.repositories.userId, userId)))
+        .for('update'),
+    );
     if (repoRows.length === 0) return;
     if (isRootClaimLive(repoRows[0]!.rootClaimedAt)) {
       throw new HttpError(

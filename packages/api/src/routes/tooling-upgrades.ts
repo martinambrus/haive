@@ -989,11 +989,14 @@ toolingUpgradeRoutes.patch('/:id/tooling', async (c) => {
     };
     assertRagLockHeld(lock);
     await db.transaction(async (tx) => {
-      const [stored] = await tx
-        .select()
-        .from(schema.repositories)
-        .where(eq(schema.repositories.id, repositoryId))
-        .for('update');
+      // A relink holds this row through its git work: give up with 409 busy rather than queue behind it.
+      const [stored] = await boundedLockWait(tx, () =>
+        tx
+          .select()
+          .from(schema.repositories)
+          .where(eq(schema.repositories.id, repositoryId))
+          .for('update'),
+      );
       if (!stored) throw new HttpError(404, 'Repository not found');
       if (typeof body.rtkEnabled === 'boolean' && stored.rtkEnabled !== body.rtkEnabled)
         updates.rtkChoiceMadeAt = new Date();

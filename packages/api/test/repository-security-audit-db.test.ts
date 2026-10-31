@@ -508,6 +508,83 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
+  const writtenRows = async () => ({
+    repository: await stored(),
+    audits: await audits(db),
+    grants: await db.select().from(schema.integrationGrants),
+    cleanups: await db.select().from(schema.repoCleanups),
+    outbox: await db.select().from(schema.projectStateOutbox),
+  });
+  /** `send` is a plain writer of the repository row, sent while a relink holds that row inside git. */
+  const answeredBusyBehindRelink = async (send: () => Response | Promise<Response>) => {
+    const root = await mkdtemp(path.join(tmpdir(), 'remote-held-'));
+    roots.push(root);
+    await git(root, ['init']);
+    await git(root, ['remote', 'add', 'origin', 'https://old.test/r']);
+    await db
+      .update(schema.repositories)
+      .set({ localPath: root, remoteUrl: 'https://old.test/r' })
+      .where(eq(schema.repositories.id, repository));
+    h.lockTimeoutMs = 300;
+    let reached = false;
+    let release!: () => void;
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.gitHook = async (args) => {
+      if (args.includes('--replace-all') && args.at(-1) === 'https://first.test/r') {
+        reached = true;
+        await resume;
+      }
+    };
+    const relink = Promise.resolve(
+      app.request(`/repos/${repository}/remote`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ remoteUrl: 'https://first.test/r' }),
+      }),
+    );
+    let writer: Promise<Response> | undefined;
+    try {
+      await vi.waitFor(() => expect(reached).toBe(true), { timeout: 15_000 });
+      const before = await writtenRows();
+      writer = Promise.resolve(send());
+      const answer = await answeredWithin(5_000, writer);
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toEqual({ error: REPOSITORY_BUSY, code: null });
+      expect(await writtenRows()).toEqual(before);
+    } finally {
+      release();
+      await Promise.all([relink, writer]);
+      h.gitHook = undefined;
+    }
+    expect((await relink).status).toBe(200);
+    expect((await audits(db)).map((row) => row.action)).toEqual(['repository.remote.update']);
+  };
+  it(
+    'answers an exclusions save 409 busy within the lock bound while a relink holds the row',
+    () =>
+      answeredBusyBehindRelink(() => sendSetting('exclusions', { scopeExcludeGlobs: ['queued'] })),
+    30_000,
+  );
+  it(
+    'answers a tooling security save 409 busy within the lock bound while a relink holds the row',
+    () => answeredBusyBehindRelink(() => sendSetting('tooling', { secretMaskEnabled: false })),
+    30_000,
+  );
+  it(
+    'answers an integrations allow-list save 409 busy within the lock bound while a relink holds the row',
+    () =>
+      answeredBusyBehindRelink(() =>
+        sendSetting('integrations', { restricted: true, connectionIds: [connection] }, 'PUT'),
+      ),
+    30_000,
+  );
+  it(
+    'answers a repository delete 409 busy within the lock bound while a relink holds the row',
+    () => answeredBusyBehindRelink(() => app.request(`/repos/${repository}`, { method: 'DELETE' })),
+    30_000,
+  );
   it('no-op tooling saves and quality knobs write no security row', async () => {
     const current = (await stored())!;
     const res = await sendSetting('tooling', {

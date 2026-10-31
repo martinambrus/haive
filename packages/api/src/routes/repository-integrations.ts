@@ -5,6 +5,7 @@ import { schema } from '@haive/database';
 import { getDb, type Database } from '../db.js';
 import { insertAuditEvent, logAuditEvent, type AuditEvent } from '../lib/audit.js';
 import { requireOwnConnections } from '../lib/integration-choice.js';
+import { boundedLockWait } from '../lib/repository-busy.js';
 import { requireAuth } from '../middleware/auth.js';
 import { HttpError, type AppEnv } from '../context.js';
 
@@ -64,11 +65,14 @@ repositoryIntegrationRoutes.put('/:id/integrations', async (c) => {
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`integration-allow-list:${repositoryId}`}, 0))`,
     );
-    const [stored] = await tx
-      .select({ restricted: schema.repositories.integrationsRestricted })
-      .from(schema.repositories)
-      .where(eq(schema.repositories.id, repositoryId))
-      .for('update');
+    // A relink holds this row through its git work: give up with 409 busy rather than queue behind it.
+    const [stored] = await boundedLockWait(tx, () =>
+      tx
+        .select({ restricted: schema.repositories.integrationsRestricted })
+        .from(schema.repositories)
+        .where(eq(schema.repositories.id, repositoryId))
+        .for('update'),
+    );
     if (!stored) throw new HttpError(404, 'Repository not found');
     const current = new Set(
       (
