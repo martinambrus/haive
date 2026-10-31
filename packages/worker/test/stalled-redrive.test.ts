@@ -707,8 +707,62 @@ describe('the tasks the sweep takes, by task status and current row', () => {
     });
   });
 
+  describe('a running task on a waiting_cli row whose runs have all ended, its continuation lost', () => {
+    const parkedOnCli = { status: 'waiting_cli' };
+    const ANOTHER_ROW = '00000000-0000-4000-8000-000000000099';
+
+    it.each([
+      { label: 'no run at all', runs: [] },
+      { label: 'one that ended', runs: [{ endedAt: idle }] },
+      { label: 'one that was superseded', runs: [{ supersededAt: idle }] },
+      {
+        label: 'several that all ended or were superseded',
+        runs: [{ endedAt: idle }, { endedAt: idle }, { supersededAt: idle }],
+      },
+      { label: 'a live run of another step', runs: [{ taskStepId: ANOTHER_ROW }] },
+    ])('takes a row with $label', async ({ runs }) => {
+      const task = { ...seed('task', 'running', parkedOnCli), runs };
+      expect(await candidatesAmong([task])).toHaveLength(1);
+    });
+
+    it.each([
+      { label: 'unstarted', startedAt: null },
+      { label: 'started', startedAt: idle },
+    ])('excludes a row with a live $label run from candidates', async ({ startedAt }) => {
+      const task = { ...seed('task', 'running', parkedOnCli), runs: [{ startedAt }] };
+      expect(await candidatesAmong([task])).toEqual([]);
+    });
+
+    it('excludes a row with a live run among ended and superseded runs', async () => {
+      const task = {
+        ...seed('task', 'running', parkedOnCli),
+        runs: [{ endedAt: idle }, { supersededAt: idle }, {}],
+      };
+      expect(await candidatesAmong([task])).toEqual([]);
+    });
+
+    it('re-drives it once the row has been idle longer than the cutoff, at the bumped epoch', async () => {
+      const task = { ...seed('task', 'running', parkedOnCli), runs: [{ endedAt: idle }] };
+      expect(await advancedBy([task])).toEqual([{ taskId: 'task', epoch: 4 }]);
+    });
+
+    it('leaves a row written since the cutoff to the pass that wrote it', async () => {
+      const written = { ...parkedOnCli, updatedAt: new Date() };
+      expect(await advancedBy([seed('task', 'running', written)])).toEqual([]);
+    });
+
+    it('leaves it when the task queue still owes the task a job', async () => {
+      expect(await advancedBy([seed('task', 'running', parkedOnCli)], ['task'])).toEqual([]);
+    });
+
+    it('leaves it to a START the queue holds for the task', async () => {
+      expect(await advancedBy([seed('task', 'running', parkedOnCli)], [], ['task'])).toEqual([]);
+    });
+  });
+
   it.each([
     ['a running row', { status: 'running' }],
+    ['a waiting_cli row', { status: 'waiting_cli' }],
     ['a parked row', { status: 'pending', waitingStartedAt: idle }],
     ['a pending row', { status: 'pending' }],
     ['a finished row', { status: 'done' }],

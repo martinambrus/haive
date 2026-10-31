@@ -49,8 +49,9 @@ import {
  * Catches what reconcileOrphanedSteps cannot: a step its own re-drive enqueue failed to queue,
  * or any hand-off lost between boots, left `pending`/missing/answered, finished with nothing after it, or
  * failed with the task still running; a park whose poll chain was lost; a step left `running` that
- * no job drives; a task queued to start whose START was lost; and a step parked on a run whose
- * cli-exec job was; and a cancelled task whose teardown never finished.
+ * no job drives; a step parked on its CLI whose runs all ended with the continuation lost; a task
+ * queued to start whose START was lost; and a step parked on a run whose cli-exec job was; and a
+ * cancelled task whose teardown never finished.
  */
 
 const log = logger.child({ module: 'stalled-redrive' });
@@ -189,9 +190,27 @@ function idleRunningRow(cutoff: Date) {
   )!;
 }
 
+/** A row parked on its CLI whose runs have all ended: the run that ended last queued the step's
+ *  continuation (`resumeStepIfLinked`), and a queue that refused it, or a Redis restored without it,
+ *  left a parked step with nothing to wait for and no job. The same `liveRun` rule as above keeps a
+ *  row with queued or running agents out; a queued run no cli-exec job owes any more is the run
+ *  recovery's below. */
+function idleWaitingCliRow(cutoff: Date) {
+  return and(
+    lt(schema.taskSteps.updatedAt, cutoff),
+    eq(schema.taskSteps.status, 'waiting_cli'),
+    not(liveRun),
+  )!;
+}
+
 /** The current rows the sweep takes for a `running` task, apart from a failed one. */
 function stalledRow(cutoff: Date) {
-  return or(redrivableRow(cutoff), overduePark(cutoff), idleRunningRow(cutoff))!;
+  return or(
+    redrivableRow(cutoff),
+    overduePark(cutoff),
+    idleRunningRow(cutoff),
+    idleWaitingCliRow(cutoff),
+  )!;
 }
 
 /** Idle since `cutoff`, or waiting_pr, which the pull-request poller rewrites every few minutes. */
@@ -210,9 +229,10 @@ interface StalledCandidate {
   rowWaitingStartedAt?: Date | null;
 }
 
-/** What a candidate's current row looks like. `running` and `parked` are what a live pass leaves. */
+/** What a candidate's current row looks like. `running`, `waiting_cli` and `parked` are what a live
+ *  pass leaves. */
 function rowShape(c: Pick<StalledCandidate, 'rowStatus' | 'rowWaitingStartedAt'>) {
-  if (c.rowStatus === 'running') return 'running';
+  if (c.rowStatus === 'running' || c.rowStatus === 'waiting_cli') return c.rowStatus;
   return c.rowStatus === 'pending' && c.rowWaitingStartedAt ? 'parked' : 'handoff';
 }
 
@@ -305,8 +325,8 @@ function unstartedRun(taskStepId: SQLWrapper | string) {
 }
 
 /** One pass: re-drives each running task whose current step row is missing, pending and not
- *  parked, parked with a heartbeat older than the cutoff, running with no run left to wait for,
- *  an answered form, or finished, and a task waiting on a person or a pull request whose
+ *  parked, parked with a heartbeat older than the cutoff, running or parked on its CLI with no run
+ *  left to wait for, an answered form, or finished, and a task waiting on a person or a pull request whose
  *  current form was answered; fails a running task whose current row failed; queues a START
  *  for a task still queued to start; and recovers a parked
  *  step whose recorded run no cli-exec job owes any more, as boot does. Each only while the task
