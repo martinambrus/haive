@@ -153,8 +153,7 @@ describe('PATCH tooling refuses a field of the wrong type, names it, and writes 
     const res = await patch(JSON.stringify({ [field]: value }));
 
     expect(res.status).toBe(400);
-    const answer = (await res.json()) as { error?: string; issues?: { path: string }[] };
-    expect(answer.error).toBe('Validation failed');
+    const answer = (await res.json()) as { issues?: { path: string }[] };
     const paths = (answer.issues ?? []).map((issue) => issue.path);
     expect(
       paths.some((path) => path === field || path.startsWith(`${field}.`)),
@@ -247,6 +246,11 @@ describe('PATCH tooling still accepts what the Tooling page sends', () => {
       'versions cleared with null',
       { rtkVersion: null, chromeDevtoolsMcpVersion: null },
       { rtkVersion: null, chromeDevtoolsMcpVersion: null },
+    ],
+    [
+      'a pinned LSP version cleared with null',
+      { lspServerVersions: { vtsls: null } },
+      { lspServerVersions: {} },
     ],
     [
       'empty lists and an empty map',

@@ -698,7 +698,7 @@ const PORTABLE_SETTING_UPDATE_KEYS = [
 ] as const;
 
 /** The PATCH body. A field of the wrong type is a 400 `Validation failed` naming it, before any
- *  lock, read or write. Loose on purpose: an unknown key survives the parse, because the MCP
+ *  lock or write. Loose on purpose: an unknown key survives the parse, because the MCP
  *  decision below must travel with no other key and counts them. */
 const toolingPatchBodySchema = z.looseObject({
   rtkEnabled: z.boolean().optional(),
