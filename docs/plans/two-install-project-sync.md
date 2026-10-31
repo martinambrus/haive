@@ -585,7 +585,7 @@ Phase 4 (repository-level content):
   concurrent edits give one question that holds no upgrade and converges under keep mine and take
   theirs from either side, a line of seven `=` refuses the whole record and recovers, an old
   personal region plans `clean_update` (an edited one `conflict`), and an override set before the
-  first onboarding reaches 07, 12 and a fresh clone. The run ends `TWO_INSTALL_OK` with 208 checks
+  first onboarding reaches 07, 12 and a fresh clone. The run ends `TWO_INSTALL_OK` with 210 checks
   and no known gap.
 
 Phase 5 (visibility and commit policy):

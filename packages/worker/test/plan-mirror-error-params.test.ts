@@ -18,39 +18,39 @@ vi.mock('bullmq', async (original) => ({
 }));
 vi.mock('../src/redis.js', () => ({ getBullRedis: () => ({}) }));
 vi.mock('../src/db.js', () => ({
-  getDb: () => ({ query: { repositories: { findFirst: h.read } } }),
+  getDb: () => ({
+    query: { repositories: { findFirst: h.read } },
+    select: () => ({ from: () => ({ where: h.read }) }),
+  }),
 }));
 
 import { PLAN_MIRROR_JOB_NAMES } from '@haive/shared';
 import { startPlanMirrorWorker } from '../src/queues/plan-mirror-queue.js';
 import { processModuleControlJob } from '../src/queues/module-control-queue.js';
 
-it.each([PLAN_MIRROR_JOB_NAMES.SAVE, PLAN_MIRROR_JOB_NAMES.PULL])(
-  'sanitizes %s before BullMQ flattens a DB failure',
-  async (name) => {
-    h.read.mockClear();
-    const secret = randomBytes(24).toString('base64url');
-    h.read.mockRejectedValueOnce(
-      new DrizzleQueryError(
-        'select * from repositories where id = $1',
-        [secret],
-        new Error(secret),
-      ),
-    );
-    startPlanMirrorWorker();
-    const err = await h
-      .processor({ name, data: { repositoryId: 'repo', userId: 'user' } })
-      .catch((err: unknown) => err);
-    expect(err instanceof Error).toBe(true);
-    const text = JSON.stringify({ message: (err as Error).message, stack: (err as Error).stack });
-    expect(
-      Array.from({ length: secret.length - 5 }, (_, i) => secret.slice(i, i + 6)).some((part) =>
-        text.includes(part),
-      ),
-    ).toBe(false);
-    expect(h.read).toHaveBeenCalledOnce();
-  },
-);
+it.each([
+  PLAN_MIRROR_JOB_NAMES.SAVE,
+  PLAN_MIRROR_JOB_NAMES.PULL,
+  PLAN_MIRROR_JOB_NAMES.SAVE_HAIVE_DATA,
+])('sanitizes %s before BullMQ flattens a DB failure', async (name) => {
+  h.read.mockClear();
+  const secret = randomBytes(24).toString('base64url');
+  h.read.mockRejectedValueOnce(
+    new DrizzleQueryError('select * from repositories where id = $1', [secret], new Error(secret)),
+  );
+  startPlanMirrorWorker();
+  const err = await h
+    .processor({ name, data: { repositoryId: 'repo', userId: 'user' } })
+    .catch((err: unknown) => err);
+  expect(err instanceof Error).toBe(true);
+  const text = JSON.stringify({ message: (err as Error).message, stack: (err as Error).stack });
+  expect(
+    Array.from({ length: secret.length - 5 }, (_, i) => secret.slice(i, i + 6)).some((part) =>
+      text.includes(part),
+    ),
+  ).toBe(false);
+  expect(h.read).toHaveBeenCalledOnce();
+});
 
 it('sanitizes a module teardown DB failure before it crosses the queue', async () => {
   const secret = randomBytes(24).toString('base64url');

@@ -142,7 +142,12 @@ index agrees with the newest commit even when another writer committed on top in
 moved to something that does not contain the commit is left alone, and a `HEAD` that moves during
 the sync is retried. Every other real-index entry,
 a file the person staged included, is neither committed nor unstaged (a blob they staged at one of
-those very names is not committed and is reset to `HEAD`). A pathspec is `:(literal)`
+those very names is not committed and is reset to `HEAD`). When nothing differs, nothing is committed and the real
+index is not written, except for the one caller that opts in, the Haive data Save (`commitHaiveProjections`):
+its no-op sets in the real index only the named entries that differ from `HEAD` there, which repairs a sync
+that failed after an earlier commit, leaves a staged entry below a named path alone, and writes nothing
+when none differ. A failed sync is retried with backoff and warned about with the count and at most ten
+paths. A pathspec is `:(literal)`
 and the changed list is read with `--no-renames`, since a detected rename would name only the new
 path and leave the deletion out. A merge or cherry-pick in progress is refused, which fails the
 step loudly, as `--only` did. The first commit of a
@@ -831,7 +836,7 @@ signal. The writer reads the row's `revision` under `lockProjectState`, before i
 database, and stamps `written_revision` to what it read when it finishes, so 12, 02 and 04 leave the
 row clean and a mutation that lands during a write stays dirty. The 10 s plan-mirror sweep calls
 `sweepDirtyProjectStates` (`project-state/refresh.ts`, at most 25 rows with a render context, each
-sweep in its own try): it skips a checkout with `MERGE_HEAD` or `REBASE_HEAD`, and looks again once it
+sweep in its own try): it skips a checkout with a merge, rebase, cherry-pick or revert open (`gitOperationInProgress`), and looks again once it
 holds the project-state lock, for the sync and for the write (`refuseDuringGitOperation`), since a
 merge can open while it waits there: the sync then answers `held`, imports nothing it read and leaves
 `last_error` alone, as the first check does, and the write refuses. A row whose repository directory is gone is held before anything else is read (`refreshProjectState`; `checkoutMissing`, `repo/checkout-head.ts`: ENOENT or a path that is not a directory, read strictly so an unreadable parent still fails the row): `last_error` says so, the row stays dirty and is touched to the back of the sweep's order like any held row, so a checkout that comes back (a re-clone into the same path) is written on the next tick, and no recovery, sync, transaction or warning runs per tick. MEASURED per dead row per tick, before: 35 statements, 11 failing opens, 3 failed git spawns, 43-46 ms and a 3.1 KB warn (about 27 MB of log a day); after: 3 statements, 1 probe and no log. Only a repository delete (the `repository_id` foreign key cascades) or the onboarding reset retires it, and the boot mark makes a clean one dirty again. Admission refused by the
@@ -920,7 +925,7 @@ untracked file under `.haive-data/state/` that Haive did not write. A merge the 
 checkout itself (00a's merge, 12 when the parent checkout is on the base branch, 13) sets aside after
 it seeds the plan base and checks again under the projection locks right before `openMerge`, where a
 file Haive rewrote since the set-aside sends it round again, up to `MOVE_ATTEMPTS`. Every outcome that
-did not merge puts the files back and, once no merge or rebase is open, re-syncs them, a throw from
+did not merge puts the files back and, once no merge, rebase, cherry-pick or revert is open, re-syncs them, a throw from
 the merge section recovers them before it reaches the caller (put back while HEAD is still where the section started, re-synced once it moved or cannot be read), and reaching done re-syncs. The owner
 and mode a set-aside captured ride in the merge state (`keptMetadata`, never the bytes), so the
 call that ends a merge restores them even when an earlier call set the files aside; a merge left
