@@ -24,7 +24,11 @@ import { schema } from '@haive/database';
 import { createFakeDb } from '@haive/database/testing';
 import { configService } from '@haive/shared';
 import { planRoutes } from '../src/routes/plan.js';
-import { enqueuePlanMirrorRefresh } from '../src/lib/plan-mirror.js';
+import {
+  enqueuePlanMirrorRefresh,
+  savePlanMirror,
+  pullPlanMirror,
+} from '../src/lib/plan-mirror.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import type { AppEnv } from '../src/context.js';
 
@@ -105,4 +109,43 @@ describe('deleting a plan after its repository disappears', () => {
     expect(await response.json()).toMatchObject({ code: 'plan_repository_gone' });
     expect(enqueuePlanMirrorRefresh).not.toHaveBeenCalled();
   });
+});
+
+describe('snapshot action failure text', () => {
+  it.each(['save', 'pull'] as const)(
+    '%s hides server paths and preserves refusal wording',
+    async (action) => {
+      const fake = createFakeDb({ repositories: schema.repositories, tasks: schema.tasks });
+      fake.insert(schema.repositories, { id: REPO, userId: USER, name: 'repo' });
+      h.db = fake.db;
+      vi.spyOn(configService, 'get').mockResolvedValue('true');
+      const operation = vi.mocked(action === 'save' ? savePlanMirror : pullPlanMirror);
+      for (const [raw, expected] of [
+        [
+          'git branch failed in /srv/private/repo: fatal: bad config',
+          'git branch failed in [path]: fatal: bad config',
+        ],
+        [
+          'a merge or rebase is open; finish it before saving the plan',
+          'a merge or rebase is open; finish it before saving the plan',
+        ],
+        [
+          "git push failed: unable to access 'https://github.com/o/r.git/': 403",
+          "git push failed: unable to access 'https://github.com/o/r.git/': 403",
+        ],
+      ]) {
+        operation.mockRejectedValueOnce(new Error(raw));
+        const response = await app.request(`/${REPO}/plan/snapshot/${action}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{}',
+        });
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({
+          error: expected,
+          code: `plan_snapshot_${action}_failed`,
+        });
+      }
+    },
+  );
 });
