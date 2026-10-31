@@ -94,10 +94,12 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
     await allowAudit(db);
     await db.execute(sql`DROP TRIGGER IF EXISTS refuse_remote_persist ON repositories`);
     await db.execute(sql`DROP FUNCTION IF EXISTS refuse_remote_persist()`);
+    await db.execute(sql`DROP TRIGGER IF EXISTS refuse_remote_commit ON audit_events`);
+    await db.execute(sql`DROP FUNCTION IF EXISTS refuse_remote_commit()`);
     for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
     await cleanActor(db, h.actor);
   });
-  for (const failure of ['none', 'persist', 'audit'] as const)
+  for (const failure of ['none', 'persist', 'commit', 'audit'] as const)
     for (const existing of [false, true])
       it(`remote ${existing ? 'relink' : 'link'}: ${failure} failure preserves checkout and binding`, async () => {
         const root = await mkdtemp(path.join(tmpdir(), 'remote-audit-'));
@@ -136,6 +138,16 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
           );
           await db.execute(
             sql`CREATE TRIGGER refuse_remote_persist BEFORE UPDATE ON repositories FOR EACH ROW EXECUTE FUNCTION refuse_remote_persist()`,
+          );
+        }
+        if (failure === 'commit') {
+          await db.execute(
+            sql.raw(
+              `CREATE FUNCTION refuse_remote_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'commit refused'; END $$`,
+            ),
+          );
+          await db.execute(
+            sql`CREATE CONSTRAINT TRIGGER refuse_remote_commit AFTER INSERT ON audit_events DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_remote_commit()`,
           );
         }
         if (failure === 'audit') await refuseAudit(db, h.actor);

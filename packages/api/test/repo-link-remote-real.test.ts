@@ -349,3 +349,41 @@ exec ${quote(real)} "$@"
     errors.mockRestore();
   }
 });
+
+it('restores fetch and push URLs when replace-all fails after push URL cleanup', async () => {
+  const { root, link, fake } = await setup();
+  await git(root, ['config', '--add', 'remote.origin.url', 'https://extra.test/r']);
+  await git(root, ['config', '--add', 'remote.origin.pushurl', 'https://push.test/r']);
+  await git(root, ['config', '--add', 'remote.origin.pushurl', 'https://push2.test/r']);
+  const shim = await mkdtemp(path.join(tmpdir(), 'remote-replace-fail-'));
+  dirs.push(shim);
+  const real = (await exec('sh', ['-c', 'command -v git'])).stdout.trim();
+  const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
+  await writeFile(
+    path.join(shim, 'git'),
+    `#!/bin/sh
+for arg in "$@"; do if [ "$arg" = 'https://new.test/r' ]; then
+  for flag in "$@"; do if [ "$flag" = --replace-all ]; then exit 128; fi; done
+fi; done
+exec ${quote(real)} "$@"
+`,
+  );
+  await chmod(path.join(shim, 'git'), 0o755);
+  const saved = process.env.PATH;
+  process.env.PATH = `${shim}:${saved}`;
+  try {
+    const response = await link();
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain('Could not update the remote');
+  } finally {
+    process.env.PATH = saved;
+  }
+  expect(await git(root, ['config', '--get-all', 'remote.origin.url'])).toBe(
+    'https://old.test/r\nhttps://extra.test/r',
+  );
+  expect(await git(root, ['config', '--get-all', 'remote.origin.pushurl'])).toBe(
+    'https://push.test/r\nhttps://push2.test/r',
+  );
+  expect(fake.rows(schema.repositories)[0]!.remoteUrl).toBeNull();
+  expect(fake.rows(schema.auditEvents)).toEqual([]);
+});
