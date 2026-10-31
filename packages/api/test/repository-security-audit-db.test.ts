@@ -175,6 +175,101 @@ describe.skipIf(!url)('Repository security settings commit with their audit, on 
           expect(JSON.stringify(await audits(db))).not.toMatch(/synthetic-password|user:|https:/);
         }
       });
+  it('restores a failed remote update before a queued relink acquires the row', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'remote-race-'));
+    roots.push(root);
+    await git(root, ['init']);
+    await git(root, ['remote', 'add', 'origin', 'https://old.test/r']);
+    await db
+      .update(schema.repositories)
+      .set({ localPath: root, remoteUrl: 'https://old.test/r' })
+      .where(eq(schema.repositories.id, repository));
+    let reached!: () => void;
+    let release!: () => void;
+    const atUpdate = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let first = true;
+    let second: Promise<Response> | undefined;
+    h.db = new Proxy(db, {
+      get(target, key) {
+        if (key === 'transaction')
+          return async (fn: (tx: any) => Promise<unknown>) => {
+            if (!first) return target.transaction(fn);
+            first = false;
+            try {
+              return await target.transaction((tx) =>
+                fn(
+                  new Proxy(tx, {
+                    get(t, prop) {
+                      if (prop === 'update')
+                        return () => ({
+                          set: () => ({
+                            where: async () => {
+                              reached();
+                              await resume;
+                              throw new Error('first persistence failed');
+                            },
+                          }),
+                        });
+                      const value = Reflect.get(t, prop);
+                      return typeof value === 'function' ? value.bind(t) : value;
+                    },
+                  }),
+                ),
+              );
+            } catch (err) {
+              // Hold the rejected transaction's caller until its queued successor commits.
+              // Restoration after ROLLBACK would then clobber the successor's checkout.
+              await second;
+              throw err;
+            }
+          };
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const remote = (remoteUrl: string) =>
+      Promise.resolve(
+        app.request(`/repos/${repository}/remote`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ remoteUrl }),
+        }),
+      );
+    const failed = remote('https://first.test/r');
+    try {
+      await atUpdate;
+      second = remote('https://second.test/r');
+      await expect
+        .poll(
+          async () =>
+            (
+              await db.execute(sql`
+        select 1 from pg_stat_activity a join pg_locks l on l.pid = a.pid
+        where a.datname = current_database() and not l.granted
+          and a.query like 'select %"repositories"%'
+      `)
+            ).length,
+          { timeout: 15_000 },
+        )
+        .toBeGreaterThan(0);
+    } finally {
+      release();
+    }
+    try {
+      expect((await failed).status).toBe(500);
+      expect((await second!).status).toBe(200);
+      expect((await stored())!.remoteUrl).toBe('https://second.test/r');
+      expect(await git(root, ['remote', 'get-url', 'origin'])).toBe('https://second.test/r');
+      expect(await audits(db)).toHaveLength(1);
+    } finally {
+      h.db = db;
+    }
+  }, 30_000);
   const sendSetting = (suffix: string, body: unknown, method = 'PATCH') =>
     app.request(`${suffix === 'exclusions' ? '/repos' : '/repositories'}/${repository}/${suffix}`, {
       method,
